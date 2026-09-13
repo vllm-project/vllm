@@ -130,7 +130,11 @@ from vllm.v1.worker.gpu.kv_connector import (
     KVConnector,
     get_kv_connector,
 )
-from vllm.v1.worker.gpu.launch_key_debug import launch_key_phase, serving_launches
+from vllm.v1.worker.gpu.launch_key_debug import (
+    launch_key_phase,
+    record_topk_topp_launches,
+    serving_launches,
+)
 from vllm.v1.worker.gpu.lora_utils import (
     LoraState,
     create_lora_capture_hook,
@@ -988,13 +992,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         sample_hidden_states: torch.Tensor,
         *,
         warmup: UnoSamplerWarmup,
-    ) -> None:
+    ) -> str:
         """Warm one real Uno sampler branch through the production ``Sampler``.
 
         The plan comes from ``enumerate_uno_served_launches`` rather than a
         hand-maintained ``num_reqs * K`` table. Temporarily install each flag
-        combination, force the non-FlashInfer production path, and restore all
-        persistent request state before serving starts.
+        combination and restore all persistent request state before serving
+        starts. The sampler's own FlashInfer decision remains intact: startup
+        must exercise the same branch the served request will take.
         """
         assert self.sampler is not None
         num_reqs = warmup.num_reqs
@@ -1009,7 +1014,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         saved_min_p = states.min_p.np[:num_reqs].copy()
         saved_seeds = states.seeds.np[:num_reqs].copy()
         saved_seeds_set = states.seeds_set[:num_reqs].copy()
-        saved_use_flashinfer = self.sampler.use_flashinfer
+        from vllm.v1.worker.gpu.warmup import capture_sampler_branches
+
+        observed_branches: list[str] = []
         try:
             self.sampler.needs_logits_processing[:num_reqs] = True
             states.temperature.np[:num_reqs] = 0.9
@@ -1022,18 +1029,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 1.0 if warmup.mode.top_p is None else warmup.mode.top_p
             )
             states.min_p.np[:num_reqs] = 0.0
-            states.seeds.np[:num_reqs] = np.arange(num_reqs, dtype=np.int64)
-            states.seeds_set[:num_reqs] = True
-            self.sampler.use_flashinfer = False
+            # An explicit request seed forces the native/Triton sampler path.
+            # Clear it instead, so this startup call follows the served
+            # FlashInfer decision for the installed sampling mode.
+            states.seeds_set[:num_reqs] = False
             states.apply_staged_writes()
 
             row_count_tensor = torch.from_numpy(
                 self._sampler_row_counts(num_reqs, num_rows)
             ).to(self.device)
-            self._dummy_sampler_run(
-                sample_hidden_states.repeat_interleave(row_count_tensor, dim=0),
-                num_reqs=num_reqs,
-            )
+            with capture_sampler_branches(self.sampler) as observed_branches:
+                with record_topk_topp_launches():
+                    self._dummy_sampler_run(
+                        sample_hidden_states.repeat_interleave(row_count_tensor, dim=0),
+                        num_reqs=num_reqs,
+                    )
         finally:
             self.sampler.needs_logits_processing[:num_reqs] = saved_needs_processing
             states.temperature.np[:num_reqs] = saved_temperature
@@ -1042,8 +1052,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             states.min_p.np[:num_reqs] = saved_min_p
             states.seeds.np[:num_reqs] = saved_seeds
             states.seeds_set[:num_reqs] = saved_seeds_set
-            self.sampler.use_flashinfer = saved_use_flashinfer
             states.apply_staged_writes()
+        if set(observed_branches) != {warmup.sampler_branch}:
+            raise RuntimeError(
+                "Uno sampler warmup reached a different branch than serving: "
+                f"mode={warmup.mode.name} expected={warmup.sampler_branch} "
+                f"observed={tuple(observed_branches)!r}"
+            )
+        return warmup.sampler_branch
 
     @torch.inference_mode()
     def _dummy_pooler_run(self, hidden_states: torch.Tensor) -> None:
@@ -1119,6 +1135,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_tokens=self.max_num_tokens,
             max_model_len=self.max_model_len,
             num_sm=num_compute_units(self.device.index),
+            use_flashinfer=bool(
+                self.sampler is not None and self.sampler.use_flashinfer
+            ),
         )
         if not plan.prepare_request_counts:
             return
@@ -1132,16 +1151,44 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # cycle at module initialization.
         from vllm.v1.worker.gpu.warmup import preserve_rng_state
 
-        with preserve_rng_state(self.device), launch_key_phase("warmup"):
-            for num_tokens in plan.prepare_request_counts:
-                _, sample_hidden_states = self._dummy_run(num_tokens)
-                if sample_hidden_states is not None:
-                    for warmup in warmups_by_request_count.get(num_tokens, []):
-                        self._warm_up_uno_sampler(sample_hidden_states, warmup=warmup)
+        executed_prepare_shapes = 0
+        executed_sampler_calls = 0
+        executed_sampler_keys: set[tuple[object, ...]] = set()
+        executed_sampler_branches: dict[str, str] = {}
+        executed_sampler_kernels: dict[str, set[str]] = {}
+        try:
+            with preserve_rng_state(self.device), launch_key_phase("warmup"):
+                for num_tokens in plan.prepare_request_counts:
+                    _, sample_hidden_states = self._dummy_run(num_tokens)
+                    executed_prepare_shapes += 1
+                    if sample_hidden_states is not None:
+                        for warmup in warmups_by_request_count.get(num_tokens, []):
+                            branch = self._warm_up_uno_sampler(
+                                sample_hidden_states, warmup=warmup
+                            )
+                            executed_sampler_calls += 1
+                            executed_sampler_keys.update(warmup.kernel_keys)
+                            executed_sampler_branches[warmup.mode.name] = branch
+                            kernels = executed_sampler_kernels.setdefault(
+                                warmup.mode.name, set()
+                            )
+                            if branch == "flashinfer":
+                                kernels.add("flashinfer_sample")
+                            else:
+                                kernels.update(
+                                    str(key[0]) for key in warmup.kernel_keys
+                                )
+        finally:
+            pass
         self.speculator.report_draft_warmup(
-            len(plan.prepare_request_counts),
-            len(plan.sampler_warmups),
-            len(plan.sampler_keys),
+            executed_prepare_shapes,
+            executed_sampler_calls,
+            len(executed_sampler_keys),
+            executed_sampler_branches,
+            {
+                mode: tuple(sorted(kernels))
+                for mode, kernels in executed_sampler_kernels.items()
+            },
         )
 
     @torch.inference_mode()

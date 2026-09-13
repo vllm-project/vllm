@@ -21,7 +21,7 @@ import json
 import os
 import threading
 from collections import defaultdict
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import asdict, is_dataclass
@@ -176,6 +176,57 @@ class _LaunchKeyReceipts:
 _receipts = _LaunchKeyReceipts()
 
 
+class _RecordingTritonKernel:
+    """Proxy a sampler kernel only for opt-in Uno warmup receipts."""
+
+    def __init__(self, kernel: Any, name: str) -> None:
+        self._kernel = kernel
+        self._name = name
+
+    def __getitem__(self, grid: tuple[int, ...]) -> Callable[..., Any]:
+        launch = self._kernel[grid]
+
+        def recorded_launch(*args: Any, **kwargs: Any) -> Any:
+            record_triton_launch(self._name, self._kernel, grid, *args, **kwargs)
+            return launch(*args, **kwargs)
+
+        return recorded_launch
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._kernel, name)
+
+
+@contextmanager
+def record_topk_topp_launches() -> Iterator[None]:
+    """Emit exact sampler launch receipts during opt-in Uno startup only.
+
+    Generic sampling is never imported or wrapped when launch-key diagnosis is
+    disabled. With the opt-in flag, this narrow startup context proxies the
+    four real Triton launch objects long enough for ``record_triton_launch`` to
+    read the same binder key that the subsequent launch uses.
+    """
+    if not _ENABLED:
+        yield
+        return
+
+    from vllm.v1.sample.ops import topk_topp_triton
+
+    kernel_names = (
+        "_topk_topp_kernel",
+        "_topp_sb_stats_kernel",
+        "_topp_sb_step_kernel",
+        "_topp_sb_mask_kernel",
+    )
+    originals = {name: getattr(topk_topp_triton, name) for name in kernel_names}
+    try:
+        for name, kernel in originals.items():
+            setattr(topk_topp_triton, name, _RecordingTritonKernel(kernel, name))
+        yield
+    finally:
+        for name, kernel in originals.items():
+            setattr(topk_topp_triton, name, kernel)
+
+
 def launch_key_phase(phase: str) -> AbstractContextManager[None]:
     """Label launches performed by a known startup operation."""
     if not _ENABLED:
@@ -251,6 +302,7 @@ def record_triton_launch(
 __all__ = [
     "launch_key_phase",
     "mark_launch_key_serving_ready",
+    "record_topk_topp_launches",
     "record_triton_launch",
     "serving_launches",
 ]

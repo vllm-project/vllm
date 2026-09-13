@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock
 
+import numpy as np
 import pytest
 import torch
 
@@ -719,8 +720,9 @@ def test_draft_warmup_request_counts_are_independent_of_k():
     assert draft_warmup_request_counts(-1) == []
 
 
-def test_uno_served_launches_cover_sampler_flags_and_integer_buckets():
-    """The production plan includes every sampler branch serving can reach."""
+@pytest.mark.parametrize("use_flashinfer", [False, True])
+def test_uno_served_launches_cover_sampler_flags_and_integer_buckets(use_flashinfer):
+    """The production plan models the sampler backend serving can reach."""
     from vllm.v1.worker.gpu.spec_decode.uno import enumerate_uno_served_launches
 
     plan = enumerate_uno_served_launches(
@@ -729,6 +731,7 @@ def test_uno_served_launches_cover_sampler_flags_and_integer_buckets():
         max_num_tokens=2048,
         max_model_len=4096,
         num_sm=82,
+        use_flashinfer=use_flashinfer,
     )
 
     assert plan.prepare_request_counts == tuple(range(1, 17))
@@ -738,28 +741,45 @@ def test_uno_served_launches_cover_sampler_flags_and_integer_buckets():
         "top_k_only",
         "neither",
     }
-    assert {warmup.source for warmup in plan.sampler_warmups} >= {
-        "pure_prefill",
-        "verification",
-        "chunked_or_mixed",
+    if not use_flashinfer:
+        assert {warmup.source for warmup in plan.sampler_warmups} >= {
+            "pure_prefill",
+            "verification",
+            "chunked_or_mixed",
+        }
+    branches = {
+        warmup.mode.name: warmup.sampler_branch for warmup in plan.sampler_warmups
     }
-    assert ("_topp_sb_stats_kernel", False, 32) in plan.sampler_keys
-    assert ("_topp_sb_stats_kernel", True, 32) in plan.sampler_keys
-    assert (
-        "_topk_topp_kernel",
-        "one",
-        True,
-        False,
-        False,
-    ) in plan.sampler_keys
-    assert (
-        "_topk_topp_kernel",
-        "multiple_of_16",
-        True,
-        True,
-        True,
-    ) in plan.sampler_keys
-    assert plan.served_sampler_keys <= plan.sampler_keys
+    expected_branches = {
+        "top_p_only": "flashinfer" if use_flashinfer else "triton",
+        "top_k_top_p": "flashinfer" if use_flashinfer else "triton",
+        "top_k_only": "flashinfer" if use_flashinfer else "triton",
+        "neither": "triton",
+    }
+    assert branches == expected_branches
+    if use_flashinfer:
+        assert plan.sampler_keys == frozenset()
+        assert plan.served_sampler_keys == frozenset()
+        assert len(plan.sampler_warmups) == 4
+    else:
+        assert len(plan.sampler_keys) == 46
+        assert ("_topp_sb_stats_kernel", False, 32) in plan.sampler_keys
+        assert ("_topp_sb_stats_kernel", True, 32) in plan.sampler_keys
+        assert (
+            "_topk_topp_kernel",
+            "one",
+            True,
+            False,
+            False,
+        ) in plan.sampler_keys
+        assert (
+            "_topk_topp_kernel",
+            "multiple_of_16",
+            True,
+            True,
+            True,
+        ) in plan.sampler_keys
+        assert plan.served_sampler_keys == plan.sampler_keys
 
 
 @pytest.mark.parametrize(
@@ -774,7 +794,7 @@ def test_uno_served_launch_enumerator_rejects_unbounded_axes(kwargs):
     from vllm.v1.worker.gpu.spec_decode.uno import enumerate_uno_served_launches
 
     with pytest.raises(ValueError):
-        enumerate_uno_served_launches(**kwargs, num_sm=82)
+        enumerate_uno_served_launches(**kwargs, num_sm=82, use_flashinfer=False)
 
 
 def test_draft_warmup_runs_every_shape_through_the_real_dummy_run(monkeypatch):
@@ -794,7 +814,7 @@ def test_draft_warmup_runs_every_shape_through_the_real_dummy_run(monkeypatch):
 
     runner = object.__new__(GPUModelRunner)
     ran: list[int] = []
-    reported: list[tuple[int, int]] = []
+    reported: list[tuple[object, ...]] = []
     proposer = object.__new__(UnoSpeculator)
     proposer.k = 8
     proposer.report_draft_warmup = lambda *args: reported.append(args)
@@ -807,6 +827,7 @@ def test_draft_warmup_runs_every_shape_through_the_real_dummy_run(monkeypatch):
                 1,
                 UnoSamplingMode("top_p_only", None, 0.9),
                 "pure_prefill",
+                "triton",
                 (("_topp_sb_stats_kernel", False, 32),),
             ),
             UnoSamplerWarmup(
@@ -814,6 +835,7 @@ def test_draft_warmup_runs_every_shape_through_the_real_dummy_run(monkeypatch):
                 18,
                 UnoSamplingMode("top_k_top_p", 50, 0.9),
                 "verification",
+                "triton",
                 (("_topp_sb_stats_kernel", True, 16),),
             ),
             UnoSamplerWarmup(
@@ -821,6 +843,7 @@ def test_draft_warmup_runs_every_shape_through_the_real_dummy_run(monkeypatch):
                 17,
                 UnoSamplingMode("top_k_only", 50, None),
                 "chunked_or_mixed",
+                "triton",
                 (("_topk_topp_kernel", "generic", True, False, False),),
             ),
             UnoSamplerWarmup(
@@ -828,6 +851,7 @@ def test_draft_warmup_runs_every_shape_through_the_real_dummy_run(monkeypatch):
                 4,
                 UnoSamplingMode("neither", None, None),
                 "pure_prefill",
+                "triton",
                 (),
             ),
         ),
@@ -836,7 +860,10 @@ def test_draft_warmup_runs_every_shape_through_the_real_dummy_run(monkeypatch):
     runner.max_num_tokens = 64
     runner.max_model_len = 128
     runner.device = torch.device("cuda", 0)
-    monkeypatch.setattr(model_runner_module, "enumerate_uno_served_launches", lambda **_: plan)
+    runner.sampler = SimpleNamespace(use_flashinfer=False)
+    monkeypatch.setattr(
+        model_runner_module, "enumerate_uno_served_launches", lambda **_: plan
+    )
     monkeypatch.setattr(model_runner_module, "num_compute_units", lambda _: 82)
     sampler_runs: list[tuple[int, int, int]] = []
 
@@ -851,6 +878,7 @@ def test_draft_warmup_runs_every_shape_through_the_real_dummy_run(monkeypatch):
 
     def warm_up_uno_sampler(hidden, *, warmup):
         sampler_runs.append((hidden.shape[0], warmup.num_reqs, warmup.num_rows))
+        return warmup.sampler_branch
 
     runner._warm_up_uno_sampler = warm_up_uno_sampler
 
@@ -862,7 +890,25 @@ def test_draft_warmup_runs_every_shape_through_the_real_dummy_run(monkeypatch):
 
         assert ran == [1, 2, 3, 4]
         assert sampler_runs == [(1, 1, 1), (2, 2, 18), (3, 3, 17), (4, 4, 4)]
-        assert reported == [(4, 4, 3)]
+        assert reported == [
+            (
+                4,
+                4,
+                3,
+                {
+                    "top_p_only": "triton",
+                    "top_k_top_p": "triton",
+                    "top_k_only": "triton",
+                    "neither": "triton",
+                },
+                {
+                    "top_p_only": ("_topp_sb_stats_kernel",),
+                    "top_k_top_p": ("_topp_sb_stats_kernel",),
+                    "top_k_only": ("_topk_topp_kernel",),
+                    "neither": (),
+                },
+            )
+        ]
         assert torch.equal(torch.random.get_rng_state(), served_rng_state)
     finally:
         torch.random.set_rng_state(prior_state)
@@ -883,6 +929,228 @@ def test_draft_warmup_skips_a_speculator_that_does_not_ask_for_it():
     runner.speculator = SimpleNamespace(report_draft_warmup=Mock())
     runner._warm_up_draft_kernels()
     assert ran == []
+
+
+def test_draft_warmup_reports_execution_not_a_nonlast_rank_plan(monkeypatch):
+    """A rank with no sampler reports zero executed sampler rows and keys."""
+    from vllm.v1.worker.gpu import model_runner as model_runner_module
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.spec_decode.uno import (
+        UnoSamplerWarmup,
+        UnoSamplingMode,
+        UnoServedLaunches,
+    )
+
+    proposer = object.__new__(UnoSpeculator)
+    proposer.k = 8
+    reports: list[tuple[object, ...]] = []
+    proposer.report_draft_warmup = lambda *args: reports.append(args)
+    plan = UnoServedLaunches(
+        prepare_request_counts=(1, 2),
+        sampler_warmups=(
+            UnoSamplerWarmup(
+                1,
+                1,
+                UnoSamplingMode("top_p_only", None, 0.9),
+                "pure_prefill",
+                "triton",
+                (("_topp_sb_stats_kernel", False, 32),),
+            ),
+        ),
+    )
+    runner = object.__new__(GPUModelRunner)
+    runner.speculator = proposer
+    runner.sampler = None
+    runner.max_num_reqs = 2
+    runner.max_num_tokens = 8
+    runner.max_model_len = 32
+    runner.device = torch.device("cpu")
+    runner._dummy_run = lambda _tokens: (None, None)
+    runner._warm_up_uno_sampler = Mock(side_effect=AssertionError("non-last rank"))
+    monkeypatch.setattr(
+        model_runner_module, "enumerate_uno_served_launches", lambda **_: plan
+    )
+    monkeypatch.setattr(model_runner_module, "num_compute_units", lambda _: 82)
+
+    runner._warm_up_draft_kernels()
+
+    assert reports == [(2, 0, 0, {}, {})]
+    runner._warm_up_uno_sampler.assert_not_called()
+
+
+@pytest.mark.parametrize("use_flashinfer", [False, True])
+def test_draft_warmup_enumerator_uses_the_production_sampler_capability(
+    monkeypatch, use_flashinfer
+):
+    """The only production enumerator caller passes the installed backend."""
+    from vllm.v1.worker.gpu import model_runner as model_runner_module
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.spec_decode.uno import UnoServedLaunches
+
+    runner = object.__new__(GPUModelRunner)
+    runner.speculator = object.__new__(UnoSpeculator)
+    runner.speculator.k = 8
+    runner.sampler = SimpleNamespace(use_flashinfer=use_flashinfer)
+    runner.max_num_reqs = 4
+    runner.max_num_tokens = 64
+    runner.max_model_len = 128
+    runner.device = torch.device("cpu")
+    call_args: list[dict[str, object]] = []
+
+    def enumerate_launches(**kwargs):
+        call_args.append(kwargs)
+        return UnoServedLaunches((), ())
+
+    monkeypatch.setattr(
+        model_runner_module, "enumerate_uno_served_launches", enumerate_launches
+    )
+    monkeypatch.setattr(model_runner_module, "num_compute_units", lambda _: 82)
+
+    runner._warm_up_draft_kernels()
+
+    assert call_args[0]["use_flashinfer"] is use_flashinfer
+
+
+@pytest.mark.parametrize(
+    ("use_flashinfer", "expected_branch"),
+    [(True, "flashinfer"), (False, "triton")],
+)
+def test_uno_sampler_warmup_keeps_the_served_sampler_backend(
+    use_flashinfer, expected_branch
+):
+    """Warmup neither injects a seed nor changes the sampler's backend flag."""
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.spec_decode.uno import UnoSamplerWarmup, UnoSamplingMode
+
+    class ArrayState:
+        def __init__(self, values):
+            self.np = np.asarray(values)
+
+    states = SimpleNamespace(
+        vocab_size=100,
+        temperature=ArrayState([1.0, 1.0]),
+        top_k=ArrayState([100, 100]),
+        top_p=ArrayState([1.0, 1.0]),
+        min_p=ArrayState([0.0, 0.0]),
+        seeds=ArrayState([19, 23]),
+        seeds_set=np.asarray([True, False]),
+        apply_staged_writes=Mock(),
+    )
+    flashinfer_calls: list[bool] = []
+    triton_top_p_launches: list[bool] = []
+    sampler = SimpleNamespace(
+        use_flashinfer=use_flashinfer,
+        needs_logits_processing=np.zeros(2, dtype=bool),
+        sampling_states=states,
+    )
+
+    def sample_random(*args, **kwargs):
+        use_flashinfer_call = (
+            kwargs["use_flashinfer"] if "use_flashinfer" in kwargs else args[6]
+        )
+        if use_flashinfer_call:
+            flashinfer_calls.append(True)
+        else:
+            triton_top_p_launches.append(True)
+
+    sampler._sample_random = sample_random
+    runner = object.__new__(GPUModelRunner)
+    runner.sampler = sampler
+    runner.device = torch.device("cpu")
+
+    def dummy_sampler_run(_hidden, *, num_reqs):
+        has_filters = (
+            states.top_k.np[:num_reqs] < states.vocab_size
+        ).any() or (states.top_p.np[:num_reqs] < 1.0).any()
+        sampler._sample_random(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            bool(
+                sampler.use_flashinfer
+                and has_filters
+                and not states.seeds_set[:num_reqs].any()
+            ),
+        )
+
+    runner._dummy_sampler_run = dummy_sampler_run
+    warmup = UnoSamplerWarmup(
+        1,
+        1,
+        UnoSamplingMode("top_p_only", None, 0.9),
+        "pure_prefill",
+        expected_branch,
+        (),
+    )
+    before_seeds = states.seeds.np.copy()
+    before_seeds_set = states.seeds_set.copy()
+
+    branch = runner._warm_up_uno_sampler(torch.empty(1, 3), warmup=warmup)
+
+    assert branch == expected_branch
+    assert sampler.use_flashinfer is use_flashinfer
+    assert states.seeds.np.tolist() == before_seeds.tolist()
+    assert states.seeds_set.tolist() == before_seeds_set.tolist()
+    if use_flashinfer:
+        assert flashinfer_calls == [True]
+        assert triton_top_p_launches == []
+    else:
+        assert flashinfer_calls == []
+        assert triton_top_p_launches == [True]
+
+
+@pytest.mark.parametrize("use_flashinfer", [True, False])
+def test_sampler_selects_flashinfer_without_an_explicit_seed(monkeypatch, use_flashinfer):
+    """The actual production sampler chooses FlashInfer before Triton filters."""
+    from vllm.v1.worker.gpu.sample import sampler as sampler_module
+
+    subject = object.__new__(sampler_module.Sampler)
+    subject.use_flashinfer = use_flashinfer
+    subject.logprobs_mode = "raw_logprobs"
+    subject.use_fp64_gumbel = False
+    subject.sampling_states = SimpleNamespace(
+        get_top_k_top_p=lambda *_args: (None, torch.tensor([0.9])),
+        any_greedy=lambda *_args: False,
+        any_explicit_seed=lambda *_args: False,
+        temperature=SimpleNamespace(gpu=torch.ones(1)),
+        seeds=SimpleNamespace(gpu=torch.zeros(1, dtype=torch.int64)),
+    )
+    subject.apply_sampling_params = lambda logits, *_args, **_kwargs: logits
+    calls: list[str] = []
+    monkeypatch.setattr(
+        sampler_module,
+        "flashinfer_sample",
+        lambda logits, _top_k, _top_p: calls.append("flashinfer")
+        or torch.zeros(logits.shape[0], dtype=torch.int64),
+    )
+    monkeypatch.setattr(
+        sampler_module,
+        "apply_top_k_top_p",
+        lambda logits, _top_k, _top_p: calls.append("triton_filter") or logits,
+    )
+    monkeypatch.setattr(
+        sampler_module,
+        "gumbel_sample",
+        lambda logits, *_args, **_kwargs: calls.append("triton_sample")
+        or torch.zeros(logits.shape[0], dtype=torch.int64),
+    )
+
+    subject.sample(
+        torch.ones((1, 4)),
+        torch.tensor([0]),
+        torch.tensor([0]),
+        np.asarray([0]),
+        torch.tensor([0]),
+        torch.tensor([0]),
+        torch.tensor([0]),
+    )
+
+    assert calls == (
+        ["flashinfer"] if use_flashinfer else ["triton_filter", "triton_sample"]
+    )
 
 
 def test_uno_warmup_key_set_covers_served_prepare_and_sampler_shapes():
@@ -974,6 +1242,7 @@ def test_uno_warmup_key_set_covers_served_prepare_and_sampler_shapes():
         max_num_tokens=2048,
         max_model_len=4096,
         num_sm=num_sms,
+        use_flashinfer=False,
     )
     # ``served_sampler_keys`` is produced before the representative-call
     # selector. Mutating that selector back to the legacy ``num_reqs * K``
@@ -981,6 +1250,33 @@ def test_uno_warmup_key_set_covers_served_prepare_and_sampler_shapes():
     assert plan.served_sampler_keys == plan.sampler_keys
     assert {dict(key)["NUM_REQS"] for key in served_prepare_keys} == set(
         plan.prepare_request_counts
+    )
+
+
+def _self_check_sampler(use_flashinfer=False):
+    """Return a sampler stub whose real backend decision can be observed."""
+    calls: list[bool] = []
+
+    def sample_random(*args, **kwargs):
+        use_flashinfer_call = (
+            kwargs["use_flashinfer"] if "use_flashinfer" in kwargs else args[6]
+        )
+        calls.append(bool(use_flashinfer_call))
+
+    return SimpleNamespace(
+        use_flashinfer=use_flashinfer,
+        _sample_random=sample_random,
+        calls=calls,
+    )
+
+
+def _run_self_check_sampler_branch(runner, sampling_params):
+    """Send a mocked scheduler pass through the sampler branch observer."""
+    use_flashinfer = runner.sampler.use_flashinfer and (
+        sampling_params.top_k != -1 or sampling_params.top_p != 1.0
+    )
+    runner.sampler._sample_random(
+        None, None, None, None, None, None, use_flashinfer
     )
 
 
@@ -994,11 +1290,12 @@ def test_uno_startup_jit_self_check_reports_compile_without_forcing_warn_abort(
     runner = SimpleNamespace(
         speculator=object.__new__(UnoSpeculator),
         adaptive_verification="saved-adaptive-state",
-        # The production arithmetic caps the mixed check at the full 2048
-        # token chunk even when decode_query_len + 2 would be larger.
+        # This deliberately oversized fixture proves the full-chunk bound. It
+        # is not the production K=8 decode shape, which has query length 9.
         max_num_tokens=2048,
         decode_query_len=2047,
         device=torch.device("cpu"),
+        sampler=_self_check_sampler(),
     )
     worker_execute_model = Mock()
     worker_sample_tokens = Mock()
@@ -1016,7 +1313,7 @@ def test_uno_startup_jit_self_check_reports_compile_without_forcing_warn_abort(
         assert _args[:2] == (runner, worker_execute_model)
         assert _args[3] == 2048
         assert _kwargs["req_id_prefix"].startswith("_uno_jit_self_check_")
-        _kwargs["sampling_params"]
+        _run_self_check_sampler_branch(runner, _kwargs["sampling_params"])
         _args[2](None)
         jit_monitor._handle_jit_event(
             backend="Triton",
@@ -1054,6 +1351,49 @@ def test_uno_startup_jit_self_check_reports_compile_without_forcing_warn_abort(
     )
 
 
+def test_uno_startup_jit_self_check_uses_the_production_k8_batch_shape(
+    monkeypatch,
+):
+    """K=8 serves ``decode_query_len=9``, so its mixed check uses 11 tokens."""
+    from vllm.utils import jit_monitor
+    from vllm.v1.worker.gpu import warmup
+
+    runner = SimpleNamespace(
+        speculator=object.__new__(UnoSpeculator),
+        adaptive_verification=None,
+        max_num_tokens=2048,
+        decode_query_len=9,
+        device=torch.device("cpu"),
+        sampler=_self_check_sampler(),
+    )
+    observed_tokens: list[int] = []
+
+    @contextmanager
+    def launched_kernels():
+        yield {
+            "_topk_topp_kernel": 1,
+            "_topp_sb_stats_kernel": 1,
+            "_topp_sb_step_kernel": 1,
+            "_topp_sb_mask_kernel": 1,
+        }
+
+    def sampled(*args, **kwargs):
+        observed_tokens.append(args[3])
+        _run_self_check_sampler_branch(runner, kwargs["sampling_params"])
+        args[2](None)
+        return True
+
+    monkeypatch.setattr(jit_monitor, "_active", True)
+    monkeypatch.setattr(warmup.torch.accelerator, "synchronize", lambda: None)
+    monkeypatch.setattr(warmup, "capture_topk_topp_launches", launched_kernels)
+    monkeypatch.setattr(warmup, "run_mixed_prefill_decode_warmup", sampled)
+
+    result = warmup.run_uno_served_jit_self_check(runner, Mock(), Mock())
+
+    assert result.passed
+    assert observed_tokens == [11, 11, 11, 11]
+
+
 def test_uno_startup_jit_self_check_cannot_pass_unarmed_or_unreached(monkeypatch):
     """A skipped cycle or missing kernel counter is not a successful check."""
     from vllm.utils import jit_monitor
@@ -1065,6 +1405,7 @@ def test_uno_startup_jit_self_check_cannot_pass_unarmed_or_unreached(monkeypatch
         max_num_tokens=32,
         decode_query_len=8,
         device=torch.device("cpu"),
+        sampler=_self_check_sampler(),
     )
     monkeypatch.setattr(jit_monitor, "_active", False)
     with pytest.raises(RuntimeError, match="requires an armed JIT monitor"):
@@ -1078,6 +1419,7 @@ def test_uno_startup_jit_self_check_cannot_pass_unarmed_or_unreached(monkeypatch
         yield {}
 
     def skipped(*_args, **_kwargs):
+        _run_self_check_sampler_branch(runner, _kwargs["sampling_params"])
         return False
 
     monkeypatch.setattr(warmup, "capture_topk_topp_launches", no_launches)
@@ -1093,7 +1435,7 @@ def test_uno_startup_jit_self_check_cannot_pass_unarmed_or_unreached(monkeypatch
 
 
 def test_uno_startup_jit_self_check_restores_rng_state(monkeypatch):
-    """The post-seed check cannot perturb a later sampled request's RNG."""
+    """The seed-free post-warmup check cannot perturb later sampling RNG."""
     from vllm.utils import jit_monitor
     from vllm.v1.worker.gpu import warmup
 
@@ -1103,6 +1445,7 @@ def test_uno_startup_jit_self_check_restores_rng_state(monkeypatch):
         max_num_tokens=32,
         decode_query_len=8,
         device=torch.device("cpu"),
+        sampler=_self_check_sampler(),
     )
     monkeypatch.setattr(jit_monitor, "_active", True)
     monkeypatch.setattr(warmup.torch.accelerator, "synchronize", lambda: None)
@@ -1118,6 +1461,7 @@ def test_uno_startup_jit_self_check_restores_rng_state(monkeypatch):
 
     def sampled(*args, **_kwargs):
         torch.rand(4)
+        _run_self_check_sampler_branch(runner, _kwargs["sampling_params"])
         args[2](None)
         return True
 
@@ -1128,6 +1472,46 @@ def test_uno_startup_jit_self_check_restores_rng_state(monkeypatch):
     result = warmup.run_uno_served_jit_self_check(runner, Mock(), Mock())
     assert result.passed
     assert torch.equal(torch.random.get_rng_state(), before)
+
+
+def test_uno_startup_jit_self_check_proves_flashinfer_branches(monkeypatch):
+    """FlashInfer modes need branch evidence, not nonexistent Triton kernels."""
+    from vllm.utils import jit_monitor
+    from vllm.v1.worker.gpu import warmup
+
+    runner = SimpleNamespace(
+        speculator=object.__new__(UnoSpeculator),
+        adaptive_verification=None,
+        max_num_tokens=32,
+        decode_query_len=8,
+        device=torch.device("cpu"),
+        sampler=_self_check_sampler(use_flashinfer=True),
+    )
+    monkeypatch.setattr(jit_monitor, "_active", True)
+    monkeypatch.setattr(warmup.torch.accelerator, "synchronize", lambda: None)
+
+    @contextmanager
+    def no_triton_launches():
+        yield {}
+
+    def sampled(*args, **kwargs):
+        _run_self_check_sampler_branch(runner, kwargs["sampling_params"])
+        args[2](None)
+        return True
+
+    monkeypatch.setattr(warmup, "capture_topk_topp_launches", no_triton_launches)
+    monkeypatch.setattr(warmup, "run_mixed_prefill_decode_warmup", sampled)
+
+    result = warmup.run_uno_served_jit_self_check(runner, Mock(), Mock())
+
+    assert result.passed
+    assert result.sampler_branches == {
+        "top_p_only": ("flashinfer",),
+        "top_k_top_p": ("flashinfer",),
+        "top_k_only": ("flashinfer",),
+        "neither": ("triton",),
+    }
+    assert result.sampler_launches == {name: {} for name in result.sampler_branches}
 
 
 def test_uno_self_check_launch_counter_only_records_an_armed_scope(monkeypatch):
@@ -1161,10 +1545,11 @@ def test_uno_self_check_launch_counter_only_records_an_armed_scope(monkeypatch):
     assert calls == [("topk", (1,)), ("topk", (2,)), ("step", (5,))]
 
 
-def test_uno_launch_key_debug_is_gated_and_scoped_to_uno_prepare():
-    """Generic sampling never constructs Uno launch-key diagnostic records."""
+def test_uno_launch_key_debug_is_gated_and_has_no_generic_serving_wrapper():
+    """Generic sampling stays untouched; only opt-in startup proxies record."""
     from vllm.v1.sample.ops import topk_topp_triton
     from vllm.v1.worker.gpu.sample import gumbel
+    from vllm.v1.worker.gpu import launch_key_debug
     from vllm.v1.worker.gpu.spec_decode import uno_prepare
 
     assert "launch_key_debug" not in inspect.getsource(topk_topp_triton)
@@ -1172,6 +1557,37 @@ def test_uno_launch_key_debug_is_gated_and_scoped_to_uno_prepare():
     prepare_source = inspect.getsource(uno_prepare)
     assert "_LAUNCH_KEY_DEBUG_ENABLED = _launch_key_debug_enabled()" in prepare_source
     assert "if record_triton_launch is not None:" in prepare_source
+    assert "record_topk_topp_launches" in inspect.getsource(launch_key_debug)
+
+
+def test_uno_launch_key_debug_records_sampler_launches_only_in_startup_scope(monkeypatch):
+    """The opt-in warmup proxy emits a receipt from each real launch object."""
+    from vllm.v1.sample.ops import topk_topp_triton
+    from vllm.v1.worker.gpu import launch_key_debug
+
+    calls: list[tuple[str, tuple[int, ...]]] = []
+    records: list[tuple[str, object]] = []
+
+    class FakeTritonKernel:
+        def __getitem__(self, grid):
+            def launch(*_args, **_kwargs):
+                calls.append(("launch", grid))
+
+            return launch
+
+    monkeypatch.setattr(topk_topp_triton, "_topk_topp_kernel", FakeTritonKernel())
+    monkeypatch.setattr(launch_key_debug, "_ENABLED", True)
+    monkeypatch.setattr(
+        launch_key_debug,
+        "record_triton_launch",
+        lambda name, _kernel, grid, *_args, **_kwargs: records.append((name, grid)),
+    )
+
+    with launch_key_debug.record_topk_topp_launches():
+        topk_topp_triton._topk_topp_kernel[(3,)]()
+
+    assert records == [("_topk_topp_kernel", (3,))]
+    assert calls == [("launch", (3,))]
 
 
 def test_uno_prefill_preserves_base_output_before_proposal_order(monkeypatch):

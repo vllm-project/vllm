@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Uno shared-model parallel drafting for Model Runner V2."""
 
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -177,14 +177,29 @@ UNO_SAMPLING_MODES = (
 )
 
 
+def sampler_branch_for_mode(mode: UnoSamplingMode, *, use_flashinfer: bool) -> str:
+    """Return the ``Sampler._sample_random`` branch serving will take.
+
+    The Uno warmup installs a non-greedy temperature and no explicit request
+    seed. Those are the only request-state conditions in addition to the
+    sampler's FlashInfer capability that select this branch. Keeping the
+    decision beside the launch enumerator prevents startup from quietly
+    warming Triton while a default CUDA deployment serves FlashInfer.
+    """
+    if use_flashinfer and (mode.topk_enabled or mode.topp_enabled):
+        return "flashinfer"
+    return "triton"
+
+
 @dataclass(frozen=True)
 class UnoSamplerWarmup:
-    """A real sampler call selected to warm one or more Triton keys."""
+    """A real sampler call selected to warm one served sampler branch."""
 
     num_reqs: int
     num_rows: int
     mode: UnoSamplingMode
     source: str
+    sampler_branch: str
     kernel_keys: tuple[tuple[object, ...], ...]
 
 
@@ -284,8 +299,13 @@ def _sampler_kernel_keys(
     mode: UnoSamplingMode,
     num_rows: int,
     num_sm: int,
+    sampler_branch: str,
 ) -> tuple[tuple[object, ...], ...]:
     """Return the real top-k/top-p kernel keys selected for one call."""
+    if sampler_branch == "flashinfer":
+        return ()
+    if sampler_branch != "triton":
+        raise ValueError(f"unknown Uno sampler branch: {sampler_branch!r}")
     # Use the production split arithmetic and branch threshold rather than
     # recreating either in a CPU-only test.
     from vllm.v1.sample.ops.topk_topp_triton import (
@@ -329,6 +349,7 @@ def enumerate_uno_served_launches(
     max_num_tokens: int,
     max_model_len: int,
     num_sm: int,
+    use_flashinfer: bool,
 ) -> UnoServedLaunches:
     """Build the complete bounded Uno warmup plan from serving behavior.
 
@@ -349,15 +370,25 @@ def enumerate_uno_served_launches(
         key
         for _num_reqs, num_rows, _source in shapes
         for mode in UNO_SAMPLING_MODES
-        for key in _sampler_kernel_keys(mode, num_rows, num_sm)
+        for key in _sampler_kernel_keys(
+            mode,
+            num_rows,
+            num_sm,
+            sampler_branch_for_mode(mode, use_flashinfer=use_flashinfer),
+        )
     )
     covered: set[tuple[object, ...]] = set()
     selected: list[UnoSamplerWarmup] = []
 
     for mode in UNO_SAMPLING_MODES:
         mode_selected = False
+        sampler_branch = sampler_branch_for_mode(
+            mode, use_flashinfer=use_flashinfer
+        )
         for num_reqs, num_rows, source in shapes:
-            kernel_keys = _sampler_kernel_keys(mode, num_rows, num_sm)
+            kernel_keys = _sampler_kernel_keys(
+                mode, num_rows, num_sm, sampler_branch
+            )
             new_keys = set(kernel_keys).difference(covered)
             # The no-filter path launches no top-k/top-p kernel, but must still
             # execute once so the self-check can prove that branch is reached.
@@ -368,6 +399,7 @@ def enumerate_uno_served_launches(
                         num_rows,
                         mode,
                         source,
+                        sampler_branch,
                         kernel_keys,
                     )
                 )
@@ -564,6 +596,8 @@ class UnoSpeculator(DraftModelSpeculator):
         prepare_shapes: int,
         sampler_calls: int,
         sampler_keys: int,
+        sampler_branches: Mapping[str, str],
+        sampler_kernels: Mapping[str, tuple[str, ...]],
     ) -> None:
         """State once what warmup covered, so a cold serve stays visible.
 
@@ -573,6 +607,14 @@ class UnoSpeculator(DraftModelSpeculator):
         "compilation during inference" warnings, so one log answers whether
         warmup covered what the requests asked for.
         """
+        for mode, branch in sampler_branches.items():
+            kernels = ",".join(sampler_kernels.get(mode, ())) or "none"
+            logger.info(
+                "Uno sampler warmup backend: mode=%s branch=%s kernels=%s",
+                mode,
+                branch,
+                kernels,
+            )
         logger.info(
             "Uno draft kernels warmed: %d prepare request shapes (1..%d "
             "requests at num_speculative_tokens=%d), %d sampler calls, and "

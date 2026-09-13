@@ -93,6 +93,37 @@ def capture_topk_topp_launches() -> Iterator[dict[str, int]]:
             setattr(topk_topp_triton, name, kernel)
 
 
+@contextmanager
+def capture_sampler_branches(sampler: Any | None) -> Iterator[list[str]]:
+    """Observe real ``Sampler._sample_random`` backend decisions temporarily."""
+    branches: list[str] = []
+    if sampler is None:
+        yield branches
+        return
+
+    original = sampler._sample_random
+    had_instance_override = "_sample_random" in vars(sampler)
+    instance_override = getattr(sampler, "_sample_random", None)
+
+    def captured_sample_random(*args: Any, **kwargs: Any) -> Any:
+        use_flashinfer = kwargs.get("use_flashinfer")
+        if use_flashinfer is None:
+            if len(args) < 7:
+                raise RuntimeError("Sampler did not pass its backend decision")
+            use_flashinfer = args[6]
+        branches.append("flashinfer" if use_flashinfer else "triton")
+        return original(*args, **kwargs)
+
+    try:
+        sampler._sample_random = captured_sample_random
+        yield branches
+    finally:
+        if had_instance_override:
+            sampler._sample_random = instance_override
+        else:
+            del sampler._sample_random
+
+
 @dataclass(frozen=True)
 class UnoJitSelfCheck:
     """Observable result of the bounded Uno post-warmup coverage check."""
@@ -101,6 +132,8 @@ class UnoJitSelfCheck:
     monitor_armed: bool
     sampler_calls: dict[str, int]
     sampler_launches: dict[str, dict[str, int]]
+    sampler_branches: dict[str, tuple[str, ...]]
+    branch_mismatches: dict[str, str]
     missing_launches: dict[str, tuple[str, ...]]
     compilations: tuple[object, ...]
 
@@ -110,6 +143,7 @@ class UnoJitSelfCheck:
             self.ran
             and self.monitor_armed
             and all(self.sampler_calls.values())
+            and not self.branch_mismatches
             and not self.missing_launches
             and not self.compilations
         )
@@ -351,11 +385,16 @@ def run_uno_served_jit_self_check(
     """
     # Avoid a module-level import cycle through model_runner.
     from vllm.utils.jit_monitor import capture_compilations, is_active
-    from vllm.v1.worker.gpu.spec_decode.uno import UNO_SAMPLING_MODES, UnoSpeculator
+    from vllm.v1.worker.gpu.spec_decode.uno import (
+        UNO_SAMPLING_MODES,
+        UnoSpeculator,
+        sampler_branch_for_mode,
+    )
 
     monitor_armed = is_active()
-    if not isinstance(getattr(model_runner, "speculator", None), UnoSpeculator):
-        return UnoJitSelfCheck(False, monitor_armed, {}, {}, {}, ())
+    speculator = getattr(model_runner, "speculator", None)
+    if not isinstance(speculator, UnoSpeculator):
+        return UnoJitSelfCheck(False, monitor_armed, {}, {}, {}, {}, ())
     if not monitor_armed:
         raise RuntimeError("Uno startup JIT self-check requires an armed JIT monitor")
 
@@ -365,6 +404,8 @@ def run_uno_served_jit_self_check(
     model_runner.adaptive_verification = None
     sampler_calls: dict[str, int] = {}
     sampler_launches: dict[str, dict[str, int]] = {}
+    sampler_branches: dict[str, tuple[str, ...]] = {}
+    branch_mismatches: dict[str, str] = {}
     missing_launches: dict[str, tuple[str, ...]] = {}
     ran = True
     try:
@@ -375,6 +416,16 @@ def run_uno_served_jit_self_check(
                     max(3, model_runner.decode_query_len + 2),
                 )
                 for mode in UNO_SAMPLING_MODES:
+                    expected_branch = sampler_branch_for_mode(
+                        mode,
+                        use_flashinfer=bool(
+                            getattr(
+                                getattr(model_runner, "sampler", None),
+                                "use_flashinfer",
+                                False,
+                            )
+                        ),
+                    )
                     sample_call_count = 0
 
                     def counted_sample_tokens(
@@ -384,32 +435,32 @@ def run_uno_served_jit_self_check(
                         sample_call_count += 1
                         return worker_sample_tokens(grammar_output)
 
-                    with capture_topk_topp_launches() as launches:
-                        mode_ran = run_mixed_prefill_decode_warmup(
-                            model_runner,
-                            worker_execute_model,
-                            counted_sample_tokens,
-                            check_tokens,
-                            req_id_prefix=f"_uno_jit_self_check_{mode.name}",
-                            sampling_params=SamplingParams(
-                                max_tokens=2,
-                                temperature=0.9,
-                                top_k=-1 if mode.top_k is None else mode.top_k,
-                                top_p=1.0 if mode.top_p is None else mode.top_p,
-                                # Force the same native/Triton sampling path
-                                # that startup warmed. FlashInfer deliberately
-                                # declines per-request generators, so a seed
-                                # gives this proof a kernel counter to read.
-                                seed=0,
-                            ),
-                        )
+                    with capture_sampler_branches(
+                        getattr(model_runner, "sampler", None)
+                    ) as branches:
+                        with capture_topk_topp_launches() as launches:
+                            mode_ran = run_mixed_prefill_decode_warmup(
+                                model_runner,
+                                worker_execute_model,
+                                counted_sample_tokens,
+                                check_tokens,
+                                req_id_prefix=f"_uno_jit_self_check_{mode.name}",
+                                sampling_params=SamplingParams(
+                                    max_tokens=2,
+                                    temperature=0.9,
+                                    top_k=-1 if mode.top_k is None else mode.top_k,
+                                    top_p=1.0 if mode.top_p is None else mode.top_p,
+                                ),
+                            )
                     torch.accelerator.synchronize()
                     sampler_calls[mode.name] = sample_call_count
                     sampler_launches[mode.name] = dict(launches)
+                    sampler_branches[mode.name] = tuple(branches)
                     ran = ran and mode_ran
                     expected = (
                         ()
-                        if not mode.topk_enabled and not mode.topp_enabled
+                        if expected_branch == "flashinfer"
+                        or (not mode.topk_enabled and not mode.topp_enabled)
                         else (
                             "_topp_sb_stats_kernel",
                             "_topp_sb_step_kernel",
@@ -430,6 +481,10 @@ def run_uno_served_jit_self_check(
                     )
                     if missing:
                         missing_launches[mode.name] = missing
+                    if set(branches) != {expected_branch}:
+                        branch_mismatches[mode.name] = (
+                            f"expected={expected_branch} observed={tuple(branches)!r}"
+                        )
     finally:
         model_runner.adaptive_verification = adaptive_verification
 
@@ -447,6 +502,8 @@ def run_uno_served_jit_self_check(
         monitor_armed,
         sampler_calls,
         sampler_launches,
+        sampler_branches,
+        branch_mismatches,
         missing_launches,
         tuple(compilations),
     )
@@ -455,9 +512,12 @@ def run_uno_served_jit_self_check(
     else:
         logger.warning(
             "Uno startup JIT self-check did not prove launch coverage: "
-            "ran=%s sampler_calls=%s missing_kernels=%s compilations=%d",
+            "ran=%s sampler_calls=%s sampler_branches=%s branch_mismatches=%s "
+            "missing_kernels=%s compilations=%d",
             result.ran,
             result.sampler_calls,
+            result.sampler_branches,
+            result.branch_mismatches,
             result.missing_launches,
             len(result.compilations),
         )
