@@ -318,13 +318,17 @@ def _decode_index_score_kernel(
     num_kv_chunks,
     USE_PDL: tl.constexpr,
 ):
-    BLOCK_SIZE_HQ: tl.constexpr = num_idx_heads * BLOCK_SIZE_Q
+    # ``tl.arange`` requires a power-of-two extent, so tile to the next power
+    # of two and mask the trailing lanes instead of assuming the product is
+    # already one. num_idx_heads == num_kv_heads, which is only a power of two
+    # for some TP splits (e.g. 96 query heads over 6 KV heads).
+    BLOCK_SIZE_HQ: tl.constexpr = triton.next_power_of_2(num_idx_heads * BLOCK_SIZE_Q)
     pid_r = tl.program_id(0)
     pid_c = tl.program_id(1)
     hq_offsets = tl.arange(0, BLOCK_SIZE_HQ)
     h_offsets = hq_offsets // BLOCK_SIZE_Q
     q_offsets = hq_offsets % BLOCK_SIZE_Q
-    q_mask = q_offsets < decode_query_len
+    q_mask = (q_offsets < decode_query_len) & (h_offsets < num_idx_heads)
     q_ids = pid_r * decode_query_len + q_offsets
 
     if USE_PDL:
