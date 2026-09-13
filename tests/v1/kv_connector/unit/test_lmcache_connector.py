@@ -12,6 +12,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
 from vllm.v1.outputs import KVConnectorOutput
 
 
+def bind_connector_methods(connector, *method_names):
+    for method_name in method_names:
+        method = getattr(LMCacheConnectorV1, method_name)
+        setattr(connector, method_name, method.__get__(connector, LMCacheConnectorV1))
+
+
 @pytest.fixture
 def mock_lmcache_engine_event():
     """Create a mock event object that mimics what the lmcache engine returns."""
@@ -69,6 +75,83 @@ def mock_connector():
     )
 
     return connector
+
+
+class TestDegradedMode:
+    """Test LMCache degraded-mode handling."""
+
+    WORKER_METHODS = (
+        "_is_lmcache_engine_available",
+        "start_load_kv",
+        "wait_for_layer_load",
+        "save_kv_layer",
+        "wait_for_save",
+        "get_finished",
+        "get_block_ids_with_load_errors",
+        "get_kv_connector_kv_cache_events",
+    )
+
+    def test_worker_methods_noop_when_engine_is_unavailable(self, mock_connector):
+        """Test that worker methods no-op when LMCache falls back to recompute."""
+        bind_connector_methods(mock_connector, *self.WORKER_METHODS)
+        mock_connector._lmcache_engine.lmcache_engine = None
+
+        forward_context = MagicMock()
+        kv_layer = MagicMock()
+        attn_metadata = MagicMock()
+
+        mock_connector.start_load_kv(forward_context, extra_arg="x")
+        mock_connector.wait_for_layer_load("layer")
+        mock_connector.save_kv_layer("layer", kv_layer, attn_metadata)
+        mock_connector.wait_for_save()
+
+        assert mock_connector.get_finished({"req"}) == (None, None)
+        assert mock_connector.get_block_ids_with_load_errors() == set()
+        assert mock_connector.get_kv_connector_kv_cache_events() is None
+
+        mock_connector._lmcache_engine.start_load_kv.assert_not_called()
+        mock_connector._lmcache_engine.wait_for_layer_load.assert_not_called()
+        mock_connector._lmcache_engine.save_kv_layer.assert_not_called()
+        mock_connector._lmcache_engine.wait_for_save.assert_not_called()
+        mock_connector._lmcache_engine.get_finished.assert_not_called()
+        mock_connector._lmcache_engine.get_kv_events.assert_not_called()
+
+    def test_worker_methods_forward_when_engine_is_available(self, mock_connector):
+        """Test that worker methods still forward when LMCache is available."""
+        bind_connector_methods(mock_connector, *self.WORKER_METHODS)
+        mock_connector._lmcache_engine.lmcache_engine = object()
+        mock_connector._lmcache_engine.get_finished.return_value = ({"send"}, {"recv"})
+        mock_connector._lmcache_engine.get_block_ids_with_load_errors.return_value = {
+            1,
+            2,
+        }
+        mock_connector._lmcache_engine.get_kv_events.return_value = None
+
+        forward_context = MagicMock()
+        kv_layer = MagicMock()
+        attn_metadata = MagicMock()
+
+        mock_connector.start_load_kv(forward_context, extra_arg="x")
+        mock_connector.wait_for_layer_load("layer")
+        mock_connector.save_kv_layer("layer", kv_layer, attn_metadata, extra_arg="y")
+        mock_connector.wait_for_save()
+
+        assert mock_connector.get_finished({"req"}) == ({"send"}, {"recv"})
+        assert mock_connector.get_block_ids_with_load_errors() == {1, 2}
+        assert mock_connector.get_kv_connector_kv_cache_events() is None
+
+        mock_connector._lmcache_engine.start_load_kv.assert_called_once_with(
+            forward_context, extra_arg="x"
+        )
+        mock_connector._lmcache_engine.wait_for_layer_load.assert_called_once_with(
+            "layer"
+        )
+        mock_connector._lmcache_engine.save_kv_layer.assert_called_once_with(
+            "layer", kv_layer, attn_metadata, extra_arg="y"
+        )
+        mock_connector._lmcache_engine.wait_for_save.assert_called_once()
+        mock_connector._lmcache_engine.get_finished.assert_called_once_with({"req"})
+        mock_connector._lmcache_engine.get_kv_events.assert_called_once()
 
 
 class TestGetKVConnectorKVCacheEvents:
