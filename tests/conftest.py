@@ -56,6 +56,8 @@ from vllm.config.model import ConvertOption, RunnerOption, _get_and_verify_dtype
 from vllm.connections import global_http_connection
 from vllm.distributed import (
     cleanup_dist_env_and_memory,
+    destroy_distributed_environment,
+    destroy_model_parallel,
     init_distributed_environment,
     initialize_model_parallel,
 )
@@ -224,8 +226,17 @@ def init_test_http_connection():
 
 
 @pytest.fixture
-def dist_init():
+def dist_init(request):
     from tests.utils import ensure_current_vllm_config
+
+    # A cpu_test gets a gloo group and no accelerator teardown, so it leaves
+    # the CUDA driver untouched. An NCCL group initializes the driver in the
+    # pytest process without setting torch.cuda.is_initialized(), so vLLM's
+    # fork/spawn guard (_maybe_force_spawn) still selects fork and the next
+    # test that launches an EngineCore subprocess dies with
+    # cudaErrorInitializationError.
+    cpu_only = request.node.get_closest_marker("cpu_test") is not None
+    backend = "gloo" if cpu_only else "nccl"
 
     # Close the fd returned by mkstemp; FileStore opens the path itself.
     # Leaving it open leaks one FD per test and eventually exhausts the
@@ -241,11 +252,15 @@ def dist_init():
                 rank=0,
                 distributed_init_method=f"file://{temp_file}",
                 local_rank=0,
-                backend="nccl",
+                backend=backend,
             )
-            initialize_model_parallel(1, 1)
+            initialize_model_parallel(1, 1, backend=backend)
             yield
-        cleanup_dist_env_and_memory()
+        if cpu_only:
+            destroy_model_parallel()
+            destroy_distributed_environment()
+        else:
+            cleanup_dist_env_and_memory()
     finally:
         with contextlib.suppress(OSError):
             os.unlink(temp_file)
