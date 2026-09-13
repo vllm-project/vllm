@@ -14,7 +14,9 @@ from utils import skip_unsupported
 from vllm.model_executor.determinism.batch_invariant import matmul_batch_invariant
 from vllm.model_executor.determinism.batch_invariant_configs import (
     _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS,
+    _get_matmul_config,
     _get_tuned_matmul_arch_family,
+    set_config_max_num_seqs,
 )
 from vllm.platforms import current_platform
 
@@ -134,3 +136,40 @@ def test_matmul_batch_invariance_across_tuned_m_buckets(m, transpose_b):
     batch_output = matmul_batch_invariant(a, b)
 
     assert torch.equal(single_output[0], batch_output[0])
+
+
+def test_get_matmul_config_pinned_to_max_num_seqs():
+    # When set_config_max_num_seqs is called, _get_matmul_config must return
+    # the same config for all runtime M values that async scheduling can produce,
+    # even if those M values span multiple m_bucket thresholds.
+    capability = (
+        current_platform.get_device_capability() if current_platform.is_cuda() else None
+    )
+    arch_family = _get_tuned_matmul_arch_family(capability)
+    if arch_family not in _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS:
+        pytest.skip("No tuned persistent matmul config for this architecture")
+
+    default = {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 64,
+               "GROUP_SIZE_M": 8, "num_stages": 3, "num_warps": 8}
+    dtype = torch.bfloat16
+    # Use a shape guaranteed to have per-bucket variation (present in all arches).
+    N, K = 2048, 2048
+
+    # Without pinning, M=8 and M=9 can land in different buckets.
+    set_config_max_num_seqs(0)
+    cfg_8 = _get_matmul_config(8, N, K, dtype, default)
+    cfg_9 = _get_matmul_config(9, N, K, dtype, default)
+    # Confirm they are indeed different so the test is meaningful on this arch.
+    if cfg_8 == cfg_9:
+        pytest.skip("M=8 and M=9 happen to share a bucket on this architecture")
+
+    # With pinning to max_num_seqs=16, both must return the same config.
+    set_config_max_num_seqs(16)
+    try:
+        pinned_8 = _get_matmul_config(8, N, K, dtype, default)
+        pinned_9 = _get_matmul_config(9, N, K, dtype, default)
+        assert pinned_8 == pinned_9, (
+            "Config must be identical for M=8 and M=9 when pinned to max_num_seqs=16"
+        )
+    finally:
+        set_config_max_num_seqs(0)
