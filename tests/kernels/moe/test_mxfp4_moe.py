@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Tests for SM100 CUTLASS MXFP4 x MXFP4 grouped MoE kernels."""
+"""Tests for CUTLASS MXFP4 x MXFP4 grouped MoE kernels (SM10x/11x and SM12x)."""
 
 import random
 
@@ -30,9 +30,13 @@ def calc_diff(x, y):
     return 1 - sim
 
 
-def is_sm100_supported() -> bool:
-    return current_platform.is_cuda() and current_platform.is_device_capability_family(
-        100
+def is_mxfp4_moe_supported() -> bool:
+    """Ask the build which devices carry compiled MXFP4 MoE kernels."""
+    capability = current_platform.get_device_capability()
+    return (
+        current_platform.is_cuda()
+        and capability is not None
+        and ops.mxfp4_experts_quant_supported(capability.to_int())
     )
 
 
@@ -61,8 +65,8 @@ def compute_ref_output(
 
 
 @pytest.mark.skipif(
-    not is_sm100_supported(),
-    reason="cutlass_mxfp4_group_mm requires CUDA SM100",
+    not is_mxfp4_moe_supported(),
+    reason="cutlass_mxfp4_group_mm requires a build with MXFP4 MoE kernels",
 )
 @pytest.mark.parametrize("num_experts", [8, 16, 32])
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16])
@@ -201,8 +205,8 @@ def test_cutlass_mxfp4_grouped_mm(num_experts, out_dtype):
 
 
 @pytest.mark.skipif(
-    not is_sm100_supported(),
-    reason="mxfp4_experts_quant requires CUDA SM100",
+    not is_mxfp4_moe_supported(),
+    reason="mxfp4_experts_quant requires a build with MXFP4 MoE kernels",
 )
 def test_mxfp4_experts_quant_basic():
     """
@@ -289,8 +293,8 @@ def compute_reference_e8m0_scale(block_max: float) -> int:
 
 
 @pytest.mark.skipif(
-    not is_sm100_supported(),
-    reason="mxfp4_experts_quant requires CUDA SM100",
+    not is_mxfp4_moe_supported(),
+    reason="mxfp4_experts_quant requires a build with MXFP4 MoE kernels",
 )
 @pytest.mark.parametrize("k", [256, 7168])
 @pytest.mark.parametrize("m", [16, 64])
@@ -412,8 +416,8 @@ def test_mxfp4_experts_quant_e8m0_scale_correctness(m, k):
 
 
 @pytest.mark.skipif(
-    not is_sm100_supported(),
-    reason="mxfp4_experts_quant requires CUDA SM100",
+    not is_mxfp4_moe_supported(),
+    reason="mxfp4_experts_quant requires a build with MXFP4 MoE kernels",
 )
 def test_mxfp4_experts_quant_no_saturation():
     """
