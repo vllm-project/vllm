@@ -347,7 +347,7 @@ class BenchmarkMetrics:
     median_e2el_ms: float
     std_e2el_ms: float
     percentiles_e2el_ms: list[tuple[float, float]]
-    # Max output tokens per second and concurrent requests at that peak
+    # Peak output tokens per second and peak number of overlapping requests.
     max_output_tokens_per_s: float
     max_concurrent_requests: int
     rtfx: float = 0.0  # Inverse Real-Time Factor for ASR benchmarks
@@ -681,6 +681,7 @@ def calculate_metrics(
         duration_seconds = int(np.ceil(max_end_time - min_start_time)) + 1
         tokens_per_second = np.zeros(duration_seconds)
         concurrent_requests_per_second = np.zeros(duration_seconds)
+        request_events: list[tuple[float, int]] = []
 
         for i, output in enumerate(successful_outputs):
             # Calculate token generation timestamp using
@@ -702,15 +703,22 @@ def calculate_metrics(
             request_end_second = int(
                 (output.start_time + output.latency) - min_start_time
             )
+            if output.latency > 0:
+                request_events.append((output.start_time, 1))
+                request_events.append((output.start_time + output.latency, -1))
 
             for second in range(request_start_second, request_end_second + 1):
                 concurrent_requests_per_second[second] += 1
 
-        # Find the maximum tokens per second and corresponding
-        # concurrent requests
+        # Process completions before arrivals at the same timestamp.
+        concurrent_requests = 0
+        for _, delta in sorted(request_events):
+            concurrent_requests += delta
+            max_concurrent_requests = max(max_concurrent_requests, concurrent_requests)
+
+        # Find the maximum tokens per second.
         if len(tokens_per_second) > 0:
             max_output_tokens_per_s = float(np.max(tokens_per_second))
-            max_concurrent_requests = int(np.max(concurrent_requests_per_second))
 
         if TERM_PLOTLIB_AVAILABLE:
             import termplotlib as tpl
@@ -724,7 +732,7 @@ def calculate_metrics(
             fig.plot(
                 np.arange(len(concurrent_requests_per_second)),
                 concurrent_requests_per_second,
-                title="Concurrent requests per second",
+                title="Requests active during each second",
             )
             fig.show()
         else:
