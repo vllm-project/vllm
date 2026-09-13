@@ -784,7 +784,8 @@ def test_triton_flashinfer_shared_cache_across_image_and_causal_steps(
             layer.mm_prefix_clamp_sliding_window = True
         builder = backend.get_builder_cls()(spec, ["composite_test"], cfg, DEVICE)
         builder.set_kernel_block_size(block_size)
-        cache = torch.empty(
+        # Match production, where unwritten page tails are zero-initialized.
+        cache = torch.zeros(
             num_blocks,
             16,
             block_size,
