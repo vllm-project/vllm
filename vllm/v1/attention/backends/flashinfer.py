@@ -646,6 +646,7 @@ class FlashInferBackend(AttentionBackend):
         use_pcp: bool = False,
         use_adaptive_verification: bool = False,
         use_dcp: bool = False,
+        use_rswa: bool = False,
     ) -> list[str]:
         invalid_reasons = super().validate_configuration(
             head_size,
@@ -666,6 +667,7 @@ class FlashInferBackend(AttentionBackend):
             use_pcp,
             use_adaptive_verification,
             use_dcp,
+            use_rswa,
         )
         if use_mm_prefix and use_dcp:
             invalid_reasons.append(
