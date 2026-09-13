@@ -16,6 +16,7 @@ import torch.nn as nn
 from transformers import AutoConfig, AutoModel, PretrainedConfig
 
 from vllm.config import ModelConfig, VllmConfig
+from vllm.model_executor.layers.attention import Attention, EncoderOnlyAttention
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.transformers.base import Base
 from vllm.model_executor.models.transformers.fusers import AttentionFuser
@@ -54,6 +55,41 @@ def get_num_fused(model) -> tuple[int, int]:
     glu = count_modules(model, MergedColumnParallelLinear)
     qkv = count_modules(model, QKVParallelLinear)
     return glu, qkv
+
+
+@pytest.mark.parametrize(
+    ("multimodal", "text_is_causal", "module_is_causal", "expected"),
+    [
+        (False, None, False, EncoderOnlyAttention),
+        (True, None, False, Attention),
+        (True, False, True, EncoderOnlyAttention),
+    ],
+)
+def test_attention_class_selection(
+    multimodal: bool,
+    text_is_causal: bool | None,
+    module_is_causal: bool,
+    expected: type[nn.Module],
+) -> None:
+    text_config = SimpleNamespace()
+    if text_is_causal is not None:
+        text_config.is_causal = text_is_causal
+    config = SimpleNamespace(get_text_config=lambda: text_config)
+    if not multimodal:
+        config = text_config
+        config.get_text_config = lambda: config
+
+    backend = SimpleNamespace(
+        config=config,
+        text_config=text_config,
+        model=nn.Module(),
+        model_config=SimpleNamespace(use_mla=False),
+        fusers={},
+        check_version=lambda *_: None,
+    )
+    backend.model.is_causal = module_is_causal
+
+    assert Base._get_attn_cls(backend) is expected
 
 
 def check_implementation(

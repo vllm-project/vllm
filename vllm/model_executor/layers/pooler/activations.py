@@ -20,21 +20,6 @@ def get_act_fn(
     config: PretrainedConfig,
     static_num_labels: bool = True,
 ) -> "PoolerActivation":
-    # get classification act_fn
-    # Implement alignment with transformers ForSequenceClassificationLoss
-    # https://github.com/huggingface/transformers/blob/57bb6db6ee4cfaccc45b8d474dfad5a17811ca60/src/transformers/loss/loss_utils.py#L92
-    num_labels: int | None = None
-    if static_num_labels:
-        num_labels = getattr(config, "num_labels", 0)
-
-    problem_type = getattr(config, "problem_type", "")
-    if problem_type == "regression":
-        return PoolerIdentity()
-    if problem_type == "single_label_classification":
-        return PoolerClassify(num_labels=num_labels)
-    if problem_type == "multi_label_classification":
-        return PoolerMultiLabelClassify()
-
     # get cross_encoder act_fn
     function_name: str | None = None
     if (
@@ -56,6 +41,21 @@ def get_act_fn(
             )
         fn = resolve_obj_by_qualname(function_name)()
         return PoolerActivation.wraps(fn)
+
+    # get classification act_fn
+    # Implement alignment with transformers ForSequenceClassificationLoss
+    # https://github.com/huggingface/transformers/blob/57bb6db6ee4cfaccc45b8d474dfad5a17811ca60/src/transformers/loss/loss_utils.py#L92
+    num_labels: int | None = None
+    if static_num_labels:
+        num_labels = getattr(config, "num_labels", 0)
+
+    problem_type = getattr(config, "problem_type", "")
+    if problem_type == "regression":
+        return PoolerIdentity()
+    if problem_type == "single_label_classification":
+        return PoolerClassify(num_labels=num_labels)
+    if problem_type == "multi_label_classification":
+        return PoolerMultiLabelClassify()
 
     return PoolerClassify(num_labels=num_labels)
 
@@ -81,8 +81,6 @@ class PoolerActivation(nn.Module, ABC):
     def wraps(module: nn.Module) -> "PoolerActivation":
         if isinstance(module, nn.Identity):
             return PoolerIdentity()
-        if isinstance(module, (nn.Sigmoid, nn.Softmax)):
-            return PoolerClassify()
 
         return LambdaPoolerActivation(module)
 

@@ -170,6 +170,8 @@ def _parse_score_content(
     role: str,
     data: ScoreData,
     mm_tracker: BaseMultiModalItemTracker,
+    *,
+    wrap_dicts: bool = False,
 ) -> list[ConversationMessage]:
     parts: Iterable[ChatCompletionContentPartParam]
     if isinstance(data, str):
@@ -183,7 +185,7 @@ def _parse_score_content(
         role=role,
         parts=parts,
         mm_tracker=mm_tracker,
-        wrap_dicts=False,
+        wrap_dicts=wrap_dicts,
         interleave_strings=False,
         multimodal_content_part_separator="",
     )
@@ -200,6 +202,25 @@ def _parse_score_content(
         raise ValueError("Only one multi-modal item is supported")
 
     return next(iter(mm_placeholder_storage.values()))[0]
+
+
+def parse_score_data_messages(
+    data_1: ScoreData,
+    data_2: ScoreData,
+    model_config: ModelConfig,
+) -> tuple[
+    list[ConversationMessage],
+    MultiModalDataDict | None,
+    MultiModalUUIDDict | None,
+]:
+    """Parse a query-document pair into normalized structured messages."""
+    mm_tracker = MultiModalItemTracker(model_config)
+    messages = [
+        *_parse_score_content("query", data_1, mm_tracker, wrap_dicts=True),
+        *_parse_score_content("document", data_2, mm_tracker, wrap_dicts=True),
+    ]
+    mm_items, mm_uuids = mm_tracker.resolve_items()
+    return messages, mm_items, mm_uuids
 
 
 def parse_score_data_single(

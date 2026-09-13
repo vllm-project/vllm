@@ -171,15 +171,27 @@ class TestGetActFn:
         result = get_act_fn(cfg)
         assert isinstance(result, PoolerMultiLabelClassify)
 
-    def test_sentence_transformers_activation(self):
+    @pytest.mark.parametrize(
+        "problem_type",
+        [
+            "regression",
+            "single_label_classification",
+            "multi_label_classification",
+        ],
+    )
+    def test_sentence_transformers_activation_overrides_problem_type(
+        self, problem_type
+    ):
         cfg = self._make_config(
-            problem_type="",
+            problem_type=problem_type,
+            num_labels=2,
             sentence_transformers={
                 "activation_fn": "torch.nn.modules.activation.Sigmoid"
             },
         )
         result = get_act_fn(cfg)
-        assert isinstance(result, PoolerClassify)
+        logits = torch.tensor([[1.0, 2.0]])
+        torch.testing.assert_close(result(logits), torch.sigmoid(logits))
 
     def test_sbert_activation(self):
         cfg = self._make_config(
@@ -189,7 +201,7 @@ class TestGetActFn:
             ),
         )
         result = get_act_fn(cfg)
-        assert isinstance(result, PoolerClassify)
+        assert isinstance(result, LambdaPoolerActivation)
 
     def test_default_fallback(self):
         cfg = self._make_config(problem_type="")
@@ -198,7 +210,7 @@ class TestGetActFn:
 
     def test_sentence_transformers_takes_priority(self):
         cfg = self._make_config(
-            problem_type="",
+            problem_type="multi_label_classification",
             sentence_transformers={"activation_fn": "torch.nn.modules.linear.Identity"},
             sbert_ce_default_activation_function=(
                 "torch.nn.modules.activation.Sigmoid"
