@@ -1425,10 +1425,6 @@ def uno_scheduler_factory(tmp_path, monkeypatch):
     )
 
     def create(**kwargs):
-        tail_mode = kwargs.pop("uno_tail_mode", "early")
-        monkeypatch.setattr(
-            "vllm.v1.core.sched.scheduler.UNO_TAIL_MODE", tail_mode, raising=False
-        )
         options = dict(
             model=str(tmp_path),
             skip_tokenizer_init=True,
@@ -1534,9 +1530,8 @@ def test_uno_terminal_length_bound_skips_only_all_terminal_batches(
 
 
 @pytest.mark.parametrize("num_output_tokens", [88, 95])
-@pytest.mark.parametrize("tail_mode", ["early", "exact"])
 def test_uno_tail_respects_explicit_context_limit(
-    uno_scheduler_factory, monkeypatch, num_output_tokens, tail_mode
+    uno_scheduler_factory, monkeypatch, num_output_tokens
 ):
     """An explicit large output cap still finishes at the context boundary."""
     # This scheduler-only OPT fixture does not execute positional embeddings.
@@ -1545,7 +1540,6 @@ def test_uno_tail_respects_explicit_context_limit(
         num_speculative_tokens=8,
         max_num_batched_tokens=4096,
         max_model_len=4096,
-        uno_tail_mode=tail_mode,
     )
     (request,) = create_requests(
         num_requests=1, num_tokens=4000, max_tokens=4096, block_size=4
@@ -1559,14 +1553,13 @@ def test_uno_tail_respects_explicit_context_limit(
     scheduler.running.append(request)
 
     output = scheduler.schedule()
-    if tail_mode == "early" or num_output_tokens == 95:
-        assert output.skip_speculator_proposal
-        assert output.num_scheduled_tokens == {request.request_id: 1}
-        assert not output.scheduled_spec_decode_tokens
-    else:
-        assert not output.skip_speculator_proposal
-        assert output.num_scheduled_tokens == {request.request_id: 8}
-        assert len(output.scheduled_spec_decode_tokens[request.request_id]) == 7
+    assert output.skip_speculator_proposal
+    assert output.num_scheduled_tokens == {request.request_id: 1}
+    assert not output.scheduled_spec_decode_tokens
+    # The trace's diagnostic lower bound uses the same effective context cap.
+    assert scheduler._will_finish_after_next_sample(request) == (
+        num_output_tokens == 95
+    )
     if num_output_tokens == 95:
         _model_output(scheduler, output, [[11]])
         assert request.num_output_tokens == 96
@@ -1574,12 +1567,11 @@ def test_uno_tail_respects_explicit_context_limit(
         assert request.is_finished()
 
 
-@pytest.mark.parametrize("tail_mode", ["early", "exact"])
 def test_uno_tail_overlapping_steps_before_output_delivery(
-    uno_scheduler_factory, tail_mode
+    uno_scheduler_factory,
 ):
     """The second dispatched step must be draft-free while O still lags at 0."""
-    scheduler = uno_scheduler_factory(uno_tail_mode=tail_mode)
+    scheduler = uno_scheduler_factory()
     (request,) = create_requests(
         num_requests=1, num_tokens=3, max_tokens=2, block_size=4
     )
@@ -1587,8 +1579,8 @@ def test_uno_tail_overlapping_steps_before_output_delivery(
     first = scheduler.schedule()
     assert request.num_output_tokens == 0
     assert request.num_output_placeholders == 1
-    # Exercise the changed helper through its production caller, before the
-    # previous sample has been observed by the scheduler.
+    # The trace's lower bound is distinct from the upper-bound tail trigger.
+    # Check it before the previous sample has been observed by the scheduler.
     assert scheduler._will_finish_after_next_sample(request)
     second = scheduler.schedule()
     assert second.skip_speculator_proposal
@@ -1607,15 +1599,13 @@ def test_uno_tail_overlapping_steps_before_output_delivery(
     assert request.is_finished()
 
 
-@pytest.mark.parametrize("tail_mode", ["early", "exact"])
 def test_uno_tail_all_reject_pending_nine_is_not_terminal(
-    uno_scheduler_factory, tail_mode
+    uno_scheduler_factory,
 ):
-    """O=120/P=9 can reach only 122; only early mode forgoes those drafts."""
+    """O=120/P=9 can reach only 122; the persistent tail forgoes those drafts."""
     scheduler = uno_scheduler_factory(
         num_speculative_tokens=8,
         max_num_batched_tokens=256,
-        uno_tail_mode=tail_mode,
     )
     (request,) = create_requests(
         num_requests=1, num_tokens=3, max_tokens=128, block_size=4
@@ -1640,26 +1630,25 @@ def test_uno_tail_all_reject_pending_nine_is_not_terminal(
     assert not scheduler._will_finish_after_next_sample(request)
 
     current = scheduler.schedule()
-    expected_queries = 1 if tail_mode == "early" else 9
+    expected_queries = 1
     assert current.num_scheduled_tokens == {request.request_id: expected_queries}
-    assert current.skip_speculator_proposal == (tail_mode == "early")
+    assert current.skip_speculator_proposal
     _model_output(scheduler, pending, [[20]])
     _model_output(scheduler, current, [[21]])
     assert request.num_output_tokens == 122
     assert not request.is_finished()
     assert request.num_output_placeholders == 0
-    # Early mode persists after rollback. Exact mode keeps using valid drafts.
+    # Tail membership persists after the pending verification rolls back.
     scheduler.update_draft_token_ids(DraftTokenIds([request.request_id], [[30] * 8]))
     continuation = scheduler.schedule()
     assert continuation.num_scheduled_tokens == {request.request_id: expected_queries}
-    assert continuation.skip_speculator_proposal == (tail_mode == "early")
-    assert bool(continuation.scheduled_spec_decode_tokens) == (tail_mode == "exact")
+    assert continuation.skip_speculator_proposal
+    assert not continuation.scheduled_spec_decode_tokens
 
 
-@pytest.mark.parametrize("tail_mode", ["early", "exact"])
-def test_uno_short_cap_retains_drafting_in_exact_mode(uno_scheduler_factory, tail_mode):
-    """A short cap still permits useful overlapping verification in exact mode."""
-    scheduler = uno_scheduler_factory(num_speculative_tokens=8, uno_tail_mode=tail_mode)
+def test_uno_short_cap_drafts_before_entering_persistent_tail(uno_scheduler_factory):
+    """Cap16 admits its first K8 verification, then the overlap enters the tail."""
+    scheduler = uno_scheduler_factory(num_speculative_tokens=8)
     (request,) = create_requests(
         num_requests=1, num_tokens=3, max_tokens=16, block_size=4
     )
@@ -1672,33 +1661,9 @@ def test_uno_short_cap_retains_drafting_in_exact_mode(uno_scheduler_factory, tai
     assert request.num_output_placeholders == 9
 
     next_decode = scheduler.schedule()
-    assert next_decode.skip_speculator_proposal == (tail_mode == "early")
-    assert next_decode.num_scheduled_tokens == {
-        request.request_id: 1 if tail_mode == "early" else 9
-    }
-    assert bool(next_decode.scheduled_spec_decode_tokens) == (tail_mode == "exact")
-
-
-def test_uno_exact_tail_preserves_accepted_draft_leap(uno_scheduler_factory):
-    """The worker's exact accepted-prefix check must handle a leap to the cap."""
-    scheduler = uno_scheduler_factory(uno_tail_mode="exact")
-    (request,) = create_requests(
-        num_requests=1, num_tokens=3, max_tokens=5, block_size=4
-    )
-    scheduler.add_request(request)
-    _model_output(scheduler, scheduler.schedule(), [[10]])
-    scheduler.update_draft_token_ids(
-        DraftTokenIds([request.request_id], [[11, 12, 13, 14]])
-    )
-    output = scheduler.schedule()
-    assert output.num_scheduled_tokens == {request.request_id: 5}
-    assert output.scheduled_spec_decode_tokens == {request.request_id: [11, 12, 13, 14]}
-    assert not output.skip_speculator_proposal
-    assert not output.zero_next_draft_req_ids
-    assert scheduler.num_lookahead_tokens == 4
-    _model_output(scheduler, output, [[11, 12, 13, 14, 15]])
-    assert list(request.output_token_ids) == [10, 11, 12, 13, 14]
-    assert request.is_finished()
+    assert next_decode.skip_speculator_proposal
+    assert next_decode.num_scheduled_tokens == {request.request_id: 1}
+    assert not next_decode.scheduled_spec_decode_tokens
 
 
 @pytest.mark.parametrize("async_scheduling", [False, True])
@@ -1798,15 +1763,13 @@ def test_uno_tail_nonfinal_prefill_does_not_count_as_sampling(
     assert final.zero_next_draft_req_ids == {request.request_id}
 
 
-@pytest.mark.parametrize("tail_mode", ["early", "exact"])
 def test_uno_preemption_waits_for_deliverable_output_before_tail_admission(
-    uno_scheduler_factory, tail_mode
+    uno_scheduler_factory,
 ):
     """Reset placeholders cannot hide pending output from a same-step resume."""
     scheduler = uno_scheduler_factory(
         num_speculative_tokens=8,
         max_num_batched_tokens=256,
-        uno_tail_mode=tail_mode,
     )
     (request,) = create_requests(
         num_requests=1, num_tokens=3, max_tokens=128, block_size=4

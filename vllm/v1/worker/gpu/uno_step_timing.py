@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.logger import init_logger
-from vllm.v1.core.sched.output import UNO_TAIL_MODE
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -41,7 +40,6 @@ class UnoStepTimingTrace:
     capture_cuda_events: bool
     tail_mode_rows: int
     current_draft_counts: tuple[int, ...]
-    post_sample_finished_rows: int = 0
     _wall_starts: dict[str, float] = field(default_factory=dict)
     wall_ms: dict[str, float] = field(default_factory=dict)
     _events: dict[str, tuple[torch.cuda.Event, torch.cuda.Event]] = field(
@@ -105,7 +103,6 @@ class UnoStepTimingTrace:
             "model_forward_wall_ms": self.wall_ms.get("model_forward"),
             "sample_wall_ms": self.wall_ms.get("sample"),
             "output_publish_wall_ms": self.wall_ms.get("output_publish"),
-            "finish_check_ms": self.wall_ms.get("finish_check"),
             "propose_wall_ms": self.wall_ms.get("propose"),
             "model_forward_gpu_ms": gpu_ms.get("model_forward"),
             "sample_gpu_ms": gpu_ms.get("sample"),
@@ -116,7 +113,6 @@ class UnoStepTimingTrace:
             "request_steps": self.request_steps,
             "proposal_skipped_terminal": self.proposal_skipped_terminal,
             "tail_mode_rows": self.tail_mode_rows,
-            "post_sample_finished_rows": self.post_sample_finished_rows,
             "current_draft_counts": self.current_draft_counts,
             "allocator_allocated_bytes": self._allocated_bytes,
             "allocator_reserved_bytes": self._reserved_bytes,
@@ -124,7 +120,7 @@ class UnoStepTimingTrace:
 
 
 class UnoStepTimingTracer:
-    """Trace early/tail steps, or every step for exact finish diagnostics."""
+    """Trace the first three steps and persistent draft-free tail steps."""
 
     def __init__(self, *, capture_cuda_events: bool | None = None) -> None:
         self._request_steps: dict[str, int] = {}
@@ -155,11 +151,7 @@ class UnoStepTimingTracer:
                 scheduler_output.num_scheduled_tokens
             )
         )
-        if (
-            UNO_TAIL_MODE != "exact"
-            and not any(step <= 3 for step in request_steps)
-            and not tail_mode_rows
-        ):
+        if not any(step <= 3 for step in request_steps) and not tail_mode_rows:
             return None
         return UnoStepTimingTrace(
             step_id=step_id,

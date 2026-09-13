@@ -27,17 +27,6 @@ UNO_STEP_TIMING_DEBUG = parse_uno_step_timing_debug(
 )
 
 
-def parse_uno_tail_mode(value: str | None) -> str:
-    """Parse the launch-only Uno tail experiment variant."""
-    if value is None:
-        return "early"
-    if value not in ("early", "exact"):
-        raise ValueError("VLLM_UNO_TAIL_MODE must be early or exact")
-    return value
-
-
-UNO_TAIL_MODE = parse_uno_tail_mode(os.environ.get("VLLM_UNO_TAIL_MODE"))
-
 if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt

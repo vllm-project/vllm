@@ -41,7 +41,6 @@ from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     UNO_STEP_TIMING_DEBUG,
-    UNO_TAIL_MODE,
     CachedRequestData,
     GrammarOutput,
     KVConnectorBlockState,
@@ -1540,7 +1539,10 @@ class Scheduler(SchedulerInterface):
         return min(request.max_tokens, self.max_model_len - request.num_prompt_tokens)
 
     def _will_finish_after_next_sample(self, request: Request) -> bool:
-        """Lower bound for a step qualified by the caller as sampling.
+        """Diagnostic lower bound for a step qualified as sampling.
+
+        The schedule trace reports this separately from the persistent tail's
+        upper-bound trigger; this predicate does not choose tail entry.
 
         Uno permits one unresolved sampling step when a new step is scheduled.
         That step guarantees only one output token regardless of draft width.
@@ -1565,15 +1567,12 @@ class Scheduler(SchedulerInterface):
         if num_new_tokens < target_queries:
             # Preserve nonfinal prefill chunks without treating them as samples.
             return num_new_tokens
-        if UNO_TAIL_MODE == "exact":
-            enter_tail = self._will_finish_after_next_sample(request)
-        else:
-            max_output = num_new_tokens - target_queries + 1
-            # This upper-bound policy deliberately forgoes usable drafts.
-            enter_tail = (
-                request.num_output_tokens + request.num_output_placeholders + max_output
-                >= self._uno_output_token_limit(request)
-            )
+        max_output = num_new_tokens - target_queries + 1
+        # This upper-bound policy deliberately forgoes usable drafts.
+        enter_tail = (
+            request.num_output_tokens + request.num_output_placeholders + max_output
+            >= self._uno_output_token_limit(request)
+        )
         if enter_tail:
             self._uno_tail_requests.add(request)
         if request in self._uno_tail_requests:

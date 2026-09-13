@@ -76,10 +76,7 @@ def capture_topk_topp_launches() -> Iterator[dict[str, int]]:
         "_topp_sb_mask_kernel",
     )
     launches: dict[str, int] = {}
-    originals = {
-        name: getattr(topk_topp_triton, name)
-        for name in kernel_names
-    }
+    originals = {name: getattr(topk_topp_triton, name) for name in kernel_names}
     try:
         for name, kernel in originals.items():
             setattr(
@@ -391,17 +388,10 @@ def warmup_kernels(
     # fixed draft counts here, then restore the manager for capture and serving.
     adaptive_verification = model_runner.adaptive_verification
     model_runner.adaptive_verification = None
-    # Synthetic requests must exercise every planned shape even after their
-    # small output cap would make the serving finish tracker suppress drafts.
-    uno_tail = getattr(model_runner, "_uno_tail", None)
-    if uno_tail is not None:
-        model_runner._uno_tail = None
     try:
         _warmup_kernels(model_runner, worker_execute_model, worker_sample_tokens)
     finally:
         model_runner.adaptive_verification = adaptive_verification
-        if uno_tail is not None:
-            model_runner._uno_tail = uno_tail
 
 
 @torch.inference_mode()
@@ -447,9 +437,6 @@ def run_uno_served_jit_self_check(
     # launch coverage, not adaptive cost calibration.
     adaptive_verification = model_runner.adaptive_verification
     model_runner.adaptive_verification = None
-    uno_tail = getattr(model_runner, "_uno_tail", None)
-    if uno_tail is not None:
-        model_runner._uno_tail = None
     sampler_calls: dict[str, int] = {}
     sampler_launches: dict[str, dict[str, int]] = {}
     sampler_branches: dict[str, tuple[str, ...]] = {}
@@ -461,86 +448,84 @@ def run_uno_served_jit_self_check(
             preserve_rng_state(getattr(model_runner, "device", None)),
             capture_compilations() as compilations,
         ):
-                check_tokens = uno_self_check_token_count(
-                    model_runner.max_num_tokens,
-                    model_runner.decode_query_len,
+            check_tokens = uno_self_check_token_count(
+                model_runner.max_num_tokens,
+                model_runner.decode_query_len,
+            )
+            for mode in UNO_SAMPLING_MODES:
+                expected_branch = sampler_branch_for_mode(
+                    mode,
+                    use_flashinfer=bool(
+                        getattr(
+                            getattr(model_runner, "sampler", None),
+                            "use_flashinfer",
+                            False,
+                        )
+                    ),
                 )
-                for mode in UNO_SAMPLING_MODES:
-                    expected_branch = sampler_branch_for_mode(
-                        mode,
-                        use_flashinfer=bool(
-                            getattr(
-                                getattr(model_runner, "sampler", None),
-                                "use_flashinfer",
-                                False,
-                            )
+                sample_call_count = 0
+
+                def counted_sample_tokens(
+                    grammar_output: GrammarOutput | None,
+                ) -> Any:
+                    nonlocal sample_call_count
+                    sample_call_count += 1
+                    return worker_sample_tokens(grammar_output)
+
+                with (
+                    capture_sampler_branches(
+                        getattr(model_runner, "sampler", None)
+                    ) as branches,
+                    capture_topk_topp_launches() as launches,
+                ):
+                    mode_ran = run_mixed_prefill_decode_warmup(
+                        model_runner,
+                        worker_execute_model,
+                        counted_sample_tokens,
+                        check_tokens,
+                        req_id_prefix=f"_uno_jit_self_check_{mode.name}",
+                        sampling_params=SamplingParams(
+                            max_tokens=2,
+                            temperature=0.9,
+                            top_k=-1 if mode.top_k is None else mode.top_k,
+                            top_p=1.0 if mode.top_p is None else mode.top_p,
                         ),
                     )
-                    sample_call_count = 0
-
-                    def counted_sample_tokens(
-                        grammar_output: GrammarOutput | None,
-                    ) -> Any:
-                        nonlocal sample_call_count
-                        sample_call_count += 1
-                        return worker_sample_tokens(grammar_output)
-
-                    with (
-                        capture_sampler_branches(
-                            getattr(model_runner, "sampler", None)
-                        ) as branches,
-                        capture_topk_topp_launches() as launches,
-                    ):
-                        mode_ran = run_mixed_prefill_decode_warmup(
-                            model_runner,
-                            worker_execute_model,
-                            counted_sample_tokens,
-                            check_tokens,
-                            req_id_prefix=f"_uno_jit_self_check_{mode.name}",
-                            sampling_params=SamplingParams(
-                                max_tokens=2,
-                                temperature=0.9,
-                                top_k=-1 if mode.top_k is None else mode.top_k,
-                                top_p=1.0 if mode.top_p is None else mode.top_p,
-                            ),
-                        )
-                    torch.accelerator.synchronize()
-                    sampler_calls[mode.name] = sample_call_count
-                    sampler_launches[mode.name] = dict(launches)
-                    sampler_branches[mode.name] = tuple(branches)
-                    ran = ran and mode_ran
-                    expected = (
-                        ()
-                        if expected_branch == "flashinfer"
-                        or (not mode.topk_enabled and not mode.topp_enabled)
-                        else (
-                            "_topp_sb_stats_kernel",
-                            "_topp_sb_step_kernel",
-                            "_topp_sb_mask_kernel",
-                        )
-                        if not mode.topk_enabled
-                        else ("_topk_topp_kernel",)
-                        if not mode.topp_enabled
-                        else (
-                            "_topk_topp_kernel",
-                            "_topp_sb_stats_kernel",
-                            "_topp_sb_step_kernel",
-                            "_topp_sb_mask_kernel",
-                        )
+                torch.accelerator.synchronize()
+                sampler_calls[mode.name] = sample_call_count
+                sampler_launches[mode.name] = dict(launches)
+                sampler_branches[mode.name] = tuple(branches)
+                ran = ran and mode_ran
+                expected = (
+                    ()
+                    if expected_branch == "flashinfer"
+                    or (not mode.topk_enabled and not mode.topp_enabled)
+                    else (
+                        "_topp_sb_stats_kernel",
+                        "_topp_sb_step_kernel",
+                        "_topp_sb_mask_kernel",
                     )
-                    missing = tuple(
-                        kernel for kernel in expected if launches.get(kernel, 0) == 0
+                    if not mode.topk_enabled
+                    else ("_topk_topp_kernel",)
+                    if not mode.topp_enabled
+                    else (
+                        "_topk_topp_kernel",
+                        "_topp_sb_stats_kernel",
+                        "_topp_sb_step_kernel",
+                        "_topp_sb_mask_kernel",
                     )
-                    if missing:
-                        missing_launches[mode.name] = missing
-                    if set(branches) != {expected_branch}:
-                        branch_mismatches[mode.name] = (
-                            f"expected={expected_branch} observed={tuple(branches)!r}"
-                        )
+                )
+                missing = tuple(
+                    kernel for kernel in expected if launches.get(kernel, 0) == 0
+                )
+                if missing:
+                    missing_launches[mode.name] = missing
+                if set(branches) != {expected_branch}:
+                    branch_mismatches[mode.name] = (
+                        f"expected={expected_branch} observed={tuple(branches)!r}"
+                    )
     finally:
         model_runner.adaptive_verification = adaptive_verification
-        if uno_tail is not None:
-            model_runner._uno_tail = uno_tail
         speculator._step = 0
 
     for compilation in compilations:

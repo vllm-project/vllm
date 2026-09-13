@@ -919,7 +919,6 @@ def test_warmup_kernels_runs_two_full_verifications(
     runner = SimpleNamespace(
         num_speculative_steps=k,
         speculator=speculator,
-        _uno_tail=None,
         decode_query_len=k + 1,
         max_model_len=4096,
         adaptive_verification=None,
@@ -1757,7 +1756,6 @@ def test_uno_startup_jit_self_check_uses_the_production_k8_batch_shape(
     runner = SimpleNamespace(
         speculator=object.__new__(UnoSpeculator),
         adaptive_verification=None,
-        _uno_tail=None,
         max_num_tokens=2048,
         decode_query_len=9,
         device=torch.device("cpu"),
@@ -1792,19 +1790,17 @@ def test_uno_startup_jit_self_check_uses_the_production_k8_batch_shape(
 
 
 @pytest.mark.parametrize("entrypoint", ["kernels", "self_check"])
-def test_uno_startup_suspends_tail_tracker_for_helper_and_restores_it(
+def test_uno_startup_suspends_adaptive_verification_for_helper_and_restores_it(
     monkeypatch, entrypoint
 ):
-    """Tracker isolation is independent of the helper's planned token shapes."""
+    """Fixed warmup counts must not use the serving adaptive manager."""
     from vllm.utils import jit_monitor
     from vllm.v1.worker.gpu import warmup
 
-    uno_tail = object()
     adaptive = object()
     runner = SimpleNamespace(
         speculator=object.__new__(UnoSpeculator),
         adaptive_verification=adaptive,
-        _uno_tail=uno_tail,
         max_num_tokens=2048,
         decode_query_len=9,
         device=torch.device("cpu"),
@@ -1813,7 +1809,7 @@ def test_uno_startup_suspends_tail_tracker_for_helper_and_restores_it(
     observed = []
 
     def record_helper(*_args, **_kwargs):
-        assert runner._uno_tail is None, "startup must disable exact finish detection"
+        assert runner.adaptive_verification is None
         assert runner.adaptive_verification is None
         observed.append(True)
         # A skipped self-check cycle still completes normally and must restore
@@ -1830,24 +1826,21 @@ def test_uno_startup_suspends_tail_tracker_for_helper_and_restores_it(
         invoke = warmup.run_uno_served_jit_self_check
     invoke(runner, Mock(), Mock())
     assert len(observed) == (1 if entrypoint == "kernels" else 4)
-    assert runner._uno_tail is uno_tail
     assert runner.adaptive_verification is adaptive
 
 
 @pytest.mark.parametrize("entrypoint", ["kernels", "self_check"])
-def test_uno_startup_restores_tail_tracker_after_callback_error(
+def test_uno_startup_restores_adaptive_verification_after_callback_error(
     monkeypatch, entrypoint
 ):
     """Both startup callers restore the serving tracker when a worker raises."""
     from vllm.utils import jit_monitor
     from vllm.v1.worker.gpu import warmup
 
-    uno_tail = object()
     adaptive = object()
     runner = SimpleNamespace(
         speculator=object.__new__(UnoSpeculator),
         adaptive_verification=adaptive,
-        _uno_tail=uno_tail,
         max_num_tokens=2048,
         decode_query_len=9,
         device=torch.device("cpu"),
@@ -1869,7 +1862,6 @@ def test_uno_startup_restores_tail_tracker_after_callback_error(
         invoke = warmup.run_uno_served_jit_self_check
     with pytest.raises(CallbackFailed):
         invoke(runner, Mock(), Mock())
-    assert runner._uno_tail is uno_tail
     assert runner.adaptive_verification is adaptive
 
 
@@ -2144,12 +2136,6 @@ def _uno_sample_tokens_runner(monkeypatch, num_reqs=1):
 
     class FakeAsyncOutput:
         def __init__(self, **kwargs) -> None:
-            self.model_runner_output = kwargs["model_runner_output"]
-            self.sampled_token_ids = kwargs["sampler_output"].sampled_token_ids.numpy()
-            self.num_sampled_tokens_np = kwargs["num_sampled_tokens"].numpy()
-            self.copy_event = SimpleNamespace(
-                synchronize=lambda: events.append("copy-ready")
-            )
             events.append("output")
 
     monkeypatch.setattr(model_runner_module, "AsyncOutput", FakeAsyncOutput)
@@ -2186,7 +2172,6 @@ def _uno_sample_tokens_runner(monkeypatch, num_reqs=1):
         uno_step_trace=None,
     )
     runner.is_last_pp_rank = True
-    runner._uno_tail = None
     runner.pcp_manager = None
     runner.pp_handler = None
     runner.check_ep_fault = False
