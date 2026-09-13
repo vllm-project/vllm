@@ -72,7 +72,7 @@ class CPUWorker(Worker):
         torch.ops._C.init_cpu_memory_env([memory_node])
 
         memory_status = get_memory_node_info(memory_node)
-        memory_fraction = vllm_config.cache_config.gpu_memory_utilization
+        memory_fraction = vllm_config.cache_config.resolved_gpu_memory_utilization
         self.requested_cpu_memory = math.ceil(
             memory_status.total_memory * memory_fraction
         )
@@ -87,7 +87,7 @@ class CPUWorker(Worker):
                 f"({format_gib(available_memory)}/"
                 f"{format_gib(memory_status.total_memory)} GiB) on startup "
                 f"is less than desired CPU memory utilization "
-                f"({vllm_config.cache_config.gpu_memory_utilization}, "
+                f"({memory_fraction}, "
                 f"{format_gib(self.requested_cpu_memory)} GiB). "
                 "On the CPU backend, the `--gpu-memory-utilization` flag "
                 "controls the fraction of CPU memory reserved (despite its "

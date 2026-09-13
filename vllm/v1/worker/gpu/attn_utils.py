@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
@@ -333,6 +333,7 @@ def init_kv_cache(
     kv_cache_allocation_context: AbstractContextManager | None = None,
     *,
     block_tables: "BlockTables | None" = None,
+    allocate: Callable[[int], torch.Tensor] | None = None,
 ) -> dict[str, Any]:
     allocation_context = kv_cache_allocation_context or nullcontext()
     with allocation_context:
@@ -352,7 +353,18 @@ def init_kv_cache(
                 device,
                 vllm_config.cache_config.get_resolved_kv_cache_layout(),
                 kernel_block_sizes,
+                allocate=allocate,
             )
+    return bind_kv_caches(kv_caches, forward_context, kv_cache_config, vllm_config)
+
+
+def bind_kv_caches(
+    kv_caches: dict[str, torch.Tensor],
+    forward_context: dict[str, Any],
+    kv_cache_config: KVCacheConfig,
+    vllm_config: VllmConfig,
+) -> dict[str, Any]:
+    """Bind per-layer KV cache views to the attention layers."""
     for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
         kv_caches[layer_name] = kv_caches[target]
     # Dual-attention models (e.g. LongCat-Flash) put two Attention modules per

@@ -53,6 +53,7 @@ from vllm.v1.utils import tensor_data
 
 if TYPE_CHECKING:
     from vllm.v1.core.block_pool import BlockPool
+    from vllm.v1.worker.worker_base import CompilationTimes
 
 
 # BlockHash represents the hash of a single KV-cache block used for
@@ -2357,6 +2358,56 @@ def get_kv_cache_capacity(
         vllm_config, kv_cache_config
     )
     return int(max_concurrency * max_model_len), max_concurrency
+
+
+def shrink_kv_cache_configs(
+    vllm_config: VllmConfig, kv_cache_configs: list[KVCacheConfig], num_blocks: int
+) -> None:
+    """Lower ``num_blocks`` of every config in place after measured sizing; the
+    tensors keep describing the capacity. Raises if ``max_model_len`` no longer
+    fits.
+    """
+    for kv_cache_config in kv_cache_configs:
+        assert num_blocks <= kv_cache_config.num_blocks
+        groups = kv_cache_config.kv_cache_groups
+        if groups:
+            # The null block is held back by the BlockPool, as in the capacity
+            # check of `get_kv_cache_configs`.
+            _check_enough_kv_cache_memory(
+                (num_blocks - 1) * _pool_bytes_per_block(groups),
+                partial(_max_memory_usage_bytes_from_groups, vllm_config, groups),
+                vllm_config.model_config.max_model_len,
+                partial(_estimate_max_model_len_from_groups, vllm_config, groups),
+            )
+        kv_cache_config.num_blocks = num_blocks
+
+
+def finalize_extensible_kv_cache(
+    vllm_config: VllmConfig,
+    kv_cache_configs: list[KVCacheConfig],
+    scheduler_kv_cache_config: KVCacheConfig,
+    compilation_times: list["CompilationTimes"],
+) -> int:
+    """Settle the KV cache size from the memory workers measured after warmup.
+
+    Every rank must agree on one block count, so the minimum becomes the
+    scheduler's ``num_blocks``; the caller commits it on the workers.
+    """
+    num_blocks = min(
+        (
+            times.num_kv_blocks
+            for times in compilation_times
+            if times.num_kv_blocks is not None
+        ),
+        default=scheduler_kv_cache_config.num_blocks,
+    )
+    num_blocks = min(num_blocks, scheduler_kv_cache_config.num_blocks)
+    shrink_kv_cache_configs(
+        vllm_config, kv_cache_configs + [scheduler_kv_cache_config], num_blocks
+    )
+    vllm_config.cache_config.num_gpu_blocks = num_blocks
+    update_kv_cache_capacity(vllm_config, scheduler_kv_cache_config)
+    return num_blocks
 
 
 def update_kv_cache_capacity(

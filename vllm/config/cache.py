@@ -69,6 +69,7 @@ class CacheConfig:
     """Configuration for the KV cache."""
 
     DEFAULT_BLOCK_SIZE: ClassVar[int] = 16
+    DEFAULT_GPU_MEMORY_UTILIZATION: ClassVar[float] = 0.92
 
     block_size: int = Field(default=None, gt=0)  # type: ignore[assignment]
     """Size of a contiguous cache block in number of tokens.
@@ -100,14 +101,16 @@ class CacheConfig:
 
     This equals to the `hash_block_size` used throughout the KV cache code.
     """
-    gpu_memory_utilization: float = Field(default=0.92, gt=0, le=1)
+    gpu_memory_utilization: float | None = Field(default=None, gt=0, le=1)
     """The fraction of GPU memory to be used for the model executor, which can
     range from 0 to 1. For example, a value of 0.5 would imply 50% GPU memory
-    utilization. If unspecified, will use the default value of 0.92. This is a
-    per-instance limit, and only applies to the current vLLM instance. It does
-    not matter if you have another vLLM instance running on the same GPU. For
-    example, if you have two vLLM instances running on the same GPU, you can
-    set the GPU memory utilization to 0.5 for each instance."""
+    utilization. This is a per-instance limit, and only applies to the current
+    vLLM instance. It does not matter if you have another vLLM instance running
+    on the same GPU. For example, if you have two vLLM instances running on the
+    same GPU, you can set the GPU memory utilization to 0.5 for each instance.
+
+    If unspecified, 1.0 with the extensible KV cache (sized from measured
+    memory) and 0.92 otherwise; see `resolved_gpu_memory_utilization`."""
     cache_dtype: CacheDType = "auto"
     """Data type for kv cache storage. If "auto", will use model data type.
     CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. ROCm (AMD GPU) supports
@@ -234,6 +237,15 @@ class CacheConfig:
     gpu_memory_utilization. Note that kv_cache_memory_bytes
     (when not-None) ignores gpu_memory_utilization"""
 
+    enable_extensible_kv_cache: bool = Field(default=None)  # type: ignore[assignment]
+    """Reserve the KV cache address range with device virtual memory and commit
+    physical pages after warmup, so the cache is sized from the memory actually
+    free after CUDA graph capture rather than from a profiling estimate. If
+    unspecified, enabled on CUDA and ROCm with the V2 model runner unless
+    kv_cache_memory_bytes is set; falls back to estimate-based sizing where the
+    driver lacks VMM support. Explicitly requesting it where unsupported is an
+    error."""
+
     kv_offloading_size: float | None = None
     """Size of the KV cache offloading buffer in GiB. When TP > 1, this is
     the total buffer size summed across all TP ranks. By default, this is set
@@ -281,6 +293,8 @@ class CacheConfig:
             "kv_cache_max_concurrency",
             # WIP feature toggle not impacting compiled graph shape
             "kv_sharing_fast_prefill",
+            # Runtime memory allocation strategy, not graph structure.
+            "enable_extensible_kv_cache",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors
@@ -296,7 +310,7 @@ class CacheConfig:
     _block_size_resolved: bool = field(default=False, init=False)
     """Guard against pydantic re-running _apply_block_size_default."""
 
-    @field_validator("block_size", mode="wrap")
+    @field_validator("block_size", "enable_extensible_kv_cache", mode="wrap")
     @classmethod
     def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
         if value is None:
@@ -317,6 +331,15 @@ class CacheConfig:
         if self.mamba_block_size is not None:
             self.user_specified_mamba_block_size = True
         return self
+
+    @property
+    def resolved_gpu_memory_utilization(self) -> float:
+        """`gpu_memory_utilization`, or its default given the sizing mode."""
+        if self.gpu_memory_utilization is not None:
+            return self.gpu_memory_utilization
+        if self.enable_extensible_kv_cache:
+            return 1.0
+        return self.DEFAULT_GPU_MEMORY_UTILIZATION
 
     @field_validator("mamba_cache_mode", mode="after")
     @classmethod
