@@ -471,24 +471,28 @@ class AsyncLLM(EngineClient):
         # Use cloned params that may have been updated in process_inputs()
         params = request.params
 
-        if is_pooling or params.n == 1:
-            await self._add_request(request, prompt_text, None, 0, queue)
+        try:
+            if is_pooling or params.n == 1:
+                await self._add_request(request, prompt_text, None, 0, queue)
+                return queue
+
+            parent_params = params
+            assert isinstance(parent_params, SamplingParams)
+
+            # Fan out child requests (for n>1).
+            parent_request = ParentRequest(request)
+            for idx in range(parent_params.n):
+                request_id, child_params = parent_request.get_child_info(idx)
+                child_request = request if idx == parent_params.n - 1 else copy(request)
+                child_request.request_id = request_id
+                child_request.sampling_params = child_params
+                await self._add_request(
+                    child_request, prompt_text, parent_request, idx, queue
+                )
             return queue
-
-        parent_params = params
-        assert isinstance(parent_params, SamplingParams)
-
-        # Fan out child requests (for n>1).
-        parent_request = ParentRequest(request)
-        for idx in range(parent_params.n):
-            request_id, child_params = parent_request.get_child_info(idx)
-            child_request = request if idx == parent_params.n - 1 else copy(request)
-            child_request.request_id = request_id
-            child_request.sampling_params = child_params
-            await self._add_request(
-                child_request, prompt_text, parent_request, idx, queue
-            )
-        return queue
+        except BaseException:
+            await self.abort(queue.request_id, internal=True)
+            raise
 
     async def _add_request(
         self,
@@ -506,8 +510,12 @@ class AsyncLLM(EngineClient):
         # Register locally before the first await so concurrent tasks see this request.
         self.output_processor.add_request(request, prompt, parent_req, index, queue)
 
-        # Add the EngineCoreRequest to EngineCore (separate process).
-        await self.engine_core.add_request_async(request)
+        try:
+            # Add the EngineCoreRequest to EngineCore (separate process).
+            await self.engine_core.add_request_async(request)
+        except BaseException:
+            await self.abort(request.request_id, internal=True)
+            raise
 
         if self.log_requests:
             logger.info("Added request %s.", request.request_id)
