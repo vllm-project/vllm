@@ -5867,6 +5867,7 @@ dependencies = [
  "futures",
  "parking_lot",
  "rmp-serde",
+ "rmpv",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -5959,6 +5960,8 @@ dependencies = [
  "asynk-strim-attr",
  "auto_enums",
  "axum",
+ "base64 0.22.1",
+ "bytemuck",
  "bytes",
  "clap",
  "educe",
@@ -6024,6 +6027,8 @@ dependencies = [
  "hf-hub",
  "itertools 0.14.0",
  "reqwest 0.12.28",
+ "rmp-serde",
+ "rmpv",
  "serde",
  "serde_json",
  "serde_with",
@@ -6037,6 +6042,7 @@ dependencies = [
  "vllm-engine-core-client",
  "vllm-llm",
  "vllm-tokenizer",
+ "zeromq",
 ]
 
 [[package]]

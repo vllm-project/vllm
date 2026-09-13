@@ -11,6 +11,7 @@ mod lora;
 mod metrics;
 pub(crate) mod openai;
 mod pause;
+mod pooling;
 mod profile;
 pub(super) mod render;
 mod server_info;
@@ -113,6 +114,9 @@ fn build_router_with_options(
         .route("/v1/models", get(openai::list_models))
         .route("/v1/completions", post(openai::completions))
         .route("/v1/chat/completions", post(openai::chat_completions))
+        .route("/v1/embeddings", post(openai::embeddings))
+        .route("/pooling", post(pooling::pooling))
+        .route("/classify", post(pooling::classify))
         // vLLM specific endpoints
         .route("/tokenize", post(tokenize::tokenize))
         .route("/detokenize", post(tokenize::detokenize));
