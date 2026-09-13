@@ -370,6 +370,98 @@ def _rocm_aiter_fused_moe_fake(
     return torch.empty_like(hidden_states)
 
 
+def _rocm_aiter_fused_moe_router_impl(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    correction_bias: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk: int,
+    num_expert_group: int = 1,
+    topk_group: int = 1,
+    need_renorm: bool = True,
+    routed_scaling_factor: float = 1.0,
+    expert_mask: torch.Tensor | None = None,
+    activation_method: int = 0,
+    quant_method: int = 0,
+    w1_scale: torch.Tensor | None = None,
+    w2_scale: torch.Tensor | None = None,
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
+    num_local_tokens: torch.Tensor | None = None,
+    output_dtype: torch.dtype | None = None,
+    hidden_pad: int = 0,
+    intermediate_pad: int = 0,
+    gate_mode: str = "",
+    num_fused_shared_experts: int = 0,
+    ep_rank: int = 0,
+    ep_size: int = 1,
+) -> torch.Tensor:
+    from aiter.fused_moe import fused_moe_router
+    from aiter.ops.flydsl.moe_common import GateMode
+
+    gate_mode = gate_mode or GateMode.SEPARATED.value
+    return fused_moe_router(
+        hidden_states,
+        gating_output,
+        correction_bias,
+        w1,
+        w2,
+        topk,
+        num_expert_group=num_expert_group,
+        topk_group=topk_group,
+        need_renorm=need_renorm,
+        routed_scaling_factor=routed_scaling_factor,
+        expert_mask=expert_mask,
+        activation=activation_method,
+        quant_type=quant_method,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        a1_scale=a1_scale,
+        a2_scale=a2_scale,
+        num_local_tokens=num_local_tokens,
+        dtype=output_dtype,
+        hidden_pad=hidden_pad,
+        intermediate_pad=intermediate_pad,
+        gate_mode=gate_mode,
+        num_fused_shared_experts=num_fused_shared_experts,
+        ep_rank=ep_rank,
+        ep_size=ep_size,
+    )
+
+
+def _rocm_aiter_fused_moe_router_fake(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    correction_bias: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk: int,
+    num_expert_group: int = 1,
+    topk_group: int = 1,
+    need_renorm: bool = True,
+    routed_scaling_factor: float = 1.0,
+    expert_mask: torch.Tensor | None = None,
+    activation_method: int = 0,
+    quant_method: int = 0,
+    w1_scale: torch.Tensor | None = None,
+    w2_scale: torch.Tensor | None = None,
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
+    num_local_tokens: torch.Tensor | None = None,
+    output_dtype: torch.dtype | None = None,
+    hidden_pad: int = 0,
+    intermediate_pad: int = 0,
+    gate_mode: str = "",
+    num_fused_shared_experts: int = 0,
+    ep_rank: int = 0,
+    ep_size: int = 1,
+) -> torch.Tensor:
+    if output_dtype is not None:
+        return torch.empty_like(hidden_states, dtype=output_dtype)
+    return torch.empty_like(hidden_states)
+
+
 def _rocm_aiter_asm_moe_tkw1_impl(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -1770,6 +1862,7 @@ class rocm_aiter_ops:
     _TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
     _MOE_SITUV2_A8W4 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4
+    _FUSED_ROUTER_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSED_ROUTER
     # TODO: Consolidate under _LINEAR_ENABLED
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
     # Lazily probed: whether aiter.topk_softmax supports the
@@ -1799,6 +1892,7 @@ class rocm_aiter_ops:
         cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
         cls._MOE_SITUV2_A8W4 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4
+        cls._FUSED_ROUTER_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSED_ROUTER
         cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
 
     @staticmethod
@@ -1915,6 +2009,11 @@ class rocm_aiter_ops:
         # _MOE_SITUV2_A8W4 is a variant of aiter fused moe, so aiter
         # fused moe must be enabled as well.
         return cls.is_fused_moe_enabled() and cls._MOE_SITUV2_A8W4
+
+    @classmethod
+    @if_aiter_supported
+    def is_fused_router_enabled(cls) -> bool:
+        return cls.is_fused_moe_enabled() and cls._FUSED_ROUTER_ENABLED
 
     @classmethod
     @if_aiter_supported
@@ -2095,6 +2194,121 @@ class rocm_aiter_ops:
 
         return "gate_mode" in inspect.signature(fused_moe).parameters
 
+    @classmethod
+    @if_aiter_supported
+    @functools.cache
+    def has_fused_moe_router(cls) -> bool:
+        """Whether the installed aiter has fused routing.
+
+        Older AITER builds do not. All four symbols are probed together so a
+        partial build declines instead of raising later.
+        """
+        try:
+            from aiter.fused_moe import (  # noqa: F401
+                fused_moe_router,
+                fused_moe_router_arch_supported,
+                fused_moe_router_config_supported,
+                fused_moe_router_supported,
+            )
+
+            return True
+        except ImportError:
+            return False
+
+    @classmethod
+    def fused_moe_router_arch_supported(cls) -> bool:
+        """Whether this GPU can run AITER's fused routing at all.
+
+        Needs no tensors, so backend selection can call it. The arch list
+        lives in AITER.
+        """
+        if not cls.has_fused_moe_router():
+            return False
+        from aiter.fused_moe import fused_moe_router_arch_supported
+
+        return bool(fused_moe_router_arch_supported())
+
+    @classmethod
+    def fused_moe_router_config_supported(
+        cls,
+        hidden_dim: int,
+        hidden_dtype: torch.dtype,
+        w1_dtype: torch.dtype,
+        quant_method: int,
+        activation_method: int,
+        gate_mode: str,
+        num_fused_shared_experts: int = 0,
+    ) -> bool:
+        """Whether the shapes and dtypes of a config are fusable.
+
+        Leaves out the per-call limits, so `fused_moe_router_supported` still
+        has to run on every forward.
+        """
+        if not cls.has_fused_moe_router():
+            return False
+        from aiter.fused_moe import fused_moe_router_config_supported
+        from aiter.ops.flydsl.moe_common import GateMode
+
+        gate_mode = gate_mode or GateMode.SEPARATED.value
+        return fused_moe_router_config_supported(
+            hidden_dim,
+            hidden_dtype,
+            w1_dtype,
+            quant_type=quant_method,
+            activation=activation_method,
+            gate_mode=gate_mode,
+            num_fused_shared_experts=num_fused_shared_experts,
+        )
+
+    @staticmethod
+    def fused_moe_router_supported(
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk: int,
+        quant_method: int,
+        activation_method: int,
+        num_expert_group: int,
+        topk_group: int,
+        gate_mode: str,
+        hidden_pad: int = 0,
+        intermediate_pad: int = 0,
+        a1_scale: torch.Tensor | None = None,
+        output_dtype: torch.dtype | None = None,
+        expert_mask: torch.Tensor | None = None,
+        num_fused_shared_experts: int = 0,
+        global_num_experts: int | None = None,
+    ) -> bool:
+        """Whether AITER's fused routing preamble covers this call.
+
+        Takes the same shape/quant arguments as `fused_moe_router` because
+        AITER also checks the tuned config, which only those pin down.
+        """
+        if not rocm_aiter_ops.has_fused_moe_router():
+            return False
+        from aiter.fused_moe import fused_moe_router_supported
+        from aiter.ops.flydsl.moe_common import GateMode
+
+        gate_mode = gate_mode or GateMode.SEPARATED.value
+        return fused_moe_router_supported(
+            hidden_states,
+            w1,
+            w2,
+            topk,
+            quant_type=quant_method,
+            activation=activation_method,
+            num_expert_group=num_expert_group,
+            topk_group=topk_group,
+            gate_mode=gate_mode,
+            hidden_pad=hidden_pad,
+            intermediate_pad=intermediate_pad,
+            a1_scale=a1_scale,
+            dtype=output_dtype,
+            expert_mask=expert_mask,
+            num_fused_shared_experts=num_fused_shared_experts,
+            global_num_experts=global_num_experts,
+        )
+
     @staticmethod
     def _probe_dsv4_i384_fhmoe_capability(num_tokens: int) -> bool:
         """Probe AITER's CSV-backed DSV4 native-I384 FHMoE contract."""
@@ -2173,6 +2387,14 @@ class rocm_aiter_ops:
                 op_func=_rocm_aiter_fused_moe_impl,
                 mutates_args=[],
                 fake_impl=_rocm_aiter_fused_moe_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_fused_moe_router",
+                op_func=_rocm_aiter_fused_moe_router_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_fused_moe_router_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
@@ -2646,6 +2868,62 @@ class rocm_aiter_ops:
             shared_w1_scale,
             shared_w2_scale,
             shared_expert_id,
+        )
+
+    @staticmethod
+    def fused_moe_router(
+        hidden_states: torch.Tensor,
+        gating_output: torch.Tensor,
+        correction_bias: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk: int,
+        num_expert_group: int = 1,
+        topk_group: int = 1,
+        need_renorm: bool = True,
+        routed_scaling_factor: float = 1.0,
+        expert_mask: torch.Tensor | None = None,
+        activation_method: int = 0,
+        quant_method: int = 0,
+        w1_scale: torch.Tensor | None = None,
+        w2_scale: torch.Tensor | None = None,
+        a1_scale: torch.Tensor | None = None,
+        a2_scale: torch.Tensor | None = None,
+        num_local_tokens: torch.Tensor | None = None,
+        output_dtype: torch.dtype | None = None,
+        hidden_pad: int = 0,
+        intermediate_pad: int = 0,
+        gate_mode: str = "",
+        num_fused_shared_experts: int = 0,
+        ep_rank: int = 0,
+        ep_size: int = 1,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.rocm_aiter_fused_moe_router(
+            hidden_states,
+            gating_output,
+            correction_bias,
+            w1,
+            w2,
+            topk,
+            num_expert_group,
+            topk_group,
+            need_renorm,
+            routed_scaling_factor,
+            expert_mask,
+            activation_method,
+            quant_method,
+            w1_scale,
+            w2_scale,
+            a1_scale,
+            a2_scale,
+            num_local_tokens,
+            output_dtype,
+            hidden_pad,
+            intermediate_pad,
+            gate_mode,
+            num_fused_shared_experts,
+            ep_rank,
+            ep_size,
         )
 
     @staticmethod

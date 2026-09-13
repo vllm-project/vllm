@@ -258,10 +258,18 @@ def backend_to_kernel_cls(
         return [AiterW4A8ExpertsMonolithic]
 
     elif backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
+        from vllm._aiter_ops import rocm_aiter_ops
         from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
             AiterExperts,
+            AiterFusedRouterExperts,
         )
 
+        # Only offer the fused-router kernel when it is opted into, so with the
+        # flag off selection is exactly what it was before. It is listed first
+        # because monolithic is preferred over modular, and it still declines
+        # on its own for configs it cannot handle.
+        if rocm_aiter_ops.is_fused_router_enabled():
+            return [AiterFusedRouterExperts, AiterExperts]
         return [AiterExperts]
 
     elif backend == Mxfp4MoeBackend.XPU:
