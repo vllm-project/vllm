@@ -4,10 +4,9 @@
 //! Conversion between gRPC protobuf types and internal `vllm-text`
 //! request/response types.
 
+use thiserror_ext::AsReport as _;
 use tonic::Status;
-use url::Url;
 use uuid::Uuid;
-use vllm_chat::MediaContentPart;
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_text::{
@@ -16,95 +15,6 @@ use vllm_text::{
 };
 
 use super::pb;
-
-pub fn media_parts_from_request(
-    media: Vec<pb::MediaItem>,
-) -> Result<Vec<MediaContentPart>, Status> {
-    let mut parts = Vec::with_capacity(media.len());
-    for (index, item) in media.into_iter().enumerate() {
-        let modality = item.modality();
-        if modality == pb::Modality::Unspecified {
-            return Err(Status::invalid_argument(format!(
-                "media[{index}].modality is required"
-            )));
-        }
-        let uuid = (!item.uuid.is_empty()).then_some(item.uuid);
-        let mime_type = (!item.mime_type.is_empty()).then_some(item.mime_type);
-        let source = item.source.ok_or_else(|| {
-            Status::invalid_argument(format!("media[{index}].source is required"))
-        })?;
-        match &source {
-            pb::media_item::Source::Url(url) => {
-                validate_media_uri(index, "url", url, &["http", "https"])?;
-            }
-            pb::media_item::Source::DataUri(uri) => {
-                validate_media_uri(index, "data_uri", uri, &["data"])?;
-            }
-            pb::media_item::Source::RawBytes(_) => {}
-        }
-        let part = match (modality, source) {
-            (
-                pb::Modality::Image,
-                pb::media_item::Source::Url(url) | pb::media_item::Source::DataUri(url),
-            ) => MediaContentPart::ImageUrl {
-                url,
-                detail: None,
-                uuid,
-            },
-            (pb::Modality::Image, pb::media_item::Source::RawBytes(data)) => {
-                MediaContentPart::ImageData {
-                    data,
-                    mime_type,
-                    uuid,
-                    detail: None,
-                }
-            }
-            (
-                pb::Modality::Video,
-                pb::media_item::Source::Url(url) | pb::media_item::Source::DataUri(url),
-            ) => MediaContentPart::VideoUrl { url, uuid },
-            (pb::Modality::Video, pb::media_item::Source::RawBytes(data)) => {
-                MediaContentPart::VideoData {
-                    data,
-                    mime_type,
-                    uuid,
-                }
-            }
-            (
-                pb::Modality::Audio,
-                pb::media_item::Source::Url(url) | pb::media_item::Source::DataUri(url),
-            ) => MediaContentPart::AudioUrl { url, uuid },
-            (pb::Modality::Audio, pb::media_item::Source::RawBytes(data)) => {
-                MediaContentPart::AudioData {
-                    data,
-                    mime_type,
-                    uuid,
-                }
-            }
-            (pb::Modality::Unspecified, _) => unreachable!("modality validated above"),
-        };
-        parts.push(part);
-    }
-    Ok(parts)
-}
-
-fn validate_media_uri(
-    index: usize,
-    field: &str,
-    value: &str,
-    allowed_schemes: &[&str],
-) -> Result<(), Status> {
-    let uri = Url::parse(value).map_err(|_| {
-        Status::invalid_argument(format!("media[{index}].{field} is not a valid URI"))
-    })?;
-    if !allowed_schemes.contains(&uri.scheme()) {
-        return Err(Status::invalid_argument(format!(
-            "media[{index}].{field} must use the {} scheme",
-            allowed_schemes.join(" or ")
-        )));
-    }
-    Ok(())
-}
 
 // ========================================================================================
 // Request conversion
@@ -350,6 +260,9 @@ fn convert_structured_output(
             StructuredOutputsParams::structural_tag(tag.clone())
         }
     };
+    params
+        .validate()
+        .map_err(|error| Status::invalid_argument(error.to_report_string()))?;
     Ok(Some(params))
 }
 
@@ -391,13 +304,14 @@ pub fn to_sequence_output(
     logprobs: Option<&DecodedLogprobs>,
     finished: Option<&Finished>,
     opts: &ResponseOpts,
-) -> pb::SequenceOutput {
+) -> Result<pb::SequenceOutput, Status> {
+    let finish_info = finished.map(|f| to_finish_info(f, token_ids)).transpose()?;
     let (lp_values, rank_values, candidates) = match logprobs {
         Some(lp) if opts.output_logprobs => output_logprobs_to_proto(lp),
         _ => (vec![], vec![], vec![]),
     };
 
-    pb::SequenceOutput {
+    Ok(pb::SequenceOutput {
         index: 0, // TODO: multi-sequence (n > 1) not supported
         text: if opts.output_text {
             delta.to_string()
@@ -413,11 +327,11 @@ pub fn to_sequence_output(
         logprobs: lp_values,
         ranks: rank_values,
         candidate_tokens: candidates,
-        finish_info: finished.map(|f| to_finish_info(f, token_ids)),
-    }
+        finish_info,
+    })
 }
 
-fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> pb::FinishInfo {
+fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> Result<pb::FinishInfo, Status> {
     use pb::finish_info::FinishReason as PbFinishReason;
 
     let (finish_reason, stop_reason) = match &finished.finish_reason {
@@ -438,18 +352,17 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> pb::FinishInfo {
             (PbFinishReason::Stop as i32, sr)
         }
         FinishReason::Length => (PbFinishReason::Length as i32, None),
-        FinishReason::Abort | FinishReason::Error | FinishReason::Repetition(_) => {
-            (PbFinishReason::Aborted as i32, None)
-        }
+        FinishReason::Error => return Err(Status::internal("engine failed during generation")),
+        FinishReason::Abort | FinishReason::Repetition(_) => (PbFinishReason::Aborted as i32, None),
     };
 
-    pb::FinishInfo {
+    Ok(pb::FinishInfo {
         num_output_tokens: finished.usage.output_token_count as u32,
         finish_reason,
         stop_reason,
         kv_transfer_params: finished.kv_transfer_params.as_ref().and_then(json_to_proto_struct),
         ec_transfer_params: finished.ec_transfer_params.as_ref().and_then(json_to_proto_struct),
-    }
+    })
 }
 
 // ========================================================================================
@@ -638,6 +551,20 @@ mod tests {
     }
 
     #[test]
+    fn grpc_rejects_empty_grammar_before_engine() {
+        use super::pb::decoding_parameters::StructuredOutput;
+        let req = pb::GenerateRequest {
+            decoding: Some(pb::DecodingParameters {
+                structured_output: Some(StructuredOutput::Grammar("  ".to_string())),
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        let err = to_text_request(req, false, &["test-model".to_string()]).unwrap_err();
+        assert!(err.message().contains("grammar cannot be an empty string"));
+    }
+
+    #[test]
     fn absent_seed_is_none() {
         let req = pb::GenerateRequest {
             sampling: Some(pb::RandomSampling {
@@ -709,7 +636,7 @@ mod tests {
         let fin = finished(FinishReason::Stop(None));
         let token_ids = [1_u32, 2, 3, 151643];
 
-        let info = to_finish_info(&fin, &token_ids);
+        let info = to_finish_info(&fin, &token_ids).expect("finish info");
 
         assert_eq!(info.finish_reason, PbFinishReason::Stop as i32);
         assert_eq!(info.stop_reason, Some(PbStopReason::EosTokenId(151643)));
@@ -719,7 +646,7 @@ mod tests {
     fn eos_stop_with_empty_token_ids_leaves_stop_reason_unset() {
         let fin = finished(FinishReason::Stop(None));
 
-        let info = to_finish_info(&fin, &[]);
+        let info = to_finish_info(&fin, &[]).expect("finish info");
 
         assert_eq!(info.finish_reason, PbFinishReason::Stop as i32);
         assert_eq!(info.stop_reason, None);
@@ -730,7 +657,7 @@ mod tests {
         let fin = finished(FinishReason::Stop(Some(StopReason::TokenId(42))));
         // Terminal token list should be ignored when an explicit stop reason is
         // present.
-        let info = to_finish_info(&fin, &[7, 42]);
+        let info = to_finish_info(&fin, &[7, 42]).expect("finish info");
 
         assert_eq!(info.finish_reason, PbFinishReason::Stop as i32);
         assert_eq!(info.stop_reason, Some(PbStopReason::StopTokenId(42)));
@@ -740,7 +667,7 @@ mod tests {
     fn explicit_stop_string_is_preserved() {
         let fin = finished(FinishReason::Stop(Some(StopReason::Text("</stop>".into()))));
 
-        let info = to_finish_info(&fin, &[1, 2, 3]);
+        let info = to_finish_info(&fin, &[1, 2, 3]).expect("finish info");
 
         assert_eq!(info.finish_reason, PbFinishReason::Stop as i32);
         assert_eq!(
@@ -753,7 +680,7 @@ mod tests {
     fn length_finish_has_no_stop_reason() {
         let fin = finished(FinishReason::Length);
 
-        let info = to_finish_info(&fin, &[1, 2, 3]);
+        let info = to_finish_info(&fin, &[1, 2, 3]).expect("finish info");
 
         assert_eq!(info.finish_reason, PbFinishReason::Length as i32);
         assert_eq!(info.stop_reason, None);
@@ -763,7 +690,7 @@ mod tests {
     fn abort_finish_is_mapped_to_aborted() {
         let fin = finished(FinishReason::Abort);
 
-        let info = to_finish_info(&fin, &[]);
+        let info = to_finish_info(&fin, &[]).expect("finish info");
 
         assert_eq!(info.finish_reason, PbFinishReason::Aborted as i32);
         assert_eq!(info.stop_reason, None);
@@ -778,7 +705,8 @@ mod tests {
             ..Default::default()
         };
 
-        let out = to_sequence_output("hello", &[10, 20, 30], None, Some(&fin), &opts);
+        let out = to_sequence_output("hello", &[10, 20, 30], None, Some(&fin), &opts)
+            .expect("sequence output");
 
         let finish = out.finish_info.expect("finish_info should be present");
         assert_eq!(finish.finish_reason, PbFinishReason::Stop as i32);

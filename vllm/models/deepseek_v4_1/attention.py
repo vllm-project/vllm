@@ -58,7 +58,7 @@ from vllm.utils.multi_stream_utils import (
 )
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.mla.indexer import (
-    DeepseekV4IndexerBackend,
+    DeepseekV41IndexerBackend,
     dsa_indexer_uses_fp4,
     get_max_prefill_buffer_size,
 )
@@ -1005,7 +1005,7 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
     def forward(self): ...
 
     def get_attn_backend(self) -> type[AttentionBackend]:
-        return DeepseekV4IndexerBackend
+        return DeepseekV41IndexerBackend
 
 
 class DeepseekV4Indexer(nn.Module):

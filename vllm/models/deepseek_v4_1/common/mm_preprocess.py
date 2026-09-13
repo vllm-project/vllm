@@ -12,14 +12,9 @@ to ``[IMAGE_START] + ([IMAGE] * n_llm_w + [IMAGE_NEW_LINE]) * n_llm_h +
 rows in reading order; the delimiters take the learned ``image_start`` /
 ``image_newline`` / ``image_end`` vectors.
 
-One vLLM-side deviation from the reference token stream: a leading
-compressor-alignment pad (``COMPRESS_PAD_TO - 1 - start % COMPRESS_PAD_TO``
-positions, so the span always starts at the same compressor phase) is
-prepended when the block is spliced into the final prompt. Pad positions
-borrow the reserved in-vocab token ``<|place_holder_mm_span_0436|>`` so
-they stay distinguishable from real span positions; they embed as the
-plain image token (v4.1 has no ``image_pad`` vector) and are routed and
-engram-deadened like image tokens.
+The token stream matches the reference exactly: no compressor-alignment
+pad is inserted (the reference pools image tokens across compressor-group
+boundaries freely).
 """
 
 import math
@@ -30,7 +25,6 @@ import numpy as np
 import torch
 from PIL import Image, ImageOps
 from transformers import BatchFeature
-from typing_extensions import assert_never
 
 from vllm.config.multimodal import BaseDummyOptions, ImageDummyOptions
 from vllm.inputs import MultiModalDataDict
@@ -44,42 +38,26 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.processing.processor import (
-    MultiModalPromptUpdates,
-    MultiModalPromptUpdatesApplyResult,
-    PlaceholderFeaturesInfo,
-    UpdateMode,
-    _plan_prompt_updates,
-)
 from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
 
 IMAGE_START, IMAGE, IMAGE_NEW_LINE, IMAGE_END = range(4)
-# Image spans are padded so they always start at the same compressor group
-# phase; v4.1 uses ratio-2 compressors (v4.0 used 4).
-COMPRESS_PAD_TO = 2
 
 IMAGE_PLACEHOLDER = "<｜deepseek_image｜>"
 
 # The checkpoint tokenizer's id for IMAGE_PLACEHOLDER (the config's
 # ``image_token_id``). Every image-span position carries this id, exactly
 # like the reference; the MoE router detects image tokens as the range
-# [IMAGE_SENTINEL_BASE_ID, IMAGE_SENTINEL_BASE_ID + 5), which also covers
-# IMAGE_PAD_ID below.
+# [IMAGE_SENTINEL_BASE_ID, IMAGE_SENTINEL_BASE_ID + 5).
 IMAGE_SENTINEL_BASE_ID = 129264
-# Leading compressor-alignment pads borrow this reserved in-vocab token
-# (``<|place_holder_mm_span_0436|>``) so they can be told apart from real
-# span positions when the per-position role is decided from token ids.
-IMAGE_PAD_ID = 129265
-IMAGE_PAD_TOKEN_NAME = "<|place_holder_mm_span_0436|>"
 
 
 def image_sentinel_mask(token_ids: torch.Tensor) -> torch.Tensor:
-    """Boolean mask for image-span positions (span tokens and align pads)."""
-    return (token_ids == IMAGE_SENTINEL_BASE_ID) | (token_ids == IMAGE_PAD_ID)
+    """Boolean mask for image-span positions."""
+    return token_ids == IMAGE_SENTINEL_BASE_ID
 
 
 def validate_image_sentinel_ids(tokenizer) -> None:
-    """Check the image/pad token ids against the tokenizer."""
+    """Check the image token id against the tokenizer."""
     image_id = tokenizer.convert_tokens_to_ids(IMAGE_PLACEHOLDER)
     if image_id != IMAGE_SENTINEL_BASE_ID:
         raise ValueError(
@@ -87,13 +65,6 @@ def validate_image_sentinel_ids(tokenizer) -> None:
             f"expected {IMAGE_SENTINEL_BASE_ID} (the config's "
             "image_token_id); the DeepSeek-V4.1 vision path keys image "
             "routing and engram masking off this id."
-        )
-    pad_id = tokenizer.convert_tokens_to_ids(IMAGE_PAD_TOKEN_NAME)
-    if pad_id != IMAGE_PAD_ID:
-        raise ValueError(
-            f"Image pad token {IMAGE_PAD_TOKEN_NAME!r} has id {pad_id}, "
-            f"expected {IMAGE_PAD_ID}; the DeepSeek-V4.1 vision path "
-            "borrows this reserved id for compressor-alignment pads."
         )
 
 
@@ -134,8 +105,7 @@ def safe_resize(
     height, width, best_height, best_width, patch_size, downsample_ratio, max_n_token
 ):
     """Shrink the pixel size until the image costs at most max_n_token LLM
-    tokens (minus the reservation for the compressor-alignment pad)."""
-    max_n_token -= COMPRESS_PAD_TO - 1
+    tokens."""
     n_llm_h, n_llm_w = llm_grid(best_height, best_width, patch_size, downsample_ratio)
     if num_image_tokens(n_llm_h, n_llm_w) > max_n_token:
         best_height, best_width = solve_resize_ratio(
@@ -293,13 +263,7 @@ class DeepseekV4VLProcessingInfo(BaseProcessingInfo):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int]:
-        # ``safe_resize`` reserves COMPRESS_PAD_TO - 1 tokens of
-        # vision_max_n_token for the compressor-alignment pad, so the full
-        # image span is bounded by vision_max_n_token; the margin is kept
-        # in case that reservation changes.
-        return {
-            "image": self.get_hf_config().vision_max_n_token + COMPRESS_PAD_TO - 1,
-        }
+        return {"image": self.get_hf_config().vision_max_n_token}
 
     def get_image_placeholder_token_id(self) -> int:
         token_id = self.get_tokenizer().convert_tokens_to_ids(IMAGE_PLACEHOLDER)
@@ -314,7 +278,7 @@ class DeepseekV4VLProcessingInfo(BaseProcessingInfo):
         # A square maximizes the ViT patch count (area) within the token
         # budget; solve the budget-derived size directly to keep the dummy
         # image small.
-        budget = hf_config.vision_max_n_token - (COMPRESS_PAD_TO - 1)
+        budget = hf_config.vision_max_n_token
         side = budget * patch_size * downsample_ratio
         best_h, best_w = solve_resize_ratio(
             side, side, patch_size, downsample_ratio, budget
@@ -397,67 +361,3 @@ class DeepseekV4VLMultiModalProcessor(
                 replacement=get_image_replacement,
             ),
         ]
-
-    def _apply_token_matches_with_placeholders(
-        self,
-        token_ids: list[int],
-        mm_prompt_updates: MultiModalPromptUpdates,
-    ) -> tuple[
-        list[int],
-        MultiModalPromptUpdatesApplyResult,
-        Mapping[str, list[PlaceholderFeaturesInfo]],
-    ]:
-        # Same as the base implementation, except that each image block gets
-        # its compressor-alignment pad (``COMPRESS_PAD_TO - 1 - start %
-        # COMPRESS_PAD_TO`` IMAGE_PAD_ID tokens) prepended while splicing:
-        # the pad depends on the block's final position in the prompt, which
-        # is unknown when the (cacheable) prompt updates are built. Pad
-        # positions are not embed positions (their id differs from
-        # image_token_id), so ``is_embed`` stays aligned with the pad-free
-        # replacement content.
-        matched_updates, result = _plan_prompt_updates(token_ids, mm_prompt_updates)
-        placeholders: dict[str, list[PlaceholderFeaturesInfo]] = {
-            modality: [] for modality in mm_prompt_updates
-        }
-
-        new_token_ids = list[int]()
-        prev_end_idx = 0
-        for matched_update in matched_updates:
-            update = matched_update.update
-            match = matched_update.match
-
-            if update.mode == UpdateMode.INSERT:
-                end_idx_to_insert = match.end_idx
-            elif update.mode == UpdateMode.REPLACE:
-                end_idx_to_insert = match.start_idx
-            else:
-                assert_never(update.mode)
-
-            new_token_ids.extend(token_ids[prev_end_idx:end_idx_to_insert])
-            start_idx = len(new_token_ids)
-
-            tokens = list(update.content.full)
-            if tokens and update.modality == "image":
-                compress_pad = COMPRESS_PAD_TO - 1 - start_idx % COMPRESS_PAD_TO
-                tokens = [IMAGE_PAD_ID] * compress_pad + tokens
-
-            if tokens:
-                content_is_embed = update.content.is_embed
-                is_embed = (
-                    content_is_embed(tokens) if content_is_embed is not None else None
-                )
-                placeholders[update.modality].append(
-                    PlaceholderFeaturesInfo(
-                        modality=update.modality,
-                        item_idx=update.item_idx,
-                        start_idx=start_idx,
-                        tokens=tokens,
-                        is_embed=is_embed,
-                    )
-                )
-                new_token_ids.extend(tokens)
-
-            prev_end_idx = match.end_idx
-
-        new_token_ids.extend(token_ids[prev_end_idx:])
-        return new_token_ids, result, placeholders

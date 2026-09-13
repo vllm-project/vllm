@@ -26,6 +26,7 @@ import torch
 
 import vllm.version
 from vllm.config import ModelConfig
+from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.platforms import current_platform
 from vllm.utils.hashing import safe_hash
 
@@ -59,14 +60,11 @@ class UnsupportedPlatformForIPCError(Exception):
     """Raised when the current platform cannot share CUDA IPC handles."""
 
 
-def check_ipc_platform_support(*, where: str) -> None:
+def check_ipc_platform_support() -> None:
     """Hard-error unless the current platform can share CUDA IPC handles.
 
     Only CUDA/ROCm tensors get a real IPC handle from ``TensorEntry``; other
     platforms (e.g. XPU) would silently ship every tensor by value instead.
-
-    Args:
-        where: Short tag ("daemon"/"engine") used in the error message.
 
     Raises:
         UnsupportedPlatformForIPCError: If the current platform is not
@@ -75,95 +73,33 @@ def check_ipc_platform_support(*, where: str) -> None:
     if current_platform.is_cuda_alike():
         return
     raise UnsupportedPlatformForIPCError(
-        f"[weight_cache:{where}] platform {current_platform.device_name!r} "
-        "does not support CUDA IPC weight sharing; only CUDA and ROCm are "
-        "supported. Use the default --load-format for this platform."
+        f"platform {current_platform.device_name!r} does not support CUDA IPC "
+        "weight sharing; only CUDA and ROCm are supported. Use the default "
+        "--load-format for this platform."
     )
 
 
-# The daemon exports tensor data only, so sharing is correct just for methods
-# whose post-load effect is either fully captured by that data or rebuilt when
-# process_weights_after_loading runs under weights_already_processed. Anything
-# absent from this registry hard-errors: a method that silently repacks into
-# shapes the client cannot reproduce or stamps unrebuildable Python-side state
-# would serve wrong numerics. Extend it only after an end-to-end check against
-# a disk-loaded baseline.
-#
-# This check is config-only so the daemon fails fast before a slow full load,
-# rather than surfacing the incompatibility only after the engine has built the
-# model (where process_weights_after_loading's supports_pre_processed_weights
-# guard would eventually catch it).
-
-
-def _quant_config_field(quant_config: Any, key: str) -> Any:
-    if quant_config is None:
-        return None
-    if isinstance(quant_config, dict):
-        return quant_config.get(key)
-    return getattr(quant_config, key, None)
-
-
-def _fp8_round_trips_via_ipc(quant_config: Any) -> bool:
-    """Only block-wise FP8 is verified.
-
-    Block-wise FP8 preserves the weight shape, while per-tensor FP8 transposes
-    ``layer.weight`` during post-processing -- a shape the client's
-    meta-initialized model cannot reproduce.
-    """
-    return _quant_config_field(quant_config, "weight_block_size") is not None
-
-
-# quantization name -> predicate(quant_config) -> True when verified safe.
-IPC_QUANT_ALLOWLIST: dict[str | None, Any] = {
-    None: lambda _quant_config: True,  # unquantized
-    "fp8": _fp8_round_trips_via_ipc,
-    "modelopt_fp4": lambda _quant_config: True,
-    # Kimi-K3 routed experts (mxfp4-pack): the MegaMoE experts keep their packed
-    # weights and scales as plain parameters and defer the DeepGEMM transform to
-    # forward(), so the exported tensors are complete. Any other mxfp4 method
-    # that repacks or drops parameters still fails closed at the engine's
-    # supports_pre_processed_weights guard.
-    "mxfp4": lambda _quant_config: True,
-}
-
-
-def is_ipc_quant_supported(quantization: str | None, quant_config: Any) -> bool:
-    predicate = IPC_QUANT_ALLOWLIST.get(quantization)
-    return False if predicate is None else bool(predicate(quant_config))
-
-
-def check_ipc_quant_support(model_config: ModelConfig, *, where: str) -> None:
-    """Hard-error unless the model's quantization is verified for IPC sharing.
+# The daemon transfers post processed weights directly
+def check_ipc_quant_support(model: torch.nn.Module) -> None:
+    """Hard-error unless every quant method supports pre-processed weights.
 
     Args:
-        model_config: Model configuration to inspect.
-        where: Short tag ("daemon"/"engine") used in the error message.
+        model: The model to inspect (weights need not be loaded).
 
     Raises:
-        UnsupportedQuantForIPCError: If the quantization method is not on the
-            verified allowlist.
+        UnsupportedQuantForIPCError: If any quant method does not declare
+            ``supports_pre_processed_weights``.
     """
-    quantization = model_config.quantization
-    # Prefer the canonical, nested-aware config (multimodal models keep it under
-    # text_config); fall back to the raw hf_config for older code paths.
-    quant_config = getattr(
-        getattr(model_config, "model_arch_config", None), "quantization_config", None
-    )
-    if quant_config is None:
-        quant_config = getattr(model_config.hf_config, "quantization_config", None)
-    if is_ipc_quant_supported(quantization, quant_config):
-        return
-    verified = ", ".join(
-        "unquantized" if name is None else repr(name) for name in IPC_QUANT_ALLOWLIST
-    )
-    raise UnsupportedQuantForIPCError(
-        f"[weight_cache:{where}] quantization {quantization!r} is not verified "
-        f"for CUDA IPC weight sharing: its post-load processing may repack "
-        f"weights into shapes the client cannot reproduce or stamp Python-side "
-        f"state that tensor export cannot carry, which would silently serve "
-        f"wrong numerics. Verified: {verified} (FP8 only with weight_block_size "
-        f"set, i.e. block-wise). Use the default --load-format for this model."
-    )
+    for name, module in model.named_modules():
+        quant_method = getattr(module, "quant_method", None)
+        if (
+            isinstance(quant_method, QuantizeMethodBase)
+            and not quant_method.supports_pre_processed_weights
+        ):
+            raise UnsupportedQuantForIPCError(
+                f"layer {name or '<root>'}: {type(quant_method).__name__} "
+                "does not support loading from pre-processed weights."
+            )
 
 
 def get_physical_device_id(device_index: int) -> int | None:

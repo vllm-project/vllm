@@ -98,6 +98,14 @@ def test_swa_offload_window_covers_unaligned_hit(boundary, eagle, left_state):
         )
     manager = CPUOffloadingManager(num_chunks=100)
     spec = SimpleNamespace(
+        config=SimpleNamespace(
+            groups=tuple(
+                SimpleNamespace(
+                    group_id=i, tokens_per_block=group.kv_cache_spec.block_size
+                )
+                for i, group in enumerate(groups)
+            )
+        ),
         tokens_per_block=(256, 64, 8),
         tokens_per_hash=8,
         blocks_per_chunk=4,
@@ -303,7 +311,24 @@ def test_aligned_boundary_store_uses_exact_source_with_partial_tail():
     assert src_spec.block_indices == [0, 0]
 
 
-def test_aligned_boundary_store_flushes_before_cow_destination_reuse():
+def test_aligned_boundary_store_maps_sparse_group_id_to_dense_transfer_slot():
+    scheduler = _make_partial_tail_scheduler()
+    indexer_config = scheduler.config.kv_group_configs[1]
+    scheduler.config = scheduler.config._replace(kv_group_configs=(indexer_config,))
+    _make_partial_tail_request(scheduler)
+    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+
+    jobs = scheduler._build_aligned_boundary_store_jobs({"req": [(1, 98, 16)]})
+
+    [job] = jobs.values()
+    assert job.src_spec.group_sizes == [1]
+    assert job.src_spec.block_indices == [0]
+
+
+@pytest.mark.parametrize("cow_reuse", [False, True])
+def test_aligned_boundary_store_flushes_before_block_reuse(cow_reuse):
     scheduler = _make_partial_tail_scheduler()
     _make_partial_tail_request(scheduler)
     scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
@@ -320,7 +345,11 @@ def test_aligned_boundary_store_flushes_before_cow_destination_reuse():
     [job_id] = meta.store_jobs
 
     output = SchedulerOutput.make_empty()
-    output.kv_cache_block_copies = [KVCacheBlockCopy(98, 99)]
+    if cow_reuse:
+        output.kv_cache_block_copies = [KVCacheBlockCopy(98, 99)]
+    else:
+        output.scheduled_cached_reqs.req_ids = ["req"]
+        output.scheduled_cached_reqs.new_block_ids = [([], [99])]
     meta = scheduler.build_connector_meta(output)
 
     assert meta.jobs_to_flush == {job_id}
@@ -382,6 +411,20 @@ def test_partial_lookup_returns_exact_boundary_and_group_load_keys():
     assert dst_spec.group_sizes == [2, 1]
     assert dst_spec.block_indices == [0, 1]
     assert req_status.partial_tail_boundary is None
+
+
+def test_lookup_cap_stops_at_authoritative_prefix_boundary():
+    scheduler = _make_partial_tail_scheduler()
+    request = _make_partial_tail_request(scheduler)
+    request.skip_reading_prefix_cache = False
+    scheduler.manager.lookup.return_value = LookupResult.HIT
+
+    tokens, load_async = scheduler.get_num_new_matched_tokens(
+        request, 0, max_num_new_tokens=20
+    )
+
+    assert (tokens, load_async) == (20, True)
+    assert scheduler._req_status["req"].partial_tail_boundary == 20
 
 
 def test_recurrent_group_unhashed_block_does_not_truncate_load_boundary():

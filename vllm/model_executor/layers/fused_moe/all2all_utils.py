@@ -8,6 +8,7 @@ import torch
 
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (
+    GroupCoordinator,
     get_ep_group,
 )
 from vllm.logger import init_logger
@@ -104,16 +105,12 @@ if current_platform.is_cuda_alike():
         )
 
 
-def get_ep_all2all_manager(eep_stage: bool = False) -> Any:
-    if eep_stage:
-        from vllm.distributed.elastic_ep.standby_state import get_standby_ep_group
-
-        ep_group = get_standby_ep_group()
-        assert ep_group is not None
-        device_communicator = ep_group.device_communicator
-    else:
-        device_communicator = get_ep_group().device_communicator
-
+def get_ep_all2all_manager(
+    ep_group: GroupCoordinator | None = None,
+) -> Any:
+    if ep_group is None:
+        ep_group = get_ep_group()
+    device_communicator = ep_group.device_communicator
     assert device_communicator is not None
     all2all_manager = device_communicator.all2all_manager
     assert all2all_manager is not None
@@ -168,7 +165,7 @@ def maybe_make_prepare_finalize(
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     allow_new_interface: bool = False,
     use_monolithic: bool = False,
-    eep_stage: bool = False,
+    all2all_manager: Any | None = None,
 ) -> FusedMoEPrepareAndFinalize | None:
     if not moe.moe_parallel_config.use_all2all_kernels:
         if not allow_new_interface:
@@ -190,7 +187,8 @@ def maybe_make_prepare_finalize(
                 "Detected DP deployment with no --enable-expert-parallel. "
                 "Falling back to AllGather+ReduceScatter dispatch/combine."
             )
-            all2all_manager = get_ep_all2all_manager(eep_stage)
+            if all2all_manager is None:
+                all2all_manager = get_ep_all2all_manager()
             return make_moe_prepare_and_finalize_naive_dp_ep(
                 is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
                 num_dispatchers=all2all_manager.world_size,
@@ -199,7 +197,8 @@ def maybe_make_prepare_finalize(
         else:
             return make_moe_prepare_and_finalize_no_dp_ep(use_monolithic)
 
-    all2all_manager = get_ep_all2all_manager(eep_stage)
+    if all2all_manager is None:
+        all2all_manager = get_ep_all2all_manager()
 
     prepare_finalize: FusedMoEPrepareAndFinalize | None = None
 
@@ -361,10 +360,7 @@ def maybe_make_prepare_finalize(
         all_to_all_args = dict(
             max_num_tokens_per_dp_rank=moe.max_num_tokens,
             token_hidden_size=moe.hidden_dim,
-            num_ep_ranks=all2all_manager.world_size,
-            num_global_experts=moe.num_experts,
-            num_local_experts=moe.num_experts // all2all_manager.world_size,
-            stage=eep_stage,
+            num_local_experts=moe.num_local_experts,
         )
         handle = all2all_manager.get_handle(all_to_all_args)
 
@@ -378,7 +374,8 @@ def maybe_make_prepare_finalize(
         prepare_finalize = NixlEPPrepareAndFinalize(
             handle,
             max_tokens_per_rank=moe.max_num_tokens,
-            num_dispatchers=all2all_manager.world_size,
+            num_dispatchers=all2all_manager.max_num_ep_ranks,
+            expert_capacity=(moe.num_local_experts * all2all_manager.max_num_ep_ranks),
             use_fp8_dispatch=use_fp8_dispatch,
             global_to_physical=global_to_physical,
             physical_to_global=physical_to_global,

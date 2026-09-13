@@ -39,8 +39,6 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
         scaling_factor: float,
         dtype: torch.dtype,
         *,
-        extrapolation_factor: float = 1,
-        attn_factor: float = 1,
         beta_fast: int = 32,
         beta_slow: int = 1,
         mscale: float = 1,
@@ -48,15 +46,12 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
         init_cache: bool = True,
     ) -> None:
         self.scaling_factor = scaling_factor
-        self.extrapolation_factor = extrapolation_factor
-        self.attn_factor = attn_factor
         self.beta_fast = beta_fast
         self.beta_slow = beta_slow
         # Get n-d magnitude scaling corrected for interpolation.
         self.mscale = float(
             yarn_get_mscale(self.scaling_factor, float(mscale))
             / yarn_get_mscale(self.scaling_factor, float(mscale_all_dim))
-            * attn_factor
         )
         self.use_flashinfer = (
             self.enabled()
@@ -96,10 +91,9 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
             self.max_position_embeddings,
         )
         # Get n-d rotational scaling corrected for extrapolation
-        inv_freq_mask = (
-            1
-            - yarn_linear_ramp_mask(low, high, self.rotary_dim // 2, dtype=torch.float)
-        ) * self.extrapolation_factor
+        inv_freq_mask = 1 - yarn_linear_ramp_mask(
+            low, high, self.rotary_dim // 2, dtype=torch.float
+        )
         inv_freq = (
             inv_freq_interpolation * (1 - inv_freq_mask)
             + inv_freq_extrapolation * inv_freq_mask

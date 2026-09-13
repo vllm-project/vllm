@@ -36,6 +36,7 @@ from .inputs import (
     VideoItem,
 )
 from .media import MediaWithBytes
+from .video import DecodedFrames
 
 _T = TypeVar("_T")
 _I = TypeVar("_I")
@@ -653,7 +654,7 @@ class MultiModalDataParser:
     def _get_video_with_metadata(
         self,
         video: VideoItem,
-    ) -> tuple[np.ndarray | MediaWithBytes[np.ndarray], dict[str, Any] | None]:
+    ) -> tuple[DecodedFrames | MediaWithBytes[DecodedFrames], dict[str, Any] | None]:
         if isinstance(video, MediaWithBytes):
             new_video, metadata = self._get_video_with_metadata(video.media)
             return MediaWithBytes(new_video, video.original_bytes), metadata
@@ -661,10 +662,11 @@ class MultiModalDataParser:
             return video
         if isinstance(video, list):
             return np.array(video), None
-        if isinstance(video, np.ndarray):
+        if isinstance(video, (np.ndarray, torch.Tensor)):
+            # Tensors pass through untouched: HF video processors accept them
+            # directly, and device tensors (e.g. NVDEC-decoded frames) must
+            # stay on-device to avoid a D2H round-trip.
             return video, None
-        if isinstance(video, torch.Tensor):
-            return video.numpy(), None
 
         assert_never(video)
 
@@ -751,8 +753,14 @@ class MultiModalDataParser:
             return VideoEmbeddingItems(data, self.expected_hidden_size)
 
         data_items: list[VideoItem]
-        if (is_list_of(data, PILImage.Image) and len(data) > 0) or (
-            isinstance(data, (np.ndarray, torch.Tensor)) and data.ndim == 4
+        if (
+            (is_list_of(data, PILImage.Image) and len(data) > 0)
+            or (
+                is_list_of(data, (np.ndarray, torch.Tensor), check="all")
+                and len(data) > 0
+                and all(item.ndim == 3 for item in data)
+            )
+            or (isinstance(data, (np.ndarray, torch.Tensor)) and data.ndim == 4)
         ):
             data_items = [data]
         elif isinstance(data, (np.ndarray, torch.Tensor)):
@@ -763,9 +771,9 @@ class MultiModalDataParser:
             data_items = data  # type: ignore[assignment]
 
         new_videos = list[
-            np.ndarray
-            | MediaWithBytes[np.ndarray]
-            | tuple[np.ndarray | MediaWithBytes[np.ndarray], dict[str, Any]]
+            DecodedFrames
+            | MediaWithBytes[DecodedFrames]
+            | tuple[DecodedFrames | MediaWithBytes[DecodedFrames], dict[str, Any]]
             | None
         ]()
         metadata_lst: list[dict[str, Any] | None] = []

@@ -17,15 +17,12 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
-from vllm.model_executor.kernels.mhc.torch import (
-    mhc_post_torch,
-    mhc_pre_delayed_torch,
-)
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.mhc import MHCPostOp, MHCPreDelayedOp
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -248,11 +245,13 @@ class DeepseekV4DecoderLayer(nn.Module):
             ),
             requires_grad=False,
         )
+        self.mhc_pre_delayed = MHCPreDelayedOp()
+        self.mhc_post = MHCPostOp()
 
     @staticmethod
     def _hc_collapse(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
-        """Reference hyper-connection collapse used by DSpark on ROCm."""
-        return (pre_mix.unsqueeze(-1) * x.float()).sum(dim=1).to(x.dtype)
+        """Hyper-connection collapse used by DSpark on ROCm."""
+        return torch.ops.vllm.hc_collapse_triton(x, pre_mix)
 
     def forward(
         self,
@@ -275,7 +274,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 # copies and the identity pre-mix selects copy 0.
                 assert self.hc_attn_fn_broadcast is not None
                 residual = x.unsqueeze(1).expand(-1, self.hc_mult, -1).contiguous()
-                post_mix, res_mix, x, attn_pre = mhc_pre_delayed_torch(
+                post_mix, res_mix, x, attn_pre = self.mhc_pre_delayed(
                     residual,
                     self.hc_attn_fn_broadcast,
                     self.hc_attn_scale,
@@ -289,7 +288,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 )
             else:
                 residual = x
-                post_mix, res_mix, x, attn_pre = mhc_pre_delayed_torch(
+                post_mix, res_mix, x, attn_pre = self.mhc_pre_delayed(
                     residual,
                     self.hc_attn_fn,
                     self.hc_attn_scale,
@@ -302,7 +301,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                     pre_mix=pre_mix,
                 )
         else:
-            residual = mhc_post_torch(x, residual, post_mix, res_mix)
+            residual = self.mhc_post(x, residual, post_mix, res_mix)
             if self.engram is not None and engram_hashes is not None:
                 # Engram injection happens between the previous sublayer's
                 # post and this block's pre, on the full hc stream, so the
@@ -312,7 +311,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                     engram_hashes[:, self.engram.layer_hash_index],
                     engram_mask,
                 )
-            post_mix, res_mix, x, attn_pre = mhc_pre_delayed_torch(
+            post_mix, res_mix, x, attn_pre = self.mhc_pre_delayed(
                 residual,
                 self.hc_attn_fn,
                 self.hc_attn_scale,
@@ -333,8 +332,8 @@ class DeepseekV4DecoderLayer(nn.Module):
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
 
-        residual = mhc_post_torch(x, residual, post_mix, res_mix)
-        post_mix, res_mix, x, ffn_pre = mhc_pre_delayed_torch(
+        residual = self.mhc_post(x, residual, post_mix, res_mix)
+        post_mix, res_mix, x, ffn_pre = self.mhc_pre_delayed(
             residual,
             self.hc_ffn_fn,
             self.hc_ffn_scale,
@@ -452,6 +451,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             self.norm = RMSNorm(config.hidden_size, self.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
+
+        self.mhc_post = MHCPostOp()
 
         spec_config = vllm_config.speculative_config
         needs_mtp_hidden_states = spec_config is not None and (
@@ -603,7 +604,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             )
             if idx + 1 in self.aux_hidden_state_layers:
                 # Reconstruct the aux hidden state for draft models
-                aux_recon = mhc_post_torch(hidden_states, residual, post_mix, res_mix)
+                aux_recon = self.mhc_post(hidden_states, residual, post_mix, res_mix)
                 aux_hidden_state = aux_recon.mean(dim=1)
                 if self.use_sequence_parallel:
                     aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
@@ -614,7 +615,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             if self.end_layer in self.aux_hidden_state_layers:
                 hidden_states = final_aux_recon
             else:
-                hidden_states = mhc_post_torch(
+                hidden_states = self.mhc_post(
                     hidden_states, residual, post_mix, res_mix
                 )
 
@@ -635,11 +636,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # mixes — the mix the reference applies via
         # ``last_layer.hc_pre(h, pre_mix)`` (v4.1 has no learned hc_head).
         assert pre_mix is not None
-        hidden_states = (
-            (pre_mix.unsqueeze(-1) * hidden_states.float())
-            .sum(dim=1)
-            .to(hidden_states.dtype)
-        )
+        hidden_states = torch.ops.vllm.hc_collapse_triton(hidden_states, pre_mix)
         hidden_states = self.norm(hidden_states)
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
