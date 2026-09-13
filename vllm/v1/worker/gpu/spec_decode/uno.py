@@ -129,6 +129,28 @@ def uncovered_draft_request_counts(
     return [n for n in range(1, max_num_reqs + 1) if n * k > largest]
 
 
+def draft_warmup_request_counts(max_num_reqs: int) -> list[int]:
+    """Request counts whose draft-input kernel must be compiled before serving.
+
+    ``_prepare_uno_inputs_kernel`` takes ``NUM_REQS`` and ``COUNT`` as Triton
+    ``constexpr`` arguments, so a batch of three requests and a batch of four
+    are different specialisations and each is compiled the first time it is
+    seen. Nothing in startup ran the fused path at all -- graph capture uses
+    ``prepare_inputs_to_capture`` rather than ``prepare_uno_inputs_fused`` --
+    so on an H100 the first served request spent 120 ms inside its draft
+    proposal against under 1.2 ms for every step after it, and a cell that
+    first reached a new request count paid again mid-run.
+
+    Every count from 1 to ``max_num_seqs`` is reachable in serving, so every
+    count is warmed. The list is the shape set, not a sample of it: a warmup
+    that covers only the counts one workload happens to hit leaves the next
+    workload paying at its own first request.
+    """
+    if max_num_reqs <= 0:
+        return []
+    return list(range(1, max_num_reqs + 1))
+
+
 class UnoSpeculator(DraftModelSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         if device.type != "cuda" or not current_platform.is_cuda():
@@ -290,6 +312,36 @@ class UnoSpeculator(DraftModelSpeculator):
             if self._lora_hook is not None:
                 self._lora_hook(None)
         self._log_draft_graph_coverage()
+
+    def draft_warmup_token_counts(self) -> list[int]:
+        """Dummy-run token counts that compile every draft-input shape.
+
+        ``_dummy_run`` derives ``num_reqs`` as ``min(num_tokens, max_num_seqs)``
+        and its draft proposal runs the real fused-input path, so asking for
+        ``n`` tokens compiles the specialisation serving will use at ``n``
+        concurrent requests. Returning the counts rather than running them
+        keeps this arithmetic testable without a GPU.
+        """
+        return draft_warmup_request_counts(self.max_num_reqs)
+
+    def report_draft_warmup(self, shapes: int) -> None:
+        """State once what warmup covered, so a cold serve stays visible.
+
+        A silent warmup is worse than none: if the shapes it compiles are not
+        the shapes serving asks for, nothing says so and the latency reads as
+        the model. Naming the count here puts it beside the JIT monitor's own
+        "compilation during inference" warnings, so one log answers whether
+        warmup covered what the requests asked for.
+        """
+        logger.info(
+            "Uno draft kernels warmed: %d request shapes (1..%d requests at "
+            "num_speculative_tokens=%d). Any later "
+            "'JIT compilation during inference' warning names a shape this "
+            "missed.",
+            shapes,
+            self.max_num_reqs,
+            self.k,
+        )
 
     def _log_draft_graph_coverage(self) -> None:
         """Say once, at startup, which request counts have a draft graph.

@@ -982,6 +982,28 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """Estimate the GPU memory required to capture CUDA graphs."""
         return _profile_cudagraph_memory(self)
 
+    def _warm_up_draft_kernels(self) -> None:
+        """Compile the speculator's own kernel shapes before serving starts.
+
+        Graph capture does not exercise a drafter's input preparation, so a
+        drafter whose kernels specialise per request count meets each of those
+        shapes for the first time on a real request and compiles it there. The
+        dummy runs below are the same mechanism adaptive verification already
+        uses for its piecewise shapes, and the counts come from the speculator
+        so a drafter that does not need them returns nothing and is skipped.
+        """
+        assert self.speculator is not None
+        token_counts = getattr(self.speculator, "draft_warmup_token_counts", None)
+        report = getattr(self.speculator, "report_draft_warmup", None)
+        if token_counts is None or report is None:
+            return
+        counts = token_counts()
+        if not counts:
+            return
+        for num_tokens in counts:
+            self._dummy_run(num_tokens)
+        report(len(counts))
+
     @torch.inference_mode()
     def capture_model(self, *, profile_only: bool = False) -> int:
         assert self.cudagraph_manager is not None
@@ -1031,6 +1053,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     if self.speculator is not None:
                         with use_workspace_lane(self._draft_workspace_lane):
                             self.speculator.capture()
+                            self._warm_up_draft_kernels()
                     if self.adaptive_verification is not None:
                         with self.step_timing.collect() as timings:
                             for batch in self.adaptive_verification.batches_to_profile(

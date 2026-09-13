@@ -666,6 +666,109 @@ def test_warmup_proposals_do_not_consume_the_serving_counters(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    ("k", "max_num_seqs"),
+    [(1, 4), (8, 4), (1, 16), (8, 16)],
+    ids=["k1_seqs4", "k8_seqs4", "k1_seqs16", "k8_seqs16"],
+)
+def test_draft_warmup_covers_every_reachable_request_count(
+    k, max_num_seqs, monkeypatch
+):
+    """Warmup enumerates the whole request range, not a sample of it.
+
+    The fused draft-input kernel takes the request count as a Triton constexpr,
+    so three requests and four requests are separate specialisations and each
+    is compiled the first time it is seen. Graph capture never runs that path
+    at all, so on an H100 the first served request spent 120 ms inside its
+    draft proposal against under 1.2 ms afterwards, and a cell that first
+    reached a new request count paid again mid-run. Covering only the counts
+    one workload happens to hit would leave the next workload paying at its own
+    first request, so the set is the full range and the shape count does not
+    depend on K.
+    """
+    from vllm.config.compilation import CUDAGraphMode
+
+    _cpu_graph_manager_patches(monkeypatch)
+    proposer = _cpu_uno_proposer(k, max_num_seqs=max_num_seqs)
+    proposer.init_cudagraph_manager(CUDAGraphMode.FULL_DECODE_ONLY)
+
+    counts = proposer.draft_warmup_token_counts()
+    assert counts == list(range(1, max_num_seqs + 1)), (
+        f"K={k}, max_num_seqs={max_num_seqs} must warm every request count"
+    )
+    # _dummy_run derives num_reqs as min(num_tokens, max_num_seqs), so each
+    # entry produces exactly the request count it names.
+    assert [min(n, max_num_seqs) for n in counts] == list(range(1, max_num_seqs + 1))
+
+
+def test_draft_warmup_request_counts_are_independent_of_k():
+    """The shape set follows the request count alone.
+
+    The kernel specialises on the request count and on the draft row count,
+    and the row count is the request count times K, so enumerating requests
+    covers both. A set that varied with K would silently shrink when a
+    deployment lowered K and leave the larger batches cold.
+    """
+    from vllm.v1.worker.gpu.spec_decode.uno import draft_warmup_request_counts
+
+    assert draft_warmup_request_counts(4) == [1, 2, 3, 4]
+    assert draft_warmup_request_counts(1) == [1]
+    assert draft_warmup_request_counts(0) == []
+    assert draft_warmup_request_counts(-1) == []
+
+
+def test_draft_warmup_runs_every_shape_through_the_real_dummy_run(monkeypatch):
+    """The runner warms each shape and says how many it covered.
+
+    Warming through the runner's own dummy run is what keeps the compiled
+    specialisations identical to the ones serving will ask for: the tensors,
+    their dtypes and the proposal path are the production ones rather than
+    synthesised stand-ins, which is the way a warmup silently misses.
+    """
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+    runner = object.__new__(GPUModelRunner)
+    ran: list[int] = []
+    reported: list[int] = []
+    runner.speculator = SimpleNamespace(
+        draft_warmup_token_counts=lambda: [1, 2, 3, 4],
+        report_draft_warmup=reported.append,
+    )
+    runner._dummy_run = lambda num_tokens: ran.append(num_tokens)
+
+    runner._warm_up_draft_kernels()
+
+    assert ran == [1, 2, 3, 4]
+    assert reported == [4]
+
+
+def test_draft_warmup_skips_a_speculator_that_does_not_ask_for_it(monkeypatch):
+    """Other drafters are untouched, and an empty set costs no dummy runs.
+
+    The hook is opt-in by attribute so a speculator whose kernels do not
+    specialise per request count pays nothing at startup, and a configuration
+    with no reachable request counts does not start a loop over an empty set
+    and then report a warmup that did not happen.
+    """
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+    runner = object.__new__(GPUModelRunner)
+    ran: list[int] = []
+    runner._dummy_run = lambda num_tokens: ran.append(num_tokens)
+
+    runner.speculator = SimpleNamespace()
+    runner._warm_up_draft_kernels()
+    assert ran == []
+
+    reported: list[int] = []
+    runner.speculator = SimpleNamespace(
+        draft_warmup_token_counts=lambda: [],
+        report_draft_warmup=reported.append,
+    )
+    runner._warm_up_draft_kernels()
+    assert ran == [] and reported == []
+
+
+@pytest.mark.parametrize(
     ("k", "expected_active_loras"),
     [(1, 0), (8, 2)],
 )
