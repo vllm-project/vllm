@@ -319,6 +319,14 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        if vllm_config.cache_config.cache_dtype == "fp8_inc":
+            raise ValueError(
+                "KV cache dtype 'fp8_inc' is not supported on CUDA; it is "
+                "specific to Intel Gaudi (HPU). Use a CUDA-compatible dtype "
+                "such as 'auto', 'float16', 'bfloat16', 'fp8', 'fp8_e4m3', "
+                "or 'fp8_e5m2'."
+            )
+
         parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config
 
