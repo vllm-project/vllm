@@ -356,6 +356,7 @@ def test_dspark_shares_target_embedding_with_smaller_draft_vocabulary():
         cache_config=SimpleNamespace(),
         load_config=SimpleNamespace(),
         model_config=SimpleNamespace(get_vocab_size=Mock(return_value=100)),
+        load_config=SimpleNamespace(load_format="auto"),
     )
 
     def fake_replace(config, **changes):
