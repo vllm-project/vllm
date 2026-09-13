@@ -23,6 +23,7 @@ import zmq.asyncio
 
 from vllm import envs
 from vllm.config import VllmConfig
+from vllm.config.kv_events import KVEventsConfig
 from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -414,6 +415,20 @@ class InprocClient(EngineCoreClient):
     def get_weight_version(self) -> str:
         return self.engine_core.get_weight_version()
 
+    def get_kv_event_sources(self) -> list[dict[str, Any]]:
+        """Return the resolved KV-event publisher endpoint per DP rank."""
+        config = self.engine_core.scheduler.get_kv_event_publisher_config()
+        if config is None:
+            return []
+        return [
+            {
+                "data_parallel_rank": 0,
+                "endpoint": config.endpoint,
+                "replay_endpoint": config.replay_endpoint,
+                "topic": config.topic,
+            }
+        ]
+
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.engine_core.add_lora(lora_request)
 
@@ -566,6 +581,11 @@ class MPClient(EngineCoreClient):
     ):
         self.vllm_config = vllm_config
         self._renderer: BaseRenderer | None = renderer
+
+        # Per-DP-rank publisher configs reported by each EngineCore in its
+        # ready response. Keyed by data_parallel_rank; populated by
+        # _apply_ready_response (see get_kv_event_sources).
+        self.kv_event_sources: dict[int, KVEventsConfig] = {}
 
         # ZMQ setup.
         sync_ctx = zmq.Context(io_threads=2)
@@ -842,6 +862,26 @@ class MPClient(EngineCoreClient):
                 self.stats_update_address = response.dp_stats_address
             else:
                 assert response.dp_stats_address == self.stats_update_address
+
+        # Record each engine's resolved KV-event publisher config (with
+        # bind-time ports when ephemeral allocation is used), keyed by DP
+        # rank, for discovery via get_kv_event_sources().
+        if response.kv_events_config is not None:
+            self.kv_event_sources[response.data_parallel_rank] = (
+                response.kv_events_config
+            )
+
+    def get_kv_event_sources(self) -> list[dict[str, Any]]:
+        """Return the resolved KV-event publisher endpoint per DP rank."""
+        return [
+            {
+                "data_parallel_rank": rank,
+                "endpoint": config.endpoint,
+                "replay_endpoint": config.replay_endpoint,
+                "topic": config.topic,
+            }
+            for rank, config in sorted(self.kv_event_sources.items())
+        ]
 
 
 def _process_utility_output(

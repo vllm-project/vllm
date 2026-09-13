@@ -1316,6 +1316,20 @@ async def test_kv_cache_events_dp(
             f"Expected 2 unique data_parallel_ranks, got {len(unique_dps)}"
         )
 
+        # The frontend must have aggregated each engine's resolved
+        # publisher config from its ready response.
+        sources = client.get_kv_event_sources()
+        assert len(sources) == dp_size
+        assert {s["data_parallel_rank"] for s in sources} == {0, 1}
+        resolved_ports = {
+            s["data_parallel_rank"]: int(s["endpoint"].rsplit(":", 1)[1])
+            for s in sources
+        }
+        assert all(port > 0 for port in resolved_ports.values())
+        if publisher_config.endpoint.endswith(":0"):
+            # Ephemeral allocation: ports are bind-time OS assignments.
+            assert len(set(resolved_ports.values())) == dp_size
+
     finally:
         client.shutdown()
         subscriber.close()

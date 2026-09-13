@@ -436,7 +436,8 @@ class ZmqEventPublisher(EventPublisher):
                 or self._endpoint.startswith("ipc://")
                 or self._endpoint.startswith("inproc://")
             ):
-                self._pub.bind(self._endpoint)
+                self._endpoint = self._bind_and_resolve(self._pub, self._endpoint)
+                self._publisher_config.endpoint = self._endpoint
             elif self._endpoint is not None:
                 self._pub.connect(self._endpoint)
 
@@ -446,7 +447,33 @@ class ZmqEventPublisher(EventPublisher):
         # 3) works in our non‑blocking poll loop alongside PUB
         if self._replay_endpoint is not None:
             self._replay = self._ctx.socket(zmq.ROUTER)
-            self._replay.bind(self._replay_endpoint)
+            self._replay_endpoint = self._bind_and_resolve(
+                self._replay, self._replay_endpoint)
+            self._publisher_config.replay_endpoint = self._replay_endpoint
+
+    def _bind_and_resolve(self, socket: zmq.Socket, endpoint: str) -> str:
+        """Bind an endpoint; for a ``:0`` port, read back the assigned one.
+
+        With an ephemeral port the OS picks the port at bind time and the
+        bind itself is the reservation, so there is no probe-then-bind
+        window. Returns the endpoint actually bound, so the caller can
+        update the tracked endpoint and publisher config with a
+        connectable address (vllm-project/vllm#51275).
+        """
+        bind_host, _, port = endpoint.rpartition(":")
+        ephemeral = endpoint.startswith("tcp://") and port == "0"
+        if not ephemeral:
+            socket.bind(endpoint)
+            return endpoint
+        # ZMQ rejects an explicit :0; bind_to_random_port performs the
+        # ephemeral bind and returns the assigned port.
+        assigned = socket.bind_to_random_port(bind_host)
+        # Report the address ZMQ actually bound (a wildcard host
+        # resolves to 0.0.0.0), so discovery consumers receive a
+        # concrete, connectable endpoint.
+        bound = socket.getsockopt(zmq.LAST_ENDPOINT).decode()
+        resolved_host = bound.rpartition(":")[0]
+        return f"{resolved_host}:{assigned}"
 
     def _publisher_thread(self) -> None:
         """Background thread that processes the event queue."""
@@ -533,6 +560,11 @@ class ZmqEventPublisher(EventPublisher):
                 last_colon_idx = endpoint.rfind(":")
                 base_addr = endpoint[:last_colon_idx]
                 base_port = int(endpoint[last_colon_idx + 1 :])
+                if base_port == 0:
+                    # Ephemeral allocation: each rank binds :0 itself and the
+                    # OS hands out distinct ports; offsetting would aim
+                    # rank r at privileged port r.
+                    return endpoint
                 new_port = base_port + data_parallel_rank
                 return f"{base_addr}:{new_port}"
             return endpoint
