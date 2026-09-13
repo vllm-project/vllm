@@ -631,6 +631,19 @@ def test_engram_head_shards_reconstruct_checkpoint(cpu_offload, tp_size, monkeyp
         monkeypatch.setattr(
             engram_ops, "get_tensor_model_parallel_rank", lambda rank=rank: rank
         )
+
+        def exchange(rows, rank=rank):
+            return torch.cat(
+                [
+                    torch.nn.functional.pad(
+                        shard, (0, 0, 0, 0, 0, (-len(ids)) % tp_size)
+                    )[rank * chunk : (rank + 1) * chunk]
+                    for shard in shards
+                ],
+                dim=0,
+            )
+
+        monkeypatch.setattr(engram_ops, "_engram_sp_exchange", exchange)
         torch.testing.assert_close(
             module.embed(ids), padded[rank * chunk : (rank + 1) * chunk], rtol=0, atol=0
         )
@@ -639,8 +652,11 @@ def test_engram_head_shards_reconstruct_checkpoint(cpu_offload, tp_size, monkeyp
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 @pytest.mark.parametrize("cpu_offload", [False, True])
 @pytest.mark.parametrize("background", [False, True])
-@pytest.mark.parametrize("num_tokens", [1, 7, 256])
-def test_engram_lookup_matches_torch(cpu_offload, background, num_tokens):
+@pytest.mark.parametrize("num_tokens", [0, 1, 7, 256])
+@pytest.mark.parametrize("token_padding", [0, 3])
+def test_engram_lookup_matches_torch(
+    cpu_offload, background, num_tokens, token_padding
+):
     """The fused gather must be bit-exact with the torch dequant path it
     replaces, from HBM and from pinned host memory alike, and must contribute
     zeros for rows another TP rank owns."""
@@ -654,7 +670,14 @@ def test_engram_lookup_matches_torch(cpu_offload, background, num_tokens):
         layer.vocab_start_idx,
         layer.vocab_end_idx,
     )
-    out = torch.empty(num_tokens, cols, layer.dim, dtype=torch.bfloat16, device="cuda")
+    expected = torch.nn.functional.pad(expected, (0, 0, 0, 0, 0, token_padding))
+    # Poison the reused output so stale rows cannot satisfy the zero-tail check.
+    out = torch.full(
+        (num_tokens + token_padding, cols, layer.dim),
+        37,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
     layer.lookup(ids, out, background=background)
     assert torch.equal(out, expected)
 
@@ -682,8 +705,10 @@ def _run_engram_prepared_rows(
     torch.nn.Module.__init__(engram)
     engram.embed_tokens = layer
     engram.use_sequence_parallel = use_sequence_parallel
+    engram._staged_token_multiple = tp_size if use_sequence_parallel else 1
+    staged_tokens = num_tokens + (-num_tokens) % engram._staged_token_multiple
     engram.staged_rows = torch.empty(
-        num_tokens,
+        staged_tokens,
         layer.part_n_hash_cols,
         layer.dim,
         dtype=torch.bfloat16,
