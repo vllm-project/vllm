@@ -1005,7 +1005,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         with launch_key_phase("warmup"):
             if native_verification:
                 assert self.rejection_sampler is not None
-                self.rejection_sampler(logits, dummy_input_batch)
+                assert num_rows > num_reqs
+                assert isinstance(self.speculator, UnoSpeculator)
+                assert self.speculator.draft_logits is not None
+                self.rejection_sampler(
+                    logits, dummy_input_batch, self.speculator.draft_logits
+                )
             else:
                 self.sampler(logits, dummy_input_batch)
 

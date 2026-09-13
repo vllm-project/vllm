@@ -753,17 +753,20 @@ def test_uno_served_launches_cover_sampler_flags_and_integer_buckets(use_flashin
         if warmup.sampler_branch != "native_verification"
     }
     expected_branches = {
-        "top_p_only": "flashinfer" if use_flashinfer else "triton",
         "top_k_top_p": "flashinfer" if use_flashinfer else "triton",
         "top_k_only": "flashinfer" if use_flashinfer else "triton",
         "neither": "triton",
     }
+    if use_flashinfer:
+        expected_branches["top_p_only"] = "flashinfer"
     assert branches == expected_branches
-    assert len(plan.sampler_keys) == 46
+    assert len(plan.sampler_keys) == (44 if use_flashinfer else 46)
     for has_k in (False, True):
         assert ("_topp_sb_stats_kernel", has_k, 32) in plan.sampler_keys
         assert ("_topp_sb_stats_kernel", has_k, 4) in plan.sampler_keys
-    assert ("_topk_topp_kernel", "one", True, False, False) in plan.sampler_keys
+    assert (
+        ("_topk_topp_kernel", "one", True, False, False) in plan.sampler_keys
+    ) is (not use_flashinfer)
     assert (
         "_topk_topp_kernel",
         "multiple_of_16",
@@ -772,6 +775,54 @@ def test_uno_served_launches_cover_sampler_flags_and_integer_buckets(use_flashin
         True,
     ) in plan.sampler_keys
     assert plan.served_sampler_keys == plan.sampler_keys
+
+
+@pytest.mark.parametrize("use_flashinfer", [False, True])
+@pytest.mark.parametrize("max_num_reqs", [1, 4, 16])
+def test_uno_warmup_shares_filter_keys_without_prefill_verification(
+    max_num_reqs, use_flashinfer
+):
+    """Every real filter key is warmed without duplicate native/Triton calls."""
+    from vllm.v1.worker.gpu.spec_decode.uno import (
+        UNO_SAMPLING_MODES,
+        _sampler_kernel_keys,
+        enumerate_uno_served_launches,
+        sampler_branch_for_mode,
+    )
+
+    plan = enumerate_uno_served_launches(
+        max_num_reqs=max_num_reqs,
+        k=8,
+        max_num_tokens=2048,
+        max_model_len=4096,
+        num_sm=82,
+        use_flashinfer=use_flashinfer,
+    )
+    covered = set()
+    for call in plan.sampler_warmups:
+        if call.sampler_branch == "native_verification":
+            assert call.num_rows > call.num_reqs
+        else:
+            assert call.num_rows == call.num_reqs
+        if call.kernel_keys:
+            assert set(call.kernel_keys) - covered, (
+                "duplicate native/Triton filter call"
+            )
+            covered.update(call.kernel_keys)
+
+    # Exhaust the small bounded domain independently of the representative
+    # shape enumerator; partial verification includes totals below max_num_reqs.
+    served_keys = set()
+    for mode in UNO_SAMPLING_MODES:
+        for num_reqs in range(1, max_num_reqs + 1):
+            for num_rows in range(num_reqs, num_reqs * 9 + 1):
+                branch = (
+                    "native_verification"
+                    if num_rows > num_reqs
+                    else sampler_branch_for_mode(mode, use_flashinfer=use_flashinfer)
+                )
+                served_keys.update(_sampler_kernel_keys(mode, num_rows, 82, branch))
+    assert covered == served_keys
 
 
 @pytest.mark.parametrize(
@@ -908,6 +959,7 @@ def test_uno_warmup_executes_native_verification_s4(monkeypatch, top_k, use_flas
     from vllm.v1.worker.gpu.sample.sampler import Sampler
     from vllm.v1.worker.gpu.sample.states import SamplingStates
     from vllm.v1.worker.gpu.spec_decode import rejection_sampler as rejection_module
+    from vllm.v1.worker.gpu.spec_decode import rejection_sampler_utils
     from vllm.v1.worker.gpu.spec_decode.uno import enumerate_uno_served_launches
 
     plan = enumerate_uno_served_launches(
@@ -982,6 +1034,8 @@ def test_uno_warmup_executes_native_verification_s4(monkeypatch, top_k, use_flas
     runner = object.__new__(GPUModelRunner)
     runner.sampler = sampler
     runner.rejection_sampler = rejection
+    runner.speculator = object.__new__(UnoSpeculator)
+    runner.speculator.draft_logits = torch.zeros((2, 8, 64))
     runner.device = torch.device("cpu")
     runner.input_buffers = InputBuffers(2, 18, runner.device)
     runner.model = SimpleNamespace(
@@ -1013,14 +1067,13 @@ def test_uno_warmup_executes_native_verification_s4(monkeypatch, top_k, use_flas
     monkeypatch.setattr(topk_topp_triton, "num_compute_units", lambda _: 82)
     for name in ("_TRITON_SPLIT_CACHE", "_TRITON_BUFFER_CACHE", "_TRITON_TABLE_CACHE"):
         monkeypatch.setattr(topk_topp_triton, name, {})
-    monkeypatch.setattr(
-        rejection_module,
-        "rejection_sample",
-        lambda *_a, **_k: (
-            torch.zeros((2, 9), dtype=torch.int64),
-            torch.ones(2, dtype=torch.int32),
-        ),
-    )
+    for name in (
+        "_compute_local_logits_stats_kernel",
+        "_rejection_kernel",
+        "_resample_kernel",
+        "_insert_resampled_kernel",
+    ):
+        monkeypatch.setattr(rejection_sampler_utils, name, LaunchRecorder(name))
     monkeypatch.setattr(
         rejection_module,
         "get_num_sampled_and_rejected",
@@ -1042,6 +1095,19 @@ def test_uno_warmup_executes_native_verification_s4(monkeypatch, top_k, use_flas
     )
     assert [args[6] for name, args, _ in split_launches if "_step_" in name] == list(
         range(5)
+    )
+    verification_launches = [
+        (name, args, kw) for name, args, kw in launches if "HAS_DRAFT_LOGITS" in kw
+    ]
+    assert {name for name, _, _ in verification_launches} == {
+        "_compute_local_logits_stats_kernel",
+        "_rejection_kernel",
+        "_resample_kernel",
+    }
+    assert all(kw["HAS_DRAFT_LOGITS"] for _, _, kw in verification_launches)
+    assert all(
+        any(arg is runner.speculator.draft_logits for arg in args)
+        for _, args, _ in verification_launches
     )
     assert sampler.use_flashinfer is use_flashinfer
     assert states.seeds_set.tolist() == [True, False]

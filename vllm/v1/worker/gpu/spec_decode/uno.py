@@ -291,6 +291,10 @@ def _served_sampler_shapes(
     # slots. The warmup synthesizes that exact uneven layout in InputBatch.
     for num_rows in range(1, max_rows + 1):
         add(min(num_rows, max_num_reqs), num_rows, "chunked_or_mixed")
+        if num_rows > 1:
+            # The same total can be a pure prefill or a partial verification.
+            # Keep a verification representative even below max_num_reqs.
+            add(min(num_rows - 1, max_num_reqs), num_rows, "chunked_or_mixed")
 
     return tuple(
         (num_reqs, num_rows, source)
@@ -367,9 +371,8 @@ def enumerate_uno_served_launches(
 
     prepare_counts = tuple(draft_warmup_request_counts(max_num_reqs))
     shapes = _served_sampler_shapes(max_num_reqs, k, max_num_tokens, max_model_len)
-    # Verification always applies native filters in RejectionSampler._verify,
-    # even when ordinary sampling selects FlashInfer. Keep both callers in the
-    # plan so backend capability cannot erase the verification launch domain.
+    # Verification always applies native filters in RejectionSampler._verify.
+    # Select it first, then ordinary sampling fills any remaining shared keys.
     candidates = [
         UnoSamplerWarmup(
             num_reqs,
@@ -381,25 +384,25 @@ def enumerate_uno_served_launches(
         )
         for mode in UNO_SAMPLING_MODES
         for branch in (
-            sampler_branch_for_mode(mode, use_flashinfer=use_flashinfer),
             "native_verification",
+            sampler_branch_for_mode(mode, use_flashinfer=use_flashinfer),
         )
         for num_reqs, num_rows, source in shapes
+        if (num_rows > num_reqs) == (branch == "native_verification")
     ]
     served_sampler_keys = frozenset(
         key for candidate in candidates for key in candidate.kernel_keys
     )
-    covered: dict[str, set[tuple[object, ...]]] = {}
+    covered: set[tuple[object, ...]] = set()
     selected: list[UnoSamplerWarmup] = []
     selected_modes: set[tuple[str, str]] = set()
     for candidate in candidates:
-        branch_keys = covered.setdefault(candidate.sampler_branch, set())
         mode_key = (candidate.mode.name, candidate.sampler_branch)
-        if set(candidate.kernel_keys).difference(branch_keys) or (
+        if set(candidate.kernel_keys).difference(covered) or (
             not candidate.kernel_keys and mode_key not in selected_modes
         ):
             selected.append(candidate)
-            branch_keys.update(candidate.kernel_keys)
+            covered.update(candidate.kernel_keys)
             selected_modes.add(mode_key)
 
     selected_keys = frozenset(key for warmup in selected for key in warmup.kernel_keys)
