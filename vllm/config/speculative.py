@@ -492,7 +492,7 @@ class SpeculativeConfig:
     suffix tree is disabled and past responses are not cached (prompt trees
     are still used)."""
 
-    suffix_decoding_max_spec_factor: float = 1.0
+    suffix_decoding_max_spec_factor: float = 0.5
     """The maximum spec factor for suffix decoding. The spec factor controls
     speculation lengths based on the prefix match length: max_spec_tokens =
     max_spec_factor * prefix_match_length."""
@@ -1549,9 +1549,9 @@ class SpeculativeConfig:
                 "`pip install suffix-gpu`."
             ) from e
         if self.num_speculative_tokens is None:
-            self.num_speculative_tokens = self.suffix_decoding_max_tree_depth
+            self.num_speculative_tokens = 5
             logger.warning(
-                "Defaulted num_speculative_tokens to %s for suffix decoding.",
+                "Defaulted num_speculative_tokens to %s for suffix_gpu.",
                 self.num_speculative_tokens,
             )
         if self.suffix_decoding_max_tree_depth < 1:

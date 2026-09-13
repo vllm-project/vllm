@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for SuffixProposerGPU (requires CUDA + suffix_gpu)."""
 
+from collections import deque
 from types import SimpleNamespace
 
 import pytest
@@ -9,6 +10,7 @@ import torch
 
 pytest.importorskip("suffix_gpu")
 
+import vllm.v1.spec_decode.suffix_proposer_gpu as suffix_proposer_module
 from vllm.v1.spec_decode.suffix_proposer_gpu import SuffixProposerGPU
 
 if not torch.cuda.is_available():
@@ -20,7 +22,7 @@ MAX_NUM_SEQS = 8
 MAX_MODEL_LEN = 256
 
 
-def _make_config(use_cuda_graph: bool) -> SimpleNamespace:
+def _make_config(use_cuda_graph: bool, tp_size: int = 1) -> SimpleNamespace:
     spec = SimpleNamespace(
         num_speculative_tokens=K,
         suffix_decoding_max_tree_depth=24,
@@ -38,7 +40,23 @@ def _make_config(use_cuda_graph: bool) -> SimpleNamespace:
         speculative_config=spec,
         model_config=SimpleNamespace(max_model_len=MAX_MODEL_LEN),
         scheduler_config=SimpleNamespace(max_num_seqs=MAX_NUM_SEQS),
+        parallel_config=SimpleNamespace(tensor_parallel_size=tp_size),
     )
+
+
+class _ReadyEvent:
+    def query(self) -> bool:
+        return True
+
+
+def _seed_pending_rebuild(proposer: SuffixProposerGPU) -> None:
+    index = proposer.drafter.global_index
+    assert index is not None
+    docs = deque()
+    index._rebuild_event = _ReadyEvent()
+    index._pending = (0, docs)
+    index.pending_epoch = 1
+    index._pending_signature = index._snapshot_signature(0, docs)
 
 
 def _propose_repetition(
@@ -161,3 +179,75 @@ def test_ingest_and_cross_request_draft():
     assert n > 0
     expect = (phrase[6:] + phrase * 2)[:n]
     assert draft[1, :n].tolist() == expect
+
+
+def test_tp_poll_waits_for_all_ranks(monkeypatch):
+    proposer = SuffixProposerGPU(_make_config(False, tp_size=2), DEVICE)
+    _seed_pending_rebuild(proposer)
+    cpu_group = object()
+    monkeypatch.setattr(
+        suffix_proposer_module,
+        "get_tp_group",
+        lambda: SimpleNamespace(cpu_group=cpu_group),
+    )
+
+    all_ready = False
+
+    def fake_all_gather(output, input_, group):
+        assert group is cpu_group
+        rank0 = input_.clone()
+        rank1 = input_.clone()
+        rank0[2] = int(all_ready)
+        rank1[2] = 1
+        output.copy_(torch.cat((rank0, rank1)))
+
+    monkeypatch.setattr(torch.distributed, "all_gather_into_tensor", fake_all_gather)
+    proposer._poll_rebuild()
+    assert proposer.drafter.global_index.active_epoch == 0
+
+    all_ready = True
+    proposer._poll_rebuild()
+    assert proposer.drafter.global_index.active_epoch == 1
+
+
+def test_tp_poll_rejects_snapshot_mismatch(monkeypatch):
+    proposer = SuffixProposerGPU(_make_config(False, tp_size=2), DEVICE)
+    _seed_pending_rebuild(proposer)
+    monkeypatch.setattr(
+        suffix_proposer_module,
+        "get_tp_group",
+        lambda: SimpleNamespace(cpu_group=object()),
+    )
+
+    def fake_all_gather(output, input_, group):
+        rank0 = input_.clone()
+        rank1 = input_.clone()
+        rank1[5] += 1
+        output.copy_(torch.cat((rank0, rank1)))
+
+    monkeypatch.setattr(torch.distributed, "all_gather_into_tensor", fake_all_gather)
+    with pytest.raises(RuntimeError, match="TP rebuild state mismatch"):
+        proposer._poll_rebuild()
+
+
+def test_tp_ingestion_uses_request_id_order(monkeypatch):
+    proposer = SuffixProposerGPU(_make_config(False, tp_size=2), DEVICE)
+    token_ids = torch.zeros(
+        MAX_NUM_SEQS, MAX_MODEL_LEN, dtype=torch.int32, device=DEVICE
+    )
+    input_batch = SimpleNamespace(
+        req_id_to_index={"req-b": 1, "req-a": 0},
+        num_tokens_no_spec=[16, 16],
+        num_prompt_tokens=[0, 0],
+    )
+    calls = []
+    monkeypatch.setattr(
+        proposer,
+        "_ingest_async",
+        lambda keys, rows, lengths, final=False: calls.append((keys, final)),
+    )
+
+    proposer.ingest_active_requests(input_batch, token_ids)
+    proposer.on_requests_finished(["req-b", "req-a"], input_batch, token_ids)
+
+    assert calls == [(["req-a", "req-b"], False), (["req-a", "req-b"], True)]

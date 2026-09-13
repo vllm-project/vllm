@@ -20,6 +20,7 @@ eager if capture fails.
 import torch
 
 from vllm.config import VllmConfig
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.v1.spec_decode.ngram_proposer_gpu import NgramProposerGPU
 from vllm.v1.worker.gpu_input_batch import InputBatch
@@ -40,6 +41,7 @@ class SuffixProposerGPU:
         self.k = config.num_speculative_tokens
         self.max_model_len = vllm_config.model_config.max_model_len
         self.max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+        self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.device = device
         self.use_cuda_graph = config.suffix_gpu_use_cuda_graph
         self.ingest_chunk = config.suffix_gpu_ingest_chunk
@@ -59,6 +61,12 @@ class SuffixProposerGPU:
             max_spec_offset=0.0,
             min_token_prob=config.suffix_decoding_min_token_prob,
             num_backoff=config.suffix_gpu_num_backoff,
+            coordinated_rebuild=self.tp_size > 1,
+        )
+
+        self._tp_rebuild_send = torch.empty(6, dtype=torch.int64, device="cpu")
+        self._tp_rebuild_recv = torch.empty(
+            self.tp_size * 6, dtype=torch.int64, device="cpu"
         )
 
         # CUDA-graph state (captured at engine warmup, or lazily on the
@@ -106,6 +114,45 @@ class SuffixProposerGPU:
             num_tokens_no_spec,
             discard_request_mask,
         )
+
+    def _poll_rebuild(self) -> None:
+        state = self.drafter.rebuild_state()
+        if state is None or state.pending_epoch is None:
+            return
+        if self.tp_size == 1:
+            self.drafter.poll()
+            return
+
+        signature = state.snapshot_signature
+        if signature is None:
+            raise RuntimeError("suffix_gpu pending rebuild has no signature")
+        self._tp_rebuild_send.copy_(
+            torch.tensor(
+                [
+                    state.active_epoch,
+                    state.pending_epoch,
+                    int(state.ready),
+                    *signature,
+                ],
+                dtype=torch.int64,
+            )
+        )
+        torch.distributed.all_gather_into_tensor(
+            self._tp_rebuild_recv,
+            self._tp_rebuild_send,
+            group=get_tp_group().cpu_group,
+        )
+        rank_states = self._tp_rebuild_recv.view(self.tp_size, 6).tolist()
+        expected = [rank_states[0][i] for i in (0, 1, 3, 4, 5)]
+        for rank, rank_state in enumerate(rank_states[1:], start=1):
+            actual = [rank_state[i] for i in (0, 1, 3, 4, 5)]
+            if actual != expected:
+                raise RuntimeError(
+                    "suffix_gpu TP rebuild state mismatch: "
+                    f"rank0={expected}, rank{rank}={actual}"
+                )
+        if all(rank_state[2] for rank_state in rank_states):
+            self.drafter.commit_rebuild(state.pending_epoch)
 
     def _ingest_async(
         self,
@@ -265,7 +312,7 @@ class SuffixProposerGPU:
         assert token_ids_gpu.device == self.device
 
         # Host-side upkeep: swap in finished background SA rebuilds.
-        self.drafter.poll()
+        self._poll_rebuild()
         # Global-index queries below must see pending side-stream ingest.
         self.sync_pending_ingest()
 
@@ -349,7 +396,10 @@ class SuffixProposerGPU:
         lengths: list[int] = []
         num_tokens = input_batch.num_tokens_no_spec
         num_prompt = input_batch.num_prompt_tokens
-        for req_id, idx in input_batch.req_id_to_index.items():
+        request_items = input_batch.req_id_to_index.items()
+        if self.tp_size > 1:
+            request_items = sorted(request_items)
+        for req_id, idx in request_items:
             resp_len = int(num_tokens[idx]) - int(num_prompt[idx])
             if resp_len < self.ingest_chunk:
                 continue
@@ -371,6 +421,8 @@ class SuffixProposerGPU:
         lengths: list[int] = []
         num_tokens = input_batch.num_tokens_no_spec
         num_prompt = input_batch.num_prompt_tokens
+        if self.tp_size > 1:
+            finished_req_ids = sorted(finished_req_ids)
         for req_id in finished_req_ids:
             idx = input_batch.req_id_to_index.get(req_id)
             if idx is None:
