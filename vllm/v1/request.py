@@ -24,6 +24,27 @@ from vllm.v1.metrics.stats import PrefillStats, RequestSpecDecodeMetrics
 from vllm.v1.structured_output.request import StructuredOutputRequest
 from vllm.v1.utils import ConstantList
 
+_CACHE_SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
+_MAX_CACHE_SALT_LENGTH = 128
+
+
+def _validate_cache_salt(cache_salt: str | None) -> str | None:
+    """Reject empty, oversized, or separator-bearing cache salts."""
+    if cache_salt is None:
+        return None
+    if (
+        not isinstance(cache_salt, str)
+        or not cache_salt
+        or len(cache_salt) > _MAX_CACHE_SALT_LENGTH
+        or any(char in _CACHE_SALT_FORBIDDEN_CHARS for char in cache_salt)
+    ):
+        raise ValueError(
+            "cache_salt must be a non-empty string of at most 128 "
+            "characters and must not contain '@', '/', '\\\\', or NUL."
+        )
+    return cache_salt
+
+
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
     from vllm.v1.core.kv_cache_utils import BlockHash
@@ -180,7 +201,7 @@ class Request:
 
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
-        self.cache_salt: str | None = cache_salt
+        self.cache_salt: str | None = _validate_cache_salt(cache_salt)
 
         # Multi-modal related
         self.mm_features = mm_features or []
