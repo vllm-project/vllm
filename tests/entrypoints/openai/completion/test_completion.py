@@ -10,6 +10,7 @@ from openai import BadRequestError
 
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import get_tokenizer
 
@@ -838,3 +839,33 @@ def test_completion_request_forwards_routed_experts_prompt_start():
     )
 
     assert sampling_params.routed_experts_prompt_start == 3
+
+
+def test_completion_request_rejects_prompt_logprobs_zero_with_stream():
+    """prompt_logprobs=0 is a meaningful, explicit request (not "unset"), so
+    it must be rejected under stream=True just like any other prompt_logprobs
+    value, per the documented "not available when stream=True" rule."""
+    with pytest.raises(VLLMValidationError, match="not available when `stream=True`"):
+        CompletionRequest(
+            model="test-model",
+            prompt="Hello",
+            prompt_logprobs=0,
+            stream=True,
+        )
+
+
+def test_completion_request_accepts_prompt_logprobs_zero_with_raw_false_stream():
+    """A raw, not-yet-coerced `stream="false"` must not be treated as truthy.
+
+    The cross-field check runs as an "after" validator against the typed,
+    coerced `self.stream` (a real bool), not the raw request dict, so a
+    string "false" that pydantic coerces to False must not wrongly reject a
+    valid `prompt_logprobs=0` request."""
+    request = CompletionRequest(
+        model="test-model",
+        prompt="Hello",
+        prompt_logprobs=0,
+        stream="false",
+    )
+    assert request.stream is False
+    assert request.prompt_logprobs == 0
