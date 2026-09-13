@@ -1536,9 +1536,11 @@ def test_uno_terminal_length_bound_skips_only_all_terminal_batches(
 @pytest.mark.parametrize("num_output_tokens", [88, 95])
 @pytest.mark.parametrize("tail_mode", ["early", "exact"])
 def test_uno_tail_respects_explicit_context_limit(
-    uno_scheduler_factory, num_output_tokens, tail_mode
+    uno_scheduler_factory, monkeypatch, num_output_tokens, tail_mode
 ):
     """An explicit large output cap still finishes at the context boundary."""
+    # This scheduler-only OPT fixture does not execute positional embeddings.
+    monkeypatch.setenv("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
     scheduler = uno_scheduler_factory(
         num_speculative_tokens=8,
         max_num_batched_tokens=4096,
