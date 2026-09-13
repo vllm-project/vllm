@@ -258,3 +258,65 @@ def test_gemma_rms_norm_mixed_input_weight_dtype(default_vllm_config) -> None:
 
     assert out.dtype == x.dtype
     torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize("num_tokens", [1, 32, 1024])
+@pytest.mark.parametrize("hidden_size", [1024, 4096, 5120])
+@pytest.mark.parametrize("add_residual", [False, True])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("weight_dtype", [torch.float32, torch.bfloat16, torch.float16])
+@torch.inference_mode()
+def test_gemma_rms_norm_triton_weight_dtypes(
+    num_tokens: int,
+    hidden_size: int,
+    add_residual: bool,
+    dtype: torch.dtype,
+    weight_dtype: torch.dtype,
+    default_vllm_config,
+) -> None:
+    if not current_platform.is_cuda():
+        pytest.skip("NVIDIA CUDA required")
+
+    device = CUDA_DEVICES[0]
+    generator = torch.Generator(device=device).manual_seed(20260910)
+    x = torch.randn(
+        num_tokens,
+        hidden_size,
+        dtype=dtype,
+        device=device,
+        generator=generator,
+    )
+    residual = (
+        torch.randn(
+            num_tokens,
+            hidden_size,
+            dtype=dtype,
+            device=device,
+            generator=generator,
+        )
+        if add_residual
+        else None
+    )
+    layer = GemmaRMSNorm(hidden_size, eps=1e-6).to(device=device)
+    layer.weight.data = layer.weight.data.to(weight_dtype)
+    layer.weight.data.normal_(mean=0.0, std=0.1, generator=generator)
+
+    out = layer(x, residual)
+    x_fp32 = x.float()
+    if residual is not None:
+        x_fp32 = x_fp32 + residual.float()
+        expected_residual = x_fp32.to(x.dtype)
+    weight_fp32 = layer.weight.data.float() + 1.0
+    variance = x_fp32.pow(2).mean(dim=-1, keepdim=True)
+    expected = (
+        x_fp32 * torch.rsqrt(variance + layer.variance_epsilon) * weight_fp32
+    ).to(x.dtype)
+
+    if residual is None:
+        assert isinstance(out, torch.Tensor)
+        torch.testing.assert_close(out, expected, atol=0, rtol=0)
+    else:
+        assert isinstance(out, tuple)
+        normalized, residual_out = out
+        torch.testing.assert_close(normalized, expected, atol=0, rtol=0)
+        torch.testing.assert_close(residual_out, expected_residual, atol=0, rtol=0)
