@@ -97,6 +97,9 @@ FORK_BUILD_ENV = _fork_build_env() if LOCAL else {}
 hf_cache = modal.Volume.from_name("inco-hf-cache", create_if_missing=True)
 results = modal.Volume.from_name("inco-results", create_if_missing=True)
 vllm_cache = modal.Volume.from_name("inco-vllm-cache", create_if_missing=True)
+# Pruned checkpoints produced by modal_reap.py; mounted so --model can point
+# at a local path instead of a HuggingFace id.
+reap_models = modal.Volume.from_name("inco-reap", create_if_missing=True)
 
 # Install THIS fork rather than a published wheel. The harness reads config
 # fields (cache_config.kv_cache_size_tokens) and passes server flags
@@ -271,7 +274,12 @@ def prefetch(model: str = "Qwen/Qwen3-30B-A3B-Instruct-2507") -> str:
     image=image,
     gpu=GPU,
     timeout=TIMEOUT_S,
-    volumes={"/cache/hf": hf_cache, "/cache/vllm": vllm_cache, "/results": results},
+    volumes={
+        "/cache/hf": hf_cache,
+        "/cache/vllm": vllm_cache,
+        "/results": results,
+        "/reap": reap_models,
+    },
     secrets=HF_SECRETS,
 )
 def sweep(
@@ -285,6 +293,7 @@ def sweep(
     max_model_len: int = 4096,
     gpu_memory_utilization: float = 0.90,
     kv_cache_gib: float = 12.0,
+    served_model_name: str = "",
     extra_serve_args: str = "",
     extra_sweep_args: str = "",
     moe_shape_log: bool = False,
@@ -295,6 +304,9 @@ def sweep(
     if moe_shape_log:
         os.environ["INCO_MOE_SHAPE_LOG"] = "1"
 
+    served_name = served_model_name or (
+        os.path.basename(model.rstrip("/")) if model.startswith("/") else model
+    )
     serve_cmd = [
         "vllm",
         "serve",
@@ -302,7 +314,7 @@ def sweep(
         "--port",
         "8000",
         "--served-model-name",
-        model,
+        served_name,
         "--max-model-len",
         str(max_model_len),
         "--max-num-seqs",
@@ -341,6 +353,8 @@ def sweep(
             "--label",
             label,
             "--model",
+            served_name,
+            "--tokenizer",
             model,
             "--isl",
             str(isl),
@@ -401,6 +415,7 @@ def main(
     concurrencies: str = "1,2,4,8,16,32,64",
     max_num_seqs: int = 64,
     kv_cache_gib: float = 12.0,
+    served_model_name: str = "",
     extra_serve_args: str = "",
     extra_sweep_args: str = "",
     moe_shape_log: bool = False,
@@ -414,6 +429,7 @@ def main(
             concurrencies=concurrencies,
             max_num_seqs=max_num_seqs,
             kv_cache_gib=kv_cache_gib,
+            served_model_name=served_model_name,
             extra_serve_args=extra_serve_args,
             extra_sweep_args=extra_sweep_args,
             moe_shape_log=moe_shape_log,

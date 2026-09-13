@@ -164,6 +164,177 @@ low-concurrency points are sequential (c=1 alone is ~7 min).
 
 ---
 
+## REAP expert pruning
+
+`inco/reap/` is a clone of [CerebrasResearch/reap](https://github.com/CerebrasResearch/reap),
+gitignored because it is a separate repository with its own submodules and
+virtualenv. To recreate it:
+
+```bash
+cd $R/inco && git clone https://github.com/CerebrasResearch/reap.git
+```
+
+**Environment is separate and must stay that way.** `reap/scripts/build.sh`
+runs `VLLM_USE_PRECOMPILED=1 uv pip install -e .`, which installs *its own*
+vLLM — sharing an environment with this fork would overwrite the engine under
+test. It also needs `cp .env.template .env` with `USER_ID` / `GROUP_ID`
+(`id -u` / `id -g`) and optionally `HF_TOKEN`.
+
+It cannot be built on macOS: the install needs Linux + CUDA. Run it on the GPU
+host, or in a Modal image of its own.
+
+The six git submodules under `third-party/` are all evaluation harnesses
+(evalplus, LiveCodeBench, helm, evalscope, creative-writing-bench,
+llm-compressor). Only needed if you turn the evals on.
+
+### Model support
+
+`MODEL_ATTRS` in `src/reap/model_util.py` is keyed by architecture class and
+contains `Qwen3MoeForCausalLM`, so `Qwen3-30B-A3B-Instruct-2507` is supported.
+`Qwen/Qwen3-30B-A3B` is the default model in their own scripts.
+
+### Pruning command
+
+Both entry points take the same 13 positional arguments:
+
+```
+1  CUDA_VISIBLE_DEVICES      7  run_lm_eval
+2  model_name                8  run_evalplus
+3  pruning_method            9  run_livecodebench
+4  seed                     10  run_math
+5  compression_ratio        11  run_wildbench
+6  calibration dataset      12  singleton_super_experts
+                            13  singleton_outlier_experts
+```
+
+`pruning-layerwise-cli.sh` uses a block-wise calibration observer intended for
+pruning large models on a single GPU (`num_batches=128`, `batch_size=8`, so
+1024 calibration samples). Evals are switched off here so it only produces the
+checkpoint — the defaults run lm_eval + evalplus + LiveCodeBench, which take
+hours.
+
+```bash
+cd $R/inco/reap
+experiments/pruning-layerwise-cli.sh 0 Qwen/Qwen3-30B-A3B-Instruct-2507 reap 42 0.5 \
+  theblackcat102/evol-codealpaca-v1 false false false false false
+```
+
+Output: `artifacts/{model_hash}/{dataset_hash}/pruned_models/{method_config}/`,
+a HuggingFace-loadable checkpoint that vLLM can serve directly.
+
+After pruning, **re-pin the KV cache upward** — the freed weight memory does
+not become KV automatically:
+
+| prune | weights | freed | KV | max batch @ 1024/512 |
+|---|---|---|---|---|
+| 0% | 58.3 GiB | - | 12 GiB | 85 |
+| 38% | 37.6 GiB | 20.7 | 32.7 GiB | 232 |
+| 50% | 31.3 GiB | 27.0 | 39.0 GiB | 277 |
+
+```bash
+$M run $R/inco/modal/modal_baseline.py \
+  --label reap50-1024-512 --model <pruned-checkpoint> \
+  --isl 1024 --osl 512 --kv-cache-gib 39 --max-num-seqs 256 \
+  --concurrencies "1,2,4,8,16,32,64,96,128,160,192,224,256"
+```
+
+### Results: 50% expert pruning at 1024/512
+
+`reap50-1024-512` vs the `chat-1024-512` baseline, same GPU model
+(H100 80GB HBM3), zero integrity warnings, zero preemption in either.
+
+```bash
+$M run $R/inco/modal/modal_baseline.py \
+  --label reap50-1024-512 --served-model-name reap50 \
+  --model /reap/pruned/Qwen3-30B-A3B-Instruct-2507/evol-codealpaca-v1/pruned_models/layerwise_reap-renorm_true-seed_42-0.50 \
+  --isl 1024 --osl 512 --kv-cache-gib 38 --max-num-seqs 256 \
+  --concurrencies "1,2,4,8,16,24,32,40,48,56,64,72,80,96,128,160,192,224,256"
+```
+
+|  | baseline | REAP 50% |
+|---|---|---|
+| weights | 58.3 GiB | 31.3 GiB |
+| KV cache (pinned) | 12 GiB | 38 GiB |
+| max resident requests | 85 | **270** |
+| peak tokens/s/gpu | 3779 @ c=80 | **7738 @ c=256** |
+
+**2.05x peak throughput.** SLO-matched:
+
+| interactivity floor | baseline | REAP | gain |
+|---|---|---|---|
+| >= 50 tok/s/user | 3517 | 4756 | +35% |
+| >= 40 tok/s/user | 3779 | 6326 | +67% |
+| >= 35 tok/s/user | 3779 | 6861 | +82% |
+
+The gain separates into two effects:
+
+* **Faster steps: ~+12%, only at high concurrency.** At c=1 and c=2 it is
+  -1% (noise): a token routes to top-8 experts whether the model has 128 or
+  64, so the weight read per step is identical. The gain appears as batch
+  size grows and more of the expert set gets touched, plateauing near +12.5%
+  by c=64. This follows from the step-time decomposition -- pruning halves
+  `W` but leaves `c` untouched.
+* **More batch: 3.2x ceiling.** The dominant effect. 27 GiB freed from
+  weights became KV cache, so every point from c=96 to c=256 is throughput
+  the unpruned model cannot produce on this hardware at any latency.
+
+So the 2x is mostly capacity, not speed.
+
+**This checkpoint came from a 16-sample calibration.** Throughput is
+determined by the architecture (64 experts), so the numbers above are valid.
+Quality is *not* measurable from it -- any accuracy claim needs the
+1024-sample checkpoint plus an eval.
+
+### Calibration cost
+
+Measured at `--batches-per-category 128 --batch-size 8` (1024 samples) on one
+H100: **~109 s per decoder block, 48 blocks, so ~87 min of calibration**, plus
+a `device_map="auto"` model reload and a ~60 s checkpoint write. Scales
+linearly in `batches_per_category`, so the bare module default of 1024
+batches/category would be roughly 12 hours.
+
+Observations are cached and reused: `layerwise_prune` loads
+`observations_{samples}_{distance}-seed_{seed}.pt` when it exists unless
+`--overwrite_observations` is set. The filename does **not** include the
+compression ratio, so a second prune at a different ratio with the same sample
+count, seed and distance measure skips calibration entirely (~2 min):
+
+```bash
+$M run $R/inco/modal/modal_reap.py --compression-ratio 0.38 \
+  --batches-per-category 128 --batch-size 8      # cache hit, prune only
+```
+
+Note the cache key is sample *count*, not batching, so `32 x 32` and `128 x 8`
+both map to `observations_1024_...` -- same data either way, but do not rely on
+the filename to distinguish batching experiments.
+
+### Calibration memory
+
+`batch_size` is **not** a free speed knob. `pruning_metrics.py` materialises
+activations shaped `(num_experts, total_tokens, hidden_dim)` -- for *all* 128
+experts, not just the routed top-8:
+
+```
+activation bytes ~= num_experts x (batch_size x model_max_length) x hidden_dim x 4
+  128 x ( 8 x 2048) x 2048 x 4 = 17.2 GB   <- default, fits
+  128 x (32 x 2048) x 2048 x 4 = 68.7 GB   <- OOM, observed
+```
+
+So the default `batch_size 8` is already near the limit on an 80GB card. The
+product `batch_size x model_max_length` is what matters: `bs=16 @ seq=1024`
+costs the same as `bs=8 @ seq=2048`.
+
+### Published checkpoints, for reference
+
+Cerebras has not released a pruned `Qwen3-30B-A3B`, but
+`cerebras/Qwen3-Coder-REAP-25B-A3B` is a REAP-pruned `Qwen3-Coder-30B-A3B` —
+architecturally identical (same `Qwen3MoeForCausalLM`, 128 experts, same
+dimensions). Benchmarking it against `Qwen3-Coder-30B-A3B` gives a measured
+before/after in about an hour with no calibration run, at the cost of swapping
+the base model from Instruct to Coder.
+
+---
+
 ## Diagnostics (not measurements)
 
 **`jit-probe`** — enumerate in-inference Triton compilations.
