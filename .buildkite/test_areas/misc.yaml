@@ -220,6 +220,28 @@ steps:
     - pytest -v -s -m 'cpu_test' v1/kv_connector/unit
     - pytest -v -s -m 'cpu_test' v1/ec_connector/unit
     - pytest -v -s -m 'cpu_test' v1/metrics
+  mirror:
+    amd:
+      label: ":amd: (CPU) V1 Others"
+      dind: false
+      device: mi250_1
+      timeout_in_minutes: 45
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      source_file_dependencies:
+      - vllm/
+      - tests/v1
+      no_gpu: true
+      commands:
+      - pytest -v -s -m 'cpu_test' v1/core
+      - pytest -v -s v1/structured_output
+      - pytest -v -s v1/test_serial_utils.py
+      - pytest -v -s v1/test_kv_cache_spec_registry.py
+      - pytest -v -s v1/cudagraph/test_cudagraph_manager.py
+      - pytest -v -s -m 'cpu_test' v1/kv_connector/unit
+      - pytest -v -s -m 'cpu_test' v1/ec_connector/unit
+      - pytest -v -s -m 'cpu_test' v1/metrics
 
 - label: ":nvidia: (H200 MIG 18GB) Extract Hidden States Integration"
   key: extract-hidden-states-integration
@@ -303,6 +325,19 @@ steps:
   - pip install 'modelscope<1.38'
   - pytest -v -s test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
+  mirror:
+    amd:
+      label: ":amd: (MI355) Regression"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 25
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      source_file_dependencies:
+      - tests/test_regression.py
+      - vllm/
+      - tests/test_regression
 
 - label: ":nvidia: (H200 MIG 35GB) Examples"
   device: h200_35gb
@@ -504,6 +539,42 @@ steps:
   - pytest -v -s tokenizers_
   - pytest -v -s parser
   - pytest -v -s transformers_utils
+  mirror:
+    amd:
+      label: ":amd: (CPU) Params, Env, Tokenizers, Parser"
+      dind: false
+      device: mi250_1
+      timeout_in_minutes: 80
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      source_file_dependencies:
+      - vllm/
+      - tests/test_envs.py
+      - tests/test_outputs.py
+      - tests/test_pooling_params.py
+      - tests/test_ray_env.py
+      - tests/test_sampling_params.py
+      - tests/multimodal
+      - tests/renderers
+      - tests/standalone_tests/lazy_imports.py
+      - tests/tokenizers_
+      - tests/reasoning
+      - tests/tool_parsers
+      - tests/parser
+      - tests/transformers_utils
+      - tests/config
+      no_gpu: true
+      commands:
+      - python3 standalone_tests/lazy_imports.py
+      - pytest -v -s test_envs.py
+      - pytest -v -s test_outputs.py
+      - pytest -v -s test_pooling_params.py
+      - pytest -v -s test_ray_env.py
+      - pytest -v -s test_sampling_params.py
+      - pytest -v -s tokenizers_
+      - pytest -v -s parser
+      - pytest -v -s transformers_utils
 
 - label: ":computer: (CPU) Multimodal + Config"
   key: cpu-multimodal-config
@@ -515,6 +586,35 @@ steps:
   commands:
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s config
+  mirror:
+    amd:
+      label: ":amd: (CPU) Multimodal + Config"
+      dind: false
+      device: mi250_1
+      timeout_in_minutes: 80
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      source_file_dependencies:
+      - vllm/
+      - tests/test_envs.py
+      - tests/test_outputs.py
+      - tests/test_pooling_params.py
+      - tests/test_ray_env.py
+      - tests/test_sampling_params.py
+      - tests/multimodal
+      - tests/renderers
+      - tests/standalone_tests/lazy_imports.py
+      - tests/tokenizers_
+      - tests/reasoning
+      - tests/tool_parsers
+      - tests/parser
+      - tests/transformers_utils
+      - tests/config
+      no_gpu: true
+      commands:
+      - pytest -v -s -m 'cpu_test' multimodal
+      - pytest -v -s config --ignore=config/test_mp_reducer.py
 
 - label: ":computer: (CPU) Reasoning + Renderers"
   key: cpu-reasoning-renderers
@@ -526,6 +626,35 @@ steps:
   commands:
   - pytest -v -s reasoning
   - pytest -v -s renderers
+  mirror:
+    amd:
+      label: ":amd: (CPU) Reasoning + Renderers"
+      dind: false
+      device: mi250_1
+      timeout_in_minutes: 80
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      source_file_dependencies:
+      - vllm/
+      - tests/test_envs.py
+      - tests/test_outputs.py
+      - tests/test_pooling_params.py
+      - tests/test_ray_env.py
+      - tests/test_sampling_params.py
+      - tests/multimodal
+      - tests/renderers
+      - tests/standalone_tests/lazy_imports.py
+      - tests/tokenizers_
+      - tests/reasoning
+      - tests/tool_parsers
+      - tests/parser
+      - tests/transformers_utils
+      - tests/config
+      no_gpu: true
+      commands:
+      - pytest -v -s reasoning
+      - pytest -v -s renderers
 
 - label: ":computer: (CPU) Tool Parsers"
   key: cpu-tool-parsers
@@ -536,6 +665,34 @@ steps:
   device: cpu-small
   commands:
   - pytest -v -s tool_parsers
+  mirror:
+    amd:
+      label: ":amd: (CPU) Tool Parsers"
+      dind: false
+      device: mi250_1
+      timeout_in_minutes: 80
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      source_file_dependencies:
+      - vllm/
+      - tests/test_envs.py
+      - tests/test_outputs.py
+      - tests/test_pooling_params.py
+      - tests/test_ray_env.py
+      - tests/test_sampling_params.py
+      - tests/multimodal
+      - tests/renderers
+      - tests/standalone_tests/lazy_imports.py
+      - tests/tokenizers_
+      - tests/reasoning
+      - tests/tool_parsers
+      - tests/parser
+      - tests/transformers_utils
+      - tests/config
+      no_gpu: true
+      commands:
+      - pytest -v -s tool_parsers
 
 - label: ":nvidia: (A100) Batch Invariance"
   key: batch-invariance-a100
@@ -621,3 +778,17 @@ steps:
   commands:
     - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
     - pytest -v -s v1/spec_decode/test_acceptance_length.py -m slow_test
+  mirror:
+    amd:
+      label: ":amd: (MI300) Acceptance Length (Large Models)"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 45
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      source_file_dependencies:
+      - vllm/v1/spec_decode/
+      - vllm/model_executor/models/mlp_speculator.py
+      - tests/v1/spec_decode/test_acceptance_length.py
+      - vllm/platforms/rocm.py

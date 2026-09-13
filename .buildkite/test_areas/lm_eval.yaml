@@ -562,3 +562,71 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
       - tests/evals/mrcr/
+
+- label: ":amd: (MI300) LM Eval Small Models Harness"
+  key: amd-lm-eval-small-models-harness
+  dind: false
+  device: mi300_1
+  timeout_in_minutes: 35
+  depends_on:
+  - image-build-amd
+  working_dir: /vllm-workspace/.buildkite/lm-eval-harness
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  - vllm/model_executor/models/
+  - vllm/model_executor/model_loader/
+  - vllm/v1/attention/backends/
+  - vllm/v1/attention/selector.py
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - .buildkite/lm-eval-harness/
+  commands:
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-small-rocm.txt
+
+- label: ":amd: (MI300) LM Eval Large Models Harness"
+  key: amd-lm-eval-large-models-harness
+  dind: false
+  device: mi300_4
+  timeout_in_minutes: 85
+  depends_on:
+  - image-build-amd
+  working_dir: /vllm-workspace/.buildkite/lm-eval-harness
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  - vllm/model_executor/models/
+  - vllm/model_executor/model_loader/
+  - vllm/v1/attention/backends/
+  - vllm/v1/attention/selector.py
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - .buildkite/lm-eval-harness/
+  num_devices: 4
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
+
+- label: ":amd: (MI300) LM Eval Large Models ROCm Harness"
+  key: amd-lm-eval-large-models-rocm-harness
+  dind: false
+  device: mi300_8
+  timeout_in_minutes: 40
+  depends_on:
+  - image-build-amd
+  working_dir: /vllm-workspace/.buildkite/lm-eval-harness
+  source_file_dependencies:
+  - vllm/model_executor/models/
+  - vllm/model_executor/model_loader/
+  - vllm/model_executor/layers/quantization/
+  - vllm/v1/attention/backends/
+  - vllm/v1/attention/selector.py
+  - vllm/model_executor/layers/layernorm.py
+  - csrc/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - .buildkite/lm-eval-harness/
+  num_devices: 8
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm.txt --tp-size=8 --timeout=5400

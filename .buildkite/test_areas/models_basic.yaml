@@ -37,6 +37,22 @@ steps:
     # test.) Also run if model initialization test file is modified
     - pytest -v -s models/test_initialization.py -k 'not test_can_initialize_small_subset' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 14
+  mirror:
+    amd:
+      label: ":amd: (MI300) Basic Models (Extra Initialization) Shard %N"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 60
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/model_executor/models/
+      - vllm/model_executor/layers/
+      - tests/models/test_initialization.py
+      - tests/models/registry.py
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H200 MIG 35GB) Basic Models (Other)"
   device: h200_35gb

@@ -365,3 +365,34 @@ steps:
     - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other/ --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]" --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"
     - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]"
     - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"
+  mirror:
+    amd:
+      label: ":amd: (MI355) Spec Decode AL MTP + Other Acceptance Nightly"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 180
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      source_file_dependencies:
+      - vllm/v1/spec_decode/
+      - vllm/v1/sample/
+      - vllm/v1/worker/gpu/
+      - vllm/v1/worker/gpu_model_runner.py
+      - vllm/v1/worker/gpu_worker.py
+      - vllm/model_executor/model_loader/
+      - vllm/model_executor/models/gemma4.py
+      - vllm/model_executor/models/gemma4_mm.py
+      - vllm/model_executor/models/gemma4_mtp.py
+      - vllm/model_executor/models/llama.py
+      - vllm/model_executor/models/llama_eagle3.py
+      - vllm/model_executor/models/medusa.py
+      - vllm/model_executor/models/registry.py
+      - tests/evals/gsm8k/
+      - tests/utils.py
+      - tests/v1/e2e/spec_decode/
+      - vllm/platforms/rocm.py
+      commands:
+      - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other/ --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]" --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"; fi
+      - if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]"; fi
+      - if [ "$$BUILDKITE_PARALLEL_JOB" = "2" ]; then pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"; fi
