@@ -221,3 +221,101 @@ def test_full_cudagraph_spec_metadata_uses_request_count():
     assert meta.spec_query_start_loc.shape == (batch.batch_size + 1,)
     assert meta.num_accepted_tokens is not None
     assert meta.num_accepted_tokens.shape == (batch.batch_size,)
+
+
+@pytest.mark.parametrize("num_decodes,batch_size", [(1, 4), (3, 8), (4, 4)])
+def test_full_cudagraph_regular_decode_accepted_counts(num_decodes, batch_size):
+    """Zero-token graph padding remains request-aligned in regular decode."""
+    builder = _create_gdn_builder(num_speculative_tokens=2, full_cuda_graph=True)
+    builder.vllm_config.cache_config.mamba_cache_mode = "none"
+    batch = BatchSpec(
+        seq_lens=[65] * num_decodes + [0] * (batch_size - num_decodes),
+        query_lens=[1] * num_decodes + [0] * (batch_size - num_decodes),
+    )
+    common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE)
+    common.num_actual_tokens = batch_size
+    common.block_table_tensor[num_decodes:].zero_()
+    counts = torch.ones(batch_size, dtype=torch.int32, device=DEVICE)
+    counts[:num_decodes] = 3
+    meta = builder.build(
+        common_prefix_len=0,
+        common_attn_metadata=common,
+        num_accepted_tokens=counts,
+    )
+    assert meta.num_decodes == batch_size
+    assert meta.num_accepted_tokens.shape == meta.non_spec_state_indices_tensor.shape
+    torch.testing.assert_close(meta.num_accepted_tokens, counts)
+    assert meta.num_accepted_tokens[num_decodes:].tolist() == [1] * (
+        batch_size - num_decodes
+    )
+    assert meta.spec_decode_src_indices[num_decodes:].tolist() == [0] * (
+        batch_size - num_decodes
+    )
+
+
+def test_regular_decode_restores_previous_spec_state():
+    builder = _create_gdn_builder(num_speculative_tokens=2)
+    builder.vllm_config.cache_config.mamba_cache_mode = "none"
+    batch = BatchSpec(seq_lens=[65], query_lens=[1])
+    common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE)
+
+    meta = builder.build(
+        common_prefix_len=0,
+        common_attn_metadata=common,
+        num_accepted_tokens=torch.tensor([3], dtype=torch.int32),
+    )
+
+    assert meta.spec_decode_src_indices is not None
+    assert meta.spec_decode_src_indices.tolist() == [
+        common.block_table_tensor[0, 2].item()
+    ]
+    assert meta.num_accepted_tokens is not None
+    assert meta.num_accepted_tokens.tolist() == [3]
+
+
+def test_mixed_batch_restores_non_spec_state():
+    builder = _create_gdn_builder(num_speculative_tokens=2)
+    builder.vllm_config.cache_config.mamba_cache_mode = "none"
+    batch = BatchSpec(seq_lens=[65, 20], query_lens=[1, 3])
+    common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE)
+
+    meta = builder.build(
+        common_prefix_len=0,
+        common_attn_metadata=common,
+        num_accepted_tokens=torch.tensor([3, 2], dtype=torch.int32),
+        num_decode_draft_tokens_cpu=torch.tensor([-1, 2], dtype=torch.int32),
+    )
+
+    assert meta.non_spec_state_indices_tensor is not None
+    assert meta.non_spec_state_indices_tensor.tolist() == [
+        common.block_table_tensor[0, 0].item()
+    ]
+    assert meta.spec_decode_src_indices is not None
+    assert meta.spec_decode_src_indices.tolist() == [
+        common.block_table_tensor[0, 2].item()
+    ]
+    assert meta.non_spec_num_accepted is not None
+    assert meta.non_spec_num_accepted.tolist() == [3]
+    assert meta.num_accepted_tokens is not None
+    assert meta.num_accepted_tokens.tolist() == [2]
+
+
+@pytest.mark.parametrize("accepted", [1, 2, 3])
+@pytest.mark.parametrize("spec_first", [False, True])
+def test_mixed_batch_keeps_independent_accepted_counts(accepted, spec_first):
+    builder = _create_gdn_builder(num_speculative_tokens=2)
+    builder.vllm_config.cache_config.mamba_cache_mode = "none"
+    query_lens = [3, 1, 1] if spec_first else [1, 1, 3]
+    drafts = [2, -1, -1] if spec_first else [-1, -1, 2]
+    counts = [3, accepted, 1] if spec_first else [accepted, 1, 3]
+    batch = BatchSpec(seq_lens=[65, 65, 65], query_lens=query_lens)
+    common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE)
+    meta = builder.build(
+        common_prefix_len=0,
+        common_attn_metadata=common,
+        num_accepted_tokens=torch.tensor(counts, dtype=torch.int32),
+        num_decode_draft_tokens_cpu=torch.tensor(drafts, dtype=torch.int32),
+    )
+    assert meta.non_spec_num_accepted is not None
+    assert meta.non_spec_num_accepted.tolist() == [accepted, 1]
+    assert meta.num_accepted_tokens.tolist() == [3]

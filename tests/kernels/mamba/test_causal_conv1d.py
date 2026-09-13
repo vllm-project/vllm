@@ -392,3 +392,43 @@ def test_causal_conv1d_varlen(
     )
     unpadded_out = out[:, : out_ref_tensor.shape[-1]]
     assert torch.allclose(unpadded_out, out_ref_tensor, rtol=rtol, atol=atol)
+
+
+@pytest.mark.parametrize("accepted", [1, 2, 3, 6])
+@pytest.mark.parametrize("seqlen", [1, 2, 8, 17])
+@pytest.mark.parametrize("dim_first", [False, True])
+def test_causal_conv1d_prefill_restores_accepted_window(accepted, seqlen, dim_first):
+    set_random_seed(123)
+    dim, width, slots = 64, 4, 9
+    shape = (4, dim, slots) if dim_first else (4, slots, dim)
+    cache = torch.randn(shape, device=DEVICE, dtype=torch.bfloat16)
+    if not dim_first:
+        cache = cache.transpose(1, 2)
+    original = cache.clone()
+    x = torch.randn(dim, seqlen, device=DEVICE, dtype=torch.bfloat16)
+    weight = torch.randn(dim, width, device=DEVICE, dtype=torch.bfloat16)
+    bias = torch.randn(dim, device=DEVICE, dtype=torch.bfloat16)
+    offset = accepted - 1
+    initial = original[2, :, offset : offset + width - 1].unsqueeze(0)
+    expected, final = causal_conv1d_ref(
+        x.unsqueeze(0),
+        weight,
+        bias,
+        initial_states=initial,
+        return_final_states=True,
+    )
+    actual = causal_conv1d_fn(
+        x,
+        weight,
+        bias,
+        conv_states=cache,
+        has_initial_state=torch.tensor([True], device=DEVICE),
+        cache_indices=torch.tensor([2], dtype=torch.int32, device=DEVICE),
+        query_start_loc=torch.tensor([0, seqlen], dtype=torch.int32, device=DEVICE),
+        num_accepted_tokens=torch.tensor([accepted], dtype=torch.int32, device=DEVICE),
+    )
+    torch.testing.assert_close(actual, expected.squeeze(0), rtol=1e-2, atol=5e-2)
+    torch.testing.assert_close(
+        cache[2, :, : width - 1], final.squeeze(0), rtol=0, atol=0
+    )
+    torch.testing.assert_close(cache[[0, 1, 3]], original[[0, 1, 3]], rtol=0, atol=0)
