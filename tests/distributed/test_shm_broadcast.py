@@ -633,6 +633,83 @@ def test_acquire_read_releases_slot_when_reader_raises():
         reader.shutdown()
 
 
+def test_concurrent_readers_are_not_stranded_on_stale_ring_slot():
+    """Two threads sharing one reader must both make progress.
+
+    `acquire_read` used to bind the metadata slot for `current_idx` once,
+    outside its retry loop. Once one thread consumed a block and advanced
+    `current_idx`, the other kept polling the slot it had already captured and
+    blocked until its own timeout, even though a later message was ready.
+    """
+    writer = MessageQueue(
+        n_reader=1,
+        n_local_reader=1,
+        max_chunk_bytes=1024 * 1024,
+        max_chunks=10,
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+
+    results: dict[str, object] = {}
+    parked: set[str] = set()
+    parked_lock = threading.Lock()
+    both_parked = threading.Event()
+    real_wait = reader._spin_condition.wait
+
+    def counting_wait(*args, **kwargs):
+        with parked_lock:
+            parked.add(threading.current_thread().name)
+            if len(parked) == 2:
+                both_parked.set()
+        return real_wait(*args, **kwargs)
+
+    def dequeue_once(name: str):
+        try:
+            results[name] = reader.dequeue(timeout=30.0)
+        except Exception as exc:  # noqa: BLE001
+            results[name] = exc
+
+    threads = [
+        threading.Thread(target=dequeue_once, args=(name,), name=name, daemon=True)
+        for name in ("reader-a", "reader-b")
+    ]
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+
+        with mock.patch.object(
+            reader._spin_condition, "wait", side_effect=counting_wait
+        ):
+            for t in threads:
+                t.start()
+            # Both threads have to be waiting on the same `current_idx` with no
+            # message available: that is the state the bug was triggered from.
+            assert both_parked.wait(timeout=10)
+
+            writer.enqueue("first")
+            writer.enqueue("second")
+
+            for t in threads:
+                t.join(timeout=15)
+            assert not any(t.is_alive() for t in threads)
+    finally:
+        writer.shutdown()
+        reader.shutdown()
+        for socket in (
+            writer.local_socket,
+            writer._spin_condition.local_notify_socket,
+            reader.local_socket,
+            reader._spin_condition.local_notify_socket,
+            reader._spin_condition.read_cancel_socket,
+            reader._spin_condition.write_cancel_socket,
+        ):
+            socket.close(linger=0)
+
+    for name, value in results.items():
+        if isinstance(value, BaseException):
+            raise AssertionError(f"{name} failed to dequeue") from value
+    assert sorted(results.values()) == ["first", "second"]
+
+
 def test_warning_logs(caplog_vllm):
     """
     Test that warning logs are emitted at VLLM_RINGBUFFER_WARNING_INTERVAL intervals
