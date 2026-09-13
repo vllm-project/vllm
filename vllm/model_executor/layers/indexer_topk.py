@@ -134,6 +134,11 @@ def deep_select_topk(
 # ---------------------------------------------------------------------------
 
 
+@functools.cache
+def get_indexer_topk(backend: str) -> "SparseIndexerTopk":
+    return SparseIndexerTopk(backend)
+
+
 class SparseIndexerTopk(torch.nn.Module):
     """The sparse indexer's decode top-k stage.
 

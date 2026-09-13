@@ -22,7 +22,7 @@ from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
 )
 from vllm.model_executor.layers.indexer_topk import (
     RADIX_TOPK_WORKSPACE_SIZE,
-    SparseIndexerTopk,
+    get_indexer_topk,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
@@ -754,8 +754,8 @@ def sparse_attn_indexer(
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
         # The backend comes from the layer (config is only readable at model
-        # construction); SparseIndexerTopk is stateless, so build it per call.
-        SparseIndexerTopk(topk_backend)(
+        # construction); dispatchers are cached per backend.
+        get_indexer_topk(topk_backend)(
             logits,
             seq_lens,
             next_n,
