@@ -1,5 +1,6 @@
 #include "cpu/cpu_types.hpp"
 
+#include <cstring>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -456,10 +457,16 @@ void memcpy_from_shm(void* dst, void* src, const int64_t bytes) {
 }
 
 void memcpy_to_shm(void* dst, void* src, const int64_t bytes) {
+  const int64_t aligned_bytes = ((bytes >> 6) << 6);  // 64 bytes aligned
+  int64_t i = 0;
 #pragma GCC unroll 4
-  for (int64_t i = 0; i < bytes; i += 64) {
+  for (; i < aligned_bytes; i += 64) {
     vec_op::INT8Vec64 data((int8_t*)src + i);
     data.nt_save((int8_t*)dst + i);
+  }
+  if (aligned_bytes < bytes) {
+    std::memcpy((int8_t*)dst + aligned_bytes, (int8_t*)src + aligned_bytes,
+                static_cast<size_t>(bytes - aligned_bytes));
   }
 }
 
