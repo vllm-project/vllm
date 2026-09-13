@@ -48,12 +48,43 @@ def _text_config(**kwargs) -> Qwen4ExpTextConfig:
     return Qwen4ExpTextConfig(**values)
 
 
+@pytest.mark.parametrize("parallel_mode", [None, "ep", "moe_sp", "compiler_sp"])
+@pytest.mark.parametrize("pp_size", [1, 2])
+def test_sp_parallel_modes(monkeypatch, parallel_mode, pp_size) -> None:
+    """Allow DP=1 and EP, fall back for PP, and reject overlapping SP modes."""
+    from vllm.models.qwen4_exp.nvidia.model import is_sequence_parallel_enabled
+
+    monkeypatch.setenv("VLLM_QWEN4_EXP_SP", "1")
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=2,
+            data_parallel_size=1,
+            pipeline_parallel_size=pp_size,
+            enable_expert_parallel=parallel_mode == "ep",
+            use_sequence_parallel_moe=parallel_mode == "moe_sp",
+        ),
+        compilation_config=SimpleNamespace(
+            pass_config=SimpleNamespace(enable_sp=parallel_mode == "compiler_sp")
+        ),
+    )
+    if pp_size > 1:
+        assert not is_sequence_parallel_enabled(config)
+    elif parallel_mode in ("moe_sp", "compiler_sp"):
+        with pytest.raises(ValueError, match="Qwen4Exp SP"):
+            is_sequence_parallel_enabled(config)
+    else:
+        assert is_sequence_parallel_enabled(config)
+    config.parallel_config.tensor_parallel_size = 1
+    assert not is_sequence_parallel_enabled(config)
+
+
 def test_qwen4_exp_mtp_returns_sample_and_multi_streams() -> None:
     from vllm.models.qwen4_exp.nvidia.mtp import (
         Qwen4ExpMultiTokenPredictor,
     )
 
     model = object.__new__(Qwen4ExpMultiTokenPredictor)
+    model.use_sequence_parallel = False
     torch.nn.Module.__init__(model)
     model.hc_count = 2
     model.hidden_size = 4
