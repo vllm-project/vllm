@@ -66,7 +66,7 @@ def _auto_init_hash_fn(request):
 
 def make_request(
     request_id: str,
-    prompt_token_ids: list[int],
+    prompt_token_ids: list[int] | None,
     block_size: int,
     hash_fn: Callable,
     mm_positions: list[PlaceholderRange] | None = None,
@@ -75,6 +75,8 @@ def make_request(
     cache_salt: str | None = None,
     lora_request: LoRARequest | None = None,
     session_id: str | None = None,
+    prompt_embeds: torch.Tensor | None = None,
+    prompt_is_token_ids: list[bool] | None = None,
 ):
     mm_features = []
     if mm_positions is not None:
@@ -101,6 +103,8 @@ def make_request(
         cache_salt=cache_salt,
         block_hasher=get_request_block_hasher(block_size, hash_fn),
         session_id=session_id,
+        prompt_embeds=prompt_embeds,
+        prompt_is_token_ids=prompt_is_token_ids,
     )
 
 
@@ -1864,6 +1868,110 @@ def test_mm_prefix_caching():
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
     assert len(computed_blocks.blocks[0]) == 3
     assert num_computed_tokens == 3 * 16
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+@pytest.mark.parametrize("changed_position", [0, 15, 16, 31, 32])
+@pytest.mark.parametrize("mask_kind", ["implicit", "all_embeds", "mixed"])
+def test_mixed_prompt_embeds_cache_respects_token_mask(
+    hash_fn: Callable, changed_position: int, mask_kind: str
+):
+    """A token-ID row must not reuse KV computed from an embedding row."""
+    block_size = 16
+    num_tokens = 2 * block_size + 2
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, 10),
+        max_model_len=128,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    prompt_embeds = torch.zeros(num_tokens, 3)
+    original_mask = None if mask_kind == "implicit" else [False] * num_tokens
+    other_position = (
+        changed_position // block_size * block_size
+        + (changed_position + 1) % block_size
+    )
+    if mask_kind == "mixed":
+        assert original_mask is not None
+        original_mask[other_position] = True
+
+    def request(request_id: str, mask: list[bool] | None) -> Request:
+        return make_request(
+            request_id,
+            [0] * num_tokens if mask is not None else None,
+            block_size,
+            hash_fn,
+            prompt_embeds=prompt_embeds,
+            prompt_is_token_ids=mask,
+        )
+
+    original = request("original", original_mask)
+    assert manager.allocate_slots(original, num_tokens) is not None
+    manager.free(original)
+
+    # An explicit all-embedding mask has the same meaning as no mask.
+    identical = request("identical", original_mask or [False] * num_tokens)
+    assert manager.get_computed_blocks(identical)[1] == 2 * block_size
+
+    changed_mask = list(original_mask or [False] * num_tokens)
+    changed_mask[changed_position] = True
+    if mask_kind == "mixed":
+        # Keep the same number of token rows while changing their positions.
+        changed_mask[other_position] = False
+    changed = request("changed", changed_mask)
+    # Both requests have the same tensor and token IDs, but token 0 uses the
+    # model's learned embedding, while the embedding row contains zeros.
+    assert manager.get_computed_blocks(changed)[1] == (
+        changed_position // block_size * block_size
+    )
+
+
+def test_mixed_prompt_embeds_mask_does_not_affect_decode_only_extra_keys():
+    """The prompt's routing mask must not be applied to generated-token blocks."""
+    prompt_embeds = torch.zeros(3, 3)
+    mixed = make_request(
+        "mixed",
+        [0] * 3,
+        4,
+        sha256,
+        prompt_embeds=prompt_embeds,
+        prompt_is_token_ids=[True, False, True],
+    )
+    pure = make_request("pure", None, 4, sha256, prompt_embeds=prompt_embeds)
+    mixed.append_output_token_ids([7] * 5)
+    pure.append_output_token_ids([7] * 5)
+    assert kv_cache_utils.generate_block_hash_extra_keys(mixed, 4, 8, 0) == (
+        kv_cache_utils.generate_block_hash_extra_keys(pure, 4, 8, 0)
+    )
+
+
+def test_mixed_prompt_embeds_mask_is_separate_from_embedding_bytes():
+    """Mask bytes must not be confused with a longer prompt embedding tensor."""
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(16, 10),
+        max_model_len=128,
+        enable_caching=True,
+        hash_block_size=16,
+    )
+    mixed = make_request(
+        "mixed",
+        [0] * 12,
+        16,
+        sha256,
+        prompt_embeds=torch.zeros(12, 3),
+        prompt_is_token_ids=[True] * 12,
+    )
+    pure_embeds = torch.zeros(13, 3)
+    # These 12 finite float32 bytes equal mixed's 12-byte routing mask.
+    pure_embeds[-1] = torch.ones(12, dtype=torch.uint8).view(torch.float32)
+    pure = make_request("pure", None, 16, sha256, prompt_embeds=pure_embeds)
+    mixed.append_output_token_ids([0] * 5)
+    pure.append_output_token_ids([0] * 4)
+    assert manager.allocate_slots(mixed, mixed.num_tokens) is not None
+    manager.free(mixed)
+
+    assert list(mixed.all_token_ids) == list(pure.all_token_ids)
+    assert manager.get_computed_blocks(pure)[1] == 0
 
 
 def test_cache_key_salting():
