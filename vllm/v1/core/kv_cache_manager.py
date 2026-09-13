@@ -15,6 +15,7 @@ from vllm.v1.core.kv_cache_coordinator import (
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy
+from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CrossAttentionSpec,
@@ -132,6 +133,7 @@ class KVCacheManager:
         pcp_world_size: int = 1,
         metrics_collector: KVCacheMetricsCollector | None = None,
         watermark: float = 0.0,
+        enable_mamba_fine_grained_prefix_cache: bool = False,
     ) -> None:
         self.max_model_len = max_model_len
         # When unset, fall back to `max_model_len` so the recycling-aware cap
@@ -164,8 +166,28 @@ class KVCacheManager:
             metrics_collector=self.metrics_collector,
             num_prefill_lookahead=num_prefill_lookahead,
         )
+        # One predicate, read by both sides of the feature, so the scheduler
+        # cannot end a chunk at a junction the manager would refuse -- a refused
+        # junction costs a forward pass and displaces the block-boundary stop.
+        # Multi-module MTP is excluded because ``cache_blocks`` then hands the
+        # manager ``num_computed - num_reprefillable`` rather than the chunk end.
+        self.mamba_fine_grained_prefix_cache = (
+            enable_mamba_fine_grained_prefix_cache
+            and bool(self.coordinator.eagle_group_ids)
+            and self.coordinator.enable_partial_hash_hits
+            and self.coordinator.num_reprefillable_tokens == 0
+        )
+        if self.mamba_fine_grained_prefix_cache:
+            for manager in self.coordinator.single_type_managers:
+                if isinstance(manager, MambaManager):
+                    manager.fine_grained_prefix_cache = True
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
+        self.retained_hit_group_ids = tuple(
+            manager.kv_cache_group_id
+            for manager in self.coordinator.single_type_managers
+            if manager.retains_longer_hit
+        )
         self.kv_cache_config = kv_cache_config
 
         # Watermark: minimum number of KV cache blocks to keep free when
@@ -270,17 +292,7 @@ class KVCacheManager:
             and self.enable_kv_cache_events
             and getattr(request, "kv_cache_report_mode", "incremental") == "full"
         ):
-            for group_idx, group_blocks in enumerate(computed_blocks):
-                num_blocks = len(group_blocks)
-                if num_blocks > 0:
-                    group = self.kv_cache_config.kv_cache_groups[group_idx]
-                    block_size = group.kv_cache_spec.block_size
-                    self.block_pool.emit_cached_block_events(
-                        request,
-                        num_blocks,
-                        block_size,
-                        group_idx,
-                    )
+            self.coordinator.emit_cached_block_events(request, computed_blocks)
 
         # The junction to pin is where the lagging sparse-retention group stops
         # (``num_new_computed_tokens``) plus the uncached shared prefix -- i.e.
@@ -446,6 +458,16 @@ class KVCacheManager:
 
         if new_computed_blocks is not None:
             new_computed_block_list = new_computed_blocks.blocks
+            if self.retained_hit_group_ids:
+                # Only retain the prefix covered by the local and external hits.
+                reused = num_new_computed_tokens + num_external_computed_tokens
+                groups = list(new_computed_block_list)
+                for group_id in self.retained_hit_group_ids:
+                    manager = self.coordinator.single_type_managers[group_id]
+                    groups[group_id] = groups[group_id][
+                        : cdiv(reused, manager.block_size)
+                    ]
+                new_computed_block_list = tuple(groups)
         else:
             new_computed_block_list = self.empty_kv_cache_blocks.blocks
 
@@ -547,7 +569,7 @@ class KVCacheManager:
 
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.
-        if not self.enable_caching or delay_cache_blocks:
+        if delay_cache_blocks:
             return self.create_kv_cache_blocks(new_blocks)
 
         # NOTE(woosuk): We want to commit (cache) up to num_local_computed_tokens
@@ -622,7 +644,7 @@ class KVCacheManager:
             bool: True if the prefix cache is successfully reset,
             False otherwise.
         """
-        if not self.block_pool.reset_prefix_cache():
+        if not self.coordinator.reset_prefix_cache():
             return False
         if self.log_stats:
             assert self.prefix_cache_stats is not None
@@ -724,6 +746,8 @@ class KVCacheManager:
             self.kv_cache_config.kv_cache_groups,
             self.get_blocks(request.request_id).blocks,
         ):
+            if not group.kv_cache_spec.prefix_cacheable:
+                continue
             if isinstance(
                 group.kv_cache_spec,
                 (CrossAttentionSpec, EncoderOnlyAttentionSpec),
@@ -779,6 +803,14 @@ class KVCacheManager:
             self.kv_cache_config.kv_cache_groups,
             strict=True,
         ):
+            if not group.kv_cache_spec.prefix_cacheable:
+                # Scratch groups (e.g. the CSA compressor ring) hold a fixed
+                # block covering no token range, so a lookup result never
+                # carries computed blocks for them and their block size does
+                # not divide the endpoint.
+                assert not group_blocks
+                truncated.append([])
+                continue
             assert num_computed_tokens % manager.block_size == 0
             num_blocks = num_computed_tokens // manager.block_size
             if isinstance(group.kv_cache_spec, MambaSpec):
@@ -864,6 +896,29 @@ class KVCacheManager:
                 offloads.setdefault(req_id, []).append(
                     (group_id, block.block_id, boundary_tokens)
                 )
+        return offloads
+
+    def finalize_partial_tail_offloads(
+        self, request: Request
+    ) -> list[tuple[int, int, int]]:
+        """Consume safe producer partial tails when a request finishes.
+
+        A mamba align table block is a valid boundary source only if no later
+        token was forwarded. The connector pins and queues the exact table
+        block before request cleanup, then releases the pin when every worker
+        reports the store job complete.
+        """
+        offloads: list[tuple[int, int, int]] = []
+        for mgr in self.coordinator.single_type_managers:
+            finalized = mgr.finalize_partial_tail_offload(
+                request.request_id,
+                request.num_computed_tokens,
+                request.num_in_flight_tokens,
+            )
+            if finalized is None:
+                continue
+            group_id, block, boundary_tokens = finalized
+            offloads.append((group_id, block.block_id, boundary_tokens))
         return offloads
 
     def new_step_starts(self) -> None:
