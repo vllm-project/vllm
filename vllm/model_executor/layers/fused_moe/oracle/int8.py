@@ -203,6 +203,12 @@ def make_int8_moe_quant_config(
             gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
         )
 
+    # MiniMax M3's SwiGLU clamp/alpha/beta params -- forward them for the
+    # non-Humming (Triton/CPU) backends too, same as the Humming branch above.
+    gemm1_alpha = getattr(layer, "swiglu_alpha", None)
+    gemm1_beta = getattr(layer, "swiglu_beta", None)
+    gemm1_clamp_limit = getattr(layer, "swiglu_limit", None)
+
     if scales_absent and not per_act_token_quant:
         return int8_w8a16_moe_quant_config(
             w1_scale=w1_scale,
@@ -211,6 +217,9 @@ def make_int8_moe_quant_config(
             w2_zp=None,
             w1_bias=w1_bias,
             w2_bias=w2_bias,
+            gemm1_alpha=gemm1_alpha,
+            gemm1_beta=gemm1_beta,
+            gemm1_clamp_limit=gemm1_clamp_limit,
         )
 
     return int8_w8a8_moe_quant_config(
@@ -221,6 +230,9 @@ def make_int8_moe_quant_config(
         w1_bias=w1_bias,
         w2_bias=w2_bias,
         per_act_token_quant=per_act_token_quant,
+        gemm1_alpha=gemm1_alpha,
+        gemm1_beta=gemm1_beta,
+        gemm1_clamp_limit=gemm1_clamp_limit,
     )
 
 
