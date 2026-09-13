@@ -818,13 +818,28 @@ def test_uno_served_sampler_shapes_bound_every_axis(
         assert largest_request <= max_model_len
 
 
-def test_warmup_kernels_runs_two_full_verifications(monkeypatch):
-    """CPU_OBSERVED/CUDA_UNVERIFIED: C=2/K=8 must reach 18 sampler rows."""
+@pytest.mark.parametrize("num_reqs", [1, 2, 4])
+@pytest.mark.parametrize("speculator_kind", ["none", "other", "uno"])
+def test_warmup_kernels_runs_two_full_verifications(
+    monkeypatch, num_reqs, speculator_kind
+):
+    """CPU_OBSERVED/CUDA_UNVERIFIED: add only the missing Uno C=2 extent.
+
+    Dense startup retains its three decode steps and original KV reservation;
+    other drafters retain five. Uno's all-request step already covers C=2 when
+    max_num_seqs is two, so its two-request extent must execute exactly once.
+    """
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
     from vllm.v1.worker.gpu import warmup
 
+    k = 0 if speculator_kind == "none" else 8
+    speculator = None if speculator_kind == "none" else object()
+    if speculator_kind == "uno":
+        speculator = object.__new__(UnoSpeculator)
     runner = SimpleNamespace(
-        num_speculative_steps=8,
-        decode_query_len=9,
+        num_speculative_steps=k,
+        speculator=speculator,
+        decode_query_len=k + 1,
         max_model_len=4096,
         adaptive_verification=None,
         is_pooling_model=False,
@@ -832,23 +847,51 @@ def test_warmup_kernels_runs_two_full_verifications(monkeypatch):
         is_last_pp_rank=True,
         model_config=SimpleNamespace(get_vocab_size=lambda: 64),
         model_state=SimpleNamespace(max_encoder_len=0),
-        scheduler_config=SimpleNamespace(max_num_seqs=4, max_num_batched_tokens=2048),
-        kv_cache_config=SimpleNamespace(kv_cache_groups=[], num_blocks=1024),
-        vllm_config=SimpleNamespace(num_lookahead_tokens=8, is_mm_encoder_only=False),
+        scheduler_config=SimpleNamespace(
+            max_num_seqs=num_reqs, max_num_batched_tokens=2048
+        ),
+        kv_cache_config=SimpleNamespace(
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["layer"],
+                    FullAttentionSpec(
+                        block_size=1, num_kv_heads=1, head_size=1, dtype=torch.float32
+                    ),
+                )
+            ],
+            # At two dense requests, one extra reserved step would reduce the
+            # admitted warmup batch to one request even without running it.
+            num_blocks=11 if k == 0 and num_reqs == 2 else 1024,
+        ),
+        vllm_config=SimpleNamespace(num_lookahead_tokens=k, is_mm_encoder_only=False),
         kv_block_zeroer=None,
         kv_connector=SimpleNamespace(set_disabled=lambda _: None),
     )
     steps = []
     monkeypatch.setattr(warmup.torch.accelerator, "synchronize", lambda: None)
     warmup.warmup_kernels(runner, steps.append, lambda _: None)
-    assert any(
-        len(step.scheduled_spec_decode_tokens) == 2
-        and step.total_num_scheduled_tokens == 18
-        and all(
-            len(drafts) == 8 for drafts in step.scheduled_spec_decode_tokens.values()
-        )
-        for step in steps
-    ), "startup must execute the two-request full-verification sampler extent"
+    assert len(steps[0].scheduled_new_reqs) == num_reqs
+    decode_steps = steps[1:-1]
+    expected = [(num_reqs, num_reqs if k else 0)]
+    if num_reqs >= 2:
+        if speculator_kind == "uno" and num_reqs > 2:
+            expected.append((2, 2))
+        expected.append((2, 1 if k else 0))
+        if k:
+            expected.append((2, 0))
+        expected.append((1, 1 if k else 0))
+    if k:
+        expected.append((1, 0))
+    assert [
+        (len(step.num_scheduled_tokens), len(step.scheduled_spec_decode_tokens))
+        for step in decode_steps
+    ] == expected
+    if speculator_kind == "uno" and num_reqs >= 2:
+        assert sum(
+            len(step.scheduled_spec_decode_tokens) == 2
+            and step.total_num_scheduled_tokens == 18
+            for step in decode_steps
+        ) == 1, "startup must execute the two-request full verification exactly once"
 
 
 @pytest.mark.parametrize("top_k", [None, 50])

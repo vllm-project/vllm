@@ -567,6 +567,11 @@ def _warmup_kernels(
         return
 
     num_spec_steps = model_runner.num_speculative_steps
+    from vllm.v1.worker.gpu.spec_decode.uno import UnoSpeculator
+
+    warm_two_request_verification = num_spec_steps > 0 and isinstance(
+        getattr(model_runner, "speculator", None), UnoSpeculator
+    )
     decode_query_len = model_runner.decode_query_len
     # Use decode_query_len + 1 tokens so the prefill batch's per-request query
     # length exceeds decode_query_len, preventing it from being misclassified as
@@ -576,7 +581,12 @@ def _warmup_kernels(
     # Upper bound on the decode steps built in `decode_steps` below.
     num_decode_steps = 1
     if not model_runner.is_pooling_model:
-        num_decode_steps = 6 if num_spec_steps > 0 else 4
+        num_decode_steps = 5 if num_spec_steps > 0 else 3
+        if (
+            warm_two_request_verification
+            and model_runner.scheduler_config.max_num_seqs > 2
+        ):
+            num_decode_steps += 1
     # Size the block allocation for the worst case: every request advancing
     # decode_query_len tokens on every decode step.
     decode_len = prompt_len + num_decode_steps * decode_query_len
@@ -746,7 +756,8 @@ def _warmup_kernels(
             (all_indices, [use_spec_decode] * num_reqs),
         ]
         if num_reqs >= 2:
-            decode_steps.append(([0, 1], [use_spec_decode, use_spec_decode]))
+            if warm_two_request_verification and num_reqs > 2:
+                decode_steps.append(([0, 1], [True, True]))
             # Mixed spec / non-spec: GDN and KDA reclassify the non-spec decode
             # as a prefill and split the batch into spec/non-spec token indices.
             decode_steps.append(([0, 1], [use_spec_decode, False]))
