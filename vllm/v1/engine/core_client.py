@@ -1711,6 +1711,12 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             "Only ray DP backend supports scaling elastic EP"
         )
         parallel_config = self.vllm_config.parallel_config
+        if new_data_parallel_size > parallel_config.elastic_ep_max_dp_size:
+            raise ValueError(
+                f"Cannot scale to data_parallel_size {new_data_parallel_size}; "
+                "--elastic-ep-max-dp-size is "
+                f"{parallel_config.elastic_ep_max_dp_size}."
+            )
         num_experts = self.vllm_config.model_config.get_num_experts()
         num_physical_experts = (
             num_experts + parallel_config.eplb_config.num_redundant_experts
@@ -1914,6 +1920,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         # NOTE(yongji): Immediately stop sending requests to the removing engines.
         self.core_engines = old_core_engines[:new_data_parallel_size]
         self.lb_engines = self.lb_engines[:new_data_parallel_size]
+        # Pending coordinator snapshots must use the surviving ranks too.
+        self.engine_ranks_managed = self.engine_ranks_managed[:new_data_parallel_size]
         removed_dp_size = cur_data_parallel_size - new_data_parallel_size
         pause_modes = ["keep"] * new_data_parallel_size + ["abort"] * removed_dp_size
         pause_futures = [
