@@ -27,6 +27,13 @@ def get_deepseek_v32_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
             tools: list[dict[str, Any]] | None = None,
             **kwargs,
         ) -> str | list[int]:
+            """Encode messages using the DeepSeek V3.2 chat format.
+
+            Request-level tools are attached to the leading system or
+            developer message so the prompt reads
+            ``{content}\\n\\n## Tools …`` instead of placing tools before
+            the system prompt.
+            """
             thinking = kwargs.get("thinking", False)
             enable_thinking = kwargs.get("enable_thinking", False)
             thinking = thinking or enable_thinking
@@ -34,10 +41,25 @@ def get_deepseek_v32_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
             if not thinking:
                 thinking_mode = "chat"
             conversation = kwargs.get("conversation", messages)
-            messages = conversation.copy()
+            messages = list(conversation)
             if tools is not None and len(tools) > 0:
-                messages.insert(0, {"role": "system"})
-                messages[0]["tools"] = tools  # type: ignore[typeddict-unknown-key]
+                # Attach tools to the existing leading system/developer
+                # message so the prompt reads `{content}\n\n## Tools …`,
+                # matching the reference encoding.  Inserting a fresh
+                # system message renders the tools block *before* the
+                # system prompt.  (Companion to PR #52255 for V4.)
+                if messages and messages[0].get("role") in (
+                    "system",
+                    "developer",
+                ):
+                    head = dict(messages[0])
+                    head["tools"] = tools  # type: ignore[typeddict-unknown-key]
+                    messages[0] = head
+                else:
+                    messages.insert(
+                        0,
+                        {"role": "system", "tools": tools},  # type: ignore[typeddict-unknown-key]
+                    )
 
             # Historical reasoning content is dropped when a new user message
             # is introduced
@@ -62,12 +84,15 @@ def get_deepseek_v32_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
             return prompt_str
 
         def num_special_tokens_to_add(self) -> int:
+            """Return the number of special tokens added by ``encode``."""
             return len(self.encode(""))
 
         def get_added_vocab(self) -> dict[str, int]:
+            """Return a copy of the added-vocabulary mapping."""
             return added_vocab.copy()
 
         def __reduce__(self):
+            """Support pickling by reconstructing via the wrapper factory."""
             return get_deepseek_v32_tokenizer, (tokenizer,)
 
     _DeepseekV32Tokenizer.__name__ = f"DSV32{tokenizer.__class__.__name__}"
@@ -79,5 +104,6 @@ def get_deepseek_v32_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
 class DeepseekV32Tokenizer(TokenizerLike):
     @classmethod
     def from_pretrained(cls, *args, **kwargs) -> HfTokenizer:
+        """Load a pretrained tokenizer and wrap it for DeepSeek V3.2."""
         tokenizer = TokenizersBackend.from_pretrained(*args, **kwargs)
         return get_cached_tokenizer(get_deepseek_v32_tokenizer(tokenizer))
