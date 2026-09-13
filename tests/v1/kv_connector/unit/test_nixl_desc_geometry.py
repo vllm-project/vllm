@@ -156,6 +156,8 @@ def test_overlaid_transfer_groups_share_region_geometry():
     worker = object.__new__(NixlConnectorWorker)
     worker.tp_rank = 0
     worker.world_size = 1
+    worker.transfer_tp_rank = 0
+    worker.transfer_tp_size = 1
     worker.block_size = 4
     worker.engine_id = "local-engine"
     worker.use_mla = True
