@@ -10,7 +10,6 @@
 # the only successful approach is to call cuda driver API in C.
 import atexit
 import gc
-import os
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -21,7 +20,11 @@ from vllm.device_allocator import AllocationData, HandleType
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.system_utils import find_loaded_library
-from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.utils.torch_utils import (
+    PIN_MEMORY,
+    get_torch_allocator_settings,
+    torch_allocator_uses_expandable_segments,
+)
 
 logger = init_logger(__name__)
 
@@ -136,6 +139,7 @@ class CuMemAllocator:
         self.pointer_to_data: dict[int, AllocationData] = {}
         self.current_tag: str = CuMemAllocator.default_tag
         self.allocator_and_pools: dict[str, Any] = {}
+        self._allocator_settings_context_depth = 0
         # Creating strong references to the two callbacks here to prevent
         # these ephemeral bound-method objects being garbage collected.
         # See discussions in https://github.com/vllm-project/vllm/pull/22724
@@ -373,16 +377,26 @@ class CuMemAllocator:
 
         # Expandable segments are incompatible with the memory pool used for
         # sleep mode (see https://github.com/pytorch/pytorch/issues/147851).
-        # If the user has enabled expandable segments via
-        # PYTORCH_CUDA_ALLOC_CONF, temporarily disable them for the duration
-        # of the memory pool context and restore on exit.
-        conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
-        expandable_was_enabled = "expandable_segments:True" in conf
-        if expandable_was_enabled:
-            torch.cuda.memory._set_allocator_settings("expandable_segments:False")
+        # Temporarily disable expandable segments for the outermost pool context.
+        allocator_settings_to_restore: str | None = None
+        if self._allocator_settings_context_depth == 0:
+            allocator_settings = get_torch_allocator_settings()
+            if torch_allocator_uses_expandable_segments(allocator_settings):
+                separator = "" if allocator_settings.rstrip().endswith(",") else ","
+                override = f"{allocator_settings}{separator}expandable_segments:False"
+                try:
+                    torch._C._accelerator_setAllocatorSettings(override)
+                except Exception:
+                    try:
+                        torch._C._accelerator_setAllocatorSettings(allocator_settings)
+                    except Exception:
+                        logger.exception("Failed to restore PyTorch allocator settings")
+                    raise
+                allocator_settings_to_restore = allocator_settings
 
         old_tag = self.current_tag
         self.current_tag = tag
+        self._allocator_settings_context_depth += 1
         try:
             with use_memory_pool_with_allocator(
                 self.python_malloc_callback, self.python_free_callback
@@ -412,8 +426,11 @@ class CuMemAllocator:
                         unmap_and_release(handle)
         finally:
             self.current_tag = old_tag
-            if expandable_was_enabled:
-                torch.cuda.memory._set_allocator_settings("expandable_segments:True")
+            self._allocator_settings_context_depth -= 1
+            if allocator_settings_to_restore is not None:
+                torch._C._accelerator_setAllocatorSettings(
+                    allocator_settings_to_restore
+                )
 
     def get_current_usage(self) -> int:
         """

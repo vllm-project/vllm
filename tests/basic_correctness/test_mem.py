@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+from contextlib import contextmanager
 
 import pytest
 import torch
@@ -31,6 +32,100 @@ def mapped_usage(allocator) -> int:
         for data in allocator.pointer_to_data.values()
         if not data.is_asleep
     )
+
+
+class _FakePool:
+    def snapshot(self):
+        return []
+
+
+@contextmanager
+def _fake_memory_pool(*args, **kwargs):
+    yield _FakePool(), object()
+
+
+def _mock_allocator_settings(monkeypatch, initial, fail_override=False):
+    current = [initial]
+    calls = []
+
+    monkeypatch.setattr(cumem, "use_memory_pool_with_allocator", _fake_memory_pool)
+    monkeypatch.setattr(cumem, "get_torch_allocator_settings", lambda: initial)
+
+    def set_settings(settings):
+        calls.append(settings)
+        current[0] = settings
+        if fail_override and settings.endswith("expandable_segments:False"):
+            raise ValueError("invalid override")
+
+    monkeypatch.setattr(torch._C, "_accelerator_setAllocatorSettings", set_settings)
+    return cumem.CuMemAllocator(), current, calls
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "original",
+    [
+        (
+            "max_split_size_mb:64,garbage_collection_threshold:0.8,"
+            "expandable_segments:True"
+        ),
+        "expandable_segments:True,",
+    ],
+)
+def test_cumem_preserves_allocator_settings(monkeypatch, original):
+    allocator, current, calls = _mock_allocator_settings(monkeypatch, original)
+    separator = "" if original.endswith(",") else ","
+    override = f"{original}{separator}expandable_segments:False"
+
+    with allocator.use_memory_pool():
+        assert current[0] == override
+
+    assert current[0] == original
+    assert calls == [override, original]
+
+
+@pytest.mark.cpu_test
+def test_cumem_restores_allocator_settings_when_override_fails(monkeypatch):
+    original = "max_split_size_mb:64,expandable_segments:True"
+    allocator, current, _ = _mock_allocator_settings(
+        monkeypatch, original, fail_override=True
+    )
+
+    with (
+        pytest.raises(ValueError, match="invalid override"),
+        allocator.use_memory_pool(),
+    ):
+        pass
+
+    assert current[0] == original
+
+
+@pytest.mark.cpu_test
+def test_cumem_restores_allocator_settings_on_error(monkeypatch):
+    original = "max_split_size_mb:64,expandable_segments:True"
+    allocator, current, _ = _mock_allocator_settings(monkeypatch, original)
+
+    with (
+        pytest.raises(RuntimeError, match="pool body failed"),
+        allocator.use_memory_pool(),
+    ):
+        raise RuntimeError("pool body failed")
+
+    assert current[0] == original
+
+
+@pytest.mark.cpu_test
+def test_nested_cumem_pool_keeps_expandable_segments_disabled(monkeypatch):
+    original = "expandable_segments:True"
+    allocator, current, calls = _mock_allocator_settings(monkeypatch, original)
+
+    with allocator.use_memory_pool("outer"):  # noqa: SIM117
+        with allocator.use_memory_pool("inner"):
+            assert current[0] == f"{original},expandable_segments:False"
+        assert current[0] == f"{original},expandable_segments:False"
+
+    assert current[0] == original
+    assert calls == [f"{original},expandable_segments:False", original]
 
 
 def _wake_up_with_poisoned_mappings(allocator, byte_value: int = 0xA5) -> None:

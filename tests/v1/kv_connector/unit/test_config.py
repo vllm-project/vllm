@@ -4,11 +4,37 @@
 """Tests for KV cache offloading configuration."""
 
 import pytest
+import torch
 
 from vllm.config import CacheConfig, KVTransferConfig, ParallelConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.cpu_test
+
+
+@pytest.fixture(autouse=True)
+def allocator_env_fallback(monkeypatch):
+    """Exercise the PyTorch 2.11 environment fallback without cached state."""
+    monkeypatch.setattr(
+        torch._C, "_accelerator_getAllocatorSettings", None, raising=False
+    )
+    for env_var in (
+        "PYTORCH_CUDA_ALLOC_CONF",
+        "PYTORCH_HIP_ALLOC_CONF",
+        "PYTORCH_ALLOC_CONF",
+    ):
+        monkeypatch.delenv(env_var, raising=False)
+
+
+def _mock_allocator_platform(monkeypatch, *, cuda_alike: bool, xpu: bool):
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: cuda_alike)
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: xpu)
+
+
+@pytest.fixture
+def accelerator_vmm_platform(monkeypatch):
+    _mock_allocator_platform(monkeypatch, cuda_alike=True, xpu=False)
 
 
 class _StubLMCacheMPConnector:
@@ -126,9 +152,11 @@ def _build_config(
 @pytest.mark.parametrize(
     "kv_connector", ["NixlConnector", "MooncakeConnectorV1", "SomeOOTConnector"]
 )
-def test_kv_connector_rejects_expandable_segments(monkeypatch, kv_connector):
+def test_kv_connector_rejects_expandable_segments(
+    monkeypatch, kv_connector, accelerator_vmm_platform
+):
     """KV connectors that pin KV cache memory (e.g. via ibv_reg_mr) are
-    invalidated when expandable_segments lets the CUDA VMM allocator remap
+    invalidated when expandable_segments lets the accelerator VMM allocator remap
     the underlying physical pages. We can't enumerate every connector that
     does this (especially OOT ones), so reject the combination whenever any
     connector is configured."""
@@ -137,7 +165,18 @@ def test_kv_connector_rejects_expandable_segments(monkeypatch, kv_connector):
         _build_config(kv_connector=kv_connector)
 
 
-def test_kv_connector_allows_expandable_segments_with_sleep_mode(monkeypatch):
+@pytest.mark.parametrize("env_var", ["PYTORCH_HIP_ALLOC_CONF", "PYTORCH_ALLOC_CONF"])
+def test_kv_connector_rejects_alloc_conf_alias(
+    monkeypatch, accelerator_vmm_platform, env_var
+):
+    monkeypatch.setenv(env_var, "expandable_segments:True")
+    with pytest.raises(ValueError, match="expandable_segments"):
+        _build_config(kv_connector="NixlConnector")
+
+
+def test_kv_connector_allows_expandable_segments_with_sleep_mode(
+    monkeypatch, accelerator_vmm_platform
+):
     """Sleep mode routes KV allocations through CuMemAllocator's pool, which
     auto-disables expandable_segments (see #40812)."""
     monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
@@ -146,17 +185,32 @@ def test_kv_connector_allows_expandable_segments_with_sleep_mode(monkeypatch):
 
 def test_kv_connector_allows_expandable_segments_with_cumem_allocator(
     monkeypatch,
+    accelerator_vmm_platform,
 ):
     """Manual CuMem allocation must also bypass expandable_segments."""
     monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     _build_config(kv_connector="NixlConnector", enable_cumem_allocator=True)
 
 
-def test_kv_connector_allows_other_alloc_conf(monkeypatch):
+def test_kv_connector_allows_other_alloc_conf(monkeypatch, accelerator_vmm_platform):
     """Other PYTORCH_CUDA_ALLOC_CONF values must not be rejected."""
     monkeypatch.setenv(
         "PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:512,expandable_segments:False"
     )
+    _build_config(kv_connector="NixlConnector")
+
+
+def test_xpu_kv_connector_rejects_expandable_segments(monkeypatch):
+    """XPU VMM cannot use the CUDA/ROCm CuMem exemption."""
+    _mock_allocator_platform(monkeypatch, cuda_alike=False, xpu=True)
+    monkeypatch.setenv("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+    with pytest.raises(ValueError, match="expandable_segments"):
+        _build_config(kv_connector="NixlConnector", enable_cumem_allocator=True)
+
+
+def test_non_vmm_platform_ignores_expandable_segments(monkeypatch):
+    _mock_allocator_platform(monkeypatch, cuda_alike=False, xpu=False)
+    monkeypatch.setenv("PYTORCH_ALLOC_CONF", "expandable_segments:True")
     _build_config(kv_connector="NixlConnector")
 
 
