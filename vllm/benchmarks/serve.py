@@ -700,17 +700,35 @@ def calculate_metrics(
             # Track concurrent requests for each second this request was active
             request_start_second = int(output.start_time - min_start_time)
             request_end_second = int(
-                (output.start_time + output.latency) - min_start_time
+                np.ceil(output.start_time + output.latency - min_start_time)
             )
 
-            for second in range(request_start_second, request_end_second + 1):
-                concurrent_requests_per_second[second] += 1
+            for second in range(request_start_second, min(duration_seconds, request_end_second)):
+                if 0 <= second < duration_seconds:
+                    concurrent_requests_per_second[second] += 1
+
+        # Calculate exact peak concurrent requests using continuous-time sweep-line
+        # over half-open intervals [start, end)
+        events: list[tuple[float, int]] = []
+        for output in successful_outputs:
+            events.append((output.start_time, 1))
+            events.append((output.start_time + output.latency, -1))
+
+        # Tie-breaking: -1 (departure) precedes +1 (arrival) for half-open intervals
+        events.sort(key=lambda x: (x[0], x[1]))
+
+        current_concurrency = 0
+        peak_concurrency = 0
+        for _, delta in events:
+            current_concurrency += delta
+            if current_concurrency > peak_concurrency:
+                peak_concurrency = current_concurrency
 
         # Find the maximum tokens per second and corresponding
         # concurrent requests
         if len(tokens_per_second) > 0:
             max_output_tokens_per_s = float(np.max(tokens_per_second))
-            max_concurrent_requests = int(np.max(concurrent_requests_per_second))
+            max_concurrent_requests = peak_concurrency
 
         if TERM_PLOTLIB_AVAILABLE:
             import termplotlib as tpl
