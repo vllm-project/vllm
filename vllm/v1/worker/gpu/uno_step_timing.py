@@ -38,6 +38,8 @@ class UnoStepTimingTrace:
     request_steps: tuple[int, ...]
     proposal_skipped_terminal: bool
     capture_cuda_events: bool
+    tail_mode_rows: int
+    current_draft_counts: tuple[int, ...]
     _wall_starts: dict[str, float] = field(default_factory=dict)
     wall_ms: dict[str, float] = field(default_factory=dict)
     _events: dict[str, tuple[torch.cuda.Event, torch.cuda.Event]] = field(
@@ -110,13 +112,15 @@ class UnoStepTimingTrace:
             "scheduled_request_count": self.scheduled_request_count,
             "request_steps": self.request_steps,
             "proposal_skipped_terminal": self.proposal_skipped_terminal,
+            "tail_mode_rows": self.tail_mode_rows,
+            "current_draft_counts": self.current_draft_counts,
             "allocator_allocated_bytes": self._allocated_bytes,
             "allocator_reserved_bytes": self._reserved_bytes,
         }
 
 
 class UnoStepTimingTracer:
-    """Track the first three worker steps for each request in this process."""
+    """Track each request's first three steps and draft-free length-tail steps."""
 
     def __init__(self, *, capture_cuda_events: bool | None = None) -> None:
         self._request_steps: dict[str, int] = {}
@@ -142,7 +146,12 @@ class UnoStepTimingTracer:
             scheduler_output.num_scheduled_tokens, request_steps
         ):
             self._request_steps[req_id] = request_step
-        if not any(step <= 3 for step in request_steps):
+        tail_mode_rows = len(
+            scheduler_output.zero_next_draft_req_ids.intersection(
+                scheduler_output.num_scheduled_tokens
+            )
+        )
+        if not any(step <= 3 for step in request_steps) and not tail_mode_rows:
             return None
         return UnoStepTimingTrace(
             step_id=step_id,
@@ -152,6 +161,11 @@ class UnoStepTimingTracer:
             request_steps=request_steps,
             proposal_skipped_terminal=scheduler_output.skip_speculator_proposal,
             capture_cuda_events=self._capture_cuda_events,
+            tail_mode_rows=tail_mode_rows,
+            current_draft_counts=tuple(
+                len(scheduler_output.scheduled_spec_decode_tokens.get(req_id, ()))
+                for req_id in scheduler_output.num_scheduled_tokens
+            ),
         )
 
     def publish(self, trace: UnoStepTimingTrace) -> None:

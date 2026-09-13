@@ -312,6 +312,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
+        self._zero_next_draft_req_ids: frozenset[str] = frozenset()
 
         self.pcp_manager: pcp.PCPManager | None = None
 
@@ -1244,10 +1245,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.speculator.draft_token_confidence_probs, input_batch
             )
 
-    def _publish_draft_tokens(self, input_batch: InputBatch) -> None:
+    def _publish_draft_tokens(
+        self,
+        input_batch: InputBatch,
+        zero_next_draft_req_ids: frozenset[str] = frozenset(),
+    ) -> None:
         """Make device draft tokens visible to the scheduler and PP peers."""
         if self.num_speculative_steps <= 0:
             return
+        self._zero_next_draft_req_ids = zero_next_draft_req_ids
         self.draft_tokens_handler.set_draft_tokens(
             input_batch,
             self.req_states.draft_tokens[input_batch.idx_mapping],
@@ -2244,6 +2250,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             routed_experts=routed_experts,
             cudagraph_stats=cudagraph_stats,
             skip_speculator_proposal=scheduler_output.skip_speculator_proposal,
+            zero_next_draft_req_ids=frozenset(scheduler_output.zero_next_draft_req_ids),
             uno_step_trace=uno_step_trace,
         )
 
@@ -2280,6 +2287,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         routed_experts = self.execute_model_state.routed_experts
         cudagraph_stats = self.execute_model_state.cudagraph_stats
         skip_speculator_proposal = self.execute_model_state.skip_speculator_proposal
+        zero_next_draft_req_ids = self.execute_model_state.zero_next_draft_req_ids
         uno_step_trace = self.execute_model_state.uno_step_trace
         self.execute_model_state = None
 
@@ -2308,6 +2316,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         assert draft_hidden_states is not None
         hidden_states, input_batch = pcp.maybe_restore_pcp_for_sampling(
             self.pcp_manager, hidden_states, input_batch
+        )
+        is_uno = isinstance(self.speculator, UnoSpeculator)
+        if not is_uno:
+            zero_next_draft_req_ids = frozenset()
+        skip_speculator_proposal = (
+            is_uno
+            and skip_speculator_proposal
+            and bool(input_batch.req_ids)
+            and all(req_id in zero_next_draft_req_ids for req_id in input_batch.req_ids)
         )
         if self.pcp_manager is not None and aux_hidden_states is not None:
             aux_hidden_states = [
@@ -2425,14 +2442,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if uno_step_trace is not None:
                 uno_step_trace.end_stage("propose")
         elif self.speculator is not None and UNO_STEP_TIMING_DEBUG:
-            # Keep publishing the existing draft buffer below: PP ranks and
-            # structured-output validation still consume that collective shape.
-            # Only the newly-unusable proposal is omitted.
+            # Keep the K-wide collective below; zero-next-draft validity makes
+            # these unchanged buffer contents unusable by the scheduler.
             logger.info("UNO_TERMINAL_PROPOSAL_SUPPRESSED")
+        if is_uno and UNO_STEP_TIMING_DEBUG:
+            logger.info(
+                "UNO_TAIL_STEP proposals_skipped=%d tail_mode_rows=%d "
+                "scheduled_rows=%d",
+                int(skip_speculator_proposal),
+                sum(
+                    req_id in zero_next_draft_req_ids for req_id in input_batch.req_ids
+                ),
+                len(input_batch.req_ids),
+            )
 
         # Spec-decode and diffusion LLMs both use draft tokens but the latter does
         # not have a speculator (i.e. self.speculator is None).
-        self._publish_draft_tokens(input_batch)
+        self._publish_draft_tokens(input_batch, zero_next_draft_req_ids)
         if uno_step_trace is not None:
             assert self._uno_step_timing is not None
             self._uno_step_timing.publish(uno_step_trace)
@@ -2445,7 +2471,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return async_output
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
-        return self.draft_tokens_handler.get_draft_tokens()
+        drafts = self.draft_tokens_handler.get_draft_tokens()
+        if drafts is not None and self._zero_next_draft_req_ids:
+            drafts.draft_token_ids = [
+                [] if req_id in self._zero_next_draft_req_ids else tokens
+                for req_id, tokens in zip(drafts.req_ids, drafts.draft_token_ids)
+            ]
+        return drafts
 
     @torch.inference_mode()
     @step_eplb_after()
@@ -2580,6 +2612,7 @@ class ExecuteModelState(NamedTuple):
     routed_experts: RoutedExpertsTensors | None
     cudagraph_stats: CUDAGraphStat | None
     skip_speculator_proposal: bool = False
+    zero_next_draft_req_ids: frozenset[str] = frozenset()
     uno_step_trace: UnoStepTimingTrace | None = None
 
 

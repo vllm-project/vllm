@@ -1594,6 +1594,9 @@ def test_uno_step_timing_debug_flag_is_launch_only_and_tracks_three_steps():
         debug_uno_step_id=7,
         debug_schedule_wall_ms=0.5,
         num_scheduled_tokens={"internal-request": 1},
+        skip_speculator_proposal=False,
+        zero_next_draft_req_ids=set(),
+        scheduled_spec_decode_tokens={},
     )
     assert tracer.begin(output, running_count=1) is not None
     assert tracer.begin(output, running_count=1) is not None
@@ -1633,13 +1636,8 @@ def test_uno_launch_key_debug_records_sampler_launches_only_in_startup_scope(
     assert calls == [("launch", (3,))]
 
 
-def test_uno_prefill_preserves_base_output_before_proposal_order(monkeypatch):
-    """This pins the pre-existing base output-before-proposal order.
-
-    ``AsyncOutput`` records the copy-stream wait before this code reaches
-    ``propose``. It is an upstream ordering regression test, not evidence of
-    a Uno hand-off optimization or a separate served-path change.
-    """
+def _uno_sample_tokens_runner(monkeypatch, num_reqs=1):
+    """Build CPU collaborators around the production sample_tokens entry."""
     from vllm.v1.worker.gpu import model_runner as model_runner_module
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
@@ -1664,11 +1662,14 @@ def test_uno_prefill_preserves_base_output_before_proposal_order(monkeypatch):
 
     runner = object.__new__(GPUModelRunner)
     input_batch = SimpleNamespace(
-        req_ids=["request-0"],
-        idx_mapping=torch.tensor([0]),
-        query_start_loc=torch.tensor([0, 1]),
+        req_ids=[f"request-{i}" for i in range(num_reqs)],
+        num_reqs=num_reqs,
+        num_draft_tokens=0,
+        logits_indices=torch.arange(num_reqs),
+        idx_mapping=torch.arange(num_reqs),
+        query_start_loc=torch.arange(num_reqs + 1),
     )
-    target_hidden = torch.tensor([[1.0, 2.0]])
+    target_hidden = torch.tensor([[1.0, 2.0]]).repeat(num_reqs, 1)
     runner.execute_model_state = SimpleNamespace(
         input_batch=input_batch,
         attn_metadata={},
@@ -1680,6 +1681,9 @@ def test_uno_prefill_preserves_base_output_before_proposal_order(monkeypatch):
         ec_connector_output=None,
         routed_experts=None,
         cudagraph_stats=None,
+        skip_speculator_proposal=False,
+        zero_next_draft_req_ids=frozenset(),
+        uno_step_trace=None,
     )
     runner.is_last_pp_rank = True
     runner.pcp_manager = None
@@ -1696,23 +1700,31 @@ def test_uno_prefill_preserves_base_output_before_proposal_order(monkeypatch):
     )
     runner.sampler = SimpleNamespace(
         sampling_states=SimpleNamespace(
-            temperature=SimpleNamespace(gpu=torch.ones(1)),
-            seeds=SimpleNamespace(gpu=torch.zeros(1, dtype=torch.int64)),
+            temperature=SimpleNamespace(gpu=torch.ones(num_reqs)),
+            seeds=SimpleNamespace(gpu=torch.zeros(num_reqs, dtype=torch.int64)),
         )
     )
     runner.req_states = SimpleNamespace(
-        draft_tokens=torch.zeros((1, 2), dtype=torch.int64),
-        last_sampled_tokens=torch.zeros((1, 1), dtype=torch.int64),
-        next_prefill_tokens=torch.zeros((1, 1), dtype=torch.int64),
-        all_token_ids=SimpleNamespace(gpu=torch.zeros((1, 2), dtype=torch.int64)),
-        num_computed_tokens=SimpleNamespace(gpu=torch.zeros(1, dtype=torch.int64)),
-        prompt_len=SimpleNamespace(np=torch.ones(1, dtype=torch.int64).numpy()),
+        draft_tokens=torch.zeros((num_reqs, 2), dtype=torch.int64),
+        last_sampled_tokens=torch.zeros((num_reqs, 1), dtype=torch.int64),
+        next_prefill_tokens=torch.zeros((num_reqs, 1), dtype=torch.int64),
+        all_token_ids=SimpleNamespace(
+            gpu=torch.zeros((num_reqs, 2), dtype=torch.int64)
+        ),
+        num_computed_tokens=SimpleNamespace(
+            gpu=torch.zeros(num_reqs, dtype=torch.int64)
+        ),
+        prompt_len=SimpleNamespace(np=torch.ones(num_reqs, dtype=torch.int64).numpy()),
     )
-    sampler_output = SimpleNamespace(sampled_token_ids=torch.tensor([[7]]))
+    sampler_output = SimpleNamespace(
+        sampled_token_ids=torch.full((num_reqs, 1), 7),
+        num_sampled=torch.ones(num_reqs, dtype=torch.int32),
+        num_rejected=torch.zeros(num_reqs, dtype=torch.int32),
+    )
     runner.sample = lambda *_args: (
         sampler_output,
-        torch.ones(1, dtype=torch.int32),
-        torch.zeros(1, dtype=torch.int32),
+        sampler_output.num_sampled,
+        sampler_output.num_rejected,
     )
     runner.postprocess_sampled = lambda *_args: events.append("postprocess")
     runner.num_speculative_steps = 2
@@ -1736,21 +1748,35 @@ def test_uno_prefill_preserves_base_output_before_proposal_order(monkeypatch):
         assert kwargs == {"dp_sync": None, "mm_inputs": None}
         events.append(f"propose-step-{proposer._step}")
         proposer._step += 1
-        return torch.tensor([[8, 9]], dtype=torch.int64)
+        return torch.tensor([[8, 9]], dtype=torch.int64).repeat(num_reqs, 1)
 
     proposer.propose = propose
     runner.speculator = proposer
+    return runner, proposer, events, FakeAsyncOutput
+
+
+@pytest.mark.parametrize("skip_proposal", [False, True])
+def test_uno_prefill_preserves_base_output_before_proposal_order(
+    monkeypatch, skip_proposal
+):
+    """D2H is issued before postprocessing, with or without a tail proposal."""
+    runner, proposer, events, output_type = _uno_sample_tokens_runner(monkeypatch)
+    runner.execute_model_state.skip_speculator_proposal = skip_proposal
+    if skip_proposal:
+        runner.execute_model_state.zero_next_draft_req_ids = frozenset({"request-0"})
 
     output = runner.sample_tokens(None)
 
-    assert isinstance(output, FakeAsyncOutput)
-    assert events == ["output", "postprocess", "propose-step-7", "publish", "kv"]
+    assert isinstance(output, output_type)
+    proposal_events = [] if skip_proposal else ["propose-step-7"]
+    assert events == ["output", "postprocess", *proposal_events, "publish", "kv"]
     # Simulate the step mutation formerly caused by a DP dummy run. It is
     # necessarily after the proposal now, rather than between defer and flush.
     proposer._step += 1
-    assert proposer._step == 9
+    assert proposer._step == (8 if skip_proposal else 9)
     assert not hasattr(runner, "_pending_uno_proposal")
-    assert runner.req_states.draft_tokens.tolist() == [[8, 9]]
+    expected_drafts = [[0, 0]] if skip_proposal else [[8, 9]]
+    assert runner.req_states.draft_tokens.tolist() == expected_drafts
 
 
 @pytest.mark.skip_global_cleanup

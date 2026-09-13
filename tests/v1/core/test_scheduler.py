@@ -1425,8 +1425,7 @@ def uno_scheduler_factory(tmp_path, monkeypatch):
     )
 
     def create(**kwargs):
-        max_num_seqs = kwargs.pop("max_num_seqs", 1)
-        return create_scheduler(
+        options = dict(
             model=str(tmp_path),
             skip_tokenizer_init=True,
             use_v2_model_runner=True,
@@ -1435,10 +1434,29 @@ def uno_scheduler_factory(tmp_path, monkeypatch):
             speculative_method="uno",
             device="cpu",
             block_size=4,
-            max_num_seqs=max_num_seqs,
+            max_num_seqs=1,
             max_num_batched_tokens=32,
-            **kwargs,
         )
+        options.update(kwargs)
+        async_scheduling = options["async_scheduling"]
+        if options["speculative_method"] == "uno":
+            # Uno currently requires async in the serving config. Construct a
+            # valid config, then exercise the base scheduler's CPU contract.
+            options["async_scheduling"] = True
+        else:
+            monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+            options["use_v2_model_runner"] = False
+        scheduler = create_scheduler(**options)
+        if not async_scheduling and options["speculative_method"] == "uno":
+            scheduler.vllm_config.scheduler_config.async_scheduling = False
+            return Scheduler(
+                vllm_config=scheduler.vllm_config,
+                kv_cache_config=scheduler.kv_cache_config,
+                structured_output_manager=scheduler.structured_output_manager,
+                block_size=scheduler.block_size,
+                log_stats=scheduler.log_stats,
+            )
+        return scheduler
 
     return create
 
@@ -1509,6 +1527,278 @@ def test_uno_terminal_length_bound_skips_only_all_terminal_batches(
     # batch contract until per-row proposal packing exists.
     mixed = scheduler.schedule()
     assert not mixed.skip_speculator_proposal
+
+
+def test_uno_tail_overlapping_steps_before_output_delivery(uno_scheduler_factory):
+    """The second dispatched step must be draft-free while O still lags at 0."""
+    scheduler = uno_scheduler_factory()
+    (request,) = create_requests(
+        num_requests=1, num_tokens=3, max_tokens=2, block_size=4
+    )
+    scheduler.add_request(request)
+    first = scheduler.schedule()
+    assert request.num_output_tokens == 0
+    assert request.num_output_placeholders == 1
+    # Exercise the changed helper through its production caller, before the
+    # previous sample has been observed by the scheduler.
+    assert scheduler._will_finish_after_next_sample(request)
+    second = scheduler.schedule()
+    assert second.skip_speculator_proposal
+    assert second.num_scheduled_tokens == {request.request_id: 1}
+    assert not second.scheduled_spec_decode_tokens
+    assert second.zero_next_draft_req_ids == {request.request_id}
+    assert request.spec_token_ids == []
+    assert request.num_output_placeholders == 2
+    # EngineCore drains the oldest output at depth two before scheduling
+    # again. P=2 alone must not be interpreted as two guaranteed outputs.
+    assert scheduler.vllm_config.max_concurrent_batches == 2
+    _model_output(scheduler, first, [[10]])
+    assert not scheduler.schedule().num_scheduled_tokens
+    _model_output(scheduler, second, [[11]])
+    assert list(request.output_token_ids) == [10, 11]
+    assert request.is_finished()
+
+
+def test_uno_tail_all_reject_pending_nine_is_not_terminal(uno_scheduler_factory):
+    """O=120/P=9 can reach only 122; upper-bound tail mode must stay usable."""
+    scheduler = uno_scheduler_factory(
+        num_speculative_tokens=8, max_num_batched_tokens=256
+    )
+    (request,) = create_requests(
+        num_requests=1, num_tokens=3, max_tokens=128, block_size=4
+    )
+    # A pending K=8 verification was launched before this policy activated
+    # (e.g. a preemption/stale-output boundary). Its rejection can shrink P.
+    request.append_output_token_ids([10] * 120)
+    scheduler.add_request(request)
+    request.num_computed_tokens = request.num_tokens - 1
+    request.spec_token_ids = [-1] * 8
+    request.status = RequestStatus.RUNNING
+    scheduler.waiting.pop_request()
+    scheduler.running.append(request)
+    pending = SchedulerOutput.make_empty()
+    pending.num_scheduled_tokens = {request.request_id: 9}
+    pending.total_num_scheduled_tokens = 9
+    pending.scheduled_spec_decode_tokens = {request.request_id: [-1] * 8}
+    pending.num_spec_tokens_to_schedule = 8
+    scheduler._update_after_schedule(pending)
+    assert request.num_output_tokens == 120
+    assert request.num_output_placeholders == 9
+    assert not scheduler._will_finish_after_next_sample(request)
+
+    current = scheduler.schedule()
+    assert current.num_scheduled_tokens == {request.request_id: 1}
+    assert current.skip_speculator_proposal
+    _model_output(scheduler, pending, [[20]])
+    _model_output(scheduler, current, [[21]])
+    assert request.num_output_tokens == 122
+    assert not request.is_finished()
+    assert request.num_output_placeholders == 0
+    # The upper trigger no longer holds after all-reject rollback, but the
+    # policy persists and synchronous retrieval cannot reinstall stale drafts.
+    scheduler.update_draft_token_ids(DraftTokenIds([request.request_id], [[30] * 8]))
+    continuation = scheduler.schedule()
+    assert continuation.num_scheduled_tokens == {request.request_id: 1}
+    assert continuation.skip_speculator_proposal
+    assert not continuation.scheduled_spec_decode_tokens
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_uno_tail_prevents_accepted_draft_leap(uno_scheduler_factory, async_scheduling):
+    """A K+1 chunk that could cross the cap becomes a K=0 sample first."""
+    scheduler = uno_scheduler_factory(async_scheduling=async_scheduling)
+    (request,) = create_requests(
+        num_requests=1, num_tokens=3, max_tokens=5, block_size=4
+    )
+    scheduler.add_request(request)
+    _model_output(scheduler, scheduler.schedule(), [[10]])
+    scheduler.update_draft_token_ids(
+        DraftTokenIds([request.request_id], [[11, 12, 13, 14]])
+    )
+    # O=1 and four accepted drafts plus bonus would leap to six (> M=5).
+    assert not scheduler._will_finish_after_next_sample(request)
+    tail = scheduler.schedule()
+    assert tail.num_scheduled_tokens == {request.request_id: 1}
+    assert not tail.scheduled_spec_decode_tokens
+    assert tail.skip_speculator_proposal
+    assert tail.zero_next_draft_req_ids == {request.request_id}
+    assert request.spec_token_ids == []
+    # K-lookahead remains owned even though no proposal is run.
+    assert scheduler.num_lookahead_tokens == 4
+    assert len(scheduler.kv_cache_manager.get_block_ids(request.request_id)[0]) == 2
+    _model_output(scheduler, tail, [[11]])
+    scheduler.update_draft_token_ids(
+        DraftTokenIds([request.request_id], [[21, 22, 23, 24]])
+    )
+    assert request.spec_token_ids == []
+    assert scheduler.schedule().num_scheduled_tokens == {request.request_id: 1}
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_uno_tail_mixed_rows_keep_zero_validity_through_grammar(
+    uno_scheduler_factory, async_scheduling
+):
+    """Mixed dense proposals must not enter a tail row's structured mask."""
+    scheduler = uno_scheduler_factory(max_num_seqs=2, async_scheduling=async_scheduling)
+    tail_req, live_req = create_requests(
+        num_requests=2,
+        num_tokens=3,
+        max_tokens=1,
+        block_size=4,
+        req_ids=["tail", "live"],
+    )
+    live_req.max_tokens = 16
+    scheduler.add_request(tail_req)
+    scheduler.add_request(live_req)
+    output = scheduler.schedule()
+    assert not output.skip_speculator_proposal
+    # Assert behavior before reading the added field for known-old inversion.
+    assert tail_req.spec_token_ids == []
+    grammar = Mock()
+    grammar.validate_tokens.side_effect = lambda tokens: tokens
+    tail_req.structured_output_request = SimpleNamespace(grammar=grammar)
+    live_req.structured_output_request = SimpleNamespace(grammar=grammar)
+    scheduler.structured_output_manager.should_advance = Mock(return_value=True)
+    scheduler.update_draft_token_ids(
+        DraftTokenIds(["tail", "live"], [[20] * 4, [30] * 4])
+    )
+    assert tail_req.spec_token_ids == []
+    assert live_req.spec_token_ids == [30] * 4
+    assert output.zero_next_draft_req_ids == {"tail"}
+    grammar.validate_tokens.assert_called_once_with([30] * 4)
+    # The production async grammar retrieval sees only the live placeholders.
+    output.scheduled_spec_decode_tokens = {"live": [-1] * 4}
+    scheduler.update_draft_token_ids_in_output(
+        DraftTokenIds(["tail", "live"], [[20] * 4, [30] * 4]), output
+    )
+    assert output.scheduled_spec_decode_tokens == {"live": [30] * 4}
+    assert grammar.validate_tokens.call_count == 2
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_uno_tail_nonfinal_prefill_does_not_count_as_sampling(
+    uno_scheduler_factory, async_scheduling
+):
+    """One-token limits do not turn an incomplete prompt into a decode row."""
+    scheduler = uno_scheduler_factory(
+        async_scheduling=async_scheduling, long_prefill_token_threshold=2
+    )
+    (request,) = create_requests(
+        num_requests=1, num_tokens=5, max_tokens=1, block_size=4
+    )
+    scheduler.add_request(request)
+    for expected_queries in [2, 2]:
+        chunk = scheduler.schedule()
+        assert not chunk.skip_speculator_proposal
+        assert chunk.num_scheduled_tokens == {request.request_id: expected_queries}
+        assert not chunk.zero_next_draft_req_ids
+        assert request.num_output_placeholders == 0
+        _model_output(scheduler, chunk, [[]])
+    final = scheduler.schedule()
+    assert final.num_scheduled_tokens == {request.request_id: 1}
+    assert final.skip_speculator_proposal
+    assert final.zero_next_draft_req_ids == {request.request_id}
+
+
+@pytest.mark.parametrize("drop_stale_output", [False, True])
+def test_uno_tail_survives_preemption_and_stale_delivery(
+    uno_scheduler_factory, drop_stale_output
+):
+    """Preemption rolls counters back, not the tail policy or KV ownership."""
+    scheduler = uno_scheduler_factory(num_blocks=32)
+    (request,) = create_requests(
+        num_requests=1, num_tokens=3, max_tokens=5, block_size=4
+    )
+    scheduler.add_request(request)
+    initial_free = scheduler.kv_cache_manager.block_pool.get_num_free_blocks()
+    _model_output(scheduler, scheduler.schedule(), [[10]])
+    tail = scheduler.schedule()
+    assert tail.num_scheduled_tokens == {request.request_id: 1}
+    scheduler.running.remove(request)
+    scheduler._preempt_request(request, 0.0, drop_stale_output=drop_stale_output)
+    assert request.num_output_placeholders == 0
+    _model_output(scheduler, tail, [[11]])
+    assert request.num_output_placeholders == 0
+    assert request.num_stale_output_tokens == 0
+    resumed = scheduler.schedule()
+    assert resumed.num_scheduled_tokens == {request.request_id: request.num_tokens}
+    assert resumed.skip_speculator_proposal
+    assert request.spec_token_ids == []
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() == initial_free
+    assert not scheduler._uno_tail_requests
+    # A later request reusing the id starts with ordinary proposals enabled.
+    (replacement,) = create_requests(
+        num_requests=1, num_tokens=3, max_tokens=16, block_size=4
+    )
+    scheduler.add_request(replacement)
+    assert not scheduler.schedule().skip_speculator_proposal
+
+
+def test_uno_tail_cached_prefill_fits_without_draft_padding(uno_scheduler_factory):
+    """Prefix-hit admission applies K=0 before rejecting the padded budget."""
+    scheduler = uno_scheduler_factory(enable_prefix_caching=True)
+    (warmer,) = create_requests(
+        num_requests=1, num_tokens=5, max_tokens=16, block_size=4, same_prompt=True
+    )
+    scheduler.add_request(warmer)
+    _model_output(scheduler, scheduler.schedule(), [[10]])
+    scheduler.finish_requests(warmer.request_id, RequestStatus.FINISHED_ABORTED)
+    (request,) = create_requests(
+        num_requests=1, num_tokens=5, max_tokens=1, block_size=4, same_prompt=True
+    )
+    scheduler.add_request(request)
+    scheduler.max_num_scheduled_tokens = 1
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {request.request_id: 1}
+    assert not output.scheduled_spec_decode_tokens
+    assert output.skip_speculator_proposal
+
+
+def test_uno_tail_policy_does_not_suppress_other_speculators(uno_scheduler_factory):
+    scheduler = uno_scheduler_factory(
+        speculative_method="ngram", async_scheduling=False
+    )
+    (request,) = create_requests(
+        num_requests=1, num_tokens=3, max_tokens=1, block_size=4
+    )
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    assert not output.skip_speculator_proposal
+    assert not output.zero_next_draft_req_ids
+
+
+@pytest.mark.parametrize("queued_update", [False, True])
+def test_uno_tail_resets_for_next_streaming_input_turn(
+    uno_scheduler_factory, queued_update
+):
+    """Both streaming continuation callers give the next turn a fresh tail."""
+    scheduler = uno_scheduler_factory(async_scheduling=False)
+    (request,) = create_requests(
+        num_requests=1, num_tokens=3, max_tokens=5, block_size=4
+    )
+    request.resumable = True
+    scheduler.add_request(request)
+    _model_output(scheduler, scheduler.schedule(), [[10]])
+    scheduler.update_draft_token_ids(
+        DraftTokenIds([request.request_id], [[11, 12, 13, 14]])
+    )
+    tail = scheduler.schedule()
+    assert tail.num_scheduled_tokens == {request.request_id: 1}
+    (continuation,) = create_requests(
+        num_requests=1, num_tokens=3, max_tokens=5, block_size=4
+    )
+    continuation.resumable = True
+    if queued_update:
+        scheduler.add_request(continuation)
+    _model_output(scheduler, tail, [[EOS_TOKEN_ID]])
+    if not queued_update:
+        assert request.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+        scheduler.add_request(continuation)
+    next_turn = scheduler.schedule()
+    assert next_turn.num_scheduled_tokens
+    assert not next_turn.skip_speculator_proposal
+    assert not next_turn.zero_next_draft_req_ids
 
 
 @pytest.mark.parametrize("num_accepted", [0, 3, 4])

@@ -3,7 +3,7 @@
 
 import os
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING
 
@@ -318,10 +318,13 @@ class SchedulerOutput:
     # Number of spec tokens to schedule for the next step.
     num_spec_tokens_to_schedule: int = 0
 
-    # A worker-side proposal after this target step cannot be consumed: every
-    # request scheduled in the batch has at most one output token remaining.
-    # This is deliberately batch-wide because the current speculator proposes
-    # one dense batch rather than an independently maskable set of rows.
+    # Uno rows whose next proposal has zero valid drafts. This is independent
+    # of the batch-wide K and persists even when a mixed batch still proposes.
+    zero_next_draft_req_ids: set[str] = field(default_factory=set)
+
+    # All scheduled Uno rows have zero next-draft validity, so the dense
+    # proposal can be skipped. Tail mode deliberately forgoes usable drafts;
+    # this flag is not an exact prediction of request termination.
     skip_speculator_proposal: bool = False
 
     # Launch-debug-only timing metadata.  These are ignored by scheduling and
