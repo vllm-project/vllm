@@ -2367,9 +2367,11 @@ def update_kv_cache_capacity(
     vllm_config.cache_config.kv_cache_size_tokens = num_tokens
     vllm_config.cache_config.kv_cache_max_concurrency = max_concurrency
     max_model_len = vllm_config.model_config.max_model_len
+    device_type = vllm_config.device_config.device_type
     logger.info_once(
-        "GPU KV cache size: %s tokens, "
+        "%s KV cache size: %s tokens, "
         "Maximum concurrency for %s tokens per request: %.2fx",
+        "GPU" if device_type == "cuda" else device_type.upper(),
         f"{num_tokens:,}",
         f"{max_model_len:,}",
         max_concurrency,
