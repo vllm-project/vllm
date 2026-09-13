@@ -151,9 +151,13 @@ class HunyuanA13BReasoningParser(ReasoningParser):
 
         def check_token_with_sequence(token):
             if self.current_state == "idle" or self.current_state == "think":
-                return (
-                    token == self.expected_sequence[self.sequence_index]
-                    or token == self.expected_sequence_side[self.sequence_index]
+                return token == self.expected_sequence[self.sequence_index] or (
+                    # The side sequence can be shorter than the main one
+                    # (response_start_ids_fast is six tokens against seven),
+                    # so length-check before indexing it, as check_last_token
+                    # below already does.
+                    self.sequence_index < len(self.expected_sequence_side)
+                    and token == self.expected_sequence_side[self.sequence_index]
                 )
             else:
                 return token == self.expected_sequence[self.sequence_index]
