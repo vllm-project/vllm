@@ -358,6 +358,10 @@ def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
         assert "DeepseekV32ForCausalLM" not in breakable_architectures
         assert "DeepseekV32MTPModel" not in breakable_architectures
         assert "GlmMoeDsaForCausalLM" not in breakable_architectures
+        # V4.1 cannot torch.compile and the ROCm sparse SWA backend only
+        # supports uniform-batch CUDA graphs, so it must opt in or the
+        # default FULL_AND_PIECEWISE serve path cannot start.
+        assert "DeepseekV41ForCausalLM" in breakable_architectures
 
         # The carve-out takes effect via the runner-selection property
         # (warning_once args must be hashable for its lru_cache).
