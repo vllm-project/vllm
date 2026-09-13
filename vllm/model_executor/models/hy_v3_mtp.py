@@ -31,6 +31,7 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
@@ -205,6 +206,7 @@ class HYV3MultiTokenPredictor(nn.Module):
         return logits
 
 
+@support_torch_compile
 class HYV3MTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
