@@ -186,6 +186,10 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
+    def supports_rswa(cls) -> bool:
+        return False
+
+    @classmethod
     def supports_non_causal(cls) -> bool:
         """Check if backend supports non-causal (bidirectional) attention
         for decoder models.
@@ -287,6 +291,7 @@ class AttentionBackend(ABC):
         use_pcp: bool = False,
         use_adaptive_verification: bool = False,
         use_dcp: bool = False,
+        use_rswa: bool = False,
     ) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
@@ -321,6 +326,8 @@ class AttentionBackend(ABC):
             invalid_reasons.append(f"attention type {attn_type} not supported")
         if has_sliding_window and not cls.supports_sliding_window():
             invalid_reasons.append("sliding window not supported")
+        if use_rswa and not cls.supports_rswa():
+            invalid_reasons.append("R-SWA not supported")
         if use_non_causal and not cls.supports_non_causal():
             invalid_reasons.append("non-causal attention not supported")
         if use_mla and use_non_causal and use_dcp and not cls.supports_non_causal_dcp():
@@ -853,6 +860,9 @@ class AttentionImplBase(ABC, Generic[T]):
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         pass
+
+    def get_impl_variants(self) -> tuple["AttentionImplBase", ...]:
+        return (self,)
 
     def prepare_for_batch(self, attn_metadata: T | None) -> None:
         """Prepare implementation-specific state for the current batch."""

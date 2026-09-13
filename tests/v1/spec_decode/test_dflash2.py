@@ -159,6 +159,7 @@ def test_dflash2_model_decoder_layer_cls(monkeypatch):
         model_config=SimpleNamespace(
             dtype=torch.float32,
             is_mm_prefix_lm=False,
+            rswa_window=None,
         ),
         kernel_config=SimpleNamespace(
             linear_backend="auto",
