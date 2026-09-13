@@ -160,6 +160,16 @@ FLASHINFER_MOE_EP_BACKENDS = frozenset(
 # moe_ep variants.
 MEGA_MOE_BACKENDS = frozenset({"deep_gemm_mega_moe"}) | FLASHINFER_MOE_EP_BACKENDS
 
+SparseIndexerTopkBackend = Literal[
+    "auto",
+    "deep_select",
+    "cooperative",
+    "persistent",
+    "per_row",
+    "flashinfer",
+    "torch",
+]
+
 # Architectures whose model code wires up the flashinfer moe_ep experts. MTP
 # and DSpark draft variants inherit the setting from these target models.
 FLASHINFER_MOE_EP_ARCHITECTURES = frozenset(
@@ -269,6 +279,21 @@ class KernelConfig:
                    running QDQ on activations.
     """
 
+    sparse_indexer_topk_backend: SparseIndexerTopkBackend = "auto"
+    """Backend for the DSA sparse indexer decode top-k kernel. Available options:
+
+    - "auto": The pre-existing chain (cooperative -> persistent -> per_row);
+      the other backends are opt-in
+    - "deep_select": Use DeepSelect kernels (SM100a/SM103a only)
+    - "cooperative": Use vLLM's cooperative_topk kernel
+    - "persistent": Use vLLM's persistent_topk kernel
+    - "per_row": Use vLLM's top_k_per_row_decode kernel
+    - "flashinfer": Use FlashInfer's top_k_ragged_transform kernel
+    - "torch": Use a plain torch.topk implementation (debug reference)
+
+    Explicit values raise RuntimeError when their constraints are not met.
+    """
+
     linear_backend: LinearBackend = "auto"
     """Backend for linear layer GEMM kernels. Available options:
 
@@ -308,6 +333,13 @@ class KernelConfig:
     @field_validator("linear_backend", mode="before")
     @classmethod
     def _normalize_linear_backend(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.lower().replace("-", "_")
+        return value
+
+    @field_validator("sparse_indexer_topk_backend", mode="before")
+    @classmethod
+    def _normalize_sparse_indexer_topk_backend(cls, value: Any) -> Any:
         if isinstance(value, str):
             return value.lower().replace("-", "_")
         return value
