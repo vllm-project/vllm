@@ -87,6 +87,8 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
     ) -> bool:
         if not marker_ids or len(marker_ids) > len(token_ids):
             return False
+        if len(marker_ids) == 1:
+            return marker_ids[0] in token_ids
         marker_len = len(marker_ids)
         return any(
             tuple(token_ids[i : i + marker_len]) == tuple(marker_ids)
