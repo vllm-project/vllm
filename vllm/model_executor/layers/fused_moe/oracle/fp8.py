@@ -519,7 +519,7 @@ def convert_to_fp8_moe_kernel_format(
         w13.is_shuffled = True
         w2.is_shuffled = True
     elif fp8_backend == Fp8MoeBackend.HUMMING:
-        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+        from vllm.model_executor.layers.quantization.utils.humming import (
             convert_to_humming_moe_kernel_format,
         )
 
@@ -641,7 +641,7 @@ def make_fp8_moe_quant_config(
         )
     elif fp8_backend == Fp8MoeBackend.HUMMING:
         from vllm.model_executor.layers.fused_moe import RoutedExperts
-        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+        from vllm.model_executor.layers.quantization.utils.humming import (
             get_humming_moe_quant_config,
         )
 

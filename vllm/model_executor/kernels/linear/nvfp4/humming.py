@@ -4,7 +4,7 @@
 import torch
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.utils.humming_utils import (
+from vllm.model_executor.layers.quantization.utils.humming import (
     apply_humming_linear,
     get_humming_linear_compute_config,
     prepare_humming_linear_layer_config,
@@ -40,9 +40,7 @@ class HummingNvFp4LinearKernel(NvFp4LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Route through humming's compressed-tensors nvfp4 loader (same path as
-        # the MoE oracle); the native group_tensor schema mishandles a scalar
-        # global scale.
+        # Reuse the CT loader for packed FP4 weights and tensor scales.
         quant_config = {
             "quant_method": "compressed-tensors",
             "format": "nvfp4-pack-quantized",
@@ -60,7 +58,21 @@ class HummingNvFp4LinearKernel(NvFp4LinearKernel):
         layer.weight_global_scale = torch.nn.Parameter(
             1.0 / layer.weight_global_scale, requires_grad=False
         )
-        self.layer_config = prepare_humming_linear_layer_config(layer, quant_config)
+        input_quant_config = None
+        if hasattr(layer, "input_global_scale"):
+            layer.input_scale_2 = torch.nn.Parameter(
+                layer.input_global_scale.reshape(-1), requires_grad=False
+            )
+            input_quant_config = {
+                "quant_method": "humming",
+                "dtype": "float4e2m1",
+                "scale_dtype": "float8e4m3",
+                "group_size": 16,
+                "quant_mode": "static_tensor_dynamic_group",
+            }
+        self.layer_config = prepare_humming_linear_layer_config(
+            layer, quant_config, input_quant_config
+        )
         self.compute_config = get_humming_linear_compute_config()
         self.locks = torch.zeros(1024, dtype=torch.int32, device=layer.weight.device)
 
