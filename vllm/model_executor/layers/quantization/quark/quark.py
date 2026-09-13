@@ -32,6 +32,7 @@ from vllm.model_executor.layers.quantization.quark.schemes import (
     QuarkOCP_MX,
     QuarkScheme,
     QuarkW4A8_MXFP4_FP8,
+    QuarkW4A16Int4,
     QuarkW8A8Fp8,
     QuarkW8A8Fp8PerBlock,
     QuarkW8A8Int8,
@@ -39,6 +40,7 @@ from vllm.model_executor.layers.quantization.quark.schemes import (
 from vllm.model_executor.layers.quantization.quark.utils import (
     QuarkQTensorHint,
     deep_compare,
+    parse_w4a16_int4_weight_config,
     should_ignore_layer,
 )
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
@@ -54,6 +56,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kInt4Static,
+    kInt4Static32,
+    kInt4Static32Asym,
+    kInt4StaticAsym,
     kInt4W4A8StaticChannelSym,
     kInt8DynamicTensorAsym,
     kInt8DynamicTensorSym,
@@ -173,8 +179,10 @@ class QuarkConfig(QuantizationConfig):
         quant_config_with_hf_to_vllm_mapper: dict[str, Any] = {}
 
         for k, v in self.quant_config.items():
-            if isinstance(v, list):
+            if isinstance(v, list) and all(isinstance(item, str) for item in v):
                 quant_config_with_hf_to_vllm_mapper[k] = hf_to_vllm_mapper.apply_list(v)
+            elif isinstance(v, list):
+                quant_config_with_hf_to_vllm_mapper[k] = v
             elif isinstance(v, dict):
                 quant_config_with_hf_to_vllm_mapper[k] = hf_to_vllm_mapper.apply_dict(v)
             else:
@@ -216,6 +224,9 @@ class QuarkConfig(QuantizationConfig):
                 weight_quant_key=weight_quant_key,
                 activation_quant_key=activation_quant_key,
                 dynamic_mxfp4_quant=dynamic_mxfp4_quant,
+                weight_config=self._find_matched_config(prefix, type(layer)).get(
+                    "weight"
+                ),
             )
             layer.scheme = scheme
             return QuarkLinearMethod(self)
@@ -228,6 +239,7 @@ class QuarkConfig(QuantizationConfig):
                 method_cls=method_cls,
                 weight_quant_key=weight_quant_key,
                 activation_quant_key=activation_quant_key,
+                layer_name=prefix,
             )
 
         return None
@@ -573,6 +585,26 @@ class QuarkConfig(QuantizationConfig):
             )
         return QuantKeyMatch(True, activation_quant_key, weight_quant_key)
 
+    def _is_w4a16_int4(
+        self,
+        weight_quant: dict[str, Any] | None,
+        input_quant: dict[str, Any] | None,
+    ) -> QuantKeyMatch:
+        if weight_quant is None or input_quant is not None:
+            return QuantKeyMatch(False, None, None)
+
+        is_int4 = weight_quant.get("dtype") in ("int4", "uint4")
+        is_packed = self.pack_method in ("order", "reorder")
+        if not (is_int4 and is_packed):
+            return QuantKeyMatch(False, None, None)
+
+        group_size, is_symmetric = parse_w4a16_int4_weight_config(weight_quant)
+        if is_symmetric:
+            weight_key = kInt4Static32 if group_size == 32 else kInt4Static
+        else:
+            weight_key = kInt4Static32Asym if group_size == 32 else kInt4StaticAsym
+        return QuantKeyMatch(True, None, weight_key)
+
     def _is_w4a8_mxfp4_fp8(
         self,
         weight_quant: dict[str, Any] | None,
@@ -892,6 +924,12 @@ class QuarkConfig(QuantizationConfig):
                 match.activation_quant_key,
                 QuarkW8A8Int8,
             )
+        elif match := self._is_w4a16_int4(weight_config, input_config):
+            return (
+                match.weight_quant_key,
+                match.activation_quant_key,
+                QuarkW4A16Int4,
+            )
         elif match := self._is_w4a8_mxfp4_fp8(weight_config, input_config):
             return (
                 match.weight_quant_key,
@@ -921,6 +959,7 @@ class QuarkConfig(QuantizationConfig):
         weight_quant_key: QuantKey | None,
         activation_quant_key: QuantKey | None,
         dynamic_mxfp4_quant: bool = False,
+        weight_config: dict[str, Any] | None = None,
     ) -> "QuarkScheme":
         """Construct a Quark scheme selected by get_scheme_cls."""
         if scheme_cls not in (
@@ -930,8 +969,23 @@ class QuarkConfig(QuantizationConfig):
             QuarkOCP_MX,
             QuarkNVFP4,
             QuarkW4A8_MXFP4_FP8,
+            QuarkW4A16Int4,
         ):
             raise AssertionError(f"Unsupported Quark scheme class: {scheme_cls}")
+
+        scheme: QuarkScheme
+        if scheme_cls is QuarkW4A16Int4:
+            normalized_weight_config = self._unwrap_single_quant_config(weight_config)
+            assert normalized_weight_config is not None
+            assert weight_quant_key is not None
+            scheme = QuarkW4A16Int4(
+                weight_quant_key=weight_quant_key,
+                activation_quant_key=activation_quant_key,
+                pack_method=self.pack_method,
+                weight_config=normalized_weight_config,
+            )
+            self._check_scheme_supported(scheme.get_min_capability())
+            return scheme
 
         kwargs: dict[str, Any] = {"activation_quant_key": activation_quant_key}
 
