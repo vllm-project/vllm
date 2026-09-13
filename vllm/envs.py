@@ -267,6 +267,8 @@ if TYPE_CHECKING:
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC: bool = False
+    VLLM_MNNVL_REDUCE_SCATTER_MAX_SIZE_BYTES_MB: int | None = None
+    VLLM_MNNVL_ALL_GATHER_MAX_SIZE_BYTES_MB: int | None = None
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
     VLLM_ENABLE_STARTUP_PLAN: bool = False
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
@@ -1881,6 +1883,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # integration is being qualified.
     "VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC": lambda: bool(
         int(os.getenv("VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC", "0"))
+    ),
+    # Maximum message size (MiB) routed through the MNNVL multicast Lamport
+    # reduce-scatter path. Larger messages fall back to the NCCL reduce-scatter.
+    # Unset keeps the 16 MiB default; raising it allocates a larger symmetric
+    # staging buffer (6x per rank).
+    "VLLM_MNNVL_REDUCE_SCATTER_MAX_SIZE_BYTES_MB": lambda: maybe_convert_int(
+        os.environ.get("VLLM_MNNVL_REDUCE_SCATTER_MAX_SIZE_BYTES_MB", None)
+    ),
+    # Maximum per-message size (MiB) routed through the MNNVL multicast Lamport
+    # all-gather path. Unset keeps the per-world-size defaults (2-8 MiB);
+    # raising it allocates a larger symmetric staging buffer (6x per rank
+    # times world size).
+    "VLLM_MNNVL_ALL_GATHER_MAX_SIZE_BYTES_MB": lambda: maybe_convert_int(
+        os.environ.get("VLLM_MNNVL_ALL_GATHER_MAX_SIZE_BYTES_MB", None)
     ),
     # Experimental: use this to enable MCP tool calling for non harmony models
     "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT": lambda: bool(
