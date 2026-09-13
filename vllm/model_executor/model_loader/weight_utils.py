@@ -1286,8 +1286,24 @@ def _fastsafetensors_memory_budget(
             budget, reason = 0, "free memory unreadable"
 
     if pg.size() > 1 and torch.distributed.is_initialized():
-        agreed = torch.tensor([budget], dtype=torch.int64, device=device)
-        torch.distributed.all_reduce(agreed, op=torch.distributed.ReduceOp.MIN)
+        # Agree on the CPU/gloo group: WORLD often has no NCCL communicator at
+        # this point (compute runs on the TP/DCP/EP subgroups), and creating one
+        # costs pinned host buffers per proxy connection for its lifetime.
+        agree_group = None
+        try:
+            from vllm.distributed.parallel_state import get_world_group
+
+            agree_group = get_world_group().cpu_group
+        except Exception:
+            agree_group = None
+        if agree_group is not None:
+            agreed = torch.tensor([budget], dtype=torch.int64)
+            torch.distributed.all_reduce(
+                agreed, op=torch.distributed.ReduceOp.MIN, group=agree_group
+            )
+        else:
+            agreed = torch.tensor([budget], dtype=torch.int64, device=device)
+            torch.distributed.all_reduce(agreed, op=torch.distributed.ReduceOp.MIN)
         agreed_budget = int(agreed.item())
         if agreed_budget != budget:
             budget, reason = agreed_budget, "agreed across ranks"
