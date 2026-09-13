@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 import torch
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -938,6 +939,25 @@ class Platform:
 
         if cache_config.mamba_cache_mode == "align":
             cache_config.mamba_block_size = cache_config.block_size
+
+        # Under BI, FLA chunks on 64. If hybrid page alignment picked a
+        # block_size not divisible by 64, lcm(64, block) becomes 2*block
+        # (e.g. 1056 → 2112) and short prefixes never hit. Round up so the
+        # align grid itself is a 64-multiple (1056 → 1088, lcm=1088).
+        if envs.VLLM_BATCH_INVARIANT and cache_config.mamba_cache_mode == "align":
+            fla_chunk = 64  # FLA_CHUNK_SIZE
+            bs = cache_config.block_size
+            rounded = ((bs + fla_chunk - 1) // fla_chunk) * fla_chunk
+            if rounded != bs:
+                cache_config.block_size = rounded
+                cache_config.mamba_block_size = rounded
+                logger.info(
+                    "Raised hybrid block_size from %d to %d so it is a "
+                    "multiple of FLA chunk size %d under batch invariance.",
+                    bs,
+                    rounded,
+                    fla_chunk,
+                )
 
         # Pad mamba page size to exactly match attention page size
         attn_page_size = cache_config.block_size * attn_page_size_1_token
