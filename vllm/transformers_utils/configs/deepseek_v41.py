@@ -68,9 +68,3 @@ class DeepseekV41Config(PretrainedConfig):
         # in-kernel, so mm-prefix ranges longer than sliding_window must be
         # kept (they are only consumed by those kernels).
         self.mm_prefix_clamp_sliding_window = vision_n_layers > 0
-        # The visibility span covers the image block [IMAGE_START,
-        # IMAGE_END]; the mm placeholder additionally carries a leading
-        # compressor-alignment pad of ``COMPRESS_PAD_TO - 1 - offset %
-        # COMPRESS_PAD_TO`` tokens (see common/mm_preprocess.py), with
-        # COMPRESS_PAD_TO = 2 for v4.1's ratio-2 compressors.
-        self.mm_prefix_span_leading_pad_modulus = 2 if vision_n_layers > 0 else 0
