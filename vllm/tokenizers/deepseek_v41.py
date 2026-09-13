@@ -67,9 +67,10 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
                     conversation.insert(0, system)
                 system["tools"] = tools
 
-            thinking = bool(kwargs.get("thinking") or kwargs.get("enable_thinking"))
-            if "thinking" not in kwargs and "enable_thinking" not in kwargs:
-                thinking = True
+            thinking = kwargs.get("enable_thinking")
+            if thinking is None:
+                thinking = kwargs.get("thinking")
+            thinking = True if thinking is None else bool(thinking)
             effort = kwargs.get("reasoning_effort")
             if effort == "none":
                 thinking = False
