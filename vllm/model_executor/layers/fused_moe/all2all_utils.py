@@ -258,7 +258,7 @@ def maybe_make_prepare_finalize(
             and quant_config.is_block_quantized
         )
         all_to_all_args = dict(
-            num_max_tokens_per_rank=moe.max_num_tokens,
+            num_max_tokens_per_rank=moe.deepep_v2_max_num_tokens_per_rank,
             hidden=moe.hidden_dim,
             num_topk=moe.experts_per_token,
             num_experts=moe.num_experts,
@@ -275,6 +275,7 @@ def maybe_make_prepare_finalize(
             rank_expert_offset=all2all_manager.rank * moe.num_local_experts,
             num_experts=moe.num_experts,
             num_topk=moe.experts_per_token,
+            sp_size=moe.sp_size,
             use_fp8_dispatch=use_fp8_dispatch,
             use_cudagraph=use_cudagraph,
         )
