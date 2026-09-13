@@ -78,6 +78,17 @@ logger = init_logger(__name__)
 
 
 class Scheduler(SchedulerInterface):
+    # Once a KV-blocked waiting request has been bypassed this many times by
+    # younger requests admitted from `self.waiting`, admission of further
+    # such requests pauses (the blocked request itself is still retried
+    # every step for free) until it is finally served. This bounds worst-
+    # case delay under a sustained stream of younger arrivals; it does not
+    # by itself guarantee progress if the bypassing requests it already
+    # admitted never finish (e.g. an unbounded-length generation) -- only
+    # reclaiming their blocks (preemption) could close that gap.
+    # See: https://github.com/vllm-project/vllm/issues/31731
+    MAX_KV_BLOCKED_BYPASSES = 8
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -203,6 +214,11 @@ class Scheduler(SchedulerInterface):
         self.waiting = create_request_queue(self.policy)
         # requests skipped in waiting flow due async deps or constraints.
         self.skipped_waiting = create_request_queue(self.policy)
+        # Tracks, per request_id, how many younger requests have been
+        # admitted from `self.waiting` while this request sat KV-blocked at
+        # the head of the queue. Cleared when the request is finally
+        # admitted or removed. See MAX_KV_BLOCKED_BYPASSES above.
+        self._kv_blocked_bypass_counts: dict[str, int] = {}
         self.running: list[Request] = []
 
         # The request IDs that are finished in between the previous and the
@@ -855,6 +871,13 @@ class Scheduler(SchedulerInterface):
         # Next, schedule the WAITING requests.
         if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
             step_skipped_waiting = create_request_queue(self.policy)
+            # Tracks whether any waiting request was skipped this step because
+            # it couldn't allocate KV blocks (as opposed to other skip reasons
+            # like blocked status or LoRA limits). `self.waiting` can end up
+            # empty after such a skip -- the request moves to
+            # `step_skipped_waiting` instead -- so `bool(self.waiting)` alone
+            # would miss it when updating `prefill_capacity_bound` below.
+            waiting_capacity_bound = False
 
             while (self.waiting or self.skipped_waiting) and token_budget > 0:
                 if input_budget <= draft_slots:
@@ -867,6 +890,18 @@ class Scheduler(SchedulerInterface):
 
                 request_queue = self._select_waiting_queue_for_scheduling()
                 assert request_queue is not None
+
+                if request_queue is self.waiting and any(
+                    count >= self.MAX_KV_BLOCKED_BYPASSES
+                    for count in self._kv_blocked_bypass_counts.values()
+                ):
+                    # A KV-blocked request has already been bypassed the max
+                    # number of times; stop admitting further waiting-queue
+                    # requests so its bypassers get a chance to finish and
+                    # free KV blocks, rather than bypassing it indefinitely.
+                    # The blocked request itself is still retried every step
+                    # via `self.skipped_waiting`, at no cost to this cap.
+                    break
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
@@ -1178,7 +1213,13 @@ class Scheduler(SchedulerInterface):
                     # manager
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
-                    break
+                    # NOTE: Mitigates head-of-line blocking under KV cache pressure.
+                    # See: https://github.com/vllm-project/vllm/issues/31731
+                    request_queue.pop_request()
+                    step_skipped_waiting.prepend_request(request)
+                    waiting_capacity_bound = True
+                    self._kv_blocked_bypass_counts.setdefault(request_id, 0)
+                    continue
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
@@ -1207,6 +1248,17 @@ class Scheduler(SchedulerInterface):
                     )
 
                 request = request_queue.pop_request()
+                if self._kv_blocked_bypass_counts:
+                    if request_queue is self.waiting:
+                        # This admission came from the "fresh" queue while
+                        # other requests remain KV-blocked -- it bypassed
+                        # each of them.
+                        for blocked_id in self._kv_blocked_bypass_counts:
+                            self._kv_blocked_bypass_counts[blocked_id] += 1
+                    else:
+                        # This request was itself a tracked KV-blocked head,
+                        # now finally admitted -- its bypass budget resets.
+                        self._kv_blocked_bypass_counts.pop(request_id, None)
                 if load_kv_async:
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
@@ -1295,7 +1347,7 @@ class Scheduler(SchedulerInterface):
             # DP prefill balancing: on a step that admitted prefills (release),
             # record whether it was capacity-bound.
             if not defer_prefills:
-                self.prefill_capacity_bound = bool(self.waiting)
+                self.prefill_capacity_bound = bool(self.waiting) or waiting_capacity_bound
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
@@ -2561,6 +2613,8 @@ class Scheduler(SchedulerInterface):
         if waiting_requests_to_remove:
             self.waiting.remove_requests(waiting_requests_to_remove)
             self.skipped_waiting.remove_requests(waiting_requests_to_remove)
+            for removed_request in waiting_requests_to_remove:
+                self._kv_blocked_bypass_counts.pop(removed_request.request_id, None)
 
         # Second pass: set status and free requests
         for request in valid_requests:
