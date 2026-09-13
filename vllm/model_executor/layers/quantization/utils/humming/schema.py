@@ -19,6 +19,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     ScaleDesc,
 )
 from vllm.platforms import current_platform
+from vllm.scalar_type import scalar_types
 from vllm.utils.import_utils import has_humming
 
 if TYPE_CHECKING:
@@ -36,6 +37,8 @@ if has_humming():
     _HUMMING_TO_QUANT_DTYPE: dict[humming_dtypes.DataType, Any] = {
         humming_dtypes.float4e0m3: FP4_DTYPE,
         humming_dtypes.float4e2m1: FP4_DTYPE,
+        humming_dtypes.float6e2m3: scalar_types.float6_e2m3f,
+        humming_dtypes.float6e3m2: scalar_types.float6_e3m2f,
         humming_dtypes.float8e3m4: FP8_DTYPE,
         humming_dtypes.float8e4m3: FP8_DTYPE,
         humming_dtypes.float8e5m2: torch.float8_e5m2,
@@ -138,13 +141,13 @@ def input_schema_to_quant_key(
                 param_dtype = torch.float16
 
     schema = schema.to_humming_schema(param_dtype)
-    if schema.a_dtype is None or schema.a_dtype.num_bits >= 16:
+    if schema.input_dtype is None or schema.input_dtype.num_bits >= 16:
         return None
 
     mode = schema.input_quant_mode
     if mode == InputQuantizationMode.Disabled:
         return None
-    dtype = _HUMMING_TO_QUANT_DTYPE[schema.a_dtype]
+    dtype = _HUMMING_TO_QUANT_DTYPE[schema.input_dtype]
 
     gs = schema.input_scale_group_size
     group_shape = GroupShape(row=1, col=gs) if gs > 0 else GroupShape.PER_TOKEN
@@ -229,7 +232,7 @@ def quant_key_to_input_schema(key: QuantKey | None) -> "HummingInputSchema":
         raise ValueError("Humming tensor and token input scales must be float32")
 
     return HummingInputSchema(
-        a_dtype=quant_dtypes[key.dtype],
+        input_dtype=quant_dtypes[key.dtype],
         input_scale_group_size=group_size,
         input_scale_dtype=scale_dtypes[scale.dtype],
         input_quant_mode=mode,

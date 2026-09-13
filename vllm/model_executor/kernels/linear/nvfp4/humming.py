@@ -8,7 +8,9 @@ from vllm.model_executor.layers.quantization.utils.humming import (
     apply_humming_linear,
     get_humming_linear_compute_config,
     prepare_humming_linear_layer_config,
+    quant_key_to_input_schema,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Dynamic
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_humming
 
@@ -58,20 +60,15 @@ class HummingNvFp4LinearKernel(NvFp4LinearKernel):
         layer.weight_global_scale = torch.nn.Parameter(
             1.0 / layer.weight_global_scale, requires_grad=False
         )
-        input_quant_config = None
+        input_quant_key = None
         if hasattr(layer, "input_global_scale"):
             layer.input_scale_2 = torch.nn.Parameter(
                 layer.input_global_scale.reshape(-1), requires_grad=False
             )
-            input_quant_config = {
-                "quant_method": "humming",
-                "dtype": "float4e2m1",
-                "scale_dtype": "float8e4m3",
-                "group_size": 16,
-                "quant_mode": "static_tensor_dynamic_group",
-            }
+            input_quant_key = kNvfp4Dynamic
+        input_schema = quant_key_to_input_schema(input_quant_key)
         self.layer_config = prepare_humming_linear_layer_config(
-            layer, quant_config, input_quant_config
+            layer, quant_config, input_schema=input_schema
         )
         self.compute_config = get_humming_linear_compute_config()
         self.locks = torch.zeros(1024, dtype=torch.int32, device=layer.weight.device)

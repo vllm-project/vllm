@@ -8,8 +8,8 @@ from vllm.model_executor.layers.quantization.utils.humming import (
     convert_linear_layer_to_humming_standard,
     get_humming_linear_compute_config,
     prepare_humming_linear_layer_config,
+    quant_key_to_input_schema,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp4Dynamic
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_humming
 
@@ -36,8 +36,10 @@ class HummingMxFp4LinearKernel(MxFp4LinearKernel):
 
     @classmethod
     def can_implement(cls, config: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
-        if config.activation_quant_key not in (None, kMxfp4Dynamic):
-            return False, "only supports MXFP4 dynamic or unquantized activations"
+        try:
+            quant_key_to_input_schema(config.activation_quant_key)
+        except ValueError as error:
+            return False, str(error)
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -53,16 +55,9 @@ class HummingMxFp4LinearKernel(MxFp4LinearKernel):
         }
 
         convert_linear_layer_to_humming_standard(layer=layer, name_map=name_map)
-        input_quant_config = None
-        if self.config.activation_quant_key == kMxfp4Dynamic:
-            input_quant_config = {
-                "quant_method": "humming",
-                "dtype": "float4e2m1",
-                "scale_dtype": "float8e8m0",
-                "group_size": 32,
-            }
+        input_schema = quant_key_to_input_schema(self.config.activation_quant_key)
         self.layer_config = prepare_humming_linear_layer_config(
-            layer, quant_config, input_quant_config
+            layer, quant_config, input_schema=input_schema
         )
         self.compute_config = get_humming_linear_compute_config()
         self.locks = torch.zeros(1024, dtype=torch.int32, device=layer.weight.device)

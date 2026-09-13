@@ -64,7 +64,7 @@ def test_humming_fp8_input_schema_to_quant_key(group_size, expected_key):
     from vllm.utils.humming import dtypes as humming_dtypes
 
     schema = HummingInputSchema(
-        a_dtype=humming_dtypes.float8e4m3,
+        input_dtype=humming_dtypes.float8e4m3,
         input_scale_group_size=group_size,
     )
     assert _humming_input_schema_to_quant_key(schema) == expected_key

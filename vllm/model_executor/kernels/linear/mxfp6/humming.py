@@ -8,15 +8,11 @@ from vllm.model_executor.layers.quantization.utils.humming import (
     convert_linear_layer_to_humming_standard,
     get_humming_linear_compute_config,
     prepare_humming_linear_layer_config,
+    quant_key_to_input_schema,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    kFp8DynamicTokenSym,
-    kMxfp4Dynamic,
-    kMxfp6E2M3Dynamic,
     kMxfp6E2M3Static,
-    kMxfp6E3M2Dynamic,
     kMxfp6E3M2Static,
-    kMxfp8Dynamic,
 )
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_humming
@@ -67,25 +63,9 @@ class HummingMxFp6LinearKernel(MxFp6LinearKernel):
             layer=layer,
             name_map={"weight": "weight", "weight_scale": "weight_scale"},
         )
-        input_quant_config = None
-        key = self.config.activation_quant_key
-        if key is not None:
-            input_dtype = {
-                kMxfp4Dynamic: "float4e2m1",
-                kMxfp6E2M3Dynamic: "float6e2m3",
-                kMxfp6E3M2Dynamic: "float6e3m2",
-                kMxfp8Dynamic: "float8e4m3",
-                kFp8DynamicTokenSym: "float8e4m3",
-            }[key]
-            scale_dtype = "float32" if key == kFp8DynamicTokenSym else "float8e8m0"
-            input_quant_config = {
-                "quant_method": "humming",
-                "dtype": input_dtype,
-                "group_size": 0 if key == kFp8DynamicTokenSym else 32,
-                "scale_dtype": scale_dtype,
-            }
+        input_schema = quant_key_to_input_schema(self.config.activation_quant_key)
         self.layer_config = prepare_humming_linear_layer_config(
-            layer, quant_config, input_quant_config
+            layer, quant_config, input_schema=input_schema
         )
         self.compute_config = get_humming_linear_compute_config()
         self.locks = torch.zeros(1024, dtype=torch.int32, device=layer.weight.device)

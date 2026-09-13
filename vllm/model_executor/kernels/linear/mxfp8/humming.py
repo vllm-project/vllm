@@ -8,7 +8,9 @@ from vllm.model_executor.layers.quantization.utils.humming import (
     convert_linear_layer_to_humming_standard,
     get_humming_linear_compute_config,
     prepare_humming_linear_layer_config,
+    quant_key_to_input_schema,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_humming
 
@@ -50,14 +52,9 @@ class HummingMxfp8LinearKernel(Mxfp8LinearKernel):
         }
 
         convert_linear_layer_to_humming_standard(layer=layer, name_map=name_map)
-        input_quant_config = {
-            "quant_method": "humming",
-            "dtype": "float8e4m3",
-            "scale_dtype": "float8e8m0",
-            "group_size": 32,
-        }
+        input_schema = quant_key_to_input_schema(kMxfp8Dynamic)
         self.layer_config = prepare_humming_linear_layer_config(
-            layer, quant_config, input_quant_config
+            layer, quant_config, input_schema=input_schema
         )
         self.compute_config = get_humming_linear_compute_config()
         self.locks = torch.zeros(1024, dtype=torch.int32, device=layer.weight.device)

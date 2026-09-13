@@ -14,7 +14,7 @@ from vllm.model_executor.layers.quantization.utils.humming.schema import (
 )
 
 if TYPE_CHECKING:
-    from vllm.utils.humming import LayerConfig
+    from vllm.utils.humming import BaseInputSchema, LayerConfig
 
 
 def convert_linear_layer_to_humming_standard(
@@ -57,6 +57,8 @@ def prepare_humming_linear_layer_config(
     layer: LinearBase,
     quant_config: dict,
     input_quant_config: dict | None = None,
+    *,
+    input_schema: "BaseInputSchema | None" = None,
 ) -> "LayerConfig":
     from vllm.utils.humming import (
         BaseInputSchema,
@@ -67,10 +69,11 @@ def prepare_humming_linear_layer_config(
     )
 
     weight_schema = BaseWeightSchema.from_config(quant_config)
-    if input_quant_config is not None:
-        input_schema = BaseInputSchema.from_config(input_quant_config)
-    else:
-        input_schema = HummingInputSchema()
+    if input_schema is None:
+        if input_quant_config is not None:
+            input_schema = BaseInputSchema.from_config(input_quant_config)
+        else:
+            input_schema = HummingInputSchema()
 
     # ReplicatedLinear has no TP partitioning and so does not set
     # input_size_per_partition; for it that is just input_size. Use hasattr
