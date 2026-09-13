@@ -15,7 +15,7 @@ import pytest
 import torch
 
 from vllm.v1.worker.gpu.input_batch import InputBuffers
-from vllm.v1.worker.gpu.launch_key_debug import _LaunchKeyReceipts
+from vllm.v1.worker.gpu.launch_key_debug import _LaunchKeyReceipts, _object_fields
 from vllm.v1.worker.gpu.spec_decode.uno import (
     UNO_LORA_ID,
     UnoSpeculator,
@@ -808,6 +808,20 @@ def test_launch_key_receipt_compares_first_served_key_to_all_warmup_keys():
         )
         is None
     )
+
+
+@pytest.mark.skip_global_cleanup
+def test_launch_key_receipt_serializes_slots_backed_options():
+    """Triton 3.8 options use slots, not ``__dict__``."""
+
+    class Options:
+        __slots__ = ("num_stages", "num_warps")
+
+        def __init__(self) -> None:
+            self.num_stages = 3
+            self.num_warps = 4
+
+    assert _object_fields(Options()) == {"num_stages": 3, "num_warps": 4}
 
 
 @pytest.mark.skip_global_cleanup

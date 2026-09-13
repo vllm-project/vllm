@@ -24,6 +24,7 @@ from collections import defaultdict
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from contextvars import ContextVar
+from dataclasses import asdict, is_dataclass
 from typing import Any, ParamSpec, TypeVar
 
 import torch
@@ -65,6 +66,24 @@ def _canonical_json(value: Mapping[str, Any]) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=repr)
 
 
+def _object_fields(value: Any) -> Any:
+    """Serialize both dict-backed and slots-backed Triton option objects."""
+    if is_dataclass(value):
+        return _json_value(asdict(value))
+    try:
+        return _json_value(vars(value))
+    except TypeError:
+        slots = getattr(type(value), "__slots__", ())
+        if isinstance(slots, str):
+            slots = (slots,)
+        fields = {
+            slot: _json_value(getattr(value, slot))
+            for slot in slots
+            if isinstance(slot, str) and hasattr(value, slot)
+        }
+        return fields or repr(value)
+
+
 def _launch_record(
     kernel_name: str,
     kernel: Any,
@@ -104,7 +123,7 @@ def _launch_record(
         "cache_hit_before_launch": key in kernel_cache,
         "grid": _json_value(grid),
         "kernel": kernel_name,
-        "options": _json_value(vars(options)),
+        "options": _object_fields(options),
         "specialization": _json_value(specialization),
         "target": repr(target),
         "triton_key": str(key),
