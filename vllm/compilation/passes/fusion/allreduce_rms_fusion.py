@@ -100,33 +100,6 @@ if hasattr(torch.ops._C, "scaled_fp4_quant"):
     STATIC_FP4_QUANT_OP = torch.ops._C.scaled_fp4_quant.out
 
 # Max size of the input tensor per world size per device capability
-# to use flashinfer fused allreduce
-FI_ALLREDUCE_FUSION_MAX_SIZE_MB: dict[int, dict[int, float]] = {
-    90: {
-        2: 64,  # 64MB
-        4: 2,  # 2MB
-        8: 0.5,  # 0.5MB
-    },
-    100: {
-        2: 64,  # 64MB
-        4: 32,  # 32MB
-        8: 1,  # 1MB
-        16: 64,  # 64MB (mnnvl multi-node)
-    },
-    103: {
-        2: 64,  # 64MB
-        4: 64,  # 64MB
-        8: 4,  # 4MB
-        16: 64,  # 64MB (mnnvl multi-node)
-    },
-    107: {
-        2: 64,  # 64MB
-        4: 64,  # 64MB
-        8: 2,  # 2MB
-    },
-}
-
-# Max size of the input tensor per world size per device capability
 # to use flashinfer one shot fused allreduce
 # OneShot max size is at most 64MB / world size (FlashInfer restriction)
 _FI_ALLREDUCE_ONE_SHOT_MAX_SIZES_MB: dict[int, dict[int, float]] = {
