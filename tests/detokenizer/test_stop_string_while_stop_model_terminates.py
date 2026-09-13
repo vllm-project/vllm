@@ -84,7 +84,7 @@ def test_stop_string_while_stop_token_terminates(include_stop_str_in_output: boo
     # Simulate that the last token ('Z') is a stop token (stop_terminated=True).
     result = detok.update(new_token_ids=token_ids, stop_terminated=True)
 
-    # The update should not report a stop string
+    # The update should report the matched stop string.
     assert result == stop_string
 
     # Output text should reflect stop-string handling:
@@ -99,3 +99,22 @@ def test_stop_string_while_stop_token_terminates(include_stop_str_in_output: boo
     # get_next_output_text should return the full text when finished=True.
     # (Buffering only applies during streaming when finished=False.)
     assert detok.get_next_output_text(finished=True, delta=False) == expected_text
+
+
+def test_stop_string_trims_speculative_overflow(include_stop_str_in_output: bool):
+    token_ids = [ord(c) for c in "abcdef"]
+    stop_string = "cd"
+    expected_token_ids = [ord(c) for c in "abcd"]
+
+    req = _make_request(
+        stop=[stop_string], include_stop_str_in_output=include_stop_str_in_output
+    )
+    detok = _DummyDetokenizer(req)
+
+    result = detok.update(new_token_ids=token_ids, stop_terminated=False)
+
+    assert result == stop_string
+    expected_text = "abcd" if include_stop_str_in_output else "ab"
+    assert detok.output_text == expected_text
+    assert detok.output_token_ids == expected_token_ids
+    assert detok.num_stop_overflow_tokens == 2
