@@ -44,6 +44,7 @@ def test_engine_core_process_shutdown_timeout(
     manager._request_shutdown_timeout = request_timeout
     manager.manager_stopped = Event()
     manager.processes = [object()]
+    manager._death_writers = []
     detach_results = iter((object(), None))
     manager._finalizer = SimpleNamespace(detach=lambda: next(detach_results))
 

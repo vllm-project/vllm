@@ -8,7 +8,9 @@ import multiprocessing
 import os
 import signal
 import sys
+import threading
 from collections.abc import Callable, Iterator
+from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import TextIO
 
@@ -276,6 +278,35 @@ def kill_process_tree(pid: int):
     # Finally kill the parent
     with contextlib.suppress(ProcessLookupError):
         os.kill(pid, signal.SIGKILL)
+
+
+def monitor_parent_death(
+    death_pipe: Connection | None,
+    on_parent_death: Callable[[], None],
+    *,
+    name: str = "DeathPipeMonitor",
+) -> threading.Thread | None:
+    """Run ``on_parent_death`` on a daemon thread once ``death_pipe`` hits EOF.
+
+    The parent keeps the write end open and never writes to it; the kernel
+    closes it when the parent exits by any means, including SIGKILL. Forked
+    siblings must close their inherited copy of the write end.
+    """
+    if death_pipe is None:
+        return None
+
+    def death_pipe_monitor():
+        try:
+            # This will block until parent process exits (pipe closes)
+            death_pipe.recv()
+        except EOFError:
+            on_parent_death()
+        except Exception as e:
+            logger.warning("Death monitoring error: %s", e)
+
+    thread = threading.Thread(target=death_pipe_monitor, daemon=True, name=name)
+    thread.start()
+    return thread
 
 
 # Resource utilities
