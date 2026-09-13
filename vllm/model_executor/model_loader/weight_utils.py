@@ -1341,6 +1341,10 @@ def initialize_single_dummy_weight(
     if param.device.type == "meta":
         return  # deferred to finalize_layerwise_processing (e.g. online quant)
 
+    if (dummy_weight_value := getattr(param, "dummy_weight_value", None)) is not None:
+        param.fill_(dummy_weight_value)
+        return
+
     if not torch.is_floating_point(param):
         if current_platform.is_rocm():
             # On ROCm, integer params (e.g. GPTQ qweight/qzeros) are left
