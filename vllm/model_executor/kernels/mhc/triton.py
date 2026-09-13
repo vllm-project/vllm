@@ -141,6 +141,129 @@ def _hc_collapse_triton_fake(x: Tensor, pre_mix: Tensor) -> Tensor:
     return torch.empty(x.shape[0], x.shape[2], dtype=x.dtype, device=x.device)
 
 
+@triton.jit
+def _mhc_pre_mix_kernel(
+    gemm_ptr,
+    sqrsum_ptr,
+    hc_scale_ptr,
+    hc_base_ptr,
+    out_ptr,
+    splitk,
+    hc_mult: tl.constexpr,
+    gemm_stride_k,
+    gemm_stride_t,
+    gemm_stride_j,
+    sqrsum_stride_k,
+    sqrsum_stride_t,
+    out_stride_t,
+    out_stride_j,
+    inv_hc_hidden,
+    rms_eps,
+    hc_pre_eps,
+    SPLITK_BLOCK: tl.constexpr,
+    HC_BLOCK: tl.constexpr,
+):
+    """Recover the pre-mix gate from a split-k mHC pre GEMM output."""
+    token_idx = tl.program_id(0).to(tl.int64)
+    ks = tl.arange(0, SPLITK_BLOCK)
+    js = tl.arange(0, HC_BLOCK)
+    kmask = ks < splitk
+    jmask = js < hc_mult
+
+    # Only the first hc_mult GEMM columns feed the pre gate.
+    gemm = tl.load(
+        gemm_ptr
+        + ks[:, None] * gemm_stride_k
+        + token_idx * gemm_stride_t
+        + js[None, :] * gemm_stride_j,
+        mask=kmask[:, None] & jmask[None, :],
+        other=0.0,
+    ).to(tl.float32)
+    mixes = tl.sum(gemm, 0)
+
+    sqrsum = tl.load(
+        sqrsum_ptr + ks * sqrsum_stride_k + token_idx * sqrsum_stride_t,
+        mask=kmask,
+        other=0.0,
+    ).to(tl.float32)
+    rstd = tl.rsqrt(tl.sum(sqrsum, 0) * inv_hc_hidden + rms_eps)
+
+    scale = tl.load(hc_scale_ptr).to(tl.float32)
+    base = tl.load(hc_base_ptr + js, mask=jmask, other=0.0).to(tl.float32)
+
+    pre = tl.sigmoid(mixes * rstd * scale + base) + hc_pre_eps
+    tl.store(out_ptr + token_idx * out_stride_t + js * out_stride_j, pre, mask=jmask)
+
+
+def mhc_pre_mix_triton(
+    gemm_out: Tensor,
+    sqrsum: Tensor,
+    hc_scale: Tensor,
+    hc_base: Tensor,
+    hc_mult: int,
+    hc_hidden_size: int,
+    rms_eps: float,
+    hc_pre_eps: float,
+) -> Tensor:
+    """Pre-mix gate for the delayed mHC pre, from AITER's split-k GEMM output.
+
+    AITER's ``mhc_pre_big_fuse`` consumes the unreduced ``[splitk, tokens,
+    hc_mult3]`` GEMM output and the matching row square-sums, but only returns
+    the post and comb gates. The delayed formulation also needs the pre gate,
+    to carry into the next sublayer seam. It is the same slice of the same
+    numbers, so recover it here rather than repeating the projection.
+    """
+    assert gemm_out.ndim == 3 and gemm_out.dtype == torch.float32
+    assert sqrsum.ndim == 2 and sqrsum.dtype == torch.float32
+    splitk, num_tokens = gemm_out.shape[0], gemm_out.shape[1]
+    assert sqrsum.shape == (splitk, num_tokens)
+
+    out = torch.empty(num_tokens, hc_mult, dtype=torch.float32, device=gemm_out.device)
+    if num_tokens == 0:
+        return out
+
+    _mhc_pre_mix_kernel[(num_tokens,)](
+        gemm_out,
+        sqrsum,
+        hc_scale,
+        hc_base,
+        out,
+        splitk,
+        hc_mult,
+        gemm_out.stride(0),
+        gemm_out.stride(1),
+        gemm_out.stride(2),
+        sqrsum.stride(0),
+        sqrsum.stride(1),
+        out.stride(0),
+        out.stride(1),
+        1.0 / hc_hidden_size,
+        rms_eps,
+        hc_pre_eps,
+        SPLITK_BLOCK=triton.next_power_of_2(splitk),
+        HC_BLOCK=triton.next_power_of_2(hc_mult),
+        num_warps=1,
+        # Match the separate FP32 multiply and add in the Torch reference.
+        enable_fp_fusion=False,
+    )
+    return out
+
+
+def _mhc_pre_mix_triton_fake(
+    gemm_out: Tensor,
+    sqrsum: Tensor,
+    hc_scale: Tensor,
+    hc_base: Tensor,
+    hc_mult: int,
+    hc_hidden_size: int,
+    rms_eps: float,
+    hc_pre_eps: float,
+) -> Tensor:
+    return torch.empty(
+        gemm_out.shape[1], hc_mult, dtype=torch.float32, device=gemm_out.device
+    )
+
+
 def hc_head_reduce_triton_kernel(
     x: torch.Tensor,
     hc_fn: torch.Tensor,
@@ -215,4 +338,12 @@ direct_register_custom_op(
     op_func=hc_collapse_triton,
     mutates_args=[],
     fake_impl=_hc_collapse_triton_fake,
+)
+
+
+direct_register_custom_op(
+    op_name="mhc_pre_mix_triton",
+    op_func=mhc_pre_mix_triton,
+    mutates_args=[],
+    fake_impl=_mhc_pre_mix_triton_fake,
 )
