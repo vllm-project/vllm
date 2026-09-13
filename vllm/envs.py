@@ -128,6 +128,7 @@ if TYPE_CHECKING:
     VLLM_USE_HW_AGNOSTIC: bool = False
     VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE: bool = True
     VLLM_GDN_DECODE_KERNEL: Literal["cuda", "triton"] = "cuda"
+    VLLM_QSA_ATTENTION_BACKEND: Literal["auto", "triton", "prims_ts"] = "auto"
     VLLM_DISABLE_PYNCCL: bool = False
     VLLM_USE_OINK_OPS: bool = False
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
@@ -1216,6 +1217,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_GDN_DECODE_KERNEL",
         "cuda",
         ["cuda", "triton"],
+        case_sensitive=False,
+    ),
+    # Select Qwen sparse attention; auto uses PrimTS when supported and
+    # available, otherwise Triton. Explicit prims_ts fails if unsupported.
+    "VLLM_QSA_ATTENTION_BACKEND": env_with_choices(
+        "VLLM_QSA_ATTENTION_BACKEND",
+        "auto",
+        ["auto", "triton", "prims_ts"],
         case_sensitive=False,
     ),
     # Disable pynccl (using torch.distributed instead)
