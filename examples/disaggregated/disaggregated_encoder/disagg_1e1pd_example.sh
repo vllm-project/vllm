@@ -31,6 +31,13 @@ fi
 EC_SHARED_STORAGE_PATH="${EC_SHARED_STORAGE_PATH:-/tmp/ec_cache}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-300}"   # wait_for_server timeout
 
+# How encoder outputs reach the PD instance:
+#   example -- ExampleConnector, via a shared filesystem
+#   zmq     -- ECZmqConnector, pushed straight to the PD worker
+EC_BACKEND="${EC_BACKEND:-example}"
+EC_ZMQ_PORT="${EC_ZMQ_PORT:-14579}"                   # PD receive port, one per rank
+EC_ZMQ_STAGING_BYTES="${EC_ZMQ_STAGING_BYTES:-4294967296}"
+
 NUM_PROMPTS="${NUM_PROMPTS:-100}"    # number of prompts to send in benchmark
 
 # Serve args
@@ -94,11 +101,47 @@ trap cleanup USR1
 trap cleanup TERM
 
 # clear previous cache
-echo "remove previous ec cache folder"
-rm -rf "$EC_SHARED_STORAGE_PATH"
+if [[ "$EC_BACKEND" == "zmq" ]]; then
+    EC_CONFIG_E='{
+        "ec_connector": "ECZmqConnector",
+        "ec_role": "ec_producer",
+        "ec_connector_extra_config": {
+            "ec_zmq_consumers": [
+                {"host": "127.0.0.1", "port": '"$EC_ZMQ_PORT"', "num_ranks": 1}
+            ]
+        }
+    }'
+    EC_CONFIG_PD='{
+        "ec_connector": "ECZmqConnector",
+        "ec_role": "ec_consumer",
+        "ec_port": '"$EC_ZMQ_PORT"',
+        "ec_connector_extra_config": {
+            "ec_zmq_staging_bytes": '"$EC_ZMQ_STAGING_BYTES"'
+        }
+    }'
+else
+    echo "remove previous ec cache folder"
+    rm -rf "$EC_SHARED_STORAGE_PATH"
 
-echo "make ec cache folder"
-mkdir -p "$EC_SHARED_STORAGE_PATH"
+    echo "make ec cache folder"
+    mkdir -p "$EC_SHARED_STORAGE_PATH"
+
+    EC_CONFIG_E='{
+        "ec_connector": "ECExampleConnector",
+        "ec_role": "ec_producer",
+        "ec_connector_extra_config": {
+            "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"
+        }
+    }'
+    EC_CONFIG_PD='{
+        "ec_connector": "ECExampleConnector",
+        "ec_role": "ec_consumer",
+        "ec_connector_extra_config": {
+            "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"
+        }
+    }'
+fi
+echo "EC transfer backend: $EC_BACKEND"
 
 ###############################################################################
 # Encoder worker
@@ -112,13 +155,7 @@ env "$DEVICE_AFFINITY_ENV=$GPU_E" vllm serve "$MODEL" \
     --max-num-batched-tokens 114688 \
     --max-num-seqs "$MAX_NUM_SEQS" \
     --allowed-local-media-path "${GIT_ROOT}"/tests/v1/ec_connector/integration \
-    --ec-transfer-config '{
-        "ec_connector": "ECExampleConnector",
-        "ec_role": "ec_producer",
-        "ec_connector_extra_config": {
-            "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"
-        }
-    }' \
+    --ec-transfer-config "$EC_CONFIG_E" \
     >"${ENC_LOG}" 2>&1 &
 
 PIDS+=($!)
@@ -134,13 +171,7 @@ env "$DEVICE_AFFINITY_ENV=$GPU_PD" vllm serve "$MODEL" \
     --max-num-seqs "$MAX_NUM_SEQS" \
     --max-model-len "$MAX_MODEL_LEN" \
     --allowed-local-media-path "${GIT_ROOT}"/tests/v1/ec_connector/integration \
-    --ec-transfer-config '{
-        "ec_connector": "ECExampleConnector",
-        "ec_role": "ec_consumer",
-        "ec_connector_extra_config": {
-            "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"
-        }
-    }' \
+    --ec-transfer-config "$EC_CONFIG_PD" \
     >"${PD_LOG}" 2>&1 &
 
 PIDS+=($!)
