@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
@@ -24,6 +25,8 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.config.load import LoadConfig
+from vllm.forward_context import ForwardContext, override_forward_context
+from vllm.model_executor.models.extract_hidden_states import unified_kv_cache_update
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_hf_text_config
 from vllm.transformers_utils.configs.extract_hidden_states import (
@@ -331,6 +334,31 @@ def test_propose_different_layer_counts(num_hidden_layers):
 
     assert draft_tokens.shape == (batch_size, 1)
     assert torch.equal(draft_tokens, sampled_token_ids)
+
+
+def test_unified_kv_cache_update_slot_mapping_list():
+    # spec decode passes slot_mapping as list[dict]; [0] is the base model (#46830)
+    layer_name = "layer.0"
+    slots = torch.arange(4)
+
+    class _RecordingImpl:
+        def __init__(self):
+            self.captured = None
+
+        def do_kv_cache_update(self, layer, to_cache, kv_cache, slot_mapping):
+            self.captured = slot_mapping
+
+    impl = _RecordingImpl()
+    attn_layer = SimpleNamespace(kv_cache=torch.empty(0), impl=impl)
+    ctx = ForwardContext(
+        no_compile_layers={layer_name: attn_layer},
+        attn_metadata={layer_name: None},
+        slot_mapping=[{layer_name: slots}],
+    )
+    with override_forward_context(ctx):
+        unified_kv_cache_update(torch.empty(0), layer_name)
+
+    assert torch.equal(impl.captured, slots)
 
 
 # ---------------------------------------------------------------------------
