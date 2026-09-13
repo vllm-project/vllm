@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib
+import inspect
+import sys
 from copy import deepcopy
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
 
@@ -412,6 +414,343 @@ def test_deepseek_v4_shared_expert_fse_uses_mtp_quantization_config_prefix(
 
     assert compatible
     assert reason is None
+
+
+def test_deepseek_v4_heterogeneous_fhmoe_keeps_native_intermediate_width() -> None:
+    from vllm.models.deepseek_v4.amd.model import _prepare_native_fp8_shared_expert
+
+    hidden_size = 7168
+    intermediate_size = 384
+    w13 = torch.empty((2 * intermediate_size, hidden_size), dtype=torch.float8_e4m3fn)
+    w2 = torch.empty((hidden_size, intermediate_size), dtype=torch.float8_e4m3fn)
+    w13_scale_bytes = (torch.arange(6 * 56).reshape(6, 56).remainder(20) + 0x60).to(
+        torch.uint8
+    )
+    w2_scale_bytes = (torch.arange(56 * 3).reshape(56, 3).remainder(30) + 0x50).to(
+        torch.uint8
+    )
+    w13_scale = w13_scale_bytes.view(torch.float8_e8m0fnu)
+    w2_scale = w2_scale_bytes.view(torch.float8_e8m0fnu)
+
+    prepared = _prepare_native_fp8_shared_expert(
+        w13, w2, w13_scale, w2_scale, intermediate_size
+    )
+
+    assert prepared[0].shape == (1, 768, 7168)
+    assert prepared[1].shape == (1, 7168, 384)
+    assert prepared[2].shape == (768, 224)
+    assert prepared[3].shape == (7168, 16)
+    expected_w13_scale = w13_scale_bytes.repeat_interleave(
+        128, dim=0
+    ).repeat_interleave(4, dim=1)
+    expected_w2_scale = w2_scale_bytes.repeat_interleave(128, dim=0).repeat_interleave(
+        4, dim=1
+    )
+    assert torch.equal(prepared[2].view(torch.uint8), expected_w13_scale)
+    assert torch.equal(prepared[3].view(torch.uint8)[:, :12], expected_w2_scale)
+    assert torch.all(prepared[3].view(torch.uint8)[:, 12:] == 0x7F)
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "supported_through", "expected"),
+    [
+        (0, 4096, False),
+        (1, 4096, True),
+        (1536, 4096, True),
+        (2048, 4096, True),
+        (2049, 4096, True),
+        (4096, 4096, True),
+        (4097, 4096, False),
+        (1536, 0, False),
+    ],
+)
+def test_deepseek_v4_heterogeneous_fhmoe_token_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    num_tokens: int,
+    supported_through: int,
+    expected: bool,
+) -> None:
+    from vllm.models.deepseek_v4.amd import model as deepseek_v4_model
+
+    checked_tokens: list[int] = []
+
+    def supports(num_tokens: int) -> bool:
+        checked_tokens.append(num_tokens)
+        return num_tokens <= supported_through
+
+    monkeypatch.setattr(
+        deepseek_v4_model.rocm_aiter_ops,
+        "fused_moe_supports_heterogeneous_shared_expert",
+        supports,
+    )
+
+    assert deepseek_v4_model._use_heterogeneous_fhmoe(num_tokens) is expected
+    assert checked_tokens == ([] if num_tokens == 0 else [num_tokens])
+
+
+def _supported_fhmoe_signature(
+    shared_w1=None,
+    shared_w2=None,
+    shared_w1_scale=None,
+    shared_w2_scale=None,
+    shared_expert_id=-1,
+) -> None:
+    pass
+
+
+def _incomplete_fhmoe_signature(
+    shared_w1=None,
+    shared_w2=None,
+    shared_w1_scale=None,
+    shared_w2_scale=None,
+) -> None:
+    pass
+
+
+def _install_fake_aiter_fhmoe(
+    monkeypatch: pytest.MonkeyPatch,
+    supports_dsv4_i384_fhmoe: object,
+    fused_moe: object,
+) -> None:
+    fake_aiter = ModuleType("aiter")
+    fake_aiter.__path__ = []
+    fake_fhmoe = ModuleType("aiter.fhmoe")
+    if supports_dsv4_i384_fhmoe is not None:
+        fake_fhmoe.__dict__["supports_dsv4_i384_fhmoe"] = supports_dsv4_i384_fhmoe
+    fake_fused_moe = ModuleType("aiter.fused_moe")
+    fake_fused_moe.__dict__["fused_moe"] = fused_moe
+    fake_aiter.__dict__["fhmoe"] = fake_fhmoe
+    fake_aiter.__dict__["fused_moe"] = fake_fused_moe
+    monkeypatch.setitem(sys.modules, "aiter", fake_aiter)
+    monkeypatch.setitem(sys.modules, "aiter.fhmoe", fake_fhmoe)
+    monkeypatch.setitem(sys.modules, "aiter.fused_moe", fake_fused_moe)
+
+
+def _supports_fhmoe_through_2047(max_tokens: int) -> bool:
+    return max_tokens <= 2047
+
+
+def _supports_fhmoe_through_2048(max_tokens: int) -> bool:
+    return max_tokens <= 2048
+
+
+def _supports_fhmoe_through_4096(max_tokens: int) -> bool:
+    return max_tokens <= 4096
+
+
+def _raises_fhmoe_config_error(max_tokens: int) -> bool:
+    raise OSError
+
+
+def _returns_truthy_non_bool(max_tokens: int) -> int:
+    return 1
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "capability", "fused_moe", "expected"),
+    [
+        (0, _supports_fhmoe_through_2048, _supported_fhmoe_signature, False),
+        (True, _supports_fhmoe_through_2048, _supported_fhmoe_signature, False),
+        (2048, None, _supported_fhmoe_signature, False),
+        (2048, True, _supported_fhmoe_signature, False),
+        (2048, _raises_fhmoe_config_error, _supported_fhmoe_signature, False),
+        (2048, _returns_truthy_non_bool, _supported_fhmoe_signature, False),
+        (2048, _supports_fhmoe_through_2047, _supported_fhmoe_signature, False),
+        (2048, _supports_fhmoe_through_2048, _incomplete_fhmoe_signature, False),
+        (2048, _supports_fhmoe_through_2048, _supported_fhmoe_signature, True),
+        (2049, _supports_fhmoe_through_2048, _supported_fhmoe_signature, False),
+        (4096, _supports_fhmoe_through_4096, _supported_fhmoe_signature, True),
+        (4097, _supports_fhmoe_through_4096, _supported_fhmoe_signature, False),
+    ],
+)
+def test_deepseek_v4_heterogeneous_fhmoe_aiter_capability(
+    monkeypatch: pytest.MonkeyPatch,
+    num_tokens: object,
+    capability: object,
+    fused_moe: object,
+    expected: bool,
+) -> None:
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    _install_fake_aiter_fhmoe(monkeypatch, capability, fused_moe)
+
+    assert (
+        rocm_aiter_ops._probe_dsv4_i384_fhmoe_capability(cast(int, num_tokens))
+        is expected
+    )
+
+
+def test_deepseek_v4_heterogeneous_fhmoe_aiter_capability_catches_import_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    fake_aiter = ModuleType("aiter")
+    fake_aiter.__path__ = []
+    monkeypatch.setitem(sys.modules, "aiter", fake_aiter)
+    monkeypatch.setitem(sys.modules, "aiter.fhmoe", None)
+
+    assert not rocm_aiter_ops._probe_dsv4_i384_fhmoe_capability(2048)
+
+
+@pytest.mark.parametrize("error", [TypeError, ValueError])
+def test_deepseek_v4_heterogeneous_fhmoe_aiter_capability_catches_signature_error(
+    monkeypatch: pytest.MonkeyPatch,
+    error: type[Exception],
+) -> None:
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    _install_fake_aiter_fhmoe(
+        monkeypatch, _supports_fhmoe_through_2048, _supported_fhmoe_signature
+    )
+
+    def raise_signature_error(_: object) -> inspect.Signature:
+        raise error
+
+    monkeypatch.setattr(inspect, "signature", raise_signature_error)
+
+    assert not rocm_aiter_ops._probe_dsv4_i384_fhmoe_capability(2048)
+
+
+@pytest.mark.parametrize(
+    ("setting", "value", "expected"),
+    [
+        ("data_parallel_size", 1, True),
+        ("data_parallel_size", 2, False),
+        ("prefill_context_parallel_size", 2, False),
+        ("topk_method", "greedy", False),
+        ("fhmoe_supported", False, False),
+    ],
+)
+def test_deepseek_v4_heterogeneous_fhmoe_compatibility_gates(
+    monkeypatch: pytest.MonkeyPatch,
+    setting: str,
+    value: object,
+    expected: bool,
+) -> None:
+    from vllm.models.deepseek_v4.amd import model as deepseek_v4_model
+
+    hf_config = SimpleNamespace(
+        n_routed_experts=384,
+        num_experts_per_tok=6,
+        n_shared_experts=1,
+        hidden_size=7168,
+        moe_intermediate_size=3072,
+        hidden_act="silu",
+        expert_dtype="fp4",
+        topk_method="noaux_tc",
+    )
+    parallel_config = SimpleNamespace(
+        enable_expert_parallel=False,
+        enable_eplb=False,
+        tensor_parallel_size=8,
+        data_parallel_size=1,
+        prefill_context_parallel_size=1,
+    )
+    if setting == "topk_method":
+        hf_config.topk_method = value
+    elif setting != "fhmoe_supported":
+        setattr(parallel_config, setting, value)
+
+    quant_config = SimpleNamespace(
+        get_name=lambda: "deepseek_v4_fp8",
+        moe_quant_algo="",
+        weight_block_size=[128, 128],
+        is_checkpoint_fp8_serialized=True,
+        is_scale_e8m0=True,
+        ignored_layers=None,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=hf_config, dtype=torch.bfloat16),
+        quant_config=quant_config,
+        parallel_config=parallel_config,
+        kernel_config=SimpleNamespace(moe_backend="aiter"),
+        offload_config=None,
+    )
+    monkeypatch.setattr(deepseek_v4_model.current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(
+        deepseek_v4_model.envs,
+        "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS",
+        True,
+    )
+    monkeypatch.setattr(deepseek_v4_model, "on_gfx950", lambda: True)
+    monkeypatch.setattr(
+        deepseek_v4_model.rocm_aiter_ops,
+        "is_fusion_moe_shared_experts_enabled",
+        lambda: True,
+    )
+    checked_tokens: list[int] = []
+    fhmoe_supported = setting != "fhmoe_supported" or value is True
+
+    def supports(num_tokens: int) -> bool:
+        checked_tokens.append(num_tokens)
+        return fhmoe_supported
+
+    monkeypatch.setattr(
+        deepseek_v4_model.rocm_aiter_ops,
+        "fused_moe_supports_heterogeneous_shared_expert",
+        supports,
+    )
+
+    assert (
+        deepseek_v4_model._heterogeneous_shared_expert_enabled(
+            cast(VllmConfig, vllm_config)
+        )
+        is expected
+    )
+    assert checked_tokens == [1]
+
+
+@pytest.mark.parametrize(
+    ("weights_shape", "ids_shape", "message"),
+    [
+        ((2, 7, 1), (2, 7, 1), "equal two-dimensional shapes"),
+        ((2, 7), (3, 7), "equal two-dimensional shapes"),
+        ((2, 6), (2, 6), "exactly 7 columns"),
+        ((2, 8), (2, 8), "exactly 7 columns"),
+    ],
+)
+def test_deepseek_v4_heterogeneous_fhmoe_rejects_invalid_routes(
+    weights_shape: tuple[int, ...],
+    ids_shape: tuple[int, ...],
+    message: str,
+) -> None:
+    from vllm.models.deepseek_v4.amd.model import _validate_heterogeneous_routes
+
+    with pytest.raises(ValueError, match=message):
+        _validate_heterogeneous_routes(
+            torch.empty(weights_shape),
+            torch.empty(ids_shape, dtype=torch.int64),
+            experts_per_token=6,
+        )
+
+
+def test_deepseek_v4_heterogeneous_fhmoe_accepts_appended_shared_route() -> None:
+    from vllm.models.deepseek_v4.amd.model import _validate_heterogeneous_routes
+
+    _validate_heterogeneous_routes(
+        torch.empty((2, 7)),
+        torch.empty((2, 7), dtype=torch.int64),
+        experts_per_token=6,
+    )
+
+
+def test_aiter_fused_moe_validates_shared_expert_arguments() -> None:
+    from vllm._aiter_ops import (
+        _validate_rocm_aiter_fused_moe_shared_expert_args,
+    )
+
+    validate = _validate_rocm_aiter_fused_moe_shared_expert_args
+    shared_tensor = torch.empty(0)
+
+    assert not validate(None, None, None, None, -1)
+    with pytest.raises(ValueError, match="requires shared weights and scales"):
+        validate(None, None, None, None, 0)
+    with pytest.raises(ValueError, match="both shared weights and scales"):
+        validate(shared_tensor, None, None, None, 0)
+    with pytest.raises(ValueError, match="non-negative shared expert ID"):
+        validate(shared_tensor, shared_tensor, shared_tensor, shared_tensor, -1)
+    assert validate(shared_tensor, shared_tensor, shared_tensor, shared_tensor, 0)
 
 
 def test_is_model_fused_shared_expert_compatible() -> None:
