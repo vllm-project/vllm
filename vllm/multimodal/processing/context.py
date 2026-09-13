@@ -23,7 +23,10 @@ from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
 from vllm.utils.jsontree import JSONTree, json_map_leaves
-from vllm.utils.mistral import is_mistral_tokenizer
+from vllm.utils.mistral import (
+    is_mistral_tokenizer,
+    is_transformers_mistral_common_tokenizer,
+)
 
 if TYPE_CHECKING:
     from transformers.configuration_utils import PretrainedConfig
@@ -237,6 +240,18 @@ class InputProcessingContext:
         tokenizer = self.tokenizer
         if is_mistral_tokenizer(tokenizer):
             tokenizer = tokenizer.transformers_tokenizer  # type: ignore[union-attr]
+        elif is_transformers_mistral_common_tokenizer(tokenizer):
+            # `AutoTokenizer` resolves "dual-format" checkpoints (HF
+            # tokenizer files alongside mistral-common's tekken.json) to
+            # transformers' `MistralCommonBackend`, which never encodes
+            # special placeholder tokens (e.g. "[IMG]") that appear in
+            # plain text. HF multimodal processors rely on that encoding
+            # when building dummy/templated inputs, so swap in a tokenizer
+            # variant that performs it. See
+            # `vllm.tokenizers.mistral.with_placeholder_token_support`.
+            from vllm.tokenizers.mistral import with_placeholder_token_support
+
+            tokenizer = with_placeholder_token_support(tokenizer)
 
         merged_kwargs = self.get_merged_mm_kwargs(kwargs)
         merged_kwargs.pop("tokenizer", None)
