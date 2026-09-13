@@ -50,10 +50,6 @@ class QuarkW8A8Int8(QuarkScheme):
         activation_quant_key: QuantKey | None,
     ):
         super().__init__(weight_quant_key, activation_quant_key)
-        self.qscheme = (
-            "per_channel" if weight_quant_key == kInt8StaticChannelSym else "per_tensor"
-        )
-
         assert activation_quant_key is not None
         self.is_static_input_scheme = activation_quant_key.scale.static
         self.input_symmetric = activation_quant_key.symmetric
@@ -86,7 +82,7 @@ class QuarkW8A8Int8(QuarkScheme):
             return weight_loader(param, loaded_weight, *args, **kwargs)
 
         self.kernel = init_int8_linear_kernel(
-            is_channelwise=(self.qscheme == "per_channel"),
+            is_channelwise=(self.weight_quant_key == kInt8StaticChannelSym),
             is_static_input_scheme=(self.is_static_input_scheme is True),
             input_symmetric=(self.input_symmetric is True),
             module_name=self.__class__.__name__,
@@ -105,7 +101,7 @@ class QuarkW8A8Int8(QuarkScheme):
         layer.register_parameter("weight", weight)
 
         # WEIGHT SCALE
-        if self.qscheme == "per_channel":
+        if self.weight_quant_key == kInt8StaticChannelSym:
             weight_scale = ChannelQuantScaleParameter(
                 data=torch.empty((sum(output_partition_sizes), 1), dtype=torch.float32),
                 output_dim=0,
@@ -118,7 +114,7 @@ class QuarkW8A8Int8(QuarkScheme):
                 weight_loader=_scale_weight_loader,
             )
         else:
-            assert self.qscheme == "per_tensor"
+            assert self.weight_quant_key == kInt8StaticTensorSym
             weight_scale = PerTensorScaleParameter(
                 data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
                 weight_loader=weight_loader,

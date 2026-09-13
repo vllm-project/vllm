@@ -60,10 +60,6 @@ class QuarkW8A8Fp8(QuarkScheme):
         activation_quant_key: QuantKey | None,
     ):
         super().__init__(weight_quant_key, activation_quant_key)
-        self.weight_qscheme = (
-            "per_channel" if weight_quant_key == kFp8StaticChannelSym else "per_tensor"
-        )
-        self.is_static_input_scheme = activation_quant_key == kFp8StaticTensorSym
         self.out_dtype = torch.get_default_dtype()
         self.input_dtype = get_current_vllm_config().model_config.dtype
 
@@ -76,7 +72,7 @@ class QuarkW8A8Fp8(QuarkScheme):
         # If per tensor, when we have a fused module (e.g. QKV) with per
         # tensor scales (thus N scales being passed to the kernel),
         # requantize so we can always run per tensor
-        if self.weight_qscheme == "per_tensor":
+        if self.weight_quant_key == kFp8StaticTensorSym:
             if current_platform.is_fp8_fnuz():
                 input_scale = getattr(layer, "input_scale", None)
                 weight, max_w_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
@@ -100,7 +96,7 @@ class QuarkW8A8Fp8(QuarkScheme):
             layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
 
         # If channelwise, scales are already lined up, so just transpose.
-        elif self.weight_qscheme == "per_channel":
+        elif self.weight_quant_key == kFp8StaticChannelSym:
             weight = layer.weight
 
             if current_platform.is_fp8_fnuz():
@@ -122,11 +118,8 @@ class QuarkW8A8Fp8(QuarkScheme):
             # required by torch.compile to be torch.nn.Parameter
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
 
-        else:
-            raise ValueError(f"Unknown quantization scheme {self.weight_qscheme}")
-
         # INPUT SCALE
-        if self.is_static_input_scheme:
+        if self.activation_quant_key == kFp8StaticTensorSym:
             layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
 
         self.fp8_linear.process_weights_after_loading(layer)
@@ -159,14 +152,14 @@ class QuarkW8A8Fp8(QuarkScheme):
         # WEIGHT SCALE
         # TODO: update create_xxx_parameter functions to return
         # the newly added parameters
-        if self.weight_qscheme == "per_channel":
+        if self.weight_quant_key == kFp8StaticChannelSym:
             weight_scale = ChannelQuantScaleParameter(
                 data=torch.empty((sum(output_partition_sizes)), dtype=torch.float32),
                 output_dim=0,
                 weight_loader=weight_loader,
             )
         else:
-            assert self.weight_qscheme == "per_tensor"
+            assert self.weight_quant_key == kFp8StaticTensorSym
             weight_scale = PerTensorScaleParameter(
                 data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
                 weight_loader=weight_loader,
@@ -177,7 +170,7 @@ class QuarkW8A8Fp8(QuarkScheme):
         layer.register_parameter("weight_scale", weight_scale)
 
         # INPUT SCALE
-        if self.is_static_input_scheme:
+        if self.activation_quant_key == kFp8StaticTensorSym:
             input_scale = PerTensorScaleParameter(
                 data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
                 weight_loader=weight_loader,
