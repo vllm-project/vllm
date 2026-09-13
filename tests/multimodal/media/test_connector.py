@@ -7,7 +7,9 @@ import os
 import shutil
 import time
 from io import BytesIO
+from pathlib import Path
 from tempfile import NamedTemporaryFile, TemporaryDirectory
+from unittest.mock import MagicMock
 
 import aiohttp
 import numpy as np
@@ -18,9 +20,10 @@ import torch
 from PIL import Image, ImageChops
 
 from vllm.assets.base import VLLM_S3_BUCKET_URL
+from vllm.connections import HTTPConnection
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.inputs import PlaceholderRange
-from vllm.multimodal.media import MediaConnector
+from vllm.multimodal.media import MediaConnector, MediaIO
 
 # Test different image extensions (JPG/PNG) and formats (gray/RGB/RGBA)
 TEST_IMAGE_ASSETS = [
@@ -462,7 +465,7 @@ async def test_ssrf_bypass_backslash_disallowed_domain():
         await connector.fetch_image_async(bypass_url)
 
 
-def _make_cached_connector(cache_dir, *, max_mb=10, ttl_hours=24):
+def _make_cached_connector(cache_dir, *, connection=None, max_mb=10, ttl_hours=24):
     """Create a MediaConnector with caching enabled via monkeypatched internals.
 
     We bypass __init__'s env-var path and wire up the cache fields directly
@@ -470,7 +473,9 @@ def _make_cached_connector(cache_dir, *, max_mb=10, ttl_hours=24):
     only used as cache keys (hashed to derive filenames); no HTTP requests
     are made.
     """
-    connector = MediaConnector()
+    connector = MediaConnector(
+        **({"connection": connection} if connection is not None else {})
+    )
     connector._media_cache_dir = cache_dir
     connector._media_cache_max_bytes = max_mb * 1024 * 1024
     connector._media_cache_ttl_secs = ttl_hours * 3600
@@ -487,6 +492,29 @@ def test_cache_put_and_get():
         connector._put_cached_bytes(url, data)
         cached = connector._get_cached_bytes(url)
         assert cached == data
+
+
+def test_uuid_is_the_authoritative_media_cache_key_over_url():
+    """An explicit UUID identifies one cached download independent of its URL."""
+    connection = MagicMock(spec=HTTPConnection)
+    connection.get_bytes.side_effect = [b"first-payload", b"second-payload"]
+
+    media_io = MagicMock(spec=MediaIO)
+    media_io.get_max_bytes.return_value = None
+    media_io.load_bytes.side_effect = lambda data: data
+
+    with TemporaryDirectory() as cache_dir:
+        connector = _make_cached_connector(cache_dir, connection=connection)
+        first = connector.load_from_url(
+            "https://first.example/image.png", media_io, uuid="shared-uuid"
+        )
+        second = connector.load_from_url(
+            "https://second.example/image.jpg", media_io, uuid="shared-uuid"
+        )
+
+        assert first == second == b"first-payload"
+        connection.get_bytes.assert_called_once()
+        assert len(list(Path(cache_dir).iterdir())) == 1
 
 
 def test_cache_ttl_expiry():
