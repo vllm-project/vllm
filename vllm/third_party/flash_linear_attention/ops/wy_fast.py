@@ -14,6 +14,7 @@ import torch
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
+from .utils import record_gdn_workspace_tensor
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
@@ -136,6 +137,8 @@ def recompute_w_u_fwd(
     BV = 64
     u = torch.empty_like(v)
     w = k.new_empty(B, T, H, K)
+    record_gdn_workspace_tensor(u)
+    record_gdn_workspace_tensor(w)
     recompute_w_u_fwd_kernel[(NT, B * H)](
         k=k,
         v=v,
