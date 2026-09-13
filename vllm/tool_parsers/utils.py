@@ -149,6 +149,24 @@ def is_complete_json(input_str: str) -> bool:
         return False
 
 
+def dump_tool_arguments(arguments: Any) -> str:
+    """Serialize tool call arguments to the JSON string the API contract wants.
+
+    Some models emit `arguments` already serialized as a JSON string rather
+    than as an object. Serializing that again would double-encode it, so a
+    string that already holds a JSON object or array is passed through
+    untouched. Any other string is serialized normally, so a bare value such
+    as `hello` still reaches the client as valid JSON.
+    """
+    if isinstance(arguments, str):
+        try:
+            if isinstance(json.loads(arguments), (dict, list)):
+                return arguments
+        except JSONDecodeError:
+            pass
+    return json.dumps(arguments, ensure_ascii=False)
+
+
 def _is_json_finite(obj: Any) -> bool:
     """Whether *obj* can be serialized to valid JSON.
 
