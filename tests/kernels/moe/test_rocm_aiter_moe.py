@@ -701,6 +701,70 @@ def test_aiter_fused_moe_mi350_mxfp4_w4a16_determinism():
     _assert_deterministic(run_mxfp4_moe, n_runs=4)
 
 
+def test_aiter_fused_moe_token_chunking_matches_unchunked():
+    """VLLM_ROCM_AITER_MOE_CHUNK_TOKENS slices the token dim across repeated
+    AITER calls to bound AITER's internal intermediate. MoE routing is
+    per-token, so the chunked result must match the unchunked one exactly."""
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FUSED_MOE_UNQUANTIZED_CONFIG,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterExperts,
+    )
+
+    _assert_aiter_supported()
+    num_tokens, hidden_dim, intermediate_dim, num_experts, topk = 32, 512, 1024, 4, 2
+    case = _make_moe_case(
+        num_tokens=num_tokens,
+        hidden_dim=hidden_dim,
+        intermediate_dim=intermediate_dim,
+        num_experts=num_experts,
+        topk=topk,
+        seed=23,
+    )
+    w1, w2 = _shuffle_moe_weights(case["w1"], case["w2"])
+    experts = AiterExperts(
+        make_dummy_moe_config(
+            num_experts=num_experts,
+            experts_per_token=topk,
+            hidden_dim=hidden_dim,
+            intermediate_size=intermediate_dim,
+        ),
+        FUSED_MOE_UNQUANTIZED_CONFIG,
+    )
+    empty = torch.empty(0, dtype=torch.bfloat16)
+
+    def run(chunk_tokens: int) -> torch.Tensor:
+        rocm_aiter_ops._MOE_CHUNK_TOKENS = chunk_tokens
+        out = torch.empty_like(case["hidden_states"])
+        experts.apply(
+            output=out,
+            hidden_states=case["hidden_states"],
+            w1=w1,
+            w2=w2,
+            topk_weights=case["topk_weights"],
+            topk_ids=case["topk_ids"],
+            activation=MoEActivation.SILU,
+            global_num_experts=num_experts,
+            expert_map=None,
+            a1q_scale=None,
+            a2_scale=None,
+            workspace13=empty,
+            workspace2=empty,
+            expert_tokens_meta=None,
+            apply_router_weight_on_input=False,
+        )
+        return out
+
+    unchunked = run(0)
+    # 32 tokens in chunks of 8 exercises the loop, including the final slice.
+    chunked = run(8)
+    torch.testing.assert_close(chunked, unchunked, atol=0.0, rtol=0.0)
+
+
 # FP8 group-quant tests ---------------------------------------------------
 
 
