@@ -716,7 +716,7 @@ class FlexAttentionMetadata:
         ]
 
         # block_table slots beyond each request's seq_len may contain garbage
-        # physical page ids (see physical_to_logical_mapping). With batched
+        # physical page ids (see physical to logical mapping). With batched
         # decode, max_seq_len is the batch max while shorter requests still
         # index all columns up to that max unless masked here.
         num_blocks = self.num_blocks_per_seq[self.doc_ids]
@@ -725,8 +725,14 @@ class FlexAttentionMetadata:
 
         custom_hint = self.block_sparsity_hint is not None
         use_rswa = self.rswa_window is not None and self.rswa_prefix_lens is not None
+        batch_invariant = envs.VLLM_BATCH_INVARIANT
+
         needs_per_q_pruning = (
-            self.causal or self.sliding_window or custom_hint or use_rswa
+            self.causal
+            or self.sliding_window
+            or custom_hint
+            or use_rswa
+            or batch_invariant
         )
 
         if needs_per_q_pruning:
@@ -781,6 +787,20 @@ class FlexAttentionMetadata:
                     self.block_size,
                 )
                 used_pages.masked_fill_(~hint_mask, 0)
+            if batch_invariant:
+                # The number of candidate KV blocks for a query token must
+                # depend only on that token's own position, not on the
+                # overall request length. Otherwise the same prefix tokens
+                # can be assigned a different number of candidate blocks
+                # depending on what else is in the request (e.g. a cache
+                # miss vs. a cache hit followed by a longer suffix), which
+                # changes the number of online-softmax merge steps and
+                # breaks bitwise-identical outputs across requests.
+                needed_blocks = (logical_q_idx + self.block_size) // self.block_size
+                beyond_needed = (
+                    self.logical_block_ids[None, :] >= needed_blocks[:, None]
+                )
+                used_pages.masked_fill_(beyond_needed, 0)
 
         used_pages_padded = pad_to_multiple(
             used_pages, multiple=self.q_block_size, dim=0
