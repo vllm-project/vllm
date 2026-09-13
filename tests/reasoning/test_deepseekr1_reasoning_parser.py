@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Sequence
+from typing import overload
+
 import pytest
 from transformers import AutoTokenizer
 
 from tests.reasoning.utils import run_reasoning_extraction
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
 
 parser_name = "deepseek_r1"
 start_token = "<think>"
@@ -17,6 +21,85 @@ REASONING_MODEL_NAME = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 @pytest.fixture(scope="module")
 def deepseek_r1_qwen_tokenizer():
     return AutoTokenizer.from_pretrained(REASONING_MODEL_NAME)
+
+
+class _CountingSequence(Sequence[int]):
+    items_read = 0
+
+    def __init__(self, values: list[int]) -> None:
+        self._values = values
+
+    @overload
+    def __getitem__(self, index: int) -> int: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> Sequence[int]: ...
+
+    def __getitem__(self, index: int | slice) -> int | Sequence[int]:
+        if isinstance(index, slice):
+            value = self._values[index]
+            type(self).items_read += len(value)
+            return value
+        type(self).items_read += 1
+        return self._values[index]
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+
+class _TestTokenizer:
+    def get_vocab(self) -> dict[str, int]:
+        return {"<think>": 1, "</think>": 2, "token": 3}
+
+
+def test_streaming_membership_only_reads_new_token_ids():
+    parser = DeepSeekR1ReasoningParser(_TestTokenizer())
+    _CountingSequence.items_read = 0
+
+    for length in range(500):
+        previous_ids = [3] * length
+        delta = parser.extract_reasoning_streaming(
+            previous_text="x" * length,
+            current_text="x" * (length + 1),
+            delta_text="x",
+            previous_token_ids=_CountingSequence(previous_ids),
+            current_token_ids=previous_ids + [3],
+            delta_token_ids=[3],
+        )
+        assert delta is not None
+        assert delta.reasoning == "x"
+
+    # The cache reads the new tail plus constant-size boundary checks.
+    # Re-scanning the accumulated list per probe would read ~125k items.
+    assert _CountingSequence.items_read <= 3 * 500
+
+
+def test_streaming_membership_rebuilds_after_history_rewind():
+    parser = DeepSeekR1ReasoningParser(_TestTokenizer())
+
+    # History holds both markers, so the delta is post-reasoning content.
+    delta = parser.extract_reasoning_streaming(
+        previous_text="<think>a</think>",
+        current_text="<think>a</think>b",
+        delta_text="b",
+        previous_token_ids=[1, 3, 2],
+        current_token_ids=[1, 3, 2, 3],
+        delta_token_ids=[3],
+    )
+    assert delta is not None
+    assert delta.content == "b"
+
+    # A rewound history must not leave the stale markers in the cache.
+    delta = parser.extract_reasoning_streaming(
+        previous_text="a",
+        current_text="ab",
+        delta_text="b",
+        previous_token_ids=[3],
+        current_token_ids=[3, 3],
+        delta_token_ids=[3],
+    )
+    assert delta is not None
+    assert delta.reasoning == "b"
 
 
 SIMPLE_REASONING = {
