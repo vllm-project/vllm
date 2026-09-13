@@ -2640,6 +2640,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let multi_connector_stats_hex =
         lines.next().expect("missing MultiConnector stats fixture line");
     let ready_response_hex = lines.next().expect("missing ready response fixture line");
+    let extended_outputs_hex = lines.next().expect("missing extended outputs fixture line");
 
     let request_bytes = hex::decode(request_hex).unwrap();
     let multimodal_request_bytes = hex::decode(multimodal_request_hex).unwrap();
@@ -2720,6 +2721,14 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     ));
 
     let decoded_outputs: EngineCoreOutputs = rmp_serde::from_slice(&outputs_bytes).unwrap();
+    // Match msgspec's base-schema result for the same extended Python message.
+    let extended_frames = [bytes::Bytes::from(
+        hex::decode(extended_outputs_hex).unwrap(),
+    )];
+    assert_eq!(
+        decode_engine_core_outputs(&extended_frames).unwrap(),
+        decoded_outputs
+    );
     expect_test::expect![[r#"
         RequestBatch(
             RequestBatchOutputs {
