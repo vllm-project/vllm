@@ -35,6 +35,7 @@ from vllm.model_executor.layers.quantization.utils.humming import (
     get_humming_moe_quant_config,
     input_schema_to_quant_key,
     make_humming_moe_kernel,
+    resolve_humming_layer_config,
     select_humming_moe_experts,
     weight_schema_to_quant_key,
 )
@@ -228,23 +229,13 @@ class HummingConfig(QuantizationConfig):
                 return None
             config = group_config
 
-        layer_config = config
-        layer_dynamic = config.get("dynamic", {})
-        if not isinstance(layer_dynamic, dict):
-            layer_dynamic = {}
-        for regex, override_config in layer_dynamic.items():
-            if regex[:1] != "+":
-                continue
-            if re.match(regex[2:], prefix):
-                layer_config = config.copy()
-                layer_config.update(override_config)
-                break
+        layer_config = resolve_humming_layer_config(config, prefix)
 
         if "quant_method" in layer_config:
             return _hm.BaseWeightSchema.from_config(layer_config)
         return None
 
-    def get_layer_input_schema(self, config: dict[str, Any], prefix: str):
+    def get_layer_input_config(self, config: dict[str, Any], prefix: str):
         if self.is_layer_skipped(config, prefix):
             return None
         if config["quant_method"] in ["compressed-tensors", "modelopt"]:
@@ -253,9 +244,14 @@ class HummingConfig(QuantizationConfig):
                 return None
             config = group_config
 
+        config = resolve_humming_layer_config(config, prefix)
         if config.get("quant_method", None) in _hm.BaseInputSchema.INPUT_SCHEMA_MAP:
-            return _hm.BaseInputSchema.from_config(config)
+            return config
         return None
+
+    def get_layer_input_schema(self, config: dict[str, Any], prefix: str):
+        config = self.get_layer_input_config(config, prefix)
+        return None if config is None else _hm.BaseInputSchema.from_config(config)
 
     def get_quant_config_for_layer(
         self, prefix: str, layer_type: str
@@ -280,14 +276,25 @@ class HummingConfig(QuantizationConfig):
         if weight_schema is not None:
             input_schema = None
             force_input_schema = None
+            allow_input_schema_fallback = True
 
             if self.full_config:
-                input_schema = self.get_layer_input_schema(self.full_config, prefix)
+                input_config = self.get_layer_input_config(self.full_config, prefix)
+                if input_config is not None:
+                    allow_input_schema_fallback = input_config.pop(
+                        "allow_fallback", True
+                    )
+                    input_schema = _hm.BaseInputSchema.from_config(input_config)
 
             if envs.VLLM_HUMMING_INPUT_QUANT_CONFIG:
                 quant_config = envs.VLLM_HUMMING_INPUT_QUANT_CONFIG.copy()
                 quant_config["quant_method"] = "humming"
-                force_input_schema = self.get_layer_input_schema(quant_config, prefix)
+                input_config = self.get_layer_input_config(quant_config, prefix)
+                if input_config is not None:
+                    allow_input_schema_fallback = input_config.pop(
+                        "allow_fallback", False
+                    )
+                    force_input_schema = _hm.BaseInputSchema.from_config(input_config)
                 if input_schema is None:
                     input_schema = force_input_schema
 
@@ -300,6 +307,7 @@ class HummingConfig(QuantizationConfig):
                 force_weight_schema=force_weight_schema,
                 force_input_schema=force_input_schema,
                 is_online_quant=is_online_quant,
+                allow_input_schema_fallback=allow_input_schema_fallback,
             )
         return None
 
@@ -333,6 +341,7 @@ class HummingLayerQuantizationConfig(HummingConfig):
         force_weight_schema: "HummingWeightSchema | None" = None,
         force_input_schema: "HummingInputSchema | None" = None,
         is_online_quant: bool = False,
+        allow_input_schema_fallback: bool = True,
     ):
         self.weight_schema = weight_schema
         if input_schema is None:
@@ -341,6 +350,7 @@ class HummingLayerQuantizationConfig(HummingConfig):
         self.force_weight_schema = force_weight_schema
         self.force_input_schema = force_input_schema
         self.is_online_quant = is_online_quant
+        self.allow_input_schema_fallback = allow_input_schema_fallback
 
     @classmethod
     def from_config(cls, config):
@@ -553,6 +563,7 @@ class HummingLinearMethod(LinearMethodBase):
             weight_schema=self.weight_schema,
             input_schema=self.input_schema,
             param_dtype=layer.param_dtype,
+            allow_fallback=self.quant_config.allow_input_schema_fallback,
         )
         self.layer_config = _hm.prepare_layer_config(
             shape_n=layer.output_partition_sizes_sum,
@@ -624,6 +635,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
             weight_schema=self.force_weight_schema or self.weight_schema,
             input_schema=self.force_input_schema or self.input_schema,
             param_dtype=moe.in_dtype,
+            allow_fallback=quant_config.allow_input_schema_fallback,
         )
         activation_key = input_schema_to_quant_key(runtime_input_schema, moe.in_dtype)
 
@@ -768,6 +780,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
             weight_schema=self.weight_schema,
             input_schema=self.input_schema,
             force_weight_schema=self.force_weight_schema,
+            allow_input_schema_fallback=self.quant_config.allow_input_schema_fallback,
         )
 
         # Build the MoE kernel

@@ -377,6 +377,17 @@ def check_and_fallback_input_schema(
     )
 
 
+def resolve_humming_layer_config(config: dict[str, Any], prefix: str) -> dict[str, Any]:
+    layer_config = config.copy()
+    dynamic = config.get("dynamic", {})
+    if isinstance(dynamic, dict):
+        for pattern, overrides in dynamic.items():
+            if pattern.startswith("+") and re.match(pattern[2:], prefix):
+                layer_config.update(overrides)
+                break
+    return layer_config
+
+
 def humming_is_layer_skipped(config: dict[str, Any], prefix: str):
     if not config:
         return True

@@ -24,6 +24,7 @@ from vllm.model_executor.layers.quantization.utils.humming.schema import (
     humming_is_layer_skipped,
     input_schema_to_quant_key,
     quant_key_to_input_schema,
+    resolve_humming_layer_config,
     weight_schema_to_quant_key,
 )
 
@@ -42,6 +43,7 @@ __all__ = [
     "select_humming_moe_experts",
     "input_schema_to_quant_key",
     "quant_key_to_input_schema",
+    "resolve_humming_layer_config",
     "weight_schema_to_quant_key",
     "convert_to_humming_moe_kernel_format",
 ]

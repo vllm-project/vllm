@@ -1528,7 +1528,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_HUMMING_ONLINE_QUANT_CONFIG": lambda: maybe_convert_json_str_or_file(
         os.environ.get("VLLM_HUMMING_ONLINE_QUANT_CONFIG", None)
     ),
-    # The activation dtype config for humming kernel
+    # The activation dtype config for humming kernel. Explicit schemas disable
+    # fallback unless the config includes "allow_fallback": true.
     "VLLM_HUMMING_INPUT_QUANT_CONFIG": lambda: maybe_convert_json_str_or_file(
         os.environ.get("VLLM_HUMMING_INPUT_QUANT_CONFIG", None)
     ),

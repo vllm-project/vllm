@@ -435,6 +435,7 @@ def _process_single_sublayer(
     num_experts: int,
     param_dtype: torch.dtype,
     force_weight_schema: Any | None = None,
+    allow_input_schema_fallback: bool = True,
 ) -> tuple[Any, Any, "LayerConfig"]:
     """
     Process a single sublayer: convert, optionally requant, prepare, and transform.
@@ -453,6 +454,7 @@ def _process_single_sublayer(
         num_experts: Number of experts
         param_dtype: Parameter data type
         force_weight_schema: Optional schema to force requantization to
+        allow_input_schema_fallback: Whether incompatible input schemas may be replaced.
 
     Returns:
         Tuple of the final weight schema, input schema, and Humming layer config.
@@ -494,6 +496,7 @@ def _process_single_sublayer(
         weight_schema=current_weight_schema,
         input_schema=current_input_schema,
         param_dtype=param_dtype,
+        allow_fallback=allow_input_schema_fallback,
     )
     config = _prepare_and_transform_sublayer(
         layer=layer,
@@ -517,6 +520,7 @@ def convert_to_humming_moe_kernel_format(
     weight_schema: Any | None = None,
     input_schema: Any | None = None,
     force_weight_schema: Any | None = None,
+    allow_input_schema_fallback: bool = True,
 ) -> dict[str, "LayerConfig"]:
     """
     Convert MoE weights from checkpoint format to Humming kernel format.
@@ -540,6 +544,7 @@ def convert_to_humming_moe_kernel_format(
         input_schema: Optional initial input quantization schema.
                      If None, built from quant_config or env vars.
         force_weight_schema: Optional schema to force requantization to
+        allow_input_schema_fallback: Whether incompatible input schemas may be replaced.
 
     Side effects:
         - Modifies layer parameters in place
@@ -564,11 +569,17 @@ def convert_to_humming_moe_kernel_format(
             weight_schema = BaseWeightSchema.from_config(quant_config)
 
         if input_schema is None:
-            input_quant_config = envs.VLLM_HUMMING_INPUT_QUANT_CONFIG or {}
+            input_quant_config = (envs.VLLM_HUMMING_INPUT_QUANT_CONFIG or {}).copy()
             if humming_is_layer_skipped(input_quant_config, layer.layer_name):
                 input_schema = HummingInputSchema()
             else:
                 # TODO: read input_quant_config from quant_config
+                input_quant_config = humming_schema.resolve_humming_layer_config(
+                    input_quant_config, layer.layer_name
+                )
+                allow_input_schema_fallback = input_quant_config.pop(
+                    "allow_fallback", False
+                )
                 input_schema = HummingInputSchema.from_config(input_quant_config)
 
     # Build sublayer configs from layer properties if not provided
@@ -603,6 +614,7 @@ def convert_to_humming_moe_kernel_format(
                 num_experts=num_experts,
                 param_dtype=param_dtype,
                 force_weight_schema=force_weight_schema,
+                allow_input_schema_fallback=allow_input_schema_fallback,
             )
         )
 
