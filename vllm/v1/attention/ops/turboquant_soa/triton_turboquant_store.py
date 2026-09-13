@@ -381,7 +381,7 @@ def _tq_fused_store_mse(
 def triton_turboquant_store(
     key: torch.Tensor,  # [N, H, D] — raw keys (post-RoPE)
     value: torch.Tensor,  # [N, H, D] — raw values
-    kv_cache: torch.Tensor,  # [num_blocks, block_size, Hk, padded_slot] uint8
+    kv_cache: torch.Tensor,  # [num_blocks, Hk, 1, page_record_size] uint8
     slot_mapping: torch.Tensor,  # [N] int32
     PiT: torch.Tensor,  # [D, D] float32
     midpoints: torch.Tensor,  # [n_centroids-1] float32
@@ -409,12 +409,29 @@ def triton_turboquant_store(
         )
     N, H, D = key.shape
     NH = N * H
-    block_size = kv_cache.shape[1]
     BLOCK_D = triton.next_power_of_2(D)
     mse_bytes = math.ceil(D * mse_bits / 8)
     n_centroids = 2**mse_bits
 
     val_data_bytes = math.ceil(D * value_quant_bits / 8)
+    per_token_bytes = key_packed_size + val_data_bytes + 4
+    aligned_token_bytes = per_token_bytes + per_token_bytes % 2
+    record_size = kv_cache.shape[-1]
+    if kv_cache.ndim != 4 or kv_cache.shape[2] != 1:
+        raise ValueError(
+            "TurboQuant cache must have shape "
+            "[num_blocks, num_kv_heads, 1, page_record_size]"
+        )
+    if kv_cache.shape[1] != H:
+        raise ValueError(
+            f"TurboQuant cache has {kv_cache.shape[1]} heads, expected {H}"
+        )
+    if record_size % aligned_token_bytes:
+        raise ValueError(
+            "TurboQuant page record is not divisible by its per-token payload: "
+            f"{record_size=} {aligned_token_bytes=}"
+        )
+    block_size = record_size // aligned_token_bytes
 
     BLOCK_VAL = triton.next_power_of_2(val_data_bytes)
 

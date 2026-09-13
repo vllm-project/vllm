@@ -45,7 +45,7 @@ def _tq_decode_stage1(
     # Precomputed query projection
     Q_rot_ptr,  # [B, Hq, D] float32
     # Compressed KV cache (combined K+V)
-    KV_cache_ptr,  # [num_blocks, block_size, Hk, padded_slot] uint8
+    KV_cache_ptr,  # [num_blocks, Hk, 1, page_record_size] uint8
     # Block table and sequence info
     Block_table_ptr,  # [B, max_num_blocks] int32
     Seq_lens_ptr,  # [B] int32
@@ -57,7 +57,6 @@ def _tq_decode_stage1(
     stride_qb,
     stride_qh,  # Q strides: [B, Hq, D]
     stride_cache_block,
-    stride_cache_pos,
     stride_cache_head,  # KV cache
     stride_bt_b,  # block_table stride per batch
     stride_mid_b,
@@ -71,8 +70,8 @@ def _tq_decode_stage1(
     KV_GROUP_SIZE: tl.constexpr,  # Hq // Hk
     # TQ layout constants
     MSE_BITS: tl.constexpr,  # 3 or 4
-    MSE_BYTES: tl.constexpr,  # ceil(D * mse_bits / 8)
-    KPS: tl.constexpr,  # key_packed_size
+    KEY_DATA_BYTES: tl.constexpr,
+    KEY_NORM_BYTES: tl.constexpr,
     VQB: tl.constexpr,  # value_quant_bits (4 or 8=FP8)
     VAL_DATA_BYTES: tl.constexpr,  # ceil(D * vqb / 8) or D for FP8
     # Score constants
@@ -145,17 +144,26 @@ def _tq_decode_stage1(
             other=0,
         ).to(tl.int64)
 
-        slot_bases = (
+        record_bases = (
             block_nums * stride_cache_block
-            + page_off.to(tl.int64) * stride_cache_pos
             + tl.cast(kv_head, tl.int64) * stride_cache_head
         )
+        page_off_i64 = page_off.to(tl.int64)
+        key_data_bases = record_bases + page_off_i64 * KEY_DATA_BYTES
+        value_data_plane = record_bases + BLOCK_SIZE * KEY_DATA_BYTES
+        value_data_bases = value_data_plane + page_off_i64 * VAL_DATA_BYTES
+        key_norm_plane = value_data_plane + BLOCK_SIZE * VAL_DATA_BYTES
+        key_norm_bases = key_norm_plane + page_off_i64 * KEY_NORM_BYTES
+        value_scale_plane = key_norm_plane + BLOCK_SIZE * KEY_NORM_BYTES
+        value_scale_bases = value_scale_plane + page_off_i64 * 2
+        value_zero_plane = value_scale_plane + BLOCK_SIZE * 2
+        value_zero_bases = value_zero_plane + page_off_i64 * 2
 
         # ============================================================
         # COMPUTE ATTENTION SCORES: [BLOCK_KV]
         # ============================================================
         if KEY_FP8:
-            k_addrs = slot_bases[:, None] + d_offs[None, :]
+            k_addrs = key_data_bases[:, None] + d_offs[None, :]
             k_raw = tl.load(
                 KV_cache_ptr + k_addrs,
                 mask=kv_mask[:, None] & d_mask[None, :],
@@ -175,7 +183,7 @@ def _tq_decode_stage1(
             scores = tl.where(kv_mask, scores, -float("inf"))
         else:
             # MSE unpack + norms
-            mse_addrs0 = slot_bases[:, None] + mse_byte_idx[None, :]
+            mse_addrs0 = key_data_bases[:, None] + mse_byte_idx[None, :]
             mse_raw0 = tl.load(
                 KV_cache_ptr + mse_addrs0,
                 mask=kv_mask[:, None] & d_mask[None, :],
@@ -210,12 +218,11 @@ def _tq_decode_stage1(
                 axis=1,
             )
 
-            # Load norms (fp16 -> fp32): norms are at MSE_BYTES offset
-            norm_bases = slot_bases + MSE_BYTES
-            n_lo = tl.load(KV_cache_ptr + norm_bases, mask=kv_mask, other=0).to(
+            # Load norms (fp16 -> fp32)
+            n_lo = tl.load(KV_cache_ptr + key_norm_bases, mask=kv_mask, other=0).to(
                 tl.uint16
             )
-            n_hi = tl.load(KV_cache_ptr + norm_bases + 1, mask=kv_mask, other=0).to(
+            n_hi = tl.load(KV_cache_ptr + key_norm_bases + 1, mask=kv_mask, other=0).to(
                 tl.uint16
             )
             vec_norms = (n_lo | (n_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
@@ -233,10 +240,8 @@ def _tq_decode_stage1(
         # ============================================================
         # VALUE LOAD + DEQUANTIZE: [BLOCK_KV, BLOCK_D]
         # ============================================================
-        val_bases = slot_bases + KPS
-
         if VQB == 3:
-            val_addrs0 = val_bases[:, None] + val_byte_idx[None, :]
+            val_addrs0 = value_data_bases[:, None] + val_byte_idx[None, :]
             val_raw0 = tl.load(
                 KV_cache_ptr + val_addrs0,
                 mask=kv_mask[:, None] & d_mask[None, :],
@@ -250,28 +255,27 @@ def _tq_decode_stage1(
             raw16 = val_raw0 | (val_raw1 << 8)
             v_idx = ((raw16 >> val_bit_shift[None, :]) & 0x7).to(tl.float32)
 
-            sc_bases = val_bases + VAL_DATA_BYTES
-            sc_lo = tl.load(KV_cache_ptr + sc_bases, mask=kv_mask, other=0).to(
+            sc_lo = tl.load(KV_cache_ptr + value_scale_bases, mask=kv_mask, other=0).to(
                 tl.uint16
             )
-            sc_hi = tl.load(KV_cache_ptr + sc_bases + 1, mask=kv_mask, other=0).to(
-                tl.uint16
-            )
+            sc_hi = tl.load(
+                KV_cache_ptr + value_scale_bases + 1, mask=kv_mask, other=0
+            ).to(tl.uint16)
             v_scales = (
                 (sc_lo | (sc_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
             )
-            zr_lo = tl.load(KV_cache_ptr + sc_bases + 2, mask=kv_mask, other=0).to(
+            zr_lo = tl.load(KV_cache_ptr + value_zero_bases, mask=kv_mask, other=0).to(
                 tl.uint16
             )
-            zr_hi = tl.load(KV_cache_ptr + sc_bases + 3, mask=kv_mask, other=0).to(
-                tl.uint16
-            )
+            zr_hi = tl.load(
+                KV_cache_ptr + value_zero_bases + 1, mask=kv_mask, other=0
+            ).to(tl.uint16)
             v_zeros = (zr_lo | (zr_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
             values = v_idx * v_scales[:, None] + v_zeros[:, None]
         else:  # VQB == 4
             vb_idx = d_offs // 2
             vb_shift = (d_offs % 2) * 4
-            val_addrs = val_bases[:, None] + vb_idx[None, :]
+            val_addrs = value_data_bases[:, None] + vb_idx[None, :]
             val_raw = tl.load(
                 KV_cache_ptr + val_addrs,
                 mask=kv_mask[:, None] & d_mask[None, :],
@@ -279,22 +283,21 @@ def _tq_decode_stage1(
             ).to(tl.int32)
             v_idx = ((val_raw >> vb_shift[None, :]) & 0xF).to(tl.float32)
 
-            sc_bases = val_bases + VAL_DATA_BYTES
-            sc_lo = tl.load(KV_cache_ptr + sc_bases, mask=kv_mask, other=0).to(
+            sc_lo = tl.load(KV_cache_ptr + value_scale_bases, mask=kv_mask, other=0).to(
                 tl.uint16
             )
-            sc_hi = tl.load(KV_cache_ptr + sc_bases + 1, mask=kv_mask, other=0).to(
-                tl.uint16
-            )
+            sc_hi = tl.load(
+                KV_cache_ptr + value_scale_bases + 1, mask=kv_mask, other=0
+            ).to(tl.uint16)
             v_scales = (
                 (sc_lo | (sc_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
             )
-            zr_lo = tl.load(KV_cache_ptr + sc_bases + 2, mask=kv_mask, other=0).to(
+            zr_lo = tl.load(KV_cache_ptr + value_zero_bases, mask=kv_mask, other=0).to(
                 tl.uint16
             )
-            zr_hi = tl.load(KV_cache_ptr + sc_bases + 3, mask=kv_mask, other=0).to(
-                tl.uint16
-            )
+            zr_hi = tl.load(
+                KV_cache_ptr + value_zero_bases + 1, mask=kv_mask, other=0
+            ).to(tl.uint16)
             v_zeros = (zr_lo | (zr_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
             values = v_idx * v_scales[:, None] + v_zeros[:, None]
 
@@ -332,14 +335,13 @@ def _tq_full_dequant_kv(
     stride_vo_h,
     stride_vo_s,
     stride_cache_block,
-    stride_cache_pos,
     stride_cache_head,
     stride_bt_b,
     HEAD_DIM: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     NUM_KV_HEADS: tl.constexpr,
-    MSE_BYTES: tl.constexpr,
-    KPS: tl.constexpr,
+    KEY_DATA_BYTES: tl.constexpr,
+    KEY_NORM_BYTES: tl.constexpr,
     VQB: tl.constexpr,
     VAL_DATA_BYTES: tl.constexpr,
     MSE_BITS: tl.constexpr,
@@ -357,11 +359,19 @@ def _tq_full_dequant_kv(
     page_idx = pos // BLOCK_SIZE
     page_off = pos % BLOCK_SIZE
     block_num = tl.load(Block_table_ptr + bid * stride_bt_b + page_idx).to(tl.int64)
-    slot_base = (
-        block_num * stride_cache_block
-        + tl.cast(page_off, tl.int64) * stride_cache_pos
-        + tl.cast(hid, tl.int64) * stride_cache_head
+    record_base = (
+        block_num * stride_cache_block + tl.cast(hid, tl.int64) * stride_cache_head
     )
+    page_off_i64 = tl.cast(page_off, tl.int64)
+    key_data_base = record_base + page_off_i64 * KEY_DATA_BYTES
+    value_data_plane = record_base + BLOCK_SIZE * KEY_DATA_BYTES
+    value_data_base = value_data_plane + page_off_i64 * VAL_DATA_BYTES
+    key_norm_plane = value_data_plane + BLOCK_SIZE * VAL_DATA_BYTES
+    key_norm_base = key_norm_plane + page_off_i64 * KEY_NORM_BYTES
+    value_scale_plane = key_norm_plane + BLOCK_SIZE * KEY_NORM_BYTES
+    value_scale_base = value_scale_plane + page_off_i64 * 2
+    value_zero_plane = value_scale_plane + BLOCK_SIZE * 2
+    value_zero_base = value_zero_plane + page_off_i64 * 2
 
     d_offs = tl.arange(0, BLOCK_D)
     d_mask = d_offs < HEAD_DIM
@@ -369,7 +379,7 @@ def _tq_full_dequant_kv(
     # === K dequant ===
     ko_base = bid * stride_ko_b + hid * stride_ko_h + pos * stride_ko_s
     if KEY_FP8:
-        k_raw = tl.load(KV_cache_ptr + slot_base + d_offs, mask=d_mask, other=0)
+        k_raw = tl.load(KV_cache_ptr + key_data_base + d_offs, mask=d_mask, other=0)
         if FP8_E4B15:
             k_recon = k_raw.to(tl.float8e4b15, bitcast=True).to(tl.float32)
         else:
@@ -383,10 +393,10 @@ def _tq_full_dequant_kv(
         mse_umask = (1 << MSE_BITS) - 1
 
         mse_raw0 = tl.load(
-            KV_cache_ptr + slot_base + mse_byte_idx, mask=d_mask, other=0
+            KV_cache_ptr + key_data_base + mse_byte_idx, mask=d_mask, other=0
         ).to(tl.int32)
         mse_raw1 = tl.load(
-            KV_cache_ptr + slot_base + mse_byte_idx + 1, mask=d_mask, other=0
+            KV_cache_ptr + key_data_base + mse_byte_idx + 1, mask=d_mask, other=0
         ).to(tl.int32)
         raw16_key = mse_raw0 | (mse_raw1 << 8)
         mse_idx = (raw16_key >> mse_bit_shift) & mse_umask
@@ -399,31 +409,27 @@ def _tq_full_dequant_kv(
             c_inv_norm = 1.0 / tl.sqrt(c_norm_sq + 1e-16)
             k_mse = k_mse * c_inv_norm
 
-        # Norms at MSE_BYTES offset (no QJL bytes)
-        norm_base = slot_base + MSE_BYTES
-        n_lo = tl.load(KV_cache_ptr + norm_base).to(tl.uint16)
-        n_hi = tl.load(KV_cache_ptr + norm_base + 1).to(tl.uint16)
+        n_lo = tl.load(KV_cache_ptr + key_norm_base).to(tl.uint16)
+        n_hi = tl.load(KV_cache_ptr + key_norm_base + 1).to(tl.uint16)
         vec_norm = (n_lo | (n_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
 
         k_recon = vec_norm * k_mse
         tl.store(K_out_ptr + ko_base + d_offs, k_recon.to(tl.float16), mask=d_mask)
 
     # === V dequant ===
-    val_base = slot_base + KPS
     if VQB == 4:
         vb_idx = d_offs // 2
         vb_shift = (d_offs % 2) * 4
-        val_raw = tl.load(KV_cache_ptr + val_base + vb_idx, mask=d_mask, other=0).to(
-            tl.int32
-        )
+        val_raw = tl.load(
+            KV_cache_ptr + value_data_base + vb_idx, mask=d_mask, other=0
+        ).to(tl.int32)
         v_idx = ((val_raw >> vb_shift) & 0xF).to(tl.float32)
 
-        sc_base = val_base + VAL_DATA_BYTES
-        sc_lo = tl.load(KV_cache_ptr + sc_base).to(tl.uint16)
-        sc_hi = tl.load(KV_cache_ptr + sc_base + 1).to(tl.uint16)
+        sc_lo = tl.load(KV_cache_ptr + value_scale_base).to(tl.uint16)
+        sc_hi = tl.load(KV_cache_ptr + value_scale_base + 1).to(tl.uint16)
         v_scale = (sc_lo | (sc_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
-        zr_lo = tl.load(KV_cache_ptr + sc_base + 2).to(tl.uint16)
-        zr_hi = tl.load(KV_cache_ptr + sc_base + 3).to(tl.uint16)
+        zr_lo = tl.load(KV_cache_ptr + value_zero_base).to(tl.uint16)
+        zr_hi = tl.load(KV_cache_ptr + value_zero_base + 1).to(tl.uint16)
         v_zero = (zr_lo | (zr_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
         v_vals = v_idx * v_scale + v_zero
     elif VQB == 3:
@@ -432,20 +438,21 @@ def _tq_full_dequant_kv(
         val_byte_idx = val_bit_off // 8
         val_bit_shift = val_bit_off % 8
         val_raw0 = tl.load(
-            KV_cache_ptr + val_base + val_byte_idx, mask=d_mask, other=0
+            KV_cache_ptr + value_data_base + val_byte_idx, mask=d_mask, other=0
         ).to(tl.int32)
         val_raw1 = tl.load(
-            KV_cache_ptr + val_base + val_byte_idx + 1, mask=d_mask, other=0
+            KV_cache_ptr + value_data_base + val_byte_idx + 1,
+            mask=d_mask,
+            other=0,
         ).to(tl.int32)
         raw16_val = val_raw0 | (val_raw1 << 8)
         v_idx = ((raw16_val >> val_bit_shift) & 0x7).to(tl.float32)
 
-        sc_base = val_base + VAL_DATA_BYTES
-        sc_lo = tl.load(KV_cache_ptr + sc_base).to(tl.uint16)
-        sc_hi = tl.load(KV_cache_ptr + sc_base + 1).to(tl.uint16)
+        sc_lo = tl.load(KV_cache_ptr + value_scale_base).to(tl.uint16)
+        sc_hi = tl.load(KV_cache_ptr + value_scale_base + 1).to(tl.uint16)
         v_scale = (sc_lo | (sc_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
-        zr_lo = tl.load(KV_cache_ptr + sc_base + 2).to(tl.uint16)
-        zr_hi = tl.load(KV_cache_ptr + sc_base + 3).to(tl.uint16)
+        zr_lo = tl.load(KV_cache_ptr + value_zero_base).to(tl.uint16)
+        zr_hi = tl.load(KV_cache_ptr + value_zero_base + 1).to(tl.uint16)
         v_zero = (zr_lo | (zr_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
         v_vals = v_idx * v_scale + v_zero
     else:
@@ -485,7 +492,7 @@ def _get_layout(D, mse_bits, value_quant_bits, key_packed_size):
 
 def triton_turboquant_decode_attention(
     query: torch.Tensor,  # [B, Hq, D] — original query
-    kv_cache: torch.Tensor,  # [num_blocks, block_size, Hk, padded_slot] uint8
+    kv_cache: torch.Tensor,  # [num_blocks, Hk, 1, page_record_size] uint8
     block_table: torch.Tensor,  # [B, max_num_blocks] int32
     seq_lens: torch.Tensor,  # [B] int32
     Pi: torch.Tensor,  # [D, D] float32
@@ -509,12 +516,24 @@ def triton_turboquant_decode_attention(
     Returns: output tensor [B, Hq, D] in query's dtype.
     """
     B, Hq, D = query.shape
-    Hk = kv_cache.shape[2]
-    block_size = kv_cache.shape[1]
+    if kv_cache.ndim != 4 or kv_cache.shape[2] != 1:
+        raise ValueError(
+            "TurboQuant cache must have shape "
+            "[num_blocks, num_kv_heads, 1, page_record_size]"
+        )
+    Hk = kv_cache.shape[1]
+    cfg = _get_layout(D, mse_bits, value_quant_bits, key_packed_size)
+    per_token_bytes = key_packed_size + cfg["val_data_bytes"] + 4
+    aligned_token_bytes = per_token_bytes + per_token_bytes % 2
+    record_size = kv_cache.shape[-1]
+    if record_size % aligned_token_bytes:
+        raise ValueError(
+            "TurboQuant page record is not divisible by its per-token payload: "
+            f"{record_size=} {aligned_token_bytes=}"
+        )
+    block_size = record_size // aligned_token_bytes
     kv_group_size = Hq // Hk
     device = query.device
-
-    cfg = _get_layout(D, mse_bits, value_quant_bits, key_packed_size)
 
     # Compute q_rot = q @ Pi.T (rotated query for MSE key scoring)
     # FP8 path: pass query directly (float16); kernel casts inline.
@@ -562,7 +581,6 @@ def triton_turboquant_decode_attention(
         q_rot.stride(1),
         kv_cache.stride(0),
         kv_cache.stride(1),
-        kv_cache.stride(2),
         block_table.stride(0),
         mid_o.stride(0),
         mid_o.stride(1),
@@ -573,8 +591,8 @@ def triton_turboquant_decode_attention(
         NUM_KV_SPLITS=NUM_KV_SPLITS,
         KV_GROUP_SIZE=kv_group_size,
         MSE_BITS=mse_bits,
-        MSE_BYTES=cfg["mse_bytes"],
-        KPS=key_packed_size,
+        KEY_DATA_BYTES=D if key_fp8 else cfg["mse_bytes"],
+        KEY_NORM_BYTES=0 if key_fp8 else 2,
         VQB=value_quant_bits,
         VAL_DATA_BYTES=cfg["val_data_bytes"],
         ATTN_SCALE=scale,
