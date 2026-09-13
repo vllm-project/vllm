@@ -1810,7 +1810,6 @@ def test_uno_startup_suspends_adaptive_verification_for_helper_and_restores_it(
 
     def record_helper(*_args, **_kwargs):
         assert runner.adaptive_verification is None
-        assert runner.adaptive_verification is None
         observed.append(True)
         # A skipped self-check cycle still completes normally and must restore
         # the serving collaborators. Its shape/coverage has separate tests.
@@ -1833,7 +1832,7 @@ def test_uno_startup_suspends_adaptive_verification_for_helper_and_restores_it(
 def test_uno_startup_restores_adaptive_verification_after_callback_error(
     monkeypatch, entrypoint
 ):
-    """Both startup callers restore the serving tracker when a worker raises."""
+    """Both startup callers restore the adaptive manager when a worker raises."""
     from vllm.utils import jit_monitor
     from vllm.v1.worker.gpu import warmup
 
