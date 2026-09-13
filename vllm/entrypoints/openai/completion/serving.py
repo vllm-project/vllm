@@ -720,7 +720,9 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             return_as_token_id=should_return_as_token_id,
                         ): max(top_lp[1].logprob, -9999.0)
                         for i, top_lp in enumerate(step_top_logprobs.items())
-                        if logprob_token_ids or num_output_top_logprobs >= i
+                        if logprob_token_ids
+                        or num_output_top_logprobs == -1
+                        or num_output_top_logprobs >= i
                     }
                 )
 

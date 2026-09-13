@@ -15,6 +15,7 @@ from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.scale_out.render.serving import ServingRender
 from vllm.exceptions import GenerationError, VLLMValidationError
+from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.online_renderer import OnlineRenderer
@@ -592,6 +593,45 @@ def test_logprobs_minus_one_allowed():
         logprobs=-1,
     )
     assert request.logprobs == -1
+
+
+def _minimal_serving_completion() -> OpenAIServingCompletion:
+    """A serving object with only what `_create_completion_logprobs` reads."""
+    serving = OpenAIServingCompletion.__new__(OpenAIServingCompletion)
+    serving.return_tokens_as_token_ids = False
+    return serving
+
+
+@pytest.mark.parametrize(
+    ("num_output_top_logprobs", "expected"),
+    [(-1, 3), (1, 2), (2, 3)],
+)
+def test_completion_logprobs_honors_requested_count(
+    num_output_top_logprobs: int, expected: int
+):
+    """`logprobs=-1` asks for every logprob, so none may be filtered out.
+
+    The validator accepts -1 and the sampler expands it to the vocabulary, so
+    dropping the candidates here would return an empty `top_logprobs` for every
+    position while still charging for the full computation.
+    """
+    tokenizer = MagicMock()
+    tokenizer.decode = lambda token_ids: f"tok{token_ids[0]}"
+    step_logprobs = {
+        10: Logprob(logprob=-0.1, decoded_token="a"),
+        11: Logprob(logprob=-0.2, decoded_token="b"),
+        12: Logprob(logprob=-0.3, decoded_token="c"),
+    }
+
+    logprobs = _minimal_serving_completion()._create_completion_logprobs(
+        token_ids=[10],
+        top_logprobs=[step_logprobs],
+        num_output_top_logprobs=num_output_top_logprobs,
+        tokenizer=tokenizer,
+    )
+
+    assert logprobs.top_logprobs is not None
+    assert len(logprobs.top_logprobs[0]) == expected
 
 
 def test_logprobs_below_minus_one_rejected():
