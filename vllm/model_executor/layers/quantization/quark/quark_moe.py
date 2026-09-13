@@ -84,6 +84,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8StaticTensorAsym,
     kInt8StaticTensorSym,
     kMxfp4Dynamic,
+    kMxfp4Static,
     kNvfp4Dynamic,
     kNvfp4Static,
 )
@@ -1298,6 +1299,18 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         logger.info_once(
             f"Using {self.mxfp4_backend.value} backend for {self.ocp_mx_scheme}"
         )
+
+    @property
+    def shared_expert_online_loader(self):
+        """Return the loader for online MXFP4 shared-expert weights."""
+        if self.weight_quant_key != kMxfp4Static:
+            return super().shared_expert_online_loader
+
+        from vllm.model_executor.layers.quantization.online.moe_shared_expert import (
+            OnlineMxfp4SharedExpertLoader,
+        )
+
+        return OnlineMxfp4SharedExpertLoader()
 
     def maybe_roundup_sizes(
         self,

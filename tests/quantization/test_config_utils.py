@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests quantization configuration matching utilities."""
 
-from unittest.mock import Mock
-
 import pytest
 
 from vllm.config.quantization import QuantizationConfigArgs
+from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer,
 )
@@ -58,7 +57,7 @@ def test_online_ignore_supports_fnmatch_patterns():
     )
 
     with pytest.raises(ValueError, match="matches both quantization_config.ignore"):
-        config.resolve_quant_method_cls(Mock(), layer_name)
+        config.resolve_quant_method_cls(LinearBase, layer_name)
 
 
 @pytest.mark.parametrize(

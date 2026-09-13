@@ -83,6 +83,40 @@ def resolve_layer_fused_shared_expert(
         else (True, None)
     )
     is_fused_shared_expert_enabled = fse_requested and fse_compatible
+
+    # In online shared_expert quantization is used, register it to
+    # `online_quantization_config.quantized_layers` ahead of weight loading.
+    if is_fused_shared_expert_enabled and quant_config is not None:
+        online_quantization_config = quant_config.online_quantization_config
+        if online_quantization_config is not None:
+            from vllm.model_executor.layers.linear import (
+                LinearBase,
+                UnquantizedLinearMethod,
+            )
+
+            for projection_name in ("gate_up_proj", "down_proj"):
+                projection_prefix = f"{prefix}.{shared_expert_name}.{projection_name}"
+                quant_method_metadata = (
+                    online_quantization_config.resolve_quant_method_cls(
+                        LinearBase, projection_prefix
+                    )
+                )
+
+                if quant_method_metadata is None:
+                    continue
+
+                source, quant_key_str, target_pattern, _, quant_method_cls = (
+                    quant_method_metadata
+                )
+
+                if quant_method_cls in (None, UnquantizedLinearMethod):
+                    continue
+
+                online_quantization_config.quantized_layers[projection_prefix] = (
+                    source.value,
+                    quant_key_str,
+                    target_pattern,
+                )
     if fse_requested and not is_fused_shared_expert_enabled:
         logger.warning(
             "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "

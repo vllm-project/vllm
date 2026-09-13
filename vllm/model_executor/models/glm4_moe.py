@@ -205,6 +205,7 @@ class Glm4MoE(nn.Module):
                 config.n_shared_experts if self.is_fused_shared_expert_enabled else None
             ),
             fuse_shared_experts=self.is_fused_shared_expert_enabled,
+            shared_expert_prefix=f"{prefix}.shared_experts",
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
