@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""
+Unified module for dataset loading, parsing, and sampling logic across vLLM benchmark scripts.
+"""
 
-from vllm.benchmarks.datasets.datasets import (
+from vllm.benchmarks.datasets import (
     DEFAULT_NUM_PROMPTS,
     AIMODataset,
     ASRDataset,
@@ -25,6 +28,7 @@ from vllm.benchmarks.datasets.datasets import (
     RandomDataset,
     RandomDatasetForReranking,
     RandomMultiModalDataset,
+    RangeRatio,
     SampleRequest,
     ShareGPTDataset,
     SonnetDataset,
@@ -47,7 +51,6 @@ from vllm.benchmarks.datasets.datasets import (
     sample_sonnet_requests,
     zeta_prompt,
 )
-from vllm.benchmarks.datasets.utils import RangeRatio
 
 __all__ = [
     "DEFAULT_NUM_PROMPTS",
@@ -96,4 +99,3 @@ __all__ = [
     "RangeRatio",
     "zeta_prompt",
 ]
-
