@@ -1,7 +1,7 @@
 group: CPU
 depends_on: []
 steps:
-- label: CPU-Kernel Tests
+- label: CPU-Kernel Tests Shard %N
   key: cpu-kernel-tests
   depends_on: []
   device: intel_cpu
@@ -16,6 +16,7 @@ steps:
   - tests/kernels/attention/test_amx_mla.py
   - vllm/v1/attention/backends/mla/amx_mla.py
   - vllm/model_executor/layers/attention/mla_attention.py
+  - tests/kernels/test_deepseek_v4_cpu_kernels.py
   - tests/kernels/moe/test_cpu_fused_moe.py
   - tests/kernels/moe/test_cpu_quant_fused_moe.py
   - tests/kernels/moe/test_zen_cpu_int8_moe.py
@@ -33,20 +34,23 @@ steps:
   commands:
     - |
       bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 30m "
-      pytest -x -v -s tests/kernels/attention/test_cpu_attn.py
-      pytest -x -v -s tests/v1/attention/test_group_head_counts.py
-      pytest -x -v -s tests/kernels/attention/test_amx_mla.py
-      pytest -x -v -s tests/kernels/moe/test_cpu_fused_moe.py
-      pytest -x -v -s tests/kernels/moe/test_cpu_quant_fused_moe.py
-      pytest -x -v -s tests/kernels/moe/test_zen_cpu_int8_moe.py
-      pytest -x -v -s tests/kernels/mamba/test_cpu_short_conv.py
-      pytest -x -v -s tests/kernels/test_onednn.py
-      pytest -x -v -s tests/kernels/test_awq_int4_to_int8.py
-      pytest -x -v -s tests/kernels/quantization/test_cpu_fp8_scaled_mm.py
-      pytest -x -v -s tests/kernels/mamba/cpu/test_cpu_gdn_ops.py
-      pytest -x -v -s tests/kernels/mamba/test_causal_conv1d.py
-      pytest -x -v -s tests/kernels/mamba/test_mamba_ssm.py
-      pytest -x -v -s tests/v1/sample/test_topk_topp_sampler.py::TestTritonTopkTopp"
+      pytest -x -v -s --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB \
+      tests/kernels/attention/test_cpu_attn.py \
+      tests/v1/attention/test_group_head_counts.py \
+      tests/kernels/attention/test_amx_mla.py \
+      tests/kernels/test_deepseek_v4_cpu_kernels.py \
+      tests/kernels/moe/test_cpu_fused_moe.py \
+      tests/kernels/moe/test_cpu_quant_fused_moe.py \
+      tests/kernels/moe/test_zen_cpu_int8_moe.py \
+      tests/kernels/mamba/test_cpu_short_conv.py \
+      tests/kernels/test_onednn.py \
+      tests/kernels/test_awq_int4_to_int8.py \
+      tests/kernels/quantization/test_cpu_fp8_scaled_mm.py \
+      tests/kernels/mamba/cpu/test_cpu_gdn_ops.py \
+      tests/kernels/mamba/test_causal_conv1d.py \
+      tests/kernels/mamba/test_mamba_ssm.py \
+      tests/v1/sample/test_topk_topp_sampler.py::TestTritonTopkTopp"
+  parallelism: 2
 
 # Note: SDE can't be downloaded from CI host because of AWS WAF
 # - label: CPU-Compatibility Tests
