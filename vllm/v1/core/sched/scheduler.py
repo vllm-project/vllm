@@ -225,6 +225,10 @@ class Scheduler(SchedulerInterface):
         # Grammar compilation failures to finish as per-request errors in
         # update_from_output.
         self.grammar_compile_error_reqs: set[str] = set()
+        # Requests that preempted themselves with no other request holding KV
+        # blocks: they can never fit and are finished with an error in
+        # update_from_output instead of re-prefilling forever.
+        self.kv_capacity_error_reqs: set[str] = set()
 
         # Encoder-related.
         # Calculate encoder cache size if applicable
@@ -793,6 +797,25 @@ class Scheduler(SchedulerInterface):
                     preempted_reqs.append(preempted_req)
                     if preempted_req == request:
                         # No more request to preempt. Cannot schedule this request.
+                        if not self.running and request.num_preemptions >= 2:
+                            # Nothing else holds KV blocks and this request still
+                            # cannot get its next chunk, so it can never fit in
+                            # the pool even though admission let it in. Fail it
+                            # instead of re-prefilling forever: a preempted
+                            # request whose groups get no prefix hit (hybrid
+                            # Mamba groups) recomputes from token zero each time.
+                            logger.error(
+                                "Request %s cannot fit in the KV cache: %d prompt "
+                                "tokens, preempted %d times with no other request "
+                                "holding blocks (pool: %d blocks of %d tokens). "
+                                "Finishing it with an error.",
+                                request.request_id,
+                                request.num_prompt_tokens,
+                                request.num_preemptions,
+                                self.kv_cache_manager.block_pool.num_gpu_blocks,
+                                self.block_size,
+                            )
+                            self.kv_capacity_error_reqs.add(request.request_id)
                         break
 
             if new_blocks is None:
@@ -2204,6 +2227,8 @@ class Scheduler(SchedulerInterface):
 
         error_req_ids = set(self.grammar_compile_error_reqs)
         self.grammar_compile_error_reqs.clear()
+        error_req_ids.update(self.kv_capacity_error_reqs)
+        self.kv_capacity_error_reqs.clear()
         if failed_kv_load_req_ids and not self.recompute_kv_load_failures:
             error_req_ids.update(failed_kv_load_req_ids)
         if self.ec_connector is not None:
