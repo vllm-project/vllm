@@ -144,7 +144,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) V1 KV Connectors"
   device: h200_35gb
   key: v1-kv-connectors
-  timeout_in_minutes: 45
+  timeout_in_minutes: 60
   source_file_dependencies: *v1-core-kv-metrics-deps
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh

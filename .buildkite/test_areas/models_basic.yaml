@@ -41,7 +41,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Basic Models (Other)"
   device: h200_35gb
   key: basic-models-tests-other
-  timeout_in_minutes: 38
+  timeout_in_minutes: 50
   source_file_dependencies:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
