@@ -555,3 +555,43 @@ def test_extract_tool_calls_non_ascii(xlam_tool_parser, xlam_tokenizer, streamin
 
     assert "北京" in args
     assert "\\u" not in args
+
+
+@pytest.mark.parametrize(
+    "model_output,expected",
+    [
+        # Empty-args tool first: later tools' arguments must not be dropped.
+        (
+            '[{"name": "a", "arguments": {}}, {"name": "b", "arguments": {"x": 42}}]',
+            [("a", {}), ("b", {"x": 42})],
+        ),
+        # Empty-args tool last: earlier tools' arguments must not be dropped.
+        (
+            '[{"name": "a", "arguments": {"x": 42}}, {"name": "b", "arguments": {}}]',
+            [("a", {"x": 42}), ("b", {})],
+        ),
+    ],
+)
+def test_extract_tool_calls_streaming_one_empty_args_tool(
+    xlam_tool_parser, xlam_tokenizer, model_output, expected
+):
+    """An empty-args tool must not clobber other tools' streamed arguments."""
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+
+    names: dict[int, str] = {}
+    args: dict[int, str] = {}
+    for delta_message in stream_delta_message_generator(
+        xlam_tool_parser, xlam_tokenizer, model_output, request
+    ):
+        for tool_call in delta_message.tool_calls or []:
+            if tool_call.function and tool_call.function.name:
+                names[tool_call.index] = tool_call.function.name
+            if tool_call.function and tool_call.function.arguments:
+                args[tool_call.index] = (
+                    args.get(tool_call.index, "") + tool_call.function.arguments
+                )
+
+    assert [names.get(i) for i in range(len(expected))] == [n for n, _ in expected]
+    assert [json.loads(args.get(i, "")) for i in range(len(expected))] == [
+        a for _, a in expected
+    ]
