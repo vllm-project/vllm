@@ -41,6 +41,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     register_all_kvcache_specs,
 )
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -2843,3 +2844,101 @@ def test_finished_eager_store_recovers_nulled_window_tail() -> None:
     hit_tokens, is_async = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
     assert hit_tokens == num_blocks * BLOCK_SIZE
     assert is_async is True
+
+
+# ---------------------------------------------------------------------------
+# Test: Hybrid model with non-prefix-cacheable block_size < hash_block_size (#56396)
+# ---------------------------------------------------------------------------
+def test_hybrid_multi_group_smaller_non_prefix_cacheable_block_size() -> None:
+    """Test multi-group hybrid models (e.g. DeepSeek-V4.1-Flash) where
+    a non-prefix-cacheable group has a smaller block_size than hash_block_size.
+    E.g. Group 0 (FullAttention): block_size=32, prefix_cacheable=True
+         Group 1 (CircularBuffer): block_size=8, prefix_cacheable=False
+    Hash block size = 32.
+    Scheduling offload store must not crash with
+    assert block_size % hash_block_size == 0.
+    """
+    register_all_kvcache_specs(vllm_config=None)
+    g0_spec = FullAttentionSpec(
+        block_size=32,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_SIZE,
+        dtype=DTYPE,
+    )
+    g1_spec = CircularBufferSpec(
+        block_size=8,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_SIZE,
+        dtype=DTYPE,
+    )
+    groups = [
+        KVCacheGroupSpec(["layer_0"], g0_spec),
+        KVCacheGroupSpec(["layer_1"], g1_spec),
+    ]
+    num_blocks = 16
+    tensors = [
+        KVCacheTensor(
+            size=_BYTES_PER_BLOCK * num_blocks * 2,
+            layers=["layer_0"],
+            layer_stride=_BYTES_PER_BLOCK * num_blocks * 2,
+            block_stride=_BYTES_PER_BLOCK * 2,
+        ),
+        KVCacheTensor(
+            size=_BYTES_PER_BLOCK * num_blocks // 2,
+            layers=["layer_1"],
+            layer_stride=_BYTES_PER_BLOCK * num_blocks // 2,
+            block_stride=_BYTES_PER_BLOCK // 2,
+        ),
+    ]
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=tensors,
+        kv_cache_groups=groups,
+    )
+    vllm_config = _make_vllm_config(block_size=32)
+    sched = SimpleCPUOffloadScheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=kv_cache_config,
+        cpu_capacity_bytes=_BYTES_PER_BLOCK * num_blocks * 4,
+        scheduler_block_size=32,
+        hash_block_size=32,
+        lazy_offload=False,
+    )
+    gpu_pool = BlockPool(
+        num_gpu_blocks=num_blocks,
+        enable_caching=True,
+        hash_block_size=32,
+    )
+    sched.bind_gpu_block_pool(gpu_pool)
+
+    req = Request(
+        request_id="req-hybrid-1",
+        prompt_token_ids=list(range(64)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=get_request_block_hasher(32, sha256),
+    )
+    # allocate group 0 (2 blocks of size 32)
+    g0_blocks = gpu_pool.get_new_blocks(2)
+    gpu_pool.cache_full_blocks(
+        request=req,
+        blocks=g0_blocks,
+        num_cached_blocks=0,
+        num_full_blocks=2,
+        block_size=32,
+        kv_cache_group_id=0,
+    )
+    # allocate group 1 (8 blocks of size 8) - non-prefix-cacheable
+    g1_blocks = gpu_pool.get_new_blocks(8)
+    kv_blocks = KVCacheBlocks(blocks=(g0_blocks, g1_blocks))
+    req.num_computed_tokens = 64
+
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+    sched_out = make_scheduler_output(
+        {req.request_id: 64},
+        new_reqs={req.request_id: kv_blocks.get_block_ids()},
+    )
+    meta = sched.build_connector_meta(sched_out)
+    assert meta.store_event >= 0
+    assert len(meta.store_gpu_blocks) == 2
