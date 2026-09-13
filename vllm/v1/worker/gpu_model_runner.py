@@ -2486,7 +2486,7 @@ class GPUModelRunner(
             self.dcp_local_seq_lens.copy_to_gpu(num_reqs_padded)
 
             cm_base.dcp_local_seq_lens = self.dcp_local_seq_lens.gpu[:num_reqs_padded]
-            cm_base.dcp_local_seq_lens_cpu = self.dcp_local_seq_lens.cpu[
+            cm_base.dcp_local_seq_lens_cpu_upper_bound = self.dcp_local_seq_lens.cpu[
                 :num_reqs_padded
             ]
 
@@ -5461,13 +5461,22 @@ class GPUModelRunner(
             and cudagraph_mode != CUDAGraphMode.NONE
             and not self.parallel_config.use_ubatching
         ):
-            self.model = BreakableCUDAGraphWrapper(self.model, self.vllm_config)
+            # Scoped to PIECEWISE dispatch; FULL cudagraphs (below) are
+            # unaffected. PIECEWISE dispatch can also arise after wrapping
+            # (drafters under a FULL target mode, or a later FULL ->
+            # FULL_AND_PIECEWISE upgrade in _check_and_update_cudagraph_mode).
+            self.model = BreakableCUDAGraphWrapper(
+                self.model, self.vllm_config, runtime_mode=CUDAGraphMode.PIECEWISE
+            )
             drafter = getattr(self, "drafter", None)
             if drafter is not None and hasattr(drafter, "model"):
                 drafter.model = BreakableCUDAGraphWrapper(
-                    drafter.model, self.vllm_config
+                    drafter.model,
+                    self.vllm_config,
+                    runtime_mode=CUDAGraphMode.PIECEWISE,
                 )
-        elif (
+
+        if (
             cudagraph_mode.has_full_cudagraphs()
             and not self.parallel_config.use_ubatching
         ):

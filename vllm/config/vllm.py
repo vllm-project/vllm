@@ -50,7 +50,7 @@ from .reasoning import ReasoningConfig
 from .scheduler import SchedulerConfig
 from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
-from .utils import SupportsHash, config, replace
+from .utils import SupportsHash, config, get_field, replace
 from .watermarking import WatermarkConfig
 from .weight_transfer import WeightTransferConfig
 
@@ -666,6 +666,14 @@ class VllmConfig:
 
     @property
     def use_v2_model_runner(self) -> bool:
+        if self.attention_config.hisparse_config is not None:
+            if envs.VLLM_USE_V2_MODEL_RUNNER is False:
+                raise ValueError(
+                    "HiSparse requires Model Runner V2; remove "
+                    "VLLM_USE_V2_MODEL_RUNNER=0."
+                )
+            return True
+
         if getattr(self, "watermark_config", None) is not None:
             if envs.VLLM_USE_V2_MODEL_RUNNER is False:
                 logger.info_once(
@@ -1134,14 +1142,67 @@ class VllmConfig:
         watermark_config = getattr(self, "watermark_config", None)
         if watermark_config is None:
             return
-        if (
-            self.speculative_config is not None
-            and not watermark_config.supports_speculative_decoding
-        ):
-            raise ValueError(
-                f"The {watermark_config.algorithm} watermarking algorithm "
-                "does not support speculative decoding."
-            )
+        if self.speculative_config is not None:
+            speculative_config = self.speculative_config
+            if speculative_config.draft_sample_method != "probabilistic":
+                raise ValueError(
+                    "Speculative decoding with watermarking requires "
+                    "draft_sample_method='probabilistic'."
+                )
+            if speculative_config.rejection_sample_method != "standard":
+                raise ValueError(
+                    "Speculative decoding with watermarking requires "
+                    "rejection_sample_method='standard'."
+                )
+            if (
+                speculative_config.parallel_drafting
+                and speculative_config.method != "dspark"
+            ):
+                raise ValueError(
+                    "Parallel speculative drafting is not supported with watermarking."
+                )
+            if speculative_config.method not in ("dspark", "eagle", "eagle3", "mtp"):
+                raise ValueError(
+                    "Watermarking supports only autoregressive model-based "
+                    "speculative decoding."
+                )
+            if (
+                not watermark_config.allow_target_only_watermarking
+                and not watermark_config.supports_speculative_decoding
+            ):
+                raise ValueError(
+                    f"The '{watermark_config.algorithm}' watermarking algorithm "
+                    "does not support speculative decoding. Set "
+                    "allow_target_only_watermarking=true to leave draft tokens "
+                    "unwatermarked."
+                )
+            if (
+                watermark_config.allow_target_only_watermarking
+                and not watermark_config.supports_speculative_decoding
+            ):
+                logger.warning_once(
+                    "Target-only watermarking leaves accepted draft tokens "
+                    "unwatermarked, weakening detectability in proportion to the "
+                    "share of output tokens supplied by accepted drafts.",
+                    scope="global",
+                )
+            if watermark_config.deduplicate_contexts != "none":
+                logger.warning_once(
+                    "Context deduplication is not supported with speculative "
+                    "decoding and will not be applied to accepted drafts, "
+                    "rejection-recovery tokens, or bonus tokens.",
+                    scope="global",
+                )
+            if watermark_config.algorithm == "dual_key_gumbel" and (
+                watermark_config.alpha != get_field(WatermarkConfig, "alpha").default
+            ):
+                logger.warning_once(
+                    "Speculative decoding selects the watermark key by token role: "
+                    "draft tokens use key A, recovery and bonus tokens use key B. "
+                    "The configured alpha=%s is not used.",
+                    watermark_config.alpha,
+                    scope="global",
+                )
         if beam_search:
             raise ValueError("Beam search is not supported with watermarking.")
         if custom_sampler:
@@ -1574,6 +1635,39 @@ class VllmConfig:
         self._maybe_disable_dynamic_sd_for_data_parallel()
         self._maybe_override_dynamic_sd_cudagraph_mode()
 
+        if self.attention_config.hisparse_config is not None:
+            if not current_platform.is_cuda():
+                raise ValueError("HiSparse currently requires NVIDIA CUDA.")
+            if self.parallel_config.pipeline_parallel_size > 1:
+                raise ValueError("HiSparse does not support pipeline parallelism.")
+            if self.parallel_config.decode_context_parallel_size > 1:
+                raise ValueError(
+                    "HiSparse does not support decode context parallelism."
+                )
+            if self.model_config is not None and not hasattr(
+                self.model_config.hf_config, "index_topk"
+            ):
+                raise ValueError(
+                    "HiSparse is only supported for DSA models with index_topk."
+                )
+            if self.kv_transfer_config is not None and (
+                self.kv_transfer_config.kv_connector
+                not in (
+                    None,
+                    "NixlConnector",
+                    "MooncakeStoreConnector",
+                    "MultiConnector",
+                )
+            ):
+                logger.warning(
+                    "HiSparse host-resident KV is configured with connector "
+                    "%s. NixlConnector (GPU-staged host imports) and "
+                    "MooncakeStoreConnector (shared-store offload) are the "
+                    "validated paths; other connectors are treated as "
+                    "debug/fallback paths.",
+                    self.kv_transfer_config.kv_connector,
+                )
+
         self._normalize_piecewise_cudagraph_mode(
             breakable_cudagraph_enabled=breakable_cudagraph_enabled
         )
@@ -1951,6 +2045,16 @@ class VllmConfig:
         if self.scheduler_config.disable_hybrid_kv_cache_manager is None:
             # Default to enable HMA if not explicitly disabled by user or logic above.
             self.scheduler_config.disable_hybrid_kv_cache_manager = False
+
+        if (
+            self.attention_config.hisparse_config is not None
+            and self.scheduler_config.disable_hybrid_kv_cache_manager
+        ):
+            raise ValueError(
+                "HiSparse requires the hybrid KV cache manager; remove "
+                "--disable-hybrid-kv-cache-manager or use connectors that "
+                "support HMA."
+            )
 
         if self.compilation_config.debug_dump_path:
             self.compilation_config.debug_dump_path = (

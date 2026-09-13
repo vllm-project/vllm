@@ -53,18 +53,37 @@ def test_watermark_config_cli():
             "--model",
             "dummy",
             "--watermark-config",
-            '{"algorithm":"gumbel","key":42,"prf":"philox"}',
+            '{"algorithm":"dual_key_gumbel","key":42,"prf":"philox","alpha":0.25,'
+            '"allow_target_only_watermarking":true}',
         ]
     )
 
     config = EngineArgs.from_cli_args(args).create_watermark_config()
 
     assert config is not None
-    assert config.algorithm == "gumbel"
+    assert config.algorithm == "dual_key_gumbel"
     assert config.key == 42
+    assert config.alpha == 0.25
     assert config.context_width == 4
+    assert config.deduplicate_contexts == "single_turn"
+    assert config.deduplicate_contexts_max_history == 8192
     assert config.prf == "philox"
-    assert not config.supports_speculative_decoding
+    assert config.allow_target_only_watermarking
+
+    args = parser.parse_args(
+        [
+            "--model",
+            "dummy",
+            "--watermark-config",
+            '{"key":42,"deduplicate_contexts":"none",'
+            '"deduplicate_contexts_max_history":32}',
+        ]
+    )
+    config = EngineArgs.from_cli_args(args).create_watermark_config()
+
+    assert config is not None
+    assert config.deduplicate_contexts == "none"
+    assert config.deduplicate_contexts_max_history == 32
 
 
 @pytest.mark.parametrize(

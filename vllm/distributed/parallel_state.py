@@ -1937,6 +1937,20 @@ def init_distributed_environment(
             _INNER_DP_WORLD = _WORLD
 
 
+def _elastic_join_warmup_ctx() -> AbstractContextManager[Any]:
+    """Defer communicator warm-up when joining a live elastic-EP cluster on ROCm.
+
+    The existing ranks defer their matching warm-up in create_standby_groups(),
+    so a joining worker must too or the warm-up collective has no peers. Both
+    sides warm up at commit.
+    """
+    from vllm.distributed.device_communicators.pynccl import defer_comm_warmup_on_rocm
+
+    if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+        return defer_comm_warmup_on_rocm()
+    return nullcontext()
+
+
 def _engram_dp_shard_size(
     world_size: int,
     data_parallel_size: int,
@@ -2181,13 +2195,14 @@ def initialize_model_parallel(
     group_ranks = all_ranks.transpose(1, 4).reshape(-1, data_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
     if enable_elastic_ep:
-        _DP = _init_stateless_group(
-            group_ranks,
-            "dp",
-            parallel_config.data_parallel_master_ip,
-            backend,
-            coord_store=coord_store,
-        )
+        with _elastic_join_warmup_ctx():
+            _DP = _init_stateless_group(
+                group_ranks,
+                "dp",
+                parallel_config.data_parallel_master_ip,
+                backend,
+                coord_store=coord_store,
+            )
     else:
         _DP = init_model_parallel_group(
             group_ranks, get_world_group().local_rank, backend, group_name="dp"
@@ -2210,14 +2225,15 @@ def initialize_model_parallel(
         group_ranks = [x.tolist() for x in group_ranks]
         use_all2all = parallel_config.use_all2all
         if enable_elastic_ep:
-            _EP = _init_stateless_group(
-                group_ranks,
-                "ep",
-                parallel_config.data_parallel_master_ip,
-                backend,
-                coord_store=coord_store,
-                use_all2all=use_all2all,
-            )
+            with _elastic_join_warmup_ctx():
+                _EP = _init_stateless_group(
+                    group_ranks,
+                    "ep",
+                    parallel_config.data_parallel_master_ip,
+                    backend,
+                    coord_store=coord_store,
+                    use_all2all=use_all2all,
+                )
         else:
             _EP = init_model_parallel_group(
                 group_ranks,
@@ -2235,13 +2251,14 @@ def initialize_model_parallel(
         assert _EPLB is None, "EPLB group is already initialized"
         if config.parallel_config.enable_eplb:
             if enable_elastic_ep:
-                _EPLB = _init_stateless_group(
-                    group_ranks,
-                    "eplb",
-                    parallel_config.data_parallel_master_ip,
-                    backend,
-                    coord_store=coord_store,
-                )
+                with _elastic_join_warmup_ctx():
+                    _EPLB = _init_stateless_group(
+                        group_ranks,
+                        "eplb",
+                        parallel_config.data_parallel_master_ip,
+                        backend,
+                        coord_store=coord_store,
+                    )
             else:
                 _EPLB = init_model_parallel_group(
                     group_ranks,
