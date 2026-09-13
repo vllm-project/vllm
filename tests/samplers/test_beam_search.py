@@ -6,13 +6,17 @@ Run `pytest tests/samplers/test_beam_search.py`.
 """
 
 import json
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import jsonschema
 import pytest
 from transformers import AutoModelForSeq2SeqLM
 
+from vllm import CompletionOutput, RequestOutput
 from vllm.assets.audio import AudioAsset
 from vllm.entrypoints.llm import LLM
+from vllm.logprobs import Logprob, SampleLogprobs
 from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams, StructuredOutputsParams
 
@@ -43,6 +47,78 @@ MAX_TOKENS = [64]
 BEAM_WIDTHS = [4]
 MM_BEAM_WIDTHS = [2]
 MODELS = ["TinyLlama/TinyLlama-1.1B-Chat-v1.0"]
+
+
+@pytest.mark.parametrize(("abort_after", "prompt_token"), [(0, 1), (1, 1), (0, 0)])
+@pytest.mark.parametrize("terminal_logprobs", [None, [], [{11: Logprob(-0.1)}]])
+def test_beam_search_abort_preserves_prefixes_and_other_prompts(
+    monkeypatch,
+    abort_after: int,
+    prompt_token: int,
+    terminal_logprobs: SampleLogprobs | None,
+) -> None:
+    """Abort ends only the affected prompt, preserving its scored prefixes."""
+
+    def run_requests(prompts, **kwargs):
+        results = []
+        for prompt in prompts:
+            tokens = prompt["prompt_token_ids"]
+            if tokens[0] == prompt_token:
+                assert len(tokens) <= abort_after + 1, "Continued after abort"
+            aborted = (
+                tokens[0] == prompt_token
+                and len(tokens) == abort_after + 1
+                and tokens[-1] != 12
+            )
+            results.append(
+                RequestOutput(
+                    request_id="inner",
+                    prompt=None,
+                    prompt_token_ids=tokens,
+                    prompt_logprobs=None,
+                    finished=True,
+                    outputs=[
+                        CompletionOutput(
+                            index=0,
+                            text="",
+                            token_ids=[] if aborted else [11],
+                            cumulative_logprob=None,
+                            logprobs=terminal_logprobs
+                            if aborted
+                            else [{11: Logprob(-0.1), 12: Logprob(-0.2)}],
+                            finish_reason="abort" if aborted else "length",
+                        )
+                    ],
+                )
+            )
+        return results
+
+    llm = LLM.__new__(LLM)
+    llm.llm_engine = Mock()
+    tokenizer = SimpleNamespace(
+        eos_token_id=0, decode=lambda tokens: " ".join(map(str, tokens))
+    )
+    llm.renderer = Mock(get_tokenizer=Mock(return_value=tokenizer))
+    monkeypatch.setattr(llm, "_preprocess_cmpl", lambda prompts: prompts)
+    monkeypatch.setattr(llm, "_render_and_run_requests", run_requests)
+    prompts = [
+        {"type": "token", "prompt_token_ids": [token]} for token in [prompt_token, 2]
+    ]
+    outputs = llm.beam_search(prompts, BeamSearchParams(beam_width=2, max_tokens=3))
+
+    aborted, normal = outputs
+    expected_tokens = (
+        [[prompt_token, 11], [prompt_token, 12]] if abort_after else [[prompt_token]]
+    )
+    assert [beam.tokens for beam in aborted.sequences] == expected_tokens
+    for beam in aborted.sequences:
+        assert beam.finish_reason == "abort"
+        assert beam.text == tokenizer.decode(beam.tokens)
+        assert len(beam.logprobs) == abort_after
+    assert aborted.sequences[0].cum_logprob == pytest.approx(-0.1 * abort_after)
+    assert len(normal.sequences) == 2
+    assert all(len(beam.tokens) == 4 for beam in normal.sequences)
+    assert all(beam.finish_reason != "abort" for beam in normal.sequences)
 
 
 @pytest.mark.parametrize("model", MODELS)

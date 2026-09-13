@@ -291,6 +291,18 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                     allowed_sets[i] = set(entry[1])
 
         for (start, end), instance in zip(instance_start_and_end, instances_batch):
+            instance_output = output[start:end]
+            if any(
+                result is not None and result.outputs[0].finish_reason == "abort"
+                for result in instance_output
+            ):
+                for beam, result in zip(all_beams[start:end], instance_output):
+                    if result is not None:
+                        beam.finish_reason = "abort"
+                        instance.completed.append(beam)
+                instance.beams = []
+                continue
+
             instance_new_beams = []
             for i in range(start, end):
                 current_beam = all_beams[i]
@@ -300,8 +312,6 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                     continue
 
                 if result.outputs[0].logprobs is not None:
-                    # if logprobs is None, the sequence completed
-                    # due to max-model-len or abortion.
                     logprobs = result.outputs[0].logprobs[0]
                     allowed = allowed_sets[i]
                     for token_id, logprob_obj in logprobs.items():
