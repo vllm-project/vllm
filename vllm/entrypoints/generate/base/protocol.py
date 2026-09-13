@@ -65,6 +65,8 @@ class SpeculativeDecodingMetrics(OpenAIBaseModel):
     # exactly j draft tokens (length num_spec_tokens + 1). Excludes the
     # always-accepted bonus token.
     acceptance_histogram: list[int]
+    # Actual proposed length k maps to a dense accepted-count histogram of k + 1.
+    acceptance_histogram_by_draft_length: dict[int, list[int]]
     num_spec_steps: int
     num_accepted_draft_tokens: int
     num_draft_tokens: int

@@ -317,6 +317,8 @@ class RequestSpecDecodeMetrics:
             also the histogram's upper bound.
         histogram: Dense counts indexed by accepted draft tokens ``j``
             (length ``num_spec_tokens + 1``).
+        histogram_by_draft_length: Accepted-count histograms keyed by actual
+            proposed draft length, after the grammar-invalidated adjustment.
         num_draft_tokens: Total proposed draft tokens, after the
             grammar-invalidated (``num_invalid_spec_tokens``) adjustment.
         per_step_accepted: Ordered accepted-draft count per verify step
@@ -330,6 +332,7 @@ class RequestSpecDecodeMetrics:
     num_draft_tokens: int = 0
     per_step_accepted: list[int] = field(default_factory=list)
     per_step_drafted: list[int] = field(default_factory=list)
+    histogram_by_draft_length: dict[int, list[int]] = field(default_factory=dict)
 
     @classmethod
     def new(cls, num_spec_tokens: int) -> "RequestSpecDecodeMetrics":
@@ -343,6 +346,11 @@ class RequestSpecDecodeMetrics:
     ) -> None:
         self.histogram[num_accepted] += 1
         self.num_draft_tokens += num_draft_tokens
+        histogram = self.histogram_by_draft_length.get(num_draft_tokens)
+        if histogram is None:
+            histogram = [0] * (num_draft_tokens + 1)
+            self.histogram_by_draft_length[num_draft_tokens] = histogram
+        histogram[num_accepted] += 1
         if detailed:
             self.per_step_accepted.append(num_accepted)
             self.per_step_drafted.append(num_draft_tokens)
@@ -364,6 +372,9 @@ class RequestSpecDecodeMetrics:
             "mean_acceptance_length": mean_al,
             "draft_acceptance_rate": rate,
             "acceptance_histogram": list(self.histogram),
+            "acceptance_histogram_by_draft_length": {
+                k: list(counts) for k, counts in self.histogram_by_draft_length.items()
+            },
             "num_spec_steps": num_spec_steps,
             "num_accepted_draft_tokens": num_accepted,
             "num_draft_tokens": self.num_draft_tokens,
