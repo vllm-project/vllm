@@ -195,6 +195,12 @@ class TestCoerceToSchemaType:
         def test_array_type(self):
             assert coerce_to_schema_type("[1, 2, 3]", "array") == [1, 2, 3]
 
+        @pytest.mark.parametrize(
+            "schema_type, value", [("object", "[1]"), ("array", '{"a": 1}')]
+        )
+        def test_wrong_container_type_preserves_input(self, schema_type, value):
+            assert coerce_to_schema_type(value, schema_type) == value
+
         def test_invalid_json_fallback(self):
             assert coerce_to_schema_type("not json", "object") == "not json"
 
@@ -233,8 +239,9 @@ class TestExtractTypesFromSchema:
     def test_direct_type_string(self):
         assert extract_types_from_schema({"type": "string"}) == ["string"]
 
-    def test_direct_type_integer(self):
-        assert extract_types_from_schema({"type": "integer"}) == ["integer"]
+    @pytest.mark.parametrize("schema_type", ["integer", " INT "])
+    def test_direct_type_integer(self, schema_type):
+        assert extract_types_from_schema({"type": schema_type}) == ["integer"]
 
     def test_type_array(self):
         result = set(extract_types_from_schema({"type": ["string", "null"]}))
@@ -272,14 +279,14 @@ class TestExtractTypesFromSchema:
         result = set(extract_types_from_schema(schema))
         assert result == {"array", "object"}
 
-    def test_none_schema_defaults_to_string(self):
-        assert extract_types_from_schema(None) == ["string"]
+    def test_none_schema_has_no_types(self):
+        assert extract_types_from_schema(None) == []
 
-    def test_non_dict_schema_defaults_to_string(self):
-        assert extract_types_from_schema("string") == ["string"]
+    def test_non_dict_schema_has_no_types(self):
+        assert extract_types_from_schema("string") == []
 
-    def test_empty_dict_defaults_to_string(self):
-        assert extract_types_from_schema({}) == ["string"]
+    def test_empty_dict_has_no_types(self):
+        assert extract_types_from_schema({}) == []
 
     def test_nested_anyof(self):
         schema = {

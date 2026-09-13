@@ -6,11 +6,13 @@ import json
 import keyword as _python_keyword
 import math
 import warnings
+from collections import defaultdict
 from dataclasses import dataclass
 from json import JSONDecodeError, JSONDecoder
 from typing import Any, TypeAlias
 
 import partial_json_parser
+from jsonschema import Draft202012Validator
 from openai.types.responses import (
     FunctionTool,
     NamespaceTool,
@@ -269,24 +271,87 @@ def _extract_tool_info(
         raise TypeError(f"Unsupported tool type: {type(tool)}")
 
 
+def get_schema_properties(params: Any) -> dict[str, Any]:
+    """Property schemas declared directly or inside object combinators.
+
+    ``allOf`` members always apply, so their properties refine the
+    direct ``properties``. Which ``anyOf``/``oneOf`` branch applies depends
+    on argument values a streaming parser only sees incrementally, so a
+    property needs agreement from every branch that can accept it. These
+    are static coercion hints, not branch validation. Branch-only names
+    without agreed hints are retained with a ``True`` schema.
+    """
+    if not isinstance(params, dict):
+        return {}
+    combinators = {
+        keyword: value
+        for keyword in ("anyOf", "oneOf", "allOf")
+        if isinstance(value := params.get(keyword), list)
+    }
+    direct = params.get("properties")
+    properties = dict(direct) if isinstance(direct, dict) else {}
+    refinements = [
+        properties,
+        *map(get_schema_properties, combinators.get("allOf", [])),
+    ]
+    for keyword in ("anyOf", "oneOf"):
+        branches = [
+            (
+                get_schema_properties(branch),
+                isinstance(branch, dict)
+                and branch.get("additionalProperties") is False
+                and not branch.get("patternProperties"),
+            )
+            for branch in combinators.get(keyword, [])
+            if branch is not False
+            and (not (types := extract_types_from_schema(branch)) or "object" in types)
+        ]
+        shared = {
+            name: schema for branch, _ in branches for name, schema in branch.items()
+        }
+        refinements.append(
+            {
+                name: schema
+                if all(
+                    other[name] == schema if name in other else closed
+                    for other, closed in branches
+                )
+                else True
+                for name, schema in shared.items()
+            }
+        )
+    constraints: dict[str, list[dict]] = defaultdict(list)
+    for refinement in refinements:
+        for name, schema in refinement.items():
+            properties.setdefault(name, True)
+            if isinstance(schema, dict):
+                constraints[name].append(schema)
+    properties.update(
+        {
+            name: schemas[0] if len(schemas) == 1 else {"allOf": schemas}
+            for name, schemas in constraints.items()
+        }
+    )
+    return properties
+
+
 def find_tool_properties(
     tools: list[Tool] | None,
     tool_name: str,
 ) -> dict[str, Any]:
-    """Find a tool by name and return its properties dict, or {}."""
+    """Find a tool by name and return its parameter property schemas, or {}."""
     if not tools:
         return {}
     for tool in tools:
         if isinstance(tool, (FunctionTool, NamespaceTool)):
-            for name, params in iter_response_function_tool_info(tool):
-                if name == tool_name:
-                    return (params or {}).get("properties", {})
+            tool_info = iter_response_function_tool_info(tool)
+        elif _is_function_tool(tool):
+            tool_info = [_extract_tool_info(tool)]
+        else:
             continue
-        if not _is_function_tool(tool):
-            continue
-        name, params = _extract_tool_info(tool)
-        if name == tool_name:
-            return (params or {}).get("properties", {})
+        for name, params in tool_info:
+            if name == tool_name:
+                return get_schema_properties(params)
     return {}
 
 
@@ -1004,29 +1069,37 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
     return candidate, added_text
 
 
-def extract_types_from_schema(schema: Any) -> list[str]:
-    """Extract all possible type strings from a JSON Schema definition.
+def extract_types_from_schema(schema: Any, *, infer_const: bool = True) -> list[str]:
+    """Extract type hints for schema-aware argument coercion.
 
-    Handles ``type`` (string or list), ``enum`` value inference, and
-    recursive ``anyOf``/``oneOf``/``allOf``.  Returns ``["string"]``
-    when no type information can be determined.
+    Handles ``type`` (string or list), ``enum``/``const`` value inference,
+    and recursive ``anyOf``/``oneOf``/``allOf``. Returns an empty list
+    when types cannot be inferred safely. Constants are not inferred inside
+    alternatives: their primitive types would lose the value constraints.
     """
-    if schema is None or not isinstance(schema, dict):
-        return ["string"]
+    if not isinstance(schema, dict):
+        return []
 
     types: set[str] = set()
 
     if "type" in schema:
         type_value = schema["type"]
         if isinstance(type_value, str):
-            types.add(type_value)
-        elif isinstance(type_value, list):
-            for t in type_value:
-                if isinstance(t, str):
-                    types.add(t)
+            type_value = [type_value]
+        if isinstance(type_value, list):
+            types.update(
+                _TYPE_ALIASES.get(key, key)
+                for t in type_value
+                if isinstance(t, str)
+                for key in [t.strip().lower()]
+            )
+            types.intersection_update(_TYPE_PRIORITY)
 
-    if "enum" in schema and isinstance(schema["enum"], list) and schema["enum"]:
-        for value in schema["enum"]:
+    values = (
+        [schema["const"]] if infer_const and "const" in schema else schema.get("enum")
+    )
+    if isinstance(values, list):
+        for value in values:
             if value is None:
                 types.add("null")
             elif isinstance(value, bool):
@@ -1042,12 +1115,32 @@ def extract_types_from_schema(schema: Any) -> list[str]:
             elif isinstance(value, dict):
                 types.add("object")
 
+    constraints = [types] if types else []
     for choice_field in ("anyOf", "oneOf", "allOf"):
         if choice_field in schema and isinstance(schema[choice_field], list):
-            for choice in schema[choice_field]:
-                types.update(extract_types_from_schema(choice))
+            branch_types = [
+                set(
+                    extract_types_from_schema(
+                        choice, infer_const=infer_const and choice_field == "allOf"
+                    )
+                )
+                for choice in schema[choice_field]
+            ]
+            if choice_field == "allOf":
+                constraints.extend(branch for branch in branch_types if branch)
+            elif branch_types and all(branch_types):
+                constraints.append(set.union(*branch_types))
 
-    return list(types) if types else ["string"]
+    if not constraints:
+        return []
+    # JSON Schema numbers include integers; conjunctions must preserve that subset.
+    for constraint in constraints:
+        if "number" in constraint:
+            constraint.add("integer")
+    types = set.intersection(*constraints)
+    if "number" in types:
+        types.discard("integer")
+    return list(types)
 
 
 _TYPE_ALIASES: dict[str, str] = {
@@ -1077,6 +1170,82 @@ _TYPE_ALIASES: dict[str, str] = {
 }
 
 
+_TYPE_PRIORITY = ("null", "integer", "number", "boolean", "object", "array", "string")
+
+
+class SchemaTypeHints:
+    """Prepare coercion hints once, without validating unrelated schema keywords."""
+
+    def __init__(self, schema: dict) -> None:
+        self.types = extract_types_from_schema(schema)
+        self.properties = {
+            name: SchemaTypeHints(prop)
+            for name, prop in get_schema_properties(schema).items()
+            if isinstance(prop, dict)
+        }
+
+        items_schema: dict = {}
+        constraints: dict = {}
+        has_items = False
+        needs_validation = False
+        # Project combinators onto item hints and type/enum/const constraints.
+        for projection in (items_schema, constraints):
+            pending: list[tuple[dict | bool, dict]] = [(schema, projection)]
+            while pending:
+                member, hints = pending.pop()
+                if member is False and projection is constraints:
+                    # The false schema admits no value.
+                    hints["enum"] = []
+                    needs_validation = True
+                if not isinstance(member, dict):
+                    continue
+                if projection is items_schema:
+                    if isinstance(items := member.get("items"), dict):
+                        hints["allOf"] = [items]
+                        has_items = True
+                else:
+                    # Keep child constraints inside their object/array alternatives.
+                    if isinstance(items := member.get("items"), (dict, bool)):
+                        pending.append((items, hints.setdefault("items", {})))
+                        needs_validation = True
+                    if isinstance(properties := member.get("properties"), dict):
+                        prop_hints: dict = {name: {} for name in properties}
+                        hints["properties"] = prop_hints
+                        pending.extend(zip(properties.values(), prop_hints.values()))
+                        needs_validation = True
+                    known = extract_types_from_schema({"type": member.get("type")})
+                    if known:
+                        hints["type"] = known
+                    if isinstance(member.get("enum"), list):
+                        hints["enum"] = member["enum"]
+                        needs_validation = True
+                    if "const" in member:
+                        hints["const"] = member["const"]
+                        needs_validation = True
+                for keyword in ("allOf", "anyOf", "oneOf"):
+                    if not isinstance(branches := member.get(keyword), list):
+                        continue
+                    if projection is items_schema and keyword != "allOf":
+                        branches = [
+                            branch
+                            for branch in branches
+                            if branch is not False
+                            and (
+                                not (types := extract_types_from_schema(branch))
+                                or "array" in types
+                            )
+                        ]
+                    branch_hints: list[dict] = [{} for _ in branches]
+                    if projection is constraints and keyword != "allOf":
+                        # Coercion considers allowed types, not oneOf branch counts.
+                        hints.setdefault("allOf", []).append({"anyOf": branch_hints})
+                    else:
+                        hints.setdefault(keyword, []).extend(branch_hints)
+                    pending.extend(zip(branches, branch_hints))
+        self.items = SchemaTypeHints(items_schema) if has_items else None
+        self.validator = Draft202012Validator(constraints) if needs_validation else None
+
+
 def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
     """Best-effort coercion of a raw string value to a JSON Schema type.
 
@@ -1096,18 +1265,7 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
         _TYPE_ALIASES.get(key, key) for t in schema_type for key in [t.strip().lower()]
     }
 
-    # Priority: null > integer > number > boolean > object > array > string
-    type_priority = [
-        "null",
-        "integer",
-        "number",
-        "boolean",
-        "object",
-        "array",
-        "string",
-    ]
-
-    for candidate_type in type_priority:
+    for candidate_type in _TYPE_PRIORITY:
         if candidate_type not in normalized_types:
             continue
 
@@ -1146,7 +1304,9 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
                 parsed = json.loads(value)
             except (json.JSONDecodeError, ValueError, TypeError):
                 continue
-            if _is_json_finite(parsed):
+            if _is_json_finite(parsed) and Draft202012Validator.TYPE_CHECKER.is_type(
+                parsed, candidate_type
+            ):
                 return parsed
             # Non-finite floats (e.g. "[1e999]" -> [inf]) cannot be
             # serialized back to valid JSON; preserve the raw string.
@@ -1160,6 +1320,11 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
     # inf/nan inside a parsed list/dict) which json.dumps would render as
     # invalid JSON (Infinity/NaN). Preserve the raw string instead.
     if not _is_json_finite(parsed):
+        return value
+    known_types = normalized_types.intersection(_TYPE_PRIORITY)
+    if known_types and not any(
+        Draft202012Validator.TYPE_CHECKER.is_type(parsed, t) for t in known_types
+    ):
         return value
     return parsed
 
