@@ -303,19 +303,55 @@ class MultiprocExecutor(Executor):
         # logs an error, shuts down the executor and invokes the failure
         # callback to inform the engine.
         def monitor_workers():
-            sentinels = [h.proc.sentinel for h in workers]
-            died = multiprocessing.connection.wait(sentinels)
+            sentinel_to_proc = {h.proc.sentinel: h.proc for h in workers}
+            polled_procs: list[BaseProcess] = []
+            failed_proc: BaseProcess | None = None
+
+            while failed_proc is None:
+                executor = self_ref()
+                if not executor or getattr(executor, "shutting_down", False):
+                    logger.debug("MultiprocWorkerMonitor: shutdown already initiated")
+                    return
+                del executor
+
+                if sentinel_to_proc:
+                    timeout = 1 if polled_procs else None
+                    ready = multiprocessing.connection.wait(
+                        sentinel_to_proc, timeout=timeout
+                    )
+                else:
+                    time.sleep(1)
+                    ready = []
+
+                for sentinel in ready:
+                    proc = sentinel_to_proc.pop(cast(int, sentinel))
+                    if proc.exitcode is None:
+                        logger.warning(
+                            "Worker sentinel for %s became ready while the process "
+                            "was still alive; falling back to exit-code polling.",
+                            proc.name,
+                        )
+                        polled_procs.append(proc)
+                    else:
+                        failed_proc = proc
+                        break
+
+                if failed_proc is None:
+                    failed_proc = next(
+                        (proc for proc in polled_procs if proc.exitcode is not None),
+                        None,
+                    )
+
             _self = self_ref()
             if not _self or getattr(_self, "shutting_down", False):
                 logger.debug("MultiprocWorkerMonitor: shutdown already initiated")
                 return
             _self.is_failed = True
-            proc = next(h.proc for h in workers if h.proc.sentinel == died[0])
             logger.error(
                 "Worker proc %s died unexpectedly (exit code: %s), "
                 "shutting down executor.",
-                proc.name,
-                proc.exitcode,
+                failed_proc.name,
+                failed_proc.exitcode,
             )
             _self.shutdown()
             callback = _self.failure_callback
