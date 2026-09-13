@@ -362,13 +362,22 @@ used for information about an instance that does not change - so it
 only needs to be observed at startup - and allows comparing across
 instances in Prometheus.
 
-We use this concept for the `vllm:cache_config_info` metric:
+We use this concept for the `vllm:cache_config_info` and
+`vllm:model_config_info` metrics:
 
 ```text
 # HELP vllm:cache_config_info Information of the LLMEngine CacheConfig
 # TYPE vllm:cache_config_info gauge
 vllm:cache_config_info{block_size="16",cache_dtype="auto",cpu_offload_gb="0",enable_prefix_caching="False",gpu_memory_utilization="0.9",...} 1.0
+# HELP vllm:model_config_info Information of the LLMEngine ModelConfig
+# TYPE vllm:model_config_info gauge
+vllm:model_config_info{dtype="auto",enforce_eager="False",max_model_len="4096",model="meta-llama/Llama-3.1-8B-Instruct",quantization="None",served_model_name="meta-llama/Llama-3.1-8B-Instruct",tokenizer="meta-llama/Llama-3.1-8B-Instruct",tokenizer_mode="auto",...} 1.0
 ```
+
+`vllm:model_config_info` is particularly useful for observing the
+auto-configured `max_model_len` (and other model-level settings) without
+having to parse startup logs, since the value is resolved at engine
+initialization and exposed as a stable gauge.
 
 However, `prometheus_client` has
 [never supported Info metrics in multiprocessing mode](https://github.com/prometheus/client_python/pull/300) -
