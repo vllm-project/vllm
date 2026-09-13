@@ -5,11 +5,23 @@ import pytest
 import torch.cuda
 
 from vllm import LLM, SamplingParams
+from vllm.exceptions import VLLMValidationError
 from vllm.platforms import current_platform
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
+from vllm.v1.engine.input_processor import InputProcessor
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+
+
+def test_routed_experts_prompt_start_cannot_exceed_prompt_len():
+    params = SamplingParams(routed_experts_prompt_start=4)
+
+    with pytest.raises(
+        VLLMValidationError,
+        match="cannot exceed the prompt length of 3 tokens",
+    ):
+        InputProcessor._validate_routed_experts_prompt_start(params, prompt_len=3)
 
 
 def test_preprocess_error_handling(monkeypatch: pytest.MonkeyPatch):
