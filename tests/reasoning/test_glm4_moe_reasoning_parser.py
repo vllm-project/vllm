@@ -227,3 +227,71 @@ def test_is_reasoning_end_full_prompt(
     token_ids = glm45_tokenizer.convert_tokens_to_ids(tokens)
     check_is_reasoning_end = parser.is_reasoning_end(token_ids)
     assert check_is_reasoning_end == is_reasoning_end
+
+
+# #54744: GLM-5.3-family templates have no thinking switch at all, so a client
+# sending enable_thinking/thinking = False (honored by GLM-4.5/4.6) must not
+# switch extraction off: the model thinks anyway and the scratchpad would leak
+# into content. A template that honored the switch emits no think tags, so
+# tag-free output keeps passing through untouched.
+DISABLED_LEAK = {
+    "output": "Simple question.</think>2 + 2 = **4**",
+    "reasoning": "Simple question.",
+    "content": "2 + 2 = **4**",
+}
+
+DISABLED_EXPLICIT_TAGS = {
+    "output": "<think>Working it out</think>The answer is 4.",
+    "reasoning": "Working it out",
+    "content": "The answer is 4.",
+}
+
+DISABLED_TAG_FREE = {
+    "output": "The answer is 4.",
+    "reasoning": None,
+    "content": "The answer is 4.",
+}
+
+
+@pytest.mark.parametrize(
+    "param_dict",
+    [
+        pytest.param(DISABLED_LEAK, id="disabled_dangling_end_tag"),
+        pytest.param(DISABLED_EXPLICIT_TAGS, id="disabled_explicit_tags"),
+    ],
+)
+def test_reasoning_disabled_kwarg_still_splits_think_block(
+    param_dict: dict, glm45_tokenizer
+):
+    output = glm45_tokenizer.tokenize(param_dict["output"])
+    output_tokens: list[str] = [
+        glm45_tokenizer.convert_tokens_to_string([token]) for token in output
+    ]
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+
+    reasoning, content = run_reasoning_extraction(
+        parser_cls(glm45_tokenizer, chat_template_kwargs={"enable_thinking": False}),
+        output_tokens,
+    )
+
+    assert reasoning == param_dict["reasoning"]
+    assert content == param_dict["content"]
+    # The fallback mirrors the enabled parser exactly on tagged output.
+    assert (reasoning, content) == run_reasoning_extraction(
+        parser_cls(glm45_tokenizer), output_tokens
+    )
+
+
+def test_reasoning_disabled_kwarg_tag_free_passthrough(glm45_tokenizer):
+    output = glm45_tokenizer.tokenize(DISABLED_TAG_FREE["output"])
+    output_tokens: list[str] = [
+        glm45_tokenizer.convert_tokens_to_string([token]) for token in output
+    ]
+    parser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        glm45_tokenizer, chat_template_kwargs={"enable_thinking": False}
+    )
+
+    reasoning, content = run_reasoning_extraction(parser, output_tokens)
+
+    assert reasoning is None
+    assert content == DISABLED_TAG_FREE["content"]
