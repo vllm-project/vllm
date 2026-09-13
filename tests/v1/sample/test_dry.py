@@ -537,8 +537,14 @@ def test_peak_memory_bounded():
         dry_allowed_length=2,
         dry_sequence_breakers=[],
     )
+    # A SMALL ALPHABET, deliberately. With randrange(1000) over 2048 positions a 2-token
+    # repeat essentially never occurs, so nothing is ever charged, dry_core returns at
+    # its ``if not charged`` guard, and this test measured only the match scan - never
+    # the penalty application it exists to bound. Eight symbols guarantee charges, and
+    # the assertion below fails if that ever stops being true rather than passing
+    # vacuously again.
     hist = torch.tensor(
-        [[rng.randrange(1000) for _ in range(window)] for _ in range(n_reqs)],
+        [[rng.randrange(8) for _ in range(window)] for _ in range(n_reqs)],
         dtype=torch.int32,
     )
     all_tokens.copy_(hist.to(device))
@@ -556,6 +562,12 @@ def test_peak_memory_bounded():
     )
     torch.accelerator.synchronize()
     peak = torch.accelerator.max_memory_allocated() - base_alloc
+    # The penalty path must actually have run, or the bound below is measuring the scan
+    # alone.
+    charged = int((logits < 0).sum().item())
+    assert charged > 0, (
+        "no token was penalized, so this test did not reach the penalty path"
+    )
     # generous headroom over the budget for l_max, W and allocator slack
     assert peak < 2 * _CHUNK_BYTE_BUDGET, f"peak transient {peak / 2**20:.0f} MiB"
 
@@ -683,3 +695,70 @@ def test_rest_dry_fields_default_to_off():
     from vllm.v1.worker.gpu.sample.dry import use_dry
 
     assert not use_dry(params)
+
+
+# ---------------------------------------------------------------------------
+# Added 2026-09-13 after an adversarial review. Each of these pins a defect
+# that review found, so that a later change cannot quietly reintroduce it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("field", ["dry_penalty_last_n", "dry_allowed_length"])
+def test_dry_int_params_reject_values_that_would_kill_the_worker(field):
+    """An out-of-range integer must be refused at the front door.
+
+    Both fields are stored into an int64 numpy array in the worker. A value at
+    or above 2**63 raises OverflowError there, inside ``execute_model``, which
+    the engine core escalates to a fatal error and ``_send_engine_dead()`` - so
+    before this bound existed, a single request could end the server. The cap
+    is llama-server's INT32_MAX, which is also far past any useful context.
+    """
+    with pytest.raises(VLLMValidationError):
+        SamplingParams(dry_multiplier=0.8, **{field: 2**63})
+    with pytest.raises(VLLMValidationError):
+        SamplingParams(dry_multiplier=0.8, **{field: 2**31})
+    # The boundary itself is legal, and so are the ordinary values.
+    SamplingParams(dry_multiplier=0.8, **{field: 2**31 - 1})
+    SamplingParams(dry_multiplier=0.8, **{field: 2})
+
+
+def test_dry_rejected_under_speculative_decoding():
+    """DRY must be refused with a speculative config, not skipped in the sampler.
+
+    The sampler's skip triggers on draft-expanded logits, which is false on any
+    step where no request carries draft tokens - the step that finishes a
+    prefill, among others. A request allowed through would therefore get DRY on
+    some steps and not others, flickering with the schedule. Refusing is the
+    honest behaviour and matches how min_p and logit_bias are handled.
+    """
+    spec = SimpleNamespace()  # only `is None` is tested by the validator
+    with pytest.raises(VLLMValidationError):
+        SamplingParams(dry_multiplier=0.8)._validate_spec_decode(spec)
+    # Without a speculative config, and with DRY off, nothing is raised.
+    SamplingParams(dry_multiplier=0.8)._validate_spec_decode(None)
+    SamplingParams()._validate_spec_decode(spec)
+
+
+def test_dry_base_below_one_warns_that_it_disabled_dry():
+    """`dry_base < 1.0` disables DRY, as in llama.cpp. Say so.
+
+    Accepting a multiplier and then silently applying no penalty is the failure
+    mode; the likeliest cause is `dry_base: 0.8` typed where
+    `dry_multiplier: 0.8` was meant. Asserted against the module logger rather
+    than caplog, because vLLM's logger does not propagate to pytest's handler.
+    """
+    from unittest.mock import patch
+
+    from vllm.v1.worker.gpu.sample.dry import use_dry
+
+    with patch("vllm.sampling_params.logger") as log:
+        params = SamplingParams(dry_multiplier=0.8, dry_base=0.8)
+    assert not use_dry(params), "base < 1.0 must disable DRY"
+    assert log.warning.called, "the disabling must be reported, not silent"
+    assert "disables DRY" in log.warning.call_args[0][0]
+
+    # A normal configuration says nothing.
+    with patch("vllm.sampling_params.logger") as log:
+        params = SamplingParams(dry_multiplier=0.8, dry_base=1.75)
+    assert use_dry(params)
+    assert not log.warning.called

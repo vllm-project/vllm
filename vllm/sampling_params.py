@@ -34,6 +34,12 @@ the per-request row width allocated by the sampler's `LogprobTokenIdsState`."""
 DEFAULT_DRY_SEQUENCE_BREAKERS = ["\n", ":", '"', "*"]
 """llama.cpp's default DRY sequence breakers."""
 
+_DRY_INT_MAX = 2**31 - 1
+"""Upper bound on the integral DRY parameters, matching llama-server's
+INT32_MAX cap. The worker stores them in an int64 numpy array, where
+anything at or above 2**63 raises OverflowError inside execute_model
+and takes the engine down."""
+
 MAX_DRY_SEQUENCE_BREAKERS = 64
 """Upper bound on `SamplingParams.dry_sequence_breakers` list length. Each
 previously-unseen breaker string costs a containment scan over the
@@ -638,23 +644,50 @@ class SamplingParams(
                 parameter="dry_multiplier",
                 value=self.dry_multiplier,
             )
+        if self.dry_multiplier and 0.0 <= self.dry_base < 1.0:
+            # llama.cpp's own gate, so this is not an error - but a request that sets a
+            # multiplier and then a sub-1.0 base gets no penalty at all, and the
+            # likeliest cause is dry_base=0.8 typed where dry_multiplier=0.8 was meant.
+            logger.warning(
+                "dry_base=%s is below 1.0, which disables DRY entirely "
+                "(llama.cpp semantics), even though dry_multiplier=%s was "
+                "set. No repetition penalty will be applied.",
+                self.dry_base,
+                self.dry_multiplier,
+            )
         if not math.isfinite(self.dry_base) or self.dry_base < 0.0:
             raise VLLMValidationError(
                 f"dry_base must be non-negative and finite, got {self.dry_base}.",
                 parameter="dry_base",
                 value=self.dry_base,
             )
-        if not isinstance(self.dry_allowed_length, int) or self.dry_allowed_length < 0:
+        # UPPER BOUNDS, not only signs. Both fields are stored into an int64 numpy array
+        # in the worker (gpu/sample/dry.py), and a value at or above 2**63 raises
+        # OverflowError there - inside execute_model, which the engine core turns into a
+        # fatal error and _send_engine_dead(). One request would end the server.
+        # llama-server bounds both fields to INT32_MAX (tools/server/server-schema.cpp),
+        # which is also far beyond any useful context length, so that is the bound used
+        # here.
+        if (
+            not isinstance(self.dry_allowed_length, int)
+            or self.dry_allowed_length < 0
+            or self.dry_allowed_length > _DRY_INT_MAX
+        ):
             raise VLLMValidationError(
-                "dry_allowed_length must be a non-negative integer, got "
-                f"{self.dry_allowed_length}.",
+                "dry_allowed_length must be an integer in "
+                f"[0, {_DRY_INT_MAX}], got {self.dry_allowed_length}.",
                 parameter="dry_allowed_length",
                 value=self.dry_allowed_length,
             )
-        if not isinstance(self.dry_penalty_last_n, int) or self.dry_penalty_last_n < -1:
+        if (
+            not isinstance(self.dry_penalty_last_n, int)
+            or self.dry_penalty_last_n < -1
+            or self.dry_penalty_last_n > _DRY_INT_MAX
+        ):
             raise VLLMValidationError(
                 "dry_penalty_last_n must be an integer: -1 (whole context), "
-                f"0 (disable), or positive, got {self.dry_penalty_last_n}.",
+                f"0 (disable), or in [1, {_DRY_INT_MAX}], got "
+                f"{self.dry_penalty_last_n}.",
                 parameter="dry_penalty_last_n",
                 value=self.dry_penalty_last_n,
             )
@@ -1166,6 +1199,18 @@ class SamplingParams(
                 "The min_p and logit_bias sampling parameters "
                 "are not yet supported with speculative decoding."
             )
+        # DRY, likewise, and it must be refused here rather than skipped in the sampler.
+        # The sampler's skip is keyed on the logits being draft-expanded, which is false
+        # on any step where no request happens to carry draft tokens - the step that
+        # finishes a prefill, for one - so a request left to run would get DRY applied
+        # on some steps and not others, flickering with the schedule.
+        # Silently-intermittent penalties are worse than a refusal.
+        if self.dry_multiplier:
+            raise VLLMValidationError(
+                "dry_multiplier is not yet supported with speculative decoding.",
+                parameter="dry_multiplier",
+                value=self.dry_multiplier,
+            )
 
     def _validate_diffusion(self, model_config: ModelConfig) -> None:
         if not model_config.is_diffusion:
@@ -1374,6 +1419,11 @@ class SamplingParams(
             f"presence_penalty={self.presence_penalty}, "
             f"frequency_penalty={self.frequency_penalty}, "
             f"repetition_penalty={self.repetition_penalty}, "
+            f"dry_multiplier={self.dry_multiplier}, "
+            f"dry_base={self.dry_base}, "
+            f"dry_allowed_length={self.dry_allowed_length}, "
+            f"dry_penalty_last_n={self.dry_penalty_last_n}, "
+            f"dry_sequence_breakers={self.dry_sequence_breakers}, "
             f"temperature={self.temperature}, "
             f"watermarking={self.watermarking}, "
             f"top_p={self.top_p}, "

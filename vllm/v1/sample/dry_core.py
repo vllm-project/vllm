@@ -196,8 +196,11 @@ def dry_core(
     K = N - 1  # offsets 1..N-1
     chunk = max(1, _CHUNK_BYTE_BUDGET // (_CHUNK_PEAK_BYTES_PER_ELEM * max(1, R * J)))
 
-    # Scatter target: per-(row, token) longest charged match.
-    l_max = torch.full((R * vocab,), -1, dtype=torch.int64, device=device)
+    # Scatter target: per-(row, token) longest charged match. int16, not int64: the
+    # value is a match length bounded by J <= _J_BUDGET (2048), so int16 is exact, and
+    # this is the one allocation that is unavoidably R*vocab. At R=256 and a 128k vocab
+    # that is 65 MB rather than 262 MB.
+    l_max = torch.full((R * vocab,), -1, dtype=torch.int16, device=device)
 
     for k0 in range(1, K + 1, chunk):
         k1 = min(k0 + chunk, K + 1)
@@ -226,28 +229,58 @@ def dry_core(
             followers = W.gather(1, (N - ks).clamp(max=N - 1).expand(R, C))
             rows = torch.arange(R, device=device)[:, None].expand(R, C) * vocab
             flat = (rows + followers.clamp(min=0))[charge]
-            l_max.scatter_reduce_(0, flat, L[charge], reduce="amax", include_self=True)
+            # .to(int16) to match l_max: torch.minimum against the int64 rep_limit above
+            # promotes L back to int64, and scatter_reduce_ requires src.dtype ==
+            # self.dtype. The cast is exact - L is a run length over J <= _J_BUDGET
+            # (2048) columns and minimum only lowers it - and rep_limit itself must NOT
+            # be narrowed instead, since it is a window length that legitimately exceeds
+            # int16 at long contexts.
+            l_max.scatter_reduce_(
+                0, flat, L[charge].to(torch.int16), reduce="amax", include_self=True
+            )
 
-    # Penalties: multiplier * base ** min(L - allowed, max_exp). llama.cpp's
-    # std::pow promotes its float base with an int exponent to double, so
-    # the penalty is computed in double precision and saturates only when
-    # stored into the float32 logit. Mirror that: pow in float64, saturate
-    # on the final cast. A float32 pow saturates too early: 0.8 * 2**128
-    # must remain a finite logit (-2.72e38), not -inf.
-    l_max = l_max.view(R, vocab)
-    charged = l_max >= 0
-    if not bool(charged.any()):
+    # Penalties: multiplier * base ** min(L - allowed, max_exp). llama.cpp's std::pow
+    # promotes its float base with an int exponent to double, so the penalty is computed
+    # in double precision and saturates only when stored into the float32 logit. Mirror
+    # that: pow in float64, saturate on the final cast. A float32 pow saturates too
+    # early: 0.8 * 2**128 must remain a finite logit (-2.72e38), not -inf.  COMPUTED ON
+    # THE CHARGED ENTRIES ONLY. A dense [R, vocab] formulation is the natural way to
+    # write this and it is what this function used to do, but it materializes l_max, the
+    # exponent, its float64 cast, the pow result, the product and the where output at
+    # full size: measured at 41 bytes per (row, vocab) entry, 1931 MiB at R=384 on a
+    # 128k vocab and linear from there, which is an out-of-memory crash whose trigger is
+    # how many concurrent requests enabled DRY. The charged set is tiny by comparison -
+    # of 32.8M entries at R=256, about 1024 are ever penalized - so everything below
+    # works on a [M] vector of charged entries and writes them back with a scatter. Same
+    # arithmetic, same dtypes, same order of operations per entry.
+    charged_flat = (l_max >= 0).nonzero(as_tuple=True)[0]  # [M] int64
+    if charged_flat.numel() == 0:
         return logits
-    exponent = torch.minimum(l_max - allowed[:, None], max_exp[:, None])
-    penalty = mult[:, None].double() * torch.pow(
-        base[:, None].double(), exponent.to(torch.float64)
+    rows_of = charged_flat.div(vocab, rounding_mode="floor")  # [M]
+    cols_of = charged_flat - rows_of * vocab  # [M]
+    lm = l_max[charged_flat].to(torch.int64)  # [M]
+    exponent = torch.minimum(lm - allowed[rows_of], max_exp[rows_of])
+    penalty = mult[rows_of].double() * torch.pow(
+        base[rows_of].double(), exponent.to(torch.float64)
     )
-    penalty = torch.where(charged, penalty, torch.zeros_like(penalty))
-    for r, bm in enumerate(breaker_masks):
-        if bm is not None and bool(bm.any()):
-            penalty[r] = torch.where(bm, torch.zeros_like(penalty[r]), penalty[r])
 
+    # Breaker zeroing, also sparse. Gathering each row's mask at the charged columns
+    # costs M elements rather than a full-vocab where per request, and it drops the
+    # per-request ``bool(bm.any())`` device sync the dense version needed
+    # (``_breaker_mask`` already returns None when a request has no breakers, so that
+    # test was redundant as well as synchronous).
+    if any_breakers:
+        brk = torch.zeros_like(cols_of, dtype=torch.bool)
+        for r, bm in enumerate(breaker_masks):
+            if bm is None:
+                continue
+            brk |= (rows_of == r) & bm[cols_of]
+        penalty = torch.where(brk, torch.zeros_like(penalty), penalty)
+
+    # accumulate=True adds, so the value is negated: for one entry this is logit + (-p)
+    # against the dense version's logit - p, which is the same IEEE result. Each flat
+    # index is unique, so accumulation never doubles a penalty.
     logits.index_put_(
-        (row_idx,), logits[row_idx] - penalty.to(logits.dtype), accumulate=False
+        (row_idx[rows_of], cols_of), (-penalty).to(logits.dtype), accumulate=True
     )
     return logits
