@@ -33,7 +33,18 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-_ENABLED = os.environ.get("VLLM_UNO_LAUNCH_KEY_DEBUG") == "1"
+
+def _read_enabled() -> bool:
+    """Validate the opt-in diagnostic flag once at module import."""
+    value = os.environ.get("VLLM_UNO_LAUNCH_KEY_DEBUG")
+    if value is None or value == "0":
+        return False
+    if value == "1":
+        return True
+    raise ValueError("VLLM_UNO_LAUNCH_KEY_DEBUG must be 0 or 1")
+
+
+_ENABLED = _read_enabled()
 _phase: ContextVar[str | None] = ContextVar("vllm_uno_launch_key_phase", default=None)
 _serving_ready = False
 

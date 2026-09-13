@@ -3,7 +3,6 @@
 import torch
 
 from vllm.triton_utils import HAS_TRITON, tl, tldevice, triton
-from vllm.v1.worker.gpu.launch_key_debug import record_triton_launch
 
 # Smallest positive value produced by Triton's fp32 `tl.rand`. Used to clamp
 # zero draws before the flipped Gumbel transform below.
@@ -280,31 +279,6 @@ def gumbel_sample(
     local_max = logits.new_empty(num_tokens, num_blocks, dtype=local_max_dtype)
     per_token_col = logits_cache_col is not None and logits_cache_col.dim() > 0
     launch_grid = (num_tokens, num_blocks)
-    record_triton_launch(
-        "_gumbel_sample_kernel",
-        _gumbel_sample_kernel,
-        launch_grid,
-        local_argmax,
-        local_argmax.stride(0),
-        local_max,
-        local_max.stride(0),
-        logits_cache,
-        logits_cache.stride(0) if logits_cache is not None else 0,
-        logits_cache.stride(1) if logits_cache is not None else 0,
-        logits_cache_col,
-        logits,
-        logits.stride(0),
-        expanded_idx_mapping,
-        seed,
-        pos,
-        temperature,
-        vocab_size,
-        BLOCK_SIZE=BLOCK_SIZE,
-        IS_DRAFTING=is_drafting,
-        APPLY_TEMPERATURE=apply_temperature,
-        USE_FP64=use_fp64,
-        PER_TOKEN_COL=per_token_col,
-    )
     _gumbel_sample_kernel[launch_grid](
         local_argmax,
         local_argmax.stride(0),

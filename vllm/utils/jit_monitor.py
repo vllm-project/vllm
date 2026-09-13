@@ -68,39 +68,13 @@ def is_active() -> bool:
 
 @contextlib.contextmanager
 def capture_compilations() -> Iterator[list[JitCompilation]]:
-    """Collect JIT events for a bounded self-check without changing runtime mode.
-
-    The caller decides whether the collected events are fatal.  This lets a
-    startup check report every observed kernel and specialization even when
-    the process-wide monitor is otherwise configured in warning mode.
-    """
+    """Collect JIT events for a bounded self-check without changing monitor mode."""
     compilations: list[JitCompilation] = []
     token = _captured_compilations.set(compilations)
     try:
         yield compilations
     finally:
         _captured_compilations.reset(token)
-
-
-def raise_on_compilations(
-    compilations: list[JitCompilation], *, context: str
-) -> None:
-    """Fail a startup check with a warning for every unexpected compile."""
-    if not compilations:
-        return
-
-    for compilation in compilations:
-        logger.warning(
-            "%s detected backend=%s event=%s kernel=%s specialization=%s",
-            context,
-            compilation.backend,
-            compilation.event,
-            compilation.fn_name,
-            compilation.detail or "key=<unavailable>",
-        )
-    raise RuntimeError(
-        f"{context} observed {len(compilations)} unexpected JIT compilation(s)"
-    )
 
 
 def activate(*, mode: JitMonitorMode = "warn", verbose: bool = False) -> None:
@@ -188,7 +162,6 @@ def _handle_jit_event(
     captured = _captured_compilations.get()
     if captured is not None:
         captured.append(JitCompilation(backend, event, fn_name, detail))
-        return
 
     if _mode == "error":
         raise RuntimeError(message % args)
