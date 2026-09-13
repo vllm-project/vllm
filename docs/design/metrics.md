@@ -390,6 +390,9 @@ The label names used are:
 - `max_lora` - the static "max number of LoRAs in a single batch."
   configuration.
 
+Streaming-input requests are removed from LoRA tracking once both the input
+stream and its final output have completed, regardless of which completes first.
+
 Encoding a running/waiting counts for multiple adapters in a
 comma-separated string seems quite misguided - we could use labels to
 distinguish between per-adapter counts. This should be revisited.
