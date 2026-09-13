@@ -79,7 +79,7 @@ def test_default_loader_hf_still_falls_back_to_pt(tmp_path):
     # Control: load_format="hf" still picks up .pt weights via fallback.
     (tmp_path / "model.pt").write_bytes(b"\x00\x00\x00\x00")
     loader = DefaultModelLoader(LoadConfig(load_format="hf"))
-    _, files, use_safetensors = loader._prepare_weights(
+    _, files, use_safetensors, _ = loader._prepare_weights(
         str(tmp_path),
         None,
         None,
