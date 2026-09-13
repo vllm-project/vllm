@@ -869,11 +869,41 @@ def get_request_block_hasher(
     return request_block_hasher
 
 
+def _resolved_attention_backends(
+    vllm_config: VllmConfig, layer_names: Iterable[str]
+) -> list[str]:
+    """Best-effort lookup of the resolved attention backend name(s) for the
+    given layers.
+
+    The requested backend (``attention_config.backend``) can be ``None`` when
+    it is auto-selected (e.g. FlashInfer chosen implicitly for
+    ``--kv-cache-dtype fp8``), so the useful name is the resolved one recorded
+    on each attention layer. Returns an empty list if it cannot be determined,
+    so callers can degrade to the backend-agnostic message.
+    """
+    ctx = getattr(vllm_config.compilation_config, "static_forward_context", None)
+    if not ctx:
+        return []
+    names: set[str] = set()
+    for layer_name in layer_names:
+        layer = ctx.get(layer_name)
+        if layer is None:
+            continue
+        try:
+            name = layer.get_attn_backend().get_name()
+        except (AttributeError, NotImplementedError):
+            continue
+        if isinstance(name, str):
+            names.add(name)
+    return sorted(names)
+
+
 def _check_enough_kv_cache_memory(
     available_memory: int,
     get_needed_memory: Callable[[], int],
     max_model_len: int,
     estimate_max_model_len: Callable[[int], int],
+    backend_names: list[str] | None = None,
 ):
     if available_memory <= 0:
         raise ValueError(
@@ -896,11 +926,21 @@ def _check_enough_kv_cache_memory(
                 f"the estimated maximum model length is {estimated_max_len}. "
             )
 
+        backend_msg = ""
+        if backend_names:
+            backends = ", ".join(backend_names)
+            backend_msg = (
+                f"The active attention backend ({backends}) reserves a "
+                f"workspace buffer that reduces the memory available for the "
+                f"KV cache, so this length may fit with a different backend. "
+            )
+
         raise ValueError(
             f"To serve at least one request with the model's max seq len "
             f"({max_model_len}), ({format_gib(needed_memory)} GiB KV "
             f"cache is needed, which is larger than the available KV cache "
             f"memory ({format_gib(available_memory)} GiB). {estimated_msg}"
+            f"{backend_msg}"
             f"Try increasing `gpu_memory_utilization` (which also controls "
             f"CPU memory on the CPU backend) or decreasing `max_model_len` "
             f"when initializing the engine. "
@@ -1006,6 +1046,7 @@ def check_enough_kv_cache_memory(
             lambda: max_memory_usage_bytes(vllm_config, kv_cache_spec.values()),
             vllm_config.model_config.max_model_len,
             lambda am: estimate_max_model_len(vllm_config, kv_cache_spec, am),
+            _resolved_attention_backends(vllm_config, kv_cache_spec.keys()),
         )
 
 
@@ -2708,11 +2749,15 @@ def get_kv_cache_configs(
     for groups, avail_mem in zip(projected_groups_per_worker, check_memory):
         if not groups:
             continue
+        layer_names = [
+            layer_name for group in groups for layer_name in group.layer_names
+        ]
         _check_enough_kv_cache_memory(
             avail_mem,
             partial(_max_memory_usage_bytes_from_groups, vllm_config, groups),
             vllm_config.model_config.max_model_len,
             partial(_estimate_max_model_len_from_groups, vllm_config, groups),
+            _resolved_attention_backends(vllm_config, layer_names),
         )
 
     kv_cache_configs: list[KVCacheConfig] = []
