@@ -301,6 +301,7 @@ kInt4W4A8StaticGroupScale128 = ScaleDesc(torch.bfloat16, True, GroupShape(1, 128
 kInt4W4A8StaticGroup128Sym = QuantKey(
     torch.int8, kInt4W4A8StaticGroupScale128, symmetric=True
 )
+kInt4Static128Bf16 = QuantKey(INT4_DTYPE, kInt4W4A8StaticGroupScale128, symmetric=True)
 
 kInt4W4A8StaticGroupScale64 = ScaleDesc(torch.bfloat16, True, GroupShape(1, 64))
 kInt4W4A8StaticGroup64Sym = QuantKey(
