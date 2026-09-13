@@ -92,6 +92,7 @@ class FastPrefillHelper:
         cu_num_logits_np: np.ndarray,
         has_prefill: bool,
         batch_desc: "BatchExecutionDescriptor",
+        num_active_loras: int = 0,
     ) -> FastPrefillBatchMetadata | None:
         if (
             not has_prefill
@@ -113,7 +114,7 @@ class FastPrefillHelper:
             num_reqs=num_reqs,
             num_tokens=num_logits,
             uniform_token_count=None,
-            num_active_loras=0,
+            num_active_loras=num_active_loras,
         )
         num_logits_padded = min(desc.num_tokens, self.max_num_tokens)
         return FastPrefillBatchMetadata(
