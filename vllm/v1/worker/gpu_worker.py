@@ -514,6 +514,11 @@ class Worker(WorkerBase):
                 self.model_runner.get_model(),
             )
 
+        # Preserve parallel weight loading, then use serving's thread count
+        # for profiling and compilation so Dynamo's global-state guards remain
+        # valid when requests arrive.
+        set_torch_threads_for_runtime()
+
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
 
@@ -930,10 +935,6 @@ class Worker(WorkerBase):
         # Warmup / first-compile is done — activate the `VLLM_GPU_SYNC_CHECK`
         # gate so subsequent `execute_model` / `sample_tokens` calls enforce it.
         enable_gpu_sync_check()
-
-        # Startup is done; steady-state serving gets no benefit from torch
-        # intra-op parallelism.
-        set_torch_threads_for_runtime()
 
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
