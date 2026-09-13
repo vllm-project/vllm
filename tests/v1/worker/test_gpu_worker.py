@@ -3,7 +3,7 @@
 
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -221,3 +221,51 @@ def test_execute_model_waits_previous_pp_send_before_forward(
 
     assert log == ["wait:prev-tensor", "forward", "isend"]
     assert worker._pp_send_work == [tensor_handle]
+
+
+def _v2_warmup_worker(monkeypatch: pytest.MonkeyPatch, enabled: bool):
+    compilation_config = SimpleNamespace(
+        mode=gpu_worker.CompilationMode.NONE,
+        backend=None,
+        compilation_time=0.0,
+        encoder_compilation_time=0.0,
+    )
+    for name in (
+        "kernel_warmup",
+        "set_random_seed",
+        "freeze_gc_heap",
+        "maybe_attach_gc_debug_callback",
+        "enable_gpu_sync_check",
+        "set_torch_threads_for_runtime",
+    ):
+        monkeypatch.setattr(gpu_worker, name, Mock())
+    monkeypatch.setattr("vllm.utils.jit_monitor.activate", Mock())
+    return SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            compilation_config=compilation_config,
+            kernel_config=SimpleNamespace(enable_jit_warmup=enabled),
+        ),
+        compilation_config=compilation_config,
+        model_runner=Mock(lora_config=None),
+        model_config=SimpleNamespace(enforce_eager=True, seed=0),
+        cache_config=SimpleNamespace(kv_cache_memory_bytes=1),
+        observability_config=Mock(),
+        use_v2_model_runner=True,
+        execute_model=Mock(),
+        sample_tokens=Mock(),
+    )
+
+
+@pytest.mark.parametrize(("enabled", "expected_calls"), [(False, 0), (True, 1)])
+def test_v2_scheduler_warmup_honors_jit_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    enabled,
+    expected_calls,
+):
+    worker = _v2_warmup_worker(monkeypatch, enabled)
+    warmup_kernels = Mock()
+    monkeypatch.setattr(gpu_worker, "warmup_kernels", warmup_kernels)
+
+    gpu_worker.Worker.compile_or_warm_up_model(worker)
+
+    assert warmup_kernels.call_count == expected_calls
