@@ -499,6 +499,18 @@ class FlashInferBackend(AttentionBackend):
                 and supports_trtllm_attention(is_prefill=True)
                 and supports_trtllm_attention(is_prefill=False)
             )
+        # FlashInfer raises an error that it requires GPU with sm75 or higher
+        # on blackwell GPUs with toolkit < 12.9
+        # https://github.com/flashinfer-ai/flashinfer/pull/3633
+        if kv_cache_dtype is not None and kv_cache_dtype in ("fp8_e4m3", "fp8"):
+            try:
+                from flashinfer.jit.core import check_cuda_arch
+            except ImportError:
+                return False
+            try:
+                check_cuda_arch()
+            except RuntimeError:
+                return False
         return super().supports_kv_cache_dtype(kv_cache_dtype)
 
     @classmethod
