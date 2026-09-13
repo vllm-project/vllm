@@ -14,6 +14,7 @@ from .utils import (
     create_request,
     create_scheduler,
     create_vllm_config,
+    make_kv_cache_config,
 )
 
 
@@ -337,3 +338,128 @@ def test_async_progressive_load_failure(
         assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
         assert scheduler.failed_recving_kv_req_ids == {request.request_id}
         assert scheduler.connector.get_num_new_matched_tokens.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "invalid_group,invalid_idx,expected_computed_tokens",
+    [
+        (0, 4, 0),
+        (1, 1, 24_576),
+    ],
+)
+def test_hybrid_load_failure_uses_runtime_manager_block_sizes(
+    scheduler: Scheduler,
+    invalid_group: int,
+    invalid_idx: int,
+    expected_computed_tokens: int,
+):
+    """Hybrid recovery must use DCP-scaled manager block sizes and align the
+    shared computed-token boundary for every cache group."""
+    attn_block = 1_536
+    mamba_block = 24_576
+    num_attn_blocks = 41
+    num_mamba_blocks = 3
+
+    scheduler.kv_cache_manager.coordinator.single_type_managers = [
+        Mock(block_size=attn_block),
+        Mock(block_size=mamba_block),
+    ]
+    scheduler.block_size = mamba_block
+
+    block_ids_by_group = (
+        list(range(100, 100 + num_attn_blocks)),
+        list(range(200, 200 + num_mamba_blocks)),
+    )
+    scheduler.kv_cache_manager.get_block_ids = Mock(return_value=block_ids_by_group)
+    request = Mock(
+        request_id="hybrid-request",
+        num_computed_tokens=num_attn_blocks * attn_block,
+    )
+    invalid_block_ids = {
+        block_ids_by_group[invalid_group][invalid_idx],
+    }
+
+    affected, _, _ = scheduler._update_requests_with_invalid_blocks(
+        [request],
+        invalid_block_ids,
+        num_scheduled_tokens={},
+        evict_blocks=False,
+    )
+
+    assert affected == {"hybrid-request"}
+    assert request.num_computed_tokens == expected_computed_tokens
+
+
+def _make_hybrid_async_load():
+    vllm_config = create_vllm_config(kv_load_failure_policy="recompute")
+    kv_cache_config = make_kv_cache_config(
+        block_size=16,
+        num_blocks=100,
+        mamba_enabled=True,
+        mamba_cache_mode="align",
+    )
+    scheduler = create_scheduler(vllm_config, kv_cache_config=kv_cache_config)
+    request = create_request(num_tokens=64)
+    scheduler.add_request(request)
+
+    scheduler.connector = Mock()
+    scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        _make_get_num_new_matched_tokens(
+            {request.request_id: 48},
+            async_load=True,
+        )
+    )
+    scheduler.connector.take_events.return_value = ()
+
+    scheduler_output = scheduler.schedule()
+    block_ids_by_group = scheduler.kv_cache_manager.get_block_ids(request.request_id)
+    assert len(block_ids_by_group) == 2
+    return scheduler, request, scheduler_output, block_ids_by_group
+
+
+def test_async_load_failure_with_hybrid_cache_groups():
+    """Exercise recovery with block tables from a real hybrid coordinator."""
+    scheduler, request, scheduler_output, block_ids_by_group = _make_hybrid_async_load()
+
+    affected, _, _ = scheduler._update_requests_with_invalid_blocks(
+        [request],
+        {scheduler.kv_cache_manager.block_pool.null_block.block_id},
+        num_scheduled_tokens={},
+        evict_blocks=False,
+    )
+    assert not affected
+    assert request.num_computed_tokens == 48
+
+    model_runner_output = create_model_runner_output(
+        reqs=[],
+        finished_recving=set(),
+        invalid_block_ids={block_ids_by_group[1][2]},
+        use_eos=True,
+    )
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    assert request.num_computed_tokens == 32
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert scheduler.failed_recving_kv_req_ids == {request.request_id}
+
+
+def test_hybrid_load_failure_evicts_downstream_blocks_from_every_group():
+    scheduler, request, _, block_ids_by_group = _make_hybrid_async_load()
+
+    affected, _, blocks_to_evict = scheduler._update_requests_with_invalid_blocks(
+        [request],
+        {block_ids_by_group[1][2]},
+        num_scheduled_tokens={},
+        evict_blocks=True,
+    )
+
+    null_block_id = scheduler.kv_cache_manager.block_pool.null_block.block_id
+    expected_blocks = {
+        block_id
+        for group in block_ids_by_group
+        for block_id in group[2:]
+        if block_id != null_block_id
+    }
+    assert affected == {request.request_id}
+    assert request.num_computed_tokens == 32
+    assert blocks_to_evict == expected_blocks
