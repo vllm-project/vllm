@@ -35,6 +35,7 @@ ENV = "VLLM_ROCM_AITER_MLA_DCP_VERIFY"
 # _parse_dcp_verify_env
 # --------------------------------------------------------------------------
 
+
 def test_default_route_is_asm(monkeypatch):
     """Unset must mean asm: upstream's only DCP-verify route is Triton
     segmented, and under DSpark every step has qlen > 1, so an accidental
@@ -48,7 +49,7 @@ def test_default_route_is_asm(monkeypatch):
     [
         ("asm", "asm", frozenset()),
         ("segmented", "segmented", frozenset()),
-        ("ASM", "asm", frozenset()),               # case-insensitive
+        ("ASM", "asm", frozenset()),  # case-insensitive
         ("  segmented  ", "segmented", frozenset()),  # surrounding space
         ("segmented:64", "segmented", frozenset({64})),
         ("asm:64,128", "asm", frozenset({64, 128})),
@@ -87,6 +88,7 @@ def test_non_integer_head_list_is_rejected(monkeypatch, raw):
 # _asm_dcp_verify_heads -- which head count the cprr kernel runs at
 # --------------------------------------------------------------------------
 
+
 @pytest.mark.parametrize("n", NATIVE)
 def test_native_head_counts_are_used_as_is(n):
     assert _heads(n) == n
@@ -112,6 +114,7 @@ def test_head_count_above_the_largest_native_is_unservable():
 # _asm_dcp_verify_selected -- per-KV-group routing
 # --------------------------------------------------------------------------
 
+
 @pytest.mark.parametrize("heads", [64, 96, 128])
 def test_no_filter_applies_the_route_to_every_group(monkeypatch, heads):
     monkeypatch.setenv(ENV, "asm")
@@ -125,8 +128,8 @@ def test_head_filter_splits_target_and_draft(monkeypatch):
     gathers 96 heads and its draft 64, so 'segmented:64' must mean
     'draft on segmented, target still on asm' -- the bisection knob."""
     monkeypatch.setenv(ENV, "segmented:64")
-    assert _selected(64) is False    # draft -> segmented
-    assert _selected(96) is True     # target -> asm
+    assert _selected(64) is False  # draft -> segmented
+    assert _selected(96) is True  # target -> asm
 
 
 def test_head_filter_inverts_with_the_route(monkeypatch):
@@ -140,6 +143,7 @@ def test_head_filter_inverts_with_the_route(monkeypatch):
 # --------------------------------------------------------------------------
 # _asm_dcp_verify_configured -- reachability
 # --------------------------------------------------------------------------
+
 
 def test_route_needs_dcp():
     assert _configured(dcp_world_size=1, cp_interleave=1) is False
@@ -156,6 +160,7 @@ def test_round_robin_interleave_other_than_one_is_excluded():
 # --------------------------------------------------------------------------
 # qlen floor
 # --------------------------------------------------------------------------
+
 
 def test_min_cprr_qlen_is_above_two():
     """qlen 2 is the steady state at num_speculative_tokens=1. The per-step

@@ -282,8 +282,21 @@ def _make_vllm_config(heads_per_rank: int):
     return vllm_config
 
 
-def _run_shard(vllm_config, spec, layer_name, device, cp_rank, kern_rank,
-               q_flat, kv_flat, nr, qlen, ctx, dcp, pos):
+def _run_shard(
+    vllm_config,
+    spec,
+    layer_name,
+    device,
+    cp_rank,
+    kern_rank,
+    q_flat,
+    kv_flat,
+    nr,
+    qlen,
+    ctx,
+    dcp,
+    pos,
+):
     """Build real metadata for one DCP rank and run the real asm kernel.
 
     ``kern_rank`` is separate from ``cp_rank`` so the positive control can hand
@@ -376,7 +389,10 @@ def _numerics(heads_per_rank: int, sabotage: bool = False):
         ).to(kv_dtype)
         q_flat = (
             torch.randn(
-                nr * qlen, gathered_heads, HEAD_SIZE, dtype=torch.float32,
+                nr * qlen,
+                gathered_heads,
+                HEAD_SIZE,
+                dtype=torch.float32,
                 device=device,
             )
             .mul_(0.5)
@@ -397,8 +413,19 @@ def _numerics(heads_per_rank: int, sabotage: bool = False):
             pos = torch.arange(r, L, DCP, device=device)  # residue class r
             kern_rank = (r + 1) % DCP if sabotage else r
             md, o, lse, _ = _run_shard(
-                vllm_config, spec, layer_name, device, r, kern_rank,
-                q_flat, kv_flat, nr, qlen, ctx, DCP, pos,
+                vllm_config,
+                spec,
+                layer_name,
+                device,
+                r,
+                kern_rank,
+                q_flat,
+                kv_flat,
+                nr,
+                qlen,
+                ctx,
+                DCP,
+                pos,
             )
             # The route actually under test must have been taken; a silent
             # fall-out to Triton/segmented would otherwise pass quietly.

@@ -8,6 +8,7 @@ from typing import ClassVar, Final
 
 import torch
 
+from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
@@ -198,7 +199,7 @@ def _segmented_dcp_verify_supported(dcp_world_size: int, cp_interleave: int) -> 
     )
 
 
-# K3-DCP-ASM-VERIFY: head counts the round-robin (cprr) asm decode has a native
+# head counts the round-robin (cprr) asm decode has a native
 # kernel for. dcp_heads = num_heads * dcp_world_size is 96 for K3 at TP8/DCP8,
 # which is 16-aligned but *not* one of these, so the cprr path pads up to 128.
 _NATIVE_CPRR_HEADS: Final = (16, 32, 64, 128)
@@ -214,7 +215,7 @@ def _asm_dcp_verify_heads(decode_num_heads: int) -> int:
     return 0
 
 
-# K3-DCP-ASM-VERIFY: shortest query length the cprr asm decode has a kernel for.
+# shortest query length the cprr asm decode has a kernel for.
 # A DSpark draft group runs at qlen = 1 + num_speculative_tokens, so nspec=1
 # would sit below this and must not silently fall back to a non-cprr call.
 _MIN_CPRR_QLEN: Final = 3
@@ -235,9 +236,8 @@ def _parse_dcp_verify_env() -> tuple[str, frozenset[int]]:
     TP8/DCP8) and only one of them may be at fault. ``segmented:64`` therefore
     means "target on asm, draft on segmented".
     """
-    import os
 
-    raw = os.environ.get("VLLM_ROCM_AITER_MLA_DCP_VERIFY", "asm").strip().lower()
+    raw = envs.VLLM_ROCM_AITER_MLA_DCP_VERIFY.strip().lower()
     route, sep, heads = raw.partition(":")
     if sep and not heads.strip():
         # A bare trailing ':' is a typo, and silently reading it as "no filter"
@@ -292,42 +292,6 @@ def _asm_dcp_verify_configured(dcp_world_size: int, cp_interleave: int) -> bool:
     the kernel's global-position causal window assumes it.
     """
     return dcp_world_size > 1 and cp_interleave == 1
-
-
-# PATCH(skip-k3-fp8-ps): Kimi-K3 prefill uses fused FA, not forward_mha FP8 ASM.
-_FUSED_MLA_PREFILL_MODEL_TYPES: Final = frozenset({"kimi_k3", "kimi_k3_mtp"})
-_FUSED_MLA_PREFILL_ARCHITECTURES: Final = frozenset(
-    {"KimiK3ForConditionalGeneration", "KimiK3MTPModel"}
-)
-
-
-def _model_uses_fused_mla_prefill(vllm_config=None) -> bool:
-    if vllm_config is None:
-        from vllm.config import get_current_vllm_config_or_none
-
-        vllm_config = get_current_vllm_config_or_none()
-    if vllm_config is None or vllm_config.model_config is None:
-        return False
-
-    model_config = vllm_config.model_config
-    hf_config = model_config.hf_config
-    hit = getattr(hf_config, "model_type", None) in _FUSED_MLA_PREFILL_MODEL_TYPES
-    if not hit:
-        architectures = getattr(hf_config, "architectures", None) or []
-        hit = any(a in _FUSED_MLA_PREFILL_ARCHITECTURES for a in architectures)
-    if not hit:
-        hf_text_config = model_config.hf_text_config
-        hit = (
-            getattr(hf_text_config, "model_type", None)
-            in _FUSED_MLA_PREFILL_MODEL_TYPES
-        )
-    if hit:
-        logger.info_once(
-            "Skipping FP8 ASM MLA prefill workspace for %s: prefill uses the "
-            "fused MLA path (forward_mha is not called).",
-            getattr(hf_config, "model_type", None) or "Kimi-K3",
-        )
-    return hit
 
 
 def _aiter_mla_small_head_mode() -> str:
@@ -437,7 +401,7 @@ class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
     min_kv_seq_len: int = 1
     # Set exactly when this batch routes to segmented DCP verification.
     dcp_verify: AiterMLADCPVerifyMetadata | None = None
-    # K3-DCP-ASM-VERIFY: GLOBAL per-request page indptr. The cprr asm decode
+    # GLOBAL per-request page indptr. The cprr asm decode
     # needs it to place each verify row's causal window in global coordinates
     # before mapping to this rank's round-robin KV shard. cp_world_size==1
     # leaves the non-DCP path untouched.
@@ -495,7 +459,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     #  https://github.com/vllm-project/vllm/issues/22945
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
-    # K3-DCP-ASM-VERIFY: the DSpark draft KV spec is non_causal_multi_token_decode
+    # the DSpark draft KV spec is non_causal_multi_token_decode
     # =True; the aiter round-robin decode applies causal masking on GLOBAL
     # positions inside the kernel (g_kv_indptr), so the non-causal-draft DCP
     # gate is safe.
@@ -553,7 +517,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             parallel_config.decode_context_parallel_size,
             parallel_config.cp_kv_cache_interleave_size,
         )
-        # K3-DCP-ASM-VERIFY: prefer the tuned fp8 asm cprr decode for DCP verify.
+        # prefer the tuned fp8 asm cprr decode for DCP verify.
         # When it can serve this shape it *replaces* the segmented route, so the
         # two are mutually exclusive and only one set of buffers is allocated.
         # The head-count half of the predicate needs self.num_heads, which is
@@ -620,12 +584,12 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # (get_mla_metadata_v1 + the decode call) all read this attribute, so
         # they stay consistent whatever it is set to -- that consistency, not
         # the specific value, is what the reduce_partial_map sizing requires.
-        import os as _os
         try:
-            _cu = torch.cuda.get_device_properties(0).multi_processor_count
+            self._mla_max_split_per_batch = torch.cuda.get_device_properties(
+                0
+            ).multi_processor_count
         except Exception:
-            _cu = 256
-        self._mla_max_split_per_batch = int(_os.environ.get("K3_MLA_MAX_SPLIT", "0")) or _cu
+            self._mla_max_split_per_batch = 256
 
         self.compilation_config = vllm_config.compilation_config
         self.decode_attn_out_dtype = vllm_config.model_config.dtype
@@ -639,7 +603,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # persistent gate below and makes aiter raise a KeyError mid-run.
         self._mtp_decode_qlen = self.reorder_batch_threshold or 1
 
-        # K3-DCP-ASM-VERIFY: the cprr kernel starts at _MIN_CPRR_QLEN, and the
+        # the cprr kernel starts at _MIN_CPRR_QLEN, and the
         # per-step gate in _forward_decode omits the global-position window
         # below it -- correct for qlen 1 (a decode row sees every local token)
         # but WRONG for qlen 2, where a row can still be causally truncated.
@@ -696,7 +660,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         self._num_attention_heads = AiterMLAHelper.get_actual_mla_num_heads(
             self._decode_num_heads
         )
-        # K3-DCP-ASM-VERIFY: the cprr kernel exists only at the native head
+        # the cprr kernel exists only at the native head
         # counts, so run (and size the persistent schedule) at the padded count.
         # 96 is 16-aligned, so get_actual_mla_num_heads leaves it alone and the
         # pad has to be applied here explicitly.
@@ -738,7 +702,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             kv_dtype,
             is_sparse=False,
             fast_mode=True,
-            # K3-DCP-ASM-VERIFY: aiter max()es its own tight bound away, so the
+            # aiter max()es its own tight bound away, so the
             # fp32 reduce scratch is sized from capacity (9.35 GiB) unless the
             # cap is stated here. It must match the max_split_per_batch passed
             # to get_mla_metadata_v1 on every DCP build.
@@ -778,7 +742,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             kv_cache_dtype_str == "fp8"
             and vllm_config.model_config.dtype == torch.bfloat16
             and AiterMLAHelper.is_valid_num_heads(self.num_heads)
-            and not _model_uses_fused_mla_prefill(vllm_config)  # PATCH(skip-k3-fp8-ps)
         )
         if self._fp8_prefill_enabled:
             max_prefill_qlen = min(
@@ -1190,7 +1153,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         pad_uniform_mtp = padded_mtp_qo_len > 0
 
         seq_lens_for_kernel = seq_lens_device
-        # K3-DCP-ASM-VERIFY: the global lengths need the same dummy-row
+        # the global lengths need the same dummy-row
         # treatment as the local ones below, but only for g_kv_indptr -- the
         # metadata field keeps the true values, which is what the segmented
         # route wants (it derives its own row lens and gives a dummy row
@@ -1218,9 +1181,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 g_tot_seq_lens = torch.where(
                     qo_lens_device > 0,
                     g_tot_seq_lens,
-                    g_tot_seq_lens.new_full(
-                        (), max_qo_len * self.dcp_world_size
-                    ),
+                    g_tot_seq_lens.new_full((), max_qo_len * self.dcp_world_size),
                 )
 
         if self._graph_seq_lens is not None:
@@ -1314,7 +1275,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 else:
                     qo_indptr = query_start_loc_device[: 1 + num_kernel_reqs]
 
-        # K3-DCP-ASM-VERIFY: build the GLOBAL per-request page indptr the cprr asm
+        # build the GLOBAL per-request page indptr the cprr asm
         # kernel needs to apply global-position causal masking over this rank's
         # local round-robin KV shard (page_size==1, so pages==tokens).
         g_kv_indptr = None
@@ -1322,9 +1283,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             assert self._g_kv_indptr_buf is not None
             _ngk = g_tot_seq_lens.shape[0]
             g_kv_indptr = self._g_kv_indptr_buf[: _ngk + 1]
-            g_kv_indptr[1:].copy_(
-                g_tot_seq_lens.cumsum(dim=0, dtype=torch.int32)
-            )
+            g_kv_indptr[1:].copy_(g_tot_seq_lens.cumsum(dim=0, dtype=torch.int32))
             # A FULL cudagraph replays at its capture-time request count, so a
             # smaller real batch leaves the tail holding the PREVIOUS step's
             # cumsum. Flatten it the way paged_kv_indptr is flattened below, so
@@ -1359,7 +1318,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             uni_qo_len = (
                 max_qo_len if pad_uniform_mtp or torch.all(qo_len == max_qo_len) else -1
             )
-            # K3-DCP-ASM-VERIFY: round-robin CP applies causality via global
+            # round-robin CP applies causality via global
             # positions plus the qlen window *inside* the kernel, so is_causal
             # must be False whenever g_kv_indptr is handed over.
             cprr_kwargs: dict = {}
@@ -1807,7 +1766,6 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
             is_quantized_kv_cache(kv_cache_dtype)
             and AiterMLAHelper.is_valid_num_heads(self.num_heads)
-            and not _model_uses_fused_mla_prefill()  # PATCH(skip-k3-fp8-ps)
         )
         if self._fp8_prefill_enabled:
             from aiter import mla_prefill_ps_asm_fwd, mla_reduce_v1
@@ -2235,7 +2193,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             "ROCM_AITER_MLA decode expected the DCP-gathered query head count "
             f"{self._decode_num_heads}, got {q.shape[1]}"
         )
-        # K3-DCP-ASM-VERIFY: the round-robin (cprr) asm decode only has kernels
+        # the round-robin (cprr) asm decode only has kernels
         # at the native head counts, so pad the DCP-gathered count (96 at
         # TP8/DCP8) up to the next one (128) and run ONE native kernel. MLA
         # heads attend independently over the shared KV, so the padding heads
@@ -2286,7 +2244,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         lse = None
         if self.dcp_world_size > 1:
-            # K3-DCP-ASM-VERIFY: drive the round-robin global-position causal
+            # drive the round-robin global-position causal
             # mask over this rank's KV shard. Only needed when a row can be
             # causally truncated, i.e. qlen > 1; a qlen==1 decode sees every
             # local token, so the plain kernel is already correct there and the
