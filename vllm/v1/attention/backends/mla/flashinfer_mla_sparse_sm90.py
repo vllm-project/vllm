@@ -104,7 +104,7 @@ class FlashInferMLASparseSM90Backend(AttentionBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        return capability.major == 9
+        return capability.major in (9, 10, 12)
 
     @classmethod
     def supports_combination(
