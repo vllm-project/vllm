@@ -100,7 +100,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 35GB) Spec Decode Speculators + MTP"
   key: spec-decode-speculators-mtp
-  timeout_in_minutes: 60
+  timeout_in_minutes: 50
   device: h200_35gb
   source_file_dependencies:
     - vllm/v1/spec_decode/
