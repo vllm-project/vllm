@@ -88,8 +88,18 @@ def build_tool_call(func_name: str, params: dict[str, str]) -> str:
     return f'{TC_START}\n{INV_START}{func_name}">\n{param_strs}{INV_END}\n{TC_END}'
 
 
-def stream(parser: DeepSeekV4EngineToolParser, full_text: str, chunk_size: int = 7):
+def stream(
+    parser: DeepSeekV4EngineToolParser,
+    full_text: str,
+    chunk_size: int = 7,
+    request: MagicMock | None = None,
+):
     deltas = []
+    req = (
+        request
+        if request is not None
+        else make_request(tools=getattr(parser, "tools", None))
+    )
     previous_text = ""
     for start in range(0, len(full_text), chunk_size):
         delta_text = full_text[start : start + chunk_size]
@@ -101,11 +111,14 @@ def stream(parser: DeepSeekV4EngineToolParser, full_text: str, chunk_size: int =
             previous_token_ids=[],
             current_token_ids=[],
             delta_token_ids=[1],
-            request=make_request(),
+            request=req,
         )
         previous_text = current_text
         if delta is not None:
             deltas.append(delta)
+    finish_delta = parser.finish_streaming()
+    if finish_delta is not None:
+        deltas.append(finish_delta)
     return deltas
 
 
@@ -148,9 +161,7 @@ def test_extract_tool_calls():
     }
 
 
-def test_function_calls_wrapper_is_not_recognized():
-    # The V3.2 wrapper is not a V4 terminal, so it passes through as content,
-    # but the invoke inside it is still parsed (tool calls anchor on the invoke).
+def test_function_calls_block_is_not_accepted():
     parser = make_parser()
     model_output = build_tool_call("search", {"query": "vllm"}).replace(
         "tool_calls", "function_calls"
@@ -158,28 +169,33 @@ def test_function_calls_wrapper_is_not_recognized():
 
     result = parser.extract_tool_calls(model_output, make_request())
 
-    assert result.tools_called
-    assert result.tool_calls[0].function.name == "search"
-    assert result.content == "<｜DSML｜function_calls>\n"
+    assert not result.tools_called
+    assert result.content == model_output
 
 
 def test_missing_tool_calls_wrapper_is_recovered():
     # Regression for #48931: at long context the model omits the
     # <｜DSML｜tool_calls> START token but still emits a complete invoke.
-    parser = make_parser()
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={"name": "search", "parameters": {"type": "object"}},
+        )
+    ]
+    parser = make_parser(tools=tools)
     model_output = build_tool_call("search", {"query": "vllm"}).replace(
         TC_START + "\n", ""
     )
     assert TC_START not in model_output
 
-    result = parser.extract_tool_calls(model_output, make_request())
+    result = parser.extract_tool_calls(model_output, make_request(tools=tools))
 
     assert result.tools_called
     assert result.tool_calls[0].function.name == "search"
     assert json.loads(result.tool_calls[0].function.arguments) == {"query": "vllm"}
     assert result.content is None
 
-    deltas = stream(make_parser(), model_output, chunk_size=3)
+    deltas = stream(make_parser(tools=tools), model_output, chunk_size=3)
     names = [
         tc.function.name
         for d in deltas
