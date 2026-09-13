@@ -69,7 +69,8 @@ class _ClientRequestState:
     unsent: list[OffloadKey] = field(default_factory=list)
     # Current lookup round. LookupMsgs carry it, each fetch closes it and
     # advances it, so every round's supply/demand/completion is isolated
-    # on the wire. PD clients never probe and stay on round 0.
+    # on the wire. PD clients never probe; the first fetch on a fresh id
+    # uses round 0. Reused ids continue from the last retired round.
     round_seq: int = 0
     # This id ran the symmetric lookup phase (register_lookup); a fetch
     # with keys then requires every key to be a confirmed probe. PD
@@ -122,7 +123,8 @@ class ClientRole:
         self._send = send
         # All per-kv_request_id state lives here. Entries are created
         # lazily by request_blocks / register_lookup and dropped by
-        # _maybe_prune once every field is idle.
+        # _maybe_prune once every field is idle. The next round_seq is
+        # kept in _next_round so a reused id does not restart at 0.
         self._requests: dict[str, _ClientRequestState] = {}
         # kv_request_ids with unsent lookup keys for the next flush to
         # visit — the work-list that keeps flush_pending_lookups from
@@ -136,6 +138,11 @@ class ClientRole:
         # Kept in exact sync with ``st.loads``.
         self._active_loads: set[str] = set()
         self._completed_loads: list[LoadResult] = []
+        # Next round_seq after idle prune so a reused kv_request_id does
+        # not restart at 0 while a delayed completion for the old round
+        # can still arrive. Entries stay until session close; dropping
+        # one would restart that id at round 0.
+        self._next_round: dict[str, int] = {}
 
     # ------------------------------------------------------------------
     # State helpers
@@ -146,11 +153,17 @@ class ClientRole:
         st = self._requests.get(kv_request_id)
         if st is None:
             st = _ClientRequestState()
+            st.round_seq = self._next_round.get(kv_request_id, 0)
             self._requests[kv_request_id] = st
         return st
 
     def _maybe_prune(self, kv_request_id: str) -> None:
-        """Drop the entry once it holds no live load or lookup state.
+        """Drop live load/lookup state once idle; keep the next round_seq.
+
+        ``_next_round`` is not TTL-expired: forgetting an id would let a
+        later reuse start at round 0 and accept a delayed completion for
+        the retired round. Long-lived sessions grow one int per unique
+        id until ``close()``.
 
         ``peer_lookup_open`` is only read by ``finish``, and every path
         that clears the last probe (fetch / finish / close) also settles
@@ -158,7 +171,16 @@ class ClientRole:
         """
         st = self._requests.get(kv_request_id)
         if st is not None and not st.loads and not st.probes and not st.unsent:
+            next_round = st.round_seq if st.round_seq > 0 else 1
+            prev = self._next_round.get(kv_request_id, 0)
+            self._next_round[kv_request_id] = max(prev, next_round)
             del self._requests[kv_request_id]
+            n = len(self._next_round)
+            if n > 0 and n & (n - 1) == 0:
+                logger.debug(
+                    "Retaining %d kv_request_id round_seq entries until session close",
+                    n,
+                )
 
     def _on_load_terminal(self, kv_request_id: str, st: _ClientRequestState) -> None:
         """Wind down id-level state once no load remains in flight."""
@@ -525,4 +547,5 @@ class ClientRole:
         self._flush_pending.clear()
         self._active_loads.clear()
         self._completed_loads.clear()
+        self._next_round.clear()
         return ClientCloseResult(failed_jobs=failed_jobs, failed_req_ids=failed_req_ids)
