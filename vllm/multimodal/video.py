@@ -1063,7 +1063,14 @@ class Molmo2VideoBackend(VideoLoader):
         max_fps = kwargs.get("max_fps")
         frame_sample_mode = kwargs.get("frame_sample_mode")
         if frame_sample_mode is None:
-            return list(range(0, source.total_frames_num))
+            total_num_frames = source.total_frames_num
+            num_frames = target.num_frames
+            if num_frames > 0:
+                n = min(num_frames, total_num_frames)
+                if n == total_num_frames:
+                    return list(range(total_num_frames))
+                return np.linspace(0, total_num_frames - 1, n, dtype=int).tolist()
+            return list(range(0, total_num_frames))
 
         if frame_sample_mode not in {"uniform_last_frame", "fps"}:
             raise NotImplementedError(
