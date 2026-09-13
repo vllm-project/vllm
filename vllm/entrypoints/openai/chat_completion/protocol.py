@@ -70,12 +70,16 @@ class ChatMessage(OpenAIBaseModel):
 
     # vLLM-specific fields that are not in OpenAI spec
     reasoning: str | None = None
+    reasoning_content: str | None = None
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler):
         data = handler(self)
-        if len(data.get("tool_calls", [])) == 0:
-            data.pop("tool_calls", None)
+        if isinstance(data, dict):
+            if len(data.get("tool_calls", [])) == 0:
+                data.pop("tool_calls", None)
+            if data.get("reasoning_content") is None:
+                data.pop("reasoning_content", None)
         return data
 
 
