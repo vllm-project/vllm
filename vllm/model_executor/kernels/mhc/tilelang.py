@@ -2,9 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.model_executor.kernels.mhc.tilelang_kernels import (
-    mhc_fused_post_pre_split_config,
-)
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -328,6 +325,7 @@ def mhc_fused_post_pre_delayed_tilelang(
         _HC_PRENORM_GEMM_TILELANG_KERNEL,
         _MHC_FUSED_TILELANG_KERNEL,
         _MHC_POST_TILELANG_KERNEL,
+        mhc_fused_post_pre_split_config,
         mhc_pre_big_fuse_tilelang,
     )
     from vllm.model_executor.kernels.mhc.warmup import (
@@ -850,6 +848,7 @@ def mhc_fused_post_pre_tilelang(
         _MHC_FUSED_TILELANG_KERNEL,
         _MHC_POST_TILELANG_KERNEL,
         _MHC_PRE_BIG_FUSE_TILELANG_KERNEL,
+        mhc_fused_post_pre_split_config,
     )
 
     assert residual.dtype == torch.bfloat16

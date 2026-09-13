@@ -24,9 +24,6 @@ from vllm.model_executor.kernels.mhc.tilelang import (
     mhc_post_tilelang,
     mhc_pre_delayed_tilelang,
 )
-from vllm.model_executor.kernels.mhc.tilelang_kernels import (
-    mhc_fused_post_pre_splits,
-)
 from vllm.model_executor.kernels.mhc.triton import hc_collapse_triton
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
@@ -218,6 +215,9 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.hc_eps = config.hc_eps
         self.hc_post_alpha = 2.0
         if vllm_config.kernel_config.enable_jit_warmup and current_platform.is_cuda():
+            from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+                mhc_fused_post_pre_splits,
+            )
             from vllm.model_executor.kernels.mhc.warmup import MHC_PRE_NORM_KERNEL
 
             max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
