@@ -531,7 +531,7 @@ def _consolidate_system_messages(
     very first message.  After developer-to-system conversion, system messages
     may appear at non-first positions; this merges them into a single message.
     """
-    system_contents: list[str] = []
+    system_contents: list[str | list[dict[str, str]]] = []
     non_system: list[ConversationMessage] = []
     needs_consolidation = False
     for i, msg in enumerate(conversation):
@@ -539,15 +539,7 @@ def _consolidate_system_messages(
             if i > 0 or system_contents:
                 needs_consolidation = True
             content = msg.get("content", "")
-            if isinstance(content, list):
-                parts = []
-                for part in content:
-                    if isinstance(part, dict) and "text" in part:
-                        parts.append(part["text"])
-                    elif isinstance(part, str):
-                        parts.append(part)
-                content = "\n".join(parts)
-            if content:
+            if isinstance(content, list) or content:
                 system_contents.append(content)
         else:
             non_system.append(msg)
@@ -555,10 +547,23 @@ def _consolidate_system_messages(
     if not needs_consolidation:
         return conversation
 
-    merged: ConversationMessage = {
-        "role": "system",
-        "content": "\n\n".join(system_contents),
-    }
+    merged_content: str | list[dict[str, str]]
+    if any(isinstance(content, list) for content in system_contents):
+        merged_parts: list[dict[str, str]] = []
+        for content in system_contents:
+            if not content:
+                continue
+            if merged_parts:
+                merged_parts.append({"type": "text", "text": "\n\n"})
+            if isinstance(content, list):
+                merged_parts.extend(content)
+            else:
+                merged_parts.append({"type": "text", "text": content})
+        merged_content = merged_parts
+    else:
+        merged_content = "\n\n".join(cast(list[str], system_contents))
+
+    merged: ConversationMessage = {"role": "system", "content": merged_content}
     return [merged, *non_system]
 
 
