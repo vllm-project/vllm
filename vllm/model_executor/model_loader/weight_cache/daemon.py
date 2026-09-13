@@ -388,12 +388,9 @@ def main() -> None:
     # nodes must agree on it; single-node can auto-pick a free port. The master
     # address is reused from the engine's --master-addr (node_rank 0).
     master_addr = parallel_config.master_addr
-    if nnodes > 1:
-        if args.weight_cache_master_port is None:
-            raise ValueError("--weight-cache-master-port is required when --nnodes > 1")
-        master_port = args.weight_cache_master_port
-    else:
-        master_port = args.weight_cache_master_port or get_open_port()
+    if nnodes > 1 and args.weight_cache_master_port is None:
+        raise ValueError("--weight-cache-master-port is required when --nnodes > 1")
+    master_port = args.weight_cache_master_port or get_open_port()
     distributed_init_method = get_distributed_init_method(master_addr, master_port)
 
     ctx = multiprocessing.get_context("spawn")
