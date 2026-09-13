@@ -509,7 +509,7 @@ def compile_flash_attn_varlen_func_from_specs(
             stride=lse_stride,
         )
 
-    return _flash_attn_fwd(
+    _flash_attn_fwd(
         q=q,
         k=k,
         v=v,

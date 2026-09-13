@@ -112,7 +112,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         assert flash_attn_varlen_func is not None
         return flash_attn_varlen_func(*args, **kwargs)
 
-    def dispatch(
+    def dispatch(  # type: ignore[override]
         self,
         *,
         q_stage: int,
@@ -173,17 +173,17 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             and uses_fa4_hd256_kernel(head_dim)
             and page_size == FA4_HD256_PAGE_SIZE
         ):
-            q_stages = (1, 2)
-            single_batches = (True, False)
-            split_counts = (1,)
+            q_stages = WarmupChoices(1, 2)
+            single_batches = WarmupChoices(True, False)
+            split_counts = WarmupChoices(1)
         elif (
             major == 9 and head_dim == 512 and window_size == (-1, -1) and softcap == 0
         ):
             # SM90 forward has split/non-split variants; its transitive
             # combine specializes at 32/64/128/256 splits.
-            q_stages = (1,)
-            single_batches = (False,)
-            split_counts = (1, 32, 64, 128, 256)
+            q_stages = WarmupChoices(1)
+            single_batches = WarmupChoices(False)
+            split_counts = WarmupChoices(1, 32, 64, 128, 256)
         else:
             return []
 
@@ -657,17 +657,20 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
 
         self.max_num_splits = 0  # No upper bound on the number of splits.
         self.aot_schedule = get_flash_attn_version() == 3
+        fa_version = get_flash_attn_version(
+            head_size=self.headdim,
+            head_size_v=kv_cache_spec.head_size_v,
+            kv_cache_block_size=self.block_size,
+            supports_fa4_hd256=True,
+        )
+        self.fa4_hd256 = fa_version == 4 and uses_fa4_hd256_kernel(
+            self.headdim, kv_cache_spec.head_size_v
+        )
 
         if (
             vllm_config.kernel_config.enable_jit_warmup
             and self.model_config.hf_config.model_type in ("gemma4", "gemma4_unified")
-            and get_flash_attn_version(
-                head_size=self.headdim,
-                head_size_v=kv_cache_spec.head_size_v,
-                kv_cache_block_size=self.block_size,
-                supports_fa4_hd256=True,
-            )
-            == 4
+            and fa_version == 4
         ):
             _FA4_DENSE_ATTENTION_KERNEL.register_warmup(
                 vllm_config=vllm_config,
