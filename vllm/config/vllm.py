@@ -2869,6 +2869,17 @@ class VllmConfig:
         if self.parallel_config.prefill_context_parallel_size > 1:
             unsupported.append("prefill context parallel")
 
+        # Note(arpera):
+        # MRV1 + PP>1 + async sched + structured output
+        # does not work in vLLM. For more info see:
+        # https://github.com/vllm-project/vllm/issues/45014
+        # Since recently MRV1 has been deprecated then
+        # there was decided not to fix the issue but instead
+        # to disallow such configuration.
+        # At the same time MRV2 works fine in this case.
+        if self.parallel_config.pipeline_parallel_size > 1:
+            unsupported.append("pipeline parallelism")
+
         # DSpark is implemented only by the V2 GPU model runner.
         if self.speculative_config:
             if self.speculative_config.method == "dspark":
