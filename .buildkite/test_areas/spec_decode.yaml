@@ -280,6 +280,8 @@ steps:
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/spec_decode/
     - vllm/model_executor/models/qwen3_dflash.py
+    - vllm/model_executor/models/qwen3_dflash2.py
+    - vllm/model_executor/models/qwen3_5.py
     - vllm/model_executor/models/laguna_dflash.py
     - tests/v1/e2e/spec_decode/
   commands:
@@ -290,6 +292,8 @@ steps:
       dind: false
       device: mi300_1
       timeout_in_minutes: 120
+      commands:
+      - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "not dflash2"
       depends_on:
       - image-build-amd
       source_file_dependencies:
