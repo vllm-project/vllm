@@ -60,7 +60,7 @@ class ModelState(ABC):
         self.device = device
 
         self.max_model_len = self.model_config.max_model_len
-        self.max_num_reqs = self.scheduler_config.max_num_seqs
+        self.max_num_reqs = self.scheduler_config.max_num_resident_seqs
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.inputs_embeds_size = self.model_config.get_inputs_embeds_size()
         self.dtype = self.model_config.dtype
