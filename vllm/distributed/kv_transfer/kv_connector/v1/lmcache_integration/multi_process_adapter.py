@@ -377,6 +377,10 @@ class LMCacheMPWorkerAdapter:
         # have corresponding store requests submitted to LMCache before
         self.previously_finished: set[str] = set()
 
+        # Track failed operations for debugging and potential retry
+        self.failed_stores: dict[str, str] = {}
+        self.failed_retrieves: dict[str, str] = {}
+
         self.model_name = model_name
         self.parallel_strategy = parallel_strategy
 
@@ -629,12 +633,14 @@ class LMCacheMPWorkerAdapter:
             finished_stores.update(other_reqs)
 
             if not s_result:
-                # TODO: add error handling here
-                logger.error(
-                    "Something went wrong when processing the "
-                    "store request for request_id=%s",
-                    request_id,
+                error_msg = (
+                    f"LMCache store operation failed for request_id={request_id}"
                 )
+                logger.error(error_msg)
+                self.failed_stores[request_id] = error_msg
+                # Don't mark failed operations as finished
+                finished_stores.discard(request_id)
+                finished_stores.difference_update(other_reqs)
 
         for request_id, (r_future, other_reqs) in self.retrieve_futures.items():
             if not r_future.query():
@@ -645,13 +651,15 @@ class LMCacheMPWorkerAdapter:
             finished_retrieves.update(other_reqs)
 
             if not all(r_result):
-                # TODO: add error handing here
-                logger.error(
-                    "Something went wrong when processing the "
-                    "retrieve request for request_id=%s, result=%s",
-                    request_id,
-                    r_result,
+                error_msg = (
+                    f"LMCache retrieve operation for request_id={request_id}, "
+                    f"result={r_result}"
                 )
+                logger.error(error_msg)
+                self.failed_retrieves[request_id] = error_msg
+                # Don't mark failed operations as finished
+                finished_retrieves.discard(request_id)
+                finished_retrieves.difference_update(other_reqs)
 
         # Remove the finished requests from the tracking dicts
         for request_id in finished_stores:
