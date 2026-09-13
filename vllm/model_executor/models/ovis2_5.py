@@ -4,14 +4,14 @@
 
 from collections.abc import Iterable, Mapping
 from functools import partial
-from typing import Annotated, Literal
+from typing import Annotated, Literal, TypedDict
 
 import torch
 import torch.nn as nn
 from transformers import BaseImageProcessor, BatchFeature, PretrainedConfig
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -40,7 +40,12 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.ovis2_5 import Ovis2_5Processor
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsMultiModal,
+    SupportsPP,
+    supports_pp,
+)
 
 IMAGE_TOKEN = "<image>"
 VIDEO_TOKEN = "<video>"
@@ -80,6 +85,11 @@ class Ovis2_5VideoPatchInputs(TensorSchema):
     patches_per_item: Annotated[list[int], TensorShape("bn")]
     grids: Annotated[torch.Tensor, TensorShape("bn", 3)]
     # This is used to restore the first two dimensions of `flat_data`.
+
+
+class Ovis2_5MultiModalInputs(TypedDict, total=False):
+    images: Ovis2_5ImagePatchInputs | None
+    videos: Ovis2_5VideoPatchInputs | None
 
 
 class VisualTokenizer(torch.nn.Module):
@@ -296,6 +306,7 @@ class Ovis2_5DummyInputsBuilder(BaseDummyInputsBuilder[Ovis2_5ProcessingInfo]):
 
         image_overrides = mm_options.get("image")
         video_overrides = mm_options.get("video")
+        assert video_overrides is None or isinstance(video_overrides, VideoDummyOptions)
 
         mm_data = {
             "image": self._get_dummy_images(
@@ -458,8 +469,10 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
 
         self.image_pad_token_id: int = IMAGE_PAD_TOKEN_ID
 
+        language_model = self.get_language_model()
+        assert supports_pp(language_model)
         self.make_empty_intermediate_tensors = (
-            self.get_language_model().make_empty_intermediate_tensors
+            language_model.make_empty_intermediate_tensors
         )
 
     def _parse_and_validate_image_input(
@@ -567,8 +580,10 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
             vision_embeddings.append(torch.cat(vision_embeddings_per_image, dim=0))
         return tuple(vision_embeddings)
 
-    def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
-        modalities = {}
+    def _parse_and_validate_multimodal_inputs(
+        self, **kwargs: object
+    ) -> Ovis2_5MultiModalInputs:
+        modalities: Ovis2_5MultiModalInputs = {}
 
         # Preserve the order of modalities if there are multiple of them
         # from the order of kwargs.
@@ -598,10 +613,12 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
         for modality in modalities:
             if modality == "images":
                 image_input = modalities["images"]
+                assert image_input is not None
                 image_embeddings = self._process_visual_input(image_input)
                 multimodal_embeddings += tuple(image_embeddings)
             if modality == "videos":
                 video_input = modalities["videos"]
+                assert video_input is not None
                 video_embeddings = self._process_visual_input(video_input)
                 multimodal_embeddings += tuple(video_embeddings)
 
