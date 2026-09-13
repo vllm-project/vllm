@@ -40,6 +40,8 @@ class Transition:
     next_state: ParserState
     events: tuple[EventType, ...] = field(default_factory=tuple)
     skip_in_token_id_mode: bool = False
+    provisional_tool_call: bool = False
+    commit_provisional_tool_call: bool = False
 
 
 @dataclass(frozen=True)
