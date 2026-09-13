@@ -1179,7 +1179,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                     str(key[0]) for key in warmup.kernel_keys
                                 )
         finally:
-            pass
+            # Dummy proposals increment Uno's noise step. Startup must not
+            # make the first served proposal begin at a later step.
+            self.speculator._step = 0
         self.speculator.report_draft_warmup(
             executed_prepare_shapes,
             executed_sampler_calls,

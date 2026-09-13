@@ -817,6 +817,7 @@ def test_draft_warmup_runs_every_shape_through_the_real_dummy_run(monkeypatch):
     reported: list[tuple[object, ...]] = []
     proposer = object.__new__(UnoSpeculator)
     proposer.k = 8
+    proposer._step = 9
     proposer.report_draft_warmup = lambda *args: reported.append(args)
     runner.speculator = proposer
     plan = UnoServedLaunches(
@@ -871,6 +872,7 @@ def test_draft_warmup_runs_every_shape_through_the_real_dummy_run(monkeypatch):
         # Model/draft code is free to consume a global generator during
         # warmup. The production wrapper must put it back before serving.
         torch.rand(3)
+        proposer._step += 1
         ran.append(num_tokens)
         return None, torch.empty(num_tokens, 3)
 
@@ -910,6 +912,7 @@ def test_draft_warmup_runs_every_shape_through_the_real_dummy_run(monkeypatch):
             )
         ]
         assert torch.equal(torch.random.get_rng_state(), served_rng_state)
+        assert proposer._step == 0
     finally:
         torch.random.set_rng_state(prior_state)
 
@@ -943,6 +946,7 @@ def test_draft_warmup_reports_execution_not_a_nonlast_rank_plan(monkeypatch):
 
     proposer = object.__new__(UnoSpeculator)
     proposer.k = 8
+    proposer._step = 5
     reports: list[tuple[object, ...]] = []
     proposer.report_draft_warmup = lambda *args: reports.append(args)
     plan = UnoServedLaunches(
@@ -975,6 +979,7 @@ def test_draft_warmup_reports_execution_not_a_nonlast_rank_plan(monkeypatch):
     runner._warm_up_draft_kernels()
 
     assert reports == [(2, 0, 0, {}, {})]
+    assert proposer._step == 0
     runner._warm_up_uno_sampler.assert_not_called()
 
 
@@ -1297,6 +1302,7 @@ def test_uno_startup_jit_self_check_reports_compile_without_forcing_warn_abort(
         device=torch.device("cpu"),
         sampler=_self_check_sampler(),
     )
+    runner.speculator._step = 0
     worker_execute_model = Mock()
     worker_sample_tokens = Mock()
 
@@ -1313,6 +1319,7 @@ def test_uno_startup_jit_self_check_reports_compile_without_forcing_warn_abort(
         assert _args[:2] == (runner, worker_execute_model)
         assert _args[3] == 2048
         assert _kwargs["req_id_prefix"].startswith("_uno_jit_self_check_")
+        runner.speculator._step += 1
         _run_self_check_sampler_branch(runner, _kwargs["sampling_params"])
         _args[2](None)
         jit_monitor._handle_jit_event(
@@ -1337,6 +1344,7 @@ def test_uno_startup_jit_self_check_reports_compile_without_forcing_warn_abort(
     )
 
     assert runner.adaptive_verification == "saved-adaptive-state"
+    assert runner.speculator._step == 0
     assert not result.passed
     assert result.monitor_armed
     assert result.sampler_calls == {name: 1 for name in (

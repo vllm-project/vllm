@@ -396,6 +396,7 @@ def run_uno_served_jit_self_check(
     if not isinstance(speculator, UnoSpeculator):
         return UnoJitSelfCheck(False, monitor_armed, {}, {}, {}, {}, ())
     if not monitor_armed:
+        speculator._step = 0
         raise RuntimeError("Uno startup JIT self-check requires an armed JIT monitor")
 
     # Match normal warmup's fixed verification shape. The self-check is about
@@ -487,6 +488,7 @@ def run_uno_served_jit_self_check(
                         )
     finally:
         model_runner.adaptive_verification = adaptive_verification
+        speculator._step = 0
 
     for compilation in compilations:
         logger.warning(
