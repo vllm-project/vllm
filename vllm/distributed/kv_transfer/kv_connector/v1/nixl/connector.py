@@ -248,6 +248,7 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         if (
             self.kv_transfer_config.kv_role == "kv_producer"
             and self.connector_worker.pcp_rank > 0
+            and not self.connector_worker.pcp_dcp_sharded
         ):
             results.finished_sending.clear()
         return results
