@@ -27,6 +27,7 @@ _CHUNK_DELTA_H_NUM_STAGES = [2, 3] if torch.version.hip else [2, 3, 4]
         "USE_GK": lambda args: args["gk"] is not None,
         "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
         "STORE_FINAL_STATE": lambda args: args["ht"] is not None,
+        "STORE_CHECKPOINT": lambda args: args["checkpoint_state"] is not None,
         "SAVE_NEW_VALUE": lambda args: args["v_new"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
     }
@@ -52,6 +53,8 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     h,
     h0,
     ht,
+    checkpoint_state,
+    checkpoint_offsets,
     cu_seqlens,
     chunk_offsets,
     T,
@@ -65,6 +68,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     USE_GK: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
+    STORE_CHECKPOINT: tl.constexpr,
     SAVE_NEW_VALUE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_EXP2: tl.constexpr,
@@ -108,6 +112,9 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         h0 = h0 + i_nh * V * K
     if STORE_FINAL_STATE:
         ht = ht + i_nh * V * K
+    if STORE_CHECKPOINT:
+        checkpoint_state += i_nh * V * K
+        checkpoint_offset = tl.load(checkpoint_offsets + i_n)
 
     # load initial state
     if USE_INITIAL_STATE:
@@ -296,6 +303,48 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
             )
             b_k = tl.load(p_k, boundary_check=(0, 1))
             b_h4 += tl.trans(tl.dot(b_k, b_v))
+        if STORE_CHECKPOINT:
+            if (checkpoint_offset > 0) & (checkpoint_offset == min((i_t + 1) * BT, T)):
+                p_hc = tl.make_block_ptr(
+                    checkpoint_state, (V, K), (K, 1), (i_v * BV, 0), (BV, 64), (1, 0)
+                )
+                tl.store(p_hc, b_h1.to(p_hc.dtype.element_ty), boundary_check=(0, 1))
+                if K > 64:
+                    p_hc = tl.make_block_ptr(
+                        checkpoint_state,
+                        (V, K),
+                        (K, 1),
+                        (i_v * BV, 64),
+                        (BV, 64),
+                        (1, 0),
+                    )
+                    tl.store(
+                        p_hc, b_h2.to(p_hc.dtype.element_ty), boundary_check=(0, 1)
+                    )
+                if K > 128:
+                    p_hc = tl.make_block_ptr(
+                        checkpoint_state,
+                        (V, K),
+                        (K, 1),
+                        (i_v * BV, 128),
+                        (BV, 64),
+                        (1, 0),
+                    )
+                    tl.store(
+                        p_hc, b_h3.to(p_hc.dtype.element_ty), boundary_check=(0, 1)
+                    )
+                if K > 192:
+                    p_hc = tl.make_block_ptr(
+                        checkpoint_state,
+                        (V, K),
+                        (K, 1),
+                        (i_v * BV, 192),
+                        (BV, 64),
+                        (1, 0),
+                    )
+                    tl.store(
+                        p_hc, b_h4.to(p_hc.dtype.element_ty), boundary_check=(0, 1)
+                    )
     # epilogue
     if STORE_FINAL_STATE:
         p_ht = tl.make_block_ptr(ht, (V, K), (K, 1), (i_v * BV, 0), (BV, 64), (1, 0))
@@ -331,6 +380,8 @@ def chunk_gated_delta_rule_fwd_h(
     chunk_indices: torch.Tensor | None = None,
     chunk_offsets: torch.Tensor | None = None,
     use_exp2: bool = False,
+    checkpoint_state: torch.Tensor | None = None,
+    checkpoint_offsets: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # This kernel is slightly different from fla to support Q/K with different head numbers.
     # In fla, Q/K always have the same head number, so Hg is always equal to H.
@@ -348,6 +399,13 @@ def chunk_gated_delta_rule_fwd_h(
         if chunk_offsets is None:
             chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT)
     assert K <= 256, "current kernel does not support head dimension larger than 256."
+    assert (checkpoint_state is None) == (checkpoint_offsets is None)
+    if checkpoint_state is not None:
+        assert checkpoint_offsets is not None
+        assert checkpoint_state.shape == (N, H, V, K)
+        assert checkpoint_state.is_contiguous()
+        assert checkpoint_offsets.shape == (N,)
+        assert checkpoint_offsets.is_contiguous()
 
     h = k.new_empty(B, NT, H, V, K)
     final_state = (
@@ -369,6 +427,8 @@ def chunk_gated_delta_rule_fwd_h(
         h=h,
         h0=initial_state,
         ht=final_state,
+        checkpoint_state=checkpoint_state,
+        checkpoint_offsets=checkpoint_offsets,
         cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
         T=T,
