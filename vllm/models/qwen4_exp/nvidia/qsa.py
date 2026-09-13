@@ -121,6 +121,7 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         output: torch.Tensor,
         token_to_req: torch.Tensor,
         use_prefill_config: bool,
+        output_gate: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -157,6 +158,7 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             token_to_req,
             use_prefill_config,
             output[:num_tokens],
+            output_gate=None if output_gate is None else output_gate[:num_tokens],
         )
         return output
 
@@ -353,6 +355,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         key: torch.Tensor,
         value: torch.Tensor,
         output: torch.Tensor,
+        output_gate: torch.Tensor | None,
     ) -> None:
         metadata = get_forward_context().attn_metadata
         if isinstance(metadata, list):
@@ -396,6 +399,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             output,
             token_to_req=side_metadata.token_to_req,
             use_prefill_config=main_metadata.max_query_len > self._max_decode_query_len,
+            output_gate=output_gate,
         )
 
     def forward(
@@ -419,10 +423,9 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             key,
             value,
             attn_output,
+            gate,
         )
         flat_output = attn_output.view(num_tokens, -1)
-        if gate is not None:
-            flat_output = flat_output * torch.sigmoid(gate)
         output, _ = self.o_proj(flat_output)
         return output
 
