@@ -115,6 +115,12 @@ def _dry_penalties(
 
 
 _J_BUDGET = 2048
+# The match-length accumulators are int16 (the cumprod/sum below, and l_max),
+# so a run length must stay representable: at 32768 the sum wraps negative and
+# at 65535 it aliases l_max's -1 sentinel exactly. Both are far outside any
+# useful budget, but the exactness argument lives at the use sites, so pin it
+# here where the number is set.
+assert _J_BUDGET < 2**15, "_J_BUDGET must fit int16 match-length accumulators"
 
 # Byte budget for the per-chunk transients of the match scan. The gather
 # W32[:, idx1] materializes [R, chunk, J] int32 (4 B/elem) before the

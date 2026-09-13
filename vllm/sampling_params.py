@@ -645,9 +645,11 @@ class SamplingParams(
                 value=self.dry_multiplier,
             )
         if self.dry_multiplier and 0.0 <= self.dry_base < 1.0:
-            # llama.cpp's own gate, so this is not an error - but a request that sets a
-            # multiplier and then a sub-1.0 base gets no penalty at all, and the
-            # likeliest cause is dry_base=0.8 typed where dry_multiplier=0.8 was meant.
+            # libllama's own gate (llama-sampler.cpp), so this is not an error.
+            # llama-server does NOT reach that gate: it coerces any base below 1.0
+            # back to its default (server-schema.cpp), so a config that silently
+            # works there produces no penalty here. That is the reason to say
+            # something rather than nothing.
             logger.warning(
                 "dry_base=%s is below 1.0, which disables DRY entirely "
                 "(llama.cpp semantics), even though dry_multiplier=%s was "
@@ -1205,6 +1207,13 @@ class SamplingParams(
         # finishes a prefill, for one - so a request left to run would get DRY applied
         # on some steps and not others, flickering with the schedule.
         # Silently-intermittent penalties are worse than a refusal.
+        # Gated on the multiplier alone, deliberately, rather than on the full
+        # use_dry() predicate (which also wants dry_base >= 1.0 and
+        # dry_penalty_last_n != 0). A request that asked for DRY and then
+        # disabled it by some other field is still refused, matching the
+        # V2-runner gate in input_processor.py: telling the caller their request
+        # is unsupported beats accepting it because a second field happened to
+        # neutralise the first.
         if self.dry_multiplier:
             raise VLLMValidationError(
                 "dry_multiplier is not yet supported with speculative decoding.",

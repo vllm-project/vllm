@@ -523,8 +523,6 @@ def test_peak_memory_bounded():
     # so peak transient memory stays near _CHUNK_BYTE_BUDGET even at
     # large batch x window; an element-denominated budget with an int64
     # gather allocated ~8x more and OOMed 8 GB GPUs.
-    from vllm.v1.sample.dry_core import _CHUNK_BYTE_BUDGET
-
     device = torch.device("cuda")
     rng = random.Random(3)
     n_reqs, window = 32, 2048
@@ -568,15 +566,16 @@ def test_peak_memory_bounded():
     assert charged > 0, (
         "no token was penalized, so this test did not reach the penalty path"
     )
-    # A real ceiling, not a formality. The old bound was 2 * _CHUNK_BYTE_BUDGET
-    # (512 MiB) against a measured peak of 100-165 MiB, which would have let a
-    # 3x regression pass unnoticed - and a 3x regression is what the dense
-    # [R, vocab] penalty formulation this test guards against looked like.
-    # 320 MiB keeps headroom for allocator slack and for the l_max floor at
-    # larger vocabularies while still failing on a return to dense.
-    limit = 320 * 1024 * 1024
-    assert limit < 2 * _CHUNK_BYTE_BUDGET, "bound must beat the chunk budget"
-    assert peak < limit, f"peak {peak / 2**20:.0f} MiB over {limit / 2**20:.0f} MiB"
+    # A ceiling chosen to DISCRIMINATE, which two earlier versions did not. The
+    # original was 2 * _CHUNK_BYTE_BUDGET (512 MiB); the second was 320 MiB,
+    # picked against the old dense peak of 165 MiB and therefore still passing
+    # the very regression it was tightened to catch. Measured on this
+    # configuration: 76.2 MiB with the sparse penalty path (bit-stable across
+    # runs), 165.3 MiB with the dense [R, vocab] formulation it replaced. 128
+    # MiB sits above the first with 1.7x headroom and below the second, so a
+    # return to dense fails here.
+    limit = 128 * 1024 * 1024
+    assert peak < limit, f"peak {peak / 2**20:.1f} MiB over {limit / 2**20:.0f} MiB"
 
 
 def _validate_with_runner(params, *, use_v2_model_runner):
@@ -720,9 +719,9 @@ def test_dry_int_params_reject_values_that_would_kill_the_worker(field):
     before this bound existed, a single request could end the server. The cap
     is llama-server's INT32_MAX, which is also far past any useful context.
     """
-    with pytest.raises(VLLMValidationError):
+    with pytest.raises(VLLMValidationError, match=field):
         SamplingParams(dry_multiplier=0.8, **{field: 2**63})
-    with pytest.raises(VLLMValidationError):
+    with pytest.raises(VLLMValidationError, match=field):
         SamplingParams(dry_multiplier=0.8, **{field: 2**31})
     # The boundary itself is legal, and so are the ordinary values.
     SamplingParams(dry_multiplier=0.8, **{field: 2**31 - 1})
@@ -739,7 +738,7 @@ def test_dry_rejected_under_speculative_decoding():
     honest behaviour and matches how min_p and logit_bias are handled.
     """
     spec = SimpleNamespace()  # only `is None` is tested by the validator
-    with pytest.raises(VLLMValidationError):
+    with pytest.raises(VLLMValidationError, match="speculative"):
         SamplingParams(dry_multiplier=0.8)._validate_spec_decode(spec)
     # Without a speculative config, and with DRY off, nothing is raised.
     SamplingParams(dry_multiplier=0.8)._validate_spec_decode(None)

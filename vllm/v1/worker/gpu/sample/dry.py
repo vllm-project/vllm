@@ -7,8 +7,12 @@ computation lives in ``vllm.v1.sample.dry_core``; windows are gathered
 directly from the GPU-resident ``req_states.all_token_ids``, so no
 per-step host-to-device copy of token history is needed.
 
-Speculative decoding is not supported yet: with expanded draft logits
-DRY is skipped with a one-time warning.
+Speculative decoding is not supported. Requests enabling DRY are refused
+up front by ``SamplingParams._validate_spec_decode``; the expanded-logits
+branch below is a defensive backstop and should be unreachable on normal
+paths. It cannot be the primary gate, because it keys on the logits being
+draft-expanded, which is false on any step where no request happens to
+carry draft tokens - so relying on it applied DRY intermittently.
 """
 
 import numpy as np
