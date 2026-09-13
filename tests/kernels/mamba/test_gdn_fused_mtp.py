@@ -10,7 +10,6 @@ from unittest.mock import patch
 
 import pytest
 import torch
-
 from vllm.platforms import current_platform
 
 if not (current_platform.is_cuda() and current_platform.has_device_capability(80)):
@@ -19,20 +18,7 @@ if not (current_platform.is_cuda() and current_platform.has_device_capability(80
         allow_module_level=True,
     )
 
-from tests.v1.attention.utils import (  # noqa: E402
-    BatchSpec,
-    create_common_attn_metadata,
-    create_vllm_config,
-)
 from vllm.config import SpeculativeConfig, set_current_vllm_config  # noqa: E402
-from vllm.model_executor.layers.mamba.gdn import qwen_gdn_linear_attn  # noqa: E402
-from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (  # noqa: E402
-    ChunkGatedDeltaRule,
-    QwenGatedDeltaNetAttention,
-)
-from vllm.model_executor.layers.mamba.mamba_utils import (  # noqa: E402
-    MambaStateShapeCalculator,
-)
 from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (  # noqa: E402
     rmsnorm_fn,
 )
@@ -42,6 +28,20 @@ from vllm.v1.attention.backends.gdn_attn import (  # noqa: E402
     GDNAttentionMetadataBuilder,
 )
 from vllm.v1.kv_cache_interface import MambaSpec  # noqa: E402
+
+from tests.v1.attention.utils import (  # noqa: E402
+    BatchSpec,
+    create_common_attn_metadata,
+    create_vllm_config,
+)
+from vllm.model_executor.layers.mamba.gdn import qwen_gdn_linear_attn  # noqa: E402
+from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (  # noqa: E402
+    ChunkGatedDeltaRule,
+    QwenGatedDeltaNetAttention,
+)
+from vllm.model_executor.layers.mamba.mamba_utils import (  # noqa: E402
+    MambaStateShapeCalculator,
+)
 
 NUM_SPEC = 3
 SPEC_TOKENS = NUM_SPEC + 1
@@ -123,12 +123,15 @@ def _build_layer(
     )
     with set_current_vllm_config(vllm_config):
         layer.chunk_gated_delta_rule = ChunkGatedDeltaRule()
+    layer._fused_decode_ones = torch.ones(8, dtype=torch.int32, device="cuda")
     for name in (
         "rearrange_mixed_qkv",
         "_forward_core",
         "_forward_core_decode_spec_post_conv_fused_norm",
         "_forward_core_decode_spec_fused_norm",
         "_can_use_fused_gdn_mtp_decode",
+        "_can_use_fused_gdn_nonspec_decode",
+        "_forward_core_decode_non_spec_fused_norm",
         "_rms_norm_gated_cuda",
         "_forward_core_fused_norm",
         "_forward_core_fused_norm_packed",
@@ -248,7 +251,9 @@ def test_fused_forward_uses_packed_entrypoint() -> None:
             id="mixed-mtp-falls-back",
         ),
         pytest.param([96], [64], [-1], 0, id="pure-prefill"),
-        pytest.param([128], [1], [-1], 0, id="pure-decode"),
+        # Non-spec single-token decode routes through the fused kernel with
+        # draft width 1 and must match the Triton reference path.
+        pytest.param([128], [1], [-1], 1, id="pure-decode"),
     ],
 )
 @pytest.mark.parametrize("output_gate_activation", ["silu", "sigmoid"])
@@ -260,7 +265,7 @@ def test_fused_model_path_matches_reference(
     expected_fused_calls: int,
     output_gate_activation: str,
 ) -> None:
-    """Fused MTP and its mixed/prefill/decode fallbacks match the reference."""
+    """Fused MTP/decode paths and their fallbacks match the reference."""
     torch.manual_seed(1)
     device = torch.device("cuda")
     vllm_config = _make_vllm_config()
