@@ -18,9 +18,7 @@ from vllm.models.deepseek_v4.nvidia.model import (
 )
 from vllm.models.deepseek_v4.nvidia.mtp import DeepSeekV4MTP
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
-from vllm.models.deepseek_v4_1.common.mm_preprocess import (
-    IMAGE_SENTINEL_BASE_ID,
-)
+from vllm.models.deepseek_v4_1.common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 from vllm.models.deepseek_v4_1.nvidia.model import DeepseekV4MoE as DeepseekV41MoE
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
@@ -77,7 +75,7 @@ def test_deepseek_v41_moe_routes_without_hash_table(
         moe = DeepseekV41MoE(v41_moe_config, prefix=f"model.layers.{layer_id}.ffn")
         hidden_states = torch.randn(4, config.hidden_size)
         input_ids = (
-            torch.tensor([42, IMAGE_SENTINEL_BASE_ID, IMAGE_SENTINEL_BASE_ID, 42])
+            torch.tensor([42, IMAGE_SENTINEL_BASE_ID, IMAGE_SENTINEL_BASE_ID, 129257])
             if vision
             else None
         )
