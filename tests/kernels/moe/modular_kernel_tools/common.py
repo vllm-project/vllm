@@ -33,6 +33,12 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
+    TrtLlmFp8ExpertsModular,
+)
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNoDPEPModular,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
     kFp8DynamicTensorSym,
@@ -308,6 +314,15 @@ class Config:
                 f"quant scheme (per_out_ch={self.is_per_out_ch_quant}, "
                 f"per_act_token={self.is_per_act_token_quant}, "
                 f"block={self.quant_block_shape})"
+            )
+
+        if (
+            self.fused_experts_type is TrtLlmFp8ExpertsModular
+            and self.is_per_out_ch_quant
+            and self.prepare_finalize_type is not MoEPrepareAndFinalizeNoDPEPModular
+        ):
+            return False, (
+                "TRTLLM FP8 PTPC requires prepare/finalize with per-token FP8 scales."
             )
 
         # Check block quantization support
@@ -712,6 +727,7 @@ def _maybe_convert_weights_for_experts(
         w2_scale=rank_weights.w2_scale,
         w13_input_scale=None,
         w2_input_scale=None,
+        per_out_ch_quant=config.is_per_out_ch_quant,
     )
 
     return WeightTensors(

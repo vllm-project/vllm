@@ -33,7 +33,9 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
+    kFp8DynamicTokenSym,
     kFp8Static128BlockSym,
+    kFp8StaticChannelSym,
 )
 from vllm.platforms import current_platform
 
@@ -121,6 +123,12 @@ def _get_priority_backends(
             _move_to_front(_AVAILABLE_BACKENDS, Fp8MoeBackend.FLASHINFER_CUTLASS)
         else:
             _move_to_front(_AVAILABLE_BACKENDS, Fp8MoeBackend.TRITON)
+
+    # The TRT-LLM FP8 PTPC kernel quantizes the FC1 output per-tensor with a
+    # unit scale rather than per-token, so only use it when requested
+    # explicitly via moe_backend.
+    if (weight_key, activation_key) == (kFp8StaticChannelSym, kFp8DynamicTokenSym):
+        _AVAILABLE_BACKENDS.remove(Fp8MoeBackend.FLASHINFER_TRTLLM)
 
     if current_platform.is_xpu():
         # XPU platform supports TritonExperts and XPUExpertsFp8,
@@ -497,6 +505,7 @@ def convert_to_fp8_moe_kernel_format(
     w2_scale: torch.Tensor,
     w13_input_scale: torch.Tensor | None,
     w2_input_scale: torch.Tensor | None,
+    per_out_ch_quant: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     block_quant = hasattr(layer, "weight_block_size")
     if fp8_backend in [Fp8MoeBackend.DEEPGEMM, Fp8MoeBackend.BATCHED_DEEPGEMM]:
@@ -564,6 +573,7 @@ def convert_to_fp8_moe_kernel_format(
             w13_input_scale=w13_input_scale,
             w2_scale=w2_scale,
             w2_input_scale=w2_input_scale,
+            per_out_ch_quant=per_out_ch_quant,
             is_trtllm=(fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM),
         )
     elif fp8_backend == Fp8MoeBackend.XPU:
