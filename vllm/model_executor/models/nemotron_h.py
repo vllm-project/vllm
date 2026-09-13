@@ -44,6 +44,7 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
@@ -198,6 +199,17 @@ class NemotronHMoE(nn.Module):
                 quant_config=quant_config,
                 disable_tp=self.is_sequence_parallel,
                 prefix=f"{prefix}.fc2_latent_proj",
+            )
+            # A bias-free, unquantized linear commutes with the TP sum
+            # (sum_r W x_r == W sum_r x_r), so one reduce after the transform
+            # suffices. Test the layer, not the model-wide `quant_config`: ModelOpt
+            # excludes the latent projections, so quantized checkpoints still get
+            # an UnquantizedLinearMethod here.
+            self.fc2_latent_proj.reduce_commutative = (
+                not config.mlp_bias
+                and isinstance(
+                    self.fc2_latent_proj.quant_method, UnquantizedLinearMethod
+                )
             )
         else:
             self.fc1_latent_proj = None
