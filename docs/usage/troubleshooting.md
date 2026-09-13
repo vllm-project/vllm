@@ -369,6 +369,29 @@ export TRITON_PTXAS_PATH="${CUDA_HOME}/bin/ptxas"
 export PATH="${CUDA_HOME}/bin:$PATH"
 ```
 
+## Running under WSL2
+
+Two vLLM-specific behaviors under WSL2 (Windows Subsystem for Linux) are easy to
+miss:
+
+- **Pinned host memory is off by default, behind two separate gates.** If the
+  startup log says `Using 'pin_memory=False' as WSL is detected`, performance may
+  suffer. On CUDA, pinned memory is only usable on WSL2 kernels `>= 4.19.121`; on
+  older kernels it is unavailable and `VLLM_WSL2_ENABLE_PIN_MEMORY` has no effect,
+  so run `wsl --update` first. On a new enough kernel it is supported but still
+  disabled by default, so opt in explicitly with
+  `export VLLM_WSL2_ENABLE_PIN_MEMORY=1`.
+- **Worker processes can linger after shutdown.** After Ctrl+C the engine may
+  report a clean shutdown while worker processes keep holding the GPU and port,
+  so a restart fails with the address already in use. Clear them with
+  `pkill -f -9 vllm` (tracked in [#39093](https://github.com/vllm-project/vllm/issues/39093)).
+
+General WSL2 notes that also affect vLLM: a server bound to `0.0.0.0` is normally
+reachable from Windows at `localhost` only in mirrored networking mode (otherwise
+use the WSL VM address from `ip addr`); guest RAM and build parallelism are capped
+by `.wslconfig` (`memory=`) and `MAX_JOBS` respectively (see the installation
+guide for the build-memory note).
+
 ## Known Issues
 
 - In `v0.5.2`, `v0.5.3`, and `v0.5.3.post1`, there is a bug caused by [zmq](https://github.com/zeromq/pyzmq/issues/2000) , which can occasionally cause vLLM to hang depending on the machine configuration. The solution is to upgrade to the latest version of `vllm` to include the [fix](https://github.com/vllm-project/vllm/pull/6759).
