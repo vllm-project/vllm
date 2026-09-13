@@ -1,9 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
-from vllm.v1.engine import EngineCoreOutputs, FinishReason
+from vllm.v1.engine import (
+    EngineCoreEvent,
+    EngineCoreEventType,
+    EngineCoreOutputs,
+    FinishReason,
+)
 from vllm.v1.metrics.stats import (
     IterationStats,
+    LoRARequestStates,
     PrefillStats,
     PromptTokenStats,
     RequestStateStats,
@@ -288,3 +294,68 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     assert stats.external_kv_transfer == 999
     assert stats.cached_tokens == 999
     assert stats.total == 1000
+
+
+def _apply_events(
+    stats: IterationStats, req_stats: RequestStateStats, *event_pairs: tuple
+):
+    stats.update_from_events(
+        "request-1",
+        [EngineCoreEvent(type=t, timestamp=ts) for t, ts in event_pairs],
+        is_prefilling=True,
+        req_stats=req_stats,
+        lora_states=LoRARequestStates(),
+        lora_name=None,
+    )
+
+
+def _finish_request(stats: IterationStats, req_stats: RequestStateStats):
+    req_stats.first_token_ts = 3.0
+    req_stats.last_token_ts = 60.0
+    req_stats.num_generation_tokens = 10
+    stats.iteration_timestamp = 60.0
+    stats.update_from_finished_request(
+        FinishReason.STOP, "request-1", 100, 128, req_stats
+    )
+
+
+def test_queued_time_anchors_at_first_queued_event():
+    """Streaming-input sessions re-emit QUEUED for each prompt chunk after
+    the first SCHEDULED event; queue time must stay anchored at the first
+    QUEUED event instead of going negative."""
+    stats = IterationStats()
+    req_stats = RequestStateStats(arrival_time=0.0)
+
+    _apply_events(
+        stats,
+        req_stats,
+        (EngineCoreEventType.QUEUED, 1.0),
+        (EngineCoreEventType.SCHEDULED, 2.0),
+    )
+    # Next streaming chunk re-queues the request long after it first ran.
+    _apply_events(stats, req_stats, (EngineCoreEventType.QUEUED, 50.0))
+
+    _finish_request(stats, req_stats)
+
+    assert stats.finished_requests[-1].queued_time == 1.0
+
+
+def test_queued_time_survives_preemption_cycle():
+    """Positive control: preemption (PREEMPTED -> SCHEDULED again) keeps the
+    first QUEUED/SCHEDULED pair as the queue-interval anchors."""
+    stats = IterationStats()
+    req_stats = RequestStateStats(arrival_time=0.0)
+
+    _apply_events(
+        stats,
+        req_stats,
+        (EngineCoreEventType.QUEUED, 1.0),
+        (EngineCoreEventType.SCHEDULED, 2.0),
+        (EngineCoreEventType.PREEMPTED, 5.0),
+        (EngineCoreEventType.SCHEDULED, 7.0),
+    )
+
+    _finish_request(stats, req_stats)
+
+    assert stats.finished_requests[-1].queued_time == 1.0
+    assert req_stats.num_preemptions == 1
