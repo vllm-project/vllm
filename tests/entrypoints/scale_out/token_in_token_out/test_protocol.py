@@ -10,6 +10,7 @@ fail loudly if the validator semantics ever drift.
 import json
 
 import pytest
+from pydantic import ValidationError
 
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateRequest,
@@ -110,3 +111,14 @@ def test_generate_request_rejects_placeholder_outside_prompt():
                 kwargs_data={"image": ["encoded"]},
             ),
         )
+
+
+def test_single_token_prompt_accepts_default_routed_experts_start():
+    request = GenerateRequest.model_validate({"token_ids": [1], "sampling_params": {}})
+
+    assert request.sampling_params.routed_experts_prompt_start == 0
+
+
+def test_empty_token_ids_remain_invalid():
+    with pytest.raises(ValidationError, match="at least 1 item"):
+        GenerateRequest.model_validate({"token_ids": [], "sampling_params": {}})
