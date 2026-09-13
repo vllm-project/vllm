@@ -221,3 +221,13 @@ def test_full_cudagraph_spec_metadata_uses_request_count():
     assert meta.spec_query_start_loc.shape == (batch.batch_size + 1,)
     assert meta.num_accepted_tokens is not None
     assert meta.num_accepted_tokens.shape == (batch.batch_size,)
+
+
+def test_full_cudagraph_spec_metadata_uses_active_runtime_k_width():
+    """A runtime K3 step on a max-K7 server exposes four state columns."""
+    builder = _create_gdn_builder(num_speculative_tokens=7, full_cuda_graph=True)
+    batch = BatchSpec(seq_lens=[80] * 8, query_lens=[4] * 8)
+    meta = _build(builder, batch, num_decode_draft_tokens=[3] * 8)
+
+    assert meta.spec_state_indices_tensor is not None
+    assert meta.spec_state_indices_tensor.shape == (batch.batch_size, 4)
