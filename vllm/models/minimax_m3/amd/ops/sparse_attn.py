@@ -117,6 +117,11 @@ def _gqa_sparse_fwd_kernel(
     SUB_K: tl.constexpr,  # CDNA only: KV sub-tile width (see _IS_MI3XX)
 ):
     sm_scale_log2e = sm_scale * 1.4426950409
+    # Scalar KV scales are loop invariant. Fold them into the QK scale and
+    # normalized output instead of scaling every K/V element.
+    if KV_SCALE_MODE == 1:
+        sm_scale_log2e *= tl.load(k_scale_ptr)
+        value_scale = tl.load(v_scale_ptr)
     pid_q = tl.program_id(0)
     pid_kh = tl.program_id(1)
     pid_b = tl.program_id(2)
@@ -176,9 +181,7 @@ def _gqa_sparse_fwd_kernel(
                 )
                 if USE_FP8:
                     k_sub = k_sub.to(q.dtype)
-                    if KV_SCALE_MODE == 1:
-                        k_sub = (k_sub * tl.load(k_scale_ptr)).to(q.dtype)
-                    elif KV_SCALE_MODE == 2:
+                    if KV_SCALE_MODE == 2:
                         k_scale = tl.load(
                             k_scale_ptr
                             + pid_kh * stride_ks_h
@@ -212,9 +215,7 @@ def _gqa_sparse_fwd_kernel(
                 )
                 if USE_FP8:
                     v_sub = v_sub.to(q.dtype)
-                    if KV_SCALE_MODE == 1:
-                        v_sub = (v_sub * tl.load(v_scale_ptr)).to(q.dtype)
-                    elif KV_SCALE_MODE == 2:
+                    if KV_SCALE_MODE == 2:
                         v_scale = tl.load(
                             v_scale_ptr
                             + pid_kh * stride_vs_h
@@ -227,6 +228,8 @@ def _gqa_sparse_fwd_kernel(
                 m_i = m_ij
                 lse_i = m_ij + tl.log2(tl.exp2(lse_i - m_ij) + l_ij)
         acc_o = acc_o * tl.exp2(m_i - lse_i)[:, None]
+        if KV_SCALE_MODE == 1:
+            acc_o *= value_scale
         acc_o = tl.reshape(acc_o, BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D)
         o_ptrs = tl.make_block_ptr(
             base=o_ptr + q_start * stride_on + pid_h * stride_oh,
