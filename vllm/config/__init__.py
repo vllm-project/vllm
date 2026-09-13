@@ -54,7 +54,6 @@ from vllm.config.utils import (
 )
 from vllm.config.vllm import (
     VllmConfig,
-    get_cached_compilation_config,
     get_current_vllm_config,
     get_current_vllm_config_or_none,
     get_layers_from_vllm_config,
@@ -142,7 +141,6 @@ __all__ = [
     "update_config",
     # From vllm.config.vllm
     "VllmConfig",
-    "get_cached_compilation_config",
     "get_current_vllm_config",
     "get_current_vllm_config_or_none",
     "set_current_vllm_config",
