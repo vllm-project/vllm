@@ -811,6 +811,9 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         gather_lens = swa_metadata.prefill_gather_lens
         assert seq_lens is not None
         assert gather_lens is not None
+        # CPU copy, so sizing the gather grid from it does not sync.
+        seq_lens_cpu = swa_metadata.prefill_seq_lens_cpu
+        assert seq_lens_cpu is not None
 
         query_start_loc_cpu = swa_metadata.query_start_loc_cpu
         query_start_loc = swa_metadata.query_start_loc
@@ -857,6 +860,10 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                     block_size=attn_metadata.block_size // self.compress_ratio,
                     offset=0,
                     use_fnuz=False,
+                    max_gather_len=int(
+                        seq_lens_cpu[chunk_start:chunk_end].max()
+                    )
+                    // self.compress_ratio,
                 )
 
             swa_block_table = swa_metadata.block_table[num_decodes:]
