@@ -3,6 +3,7 @@
 
 import os
 import types
+from typing import cast
 from unittest.mock import patch
 
 import pytest
@@ -74,7 +75,9 @@ def test_runai_passes_revision_by_name():
         ),
         patch.object(rsl, "download_safetensors_index_file_from_hf") as mock_idx,
     ):
-        rsl.RunaiModelStreamerLoader._prepare_weights(fake_self, "org/model", "myrev")
+        rsl.RunaiModelStreamerLoader._prepare_weights(
+            cast(rsl.RunaiModelStreamerLoader, fake_self), "org/model", "myrev"
+        )
 
     mock_idx.assert_called_once()
     assert mock_idx.call_args.kwargs.get("revision") == "myrev"

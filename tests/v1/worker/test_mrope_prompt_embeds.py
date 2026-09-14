@@ -30,7 +30,8 @@ def _make_runner_and_req(prompt_token_ids, prompt_embeds):
     """Create a minimal GPUModelRunner instance and request state."""
     model = FakeMRoPEModel()
     instance = object.__new__(GPUModelRunner)
-    instance.get_model = lambda: model
+    # Stub the bound method on a hand-built runner to serve the fake MRoPE model.
+    instance.get_model = lambda: model  # type: ignore[method-assign]
 
     req_state = Mock(spec=CachedRequestState)
     req_state.prompt_token_ids = prompt_token_ids

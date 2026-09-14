@@ -8,13 +8,14 @@ compose to a bit-exact round trip of the replicated computation.
 """
 
 from types import SimpleNamespace
+from typing import cast
 from unittest import mock
 
 import numpy as np
 import pytest
 import torch
 
-from vllm.v1.core.sched.output import GrammarOutput
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.sample import batch_shard
 from vllm.v1.worker.gpu.sample.batch_shard import (
@@ -313,7 +314,9 @@ def test_shard_grammar_output(tp_size: int):
     kept_total = 0
     for rank in range(tp_size):
         local_req_ids = [req_ids[i] for i in range(num_reqs) if owner[i] == rank]
-        local = _shard_grammar_output(grammar_output, input_batch, local_req_ids)
+        local = _shard_grammar_output(
+            grammar_output, cast(InputBatch, input_batch), local_req_ids
+        )
         expected_idx = [i for i in grammar_idx if owner[i] == rank]
         if not expected_idx:
             assert local is None
@@ -607,6 +610,8 @@ def test_finish_requests_frees_slots_in_sorted_order():
         finished_req_ids={"req-b", "req-c", "req-a"},
         preempted_req_ids={"req-e", "req-d"},
     )
-    GPUModelRunner.finish_requests(fake_runner, scheduler_output)
+    GPUModelRunner.finish_requests(
+        cast(GPUModelRunner, fake_runner), cast(SchedulerOutput, scheduler_output)
+    )
     assert removed == sorted(removed)
     assert set(removed) == {"req-a", "req-b", "req-c", "req-d", "req-e"}

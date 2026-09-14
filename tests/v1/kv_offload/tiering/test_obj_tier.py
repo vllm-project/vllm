@@ -12,6 +12,7 @@ import time
 import uuid
 from collections.abc import Callable
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -23,6 +24,7 @@ from vllm.v1.kv_offload.base import (
     LookupResult,
     Medium,
     OffloadingKVEventsConfig,
+    OffloadingSpec,
     OffloadKey,
     ReqContext,
     ScheduleEndContext,
@@ -245,7 +247,8 @@ def _make_tier(
         ),
     ):
         tier = ObjectStoreSecondaryTierManager(
-            offloading_spec=offloading_spec,
+            # A SimpleNamespace duck-types the attributes the tier reads.
+            offloading_spec=cast(OffloadingSpec, offloading_spec),
             primary_kv_view=primary_kv_view,
             tier_type="obj",
             store_config=_STORE_CONFIG,
@@ -272,7 +275,7 @@ def lookup_and_wait(
     keys: list[OffloadKey],
     ctx: ReqContext = _CTX,
     timeout: float = 1.0,
-) -> list[bool]:
+) -> list[LookupResult]:
     """Perform a full async lookup cycle and return resolved results."""
     for k in keys:
         tier.lookup(k, ctx)

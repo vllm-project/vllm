@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import MethodType, SimpleNamespace
-from typing import get_args
+from typing import Any, cast, get_args
 
 import numpy as np
 import pytest
@@ -10,6 +10,7 @@ import torch
 
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.platforms import current_platform
+from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     RejectionSampler,
     _iter_request_chunks,
@@ -49,7 +50,7 @@ def test_chunked_scores_match_full_batch(logprobs_mode: str):
         ).to(device),
     )
     rejection_sampler = object.__new__(RejectionSampler)
-    rejection_sampler.sampler = SimpleNamespace(logprobs_mode=logprobs_mode)
+    rejection_sampler.sampler = cast(Any, SimpleNamespace(logprobs_mode=logprobs_mode))
     rejection_sampler.num_speculative_steps = 3
     rejection_sampler.enable_adaptive_verification = False
 
@@ -69,12 +70,15 @@ def test_chunked_scores_match_full_batch(logprobs_mode: str):
         ) % logits.shape[1]
         return logits.float() + 1, sampled, num_sampled
 
-    rejection_sampler._verify = MethodType(fake_verify, rejection_sampler)
+    # Stub the bound method on a hand-built sampler to observe chunk boundaries.
+    rejection_sampler._verify = MethodType(  # type: ignore[method-assign]
+        fake_verify, rejection_sampler
+    )
     logits = torch.arange(170, dtype=torch.float32, device=device).view(10, 17)
 
     sampled, num_sampled, chunked_logprobs = rejection_sampler._verify_in_chunks(
         logits,
-        input_batch,
+        cast(InputBatch, input_batch),
         draft_logits=None,
         draft_sampled=torch.arange(10, device=device),
         pos=torch.arange(10, device=device),

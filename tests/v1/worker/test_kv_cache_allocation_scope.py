@@ -11,6 +11,9 @@ import torch
 import vllm.v1.hisparse.binding as hisparse_binding
 import vllm.v1.worker.gpu.attn_utils as attn_utils
 import vllm.v1.worker.gpu_model_runner as gpu_model_runner
+from vllm.config import VllmConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu_worker import Worker
 
 
@@ -78,12 +81,12 @@ def test_mrv2_kv_pool_only_wraps_backing_allocation(monkeypatch, hisparse) -> No
     )
     result = attn_utils.init_kv_cache(
         {},
-        SimpleNamespace(kv_cache_groups=[]),
+        cast(KVCacheConfig, SimpleNamespace(kv_cache_groups=[])),
         torch.device("cpu"),
         [],
-        config,
+        cast(VllmConfig, config),
         kv_cache_allocation_context=scope,
-        block_tables=SimpleNamespace(),
+        block_tables=cast(BlockTables, SimpleNamespace()),
     )
 
     assert len(hisparse_bindings) == int(hisparse)
@@ -114,8 +117,8 @@ def test_mrv1_kv_pool_only_wraps_backing_allocation(monkeypatch) -> None:
         kv_caches=[],
     )
     result = gpu_model_runner.GPUModelRunner.initialize_kv_cache_tensors(
-        runner,
-        SimpleNamespace(kv_cache_groups=[]),
+        cast(gpu_model_runner.GPUModelRunner, runner),
+        cast(KVCacheConfig, SimpleNamespace(kv_cache_groups=[])),
         [],
         kv_cache_allocation_context=scope,
     )

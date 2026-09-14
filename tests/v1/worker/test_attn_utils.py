@@ -8,15 +8,18 @@ never addressed by the logical view.
 """
 
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import torch
 
 import vllm.v1.hisparse.binding as attn_utils_module
 from tests.v1.attention.utils import dense_kv_cache_views
+from vllm.config import VllmConfig
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MultipleOf
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.binding import allocate_hisparse_kv_caches
+from vllm.v1.hisparse.runtime import HiSparseHostPool
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiSparseResidentSpec,
@@ -33,6 +36,7 @@ from vllm.v1.worker.gpu.attn_utils import (
     get_attn_cg_support,
     get_query_lens_mismatch_unsupported_backend,
 )
+from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.utils import (
     AttentionGroup,
     allocate_kv_cache,
@@ -80,8 +84,13 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
             get_attn_backend=lambda backend=backend: backend,
         )
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
-    config = SimpleNamespace(
-        attention_config=SimpleNamespace(hisparse_config=object() if enabled else None)
+    config = cast(
+        VllmConfig,
+        SimpleNamespace(
+            attention_config=SimpleNamespace(
+                hisparse_config=object() if enabled else None
+            )
+        ),
     )
     if expected is None:
         with pytest.raises(ValueError, match="supported by every sparse"):
@@ -122,19 +131,19 @@ def test_attention_checks_preserve_global_and_target_scoped_support():
         dtype=torch.bfloat16,
     )
     target_group = AttentionGroup(
-        _TargetBackend,
+        cast(type[AttentionBackend], _TargetBackend),
         ["target"],
         spec,
-        0,  # type: ignore[arg-type]
+        0,
     )
     target_group.metadata_builders = [
         _FakeMetadataBuilder(AttentionCGSupport.ALWAYS)  # type: ignore[list-item]
     ]
     draft_group = AttentionGroup(
-        _DraftBackend,
+        cast(type[AttentionBackend], _DraftBackend),
         ["draft"],
         spec,
-        0,  # type: ignore[arg-type]
+        0,
     )
     draft_group.metadata_builders = [
         _FakeMetadataBuilder(AttentionCGSupport.UNIFORM_BATCH)  # type: ignore[list-item]
@@ -197,8 +206,9 @@ def test_get_kv_sharing_fast_prefill_eligible_layers(monkeypatch: pytest.MonkeyP
             lambda *a, **k: {name: None for name in layer_names},
         )
         monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda *a: shared)
-        vllm_config = SimpleNamespace(
-            cache_config=SimpleNamespace(kv_sharing_fast_prefill=True)
+        vllm_config = cast(
+            VllmConfig,
+            SimpleNamespace(cache_config=SimpleNamespace(kv_sharing_fast_prefill=True)),
         )
         return attn_utils.get_kv_sharing_fast_prefill_eligible_layers(
             vllm_config, draft_layer_names
@@ -234,8 +244,9 @@ def test_get_kv_sharing_fast_prefill_eligible_layers(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(
         attn_utils, "get_shared_kv_cache_layers", lambda *a: {"t0": "t0"}
     )
-    vllm_config = SimpleNamespace(
-        cache_config=SimpleNamespace(kv_sharing_fast_prefill=False)
+    vllm_config = cast(
+        VllmConfig,
+        SimpleNamespace(cache_config=SimpleNamespace(kv_sharing_fast_prefill=False)),
     )
     assert attn_utils.get_kv_sharing_fast_prefill_eligible_layers(vllm_config) == set()
 
@@ -283,11 +294,14 @@ def test_profiling_cleanup_releases_tp_shared_region_once(monkeypatch):
 def test_init_hisparse_rolls_back_shared_region(monkeypatch, failure_phase):
     """A failure after mmap allocation must not leak the shared registration."""
     region = _FakeSharedHostRegion()
-    vllm_config = SimpleNamespace(
-        cache_config=SimpleNamespace(
-            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC
+    vllm_config = cast(
+        VllmConfig,
+        SimpleNamespace(
+            cache_config=SimpleNamespace(
+                get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC
+            ),
+            scheduler_config=SimpleNamespace(max_num_seqs=1, max_num_batched_tokens=1),
         ),
-        scheduler_config=SimpleNamespace(max_num_seqs=1, max_num_batched_tokens=1),
     )
 
     def allocate(*args):
@@ -311,12 +325,12 @@ def test_init_hisparse_rolls_back_shared_region(monkeypatch, failure_phase):
     )
     with pytest.raises(RuntimeError, match="initialization failed"):
         attn_utils_module.init_hisparse_kv_cache(
-            SimpleNamespace(),
+            cast(KVCacheConfig, SimpleNamespace()),
             torch.device("cpu"),
             [],
             vllm_config,
             {},
-            SimpleNamespace(),
+            cast(BlockTables, SimpleNamespace()),
         )
     assert region.cleanup_calls == 1
 
@@ -339,6 +353,7 @@ def test_reshape_padded_kv_cache_strides_by_padded_page():
     # Content dim packs K and V: 2 * head_size.
     assert kv_cache.shape == (num_blocks, 1, 16, 2 * spec.head_size)
     assert kv_cache.dtype == spec.dtype
+    assert spec.page_size_padded is not None
     assert kv_cache.stride(0) == spec.page_size_padded // elem_size
     assert kv_cache[1].storage_offset() == spec.page_size_padded // elem_size
     # Within one block the (unpadded) content stays compact.
@@ -580,7 +595,7 @@ def test_allocate_hisparse_kv_caches_host_pool_and_view_less_specs():
         torch.device("cpu"),
         KVCacheLayout.LBHNC,
         [2, 2, 2],
-        SimpleNamespace(allocate=host_allocator),
+        cast(HiSparseHostPool, SimpleNamespace(allocate=host_allocator)),
     )
     assert len(config.kv_cache_tensors) == 3
 

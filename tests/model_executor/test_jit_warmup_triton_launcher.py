@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import torch
@@ -14,8 +14,10 @@ from vllm.model_executor.warmup.jit_warmup import (
     kernel_launcher,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DispatchSpec,
     LaunchSpec,
     TritonJitKey,
+    TritonKernelDispatcher,
     TritonWarmupTensor,
     VllmTritonJitKernel,
     triton_kernel_dispatcher_with_warmup,
@@ -68,6 +70,19 @@ def _patch_key_deriver(
     )
 
 
+def _warmup_api(
+    dispatcher: TritonKernelDispatcher[...],
+) -> jit_warmup_triton_helper._DecoratedTritonJitKernel:
+    """Reveal the warmup surface that ``TritonKernelDispatcher`` omits.
+
+    The decorator is annotated with the minimal protocol production callers
+    need (``__call__`` and ``register_warmup``); the object it returns is a
+    ``_DecoratedTritonJitKernel``, whose compile-time warmup methods are what
+    these tests exercise.
+    """
+    return cast(jit_warmup_triton_helper._DecoratedTritonJitKernel, dispatcher)
+
+
 class _TestTritonKernel(VllmTritonJitKernel["_TestTritonKernel.CompileKey"]):
     kernel = _FakeTritonKernel()
 
@@ -75,7 +90,7 @@ class _TestTritonKernel(VllmTritonJitKernel["_TestTritonKernel.CompileKey"]):
     class CompileKey:
         value: int
 
-    def dispatch(self, *, value: int) -> CompileKey:
+    def dispatch(self, *, value: int) -> CompileKey:  # type: ignore[override]
         return self.CompileKey(value=value)
 
     def get_warmup_keys(self) -> list[CompileKey]:
@@ -158,7 +173,7 @@ def test_triton_kernel_decorator_returns_launcher(
         )
 
     @triton_kernel_dispatcher_with_warmup(kernel=kernel, warmup_inputs=warmup_inputs)
-    def launch(first: str, second: int = 2, config: int = 7) -> LaunchSpec:
+    def launch(first: str, second: int = 2, config: int = 7) -> DispatchSpec:
         return (2,), dict(aliased_ptr=first, CONST=config)
 
     def fake_keys(kernel: Any, kwargs: Any) -> set[TritonJitKey]:
@@ -166,11 +181,12 @@ def test_triton_kernel_decorator_returns_launcher(
 
     _patch_key_deriver(monkeypatch, fake_keys)
 
-    keys = launch.get_warmup_keys()
-    keys_with_config = launch.get_warmup_keys(vllm_config=object())
+    dispatcher = _warmup_api(launch)
+    keys = dispatcher.get_warmup_keys()
+    keys_with_config = dispatcher.get_warmup_keys(vllm_config=object())
     assert keys_with_config == keys
     assert [dict(key.inputs)["second"] for key in keys] == [1, 2]
-    launch.compile(keys[0])
+    dispatcher.compile(keys[0])
     assert kernel.warmup_calls == [
         {
             "grid": (1,),
@@ -202,9 +218,11 @@ def test_triton_kernel_decorator_returns_launcher(
             },
         )
     ]
-    assert launch.__name__ == "launch"
+    assert dispatcher.__name__ == "launch"
     with pytest.raises(TypeError, match="unexpected keyword"):
-        launch(first, 1, 7, stale_constexpr=True)
+        # Passing a stale constexpr is the point of the test, so mypy is
+        # right to reject the call; the launcher must reject it too.
+        launch(first, 1, 7, stale_constexpr=True)  # type: ignore[call-arg]
 
 
 def test_triton_kernel_decorator_without_triton(
@@ -218,7 +236,7 @@ def test_triton_kernel_decorator_without_triton(
         return dict(first="warmup", second=1)
 
     @triton_kernel_dispatcher_with_warmup(kernel=kernel, warmup_inputs=warmup_inputs)
-    def launch(first: str, second: int) -> LaunchSpec:
+    def launch(first: str, second: int) -> DispatchSpec:
         return (2,), dict(CONST=7)
 
     launch("runtime", 2)
@@ -241,7 +259,7 @@ def test_triton_kernel_decorator_exhausts_large_ranges_before_deduplication(
         return 7 if second <= 97 else 8
 
     @triton_kernel_dispatcher_with_warmup(kernel=kernel, warmup_inputs=warmup_inputs)
-    def dispatch(first: str, second: int) -> LaunchSpec:
+    def dispatch(first: str, second: int) -> DispatchSpec:
         dispatched.append(second)
         return (second,), dict(CONST=specialization(second))
 
@@ -250,7 +268,7 @@ def test_triton_kernel_decorator_exhausts_large_ranges_before_deduplication(
 
     _patch_key_deriver(monkeypatch, fake_keys)
 
-    keys = dispatch.get_warmup_keys()
+    keys = _warmup_api(dispatch).get_warmup_keys()
     assert dispatched == list(range(1, 8193))
     assert len(keys) == 2
     assert {specialization(dict(key.inputs)["second"]) for key in keys} == {7, 8}
@@ -265,7 +283,7 @@ def test_triton_kernel_decorator_propagates_dispatch_assertions(
         return dict(first="warmup", second=WarmupChoices(1, 2))
 
     @triton_kernel_dispatcher_with_warmup(kernel=kernel, warmup_inputs=warmup_inputs)
-    def dispatch(first: str, second: int) -> LaunchSpec:
+    def dispatch(first: str, second: int) -> DispatchSpec:
         assert second != 2, "broken dispatch"
         return (1,), dict(CONST=second)
 
@@ -275,7 +293,7 @@ def test_triton_kernel_decorator_propagates_dispatch_assertions(
     )
 
     with pytest.raises(AssertionError, match="broken dispatch"):
-        dispatch.get_warmup_keys()
+        _warmup_api(dispatch).get_warmup_keys()
 
 
 def test_triton_kernel_dispatch_uses_device_fake_tensors(
@@ -291,7 +309,7 @@ def test_triton_kernel_dispatch_uses_device_fake_tensors(
         )
 
     @triton_kernel_dispatcher_with_warmup(kernel=kernel, warmup_inputs=warmup_inputs)
-    def dispatch(first: torch.Tensor, second: int) -> LaunchSpec:
+    def dispatch(first: torch.Tensor, second: int) -> DispatchSpec:
         assert isinstance(first, torch.Tensor)
         assert first.device.type == device_type
         assert first[0].is_contiguous()
@@ -302,7 +320,7 @@ def test_triton_kernel_dispatch_uses_device_fake_tensors(
         lambda kernel, kwargs: {TritonJitKey(id(kernel), "fake", 0, kwargs["CONST"])},
     )
 
-    keys = dispatch.get_warmup_keys()
+    keys = _warmup_api(dispatch).get_warmup_keys()
     assert len(keys) == 1
     assert dict(keys[0].inputs)["first"].device.type == device_type
 

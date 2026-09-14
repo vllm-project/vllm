@@ -4,13 +4,13 @@
 import io
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import pybase64
 import pytest
 import torch
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import SingletonPrompt
 from vllm.renderers import TokenizeParams
@@ -98,7 +98,10 @@ def _build_renderer(
     max_chars_per_token: int = 1,
 ):
     renderer = HfRenderer(
-        MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
+        cast(
+            VllmConfig,
+            MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
+        ),
         tokenizer=(
             None
             if model_config.skip_tokenizer_init
@@ -630,11 +633,12 @@ class TestRenderEmbedPrompt:
         text_input = "Hello world"
         tensor_input = torch.randn(5, hidden_size, dtype=torch.float32)
 
+        mixed_inputs: list[SingletonPrompt | bytes] = [
+            text_input,
+            self._create_test_embed_bytes(tensor_input),
+        ]
         prompts = renderer.render_prompts(
-            _preprocess_prompt(
-                renderer.model_config,
-                [text_input, self._create_test_embed_bytes(tensor_input)],
-            )
+            _preprocess_prompt(renderer.model_config, mixed_inputs)
         )
         results = renderer.tokenize_prompts(
             prompts,

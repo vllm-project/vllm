@@ -156,8 +156,19 @@ async def test_generate_with_async_generator():
     llm.add_request = mock_add_request
 
     async def input_generator() -> AsyncGenerator[StreamingInput, None]:
-        yield StreamingInput(prompt="Hello", sampling_params=sampling_params)
-        yield StreamingInput(prompt=" world", sampling_params=sampling_params)
+        # `StreamingInput.prompt` is annotated as the already-rendered
+        # `EngineInput`, but the only consumer of the field,
+        # `InputProcessor.process_inputs()`, takes `PromptType | EngineInput`,
+        # so an unrendered text prompt is valid here (as in the e2e streaming
+        # tests). Drop these ignores if the annotation is widened.
+        yield StreamingInput(
+            prompt="Hello",  # type: ignore[arg-type]
+            sampling_params=sampling_params,
+        )
+        yield StreamingInput(
+            prompt=" world",  # type: ignore[arg-type]
+            sampling_params=sampling_params,
+        )
 
     outputs = []
     async for output in llm.generate(input_generator(), sampling_params, request_id):

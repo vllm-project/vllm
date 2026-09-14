@@ -2,14 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import Mock
 
 import pytest
 import torch
 
 import vllm.v1.worker.gpu.kv_connector as kv_connector_module
-from vllm.config import KVTransferConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransferResults
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
 
@@ -39,18 +41,21 @@ def _make_connector(
         kv_role="kv_consumer",
         kv_buffer_device="cpu",
     )
-    connector = ActiveKVConnector(  # type: ignore[arg-type]
-        SimpleNamespace(kv_transfer_config=kv_config), {}
+    connector = ActiveKVConnector(
+        cast(VllmConfig, SimpleNamespace(kv_transfer_config=kv_config)), {}
     )
     events.clear()
     return connector
 
 
-def _scheduler_output(has_sync_kv_loads: bool) -> SimpleNamespace:
-    return SimpleNamespace(
-        kv_connector_metadata=object(),
-        finished_req_ids=set(),
-        has_sync_kv_loads=has_sync_kv_loads,
+def _scheduler_output(has_sync_kv_loads: bool) -> SchedulerOutput:
+    return cast(
+        SchedulerOutput,
+        SimpleNamespace(
+            kv_connector_metadata=object(),
+            finished_req_ids=set(),
+            has_sync_kv_loads=has_sync_kv_loads,
+        ),
     )
 
 
@@ -66,7 +71,7 @@ def test_load_start_phase(
     request_indices = torch.tensor([3, 1])
     request_ids = ["first", "second"]
     attn_metadata = {"layer": object()}
-    connector.pre_forward(  # type: ignore[arg-type]
+    connector.pre_forward(
         output,
         request_state_indices=request_indices,
         request_ids=request_ids,
@@ -79,21 +84,22 @@ def test_load_start_phase(
     connector.post_forward(set())
     assert events == ["handle", "bind", "start", "wait", "clear"]
 
-    kwargs = connector.kv_connector.start_load_kv.call_args.kwargs
+    start_load_kv = cast(Mock, connector.kv_connector.start_load_kv)
+    kwargs = start_load_kv.call_args.kwargs
     assert kwargs["request_state_indices"] is request_indices
     assert kwargs["request_ids"] is request_ids
     assert kwargs["attn_metadata"] is attn_metadata
 
     # A subsequent step without a forward must not reuse the prior batch.
-    connector.no_forward(_scheduler_output(False))  # type: ignore[arg-type]
-    assert connector.kv_connector.start_load_kv.call_count == 2
-    assert connector.kv_connector.start_load_kv.call_args.kwargs == {}
+    connector.no_forward(_scheduler_output(False))
+    assert start_load_kv.call_count == 2
+    assert start_load_kv.call_args.kwargs == {}
 
 
 def test_no_forward_starts_deferred_load_once(monkeypatch: pytest.MonkeyPatch):
     events: list[str] = []
     connector = _make_connector(monkeypatch, events)
 
-    connector.no_forward(_scheduler_output(False))  # type: ignore[arg-type]
+    connector.no_forward(_scheduler_output(False))
 
     assert events == ["handle", "bind", "start", "clear"]

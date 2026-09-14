@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import torch
@@ -11,7 +12,11 @@ import vllm.models.deepseek_v32.attention as deepseek_attention
 from vllm.config import CUDAGraphMode
 from vllm.models.deepseek_v32 import attention as deepseek_v32_attention
 from vllm.models.deepseek_v32.attention import DeepseekV32Attention
-from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
+from vllm.v1.attention.backends.mla.indexer import (
+    DeepSeekV32IndexerDecodeMetadata,
+    DeepseekV32IndexerMetadata,
+    DeepseekV32IndexerPrefillMetadata,
+)
 
 INDEXER_LAYER = "model.layers.0.self_attn.indexer.k_cache"
 MLA_LAYER = "model.layers.0.self_attn.attn"
@@ -46,7 +51,7 @@ def test_sparse_attention_refreshes_batch_state_inside_eager_segment(
 
     with pytest.raises(BatchStateRefreshed):
         DeepseekV32Attention._sparse_indexer_and_attn(
-            layer,
+            cast(DeepseekV32Attention, layer),
             torch.empty(1, dtype=torch.long),
             torch.empty(1, 1),
             torch.empty(1, 1, 1),
@@ -80,7 +85,9 @@ def make_indexer_metadata(
         num_decode_tokens=num_decode_tokens,
         num_prefills=num_prefills,
         num_prefill_tokens=num_prefill_tokens,
-        prefill=SimpleNamespace(chunks=[]) if num_prefills else None,
+        prefill=cast(DeepseekV32IndexerPrefillMetadata, SimpleNamespace(chunks=[]))
+        if num_prefills
+        else None,
     )
 
 
@@ -129,7 +136,7 @@ def test_short_prefill_updates_k_cache_before_scoring_decision(
         slot_mapping=slot_mapping,
     )
     if indexer_metadata.num_decodes:
-        indexer_metadata.decode = object()
+        indexer_metadata.decode = cast(DeepSeekV32IndexerDecodeMetadata, object())
     mla_metadata = make_mla_metadata(
         use_dense_mha=batch_kind != "force_mqa",
         num_decode_tokens=mla_num_decode_tokens,
@@ -307,7 +314,7 @@ def test_deepseek_v32_dispatches_selected_mha(
     output = torch.empty(2, 2)
 
     DeepseekV32Attention._sparse_indexer_and_attn(
-        layer,
+        cast(DeepseekV32Attention, layer),
         torch.arange(2),
         torch.empty(2, 2),
         q_nope,

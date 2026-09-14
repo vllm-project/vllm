@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import torch
 import torch.nn as nn
 
+from vllm.config import VllmConfig
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
     spec_decode_needs_target_embed,
@@ -106,5 +108,5 @@ def test_target_embedding_provisioning(
         raising=True,
     )
     speculative_config = None if method is None else SimpleNamespace(method=method)
-    config = SimpleNamespace(speculative_config=speculative_config)
+    config = cast(VllmConfig, SimpleNamespace(speculative_config=speculative_config))
     assert spec_decode_needs_target_embed(config) is expected
