@@ -340,6 +340,8 @@ class AdaptiveVerificationManager:
             for req_id, num_tokens in zip(req_ids, num_non_draft_tokens, strict=True)
         }
         draft_budget = int(np.argmax(num_tokens_to_estimated_accepted_tokens / costs))
+        # Rank-local confidences must not select different TP execution sizes.
+        draft_budget = get_tp_group().broadcast_object(draft_budget, src=0)
         self._batch_budget = (
             num_drafts_per_req,
             num_non_draft_tokens_per_req,
@@ -422,6 +424,8 @@ class AdaptiveVerificationManager:
                     draft_budget,
                     self.num_speculative_steps,
                 )
+                # Equal totals alone do not ensure identical request boundaries.
+                get_tp_group().broadcast(capacities, src=0)
 
         num_non_draft_tokens_gpu = self._num_non_draft_tokens[:num_reqs]
         async_copy_to_gpu(
