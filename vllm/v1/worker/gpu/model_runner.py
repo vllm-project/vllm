@@ -987,6 +987,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """Estimate the GPU memory required to capture CUDA graphs."""
         return _profile_cudagraph_memory(self)
 
+    def needs_cudagraph_capture(self) -> bool:
+        """Whether capture_model() has any CUDA graphs left to capture."""
+        return (
+            self.model_state.supports_mm_inputs
+            and self.model_state.encoder_runner.has_cudagraph()
+        ) or (
+            self.cudagraph_manager is not None
+            and self.cudagraph_manager.needs_capture()
+        )
+
     @torch.inference_mode()
     def capture_model(self, *, profile_only: bool = False) -> int:
         assert self.cudagraph_manager is not None
