@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, Mock, call, patch
 from uuid import UUID
 
 import pytest
+import torch
 from pydantic import ValidationError
 
 from vllm.config import (
@@ -17,7 +18,7 @@ from vllm.config import (
 )
 from vllm.config.profiler import _is_uri_path
 from vllm.platforms import current_platform
-from vllm.profiler.wrapper import ProtonProfilerWrapper, WorkerProfiler
+from vllm.profiler.wrapper import ProtonProfilerWrapper, TorchProfilerWrapper, WorkerProfiler
 from vllm.v1.core.sched.output import CachedRequestData
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker
@@ -51,6 +52,26 @@ def default_profiler_config():
         delay_iterations=0,
         max_iterations=0,
     )
+
+
+def test_torch_profiler_activities_are_configurable(tmp_path):
+    config = ProfilerConfig(
+        profiler="torch",
+        torch_profiler_dir=str(tmp_path),
+        torch_profiler_activities=["CPU"],
+    )
+    with patch("vllm.profiler.wrapper.torch.profiler.profile") as profile:
+        TorchProfilerWrapper(config, "worker", 0, activities=["CPU"])
+    assert profile.call_args.kwargs["activities"] == [torch.profiler.ProfilerActivity.CPU]
+
+
+@pytest.mark.parametrize(
+    "activities",
+    [[], ["CPU", "CPU"]],
+)
+def test_torch_profiler_activities_reject_invalid_values(activities):
+    with pytest.raises(ValueError, match="torch_profiler_activities"):
+        ProfilerConfig(torch_profiler_activities=activities)
 
 
 def test_immediate_start_stop(default_profiler_config):
