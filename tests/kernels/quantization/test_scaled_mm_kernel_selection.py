@@ -47,9 +47,7 @@ def test_linear_backend_override_is_quantization_specific():
         assert _get_linear_backend(quantization="fp8_w8a8") == "cutlass"
 
 
-@patch.object(
-    HummingFP8ScaledMMLinearKernel, "is_supported", return_value=(True, None)
-)
+@patch.object(HummingFP8ScaledMMLinearKernel, "is_supported", return_value=(True, None))
 @patch("vllm.model_executor.kernels.linear.current_platform")
 def test_fp8_linear_backend_override(platform_mock, _):
     platform_mock._enum = PlatformEnum.CUDA
