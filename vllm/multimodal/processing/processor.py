@@ -8,6 +8,7 @@ from enum import Enum
 from functools import lru_cache
 from typing import (
     TYPE_CHECKING,
+    ClassVar,
     Generic,
     NamedTuple,
     Protocol,
@@ -1033,6 +1034,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     Not to be confused with `transformers.ProcessorMixin`.
     """
 
+    requires_tokenizer: ClassVar[bool] = True
+
     def __init__(
         self,
         info: _I,
@@ -1041,6 +1044,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         cache: BaseMultiModalProcessorCache | None = None,
     ) -> None:
         super().__init__()
+
+        if self.requires_tokenizer and info.ctx.tokenizer is None:
+            raise ValueError(
+                f"{type(self).__name__} requires a tokenizer and cannot be "
+                "initialized when `skip_tokenizer_init=True`. Disable "
+                "`--skip-tokenizer-init`."
+            )
 
         self.info = info
         self.dummy_inputs = dummy_inputs
@@ -1559,14 +1569,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             # let BPE merge tokens across a segment boundary, silently
             # changing how a non-special-token placeholder is tokenized.
             new_token_ids = flatten_2d_lists(
-                [
-                    cached_encode(tokenizer, text, add_special_tokens=False)
-                    for text in out_texts
-                ]
+                [tokenizer.encode(text, add_special_tokens=False) for text in out_texts]
             )
         else:
-            new_token_ids = cached_encode(
-                tokenizer, "".join(out_texts), add_special_tokens=False
+            new_token_ids = tokenizer.encode(
+                "".join(out_texts), add_special_tokens=False
             )
 
         return new_token_ids, result
@@ -1814,6 +1821,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
             inputs.mm_data_items,
             inputs.mm_uuid_items,
             hf_processor_mm_kwargs=inputs.hf_processor_mm_kwargs,
+            media_io_kwargs=inputs.media_io_kwargs,
         )
 
         encoder_inputs = super().apply(encoder_processor_inputs, timing_ctx)

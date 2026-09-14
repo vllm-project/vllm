@@ -32,6 +32,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     subclass_attention_backend_with_overrides,
 )
+from vllm.v1.attention.backends.cpu_attn import CPUAttentionBackend
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 
 try:
@@ -160,10 +161,8 @@ def create_whisper_attention_backend_with_block_pooling(
             new_common_attn_metadata.query_start_loc *= block_pool_size
             new_common_attn_metadata.query_start_loc_cpu *= block_pool_size
             new_common_attn_metadata.seq_lens *= block_pool_size
-            if new_common_attn_metadata._seq_lens_cpu is not None:
-                new_common_attn_metadata._seq_lens_cpu *= block_pool_size
-            if new_common_attn_metadata._num_computed_tokens_cpu is not None:
-                new_common_attn_metadata._num_computed_tokens_cpu *= block_pool_size
+            if new_common_attn_metadata.seq_lens_cpu_upper_bound is not None:
+                new_common_attn_metadata.seq_lens_cpu_upper_bound *= block_pool_size
             new_common_attn_metadata.num_actual_tokens *= block_pool_size
             new_common_attn_metadata.max_query_len *= block_pool_size
             new_common_attn_metadata.max_seq_len *= block_pool_size
@@ -225,6 +224,7 @@ def create_whisper_attention_backend_with_block_pooling(
         b
         for b in (
             AiterFlashAttentionBackend,
+            CPUAttentionBackend,
             FlashAttentionBackend,
             RocmAttentionBackend,
             TritonAttentionBackend,
@@ -239,7 +239,9 @@ def create_whisper_attention_backend_with_block_pooling(
             "appreciated."
         )
 
-    if not issubclass(underlying_attn_backend, FlashAttentionBackend):
+    if not issubclass(
+        underlying_attn_backend, (CPUAttentionBackend, FlashAttentionBackend)
+    ):
         logger.info(
             "Using %s for Whisper causal attention with block pooling. "
             "This backend was recently enabled for this model. "

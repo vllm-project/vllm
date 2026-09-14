@@ -68,7 +68,7 @@ def _fp8_quant_and_cache_write(
     kv_cache_ptr,
     kv_cache_scale_ptr,
     cache_block_size,
-    cache_stride,
+    cache_block_stride,
     offsets,
     HEAD_DIM: tl.constexpr,
 ):
@@ -76,7 +76,7 @@ def _fp8_quant_and_cache_write(
 
     block_idx = slot_idx // cache_block_size
     block_offset = slot_idx % cache_block_size
-    block_start = block_idx * cache_block_size * cache_stride
+    block_start = block_idx * cache_block_stride
 
     tl.store(
         kv_cache_ptr + block_start + block_offset * HEAD_DIM + offsets,
@@ -129,8 +129,9 @@ def _fused_norm_rope_kernel(
     index_k_out_ptr,
     index_k_out_stride,
     INDEX_K_HALF_ROT_DIM: tl.constexpr,
-    # Cache params (shared by indexer K and MLA)
+    # Cache params
     slot_mapping_ptr,
+    indexer_slot_mapping_ptr,
     # Index K FP8 cache
     indexer_cache_ptr,
     indexer_cache_scale_ptr,
@@ -140,6 +141,7 @@ def _fused_norm_rope_kernel(
     mla_cache_ptr,
     mla_cache_block_stride,
     mla_cache_entry_stride,
+    MLA_CACHE_BLOCK_SIZE: tl.constexpr,
     MLA_CACHE_FP8: tl.constexpr,
     mla_cache_scale_ptr,
     # fp8_ds_mla cache views (block-scaled fp8 NoPE + unquantized bf16 RoPE).
@@ -180,22 +182,33 @@ def _fused_norm_rope_kernel(
             )
         return
 
-    if slot_mapping_ptr is None:
-        if kv_out_ptr is None and kpe_out_ptr is None and index_k_out_ptr is None:
-            return
-    elif tl.load(slot_mapping_ptr + tok_idx) < 0:
-        # Padding
-        return
-
     if pid == 2:
-        # Q RMS norm
+        # Q RMS norm. Runs for every row: under DCP a negative slot only
+        # means another rank owns this token's KV slot, but the query is
+        # still needed on every rank (queries are not sharded), so the
+        # slot-based skip below must not gate it. Padding rows do harmless
+        # row-local extra work (no position load, no cache write).
         q_block = tl.arange(0, Q_BLOCK_SIZE)
         q_mask = q_block < Q_DIM
         q_c = tl.load(q_c_ptr + tok_idx * q_c_stride + q_block, mask=q_mask, other=0.0)
         q_c_rms_w = tl.load(q_rms_norm_w_ptr + q_block, mask=q_mask)
         q_c = _rms_norm(q_c, q_c_rms_w, q_rms_eps, Q_DIM)
         tl.store(q_c_out_ptr + tok_idx * q_c_out_stride + q_block, q_c, mask=q_mask)
-    elif pid == 1:
+        return
+
+    if slot_mapping_ptr is None:
+        if kv_out_ptr is None and kpe_out_ptr is None and index_k_out_ptr is None:
+            return
+    elif tl.load(slot_mapping_ptr + tok_idx) < 0 and (
+        pid != 1 or (kv_out_ptr is None and kpe_out_ptr is None)
+    ):
+        # Padding, or (under DCP) a token whose KV slot another rank owns.
+        # Dense prefill still consumes the materialized normalized/rotated K
+        # rows on every rank, so pid 1 must produce them even when this rank
+        # must not write the owner-local cache slot.
+        return
+
+    if pid == 1:
         # KV RMS Norm + KV RoPE + MLA concat_and_cache.
         # Merged so the normed kv_c and RoPE'd k_pe can be written
         # to the MLA KV cache directly without a separate kernel.
@@ -242,7 +255,9 @@ def _fused_norm_rope_kernel(
                 return
 
             slot_idx = tl.load(slot_mapping_ptr + tok_idx)
-            mla_block_size = mla_cache_block_stride // mla_cache_entry_stride
+            if slot_idx < 0:
+                return
+            mla_block_size = MLA_CACHE_BLOCK_SIZE
             mla_block_idx = slot_idx // mla_block_size
             mla_block_off = slot_idx % mla_block_size
 
@@ -386,8 +401,8 @@ def _fused_norm_rope_kernel(
             )
 
         # PCP inserts index K after gathering; other paths write it directly.
-        if indexer_cache_ptr is not None and slot_mapping_ptr is not None:
-            slot_idx = tl.load(slot_mapping_ptr + tok_idx)
+        if indexer_cache_ptr is not None and indexer_slot_mapping_ptr is not None:
+            slot_idx = tl.load(indexer_slot_mapping_ptr + tok_idx)
             _fp8_quant_and_cache_write(
                 result,
                 index_k_mask,
@@ -417,8 +432,9 @@ def fused_norm_rope(
     index_k_layer_norm_eps: float,
     index_k_rope_cos_sin_cache: torch.Tensor | None,
     topk_indices_buffer: torch.Tensor,
-    # Cache params for fused writes (single slot_mapping for both caches)
+    # Cache params for fused writes
     slot_mapping: torch.Tensor | None = None,
+    indexer_slot_mapping: torch.Tensor | None = None,
     indexer_k_cache: torch.Tensor | None = None,
     mla_kv_cache: torch.Tensor | None = None,
     mla_kv_cache_dtype: str = "auto",
@@ -462,9 +478,11 @@ def fused_norm_rope(
     # --- Indexer K cache setup ---
     if indexer_k_cache is not None:
         assert slot_mapping is not None
+        if indexer_slot_mapping is None:
+            indexer_slot_mapping = slot_mapping
         idx_cache_scale_view = indexer_k_cache.view(torch.uint8).view(torch.float32)
         idx_cache_block_size = indexer_k_cache.shape[1]
-        idx_cache_stride = indexer_k_cache.shape[2]
+        idx_cache_stride = indexer_k_cache.stride(0)
         if indexer_k_cache.dtype == torch.uint8:
             indexer_k_cache = indexer_k_cache.view(torch.float8_e4m3fn)
     else:
@@ -479,6 +497,7 @@ def fused_norm_rope(
     mla_ds_scale_view = torch.empty(0, dtype=torch.float32, device=device)
     mla_ds_rope_view = torch.empty(0, dtype=torch.bfloat16, device=device)
     if mla_kv_cache is not None:
+        mla_block_size = mla_kv_cache.shape[1]
         if mla_cache_ds_mla:
             # 656-byte custom layout addressed in bytes; mla_cache_ptr is the
             # 1-byte fp8 view, so block/entry strides are byte offsets and the
@@ -503,6 +522,7 @@ def fused_norm_rope(
         mla_kv_cache = torch.empty(0, dtype=torch.bfloat16, device=device)
         mla_block_stride = 0
         mla_entry_stride = 0
+        mla_block_size = 1
         mla_k_scale = _dummy((1,), torch.float32, device)
 
     if q_c_out is None:
@@ -562,6 +582,7 @@ def fused_norm_rope(
         index_k_rope_cos_sin_cache.shape[-1] // 2,
         # Cache params
         slot_mapping,
+        indexer_slot_mapping,
         indexer_k_cache,
         idx_cache_scale_view,
         idx_cache_block_size,
@@ -570,6 +591,7 @@ def fused_norm_rope(
         mla_kv_cache,
         mla_block_stride,
         mla_entry_stride,
+        mla_block_size,
         mla_cache_fp8,
         mla_k_scale,
         mla_ds_scale_view,

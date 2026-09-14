@@ -67,7 +67,8 @@ def _make_profiling_runner(
     events: list[str] = []
     runner.events = events
 
-    def _capture_model() -> int:
+    def _capture_model(*, profile_only: bool = False) -> int:
+        assert profile_only
         events.append("capture")
         # Simulate the manager's per-FULL-graph memory sampling.
         samples = runner.cudagraph_manager._capture_mem_samples
@@ -183,7 +184,7 @@ def test_profile_cudagraph_memory_tears_down_on_capture_error(monkeypatch):
     _patch_module(monkeypatch)
     runner = _make_profiling_runner(CUDAGraphMode.FULL)
 
-    def _boom() -> int:
+    def _boom(*, profile_only: bool = False) -> int:
         runner.events.append("capture")
         raise RuntimeError("capture failed")
 
@@ -204,7 +205,7 @@ def test_profile_cudagraph_memory_restores_compilation_counters(monkeypatch):
     _patch_module(monkeypatch)
     runner = _make_profiling_runner(CUDAGraphMode.FULL)
 
-    def _capture_model() -> int:
+    def _capture_model(*, profile_only: bool = False) -> int:
         compilation_counter.num_cudagraph_captured += 5
         compilation_counter.num_gpu_runner_capture_triggers += 1
         return 1 << 30
@@ -288,9 +289,9 @@ def test_profile_cudagraph_memory_redirects_wrapper_pools(monkeypatch):
     try:
         capture_model = runner.capture_model
 
-        def _capture_model() -> int:
+        def _capture_model(*, profile_only: bool = False) -> int:
             wrapper.pool_during_capture = wrapper.graph_pool
-            return capture_model()
+            return capture_model(profile_only=profile_only)
 
         runner.capture_model = _capture_model
 
@@ -328,9 +329,9 @@ def test_profile_cudagraph_memory_swaps_and_drops_speculator_managers(monkeypatc
     pools_seen: list[Any] = []
     capture_model = runner.capture_model
 
-    def _capture_model() -> int:
+    def _capture_model(*, profile_only: bool = False) -> int:
         pools_seen.append(runner.speculator.cudagraph_manager.pool)
-        return capture_model()
+        return capture_model(profile_only=profile_only)
 
     runner.capture_model = _capture_model
 
@@ -379,7 +380,7 @@ def test_profile_cudagraph_memory_frees_throwaway_pool(monkeypatch):
         manager.pool = cgu.current_platform.get_global_graph_pool()
         r.speculator = SimpleNamespace(cudagraph_manager=manager)
 
-    def _capture_model() -> int:
+    def _capture_model(*, profile_only: bool = False) -> int:
         for owner in (
             runner.cudagraph_manager,
             runner.speculator.cudagraph_manager,
@@ -402,3 +403,39 @@ def test_profile_cudagraph_memory_frees_throwaway_pool(monkeypatch):
 
     assert memory["captured"] - memory["before"] >= 3 * allocation_bytes
     assert memory["after"] == memory["before"]
+
+
+def test_teardown_profiling_state_clears_mamba_align_metadata(monkeypatch):
+    """Profiling-cached Mamba align metadata must be invalidated at teardown.
+
+    ``MambaHybridModelState`` lazily caches ``_mamba_group_ids`` and
+    ``_mamba_spec`` from whichever KVCacheConfig it first sees. When the
+    profiling config's group layout differs from the real (e.g. PP-projected)
+    config, reusing the stale metadata mismatches the real block tables
+    ("expected 3 block tables, got 4" at
+    ``MambaSpecDecodeGPUContext.initialize_from_forward_context``).
+    """
+    runner: Any = mrv2.GPUModelRunner.__new__(mrv2.GPUModelRunner)
+    runner.compilation_config = SimpleNamespace(static_forward_context={})
+    runner.model_state = SimpleNamespace(
+        supports_mm_inputs=False,
+        _mamba_ctx=object(),
+        _mamba_group_ids=[0, 1],
+        _mamba_spec=object(),
+    )
+    runner.cache_config = SimpleNamespace(num_gpu_blocks=1)
+    runner.kv_caches = []
+    runner.attn_groups = []
+    runner.kv_cache_config = SimpleNamespace()
+    runner.cudagraph_manager = object()
+    runner.lora_config = None
+    runner.maybe_remove_all_loras = lambda _: None
+
+    monkeypatch.setattr(cgu.torch.accelerator, "synchronize", lambda: None)
+    monkeypatch.setattr(cgu.torch.accelerator, "empty_cache", lambda: None)
+
+    cgu._teardown_profiling_state(runner)
+
+    assert runner.model_state._mamba_ctx is None
+    assert runner.model_state._mamba_group_ids == []
+    assert runner.model_state._mamba_spec is None
