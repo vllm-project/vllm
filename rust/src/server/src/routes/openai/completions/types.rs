@@ -90,6 +90,10 @@ pub struct CompletionRequest {
     pub user: Option<String>,
 
     // -------- vLLM Sampling Parameters --------
+    /// Whether to apply the engine's configured watermark to this request.
+    #[serde(default = "default_true")]
+    pub watermarking: bool,
+
     /// Options for streaming response
     pub stream_options: Option<StreamOptions>,
 

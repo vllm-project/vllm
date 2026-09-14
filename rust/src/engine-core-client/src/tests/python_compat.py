@@ -34,6 +34,7 @@ class FinishReason(IntEnum):
 # Mirror of real SamplingParams; omit_defaults makes fixtures match real maps.
 class EngineCoreSamplingParams(msgspec.Struct, dict=True, omit_defaults=True):
     temperature: float = 1.0
+    watermarking: bool = True
     top_p: float = 1.0
     top_k: int = 0
     seed: int | None = None
@@ -123,6 +124,7 @@ request = EngineCoreRequest(
     mm_features=None,
     sampling_params=EngineCoreSamplingParams(
         temperature=0.8,
+        watermarking=False,
         top_p=0.9,
         top_k=8,
         seed=None,
