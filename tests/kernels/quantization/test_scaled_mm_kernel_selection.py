@@ -33,6 +33,14 @@ from vllm.platforms import PlatformEnum
 pytestmark = pytest.mark.cpu_test
 
 
+def test_linear_backend_default_is_unchanged():
+    config = VllmConfig(kernel_config=KernelConfig(linear_backend="cutlass"))
+
+    with set_current_vllm_config(config):
+        assert _get_linear_backend() == "cutlass"
+        assert _get_linear_backend(quantization="fp8_w8a8") == "cutlass"
+
+
 def test_linear_backend_override_is_quantization_specific():
     config = VllmConfig(
         kernel_config=KernelConfig(

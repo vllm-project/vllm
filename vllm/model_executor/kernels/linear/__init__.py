@@ -235,14 +235,18 @@ from vllm.platforms import PlatformEnum, current_platform
 logger = init_logger(__name__)
 
 
-def _get_linear_backend(*, quantization: str) -> str:
+def _get_linear_backend(*, quantization: str | None = None) -> str:
     """Get the linear_backend setting from the current vllm config."""
     from vllm.config import get_current_vllm_config_or_none
 
     if (config := get_current_vllm_config_or_none()) is None:
         return "auto"
-    overrides = config.kernel_config.linear_backend_per_quant or {}
-    if override := overrides.get(quantization):
+    overrides = config.kernel_config.linear_backend_per_quant
+    if (
+        quantization is not None
+        and overrides is not None
+        and (override := overrides.get(quantization))
+    ):
         logger.info_once(
             "Applied linear backend override for %r: %r", quantization, override
         )
@@ -376,7 +380,7 @@ def _resolve_backend_kernels(
     kernels: list[type],
     layer_desc: str,
     *,
-    quantization: str,
+    quantization: str | None = None,
 ) -> list[type]:
     """Apply --linear-backend filtering to one layer type's kernel list.
 
@@ -630,10 +634,10 @@ def is_supported_and_can_implement_kernel(
 def choose_scaled_mm_linear_kernel(
     config: _KernelConfigT,
     possible_kernels: dict[PlatformEnum, list[type[_KernelT]]],
-    *,
-    quantization: str,
     compute_capability: int | None = None,
     force_kernel: type[_KernelT] | None = None,
+    *,
+    quantization: str | None = None,
 ) -> type[_KernelT]:
     """
     Choose a _KernelT that can implement the given config for the
@@ -645,13 +649,13 @@ def choose_scaled_mm_linear_kernel(
             to be implemented.
         possible_kernels (dict[PlatformEnum, list[_KernelT]]): A
             dictionary of platforms and their list of possible kernels.
-        quantization: Quantization scheme used to select a backend override.
         compute_capability (Optional[int], optional): The compute capability of
             the target device, if None uses `current_platform` to get the
             compute capability. Defaults to None.
         force_kernel (Optional[type[_KernelT]]): An Optional forced kernel to override
             the possible_kernels if it can be implemented. If None, it will only try the
             possible kernels.
+        quantization: Quantization scheme used to select a backend override.
 
     Raises:
         ValueError: If no kernel can implement the given config.
