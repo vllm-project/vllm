@@ -50,9 +50,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer,
 )
-from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
-    dequantize_to_dtype as dequantize_nvfp4_to_dtype,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     scaled_dequantize,
@@ -205,7 +202,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
     ) -> tuple[int, int] | None:
         if quant_config is None:
             return None
-        if DeepGemmMegaMoEExperts.source_is_fp4(quant_config, layer, prefix):
+        if DeepGemmMegaMoEExperts.source_is_mxfp4(quant_config, layer, prefix):
             return None
         if (
             quant_config.get_name() == "compressed-tensors"
@@ -221,8 +218,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
             or len(block_size) != 2
         ):
             raise NotImplementedError(
-                "GLM MegaMoE supports BF16, NVFP4, MXFP4, or serialized "
-                "block-FP8 checkpoints."
+                "GLM MegaMoE supports BF16, MXFP4, or serialized block-FP8 checkpoints."
             )
         logger.warning_once(
             "DeepGEMM has no FP8-weight MegaMoE kernel; GLM block-FP8 routed "
@@ -230,19 +226,6 @@ class DeepGemmMegaMoEExperts(nn.Module):
             "memory footprint."
         )
         return (block_size[0], block_size[1])
-
-    @staticmethod
-    def source_is_nvfp4(
-        quant_config: QuantizationConfig | None,
-        layer: nn.Module | None = None,
-        prefix: str | None = None,
-    ) -> bool:
-        return (
-            DeepGemmMegaMoEExperts.source_format_from_quant_config(
-                quant_config, layer, prefix
-            )
-            == "nvfp4-pack-quantized"
-        )
 
     @staticmethod
     def source_is_mxfp4(
@@ -256,16 +239,6 @@ class DeepGemmMegaMoEExperts(nn.Module):
             )
             == "mxfp4-pack-quantized"
         )
-
-    @staticmethod
-    def source_is_fp4(
-        quant_config: QuantizationConfig | None,
-        layer: nn.Module | None = None,
-        prefix: str | None = None,
-    ) -> bool:
-        return DeepGemmMegaMoEExperts.source_format_from_quant_config(
-            quant_config, layer, prefix
-        ) in ("nvfp4-pack-quantized", "mxfp4-pack-quantized")
 
     @staticmethod
     def source_format_from_quant_config(
@@ -310,7 +283,6 @@ class DeepGemmMegaMoEExperts(nn.Module):
         num_shared_experts: int = 0,
         mma_type: str = "fp8xfp4",
         source_weight_block_size: tuple[int, int] | None = None,
-        source_nvfp4: bool = False,
         source_mxfp4: bool = False,
         prefix: str = "",
         num_logical_experts: int | None = None,
@@ -332,26 +304,12 @@ class DeepGemmMegaMoEExperts(nn.Module):
             raise ValueError(
                 "Block-FP8 source weights are only supported by BF16 MegaMoE."
             )
-        if source_nvfp4 and source_mxfp4:
-            raise ValueError("MegaMoE source weights cannot be both NVFP4 and MXFP4.")
-        if (source_nvfp4 or source_mxfp4) and source_weight_block_size is not None:
+        if source_mxfp4 and source_weight_block_size is not None:
             raise ValueError("MegaMoE source weights cannot be both FP4 and block-FP8.")
         if source_mxfp4 and mma_type != "fp8xfp4":
             raise ValueError("MXFP4 source weights require FP8xFP4 MegaMoE.")
-        if source_nvfp4:
-            if mma_type == "fp8xfp4":
-                logger.warning_once(
-                    "Requantizing NVFP4 routed expert weights to DeepGEMM's "
-                    "E2M1/UE8M0 FP4 format."
-                )
-            else:
-                logger.warning_once(
-                    "DeepGEMM has no NVFP4-weight BF16 MegaMoE kernel; GLM "
-                    "NVFP4 routed expert weights will be dequantized to BF16."
-                )
         self.mma_type = mma_type
         self.source_weight_block_size = source_weight_block_size
-        self.source_nvfp4 = source_nvfp4
         self.source_mxfp4 = source_mxfp4
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
 
@@ -362,14 +320,14 @@ class DeepGemmMegaMoEExperts(nn.Module):
         self.eplb_state = EplbLayerState()
 
         weight_attrs = {"weight_loader": self.weight_loader}
-        source_is_packed = source_nvfp4 or source_mxfp4
+        source_is_packed = source_mxfp4
         if source_is_packed or mma_type == "fp8xfp4":
             weight_dtype = torch.uint8
         elif source_weight_block_size is not None:
             weight_dtype = torch.float8_e4m3fn
         else:
             weight_dtype = torch.bfloat16
-        uses_packed_storage = mma_type == "fp8xfp4" or source_nvfp4
+        uses_packed_storage = mma_type == "fp8xfp4"
         packed_hidden_size = hidden_size // 2 if uses_packed_storage else hidden_size
         packed_intermediate_size = (
             intermediate_size // 2 if uses_packed_storage else intermediate_size
@@ -391,18 +349,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
             self.register_parameter("w13_weight", w13_weight)
             self.w13_weight_packed = None
 
-        if source_nvfp4:
-            self.w13_weight_scale = nn.Parameter(
-                torch.zeros(
-                    num_local_experts,
-                    2 * intermediate_size,
-                    hidden_size // 16,
-                    dtype=torch.float8_e4m3fn,
-                ),
-                requires_grad=False,
-            )
-            set_weight_attrs(self.w13_weight_scale, weight_attrs)
-        elif mma_type == "fp8xfp4":
+        if mma_type == "fp8xfp4":
             self.w13_weight_scale = nn.Parameter(
                 torch.zeros(
                     num_local_experts,
@@ -459,18 +406,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
             self.register_parameter("w2_weight", w2_weight)
             self.w2_weight_packed = None
 
-        if source_nvfp4:
-            self.w2_weight_scale = nn.Parameter(
-                torch.zeros(
-                    num_local_experts,
-                    hidden_size,
-                    intermediate_size // 16,
-                    dtype=torch.float8_e4m3fn,
-                ),
-                requires_grad=False,
-            )
-            set_weight_attrs(self.w2_weight_scale, weight_attrs)
-        elif mma_type == "fp8xfp4":
+        if mma_type == "fp8xfp4":
             self.w2_weight_scale = nn.Parameter(
                 torch.zeros(
                     num_local_experts,
@@ -499,36 +435,6 @@ class DeepGemmMegaMoEExperts(nn.Module):
             set_weight_attrs(self.w2_weight_scale_inv, weight_attrs)
         else:
             self.w2_weight_scale_inv = None
-
-        if source_nvfp4:
-            self.w13_weight_global_scale = nn.Parameter(
-                torch.zeros(num_local_experts, 2, dtype=torch.float32),
-                requires_grad=False,
-            )
-            self.w2_weight_global_scale = nn.Parameter(
-                torch.zeros(num_local_experts, dtype=torch.float32),
-                requires_grad=False,
-            )
-            self.w13_input_global_scale = nn.Parameter(
-                torch.zeros(num_local_experts, 2, dtype=torch.float32),
-                requires_grad=False,
-            )
-            self.w2_input_global_scale = nn.Parameter(
-                torch.zeros(num_local_experts, dtype=torch.float32),
-                requires_grad=False,
-            )
-            for parameter in (
-                self.w13_weight_global_scale,
-                self.w2_weight_global_scale,
-                self.w13_input_global_scale,
-                self.w2_input_global_scale,
-            ):
-                set_weight_attrs(parameter, weight_attrs)
-        else:
-            self.w13_weight_global_scale = None
-            self.w2_weight_global_scale = None
-            self.w13_input_global_scale = None
-            self.w2_input_global_scale = None
 
         self._transformed_l1_weights: (
             torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None
@@ -643,166 +549,11 @@ class DeepGemmMegaMoEExperts(nn.Module):
             )
         return l1, l2
 
-    def _dequantize_nvfp4_weights(self) -> tuple[torch.Tensor, torch.Tensor]:
-        assert self.w13_weight_packed is not None
-        assert self.w2_weight_packed is not None
-        assert self.w13_weight_scale is not None
-        assert self.w2_weight_scale is not None
-        assert self.w13_weight_global_scale is not None
-        assert self.w2_weight_global_scale is not None
-        device = self.w13_weight_packed.device
-        l1 = torch.empty(
-            self.num_local_experts,
-            2 * self.intermediate_size,
-            self.hidden_size,
-            dtype=torch.bfloat16,
-            device=device,
-        )
-        l2 = torch.empty(
-            self.num_local_experts,
-            self.hidden_size,
-            self.intermediate_size,
-            dtype=torch.bfloat16,
-            device=device,
-        )
-        half = self.intermediate_size
-        for expert_id in range(self.num_local_experts):
-            gate = dequantize_nvfp4_to_dtype(
-                self.w13_weight_packed[expert_id, :half],
-                self.w13_weight_scale[expert_id, :half],
-                self.w13_weight_global_scale[expert_id, 0].reciprocal(),
-                torch.bfloat16,
-                block_size=16,
-                swizzle=False,
-            ).view(-1, 8, self.hidden_size)
-            up = dequantize_nvfp4_to_dtype(
-                self.w13_weight_packed[expert_id, half:],
-                self.w13_weight_scale[expert_id, half:],
-                self.w13_weight_global_scale[expert_id, 1].reciprocal(),
-                torch.bfloat16,
-                block_size=16,
-                swizzle=False,
-            ).view(-1, 8, self.hidden_size)
-            l1[expert_id].copy_(
-                torch.stack((gate, up), dim=1).view(
-                    2 * self.intermediate_size, self.hidden_size
-                )
-            )
-            l2[expert_id].copy_(
-                dequantize_nvfp4_to_dtype(
-                    self.w2_weight_packed[expert_id],
-                    self.w2_weight_scale[expert_id],
-                    self.w2_weight_global_scale[expert_id].reciprocal(),
-                    torch.bfloat16,
-                    block_size=16,
-                    swizzle=False,
-                )
-            )
-        return l1, l2
-
-    def _requantize_nvfp4_weights(
-        self, deep_gemm: typing.Any
-    ) -> tuple[tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
-        assert self.w13_weight_packed is not None
-        assert self.w2_weight_packed is not None
-        assert self.w13_weight_scale is not None
-        assert self.w2_weight_scale is not None
-        assert self.w13_weight_global_scale is not None
-        assert self.w2_weight_global_scale is not None
-        device = self.w13_weight_packed.device
-        l1_scale = torch.empty(
-            self.num_local_experts,
-            2 * self.intermediate_size,
-            self.hidden_size // 32,
-            dtype=torch.float32,
-            device=device,
-        )
-        l2_scale = torch.empty(
-            self.num_local_experts,
-            self.hidden_size,
-            self.intermediate_size // 32,
-            dtype=torch.float32,
-            device=device,
-        )
-        half = self.intermediate_size
-        for expert_id in range(self.num_local_experts):
-            for row_slice, global_scale_idx in (
-                (slice(0, half), 0),
-                (slice(half, 2 * half), 1),
-            ):
-                dequantized = dequantize_nvfp4_to_dtype(
-                    self.w13_weight_packed[expert_id, row_slice],
-                    self.w13_weight_scale[expert_id, row_slice],
-                    self.w13_weight_global_scale[
-                        expert_id, global_scale_idx
-                    ].reciprocal(),
-                    torch.bfloat16,
-                    block_size=16,
-                    swizzle=False,
-                )
-                packed, scale = deep_gemm.per_token_cast_to_fp4(
-                    dequantized,
-                    use_ue8m0=True,
-                    gran_k=32,
-                    use_packed_ue8m0=False,
-                )
-                self.w13_weight_packed[expert_id, row_slice].copy_(
-                    packed.view(torch.uint8)
-                )
-                l1_scale[expert_id, row_slice].copy_(scale)
-
-            dequantized = dequantize_nvfp4_to_dtype(
-                self.w2_weight_packed[expert_id],
-                self.w2_weight_scale[expert_id],
-                self.w2_weight_global_scale[expert_id].reciprocal(),
-                torch.bfloat16,
-                block_size=16,
-                swizzle=False,
-            )
-            packed, scale = deep_gemm.per_token_cast_to_fp4(
-                dequantized,
-                use_ue8m0=True,
-                gran_k=32,
-                use_packed_ue8m0=False,
-            )
-            self.w2_weight_packed[expert_id].copy_(packed.view(torch.uint8))
-            l2_scale[expert_id].copy_(scale)
-
-        transformed_l1_scale = deep_gemm.transform_sf_into_required_layout(
-            l1_scale,
-            2 * self.intermediate_size,
-            self.hidden_size,
-            (1, 32),
-            self.num_local_experts,
-        )
-        transformed_l2_scale = deep_gemm.transform_sf_into_required_layout(
-            l2_scale,
-            self.hidden_size,
-            self.intermediate_size,
-            (1, 32),
-            self.num_local_experts,
-        )
-        return deep_gemm.transform_weights_for_mega_moe(
-            (
-                self.w13_weight_packed.data.view(torch.int8),
-                transformed_l1_scale,
-            ),
-            (
-                self.w2_weight_packed.data.view(torch.int8),
-                transformed_l2_scale,
-            ),
-            **self._transform_weights_kwargs(),
-        )
-
     def _transform_weights_kwargs(self) -> dict[str, typing.Any]:
         return {}
 
     def _check_runtime_supported(self) -> None:
-        loader_weight = (
-            self.w13_weight_packed
-            if self.source_nvfp4 or self.source_mxfp4
-            else self.w13_weight
-        )
+        loader_weight = self.w13_weight_packed if self.source_mxfp4 else self.w13_weight
         assert loader_weight is not None
         device = loader_weight.device
         if torch.cuda.get_device_capability(device)[0] != 10:
@@ -986,18 +737,8 @@ class DeepGemmMegaMoEExperts(nn.Module):
 
         if self._transformed_l1_weights is None:
             self._check_runtime_supported()
-            if self.source_nvfp4 and self.mma_type == "fp8xfp4":
-                (
-                    self._transformed_l1_weights,
-                    self._transformed_l2_weights,
-                ) = self._requantize_nvfp4_weights(deep_gemm)
-            elif self.mma_type == "bf16xbf16":
-                if self.source_nvfp4:
-                    (
-                        self._transformed_l1_weights,
-                        self._transformed_l2_weights,
-                    ) = self._dequantize_nvfp4_weights()
-                elif self.source_weight_block_size is not None:
+            if self.mma_type == "bf16xbf16":
+                if self.source_weight_block_size is not None:
                     (
                         self._transformed_l1_weights,
                         self._transformed_l2_weights,
@@ -1515,10 +1256,6 @@ class DeepseekV4MoE(nn.Module):
         )
         if self.use_fi_mega_moe:
             expert_kwargs["activation_clamp"] = activation_clamp
-        elif DeepGemmMegaMoEExperts.source_is_nvfp4(
-            vllm_config.quant_config, self, f"{prefix}.experts"
-        ):
-            expert_kwargs["source_nvfp4"] = True
         self.experts = experts_cls(vllm_config, **expert_kwargs)
 
     def _init_fused_moe_experts(

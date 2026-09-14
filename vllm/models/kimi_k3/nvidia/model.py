@@ -421,10 +421,6 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
         self.w2_weight_packed = None
         self.w2_weight_scale = None
         self.w2_weight_scale_inv = None
-        self.w13_weight_global_scale = None
-        self.w2_weight_global_scale = None
-        self.w13_input_global_scale = None
-        self.w2_input_global_scale = None
 
     def get_symm_buffer(self):
         from vllm.utils.deep_gemm import _import_deep_gemm
@@ -534,23 +530,16 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
 
 
 def make_kimi_k3_mega_moe_expert_params_mapping(
-    num_experts: int, source_nvfp4: bool = False
+    num_experts: int,
 ) -> list[tuple[str, str, int, str]]:
     mapping = []
-    suffixes = (
-        (
-            ("weight_packed", "weight_packed"),
-            ("weight_scale", "weight_scale"),
-            ("weight_global_scale", "weight_global_scale"),
-            ("input_global_scale", "input_global_scale"),
-        )
-        if source_nvfp4
-        else (("weight", "weight_packed"), ("weight_scale", "weight_scale"))
-    )
     for expert_id in range(num_experts):
         for shard_id in ("w1", "w2", "w3"):
             param_prefix = "w13" if shard_id in ("w1", "w3") else "w2"
-            for param_suffix, checkpoint_suffix in suffixes:
+            for param_suffix, checkpoint_suffix in (
+                ("weight", "weight_packed"),
+                ("weight_scale", "weight_scale"),
+            ):
                 mapping.append(
                     (
                         f"experts.{param_prefix}_{param_suffix}",
@@ -730,9 +719,6 @@ class KimiMoE(nn.Module):
                 top_k=num_experts_per_token,
                 hidden_size=self.moe_hidden_size,
                 intermediate_size=self.padded_moe_intermediate_size,
-                source_nvfp4=DeepseekV4MegaMoEExperts.source_is_nvfp4(
-                    quant_config, self, f"{prefix}.experts"
-                ),
                 prefix=f"{prefix}.experts",
                 activation="situ",
                 activation_beta=activation_situ_beta,
@@ -1495,15 +1481,9 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             for module in self.modules()
             if isinstance(module, KimiMoE)
         )
-        mega_moe_source_nvfp4 = any(
-            module.experts.source_nvfp4
-            for module in self.modules()
-            if isinstance(module, KimiMoE) and module.use_mega_moe
-        )
         if self.config.is_moe and use_mega_moe:
             expert_params_mapping = make_kimi_k3_mega_moe_expert_params_mapping(
-                self.config.num_experts,
-                source_nvfp4=mega_moe_source_nvfp4,
+                self.config.num_experts
             )
         elif self.config.is_moe:
             # Params for weights, fp8 weight scales, fp8 activation scales
