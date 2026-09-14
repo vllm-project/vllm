@@ -3750,7 +3750,7 @@ def causal_conv1d_fwd_cpu(
     cache_indices: torch.Tensor | None,
     has_initial_state: torch.Tensor | None,
     silu_activation: bool,
-    is_vnni: bool,
+    is_weight_packed: bool,
 ) -> torch.Tensor:
     return torch.ops._C.causal_conv1d_fwd_cpu(
         x,
@@ -3762,7 +3762,7 @@ def causal_conv1d_fwd_cpu(
         has_initial_state,
         silu_activation,
         -1,
-        is_vnni,
+        is_weight_packed,
     )
 
 
@@ -3773,7 +3773,7 @@ def causal_conv1d_update_cpu(
     bias: torch.Tensor | None,
     silu_activation: bool,
     conv_state_indices: torch.Tensor | None,
-    is_vnni: bool,
+    is_weight_packed: bool,
     num_accepted_tokens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.ops._C.causal_conv1d_update_cpu(
@@ -3785,7 +3785,7 @@ def causal_conv1d_update_cpu(
         num_accepted_tokens,
         conv_state_indices,
         -1,
-        is_vnni,
+        is_weight_packed,
     )
 
 

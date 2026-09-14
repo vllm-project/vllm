@@ -5,16 +5,6 @@
 
 #if defined(ARM_BF16_SUPPORT)
 
-inline bfloat16x8_t zip1q_bf16(bfloat16x8_t a, bfloat16x8_t b) {
-  return vreinterpretq_bf16_u16(
-      vzip1q_u16(vreinterpretq_u16_bf16(a), vreinterpretq_u16_bf16(b)));
-}
-
-inline bfloat16x8_t zip2q_bf16(bfloat16x8_t a, bfloat16x8_t b) {
-  return vreinterpretq_bf16_u16(
-      vzip2q_u16(vreinterpretq_u16_bf16(a), vreinterpretq_u16_bf16(b)));
-}
-
 template <int K, int BLOCK_N, bool has_bias, bool has_silu>
 struct tinygemm_kernel<at::BFloat16, K, BLOCK_N, has_bias, has_silu> {
   static inline bfloat16x8_t load_bf16x8(const at::BFloat16* ptr) {
@@ -74,16 +64,23 @@ struct tinygemm_kernel<at::BFloat16, K, BLOCK_N, has_bias, has_silu> {
 
       // Use the zip operation to match the input layout to the weights layout
       bfloat16x8_t va_pair =
-          zip1q_bf16(va[0], va[1]);  // channels 0-3, inputs for taps 0-1
+          vreinterpretq_bf16_u16(  // channels 0-3, inputs for taps 0-1
+              vzip1q_u16(vreinterpretq_u16_bf16(va[0]),
+                         vreinterpretq_u16_bf16(va[1])));
       vc0 = vbfdotq_f32(vc0, va_pair,
                         vb0);  // 4 independent length-two dot products
-      va_pair = zip2q_bf16(va[0], va[1]);  // channels 4-7, inputs for taps 0-1
+      va_pair = vreinterpretq_bf16_u16(  // channels 4-7, inputs for taps 0-1
+          vzip2q_u16(vreinterpretq_u16_bf16(va[0]),
+                     vreinterpretq_u16_bf16(va[1])));
       vc1 = vbfdotq_f32(vc1, va_pair, vb1);
-      va_pair = zip1q_bf16(va[2], va[3]);  // channels 0-3, inputs for taps 2-3
-      vc0 =
-          vbfdotq_f32(vc0, va_pair,
-                      vb2);  // Add to the previous result for the same channels
-      va_pair = zip2q_bf16(va[2], va[3]);  // channels 4-7, inputs for taps 2-3
+      va_pair = vreinterpretq_bf16_u16(  // channels 0-3, inputs for taps 2-3
+          vzip1q_u16(vreinterpretq_u16_bf16(va[2]),
+                     vreinterpretq_u16_bf16(va[3])));
+      // Add to the previous result for the same channels
+      vc0 = vbfdotq_f32(vc0, va_pair, vb2);
+      va_pair = vreinterpretq_bf16_u16(  // channels 4-7, inputs for taps 2-3
+          vzip2q_u16(vreinterpretq_u16_bf16(va[2]),
+                     vreinterpretq_u16_bf16(va[3])));
       vc1 = vbfdotq_f32(vc1, va_pair, vb3);
 
       using fVec = at::vec::Vectorized<float>;
