@@ -3489,6 +3489,226 @@ def test_fa4_sparse_routes_whole_batches(monkeypatch, num_decode_tokens, dcp):
     assert torch.isneginf(lse[0]).all()
 
 
+@pytest.mark.parametrize(
+    "num_decode_tokens,all_resident,lane",
+    [
+        (7, True, "decode"),
+        (0, True, "resident"),
+        (0, False, "staged"),
+        (3, True, "mixed"),
+    ],
+)
+def test_fa4_sparse_hisparse_routes_lanes(
+    monkeypatch, num_decode_tokens, all_resident, lane
+):
+    import vllm.v1.attention.backends.mla.flashattn_mla_sparse as fa4_sparse
+    from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
+        FlashAttnMLASparseFA4Impl,
+    )
+
+    num_tokens = 7
+    num_prefill_tokens = num_tokens - num_decode_tokens
+    inputs = _fa4_inputs([128] * num_tokens, device="cpu")
+    inputs.metadata.num_decode_tokens = num_decode_tokens
+    calls = _record_fa4_kernels(monkeypatch, 16, device="cpu")
+    # Distinct block counts, so the KV tensor a kernel is handed names its lane.
+    host_cache = inputs.kv_cache
+    hot = torch.zeros(6, inputs.block_size, 576, dtype=torch.bfloat16)
+    staged = torch.zeros(3, inputs.block_size, 576, dtype=torch.bfloat16)
+    hot_rows = hot.shape[0] * inputs.block_size
+
+    def physical(rows):
+        return (
+            torch.zeros(rows, inputs.topk, dtype=torch.int32),
+            torch.full((rows,), inputs.topk, dtype=torch.int32),
+        )
+
+    index_group = object.__new__(HiSparseMLAIndexGroup)
+    index_group.physical_kv_cache = MagicMock(return_value=hot)
+    index_group.cache = MagicMock(
+        return_value=SimpleNamespace(all_context_pages_resident=all_resident)
+    )
+    index_group.convert_decode_logical_to_physical_topk = MagicMock(
+        return_value=physical(num_decode_tokens)
+    )
+    index_group.convert_logical_to_physical_topk = MagicMock(
+        return_value=physical(num_tokens)
+    )
+    index_group.stage_prefill_rows = MagicMock(
+        return_value=(
+            staged,
+            torch.zeros(1, staged.shape[0], dtype=torch.int32),
+            torch.zeros(num_prefill_tokens, dtype=torch.int32),
+        )
+    )
+    triton_convert = MagicMock(return_value=physical(num_prefill_tokens))
+    monkeypatch.setattr(
+        fa4_sparse, "triton_convert_req_index_to_global_index", triton_convert
+    )
+    impl = _fa4_impl(topk_indices_buffer=inputs.topk_indices, index_group=index_group)
+
+    with torch.inference_mode():
+        out, lse = FlashAttnMLASparseFA4Impl.forward_mqa(
+            impl, (inputs.ql_nope, inputs.q_pe), host_cache, inputs.metadata, None
+        )
+
+    assert lse is None
+    # A lane handed the whole batch would concatenate to more rows than this.
+    assert out.shape == (num_tokens, 16, 512)
+    if num_decode_tokens:
+        (fa4,) = calls.fa4
+        decode_topk, decode_counts = (
+            index_group.convert_decode_logical_to_physical_topk.return_value
+        )
+        # Identity, not equality: a sub-slice would break pointer stability.
+        assert fa4["gather_kv_indices"] is decode_topk
+        assert fa4["gather_kv_valid_length"] is decode_counts
+        assert fa4["v"].data_ptr() == hot.data_ptr()
+        # Bounds come from the hot buffer's row count, not the host pool's.
+        assert fa4["seqused_k"].tolist() == [hot_rows] * num_decode_tokens
+    else:
+        assert calls.fa4 == []
+
+    if lane == "decode":
+        assert calls.trtllm == []
+        assert (out == 1.0).all()
+        return
+
+    (trtllm,) = calls.trtllm
+    if lane == "resident":
+        index_group.stage_prefill_rows.assert_not_called()
+        assert trtllm["kv_cache"].data_ptr() == hot.data_ptr()
+        prefill_topk, prefill_counts = (
+            index_group.convert_logical_to_physical_topk.return_value
+        )
+    else:
+        # Staged and mixed both stage; the resident lane is decode-free only.
+        index_group.convert_logical_to_physical_topk.assert_not_called()
+        assert trtllm["kv_cache"].data_ptr() == staged.data_ptr()
+        assert "BLOCK_STRIDE_ROWS" not in triton_convert.call_args.kwargs
+        prefill_topk, prefill_counts = triton_convert.return_value
+    assert trtllm["block_tables"].data_ptr() == prefill_topk.data_ptr()
+    assert trtllm["seq_lens"] is prefill_counts
+    assert (out[:num_decode_tokens] == 1.0).all()
+    assert (out[num_decode_tokens:] == 2.0).all()
+
+
+@pytest.mark.parametrize("hisparse", [False, True])
+def test_fa4_builder_requires_uniform_decodes_only_under_hisparse(
+    monkeypatch, hisparse
+):
+    """Only HiSparse caps the decode window and requires uniform decodes."""
+    from vllm.model_executor.layers.attention.sparse_mla_attention import (
+        SparseMLACommonMetadataBuilder,
+    )
+    from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
+        FlashAttnMLASparseFA4MetadataBuilder,
+    )
+
+    def stub_base_init(self, kv_cache_spec, layer_names, vllm_config, device):
+        # Only the reorder-threshold inputs matter here.
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
+
+    monkeypatch.setattr(SparseMLACommonMetadataBuilder, "__init__", stub_base_init)
+    model_config = SimpleNamespace()
+    model_config.get_num_attention_heads = MethodType(
+        lambda self, parallel_config: 16, model_config
+    )
+    vllm_config = SimpleNamespace(
+        model_config=model_config,
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=3, parallel_drafting=False
+        ),
+        attention_config=SimpleNamespace(
+            hisparse_config=HiSparseConfig() if hisparse else None
+        ),
+    )
+
+    builder = FlashAttnMLASparseFA4MetadataBuilder(
+        None, ["layer"], vllm_config, torch.device("cpu")
+    )
+
+    assert builder.reorder_batch_threshold == (4 if hisparse else 128)
+    assert builder.require_uniform_decodes is hisparse
+
+
+def test_fa4_sparse_autotune_hisparse_decode_runs_decode_lane(monkeypatch):
+    """The warmup hook runs the FA4 decode lane over the hot buffer."""
+    from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
+        FlashAttnMLASparseFA4Impl,
+    )
+
+    block_size, topk, max_num_reqs = 64, 128, 3
+    hot = torch.zeros(5, block_size, 576, dtype=torch.bfloat16)
+    calls = _record_fa4_kernels(monkeypatch, 16, device="cpu")
+    index_group = object.__new__(HiSparseMLAIndexGroup)
+    index_group.caches = [
+        SimpleNamespace(
+            runtime=SimpleNamespace(
+                hot=SimpleNamespace(attention_cache=hot, block_size=block_size),
+                max_num_reqs=max_num_reqs,
+            )
+        )
+    ]
+    impl = _fa4_impl(
+        topk_indices_buffer=torch.zeros(max_num_reqs, topk, dtype=torch.int32),
+        index_group=index_group,
+    )
+
+    with torch.inference_mode():
+        FlashAttnMLASparseFA4Impl.autotune_hisparse_decode(impl, SimpleNamespace())
+
+    (fa4,) = calls.fa4
+    assert fa4["v"].data_ptr() == hot.data_ptr()
+    # The decode lane's cached varlen scalars, keyed on the hot row count.
+    assert fa4["seqused_k"].tolist() == [hot.shape[0] * block_size] * max_num_reqs
+    assert fa4["gather_kv_indices"].shape == (max_num_reqs, topk)
+    assert fa4["gather_kv_valid_length"].tolist() == [topk] * max_num_reqs
+
+
+def test_hisparse_autotune_dispatch_reaches_fa4():
+    """The warmup dispatch is duck-typed, so FA4's hook runs, once per config."""
+    from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
+        autotune_hisparse_flashinfer_attention,
+    )
+
+    def fa4_layer(topk=128):
+        impl = _fa4_impl(
+            topk_indices_buffer=torch.zeros(4, topk, dtype=torch.int32),
+            kv_cache_dtype="auto",
+            index_group=object(),
+            autotune_hisparse_decode=MagicMock(),
+        )
+        return SimpleNamespace(impl=impl, hisparse_cache=object())
+
+    # A distinct top-k width, so only the missing cache can skip this one.
+    first, duplicate, unbound = fa4_layer(), fa4_layer(), fa4_layer(topk=64)
+    unbound.hisparse_cache = None
+    # A non-sparse layer has no hook at all: duck-typing skips it, not crashes.
+    plain = SimpleNamespace(impl=SimpleNamespace(), hisparse_cache=object())
+    runner = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            compilation_config=SimpleNamespace(
+                static_forward_context={
+                    "a": first,
+                    "b": duplicate,
+                    "c": unbound,
+                    "d": plain,
+                }
+            )
+        )
+    )
+
+    autotune_hisparse_flashinfer_attention(runner)
+
+    first.impl.autotune_hisparse_decode.assert_called_once_with(first)
+    # Same key: warmed once for the whole model, not once per layer.
+    duplicate.impl.autotune_hisparse_decode.assert_not_called()
+    unbound.impl.autotune_hisparse_decode.assert_not_called()
+
+
 def _fa4_gate(local_heads, *, dcp_size=1, hisparse=False):
     """``validate_configuration`` on a fixed SM100, not the running GPU's."""
     vllm_config = create_vllm_config(
@@ -3549,16 +3769,13 @@ def test_fa4_sparse_supports_head_counts(monkeypatch, local_heads, dcp_size, sup
 
 
 def test_fa4_sparse_gates_flashinfer_and_hisparse(monkeypatch):
-    """FlashInfer serves the prefill batches, so it is a hard dependency; a
-    HiSparse config has no route through either lane, so the backend has to
-    hand it to the next candidate rather than raise at layer construction."""
+    """FlashInfer is a hard dependency; a HiSparse config must not deflect."""
     import vllm.v1.attention.backends.mla.flashattn_mla_sparse as fa4_sparse
 
     monkeypatch.setattr("vllm.utils.flashinfer.has_flashinfer", lambda: True)
     monkeypatch.setattr(fa4_sparse, "_fa4_cute_mla_available", lambda: None)
 
-    (reason,) = _fa4_gate(16, hisparse=True)
-    assert "HiSparse" in reason
+    assert _fa4_gate(16, hisparse=True) == []
 
     monkeypatch.setattr("vllm.utils.flashinfer.has_flashinfer", lambda: False)
     (reason,) = _fa4_gate(16)
