@@ -919,6 +919,16 @@ class SparseAttnIndexerKpool(CustomOp):
             raise RuntimeError(
                 "Sparse Attention Indexer CUDA op requires DeepGEMM to be installed."
             )
+        _cfg = get_current_vllm_config_or_none()
+        _parallel = _cfg.parallel_config if _cfg is not None else None
+        if (
+            _parallel is not None
+            and _parallel.prefill_context_parallel_size > 1
+            and _parallel.decode_context_parallel_size > 1
+        ):
+            raise NotImplementedError(
+                "SparseAttnIndexerKpool does not support PCP+DCP."
+            )
 
     def forward_native(
         self,
