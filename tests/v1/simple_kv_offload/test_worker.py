@@ -10,6 +10,7 @@ read partially written / stale blocks and silently corrupt the CPU cache.
 from __future__ import annotations
 
 import time
+from contextlib import nullcontext
 from unittest.mock import MagicMock
 
 import pytest
@@ -21,7 +22,13 @@ if not current_platform.is_cuda_alike():
     pytest.skip("Requires CUDA or ROCm", allow_module_level=True)
 
 from tests.v1.attention.utils import dense_kv_cache_tensor, dense_kv_cache_views
+from tests.v1.kv_connector.unit.test_kv_connector_lifecycle import (
+    _make_empty_scheduler_output,
+)
 from vllm.config import CacheConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
+    SimpleCPUOffloadConnector,
+)
 from vllm.v1.core.kv_cache_utils import (
     get_kv_cache_config_from_groups,
     is_kv_cache_spec_uniform,
@@ -41,11 +48,12 @@ from vllm.v1.simple_kv_offload.cuda_mem_ops import (
     CU_MEMCPY_SRC_ACCESS_ORDER_ANY,
     CU_MEMCPY_SRC_ACCESS_ORDER_STREAM,
     build_params,
-    pin_tensor,
 )
 from vllm.v1.simple_kv_offload.disk_backend import DiskBackend
 from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadMetadata
 from vllm.v1.simple_kv_offload.worker import SimpleCPUOffloadWorker
+from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
+from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.utils import allocate_kv_cache
 
 NUM_BLOCKS = 64
@@ -58,8 +66,11 @@ SLEEP_CYCLES = 50_000_000
 
 def _make_backend() -> tuple[DmaCopyBackend, torch.Tensor, torch.Tensor]:
     gpu = {"k": torch.zeros((NUM_BLOCKS, BLOCK_BYTES), dtype=torch.int8, device="cuda")}
-    cpu = {"k": torch.zeros((NUM_BLOCKS, BLOCK_BYTES), dtype=torch.int8, device="cpu")}
-    pin_tensor(cpu["k"])
+    cpu = {
+        "k": torch.zeros(
+            (NUM_BLOCKS, BLOCK_BYTES), dtype=torch.int8, device="cpu", pin_memory=True
+        )
+    }
     low_pri, _ = torch.cuda.Stream.priority_range()
     backend = DmaCopyBackend()
     backend.init(
@@ -70,6 +81,92 @@ def _make_backend() -> tuple[DmaCopyBackend, torch.Tensor, torch.Tensor]:
         torch.cuda.Stream(priority=low_pri),
     )
     return backend, gpu["k"], cpu["k"]
+
+
+@pytest.mark.parametrize("use_v2", [False, True])
+def test_no_forward_step_completes_cpu_store(monkeypatch, use_v2):
+    """A finished request's final store must drain without another model step."""
+    backend, gpu, cpu = _make_backend()
+    worker = SimpleCPUOffloadWorker(None, None, cpu_capacity_bytes=0)
+    worker._backend = backend
+    connector = SimpleCPUOffloadConnector.__new__(SimpleCPUOffloadConnector)
+    connector.worker_handler = worker
+    output = _make_empty_scheduler_output()
+    output.kv_connector_metadata = SimpleCPUOffloadMetadata(
+        store_event=0, store_gpu_blocks=[0], store_cpu_blocks=[0]
+    )
+    module = "vllm.v1.worker.kv_connector_model_runner_mixin"
+    monkeypatch.setattr(f"{module}.get_kv_transfer_group", lambda: connector)
+    monkeypatch.setattr(f"{module}.set_forward_context", lambda *a: nullcontext())
+    monkeypatch.setattr(f"{module}.get_forward_context", lambda: None)
+    try:
+        gpu.fill_(91)
+        if use_v2:
+            active = ActiveKVConnector.__new__(ActiveKVConnector)
+            active.kv_connector = connector
+            active._disabled = False
+            active._pending_load_start = False
+            module = "vllm.v1.worker.gpu.kv_connector"
+            monkeypatch.setattr(f"{module}.is_forward_context_available", lambda: True)
+            monkeypatch.setattr(f"{module}.get_forward_context", lambda: None)
+            result = active.no_forward(output)
+        else:
+            result = KVConnectorModelRunnerMixin.kv_connector_no_forward(output, None)
+        completion = (
+            result.kv_connector_output.kv_connector_worker_meta
+            if result.kv_connector_output is not None
+            else None
+        )
+        deadline = time.monotonic() + 5
+        while completion is None and time.monotonic() < deadline:
+            connector.get_finished(set())
+            completion = connector.build_connector_worker_meta()
+            time.sleep(0.001)
+        assert completion is not None, "CPU store never completed on the empty step"
+        assert completion.completed_store_events == {0: 1}
+        assert torch.equal(cpu[0], gpu[0].cpu())
+    finally:
+        backend.shutdown()
+
+
+def test_deferred_store_waits_for_draft_forward(monkeypatch):
+    """Target completion must not submit the store before draft finalization."""
+    backend, gpu, cpu = _make_backend()
+    worker = SimpleCPUOffloadWorker(None, None, cpu_capacity_bytes=0)
+    worker._backend = backend
+    connector = SimpleCPUOffloadConnector.__new__(SimpleCPUOffloadConnector)
+    connector.worker_handler = worker
+    output = _make_empty_scheduler_output()
+    output.kv_connector_metadata = SimpleCPUOffloadMetadata(
+        store_event=0, store_gpu_blocks=[0], store_cpu_blocks=[0]
+    )
+    module = "vllm.v1.worker.kv_connector_model_runner_mixin"
+    monkeypatch.setattr(f"{module}.get_kv_transfer_group", lambda: connector)
+    monkeypatch.setattr(f"{module}.has_kv_transfer_group", lambda: True)
+    monkeypatch.setattr(f"{module}.get_forward_context", lambda: None)
+    launch = MagicMock(wraps=backend.launch_copy)
+    monkeypatch.setattr(backend, "launch_copy", launch)
+    try:
+        with KVConnectorModelRunnerMixin._get_kv_connector_output(
+            output, defer_finalize=True
+        ):
+            gpu.fill_(17)
+        launch.assert_not_called()
+        gpu.fill_(91)
+        KVConnectorModelRunnerMixin.finalize_kv_connector()
+        assert launch.call_count == 1
+        completion = None
+        deadline = time.monotonic() + 5
+        while completion is None and time.monotonic() < deadline:
+            connector.get_finished(set())
+            completion = connector.build_connector_worker_meta()
+            time.sleep(0.001)
+        assert completion is not None
+        assert completion.completed_store_events == {0: 1}
+        assert torch.equal(cpu[0], gpu[0].cpu())
+        assert launch.call_count == 1
+    finally:
+        backend.shutdown()
 
 
 def _drive_store(
