@@ -281,14 +281,14 @@ at::Tensor causal_conv1d_fwd_cpu(
     const std::optional<at::Tensor>& query_start_loc,
     const std::optional<at::Tensor>& cache_indices,
     const std::optional<at::Tensor>& has_initial_state, bool silu_activation,
-    int64_t pad_slot_id, bool is_vnni);
+    int64_t pad_slot_id, bool is_weight_packed);
 
 at::Tensor causal_conv1d_update_cpu(
     const at::Tensor& x, const at::Tensor& conv_states,
     const at::Tensor& weight, const std::optional<at::Tensor>& bias,
     bool silu_activation, const std::optional<at::Tensor>& num_accepted_tokens,
     const std::optional<at::Tensor>& conv_state_indices, int64_t pad_slot_id,
-    bool is_vnni);
+    bool is_weight_packed);
 
 void activation_lut_bf16(torch::Tensor& out, torch::Tensor& input,
                          const std::string& activation);
@@ -510,6 +510,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       " -> ()");
   ops.impl("activation_lut_bf16", torch::kCPU, &activation_lut_bf16);
 
+#endif  // (defined(__aarch64__) && !defined(__APPLE__))
+
+#if (defined(__aarch64__) && defined(ARM_BF16_SUPPORT) && \
+     !defined(__APPLE__)) ||                              \
+    (defined(__AVX512BF16__) && defined(__AVX512F__) &&   \
+     defined(__AVX512VNNI__))
+
+  // Adapted from sglang: casual_conv1d kernels
   ops.def("causal_conv1d_weight_pack(Tensor weight) -> Tensor");
   ops.impl("causal_conv1d_weight_pack", torch::kCPU,
            &causal_conv1d_weight_pack);
@@ -518,7 +526,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "causal_conv1d_fwd_cpu(Tensor x, Tensor weight, Tensor? bias, Tensor? "
       "conv_states, Tensor? query_start_loc,"
       "Tensor? cache_indices, Tensor? has_initial_state, bool silu_activation, "
-      "int pad_slot_id, bool is_vnni) -> "
+      "int pad_slot_id, bool is_weight_packed) -> "
       "Tensor");
   ops.impl("causal_conv1d_fwd_cpu", torch::kCPU, &causal_conv1d_fwd_cpu);
 
@@ -527,9 +535,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "weight, Tensor? bias, bool silu_activation,"
       "Tensor? num_accepted_tokens, Tensor? conv_state_indices, int "
       "pad_slot_id, "
-      "bool is_vnni) -> Tensor");
+      "bool is_weight_packed) -> Tensor");
   ops.impl("causal_conv1d_update_cpu", torch::kCPU, &causal_conv1d_update_cpu);
-#endif  // (defined(__aarch64__) && !defined(__APPLE__))
+#endif
 
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
@@ -678,24 +686,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "quantize_fp8e4m3_vec(Tensor input, bool channelwise, Tensor? scale_opt) "
       "-> (Tensor, Tensor)");
   ops.impl("quantize_fp8e4m3_vec", torch::kCPU, &quantize_fp8e4m3_vec);
-
-  ops.def("causal_conv1d_weight_pack(Tensor weight) -> Tensor");
-  ops.impl("causal_conv1d_weight_pack", torch::kCPU,
-           &causal_conv1d_weight_pack);
-  ops.def(
-      "causal_conv1d_fwd_cpu(Tensor x, Tensor weight, Tensor? bias, Tensor? "
-      "conv_states, Tensor? query_start_loc,"
-      "Tensor? cache_indices, Tensor? has_initial_state, bool silu_activation, "
-      "int pad_slot_id, bool is_vnni) -> "
-      "Tensor");
-  ops.impl("causal_conv1d_fwd_cpu", torch::kCPU, &causal_conv1d_fwd_cpu);
-  ops.def(
-      "causal_conv1d_update_cpu(Tensor x, Tensor(a!) conv_states, Tensor "
-      "weight, Tensor? bias, bool silu_activation,"
-      "Tensor? num_accepted_tokens, Tensor? conv_state_indices, int "
-      "pad_slot_id, "
-      "bool is_vnni) -> Tensor");
-  ops.impl("causal_conv1d_update_cpu", torch::kCPU, &causal_conv1d_update_cpu);
 
   // Adapted from sglang: MLA CPU kernels (AMX-only, DeepSeek V2/V3/R1)
   ops.def(
