@@ -24,6 +24,7 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    MergedColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
 )
@@ -50,10 +51,21 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 
 logger = init_logger(__name__)
+
+
+def _should_use_fused_qkv_gate(vllm_config: VllmConfig) -> bool:
+    return (
+        current_platform.is_cuda()
+        and get_tensor_model_parallel_world_size() == 1
+        and vllm_config.model_config.dtype == torch.bfloat16
+        and vllm_config.quant_config is None
+        and vllm_config.lora_config is None
+    )
 
 
 class AfmoeMoE(nn.Module):
@@ -164,6 +176,7 @@ class AfmoeAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
+        use_fused_qkv_gate: bool = False,
     ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
@@ -192,15 +205,44 @@ class AfmoeAttention(nn.Module):
         self.is_local_attention = config.layer_types[layer_idx] == "sliding_attention"
         self.sliding_window = config.sliding_window if self.is_local_attention else None
 
-        self.qkv_proj = QKVParallelLinear(
-            self.hidden_size,
-            self.head_dim,
-            self.total_num_heads,
-            self.total_num_kv_heads,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj",
-        )
+        self.use_fused_qkv_gate = use_fused_qkv_gate
+        self.qkv_gate_proj: MergedColumnParallelLinear | None
+        self.qkv_proj: QKVParallelLinear | None
+        self.gate_proj: ColumnParallelLinear | None
+        if self.use_fused_qkv_gate:
+            self.qkv_gate_proj = MergedColumnParallelLinear(
+                self.hidden_size,
+                [
+                    self.total_num_heads * self.head_dim,
+                    self.total_num_kv_heads * self.head_dim,
+                    self.total_num_kv_heads * self.head_dim,
+                    self.total_num_heads * self.head_dim,
+                ],
+                bias=False,
+                prefix=f"{prefix}.qkv_gate_proj",
+            )
+            self.qkv_proj = None
+            self.gate_proj = None
+        else:
+            self.qkv_gate_proj = None
+            self.qkv_proj = QKVParallelLinear(
+                self.hidden_size,
+                self.head_dim,
+                self.total_num_heads,
+                self.total_num_kv_heads,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkv_proj",
+            )
+
+            # Gating projection
+            self.gate_proj = ColumnParallelLinear(
+                hidden_size,
+                self.total_num_heads * self.head_dim,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.gate_proj",
+            )
 
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
@@ -208,15 +250,6 @@ class AfmoeAttention(nn.Module):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
-        )
-
-        # Gating projection
-        self.gate_proj = ColumnParallelLinear(
-            hidden_size,
-            self.total_num_heads * self.head_dim,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.gate_proj",
         )
 
         # Q/K normalization
@@ -251,9 +284,18 @@ class AfmoeAttention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
-        gate, _ = self.gate_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        if self.use_fused_qkv_gate:
+            assert self.qkv_gate_proj is not None
+            qkv_gate, _ = self.qkv_gate_proj(hidden_states)
+            q, k, v, gate = qkv_gate.split(
+                [self.q_size, self.kv_size, self.kv_size, self.q_size], dim=-1
+            )
+        else:
+            assert self.qkv_proj is not None
+            assert self.gate_proj is not None
+            qkv, _ = self.qkv_proj(hidden_states)
+            gate, _ = self.gate_proj(hidden_states)
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         # Apply Q/K normalization
         q = self.q_norm(q.reshape(-1, self.num_heads, self.head_dim)).reshape(q.shape)
@@ -281,6 +323,7 @@ class AfmoeDecoderLayer(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
+        use_fused_qkv_gate: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -302,6 +345,7 @@ class AfmoeDecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
+            use_fused_qkv_gate=use_fused_qkv_gate,
         )
 
         # MoE or dense FFN
@@ -373,6 +417,10 @@ class AfmoeModel(nn.Module, EagleModelMixin):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         enable_eplb = vllm_config.parallel_config.enable_eplb
+        # The generic merged layout does not implement QKV's replicated KV-head
+        # sharding. Keep the existing modules for TP, quantized, LoRA, and
+        # non-CUDA contexts until each has an independently qualified layout.
+        self.use_fused_qkv_gate = _should_use_fused_qkv_gate(vllm_config)
         self.config = config
 
         self.vocab_size = config.vocab_size
@@ -393,6 +441,7 @@ class AfmoeModel(nn.Module, EagleModelMixin):
                 quant_config=quant_config,
                 prefix=prefix,
                 enable_eplb=enable_eplb,
+                use_fused_qkv_gate=self.use_fused_qkv_gate,
             ),
             prefix=f"{prefix}.layers",
         )
@@ -496,6 +545,18 @@ class AfmoeForCausalLM(
         },
     )
 
+    hf_to_vllm_fused_mapper = (
+        WeightsMapper(
+            orig_to_new_stacked={
+                ".self_attn.q_proj": (".self_attn.qkv_gate_proj", 0),
+                ".self_attn.k_proj": (".self_attn.qkv_gate_proj", 1),
+                ".self_attn.v_proj": (".self_attn.qkv_gate_proj", 2),
+                ".self_attn.gate_proj": (".self_attn.qkv_gate_proj", 3),
+            },
+        )
+        | hf_to_vllm_mapper
+    )
+
     fall_back_to_pt_during_load = False
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -583,4 +644,9 @@ class AfmoeForCausalLM(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        mapper = (
+            self.hf_to_vllm_fused_mapper
+            if self.model.use_fused_qkv_gate
+            else self.hf_to_vllm_mapper
+        )
+        return loader.load_weights(weights, mapper=mapper)
