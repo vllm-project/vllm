@@ -2709,15 +2709,15 @@ fn python_msgpack_fixtures_match_rust_encoding() {
         decode_value(&rmp_serde::to_vec_named(&expected_multimodal_request.mm_features).unwrap());
     assert_eq!(python_mm_features, rust_mm_features);
 
-    let decoded_sampling_mask_outputs: EngineCoreOutputs =
-        rmp_serde::from_slice(&sampling_mask_outputs_bytes).unwrap();
+    let decoded_sampling_mask_outputs =
+        decode_engine_core_outputs(&[bytes::Bytes::from(sampling_mask_outputs_bytes)]).unwrap();
     let sampling_mask_output =
         &decoded_sampling_mask_outputs.as_request_batch().unwrap().outputs[0];
     assert!(sampling_mask_output.mm_cache_miss_hashes.is_none());
-    assert!(matches!(
-        sampling_mask_output.new_sampling_mask.as_ref(),
-        Some(Value::Array(fields)) if fields.len() == 3
-    ));
+    assert_eq!(
+        sampling_mask_output.new_sampling_mask.as_ref().unwrap().rows,
+        vec![vec![2, 12, 16, 17, 18]]
+    );
 
     let decoded_outputs: EngineCoreOutputs = rmp_serde::from_slice(&outputs_bytes).unwrap();
     expect_test::expect![[r#"

@@ -30,6 +30,7 @@ pub mod multimodal;
 pub mod output;
 pub mod request;
 pub mod sampling;
+pub mod sampling_mask;
 pub mod stats;
 pub mod structured_outputs;
 pub mod tensor;
