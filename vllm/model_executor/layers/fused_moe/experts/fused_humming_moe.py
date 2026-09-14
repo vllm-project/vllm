@@ -748,6 +748,25 @@ class HummingIndexedExperts(HummingExpertsBase):
         moe_kwargs1.update(moe_common_kwargs)
         moe_kwargs2.update(moe_common_kwargs)
 
+        w2_block_size = 64
+        for lower, upper, config in self.w2_tuning_config:
+            if lower < valid_shape_m <= upper:
+                w2_block_size = config["block_shape"][0]
+                break
+        if w2_block_size != moe_block_size:
+            sorted_ids2, expert_ids2, num_tokens_padded2 = moe_align_block_size(
+                topk_ids=topk_ids,
+                block_size=w2_block_size,
+                num_experts=self.global_num_experts,
+                expert_map=expert_map,
+                ignore_invalid_experts=True,
+            )
+            moe_kwargs2.update(
+                sorted_ids=sorted_ids2,
+                expert_ids=expert_ids2,
+                num_tokens_padded=num_tokens_padded2,
+            )
+
         return moe_kwargs1, moe_kwargs2, scatter_idx
 
     def apply(

@@ -1306,6 +1306,56 @@ def _make_humming_indexed_experts(activation: MoEActivation):
     return experts, layer
 
 
+@pytest.mark.parametrize("valid_shape_m", [8192, 8193])
+@pytest.mark.parametrize("w2_block_size", [64, 96, 128])
+def test_humming_indexed_routing_matches_each_projection_tile(
+    valid_shape_m: int, w2_block_size: int
+):
+    """Independently tuned projections preserve routed rows and expert identity."""
+    from types import SimpleNamespace
+
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        HummingIndexedExperts,
+    )
+
+    topk_ids = torch.tensor([[0, 1], [1, 2], [2, 0]], device="cuda")
+    expert_map = torch.tensor([1, -1, 0], dtype=torch.int32, device="cuda")
+    experts = SimpleNamespace(
+        global_num_experts=3,
+        estimate_local_valid_shape_m=lambda _: valid_shape_m,
+        w13_tuning_config=[
+            [0, 8192, {"block_shape": [64, 128, 64]}],
+            [8192, 16384, {"block_shape": [128, 128, 64]}],
+        ],
+        w2_tuning_config=[
+            [0, 8192, {"block_shape": [64, 128, 64]}],
+            [8192, 16384, {"block_shape": [w2_block_size, 128, 64]}],
+        ],
+        compute_config_str="compute",
+        w13_tuning_config_str="w13",
+        w2_tuning_config_str="w2",
+    )
+    first, second, _ = HummingIndexedExperts.prepare_humming_moe_kwargs(
+        experts, topk_ids, expert_map, None
+    )
+    block_sizes = (64, 64) if valid_shape_m == 8192 else (128, w2_block_size)
+    expected_rows = torch.where(expert_map[topk_ids.flatten()] >= 0)[0]
+    for kwargs, block_size in zip((first, second), block_sizes):
+        padded = kwargs["num_tokens_padded"].item()
+        assert padded % block_size == 0
+        rows = kwargs["sorted_ids"][:padded].long()
+        valid = rows < topk_ids.numel()
+        torch.testing.assert_close(rows[valid].sort().values, expected_rows)
+        routed_experts = kwargs["expert_ids"][: padded // block_size]
+        torch.testing.assert_close(
+            routed_experts.repeat_interleave(block_size)[valid],
+            expert_map[topk_ids.flatten()[rows[valid]]],
+        )
+    assert (first["top_k"], second["top_k"]) == (2, 1)
+    for key in ("sorted_ids", "expert_ids", "num_tokens_padded"):
+        assert (first[key] is second[key]) == (block_sizes[0] == block_sizes[1])
+
+
 @pytest.mark.parametrize("activation", list(MoEActivation))
 def test_humming_activation_metadata_tracks_shared_apply(activation: MoEActivation):
     from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
