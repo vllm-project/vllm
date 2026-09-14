@@ -454,7 +454,9 @@ if triton_kernels_version is not None:
             )
             from triton_kernels.tensor import make_ragged_tensor_metadata
 
-            if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx950
+
+            if on_gfx950():
                 # block_n=64/block_k=256 fit gfx950's 160KB LDS + the CDNA4
                 # scale swizzle; block_m=32 avoids an autotuner block_m=128
                 # padding cliff (~15x) at decode-sized ragged MoE shapes.
