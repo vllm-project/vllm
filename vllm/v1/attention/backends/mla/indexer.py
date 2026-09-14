@@ -770,6 +770,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self.pcp_world_size = parallel_config.prefill_context_parallel_size
         self.use_pcp = self.pcp_world_size > 1
+        self.pcp_rank = get_pcp_group().rank_in_group if self.use_pcp else 0
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
         # NOTE(Chen):an estimated max size of flattened_kv. Need to double check.
         self.max_prefill_buffer_size = get_max_prefill_buffer_size(self.vllm_config)
@@ -1181,8 +1182,15 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 factor = self.kv_cache_spec.block_size // kernel_block_size
                 indexer_block_table = (block_table[:, ::factor] // factor).contiguous()
             padded_num_tokens = num_tokens
-            if self.pcp_world_size > 1:
+            token_slot_mapping = slot_mapping
+            if self.use_pcp:
+                # The gathered layout holds each rank's local tokens, padded, in
+                # rank order, so this rank's segment lines up with query_start_loc.
                 padded_num_tokens = slot_mapping.shape[0] // self.pcp_world_size
+                token_slot_mapping = slot_mapping[
+                    self.pcp_rank * padded_num_tokens : (self.pcp_rank + 1)
+                    * padded_num_tokens
+                ]
             compressed_slot_mapping = get_compressed_slot_mapping(
                 num_tokens,
                 query_start_loc,
@@ -1191,8 +1199,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 self.kv_cache_spec.num_states,
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,
-                # Under PCP the token slot mapping is in the gathered layout.
-                token_slot_mapping=None if self.use_pcp else slot_mapping,
+                token_slot_mapping=token_slot_mapping,
             )
             if self.pcp_world_size > 1:
                 compressed_slot_mapping = get_pcp_group().all_gather(
