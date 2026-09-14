@@ -605,6 +605,7 @@ class TestHealthyBypass:
         bp = self._make_detector()
         bp._completions = _BP_WARMUP
         bp._healthy_streak = EMABackpressureDetector._HEALTHY_THRESHOLD
+        bp._ema = _BP_LOW_WATER_S
         bp._last_update = time.monotonic()
         block_bytes = 16
         slow_s_per_mib = _BP_HIGH_WATER_S * 2
