@@ -2143,13 +2143,15 @@ class rocm_aiter_ops:
             if not current_platform.is_rocm():
                 return
 
-            from vllm.platforms.rocm import on_gfx11
+            from vllm.platforms.rocm import on_gfx11, on_gfx950
 
-            if on_gfx11() and not _OPS_REGISTERED:
+            # This op has self-contained Triton/C++ implementations on gfx11
+            # and gfx950.  Only its optional top-k fast path comes from aiter.
+            if (on_gfx11() or on_gfx950()) and not _OPS_REGISTERED:
                 direct_register_custom_op(
                     op_name="rocm_aiter_sparse_attn_indexer",
                     op_func=rocm_aiter_sparse_attn_indexer,
-                    mutates_args=["topk_indices_buffer"],
+                    mutates_args=["topk_indices_buffer", "candidate_blocks"],
                     fake_impl=rocm_aiter_sparse_attn_indexer_fake,
                     dispatch_key=current_platform.dispatch_key,
                 )
@@ -2327,7 +2329,7 @@ class rocm_aiter_ops:
             direct_register_custom_op(
                 op_name="rocm_aiter_sparse_attn_indexer",
                 op_func=rocm_aiter_sparse_attn_indexer,
-                mutates_args=["topk_indices_buffer"],
+                mutates_args=["topk_indices_buffer", "candidate_blocks"],
                 fake_impl=rocm_aiter_sparse_attn_indexer_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
@@ -3595,6 +3597,137 @@ class rocm_aiter_ops:
             post_mix.view(*outer_shape, hc_mult, 1),
             comb_mix.view(*outer_shape, hc_mult, hc_mult),
             layer_input.view(*outer_shape, hidden_size),
+        )
+
+    @staticmethod
+    def mhc_pre_delayed(
+        residual: torch.Tensor,
+        fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        rms_eps: float,
+        hc_pre_eps: float,
+        hc_sinkhorn_eps: float,
+        hc_post_mult_value: float,
+        sinkhorn_repeat: int,
+        pre_mix: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """mHC pre using the pre-mix carried from the previous sublayer.
+
+        Same gates as :meth:`mhc_pre`, but the stream collapse applies the
+        caller's ``pre_mix`` instead of the one computed here, and the one
+        computed here is returned for the next sublayer seam. AITER has no
+        single kernel for that shape, so drive its two stages directly:
+        ``mhc_pre_big_fuse`` still produces the post and comb gates (including
+        every sinkhorn iteration), while the pre gate is recovered from the
+        same split-k GEMM output and the collapse is done by the Triton
+        kernel. ``mhc_pre_big_fuse`` also writes a collapse we do not use;
+        that redundant store is the price of not having a native delayed
+        kernel, and is small next to the ~140 launches it replaces.
+
+        Returns:
+            post_mix: shape (..., hc_mult, 1), dtype torch.float32
+            comb_mix: shape (..., hc_mult, hc_mult), dtype torch.float32
+            layer_input: shape (..., hidden_size), dtype torch.bfloat16
+            next_pre_mix: shape (..., hc_mult), dtype torch.float32
+        """
+        from aiter.ops.mhc import (
+            get_mhc_pre_splitk,
+            mhc_pre_big_fuse,
+            mhc_pre_gemm_sqrsum,
+        )
+
+        assert residual.dtype == torch.bfloat16
+        assert fn.dtype == torch.float32
+        assert hc_scale.dtype == torch.float32
+        assert hc_base.dtype == torch.float32
+
+        hc_mult = residual.shape[-2]
+        hidden_size = residual.shape[-1]
+        hc_mult3 = hc_mult * 2 + hc_mult * hc_mult
+        hc_hidden_size = hc_mult * hidden_size
+
+        assert fn.shape == (hc_mult3, hc_hidden_size)
+        assert hc_scale.shape == (3,)
+        assert hc_base.shape == (hc_mult3,)
+
+        outer_shape = residual.shape[:-2]
+        residual_flat = residual.view(-1, hc_mult, hidden_size)
+        num_tokens = residual_flat.shape[0]
+        device = residual_flat.device
+
+        if num_tokens == 0:
+            return (
+                torch.empty(0, hc_mult, 1, dtype=torch.float32, device=device),
+                torch.empty(0, hc_mult, hc_mult, dtype=torch.float32, device=device),
+                torch.empty(0, hidden_size, dtype=torch.bfloat16, device=device),
+                torch.empty(0, hc_mult, dtype=torch.float32, device=device),
+            )
+
+        pre_mix_flat = None if pre_mix is None else pre_mix.view(-1, hc_mult)
+
+        # AITER's Python wrappers allocate without explicit device arguments.
+        with torch.device(device):
+            splitk, tile_k = get_mhc_pre_splitk(num_tokens, hc_hidden_size)
+            # AITER pads the GEMM output to a multiple of 32 columns.
+            gemm_pad = torch.empty(
+                splitk,
+                num_tokens,
+                (hc_mult3 + 31) // 32 * 32,
+                dtype=torch.float32,
+                device=device,
+            )
+            gemm_out = gemm_pad[:, :, :hc_mult3]
+            sqrsum = torch.empty(splitk, num_tokens, dtype=torch.float32, device=device)
+            mhc_pre_gemm_sqrsum(gemm_out, sqrsum, residual_flat, fn, tile_k, 0)
+
+            post_mix = torch.empty(
+                num_tokens, hc_mult, 1, dtype=torch.float32, device=device
+            )
+            comb_mix = torch.empty(
+                num_tokens, hc_mult, hc_mult, dtype=torch.float32, device=device
+            )
+            unused_collapse = torch.empty(
+                num_tokens, hidden_size, dtype=torch.bfloat16, device=device
+            )
+            mhc_pre_big_fuse(
+                post_mix,
+                comb_mix,
+                unused_collapse,
+                gemm_out,
+                sqrsum,
+                hc_scale,
+                hc_base,
+                residual_flat,
+                rms_eps,
+                hc_pre_eps,
+                hc_sinkhorn_eps,
+                hc_post_mult_value,
+                sinkhorn_repeat,
+            )
+
+        next_pre_mix = torch.ops.vllm.mhc_pre_mix_triton(
+            gemm_out,
+            sqrsum,
+            hc_scale,
+            hc_base,
+            hc_mult,
+            hc_hidden_size,
+            rms_eps,
+            hc_pre_eps,
+        )
+
+        if pre_mix_flat is None:
+            # Model entry selects residual stream zero.
+            layer_input = residual_flat[:, 0]
+        else:
+            layer_input = torch.ops.vllm.hc_collapse_triton(residual_flat, pre_mix_flat)
+
+        return (
+            post_mix.view(*outer_shape, hc_mult, 1),
+            comb_mix.view(*outer_shape, hc_mult, hc_mult),
+            layer_input.view(*outer_shape, hidden_size),
+            next_pre_mix.view(*outer_shape, hc_mult),
         )
 
     @staticmethod
