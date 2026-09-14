@@ -14,6 +14,7 @@ from torch import nn
 from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
     SkinnyGemmConfig,
 )
+from vllm.models.deepseek_v4_1.nvidia import low_latency_gemm as dsv41_gemm
 from vllm.models.deepseek_v32.nvidia import glm52_low_latency_gemm as glm52_gemm
 from vllm.models.kimi_k3.nvidia import low_latency_gemm as k3_gemm
 from vllm.models.kimi_k3.nvidia.low_latency_gemm import KIMI_K3_PROJECTIONS
@@ -1332,3 +1333,419 @@ def test_fallback_preserves_default_method() -> None:
     output = method.apply(SimpleNamespace(weight=weight), x)
 
     torch.testing.assert_close(output, torch.nn.functional.linear(x, weight))
+
+
+# ---------------------------------------------------------------------------
+# DeepSeek-V4.1 skinny GEMM dispatch (SM100, 20 measured cells).
+# ---------------------------------------------------------------------------
+
+# Mirrors dsv41_gemm.DSV41_PROJECTIONS_SM100. SIMT tuples are (bm, bn) with
+# warps=4 throughout; CuTe tuples are (block_size, outputs_per_block,
+# k_unroll, vector_width, static_k); ll tuples are (M, bs) dotprod block sizes.
+DSV41_EXPECTED_SIMT = {
+    (1792, 5120): {1: (1, 4)},
+    (1024, 4096): {1: (1, 1), 2: (1, 4), 4: (4, 2)},
+    (5120, 1024): {1: (1, 8), 2: (2, 8)},
+    (32, 5120): {4: (2, 4)},
+}
+DSV41_EXPECTED_CUTE = {
+    (32, 5120): {
+        1: (160, 4, 1, 8, 5120),
+        2: (160, 4, 1, 8, 5120),
+    },
+    (128, 512): {
+        1: (64, 2, 2, 8, None),
+        2: (64, 2, 2, 8, None),
+        4: (64, 2, 2, 8, None),
+    },
+    (16160, 5120): {
+        1: (64, 4, 1, 8, 5120),
+        2: (64, 4, 1, 8, 5120),
+    },
+}
+DSV41_EXPECTED_LL = {
+    (1024, 5120): {1: 256, 2: 128, 4: 128},
+    (512, 5120): {1: 256, 2: 256, 4: 128},
+}
+
+DSV41_TABLE = dsv41_gemm.DSV41_PROJECTIONS_SM100
+
+DSV41_CUTE_CASES = [
+    (n, k, num_tokens, config)
+    for (n, k), spec in DSV41_TABLE.items()
+    for num_tokens, config in spec.cute_configs
+]
+
+DSV41_LL_CASES = [
+    (n, k, num_tokens, bs)
+    for (n, k), spec in DSV41_TABLE.items()
+    for num_tokens, bs in spec.ll_dotprod_bs
+]
+
+
+def _dsv41_config_tuple(config: SkinnyGemmConfig) -> tuple:
+    return (
+        config.block_size,
+        config.outputs_per_block,
+        config.k_unroll,
+        config.vector_width,
+        config.static_k,
+    )
+
+
+def test_dsv41_table_matches_measured_cells() -> None:
+    assert len(DSV41_TABLE) == 8
+    assert (
+        sum(
+            len(spec.cute_configs) + len(spec.simt_configs) + len(spec.ll_dotprod_bs)
+            for spec in DSV41_TABLE.values()
+        )
+        == 20
+    )
+    simt = {
+        (n, k): {m: (config.bm, config.bn) for m, config in spec.simt_configs}
+        for (n, k), spec in DSV41_TABLE.items()
+        if spec.simt_configs
+    }
+    assert simt == DSV41_EXPECTED_SIMT
+    assert all(
+        config.warps == 4
+        for spec in DSV41_TABLE.values()
+        for _, config in spec.simt_configs
+    )
+    cute = {
+        (n, k): {m: _dsv41_config_tuple(config) for m, config in spec.cute_configs}
+        for (n, k), spec in DSV41_TABLE.items()
+        if spec.cute_configs
+    }
+    assert cute == DSV41_EXPECTED_CUTE
+    ll = {
+        (n, k): dict(spec.ll_dotprod_bs)
+        for (n, k), spec in DSV41_TABLE.items()
+        if spec.ll_dotprod_bs
+    }
+    assert ll == DSV41_EXPECTED_LL
+    # The MXFP8 SIMT rows agree with the fused_wqa_wkv/wo_a/wo_b projections;
+    # wo_a additionally requires the (1, 1024, 4096) gated chain shape.
+    assert {(n, k) for (n, k), spec in DSV41_TABLE.items() if spec.mxfp8} == {
+        (1792, 5120),
+        (1024, 4096),
+        (5120, 1024),
+    }
+
+
+@pytest.mark.parametrize(
+    "capability,swaps",
+    [((10, 0), True), ((9, 0), False), ((10, 3), False), ((12, 0), False)],
+)
+def test_dsv41_installation_requires_sm100(
+    monkeypatch: pytest.MonkeyPatch,
+    capability: tuple[int, int],
+    swaps: bool,
+) -> None:
+    class FakeLinear(nn.Module):
+        def __init__(self, quant_method: object, n: int, k: int) -> None:
+            super().__init__()
+            self.quant_method = quant_method
+            self.weight = torch.empty(n, k, dtype=torch.bfloat16)
+
+    class FakeHead(nn.Module):
+        def __init__(self, n: int, k: int) -> None:
+            super().__init__()
+            self.quant_method = dsv41_gemm.UnquantizedEmbeddingMethod()
+            self.weight = torch.empty(n, k, dtype=torch.bfloat16)
+
+    root = nn.Module()
+    root.weights_proj = FakeLinear(dsv41_gemm.UnquantizedLinearMethod(), 32, 5120)
+    root.wk = FakeLinear(dsv41_gemm.UnquantizedLinearMethod(), 128, 512)
+    root.lm_head = FakeHead(16160, 5120)
+    quantized_method = object()
+    root.quantized = FakeLinear(quantized_method, 32, 5120)
+    root.unlisted = FakeLinear(dsv41_gemm.UnquantizedLinearMethod(), 1234, 5678)
+    # ll-only rows (compressor scores) keep the original method: they dispatch
+    # at the model layer, not by quant-method replacement.
+    root.fused_wkv_wgate = FakeLinear(dsv41_gemm.UnquantizedLinearMethod(), 1024, 5120)
+
+    monkeypatch.setattr(dsv41_gemm, "LinearBase", FakeLinear)
+    monkeypatch.setattr(dsv41_gemm, "ParallelLMHead", FakeHead)
+    monkeypatch.setattr(
+        dsv41_gemm.current_platform,
+        "is_device_capability",
+        lambda cc: cc == capability,
+    )
+    monkeypatch.setattr(
+        dsv41_gemm.shape_dynamic_skinny_gemm, "is_available", lambda: True
+    )
+    warmup_configs: set[SkinnyGemmConfig] = set()
+    monkeypatch.setattr(
+        dsv41_gemm.shape_dynamic_skinny_gemm,
+        "request_warmup_configs",
+        lambda dtype, configs: warmup_configs.update(configs),
+    )
+    warmup_calls: list[bool] = []
+    monkeypatch.setattr(
+        dsv41_gemm, "_warmup_measured_kernels", lambda: warmup_calls.append(True)
+    )
+    monkeypatch.setattr(dsv41_gemm, "_ACTIVE", False)
+    vllm_config = SimpleNamespace(
+        lora_config=None,
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+    )
+
+    dsv41_gemm.enable_dsv41_low_latency_gemm(root, vllm_config)
+
+    if swaps:
+        assert isinstance(
+            root.weights_proj.quant_method, dsv41_gemm.Dsv41LowLatencyLinearMethod
+        )
+        assert isinstance(root.wk.quant_method, dsv41_gemm.Dsv41LowLatencyLinearMethod)
+        assert isinstance(
+            root.lm_head.quant_method, dsv41_gemm.Dsv41LowLatencyEmbeddingMethod
+        )
+        assert dsv41_gemm._ACTIVE is True
+        assert warmup_configs == {
+            config for spec in DSV41_TABLE.values() for _, config in spec.cute_configs
+        }
+        assert warmup_calls
+    else:
+        assert (
+            type(root.weights_proj.quant_method) is dsv41_gemm.UnquantizedLinearMethod
+        )
+        assert dsv41_gemm._ACTIVE is False
+        assert not warmup_configs
+        assert not warmup_calls
+    assert root.quantized.quant_method is quantized_method
+    assert type(root.unlisted.quant_method) is dsv41_gemm.UnquantizedLinearMethod
+    assert type(root.fused_wkv_wgate.quant_method) is dsv41_gemm.UnquantizedLinearMethod
+
+
+@pytest.mark.parametrize("lora_config", [None, object()])
+def test_dsv41_enable_respects_lora(
+    monkeypatch: pytest.MonkeyPatch, lora_config: object
+) -> None:
+    class FakeLinear(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.quant_method = dsv41_gemm.UnquantizedLinearMethod()
+            self.weight = torch.empty(32, 5120, dtype=torch.bfloat16)
+
+    root = nn.Module()
+    root.projection = FakeLinear()
+    monkeypatch.setattr(dsv41_gemm, "LinearBase", FakeLinear)
+    monkeypatch.setattr(
+        dsv41_gemm.current_platform,
+        "is_device_capability",
+        lambda cc: cc == (10, 0),
+    )
+    monkeypatch.setattr(dsv41_gemm, "_ACTIVE", False)
+    vllm_config = SimpleNamespace(
+        lora_config=lora_config,
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+    )
+
+    dsv41_gemm.enable_dsv41_low_latency_gemm(root, vllm_config)
+
+    if lora_config is None:
+        assert isinstance(
+            root.projection.quant_method, dsv41_gemm.Dsv41LowLatencyLinearMethod
+        )
+        assert dsv41_gemm._ACTIVE is True
+    else:
+        # LoRA hooks run in module forward, which the skinny branches bypass.
+        assert type(root.projection.quant_method) is dsv41_gemm.UnquantizedLinearMethod
+        assert dsv41_gemm._ACTIVE is False
+
+
+def test_dsv41_enable_respects_dtype(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeLinear(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.quant_method = dsv41_gemm.UnquantizedLinearMethod()
+            self.weight = torch.empty(32, 5120, dtype=torch.bfloat16)
+
+    root = nn.Module()
+    root.projection = FakeLinear()
+    monkeypatch.setattr(dsv41_gemm, "LinearBase", FakeLinear)
+    monkeypatch.setattr(
+        dsv41_gemm.current_platform,
+        "is_device_capability",
+        lambda cc: cc == (10, 0),
+    )
+    monkeypatch.setattr(dsv41_gemm, "_ACTIVE", False)
+    vllm_config = SimpleNamespace(
+        lora_config=None,
+        model_config=SimpleNamespace(dtype=torch.float16),
+    )
+
+    dsv41_gemm.enable_dsv41_low_latency_gemm(root, vllm_config)
+
+    assert type(root.projection.quant_method) is dsv41_gemm.UnquantizedLinearMethod
+    assert dsv41_gemm._ACTIVE is False
+
+
+def test_dsv41_skinny_gemm_short_circuits(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(dsv41_gemm, "_ACTIVE", True)
+    monkeypatch.setattr(
+        dsv41_gemm.current_platform,
+        "is_device_capability",
+        lambda cc: cc == (10, 0),
+    )
+    x = torch.randn(1, 5120, dtype=torch.bfloat16)
+    w = torch.randn(1792, 5120, dtype=torch.bfloat16)
+
+    # Unlisted shape: no table entry.
+    assert dsv41_gemm.try_dsv41_skinny_gemm(x, torch.randn(64, 80)) is None
+    # Not activated.
+    monkeypatch.setattr(dsv41_gemm, "_ACTIVE", False)
+    assert dsv41_gemm.try_dsv41_skinny_gemm(x, w, out_fp32=True) is None
+    monkeypatch.setattr(dsv41_gemm, "_ACTIVE", True)
+    # Non-SM100 capability.
+    monkeypatch.setattr(
+        dsv41_gemm.current_platform, "is_device_capability", lambda cc: False
+    )
+    assert dsv41_gemm.try_dsv41_skinny_gemm(x, w, out_fp32=True) is None
+    monkeypatch.setattr(
+        dsv41_gemm.current_platform,
+        "is_device_capability",
+        lambda cc: cc == (10, 0),
+    )
+    # VLLM_BATCH_INVARIANT short-circuits back to the original path.
+    monkeypatch.setattr(dsv41_gemm.envs, "VLLM_BATCH_INVARIANT", True)
+    assert dsv41_gemm.try_dsv41_skinny_gemm(x, w, out_fp32=True) is None
+    monkeypatch.setattr(dsv41_gemm.envs, "VLLM_BATCH_INVARIANT", False)
+    # CPU tensors fail the runtime checks even when everything else matches.
+    w_fp8 = torch.randn(1792, 5120).to(torch.float8_e4m3fn)
+    assert (
+        dsv41_gemm.try_dsv41_skinny_gemm(x, w_fp8, sw=torch.zeros(1, dtype=torch.uint8))
+        is None
+    )
+    # M outside the measured cell (ll row covers M in {1, 2, 4} only).
+    w_ll = torch.randn(1024, 5120, dtype=torch.bfloat16)
+    assert (
+        dsv41_gemm.try_dsv41_skinny_gemm(
+            torch.randn(8, 5120, dtype=torch.bfloat16), w_ll, out_fp32=True
+        )
+        is None
+    )
+
+
+def test_dsv41_method_apply_falls_back_on_bias() -> None:
+    x = torch.randn(2, 64)
+    weight = torch.randn(32, 64)
+    bias = torch.randn(32)
+    method = dsv41_gemm.Dsv41LowLatencyLinearMethod()
+
+    output = method.apply(SimpleNamespace(weight=weight), x, bias)
+
+    torch.testing.assert_close(output, torch.nn.functional.linear(x, weight, bias))
+
+
+def test_dsv41_bf16_impl_falls_back_outside_table() -> None:
+    x = torch.randn(8, 512, dtype=torch.bfloat16)
+    listed = torch.randn(128, 512, dtype=torch.bfloat16)  # M8 not in table
+    unlisted = torch.randn(64, 512, dtype=torch.bfloat16)
+
+    torch.testing.assert_close(
+        dsv41_gemm._dsv41_bf16_gemm(x, listed),
+        torch.nn.functional.linear(x, listed),
+    )
+    torch.testing.assert_close(
+        dsv41_gemm._dsv41_bf16_gemm(x, unlisted),
+        torch.nn.functional.linear(x, unlisted),
+    )
+
+
+def _require_sm100() -> None:
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 0):
+        pytest.skip("DSV4.1 skinny selection requires SM100")
+
+
+def _require_sm100_and_cute() -> None:
+    _require_sm100()
+    if not dsv41_gemm.shape_dynamic_skinny_gemm.is_available():
+        pytest.skip("CuTe DSL is not available")
+
+
+@pytest.mark.parametrize("n,k,num_tokens,config", DSV41_CUTE_CASES)
+def test_dsv41_cute_selected_shapes(
+    n: int,
+    k: int,
+    num_tokens: int,
+    config: SkinnyGemmConfig,
+) -> None:
+    _require_sm100_and_cute()
+    torch.manual_seed(42 + num_tokens)
+    x = torch.randn(num_tokens, k, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
+
+    output = torch.ops.vllm.dsv41_bf16_gemm(x, weight)
+
+    reference = x.float() @ weight.float().t()
+    torch.testing.assert_close(output.float(), reference, rtol=2e-2, atol=2e-1)
+
+
+def test_dsv41_bf16_simt_selected_shape() -> None:
+    _require_sm100()
+    torch.manual_seed(42)
+    x = torch.randn(4, 5120, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(32, 5120, dtype=torch.bfloat16, device="cuda")
+
+    output = torch.ops.vllm.dsv41_bf16_gemm(x, weight)
+
+    reference = x.float() @ weight.float().t()
+    torch.testing.assert_close(output.float(), reference, rtol=2e-2, atol=2e-1)
+
+
+def test_dsv41_bf16_op_falls_back_identically() -> None:
+    """M outside the table must produce the standard F.linear result."""
+    _require_sm100()
+    torch.manual_seed(42)
+    x = torch.randn(8, 512, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(128, 512, dtype=torch.bfloat16, device="cuda")
+
+    output = torch.ops.vllm.dsv41_bf16_gemm(x, weight)
+
+    torch.testing.assert_close(output, torch.nn.functional.linear(x, weight))
+
+
+def test_dsv41_bf16_op_rejects_nonpacked_input() -> None:
+    """A wider-storage row view with M>1 is not packed: fall back to F.linear."""
+    _require_sm100_and_cute()
+    torch.manual_seed(42)
+    n, k = 32, 5120
+    storage = torch.randn(2, k + 64, dtype=torch.bfloat16, device="cuda")
+    x = storage[:, :k]
+    weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
+    assert x.stride(1) == 1 and not dsv41_gemm._is_packed_row_major(x)
+
+    output = torch.ops.vllm.dsv41_bf16_gemm(x, weight)
+
+    torch.testing.assert_close(output, torch.nn.functional.linear(x, weight))
+
+
+@pytest.mark.parametrize("n,k,num_tokens,bs", DSV41_LL_CASES)
+def test_dsv41_ll_fp32_selected_shapes(
+    monkeypatch: pytest.MonkeyPatch,
+    n: int,
+    k: int,
+    num_tokens: int,
+    bs: int,
+) -> None:
+    _require_sm100()
+    if not dsv41_gemm.ll_bf16.is_available():
+        pytest.skip("CuTe DSL is not available")
+    monkeypatch.setattr(dsv41_gemm, "_ACTIVE", True)
+    torch.manual_seed(42 + num_tokens)
+    x = torch.randn(num_tokens, k, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
+
+    output = dsv41_gemm.try_compressor_kv_score_gemm(x, weight)
+
+    assert output is not None
+    assert output.dtype == torch.float32
+    assert dict(DSV41_TABLE[(n, k)].ll_dotprod_bs)[num_tokens] == bs
+    reference = torch.mm(x, weight.T, out_dtype=torch.float32)
+    cosine = torch.nn.functional.cosine_similarity(
+        output.flatten(), reference.flatten(), dim=0
+    ).item()
+    assert cosine > 0.999
