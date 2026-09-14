@@ -798,3 +798,81 @@ def test_mla_kv_b_lora_uses_explicit_token_mapping(dtype):
     torch.testing.assert_close(linear_output, linear_snapshot)
     torch.testing.assert_close(q_output, q_snapshot)
     torch.testing.assert_close(v_output, v_snapshot)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="MLA LoRA kernels require CUDA"
+)
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_mla_kv_b_lora_q_composes_dcp_local_heads(dtype):
+    device = f"{DEVICE_TYPE}:0"
+    set_random_seed(1)
+    num_tokens = 4
+    num_loras = 1
+    dcp_size = 2
+    local_heads = 2
+    kv_lora_rank = 16
+    qk_nope_head_dim = 8
+    v_head_dim = 8
+    lora_rank = 4
+    full_head_dim = qk_nope_head_dim + v_head_dim
+    mapping = torch.zeros(num_tokens, dtype=torch.long, device=device)
+    no_lora_flag_cpu = torch.tensor([False], dtype=torch.bool, device="cpu")
+
+    lora_a = torch.randn(
+        num_loras, 1, lora_rank, kv_lora_rank, dtype=dtype, device=device
+    )
+    local_q = [
+        torch.randn(
+            num_tokens, local_heads, qk_nope_head_dim, dtype=dtype, device=device
+        )
+        for _ in range(dcp_size)
+    ]
+    local_b = [
+        torch.randn(
+            num_loras,
+            1,
+            local_heads * full_head_dim,
+            lora_rank,
+            dtype=dtype,
+            device=device,
+        )
+        for _ in range(dcp_size)
+    ]
+    local_outputs = [
+        torch.zeros(num_tokens, local_heads, kv_lora_rank, dtype=dtype, device=device)
+        for _ in range(dcp_size)
+    ]
+
+    for q_nope, lora_b, output in zip(local_q, local_b, local_outputs):
+        triton_ops.mla_kv_b_lora_q(
+            q_nope,
+            lora_a,
+            lora_b,
+            output,
+            mapping,
+            no_lora_flag_cpu,
+            v_head_dim,
+        )
+
+    gathered_output = torch.cat(local_outputs, dim=1)
+    gathered_q = torch.cat(local_q, dim=1)
+    gathered_b = torch.cat(
+        [
+            shard.view(num_loras, local_heads, full_head_dim, lora_rank)
+            for shard in local_b
+        ],
+        dim=1,
+    ).view(num_loras, 1, dcp_size * local_heads * full_head_dim, lora_rank)
+    expected = torch.zeros_like(gathered_output)
+    triton_ops.mla_kv_b_lora_q(
+        gathered_q,
+        lora_a,
+        gathered_b,
+        expected,
+        mapping,
+        no_lora_flag_cpu,
+        v_head_dim,
+    )
+
+    torch.testing.assert_close(gathered_output, expected, rtol=3e-2, atol=3e-2)

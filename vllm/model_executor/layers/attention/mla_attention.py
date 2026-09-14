@@ -1006,7 +1006,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
 
         if num_mqa_tokens > 0:
-            if q_dcp_replicated is not None:
+            mqa_lora_mapping = self._kv_b_proj_lora_mapping(0, num_mqa_tokens)
+            apply_q_lora = getattr(self.kv_b_proj, "apply_mla_kv_b_lora_q", None)
+            has_kv_b_lora = apply_q_lora is not None and mqa_lora_mapping is not None
+            # The replicated query contains every DCP rank's heads, while the
+            # kv_b LoRA B tensor remains rank-local. Use the local query and the
+            # ordinary post-absorption DCP gather whenever this wrapper is present.
+            if q_dcp_replicated is not None and not has_kv_b_lora:
                 mqa_q = q_dcp_replicated[:num_mqa_tokens]
                 qrep_decode = True
             else:
@@ -1084,8 +1090,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     mqa_ql_nope = mqa_q_nope.new_empty((B, N, L))
                     torch.bmm(mqa_q_nope, W_UK_T, out=mqa_ql_nope.transpose(0, 1))
 
-            apply_q_lora = getattr(self.kv_b_proj, "apply_mla_kv_b_lora_q", None)
-            mqa_lora_mapping = self._kv_b_proj_lora_mapping(0, num_mqa_tokens)
             if apply_q_lora is not None and mqa_lora_mapping is not None:
                 apply_q_lora(
                     mqa_q_nope.transpose(0, 1),
