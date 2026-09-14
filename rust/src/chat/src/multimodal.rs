@@ -39,11 +39,14 @@ use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
 mod audio;
 mod expand;
 mod image;
+mod input;
 mod item;
+mod preprocessed;
 mod tensor;
 mod video;
 
 use self::expand::expand_prompt_token_ids;
+pub use self::input::MultimodalInput;
 
 /// Resolved multimodal support for one loaded model.
 #[derive(Clone)]
@@ -654,11 +657,16 @@ impl MultimodalModelInfo {
     ///
     /// Modalities without a configured count are unlimited.
     fn validate_mm_limits(&self, media_parts: &[MediaContentPart]) -> Result<()> {
+        self.validate_modality_limits(media_parts.iter().filter_map(media_part_limit_modality))
+    }
+
+    fn validate_modality_limits(
+        &self,
+        modalities: impl IntoIterator<Item = MmModality>,
+    ) -> Result<()> {
         let mut counts: HashMap<MmModality, usize> = HashMap::new();
-        for part in media_parts {
-            if let Some(modality) = media_part_limit_modality(part) {
-                *counts.entry(modality).or_default() += 1;
-            }
+        for modality in modalities {
+            *counts.entry(modality).or_default() += 1;
         }
 
         for (modality, count) in counts {
@@ -675,6 +683,32 @@ impl MultimodalModelInfo {
         }
 
         Ok(())
+    }
+
+    /// Validate inline storage, batching, and placeholder ranges, then check
+    /// this model's supported modalities and item-count limits.
+    ///
+    /// `prompt_len` must include all expanded multimodal placeholders.
+    pub(crate) fn prepare_preprocessed(
+        &self,
+        mut features: MmFeatures,
+        prompt_len: usize,
+    ) -> Result<MmFeatures> {
+        preprocessed::validate_features(&mut features, prompt_len)?;
+        for feature in &features {
+            let supported = match feature.modality {
+                MmModality::Image => self.image.is_some(),
+                MmModality::Video => self.video.is_some(),
+                MmModality::Audio => self.audio.is_some(),
+            };
+            if !supported {
+                return Err(Error::UnsupportedModality {
+                    modality: feature.modality.as_str().to_owned(),
+                });
+            }
+        }
+        self.validate_modality_limits(features.iter().map(|feature| feature.modality))?;
+        Ok(features)
     }
 
     /// Run media fetch, per-modality preprocessing, prompt expansion, and
