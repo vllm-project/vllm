@@ -824,20 +824,22 @@ class BaseRenderer(ABC, Generic[_T]):
     ) -> MultiModalUUIDItems:
         model_config = self.model_config
 
-        # NOTE: When users explicitly turn off BOTH prefix caching and input
-        # processing caching, no multimodal features or embeddings will be
-        # reused across requests, therefore identifying multimodal data items
-        # by their content is no longer necessary, and we create uuids with
-        # `<mm_req_id>-<modality>-<index>`, overriding even user-provided ones.
+        # Skip content hashing when both caches are disabled, but preserve
+        # explicit UUIDs used to identify embeddings across EC instances.
         if (
             model_config.multimodal_config
             and model_config.multimodal_config.mm_processor_cache_gb == 0
             and not self.config.cache_config.enable_prefix_caching
         ):
-            mm_uuid_items = {
-                modality: [f"{mm_req_id}-{modality}-{i}" for i in range(data_count)]
-                for modality, data_count in mm_data_items.get_all_counts().items()
-            }
+            mm_uuid_items = dict(mm_uuid_items)
+            for modality, data_count in mm_data_items.get_all_counts().items():
+                uuids = mm_uuid_items.get(modality)
+                if uuids is None:
+                    uuids = [None] * data_count
+                mm_uuid_items[modality] = [
+                    uuid if uuid is not None else f"{mm_req_id}-{modality}-{i}"
+                    for i, uuid in enumerate(uuids)
+                ]
 
         self._validate_mm_uuids(mm_data, mm_data_items, mm_uuid_items)
 
