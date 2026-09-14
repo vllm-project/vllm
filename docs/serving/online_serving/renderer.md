@@ -31,9 +31,8 @@ VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1 vllm serve <model>
 ## Get Responses prompt token IDs
 
 Use `/v1/responses/render` to get prompt token IDs before choosing a model
-replica. `/tokenize` accepts completion and chat inputs; Responses input uses
-the render endpoint. Rendering applies prompt construction and preprocessing
-without running inference.
+replica. Rendering applies prompt construction and preprocessing without running
+inference.
 
 The Responses render endpoint uses the same prompt construction as
 `/v1/responses` and returns one token-in `GenerateRequest`. It is stateless:

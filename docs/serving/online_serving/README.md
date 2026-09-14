@@ -135,7 +135,12 @@ explicit value of `0` is rejected for those modes.
 
 ### Renderer APIs
 
-For further details on renderer APIs, please refer to [this page](renderer.md).
+Renderer APIs preprocess completion, chat, and Responses requests without running
+inference. They handle tokenization, model-specific prompt formatting, and
+multimodal preprocessing, returning prompt token IDs, sampling parameters, and
+any processed multimodal inputs for generation.
+
+See the [renderer guide](renderer.md) for setup instructions and examples.
 
 - [Completions Render API](renderer.md) (`/v1/completions/render`)
     - Render completion requests
@@ -158,10 +163,6 @@ For further details on derenderer APIs, please refer to [this page](derenderer.m
 - `/tokenize` - Tokenize text
 - `/detokenize` - Detokenize tokens
 - `/tokenizer_info` - Get comprehensive tokenizer information including chat templates and configuration
-
-For Responses API input, use `/v1/responses/render` to get prompt token IDs
-before routing a request. See [Get Responses prompt token IDs](renderer.md#get-responses-prompt-token-ids)
-for an example and the required server configuration.
 
 ## Elastic Expert Parallelism (EEP)
 
