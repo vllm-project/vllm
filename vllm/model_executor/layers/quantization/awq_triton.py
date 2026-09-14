@@ -101,7 +101,7 @@ def _awq_gemm_fused_fp32_impl(
 ) -> torch.Tensor:
     m, k = inputs.shape
     n = qweight.shape[1] * 8
-    group_size = k // scales.shape[0]
+    num_groups = scales.shape[0]
     if inputs.dtype != torch.float16 or scales.dtype != torch.float16:
         raise ValueError("fused AWQ GEMM supports FP16 inputs and scales only")
     if qweight.dtype != torch.int32 or qzeros.dtype != torch.int32:
@@ -110,12 +110,18 @@ def _awq_gemm_fused_fp32_impl(
         raise ValueError("fused AWQ GEMM requires contiguous tensors")
     if qweight.shape[0] != k:
         raise ValueError("fused AWQ GEMM weight K does not match the input")
-    if scales.shape != (k // group_size, n):
-        raise ValueError("fused AWQ GEMM scales have an invalid shape")
-    if qzeros.shape != (k // group_size, n // 8):
-        raise ValueError("fused AWQ GEMM zeros have an invalid shape")
+    if num_groups == 0 or k % num_groups != 0:
+        raise ValueError(
+            "fused AWQ GEMM requires K to be an exact multiple of the number "
+            "of quantization groups"
+        )
+    group_size = k // num_groups
     if group_size != 128:
         raise ValueError("fused AWQ GEMM supports group_size=128 only")
+    if scales.shape != (num_groups, n):
+        raise ValueError("fused AWQ GEMM scales have an invalid shape")
+    if qzeros.shape != (num_groups, n // 8):
+        raise ValueError("fused AWQ GEMM zeros have an invalid shape")
     if k % 32 != 0 or n % 32 != 0:
         raise ValueError("fused AWQ GEMM requires K and N aligned to 32")
 

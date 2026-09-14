@@ -255,6 +255,60 @@ def test_awq_gemm_fused_fp32_rejects_non_contiguous():
 
 
 @fused_fp32_skip
+def test_awq_gemm_fused_fp32_rejects_non_exact_group_count():
+    # K=257 with 2 quantization groups: 257 // 2 == 128 looks like a valid
+    # group_size after integer-division truncation, but 257 is not an exact
+    # multiple of 2, so the last group would read one row past scales/qzeros.
+    m, k, n, num_groups = 32, 257, 32, 2
+    input = torch.rand((m, k), dtype=torch.float16, device=device)
+    qweight = torch.randint(
+        0, torch.iinfo(torch.int32).max, (k, n // 8), dtype=torch.int32, device=device
+    )
+    scales = torch.rand((num_groups, n), dtype=torch.float16, device=device)
+    qzeros = torch.randint(
+        0,
+        torch.iinfo(torch.int32).max,
+        (num_groups, n // 8),
+        dtype=torch.int32,
+        device=device,
+    )
+    with pytest.raises(ValueError, match="exact multiple"):
+        awq_gemm_fused_fp32(input, qweight, scales, qzeros)
+
+
+@fused_fp32_skip
+@pytest.mark.parametrize("N", [32, 64, 96, 160])
+@pytest.mark.parametrize("K", [128, 256])
+def test_awq_gemm_fused_fp32_batch_invariant(N, K):
+    """The kernel switches (BLOCK_SIZE_M, BLOCK_SIZE_N) tiling at M=128; a
+    fixed row's output must be bit-identical regardless of how many other
+    rows share its launch, or batch-invariant mode's guarantee is broken."""
+    group_size = 128
+    set_random_seed(0)
+
+    qweight = torch.randint(
+        0, torch.iinfo(torch.int32).max, (K, N // 8), dtype=torch.int32, device=device
+    )
+    qzeros = torch.randint(
+        0,
+        torch.iinfo(torch.int32).max,
+        (K // group_size, N // 8),
+        dtype=torch.int32,
+        device=device,
+    )
+    scales = torch.rand((K // group_size, N), dtype=torch.float16, device=device)
+    row = torch.rand((1, K), dtype=torch.float16, device=device)
+
+    reference = awq_gemm_fused_fp32(row, qweight, scales, qzeros)
+
+    for m in (32, 127, 128, 129, 256):
+        batch = torch.rand((m, K), dtype=torch.float16, device=device)
+        batch[0] = row[0]
+        output = awq_gemm_fused_fp32(batch, qweight, scales, qzeros)
+        torch.testing.assert_close(output[0], reference[0], atol=0, rtol=0)
+
+
+@fused_fp32_skip
 def test_awq_gemm_fused_fp32_rejects_unsupported_group_size():
     # group_size=64 is a supported AWQ group size in general, but the fused
     # kernel only implements 128; scales/qzeros shaped for group_size=64
