@@ -128,6 +128,7 @@ if TYPE_CHECKING:
     VLLM_USE_HW_AGNOSTIC: bool = False
     VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE: bool = True
     VLLM_GDN_DECODE_KERNEL: Literal["cuda", "triton"] = "cuda"
+    VLLM_GDN_BACKEND: Literal["auto", "triton", "sycl"] = "auto"
     VLLM_DISABLE_PYNCCL: bool = False
     VLLM_USE_OINK_OPS: bool = False
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
@@ -1206,6 +1207,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_GDN_DECODE_KERNEL",
         "cuda",
         ["cuda", "triton"],
+        case_sensitive=False,
+    ),
+    # Select the whole-layer GDN implementation on XPU: "sycl" is the fused XPU
+    # op, "triton" is the Triton/FLA kernel chain. "auto" means "sycl". Ignored
+    # on every other platform, which only has the Triton chain.
+    "VLLM_GDN_BACKEND": env_with_choices(
+        "VLLM_GDN_BACKEND",
+        "auto",
+        ["auto", "triton", "sycl"],
         case_sensitive=False,
     ),
     # Disable pynccl (using torch.distributed instead)

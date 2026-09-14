@@ -150,6 +150,27 @@ def _resolve_gdn_prefill_backend(
     return backend, "triton"
 
 
+def _resolve_gdn_backend() -> Literal["triton", "sycl"]:
+    """Pick the whole-layer GDN implementation from `VLLM_GDN_BACKEND`.
+
+    Unlike `_resolve_gdn_prefill_backend`, which picks the prefill chunk-scan
+    kernel only, this picks between the fused SYCL op that implements the entire
+    GDN layer and the Triton/FLA kernel chain. XPU has both; every other
+    platform only has the Triton chain.
+    """
+    backend = envs.VLLM_GDN_BACKEND.strip().lower()
+    if backend == "auto":
+        return "sycl" if current_platform.is_xpu() else "triton"
+    if backend == "sycl":
+        if not current_platform.is_xpu():
+            raise ValueError(
+                "VLLM_GDN_BACKEND=sycl requires XPU; the fused SYCL GDN op is "
+                f"not available on {current_platform.device_name}."
+            )
+        return "sycl"
+    return "triton"
+
+
 def _log_gdn_backend_decision(
     vllm_config: VllmConfig,
     requested_backend: str,
@@ -399,7 +420,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.key_dim = self.head_k_dim * self.num_k_heads
         self.value_dim = self.head_v_dim * self.num_v_heads
         self.gqa_interleaved_layout = gqa_interleaved_layout
-        if current_platform.is_xpu():
+        if current_platform.is_xpu() and _resolve_gdn_backend() == "sycl":
             self._forward_method = self.forward_xpu
         elif current_platform.is_cpu():
             from vllm.model_executor.layers.mamba.ops.cpu.gdn_attention import (
@@ -412,6 +433,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self._forward_method = self.forward_hip
         else:
             self._forward_method = self.forward_cuda
+        logger.info_once("GDN layer implementation: %s", self._forward_method.__name__)
 
         # QKV
         self.conv_dim = self.key_dim * 2 + self.value_dim
@@ -523,6 +545,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 self.gdn_decode_kernel = "triton"
         elif current_platform.is_cpu():
             self.gdn_decode_kernel = "CPU"
+        elif self.gdn_decode_kernel == "cuda":
+            # The fused decode kernel is CUDA/ROCm-only; every other platform
+            # running the Triton layer path must use the Triton decode chain.
+            self.gdn_decode_kernel = "triton"
 
         self.enable_fused_gdn_decode = self.gdn_decode_kernel == "cuda"
         logger.info_once("GDN decode kernel: %s", self.gdn_decode_kernel)
