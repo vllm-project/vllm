@@ -274,7 +274,7 @@ run_epd_mooncake() {
     --baseline_file "$BASELINE_FILE" \
     "${TEST_ARGS[@]}"
 
-  curl --fail-with-body -sS "http://localhost:${ENCODE_PORT}/collective_rpc" \
+  curl -fsS "http://localhost:${ENCODE_PORT}/collective_rpc" \
     -H 'Content-Type: application/json' \
     -d '{"method":"encoder_graph_stats"}' \
     >"${LOG_PATH}/encoder_graph_stats.json"
