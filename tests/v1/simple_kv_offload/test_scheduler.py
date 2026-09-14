@@ -1319,12 +1319,10 @@ def test_inflight_finish_deferred_cleanup() -> None:
 # Test 8: Null GPU blocks are skipped in store and load transfer pairs
 # ---------------------------------------------------------------------------
 def test_multi_group_null_blocks_skipped() -> None:
-    """Null GPU blocks (no block_hash) must not appear in store or load pairs.
+    """The null block id never appears in store or load pairs.
 
-    In eager store mode, _prepare_eager_store_specs skips blocks whose
-    block_hash is None (null blocks have no hash). We verify this by mixing
-    real hashed blocks with unhashed (null-like) blocks in a single group and
-    checking that only real blocks appear in the store list.
+    A null block-table slot whose hash is still cached on the GPU is stored
+    from the cached block instead; the null block itself is never copied.
     """
     fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=16, num_groups=1, lazy=False)
     sched = fix.scheduler
@@ -1356,9 +1354,11 @@ def test_multi_group_null_blocks_skipped() -> None:
         f"Null block id {null_block_id} should not appear in store transfer pairs"
     )
 
-    # Only real block should be scheduled for store
-    assert len(meta.store_gpu_blocks) == 1
+    # The nulled slot's hash is still cached on the GPU, so that block is
+    # recovered from the pool and stored alongside the real one.
+    assert len(meta.store_gpu_blocks) == 2
     assert gpu_blocks[0].block_id in meta.store_gpu_blocks
+    assert gpu_blocks[1].block_id in meta.store_gpu_blocks
 
     # Complete the store
     assert meta.store_event >= 0
@@ -1374,13 +1374,12 @@ def test_multi_group_null_blocks_skipped() -> None:
         block_hasher=req._block_hasher,
     )
     hit_tokens, is_async = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
-    # Only 1 block was stored (the real one)
-    assert hit_tokens == BLOCK_SIZE
+    assert hit_tokens == 2 * BLOCK_SIZE
     assert is_async is True
 
     # Allocate new GPU blocks for the load
-    gpu_blocks2 = gpu_pool.get_new_blocks(1)
-    kv_blocks2 = KVCacheBlocks(blocks=([gpu_blocks2[0], null_block],))
+    gpu_blocks2 = gpu_pool.get_new_blocks(2)
+    kv_blocks2 = KVCacheBlocks(blocks=(gpu_blocks2,))
     sched.update_state_after_alloc(req2, kv_blocks2, num_external_tokens=hit_tokens)
 
     sched_out2 = make_scheduler_output({req2.request_id: 1})
@@ -2800,3 +2799,47 @@ def test_boundary_handoff_keeps_block_meta_index_parallel() -> None:
     assert req_ids == [req.request_id]
     assert block_meta is not None
     assert len(block_meta) == len(gpu_ids) == len(cpu_ids)
+
+
+def test_finished_eager_store_recovers_nulled_window_tail() -> None:
+    """A sliding-window group nulls pages that left the window before the
+    connector sees the finished request's block table, while the GPU keeps
+    them hashed in its free queue. The eager store must copy those pages, or
+    the CPU lookup (which needs the whole window) misses every time."""
+    fix = make_scheduler(num_cpu_blocks=16, num_gpu_blocks=32, num_groups=2, lazy=False)
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+    null_block = gpu_pool.null_block
+
+    num_blocks = 4  # == sliding window of the test SWA group
+    req = make_request(num_blocks=num_blocks)
+    fa_blocks = _allocate_gpu_blocks(gpu_pool, req, num_blocks, group_id=0)
+    swa_blocks = _allocate_gpu_blocks(gpu_pool, req, num_blocks, group_id=1)
+    # remove_skipped_blocks() ran: the two oldest window pages are freed (still
+    # hashed) and their slots hold the null block.
+    gpu_pool.free_blocks(swa_blocks[:2])
+    swa_table = [null_block, null_block, *swa_blocks[2:]]
+    kv_blocks = KVCacheBlocks(blocks=(fa_blocks, swa_table))
+    req.num_computed_tokens = num_blocks * BLOCK_SIZE
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+
+    block_ids = kv_blocks.get_block_ids()
+    sched.request_finished_all_groups(req, block_ids)
+    meta = sched.build_connector_meta(make_scheduler_output({}))
+
+    assert null_block.block_id not in meta.store_gpu_blocks
+    assert set(meta.store_gpu_blocks) == {b.block_id for b in (*fa_blocks, *swa_blocks)}
+    assert meta.store_event >= 0
+    simulate_store_completion(sched, meta.store_event)
+
+    req2 = Request(
+        request_id="req-window-tail-load",
+        prompt_token_ids=req.prompt_token_ids,
+        sampling_params=req.sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=req._block_hasher,
+    )
+    hit_tokens, is_async = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
+    assert hit_tokens == num_blocks * BLOCK_SIZE
+    assert is_async is True

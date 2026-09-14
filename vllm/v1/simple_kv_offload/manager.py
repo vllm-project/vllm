@@ -51,7 +51,7 @@ from vllm.v1.simple_kv_offload.metadata import (
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-    from vllm.v1.core.kv_cache_utils import KVCacheBlock
+    from vllm.v1.core.kv_cache_utils import BlockHashList, KVCacheBlock
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
@@ -783,6 +783,18 @@ class SimpleCPUOffloadScheduler:
         req_ids = list(dict.fromkeys(req_ids))
         return merged_gpu_block_ids, merged_cpu_block_ids, req_ids, merged_block_meta
 
+    def _cached_gpu_block(
+        self, resolved_hashes: "BlockHashList", block_idx: int, group_id: int
+    ) -> "KVCacheBlock | None":
+        """Return the GPU block still cached under this group's block hash."""
+        if block_idx >= len(resolved_hashes):
+            return None
+        assert self._gpu_block_pool is not None
+        blocks = self._gpu_block_pool.get_cached_block(
+            resolved_hashes[block_idx], [group_id]
+        )
+        return blocks[0] if blocks else None
+
     def _select_eager_blocks_to_store(
         self,
         state: StoreRequestState,
@@ -827,18 +839,25 @@ class SimpleCPUOffloadScheduler:
             # the middle of the request.
             group_size = self.group_block_sizes[g]
             ready = min(len(group_gpu_ids), aligned_tokens // group_size)
-            resolved_hashes = (
-                resolve_block_hashes(
-                    request.block_hashes, self.hash_block_size, group_size
-                )
-                if block_meta is not None
-                else None
+            resolved_hashes = resolve_block_hashes(
+                request.block_hashes, self.hash_block_size, group_size
             )
             curr_mm_idx = 0
             secondary_mm_idx = 0
             start = state.num_stored_blocks[g]
             for i, gpu_block_id in enumerate(group_gpu_ids[start:ready], start=start):
                 gpu_block = self._gpu_block_pool.blocks[gpu_block_id]
+                if gpu_block.is_null:
+                    # Sliding-window groups null pages that left the window
+                    # before the connector sees the block table, but the
+                    # retained prefix-cache tail stays hashed in the GPU free
+                    # queue; store it from there.
+                    recovered = self._cached_gpu_block(resolved_hashes, i, g)
+                    if recovered is None:
+                        advanced_per_group[g] += 1
+                        continue
+                    gpu_block = recovered
+                    gpu_block_id = gpu_block.block_id
                 if (
                     self._classify_store_candidate(gpu_block)
                     is not _StoreAdmission.READY
@@ -854,7 +873,6 @@ class SimpleCPUOffloadScheduler:
                 if block_meta is not None:
                     token_start = i * group_size
                     token_end = token_start + group_size
-                    assert resolved_hashes is not None
                     parent_hash = (
                         None
                         if i == 0
