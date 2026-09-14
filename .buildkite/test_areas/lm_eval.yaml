@@ -322,11 +322,12 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-a100-shard-$$BUILDKITE_PARALLEL_JOB.txt
 
-- label: ":nvidia: (A100) LM Eval Humming Activation INT8 TEMPORARY"
+- label: ":nvidia: (A100) LM Eval Humming Activation INT8 TEMPORARY Shard %N"
   key: lm-eval-humming-a100-act
   timeout_in_minutes: 45
   device: a100
   num_devices: 1
+  parallelism: 2
   source_file_dependencies:
   - vllm/model_executor/layers/quantization/humming.py
   - vllm/model_executor/layers/quantization/utils/humming/
@@ -334,7 +335,7 @@ steps:
   - vllm/model_executor/layers/fused_moe/oracle/
   - vllm/model_executor/kernels/linear/
   commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-int8.txt
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-a100-act-int8-shard-$$BUILDKITE_PARALLEL_JOB.txt
 
 - label: ":nvidia: (H100) LM Eval Humming Default TEMPORARY Shard %N"
   key: lm-eval-humming-h100-default
