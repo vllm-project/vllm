@@ -31,6 +31,8 @@ from vllm.distributed.device_communicators.base_device_communicator import (
 )
 from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
 from vllm.engine.arg_utils import EngineArgs
+from vllm.platforms import CpuArchEnum, current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_nvlink_two_sided,
@@ -41,22 +43,44 @@ from vllm.utils.network_utils import get_open_port
 from ..utils import init_test_distributed_environment
 
 
+@pytest.fixture
+def cuda_host(monkeypatch):
+    """Resolve the all2all default as it would on a datacenter Blackwell host,
+    where only a Grace CPU distinguishes GB200/GB300 from x86 HGX B200/B300."""
+    from vllm.config.parallel import _prefers_one_sided_all2all
+
+    def apply(cpu_arch: CpuArchEnum) -> None:
+        monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+        monkeypatch.setattr(current_platform, "get_cpu_architecture", lambda: cpu_arch)
+        # `is_device_capability_family` is a classmethod, so it reads the
+        # capability off the class rather than the instance patched above.
+        monkeypatch.setattr(
+            type(current_platform),
+            "get_device_capability",
+            staticmethod(lambda device_id=0: DeviceCapability(major=10, minor=0)),
+        )
+        _prefers_one_sided_all2all.cache_clear()
+
+    yield apply
+    _prefers_one_sided_all2all.cache_clear()
+
+
 @pytest.mark.parametrize(
-    ("platform", "expected_backend"),
+    ("cpu_arch", "expected_backend"),
     [
         pytest.param(
-            "cuda",
+            CpuArchEnum.ARM,
             "flashinfer_nvlink_one_sided",
             marks=pytest.mark.skipif(
                 not has_flashinfer_nvlink_one_sided(),
                 reason="FlashInfer NVLink one-sided not available",
             ),
         ),
-        ("non_cuda", "allgather_reducescatter"),
+        (CpuArchEnum.X86, "allgather_reducescatter"),
     ],
 )
 def test_default_ep_communicator_uses_platform_all2all_backend(
-    monkeypatch, platform, expected_backend
+    monkeypatch, cuda_host, cpu_arch, expected_backend
 ):
     def init_device_communicator(
         self,
@@ -85,12 +109,7 @@ def test_default_ep_communicator_uses_platform_all2all_backend(
         self.rank = 0
         self.world_size = 1
 
-    monkeypatch.setattr(
-        "vllm.platforms.current_platform.is_cuda", lambda: platform == "cuda"
-    )
-    monkeypatch.setattr(
-        "vllm.platforms.current_platform.has_device_capability", lambda _: True
-    )
+    cuda_host(cpu_arch)
     monkeypatch.setattr(DeviceCommunicatorBase, "__init__", init_device_communicator)
     monkeypatch.setattr(All2AllManagerBase, "__init__", init_all2all_manager)
 
@@ -108,7 +127,7 @@ def test_default_ep_communicator_uses_platform_all2all_backend(
         )
 
     assert device_communicator.all2all_backend == expected_backend
-    if platform == "cuda":
+    if expected_backend == "flashinfer_nvlink_one_sided":
         assert isinstance(
             device_communicator.all2all_manager, FlashInferNVLinkOneSidedManager
         )
@@ -117,23 +136,20 @@ def test_default_ep_communicator_uses_platform_all2all_backend(
 
 
 @pytest.mark.parametrize(
-    ("is_cuda", "expected_backend"),
+    ("cpu_arch", "expected_backend"),
     [
-        (True, "flashinfer_nvlink_one_sided"),
-        (False, "allgather_reducescatter"),
+        (CpuArchEnum.ARM, "flashinfer_nvlink_one_sided"),
+        (CpuArchEnum.X86, "allgather_reducescatter"),
     ],
 )
 def test_engine_args_resolves_all2all_backend_default(
-    monkeypatch, is_cuda, expected_backend
+    monkeypatch, cuda_host, cpu_arch, expected_backend
 ):
     """`EngineArgs` mirrors this field from `ParallelConfig`, and
     `create_engine_config()` passes the value straight back. The default must
     therefore arrive as a resolved string; leaking a `FieldInfo` through makes
     every launch without `--all2all-backend` fail config validation."""
-    monkeypatch.setattr("vllm.platforms.current_platform.is_cuda", lambda: is_cuda)
-    monkeypatch.setattr(
-        "vllm.platforms.current_platform.has_device_capability", lambda _: True
-    )
+    cuda_host(cpu_arch)
     monkeypatch.setattr(
         "vllm.utils.flashinfer.has_flashinfer_nvlink_one_sided", lambda: True
     )

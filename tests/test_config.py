@@ -1230,14 +1230,6 @@ def test_one_sided_all2all_default_falls_back_without_flashinfer(monkeypatch):
         _prefers_one_sided_all2all.cache_clear()
 
 
-def test_engine_args_resolves_all2all_backend_default():
-    """EngineArgs is a stdlib dataclass, so mirroring the Pydantic class
-    attribute would hand it a FieldInfo instead of a backend name."""
-    from vllm.engine.arg_utils import EngineArgs
-
-    assert isinstance(EngineArgs().all2all_backend, str)
-
-
 @pytest.mark.parametrize(
     "dp_size, across_dp, expected",
     [(1, False, 4), (1, True, 4), (2, False, 4), (2, True, 8)],
