@@ -43,6 +43,7 @@ class FixFunctionalizationPass(VllmInductorPass):
         self.nodes_to_remove: list[torch.fx.Node] = []
         count = 0
 
+        protected = self.get_protected_nodes(graph)
         rope_targets = [torch.ops._C.rotary_embedding.default]
 
         if hasattr(torch.ops.vllm, "rocm_aiter_triton_rotary_embedding"):
@@ -54,15 +55,7 @@ class FixFunctionalizationPass(VllmInductorPass):
             if not is_func(node, auto_functionalized):
                 continue  # Avoid deep if-elif nesting
 
-            # Preserve wrappers whose users cannot be rewritten, before any edits.
-            if any(
-                not is_func(user, operator.getitem)
-                and (
-                    not is_func(user, control_deps)
-                    or node in tree_leaves((user.args[1:], user.kwargs))
-                )
-                for user in node.users
-            ):
+            if node in protected:
                 continue
 
             kwargs = node.kwargs
@@ -274,6 +267,34 @@ class FixFunctionalizationPass(VllmInductorPass):
             "De-functionalized %s nodes, removed %s nodes", count, count_removed
         )
         self.nodes_to_remove.clear()
+
+    def get_protected_nodes(self, graph: torch.fx.Graph) -> set[torch.fx.Node]:
+        """Conservatively preserve data descendants of unsupported wrapper uses."""
+        protected: set[torch.fx.Node] = set()
+        for node in graph.nodes:
+            # Scheduling dependencies do not imply shared tensor storage.
+            inputs = (
+                tree_leaves((node.args[1:], node.kwargs))
+                if is_func(node, control_deps)
+                else node.all_input_nodes
+            )
+            if any(
+                isinstance(arg, torch.fx.Node) and arg in protected for arg in inputs
+            ) or (
+                is_func(node, auto_functionalized)
+                and any(
+                    not is_func(user, operator.getitem)
+                    and (
+                        not is_func(user, control_deps)
+                        or node in tree_leaves((user.args[1:], user.kwargs))
+                    )
+                    for user in node.users
+                )
+            ):
+                # Analyze before rewriting: downstream reinplacing can otherwise
+                # overwrite an observable output, including through views.
+                protected.add(node)
+        return protected
 
     def _remove(self, node_or_nodes: torch.fx.Node | Iterable[torch.fx.Node]) -> None:
         """

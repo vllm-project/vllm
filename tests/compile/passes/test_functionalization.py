@@ -362,6 +362,58 @@ def test_fix_functionalization_preserves_unsupported_users(use, monkeypatch):
         torch.testing.assert_close(actual_inputs[0], inputs[0])
 
 
+@pytest.mark.parametrize("use", ["output", "payload"])
+@pytest.mark.parametrize("use_view", [False, True])
+def test_fix_functionalization_preserves_connected_outputs(use, use_view, monkeypatch):
+    """Downstream mutations must not overwrite retained wrapper outputs."""
+    TestFunctionWithMutatedArgsAndReturn.register_test_custom_op()
+    target = torch.ops.vllm.function_with_mutated_args_and_return.default
+    monkeypatch.setattr(torch.ops, "_C", Mock())
+    graph = torch.fx.Graph()
+    x, y = graph.placeholder("x"), graph.placeholder("y")
+    wrappers: list[torch.fx.Node] = []
+    outputs: list[torch.fx.Node] = []
+    arg = x
+    for _ in range(3):
+        wrapper = graph.call_function(
+            auto_functionalized, args=(target,), kwargs={"x": arg}
+        )
+        ret = graph.call_function(operator.getitem, args=(wrapper, 0))
+        mut = graph.call_function(operator.getitem, args=(wrapper, 1))
+        wrappers.append(wrapper)
+        outputs.extend((ret, mut))
+        arg = (
+            graph.call_function(torch.ops.aten.view.default, args=(mut, [-1]))
+            if use_view
+            else mut
+        )
+    independent = graph.call_function(torch.ops.aten.alias.default, args=(y,))
+    ordinary = graph.call_function(
+        auto_functionalized, args=(target,), kwargs={"x": independent}
+    )
+    outputs.extend(
+        graph.call_function(operator.getitem, args=(ordinary, idx)) for idx in (0, 1)
+    )
+    graph.output((wrappers[0] if use == "output" else outputs[1], *outputs))
+    module = torch.fx.GraphModule(torch.nn.Module(), graph)
+    preserve_node_ordering(graph, {independent: OrderedSet([wrappers[0]])})
+    if use == "payload":
+        preserve_node_ordering(graph, {outputs[0]: OrderedSet([y])})
+    module.recompile()
+    x_value = torch.arange(4, dtype=torch.float32, device=current_platform.device_type)
+    y_value = x_value + 10
+    expected = module(x_value.clone(), y_value.clone())
+
+    FixFunctionalizationPass(VllmConfig())(graph)
+    graph.lint()
+    module.recompile()
+    actual_x = x_value.clone()
+    torch.testing.assert_close(module(actual_x, y_value.clone()), expected)
+    torch.testing.assert_close(actual_x, x_value)
+    assert all(wrapper in graph.nodes for wrapper in wrappers)
+    assert ordinary not in graph.nodes
+
+
 MODELS_AND_DO_FUSION = {
     TestSiluMul: [True, False],
     TestFusedAddRMSNorm: [True, False],
