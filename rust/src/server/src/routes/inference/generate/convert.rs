@@ -165,6 +165,30 @@ mod tests {
     }
 
     #[test]
+    fn prepare_generate_request_preserves_watermarking_defaults_and_opt_out() {
+        for watermarking in [None, Some(true), Some(false)] {
+            let mut body = json!({
+                "token_ids": [11, 22],
+                "sampling_params": {}
+            });
+            if let Some(watermarking) = watermarking {
+                body["sampling_params"]["watermarking"] = json!(watermarking);
+            }
+            let prepared = prepare_generate_request(
+                serde_json::from_value(body).expect("parse request"),
+                &served(&["test-model"]),
+                ResolvedRequestContext::default(),
+                None,
+            )
+            .expect("prepare request");
+            assert_eq!(
+                prepared.text_request.sampling_params.watermarking,
+                watermarking.unwrap_or(true)
+            );
+        }
+    }
+
+    #[test]
     fn prepare_generate_request_forwards_thinking_token_budget() {
         let request: GenerateRequest = serde_json::from_value(json!({
             "model": "Qwen/Qwen1.5-0.5B-Chat",
