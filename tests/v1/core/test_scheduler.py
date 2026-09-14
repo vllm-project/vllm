@@ -630,6 +630,107 @@ def test_throttle_capacity_bound_guard_admits():
     assert "b" in output.num_scheduled_tokens
 
 
+def test_decode_priority_cadence_defers_prefill():
+    """Decode-priority cadence: while a pure-decode request is running, prefill
+    compute is deferred on all but every Nth step (N = decode_priority_cadence),
+    so throttled steps run decode-only. Unlike the DP cadence, this defers even
+    when the waiting queue is full (no prefill_capacity_bound guard)."""
+    scheduler = create_scheduler(
+        max_num_seqs=16,
+        max_num_batched_tokens=50,
+        enable_chunked_prefill=True,
+        decode_priority_cadence=2,
+    )
+
+    # A short request that finishes prefill in one step -> a running decode.
+    (decode_req,) = create_requests(num_requests=1, num_tokens=4, req_ids=["dec0"])
+    scheduler.add_request(decode_req)
+    output = scheduler.schedule()  # step 1 (current_step=1)
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["dec0"],
+            req_id_to_index={"dec0": 0},
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    assert decode_req in scheduler.running and not decode_req.is_prefill_chunk
+
+    # A long request (80 tokens, budget 50) -> prefilled in chunks.
+    (chunk_req,) = create_requests(num_requests=1, num_tokens=80, req_ids=["chk0"])
+    scheduler.add_request(chunk_req)
+
+    # Step 2 (current_step=2, 2 % 2 == 0): release step, prefill admitted.
+    output = scheduler.schedule()
+    assert "chk0" in output.num_scheduled_tokens
+    assert "dec0" in output.num_scheduled_tokens
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["dec0", "chk0"],
+            req_id_to_index={"dec0": 0, "chk0": 1},
+            sampled_token_ids=[[0], []],  # no token sampled for partial prefill
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    assert chunk_req.is_prefill_chunk  # still mid-prefill, in running
+
+    # Step 3 (current_step=3, 3 % 2 != 0): throttled, prefill deferred, decode runs.
+    output = scheduler.schedule()
+    assert "chk0" not in output.num_scheduled_tokens
+    assert "dec0" in output.num_scheduled_tokens
+
+    # Step 4 (current_step=4, 4 % 2 == 0): release, prefill chunk resumes.
+    output = scheduler.schedule()
+    assert "chk0" in output.num_scheduled_tokens
+
+
+def test_decode_priority_cadence_no_decode_no_defer():
+    """The cadence only defers prefill while a pure-decode request is running.
+    A prefill-only workload (no decode in flight) is unaffected: the in-progress
+    prefill chunk is admitted on every step, including throttled ones, so TTFT is
+    not stalled."""
+    scheduler = create_scheduler(
+        max_num_seqs=16,
+        max_num_batched_tokens=50,
+        enable_chunked_prefill=True,
+        decode_priority_cadence=2,
+    )
+    (chunk_req,) = create_requests(num_requests=1, num_tokens=200, req_ids=["chk0"])
+    scheduler.add_request(chunk_req)
+
+    # Step 1 (current_step=1): no decode running -> prefill admitted.
+    output = scheduler.schedule()
+    assert "chk0" in output.num_scheduled_tokens
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["chk0"],
+            req_id_to_index={"chk0": 0},
+            sampled_token_ids=[[]],  # no token sampled for partial prefill
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    assert chunk_req.is_prefill_chunk  # mid-prefill, in running
+
+    # Step 2 (current_step=2, release): prefill continues.
+    output = scheduler.schedule()
+    assert "chk0" in output.num_scheduled_tokens
+    assert chunk_req.is_prefill_chunk
+
+    # Step 3 (current_step=3, 3 % 2 != 0, "throttled"): still no pure decode
+    # running (chk0 is a prefill chunk), so the prefill is NOT deferred.
+    output = scheduler.schedule()
+    assert "chk0" in output.num_scheduled_tokens
+
+
 def test_no_mm_input_chunking():
     # Disable multimodal input chunking.
     scheduler = create_scheduler(
