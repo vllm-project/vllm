@@ -40,7 +40,7 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.data imp
 pytestmark = pytest.mark.cpu_test
 KEY = (
     "test@embedding@model:model@revision:revision"
-    "@encoder:encoder@dtype:torch.float32@protocol:v2"
+    "@encoder:encoder@dtype:torch.float32@protocol:v3"
 )
 SPEC = TensorSpec((2, 2), "torch.float32", 16)
 
@@ -55,7 +55,7 @@ def test_embedding_key_combines_namespace_and_identifier():
     config.model_config.multimodal_config = None
     assert make_embedding_key(build_embedding_namespace(config), "image@1") == (
         "team@cache@embedding@model:shared/model@revision:rev:1"
-        "@encoder:encoder:default@dtype:torch.float32@protocol:v2@id:image@1"
+        "@encoder:encoder:default@dtype:torch.float32@protocol:v3@id:image@1"
     )
 
 
@@ -110,8 +110,9 @@ class MemoryStore:
         obj = self.objects.get(key)
         if obj is None:
             return [[[-704]]]
-        ctypes.memmove(ptr + dst, obj[src : src + size], size)
-        return [[[size]]]
+        payload = obj[src : src + size]
+        ctypes.memmove(ptr + dst, payload, len(payload))
+        return [[[len(payload)]]]
 
 
 @pytest.fixture
@@ -125,6 +126,27 @@ def backend():
     yield instance
     # Some tests deliberately poison I/O; always stop the Python executor.
     instance._executor.shutdown(wait=True)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_tensor_round_trip(backend, dtype):
+    tensor = torch.arange(6, dtype=dtype).reshape(2, 3)
+    client = backend.store_client
+    key = make_embedding_key(KEY, "a")
+    client.put_tensor(key, tensor)
+    expected = TensorSpec(tuple(tensor.shape), str(dtype), tensor.nbytes)
+    loaded = client.load_tensor(key, expected, "cpu")
+    assert loaded.dtype == dtype and torch.equal(loaded, tensor)
+    assert len(client.store.objects[key]) == 24 + tensor.nbytes
+    assert not client.store.registered
+
+
+def test_non_matrix_output_is_rejected_before_registration(backend):
+    client = backend.store_client
+    client.store.register_buffer = MagicMock()
+    with pytest.raises(store_client.EmbeddingStoreOperationError, match="2D"):
+        client.put_tensor(make_embedding_key(KEY, "a"), torch.ones(2, 2, 2))
+    client.store.register_buffer.assert_not_called()
 
 
 def make_worker(backend):
@@ -164,6 +186,7 @@ def make_worker(backend):
     "mode",
     [
         "miss",
+        "legacy",
         "hit",
         "partial",
         "get-failure",
@@ -183,6 +206,10 @@ def test_reuse_pipeline(backend, mode):
     from vllm.v1.worker.gpu.model_states.interface import ModelState
 
     native = backend.store_client.store
+    if mode == "legacy":
+        old_namespace = KEY.replace("@protocol:v3", "@protocol:v2")
+        for key in "abc":
+            native.objects[make_embedding_key(old_namespace, key)] = b"old format"
     if mode == "partial":
         hits = {"a", "c"}
     elif mode in ("hit", "get-failure", "lease-expired", "registration-failure"):
@@ -195,7 +222,7 @@ def test_reuse_pipeline(backend, mode):
         read = native.get_into_ranges
 
         def failed_read(pointers, keys, dst, src, sizes):
-            if keys == [[make_embedding_key(KEY, "b")]] and src == [[[304]]]:
+            if keys == [[make_embedding_key(KEY, "b")]] and src == [[[24]]]:
                 if mode == "lease-expired":
                     # Native ranged GET checks the lease after the transfer.
                     read(pointers, keys, dst, src, sizes)
@@ -270,7 +297,7 @@ def test_reuse_pipeline(backend, mode):
     } == set("abc")
     backend.shutdown()
     assert not native.registered
-    if mode == "miss":
+    if mode in ("miss", "legacy"):
         other = store_backend.MooncakeEmbeddingStoreBackend(
             store_client.MooncakeEmbeddingStoreClient(native),
             KEY,
@@ -289,11 +316,22 @@ def test_reuse_pipeline(backend, mode):
             other.shutdown()
 
 
-@pytest.mark.parametrize("mismatch", ["revision", "shape"])
+@pytest.mark.parametrize(
+    "mismatch", ["revision", "shape", "dtype", "magic", "short-header", "short-data"]
+)
 def test_incompatible_output_is_a_miss(backend, mismatch):
-    backend.store_client.put_tensor(make_embedding_key(KEY, "a"), torch.ones(2, 2))
+    key = make_embedding_key(KEY, "a")
+    dtype = torch.float16 if mismatch == "dtype" else torch.float32
+    backend.store_client.put_tensor(key, torch.ones(2, 2, dtype=dtype))
     if mismatch == "revision":
         backend.namespace = KEY.replace("@revision:revision", "@revision:other")
+    objects = backend.store_client.store.objects
+    if mismatch == "magic":
+        objects[key] = b"\0" * 4 + objects[key][4:]
+    elif mismatch == "short-header":
+        objects[key] = objects[key][:23]
+    elif mismatch == "short-data":
+        objects[key] = objects[key][:-1]
     expected = replace(SPEC, shape=(4, 1)) if mismatch == "shape" else SPEC
     outputs: dict[str, torch.Tensor] = {}
     assert not backend.resolve_inputs({"a": expected}, outputs, "cpu")
@@ -305,7 +343,7 @@ def test_partial_registration_rejection_releases_publication(backend):
     native = backend.store_client.store
     register = native.register_buffer
     native.register_buffer = lambda addr, size: (
-        -500 if size == 304 else register(addr, size)
+        -500 if size == 24 else register(addr, size)
     )
     native.batch_put_from_multi_buffers = MagicMock()
     tensor = torch.ones(2, 2)
@@ -334,7 +372,7 @@ def test_native_io_owners(backend, operation):
         client.put_tensor(key, tensor)
         read = native.get_into_ranges
         native.get_into_ranges = lambda ptrs, keys, dst, src, sizes: (
-            [[[-800]]] if src == [[[304]]] else read(ptrs, keys, dst, src, sizes)
+            [[[-800]]] if src == [[[24]]] else read(ptrs, keys, dst, src, sizes)
         )
         with (
             patch.object(store_client.torch, "empty", return_value=tensor),
@@ -365,7 +403,7 @@ def test_native_io_owners(backend, operation):
 
 
 def test_publication_budget_charges_and_releases_backing_storage(backend):
-    tensor = torch.arange(16, dtype=torch.float32)[:4]
+    tensor = torch.arange(16, dtype=torch.float32)[:4].view(2, 2)
     owner = weakref.ref(tensor)
     future: Future[None] = Future()
     backend.max_pending_items = 1
@@ -462,5 +500,5 @@ def test_readiness_and_shutdown_do_not_block_p2p_completion(backend):
     assert not backend.store_client.store.registered and backend._pending_bytes == 0
 
     assert backend.store_client.store.objects[make_embedding_key(KEY, "a")][
-        304:
+        24:
     ] == struct.pack("<4f", 0, 1, 2, 3)

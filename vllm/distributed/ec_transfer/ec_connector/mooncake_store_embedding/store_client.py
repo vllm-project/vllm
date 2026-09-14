@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Thin Mooncake Store client for embedding objects.
 
-Tensor codec adapted from vLLM PR #47302 (0d1f71f5d36c).
+Originally adapted from vLLM PR #47302 (0d1f71f5d36c). The v3 key namespace
+uses a compact header for complete 2D embeddings, not that PR's tensor format.
 """
 
 from __future__ import annotations
@@ -18,7 +19,6 @@ from typing import Any
 import torch
 
 from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.data import (
-    MOONCAKE_TENSOR_METADATA_NBYTES,
     TensorSpec,
 )
 from vllm.distributed.mooncake_store import MooncakeStoreConfig, setup_mooncake_store
@@ -66,11 +66,8 @@ _SAFE_PUT_REJECTIONS = _SAFE_IO_REJECTIONS | {_MooncakeErrorCode.TENANT_QUOTA_EX
 
 
 _MOONCAKE_TENSOR_OBJECT_MAGIC = 0x4D4F4F4E
-_MOONCAKE_TENSOR_OBJECT_VERSION = 1
-_MOONCAKE_TENSOR_HEADER_FORMAT = "<IHHiiIIQQ"
-_MOONCAKE_TENSOR_HEADER_NBYTES = struct.calcsize(_MOONCAKE_TENSOR_HEADER_FORMAT)
-_MOONCAKE_TENSOR_GLOBAL_SHAPE_OFFSET = _MOONCAKE_TENSOR_HEADER_NBYTES
-_MOONCAKE_TENSOR_LOCAL_SHAPE_OFFSET = _MOONCAKE_TENSOR_GLOBAL_SHAPE_OFFSET + 64
+# Magic, dtype, token count, hidden dimension. Format versioning is in the key.
+_MOONCAKE_TENSOR_HEADER = struct.Struct("<IIQQ")
 _MOONCAKE_DTYPE_TO_TORCH_DTYPE = {
     0: "torch.float32",
     11: "torch.float16",
@@ -224,11 +221,11 @@ class MooncakeEmbeddingStoreClient:
     def load_tensor(
         self, pool_key: str, expected: TensorSpec, device: torch.device | str
     ) -> torch.Tensor:
-        buffer = (ctypes.c_ubyte * MOONCAKE_TENSOR_METADATA_NBYTES)()
+        buffer = (ctypes.c_ubyte * _MOONCAKE_TENSOR_HEADER.size)()
         self._get_range(
             pool_key,
             ctypes.addressof(buffer),
-            MOONCAKE_TENSOR_METADATA_NBYTES,
+            _MOONCAKE_TENSOR_HEADER.size,
             0,
             owner=buffer,
         )
@@ -242,7 +239,7 @@ class MooncakeEmbeddingStoreClient:
             pool_key,
             target.data_ptr(),
             expected.nbytes,
-            MOONCAKE_TENSOR_METADATA_NBYTES,
+            _MOONCAKE_TENSOR_HEADER.size,
             owner=target,
         )
         return target
@@ -318,60 +315,18 @@ def _validate_mooncake_tensor_metadata(
     metadata: bytes,
     expected: TensorSpec,
 ) -> None:
-    (
-        magic,
-        version,
-        header_size,
-        dtype,
-        ndim,
-        layout_kind,
-        _reserved_flags,
-        data_offset,
-        data_bytes,
-    ) = struct.unpack_from(_MOONCAKE_TENSOR_HEADER_FORMAT, metadata, 0)
-    if (
-        magic != _MOONCAKE_TENSOR_OBJECT_MAGIC
-        or version != _MOONCAKE_TENSOR_OBJECT_VERSION
-        or header_size != MOONCAKE_TENSOR_METADATA_NBYTES
-    ):
+    magic, dtype, num_tokens, hidden_dim = _MOONCAKE_TENSOR_HEADER.unpack(metadata)
+    if magic != _MOONCAKE_TENSOR_OBJECT_MAGIC:
         raise EmbeddingStoreOperationError(
             f"invalid Mooncake tensor metadata header for {pool_key}"
-        )
-    if ndim != len(expected.shape) or not 0 < ndim <= 8:
-        raise EmbeddingStoreOperationError(
-            f"invalid embedding tensor ndim for {pool_key}: {ndim}"
         )
     if _MOONCAKE_DTYPE_TO_TORCH_DTYPE.get(dtype) != expected.dtype:
         raise EmbeddingStoreOperationError(
             f"unexpected Mooncake tensor dtype for {pool_key}: {dtype}"
         )
-    if layout_kind != 0:
-        raise EmbeddingStoreOperationError(
-            f"unsupported embedding tensor layout for {pool_key}: {layout_kind}"
-        )
-    if data_offset != MOONCAKE_TENSOR_METADATA_NBYTES:
-        raise EmbeddingStoreOperationError(
-            f"invalid embedding tensor data offset for {pool_key}: {data_offset}"
-        )
-    global_shape = struct.unpack_from(
-        "<8q",
-        metadata,
-        _MOONCAKE_TENSOR_GLOBAL_SHAPE_OFFSET,
-    )
-    local_shape = struct.unpack_from(
-        "<8q",
-        metadata,
-        _MOONCAKE_TENSOR_LOCAL_SHAPE_OFFSET,
-    )
-    if global_shape != local_shape or local_shape[:ndim] != expected.shape:
+    if (num_tokens, hidden_dim) != expected.shape:
         raise EmbeddingStoreOperationError(
             f"embedding tensor shape mismatch for {pool_key}: expected={expected.shape}"
-        )
-    if data_bytes != expected.nbytes:
-        raise EmbeddingStoreOperationError(
-            "embedding tensor shape/dtype do not match payload size for "
-            f"{pool_key}: expected={expected.nbytes} "
-            f"actual={data_bytes}"
         )
 
 
@@ -381,25 +336,12 @@ def _encode_mooncake_tensor_metadata(tensor: torch.Tensor) -> bytes:
         raise EmbeddingStoreOperationError(
             f"unsupported embedding tensor dtype: {dtype}"
         )
-    shape = tuple(int(dim) for dim in tensor.shape)
-    if len(shape) > 8:
+    if tensor.ndim != 2:
         raise EmbeddingStoreOperationError(
-            f"embedding tensor has too many dimensions: {len(shape)}"
+            f"embedding tensor must be 2D: shape={tuple(tensor.shape)}"
         )
-    nbytes = tensor.numel() * tensor.element_size()
-    header = struct.pack(
-        _MOONCAKE_TENSOR_HEADER_FORMAT,
+    return _MOONCAKE_TENSOR_HEADER.pack(
         _MOONCAKE_TENSOR_OBJECT_MAGIC,
-        _MOONCAKE_TENSOR_OBJECT_VERSION,
-        MOONCAKE_TENSOR_METADATA_NBYTES,
         _TORCH_DTYPE_TO_MOONCAKE_DTYPE[dtype],
-        len(shape),
-        0,
-        0,
-        MOONCAKE_TENSOR_METADATA_NBYTES,
-        nbytes,
+        *tensor.shape,
     )
-    dims = shape + (-1,) * (8 - len(shape))
-    tensor_shape = struct.pack("<8q", *dims)
-    axes = b"\0" * (32 * 4)
-    return header + tensor_shape + tensor_shape + struct.pack("<II", 0, 0) + axes

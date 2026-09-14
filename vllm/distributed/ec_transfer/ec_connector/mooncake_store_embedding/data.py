@@ -10,8 +10,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
-EMBEDDING_CACHE_KEY_VERSION = "v2"
-MOONCAKE_TENSOR_METADATA_NBYTES = 304
+EMBEDDING_CACHE_KEY_VERSION = "v3"
 
 
 def make_embedding_key(namespace: str, identifier: str) -> str:

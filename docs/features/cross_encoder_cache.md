@@ -15,7 +15,7 @@ use the existing `ECMooncakeConnector` P2P delivery to Prefill.
 - Mooncake 0.3.12 or later with a running RAM Store. Disk offloading
   (`enable_offload: true`) is not supported.
 
-Shared reuse supports images with contiguous FP16, BF16 or FP32 encoder outputs.
+Shared reuse supports images with contiguous 2D FP16, BF16 or FP32 encoder outputs.
 Other modalities use normal encoding; non-contiguous outputs are not published.
 
 ## Usage
@@ -95,3 +95,5 @@ must consistently identify the same input; see [cached inputs](multimodal_inputs
   I/O completion or buffer release can fail the worker.
 - An independent Store can retain embeddings across Encoder restarts. Capacity,
   eviction and resilience to Store failures depend on the Store deployment.
+- The `protocol:v3` namespace isolates the compact embedding format from older
+  cache objects. Encoders using different format versions do not share hits.
