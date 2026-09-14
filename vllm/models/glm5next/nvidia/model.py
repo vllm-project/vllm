@@ -1230,6 +1230,9 @@ class Glm5NextForConditionalGeneration(
         self.num_shared_experts = example_moe.n_shared_experts
         self.num_redundant_experts = example_moe.n_redundant_experts
 
+    def process_weights_after_loading(self) -> None:
+        self.language_model.process_weights_after_loading()
+
     def update_physical_experts_metadata(
         self,
         num_physical_experts: int,

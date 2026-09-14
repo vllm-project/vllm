@@ -77,9 +77,21 @@ class DeepGemmMegaMoEExperts(nn.Module):
             ):
                 return False
             if get_scheme_dict is not None:
-                scheme_dict = get_scheme_dict(layer, expert_prefix)
-                if scheme_dict is not None:
-                    source_format = scheme_dict.get("format") or source_format
+                # Resolve the checkpoint's unfused Linear projections.
+                projection = nn.Linear(1, 1, bias=False, device="meta")
+                scheme_dicts = [
+                    get_scheme_dict(projection, f"{expert_prefix}.0.{name}")
+                    for name in ("gate_proj", "up_proj", "down_proj")
+                ]
+                scheme_dict = scheme_dicts[0]
+                if any(scheme != scheme_dict for scheme in scheme_dicts[1:]):
+                    raise ValueError(
+                        "All MoE projections need to have same "
+                        "quantization scheme but found multiple"
+                    )
+                if scheme_dict is None:
+                    return False
+                source_format = scheme_dict.get("format") or source_format
         elif source_format is None:
             config = getattr(quant_config, "config", None) or {}
             source_format = config.get("format")
@@ -107,6 +119,18 @@ class DeepGemmMegaMoEExperts(nn.Module):
         num_logical_experts: int | None = None,
     ):
         super().__init__()
+        parallel_config = vllm_config.parallel_config
+        if (
+            parallel_config.enable_expert_parallel
+            and parallel_config.enable_ep_weight_filter
+            and not parallel_config.enable_eplb
+            and parallel_config.expert_placement_strategy == "round_robin"
+        ):
+            raise ValueError(
+                "DeepGEMM MegaMoE requires contiguous expert placement when "
+                "EP weight filtering is enabled without EPLB. Use "
+                "--expert-placement-strategy linear or disable EP weight filtering."
+            )
         self.prefix = prefix
         self.capture_fn: Callable[[torch.Tensor], None] | None = None
         self.num_experts = num_experts

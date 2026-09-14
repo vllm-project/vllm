@@ -6,6 +6,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+    CompressedTensorsConfig,
+)
 from vllm.model_executor.models.deepseek_v2 import (
     _is_deep_gemm_mega_moe_requested,
     _scale_mega_moe_output_for_deferred_reduce,
@@ -14,6 +17,7 @@ from vllm.models.common.deep_gemm_mega_moe import (
     DeepGemmMegaMoEExperts,
     make_mega_moe_expert_params_mapping,
 )
+from vllm.models.glm5next.nvidia.model import Glm5NextForConditionalGeneration
 from vllm.platforms import current_platform
 
 
@@ -38,9 +42,13 @@ class _TestQuantConfig:
         return {"format": self.quant_format} if self.quant_format is not None else None
 
 
-def _make_checkpoint_experts(mma_type: str, **source_kwargs) -> DeepGemmMegaMoEExperts:
+def _make_checkpoint_experts(
+    mma_type: str, *, parallel_config=None, **source_kwargs
+) -> DeepGemmMegaMoEExperts:
     return DeepGemmMegaMoEExperts(
         SimpleNamespace(
+            parallel_config=parallel_config
+            or SimpleNamespace(enable_expert_parallel=False),
             scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
             compilation_config=SimpleNamespace(static_forward_context={}),
         ),
@@ -129,6 +137,68 @@ def test_mega_moe_rejects_unsupported_compressed_tensors_checkpoint():
             torch.nn.Identity(),
             "model.layers.0.mlp",
         )
+
+
+@pytest.mark.parametrize("target", ["Linear", r"re:.*\.experts\.0\..*_proj"])
+@pytest.mark.parametrize("suffix", ["", ".experts"])
+@pytest.mark.parametrize("ignored", [False, True])
+def test_mega_moe_resolves_projection_targets_and_ignores(target, suffix, ignored):
+    quant_config = CompressedTensorsConfig(
+        target_scheme_map={target: {"format": "mxfp4-pack-quantized"}},
+        ignore=[r"re:.*\.experts\.0\..*_proj"] if ignored else [],
+        quant_format="pack-quantized",
+    )
+
+    assert DeepGemmMegaMoEExperts.source_is_mxfp4(
+        quant_config, torch.nn.Identity(), f"model.layers.0.mlp{suffix}"
+    ) is (not ignored)
+
+
+@pytest.mark.parametrize("ignore_gate", [False, True])
+def test_mega_moe_rejects_inconsistent_projection_schemes(ignore_gate):
+    quant_config = CompressedTensorsConfig(
+        target_scheme_map={
+            r"re:.*\.gate_proj": {"format": "pack-quantized"},
+            "Linear": {"format": "mxfp4-pack-quantized"},
+        },
+        ignore=[r"re:.*\.gate_proj"] if ignore_gate else [],
+        quant_format="pack-quantized",
+    )
+
+    with pytest.raises(ValueError, match="All MoE projections"):
+        DeepGemmMegaMoEExperts.source_is_mxfp4(
+            quant_config, torch.nn.Identity(), "model.layers.0.mlp"
+        )
+
+
+@pytest.mark.parametrize("placement", ["linear", "round_robin"])
+@pytest.mark.parametrize("weight_filter", [False, True])
+@pytest.mark.parametrize("eplb", [False, True])
+def test_mega_moe_rejects_incompatible_ep_weight_filter(placement, weight_filter, eplb):
+    parallel_config = SimpleNamespace(
+        enable_expert_parallel=True,
+        enable_ep_weight_filter=weight_filter,
+        enable_eplb=eplb,
+        expert_placement_strategy=placement,
+    )
+    if placement == "round_robin" and weight_filter and not eplb:
+        with pytest.raises(ValueError, match="requires contiguous expert placement"):
+            _make_checkpoint_experts("bf16xbf16", parallel_config=parallel_config)
+    else:
+        _make_checkpoint_experts("bf16xbf16", parallel_config=parallel_config)
+
+
+def test_glm5next_multimodal_post_load_finalizes_language_model():
+    calls = []
+    model = SimpleNamespace(
+        language_model=SimpleNamespace(
+            process_weights_after_loading=lambda: calls.append("finalized")
+        )
+    )
+
+    Glm5NextForConditionalGeneration.process_weights_after_loading(model)
+
+    assert calls == ["finalized"]
 
 
 @pytest.mark.parametrize(
