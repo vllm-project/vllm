@@ -65,7 +65,7 @@ def test_v41_fused_save_compress_and_insert(
     a Torch reference with BF16 rounding before RoPE. Replays change both
     inputs and history so stale scratch/cache values cannot satisfy the test.
     """
-    from vllm.models.deepseek_v4_1.common.ops.fused_compress_quant_cache import (
+    from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
         fused_save_compress_norm,
         rope_quant_insert,
     )
@@ -226,7 +226,7 @@ def test_v41_rope_insert_plain_row(compress_ratio: int, store_fp8: bool):
     Non-boundary positions, negative slots and untouched rows must keep their
     prior contents.
     """
-    from vllm.models.deepseek_v4_1.common.ops.fused_compress_quant_cache import (
+    from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
         rope_quant_insert,
     )
 
@@ -301,7 +301,7 @@ def test_v41_compressor_metadata_maps_tokens_to_their_ring():
     capacity`` and keep padding tokens at PAD."""
     from unittest.mock import MagicMock
 
-    from vllm.models.deepseek_v4_1.compressor import CompressorMetadataBuilder
+    from vllm.models.deepseek_v41.compressor import CompressorMetadataBuilder
     from vllm.v1.attention.backend import CommonAttentionMetadata
     from vllm.v1.kv_cache_interface import CircularBufferSpec
 
@@ -351,11 +351,11 @@ def test_v41_compressor_metadata_maps_tokens_to_their_ring():
 def test_v41_attention_joins_cache_writes_before_consumption(use_aux, use_graph):
     """Both reused-event joins must publish this forward's states and cache rows."""
     from vllm.forward_context import ForwardContext, override_forward_context
-    from vllm.models.deepseek_v4_1.attention import (
+    from vllm.models.deepseek_v41.attention import (
         DeepseekV4Attention,
         DeepseekV4Indexer,
     )
-    from vllm.models.deepseek_v4_1.compressor import DeepseekCompressor
+    from vllm.models.deepseek_v41.compressor import DeepseekCompressor
 
     torch.manual_seed(43)
     raw = torch.randn(19, 1024, device="cuda")
@@ -705,9 +705,13 @@ def test_gfx950_compressed_cache_canonicalizes_nonfinite(writer: str) -> None:
     ],
 )
 def test_get_c128_boundary(starts, query_start_loc, expected):
+    query_start_loc_tensor = torch.tensor(query_start_loc)
+    query_lens = query_start_loc_tensor[1:] - query_start_loc_tensor[:-1]
     metadata = SimpleNamespace(
-        _num_computed_tokens_cpu=None if starts is None else torch.tensor(starts),
-        query_start_loc_cpu=torch.tensor(query_start_loc),
+        seq_lens_cpu_upper_bound=(
+            None if starts is None else torch.tensor(starts) + query_lens
+        ),
+        query_start_loc_cpu=query_start_loc_tensor,
     )
     assert _get_c128_boundary(metadata) is expected
 
