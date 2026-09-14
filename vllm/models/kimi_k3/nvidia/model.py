@@ -3,7 +3,7 @@
 """Kimi-K3 multimodal model implementation for vLLM."""
 
 import math
-from collections.abc import Iterable
+from collections.abc import Hashable, Iterable
 from typing import Any, cast
 
 import torch
@@ -116,7 +116,7 @@ from vllm.transformers_utils.configs.kimi_k3 import KimiK3Config
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
-from vllm.utils.torch_utils import aux_stream
+from vllm.utils.torch_utils import aux_stream, is_meta_module
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from ..common.mm_preprocess import (
@@ -366,6 +366,10 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
         self.activation = activation
         self.activation_beta = activation_beta
         self.activation_linear_beta = activation_linear_beta
+        self.register_buffer("_mega_l1_packed", None, persistent=False)
+        self.register_buffer("_mega_l1_scale", None, persistent=False)
+        self.register_buffer("_mega_l2_packed", None, persistent=False)
+        self.register_buffer("_mega_l2_scale", None, persistent=False)
 
     def synchronize_first_launch(self) -> None:
         ep_group = get_ep_group()
@@ -379,6 +383,14 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
 
     def finalize_weights(self, shared_experts: DeepseekV4MLP | None = None) -> None:
         if self._transformed_l1_weights is not None:
+            return
+
+        # Weight cache IPC engine: the daemon exported the transformed
+        # buffers; reuse them zero-copy and drop the raw packed params.
+        if self._mega_l1_packed is not None:
+            self._transformed_l1_weights = (self._mega_l1_packed, self._mega_l1_scale)
+            self._transformed_l2_weights = (self._mega_l2_packed, self._mega_l2_scale)
+            self._drop_raw_mega_weights()
             return
 
         self._check_runtime_supported()
@@ -406,6 +418,15 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
                 activation=self.activation,
             )
         )
+        l1_packed, l1_scale = self._transformed_l1_weights
+        l2_packed, l2_scale = self._transformed_l2_weights
+        self.register_buffer("_mega_l1_packed", l1_packed, persistent=False)
+        self.register_buffer("_mega_l1_scale", l1_scale, persistent=False)
+        self.register_buffer("_mega_l2_packed", l2_packed, persistent=False)
+        self.register_buffer("_mega_l2_scale", l2_scale, persistent=False)
+        self._drop_raw_mega_weights()
+
+    def _drop_raw_mega_weights(self) -> None:
         self.w13_weight = None
         self.w13_weight_scale = None
         self.w2_weight = None
@@ -1793,7 +1814,9 @@ class KimiK3ForConditionalGeneration(
                 quant_config=self._maybe_ignore_quant_config(quant_config),
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
-            if self._maybe_ignore_quant_config(quant_config) is not None:
+            if is_meta_module(self.vision_tower):
+                pass
+            elif self._maybe_ignore_quant_config(quant_config) is not None:
                 self.vision_tower = self.vision_tower.to(device=self.device)
             else:
                 self.vision_tower = self.vision_tower.to(
@@ -1833,9 +1856,10 @@ class KimiK3ForConditionalGeneration(
                 quant_config=self._maybe_ignore_quant_config(quant_config),
                 prefix=maybe_prefix(prefix, "mm_projector"),
             )
-            self.mm_projector = self.mm_projector.to(
-                device=self.device, dtype=model_config.dtype
-            )
+            if not is_meta_module(self.mm_projector):
+                self.mm_projector = self.mm_projector.to(
+                    device=self.device, dtype=model_config.dtype
+                )
 
         self.quant_config = quant_config
         with self._mark_language_model(vllm_config):
@@ -1948,6 +1972,7 @@ class KimiK3ForConditionalGeneration(
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
