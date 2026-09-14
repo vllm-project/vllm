@@ -119,6 +119,8 @@ def test_v2_batch_coordination_returns_dp_and_moe_non_sp_token_counts(monkeypatc
                     [0, 0, 0, 0],
                     [0, 0, 0, 0],
                     [-1, -1, -1, -1],
+                    [0, 0, 0, 0],
+                    [1, 1, 1, 1],
                 ],
                 dtype=torch.int32,
             )
