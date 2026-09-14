@@ -1003,8 +1003,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 bad_experts = bad.nonzero(as_tuple=True)[0].tolist()
                 raise ValueError(
                     f"NVFP4 MoE checkpoint has incomplete ModelOpt calibration "
-                    f"or load: '{name}' has zero or non-finite values for "
-                    f"expert ids {bad_experts}."
+                    f"or load for layer '{layer.layer_name}': '{name}' has zero "
+                    f"or non-finite values for expert ids {bad_experts}."
                 )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:

@@ -824,6 +824,7 @@ def _make_nvfp4_moe(quant_method="NVFP4", backend=None):
 
 def _create_nvfp4_moe_layer(moe, num_experts=8):
     layer = torch.nn.Module()
+    layer.layer_name = "test.moe.experts"
     with (
         patch(
             "vllm.model_executor.parameter.get_tensor_model_parallel_rank",
@@ -881,7 +882,10 @@ def test_modelopt_nvfp4_moe_reports_missing_scale_experts(param_name):
     _fill_nvfp4_moe_scales(layer)
     getattr(layer, param_name).data[2] = float("nan")
 
-    with pytest.raises(ValueError, match=rf"'{param_name}'.*\[2\]"):
+    with pytest.raises(
+        ValueError,
+        match=rf"layer 'test\.moe\.experts'.*'{param_name}'.*\[2\]",
+    ):
         moe._validate_loaded_expert_scales(layer)
 
 
