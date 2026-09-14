@@ -222,7 +222,7 @@ class TestBackpressure:
     def setup(self):
         mock_region = _mock_mmap_region(20)
         self.primary = CPUPrimaryTierOffloadingManager(
-            num_blocks=20, mmap_region=mock_region
+            num_chunks=20, mmap_region=mock_region
         )
         mock_view = mock_region.create_kv_memoryview()
         self.tier = DelayedSecondaryTierManager(
