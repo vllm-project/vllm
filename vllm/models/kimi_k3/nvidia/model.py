@@ -1170,13 +1170,8 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         self.use_attn_res = self.attn_res_block_size is not None
         self.use_sequence_parallel = use_kimi_k3_sequence_parallel(vllm_config)
         if self.use_sequence_parallel:
-            parallel_config = vllm_config.parallel_config
             logger.info_once(
-                "Kimi K3 model-level sequence parallelism is enabled "
-                "(TP=%d, PP=%d, MoE backend=%s).",
-                parallel_config.tensor_parallel_size,
-                parallel_config.pipeline_parallel_size,
-                vllm_config.kernel_config.moe_backend,
+                "Kimi K3 model-level sequence parallelism is enabled.",
                 scope="global",
             )
 
