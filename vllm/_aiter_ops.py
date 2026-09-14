@@ -858,6 +858,15 @@ def _rocm_aiter_triton_gemm_a8w8_blockscale_fake(
     return Y
 
 
+_AITER_BLOCKSCALE_TRITON_MIN_M = 384
+
+
+def _rocm_aiter_use_triton_blockscale(m: int, n: int, k: int) -> bool:
+    if m < _AITER_BLOCKSCALE_TRITON_MIN_M or not current_platform.is_rocm():
+        return False
+    return not rocm_aiter_ops.is_blockscale_tuned(n, k)
+
+
 def _rocm_aiter_gemm_a8w8_blockscale_impl(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -866,6 +875,13 @@ def _rocm_aiter_gemm_a8w8_blockscale_impl(
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
     from aiter import gemm_a8w8_blockscale
+
+    # Must stay inside the custom op: a branch in the caller would be traced
+    # once by Dynamo and frozen at the shape seen during tracing.
+    if _rocm_aiter_use_triton_blockscale(A.shape[0], B.shape[0], B.shape[1]):
+        return _rocm_aiter_triton_gemm_a8w8_blockscale_impl(
+            A, B, As, Bs, output_dtype=output_dtype
+        )
 
     return gemm_a8w8_blockscale(A, B, As, Bs, dtype=output_dtype)
 
@@ -3287,6 +3303,22 @@ class rocm_aiter_ops:
         import aiter.ops.gemm_op_a8w8 as aiter_gemm_a8w8_ops
 
         csv_path = aiter_gemm_a8w8_ops.AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE_FILE
+        gfx = aiter_gemm_a8w8_ops.get_gfx()
+        cu_num = aiter_gemm_a8w8_ops.get_cu_num()
+        return (n, k) in _load_gemm_tuned_configs(
+            csv_path, (("gfx", gfx), ("cu_num", cu_num)), key_cols=("N", "K")
+        )
+
+    @staticmethod
+    def is_blockscale_tuned(n: int, k: int) -> bool:
+        """Whether (N, K) has a tuned aiter blockscale (non-preshuffled) config."""
+        if not current_platform.is_rocm():
+            return False
+        import aiter.ops.gemm_op_a8w8 as aiter_gemm_a8w8_ops
+
+        csv_path = (
+            aiter_gemm_a8w8_ops.AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_FILE
+        )
         gfx = aiter_gemm_a8w8_ops.get_gfx()
         cu_num = aiter_gemm_a8w8_ops.get_cu_num()
         return (n, k) in _load_gemm_tuned_configs(
