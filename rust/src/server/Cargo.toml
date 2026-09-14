@@ -20,6 +20,7 @@ libc.workspace = true
 llm-multimodal.workspace = true
 openssl.workspace = true
 prost-types.workspace = true
+prost.workspace = true
 rmp-serde.workspace = true
 rmpv.workspace = true
 serde.workspace = true

@@ -50,6 +50,8 @@ pub struct Finished {
     /// Connector-specific encoder cache transfer parameters for disaggregated
     /// serving.
     pub ec_transfer_params: Option<serde_json::Value>,
+    /// Sampling support sets aligned with all generated token positions.
+    pub sampling_mask: Option<Vec<Vec<u32>>>,
 }
 
 /// Sample metadata emitted by one engine output update.
@@ -120,6 +122,7 @@ pub async fn decoded_text_event_stream(
     let mut sampled_token_ids = Vec::new();
     let mut output_token_count: usize = 0;
     let mut sampled_logprobs: Option<DecodedLogprobs> = None;
+    let mut sampling_mask: Option<Vec<Vec<u32>>> = None;
 
     while let Some(next) = raw_stream.next().await {
         let output = next?;
@@ -213,6 +216,7 @@ pub async fn decoded_text_event_stream(
 
         let mut new_token_ids = output.token_ids;
         let mut new_logprobs = output.logprobs;
+        let mut new_sampling_mask = output.sampling_mask;
 
         // Trim tokens and logprobs if we matched stop string.
         if let Some(num_tokens) = truncate_tokens_to {
@@ -220,9 +224,15 @@ pub async fn decoded_text_event_stream(
             if let Some(logprobs) = &mut new_logprobs {
                 logprobs.positions.truncate(num_tokens);
             }
+            if let Some(rows) = &mut new_sampling_mask {
+                rows.truncate(num_tokens);
+            }
         }
 
         output_token_count += new_token_ids.len();
+        if let Some(mut rows) = new_sampling_mask {
+            sampling_mask.get_or_insert_with(Vec::new).append(&mut rows);
+        }
 
         let decoded_logprobs = new_logprobs
             .as_ref()
@@ -246,6 +256,15 @@ pub async fn decoded_text_event_stream(
         }
 
         if let Some(reason) = finish_reason {
+            if let Some(rows) = sampling_mask.as_ref()
+                && rows.len() != output_token_count
+            {
+                return Err(Error::SamplingMaskTokenCountMismatch {
+                    request_id,
+                    token_count: output_token_count,
+                    row_count: rows.len(),
+                });
+            }
             // Flush any remaining buffered text.
             let (last_chunk, full_decoded) = decoder.flush(truncate_output_to)?;
             let text_len = full_decoded.text.len();
@@ -293,6 +312,7 @@ pub async fn decoded_text_event_stream(
                     finish_reason: reason,
                     kv_transfer_params,
                     ec_transfer_params,
+                    sampling_mask,
                 })),
             })
             .await;
@@ -354,6 +374,7 @@ mod tests {
 
     use futures::{Stream, StreamExt as _, stream};
     use vllm_engine_core_client::AbortCause;
+    use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs, TokenLogprob};
     use vllm_llm::GenerateOutput;
     use vllm_tokenizer::{TokenAnchor, TokenAttribution, test_utils::TestTokenizer};
 
@@ -382,6 +403,33 @@ mod tests {
     /// Convert ASCII string to token IDs (one byte per token).
     fn ascii_tokens(s: &str) -> Vec<u32> {
         s.bytes().map(u32::from).collect()
+    }
+
+    #[tokio::test]
+    async fn sampling_masks_survive_text_decode_and_collection() {
+        let prompt: Arc<[u32]> = Arc::from([]);
+        let mut first = GenerateOutput::for_test(Some(prompt), vec![b'a' as u32], None);
+        first.sampling_mask = Some(vec![vec![1, b'a' as u32]]);
+        let mut terminal =
+            GenerateOutput::for_test(None, vec![b'b' as u32], Some(FinishReason::Length));
+        terminal.sampling_mask = Some(vec![vec![2, b'b' as u32]]);
+        let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
+
+        let collected = decoded_text_event_stream(
+            "test-mask".into(),
+            tokenizer,
+            stream::iter([Ok(first), Ok(terminal)]),
+            TextDecodeOptions::default(),
+            false,
+        )
+        .collect_output()
+        .await
+        .unwrap();
+
+        assert_eq!(
+            collected.sampling_mask,
+            Some(vec![vec![1, b'a' as u32], vec![2, b'b' as u32]])
+        );
     }
 
     fn opts(stop: &[&str], min_tokens: u32) -> TextDecodeOptions {
@@ -472,6 +520,7 @@ mod tests {
                             finish_reason: FinishReason::Length,
                             kv_transfer_params: None,
                             ec_transfer_params: None,
+                            sampling_mask: None,
                         }),
                     ),
                 ],
@@ -503,6 +552,7 @@ mod tests {
                             ))),
                             kv_transfer_params: None,
                             ec_transfer_params: None,
+                            sampling_mask: None,
                         }),
                     ),
                 ],
@@ -574,6 +624,57 @@ mod tests {
         let output = run_to_completion(ascii_tokens("hello"), opts(&["e"], 0)).await;
         assert_eq!(output.text, "h");
         assert!(output.finish_reason.is_stop());
+    }
+
+    #[tokio::test]
+    async fn stream_stop_string_mid_chunk_keeps_token_logprob_mask_alignment() {
+        let token_ids = ascii_tokens("abcxyz");
+        let mut raw = GenerateOutput::for_test(
+            Some(Arc::from([])),
+            token_ids.clone(),
+            Some(FinishReason::Length),
+        );
+        raw.logprobs = Some(Logprobs {
+            positions: token_ids
+                .iter()
+                .map(|&token_id| PositionLogprobs {
+                    entries: vec![TokenLogprob {
+                        token_id,
+                        logprob: -0.25,
+                        rank: 1,
+                    }],
+                })
+                .collect(),
+        });
+        raw.sampling_mask =
+            Some(token_ids.iter().map(|&token_id| vec![token_id, token_id + 100]).collect());
+        let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
+
+        let output = decoded_text_event_stream(
+            "test-mid-chunk-stop".into(),
+            tokenizer,
+            stream::iter([Ok(raw)]),
+            opts(&["cx"], 0),
+            false,
+        )
+        .collect_output()
+        .await
+        .unwrap();
+
+        assert_eq!(output.text, "ab");
+        assert!(output.finish_reason.is_stop());
+        assert_eq!(output.token_ids, ascii_tokens("abcx"));
+        assert_eq!(output.logprobs.as_ref().unwrap().positions.len(), 4);
+        assert_eq!(
+            output.sampling_mask,
+            Some(vec![
+                vec![b'a' as u32, b'a' as u32 + 100],
+                vec![b'b' as u32, b'b' as u32 + 100],
+                vec![b'c' as u32, b'c' as u32 + 100],
+                vec![b'x' as u32, b'x' as u32 + 100],
+            ])
+        );
+        assert_eq!(output.usage.output_token_count, 4);
     }
 
     #[tokio::test]
