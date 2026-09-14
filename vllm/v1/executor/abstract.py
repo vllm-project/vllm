@@ -260,8 +260,11 @@ class Executor(ABC):
         self.collective_rpc("execute_dummy_batch")
 
     def take_draft_token_ids(self, step_id: int | None = None) -> DraftTokenIds | None:
+        # Omit step_id when unset so plugin workers with the documented
+        # no-argument take_draft_token_ids() keep working.
+        kwargs = {} if step_id is None else {"step_id": step_id}
         output: list[DraftTokenIds] = self.collective_rpc(
-            "take_draft_token_ids", kwargs={"step_id": step_id}
+            "take_draft_token_ids", kwargs=kwargs
         )
         return output[0]
 

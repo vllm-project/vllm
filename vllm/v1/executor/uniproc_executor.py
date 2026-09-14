@@ -142,9 +142,10 @@ class UniProcExecutor(Executor):
         )
 
     def take_draft_token_ids(self, step_id: int | None = None) -> DraftTokenIds | None:
+        kwargs = {} if step_id is None else {"step_id": step_id}
         return self.collective_rpc(
             "take_draft_token_ids",
-            kwargs={"step_id": step_id},
+            kwargs=kwargs,
             single_value=True,
         )
 

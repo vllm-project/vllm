@@ -368,10 +368,11 @@ class MultiprocExecutor(Executor):
 
     def take_draft_token_ids(self, step_id: int | None = None) -> DraftTokenIds | None:
         # OPTIMIZATION: Get output only from a single worker (output_rank)
+        kwargs = {} if step_id is None else {"step_id": step_id}
         return self.collective_rpc(
             "take_draft_token_ids",
             unique_reply_rank=self.output_rank,
-            kwargs={"step_id": step_id},
+            kwargs=kwargs,
         )
 
     def collective_rpc(  # type: ignore[override]
