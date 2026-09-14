@@ -7,6 +7,7 @@ import time
 import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
+from dataclasses import replace
 from typing import Any
 
 import vllm.envs as envs
@@ -41,6 +42,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tracing import init_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
 from vllm.v1.engine import EngineCoreRequest, PauseMode
@@ -51,6 +53,10 @@ from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollec
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.executor import Executor
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
+from vllm.v1.hidden_state_capture import (
+    HiddenStateCapturePlan,
+    hidden_state_capture_capability,
+)
 from vllm.v1.metrics.loggers import (
     StatLoggerFactory,
     StatLoggerManager,
@@ -362,6 +368,7 @@ class AsyncLLM(EngineClient):
         prompt_text: str | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
+        hidden_state_capture: HiddenStateCapturePlan | None = None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
@@ -458,7 +465,27 @@ class AsyncLLM(EngineClient):
         if reasoning_parser_kwargs is not None:
             request.reasoning_parser_kwargs = reasoning_parser_kwargs
 
+        if hidden_state_capture is not None:
+            if request.hidden_state_capture is not None:
+                raise ValueError("Hidden-state capture plan was supplied twice")
+            request.hidden_state_capture = hidden_state_capture
+        if (plan := request.hidden_state_capture) is not None:
+            if not isinstance(params, SamplingParams) or params.n != 1:
+                raise ValueError("Hidden-state capture requires a single completion")
+            prompt_len = length_from_prompt_token_ids_or_embeds(
+                request.prompt_token_ids, request.prompt_embeds
+            )
+            if plan.prompt_len != prompt_len or plan.request_id != request.request_id:
+                raise ValueError("Hidden-state capture plan does not match the request")
+            if reason := hidden_state_capture_capability(self.vllm_config):
+                logger.warning_once("Hidden-state capture unavailable: %s", reason)
+                request.hidden_state_capture = None
+
         self.input_processor.assign_request_id(request)
+        if request.hidden_state_capture is not None:
+            request.hidden_state_capture = replace(
+                request.hidden_state_capture, request_id=request.request_id
+            )
 
         # We start the output_handler on the first call to add_request() so
         # we can call __init__ before the event loop, which enables us
@@ -639,6 +666,7 @@ class AsyncLLM(EngineClient):
         session_id: str | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
+        hidden_state_capture: HiddenStateCapturePlan | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -681,6 +709,7 @@ class AsyncLLM(EngineClient):
                 prompt_text=prompt_text,
                 reasoning_ended=reasoning_ended,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
+                hidden_state_capture=hidden_state_capture,
             )
 
             # The output_handler task pushes items into the queue.

@@ -16,6 +16,10 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
+from vllm.v1.hidden_state_capture import (
+    HiddenStateCapturePlan,
+    HiddenStateCaptureResult,
+)
 from vllm.v1.metrics.stats import (
     PrefillStats,
     RequestSpecDecodeMetrics,
@@ -157,6 +161,8 @@ class EngineCoreRequest(
 
     session_id: str | None = None
 
+    hidden_state_capture: HiddenStateCapturePlan | None = None
+
     @property
     def params(self) -> SamplingParams | PoolingParams:
         """Return the processed params (sampling or pooling)."""
@@ -232,6 +238,9 @@ class EngineCoreOutput(
     # Per-request spec-decode acceptance; attached only on the final output.
     # Appended last so `array_like` positional serialization stays compatible.
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
+
+    hidden_state_capture: HiddenStateCaptureResult | None = None
+    hidden_capture_skip_reason: str | None = None
 
     @property
     def finished(self) -> bool:

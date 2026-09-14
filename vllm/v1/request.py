@@ -20,6 +20,10 @@ from vllm.v1.engine import (
     EngineCoreRequest,
     FinishReason,
 )
+from vllm.v1.hidden_state_capture import (
+    HiddenStateCaptureBuffer,
+    HiddenStateCapturePlan,
+)
 from vllm.v1.metrics.stats import PrefillStats, RequestSpecDecodeMetrics
 from vllm.v1.structured_output.request import StructuredOutputRequest
 from vllm.v1.utils import ConstantList
@@ -78,8 +82,14 @@ class Request:
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
         abort_immediately: bool = False,
+        hidden_state_capture: HiddenStateCapturePlan | None = None,
     ) -> None:
         self.request_id = request_id
+        self.hidden_state_capture = (
+            HiddenStateCaptureBuffer(hidden_state_capture)
+            if hidden_state_capture is not None
+            else None
+        )
         self.client_index = client_index
         self.priority = priority
         self.sampling_params = sampling_params
@@ -260,6 +270,7 @@ class Request:
             reasoning_ended=request.reasoning_ended,
             reasoning_parser_kwargs=request.reasoning_parser_kwargs,
             abort_immediately=request.abort_immediately,
+            hidden_state_capture=request.hidden_state_capture,
         )
 
     def append_output_token_ids(

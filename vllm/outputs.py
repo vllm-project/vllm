@@ -128,6 +128,8 @@ class RequestOutput:
             prefix-cache writes for this request.
         kv_transfer_params: The params for remote K/V transfer.
         ec_transfer_params: The params for remote encoder-cache transfer.
+        hidden_state_capture: Captured hidden rows and their absolute positions.
+        hidden_capture_skip_reason: Why a requested capture produced no sample.
     """
 
     def __init__(
@@ -147,6 +149,8 @@ class RequestOutput:
         *,
         kv_transfer_params: dict[str, Any] | None = None,
         ec_transfer_params: dict[str, Any] | None = None,
+        hidden_state_capture: Any | None = None,
+        hidden_capture_skip_reason: str | None = None,
         # Forward compatibility, code that uses args added in new release can
         # still run with older versions of vLLM without breaking.
         **kwargs: Any,
@@ -169,6 +173,8 @@ class RequestOutput:
         self.num_cache_creation_tokens = num_cache_creation_tokens
         self.kv_transfer_params = kv_transfer_params
         self.ec_transfer_params = ec_transfer_params
+        self.hidden_state_capture = hidden_state_capture
+        self.hidden_capture_skip_reason = hidden_capture_skip_reason
 
     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
         """Merge subsequent RequestOutput into this one"""
@@ -176,6 +182,10 @@ class RequestOutput:
         self.finished |= next_output.finished
         self.kv_transfer_params = next_output.kv_transfer_params
         self.ec_transfer_params = next_output.ec_transfer_params
+        if next_output.hidden_state_capture is not None:
+            self.hidden_state_capture = next_output.hidden_state_capture
+        if next_output.hidden_capture_skip_reason is not None:
+            self.hidden_capture_skip_reason = next_output.hidden_capture_skip_reason
 
         for next_completion in next_output.outputs:
             for i, completion in enumerate(self.outputs):

@@ -22,7 +22,7 @@ import gc
 import time
 from contextlib import AbstractContextManager
 from copy import deepcopy
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 
 import numpy as np
 import torch
@@ -48,7 +48,10 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
 from vllm.model_executor.model_loader import get_model_loader
-from vllm.model_executor.models.interfaces import requires_raw_input_tokens
+from vllm.model_executor.models.interfaces import (
+    SupportsEagle3,
+    requires_raw_input_tokens,
+)
 from vllm.model_executor.offloader import (
     create_offloader,
     get_offloader,
@@ -66,6 +69,11 @@ from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+from vllm.v1.hidden_state_capture import (
+    HiddenStateCapturePlan,
+    capture_scheduled_hidden_states,
+    drop_incompatible_aux_plans,
+)
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
@@ -159,6 +167,7 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     resolve_adaptive_cudagraph_mode,
 )
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
+    get_eagle3_aux_layers_from_config,
     set_eagle3_aux_hidden_state_layers,
     verify_supports_aux_hidden_states_over_pp,
 )
@@ -276,6 +285,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Speculative decoding.
         self.speculator = None
         self.use_aux_hidden_state_outputs = False
+        self.hidden_state_capture_plans: dict[str, HiddenStateCapturePlan] = {}
+        self.hidden_state_capture_aux_layer_ids: tuple[int, ...] = ()
         self.num_speculative_steps = vllm_config.num_speculative_tokens
         if self.speculative_config is not None:
             if self.is_last_pp_rank:
@@ -412,6 +423,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.use_aux_hidden_state_outputs:
                 assert self.speculative_config is not None
                 set_eagle3_aux_hidden_state_layers(self.model, self.speculative_config)
+                aux_layers = (
+                    get_eagle3_aux_layers_from_config(self.speculative_config)
+                    or cast(
+                        SupportsEagle3, self.model
+                    ).get_eagle3_default_aux_hidden_state_layers()
+                )
+                self.hidden_state_capture_aux_layer_ids = tuple(sorted(set(aux_layers)))
                 if self.use_pp:
                     assert self.speculative_config.method is not None
                     verify_supports_aux_hidden_states_over_pp(
@@ -1082,6 +1100,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
         finished_req_ids = scheduler_output.finished_req_ids
+        for req_id in finished_req_ids:
+            self.hidden_state_capture_plans.pop(req_id, None)
+        for req_id in scheduler_output.finished_hidden_capture_req_ids or ():
+            self.hidden_state_capture_plans.pop(req_id, None)
         if self.pooling_runner is not None:
             # Preempted docs keep their query-use reservation until rescheduled.
             self.pooling_runner.on_requests_finished(finished_req_ids)
@@ -1113,6 +1135,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for new_req_data in scheduler_output.scheduled_new_reqs:
             assert new_req_data.prefill_token_ids is not None
             req_id = new_req_data.req_id
+            if new_req_data.hidden_state_capture is not None:
+                self.hidden_state_capture_plans[req_id] = (
+                    new_req_data.hidden_state_capture
+                )
 
             # Streaming input update: request already exists from a prior
             # chunk. Remove old state so it can be cleanly re-added below
@@ -2028,6 +2054,40 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for states in aux_hidden_states
             ]
 
+        hidden_capture_chunks = None
+        hidden_capture_errors = None
+        if self.hidden_state_capture_plans:
+            hidden_capture_errors = drop_incompatible_aux_plans(
+                self.hidden_state_capture_plans,
+                input_batch.req_ids,
+                self.hidden_state_capture_aux_layer_ids,
+                aux_hidden_states,
+            )
+            for req_id in hidden_capture_errors:
+                logger.warning(
+                    "Hidden-state capture unavailable for %s: aux layers", req_id
+                )
+            if self.hidden_state_capture_plans:
+                num_scheduled = {
+                    req_id: int(
+                        input_batch.query_start_loc_np[i + 1]
+                        - input_batch.query_start_loc_np[i]
+                    )
+                    for i, req_id in enumerate(input_batch.req_ids)
+                }
+                computed = {
+                    req_id: int(input_batch.num_computed_tokens_np[i])
+                    for i, req_id in enumerate(input_batch.req_ids)
+                }
+                hidden_capture_chunks = capture_scheduled_hidden_states(
+                    self.hidden_state_capture_plans,
+                    input_batch.req_ids,
+                    num_scheduled,
+                    computed,
+                    hidden_states,
+                    aux_hidden_states,
+                )
+
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output
         )
@@ -2060,6 +2120,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sampled_token_ids=None,  # type: ignore
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
             cudagraph_stats=cudagraph_stats,
+            hidden_state_capture=hidden_capture_chunks,
+            hidden_capture_errors=hidden_capture_errors,
         )
         # Start async output copy here so that it can overlap with speculator proposal.
         async_output = AsyncOutput(

@@ -54,6 +54,7 @@ from vllm.v1.core.sched.request_queue import (
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.hidden_state_capture import accepted_hidden_range
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
@@ -210,6 +211,7 @@ class Scheduler(SchedulerInterface):
         # requests so that they can free the cached states for those requests.
         # This is flushed at the end of each scheduling step.
         self.finished_req_ids: set[str] = set()
+        self.finished_hidden_capture_req_ids: set[str] = set()
 
         # IDs of requests preempted since the last call to schedule().
         self.reset_preempted_req_ids: set[str] = set()
@@ -1420,6 +1422,7 @@ class Scheduler(SchedulerInterface):
             # It contains the request IDs that are finished in between
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
+            finished_hidden_capture_req_ids=self.finished_hidden_capture_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
             has_sync_kv_loads=has_sync_kv_loads,
@@ -1566,6 +1569,7 @@ class Scheduler(SchedulerInterface):
         # NOTE: We shouldn't just clear() here because it will also affect
         # the scheduler output.
         self.finished_req_ids = set()
+        self.finished_hidden_capture_req_ids = set()
         self.reset_preempted_req_ids = set()
 
     def _update_request_as_session(
@@ -1978,6 +1982,7 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
+            num_rejected = 0
             if scheduled_spec_token_ids and (
                 generated_token_ids or self.num_sampled_tokens_per_step == 0
             ):
@@ -2080,6 +2085,57 @@ class Scheduler(SchedulerInterface):
                     request.resumable = False
                     stopped = True
 
+            capture_result = None
+            capture_skip_reason = None
+            if (capture_buffer := request.hidden_state_capture) is not None:
+                capture_skip_reason = (
+                    model_runner_output.hidden_capture_errors or {}
+                ).get(req_id)
+                if capture_skip_reason is None:
+                    if (
+                        not output_is_stale
+                        and (
+                            chunk := (
+                                model_runner_output.hidden_state_capture or {}
+                            ).get(req_id)
+                        )
+                        is not None
+                        and new_token_ids
+                    ):
+                        scheduled_end = request.num_computed_tokens + num_rejected
+                        accepted_start, accepted_end = accepted_hidden_range(
+                            scheduled_end,
+                            num_tokens_scheduled,
+                            len(new_token_ids),
+                            bool(scheduled_spec_token_ids),
+                        )
+                        capture_buffer.add(chunk.accepted(accepted_start, accepted_end))
+                    if stopped or (
+                        not output_is_stale
+                        and request.num_computed_tokens
+                        >= capture_buffer.plan.window_end_abs
+                    ):
+                        capture_result = capture_buffer.finish()
+                        if capture_result is None:
+                            capture_skip_reason = (
+                                "ended_before_window"
+                                if stopped
+                                and request.num_computed_tokens
+                                < capture_buffer.plan.window_start_abs
+                                else "insufficient_rows"
+                            )
+                            logger.info(
+                                "Hidden-state capture skipped for %s (%s): %d rows, "
+                                "minimum %d",
+                                req_id,
+                                capture_skip_reason,
+                                capture_buffer.num_rows,
+                                capture_buffer.plan.min_rows,
+                            )
+                if capture_skip_reason is not None or capture_result is not None:
+                    request.hidden_state_capture = None
+                    self.finished_hidden_capture_req_ids.add(req_id)
+
             routed_experts = None
             if (
                 self.enable_return_routed_experts
@@ -2121,7 +2177,11 @@ class Scheduler(SchedulerInterface):
                         routed_experts = routing_data[end - len(new_token_ids) : end]
 
             should_emit_output = bool(
-                new_token_ids or pooler_output is not None or stopped
+                new_token_ids
+                or pooler_output is not None
+                or stopped
+                or capture_result is not None
+                or capture_skip_reason is not None
             )
             if should_emit_output:
                 prefill_stats = request.take_prefill_stats()
@@ -2188,6 +2248,8 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        hidden_state_capture=capture_result,
+                        hidden_capture_skip_reason=capture_skip_reason,
                     )
                 )
             else:

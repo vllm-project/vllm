@@ -13,6 +13,7 @@ import torch
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.hidden_state_capture import HiddenStateCaptureChunk
 
 if TYPE_CHECKING:
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorWorkerMetadata
@@ -372,6 +373,10 @@ class ModelRunnerOutput:
 
     # ``None`` when ``return_sampling_mask`` is off.
     sampling_masks: SamplingMaskLists | None = None
+
+    # Only populated when a request's scheduled positions intersect its window.
+    hidden_state_capture: dict[str, HiddenStateCaptureChunk] | None = None
+    hidden_capture_errors: dict[str, str] | None = None
 
     @staticmethod
     def with_kv_conn_output_only(

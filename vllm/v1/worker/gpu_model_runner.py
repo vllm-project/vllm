@@ -153,6 +153,11 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
+from vllm.v1.hidden_state_capture import (
+    HiddenStateCapturePlan,
+    capture_scheduled_hidden_states,
+    drop_incompatible_aux_plans,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     ChunkedLocalAttentionSpec,
@@ -719,6 +724,8 @@ class GPUModelRunner(
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
+        self.hidden_state_capture_plans: dict[str, HiddenStateCapturePlan] = {}
+        self.hidden_state_capture_aux_layer_ids: tuple[int, ...] = ()
         # NOTE(rob): num_prompt_logprobs only includes reqs
         # that are currently in the prefill phase.
         self.num_prompt_logprobs: dict[str, int] = {}
@@ -1225,8 +1232,11 @@ class GPUModelRunner(
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             req_state = self.requests.pop(req_id, None)
+            self.hidden_state_capture_plans.pop(req_id, None)
             self._on_request_state_removed(req_id, req_state)
             self.num_prompt_logprobs.pop(req_id, None)
+        for req_id in scheduler_output.finished_hidden_capture_req_ids or ():
+            self.hidden_state_capture_plans.pop(req_id, None)
         self.late_interaction_runner.on_requests_finished(
             scheduler_output.finished_req_ids
         )
@@ -1288,6 +1298,10 @@ class GPUModelRunner(
         # Add new requests to the cached states.
         for new_req_data in scheduler_output.scheduled_new_reqs:
             req_id = new_req_data.req_id
+            if new_req_data.hidden_state_capture is not None:
+                self.hidden_state_capture_plans[req_id] = (
+                    new_req_data.hidden_state_capture
+                )
             if req_id in self.requests:
                 # For streaming case only.
                 req_state = self._update_streaming_request(req_id, new_req_data)
@@ -4601,6 +4615,34 @@ class GPUModelRunner(
         with record_function_or_nullcontext("gpu_model_runner: sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
+        hidden_capture_chunks = None
+        hidden_capture_errors = None
+        if self.hidden_state_capture_plans and get_pp_group().is_last_rank:
+            hidden_capture_errors = drop_incompatible_aux_plans(
+                self.hidden_state_capture_plans,
+                self.input_batch.req_ids,
+                self.hidden_state_capture_aux_layer_ids,
+                aux_hidden_states,
+            )
+            for req_id in hidden_capture_errors:
+                logger.warning(
+                    "Hidden-state capture unavailable for %s: aux layers", req_id
+                )
+            if self.hidden_state_capture_plans:
+                computed = {
+                    req_id: int(self.input_batch.num_computed_tokens_cpu[idx])
+                    for req_id, idx in self.input_batch.req_id_to_index.items()
+                    if req_id in scheduler_output.num_scheduled_tokens
+                }
+                hidden_capture_chunks = capture_scheduled_hidden_states(
+                    self.hidden_state_capture_plans,
+                    self.input_batch.req_ids,
+                    scheduler_output.num_scheduled_tokens,
+                    computed,
+                    hidden_states,
+                    aux_hidden_states,
+                )
+
         self._update_states_after_model_execute(
             sampler_output.sampled_token_ids, scheduler_output
         )
@@ -4791,6 +4833,8 @@ class GPUModelRunner(
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
                 routed_experts=None,
+                hidden_state_capture=hidden_capture_chunks,
+                hidden_capture_errors=hidden_capture_errors,
             )
 
         if not self.use_async_scheduling:
@@ -5514,6 +5558,7 @@ class GPUModelRunner(
             aux_layers = self.model.get_eagle3_default_aux_hidden_state_layers()
 
         self.model.set_aux_hidden_state_layers(aux_layers)
+        self.hidden_state_capture_aux_layer_ids = tuple(sorted(set(aux_layers)))
 
     def _get_eagle3_aux_layers_from_config(self) -> tuple[int, ...] | None:
         """Extract Eagle3 auxiliary layer indices from speculative config.

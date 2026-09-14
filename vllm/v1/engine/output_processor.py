@@ -4,7 +4,7 @@
 import asyncio
 from collections import defaultdict, deque
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, cast
 
 import numpy as np
@@ -32,6 +32,7 @@ from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
+from vllm.v1.hidden_state_capture import HiddenStateCaptureResult
 from vllm.v1.metrics.stats import (
     IterationStats,
     LoRARequestStates,
@@ -179,6 +180,8 @@ class RequestState:
         # Per-sequence spec-decode accumulator; arrives once (on finish) via
         # EngineCoreOutput, then attached to this sequence's CompletionOutput.
         self.spec_decode_metrics: RequestSpecDecodeMetrics | None = None
+        self.hidden_state_capture: HiddenStateCaptureResult | None = None
+        self.hidden_capture_skip_reason: str | None = None
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
 
@@ -390,6 +393,16 @@ class RequestState:
             num_cached_tokens=self.num_cached_tokens,
             num_cache_creation_tokens=self.num_cache_creation_tokens,
             metrics=self.stats,
+            hidden_state_capture=(
+                self.hidden_state_capture
+                if finished or self.output_kind == RequestOutputKind.DELTA
+                else None
+            ),
+            hidden_capture_skip_reason=(
+                self.hidden_capture_skip_reason
+                if finished or self.output_kind == RequestOutputKind.DELTA
+                else None
+            ),
         )
 
     def _new_completion_output(
@@ -684,6 +697,15 @@ class OutputProcessor:
 
             if engine_core_output.spec_decode_metrics is not None:
                 req_state.spec_decode_metrics = engine_core_output.spec_decode_metrics
+            if engine_core_output.hidden_state_capture is not None:
+                req_state.hidden_state_capture = replace(
+                    engine_core_output.hidden_state_capture,
+                    request_id=req_state.external_req_id,
+                )
+            if engine_core_output.hidden_capture_skip_reason is not None:
+                req_state.hidden_capture_skip_reason = (
+                    engine_core_output.hidden_capture_skip_reason
+                )
 
             if pooling_output is None:
                 assert req_state.detokenizer is not None
@@ -713,6 +735,12 @@ class OutputProcessor:
                 kv_transfer_params,
                 ec_transfer_params,
             ):
+                if isinstance(request_output, RequestOutput) and (
+                    request_output.finished
+                    or req_state.output_kind == RequestOutputKind.DELTA
+                ):
+                    req_state.hidden_state_capture = None
+                    req_state.hidden_capture_skip_reason = None
                 if req_state.streaming_input:
                     request_output.finished = False
 
