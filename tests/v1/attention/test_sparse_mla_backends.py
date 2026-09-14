@@ -40,8 +40,13 @@ if not current_platform.is_cuda():
         allow_module_level=True,
     )
 
+import vllm.v1.attention.backends.mla.flashinfer_mla_sparse as flashinfer_sparse_mod
+from vllm.model_executor.layers.attention.mla_attention import (
+    _canonicalize_sparse_mla_kv_cache_dtype,
+)
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+    FlashInferMLASparseImpl,
     FlashInferMLASparseTRTLLMBackend,
 )
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
@@ -77,6 +82,60 @@ SPARSE_BACKEND_BATCH_SPECS["large_q_pure_prefill"] = BatchSpec(
 )
 
 DEVICE_TYPE = current_platform.device_type
+
+
+def test_nope_flashinfer_sparse_mla_uses_model_scale(monkeypatch):
+    """Weight absorption must not change the model's attention temperature."""
+    model_scale = 256**-0.5
+    kv_lora_rank = 512
+    topk = torch.zeros((1, 1), dtype=torch.int32)
+    metadata = SimpleNamespace(
+        req_id_per_token=torch.zeros(1, dtype=torch.int32),
+        block_table=torch.zeros((1, 1), dtype=torch.int32),
+        block_size=1,
+    )
+    recorded_scale = None
+
+    impl = object.__new__(FlashInferMLASparseImpl)
+    impl.scale = model_scale
+    impl.qk_nope_head_dim = 256
+    impl.kv_lora_rank = kv_lora_rank
+    impl.qk_rope_head_dim = 0
+    impl.kv_cache_dtype = "auto"
+    impl.topk_indices_buffer = topk
+    impl.dcp_world_size = 1
+    impl._workspace_buffer = torch.empty(1)
+    impl.bmm1_scale = None
+    impl.bmm2_scale = None
+    impl.is_nope_mla = True
+    impl.need_to_return_lse_for_decode = False
+    monkeypatch.setattr(
+        flashinfer_sparse_mod,
+        "triton_convert_req_index_to_global_index",
+        lambda *args, **kwargs: (topk, torch.ones(1, dtype=torch.int32)),
+    )
+
+    import flashinfer.decode
+
+    def fake_flashinfer(**kwargs):
+        nonlocal recorded_scale
+        recorded_scale = kwargs["bmm1_scale"]
+        return torch.zeros((1, 1, 1, kv_lora_rank))
+
+    monkeypatch.setattr(
+        flashinfer.decode,
+        "trtllm_batch_decode_with_kv_cache_mla",
+        fake_flashinfer,
+    )
+    impl.forward_mqa(
+        torch.zeros(1, 1, kv_lora_rank),
+        torch.zeros(1, 1, kv_lora_rank),
+        metadata,
+        SimpleNamespace(),
+    )
+
+    assert recorded_scale == model_scale
+    assert recorded_scale != kv_lora_rank**-0.5
 
 
 def _float_to_e8m0_truncate(f: float) -> float:
@@ -184,13 +243,89 @@ def _quantize_dequantize_fp8_ds_mla(
     return dequant_kv_c, dequant_k_pe
 
 
+_E2M1_TABLE = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
+
+
+def _quantize_dequantize_nvfp4_ds_mla(
+    kv_c: torch.Tensor,
+    k_pe: torch.Tensor,
+    block_size: int,
+    kv_cache_dtype: str,
+    scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Round-trip kv_c/k_pe through the nvfp4_ds_mla cache layout.
+
+    Layout (per token, uint8): [e2m1-packed NoPE | unscaled e4m3 RoPE |
+    per-16 e4m3 NoPE SFs]. The SF bytes are stored permuted (an 8x4 -> 4x8
+    transpose: the scale for element block s lives at byte 8 * (s & 3) +
+    (s >> 2)) so that the 8 scales one FlashMLA dequant thread needs are
+    contiguous. Dequant: x = value * float(sf), which is exact in bf16, so
+    this python dequant matches the kernels bit-for-bit.
+    """
+    if kv_c.numel() == 0:
+        return kv_c.clone(), k_pe.clone()
+
+    kv_lora_rank = kv_c.shape[-1]
+    rope_dim = k_pe.shape[-1]
+    num_tokens = kv_c.shape[0]
+    num_blocks = max(1, math.ceil(num_tokens / block_size))
+    entry_size = (
+        math.ceil((kv_lora_rank // 2 + rope_dim + kv_lora_rank // 16) / 16) * 16
+    )
+    sf_nope_off = kv_lora_rank // 2 + rope_dim
+
+    tmp_cache = torch.zeros(
+        num_blocks, block_size, entry_size, dtype=torch.uint8, device=kv_c.device
+    )
+    slot_mapping = torch.arange(num_tokens, dtype=torch.long, device=kv_c.device)
+    ops.concat_and_cache_mla(
+        kv_c, k_pe, tmp_cache, slot_mapping, kv_cache_dtype=kv_cache_dtype, scale=scale
+    )
+
+    tokens = tmp_cache.view(-1, entry_size)[:num_tokens]
+    table = torch.tensor(
+        _E2M1_TABLE + [-v for v in _E2M1_TABLE],
+        dtype=torch.float32,
+        device=kv_c.device,
+    )
+
+    def unpack_e2m1(packed: torch.Tensor) -> torch.Tensor:
+        lo = (packed & 0xF).long()
+        hi = (packed >> 4).long()
+        return table[torch.stack([lo, hi], dim=-1).flatten(-2)]
+
+    nope_vals = unpack_e2m1(tokens[:, : kv_lora_rank // 2])
+    num_nope_sf = kv_lora_rank // 16
+    nope_sf = (
+        # undo the on-wire SF permutation -> element-block order
+        tokens[:, sf_nope_off : sf_nope_off + num_nope_sf]
+        .unflatten(-1, (4, num_nope_sf // 4))
+        .transpose(-1, -2)
+        .flatten(-2)
+        .view(torch.float8_e4m3fn)
+        .float()
+    )
+    dequant_kv_c = (
+        (nope_vals.unflatten(-1, (-1, 16)) * nope_sf.unsqueeze(-1)).flatten(-2)
+    ).to(kv_c.dtype)
+
+    # RoPE: plain e4m3, no scale factor
+    rope_raw = tokens[:, kv_lora_rank // 2 : sf_nope_off]
+    dequant_k_pe = rope_raw.view(torch.float8_e4m3fn).to(k_pe.dtype)
+
+    return dequant_kv_c, dequant_k_pe
+
+
 @pytest.mark.parametrize(
     "backend_cls",
     [FlashMLASparseBackend, FlashInferMLASparseTRTLLMBackend],
     ids=["FlashMLA", "FlashInferTRTLLM"],
 )
 @pytest.mark.parametrize("batch_name", list(SPARSE_BACKEND_BATCH_SPECS.keys()))
-@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_ds_mla"])
+@pytest.mark.parametrize(
+    "kv_cache_dtype",
+    ["auto", "fp8", "fp8_ds_mla", "nvfp4_ds_mla"],
+)
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
 @pytest.mark.parametrize("block_size", [32, 64])
 @pytest.mark.parametrize(("q_scale", "k_scale"), [(1.0, 1.0), (2.0, 3.0)])
@@ -219,6 +354,17 @@ def test_sparse_backend_decode_correctness(
             "fp8_ds_mla kv-cache dtype"
         )
 
+    if kv_cache_dtype == "nvfp4_ds_mla":
+        # Unlike "fp8" (an alias canonicalized to "fp8_ds_mla" above), the
+        # NVFP4 DS-MLA dtype must reach the backend unchanged.
+        assert (
+            _canonicalize_sparse_mla_kv_cache_dtype(backend_cls, kv_cache_dtype)
+            == kv_cache_dtype
+        )
+        device_capability = current_platform.get_device_capability()
+        if device_capability is None or device_capability.major != 10:
+            pytest.skip("The NVFP4 DS-MLA kv-cache dtype requires SM 10.x")
+
     supported_block_sizes = backend_cls.get_supported_kernel_block_sizes()
     if block_size not in supported_block_sizes:
         pytest.skip(
@@ -238,6 +384,7 @@ def test_sparse_backend_decode_correctness(
 
     batch_spec = SPARSE_BACKEND_BATCH_SPECS[batch_name]
     use_fp8_ds_mla_quantization = kv_cache_dtype == "fp8_ds_mla"
+    use_nvfp4_ds_mla_quantization = kv_cache_dtype == "nvfp4_ds_mla"
 
     device = torch.device(DEVICE_TYPE)
     dtype = torch.bfloat16
@@ -379,6 +526,15 @@ def test_sparse_backend_decode_correctness(
                 block_size=block_size,
                 scale=kv_cache_scale,
                 simulate_sm100_e8m0_scales=is_sm100,
+            )
+            k_pe_full = k_pe_squeezed.unsqueeze(1)
+        elif use_nvfp4_ds_mla_quantization:
+            kv_c_full, k_pe_squeezed = _quantize_dequantize_nvfp4_ds_mla(
+                kv_c_full,
+                k_pe_full.squeeze(1),
+                block_size=block_size,
+                kv_cache_dtype=kv_cache_dtype,
+                scale=kv_cache_scale,
             )
             k_pe_full = k_pe_squeezed.unsqueeze(1)
 
@@ -1351,14 +1507,14 @@ def test_triton_convert_returns_valid_counts(num_topk_tokens: int):
         return_valid_counts=False,
     )
     assert isinstance(result_only, torch.Tensor)
-    torch.testing.assert_close(result_only, result, rtol=0, atol=0)
+    for row, num_valid in enumerate(expected_valid):
+        compact_valid = result[row, :num_valid].sort().values
+        original_valid = result_only[row][result_only[row] >= 0].sort().values
+        torch.testing.assert_close(compact_valid, original_valid, rtol=0, atol=0)
+        assert torch.all(result[row, num_valid:] == -1)
 
 
 def test_flashmla_cache_dtype_aliases_use_ds_layout():
-    from vllm.model_executor.layers.attention.mla_attention import (
-        _canonicalize_sparse_mla_kv_cache_dtype,
-    )
-
     # kv-cache dtype aliases are canonicalized to fp8_ds_mla before the layer
     # stores kv_cache_dtype, so they cannot bypass the gate.
     for alias in ("fp8", "fp8_e4m3"):

@@ -2,7 +2,7 @@ group: Samplers
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H200) Samplers"
+- label: ":nvidia: (H200 MIG 35GB) Samplers"
   device: h200_35gb
   key: samplers-test
   timeout_in_minutes: 40

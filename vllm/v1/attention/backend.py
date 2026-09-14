@@ -227,6 +227,13 @@ class AttentionBackend(ABC):
             return False
 
     @classmethod
+    def supports_dcp(cls) -> bool:
+        try:
+            return cls.get_impl_cls().supports_dcp
+        except NotImplementedError:
+            return False
+
+    @classmethod
     def supports_non_causal_dcp(cls) -> bool:
         builder_cls = cls.get_builder_cls()
         return bool(getattr(builder_cls, "supports_non_causal_multi_token_dcp", False))
@@ -324,6 +331,8 @@ class AttentionBackend(ABC):
             invalid_reasons.append("KV connector not supported")
         if use_pcp and not cls.supports_pcp():
             invalid_reasons.append("PCP not supported")
+        if use_dcp and not cls.supports_dcp():
+            invalid_reasons.append("DCP not supported")
         if (
             use_adaptive_verification
             and not cls.supports_device_cpu_query_lens_mismatch()
@@ -610,6 +619,10 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         self.layer_names = layer_names
         self.vllm_config = vllm_config
         self.device = device
+        self.kernel_block_size: int | None = None
+
+    def set_kernel_block_size(self, kernel_block_size: int) -> None:
+        self.kernel_block_size = kernel_block_size
 
     @classmethod
     def get_cudagraph_support(

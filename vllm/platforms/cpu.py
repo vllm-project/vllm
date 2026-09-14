@@ -31,6 +31,61 @@ else:
     VllmConfig = None
 
 
+def _cpu_mamba_backend(vllm_config: VllmConfig) -> str:
+    """Return the CPU state backend selected by the model configuration."""
+    model_config = vllm_config.model_config
+    if model_config is None:
+        return "none"
+
+    hf_config = getattr(model_config, "hf_text_config", None)
+    model_type = str(getattr(hf_config, "model_type", "")).lower()
+    architecture = str(getattr(model_config, "architecture", "")).lower()
+    layer_types = getattr(hf_config, "layer_types", None)
+    has_linear_attention = isinstance(layer_types, (list, tuple)) and (
+        "linear_attention" in layer_types
+    )
+
+    try:
+        has_inner_state = bool(model_config.has_inner_state)
+    except (AttributeError, RuntimeError):
+        has_inner_state = False
+
+    if not (has_inner_state or has_linear_attention):
+        return "none"
+
+    fallback_backend = model_type or architecture or "unknown"
+    if not has_linear_attention:
+        return fallback_backend
+
+    try:
+        model_cls, _ = model_config.registry.resolve_model_cls(
+            model_config.architecture,
+            model_config=model_config,
+        )
+    except Exception:
+        return fallback_backend
+
+    try:
+        state_dtypes = model_cls.get_mamba_state_dtype_from_config(vllm_config)
+    except Exception:
+        return fallback_backend
+
+    if not isinstance(state_dtypes, tuple) or len(state_dtypes) != 2:
+        return fallback_backend
+
+    if vllm_config.cache_config.mamba_ssm_cache_dtype == "float16":
+        cache_dtype = torch.float16
+    elif vllm_config.cache_config.mamba_ssm_cache_dtype == "bfloat16":
+        cache_dtype = torch.bfloat16
+    else:
+        return fallback_backend
+
+    if state_dtypes[1] == cache_dtype:
+        return "gdn"
+
+    return fallback_backend
+
+
 def get_max_threads(pid=0):
     if hasattr(os, "sched_getaffinity"):
         return len(os.sched_getaffinity(pid))
@@ -181,16 +236,27 @@ class CpuPlatform(Platform):
                 "otherwise the performance is not optimized."
             )
 
-        # Accelerated GDN (AMX tiles or AVX-512BF16 VDPBF16PS) requires
-        # float32 SSM state.
+        # Accelerated GDN uses AMX tiles or AVX-512BF16 VDPBF16PS.
         if (
             torch.cpu._is_avx512_bf16_supported()
             and cache_config.mamba_ssm_cache_dtype != "float32"
         ):
-            cache_config.mamba_ssm_cache_dtype = "float32"
-            logger.warning(
-                "Reset SSM cache type to float32 for accelerated GDN mamba attention."
-            )
+            mamba_backend = _cpu_mamba_backend(vllm_config)
+            if (
+                cache_config.mamba_ssm_cache_dtype in ("float16", "bfloat16")
+                and mamba_backend == "gdn"
+            ):
+                logger.info(
+                    "Using %s SSM state storage for the CPU accelerated GDN backend.",
+                    cache_config.mamba_ssm_cache_dtype,
+                )
+            else:
+                cache_config.mamba_ssm_cache_dtype = "float32"
+                logger.warning(
+                    "Reset SSM cache type to float32 for accelerated GDN mamba "
+                    "backend '%s'.",
+                    mamba_backend,
+                )
 
         # Lagecy setting
         env_key = "VLLM_CPU_KVCACHE_SPACE"

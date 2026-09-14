@@ -2,7 +2,7 @@ group: Kernels
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H200) vLLM IR"
+- label: ":nvidia: (H200 MIG 18GB) vLLM IR"
   key: vllm-ir-tests
   timeout_in_minutes: 35
   device: h200_18gb
@@ -14,7 +14,7 @@ steps:
     - pytest -v -s tests/ir
     - pytest -v -s tests/kernels/ir
 
-- label: ":nvidia: (H200) Core Operation Kernels Shard %N"
+- label: ":nvidia: (H200 MIG 35GB) Core Operation Kernels Shard %N"
   device: h200_35gb
   key: kernels-core-operation-test
   timeout_in_minutes: 120
@@ -33,13 +33,32 @@ steps:
   num_devices: 2
   device: h100
   source_file_dependencies:
-  - csrc/minimax_reduce_rms_kernel.cu
-  - csrc/minimax_reduce_rms_kernel.h
-  - vllm/model_executor/layers/mamba/linear_attn.py
-  - vllm/model_executor/layers/mamba/lamport_workspace.py
+  - csrc/libtorch_stable/minimax_reduce_rms_kernel.cu
+  - csrc/libtorch_stable/minimax_reduce_rms_kernel.h
+  - csrc/libtorch_stable/ops.h
+  - csrc/libtorch_stable/torch_bindings.cpp
+  - vllm/model_executor/layers/minimax_rms_norm/
+  - vllm/model_executor/layers/mamba/linear/minimax_linear_attn.py
   - tests/kernels/core/test_minimax_reduce_rms.py
   commands:
     - pytest -v -s kernels/core/test_minimax_reduce_rms.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) MiniMax Reduce RMS Kernels"
+      dind: false
+      device: mi355_2
+      timeout_in_minutes: 45
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/model_executor/layers/minimax_rms_norm/
+      - vllm/distributed/
+      - vllm/_aiter_ops.py
+      - vllm/envs.py
+      - vllm/platforms/rocm.py
+      - tests/kernels/core/test_minimax_reduce_rms.py
+      - tests/utils.py
 
 - label: ":nvidia: (H100) DeepSeek V4 Kernels"
   key: deepseek-v4-kernel-test-h100
@@ -80,6 +99,7 @@ steps:
   source_file_dependencies:
   - csrc/
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   - tests/kernels/
   commands:
     - pytest -v -s kernels/
@@ -103,7 +123,9 @@ steps:
 
 - label: ":nvidia: (L4) Attention Kernels Shard %N"
   key: kernels-attention-test
-  timeout_in_minutes: 65
+  device: l4
+  num_devices: 1
+  timeout_in_minutes: 30
   source_file_dependencies:
   - csrc/attention/
   - vllm/v1/attention
@@ -113,7 +135,7 @@ steps:
   - tests/kernels/attention
   commands:
     - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 2
+  parallelism: 7
   mirror:
     amd:
       label: ":amd: (MI300) Attention Kernels Shard %N"
@@ -144,7 +166,7 @@ steps:
   commands:
     - pytest -v -s kernels/attention/test_triton_unified_attention_diffkv.py
 
-- label: ":nvidia: (H100) FlashMLA Kernels"
+- label: ":nvidia: (H100) MLA Kernel Test"
   key: kernels-flashmla-test-h100
   timeout_in_minutes: 25
   device: h100
@@ -154,29 +176,38 @@ steps:
   - vllm/v1/attention/ops/flashmla.py
   - vllm/v1/attention/backends/mla/flashmla.py
   - vllm/v1/attention/backends/mla/flashmla_sparse.py
+  - vllm/v1/attention/backends/mla/flashinfer_mla_sparse_sm90.py
+  - vllm/utils/flashinfer.py
+  - tests/kernels/attention/test_flashinfer_mla_decode.py
   - tests/kernels/attention/test_flashmla.py
   - tests/kernels/attention/test_flashmla_sparse.py
   - tests/kernels/attention/test_mla_cross_layer_kernel_equivalence.py
   commands:
     - pytest -v -s kernels/attention/test_flashmla.py
     - pytest -v -s kernels/attention/test_flashmla_sparse.py
+    - pytest -v -s kernels/attention/test_flashinfer_mla_decode.py
     - pytest -v -s kernels/attention/test_mla_cross_layer_kernel_equivalence.py
 
 - label: ":nvidia: (L4) Quantization Kernels Shard %N"
   key: kernels-quantization-test
-  timeout_in_minutes: 60
+  device: l4
+  num_devices: 1
+  timeout_in_minutes: 30
   source_file_dependencies:
   - csrc/quantization/
   - vllm/model_executor/layers/quantization
   - tests/kernels/quantization
   commands:
     - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 2
+  parallelism: 6
   mirror:
     amd:
       label: ":amd: (MI300) Quantization Kernels Shard %N"
       dind: false
       device: mi300_1
+      # Pin the AMD mirror at its current 2 shards so raising NVIDIA
+      # parallelism does not multiply AMD copies (needs ci-infra #473).
+      parallelism: 2
       timeout_in_minutes: 120
       source_file_dependencies:
       - csrc/quantization/
@@ -193,6 +224,8 @@ steps:
 
 - label: ":nvidia: (L4) MoE Kernels Shard %N"
   key: kernels-moe-test
+  device: l4
+  num_devices: 1
   timeout_in_minutes: 50
   source_file_dependencies:
   - csrc/quantization/cutlass_w8a8/moe/
@@ -225,7 +258,7 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200) Mamba Kernels"
+- label: ":nvidia: (H200 MIG 35GB) Mamba Kernels"
   device: h200_35gb
   key: kernels-mamba-test
   timeout_in_minutes: 60
@@ -235,6 +268,13 @@ steps:
   - vllm/model_executor/layers/mamba/ops
   commands:
     - pytest -v -s kernels/mamba
+  mirror:
+    amd:
+      label: ":amd: (MI250) Mamba Kernels"
+      device: mi250_1
+      timeout_in_minutes: 55
+      depends_on:
+      - image-build-amd
 
 - label: ":nvidia: (H100) DeepGEMM Kernels"
   key: kernels-deepgemm-test-h100
@@ -263,9 +303,10 @@ steps:
     - pytest -v -s kernels/attention/test_deepgemm_attention.py
     - pytest -v -s quantization/test_cutlass_w4a16.py
 
-- label: ":nvidia: (B200) Kernels"
+- label: ":nvidia: (B200) Kernels Shard %N"
   key: kernels-b200
-  timeout_in_minutes: 80
+  timeout_in_minutes: 30
+  parallelism: 3
   working_dir: "/vllm-workspace/"
   device: b200-k8s
   # optional: true
@@ -300,6 +341,7 @@ steps:
   - csrc/libtorch_stable/fused_minimax_m3_qknorm_rope_kv_insert_kernel.cu
   - csrc/libtorch_stable/ops.h
   - csrc/libtorch_stable/torch_bindings.cpp
+  - tests/kernels/attention/test_flashinfer_mla_decode.py
   - tests/kernels/attention/test_minimax_m3_msa_cutlass_sparse_decode.py
   - tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
   - tests/kernels/mamba/test_gdn_prefill_cutedsl.py
@@ -309,39 +351,49 @@ steps:
   - tests/kernels/test_top_k_per_row.py
   commands:
     - nvidia-smi
-    - python3 examples/basic/offline_inference/chat.py
-    # Attention
-    # num_heads2 broken by https://github.com/flashinfer-ai/flashinfer/issues/1353
-    - pytest -v -s tests/kernels/attention/test_attention_selector.py
-    - pytest -v -s tests/kernels/attention/test_flashinfer.py -k 'not num_heads2'
-    - pytest -v -s tests/kernels/attention/test_flashinfer_trtllm_attention.py
-    - pytest -v -s tests/kernels/attention/test_cutlass_mla_decode.py
-    - pytest -v -s tests/kernels/attention/test_flashinfer_mla_decode.py
-    - pytest -v -s tests/kernels/attention/test_minimax_m3_msa_cutlass_sparse_decode.py
-    - pytest -v -s tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
-    - pytest -v -s tests/kernels/test_top_k_per_row.py
-    # Quantization
-    - pytest -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8'
-    - pytest -v -s tests/kernels/quantization/test_nvfp4_quant.py
-    - pytest -v -s tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
-    - pytest -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py
-    - pytest -v -s tests/kernels/quantization/test_flashinfer_scaled_mm.py
-    - pytest -v -s tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
-    - pytest -v -s tests/kernels/quantization/test_nvfp4_qutlass.py
-    - pytest -v -s tests/kernels/quantization/test_mxfp4_qutlass.py
-    - pytest -v -s tests/kernels/moe/test_nvfp4_moe.py
-    - pytest -v -s tests/kernels/moe/test_mxfp4_moe.py
-    - pytest -v -s tests/kernels/moe/test_ocp_mx_moe.py
-    - pytest -v -s tests/kernels/moe/test_flashinfer.py
-    - pytest -v -s tests/kernels/moe/test_flashinfer_moe.py
-    - pytest -v -s tests/kernels/moe/test_trtllm_nvfp4_moe.py
-    - pytest -v -s tests/kernels/moe/test_cutedsl_moe.py
-    - pytest -v -s tests/kernels/mamba/test_gdn_prefill_cutedsl.py
-    - pytest -v -s tests/kernels/test_bf16x3_router_gemm_cutedsl.py
-    - pytest -v -s tests/kernels/attention/test_minimax_m3.py
-    - pytest -v -s tests/kernels/test_ll_bf16_gemm.py
-    # e2e
-    - pytest -v -s tests/models/quantization/test_nvfp4.py
+    - |
+      set -eu
+      case "$$BUILDKITE_PARALLEL_JOB" in
+        0)
+          pytest -v -s tests/kernels/attention/test_attention_selector.py
+          pytest -v -s tests/kernels/attention/test_flashinfer_trtllm_attention.py
+          pytest -v -s tests/kernels/attention/test_flashinfer_mla_decode.py
+          pytest -v -s tests/kernels/test_top_k_per_row.py
+          pytest -v -s tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
+          pytest -v -s tests/kernels/quantization/test_flashinfer_scaled_mm.py
+          pytest -v -s tests/kernels/moe/test_nvfp4_moe.py
+          pytest -v -s tests/kernels/moe/test_ocp_mx_moe.py
+          pytest -v -s tests/kernels/test_bf16x3_router_gemm_cutedsl.py
+          pytest -v -s tests/kernels/test_ll_bf16_gemm.py
+          ;;
+        1)
+          python3 examples/basic/offline_inference/chat.py
+          pytest -v -s tests/kernels/attention/test_minimax_m3_msa_cutlass_sparse_decode.py
+          pytest -v -s tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
+          pytest -v -s tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
+          pytest -v -s tests/kernels/quantization/test_nvfp4_qutlass.py
+          pytest -v -s tests/kernels/moe/test_mxfp4_moe.py
+          pytest -v -s tests/kernels/moe/test_flashinfer_moe.py
+          pytest -v -s tests/kernels/moe/test_cutedsl_moe.py
+          pytest -v -s tests/models/quantization/test_nvfp4.py
+          ;;
+        2)
+          pytest -v -s tests/kernels/attention/test_flashinfer.py -k 'not num_heads2'
+          pytest -v -s tests/kernels/attention/test_cutlass_mla_decode.py
+          pytest -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8'
+          pytest -v -s tests/kernels/quantization/test_nvfp4_quant.py
+          pytest -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py
+          pytest -v -s tests/kernels/quantization/test_mxfp4_qutlass.py
+          pytest -v -s tests/kernels/moe/test_flashinfer.py
+          pytest -v -s tests/kernels/moe/test_trtllm_nvfp4_moe.py
+          pytest -v -s tests/kernels/mamba/test_gdn_prefill_cutedsl.py
+          pytest -v -s tests/kernels/attention/test_minimax_m3.py
+          ;;
+        *)
+          echo "unexpected BUILDKITE_PARALLEL_JOB=$$BUILDKITE_PARALLEL_JOB" >&2
+          exit 1
+          ;;
+      esac
 
 - label: ":nvidia: (DGX) Spark b12x Linear Kernels Nightly"
   key: b12x-linear-kernels-dgx-spark-nightly
@@ -375,7 +427,7 @@ steps:
   - tests/quantization/reference_mxfp4.py
   - tests/quantization/test_auto_round.py
   commands:
-  - uv pip install --system b12x==1.2.6
+  - uv pip install --system b12x==1.3.0
   - pytest -v -s model_executor/kernels/test_b12x_linear.py
       model_executor/test_b12x_warmup.py
       kernels/quantization/test_block_fp8.py
@@ -393,6 +445,13 @@ steps:
     - pip install helion==1.4.0
     - pytest -v -s kernels/helion/ --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
+  mirror:
+    amd:
+      label: ":amd: (MI250) Helion Kernels Shard %N"
+      device: mi250_1
+      timeout_in_minutes: 45
+      depends_on:
+      - image-build-amd
 
  
 - label: ":nvidia: (H100) FP8 MoE Kernels"

@@ -56,6 +56,10 @@ class TPMapping:
     # FA head offset factor for hetero-TP (D_TP > P_TP).
     rank_offset_factor: int
 
+    # Local ranks (in aggregate) that read from a given source rank. The producer frees
+    # a request's blocks only once that many notifications have come in.
+    local_consumers: int = 1
+
 
 # ======================================================================
 # TP mapping computation
@@ -66,22 +70,31 @@ def compute_tp_mapping(
     transfer_topology: TransferTopology,
     remote_tp_size: int,
     group_spec_types: tuple[type[KVCacheSpec], ...],
+    remote_dcp_size: int = 1,
 ) -> TPMapping:
     """Build the complete local-to-remote TP mapping.
 
     Computes source ranks, head slot assignments, and the rank offset
     factor in a single pass.
+
+    DCP support is scoped to MLA only, with a side is either fully replicated or fully
+    sharded. DCP-branch reuses the same rank set used at handshake selection.
     """
     tp_rank = transfer_topology.tp_rank
     tp_size = transfer_topology.tp_size
     total_num_kv_heads = transfer_topology.total_num_kv_heads
     # --- Attention source ranks ---
     if transfer_topology.is_mla or tp_size >= remote_tp_size:
-        # D (local TP) > P (remote TP): multiple local ranks read different chunks from
-        # *one* remote rank, corresponding to different kv heads.
-        # For MLA, we only need one remote since cache is duplicated. When P TP=k*TP k,
-        # this will spread mla ranks to read from remote k*tp_rank.
-        attn_ranks = [tp_rank * remote_tp_size // tp_size]
+        if transfer_topology.is_mla and remote_dcp_size > 1:
+            attn_ranks = transfer_topology.dcp_source_ranks(
+                remote_tp_size, remote_dcp_size
+            )
+        else:
+            # D (local TP) > P (remote TP): multiple local ranks read different chunks
+            # from *one* remote rank, corresponding to different kv heads.
+            # For MLA, we only need one remote since cache is duplicated. When
+            # P TP=k*TP k, this will spread mla ranks to read from remote k*tp_rank.
+            attn_ranks = [tp_rank * remote_tp_size // tp_size]
     else:
         # P (remote TP) > D (local TP): one local rank
         # reads from multiple remote ranks.
@@ -134,9 +147,14 @@ def compute_tp_mapping(
         # D TP > P TP: we index into remote to read different heads depending on rank.
         rank_offset_factor = tp_rank % (tp_size // remote_tp_size)
 
+    local_consumers = transfer_topology.dcp_consumer_count(
+        remote_tp_size, remote_dcp_size
+    )
+
     return TPMapping(
         source_ranks_per_group=source_ranks_per_group,
         all_source_ranks=tuple(all_ranks),
         rank_to_attention_slot=rank_to_attention_slot,
         rank_offset_factor=rank_offset_factor,
+        local_consumers=local_consumers,
     )

@@ -120,6 +120,7 @@ class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
     # Non-causal DSpark blocks are flattened to single-token rows in forward_mqa.
     supports_non_causal_multi_token_decode: ClassVar[bool] = True
+    supports_non_causal_multi_token_dcp: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -288,8 +289,8 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         seq_lens = attn_metadata.decode.seq_lens
 
         if not attn_metadata.causal:
-            # FlashInfer decode has no causal flag. For TP-only DSpark, flatten
-            # each non-causal query block into independent single-token rows.
+            # FlashInfer decode has no causal flag. Flatten each non-causal
+            # query block into independent single-token rows.
             query_len = attn_metadata.num_decode_tokens // attn_metadata.num_decodes
             q = q.unsqueeze(1)
             if query_len > 1:
@@ -323,9 +324,12 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         extra_kwargs: dict[str, Any] = {}
         decode_backend: str | None
         if self.dcp_world_size > 1:
-            assert self.cp_kv_cache_interleave_size == 1
             causal_seqlens_kv_global = attn_metadata.decode.dcp_tot_seq_lens
             assert causal_seqlens_kv_global is not None
+            if not attn_metadata.causal and query_len > 1:
+                causal_seqlens_kv_global = causal_seqlens_kv_global.repeat_interleave(
+                    query_len
+                )
             extra_kwargs.update(
                 enable_dcp=True,
                 cp_world=self.dcp_world_size,

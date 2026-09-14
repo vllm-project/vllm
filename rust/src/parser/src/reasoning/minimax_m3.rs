@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use vllm_tokenizer::DynTokenizer;
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 
 use super::{DelimitedReasoningParser, ReasoningDelta, ReasoningParser, Result};
 
@@ -20,7 +20,7 @@ pub struct MiniMaxM3ReasoningParser {
     at_response_start: bool,
     /// Holds an initial suffix like `</mm` while it may still complete into the
     /// leading closer on a later chunk.
-    leading_end_buffer: String,
+    leading_end_buffer: DecodedText,
 }
 
 impl MiniMaxM3ReasoningParser {
@@ -29,31 +29,30 @@ impl MiniMaxM3ReasoningParser {
         Ok(Self {
             inner: DelimitedReasoningParser::new(tokenizer, M3_THINK_START, M3_THINK_END, false)?,
             at_response_start: true,
-            leading_end_buffer: String::new(),
+            leading_end_buffer: DecodedText::default(),
         })
     }
 
     /// Drop a response-leading `</mm:think>` while preserving later unmatched
     /// closers as ordinary content.
-    fn push_inner(&mut self, delta: &str) -> ReasoningDelta {
+    fn push_inner(&mut self, delta: DecodedText) -> ReasoningDelta {
         if self.at_response_start && !self.inner.in_reasoning() {
-            self.leading_end_buffer.push_str(delta);
-            let buffered = std::mem::take(&mut self.leading_end_buffer);
+            self.leading_end_buffer.append(delta);
+            let mut buffered = self.leading_end_buffer.take();
 
-            if buffered.is_empty() {
-                return ReasoningDelta::default();
-            }
-            if let Some(rest) = buffered.strip_prefix(M3_THINK_END) {
+            if buffered.text.starts_with(M3_THINK_END) {
                 self.at_response_start = false;
-                return self.inner.push(rest);
+                // The dropped marker span keeps its tokens out of any count.
+                let _ = buffered.drain_prefix(M3_THINK_END.len());
+                return self.inner.push(buffered);
             }
-            if M3_THINK_END.starts_with(buffered.as_str()) {
+            if M3_THINK_END.starts_with(buffered.text.as_str()) {
                 self.leading_end_buffer = buffered;
                 return ReasoningDelta::default();
             }
 
             self.at_response_start = false;
-            return self.inner.push(&buffered);
+            return self.inner.push(buffered);
         }
 
         self.inner.push(delta)
@@ -62,10 +61,10 @@ impl MiniMaxM3ReasoningParser {
 
 fn append_delta(target: &mut ReasoningDelta, delta: ReasoningDelta) {
     if let Some(reasoning) = delta.reasoning {
-        target.push_reasoning(&reasoning);
+        target.push_reasoning(reasoning);
     }
     if let Some(content) = delta.content {
-        target.push_content(&content);
+        target.push_content(content);
     }
 }
 
@@ -84,16 +83,16 @@ impl ReasoningParser for MiniMaxM3ReasoningParser {
         Ok(())
     }
 
-    fn push(&mut self, delta: &str) -> Result<ReasoningDelta> {
+    fn push(&mut self, delta: DecodedText) -> Result<ReasoningDelta> {
         Ok(self.push_inner(delta))
     }
 
     fn finish(&mut self) -> Result<ReasoningDelta> {
         let mut delta = ReasoningDelta::default();
         if !self.leading_end_buffer.is_empty() {
-            let pending = std::mem::take(&mut self.leading_end_buffer);
+            let pending = self.leading_end_buffer.take();
             self.at_response_start = false;
-            append_delta(&mut delta, self.inner.push(&pending));
+            append_delta(&mut delta, self.inner.push(pending));
         }
         append_delta(&mut delta, self.inner.finish());
         Ok(delta)

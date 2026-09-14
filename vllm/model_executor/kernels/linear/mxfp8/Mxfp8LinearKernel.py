@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 import torch
 
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+
 
 @dataclass
 class Mxfp8LinearLayerConfig:
@@ -29,6 +31,12 @@ class Mxfp8LinearKernel(ABC):
         assert self.can_implement(c)[0]
         assert self.is_supported()[0]
         self.config = c
+
+    def input_quant_key(self) -> QuantKey | None:
+        """Return the input quantization key supported by this kernel. If the kernel
+        does not support input quantization outside of the kernel, return None.
+        """
+        return None
 
     @classmethod
     @abstractmethod

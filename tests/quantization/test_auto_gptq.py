@@ -10,13 +10,20 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from tests.quantization.utils import is_quant_method_supported
+from tests.quantization.utils import (
+    is_quant_method_supported,
+    load_model_without_vllm_runner,
+)
+from vllm.config import set_current_vllm_config
+from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.quantization.auto_gptq import (
     AutoGPTQConfig,
     AutoGPTQLinearMethod,
     AutoGPTQMoEMethod,
 )
+from vllm.platforms import current_platform
 
 PROMPT = "On the surface of Mars, we found"
 
@@ -30,29 +37,32 @@ MODELS = [
     reason="auto_gptq is not supported on this GPU type.",
 )
 @pytest.mark.parametrize("model_id", MODELS)
-def test_auto_gptq_quantization_method(vllm_runner, model_id: str, monkeypatch):
+def test_auto_gptq_quantization_method(
+    model_id: str, monkeypatch, dist_init, workspace_init
+):
     """Test that quantization='auto_gptq' loads and runs correctly."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-
-    with vllm_runner(
+    model, vllm_config = load_model_without_vllm_runner(
         model_id,
         dtype=torch.float16,
         quantization="auto_gptq",
-        max_model_len=2048,
-        enforce_eager=True,
-    ) as llm:
+        model_config_kwargs={"max_model_len": 2048},
+    )
 
-        def check_model(model):
-            for name, submodule in model.named_modules():
-                if name == "model.layers.0.self_attn.qkv_proj":
-                    assert isinstance(submodule.quant_method, AutoGPTQLinearMethod)
-                    break
+    qkv_proj = model.model.layers[0].self_attn.qkv_proj
+    assert isinstance(qkv_proj.quant_method, AutoGPTQLinearMethod)
 
-        llm.apply_model(check_model)
-
-        outputs = llm.generate_greedy([PROMPT], max_tokens=8)
-        assert outputs
-        assert len(outputs[0][1]) > 0
+    target_device = torch.device(current_platform.device_type)
+    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())
+    input_ids = torch.tensor([1, 2, 3, 4], device=target_device)
+    positions = torch.arange(input_ids.numel(), device=target_device)
+    with (
+        set_current_vllm_config(vllm_config),
+        set_forward_context(None, vllm_config, num_tokens=input_ids.numel()),
+    ):
+        hidden_states = model(input_ids, positions, None)
+        logits = model.compute_logits(hidden_states)
+    assert torch.isfinite(logits).all()
 
 
 def test_auto_gptq_config_get_name():

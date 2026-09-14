@@ -532,10 +532,12 @@ def test_runtime_cache_miss_compiles_and_caches_executor() -> None:
 def test_registry_records_only_inside_model_setup_context() -> None:
     registry = JitWarmupRegistry(_config())
     kernel = RecordingToyKernel()
+    config = _config()
 
     kernel.register_warmup(3, _config())
     with registry.activate():
-        kernel.register_warmup(3, _config())
+        kernel.register_warmup(3, config)
+        kernel.register_warmup(3, config)
 
     assert len(registry) == 1
     assert kernel.compiled == []
@@ -588,6 +590,35 @@ def test_registry_passes_vllm_config_to_default_requests() -> None:
     registry.warmup()
 
     assert kernel.compiled == [ConfigKernel.CompileKey(value=7)]
+
+
+def test_registry_default_request_supports_config_free_kernel() -> None:
+    class ConfigFreeKernel(VllmJitKernel["ConfigFreeKernel.CompileKey"]):
+        @dataclass(frozen=True)
+        class CompileKey:
+            value: int
+
+        def __init__(self) -> None:
+            self.compiled: list[ConfigFreeKernel.CompileKey] = []
+            super().__init__()
+
+        def dispatch(self, *, value: int) -> CompileKey:  # type: ignore[override]
+            return self.CompileKey(value=value)
+
+        def get_warmup_keys(self) -> list[CompileKey]:
+            return [self.dispatch(value=7)]
+
+        def compile(self, compile_key: CompileKey) -> None:
+            self.compiled.append(compile_key)
+
+    registry = JitWarmupRegistry(_config())
+    kernel = ConfigFreeKernel()
+
+    with registry.activate():
+        kernel.register_warmup()
+    registry.warmup()
+
+    assert kernel.compiled == [ConfigFreeKernel.CompileKey(value=7)]
 
 
 def test_get_ast_full_name_handles_names_attributes_and_other_nodes() -> None:

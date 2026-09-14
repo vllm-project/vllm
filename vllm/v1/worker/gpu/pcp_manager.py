@@ -575,9 +575,6 @@ class PCPManager:
             num_computed_prefill_tokens_np=local_num_computed_prefill_tokens_np,
             is_prefilling_np=local_is_prefilling_np,
             has_prefill=bool(local_is_prefilling_np.any()),
-            max_seq_len_np=global_batch.max_seq_len_np[local_to_global_batch_req_idx_np]
-            if global_batch.max_seq_len_np is not None
-            else None,
             input_ids=input_buffers.input_ids[:num_local_tokens_padded],
             positions=input_buffers.positions[:num_local_tokens_padded],
             is_padding=is_padding,

@@ -536,7 +536,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         def group_ids(block_ids: BlockIds, rank: int) -> BlockIds:
             return [
                 list(block_ids[g])
-                if (replicate_attn and _is_attention_spec(self._group_spec_types[g]))
+                if (self._is_csa_linear and tp_ratio < 0)
+                or (replicate_attn and _is_attention_spec(self._group_spec_types[g]))
                 or rank in plan.source_ranks_per_group[g]
                 else []
                 for g in range(num_groups)

@@ -9,7 +9,6 @@
 #
 # Build targets:
 #   vllm-openai (default): used for serving deployment
-#   vllm-openai-zen: vLLM from source + zentorch from PyPI via vllm[zen]
 #   vllm-test: used for CI tests
 #   vllm-dev: used for development
 #
@@ -28,7 +27,7 @@
 # cache mounts (ccache, cargo registry) aren't exported by `--cache-to
 # type=registry`, so they don't survive a build landing on a different/fresh
 # builder. sccache's cache lives in S3 instead, so it does.
-FROM ubuntu:22.04 AS base
+FROM ubuntu:25.04 AS base
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -67,9 +66,15 @@ ENV MAX_JOBS=${max_jobs}
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update -y \
-    && apt-get install -y --no-install-recommends sudo ccache wget zlib1g-dev \
-    gcc-12 g++-12 libtcmalloc-minimal4 libnuma-dev ffmpeg libsm6 libxext6 libgl1 jq lsof make xz-utils \
-    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12 \
+    && apt-get install -y --no-install-recommends sudo ccache git curl wget ca-certificates zlib1g-dev \
+    software-properties-common libtcmalloc-minimal4 libnuma-dev ffmpeg libsm6 libxext6 libgl1 jq lsof make xz-utils \
+    && for i in 1 2 3; do \
+        add-apt-repository -y ppa:ubuntu-toolchain-r/test && break || \
+        { echo "Attempt $i failed, retrying toolchain PPA..."; sleep 5; }; \
+    done \
+    && apt-get update -y \
+    && apt-get install -y --no-install-recommends gcc-15 g++-15 \
+    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-15 10 --slave /usr/bin/g++ g++ /usr/bin/g++-15 \
     && curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ARG TARGETARCH
@@ -84,7 +89,7 @@ ENV SCCACHE_S3_NO_CREDENTIALS=${USE_SCCACHE:+${SCCACHE_S3_NO_CREDENTIALS}}
 ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
 
 # Compiler and linker environment
-ENV CC=/usr/bin/gcc-12 CXX=/usr/bin/g++-12
+ENV CC=/usr/bin/gcc-15 CXX=/usr/bin/g++-15
 ENV CCACHE_DIR=/root/.cache/ccache
 ENV CMAKE_CXX_COMPILER_LAUNCHER=ccache
 
@@ -100,13 +105,33 @@ ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE="copy"
 
+# PyTorch provides its own indexes for standard and nightly builds.
+# PYTORCH_NIGHTLY=1 builds the CPU image against torch nightly (parity with the
+# GPU torch-nightly lane); default 0 keeps the pinned release CPU build.
+ARG PYTORCH_NIGHTLY=0
+ARG PYTORCH_CPU_INDEX_BASE_URL=https://download.pytorch.org/whl
+
 # Copy requirements files for installation
 COPY requirements/common.txt requirements/common.txt
 COPY requirements/cpu.txt requirements/cpu.txt
+COPY use_existing_torch.py use_existing_torch.py
 
+# For nightly: install torch nightly (CPU) first, strip torch pins from the
+# requirements via use_existing_torch.py so they can't pull it back to a release
+# build, then install the rest from the nightly CPU index (no --torch-backend,
+# which would force the stable channel). Release path is unchanged.
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --upgrade pip && \
-    uv pip install -r requirements/cpu.txt --torch-backend cpu
+    if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+        echo "Installing torch nightly (CPU)..." \
+        && uv pip install torch torchaudio torchvision torchcodec --pre \
+            --index-url ${PYTORCH_CPU_INDEX_BASE_URL}/nightly/cpu \
+        && python3 use_existing_torch.py --prefix \
+        && uv pip install -r requirements/cpu.txt \
+            --extra-index-url ${PYTORCH_CPU_INDEX_BASE_URL}/nightly/cpu; \
+    else \
+        uv pip install -r requirements/cpu.txt --torch-backend cpu; \
+    fi
 
 ENV TARGETARCH=${TARGETARCH}
 
@@ -140,12 +165,15 @@ RUN apt-get update -y \
 WORKDIR /workspace
 
 COPY requirements/build/rust.txt requirements/build/rust.txt
-RUN python3 -m pip install --no-cache-dir -r requirements/build/rust.txt
+RUN python3 -m pip install --break-system-packages --no-cache-dir -r requirements/build/rust.txt
 
 ARG USE_SCCACHE
 ARG SCCACHE_ENDPOINT
 ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
 ARG SCCACHE_REGION_NAME=us-west-2
+# When set, sccache skips the S3 backend and uses a local disk cache instead
+# (for builds without S3 credentials, e.g. a developer's local `docker build`).
+ARG SCCACHE_LOCAL_ONLY=0
 
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET_NAME}}
 ENV SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION_NAME}}
@@ -167,10 +195,16 @@ ENV CARGO_BUILD_JOBS=4
 # inputs. The child stage below relinks the crates that embed the exact version.
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
+    --mount=type=cache,target=/root/.cache/sccache-local,sharing=locked \
     --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
     if [ "$USE_SCCACHE" = "1" ]; then \
         export RUSTC_WRAPPER=sccache; \
-        if [ -n "${SCCACHE_ENDPOINT}" ]; then export SCCACHE_ENDPOINT="${SCCACHE_ENDPOINT}"; fi; \
+        if [ "$SCCACHE_LOCAL_ONLY" = "1" ]; then \
+            unset SCCACHE_BUCKET SCCACHE_REGION; \
+            export SCCACHE_DIR=/root/.cache/sccache-local SCCACHE_CACHE_SIZE=20G; \
+        elif [ -n "${SCCACHE_ENDPOINT}" ]; then \
+            export SCCACHE_ENDPOINT="${SCCACHE_ENDPOINT}"; \
+        fi; \
         sccache --show-stats; \
     fi && \
     SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+docker.cache" bash build_rust.sh && \
@@ -191,6 +225,10 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
 # build it never uses.
 FROM base-arch AS vllm-src
 
+# Re-declare torch-nightly args (ARGs do not cross FROM)
+ARG PYTORCH_NIGHTLY=0
+ARG PYTORCH_CPU_INDEX_BASE_URL=https://download.pytorch.org/whl
+
 ARG GIT_REPO_CHECK=0
 # Support for cross-compilation with x86 ISA including AVX2 and AVX512: docker build --build-arg VLLM_CPU_X86="true" ...
 ARG VLLM_CPU_X86=0
@@ -198,6 +236,7 @@ ENV VLLM_CPU_X86=${VLLM_CPU_X86}
 # Support for cross-compilation with ARM BF16 ISA: docker build --build-arg VLLM_CPU_ARM_BF16="true" ...
 ARG VLLM_CPU_ARM_BF16=0
 ENV VLLM_CPU_ARM_BF16=${VLLM_CPU_ARM_BF16}
+ARG ENABLE_AMX_FP8=1
 
 WORKDIR /vllm-workspace
 
@@ -215,7 +254,13 @@ RUN if [ "$TARGETARCH" = "arm64" ] && [ "$VLLM_CPU_X86" != "0" ]; then \
 COPY requirements/build/cpu.txt requirements/build/cpu.txt
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -r requirements/build/cpu.txt --torch-backend cpu
+    if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+        python3 /workspace/use_existing_torch.py --prefix \
+        && uv pip install -r requirements/build/cpu.txt \
+            --extra-index-url ${PYTORCH_CPU_INDEX_BASE_URL}/nightly/cpu; \
+    else \
+        uv pip install -r requirements/build/cpu.txt --torch-backend cpu; \
+    fi
 
 COPY . .
 
@@ -226,20 +271,40 @@ COPY --from=rust-build /workspace/vllm/_rust_*.so vllm/
 
 RUN if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh ; fi
 
+# For torch nightly, strip the torch/vision/audio/codec pins from the source
+# tree's requirements *after* `COPY . .` (which restored the pinned files) so
+# the wheel built below does not hard-pin the release torch (e.g.
+# torch==2.11.0+cpu). setup.py reads requirements/cpu.txt into install_requires;
+# leaving the pin makes `uv pip install dist/*.whl` unsatisfiable against the
+# nightly index. The nightly torch installed in the base image satisfies the
+# now-unpinned dependency. Done at the end of vllm-src so vllm-build and
+# vllm-dev, which both derive from it, inherit the unpinned tree.
+RUN if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+        python3 /workspace/use_existing_torch.py --prefix; \
+    fi
+
 ######################### BUILD IMAGE #########################
 FROM vllm-src AS vllm-build
 
 ARG USE_SCCACHE
 ARG SCCACHE_ENDPOINT
+ARG SCCACHE_LOCAL_ONLY=0
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/root/.cache/sccache-local,sharing=locked \
     --mount=type=cache,target=/vllm-workspace/.deps,sharing=locked \
     --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
     if [ "$USE_SCCACHE" = "1" ]; then \
-        if [ -n "${SCCACHE_ENDPOINT}" ]; then export SCCACHE_ENDPOINT="${SCCACHE_ENDPOINT}"; fi; \
+        if [ "$SCCACHE_LOCAL_ONLY" = "1" ]; then \
+            unset SCCACHE_BUCKET SCCACHE_REGION; \
+            export SCCACHE_DIR=/root/.cache/sccache-local SCCACHE_CACHE_SIZE=20G; \
+        elif [ -n "${SCCACHE_ENDPOINT}" ]; then \
+            export SCCACHE_ENDPOINT="${SCCACHE_ENDPOINT}"; \
+        fi; \
         sccache --show-stats; \
     fi && \
+    CMAKE_ARGS="-DENABLE_AMX_FP8=${ENABLE_AMX_FP8}" \
     VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 && \
     if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
 
@@ -255,6 +320,7 @@ ARG VLLM_CPU_X86=0
 
 ARG USE_SCCACHE
 ARG SCCACHE_ENDPOINT
+ARG SCCACHE_LOCAL_ONLY=0
 
 WORKDIR /vllm-workspace
 
@@ -262,15 +328,22 @@ RUN mkdir dist
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/root/.cache/sccache-local,sharing=locked \
     --mount=type=cache,target=/vllm-workspace/.deps,sharing=locked \
     --mount=type=cache,target=/root/.triton \
     --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
+    set -ex; \
     if [ "$TARGETARCH" = "amd64" ] || [ "$VLLM_CPU_X86" != "0" ]; then \
         git clone --recurse-submodules --shallow-submodules --filter=blob:none "https://github.com/triton-lang/triton-cpu.git"; \
         cd triton-cpu; \
         git checkout "270e696d"; \
         if [ "$USE_SCCACHE" = "1" ]; then \
-            if [ -n "${SCCACHE_ENDPOINT}" ]; then export SCCACHE_ENDPOINT="${SCCACHE_ENDPOINT}"; fi; \
+            if [ "$SCCACHE_LOCAL_ONLY" = "1" ]; then \
+                unset SCCACHE_BUCKET SCCACHE_REGION; \
+                export SCCACHE_DIR=/root/.cache/sccache-local SCCACHE_CACHE_SIZE=20G; \
+            elif [ -n "${SCCACHE_ENDPOINT}" ]; then \
+                export SCCACHE_ENDPOINT="${SCCACHE_ENDPOINT}"; \
+            fi; \
             export TRITON_APPEND_CMAKE_ARGS="-DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache"; \
             sccache --show-stats; \
         fi; \
@@ -282,6 +355,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 ######################### TEST DEPS #########################
 FROM base-arch AS vllm-test-deps
+
+# Re-declare torch-nightly args (ARGs do not cross FROM)
+ARG PYTORCH_NIGHTLY=0
+ARG PYTORCH_CPU_INDEX_BASE_URL=https://download.pytorch.org/whl
 
 WORKDIR /vllm-workspace
 
@@ -297,10 +374,20 @@ RUN case "$(uname -m)" in \
     esac
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -r requirements/test/cpu.txt --torch-backend cpu
+    if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+        python3 /workspace/use_existing_torch.py --prefix \
+        && uv pip install -r requirements/test/cpu.txt \
+            --extra-index-url ${PYTORCH_CPU_INDEX_BASE_URL}/nightly/cpu; \
+    else \
+        uv pip install -r requirements/test/cpu.txt --torch-backend cpu; \
+    fi
 
 ######################### DEV IMAGE #########################
 FROM vllm-src AS vllm-dev
+
+# Re-declare torch-nightly args (ARGs do not cross FROM)
+ARG PYTORCH_NIGHTLY=0
+ARG PYTORCH_CPU_INDEX_BASE_URL=https://download.pytorch.org/whl
 
 WORKDIR /vllm-workspace
 
@@ -323,7 +410,12 @@ COPY --from=vllm-test-deps /vllm-workspace/requirements/test/cpu.txt requirement
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r requirements/lint.txt && \
-    uv pip install -r requirements/test/cpu.txt --torch-backend cpu && \
+    if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+        uv pip install -r requirements/test/cpu.txt \
+            --extra-index-url ${PYTORCH_CPU_INDEX_BASE_URL}/nightly/cpu; \
+    else \
+        uv pip install -r requirements/test/cpu.txt --torch-backend cpu; \
+    fi && \
     pre-commit install --hook-type pre-commit --hook-type commit-msg
 
 # Installed after requirements/test/cpu.txt (which pins triton==3.6.0) so the
@@ -406,21 +498,5 @@ LABEL ai.vllm.build.python-version="${PYTHON_VERSION:-3.12}"
 # stage above adds examples/ for testing only, so without this the published
 # vllm-openai-cpu image would not ship examples/*.jinja.
 COPY examples examples
-
-ENTRYPOINT ["vllm", "serve"]
-
-
-######################### ZEN CPU PYPI IMAGE #########################
-FROM vllm-openai AS vllm-openai-zen
-
-ARG TARGETARCH
-
-RUN if [ "$TARGETARCH" != "amd64" ]; then \
-        echo "ERROR: vllm-openai-amd only supports --platform=linux/amd64"; \
-        exit 1; \
-    fi
-
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install "vllm[zen]"
 
 ENTRYPOINT ["vllm", "serve"]

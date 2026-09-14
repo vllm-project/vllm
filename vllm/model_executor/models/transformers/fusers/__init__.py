@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Concrete fusers for the Transformers modeling backend."""
 
+from vllm.model_executor.models.transformers.fusers.attention import AttentionFuser
 from vllm.model_executor.models.transformers.fusers.base import (
     BaseFuser,
     RewriteFuser,
@@ -15,6 +16,7 @@ from vllm.model_executor.models.transformers.fusers.qkv import QKVFuser
 from vllm.model_executor.models.transformers.fusers.rms_norm import RMSNormFuser
 
 __all__ = [
+    "AttentionFuser",
     "BaseFuser",
     "RewriteFuser",
     "StackedFuser",

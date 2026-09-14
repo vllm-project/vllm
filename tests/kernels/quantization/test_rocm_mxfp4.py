@@ -50,7 +50,16 @@ SKINNY_GEMM_PASS_RATES = {
 }
 PRESHUFFLED_SHAPES = [
     (64, 4096, 8192),
-    (32, 8192, 8192),
+    # aiter 0.1.20 Triton preshuffled fp4 GEMM OOBs (GPU memory access fault ->
+    # SIGABRT, crashing the process) for (M=32, N=8192, K=8192) on gfx950, despite
+    # advertising the (N, K) as tuned. A hard GPU fault can't be xfail'd, so skip it
+    # until the aiter kernel is fixed (ROCm/aiter#4867).
+    pytest.param(
+        (32, 8192, 8192),
+        marks=pytest.mark.skip(
+            reason="aiter 0.1.20 preshuffled fp4 GEMM OOB (M32,N8192,K8192, gfx950)"
+        ),
+    ),
 ]
 
 

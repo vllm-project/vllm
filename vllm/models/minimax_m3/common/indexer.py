@@ -369,6 +369,18 @@ class MiniMaxM3IndexerImpl(nn.Module):
         # Shared, stable-address top-k output buffer (set by the model for the
         # cudagraph-safe MSA impl); None -> impl allocates fresh (eager).
         self.topk_indices_buffer = topk_indices_buffer
+        topk_completion_counter = None
+        if current_platform.is_rocm() and topk_indices_buffer is not None:
+            topk_completion_counter = torch.zeros(
+                topk_indices_buffer.shape[:2],
+                dtype=torch.int32,
+                device=topk_indices_buffer.device,
+            )
+        self.register_buffer(
+            "topk_completion_counter",
+            topk_completion_counter,
+            persistent=False,
+        )
         # Owns the side cache (registers itself in the static forward context).
         self.index_cache = MiniMaxM3IndexerCache(
             head_dim=index_head_dim,
@@ -392,6 +404,11 @@ class MiniMaxM3IndexerTritonImpl(MiniMaxM3IndexerImpl):
     def forward(
         self,
         index_query: torch.Tensor,
+        *,
+        attention_block_table: torch.Tensor | None = None,
+        sparse_block_table_out: torch.Tensor | None = None,
+        sparse_context_lens_out: torch.Tensor | None = None,
+        block_page_stride: int | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         attn_metadata = get_forward_context().attn_metadata
         if not isinstance(attn_metadata, dict):
@@ -417,6 +434,19 @@ class MiniMaxM3IndexerTritonImpl(MiniMaxM3IndexerImpl):
         if index_md.num_decodes > 0:
             d = index_md.decode
             assert d is not None
+            fused_sparse_kwargs = {}
+            if attention_block_table is not None:
+                fused_sparse_kwargs = {
+                    "attention_block_table": attention_block_table,
+                    "sparse_block_table_out": sparse_block_table_out,
+                    "sparse_context_lens_out": sparse_context_lens_out,
+                    "block_page_stride": block_page_stride,
+                }
+            decode_backend_kwargs = {}
+            if current_platform.is_rocm():
+                decode_backend_kwargs["completion_counter"] = (
+                    self.topk_completion_counter
+                )
             decode_topk = minimax_m3_index_decode(
                 iq[:nd],
                 kv,
@@ -430,6 +460,8 @@ class MiniMaxM3IndexerTritonImpl(MiniMaxM3IndexerImpl):
                 d.decode_query_len,
                 d.max_decode_query_len,
                 out=buf_htk,
+                **fused_sparse_kwargs,
+                **decode_backend_kwargs,
             )
         if index_md.num_prefills > 0:
             p = index_md.prefill
@@ -567,5 +599,43 @@ class MiniMaxM3Indexer(nn.Module):
     def forward(
         self,
         index_query: torch.Tensor,
+        *,
+        attention_block_table: torch.Tensor | None = None,
+        sparse_block_table_out: torch.Tensor | None = None,
+        sparse_context_lens_out: torch.Tensor | None = None,
+        block_page_stride: int | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-        return self.impl(index_query)
+        if attention_block_table is None and all(
+            arg is None
+            for arg in (
+                sparse_block_table_out,
+                sparse_context_lens_out,
+                block_page_stride,
+            )
+        ):
+            return self.impl(index_query)
+        if attention_block_table is None or any(
+            arg is None
+            for arg in (
+                sparse_block_table_out,
+                sparse_context_lens_out,
+                block_page_stride,
+            )
+        ):
+            raise ValueError(
+                "MiniMax-M3 fused decode sparse-table arguments must be "
+                "provided together"
+            )
+        if not current_platform.is_rocm() or not isinstance(
+            self.impl, MiniMaxM3IndexerTritonImpl
+        ):
+            raise ValueError(
+                "MiniMax-M3 fused decode sparse-table construction is ROCm-only"
+            )
+        return self.impl(
+            index_query,
+            attention_block_table=attention_block_table,
+            sparse_block_table_out=sparse_block_table_out,
+            sparse_context_lens_out=sparse_context_lens_out,
+            block_page_stride=block_page_stride,
+        )

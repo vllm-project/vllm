@@ -236,6 +236,13 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         # that changes the output token count, so video uses the eager path.
         modalities=["image"],
         image_prompt=ernie45_vl_chat_template("What is in this image?"),
+        # Ernie4_5_VLMoeModel is deliberately not torch-compiled, since its
+        # split of text and vision experts breaks compilation, so piecewise
+        # cudagraphs have nothing to partition. Only the encoder graphs this
+        # test covers are captured.
+        compilation_config_overrides={
+            "cudagraph_mode": 2,
+        },
         # Shrink to 1 text + 1 vision layer with random weights so the test
         # runs on any CI GPU and skips the ~56 GiB weight download. The test
         # only validates encoder CG capture/replay, not output quality.

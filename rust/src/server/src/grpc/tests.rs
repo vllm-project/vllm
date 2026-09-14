@@ -49,6 +49,7 @@ use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
 use super::control::kv_event_source;
+use super::convert::json_to_proto_struct;
 use super::pb::control_client::ControlClient;
 use super::pb::inference_client::InferenceClient;
 use super::{ControlServer, ControlServiceImpl, InferenceServer, InferenceServiceImpl, pb};
@@ -141,6 +142,29 @@ fn default_stream_output_specs() -> Vec<(Vec<u32>, Option<EngineCoreFinishReason
         (vec![b'i' as u32], None),
         (vec![b'!' as u32], Some(EngineCoreFinishReason::Stop)),
     ]
+}
+
+fn ec_proto_struct(mm_hashes: &[&str]) -> prost_types::Struct {
+    let ec_items: Vec<_> = mm_hashes
+        .iter()
+        .map(|mm_hash| {
+            serde_json::json!({
+                "image_grid_thw": [[1, 16, 16]],
+                "mm_hash": mm_hash,
+            })
+        })
+        .collect();
+    json_to_proto_struct(&serde_json::json!({ "ec_items": ec_items }))
+        .expect("valid EC proto struct")
+}
+
+fn decode_kv_proto_struct() -> prost_types::Struct {
+    json_to_proto_struct(&serde_json::json!({
+        "do_remote_prefill": true,
+        "pp_size": 1,
+        "remote_block_ids": [[7]],
+    }))
+    .expect("valid KV proto struct")
 }
 
 async fn send_outputs(push: &mut PushSocket, outputs: EngineCoreOutputs) {
@@ -701,22 +725,51 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
             |request| {
                 let token_ids = request.prompt_token_ids.as_ref().expect("prompt token ids");
                 let features = request.mm_features.as_ref().expect("multimodal features");
-                assert_eq!(features.len(), 1);
+                assert_eq!(features.len(), 2);
 
-                let feature = &features[0];
-                assert_eq!(feature.modality, "image");
-                assert_eq!(feature.identifier, "image-1");
-                assert_eq!(feature.mm_position.offset, 1);
-                assert!(feature.mm_position.length > 1);
-                assert_eq!(token_ids.len(), feature.mm_position.length + 2);
-                assert_eq!(token_ids[0], 11);
-                assert_eq!(token_ids.last(), Some(&12));
-                assert!(
-                    token_ids[feature.mm_position.offset
-                        ..feature.mm_position.offset + feature.mm_position.length]
-                        .iter()
-                        .all(|token_id| *token_id == QWEN_IMAGE_TOKEN_ID)
+                for (feature, identifier) in features.iter().zip(["image-1", "image-2"]) {
+                    assert_eq!(feature.modality, "image");
+                    assert_eq!(feature.identifier, identifier);
+                    assert!(feature.mm_position.length > 1);
+                    assert_eq!(
+                        feature
+                            .data
+                            .as_ref()
+                            .expect("multimodal feature data")
+                            .keys()
+                            .map(String::as_str)
+                            .collect::<Vec<_>>(),
+                        vec!["image_grid_thw"]
+                    );
+                }
+                assert_eq!(features[0].mm_position.offset, 1);
+                let xargs = request
+                    .sampling_params
+                    .as_ref()
+                    .and_then(|params| params.extra_args.as_ref())
+                    .expect("KV transfer args");
+                let kv_transfer_params =
+                    xargs.get("kv_transfer_params").expect("KV transfer params");
+                assert_eq!(kv_transfer_params["pp_size"].as_i64(), Some(1));
+                assert_eq!(
+                    kv_transfer_params["remote_block_ids"][0][0].as_i64(),
+                    Some(7)
                 );
+                assert!(!xargs.contains_key("ec_transfer_params"));
+                assert_eq!(
+                    token_ids.len(),
+                    features.iter().map(|feature| feature.mm_position.length).sum::<usize>() + 3
+                );
+                assert_eq!(token_ids[0], 11);
+                assert_eq!(token_ids.last(), Some(&13));
+                for feature in features {
+                    assert!(
+                        token_ids[feature.mm_position.offset
+                            ..feature.mm_position.offset + feature.mm_position.length]
+                            .iter()
+                            .all(|token_id| *token_id == QWEN_IMAGE_TOKEN_ID)
+                    );
+                }
             },
         )
         .await;
@@ -734,16 +787,24 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
             request_id: "test-multimodal".to_string(),
             model: "test-model".to_string(),
             prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
-                ids: vec![11, QWEN_IMAGE_TOKEN_ID, 12],
+                ids: vec![11, QWEN_IMAGE_TOKEN_ID, 12, QWEN_IMAGE_TOKEN_ID, 13],
             })),
-            media: vec![pb::MediaItem {
-                modality: pb::Modality::Image as i32,
-                source: Some(pb::media_item::Source::DataUri(
-                    TINY_PNG_DATA_URI.to_string(),
-                )),
-                mime_type: String::new(),
-                uuid: "image-1".to_string(),
-            }],
+            media: ["image-1", "image-2"]
+                .into_iter()
+                .map(|uuid| pb::MediaItem {
+                    modality: pb::Modality::Image as i32,
+                    source: Some(pb::media_item::Source::DataUri(
+                        TINY_PNG_DATA_URI.to_string(),
+                    )),
+                    mime_type: String::new(),
+                    uuid: uuid.to_string(),
+                })
+                .collect(),
+            kv: Some(pb::KvCacheParameters {
+                kv_transfer_params: Some(decode_kv_proto_struct()),
+                ec_transfer_params: Some(ec_proto_struct(&["image-2", "image-1"])),
+                ..Default::default()
+            }),
             stopping: Some(pb::StoppingCriteria {
                 max_new_tokens: 10,
                 ..Default::default()

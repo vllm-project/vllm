@@ -86,7 +86,7 @@ def resolve_layer_fused_shared_expert(
     if fse_requested and not is_fused_shared_expert_enabled:
         logger.warning(
             "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "
-            "cannot be enabled: %s.",
+            "cannot be enabled - skipping for this layer: %s.",
             fse_reason,
         )
     return is_fused_shared_expert_enabled
@@ -501,35 +501,6 @@ def fi_moe_largest_bucket(moe_config: "FusedMoEConfig") -> int:
     For a detailed explanation, see: `docs/serving/data_parallel_deployment.md`
     """
     return max(moe_config.max_num_tokens * moe_config.dp_size, 8192)
-
-
-def trtllm_moe_pack_topk_ids_weights(
-    topk_ids: torch.Tensor,
-    topk_weights: torch.Tensor,
-    block_size: int = 1024,
-) -> torch.Tensor:
-    assert topk_ids.shape == topk_weights.shape
-    assert topk_ids.is_contiguous() and topk_weights.is_contiguous()
-
-    original_shape = topk_ids.shape
-    ids_flat = topk_ids.reshape(-1)
-    weights_flat = topk_weights.reshape(-1)
-
-    n_elements = ids_flat.numel()
-    output = torch.empty(n_elements, dtype=torch.int32, device=topk_ids.device)
-
-    use_gdc = current_platform.is_cuda() and current_platform.has_device_capability(90)
-    grid = (triton.cdiv(n_elements, block_size),)
-    _pack_topk_ids_weights_kernel[grid](
-        ids_flat,
-        weights_flat,
-        output,
-        n_elements,
-        BLOCK_SIZE=block_size,
-        USE_GDC=use_gdc,
-        launch_pdl=use_gdc,
-    )
-    return output.reshape(original_shape)
 
 
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)

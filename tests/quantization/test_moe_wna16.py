@@ -313,3 +313,56 @@ def test_compressed_tensors_wna16_moe_converts_and_sets_up_humming_kernel():
     assert not hasattr(layer, "w2_weight_packed")
     assert layer.w13_weight.dtype is torch.int32
     assert layer.w2_weight.dtype is torch.int32
+
+
+def test_moe_wna16_forwards_packed_modules_mapping_to_linear_delegate(monkeypatch):
+    """The linear delegate must receive packed_modules_mapping.
+
+    It is rebuilt from the raw HF quantization dict, which lists shard names and
+    never fused ones, so without the mapping a fused layer resolves to
+    `UnquantizedLinearMethod` and the checkpoint's qweight has nowhere to load.
+    """
+    from vllm.model_executor.layers.linear import ColumnParallelLinear
+    from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
+
+    config = MoeWNA16Config(
+        linear_quant_method="gptq",
+        weight_bits=4,
+        group_size=128,
+        has_zp=False,
+        lm_head_quantized=False,
+        modules_to_not_convert=None,
+        full_config={
+            "bits": 4,
+            "group_size": 128,
+            "desc_act": False,
+            "sym": True,
+            "quant_method": "gptq",
+            # As emitted by AutoGPTQ: shard names, never the fused name.
+            "modules_in_block_to_quantize": [["mlp.gate_proj", "mlp.up_proj"]],
+        },
+    )
+    config.packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
+
+    seen: dict[str, dict[str, list[str]]] = {}
+    monkeypatch.setattr(
+        AutoGPTQConfig,
+        "get_quant_method",
+        lambda self, layer, prefix: seen.setdefault(
+            "mapping", self.packed_modules_mapping
+        ),
+    )
+    layer = ColumnParallelLinear.__new__(ColumnParallelLinear)
+    config.get_quant_method(layer, "model.layers.0.mlp.gate_up_proj")
+
+    assert seen["mapping"] == {"gate_up_proj": ["gate_proj", "up_proj"]}
+
+
+def test_xpu_platform_supports_moe_wna16():
+    """Regression guard for the XPU quantization allowlist."""
+    try:
+        from vllm.platforms.xpu import XPUPlatform
+    except ImportError:
+        pytest.skip("vllm_xpu_kernels not importable outside an XPU stack")
+
+    assert "moe_wna16" in XPUPlatform.supported_quantization

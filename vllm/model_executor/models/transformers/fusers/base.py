@@ -20,10 +20,14 @@ if TYPE_CHECKING:
 class BaseFuser(ABC):
     """A detected fusion and how to apply it.
 
-    `match` analyses the module *class* once (cached, see `get_fuser`); `fuse`
+    `match` analyses the module *class* once (cached, see `get_fusers`); `fuse`
     then applies the fusion to an instance in `recursive_replace`, returning the
     module to install in its place.
     """
+
+    redefines_forward: ClassVar[bool] = True
+    """Whether `fuse` gives the module a different forward,
+    by rewriting its source or by returning a different module in its place."""
 
     @abstractmethod
     def info(self, name: str) -> str:

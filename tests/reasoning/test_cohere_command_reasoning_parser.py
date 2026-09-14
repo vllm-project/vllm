@@ -12,13 +12,13 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     JsonSchemaResponseFormat,
     ResponseFormat,
     StructuralTagResponseFormat,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.reasoning.cohere_command_reasoning_parser import (
@@ -251,6 +251,25 @@ class TestIsReasoningEnd:
         assert parser.is_reasoning_end(
             [start_id, end_id, chatbot_id, start_id, *content_ids, end_id]
         )
+
+
+@pytest.mark.parametrize(
+    "parser_cls",
+    [
+        CohereCommand3ReasoningParser,
+        CohereCommand4ReasoningParser,
+    ],
+    ids=["cmd3", "cmd4"],
+)
+def test_count_reasoning_tokens(tokenizer, parser_cls):
+    parser = parser_cls(tokenizer)
+    start = parser.start_token_id
+    end = parser.end_token_id
+
+    assert parser.count_reasoning_tokens([99, start, 11, 12, end, 100]) == 2
+    assert parser.count_reasoning_tokens([end, start, 1, start, 2, end, 3, end]) == 3
+    assert parser.count_reasoning_tokens([start, 1, 2]) == 2
+    assert parser.count_reasoning_tokens([1, 2, end]) == 0
 
 
 SCHEMA_A = {"type": "object", "properties": {"a": {"type": "string"}}}

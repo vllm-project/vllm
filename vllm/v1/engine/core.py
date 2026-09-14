@@ -333,8 +333,19 @@ class EngineCore:
         vllm_config.cache_config.num_gpu_blocks = scheduler_kv_cache_config.num_blocks
         kv_cache_groups = scheduler_kv_cache_config.kv_cache_groups
         if kv_cache_groups:
+            # Exclude groups that opt out of prefix caching (e.g. GLM-5.3-Flash
+            # kpool tail, a 1-block/req scratch buffer with block_size=kpool):
+            # their small block_size would otherwise drag the global block_size
+            # below the real allocator block size and desync it from mamba.
+            participating = [
+                g.kv_cache_spec.block_size
+                for g in kv_cache_groups
+                if g.kv_cache_spec.prefix_cacheable
+            ]
             vllm_config.cache_config.block_size = min(
-                g.kv_cache_spec.block_size for g in kv_cache_groups
+                participating
+                if participating
+                else [g.kv_cache_spec.block_size for g in kv_cache_groups]
             )
             update_kv_cache_capacity(vllm_config, scheduler_kv_cache_config)
 
@@ -2021,6 +2032,7 @@ class DPEngineCoreProc(EngineCoreProc):
 
         scheduler_config = vllm_config.scheduler_config
         self.prefill_schedule_interval = scheduler_config.prefill_schedule_interval
+        self.dp_sync_interval = vllm_config.parallel_config.dp_sync_interval
 
         # Counts forward-passes of the model so that we can synchronize
         # finished with DP peers every N steps.
@@ -2269,9 +2281,9 @@ class DPEngineCoreProc(EngineCoreProc):
         raise SystemExit
 
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
-        # Optimization - only perform finish-sync all-reduce every 32 steps.
+        # Sync step 1 too: an idle pause needs one dummy batch, not a full interval.
         self.step_counter += 1
-        if self.step_counter % 32 != 0:
+        if self.step_counter != 1 and self.step_counter % self.dp_sync_interval != 0:
             return True
 
         has_unfinished, pause_consensus = ParallelConfig.sync_dp_state(
