@@ -510,6 +510,13 @@ class DraftModelSpeculator(BaseSpeculator):
             num_tokens_across_dp=torch.full_like(
                 target_dp_sync.num_tokens_across_dp, num_batch_tokens
             ),
+            moe_non_sp_token_counts=(
+                torch.full_like(
+                    target_dp_sync.moe_non_sp_token_counts, num_batch_tokens
+                )
+                if target_dp_sync.moe_non_sp_token_counts is not None
+                else None
+            ),
             uniform_token_count=num_query_per_req,
             eager=False,
         ), num_batch_tokens
