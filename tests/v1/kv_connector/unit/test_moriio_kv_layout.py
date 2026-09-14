@@ -341,7 +341,7 @@ def test_mixed_layers_compute_distinct_offsets_per_layer():
     assert interleaved != indexer
 
 
-def test_write_transfer_plan_caches_offsets_per_geometry():
+def test_write_transfer_plan_caches_offsets_per_layer_geometry():
     kv_caches = {
         "dense0": torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16),
         "dense1": torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16),
@@ -354,7 +354,12 @@ def test_write_transfer_plan_caches_offsets_per_geometry():
         layer_name_to_local_kv_cache_metadata: dict[str, list[Any]]
 
         def _compute_block_transfer_offsets(
-            self, layer_name, local_block_ids, remote_block_ids, remote_moriio_meta
+            self,
+            layer_name,
+            local_block_ids,
+            remote_block_ids,
+            remote_moriio_meta,
+            remote_engine_id=None,
         ):
             calls.append(layer_name)
             call_id = len(calls)
@@ -369,41 +374,26 @@ def test_write_transfer_plan_caches_offsets_per_geometry():
     remote_meta = _remote_meta()
 
     dense0_plan = writer._prepare_transfer_plan(
-        SimpleNamespace(
-            layer_name="dense0",
-            local_block_ids=[1, 3],
-            request_id="req",
-            transfer_id="xfer",
-        ),
+        _write_task("dense0"),
         request_info,
         remote_meta,
     )
     dense1_plan = writer._prepare_transfer_plan(
-        SimpleNamespace(
-            layer_name="dense1",
-            local_block_ids=[1, 3],
-            request_id="req",
-            transfer_id="xfer",
-        ),
+        _write_task("dense1"),
         request_info,
         remote_meta,
     )
     indexer_plan = writer._prepare_transfer_plan(
-        SimpleNamespace(
-            layer_name="indexer",
-            local_block_ids=[1, 3],
-            request_id="req",
-            transfer_id="xfer",
-        ),
+        _write_task("indexer"),
         request_info,
         remote_meta,
     )
 
-    assert calls == ["dense0", "indexer"]
+    assert calls == ["dense0", "dense1", "indexer"]
     assert dense0_plan.transfer_local_offsets == [1]
-    assert dense1_plan.transfer_local_offsets == [1]
-    assert indexer_plan.transfer_local_offsets == [2]
-    assert len(request_info.transfer_offsets) == 2
+    assert dense1_plan.transfer_local_offsets == [2]
+    assert indexer_plan.transfer_local_offsets == [3]
+    assert len(request_info.transfer_offsets) == 3
 
 
 def test_write_scheduler_deduplicates_layers_and_seals_expected_count():

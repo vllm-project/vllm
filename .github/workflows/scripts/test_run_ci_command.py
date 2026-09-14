@@ -45,6 +45,7 @@ def make_pr(**overrides: Any) -> dict[str, Any]:
         "base": {"ref": "main"},
         "draft": False,
         "head": {
+            "label": "contributor:feature",
             "ref": "feature",
             "repo": {"clone_url": "https://github.com/contributor/vllm.git"},
             "sha": "0123456789abcdef",
@@ -479,7 +480,7 @@ class RunCiCommandTest(unittest.TestCase):
             payload,
             {
                 "commit": "0123456789abcdef",
-                "branch": "feature",
+                "branch": "contributor:feature",
                 "message": "PR #42 /ci run by @reviewer",
                 "pull_request_id": 42,
                 "pull_request_base_branch": "main",
@@ -497,6 +498,23 @@ class RunCiCommandTest(unittest.TestCase):
                 },
             },
         )
+
+    def test_build_payload_uses_head_label_to_avoid_branch_collision(self) -> None:
+        pr = make_pr()
+        pr["head"]["ref"] = "main"
+        pr["head"]["label"] = "contributor:main"
+
+        payload = create_build_payload(actor="reviewer", comment_id=99, pr=pr)
+
+        self.assertEqual(payload["branch"], "contributor:main")
+
+    def test_build_payload_falls_back_to_ref_without_label(self) -> None:
+        pr = make_pr()
+        del pr["head"]["label"]
+
+        payload = create_build_payload(actor="reviewer", comment_id=99, pr=pr)
+
+        self.assertEqual(payload["branch"], "feature")
 
     def test_write_reviewer_runs_ci_without_delegation(self) -> None:
         github = FakeGitHub()
@@ -1039,56 +1057,65 @@ class RunCiCommandTest(unittest.TestCase):
         github = FakeGitHub()
         buildkite = FakeBuildkite(
             [
+                # Builds created under the head label (owner:branch).
                 [
                     {
-                        "branch": "feature",
+                        "branch": "contributor:feature",
                         "number": 123,
                         "pull_request": {"id": 42},
                         "state": "running",
                         "web_url": "https://buildkite.example/builds/123",
                     },
                     {
-                        "branch": "feature",
+                        "branch": "contributor:feature",
                         "number": 124,
                         "meta_data": {"github-pr-number": "42"},
                         "state": "failing",
                         "web_url": "https://buildkite.example/builds/124",
                     },
                     {
-                        "branch": "feature",
+                        "branch": "contributor:feature",
                         "number": 125,
                         "pull_request": {"id": 43},
                         "state": "running",
                         "web_url": "https://buildkite.example/builds/125",
                     },
                     {
-                        "branch": "other-branch",
-                        "number": 126,
-                        "pull_request": {"id": 42},
-                        "state": "running",
-                        "web_url": "https://buildkite.example/builds/126",
-                    },
-                    {
-                        "branch": "feature",
+                        "branch": "contributor:feature",
                         "number": 127,
                         "pull_request": {"id": 42},
                         "state": "passed",
                         "web_url": "https://buildkite.example/builds/127",
                     },
-                ]
+                ],
+                # Legacy builds created under the bare ref before the label change.
+                [
+                    {
+                        "branch": "feature",
+                        "number": 126,
+                        "pull_request": {"id": 42},
+                        "state": "running",
+                        "web_url": "https://buildkite.example/builds/126",
+                    },
+                ],
             ]
         )
 
         run(make_event(COMMAND_CANCEL_CI), github, buildkite)
 
-        self.assertEqual(buildkite.cancel_calls, [123, 124])
-        self.assertIn("Requested cancellation of 2 CI builds", github.comments[0])
+        self.assertEqual(buildkite.cancel_calls, [123, 124, 126])
+        self.assertEqual(
+            [request["branch"] for request in buildkite.list_requests],
+            ["contributor:feature", "feature"],
+        )
+        self.assertIn("Requested cancellation of 3 CI builds", github.comments[0])
         self.assertIn("#123", github.comments[0])
         self.assertIn("#124", github.comments[0])
+        self.assertIn("#126", github.comments[0])
 
     def test_ci_cancel_is_a_noop_without_active_builds(self) -> None:
         github = FakeGitHub()
-        buildkite = FakeBuildkite([[]])
+        buildkite = FakeBuildkite([[], []])
 
         run(make_event(COMMAND_CANCEL_CI), github, buildkite)
 
@@ -1103,15 +1130,6 @@ class RunCiCommandTest(unittest.TestCase):
             [
                 [
                     {
-                        "branch": "feature",
-                        "number": 321,
-                        "pull_request": {"id": 42},
-                        "state": "running",
-                        "web_url": "https://buildkite.example/amd-ci/builds/321",
-                    }
-                ],
-                [
-                    {
                         "branch": "contributor:feature",
                         "number": 322,
                         "pull_request": {"id": 42},
@@ -1119,15 +1137,24 @@ class RunCiCommandTest(unittest.TestCase):
                         "web_url": "https://buildkite.example/amd-ci/builds/322",
                     }
                 ],
+                [
+                    {
+                        "branch": "feature",
+                        "number": 321,
+                        "pull_request": {"id": 42},
+                        "state": "running",
+                        "web_url": "https://buildkite.example/amd-ci/builds/321",
+                    }
+                ],
             ]
         )
 
         run(make_event(COMMAND_CANCEL_AMD_CI), github, buildkite)
 
-        self.assertEqual(buildkite.cancel_calls, [321, 322])
+        self.assertEqual(buildkite.cancel_calls, [322, 321])
         self.assertEqual(
             [request["branch"] for request in buildkite.list_requests],
-            ["feature", "contributor:feature"],
+            ["contributor:feature", "feature"],
         )
         self.assertTrue(
             all(

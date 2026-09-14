@@ -246,16 +246,8 @@ class Gemma4MTPAttention(nn.Module):
 
         q, _ = self.rotary_emb(positions, q, None)
 
-        # Attention reads K/V from the target's cache via KV sharing;
-        # these dummy tensors are never consumed but required by the API.
-        num_tokens = q.shape[0]
-        kv_dummy = torch.empty(
-            num_tokens,
-            self.num_kv_heads * self.head_dim,
-            dtype=q.dtype,
-            device=q.device,
-        )
-        attn_output = self.attn(q, kv_dummy, kv_dummy)
+        # Attention reads K/V from the target's cache via KV sharing.
+        attn_output = self.attn(q, None, None)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -524,6 +516,10 @@ class Gemma4MTP(nn.Module):
         draft_cfg = speculative_config.draft_model_config
         gen_cfg = draft_cfg.try_get_generation_config()
         self._suppress_token_ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
+        # Materialized on-device in load_weights: compute_logits runs under CUDA
+        # graph capture in the V2 speculator, where indexing with a Python list
+        # would issue an unpinned H2D copy (illegal during capture).
+        self._suppress_idx: torch.Tensor | None = None
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -576,8 +572,8 @@ class Gemma4MTP(nn.Module):
             )
         else:
             logits = self.logits_processor(self.lm_head, hidden_states)
-        if logits is not None and self._suppress_token_ids:
-            logits[:, self._suppress_token_ids] = -float("inf")
+        if logits is not None and self._suppress_idx is not None:
+            logits.index_fill_(1, self._suppress_idx, -float("inf"))
         return logits
 
     def get_top_tokens(
@@ -594,4 +590,11 @@ class Gemma4MTP(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         self._stable_full_lm_head_weight = None
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        if self._suppress_token_ids:
+            self._suppress_idx = torch.tensor(
+                self._suppress_token_ids,
+                dtype=torch.long,
+                device=next(self.parameters()).device,
+            )
+        return loaded
