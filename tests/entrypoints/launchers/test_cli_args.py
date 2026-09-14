@@ -151,6 +151,29 @@ def test_multiple_valid_inputs(serve_parser):
 
 
 ### Tests for serve argument validation that run prior to loading
+@pytest.mark.parametrize("frontend", ["http", "grpc", "rust"])
+@pytest.mark.parametrize("enable_pd_role", [False, True])
+def test_pd_role_requires_python_http_frontend(
+    serve_parser, monkeypatch, frontend, enable_pd_role
+):
+    kv_config = {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
+    if enable_pd_role:
+        kv_config["pd_role"] = "prefill"
+    cli_args = ["--kv-transfer-config", json.dumps(kv_config)]
+    if frontend == "grpc":
+        cli_args.append("--grpc")
+    monkeypatch.setattr(
+        cli_args_module.envs, "VLLM_USE_RUST_FRONTEND", frontend == "rust"
+    )
+    args = serve_parser.parse_args(cli_args)
+
+    if enable_pd_role and frontend != "http":
+        with pytest.raises(ValueError, match="requires the Python HTTP frontend"):
+            validate_parsed_serve_args(args)
+    else:
+        validate_parsed_serve_args(args)
+
+
 def test_enable_auto_choice_passes_without_tool_call_parser(serve_parser):
     """Ensure validation fails if tool choice is enabled with no call parser"""
     # If we enable-auto-tool-choice, explode with no tool-call-parser
