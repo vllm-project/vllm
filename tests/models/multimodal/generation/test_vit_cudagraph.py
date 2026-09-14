@@ -569,5 +569,7 @@ def test_eonly_vit_cudagraph_outputs(model_id, vllm_runner, image_assets, monkey
             "encoder_cudagraph_max_vision_items_per_batch": 2,
         },
     ) as model:
-        results = model.llm.collective_rpc(_check_eonly_encoder_outputs, args=(inputs,))
+        results = model.llm.collective_rpc(
+            partial(_check_eonly_encoder_outputs, batches=inputs)
+        )
         print(f"E-only {model_id}: {results}")
