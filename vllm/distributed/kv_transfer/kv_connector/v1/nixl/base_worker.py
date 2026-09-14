@@ -222,15 +222,15 @@ class NixlBaseConnectorWorker:
                 ]
             )
 
-        # All-attention fast path: single vectorized broadcast.
+        # All-attention fast path.
         if num_ssm_regions == 0:
             if region_group_ids is None:
                 region_group_ids = self.region_group_ids
                 if uses_region_group_mapping is None:
                     uses_region_group_mapping = self._uses_region_group_mapping
-            if not region_group_ids and num_regions == 1:
+            if not region_group_ids and num_desc_regions == 1:
                 region_group_ids = [0]
-            assert len(region_group_ids) == num_regions
+            assert len(region_group_ids) == num_desc_regions
             if uses_region_group_mapping is None:
                 uses_region_group_mapping = len(set(region_group_ids)) > 1
             region_group_ids_array = np.asarray(region_group_ids, dtype=np.int32)

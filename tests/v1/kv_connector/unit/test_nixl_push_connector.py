@@ -856,6 +856,8 @@ class TestPushWriterNotifs:
         w.xfer_stats = MagicMock()
         w._failed_recv_reqs = queue.Queue()
         w._pending_recv_notifs = {}
+        w._replicated_pcp_done_sending = set()
+        w.use_host_buffer = False
         w._reqs_to_process.add("req-send")
         w._reqs_to_send["req-send"] = time.perf_counter() + 60
         w._sending_transfers["req-send"] = [1, 2]
@@ -1618,6 +1620,29 @@ class TestPushPrefixCaching:
         local, remote = self._written_block_ids(w)
         assert local == [10, 11, 12]
         assert remote == [500, 501, 502]
+
+    @pytest.mark.parametrize("layer_name_routing", [False, True])
+    def test_different_region_groups_require_layer_routing(self, layer_name_routing):
+        """A layer mapped to a pooled remote region can still receive its blocks."""
+        w, engine_id = self._worker_driving_xfer()
+        w.dst_region_group_ids[engine_id] = [-1]
+        if layer_name_routing:
+            w._transfer_layer_group_ids = (0,)
+        reg = _registration_data("req-groups", local_block_ids=([500, 501],))
+
+        if not layer_name_routing:
+            with pytest.raises(NotImplementedError, match="cache-group layouts"):
+                NixlPushConnectorWorker._do_start_push_kv(
+                    w, "req-groups", ([10, 11],), reg
+                )
+            w.nixl_wrapper.make_prepped_xfer.assert_not_called()
+            return
+
+        NixlPushConnectorWorker._do_start_push_kv(w, "req-groups", ([10, 11],), reg)
+
+        local, remote = self._written_block_ids(w)
+        assert local == [10, 11]
+        assert remote == [500, 501]
 
 
 def _agent_metadata(
