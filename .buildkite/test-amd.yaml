@@ -533,7 +533,7 @@ steps:
   - tests/models/
   commands:
   - TARGET_TEST_SUITE=MI300 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
-  - HIP_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/sharded_state/test_sharded_state_loader.py -m '(not slow_test)'
+  - HIP_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/sharded_state/test_sharded_state_loader.py -m 'distributed(num_gpus=2)'
   - pytest models/transformers/test_backend.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/language -v -s -m 'distributed(num_gpus=2)'
   - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_phi4siglip.py
