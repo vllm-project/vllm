@@ -121,12 +121,7 @@ For further details on profiling vLLM, please refer to [this page](../../contrib
 
 ## Scale-Out APIs
 
-Scale-out APIs are disabled by default on `vllm serve`. The environment
-variable accepts only `0` or `1`; set `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1` to
-register the endpoints below. The
-dedicated `vllm launch render` and `vllm serve --tokens-only` modes are explicit
-opt-ins and enable their required endpoints when the variable is unset; an
-explicit value of `0` is rejected for those modes.
+Scale-out APIs are disabled by default on `vllm serve`. Set `--enable-scale-out` to register the endpoints below. The dedicated `vllm launch render` and `vllm serve --tokens-only` modes always register their required endpoints regardless of `--enable-scale-out`.
 
 ### Tokens IN <> Tokens OUT APIs
 
