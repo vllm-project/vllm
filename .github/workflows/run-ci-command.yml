@@ -16,6 +16,7 @@ permissions:
 jobs:
   run-ci-command:
     if: >-
+      github.repository_owner == 'vllm-project' &&
       github.event.issue.pull_request &&
       (github.event.comment.body == '/ci run' ||
       github.event.comment.body == '/ci run all' ||
