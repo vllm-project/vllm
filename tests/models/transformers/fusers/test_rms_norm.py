@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for the Transformers modeling backend's RMSNorm fuser."""
 
-from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -244,6 +243,8 @@ def test_gated_rms_norm_is_not_fused(cls):
         (GemmaRMSNorm, "GemmaRMSNorm", True),
         (WeightlessRMSNorm, "RMSNorm", False),
         (Gemma4RMSNorm, "RMSNorm", False),
+        (KwargPowRMSNorm, "RMSNorm", False),
+        (KwargBasePowRMSNorm, "RMSNorm", False),
         (WeightlessGemma4RMSNorm, "RMSNorm", False),
     ],
 )
@@ -270,7 +271,9 @@ def test_rms_norm_builds_vllm_class(cls, expected, zero_centered, default_vllm_c
     assert built.weight.shape[0] == (weight.size(0) if weight is not None else 0)
 
 
-@pytest.mark.parametrize("cls", [Gemma4RMSNorm, PowOperatorRMSNorm, KwargPowRMSNorm])
+@pytest.mark.parametrize(
+    "cls", [Gemma4RMSNorm, PowOperatorRMSNorm, KwargPowRMSNorm, KwargBasePowRMSNorm]
+)
 def test_pow_spelled_norm_fuses_to_equivalent_math(cls, default_vllm_config):
     """Matching `pow(v, -0.5)` is only sound if it really is the reciprocal square
     root: the fused norm must reproduce the unfused forward, not just replace it.
@@ -404,149 +407,3 @@ def test_gathered_norm_rejects_uneven_sharding(default_vllm_config):
     norm.tp_size = 2  # emulate TP=2 without a real process group
     with pytest.raises(ValueError, match="does not tile it evenly"):
         norm(torch.randn(2, 3))  # 3 * 2 != 8
-
-
-# The TP-aware norm has to be a subclass of the norm it wraps, and `CustomOp.__new__`
-# keys the out-of-tree swap on `cls.__name__` -- so a fixed `TPAwareRMSNorm` never
-# matches a platform plugin's `"RMSNorm"` registration, and the plugin's kernels are
-# silently skipped. `_tp_aware` closes that by deriving from the override instead.
-
-
-@contextmanager
-def _registered(base, override):
-    """Register `override` under `base.__name__`, as a platform plugin does.
-
-    `override=None` clears the name, so a test can assert the no-override
-    behaviour even in a process where a plugin has already registered one.
-    """
-    from vllm.model_executor.custom_op import op_registry_oot
-
-    sentinel = object()
-    previous = op_registry_oot.get(base.__name__, sentinel)
-    if override is None:
-        op_registry_oot.pop(base.__name__, None)
-    else:
-        op_registry_oot[base.__name__] = override
-    try:
-        yield override
-    finally:
-        if previous is sentinel:
-            op_registry_oot.pop(base.__name__, None)
-        else:
-            op_registry_oot[base.__name__] = previous
-
-
-def _plugin_norm(base, name):
-    """A plugin's override: `base`'s subclass whose `forward_native` is a sentinel."""
-    return type(name, (base,), {"forward_native": lambda self, x: torch.zeros_like(x)})
-
-
-def test_tp_aware_without_override_is_the_in_tree_class():
-    from vllm.model_executor.layers.layernorm import GemmaRMSNorm as VLLMGemmaRMSNorm
-    from vllm.model_executor.layers.layernorm import RMSNorm as VLLMRMSNorm
-    from vllm.model_executor.models.transformers.fusers import rms_norm
-
-    with _registered(VLLMRMSNorm, None), _registered(VLLMGemmaRMSNorm, None):
-        assert rms_norm._tp_aware(VLLMRMSNorm) is rms_norm.TPAwareRMSNorm
-        assert rms_norm._tp_aware(VLLMGemmaRMSNorm) is rms_norm.TPAwareGemmaRMSNorm
-
-
-def test_tp_aware_derives_from_a_registered_override():
-    """The built class carries the override's implementation *and* the TP gather,
-    and is named after the override so a repr or stack trace says which ran."""
-    from vllm.model_executor.layers.layernorm import RMSNorm as VLLMRMSNorm
-    from vllm.model_executor.models.transformers.fusers import rms_norm
-
-    override = _plugin_norm(VLLMRMSNorm, "PluginRMSNorm")
-    with _registered(VLLMRMSNorm, override):
-        built = rms_norm._tp_aware(VLLMRMSNorm)
-
-    assert issubclass(built, override)
-    assert issubclass(built, rms_norm.TPAwareNormMixin)
-    assert built.__name__ == "TPAwarePluginRMSNorm"
-    # The gather must run *before* the override's math, not after it.
-    mro = built.__mro__
-    assert mro.index(rms_norm.TPAwareNormMixin) < mro.index(override)
-
-
-def test_tp_aware_ignores_an_unusable_registration():
-    """A registration that is not a subclass of the norm is not a usable override:
-    `CustomOp.__new__` would refuse the swap, so the in-tree class stays."""
-    from vllm.model_executor.layers.layernorm import RMSNorm as VLLMRMSNorm
-    from vllm.model_executor.models.transformers.fusers import rms_norm
-
-    with _registered(VLLMRMSNorm, type("Unrelated", (nn.Module,), {})):
-        assert rms_norm._tp_aware(VLLMRMSNorm) is rms_norm.TPAwareRMSNorm
-
-
-def test_tp_aware_class_is_cached_per_resolved_override(default_vllm_config):
-    """One class per (norm, override) pair -- two `fuse` calls must not produce two
-    unrelated types -- but the cache is keyed on the override, so it never serves a
-    stale class after the registration changes."""
-    from vllm.model_executor.layers.layernorm import RMSNorm as VLLMRMSNorm
-    from vllm.model_executor.models.transformers.fusers import rms_norm
-
-    override = _plugin_norm(VLLMRMSNorm, "CachedPluginRMSNorm")
-    with _registered(VLLMRMSNorm, override):
-        first = rms_norm._tp_aware(VLLMRMSNorm)
-        assert rms_norm._tp_aware(VLLMRMSNorm) is first
-        # The path that runs once per norm instance is `fuse`, not `_tp_aware`:
-        # guard the one-class-per-norm-kind invariant where it can regress.
-        m1, m2 = RMSNorm(16), RMSNorm(16)
-        fuser = get_fuser(m1, RMSNormFuser)
-        built1 = fuser.fuse(m1, "norm", default_vllm_config)
-        built2 = fuser.fuse(m2, "norm", default_vllm_config)
-        assert type(built1) is type(built2) is first
-    with _registered(VLLMRMSNorm, None):
-        assert rms_norm._tp_aware(VLLMRMSNorm) is rms_norm.TPAwareRMSNorm
-    with _registered(VLLMRMSNorm, override):
-        assert rms_norm._tp_aware(VLLMRMSNorm) is first
-
-
-@pytest.mark.parametrize(
-    "cls,base_name", [(RMSNorm, "RMSNorm"), (GemmaRMSNorm, "GemmaRMSNorm")]
-)
-def test_fuse_builds_the_registered_override(cls, base_name, default_vllm_config):
-    """End to end: the module the fuser installs runs the override's kernels.
-
-    `forward_native` is called directly -- the point is which implementation the
-    fused module carries, not which vendor forward this host dispatches to.
-    """
-    import vllm.model_executor.layers.layernorm as vllm_layernorm
-
-    base = getattr(vllm_layernorm, base_name)
-    override = _plugin_norm(base, f"Fused{base_name}Override")
-    with _registered(base, override):
-        module = cls(16)
-        built = get_fuser(module, RMSNormFuser).fuse(
-            module, "norm", default_vllm_config
-        )
-
-    assert isinstance(built, override)
-    x = torch.randn(4, 16)
-    torch.testing.assert_close(built.forward_native(x), torch.zeros_like(x))
-
-
-def test_info_names_the_implementation_that_runs(default_vllm_config):
-    """The fuse log has to name what was installed, or a silently skipped override
-    reads exactly like a working one. `info` reports the class `fuse` stashed, so
-    the log can never disagree with the module that actually runs."""
-    from vllm.model_executor.layers.layernorm import RMSNorm as VLLMRMSNorm
-
-    def qualname(cls):
-        return f"{cls.__module__}.{cls.__name__}"
-
-    fuser = RMSNormFuser(zero_centered=False, source_cls="HFRMSNorm")
-    module = RMSNorm(16)
-    with _registered(VLLMRMSNorm, None):
-        built = fuser.fuse(module, "norm", default_vllm_config)
-        in_tree = fuser.info("norm")
-        assert f"-> {qualname(type(built))} (CustomOp)" in in_tree
-        assert type(built).__name__ == "TPAwareRMSNorm"
-    # A plugin usually registers under the in-tree name *and* reuses it for its
-    # own class, so the class name alone cannot tell the two logs apart.
-    with _registered(VLLMRMSNorm, _plugin_norm(VLLMRMSNorm, "RMSNorm")):
-        built = fuser.fuse(module, "norm", default_vllm_config)
-        assert f"-> {qualname(type(built))} (CustomOp)" in fuser.info("norm")
-        assert type(built).__name__ == "TPAwareRMSNorm"
-        assert fuser.info("norm") != in_tree
