@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from types import SimpleNamespace
@@ -29,10 +30,12 @@ from vllm.distributed.aux_output_connector.store import (
     BlockObjectStore,
     BlockObjectStoreError,
 )
-from vllm.distributed.aux_output_connector.worker import AuxOutputWorkerConnector
+from vllm.distributed.aux_output_connector.worker import (
+    AuxOutputWorkerConnector,
+    PendingAuxOutput,
+)
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
-from vllm.v1.executor.uniproc_executor import AsyncOutputFuture
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu import async_utils
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
@@ -153,7 +156,6 @@ def _execution_ranges(metadata, request_ids):
 
 def _begin_step(worker: AuxOutputWorkerConnector, step: _WorkerStep) -> None:
     worker.begin_step(step.metadata)
-    worker.defer_no_forward_output(EMPTY_MODEL_RUNNER_OUTPUT).get_output()
 
 
 def _make_worker(
@@ -181,8 +183,7 @@ def _make_worker(
     )
     worker._requests = {}
     worker._generation = 0
-    worker._step_metadata = None
-    worker._output_lock = threading.Lock()
+    worker._pending_output = None
     return worker
 
 
@@ -232,19 +233,33 @@ def test_worker_skips_aux_outputs_for_internal_warmup_step():
     worker.close()
 
 
-def test_async_output_owns_metadata_while_next_step_is_registered(monkeypatch):
-    """UniProc consumes FIFO futures after launching the next step, without a wait."""
-    monkeypatch.setattr(torch.cuda, "Event", lambda **kwargs: Mock())
+def _pending_output(worker, callback):
+    pending = PendingAuxOutput(
+        worker, np.array([]), np.array([]), torch.empty(0), callback
+    )
+    worker._pending_output = pending
+    return pending
+
+
+def test_worker_completes_previous_output_without_an_output_thread(monkeypatch):
+    """UniProc starts its next step before consuming the previous lazy Future."""
+    event = Mock()
+    monkeypatch.setattr(torch.cuda, "Event", lambda **kwargs: event)
     monkeypatch.setattr(async_utils, "stream", lambda *args: nullcontext())
-    monkeypatch.setattr(async_utils, "async_copy_to_np", lambda t: t.numpy().copy())
+    monkeypatch.setattr(
+        async_utils, "async_copy_to_np", lambda tensor: tensor.numpy().copy()
+    )
     worker = _make_worker(1)
-    worker.begin_step(_metadata(0, [_request_metadata("r", 0, 1, 0, [])], {}).metadata)
+    worker.begin_step(
+        _metadata(0, [_request_metadata("request", 0, 1, 0, [])], {}).metadata
+    )
     rows = torch.ones((1, *_SHAPE), dtype=torch.uint8)
-    worker._capturer = Mock()
-    worker._capturer.snapshot_routing_data.return_value = rows
-    pending = worker.prepare_output(["r"], np.array([0]), np.array([0, 1]))
+    pending = PendingAuxOutput(worker, np.array([0]), np.array([0, 1]), rows)
+    worker._pending_output = pending
+    process_output = Mock(wraps=worker.process_output)
+    monkeypatch.setattr(worker, "process_output", process_output)
     output = async_utils.AsyncOutput(
-        ModelRunnerOutput(["r"], {"r": 0}),
+        ModelRunnerOutput(["request"], {"request": 0}),
         SamplerOutput(
             torch.tensor([[7]]), None, None, None, num_rejected=torch.tensor([0])
         ),
@@ -253,18 +268,64 @@ def test_async_output_owns_metadata_while_next_step_is_registered(monkeypatch):
         Mock(),
         pending_aux_output=pending,
     )
-    first = AsyncOutputFuture(output, single_value=True)
-    worker.begin_step(_metadata(0, [], {"r": []}).metadata)
-    terminal = AsyncOutputFuture(
-        worker.defer_no_forward_output(EMPTY_MODEL_RUNNER_OUTPUT), True
-    )
-    assert worker._requests == {}
-    result = first.result()
+    assert pending.finish_callback is not None
+    event.record.assert_called_once()
+    process_output.assert_not_called()
+
+    worker.begin_step(_metadata(0, [], {}).metadata)
+    result = output.get_output()
+
     assert result.sampled_token_ids == [[7]]
-    np.testing.assert_array_equal(result.aux_output_connector_output["r"].rows, rows)
-    assert first.result() is result
-    assert terminal.result() is EMPTY_MODEL_RUNNER_OUTPUT
-    assert worker._requests == {}
+    np.testing.assert_array_equal(
+        result.aux_output_connector_output["request"].rows, rows.numpy()
+    )
+    process_output.assert_called_once()
+    assert worker._pending_output is None
+    worker.close()
+
+
+def test_worker_and_output_thread_commit_previous_output_once():
+    worker = _make_worker(1)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def finish():
+        entered.set()
+        assert release.wait(5)
+        return {}
+
+    callback = Mock(side_effect=finish)
+    pending = _pending_output(worker, callback)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        output = executor.submit(pending.finish_once)
+        try:
+            assert entered.wait(5)
+            next_step = executor.submit(
+                worker.begin_step, _metadata(0, [], {}).metadata
+            )
+            with pytest.raises(TimeoutError):
+                next_step.result(timeout=0.1)
+        finally:
+            release.set()
+        assert output.result(timeout=5) == {}
+        next_step.result(timeout=5)
+
+    callback.assert_called_once_with()
+    assert worker._pending_output is None
+    worker.close()
+
+
+def test_failed_aux_output_is_not_retried_or_hidden_by_next_step():
+    worker = _make_worker(1)
+    error = RuntimeError("publish failed")
+    callback = Mock(side_effect=error)
+    pending = _pending_output(worker, callback)
+
+    for consume in (pending.finish_once, lambda: worker.begin_step(None)):
+        with pytest.raises(RuntimeError, match="publish failed") as caught:
+            consume()
+        assert caught.value is error
+    callback.assert_called_once_with()
     worker.close()
 
 
@@ -286,50 +347,6 @@ def test_worker_rejects_invalid_rejected_token_count():
             num_tokens=(1,),
         )
 
-    worker.close()
-
-
-def test_close_discards_unconsumed_metadata_without_applying_it():
-    worker = _make_worker(1)
-    worker.begin_step(_metadata(1, [], {}).metadata)
-    output = worker.defer_no_forward_output(EMPTY_MODEL_RUNNER_OUTPUT)
-    worker.close()
-    assert worker._generation == 0
-    with pytest.raises(RuntimeError, match="connector is closed"):
-        output.get_output()
-    worker.close()
-
-
-def test_close_waits_for_active_output_to_release_store(monkeypatch):
-    worker = _make_worker(1)
-    store = worker._store
-    close = Mock(wraps=store.close)
-    monkeypatch.setattr(store, "close", close)
-    closing = threading.Event()
-
-    def shutdown():
-        closing.set()
-        worker.close()
-
-    with worker.output_context(_metadata(0, [], {}).metadata):
-        thread = threading.Thread(target=shutdown)
-        thread.start()
-        assert closing.wait(1)
-        close.assert_not_called()
-    thread.join(timeout=2)
-    assert not thread.is_alive()
-    close.assert_called_once()
-
-
-def test_failed_output_releases_lifecycle_lock():
-    worker = _make_worker(1)
-    with (
-        pytest.raises(ValueError, match="test failure"),
-        worker.output_context(_metadata(0, [], {}).metadata),
-    ):
-        raise ValueError("test failure")
-    assert worker._output_lock.acquire(blocking=False)
-    worker._output_lock.release()
     worker.close()
 
 
@@ -364,15 +381,15 @@ def _process_output(
         query_start_loc,
     )
     assert pending is not None
-    with worker.output_context(pending.metadata):
-        return worker.process_output(
-            request_ids,
-            pending.token_starts,
-            pending.query_start_loc,
-            pending.routed_experts.cpu().numpy(),
-            num_sampled,
-            num_rejected,
-        )
+    pending.finish_callback = lambda: worker.process_output(
+        request_ids,
+        pending.token_starts,
+        pending.query_start_loc,
+        pending.routed_experts.cpu().numpy(),
+        num_sampled,
+        num_rejected,
+    )
+    return pending.finish_once()
 
 
 def test_worker_ignores_cudagraph_query_padding():
@@ -1589,7 +1606,6 @@ def test_terminal_request_publishes_hash_discovered_after_last_schedule():
     connector.request_finished(request)
     cleanup = connector.build_connector_meta(_step_output([], [], []), {})
     worker.begin_step(cleanup)
-    worker.defer_no_forward_output(EMPTY_MODEL_RUNNER_OUTPUT).get_output()
 
     assert worker._store is not None
     np.testing.assert_array_equal(

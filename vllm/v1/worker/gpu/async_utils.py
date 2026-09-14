@@ -3,6 +3,7 @@
 import contextlib
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -20,6 +21,7 @@ from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
 from vllm.v1.worker.utils import raise_if_nan_logits
 
 if TYPE_CHECKING:
+    from vllm.distributed.aux_output_connector.connector import AuxOutputRequestOutput
     from vllm.distributed.aux_output_connector.worker import PendingAuxOutput
     from vllm.v1.worker.gpu.input_batch import InputBatch
 
@@ -161,10 +163,26 @@ class AsyncOutput(AsyncModelRunnerOutput):
                     pending_aux_output.routed_experts
                 )
                 self.num_rejected = async_copy_to_np(sampler_output.num_rejected)
+                pending_aux_output.finish_callback = partial(
+                    self._finish_aux_output, pending_aux_output
+                )
             if check_ep_fault:
                 has_fault = get_ep_all2all_manager().query_fault()
                 self._has_fault = has_fault.to("cpu", non_blocking=True)
             self.copy_event.record(copy_stream)
+
+    def _finish_aux_output(
+        self, pending: "PendingAuxOutput"
+    ) -> dict[str, "AuxOutputRequestOutput"]:
+        self.copy_event.synchronize()
+        return pending.connector.process_output(
+            self.model_runner_output.req_ids,
+            pending.token_starts,
+            pending.query_start_loc,
+            self.routed_experts,
+            self.num_sampled_tokens_np,
+            self.num_rejected,
+        )
 
     def get_output(self) -> ModelRunnerOutput:
         self.copy_event.synchronize()
@@ -195,18 +213,9 @@ class AsyncOutput(AsyncModelRunnerOutput):
             self.model_runner_output.logprobs = self.logprobs_tensors.tolists()
         self.model_runner_output.prompt_logprobs_dict = self.prompt_logprobs_dict
         if self.pending_aux_output is not None:
-            pending = self.pending_aux_output
-            with pending.connector.output_context(pending.metadata):
-                self.model_runner_output.aux_output_connector_output = (
-                    pending.connector.process_output(
-                        self.model_runner_output.req_ids,
-                        pending.token_starts,
-                        pending.query_start_loc,
-                        self.routed_experts,
-                        self.num_sampled_tokens_np,
-                        self.num_rejected,
-                    )
-                )
+            self.model_runner_output.aux_output_connector_output = (
+                self.pending_aux_output.finish_once()
+            )
 
         if self._has_fault is not None and self._has_fault.item():
             mask = get_ep_all2all_manager().query_active_mask()
