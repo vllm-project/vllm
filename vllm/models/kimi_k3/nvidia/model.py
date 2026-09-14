@@ -1376,6 +1376,8 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
                 residual = residual[:local_num_tokens]
 
         remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
+        if self.use_sequence_parallel:
+            remote_aux = [t[: hidden_states.shape[0]] for t in remote_aux]
 
         # sharded aux hidden states when sp is enabled
         aux_hidden_states: list[torch.Tensor] = []
@@ -1454,6 +1456,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         else:
             hidden_states = hidden_states + residual
 
+        aux_hidden_states = remote_aux + aux_hidden_states
         if self.use_sequence_parallel:
             if aux_hidden_states:
                 hidden_size = hidden_states.shape[-1]
@@ -1471,7 +1474,6 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
 
         # NOTE: the final norm is applied in compute_logits instead of here, so
         # the MTP draft model receives the pre-norm hidden states.
-        aux_hidden_states = remote_aux + aux_hidden_states
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states
@@ -1656,6 +1658,9 @@ class KimiLinearForCausalLM(
         self.model = KimiLinearModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        self.pp_intermediate_tensors_are_sequence_sharded = (
+            self.model.use_sequence_parallel
+        )
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 self.config.vocab_size,
@@ -1681,12 +1686,6 @@ class KimiLinearForCausalLM(
         device: torch.device,
     ) -> IntermediateTensors:
         return self.model.make_empty_intermediate_tensors(batch_size, dtype, device)
-
-    def get_pp_intermediate_tensor_all_gather_overrides(self) -> dict[str, bool]:
-        """Keep model-level SP shards local across pipeline stages."""
-        if not self.model.use_sequence_parallel:
-            return {}
-        return {"hidden_states": False, "residual": False}
 
     def forward(  # type: ignore[override]
         self,
@@ -1908,15 +1907,10 @@ class KimiK3ForConditionalGeneration(
         self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.language_model.make_empty_intermediate_tensors
         )
-        self.media_placeholder: int = self.config.media_placeholder_token_id
-
-    def get_pp_intermediate_tensor_all_gather_overrides(self) -> dict[str, bool]:
-        getter = getattr(
-            self.language_model,
-            "get_pp_intermediate_tensor_all_gather_overrides",
-            None,
+        self.pp_intermediate_tensors_are_sequence_sharded = (
+            self.language_model.pp_intermediate_tensors_are_sequence_sharded
         )
-        return {} if getter is None else getter()
+        self.media_placeholder: int = self.config.media_placeholder_token_id
 
     # -- SupportsEncoderCudaGraph protocol methods --
 

@@ -239,15 +239,41 @@ def test_kimi_pipeline_stage_keeps_received_sequence_shard(
     assert output["hidden_states"].shape == output["residual"].shape == (2, 2)
 
 
-def test_kimi_sp_pipeline_transport_disables_tp_all_gather():
-    causal_lm = object.__new__(kimi_model.KimiLinearForCausalLM)
-    nn.Module.__init__(causal_lm)
-    causal_lm.model = SimpleNamespace(use_sequence_parallel=True)
-
-    assert causal_lm.get_pp_intermediate_tensor_all_gather_overrides() == {
-        "hidden_states": False,
-        "residual": False,
-    }
+def test_kimi_last_pipeline_stage_gathers_received_aux_shards(monkeypatch):
+    model = object.__new__(kimi_model.KimiLinearModel)
+    nn.Module.__init__(model)
+    model.use_sequence_parallel = True
+    model.use_attn_res = False
+    model.start_layer = 1
+    model.end_layer = 2
+    model.aux_hidden_state_layers = ()
+    model._aux_upstream_total_cached = 1
+    model.layers = nn.ModuleList([nn.Identity(), _RecordingDecoderLayer()])
+    monkeypatch.setattr(
+        kimi_model,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=False, is_last_rank=True),
+    )
+    monkeypatch.setattr(kimi_model, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(kimi_model.envs, "VLLM_MOE_SKIP_PADDING", False)
+    gather = Mock(side_effect=lambda x: torch.cat([x, x + 100], dim=0))
+    monkeypatch.setattr(kimi_model, "sp_all_gather", gather)
+    hidden = torch.arange(4, dtype=torch.float32).view(2, 2)
+    aux = hidden + 10
+    output, aux_outputs = model(
+        input_ids=None,
+        positions=torch.arange(3),
+        intermediate_tensors=kimi_model.IntermediateTensors(
+            {
+                "hidden_states": hidden,
+                "residual": torch.ones_like(hidden),
+                "aux_hidden_states_0": aux,
+            }
+        ),
+    )
+    gather.assert_called_once()
+    torch.testing.assert_close(output, torch.cat([hidden + 1, hidden + 101])[:3])
+    torch.testing.assert_close(aux_outputs[0], torch.cat([aux, aux + 100])[:3])
 
 
 def test_kimi_decoder_layer_keeps_moe_states_sequence_sharded(monkeypatch):

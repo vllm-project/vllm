@@ -1683,6 +1683,12 @@ class VllmConfig:
         pass_config = self.compilation_config.pass_config
         if pass_config.fuse_gemm_comms:
             pass_config.enable_sp = True
+        if pass_config.enable_sp and self.parallel_config.pipeline_parallel_size > 1:
+            raise ValueError(
+                "Compiler sequence parallelism does not support pipeline parallelism. "
+                "Disable compilation_config.pass_config.enable_sp and "
+                "fuse_gemm_comms. Model-level sequence parallelism is unaffected."
+            )
         if pass_config.enable_sp:
             if self.parallel_config.tensor_parallel_size == 1:
                 logger.warning_once("Sequence Parallelism requires TP>1, disabling")
@@ -1878,29 +1884,15 @@ class VllmConfig:
             data_parallel_size=effective_dp_size,
         )
 
-        if self.compilation_config.pass_config.enable_sp:
-            # With pipeline parallelism, native rms norm tracing errors due to
-            # incorrect residual shape.
-            # Use custom rms norm to unblock. In the future,
-            # the pass will operate on higher-level IR to avoid the issue.
-            # TODO: https://github.com/vllm-project/vllm/issues/27894
-            if self.compilation_config.mode != CompilationMode.VLLM_COMPILE:
-                logger.warning_once(
-                    "Sequence parallelism is enabled, but running in wrong "
-                    "vllm compile mode: %s.",
-                    self.compilation_config.mode,
-                )
-
-            if self.parallel_config.pipeline_parallel_size > 1:
-                if "-rms_norm" not in self.compilation_config.custom_ops:
-                    self.compilation_config.custom_ops.append("+rms_norm")
-                else:
-                    logger.warning_once(
-                        "Sequence parallelism not supported with "
-                        "native rms_norm when using %s, "
-                        "this will likely lead to an error.",
-                        "pipeline parallelism",
-                    )
+        if (
+            self.compilation_config.pass_config.enable_sp
+            and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
+        ):
+            logger.warning_once(
+                "Sequence parallelism is enabled, but running in wrong "
+                "vllm compile mode: %s.",
+                self.compilation_config.mode,
+            )
 
         # final check of cudagraph mode after all possible updates
         if current_platform.is_cuda_alike():

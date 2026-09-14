@@ -60,7 +60,7 @@ from vllm.multimodal.encoder_budget import (
     MultiModalBudget,
     get_dummy_encoder_profile_inputs,
 )
-from vllm.sequence import IntermediateTensors
+from vllm.sequence import IntermediateTensors, get_intermediate_tensor_num_tokens
 from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
@@ -1860,11 +1860,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             n = input_batch.num_tokens_after_padding
             received_num_tokens = n
             if not dummy_run:
-                received_lengths = {
-                    tensor.shape[0] for tensor in intermediate_tensors.tensors.values()
-                }
-                assert len(received_lengths) == 1
-                received_num_tokens = received_lengths.pop()
+                received_num_tokens = get_intermediate_tensor_num_tokens(
+                    intermediate_tensors
+                )
                 assert received_num_tokens <= n
             new_tensors = {
                 k: v[:received_num_tokens]

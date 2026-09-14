@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import inspect
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
+import torch
 
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.worker import gpu_worker, startup_plan
@@ -221,3 +223,48 @@ def test_execute_model_waits_previous_pp_send_before_forward(
 
     assert log == ["wait:prev-tensor", "forward", "isend"]
     assert worker._pp_send_work == [tensor_handle]
+
+
+@pytest.mark.parametrize("sequence_sharded", [False, True])
+def test_pp_transport_uses_same_layout_for_send_and_receive(
+    monkeypatch, sequence_sharded
+):
+    from vllm.sequence import IntermediateTensors
+
+    # Include an auxiliary tensor: transport must cover every key uniformly.
+    tensors = {
+        "hidden_states": torch.arange(8).reshape(2, 4),
+        "residual": torch.ones(2, 3, 4),
+        "aux_hidden_states_0": torch.full((2, 4), 7),
+    }
+    pp = Mock(is_first_rank=False, is_last_rank=False)
+    pp.irecv_tensor_dict.return_value = (tensors, [], [])
+    pp.isend_tensor_dict.return_value = [Mock(), Mock()]
+    tp = object()
+    monkeypatch.setattr(gpu_worker, "get_pp_group", lambda: pp)
+    monkeypatch.setattr(gpu_worker, "get_tp_group", lambda: tp)
+
+    def forward(scheduler_output, received):
+        for key, tensor in tensors.items():
+            torch.testing.assert_close(received[key], tensor)
+        return IntermediateTensors(tensors)
+
+    worker = SimpleNamespace(
+        _pp_send_work=[],
+        pp_intermediate_tensors_are_sequence_sharded=sequence_sharded,
+        vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(distributed_executor_backend="mp"),
+        ),
+        model_runner=SimpleNamespace(execute_model=forward),
+        use_v2_model_runner=False,
+        annotate_profile=lambda _: nullcontext(),
+    )
+    scheduler_output = SimpleNamespace(total_num_scheduled_tokens=4)
+    execute = inspect.unwrap(gpu_worker.Worker.execute_model)
+    assert execute(worker, scheduler_output) is None
+    expected_group = None if sequence_sharded else tp
+    pp.irecv_tensor_dict.assert_called_once_with(all_gather_group=expected_group)
+    pp.isend_tensor_dict.assert_called_once_with(
+        tensors, all_gather_group=expected_group
+    )
+    assert worker._pp_send_work == pp.isend_tensor_dict.return_value[1:]

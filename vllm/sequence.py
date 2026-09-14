@@ -60,3 +60,21 @@ class IntermediateTensors:
             k: torch.empty_like(v) for k, v in intermediate_tensors.tensors.items()
         }
         return IntermediateTensors(tensors)
+
+
+def get_intermediate_tensor_num_tokens(
+    intermediate_tensors: IntermediateTensors,
+) -> int:
+    """Read the common leading dimension of nonempty, token-aligned PP tensors.
+
+    Call after any residual reconstruction and token clipping. Intermediate
+    tensors with different token layouts must be normalized before calling.
+    """
+    output_token_counts = {
+        tensor.shape[0] for tensor in intermediate_tensors.tensors.values()
+    }
+    assert len(output_token_counts) == 1, (
+        "Expected a common token count for PP intermediate tensors, got "
+        f"{ {k: tuple(v.shape) for k, v in intermediate_tensors.items()} }"
+    )
+    return next(iter(output_token_counts))

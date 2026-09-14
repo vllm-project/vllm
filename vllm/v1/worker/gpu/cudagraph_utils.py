@@ -32,7 +32,7 @@ from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
-from vllm.sequence import IntermediateTensors
+from vllm.sequence import IntermediateTensors, get_intermediate_tensor_num_tokens
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.hisparse.binding import release_hisparse_profiling_cache
@@ -638,12 +638,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                 # Non-last PP rank.
                 assert isinstance(model_output, IntermediateTensors)
                 intermediate_tensors = model_output
-                output_token_counts = {
-                    tensor.shape[0]
-                    for tensor in intermediate_tensors.tensors.values()
-                }
-                assert len(output_token_counts) == 1
-                num_tokens = next(iter(output_token_counts))
+                num_tokens = get_intermediate_tensor_num_tokens(intermediate_tensors)
                 self.intermediate_tensor_num_tokens[desc] = num_tokens
                 if self.intermediate_tensors is None:
                     self.intermediate_tensors = IntermediateTensors.empty_like(
