@@ -7,7 +7,6 @@ from typing import cast
 
 import torch
 
-from vllm import envs
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -545,13 +544,9 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         has no eager breaks.
         """
         attn_metadata = get_forward_context().attn_metadata
-        return (
-            self.aux_stream_list is not None
-            and envs.VLLM_ROCM_DSV4_CSA_MULTI_STREAM
-            and (
-                torch.cuda.is_current_stream_capturing()
-                or not isinstance(attn_metadata, dict)
-            )
+        return self.aux_stream_list is not None and (
+            torch.cuda.is_current_stream_capturing()
+            or not isinstance(attn_metadata, dict)
         )
 
     def _run_sequential_pipeline(
