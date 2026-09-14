@@ -906,9 +906,7 @@ class TestBareAndMalformedOpeners:
     """
 
     def test_bare_opener_non_streaming(self, parser, mock_request):
-        model_output = (
-            '<|tool_call>:get_weather{location:<|"|>London<|"|>}<tool_call|>'
-        )
+        model_output = '<|tool_call>:get_weather{location:<|"|>London<|"|>}<tool_call|>'
         result = parser.extract_tool_calls(model_output, mock_request)
 
         assert result.tools_called is True
@@ -929,7 +927,7 @@ class TestBareAndMalformedOpeners:
 
     def test_bare_opener_multiple_args(self, parser, mock_request):
         model_output = (
-            '<|tool_call>:get_weather{'
+            "<|tool_call>:get_weather{"
             'location:<|"|>Tokyo<|"|>,unit:<|"|>celsius<|"|>}'
             "<tool_call|>"
         )
@@ -980,7 +978,7 @@ class TestBareAndMalformedOpeners:
         model_output = (
             "<|tool_call>:bad no brace<tool_call|>"
             '<|tool_call>call:search{input:<|"|>hello<|"|>}<tool_call|>'
-            '<|tool_call>:set{flag:true,count:5}<tool_call|>'
+            "<|tool_call>:set{flag:true,count:5}<tool_call|>"
         )
         result = parser.extract_tool_calls(model_output, mock_request)
 
