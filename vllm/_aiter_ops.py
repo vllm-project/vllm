@@ -861,6 +861,43 @@ def _rocm_aiter_triton_gemm_a8w8_blockscale_fake(
     return Y
 
 
+# M at or above which routing an untuned shape to aiter's Triton blockscale
+# kernel is a measured win. Architectures absent here are never routed.
+_AITER_BLOCKSCALE_TRITON_MIN_M = {
+    "gfx942": 2048,
+    "gfx950": 384,
+}
+
+
+@functools.cache
+def _rocm_aiter_blockscale_triton_min_m() -> int | None:
+    if not current_platform.is_rocm():
+        return None
+    import aiter.ops.gemm_op_a8w8 as aiter_gemm_a8w8_ops
+
+    return _AITER_BLOCKSCALE_TRITON_MIN_M.get(aiter_gemm_a8w8_ops.get_gfx())
+
+
+def _rocm_aiter_use_triton_blockscale(m: int, n: int, k: int) -> bool:
+    min_m = _rocm_aiter_blockscale_triton_min_m()
+    if min_m is None or m < min_m:
+        return False
+    import aiter.ops.gemm_op_a8w8 as aiter_gemm_a8w8_ops
+
+    # Same cached lookup aiter makes internally, so this costs nothing and
+    # cannot disagree with it. None means aiter has no tuned CK config for
+    # this shape and will fall back to its single default instance.
+    return (
+        aiter_gemm_a8w8_ops.get_CKGEMM_config(
+            m,
+            n,
+            k,
+            aiter_gemm_a8w8_ops.AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_FILE,
+        )
+        is None
+    )
+
+
 def _rocm_aiter_gemm_a8w8_blockscale_impl(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -869,6 +906,13 @@ def _rocm_aiter_gemm_a8w8_blockscale_impl(
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
     from aiter import gemm_a8w8_blockscale
+
+    # Must stay inside the custom op: a branch in the caller would be traced
+    # once by Dynamo and frozen at the shape seen during tracing.
+    if _rocm_aiter_use_triton_blockscale(A.shape[0], B.shape[0], B.shape[1]):
+        return _rocm_aiter_triton_gemm_a8w8_blockscale_impl(
+            A, B, As, Bs, output_dtype=output_dtype
+        )
 
     return gemm_a8w8_blockscale(A, B, As, Bs, dtype=output_dtype)
 
