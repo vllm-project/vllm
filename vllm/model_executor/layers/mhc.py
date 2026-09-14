@@ -292,6 +292,161 @@ class MHCPreOp(CustomOp):
         )
 
 
+# --8<-- [start:mhc_pre_delayed]
+@CustomOp.register("mhc_pre_delayed")
+class MHCPreDelayedOp(CustomOp):
+    """MHC pre block using the pre-mix carried from the previous sublayer.
+
+    Same gates as :class:`MHCPreOp`, but the stream collapse applies the
+    caller's ``pre_mix`` and this sublayer's pre-mix is returned for the next
+    sublayer seam. Returns post_mix, comb_mix, layer_input, next_pre_mix.
+    """
+
+    # --8<-- [end:mhc_pre_delayed]
+    @classmethod
+    def enabled(cls) -> bool:
+        return True
+
+    def forward_cuda(
+        self,
+        residual: torch.Tensor,
+        fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        rms_eps: float,
+        hc_pre_eps: float,
+        hc_sinkhorn_eps: float,
+        hc_post_mult_value: float,
+        sinkhorn_repeat: int,
+        pre_mix: torch.Tensor | None = None,
+        x: torch.Tensor | None = None,
+        norm_weight: torch.Tensor | None = None,
+        norm_eps: float = 1e-6,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        return torch.ops.vllm.mhc_pre_delayed_tilelang(
+            residual,
+            fn,
+            hc_scale,
+            hc_base,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_mult_value,
+            sinkhorn_repeat,
+            pre_mix,
+            x,
+            norm_weight,
+            norm_eps,
+        )
+
+    def forward_hip(
+        self,
+        residual: torch.Tensor,
+        fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        rms_eps: float,
+        hc_pre_eps: float,
+        hc_sinkhorn_eps: float,
+        hc_post_mult_value: float,
+        sinkhorn_repeat: int,
+        pre_mix: torch.Tensor | None = None,
+        x: torch.Tensor | None = None,
+        norm_weight: torch.Tensor | None = None,
+        norm_eps: float = 1e-6,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        # The AITER delayed path drives mhc_pre_gemm_sqrsum against `residual`
+        # and folds no RMSNorm, so it cannot serve the model-entry broadcast
+        # (which projects a narrower `x`) or a fused norm. Both are handled by
+        # TileLang, or by the reference when TileLang is unavailable.
+        if (
+            x is None
+            and norm_weight is None
+            and _aiter_mhc_supported(residual, None, supports_norm=False)
+        ):
+            return torch.ops.vllm.mhc_pre_delayed_aiter(
+                residual,
+                fn,
+                hc_scale,
+                hc_base,
+                rms_eps,
+                hc_pre_eps,
+                hc_sinkhorn_eps,
+                hc_post_mult_value,
+                sinkhorn_repeat,
+                pre_mix,
+            )
+        if HAS_TILELANG_MHC:
+            return torch.ops.vllm.mhc_pre_delayed_tilelang(
+                residual,
+                fn,
+                hc_scale,
+                hc_base,
+                rms_eps,
+                hc_pre_eps,
+                hc_sinkhorn_eps,
+                hc_post_mult_value,
+                sinkhorn_repeat,
+                pre_mix,
+                x,
+                norm_weight,
+                norm_eps,
+            )
+        return self.forward_native(
+            residual,
+            fn,
+            hc_scale,
+            hc_base,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_mult_value,
+            sinkhorn_repeat,
+            pre_mix,
+            x,
+            norm_weight,
+            norm_eps,
+        )
+
+    def forward_native(
+        self,
+        residual: torch.Tensor,
+        fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        rms_eps: float,
+        hc_pre_eps: float,
+        hc_sinkhorn_eps: float,
+        hc_post_mult_value: float,
+        sinkhorn_repeat: int,
+        pre_mix: torch.Tensor | None = None,
+        x: torch.Tensor | None = None,
+        norm_weight: torch.Tensor | None = None,
+        norm_eps: float = 1e-6,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        post_mix, comb_mix, layer_input, next_pre_mix = (
+            mhc_kernels.mhc_pre_delayed_torch(
+                residual,
+                fn,
+                hc_scale,
+                hc_base,
+                rms_eps,
+                hc_pre_eps,
+                hc_sinkhorn_eps,
+                hc_post_mult_value,
+                sinkhorn_repeat,
+                pre_mix=pre_mix,
+                x=x,
+            )
+        )
+        return (
+            post_mix,
+            comb_mix,
+            _apply_mhc_norm(layer_input, norm_weight, norm_eps),
+            next_pre_mix,
+        )
+
+
 # --8<-- [start:mhc_post]
 @CustomOp.register("mhc_post")
 class MHCPostOp(CustomOp):
