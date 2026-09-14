@@ -27,6 +27,7 @@ steps:
       pytest -v -s kernels/ir'
 
 - label: UVA Kernel Tests
+  key: uva-kernel-tests
   timeout_in_minutes: 20
   device: intel_gpu
   agent_tags:

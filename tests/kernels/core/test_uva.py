@@ -207,6 +207,8 @@ def test_staged_write_inflight(uva_target, dtype):
             event.synchronize()
             torch.testing.assert_close(snapshot.cpu(), reference, rtol=0, atol=0)
 
+
+@pytest.mark.skipif(not is_uva_available(), reason="UVA is not available.")
 @pytest.mark.parametrize("device", DEVICES)
 def test_non_pinned_cpu_tensor(device):
     # Non-pinned CPU tensors are internally copied into a pinned buffer,
