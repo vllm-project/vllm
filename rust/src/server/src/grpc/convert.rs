@@ -66,11 +66,16 @@ pub fn to_text_request(
     let response = req.response.as_ref();
     let kv = req.kv.as_ref();
 
-    let mut sampling_params = match decode_native_sampling_params(&req.native_sampling_params_json)?
-    {
-        Some(sampling_params) => sampling_params,
-        None => build_sampling_params(req.temperature, sampling, decoding, stopping, response)?,
-    };
+    let (mut sampling_params, num_sequences) =
+        match decode_native_sampling_params(&req.native_sampling_params_json)? {
+            Some(native) => (native.inner, native.n.unwrap_or(1)),
+            None => (
+                build_sampling_params(req.temperature, sampling, decoding, stopping)?,
+                sampling.map_or(1, |sampling| sampling.num_sequences.max(1)),
+            ),
+        };
+    apply_response_options(&mut sampling_params, response)?;
+    validate_sampling_params(&mut sampling_params, num_sequences)?;
 
     // Thread KVCacheParameters → SamplingParams fields.
     if let Some(kv) = kv {
@@ -119,7 +124,7 @@ pub fn to_text_request(
     })
 }
 
-fn decode_native_sampling_params(payload: &[u8]) -> Result<Option<SamplingParams>, Status> {
+fn decode_native_sampling_params(payload: &[u8]) -> Result<Option<GenerateSamplingParams>, Status> {
     if payload.is_empty() {
         return Ok(None);
     }
@@ -129,15 +134,11 @@ fn decode_native_sampling_params(payload: &[u8]) -> Result<Option<SamplingParams
         )));
     }
 
-    let native = serde_json::from_slice::<GenerateSamplingParams>(payload).map_err(|error| {
-        Status::invalid_argument(format!("native_sampling_params_json is invalid: {error}"))
-    })?;
-    if native.n.unwrap_or(1) != 1 {
-        return Err(Status::invalid_argument(
-            "native sampling parameter n must be 1",
-        ));
-    }
-    Ok(Some(native.inner))
+    serde_json::from_slice::<GenerateSamplingParams>(payload)
+        .map(Some)
+        .map_err(|error| {
+            Status::invalid_argument(format!("native_sampling_params_json is invalid: {error}"))
+        })
 }
 
 fn build_sampling_params(
@@ -145,7 +146,6 @@ fn build_sampling_params(
     sampling: Option<&pb::RandomSampling>,
     decoding: Option<&pb::DecodingParameters>,
     stopping: Option<&pb::StoppingCriteria>,
-    response: Option<&pb::ResponseOptions>,
 ) -> Result<SamplingParams, Status> {
     // Temperature is a top-level GenerateRequest field. Default to greedy (0.0) for
     // the gRPC API when the caller does not specify a value. This differs from
@@ -162,14 +162,6 @@ fn build_sampling_params(
     // stage, which falls back to the model-provided default or a
     // neutral/disabled value otherwise.
     if let Some(s) = sampling {
-        // num_sequences (n > 1) is not supported yet by the TextLlm layer; the response
-        // path also hardcodes SequenceOutput.index = 0, so accepting >1 would silently
-        // truncate output cardinality. Reject explicitly.
-        if s.num_sequences > 1 {
-            return Err(Status::invalid_argument(
-                "num_sequences > 1 is not supported",
-            ));
-        }
         if s.top_k != 0 {
             params.top_k = Some(s.top_k);
         }
@@ -216,32 +208,47 @@ fn build_sampling_params(
         params.ignore_eos = s.ignore_eos;
     }
 
-    // ResponseOptions → logprobs
-    if let Some(r) = response {
-        if r.output_logprobs {
-            let (count, token_ids) = candidate_logprob_spec(r.output_candidates.as_ref());
-            params.logprobs = count;
-            params.logprob_token_ids = token_ids;
-        }
-        if r.prompt_logprobs {
-            // The engine-core protocol has only one shared `logprob_token_ids` field
-            // for output and prompt logprobs, so a per-token-id selector for prompt
-            // candidates can't be honored independently. Reject it instead of silently
-            // dropping the list.
-            if matches!(
-                r.prompt_candidates.as_ref().and_then(|c| c.select.as_ref()),
-                Some(pb::candidate_tokens::Select::TokenIds(_))
-            ) {
-                return Err(Status::invalid_argument(
-                    "prompt_candidates token_ids selector is not supported",
-                ));
-            }
-            let (count, _) = candidate_logprob_spec(r.prompt_candidates.as_ref());
-            params.prompt_logprobs = count;
-        }
-    }
-
     Ok(params)
+}
+
+fn validate_sampling_params(params: &mut SamplingParams, num_sequences: u32) -> Result<(), Status> {
+    if num_sequences != 1 {
+        return Err(Status::invalid_argument("num_sequences must be 1"));
+    }
+    params.temperature.get_or_insert(0.0);
+    if let Some(structured_outputs) = params.structured_outputs.as_ref() {
+        structured_outputs
+            .validate()
+            .map_err(|error| Status::invalid_argument(error.to_report_string()))?;
+    }
+    Ok(())
+}
+
+fn apply_response_options(
+    params: &mut SamplingParams,
+    response: Option<&pb::ResponseOptions>,
+) -> Result<(), Status> {
+    let Some(response) = response else {
+        return Ok(());
+    };
+    if response.output_logprobs {
+        let (count, token_ids) = candidate_logprob_spec(response.output_candidates.as_ref());
+        params.logprobs = count;
+        params.logprob_token_ids = token_ids;
+    }
+    if response.prompt_logprobs {
+        if matches!(
+            response.prompt_candidates.as_ref().and_then(|c| c.select.as_ref()),
+            Some(pb::candidate_tokens::Select::TokenIds(_))
+        ) {
+            return Err(Status::invalid_argument(
+                "prompt_candidates token_ids selector is not supported",
+            ));
+        }
+        let (count, _) = candidate_logprob_spec(response.prompt_candidates.as_ref());
+        params.prompt_logprobs = count;
+    }
+    Ok(())
 }
 
 /// Map the proto `CandidateTokens` selector to a `(logprobs_count,
@@ -557,7 +564,6 @@ impl ResponseOpts {
         }
         if sampling.prompt_logprobs.is_some() {
             options.prompt_logprobs = true;
-            options.prompt_token_ids = true;
         }
         options
     }
@@ -736,6 +742,72 @@ mod tests {
     }
 
     #[test]
+    fn response_options_overlay_native_sampling_json() {
+        let req = pb::GenerateRequest {
+            native_sampling_params_json: serde_json::to_vec(&serde_json::json!({
+                "temperature": 0.9,
+                "top_k": 0,
+                "seed": i64::MAX
+            }))
+            .expect("serialize native sampling"),
+            response: Some(pb::ResponseOptions {
+                output_logprobs: true,
+                output_candidates: Some(pb::CandidateTokens {
+                    select: Some(pb::candidate_tokens::Select::TokenIds(pb::TokenIds {
+                        ids: vec![7, 11],
+                    })),
+                }),
+                prompt_logprobs: true,
+                prompt_candidates: Some(pb::CandidateTokens {
+                    select: Some(pb::candidate_tokens::Select::TopN(3)),
+                }),
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+
+        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+
+        assert_eq!(text.sampling_params.temperature, Some(0.9));
+        assert_eq!(text.sampling_params.top_k, Some(0));
+        assert_eq!(text.sampling_params.seed, Some(i64::MAX));
+        assert_eq!(text.sampling_params.logprobs, None);
+        assert_eq!(text.sampling_params.logprob_token_ids, Some(vec![7, 11]));
+        assert_eq!(text.sampling_params.prompt_logprobs, Some(3));
+    }
+
+    #[test]
+    fn native_sampling_uses_grpc_defaults_and_shared_validation() {
+        let defaults = to_text_request(
+            pb::GenerateRequest {
+                native_sampling_params_json: b"{}".to_vec(),
+                ..base_request()
+            },
+            false,
+            &["test-model".to_string()],
+        )
+        .expect("convert defaults");
+        assert_eq!(defaults.sampling_params.temperature, Some(0.0));
+
+        for native in [
+            serde_json::json!({"n": 0}),
+            serde_json::json!({"n": 2}),
+            serde_json::json!({"structured_outputs": {"grammar": " "}}),
+        ] {
+            let error = to_text_request(
+                pb::GenerateRequest {
+                    native_sampling_params_json: serde_json::to_vec(&native).unwrap(),
+                    ..base_request()
+                },
+                false,
+                &["test-model".to_string()],
+            )
+            .expect_err("invalid native sampling");
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        }
+    }
+
+    #[test]
     fn native_sampling_json_rejects_invalid_payloads() {
         for payload in [b"not-json".to_vec(), b"[]".to_vec()] {
             let error = to_text_request(
@@ -764,7 +836,7 @@ mod tests {
 
         assert!(options.output_logprobs);
         assert!(options.prompt_logprobs);
-        assert!(options.prompt_token_ids);
+        assert!(!options.prompt_token_ids);
 
         let token_ids_only = SamplingParams {
             logprob_token_ids: Some(vec![42]),
