@@ -1,0 +1,372 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Stage writes to host-memory KV through device memory.
+
+Direct same-node device-to-host transfers may fall back to TCP loopback. This
+module instead reads into device staging buffers, then copies into the host
+destination. Requests complete only after every chunk reaches host memory.
+"""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
+from typing import Any
+
+import numpy as np
+import torch
+
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
+_SHUTDOWN_POLL_INTERVAL_S = 0.001
+
+
+class _Pool:
+    """Staging descriptors for a single descriptor length."""
+
+    def __init__(
+        self,
+        *,
+        desc_len: int,
+        device: torch.device,
+        nixl_wrapper: Any,
+        memory_type: str,
+        backends: Any,
+        stage_bytes: int,
+        num_slots: int,
+    ) -> None:
+        self.desc_len = desc_len
+        self.nixl_wrapper = nixl_wrapper
+        # Each slot holds a whole number of descriptors so a descriptor is
+        # never torn across slots.
+        self.descs_per_slot = max(stage_bytes // (desc_len * num_slots), 1)
+        total_descs = self.descs_per_slot * num_slots
+        self.buffer = torch.empty(
+            total_descs * desc_len, dtype=torch.uint8, device=device
+        )
+        base = self.buffer.data_ptr()
+        device_id = device.index or 0
+        # The staging buffer must be registered with NIXL before descriptors
+        # over it can be prepared, exactly as the KV caches are.
+        self.reg_descs = nixl_wrapper.get_reg_descs(
+            [(base, self.buffer.numel(), device_id, "")], memory_type
+        )
+        nixl_wrapper.register_memory(self.reg_descs, backends=backends)
+        blocks = [
+            (base + i * desc_len, desc_len, device_id) for i in range(total_descs)
+        ]
+        descs = nixl_wrapper.get_xfer_descs(blocks, memory_type)
+        self.handle = nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs)
+        self.slots = [
+            _Slot(
+                pool=self,
+                event=torch.cuda.Event(),
+                desc_ids=np.arange(
+                    s * self.descs_per_slot,
+                    (s + 1) * self.descs_per_slot,
+                    dtype=np.int64,
+                ),
+            )
+            for s in range(num_slots)
+        ]
+        self.free_slots = list(self.slots)
+        self.bytes = total_descs * desc_len
+
+
+@dataclass
+class _Slot:
+    """One staging region plus the event guarding its in-flight copy."""
+
+    pool: _Pool
+    event: torch.cuda.Event
+    # Descriptor ids into this pool's staging dlist.
+    desc_ids: np.ndarray
+
+
+@dataclass
+class _ReqState:
+    """Per-request pipeline state: chunks waiting, reading, and copying."""
+
+    # (remote_desc_ids, local_desc_ids, remote_handle, desc_len)
+    queued: list[tuple[np.ndarray, np.ndarray, int, int]] = field(default_factory=list)
+    # (xfer_handle, slot, local_desc_ids)
+    reading: list[tuple[int, _Slot, np.ndarray]] = field(default_factory=list)
+    copying: list[_Slot] = field(default_factory=list)
+    failed: bool = False
+    aborted: bool = False
+
+
+class HostWriteStager:
+    """Pipelines remote reads into host destinations through device memory."""
+
+    def __init__(
+        self,
+        *,
+        desc_lens: np.ndarray,
+        host_addrs: np.ndarray,
+        host_buffers: list[torch.Tensor],
+        device: torch.device,
+        nixl_wrapper: Any,
+        memory_type: str,
+        backends: Any,
+        stage_bytes: int,
+        num_slots: int,
+    ) -> None:
+        self.desc_lens = desc_lens
+        self.host_addrs = host_addrs
+        self.nixl_wrapper = nixl_wrapper
+        self._host_storages: list[torch.UntypedStorage] = []
+        self._host_storage_ids = np.full(len(host_addrs), -1, dtype=np.int64)
+        self._host_storage_offsets = np.empty(len(host_addrs), dtype=np.uint64)
+        end_addrs = host_addrs + desc_lens.astype(np.uint64)
+        seen_storage_addrs: set[int] = set()
+        for host_buffer in host_buffers:
+            storage = host_buffer.untyped_storage()
+            storage_addr = storage.data_ptr()
+            if storage_addr in seen_storage_addrs:
+                continue
+            seen_storage_addrs.add(storage_addr)
+            storage_id = len(self._host_storages)
+            self._host_storages.append(storage)
+            matches = (
+                (self._host_storage_ids < 0)
+                & (host_addrs >= storage_addr)
+                & (end_addrs <= storage_addr + storage.nbytes())
+            )
+            self._host_storage_ids[matches] = storage_id
+            self._host_storage_offsets[matches] = host_addrs[matches] - storage_addr
+        if np.any(self._host_storage_ids < 0):
+            raise ValueError("host staging descriptor is outside its KV buffer")
+
+        lengths = sorted({int(x) for x in np.unique(desc_lens)})
+        per_pool_bytes = max(stage_bytes // len(lengths), 1)
+        self._pools: dict[int, _Pool] = {
+            length: _Pool(
+                desc_len=length,
+                device=device,
+                nixl_wrapper=nixl_wrapper,
+                memory_type=memory_type,
+                backends=backends,
+                stage_bytes=per_pool_bytes,
+                num_slots=num_slots,
+            )
+            for length in lengths
+        }
+        self._copy_stream = torch.cuda.Stream(device=device)
+        self._reqs: dict[str, _ReqState] = {}
+        self._closed = False
+
+        logger.info(
+            "NIXL host write staging enabled: %.2f GiB device staging across "
+            "%d descriptor length(s) %s, %d slots each",
+            sum(pool.bytes for pool in self._pools.values()) / 2**30,
+            len(lengths),
+            lengths,
+            num_slots,
+        )
+
+    @property
+    def active_req_ids(self) -> set[str]:
+        return set(self._reqs)
+
+    def submit(
+        self,
+        req_id: str,
+        remote_desc_ids: np.ndarray,
+        local_desc_ids: np.ndarray,
+        remote_handle: int,
+    ) -> None:
+        """Queue a read, split by descriptor length then chunked, and start it."""
+        remote_desc_ids = np.asarray(remote_desc_ids)
+        local_desc_ids = np.asarray(local_desc_ids)
+        state = self._reqs.setdefault(req_id, _ReqState())
+        if state.aborted:
+            raise RuntimeError(f"host staging request {req_id!r} is draining")
+        lengths = self.desc_lens[local_desc_ids]
+        for length, pool in self._pools.items():
+            mask = lengths == length
+            if not mask.any():
+                continue
+            remote_group = remote_desc_ids[mask]
+            local_group = local_desc_ids[mask]
+            chunk = pool.descs_per_slot
+            for i in range(0, len(remote_group), chunk):
+                state.queued.append(
+                    (
+                        remote_group[i : i + chunk],
+                        local_group[i : i + chunk],
+                        remote_handle,
+                        length,
+                    )
+                )
+        self._pump(state)
+
+    def _pump(self, state: _ReqState) -> None:
+        """Post queued chunks whose pool has a free slot."""
+        remaining: list[tuple[np.ndarray, np.ndarray, int, int]] = []
+        for entry in state.queued:
+            remote_ids, local_ids, remote_handle, length = entry
+            pool = self._pools[length]
+            if not pool.free_slots:
+                remaining.append(entry)
+                continue
+            slot = pool.free_slots.pop()
+            stage_ids = slot.desc_ids[: len(remote_ids)]
+            handle = None
+            try:
+                handle = self.nixl_wrapper.make_prepped_xfer(
+                    "READ", pool.handle, stage_ids, remote_handle, remote_ids
+                )
+                self.nixl_wrapper.transfer(handle)
+            except Exception:
+                state.failed = True
+                state.queued = []
+                if handle is None:
+                    pool.free_slots.append(slot)
+                else:
+                    state.reading.append((handle, slot, local_ids))
+                raise
+            state.reading.append((handle, slot, local_ids))
+        state.queued = remaining
+
+    def _start_copy(self, slot: _Slot, local_ids: np.ndarray) -> None:
+        """Copy a completed chunk from staging into its host destinations."""
+        stream = self._copy_stream
+        pool = slot.pool
+        with torch.cuda.stream(stream):
+            try:
+                for j, local_id in enumerate(local_ids):
+                    storage_id = self._host_storage_ids[local_id]
+                    destination = torch.empty(0, dtype=torch.uint8, device="cpu").set_(
+                        self._host_storages[storage_id],
+                        int(self._host_storage_offsets[local_id]),
+                        (pool.desc_len,),
+                        (1,),
+                    )
+                    stage_id = int(slot.desc_ids[j])
+                    source = pool.buffer.narrow(
+                        0, stage_id * pool.desc_len, pool.desc_len
+                    )
+                    destination.copy_(source, non_blocking=True)
+            finally:
+                slot.event.record(stream)
+
+    def get_finished(self) -> tuple[set[str], set[str]]:
+        """Return successfully and unsuccessfully completed request IDs."""
+        done: set[str] = set()
+        failed: set[str] = set()
+        for req_id, state in list(self._reqs.items()):
+            if state.failed or state.aborted:
+                state.queued.clear()
+            still_reading = []
+            for handle, slot, local_ids in state.reading:
+                try:
+                    xfer_state = self.nixl_wrapper.check_xfer_state(handle)
+                except Exception:
+                    state.failed = True
+                    state.queued.clear()
+                    try:
+                        self.nixl_wrapper.release_xfer_handle(handle)
+                    except Exception:
+                        still_reading.append((handle, slot, local_ids))
+                    else:
+                        slot.pool.free_slots.append(slot)
+                    continue
+                if xfer_state == "PROC":
+                    still_reading.append((handle, slot, local_ids))
+                    continue
+                try:
+                    self.nixl_wrapper.release_xfer_handle(handle)
+                except Exception:
+                    state.failed = True
+                    state.queued.clear()
+                    still_reading.append((handle, slot, local_ids))
+                    continue
+                if xfer_state != "DONE":
+                    state.failed = True
+                    state.queued.clear()
+                    slot.pool.free_slots.append(slot)
+                    continue
+                if state.failed or state.aborted:
+                    slot.pool.free_slots.append(slot)
+                    continue
+                try:
+                    self._start_copy(slot, local_ids)
+                except Exception:
+                    logger.exception("host KV staging copy failed for %s", req_id)
+                    state.failed = True
+                    state.queued.clear()
+                    state.copying.append(slot)
+                    continue
+                state.copying.append(slot)
+            state.reading = still_reading
+
+            still_copying = []
+            for slot in state.copying:
+                if slot.event.query():
+                    slot.pool.free_slots.append(slot)
+                else:
+                    still_copying.append(slot)
+            state.copying = still_copying
+
+            if not state.failed and not state.aborted:
+                try:
+                    self._pump(state)
+                except Exception:
+                    logger.exception("host KV staging read failed for %s", req_id)
+                    state.failed = True
+                    state.queued.clear()
+
+            if not state.reading and not state.copying and not state.queued:
+                self._reqs.pop(req_id, None)
+                if not state.aborted:
+                    (failed if state.failed else done).add(req_id)
+        return done, failed
+
+    def abort(self, req_id: str) -> None:
+        state = self._reqs.get(req_id)
+        if state is None:
+            return
+        state.aborted = True
+        state.queued.clear()
+
+    def _begin_shutdown(self) -> None:
+        """Stop issuing reads and mark all staged requests aborted."""
+        if self._closed:
+            return
+        for req_id in tuple(self._reqs):
+            self.abort(req_id)
+
+    def _poll_shutdown(self, cancel: bool = False) -> bool:
+        """Advance shutdown without blocking and return whether it completed."""
+        if self._closed:
+            return True
+        if cancel:
+            for state in self._reqs.values():
+                still_reading = []
+                for read in state.reading:
+                    handle, slot, _ = read
+                    try:
+                        self.nixl_wrapper.release_xfer_handle(handle)
+                    except Exception:
+                        still_reading.append(read)
+                    else:
+                        slot.pool.free_slots.append(slot)
+                state.reading = still_reading
+        self.get_finished()
+        if self._reqs:
+            return False
+        self._copy_stream.synchronize()
+        for pool in self._pools.values():
+            self.nixl_wrapper.release_dlist_handle(pool.handle)
+            self.nixl_wrapper.deregister_memory(pool.reg_descs)
+        self._closed = True
+        return True
+
+    def shutdown(self) -> None:
+        """Abort active requests and block until staging resources are safe."""
+        self._begin_shutdown()
+        while not self._poll_shutdown(cancel=True):
+            time.sleep(_SHUTDOWN_POLL_INTERVAL_S)

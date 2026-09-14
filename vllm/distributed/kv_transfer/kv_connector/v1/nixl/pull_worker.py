@@ -168,6 +168,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         local_block_ids = meta.local_physical_block_ids
         remote_region_groups = self.dst_region_group_ids[engine_id]
         local_region_groups = self.region_group_ids or remote_region_groups
+        groups_differ = local_region_groups != remote_region_groups
         if not local_block_ids:
             read_specs = [
                 ReadSpec(
@@ -188,7 +189,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 remote_region_groups,
             )
             return
-        elif local_region_groups != remote_region_groups:
+        elif groups_differ:
             if not self.use_mla or self._has_mamba:
                 raise NotImplementedError(
                     "Different NIXL cache-group layouts are only supported for "
@@ -318,6 +319,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 request_id=req_id,
                 dst_engine_id=meta.remote.engine_id,
                 remote_request_id=meta.remote.request_id,
+                remote_host=meta.remote.host,
                 local_xfer_side_handle=local_xfer_side_handle,
                 local_dram_handle=local_dram_handle,
                 remote_xfer_side_handle=remote_xfer_side_handle,
@@ -342,6 +344,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         dst_engine_id: str,
         request_id: str,
         remote_request_id: str,
+        remote_host: str,
         local_xfer_side_handle: int,
         local_dram_handle: int | None,
         remote_xfer_side_handle: int,
@@ -487,6 +490,21 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     remote_block_descs_ids=remote_block_descs_ids,
                     notif_agent=self._remote_agents[dst_engine_id][(0, remote_rank)],
                     notif_id=notif_id,
+                )
+                return True
+            if host_stager := self._maybe_init_host_stager(remote_host):
+                # Same-host destination is host memory: read into device staging
+                # and copy down, instead of letting UCX use TCP loopback.
+                # Notify the remote only once every chunk has landed, which the
+                # stager reports through _get_finished_host_staging.
+                self._pending_recv_notifs.setdefault(request_id, []).append(
+                    (self._remote_agents[dst_engine_id][(0, remote_rank)], notif_id)
+                )
+                host_stager.submit(
+                    request_id,
+                    remote_block_descs_ids,
+                    local_block_descs_ids,
+                    remote_xfer_side_handle,
                 )
                 return True
             handle = self.nixl_wrapper.make_prepped_xfer(
