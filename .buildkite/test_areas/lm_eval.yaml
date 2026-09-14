@@ -417,9 +417,10 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-fp8.txt
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-int8.txt
 
-- label: ":nvidia: (H200 MIG 18GB) LM Eval TurboQuant KV Cache"
+- label: ":nvidia: (H200 MIG 18GB) LM Eval TurboQuant KV Cache Shard %N"
   key: lm-eval-turboquant-kv-cache
-  timeout_in_minutes: 55
+  timeout_in_minutes: 30
+  parallelism: 4
   device: h200_18gb
   source_file_dependencies:
   - vllm/model_executor/layers/quantization/turboquant/
@@ -427,7 +428,10 @@ steps:
   - vllm/v1/attention/ops/triton_turboquant_decode.py
   - vllm/v1/attention/ops/triton_turboquant_store.py
   commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant.txt
+  # One kv-cache-dtype per shard, worst of five main runs (builds 89152-89200):
+  # k8v4 14.4m, t4nc 14.6m, k3v4nc 12.4m, t3nc 12.6m. New TurboQuant configs
+  # must be added to exactly one models-turboquant-shard-*.txt.
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-shard-$$BUILDKITE_PARALLEL_JOB.txt
 
 - label: ":nvidia: (H100) GPQA Eval (GPT-OSS)"
   key: gpqa-eval-gpt-oss-2xh100
