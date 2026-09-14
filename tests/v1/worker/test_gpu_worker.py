@@ -210,6 +210,7 @@ def test_execute_model_waits_previous_pp_send_before_forward(
                 pipeline_parallel_size=2, distributed_executor_backend="mp"
             ),
         ),
+        pp_intermediate_tensors_are_sequence_sharded=False,
         use_v2_model_runner=False,
         model_runner=SimpleNamespace(execute_model=run_model),
         annotate_profile=lambda scheduler_output: nullcontext(),
