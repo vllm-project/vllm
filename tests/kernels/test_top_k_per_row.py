@@ -22,10 +22,21 @@ def _has_device_capability(major: int) -> bool:
     return current_platform.is_cuda() and current_platform.has_device_capability(major)
 
 
+def _on_gfx950() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx950
+
+    return on_gfx950()
+
+
 # DeepSelect is compiled for sm_100a/sm_103a only.
 requires_sm100 = pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),
     reason="DeepSelect requires SM100a/SM103a",
+)
+requires_gfx950 = pytest.mark.skipif(
+    not _on_gfx950(), reason="This test exercises the gfx950 launch configuration"
 )
 
 
@@ -508,13 +519,10 @@ def _assert_exact_topk(
     assert torch.equal(selected[:, : expected.shape[1]], expected)
 
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="This test requires ROCm")
+@requires_gfx950
 @torch.inference_mode()
 def test_top_k_per_row_decode_gfx950_k512_1d_seq_lens() -> None:
     """Honor causal offsets and exact compressed lengths, including short rows."""
-    if not torch.cuda.get_device_properties(0).gcnArchName.startswith("gfx950"):
-        pytest.skip("This test exercises the gfx950 launch configuration")
-
     next_n, width, top_k = 6, 16_384, 512
     lengths = torch.tensor(
         [0, 1, 511, 512, 513, 1023, 1024, 16_000],
@@ -534,13 +542,45 @@ def test_top_k_per_row_decode_gfx950_k512_1d_seq_lens() -> None:
     _assert_exact_topk(logits, indices, row_ends)
 
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="This test requires ROCm")
+@pytest.mark.parametrize(
+    ("rows", "row_length"),
+    [
+        pytest.param(128, 65_536, id="single-before-64k"),
+        pytest.param(128, 65_537, id="four-splits-after-64k"),
+        pytest.param(129, 262_144, id="single-before-three-split-length"),
+        pytest.param(129, 262_145, id="three-splits-after-256k"),
+        pytest.param(160, 262_145, id="three-splits-upper-row-bound"),
+        pytest.param(161, 262_144, id="single-before-two-split-length"),
+        pytest.param(161, 262_145, id="two-splits-after-256k"),
+        pytest.param(256, 262_145, id="two-splits-upper-row-bound"),
+        pytest.param(257, 262_145, id="large-row-single-block"),
+        pytest.param(384, 262_145, id="optimized-row-limit"),
+        pytest.param(385, 262_145, id="native-fallback"),
+    ],
+)
+@requires_gfx950
+@torch.inference_mode()
+def test_top_k_per_row_decode_gfx950_k512_split_policy_boundaries(
+    rows: int, row_length: int
+) -> None:
+    width, top_k = 262_145, 512
+    row = torch.arange(width, dtype=torch.float32, device="cuda")
+    logits = row.expand(rows, -1)
+    lengths = torch.full((rows,), row_length, dtype=torch.int32, device="cuda")
+    indices = torch.empty((rows, top_k), dtype=torch.int32, device="cuda")
+
+    _run_topk_backend("top_k_per_row_decode", logits, lengths, indices, top_k, width)
+
+    expected = torch.arange(
+        row_length - top_k, row_length, dtype=torch.int32, device="cuda"
+    ).expand_as(indices)
+    assert torch.equal(indices.sort(1).values, expected)
+
+
+@requires_gfx950
 @torch.inference_mode()
 def test_top_k_per_row_decode_gfx950_k512_masked_graph_replay() -> None:
     """Preserve visible top-k scores when masks and lengths change on replay."""
-    if not torch.cuda.get_device_properties(0).gcnArchName.startswith("gfx950"):
-        pytest.skip("This test exercises the gfx950 launch configuration")
-
     rows, next_n, width, top_k = 24, 6, 262_145, 512
     logits = torch.full((rows, width), 1e20, dtype=torch.float32, device="cuda")
     lengths = torch.full(
