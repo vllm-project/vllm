@@ -15,7 +15,7 @@ reason about temporal order.
 """
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 
 import numpy as np
@@ -629,6 +629,9 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
 
                 # Process frames as images with max_soft_tokens=70
                 video_mm_kwargs = dict(hf_processor_mm_kwargs)
+                # Override configured image options too: these inputs are video
+                # frames, whose cache keys exclude images_kwargs.
+                video_mm_kwargs["images_kwargs"] = {}
                 video_mm_kwargs["max_soft_tokens"] = _VIDEO_MAX_SOFT_TOKENS
 
                 dummy_prompt = ("\t" + processor.image_token) * len(frames)
@@ -1812,6 +1815,7 @@ class Gemma4ForConditionalGeneration(
         device: torch.device | str = "cpu",
         dtype: torch.dtype | None = None,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
         **kwargs: Any,
     ) -> "EncoderCudaGraphCaptureInputs":
         from vllm.v1.worker.encoder_cudagraph_defs import (

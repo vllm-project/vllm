@@ -7,6 +7,7 @@ DeltaMessage / ExtractedToolCallInformation protocol.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -130,6 +131,68 @@ def _make_engine(
         tools=tools,
         parser_engine_config=cfg,
     )
+
+
+# ── TestReasoningEndTokenIds ─────────────────────────────────────────
+
+
+def _with_reasoning_exits(
+    *exits: tuple[str, ParserState, tuple[EventType, ...]],
+) -> ParserEngineConfig:
+    """Combined config plus extra transitions out of REASONING."""
+    base = _combined_config()
+    transitions = dict(base.transitions)
+    for terminal, next_state, events in exits:
+        transitions[(ParserState.REASONING, terminal)] = Transition(next_state, events)
+    return dataclasses.replace(base, transitions=transitions)
+
+
+class TestReasoningEndTokenIds:
+    """ParserEngine derives the reasoning-end token set from its config."""
+
+    def test_every_reasoning_end_exit_contributes(self):
+        cfg = _with_reasoning_exits(
+            (
+                "TOOL_START",
+                ParserState.TOOL_ARGS,
+                (EventType.REASONING_END, EventType.TOOL_CALL_START),
+            ),
+        )
+        assert _make_engine(cfg).reasoning_end_token_ids == {201, 202}
+
+    def test_transition_staying_in_reasoning_is_ignored(self):
+        cfg = _with_reasoning_exits(("THINK_START", ParserState.REASONING, ()))
+        assert _make_engine(cfg).reasoning_end_token_ids == {201}
+
+    def test_unreported_exit_fails_closed(self):
+        cfg = _with_reasoning_exits(
+            ("TOOL_START", ParserState.TOOL_ARGS, (EventType.TOOL_CALL_START,)),
+        )
+        assert _make_engine(cfg).reasoning_end_token_ids == frozenset()
+
+    def test_unresolved_think_end_fails_closed(self):
+        vocab = {k: v for k, v in _VOCAB.items() if k != "</think>"}
+        assert _make_engine(vocab=vocab).reasoning_end_token_ids == frozenset()
+
+        text_only = dataclasses.replace(
+            _combined_config(), token_id_terminals={"THINK_START": "<think>"}
+        )
+        assert _make_engine(text_only).reasoning_end_token_ids == frozenset()
+
+    def test_config_without_reasoning_has_empty_set(self):
+        assert _make_engine(_hermes_config()).reasoning_end_token_ids == frozenset()
+
+    def test_find_reasoning_end_offset_returns_first_match(self):
+        engine = _make_engine()
+        assert engine.find_reasoning_end_offset([5, 201, 6, 201]) == 1
+        assert engine.find_reasoning_end_offset([5, 6]) is None
+        assert engine.find_reasoning_end_offset([]) is None
+        # Rejected-draft placeholders never match.
+        assert engine.find_reasoning_end_offset([-1, 201]) == 1
+
+    def test_find_reasoning_end_offset_with_empty_set_returns_none(self):
+        engine = _make_engine(_hermes_config())
+        assert engine.find_reasoning_end_offset([201]) is None
 
 
 # ── TestEventsToDelta ────────────────────────────────────────────────

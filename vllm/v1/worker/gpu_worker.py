@@ -28,6 +28,8 @@ from vllm.distributed import (
 from vllm.distributed.ec_transfer import (
     ensure_ec_transfer_initialized,
     ensure_ec_transfer_shutdown,
+    get_ec_transfer,
+    has_ec_transfer,
 )
 from vllm.distributed.eplb.eplb_utils import override_envs_for_eplb
 from vllm.distributed.kv_transfer import (
@@ -43,6 +45,7 @@ from vllm.distributed.parallel_state import (
     Handle,
     checkpoint_prepare_distributed_state,
     checkpoint_restore_distributed_state,
+    get_pcp_group,
     get_pp_group,
     get_tp_group,
     resume_device_comms,
@@ -501,6 +504,9 @@ class Worker(WorkerBase):
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
 
+        if has_ec_transfer():
+            get_ec_transfer().start_worker_services()
+
         if self.vllm_config.weight_transfer_config is not None:
             self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
                 self.vllm_config.weight_transfer_config,
@@ -698,6 +704,14 @@ class Worker(WorkerBase):
 
         pp_rank = get_pp_group().rank_in_group
         tp_rank = get_tp_group().rank_in_group
+        parallel_config = self.vllm_config.parallel_config
+        if (
+            parallel_config.prefill_context_parallel_size > 1
+            and parallel_config.decode_context_parallel_size > 1
+        ):
+            tp_rank += (
+                get_pcp_group().rank_in_group * parallel_config.tensor_parallel_size
+            )
         return {(pp_rank, tp_rank): metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:

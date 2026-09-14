@@ -47,13 +47,21 @@ from vllm.platforms import current_platform
 class MockLinearForFusion(torch.nn.Module):
     """Mock linear layer that exposes input_quant_key for fusion testing."""
 
-    def __init__(self, quant_key, input_scale=None, input_global_scale=None):
+    def __init__(
+        self,
+        quant_key,
+        input_scale=None,
+        input_global_scale=None,
+        input_global_scale_inv=None,
+    ):
         super().__init__()
         self.input_quant_key = quant_key
         if input_scale is not None:
             self.input_scale = input_scale
         if input_global_scale is not None:
             self.input_global_scale = input_global_scale
+        if input_global_scale_inv is not None:
+            self.input_global_scale_inv = input_global_scale_inv
 
 
 ROCM_KERNELS = [ROCmFP8ScaledMMLinearKernel, PerTensorTorchFP8ScaledMMLinearKernel]
@@ -206,6 +214,10 @@ def test_manual_fusion_fp8_dynamic_128(dtype: torch.dtype):
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+# Cover M < 128 (padded swizzled SF tiles) and hidden_size that makes the
+# kernel launch grid.y > 1 (num_packed_cols = hidden_size / 16 > 512).
+@pytest.mark.parametrize("num_tokens", [1, 127, 128])
+@pytest.mark.parametrize("hidden_size", [256, 14336])
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="NVFP4 CUDA only")
 @pytest.mark.skipif(
     not current_platform.has_device_capability(100), reason="NVFP4 requires SM100+"
@@ -213,7 +225,9 @@ def test_manual_fusion_fp8_dynamic_128(dtype: torch.dtype):
 @pytest.mark.skipif(
     envs.VLLM_TARGET_DEVICE not in ["cuda", "rocm"], reason="Only test on CUDA and ROCm"
 )
-def test_manual_fusion_nvfp4_dynamic(dtype: torch.dtype):
+def test_manual_fusion_nvfp4_dynamic(
+    dtype: torch.dtype, num_tokens: int, hidden_size: int
+):
     """Test kNvfp4Dynamic fusion path.
 
     Compares fused (silu_and_mul_nvfp4_quant) vs unfused (silu_and_mul)
@@ -228,10 +242,12 @@ def test_manual_fusion_nvfp4_dynamic(dtype: torch.dtype):
     torch.set_default_dtype(dtype)
 
     # NVFP4 requires hidden_size divisible by 16 (block size) and by 2 (packing).
-    # M (num_tokens) must be >= 128 for the 128x4 swizzled scale layout.
-    num_tokens, hidden_size = 128, 256
     x = torch.rand(num_tokens, hidden_size * 2)
-    input_global_scale = torch.tensor([1.0], dtype=torch.float32, device="cuda")
+    # Non-1.0 global scale so the test is sensitive to the scale direction:
+    # the fused producer must quantize with input_global_scale_inv (the GEMM's
+    # alpha divides by input_global_scale), matching the unfused path.
+    input_global_scale = torch.tensor([0.5], dtype=torch.float32, device="cuda")
+    input_global_scale_inv = 1.0 / input_global_scale
 
     config = VllmConfig(
         compilation_config=CompilationConfig(custom_ops=["none"]),
@@ -247,7 +263,9 @@ def test_manual_fusion_nvfp4_dynamic(dtype: torch.dtype):
 
         # Fused path: apply silu_and_mul + NVFP4 quantization
         mock_linear_with_key = MockLinearForFusion(
-            kNvfp4Dynamic, input_global_scale=input_global_scale
+            kNvfp4Dynamic,
+            input_global_scale=input_global_scale,
+            input_global_scale_inv=input_global_scale_inv,
         )
         result_fused = maybe_fused_act_quant(silu_and_mul, x, mock_linear_with_key)
 
@@ -260,11 +278,24 @@ def test_manual_fusion_nvfp4_dynamic(dtype: torch.dtype):
         assert result_fused.orig_dtype == dtype
         assert result_fused.orig_shape == (num_tokens, hidden_size)
 
-        # Dequantize fused result and compare with unfused
+        # The scale tensor must use the padded 128x4-tile swizzled layout,
+        # same as scaled_fp4_quant's allocator; the kernel writes a full
+        # 128-row tile even when M is smaller.
+        from vllm.utils.math_utils import round_up
+
+        assert result_fused.scale.dtype == current_platform.fp8_dtype()
+        assert result_fused.scale.shape == (
+            round_up(num_tokens, 128),
+            round_up(hidden_size // 16, 4),
+        )
+
+        # Dequantize fused result and compare with unfused. The block scales
+        # must have been folded with input_global_scale_inv, so dequantize
+        # with the same inverse scale to recover the activation.
         dequant_result = dequantize_nvfp4_to_dtype(
             tensor_fp4=result_fused.data,
             tensor_sf=result_fused.scale,
-            global_scale=input_global_scale,
+            global_scale=input_global_scale_inv,
             dtype=dtype,
             device="cuda",
             block_size=16,
