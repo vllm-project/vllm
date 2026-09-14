@@ -2003,7 +2003,9 @@ class MambaManager(SingleTypeKVCacheManager):
         )
         num_cached_blocks_after = self.num_cached_block.get(request.request_id, 0)
         if self.mamba_cache_mode == "align":
-            partial_hash = self._cache_partial_tail_block(request, num_tokens)
+            partial_hash = self._cache_partial_tail_block(
+                request, num_tokens, retention_interval=retention_interval
+            )
             if partial_hash is not None:
                 self.cached_blocks_this_step.add(partial_hash)
         if num_cached_blocks_after > num_cached_blocks_before:
@@ -2038,6 +2040,7 @@ class MambaManager(SingleTypeKVCacheManager):
         self,
         request: Request,
         num_tokens: int,
+        retention_interval: int | None = None,
     ) -> BlockHashWithGroupId | None:
         hash_block_size = self.block_pool.hash_block_size
         # Re-key the reserved block at its exported checkpoint boundary.
@@ -2047,6 +2050,13 @@ class MambaManager(SingleTypeKVCacheManager):
             blocks = self.req_to_blocks[request.request_id]
             assert 0 <= checkpoint_idx < len(blocks)
             checkpoint_block = blocks[checkpoint_idx]
+            if (
+                retention_interval == 0
+                and num_tokens < request.num_prompt_tokens
+                and checkpoint_position != request.shared_prefix_boundary
+            ):
+                self.block_pool.evict_blocks({checkpoint_block.block_id})
+                return None
             if checkpoint_block.block_hash_num_tokens == checkpoint_position:
                 return None
             return self.block_pool.cache_partial_block(
