@@ -9,6 +9,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 
 use crate::error::{Error, Result, bail_ext_value_decode};
+use crate::protocol::dtype::{NumpyDtype, TensorDtype};
 use crate::protocol::logprobs::array::decode_array1_u32;
 use crate::protocol::tensor::WireNdArray;
 
@@ -199,12 +200,12 @@ mod tests {
             new_token_ids: vec![16, 18],
             new_sampling_mask: Some(MaybeWireSamplingMask::Wire(Box::new(WireSamplingMask {
                 token_ids: WireNdArray {
-                    dtype: "<i4".to_string(),
+                    dtype: NumpyDtype::little(TensorDtype::I32),
                     shape: vec![4],
                     data: WireArrayData::AuxIndex(1),
                 },
                 offsets: Some(WireNdArray {
-                    dtype: "<i8".to_string(),
+                    dtype: NumpyDtype::little(TensorDtype::I64),
                     shape: vec![3],
                     data: WireArrayData::AuxIndex(2),
                 }),
