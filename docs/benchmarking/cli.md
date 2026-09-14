@@ -62,6 +62,23 @@ Legend:
 
 ### 🚀 Online Benchmark
 
+#### Minimal Performance Investigation
+
+For performance investigations, run unprofiled benchmarks first and keep the
+server configuration fixed while changing one workload variable at a time.
+
+| Focus | Workload shape | Useful for |
+| --- | --- | --- |
+| Prefill-heavy | Long input, short output | Prompt processing and prefill changes |
+| Decode-heavy | Short input, long output | Generation throughput and decode changes |
+| Mixed serving | ShareGPT or a similar natural workload | End-to-end serving behavior |
+
+When isolating a performance change, sweep either `--request-rate` or
+`--max-concurrency` first, not both at once. Combine workload controls later for
+production-like or SLA validation runs. When sharing results, include the vLLM
+commit, hardware, server command, benchmark command, workload shape, and key
+metrics such as TTFT, TPOT, ITL, throughput, and goodput when configured.
+
 <details class="admonition abstract" markdown="1">
 <summary>Show more</summary>
 
