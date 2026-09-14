@@ -153,6 +153,7 @@ class DSparkSpeculator(DFlashSpeculator):
                 sampled,
                 idx_map,
                 self.temperature,
+                step,
             )
         return sampled
 
