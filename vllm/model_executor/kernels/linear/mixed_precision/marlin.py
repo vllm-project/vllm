@@ -8,10 +8,8 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     MARLIN_SUPPORTED_GROUP_SIZES,
     apply_gptq_marlin_linear,
-    check_marlin_supports_shape,
     marlin_act_int8_process_scales,
-    marlin_is_k_full,
-    marlin_make_empty_g_idx,
+    marlin_make_empty,
     marlin_make_workspace_new,
     marlin_pad_dim,
     marlin_pad_qweight,
@@ -19,13 +17,11 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_padded_nk,
     marlin_permute_bias,
     marlin_permute_scales,
-    marlin_sort_g_idx,
     marlin_zero_points,
     query_marlin_supported_quant_types,
     unpack_cols,
 )
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
-from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -57,16 +53,6 @@ class MarlinLinearKernel(MPLinearKernel):
                 f"Group size ({c.group_size}) not supported by "
                 "Marlin, supported group sizes are: "
                 f"{MARLIN_SUPPORTED_GROUP_SIZES}",
-            )
-
-        if c.has_g_idx:
-            # Act-order couples K to the full-model group layout, so tile
-            # padding is not supported; keep the strict shape check.
-            return check_marlin_supports_shape(
-                c.partition_weight_shape[1],  # out_features
-                c.partition_weight_shape[0],  # in_features
-                c.full_weight_shape[0],  # in_features
-                c.group_size,
             )
 
         # A group straddling TP ranks cannot be fixed by padding.
@@ -102,25 +88,16 @@ class MarlinLinearKernel(MPLinearKernel):
                 getattr(layer, self.w_s_name).data * 512
             )
 
-        row_parallel = c.partition_weight_shape[0] != c.full_weight_shape[0]
-        self.is_k_full = marlin_is_k_full(c.has_g_idx, row_parallel)
-
         size_k, size_n = c.partition_weight_shape
-        if c.has_g_idx:
-            # Act-order shapes were strictly validated in can_implement.
-            padded_n, padded_k = size_n, size_k
-        else:
-            padded_n, padded_k = marlin_padded_nk(size_n, size_k, c.group_size)
+        padded_n, padded_k = marlin_padded_nk(size_n, size_k, c.group_size)
 
         # Allocate marlin workspace, reusing existing storage on reload.
         self.workspace = marlin_make_workspace_new(
             device, existing=getattr(self, "workspace", None)
         )
 
-        # Default names since marlin requires empty parameters for these,
+        # Default name since marlin requires empty parameter for zp,
         # TODO: remove this requirement from marlin (allow optional tensors)
-        if self.w_gidx_name is None:
-            self.w_gidx_name = "g_idx"
         if self.w_zp_name is None:
             self.w_zp_name = "w_zp"
 
@@ -131,7 +108,6 @@ class MarlinLinearKernel(MPLinearKernel):
                 marlin_pad_qweight(
                     x.data.contiguous(), size_n, size_k, padded_n, padded_k
                 ),
-                perm=layer.g_idx_sort_indices,
                 size_k=padded_k,
                 size_n=padded_n,
                 num_bits=c.weight_type.size_bits,
@@ -172,18 +148,6 @@ class MarlinLinearKernel(MPLinearKernel):
                 layer.input_global_scale = None
             return x
 
-        if c.has_g_idx:
-            g_idx, g_idx_sort_indices = marlin_sort_g_idx(
-                getattr(layer, self.w_gidx_name)
-            )
-            self._transform_param(layer, self.w_gidx_name, lambda _: g_idx)
-            replace_parameter(
-                layer, "g_idx_sort_indices", g_idx_sort_indices, prefer_copy=True
-            )
-        else:
-            setattr(layer, self.w_gidx_name, marlin_make_empty_g_idx(device))
-            layer.g_idx_sort_indices = marlin_make_empty_g_idx(device)
-
         if c.zero_points:
             grouped_k = size_k // c.group_size if c.group_size != -1 else 1
             padded_grouped_k = padded_k // c.group_size if c.group_size != -1 else 1
@@ -211,7 +175,7 @@ class MarlinLinearKernel(MPLinearKernel):
                 ),
             )
         else:
-            setattr(layer, self.w_zp_name, marlin_make_empty_g_idx(device))
+            setattr(layer, self.w_zp_name, marlin_make_empty(device))
         self._transform_param(layer, self.w_q_name, transform_w_q)
         self._transform_param(layer, self.w_s_name, transform_w_s)
 
@@ -227,23 +191,16 @@ class MarlinLinearKernel(MPLinearKernel):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         c = self.config
-        w_q, w_s, w_zp, w_gidx = self._get_weight_params(layer)
-
-        # `process_weights_after_loading` will ensure w_zp and w_gidx are not
-        #  None for marlin
-
+        w_q, w_s, w_zp = self._get_weight_params(layer)
         return apply_gptq_marlin_linear(
             input=x,
             weight=w_q,
             weight_scale=w_s,
             weight_zp=w_zp,  # type: ignore
-            g_idx=w_gidx,  # type: ignore
-            g_idx_sort_indices=layer.g_idx_sort_indices,
             workspace=self.workspace,
             wtype=c.weight_type,
             input_size_per_partition=c.partition_weight_shape[0],
             output_size_per_partition=c.partition_weight_shape[1],
-            is_k_full=self.is_k_full,
             input_global_scale=getattr(layer, "input_global_scale", None),
             bias=bias,
             input_dtype=c.act_type,
