@@ -77,11 +77,11 @@ class GCDebugger:
         elif phase == "stop":
             # After GC finished, Record GC elapsed time and
             # optionally top collected objects
-            elpased_ms = (time.monotonic_ns() - self.start_time_ns) / 1e6
+            elapsed_ms = (time.monotonic_ns() - self.start_time_ns) / 1e6
             logger.info(
                 "GC took %.3fms to complete. "
                 "Collected %s objects (out of %d) in GC generation %d.%s",
-                elpased_ms,
+                elapsed_ms,
                 str(info.get("collected", "?")),
                 self.num_objects,
                 generation,
