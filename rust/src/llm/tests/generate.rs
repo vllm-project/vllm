@@ -408,7 +408,6 @@ async fn collect_output_rejects_partial_sampling_mask() {
         cached_token_count: 0,
         kv_transfer_params: None,
         ec_transfer_params: None,
-        routed_experts: None,
         sampling_mask: Some(vec![vec![1, 33, 99]]),
     };
 
