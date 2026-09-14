@@ -501,7 +501,7 @@ def test_vit_cudagraph_video(model_id, vllm_runner, video_assets):
         assert isinstance(output_text, str)
 
 
-def _check_eonly_encoder_outputs(worker, batches):
+def _check_eonly_encoder_outputs(worker, batches, eager_token_budget=None):
     """Compare real E-only replay with eager, retaining outputs across replay."""
     import torch
 
@@ -514,11 +514,34 @@ def _check_eonly_encoder_outputs(worker, batches):
     retained: list[tuple[torch.Tensor, torch.Tensor]] = []
     max_error = 0.0
     stats = []
+    batch_shape_drift = []
     with torch.inference_mode():
         for batch in batches:
             kwargs = {key: value.to(runner.device) for key, value in batch.items()}
             actual = manager.execute(kwargs)
-            expected = runner.model.embed_multimodal(**kwargs)
+            standalone = runner.model.embed_multimodal(**kwargs)
+            expected = standalone
+            if eager_token_budget is not None and len(standalone) > 1:
+                pixels, grids = kwargs["pixel_values"], kwargs["image_grid_thw"]
+                target_patches = (
+                    eager_token_budget * runner.model.visual.spatial_merge_size**2
+                )
+                # Qwen2.5 BF16 GEMMs vary with batch size. Use an ordinary
+                # eager batch of real duplicate items with the same shape.
+                last_patches = int(grids[-1].prod().item())
+                missing = target_patches - pixels.shape[0]
+                assert missing > 0 and missing % last_patches == 0
+                repeats = missing // last_patches
+                eager_kwargs = {
+                    "pixel_values": torch.cat(
+                        [pixels] + [pixels[-last_patches:]] * repeats
+                    ),
+                    "image_grid_thw": torch.cat([grids, grids[-1:].repeat(repeats, 1)]),
+                }
+                assert eager_kwargs["pixel_values"].shape[0] == target_patches
+                augmented = runner.model.embed_multimodal(**eager_kwargs)
+                assert len(augmented) == len(standalone) + repeats
+                expected = augmented[: len(standalone)]
             assert len(actual) == len(expected)
             for output, reference in zip(actual, expected):
                 assert torch.isfinite(output).all()
@@ -529,12 +552,28 @@ def _check_eonly_encoder_outputs(worker, batches):
                 torch.testing.assert_close(output, snapshot, rtol=0, atol=0)
             retained.extend((output, output.clone()) for output in actual)
             stats.append(manager.get_cumulative_stats())
+            batch_shape_drift.append(
+                {
+                    "graph_vs_standalone": max(
+                        (a - b).abs().max().item() for a, b in zip(actual, standalone)
+                    ),
+                    "eager_batch_vs_standalone": max(
+                        (a - b).abs().max().item() for a, b in zip(expected, standalone)
+                    ),
+                }
+            )
     assert stats[0]["graph_hits"] > 0
     assert stats[1]["graph_hits"] > stats[0]["graph_hits"]
     assert stats[2]["graph_misses"] > stats[1]["graph_misses"]
     assert stats[3]["graph_hits"] > stats[2]["graph_hits"]
     assert stats[4]["graph_hits"] > stats[3]["graph_hits"]
-    return {"max_abs_error": max_error, "stats": stats}
+    assert stats[5]["graph_hits"] > stats[4]["graph_hits"]
+    assert stats[6]["graph_hits"] > stats[5]["graph_hits"]
+    return {
+        "max_abs_error": max_error,
+        "stats": stats,
+        "batch_shape_drift": batch_shape_drift,
+    }
 
 
 @pytest.mark.parametrize(
@@ -555,13 +594,16 @@ def test_eonly_vit_cudagraph_outputs(
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     config = MODEL_CONFIGS[model_id]
+    token_budgets = [64, 256, 2048]
     processor = AutoProcessor.from_pretrained(config.model)
     first, second = [asset.pil_image for asset in image_assets]
     batches = [
         [first.resize((224, 224))],
         [second.resize((448, 224)), first.resize((224, 224))],
-        [second.resize((896, 896))],
+        [second.resize((1792, 1792))],
         [second.resize((224, 224))],
+        [first.resize((1280, 720))],
+        [first.resize((224, 224))],
     ]
     frames = sample_frames_from_video(video_assets[0].np_ndarrays, 2)
     video = np.stack(
@@ -578,7 +620,7 @@ def test_eonly_vit_cudagraph_outputs(
         compilation_config={
             "cudagraph_mode": "NONE",
             "cudagraph_mm_encoder": True,
-            "encoder_cudagraph_token_budgets": [256],
+            "encoder_cudagraph_token_budgets": token_budgets,
             "encoder_cudagraph_max_vision_items_per_batch": 2,
             "encoder_cudagraph_max_frames_per_batch": 2,
         },
@@ -604,6 +646,12 @@ def test_eonly_vit_cudagraph_outputs(
             )
         )
         results = model.llm.collective_rpc(
-            partial(_check_eonly_encoder_outputs, batches=inputs)
+            partial(
+                _check_eonly_encoder_outputs,
+                batches=inputs,
+                eager_token_budget=256 if model_id == "qwen2_5_vl" else None,
+            )
         )
+        for result in results:
+            assert result["stats"][0]["token_budgets"] == token_budgets
         print(f"E-only {model_id}: {results}")

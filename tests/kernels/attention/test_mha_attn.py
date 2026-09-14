@@ -252,6 +252,36 @@ def test_mha_attn_varlen_forward(
     torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=1e-2)
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA graphs")
+def test_mha_attn_graph_replay_keeps_padding_finite(default_vllm_config):
+    """Padding must not carry graph-pool NaNs into subsequent encoder blocks."""
+    set_random_seed(0)
+    with set_default_torch_dtype(torch.bfloat16):
+        attn = MMEncoderAttention(16, 64, scale=64**-0.5)
+    assert attn.attn_backend == AttentionBackendEnum.FLASH_ATTN
+    q, k, v = [
+        torch.randn(1, 256, 16, 64, device="cuda", dtype=torch.bfloat16)
+        for _ in range(3)
+    ]
+    cu_seqlens = torch.tensor([0, 256, 256], device="cuda", dtype=torch.int32)
+    max_seqlen = torch.tensor(256, dtype=torch.int32, device="cpu")
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        attn(q, k, v, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            output = attn(q, k, v, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+    torch.cuda.current_stream().wait_stream(stream)
+
+    output.fill_(float("nan"))
+    cu_seqlens.copy_(torch.tensor([0, 128, 128], device="cuda", dtype=torch.int32))
+    graph.replay()
+    assert output.isfinite().all()
+    reference = ref_attention(q[:, :128], k[:, :128], v[:, :128], scale=64**-0.5)
+    torch.testing.assert_close(output[:, :128], reference, atol=1e-2, rtol=1e-2)
+
+
 @pytest.mark.parametrize("var_seq_len", VAR_SEQ_LENS)
 @pytest.mark.parametrize(
     "dtype",

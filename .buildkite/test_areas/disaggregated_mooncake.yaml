@@ -43,6 +43,7 @@ steps:
     - vllm/v1/worker/mm_encoder_model_runner.py
     - vllm/v1/worker/encoder_cudagraph.py
     - vllm/v1/worker/encoder_cudagraph_defs.py
+    - vllm/v1/attention/ops/vit_attn_wrappers.py
     - vllm/v1/worker/gpu/model_states/
     - vllm/v1/worker/gpu/mm/
     - tests/v1/cudagraph/test_encoder_cudagraph.py

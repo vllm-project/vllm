@@ -59,6 +59,10 @@ def flash_attn_maxseqlen_wrapper(
             max_seqlen = max_seqlen.item()
 
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
+    if current_platform.is_cuda():
+        # Varlen attention leaves padding unwritten. Graph-pool NaNs in those
+        # rows can propagate through later encoder blocks into valid tokens.
+        kwargs["out"] = torch.zeros_like(q)
     output = flash_attn_varlen_func(
         q,
         k,
