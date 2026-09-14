@@ -18,6 +18,10 @@ from vllm.v1.worker.gpu.metrics.logits import get_num_nans
 from vllm.v1.worker.gpu.sample.bad_words import BadWordsState
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.logit_bias import LogitBiasState
+from vllm.v1.worker.gpu.sample.logits_processor.interface import (
+    LogitsContext,
+    LogitsProcessor,
+)
 from vllm.v1.worker.gpu.sample.logprob import (
     LogprobTokenIdsState,
     compute_topk_scores,
@@ -43,12 +47,14 @@ class Sampler:
         enable_trace_replay: bool = False,
         reasoning_config: ReasoningConfig | None = None,
         return_sampling_mask: bool = False,
+        logitsprocs: list[LogitsProcessor] | None = None,
     ):
         self.logprobs_mode = logprobs_mode
         self.compute_nans = envs.VLLM_COMPUTE_NANS_IN_LOGITS  # False by default.
         self.use_fp64_gumbel = use_fp64_gumbel
 
         self.req_states = req_states
+        self.logitsprocs = logitsprocs or []
         self.sampling_states = SamplingStates(max_num_reqs, vocab_size)
         self.penalties_state = PenaltiesState(req_states)
         self.logit_bias_state = LogitBiasState(max_num_reqs, device)
@@ -79,6 +85,9 @@ class Sampler:
 
         states = self.sampling_states
         temperature = states.temperature.np[req_idx]
+        use_logitsproc = False
+        for processor in self.logitsprocs:
+            use_logitsproc |= processor.add_request(req_idx, sampling_params)
         self.needs_logits_processing[req_idx] = (
             self.logit_bias_state.use_logit_bias[req_idx]
             or self.penalties_state.use_penalty[req_idx]
@@ -91,6 +100,7 @@ class Sampler:
             or states.min_p.np[req_idx] != 0.0
             or states.top_k.np[req_idx] != states.vocab_size
             or states.top_p.np[req_idx] != 1.0
+            or use_logitsproc
         )
 
     def apply_staged_writes(self) -> None:
@@ -256,6 +266,18 @@ class Sampler:
             input_ids,
             expanded_local_pos,
         )
+
+        # Apply custom processors, before temperature scaling.
+        if self.logitsprocs:
+            ctx = LogitsContext(
+                expanded_idx_mapping=expanded_idx_mapping,
+                idx_mapping_np=idx_mapping_np,
+                expanded_local_pos=expanded_local_pos,
+                input_ids=input_ids,
+                pos=pos,
+            )
+            for processor in self.logitsprocs:
+                logits = processor.apply(logits, ctx)
 
         # Apply temperature in place.
         self.sampling_states.apply_temperature(

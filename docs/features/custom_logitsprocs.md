@@ -16,7 +16,51 @@ In vLLM, logits processors operate at batch granularity. During a given engine s
 
 ## Creating a Custom Logits Processor
 
-Custom logits processors must subclass `vllm.v1.sample.logits_processor.LogitsProcessor` and define (at minimum) the following methods:
+Which interface to implement depends on the active model runner. Model
+Runner V2 (MRV2) and the V1 model runner use different interfaces; MRV2 is
+selected by `use_v2_model_runner` in `vllm/config/vllm.py` (forced with
+`VLLM_USE_V2_MODEL_RUNNER`), and the active runner is logged at startup.
+
+### Model Runner V2
+
+Custom logits processors must subclass
+`vllm.v1.worker.gpu.sample.logits_processor.LogitsProcessor` and define (at
+minimum) the following methods:
+
+* `__init__(self, vllm_config: VllmConfig, state: LogitsBatchState)`:
+    * `state` is a narrow, read-only view of the persistent batch, exposing
+      the on-device token history (`all_token_ids`, `prompt_len`,
+      `prefill_len`, `total_len`) plus `device`, `max_num_reqs` and
+      `vocab_size`.
+
+* `add_request(self, req_idx, sampling_params) -> bool`:
+    * Initialize per-slot state for a request entering the batch. Slots are
+      recycled through a free list, so per-slot state must be fully
+      (re)initialized here; there is no removal hook, since freed slots are
+      never read.
+    * Return whether this processor modifies logits for the request. The
+      sampler skips the logits-processing pipeline for batches in which no
+      request needs it.
+
+* `apply_staged_writes(self) -> None` (optional):
+    * Flush host-side writes staged by `add_request()` to the device; called
+      once per step before the forward pass.
+
+* `apply(self, logits: torch.Tensor, ctx: LogitsContext) -> torch.Tensor`:
+    * `ctx` carries the step's batch layout (row-to-slot mappings,
+      `input_ids`, positions). In MRV2 a logits row is not a request: rows
+      are reordered every step, and under speculative decoding a request
+      owns one row per draft token.
+
+V1's `update_state(BatchUpdate)` and `is_argmax_invariant()` do not exist in
+MRV2: processors read token history from `state` inside `apply()`, and MRV2
+computes no early argmax. Unlike V1, custom logits processors stay active
+under speculative decoding. Custom logits processors written against the V1
+interface (below) are rejected at load time with a clear error.
+
+### Model Runner V1
+
+With the V1 model runner, custom logits processors must subclass `vllm.v1.sample.logits_processor.LogitsProcessor` and define (at minimum) the following methods:
 
 * `validate_params(cls, sampling_params: SamplingParams)`:
     * Raise `ValueError` if `SamplingParams` has invalid arguments (especially custom arguments) used by logits processor.
@@ -43,7 +87,7 @@ Custom logits processors must subclass `vllm.v1.sample.logits_processor.LogitsPr
     * Use the `BatchUpdate` members to update logits processor internal state
     * **Note:** batch update data structure may be `None`, signaling no change to the batch constituents. In this case, the LogitsProcessor might still want to update its state based on the updated `output_token_ids` lists that it could have retained when they were added.
 
-### How the vLLM engine builds the `BatchUpdate` data structure
+### How the vLLM engine builds the `BatchUpdate` data structure (Model Runner V1)
 
 !!! important
     Some logits processors design changes are still in progress. We expect
@@ -287,6 +331,12 @@ Once you have created a custom subclass (like `WrappedPerReqLogitsProcessor`) wh
 ## Ways to Load Your Custom Logits Processor in vLLM
 
 Logits processors are loaded at initialization. Critically, the set of loaded logits processors cannot be modified after the vLLM engine finishes loading, and new logits processors cannot be loaded on-demand for individual requests.
+
+Loaded classes are validated against the active model runner's interface:
+`vllm.v1.worker.gpu.sample.logits_processor.LogitsProcessor` under Model
+Runner V2 (the default) and `vllm.v1.sample.logits_processor.LogitsProcessor`
+under V1. A processor written against the other interface is rejected with a
+clear error.
 
 This section details different ways of making your logits processor visible to vLLM and triggering vLLM to load your logits processor.
 
