@@ -142,6 +142,7 @@ else:
     QuantizationMethods = str
     LoadFormats = str
     UsageContext = Any
+    OnlineQuantizationConfigArgs = Any
 
 
 logger = init_logger(__name__)
