@@ -1329,14 +1329,14 @@ class VllmConfig:
             self.kv_transfer_config is not None
             and self.kv_transfer_config.has_connector("NixlConnector")
         ):
-            assert self.parallel_config.prefill_context_parallel_size == 1, (
-                "NIXL does not support prefill context parallelism."
-            )
             dcp_size = self.parallel_config.decode_context_parallel_size
-            tp_size = self.parallel_config.tensor_parallel_size
-            assert dcp_size in (1, tp_size), (
+            transfer_tp_size = max(
+                self.parallel_config.tensor_parallel_size,
+                self.parallel_config.prefill_context_parallel_size,
+            )
+            assert dcp_size in (1, transfer_tp_size), (
                 f"decode_context_parallel_size={dcp_size} must be 1 or equal "
-                f"to tensor_parallel_size={tp_size} when using NixlConnector."
+                f"to the NIXL transfer parallel size={transfer_tp_size}."
             )
             if self.model_config is not None:
                 assert self.model_config.use_mla or dcp_size == 1, (
@@ -3034,8 +3034,9 @@ class VllmConfig:
             unsupported.append("dual batch overlap with multimodal models")
         if model_config is not None and model_config.is_hybrid:
             unsupported.append("dual batch overlap with hybrid models")
-        if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
-            unsupported.append("dual batch overlap with CUDA graphs")
+        if self.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
+            # DBO captures FULL graphs only.
+            unsupported.append("dual batch overlap with PIECEWISE CUDA graphs")
         if self.is_mm_encoder_only:
             unsupported.append("dual batch overlap with encoder only models")
 

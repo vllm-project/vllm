@@ -12,7 +12,7 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
-from vllm.models.deepseek_v4_1.common.ops.fused_compress_quant_cache import (
+from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
     fused_save_compress_norm,
     rope_quant_insert,
 )
