@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Request-time validation of structured output requests."""
 
+import copy
+
 import pytest
 
 from vllm.config import StructuredOutputsConfig
@@ -160,3 +162,37 @@ def test_auto_backend_falls_back_on_unsupported_schema(schema, expected_backend)
         tokenizer=object(),
     )
     assert params.structured_outputs._backend == expected_backend
+
+
+def test_auto_backend_flattens_mergeable_allof_instead_of_falling_back():
+    """Mergeable multi-branch allOf stays on xgrammar instead of the slower
+    fallback."""
+    schema = {
+        "$defs": {
+            "Animal": {
+                "title": "Animal",
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+            }
+        },
+        "title": "Dog",
+        "allOf": [
+            {"$ref": "#/$defs/Animal"},
+            {
+                "type": "object",
+                "properties": {"breed": {"type": "string"}},
+                "required": ["breed"],
+            },
+        ],
+    }
+    original = copy.deepcopy(schema)
+    params = SamplingParams(structured_outputs=StructuredOutputsParams(json=schema))
+    params._validate_structured_outputs(
+        _StubModelConfig(is_diffusion=False),
+        StructuredOutputsConfig(backend="auto"),
+        tokenizer=object(),
+    )
+    assert params.structured_outputs._backend == "xgrammar"
+    assert "allOf" not in params.structured_outputs.json
+    assert schema == original
