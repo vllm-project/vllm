@@ -158,14 +158,14 @@ impl EngineCoreRequest {
 
 #[cfg(test)]
 mod tests {
-use rmpv::Value;
+    use rmpv::Value;
 
-use super::*;
-use crate::protocol::dtype::TensorDtype;
-use crate::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
-use crate::protocol::multimodal::{
-    MmBatchedField, MmFeatureSpec, MmField, MmFieldElem, MmKwargValue, MmModality,
-    PlaceholderRange,
+    use super::*;
+    use crate::protocol::dtype::TensorDtype;
+    use crate::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
+    use crate::protocol::multimodal::{
+        MmBatchedField, MmFeatureSpec, MmField, MmFieldElem, MmKwargValue, MmModality,
+        PlaceholderRange,
     };
     use crate::protocol::sampling::EngineCoreSamplingParams;
     use crate::protocol::tensor::{WireArrayData, WireTensor};
