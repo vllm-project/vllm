@@ -51,13 +51,18 @@ from vllm.benchmarks.lib.endpoint_request_func import (
     RequestFuncOutput,
 )
 from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
-from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
+from vllm.benchmarks.lib.utils import (
+    convert_to_pytorch_benchmark_format,
+    redact_sensitive_namespace,
+    write_to_json,
+)
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.utils.network_utils import join_host_port
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
+_SENSITIVE_ARG_FIELDS = ("header",)
 
 
 def _merge_overrides(base: dict | None, override: dict | None) -> dict | None:
@@ -1536,7 +1541,7 @@ def save_to_pytorch_benchmark_format(
     # later if needed
     ignored_metrics = ["ttfts", "itls", "generated_texts", "errors"]
     pt_records = convert_to_pytorch_benchmark_format(
-        args=args,
+        args=redact_sensitive_namespace(args, _SENSITIVE_ARG_FIELDS),
         metrics={k: [results[k]] for k in metrics if k in results},
         extra_info={
             k: results[k]
@@ -2013,7 +2018,7 @@ def main(args: argparse.Namespace) -> dict[str, Any]:
 
 
 async def main_async(args: argparse.Namespace) -> dict[str, Any]:
-    print(args)
+    print(redact_sensitive_namespace(args, _SENSITIVE_ARG_FIELDS))
     if args.max_concurrency is not None and args.max_concurrency <= 0:
         raise ValueError("--max-concurrency must be greater than 0")
 
