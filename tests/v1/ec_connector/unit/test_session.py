@@ -451,14 +451,16 @@ def test_consumer_session_poll_not_ready_nack_goes_to_retryable():
     assert not results.completed
 
 
-def test_consumer_session_take_results_clears_state():
+def test_consumer_session_ack_timeout_reports_retry_once():
+    """A delayed producer ACK is retryable, and its result is drained once."""
     s = _make_consumer_session()
     s.start_xfer("h1", [0, 1], deadline=time.monotonic() - 1)
     s.poll([], time.monotonic())
     r1 = s.take_results()
-    assert "h1" in r1.tombstoned
+    assert "h1" in r1.retryable
+    assert not r1.tombstoned
     r2 = s.take_results()
-    assert not r2.tombstoned  # cleared after first take
+    assert not r2.retryable  # cleared after first take
 
 
 def test_consumer_session_on_peer_down_cancels_waiting_ack():
