@@ -111,13 +111,13 @@ mkdir -p "$EC_SHARED_STORAGE_PATH"
 ###############################################################################
 # Proxy
 #
-# Starts first and empty: every worker below registers itself once it is
-# serving, so nothing here has to name them.
+# E and P register dynamically; D is configured statically.
 ###############################################################################
 python -m vllm.distributed.ec_transfer.proxy.epd_proxy \
     --host "0.0.0.0" \
     --port "$PROXY_PORT" \
     --registry-address "tcp://127.0.0.1:$PROXY_REGISTRY_PORT" \
+    --decode-servers-urls "http://127.0.0.1:$DECODE_PORT" \
     >"${PROXY_LOG}" 2>&1 &
 
 PIDS+=($!)
@@ -201,11 +201,6 @@ vllm serve "$MODEL" \
     --kv-transfer-config '{
         "kv_connector": "NixlConnector",
         "kv_role": "kv_consumer"
-    }' \
-    --ec-transfer-config '{
-        "ec_connector_extra_config": {
-            "proxy_registry_addr": "tcp://127.0.0.1:'"$PROXY_REGISTRY_PORT"'"
-        }
     }' \
     >"${D_LOG}" 2>&1 &
 

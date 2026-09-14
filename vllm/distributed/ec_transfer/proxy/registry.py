@@ -62,6 +62,7 @@ class InstanceRecord:
     metadata: dict[str, Any] = field(default_factory=dict)
     engine_id: str | None = None
     dp_rank: int | None = None
+    is_static: bool = False
     registered_at: float = field(default_factory=time.monotonic)
 
     @property
@@ -276,6 +277,8 @@ class InstanceRegistry:
         if self._evicted_ttl <= 0:
             return
         for key, since in list(self._evicted_since.items()):
+            if self._evicted[key].is_static:
+                continue
             if now - since < self._evicted_ttl:
                 continue
             record = self._evicted.pop(key, None)

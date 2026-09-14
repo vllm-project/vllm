@@ -76,8 +76,7 @@ class ProxyRegistrar:
         self._thread.start()
 
     def _run(self) -> None:
-        if self.payload.get("dp_rank") is not None:
-            self._wait_for_service()
+        self._wait_for_service()
         if self._stop.is_set():
             return
         context = zmq.Context()
@@ -113,9 +112,6 @@ class ProxyRegistrar:
                     raise RuntimeError(response.get("error"))
         except Exception as error:
             logger.warning("EPD registration failed: %s", error)
-
-    async def stop(self) -> None:
-        await asyncio.to_thread(self.close)
 
     def close(self) -> None:
         self._stop.set()
@@ -205,7 +201,7 @@ def registrar_from_vllm_config(
     dp_rank: int | None = None,
 ) -> ProxyRegistrar | None:
     ec_config = getattr(vllm_config, "ec_transfer_config", None)
-    if ec_config is None:
+    if ec_config is None or not ec_config.is_ec_transfer_instance:
         return None
     get = ec_config.get_from_extra_config
     registry_addr = get("proxy_registry_addr", None)
@@ -226,15 +222,25 @@ def registrar_from_vllm_config(
     )
 
 
-def maybe_start(state) -> ProxyRegistrar | None:
-    """Start frontend registration unless a worker owns runtime addresses."""
-    vllm_config = getattr(state, "vllm_config", None)
-    if vllm_config is None:
-        return None
+def start_worker_registration(vllm_config: VllmConfig) -> ProxyRegistrar | None:
+    """Register one worker per replica; Mooncake registers its runtime endpoints."""
     ec_config = getattr(vllm_config, "ec_transfer_config", None)
     if ec_config is not None and ec_config.ec_connector == "ECMooncakeConnector":
         return None
-    registrar = registrar_from_vllm_config(vllm_config)
+    registrar = registrar_from_vllm_config(
+        vllm_config, dp_rank=vllm_config.parallel_config.data_parallel_index
+    )
     if registrar is not None:
+        from vllm.distributed.parallel_state import (
+            get_pcp_group,
+            get_pp_group,
+            get_tp_group,
+        )
+
+        if any(
+            group.rank_in_group != 0
+            for group in (get_tp_group(), get_pp_group(), get_pcp_group())
+        ):
+            return None
         registrar.start()
     return registrar

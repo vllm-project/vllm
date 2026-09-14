@@ -66,14 +66,32 @@ class TestRouting:
             "http://e0:8000",
         ]
 
+    def test_static_decode_requires_a_registered_prefill(self):
+        app = build_app(EPDProxyConfig(decode_servers_urls=["http://d0:8000/"]))
+        proxy = app.state.proxy
+        with pytest.raises(HTTPException) as excinfo:
+            proxy.route(num_items=0)
+        assert excinfo.value.status_code == 503
+        proxy.registry.register(InstanceRecord(PREFILL, "http://p0:8000"))
+        route = proxy.route(num_items=0)
+        assert route.decode.url == "http://d0:8000"
+        assert route.consumer.url == "http://p0:8000"
+        proxy.registry.unregister("http://p0:8000")
+        with pytest.raises(HTTPException):
+            proxy.route(num_items=0)
+
 
 class TestConsumerAddress:
     """Which stage receives the embedding depends on the topology."""
 
     def test_shared_storage_connectors_name_no_target(self, proxy):
-        """Nothing registered a receive address, so the encoder is told none."""
-        proxy.registry.register(InstanceRecord(DECODE, "http://d0:8000"))
-        assert proxy.route(num_items=0).consumer_zmq is None
+        """Pin the registered replica without requiring a push endpoint."""
+        proxy.registry.register(
+            InstanceRecord(DECODE, "http://d0:8000", dp_rank=1, dp_size=2)
+        )
+        route = proxy.route(num_items=0)
+        assert route.consumer_zmq is None
+        assert proxy._headers(route, "req", route.decode)["X-data-parallel-rank"] == "1"
 
     def test_decode_is_the_consumer_when_prefill_is_not_split_out(self, proxy):
         proxy.registry.register(

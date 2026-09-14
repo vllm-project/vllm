@@ -359,10 +359,11 @@ run_epd_1e_1p_1d() {
     
     declare -a PIDS=()
     
-    # Start the proxy first: it holds the roster the workers register into.
+    # E and P register dynamically; D is configured statically.
     echo "Starting EPD proxy on port $PROXY_PORT"
     python -m vllm.distributed.ec_transfer.proxy.epd_proxy --host "0.0.0.0" --port "$PROXY_PORT" \
         --registry-address "tcp://127.0.0.1:$REGISTRY_PORT" \
+        --decode-servers-urls "http://127.0.0.1:$DECODE_PORT" \
         > "$LOG_PATH"/epd_proxy.log 2>&1 &
     PIDS+=($!)
     echo "Waiting for proxy..."
@@ -435,11 +436,6 @@ run_epd_1e_1p_1d() {
         --kv-transfer-config '{
             "kv_connector": "NixlConnector",
             "kv_role": "kv_consumer"
-        }' \
-        --ec-transfer-config '{
-            "ec_connector_extra_config": {
-                "proxy_registry_addr": "tcp://127.0.0.1:'"$REGISTRY_PORT"'"
-            }
         }' \
         > "$LOG_PATH"/1e1p1d_decode.log 2>&1 &
     PIDS+=($!)

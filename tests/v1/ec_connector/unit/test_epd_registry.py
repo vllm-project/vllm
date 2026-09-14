@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Dynamic registration and liveness for the EPD proxy's instance registry."""
 
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -94,15 +94,22 @@ class TestLiveness:
         assert registry.status()["encode"]["evicted"] == ["http://e0:8000"]
 
     @pytest.mark.asyncio
-    async def test_a_recovered_instance_rejoins_without_re_registering(self, registry):
+    @pytest.mark.parametrize("is_static", [False, True])
+    async def test_a_recovered_instance_rejoins_without_re_registering(
+        self, registry, is_static
+    ):
         """Restarting every encoder to recover from a blip is not acceptable."""
-        registry.register(InstanceRecord(ENCODE, "http://e0:8000"))
+        role = DECODE if is_static else ENCODE
+        registry.register(InstanceRecord(role, "http://e0:8000", is_static=is_static))
         for _ in range(registry._fail_threshold):
             await _probe_round(registry, healthy=set())
-        assert registry.urls(ENCODE) == []
+        assert registry.urls(role) == []
 
-        await _probe_round(registry, healthy={"http://e0:8000"})
-        assert registry.urls(ENCODE) == ["http://e0:8000"]
+        if is_static:
+            await _probe_round(registry, healthy=set(), now=120)
+
+        await _probe_round(registry, healthy={"http://e0:8000"}, now=121)
+        assert registry.urls(role) == ["http://e0:8000"]
 
     @pytest.mark.asyncio
     async def test_a_heartbeat_does_not_override_failed_health_checks(self, registry):
@@ -140,7 +147,9 @@ class TestSelfRegistration:
             vllm_config=SimpleNamespace(
                 ec_transfer_config=ec_config,
                 kv_transfer_config=kv_config,
-                parallel_config=SimpleNamespace(data_parallel_size=1),
+                parallel_config=SimpleNamespace(
+                    data_parallel_size=1, data_parallel_index=0
+                ),
             ),
             args=SimpleNamespace(host="127.0.0.1", port=port, ssl_certfile=None),
         )
@@ -149,15 +158,15 @@ class TestSelfRegistration:
         from vllm.distributed.ec_transfer.proxy import register as mod
 
         with patch.object(mod.ProxyRegistrar, "start"):
-            assert mod.maybe_start(self._state()) is None
-            assert mod.maybe_start(self._state(ec_role="ec_producer")) is None
+            assert mod.start_worker_registration(self._state().vllm_config) is None
+            assert (
+                mod.start_worker_registration(
+                    self._state(ec_role="ec_producer").vllm_config
+                )
+                is None
+            )
 
-    def test_an_instance_with_no_ec_role_still_registers(self):
-        """A decode instance carries an EC config only to name the proxy.
-
-        It moves no embeddings, but the proxy still has to know where to
-        forward, so an absent role must not silence the announcement.
-        """
+    def test_an_instance_with_no_ec_role_does_not_register(self):
         from vllm.distributed.ec_transfer.proxy import register as mod
 
         state = self._state(
@@ -167,10 +176,39 @@ class TestSelfRegistration:
             }
         )
         with patch.object(mod.ProxyRegistrar, "start"):
-            registrar = mod.maybe_start(state)
-        assert registrar is not None
-        assert registrar.payload["role"] == "decode"
-        assert registrar.payload["url"] == "http://127.0.0.1:8000"
+            assert mod.start_worker_registration(state.vllm_config) is None
+
+    @pytest.mark.parametrize("rank", [0, 1])
+    @pytest.mark.parametrize("backend", ["ECExampleConnector", "ECCPUConnector"])
+    def test_worker_registration_is_owned_by_one_rank(self, rank, backend):
+        from vllm.distributed.ec_transfer import ec_transfer_state as state_mod
+        from vllm.distributed.ec_transfer.proxy import register as mod
+
+        config = self._state(
+            ec_role="ec_consumer",
+            ec_extra={
+                "proxy_registry_addr": "tcp://proxy:14580",
+                "_http_address": "http://127.0.0.1:8000",
+            },
+        ).vllm_config
+        config.ec_transfer_config.ec_connector = backend
+        parallel = "vllm.distributed.parallel_state"
+        with (
+            patch.object(state_mod, "_EC_CONNECTOR_AGENT", None),
+            patch.object(state_mod, "_EC_REGISTRAR", None),
+            patch.object(state_mod.ECConnectorFactory, "create_connector") as factory,
+            patch(f"{parallel}.get_tp_group", return_value=Mock(rank_in_group=rank)),
+            patch(f"{parallel}.get_pp_group", return_value=Mock(rank_in_group=0)),
+            patch(f"{parallel}.get_pcp_group", return_value=Mock(rank_in_group=0)),
+            patch.object(mod.ProxyRegistrar, "start") as start,
+            patch.object(mod.ProxyRegistrar, "close") as close,
+        ):
+            state_mod.ensure_ec_transfer_initialized(config)
+            state_mod.ensure_ec_transfer_initialized(config)
+            assert start.call_count == (1 if rank == 0 else 0)
+            state_mod.ensure_ec_transfer_shutdown()
+            assert close.call_count == start.call_count
+            factory.return_value.shutdown.assert_called_once()
 
     def test_roles_follow_what_the_instance_was_configured_to_do(self):
         from vllm.distributed.ec_transfer.proxy.register import infer_role

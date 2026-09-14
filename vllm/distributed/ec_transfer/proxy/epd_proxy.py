@@ -2,10 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Proxy that fans a multimodal request out to encoders, then prefill/decode.
 
-The proxy starts with an empty roster: encode, prefill and decode instances
-register themselves once they are serving, and the proxy owns liveness from
-then on. Nothing about the topology is known at launch, so an instance can
-join or leave without restarting anything else.
+E and P/PD instances register themselves through their EC connectors.
+Separate decode instances are configured statically at the proxy.
 """
 
 from __future__ import annotations
@@ -17,7 +15,7 @@ import os
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import aiohttp
@@ -49,6 +47,7 @@ EMBEDS_TYPES = {
 @dataclass
 class EPDProxyConfig:
     registry_address: str = "tcp://0.0.0.0:14580"
+    decode_servers_urls: list[str] = field(default_factory=list)
     probe_interval: float = 5.0
     probe_timeout: float = 2.0
     fail_threshold: int = 3
@@ -182,6 +181,10 @@ class EPDProxy:
                 status_code=503, detail="No decode instance is registered"
             )
         prefill = self.registry.pick(InstanceRole.PREFILL)
+        if self.config.decode_servers_urls and prefill is None:
+            raise HTTPException(
+                status_code=503, detail="No prefill instance is registered"
+            )
         encoders = self.registry.pick_many(InstanceRole.ENCODE, num_items)
         if num_items and not encoders:
             raise HTTPException(
@@ -192,29 +195,19 @@ class EPDProxy:
         return route
 
     def _name_consumer(self, route: _Route) -> None:
-        """Choose where the encoders push, and which replica runs the request.
-
-        Which stage consumes the embedding depends on the topology -- the
-        prefill instance when prefill is split out, the decode instance
-        otherwise -- so the consumer is whichever one registered a receive
-        address rather than whichever list it came from. Connectors that
-        publish to shared storage register none, and the encoders are then
-        told nothing.
-        """
-        for candidate in (route.prefill, route.decode):
-            if candidate is None or not candidate.ec_zmq_addrs:
-                continue
-            route.consumer = candidate
-            if candidate.dp_rank is not None:
+        """Pin the EC consumer replica and, for push connectors, its endpoint."""
+        candidate = route.prefill or route.decode
+        route.consumer = candidate
+        if candidate.dp_rank is not None:
+            route.dp_rank = candidate.dp_rank
+            if candidate.ec_zmq_addrs:
                 route.consumer_zmq = candidate.ec_zmq_addrs[0]
-                route.dp_rank = candidate.dp_rank
-            else:
-                rank = self.registry.next_replica(candidate)
-                route.consumer_zmq = candidate.ec_zmq_addrs[
-                    rank % len(candidate.ec_zmq_addrs)
-                ]
-                route.dp_rank = rank if candidate.dp_size > 1 else None
-            return
+        elif candidate.ec_zmq_addrs:
+            rank = self.registry.next_replica(candidate)
+            route.consumer_zmq = candidate.ec_zmq_addrs[
+                rank % len(candidate.ec_zmq_addrs)
+            ]
+            route.dp_rank = rank if candidate.dp_size > 1 else None
 
     # ---------------------------------------------------------------- #
     # Stages                                                           #
@@ -422,6 +415,10 @@ def build_app(config: EPDProxyConfig | None = None) -> FastAPI:
         fail_threshold=config.fail_threshold,
         evicted_ttl=config.evicted_ttl,
     )
+    for url in config.decode_servers_urls:
+        registry.register(
+            InstanceRecord(InstanceRole.DECODE, url.rstrip("/"), is_static=True)
+        )
     proxy = EPDProxy(config, registry)
     registration = RegistrationServer(config.registry_address, registry)
 
@@ -542,12 +539,18 @@ def main() -> None:
         prog="python -m vllm.distributed.ec_transfer.proxy.epd_proxy",
         description=(
             "Routes multimodal requests across encode, prefill and decode "
-            "instances. The proxy holds no topology of its own: start it "
-            "first, and instances register with it as they come up."
+            "instances. E and P/PD register dynamically; separate D instances "
+            "are configured with --decode-servers-urls."
         ),
     )
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument(
+        "--decode-servers-urls",
+        nargs="+",
+        default=[],
+        help="Static decode URLs for E+P+D. Omit for E+PD.",
+    )
     parser.add_argument(
         "--registry-address",
         default=EPDProxyConfig.registry_address,
@@ -587,6 +590,7 @@ def main() -> None:
     app = build_app(
         EPDProxyConfig(
             registry_address=args.registry_address,
+            decode_servers_urls=args.decode_servers_urls,
             probe_interval=args.probe_interval,
             probe_timeout=args.probe_timeout,
             fail_threshold=args.fail_threshold,

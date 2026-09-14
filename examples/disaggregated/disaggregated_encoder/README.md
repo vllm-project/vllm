@@ -107,7 +107,8 @@ python -m vllm.distributed.ec_transfer.proxy.epd_proxy \
 ```
 
 It comes up with an empty roster and answers `503` until instances register.
-Each instance announces itself once it is serving, by naming the proxy in its
+Each E or P/PD instance announces itself through its EC worker once it is serving,
+by naming the proxy in its
 EC transfer config:
 
 ```bash
@@ -116,24 +117,18 @@ EC transfer config:
 }
 ```
 
-A decode instance in an E+P+D deployment moves no embeddings and so has no EC
-role, but the proxy still has to know where to forward. Give it an EC config
-carrying nothing but the registry address:
+A separate D instance in E+P+D needs no EC registration config. Instead,
+pass its HTTP address to the proxy:
 
 ```bash
---ec-transfer-config '{
-    "ec_connector_extra_config": {
-        "proxy_registry_addr": "tcp://proxy-host:14580"
-    }
-}'
+--decode-servers-urls http://decode-host:8003
 ```
 
 The role is inferred, not declared: an encoder-only instance registers as
 `encode`, a KV producer as `prefill`, and anything else as `decode` -- which
 covers a fused prefill+decode instance.
 
-Adding capacity means starting another instance; removing it means stopping
-one. Nothing else has to be restarted or reconfigured.
+E and P/PD can join or leave dynamically. Separate D addresses remain static.
 
 ### Liveness
 
@@ -150,10 +145,11 @@ roster by itself.
 | Flag | Description |
 | ---- | ----------- |
 | `--host`, `--port` | Bind address for the proxy (defaults: `0.0.0.0:8000`). |
+| `--decode-servers-urls` | Static D addresses for E+P+D; omit for E+PD. |
 | `--probe-interval` | Seconds between health probes. `0` disables probing. |
 | `--probe-timeout` | Per-probe timeout. |
 | `--fail-threshold` | Consecutive failed probes before an instance stops being routed to. |
-| `--evicted-ttl` | Seconds to keep probing an unreachable instance before forgetting it. `0` probes forever. |
+| `--evicted-ttl` | Seconds before forgetting an unreachable dynamic instance. Static D addresses are always retained. `0` probes forever. |
 
 ### Inspecting the roster
 
