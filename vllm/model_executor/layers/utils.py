@@ -278,13 +278,27 @@ def dispatch_cpu_unquantized_gemm(
     # Skip CPU GEMM dispatch for non-2D weights (e.g. MoE 3D expert weights).
     # These layers are handled by their own specialized methods.
     if layer.weight.ndim != 2:
-        # this is not a linear layer
-        # For now it should be a causal_conv1d op or MoE 3D expert weights
-        # The C++ causal_conv1d kernels use VDPBF16PS (no AMX tiles), so the
-        # VNNI weight prepack applies to any AVX-512BF16 CPU, not just AMX
-        # (e.g. AMD Zen5/Turin).
-        if torch.cpu._is_avx512_bf16_supported() and hasattr(
-            ops, "causal_conv1d_weight_pack"
+        # This is not a linear layer.
+        # For now it should be a causal_conv1d op or MoE 3D expert weights.
+        # Causal-conv weights use [dim, 1, width].
+        # The C++ causal_conv1d kernels support aarch64 with bf16 and
+        # x86 CPUs that use VDPBF16PS (no AMX tiles). So the
+        # weight prepack applies to aarch64 with bf16 and any AVX-512BF16 CPU,
+        # not just AMX (e.g. AMD Zen5/Turin).
+        is_causal_conv1d_weight = (
+            layer.weight.ndim == 3
+            and layer.weight.size(1) == 1
+            and layer.weight.size(2) == 4
+            and layer.weight.dtype == torch.bfloat16
+        )
+        is_arm_bf16 = (
+            current_platform.get_cpu_architecture() == CpuArchEnum.ARM
+            and torch.cpu.get_capabilities().get("bf16", False)
+        )
+        if (
+            (is_arm_bf16 or torch.cpu._is_avx512_bf16_supported())
+            and is_causal_conv1d_weight
+            and hasattr(ops, "causal_conv1d_weight_pack")
         ):
             # prepack conv weight
             unpacked = (
@@ -296,7 +310,7 @@ def dispatch_cpu_unquantized_gemm(
                 .clone()
             )
             # Stash the un-packed (dim, width) weight so the speculative-decode
-            # GDN path (which uses torch conv, not the C++ kernel) can use it.
+            # and unsupported-layout fallbacks can still use ordinary weights.
             layer._cpu_unpacked_conv_weight = unpacked
             layer.weight.data = ops.causal_conv1d_weight_pack(unpacked)
         return

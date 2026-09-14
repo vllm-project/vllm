@@ -564,7 +564,7 @@ at::Tensor causal_conv1d_weight_pack(const at::Tensor& weight) {
 
   auto packed_weight = at::empty_like(weight);
   AT_DISPATCH_REDUCED_FLOATING_TYPES(weight.scalar_type(), "causal_conv1d_fwd_kernel_impl", [&] {
-    // cast to float32 as vnni size is 2
+    // Copy each pair as an opaque 32-bit word. This is not a bf16->fp32 conversion.
     const float* w_data = reinterpret_cast<float*>(weight.data_ptr<scalar_t>());
     float* packed_data = reinterpret_cast<float*>(packed_weight.data_ptr<scalar_t>());
 
@@ -654,9 +654,9 @@ at::Tensor causal_conv1d_fwd_cpu(
     const std::optional<at::Tensor>& has_initial_state,
     bool silu_activation,
     int64_t pad_slot_id,
-    bool is_vnni) {
+    bool is_weight_packed) {
   CHECK_CONTIGUOUS(weight);
-  auto packed_w = is_vnni ? weight : causal_conv1d_weight_pack(weight);
+  auto packed_w = is_weight_packed ? weight : causal_conv1d_weight_pack(weight);
 
   const bool is_var_seqlen = query_start_loc.has_value();
   const int64_t input_ndim = is_var_seqlen ? 2 : 3;
@@ -767,10 +767,10 @@ at::Tensor causal_conv1d_update_cpu(
     const std::optional<at::Tensor>& num_accepted_tokens,
     const std::optional<at::Tensor>& conv_state_indices,
     int64_t pad_slot_id,
-    bool is_vnni) {
+    bool is_weight_packed) {
   CHECK_CONTIGUOUS(x);
   CHECK_CONTIGUOUS(weight);
-  auto packed_w = is_vnni ? weight : causal_conv1d_weight_pack(weight);
+  auto packed_w = is_weight_packed ? weight : causal_conv1d_weight_pack(weight);
 
   TORCH_CHECK(
       x.dim() == 2 || x.dim() == 3,

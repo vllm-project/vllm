@@ -438,8 +438,10 @@ def _sd_conv_states(
     return storage.transpose(1, 2)
 
 
-def _maybe_pack_conv_weight(weight: torch.Tensor, is_vnni: bool) -> torch.Tensor:
-    return ops.causal_conv1d_weight_pack(weight) if is_vnni else weight
+def _maybe_pack_conv_weight(
+    weight: torch.Tensor, is_weight_packed: bool
+) -> torch.Tensor:
+    return ops.causal_conv1d_weight_pack(weight) if is_weight_packed else weight
 
 
 @torch.inference_mode()
@@ -577,7 +579,10 @@ def test_spec_aware_nonspec_materializes_state_indices(
 
 
 @torch.inference_mode()
+@pytest.mark.parametrize(("has_amx", "has_arm_bf16"), [(True, False), (False, True)])
 def test_spec_forward_prepares_native_conv_metadata(
+    has_amx: bool,
+    has_arm_bf16: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     block_table = torch.tensor([[0, 1], [4, 5]], dtype=torch.int32)
@@ -598,14 +603,17 @@ def test_spec_forward_prepares_native_conv_metadata(
     )
     forwarded_indices = None
     forwarded_counts = None
+    forwarded_is_weight_packed = None
 
     def causal_conv1d_update_cpu(**kwargs):
-        nonlocal forwarded_counts, forwarded_indices
+        nonlocal forwarded_counts, forwarded_indices, forwarded_is_weight_packed
         forwarded_indices = kwargs["conv_state_indices"]
         forwarded_counts = kwargs["num_accepted_tokens"]
+        forwarded_is_weight_packed = kwargs["is_weight_packed"]
         return kwargs["x"]
 
-    monkeypatch.setattr(torch.cpu, "_is_amx_tile_supported", lambda: True)
+    monkeypatch.setattr(torch.cpu, "_is_amx_tile_supported", lambda: has_amx)
+    monkeypatch.setattr(gdn_attention, "is_arm_bf16", lambda: has_arm_bf16)
     monkeypatch.setattr(gdn_attention, "is_conv_state_dim_first", lambda: False)
     monkeypatch.setattr(
         gdn_attention.ops, "causal_conv1d_update_cpu", causal_conv1d_update_cpu
@@ -643,6 +651,7 @@ def test_spec_forward_prepares_native_conv_metadata(
         assert actual is not None
         assert actual.is_contiguous()
         assert actual.dtype == torch.int32
+        assert forwarded_is_weight_packed is True
         torch.testing.assert_close(actual, reference)
 
 
@@ -703,15 +712,15 @@ def test_causal_conv1d_torch_two_call_split(total_tokens: int, split: int) -> No
 
 
 @pytest.mark.skipif(
-    not torch.cpu._is_amx_tile_supported(),
-    reason="requires AMX support",
+    not (torch.cpu._is_amx_tile_supported() or gdn_attention.is_arm_bf16()),
+    reason="native causal conv1d requires AMX or Arm BF16 support",
 )
 @torch.inference_mode()
 def test_causal_conv1d_update_cpu_accepts_wide_state() -> None:
     state_len = CONV_KERNEL - 1
     wide_state_len = state_len + 5
     batch_size = 3
-    is_vnni = True
+    is_weight_packed = True
     x, weight, bias = _conv_inputs(batch_size)
     conv_state_indices = torch.tensor([2, 0, 1], dtype=torch.int32)
 
@@ -724,7 +733,7 @@ def test_causal_conv1d_update_cpu_accepts_wide_state() -> None:
     wide_state[:, :, state_len:].fill_(7)
     wide_tail = wide_state[:, :, state_len:].clone()
 
-    conv_weight = _maybe_pack_conv_weight(weight, is_vnni)
+    conv_weight = _maybe_pack_conv_weight(weight, is_weight_packed)
     out_narrow = ops.causal_conv1d_update_cpu(
         x=x,
         conv_states=narrow_state,
@@ -732,7 +741,7 @@ def test_causal_conv1d_update_cpu_accepts_wide_state() -> None:
         bias=bias,
         silu_activation=True,
         conv_state_indices=conv_state_indices,
-        is_vnni=is_vnni,
+        is_weight_packed=is_weight_packed,
     )
     out_wide = ops.causal_conv1d_update_cpu(
         x=x,
@@ -741,7 +750,7 @@ def test_causal_conv1d_update_cpu_accepts_wide_state() -> None:
         bias=bias,
         silu_activation=True,
         conv_state_indices=conv_state_indices,
-        is_vnni=is_vnni,
+        is_weight_packed=is_weight_packed,
     )
 
     torch.testing.assert_close(out_wide, out_narrow, atol=1e-2, rtol=1e-2)
@@ -783,11 +792,18 @@ def _ref_causal_conv1d_update_cpu_multi(
 
 
 @pytest.mark.skipif(
-    not torch.cpu._is_amx_tile_supported(),
-    reason="requires AMX support",
+    not (torch.cpu._is_amx_tile_supported() or gdn_attention.is_arm_bf16()),
+    reason="native causal conv1d requires AMX or Arm BF16 support",
 )
 @pytest.mark.parametrize(
-    ("batch_size, seq_len, accepted_counts, has_bias, silu_activation, is_vnni"),
+    (
+        "batch_size, "
+        "seq_len, "
+        "accepted_counts, "
+        "has_bias, "
+        "silu_activation, "
+        "is_weight_packed"
+    ),
     [
         (1, 1, [1], False, False, False),
         (1, 1, [1], True, True, True),
@@ -804,7 +820,7 @@ def test_causal_conv1d_update_cpu_multi_token_matches_python(
     accepted_counts: list[int],
     has_bias: bool,
     silu_activation: bool,
-    is_vnni: bool,
+    is_weight_packed: bool,
 ) -> None:
     dim = 96
     state_len = seq_len + 2
@@ -822,7 +838,7 @@ def test_causal_conv1d_update_cpu_multi_token_matches_python(
     )
     conv_states = conv_states_ref.clone()
 
-    conv_weight = _maybe_pack_conv_weight(weight, is_vnni)
+    conv_weight = _maybe_pack_conv_weight(weight, is_weight_packed)
     out = ops.causal_conv1d_update_cpu(
         x=x,
         conv_states=conv_states,
@@ -830,7 +846,7 @@ def test_causal_conv1d_update_cpu_multi_token_matches_python(
         bias=bias,
         silu_activation=silu_activation,
         conv_state_indices=conv_state_indices,
-        is_vnni=is_vnni,
+        is_weight_packed=is_weight_packed,
         num_accepted_tokens=num_accepted_tokens,
     )
     ref_out = _ref_causal_conv1d_update_cpu_multi(
@@ -848,8 +864,8 @@ def test_causal_conv1d_update_cpu_multi_token_matches_python(
 
 
 @pytest.mark.skipif(
-    not torch.cpu._is_amx_tile_supported(),
-    reason="requires AMX support",
+    not (torch.cpu._is_amx_tile_supported() or gdn_attention.is_arm_bf16()),
+    reason="native causal conv1d requires AMX or Arm BF16 support",
 )
 @pytest.mark.parametrize("num_accepted", [0, 17])
 @torch.inference_mode()
@@ -872,14 +888,15 @@ def test_causal_conv1d_update_cpu_rejects_invalid_accepted_count(
             bias=None,
             silu_activation=True,
             conv_state_indices=torch.tensor([0], dtype=torch.int32),
-            is_vnni=False,
+            is_weight_packed=False,
             num_accepted_tokens=torch.tensor([num_accepted], dtype=torch.int32),
         )
 
 
 @pytest.mark.skipif(
-    not torch.cpu._is_avx512_bf16_supported(),
-    reason="causal_conv1d_fwd_cpu requires AVX-512BF16 (Intel Xeon or AMD EPYC)",
+    not (torch.cpu._is_avx512_bf16_supported() or gdn_attention.is_arm_bf16()),
+    reason="causal_conv1d_fwd_cpu requires AVX-512BF16"
+    " (Intel Xeon or AMD EPYC) or Arm BF16 support",
 )
 @pytest.mark.parametrize("total_tokens, split", TWO_CALL_SPLITS)
 @torch.inference_mode()
@@ -888,13 +905,13 @@ def test_causal_conv1d_fwd_cpu_two_call_split(total_tokens: int, split: int) -> 
     matches the single-call result.
 
     Regression test for ``causal_conv1d_fwd_varlen_kernel_impl`` (``conv.cpp``)
-    ignoring the carried conv state on continued chunks. Runs on any
-    AVX-512BF16 CPU since conv.cpp uses VDPBF16PS, not AMX tiles.
+    ignoring the carried conv state on continued chunks. Runs on aarch64 cpus with
+    bf16 support or any AVX-512BF16 CPU since conv.cpp uses VDPBF16PS, not AMX tiles.
     """
     state_len = CONV_KERNEL - 1
     x, weight, bias = _conv_inputs(total_tokens)
 
-    def amx(x_seg, conv_states, has_init):
+    def native(x_seg, conv_states, has_init):
         seq = x_seg.shape[0]
         return ops.causal_conv1d_fwd_cpu(
             x=x_seg.transpose(0, 1),  # [dim, seq]; stride(-2)==1 (view of [seq,dim])
@@ -905,30 +922,30 @@ def test_causal_conv1d_fwd_cpu_two_call_split(total_tokens: int, split: int) -> 
             cache_indices=torch.tensor([0], dtype=torch.int32),
             has_initial_state=torch.tensor([has_init]),
             silu_activation=True,
-            is_vnni=False,
+            is_weight_packed=False,
         ).contiguous()
 
     # conv_state layout passed by the AMX branch: [num_slots, dim, state_len].
     cs_full = torch.zeros(1, CONV_DIM, state_len, dtype=x.dtype)
-    out_full = amx(x, cs_full, False)
+    out_full = native(x, cs_full, False)
 
     cs_split = torch.zeros(1, CONV_DIM, state_len, dtype=x.dtype)
-    out1 = amx(x[:split], cs_split, False)
-    out2 = amx(x[split:], cs_split, True)
+    out1 = native(x[:split], cs_split, False)
+    out2 = native(x[split:], cs_split, True)
     out_split = torch.cat([out1, out2], dim=1)
 
     torch.testing.assert_close(out_split, out_full, atol=1e-2, rtol=1e-2)
 
 
 @pytest.mark.skipif(
-    not torch.cpu._is_amx_tile_supported(),
-    reason="requires AMX support",
+    not (torch.cpu._is_amx_tile_supported() or gdn_attention.is_arm_bf16()),
+    reason="native causal conv1d requires AMX or Arm BF16 support",
 )
 @torch.inference_mode()
 def test_causal_conv1d_fwd_cpu_accepts_wide_state() -> None:
     state_len = CONV_KERNEL - 1
     wide_state_len = state_len + 5
-    is_vnni = True
+    is_weight_packed = True
     seq_lens = [CHUNK_SIZE - 1, CHUNK_SIZE + 5]
     total_tokens = sum(seq_lens)
     x, weight, bias = _conv_inputs(total_tokens)
@@ -945,7 +962,7 @@ def test_causal_conv1d_fwd_cpu_accepts_wide_state() -> None:
     wide_state[:, :, state_len:].fill_(7)
     wide_tail = wide_state[:, :, state_len:].clone()
 
-    conv_weight = _maybe_pack_conv_weight(weight, is_vnni)
+    conv_weight = _maybe_pack_conv_weight(weight, is_weight_packed)
     out_narrow = ops.causal_conv1d_fwd_cpu(
         x=x.transpose(0, 1),
         weight=conv_weight,
@@ -955,7 +972,7 @@ def test_causal_conv1d_fwd_cpu_accepts_wide_state() -> None:
         cache_indices=cache_indices,
         has_initial_state=has_initial_state,
         silu_activation=True,
-        is_vnni=is_vnni,
+        is_weight_packed=is_weight_packed,
     )
     out_wide = ops.causal_conv1d_fwd_cpu(
         x=x.transpose(0, 1),
@@ -966,7 +983,7 @@ def test_causal_conv1d_fwd_cpu_accepts_wide_state() -> None:
         cache_indices=cache_indices,
         has_initial_state=has_initial_state,
         silu_activation=True,
-        is_vnni=is_vnni,
+        is_weight_packed=is_weight_packed,
     )
 
     torch.testing.assert_close(out_wide, out_narrow, atol=1e-2, rtol=1e-2)
@@ -1000,15 +1017,23 @@ def test_batch_memcpy_cpu_fallback() -> None:
 
 
 # ---------------------------------------------------------------------------
-# C++ conv (conv.cpp) uses VDPBF16PS, not AMX tiles, so it runs on any
-# AVX-512BF16 CPU; weight is VNNI-packed on this same predicate at load time.
+# C++ conv (conv.cpp) uses AArch64BF16 or VDPBF16PS, not AMX tiles, so it can
+# run on any AVX-512BF16 CPU; weight is packed on this same predicate at load time.
 # ---------------------------------------------------------------------------
 
 _HAS_AVX512_BF16 = torch.cpu._is_avx512_bf16_supported()
 
 _STATE_LEN = CONV_KERNEL - 1
 
-CONV_EQUIV_SEQ_LENS = [[1], [7], [64], [65], [1, 2, 3], [63, 64, 65], [128, 129]]
+CONV_EQUIV_SEQ_LENS = [
+    [1],
+    [7],
+    [64],
+    [65],
+    [1, 2, 3],
+    [63, 64, 65],
+    [128, 129],
+]
 
 
 def _conv_fp32_oracle(x, weight, bias, seq_lens, activation="silu"):
@@ -1053,10 +1078,10 @@ def _run_prefill_torch(x, weight, bias, seq_lens):
     return out.transpose(0, 1).contiguous(), conv_states
 
 
-def _run_prefill_cpp(x, weight, bias, seq_lens, is_vnni=False):
+def _run_prefill_cpp(x, weight, bias, seq_lens, is_weight_packed=False):
     num_seqs = len(seq_lens)
-    packed_w = ops.causal_conv1d_weight_pack(weight) if is_vnni else weight
-    if is_vnni:
+    packed_w = ops.causal_conv1d_weight_pack(weight) if is_weight_packed else weight
+    if is_weight_packed:
         # C++-branch layout: kv-cache "SD" [slots, state_len, dim] transposed to
         # [slots, dim, state_len] (a non-contiguous view).
         conv_state = torch.zeros(
@@ -1076,13 +1101,14 @@ def _run_prefill_cpp(x, weight, bias, seq_lens, is_vnni=False):
         cache_indices=torch.arange(num_seqs, dtype=torch.int32),
         has_initial_state=torch.zeros(num_seqs, dtype=torch.bool),
         silu_activation=True,
-        is_vnni=is_vnni,
+        is_weight_packed=is_weight_packed,
     )
     return out.transpose(0, 1).contiguous(), conv_state
 
 
 @pytest.mark.skipif(
-    not _HAS_AVX512_BF16, reason="C++ causal_conv1d requires AVX-512BF16"
+    not (_HAS_AVX512_BF16 or gdn_attention.is_arm_bf16()),
+    reason="C++ causal_conv1d requires AVX-512BF16 or Arm BF16 support",
 )
 @pytest.mark.parametrize("seq_lens", CONV_EQUIV_SEQ_LENS)
 @torch.inference_mode()
@@ -1096,7 +1122,8 @@ def test_conv_cpp_matches_torch(seq_lens):
 
 
 @pytest.mark.skipif(
-    not _HAS_AVX512_BF16, reason="C++ causal_conv1d requires AVX-512BF16"
+    not (_HAS_AVX512_BF16 or gdn_attention.is_arm_bf16()),
+    reason="C++ causal_conv1d requires AVX-512BF16 or Arm BF16 support",
 )
 @pytest.mark.parametrize("seq_lens", CONV_EQUIV_SEQ_LENS)
 @torch.inference_mode()
@@ -1115,89 +1142,114 @@ def test_conv_cpp_no_worse_than_torch_vs_fp32(seq_lens):
 
 
 @pytest.mark.skipif(
-    not _HAS_AVX512_BF16, reason="C++ causal_conv1d requires AVX-512BF16"
+    not (_HAS_AVX512_BF16 or gdn_attention.is_arm_bf16()),
+    reason="C++ causal_conv1d requires AVX-512BF16 or Arm BF16 support",
 )
 @pytest.mark.parametrize("seq_lens", CONV_EQUIV_SEQ_LENS)
 @torch.inference_mode()
-def test_conv_cpp_vnni_packed_matches_torch(seq_lens):
-    """The exact runtime prefill sequence (VNNI-packed weight + SD-layout
-    conv_state view + is_vnni=True) must match the torch fallback. Validates
-    the packing + layout handoff on any AVX-512BF16 CPU."""
+def test_conv_cpp_weight_packed_matches_torch(seq_lens):
+    """The exact runtime prefill sequence (packed weight + SD-layout
+    conv_state view + is_weight_packed=True) must match the torch fallback. Validates
+    the native packing + layout handoff."""
     x, weight, bias = _conv_inputs(sum(seq_lens))
     out_torch, _ = _run_prefill_torch(x, weight, bias, seq_lens)
-    out_vnni, _ = _run_prefill_cpp(x, weight, bias, seq_lens, is_vnni=True)
-    torch.testing.assert_close(out_vnni, out_torch, atol=1e-2, rtol=1e-2)
+    out_weight_packed, _ = _run_prefill_cpp(
+        x, weight, bias, seq_lens, is_weight_packed=True
+    )
+    torch.testing.assert_close(out_weight_packed, out_torch, atol=1e-2, rtol=1e-2)
 
 
 @pytest.mark.skipif(
-    not _HAS_AVX512_BF16, reason="C++ causal_conv1d requires AVX-512BF16"
+    not (_HAS_AVX512_BF16 or gdn_attention.is_arm_bf16()),
+    reason="C++ causal_conv1d requires AVX-512BF16 or Arm BF16 support",
 )
 @pytest.mark.parametrize("batch", DECODE_BATCH_SIZES)
+@pytest.mark.parametrize(
+    ("dim", "has_bias", "silu_activation", "is_weight_packed"),
+    [
+        (32, False, False, False),
+        (32, True, True, True),
+        (96, False, True, True),
+        (96, True, False, False),
+        (8192, False, True, False),
+        (8192, True, True, True),
+    ],
+)
 @torch.inference_mode()
-def test_conv_update_cpp_matches_torch(batch):
-    """Decode conv: causal_conv1d_update_cpu matches causal_conv1d_update_torch,
-    including the in-place conv_state update (the next-step handoff)."""
+def test_conv_update_cpp_matches_torch(
+    batch, dim, has_bias, silu_activation, is_weight_packed
+):
+    """Decode preserves indexed, padded state across successive signed inputs."""
     from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
         causal_conv1d_update_torch,
     )
 
-    x = tensor_cache(batch * CONV_DIM, torch.bfloat16).view(batch, CONV_DIM)
-    weight = tensor_cache(CONV_DIM * CONV_KERNEL, torch.bfloat16).view(
-        CONV_DIM, CONV_KERNEL
-    )
-    bias = tensor_cache(CONV_DIM, torch.bfloat16)
-    conv_state = tensor_cache(batch * CONV_DIM * _STATE_LEN, torch.bfloat16).view(
-        batch, CONV_DIM, _STATE_LEN
-    )
+    torch.manual_seed(0)
+    weight = torch.randn(dim, CONV_KERNEL, dtype=torch.bfloat16)
+    bias = torch.randn(dim, dtype=torch.bfloat16) if has_bias else None
+    conv_weight = _maybe_pack_conv_weight(weight, is_weight_packed)
+    indices = torch.arange(batch, 0, -1, dtype=torch.int32)
+    storage_ref = torch.randn(batch + 2, _STATE_LEN + 2, dim, dtype=torch.bfloat16)
+    storage_cpp = storage_ref.clone()
+    cs_cpp = storage_cpp[:, :_STATE_LEN].transpose(1, 2)
 
-    cs_torch = conv_state.clone()
-    out_torch = causal_conv1d_update_torch(
-        x=x.unsqueeze(-1),
-        conv_state=cs_torch,
-        weight=weight,
-        bias=bias,
-        activation="silu",
-    ).squeeze(-1)
-
-    cs_cpp = conv_state.clone()
-    out_cpp = ops.causal_conv1d_update_cpu(
-        x=x.contiguous(),
-        conv_states=cs_cpp,
-        weight=weight,
-        bias=bias,
-        silu_activation=True,
-        conv_state_indices=torch.arange(batch, dtype=torch.int32),
-        is_vnni=False,
-    )
-    torch.testing.assert_close(out_cpp, out_torch, atol=1e-2, rtol=1e-2)
-    torch.testing.assert_close(cs_cpp, cs_torch, atol=1e-2, rtol=1e-2)
+    for _ in range(3):
+        x = torch.randn(batch, dim, dtype=torch.bfloat16)
+        cs_torch = storage_ref[indices, :_STATE_LEN].transpose(1, 2).contiguous()
+        out_torch = causal_conv1d_update_torch(
+            x=x.unsqueeze(-1),
+            conv_state=cs_torch,
+            weight=weight,
+            bias=bias,
+            activation="silu" if silu_activation else None,
+        ).squeeze(-1)
+        storage_ref[indices, :_STATE_LEN] = cs_torch.transpose(1, 2)
+        out_cpp = ops.causal_conv1d_update_cpu(
+            x=x,
+            conv_states=cs_cpp,
+            weight=conv_weight,
+            bias=bias,
+            silu_activation=silu_activation,
+            conv_state_indices=indices,
+            is_weight_packed=is_weight_packed,
+        )
+        torch.testing.assert_close(out_cpp, out_torch, atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(storage_cpp, storage_ref, atol=0, rtol=0)
 
 
 @pytest.mark.skipif(
-    not _HAS_AVX512_BF16, reason="C++ causal_conv1d requires AVX-512BF16"
+    not (_HAS_AVX512_BF16 or gdn_attention.is_arm_bf16()),
+    reason="C++ causal_conv1d requires AVX-512BF16 or Arm BF16 support",
 )
 @torch.inference_mode()
 def test_conv_weight_pack_roundtrip_unpacked_matches():
     """`causal_conv1d_weight_pack` repacks the (dim, width) weight, so the C++ conv op
-    with packed weight + is_vnni=True must equal unpacked weight + is_vnni=False.
-    Guards the spec-decode contract: the runtime VNNI-packs `layer.conv1d.weight`
-    in place and stashes the original as `_cpu_unpacked_conv_weight` for the torch
-    spec-decode path, so both must produce identical math.
+    with packed weight + is_weight_packed=True must equal unpacked weight
+    + is_weight_packed=False. Guards the spec-decode contract: the runtime packs
+    `layer.conv1d.weight` in place and stashes the original as
+    `_cpu_unpacked_conv_weight` for the torch spec-decode path, so both must produce
+    identical math.
     """
     seq_lens = [7, 64, 65]
     x, weight, bias = _conv_inputs(sum(seq_lens))
-    out_unpacked, _ = _run_prefill_cpp(x, weight, bias, seq_lens, is_vnni=False)
-    out_packed, _ = _run_prefill_cpp(x, weight, bias, seq_lens, is_vnni=True)
-    torch.testing.assert_close(out_packed, out_unpacked, atol=1e-2, rtol=1e-2)
+    out_unpacked, state_unpacked = _run_prefill_cpp(
+        x, weight, bias, seq_lens, is_weight_packed=False
+    )
+    out_packed, state_packed = _run_prefill_cpp(
+        x, weight, bias, seq_lens, is_weight_packed=True
+    )
+    torch.testing.assert_close(out_packed, out_unpacked, atol=0, rtol=0)
+    torch.testing.assert_close(state_packed, state_unpacked, atol=0, rtol=0)
 
 
 @pytest.mark.skipif(
-    not _HAS_AVX512_BF16, reason="C++ causal_conv1d requires AVX-512BF16"
+    not (_HAS_AVX512_BF16 or gdn_attention.is_arm_bf16()),
+    reason="C++ causal_conv1d requires AVX-512BF16 or AArch64 BF16",
 )
 @torch.inference_mode()
 def test_spec_decode_unpacked_conv_weight_stash():
-    """Spec-decode correctness: AVX-512BF16 CPUs VNNI-pack ``conv1d.weight`` in place
-    at load time and stash the original ``(dim, width)`` tensor as
+    """Spec-decode correctness: AVX-512BF16 and AArch64 BF16 CPUs pack ``conv1d.weight``
+    in place at load time and stash the original ``(dim, width)`` tensor as
     ``_cpu_unpacked_conv_weight``; the spec-decode path must use that stash since
     reading the packed weight directly produces garbage. Verifies the recovered
     weight equals the original and that torch F.conv1d agrees with the C++ conv
@@ -1221,7 +1273,7 @@ def test_spec_decode_unpacked_conv_weight_stash():
     # 1. The stash must exist and equal the original (dim, width) weight.
     assert hasattr(conv, "_cpu_unpacked_conv_weight"), (
         "dispatch_cpu_unquantized_gemm did not stash _cpu_unpacked_conv_weight "
-        "on an AVX-512BF16 CPU"
+        "on an AArch64-BF16 or AVX-512BF16 CPU"
     )
     stash = conv._cpu_unpacked_conv_weight
     torch.testing.assert_close(stash, orig_2d, atol=0, rtol=0)
@@ -1230,10 +1282,10 @@ def test_spec_decode_unpacked_conv_weight_stash():
     recovered = getattr(conv, "_cpu_unpacked_conv_weight", None)
     assert recovered is not None
     # conv.weight is now packed; using it directly (the bug) would differ.
-    packed_weight = conv.weight  # [dim, 1, width], VNNI-packed contents
+    packed_weight = conv.weight  # [dim, 1, width], packed contents
 
     # 3. Spec-path torch conv with the recovered unpacked weight must match the
-    #    nonspec C++ conv with the packed weight (is_vnni=True).
+    #    nonspec C++ conv with the packed weight (is_weight_packed=True).
     seq_lens = [7, 65]
     total = sum(seq_lens)
     x = tensor_cache(total * CONV_DIM, torch.bfloat16).view(total, CONV_DIM)
@@ -1255,7 +1307,7 @@ def test_spec_decode_unpacked_conv_weight_stash():
             cache_indices=torch.arange(num_seqs, dtype=torch.int32),
             has_initial_state=torch.zeros(num_seqs, dtype=torch.bool),
             silu_activation=True,
-            is_vnni=True,
+            is_weight_packed=True,
         )
         .transpose(0, 1)
         .contiguous()
