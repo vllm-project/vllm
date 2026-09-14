@@ -557,6 +557,7 @@ def test_eonly_vit_cudagraph_outputs(model_id, vllm_runner, image_assets, monkey
         config.model,
         dtype=config.dtype,
         mm_encoder_only=True,
+        enable_prefix_caching=False,
         max_model_len=4096,
         max_num_seqs=2,
         limit_mm_per_prompt={"image": 2, "video": 0},
