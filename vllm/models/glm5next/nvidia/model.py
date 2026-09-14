@@ -252,7 +252,16 @@ class Glm5NextMoE(nn.Module):
         hidden_states: torch.Tensor,
         already_sequence_parallel: bool = False,
     ) -> torch.Tensor:
-        num_tokens, hidden_dim = hidden_states.shape
+        # Rank-agnostic: model runners may feed bucketed rank-3
+        # [1, T, hidden] rather than the rank-2 [tokens, hidden] assumed here.
+        # Flatten on the way in and restore the leading dims on the way out;
+        # the ops below (sequence_parallel_chunk, all_gather, the [:num_tokens]
+        # slice) all require tokens to live on dim 0. No-op for rank-2 input.
+        orig_leading_shape = hidden_states.shape[:-1]
+        hidden_dim = hidden_states.shape[-1]
+        if hidden_states.dim() != 2:
+            hidden_states = hidden_states.reshape(-1, hidden_dim)
+        num_tokens = hidden_states.shape[0]
 
         # Chunk the hidden states so they aren't replicated across TP ranks.
         # This avoids duplicate computation in self.experts.
@@ -272,7 +281,7 @@ class Glm5NextMoE(nn.Module):
             )
             final_hidden_states = final_hidden_states[:num_tokens]
 
-        return final_hidden_states.view(num_tokens, hidden_dim)
+        return final_hidden_states.view(*orig_leading_shape, hidden_dim)
 
 
 class Glm5NextDecoderLayer(nn.Module):
