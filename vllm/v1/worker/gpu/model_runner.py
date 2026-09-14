@@ -1891,10 +1891,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # NOTE(woosuk): Here, we don't need to pass the input tensors,
             # because they are already copied to the CUDA graph input buffers.
             assert self.cudagraph_manager is not None
-            self.kv_connector.pre_forward(
-                **connector_kwargs, attn_metadata=attn_metadata
-            )
+            connector_kwargs["attn_metadata"] = attn_metadata
+            self.kv_connector.pre_forward(**connector_kwargs)
+            if scheduler_output.has_sync_kv_loads:
+                # Sync loads need to run before this step's forward.
+                self.kv_connector.start_loads(**connector_kwargs)
             model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
+            if not scheduler_output.has_sync_kv_loads:
+                # Async loads target requests not scheduled this step, so
+                # they only need to be resident before a later forward.
+                # Submit after this step's forward launch to keep the load
+                # submission off the critical path.
+                self.kv_connector.start_loads(**connector_kwargs)
         else:
             # For piecewise and eager mode, just call model().
             batch_descriptor = BatchDescriptor(
@@ -1918,6 +1926,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 is_padding=input_batch.is_padding,
             ):
                 self.kv_connector.pre_forward(**connector_kwargs)
+                if scheduler_output.has_sync_kv_loads:
+                    # Sync loads need to run before this step's forward.
+                    self.kv_connector.start_loads(**connector_kwargs)
                 if ubatch_state is not None:
                     assert self.ubatch_runner is not None
                     model_output = self.ubatch_runner.run(
@@ -1934,6 +1945,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 else:
                     # Eager (NONE): call the raw model directly.
                     model_output = self.model(**model_inputs)
+
+                if not scheduler_output.has_sync_kv_loads:
+                    # Async loads target requests not scheduled this step, so
+                    # they only need to be resident before a later forward.
+                    # Submit after this step's forward launch, while the
+                    # forward context is still active, to keep the load
+                    # submission off the critical path.
+                    self.kv_connector.start_loads(**connector_kwargs)
 
         self.kv_connector.finish_forward()
 
