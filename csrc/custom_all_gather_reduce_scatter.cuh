@@ -52,10 +52,14 @@ __global__ void __launch_bounds__(512, 1)
   barrier_at_end<ngpus, true>(sg, self_sg, rank);
 }
 
+// Multimem reduce-scatter reduces through an NVLS multicast mapping, which
+// has no AMD equivalent. The whole path is compiled out on ROCm and the host
+// entry point rejects the call instead of launching anything.
+#if !defined(USE_ROCM)
+
 template <typename T>
 DINLINE void multimem_load_reduce_16(uint32_t (&result)[4], const T* address) {
-#if !defined(USE_ROCM) && CUDA_VERSION >= 12020 && defined(__CUDA_ARCH__) && \
-    (__CUDA_ARCH__ >= 900)
+  #if CUDA_VERSION >= 12020 && defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   if constexpr (std::is_same<T, nv_bfloat16>::value) {
     asm volatile(
         "multimem.ld_reduce.relaxed.sys.global.add.acc::f32.v4.bf16x2 "
@@ -79,30 +83,21 @@ DINLINE void multimem_load_reduce_16(uint32_t (&result)[4], const T* address) {
         : "l"(address)
         : "memory");
   }
-#elif defined(USE_ROCM)
-  __builtin_trap();
-#else
+  #else
   asm volatile("trap;");
-#endif
+  #endif
 }
 
 DINLINE void store_global_16(void* address, const uint32_t (&value)[4]) {
-#if !defined(USE_ROCM)
   asm volatile("st.global.v4.u32 [%0], {%1,%2,%3,%4};"
                :
                : "l"(address), "r"(value[0]), "r"(value[1]), "r"(value[2]),
                  "r"(value[3])
                : "memory");
-#else
-  auto* output = reinterpret_cast<uint32_t*>(address);
-  #pragma unroll
-  for (int i = 0; i < 4; ++i) output[i] = value[i];
-#endif
 }
 
 DINLINE void mnnvl_multimem_publish_flag(FlagType* flag_addr, FlagType flag) {
-#if !defined(USE_ROCM) && CUDA_VERSION >= 12020 && defined(__CUDA_ARCH__) && \
-    (__CUDA_ARCH__ >= 900)
+  #if CUDA_VERSION >= 12020 && defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   asm volatile("multimem.st.release.sys.global.u32 [%0], %1;"
                :
                : "l"(flag_addr), "r"(flag)
@@ -110,20 +105,9 @@ DINLINE void mnnvl_multimem_publish_flag(FlagType* flag_addr, FlagType flag) {
   // The flag is stored through the multicast alias and polled through the
   // local unicast alias in the same grid.
   asm volatile("fence.proxy.alias;" ::: "memory");
-#elif defined(USE_ROCM)
-  __builtin_trap();
-#else
+  #else
   asm volatile("trap;");
-#endif
-}
-
-DINLINE FlagType mnnvl_multimem_acquire_flag(FlagType* flag_addr) {
-#if !defined(USE_ROCM)
-  return ld_flag_acquire(flag_addr);
-#else
-  return __scoped_atomic_load_n(flag_addr, __ATOMIC_ACQUIRE,
-                                __MEMORY_SCOPE_DEVICE);
-#endif
+  #endif
 }
 
 template <bool ready, int ngpus>
@@ -137,9 +121,9 @@ __global__ void mnnvl_multimem_barrier_kernel(Signal* local_signal,
       ready ? local_signal->start[0] : local_signal->end[0];
   // Replicate this rank's counter into every backing allocation.
   mnnvl_multimem_publish_flag(&multicast_counters[rank], flag);
-#pragma unroll
+  #pragma unroll
   for (int peer = 0; peer < ngpus; ++peer) {
-    while (mnnvl_multimem_acquire_flag(&local_counters[peer]) != flag);
+    while (ld_flag_acquire(&local_counters[peer]) != flag);
   }
   local_signal->_flag[0] = flag;
 }
@@ -155,11 +139,7 @@ __global__ void __launch_bounds__(kMnnvlMultimemRsThreads, 1)
       kThreadsPerWarp * kMnnvlMultimemRsUnroll;
 
   int lane;
-#if !defined(USE_ROCM)
   asm volatile("mov.u32 %0, %%laneid;" : "=r"(lane));
-#else
-  lane = threadIdx.x % kThreadsPerWarp;
-#endif
   int warp = blockIdx.x * kWarpsPerCta + threadIdx.x / kThreadsPerWarp;
   int num_warps = gridDim.x * kWarpsPerCta;
   int pack_offset = warp * kPacksPerWarpIteration + lane;
@@ -170,7 +150,7 @@ __global__ void __launch_bounds__(kMnnvlMultimemRsThreads, 1)
 
   while (pack_offset < packs_per_rank) {
     uint32_t reduced[kMnnvlMultimemRsUnroll][4];
-#pragma unroll
+  #pragma unroll
     for (int u = 0; u < kMnnvlMultimemRsUnroll; ++u) {
       int pack = pack_offset + u * kThreadsPerWarp;
       if (pack < packs_per_rank) {
@@ -179,7 +159,7 @@ __global__ void __launch_bounds__(kMnnvlMultimemRsThreads, 1)
                             rank_input + pack * kMnnvlMultimemRsVectorBytes));
       }
     }
-#pragma unroll
+  #pragma unroll
     for (int u = 0; u < kMnnvlMultimemRsUnroll; ++u) {
       int pack = pack_offset + u * kThreadsPerWarp;
       if (pack < packs_per_rank) {
@@ -190,6 +170,8 @@ __global__ void __launch_bounds__(kMnnvlMultimemRsThreads, 1)
     pack_offset += pack_stride;
   }
 }
+
+#endif  // !defined(USE_ROCM)
 
 template <typename P>
 union LamportPack {

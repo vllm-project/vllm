@@ -195,6 +195,11 @@ template <typename T>
 void CustomAllreduce::mnnvl_multimem_reduce_scatter(
     cudaStream_t stream, const T* multicast_input, T* output,
     Signal* local_signal, Signal* multicast_signal, int size, int block_limit) {
+#if defined(USE_ROCM)
+  throw std::runtime_error(
+      "MNNVL multimem reduce-scatter requires NVLS multicast and is not "
+      "supported on ROCm");
+#else
   if (size <= 0)
     throw std::runtime_error(
         "MNNVL multimem reduce-scatter requires a non-empty input");
@@ -212,16 +217,16 @@ void CustomAllreduce::mnnvl_multimem_reduce_scatter(
   int blocks = std::min(
       block_limit, (packs_per_rank + packs_per_block - 1) / packs_per_block);
 
-#define MNNVL_MULTIMEM_RS_CASE(ngpus)                                 \
-  case ngpus:                                                         \
-    mnnvl_multimem_barrier_kernel<true, ngpus>                        \
-        <<<1, 1, 0, stream>>>(local_signal, multicast_signal, rank_); \
-    mnnvl_multimem_reduce_scatter_kernel<T, ngpus>                    \
-        <<<blocks, kMnnvlMultimemRsThreads, 0, stream>>>(             \
-            multicast_input, output, rank_, packs_per_rank);          \
-    mnnvl_multimem_barrier_kernel<false, ngpus>                       \
-        <<<1, 1, 0, stream>>>(local_signal, multicast_signal, rank_); \
-    break;
+  #define MNNVL_MULTIMEM_RS_CASE(ngpus)                                 \
+    case ngpus:                                                         \
+      mnnvl_multimem_barrier_kernel<true, ngpus>                        \
+          <<<1, 1, 0, stream>>>(local_signal, multicast_signal, rank_); \
+      mnnvl_multimem_reduce_scatter_kernel<T, ngpus>                    \
+          <<<blocks, kMnnvlMultimemRsThreads, 0, stream>>>(             \
+              multicast_input, output, rank_, packs_per_rank);          \
+      mnnvl_multimem_barrier_kernel<false, ngpus>                       \
+          <<<1, 1, 0, stream>>>(local_signal, multicast_signal, rank_); \
+      break;
 
   switch (world_size_) {
     MNNVL_MULTIMEM_RS_CASE(2)
@@ -231,7 +236,8 @@ void CustomAllreduce::mnnvl_multimem_reduce_scatter(
       throw std::runtime_error(
           "MNNVL multimem reduce-scatter only supports num gpus in (2,4,8)");
   }
-#undef MNNVL_MULTIMEM_RS_CASE
+  #undef MNNVL_MULTIMEM_RS_CASE
+#endif
 }
 
 }  // namespace vllm
