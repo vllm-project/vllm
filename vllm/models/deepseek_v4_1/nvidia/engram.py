@@ -227,8 +227,10 @@ class ParallelEngramEmbedding(BaseParallelEngramEmbedding):
         block_size: int = 32,
         cpu_offload: bool = False,
         dp_shared_memory: bool = False,
+        disk_offload_dir: str | None = None,
     ) -> None:
         self.cpu_offload = cpu_offload
+        self.disk_offload_dir = disk_offload_dir
         self.dp_shared_memory = dp_shared_memory
         self.dp_size = get_engram_dp_size()
         if dp_shared_memory:
@@ -242,7 +244,16 @@ class ParallelEngramEmbedding(BaseParallelEngramEmbedding):
                     "DP replicas to be co-located."
                 )
             self.dp_size = 1
-        if cpu_offload and not is_uva_available():
+        if disk_offload_dir is not None:
+            if not cpu_offload:
+                raise ValueError("disk_offload_dir requires cpu_offload=True")
+            if dp_shared_memory:
+                raise ValueError(
+                    "disk_offload_dir and dp_shared_memory are alternative "
+                    "placements for the same table; enable only one."
+                )
+        # Only the UVA path needs UVA; a file-backed shard is read on the host.
+        if cpu_offload and disk_offload_dir is None and not is_uva_available():
             raise RuntimeError("Engram CPU offload requires UVA support")
         self._views: tuple[torch.Tensor, torch.Tensor] | None = None
         self._view_src: tuple[int, int] | None = None
@@ -253,8 +264,8 @@ class ParallelEngramEmbedding(BaseParallelEngramEmbedding):
             # The ue8m0 encoding of scale 1.0 is exponent byte 127.
             set_weight_attrs(self.weight_scale_inv, {"dummy_weight_value": 127})
             logger.info(
-                "Engram table offloaded to pinned host memory: %d rows x %d, "
-                "%.2f GiB %s",
+                "Engram table offloaded to %s: %d rows x %d, %.2f GiB %s",
+                "disk" if disk_offload_dir is not None else "pinned host memory",
                 self.part_num_embeddings,
                 dim,
                 self.part_num_embeddings * (dim + dim // block_size) / 1024**3,
@@ -278,6 +289,12 @@ class ParallelEngramEmbedding(BaseParallelEngramEmbedding):
             return storage.weight, storage.weight_scale_inv
         if not self.cpu_offload:
             return super()._allocate_weights()
+        if self.disk_offload_dir is not None:
+            return self._open_disk_shard(
+                self.disk_offload_dir,
+                (self.part_num_embeddings, self.dim),
+                (self.part_num_embeddings, self.dim // self.block_size),
+            )
         # Model initialization may be inside a CUDA device context.
         return (
             torch.empty(
@@ -299,7 +316,8 @@ class ParallelEngramEmbedding(BaseParallelEngramEmbedding):
     def _storage(self) -> tuple[torch.Tensor, torch.Tensor]:
         if self._shared_memory is not None:
             return self._shared_memory.get_views(self.weight, self.weight_scale_inv)
-        if not self.cpu_offload:
+        # A mapped file is read on the host, never through a UVA view.
+        if not self.cpu_offload or self.disk_offload_dir is not None:
             return super()._storage()
         src = (self.weight.data_ptr(), self.weight_scale_inv.data_ptr())
         if self._view_src != src:
@@ -363,6 +381,7 @@ class Engram(BaseEngram):
             tuple(size for order in layout.primes[layer_hash_index] for size in order),
             cpu_offload=engram_config.cpu_offload,
             dp_shared_memory=engram_config.dp_shared_memory,
+            disk_offload_dir=engram_config.disk_offload_dir,
         )
 
     def _init_staging(self, max_tokens: int, head_dim: int) -> None:
@@ -376,7 +395,32 @@ class Engram(BaseEngram):
             return super().prepare_embeddings(hash_ids)
         rows = self.staged_rows[: hash_ids.shape[0]]
         assert rows.shape[0] == hash_ids.shape[0], "engram staging buffer too small"
+        if self.embed_tokens.disk_offload_dir is not None:
+            self._lookup_from_disk(hash_ids, rows)
+            return
         self._start_prefetch(hash_ids, rows, self._prefetch_stream)
+
+    def _lookup_from_disk(self, hash_ids: torch.Tensor, rows: torch.Tensor) -> None:
+        """Gather this layer's rows from the mapped shard.
+
+        Runs inline, on this thread, rather than on a side stream or a worker.
+        The gather is host work -- a device-to-host copy of the ids, a dedup,
+        and a read from a mapped file -- and none of that is legal while a
+        stream is capturing. Capture mode is global, so a worker thread does
+        not escape the restriction either: it cannot observe that the forward
+        thread is capturing, and its in-flight gather would run straight
+        through the capture window and invalidate it.
+
+        Overlapping the gather therefore needs a capture context that can break
+        around host work, which the cudagraph runner does not offer today.
+        """
+        if torch.cuda.is_current_stream_capturing():
+            # Capture stub: do no I/O. Warmup output is discarded, so leaving
+            # the staging buffer untouched is harmless. The real gather runs on
+            # every live step, which requires a cudagraph mode that still
+            # executes this forward (piecewise) rather than replaying it whole.
+            return
+        self.embed_tokens.lookup(hash_ids, rows)
 
     @eager_break_during_capture
     def _start_prefetch(
@@ -394,7 +438,9 @@ class Engram(BaseEngram):
         torch.cuda.current_stream().wait_stream(stream)
 
     def _ready_rows(self, num_tokens: int) -> torch.Tensor:
-        if self._prefetch_stream is not None:
+        if self._prefetch_stream is not None and (
+            self.embed_tokens.disk_offload_dir is None
+        ):
             self._finish_prefetch(self._prefetch_stream)
         if self.embed_tokens.dp_size > 1:
             slot = engram_gathered_num_tokens()
