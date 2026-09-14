@@ -12,9 +12,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a8_moe import (
-    patch_gating_output,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp4Static,
@@ -169,11 +166,6 @@ def aiter_triton_kernel_w4a16_moe_forward(
     if on_gfx1250():
         _routing_mod.is_tdm_avail = lambda: False
     aiter_routing = _routing_mod.routing
-
-    # See context in #50859.
-    # TODO: Remove once https://github.com/ROCm/aiter/pull/4530 is merged,
-    # AITER released, and AITER pin in vLLM increased from 0.1.19.
-    gating_output = patch_gating_output(gating_output, global_num_experts)
 
     if score_mode is not None:
         use_grouped_topk = num_expert_group is not None and num_expert_group > 1
