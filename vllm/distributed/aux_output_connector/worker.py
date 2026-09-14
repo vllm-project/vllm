@@ -4,9 +4,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from threading import Event
+from threading import Lock
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -33,6 +34,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     bind_routed_experts_capturer,
 )
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
+from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -52,14 +54,23 @@ class PendingAuxOutput:
     """Own one step's R3 snapshot until its asynchronous copy is consumed."""
 
     connector: AuxOutputWorkerConnector
+    metadata: AuxOutputConnectorMetadata
     token_starts: np.ndarray
     query_start_loc: np.ndarray
     routed_experts: torch.Tensor
-    finished: Event = field(default_factory=Event)
 
-    def complete(self) -> None:
-        self.connector._pending_output = None
-        self.finished.set()
+
+@dataclass
+class MetadataOnlyAuxOutput(AsyncModelRunnerOutput):
+    """Consume control-only steps on the executor's ordered output path."""
+
+    connector: AuxOutputWorkerConnector
+    metadata: AuxOutputConnectorMetadata
+    output: ModelRunnerOutput
+
+    def get_output(self) -> ModelRunnerOutput:
+        with self.connector.output_context(self.metadata):
+            return self.output
 
 
 class AuxOutputWorkerConnector:
@@ -84,7 +95,7 @@ class AuxOutputWorkerConnector:
         self._requests: dict[str, _WorkerRequestState] = {}
         self._generation = 0
         self._step_metadata: AuxOutputConnectorMetadata | None = None
-        self._pending_output: PendingAuxOutput | None = None
+        self._output_lock = Lock()
         # Every TP rank participates in capture collectives, but only the
         # executor output rank owns the auxiliary output data plane.
         if not get_tp_group().is_first_rank:
@@ -123,21 +134,18 @@ class AuxOutputWorkerConnector:
         query_start_loc: np.ndarray,
     ) -> PendingAuxOutput | None:
         """Snapshot one step's R3 tensor for asynchronous CPU transfer."""
-        buffer = self._buffer
-        if buffer is None or self._step_metadata is None:
+        if self._buffer is None or self._step_metadata is None:
             return None
-        assert self._pending_output is None
 
         query_start_loc = query_start_loc[: len(request_ids) + 1]
         num_rows = int(query_start_loc[-1])
-        pending_output = PendingAuxOutput(
+        return PendingAuxOutput(
             self,
+            self._step_metadata,
             token_starts,
             query_start_loc,
             self._capturer.snapshot_routing_data(num_rows),
         )
-        self._pending_output = pending_output
-        return pending_output
 
     def process_output(
         self,
@@ -278,12 +286,27 @@ class AuxOutputWorkerConnector:
                 buffer.release_block(rows)
 
     def begin_step(self, metadata: AuxOutputConnectorMetadata | None) -> None:
-        """Apply one scheduler step's request and block-hash updates."""
-        if pending_output := self._pending_output:
-            pending_output.finished.wait()
+        """Save control data for this step's output without mutating request state."""
         self._step_metadata = metadata
-        if self._buffer is None or metadata is None:
-            return
+
+    def defer_no_forward_output(
+        self, output: ModelRunnerOutput
+    ) -> ModelRunnerOutput | MetadataOnlyAuxOutput:
+        if self._buffer is None or self._step_metadata is None:
+            return output
+        return MetadataOnlyAuxOutput(self, self._step_metadata, output)
+
+    @contextmanager
+    def output_context(self, metadata: AuxOutputConnectorMetadata) -> Iterator[None]:
+        """Apply metadata before rows; exclude store shutdown, not GPU execution."""
+        with self._output_lock:
+            if self._store is None:
+                raise RuntimeError("auxiliary output connector is closed")
+            self._apply_metadata(metadata)
+            yield
+
+    def _apply_metadata(self, metadata: AuxOutputConnectorMetadata) -> None:
+        assert self._buffer is not None
         assert not metadata.requests.keys() & metadata.finished_requests, (
             "auxiliary output request cannot run and finish in one step"
         )
@@ -330,5 +353,9 @@ class AuxOutputWorkerConnector:
             self._buffer.discard(request_id)
 
     def close(self) -> None:
-        if self._store is not None:
-            self._store.close()
+        with self._output_lock:
+            if self._store is not None:
+                try:
+                    self._store.close()
+                finally:
+                    self._store = None

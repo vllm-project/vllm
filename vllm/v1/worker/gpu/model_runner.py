@@ -69,6 +69,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import (
+    AsyncModelRunnerOutput,
     DraftTokenIds,
     ECConnectorOutput,
     ModelRunnerOutput,
@@ -1629,7 +1630,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         is_profile: bool = False,
         context_len: int = 0,
         valid_dummy_state_slots: bool = False,
-    ) -> ModelRunnerOutput | IntermediateTensors | None:
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors | None:
         if not dummy_run:
             # Update the request states.
             self.update_pp_decode_requests()
@@ -1646,9 +1647,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if scheduler_output.total_num_scheduled_tokens == 0:
                 # No need to run the model.
                 empty_output = self.kv_connector.no_forward(scheduler_output)
-                return self._merge_ec_connector_no_forward(
+                empty_output = self._merge_ec_connector_no_forward(
                     scheduler_output, empty_output
                 )
+                if self.aux_output_connector is not None:
+                    return self.aux_output_connector.defer_no_forward_output(
+                        empty_output
+                    )
+                return empty_output
 
         # Get batch descriptor and sync across DP ranks.
         num_reqs = len(scheduler_output.num_scheduled_tokens)

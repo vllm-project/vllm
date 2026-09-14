@@ -196,7 +196,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.model_runner_output.prompt_logprobs_dict = self.prompt_logprobs_dict
         if self.pending_aux_output is not None:
             pending = self.pending_aux_output
-            try:
+            with pending.connector.output_context(pending.metadata):
                 self.model_runner_output.aux_output_connector_output = (
                     pending.connector.process_output(
                         self.model_runner_output.req_ids,
@@ -207,8 +207,6 @@ class AsyncOutput(AsyncModelRunnerOutput):
                         self.num_rejected,
                     )
                 )
-            finally:
-                pending.complete()
 
         if self._has_fault is not None and self._has_fault.item():
             mask = get_ep_all2all_manager().query_active_mask()

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import threading
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -30,6 +31,10 @@ from vllm.distributed.aux_output_connector.store import (
 )
 from vllm.distributed.aux_output_connector.worker import AuxOutputWorkerConnector
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.executor.uniproc_executor import AsyncOutputFuture
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+from vllm.v1.worker.gpu import async_utils
+from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
 pytestmark = pytest.mark.cpu_test
 
@@ -148,6 +153,7 @@ def _execution_ranges(metadata, request_ids):
 
 def _begin_step(worker: AuxOutputWorkerConnector, step: _WorkerStep) -> None:
     worker.begin_step(step.metadata)
+    worker.defer_no_forward_output(EMPTY_MODEL_RUNNER_OUTPUT).get_output()
 
 
 def _make_worker(
@@ -175,7 +181,8 @@ def _make_worker(
     )
     worker._requests = {}
     worker._generation = 0
-    worker._pending_output = None
+    worker._step_metadata = None
+    worker._output_lock = threading.Lock()
     return worker
 
 
@@ -225,27 +232,39 @@ def test_worker_skips_aux_outputs_for_internal_warmup_step():
     worker.close()
 
 
-def test_worker_waits_for_previous_aux_output_before_next_step():
+def test_async_output_owns_metadata_while_next_step_is_registered(monkeypatch):
+    """UniProc consumes FIFO futures after launching the next step, without a wait."""
+    monkeypatch.setattr(torch.cuda, "Event", lambda **kwargs: Mock())
+    monkeypatch.setattr(async_utils, "stream", lambda *args: nullcontext())
+    monkeypatch.setattr(async_utils, "async_copy_to_np", lambda t: t.numpy().copy())
     worker = _make_worker(1)
-    finished = threading.Event()
-    worker._pending_output = SimpleNamespace(finished=finished)
-    entered = threading.Event()
-    returned = threading.Event()
-
-    def begin_step():
-        entered.set()
-        worker.begin_step(_metadata(0, [], {}).metadata)
-        returned.set()
-
-    thread = threading.Thread(target=begin_step)
-    thread.start()
-    assert entered.wait(1)
-    assert not returned.wait(0.05)
-    worker._pending_output = None
-    finished.set()
-    assert returned.wait(1)
-    thread.join()
-    assert worker._pending_output is None
+    worker.begin_step(_metadata(0, [_request_metadata("r", 0, 1, 0, [])], {}).metadata)
+    rows = torch.ones((1, *_SHAPE), dtype=torch.uint8)
+    worker._capturer = Mock()
+    worker._capturer.snapshot_routing_data.return_value = rows
+    pending = worker.prepare_output(["r"], np.array([0]), np.array([0, 1]))
+    output = async_utils.AsyncOutput(
+        ModelRunnerOutput(["r"], {"r": 0}),
+        SamplerOutput(
+            torch.tensor([[7]]), None, None, None, num_rejected=torch.tensor([0])
+        ),
+        torch.tensor([1]),
+        Mock(),
+        Mock(),
+        pending_aux_output=pending,
+    )
+    first = AsyncOutputFuture(output, single_value=True)
+    worker.begin_step(_metadata(0, [], {"r": []}).metadata)
+    terminal = AsyncOutputFuture(
+        worker.defer_no_forward_output(EMPTY_MODEL_RUNNER_OUTPUT), True
+    )
+    assert worker._requests == {}
+    result = first.result()
+    assert result.sampled_token_ids == [[7]]
+    np.testing.assert_array_equal(result.aux_output_connector_output["r"].rows, rows)
+    assert first.result() is result
+    assert terminal.result() is EMPTY_MODEL_RUNNER_OUTPUT
+    assert worker._requests == {}
     worker.close()
 
 
@@ -267,6 +286,50 @@ def test_worker_rejects_invalid_rejected_token_count():
             num_tokens=(1,),
         )
 
+    worker.close()
+
+
+def test_close_discards_unconsumed_metadata_without_applying_it():
+    worker = _make_worker(1)
+    worker.begin_step(_metadata(1, [], {}).metadata)
+    output = worker.defer_no_forward_output(EMPTY_MODEL_RUNNER_OUTPUT)
+    worker.close()
+    assert worker._generation == 0
+    with pytest.raises(RuntimeError, match="connector is closed"):
+        output.get_output()
+    worker.close()
+
+
+def test_close_waits_for_active_output_to_release_store(monkeypatch):
+    worker = _make_worker(1)
+    store = worker._store
+    close = Mock(wraps=store.close)
+    monkeypatch.setattr(store, "close", close)
+    closing = threading.Event()
+
+    def shutdown():
+        closing.set()
+        worker.close()
+
+    with worker.output_context(_metadata(0, [], {}).metadata):
+        thread = threading.Thread(target=shutdown)
+        thread.start()
+        assert closing.wait(1)
+        close.assert_not_called()
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    close.assert_called_once()
+
+
+def test_failed_output_releases_lifecycle_lock():
+    worker = _make_worker(1)
+    with (
+        pytest.raises(ValueError, match="test failure"),
+        worker.output_context(_metadata(0, [], {}).metadata),
+    ):
+        raise ValueError("test failure")
+    assert worker._output_lock.acquire(blocking=False)
+    worker._output_lock.release()
     worker.close()
 
 
@@ -301,7 +364,7 @@ def _process_output(
         query_start_loc,
     )
     assert pending is not None
-    try:
+    with worker.output_context(pending.metadata):
         return worker.process_output(
             request_ids,
             pending.token_starts,
@@ -310,8 +373,6 @@ def _process_output(
             num_sampled,
             num_rejected,
         )
-    finally:
-        pending.complete()
 
 
 def test_worker_ignores_cudagraph_query_padding():
@@ -1528,6 +1589,7 @@ def test_terminal_request_publishes_hash_discovered_after_last_schedule():
     connector.request_finished(request)
     cleanup = connector.build_connector_meta(_step_output([], [], []), {})
     worker.begin_step(cleanup)
+    worker.defer_no_forward_output(EMPTY_MODEL_RUNNER_OUTPUT).get_output()
 
     assert worker._store is not None
     np.testing.assert_array_equal(
