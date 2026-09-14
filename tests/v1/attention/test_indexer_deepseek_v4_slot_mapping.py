@@ -32,6 +32,111 @@ from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.utils import select_common_block_size
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("query_lens", [[1], [6] * 16, [0, 2, 6, 0, 4], [0, 0, 0]])
+@pytest.mark.parametrize("padding", [0, 17])
+def test_fused_indexer_decode_metadata(query_lens, padding):
+    """Flatten device query boundaries and clear graph padding on every replay."""
+    from vllm.v1.attention.ops.metadata import _indexer_decode_metadata_kernel
+
+    device = "cuda"
+    lengths = torch.tensor(query_lens, device=device, dtype=torch.int32)
+    qsl = torch.cat(
+        [torch.zeros(1, device=device, dtype=torch.int32), lengths.cumsum(0).int()]
+    )
+    reqs = len(query_lens)
+    n = sum(query_lens)
+    tokens = n + padding
+    capacity = max(tokens, reqs) + 31
+    seq = lengths + 4096
+    # Exercise block-table row padding and masked columns.
+    bt = torch.arange(reqs * 74, device=device, dtype=torch.int32).view(reqs, 74)[
+        :, :65
+    ]
+    out_bt = torch.full((capacity, 69), -99, device=device, dtype=torch.int32)
+    outputs = [
+        torch.full((capacity,), -99, device=device, dtype=torch.int32) for _ in range(4)
+    ]
+    out_seq, out_lens, indices, per_req = outputs
+    grid = max(reqs, tokens + (capacity - tokens + 255) // 256)
+    _indexer_decode_metadata_kernel[(grid,)](
+        qsl,
+        seq,
+        bt,
+        out_seq,
+        out_bt,
+        out_lens,
+        indices,
+        per_req,
+        reqs,
+        tokens,
+        capacity,
+        bt.stride(0),
+        out_bt.stride(0),
+        BLOCK_COLS=bt.shape[1],
+        num_warps=4,
+    )
+    expected_req = torch.repeat_interleave(torch.arange(reqs, device=device), lengths)
+    expected_seq = torch.cat(
+        [torch.arange(4097, 4097 + q, device=device) for q in query_lens]
+    )
+    torch.testing.assert_close(out_seq[:n], expected_seq.int(), rtol=0, atol=0)
+    assert torch.count_nonzero(out_seq[n:]) == 0
+    torch.testing.assert_close(out_bt[:n, :65], bt[expected_req], rtol=0, atol=0)
+    assert torch.count_nonzero(out_bt[n:tokens, :65]) == 0
+    torch.testing.assert_close(indices[:n], expected_req.int(), rtol=0, atol=0)
+    torch.testing.assert_close(
+        indices[n:tokens],
+        torch.arange(reqs, reqs + padding, device=device, dtype=torch.int32),
+    )
+    assert torch.all(out_lens[:tokens] == 1)
+    torch.testing.assert_close(per_req[:reqs], lengths)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("query_lens", [[1], [0, 257, 1, 0, 3], [6] * 64, [2, 6, 4, 0]])
+def test_device_token_request_mapping(query_lens):
+    """Graph replay follows device boundaries even when CPU lengths are stale."""
+    lengths = torch.tensor(query_lens, device="cuda", dtype=torch.int32)
+    qsl = torch.cat(
+        [torch.zeros(1, device="cuda", dtype=torch.int32), lengths.cumsum(0).int()]
+    )
+    n = sum(query_lens)
+    output = torch.full((n + 7,), -99, device="cuda", dtype=torch.int32)
+    common = CommonAttentionMetadata(
+        query_start_loc=qsl,
+        query_start_loc_cpu=qsl.cpu(),
+        seq_lens=lengths,
+        num_reqs=len(query_lens),
+        num_actual_tokens=output.numel(),
+        max_query_len=max(query_lens),
+        max_seq_len=max(query_lens),
+        block_table_tensor=torch.empty(
+            (len(query_lens), 1), device="cuda", dtype=torch.int32
+        ),
+        slot_mapping=torch.full((n + 7,), -1, device="cuda", dtype=torch.int64),
+    )
+    result = common.token_to_req_indices(output)
+    assert result.data_ptr() == output.data_ptr()
+    expected = torch.repeat_interleave(
+        torch.arange(len(query_lens), device="cuda", dtype=torch.int32), lengths
+    )
+    torch.testing.assert_close(output[:n], expected)
+    assert torch.count_nonzero(output[n:]) == 0
+    graph = torch.cuda.CUDAGraph()
+    common._token_to_req_indices_cache = None
+    with torch.cuda.graph(graph):
+        common.token_to_req_indices(output)
+    reversed_lens = lengths.flip(0)
+    qsl[1:].copy_(reversed_lens.cumsum(0))
+    graph.replay()
+    expected = torch.repeat_interleave(
+        torch.arange(len(query_lens), device="cuda", dtype=torch.int32), reversed_lens
+    )
+    torch.testing.assert_close(output[:n], expected)
+    assert torch.count_nonzero(output[n:]) == 0
+
+
 def test_indexer_shares_uncompressed_block_size_with_deepseek_v4_mla():
     """Packed MLA/indexer groups must retain 64 compressed rows per page."""
     kernel_block_size = select_common_block_size(
@@ -107,6 +212,7 @@ def test_index_conversion_warmup_uses_physical_block_stride():
         ),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=1,
+            prefill_context_parallel_size=1,
             cp_kv_cache_interleave_size=1,
         ),
     )
