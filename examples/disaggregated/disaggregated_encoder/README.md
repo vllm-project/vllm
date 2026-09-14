@@ -64,7 +64,7 @@ The `ECExampleConnector` is used to store the encoder cache on local disk and fa
     "ec_role": "ec_producer",
     "ec_connector_extra_config": {
         "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'",
-        "proxy_url": "http://localhost:'"$PROXY_PORT"'"
+        "proxy_registry_addr": "tcp://localhost:'"$PROXY_REGISTRY_PORT"'"
     }
 }' 
 
@@ -74,7 +74,7 @@ The `ECExampleConnector` is used to store the encoder cache on local disk and fa
     "ec_role": "ec_consumer",
     "ec_connector_extra_config": {
         "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'",
-        "proxy_url": "http://localhost:'"$PROXY_PORT"'"
+        "proxy_registry_addr": "tcp://localhost:'"$PROXY_REGISTRY_PORT"'"
     }
 }' 
 ```
@@ -102,7 +102,8 @@ If you run a separate prefill instance, you will need --kv-transfer-config to fa
 Start the proxy first, with no topology:
 
 ```bash
-python -m vllm.distributed.ec_transfer.proxy.epd_proxy --port 8000
+python -m vllm.distributed.ec_transfer.proxy.epd_proxy \
+    --port 8000 --registry-address tcp://proxy-host:14580
 ```
 
 It comes up with an empty roster and answers `503` until instances register.
@@ -110,17 +111,19 @@ Each instance announces itself once it is serving, by naming the proxy in its
 EC transfer config:
 
 ```bash
-"ec_connector_extra_config": {"proxy_url": "http://proxy-host:8000"}
+"ec_connector_extra_config": {
+    "proxy_registry_addr": "tcp://proxy-host:14580"
+}
 ```
 
 A decode instance in an E+P+D deployment moves no embeddings and so has no EC
 role, but the proxy still has to know where to forward. Give it an EC config
-carrying nothing but the proxy URL:
+carrying nothing but the registry address:
 
 ```bash
 --ec-transfer-config '{
     "ec_connector_extra_config": {
-        "proxy_url": "http://proxy-host:8000"
+        "proxy_registry_addr": "tcp://proxy-host:14580"
     }
 }'
 ```

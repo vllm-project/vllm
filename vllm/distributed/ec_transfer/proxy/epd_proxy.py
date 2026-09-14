@@ -23,8 +23,8 @@ from typing import Any
 import aiohttp
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
 
+from vllm.distributed.ec_transfer.proxy.register import RegistrationServer
 from vllm.distributed.ec_transfer.proxy.registry import (
     InstanceRecord,
     InstanceRegistry,
@@ -48,6 +48,7 @@ EMBEDS_TYPES = {
 
 @dataclass
 class EPDProxyConfig:
+    registry_address: str = "tcp://0.0.0.0:14580"
     probe_interval: float = 5.0
     probe_timeout: float = 2.0
     fail_threshold: int = 3
@@ -203,12 +204,16 @@ class EPDProxy:
         for candidate in (route.prefill, route.decode):
             if candidate is None or not candidate.ec_zmq_addrs:
                 continue
-            rank = self.registry.next_replica(candidate)
             route.consumer = candidate
-            route.consumer_zmq = candidate.ec_zmq_addrs[
-                rank % len(candidate.ec_zmq_addrs)
-            ]
-            route.dp_rank = rank if candidate.dp_size > 1 else None
+            if candidate.dp_rank is not None:
+                route.consumer_zmq = candidate.ec_zmq_addrs[0]
+                route.dp_rank = candidate.dp_rank
+            else:
+                rank = self.registry.next_replica(candidate)
+                route.consumer_zmq = candidate.ec_zmq_addrs[
+                    rank % len(candidate.ec_zmq_addrs)
+                ]
+                route.dp_rank = rank if candidate.dp_size > 1 else None
             return
 
     # ---------------------------------------------------------------- #
@@ -409,26 +414,6 @@ class EPDProxy:
                     yield chunk.decode("utf-8", errors="ignore")
 
 
-class RegisterRequest(BaseModel):
-    """What an instance reports when it joins.
-
-    Attributes:
-        role: Which stage this instance serves.
-        url: Base OpenAI-compatible URL other components should reach it at.
-        ec_zmq_addrs: Encoder-cache receive addresses, one per rank. Only an
-            EC consumer has these and only it knows them; reporting them here
-            is what lets the proxy name a push target without operators
-            hand-aligning a list against the instance URLs.
-        dp_size: Data-parallel replicas behind `url`.
-    """
-
-    role: InstanceRole
-    url: str
-    ec_zmq_addrs: list[str] = Field(default_factory=list)
-    dp_size: int = 1
-    metadata: dict = Field(default_factory=dict)
-
-
 def build_app(config: EPDProxyConfig | None = None) -> FastAPI:
     config = config or EPDProxyConfig()
     registry = InstanceRegistry(
@@ -438,6 +423,7 @@ def build_app(config: EPDProxyConfig | None = None) -> FastAPI:
         evicted_ttl=config.evicted_ttl,
     )
     proxy = EPDProxy(config, registry)
+    registration = RegistrationServer(config.registry_address, registry)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -446,34 +432,18 @@ def build_app(config: EPDProxyConfig | None = None) -> FastAPI:
         timeout = aiohttp.ClientTimeout(total=100_000)
         connector = aiohttp.TCPConnector(limit=0, force_close=False)
         proxy.session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+        registration.start()
         registry.start_probing()
         try:
             yield
         finally:
             await registry.stop_probing()
+            await registration.stop()
             await proxy.session.close()
 
     app = FastAPI(lifespan=lifespan)
     app.state.proxy = proxy
     app.state.registry = registry
-
-    @app.post("/instances")
-    async def register_instance(body: RegisterRequest):
-        registry.register(
-            InstanceRecord(
-                role=body.role,
-                url=body.url.rstrip("/"),
-                ec_zmq_addrs=body.ec_zmq_addrs,
-                dp_size=body.dp_size,
-                metadata=body.metadata,
-            )
-        )
-        return {"registered": body.url, "role": body.role.value}
-
-    @app.delete("/instances")
-    async def unregister_instance(body: RegisterRequest):
-        removed = registry.unregister(body.url.rstrip("/"))
-        return {"unregistered": body.url, "found": removed}
 
     @app.get("/instances")
     async def list_instances():
@@ -579,6 +549,11 @@ def main() -> None:
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument(
+        "--registry-address",
+        default=EPDProxyConfig.registry_address,
+        help="ZMQ address used by instances to register with this proxy.",
+    )
+    parser.add_argument(
         "--probe-interval",
         type=float,
         default=EPDProxyConfig.probe_interval,
@@ -611,6 +586,7 @@ def main() -> None:
 
     app = build_app(
         EPDProxyConfig(
+            registry_address=args.registry_address,
             probe_interval=args.probe_interval,
             probe_timeout=args.probe_timeout,
             fail_threshold=args.fail_threshold,

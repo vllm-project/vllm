@@ -60,7 +60,13 @@ class InstanceRecord:
     ec_zmq_addrs: list[str] = field(default_factory=list)
     dp_size: int = 1
     metadata: dict[str, Any] = field(default_factory=dict)
+    engine_id: str | None = None
+    dp_rank: int | None = None
     registered_at: float = field(default_factory=time.monotonic)
+
+    @property
+    def key(self) -> tuple[str, int | None]:
+        return self.url, self.dp_rank
 
 
 class InstanceRegistry:
@@ -76,10 +82,10 @@ class InstanceRegistry:
         self._fail_threshold = fail_threshold
         self._evicted_ttl = evicted_ttl
 
-        self._live: dict[str, InstanceRecord] = {}
-        self._evicted: dict[str, InstanceRecord] = {}
-        self._evicted_since: dict[str, float] = {}
-        self._fail_counts: dict[str, int] = {}
+        self._live: dict[tuple[str, int | None], InstanceRecord] = {}
+        self._evicted: dict[tuple[str, int | None], InstanceRecord] = {}
+        self._evicted_since: dict[tuple[str, int | None], float] = {}
+        self._fail_counts: dict[tuple[str, int | None], int] = {}
         # One cursor per role, only ever incremented. Rebuilding it whenever
         # the roster changes -- what an `itertools.cycle` over a mutable list
         # forces -- restarts every fan-out at the first instance and hot-spots
@@ -90,30 +96,52 @@ class InstanceRegistry:
 
     def register(self, record: InstanceRecord) -> bool:
         """Add or refresh an instance. Returns True if it was not already live."""
-        url = record.url
-        self._fail_counts.pop(url, None)
-        self._evicted.pop(url, None)
-        self._evicted_since.pop(url, None)
-        was_new = url not in self._live
-        self._live[url] = record
+        key = record.key
+        previous = self._live.get(key) or self._evicted.get(key)
+        if previous is not None and previous.engine_id == record.engine_id:
+            target = self._live if key in self._live else self._evicted
+            target[key] = record
+            return False
+        self._fail_counts.pop(key, None)
+        self._evicted.pop(key, None)
+        self._evicted_since.pop(key, None)
+        was_new = previous is None
+        self._live[key] = record
         logger.info(
             "%s instance %s: %s",
             "Registered" if was_new else "Refreshed",
             record.role.value,
-            url,
+            record.url,
         )
         return was_new
 
-    def unregister(self, url: str) -> bool:
+    def unregister(
+        self, url: str, engine_id: str | None = None, dp_rank: int | None = None
+    ) -> bool:
         """Drop an instance for good, so a probe cannot bring it back."""
-        found = url in self._live or url in self._evicted
-        self._live.pop(url, None)
-        self._evicted.pop(url, None)
-        self._evicted_since.pop(url, None)
-        self._fail_counts.pop(url, None)
-        if found:
-            logger.info("Unregistered instance: %s", url)
-        return found
+        key = (url, dp_rank)
+        record = self._live.get(key) or self._evicted.get(key)
+        found = record is not None and (
+            engine_id is None or record.engine_id == engine_id
+        )
+        if not found:
+            return False
+        self._live.pop(key, None)
+        self._evicted.pop(key, None)
+        self._evicted_since.pop(key, None)
+        self._fail_counts.pop(key, None)
+        logger.info("Unregistered instance: %s", url)
+        return True
+
+    def find(self, engine_id: str, dp_rank: int) -> InstanceRecord | None:
+        return next(
+            (
+                record
+                for record in self._live.values()
+                if record.engine_id == engine_id and record.dp_rank == dp_rank
+            ),
+            None,
+        )
 
     def instances(self, role: InstanceRole) -> list[InstanceRecord]:
         return [record for record in self._live.values() if record.role is role]
@@ -158,7 +186,9 @@ class InstanceRegistry:
             role.value: {
                 "live": [record.url for record in self.instances(role)],
                 "evicted": [
-                    url for url, record in self._evicted.items() if record.role is role
+                    record.url
+                    for record in self._evicted.values()
+                    if record.role is role
                 ],
             }
             for role in InstanceRole
@@ -207,11 +237,12 @@ class InstanceRegistry:
             return resp.status == 200
 
     def _on_probe_success(self, record: InstanceRecord) -> None:
-        self._fail_counts.pop(record.url, None)
-        if record.url in self._evicted:
-            self._evicted.pop(record.url, None)
-            self._evicted_since.pop(record.url, None)
-            self._live[record.url] = record
+        key = record.key
+        self._fail_counts.pop(key, None)
+        if key in self._evicted:
+            self._evicted.pop(key, None)
+            self._evicted_since.pop(key, None)
+            self._live[key] = record
             logger.info(
                 "Instance %s (%s) is healthy again; routing resumed",
                 record.url,
@@ -219,19 +250,20 @@ class InstanceRegistry:
             )
 
     def _on_probe_failure(self, record: InstanceRecord, now: float) -> None:
-        if record.url not in self._live:
+        key = record.key
+        if key not in self._live:
             # Either already evicted, or unregistered while this probe was in
             # flight. A round snapshots its targets and then awaits, so a
             # removal inside that window would otherwise be undone by a result
             # describing a registry that no longer exists.
             return
-        failures = self._fail_counts.get(record.url, 0) + 1
-        self._fail_counts[record.url] = failures
+        failures = self._fail_counts.get(key, 0) + 1
+        self._fail_counts[key] = failures
         if failures < self._fail_threshold:
             return
-        self._live.pop(record.url, None)
-        self._evicted[record.url] = record
-        self._evicted_since[record.url] = now
+        self._live.pop(key, None)
+        self._evicted[key] = record
+        self._evicted_since[key] = now
         logger.warning(
             "Instance %s (%s) failed %d consecutive probes; stopped routing "
             "to it. It rejoins on its own once it responds again.",
@@ -243,10 +275,11 @@ class InstanceRegistry:
     def _drop_expired(self, now: float) -> None:
         if self._evicted_ttl <= 0:
             return
-        for url, since in list(self._evicted_since.items()):
+        for key, since in list(self._evicted_since.items()):
             if now - since < self._evicted_ttl:
                 continue
-            self._evicted.pop(url, None)
-            self._evicted_since.pop(url, None)
-            self._fail_counts.pop(url, None)
-            logger.warning("Instance %s stayed down; forgetting it", url)
+            record = self._evicted.pop(key, None)
+            self._evicted_since.pop(key, None)
+            self._fail_counts.pop(key, None)
+            if record is not None:
+                logger.warning("Instance %s stayed down; forgetting it", record.url)

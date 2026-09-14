@@ -49,8 +49,12 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake.transfer import (
     MooncakeTransfer,
     ensure_mooncake_available,
 )
+from vllm.distributed.ec_transfer.proxy.register import (
+    ProxyRegistrar,
+    registrar_from_vllm_config,
+)
 from vllm.logger import init_logger
-from vllm.utils.network_utils import get_ip
+from vllm.utils.network_utils import get_ip, make_zmq_path
 
 logger = init_logger(__name__)
 
@@ -90,8 +94,11 @@ class ECMooncakeWorker:
         self.is_producer = config.is_producer
         self.is_consumer = config.is_consumer
         self._buffer_device = config.buffer_device
-        self._control_host = config.control_host
-        self._control_port = config.control_port
+        self._control_host = get_ip()
+        self._vllm_config = vllm_config
+        self._registrar: ProxyRegistrar | None = None
+        self._peer_addresses: list[str] = []
+        self._dp_rank = config.dp_rank
         self._transfer = MooncakeTransfer(get_ip(), config.protocol)
         self._consumer_memory = ConsumerMemoryPool(
             config.pool_size,
@@ -112,7 +119,7 @@ class ECMooncakeWorker:
             config.pool_size,
             self._transfer,
         )
-        self._control_client = ControlClient(config.control_timeout_ms)
+        self._control_client = ControlClient(config.control_timeout_ms, config.dp_rank)
         self._shutdown_drain_timeout_s = config.control_timeout_ms / 1000
         self._io_executor = ThreadPoolExecutor(
             max_workers=_TRANSFER_WORKERS,
@@ -173,6 +180,9 @@ class ECMooncakeWorker:
             self._is_receiving_rank = True
 
     def start_services(self) -> None:
+        if self.is_producer and not self.is_consumer:
+            self._register_instance()
+            return
         if not self.is_consumer or self._control_server is not None:
             return
         self._resolve_consumer_rank()
@@ -186,28 +196,50 @@ class ECMooncakeWorker:
             raise RuntimeError(
                 "Mooncake push mode requires a registered consumer buffer pool."
             )
-        base_port = self._control_port
         self._control_server = ConsumerControlServer(
             # The reservation channel hands out registered-memory addresses
             # and takes cancellations, so it listens where the Consumer
-            # advertises itself (`ec_ip`), not on every interface.
+            # advertises itself, not on every interface.
             self._control_host,
-            base_port + self._tp_rank,
             self._reserve_push_destination,
             self._push_status,
             self._reservations.complete,
             self._reservations.cancel,
             self._reservations.expire,
-            peer_ports=[base_port + rank for rank in range(self._tp_size)],
+            peer_addresses=lambda: self._peer_addresses,
             device=consumer_pool.device,
             drain_ready=self._reservations.drain_ready,
         )
         try:
             self._control_server.start()
+            address = make_zmq_path(
+                "tcp", self._control_host, self._control_server.port
+            )
+            self._peer_addresses = [address]
+            if self._tp_size > 1:
+                from vllm.distributed.parallel_state import get_tp_group
+
+                self._peer_addresses = [""] * self._tp_size
+                torch.distributed.all_gather_object(
+                    self._peer_addresses, address, group=get_tp_group().cpu_group
+                )
+            if self._tp_rank == 0:
+                self._register_instance()
         except Exception:
             self._control_server.close()
             self._control_server = None
             raise
+
+    def _register_instance(self) -> None:
+        if self._registrar is not None:
+            return
+        self._registrar = registrar_from_vllm_config(
+            self._vllm_config,
+            ec_zmq_addrs=self._peer_addresses,
+            dp_rank=self._dp_rank,
+        )
+        if self._registrar is not None:
+            self._registrar.start()
 
     def _reserve_push_destination(self, payload: dict[str, Any]) -> dict[str, Any]:
         transfer_id = str(payload["transfer_id"])
@@ -900,6 +932,8 @@ class ECMooncakeWorker:
         if self._shutdown:
             return
         self._shutdown = True
+        if self._registrar is not None:
+            self._registrar.close()
         dispatcher = getattr(self, "_dispatcher", None)
         if dispatcher is not None:
             self._dispatch_stop.set()

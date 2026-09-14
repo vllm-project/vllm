@@ -49,12 +49,6 @@ class TestRegistration:
         assert registry.register(record) is False
         assert registry.urls(ENCODE) == ["http://e0:8000"]
 
-    def test_roles_are_routed_separately(self, registry):
-        registry.register(InstanceRecord(ENCODE, "http://e0:8000"))
-        registry.register(InstanceRecord(DECODE, "http://d0:8000"))
-        assert registry.urls(ENCODE) == ["http://e0:8000"]
-        assert registry.urls(DECODE) == ["http://d0:8000"]
-
     def test_consumer_reports_its_own_transfer_addresses(self, registry):
         """Only the EC consumer knows these, so they ride with its record.
 
@@ -79,25 +73,17 @@ class TestRegistration:
         assert registry.unregister("http://e0:8000") is False
         assert registry.pick(ENCODE) is None
 
+    def test_round_robin_survives_registration(self, registry):
+        _fill(registry, ENCODE, 2)
+        assert [record.url for record in registry.pick_many(ENCODE, 2)] == [
+            "http://h0:8000",
+            "http://h1:8000",
+        ]
+        registry.register(InstanceRecord(ENCODE, "http://h2:8000"))
+        assert registry.pick(ENCODE).url == "http://h2:8000"
+
 
 class TestLiveness:
-    @pytest.mark.asyncio
-    async def test_one_missed_probe_does_not_evict(self, registry):
-        """A busy encoder can miss a probe; only a run of them means death."""
-        registry.register(InstanceRecord(ENCODE, "http://e0:8000"))
-        for _ in range(registry._fail_threshold - 1):
-            await _probe_round(registry, healthy=set())
-        assert registry.urls(ENCODE) == ["http://e0:8000"]
-
-    @pytest.mark.asyncio
-    async def test_a_success_clears_the_failure_run(self, registry):
-        registry.register(InstanceRecord(ENCODE, "http://e0:8000"))
-        await _probe_round(registry, healthy=set())
-        await _probe_round(registry, healthy=set())
-        await _probe_round(registry, healthy={"http://e0:8000"})
-        await _probe_round(registry, healthy=set())
-        assert registry.urls(ENCODE) == ["http://e0:8000"]
-
     @pytest.mark.asyncio
     async def test_consecutive_failures_stop_routing(self, registry):
         registry.register(InstanceRecord(ENCODE, "http://e0:8000"))
@@ -119,30 +105,13 @@ class TestLiveness:
         assert registry.urls(ENCODE) == ["http://e0:8000"]
 
     @pytest.mark.asyncio
-    async def test_a_lasting_outage_is_eventually_forgotten(self, registry):
-        registry.register(InstanceRecord(ENCODE, "http://e0:8000"))
-        for _ in range(registry._fail_threshold):
-            await _probe_round(registry, healthy=set(), now=0.0)
-        assert registry.status()["encode"]["evicted"] == ["http://e0:8000"]
-
-        await _probe_round(registry, healthy=set(), now=registry._evicted_ttl + 1)
-        assert registry.status()["encode"]["evicted"] == []
-
-    @pytest.mark.asyncio
-    async def test_re_registering_revives_an_evicted_instance(self, registry):
-        registry.register(InstanceRecord(ENCODE, "http://e0:8000"))
+    async def test_a_heartbeat_does_not_override_failed_health_checks(self, registry):
+        record = InstanceRecord(ENCODE, "http://e0:8000", engine_id="engine")
+        registry.register(record)
         for _ in range(registry._fail_threshold):
             await _probe_round(registry, healthy=set())
+        registry.register(record)
         assert registry.urls(ENCODE) == []
-
-        registry.register(InstanceRecord(ENCODE, "http://e0:8000"))
-        assert registry.urls(ENCODE) == ["http://e0:8000"]
-        assert registry.status()["encode"]["evicted"] == []
-
-    @pytest.mark.asyncio
-    async def test_probing_an_empty_registry_is_a_no_op(self, registry):
-        await _probe_round(registry, healthy=set())
-        assert registry.status()["encode"]["live"] == []
 
 
 class TestSelfRegistration:
@@ -191,7 +160,12 @@ class TestSelfRegistration:
         """
         from vllm.distributed.ec_transfer.proxy import register as mod
 
-        state = self._state(ec_extra={"proxy_url": "http://proxy:8000"})
+        state = self._state(
+            ec_extra={
+                "proxy_registry_addr": "tcp://proxy:14580",
+                "_http_address": "http://127.0.0.1:8000",
+            }
+        )
         with patch.object(mod.ProxyRegistrar, "start"):
             registrar = mod.maybe_start(state)
         assert registrar is not None

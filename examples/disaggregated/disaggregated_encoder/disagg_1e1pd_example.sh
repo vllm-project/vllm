@@ -13,6 +13,7 @@ mkdir -p "$LOG_PATH"
 ENCODE_PORT="${ENCODE_PORT:-19534}"
 PREFILL_DECODE_PORT="${PREFILL_DECODE_PORT:-19535}"
 PROXY_PORT="${PROXY_PORT:-10001}"
+PROXY_REGISTRY_PORT="${PROXY_REGISTRY_PORT:-10002}"
 
 GPU_E="${GPU_E:-0}"
 GPU_PD="${GPU_PD:-1}"
@@ -109,6 +110,7 @@ mkdir -p "$EC_SHARED_STORAGE_PATH"
 python -m vllm.distributed.ec_transfer.proxy.epd_proxy \
     --host "0.0.0.0" \
     --port "$PROXY_PORT" \
+    --registry-address "tcp://127.0.0.1:$PROXY_REGISTRY_PORT" \
     >"${PROXY_LOG}" 2>&1 &
 
 PIDS+=($!)
@@ -132,7 +134,7 @@ env "$DEVICE_AFFINITY_ENV=$GPU_E" vllm serve "$MODEL" \
         "ec_role": "ec_producer",
         "ec_connector_extra_config": {
             "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'",
-            "proxy_url": "http://localhost:'"$PROXY_PORT"'"
+            "proxy_registry_addr": "tcp://127.0.0.1:'"$PROXY_REGISTRY_PORT"'"
         }
     }' \
     >"${ENC_LOG}" 2>&1 &
@@ -156,7 +158,7 @@ env "$DEVICE_AFFINITY_ENV=$GPU_PD" vllm serve "$MODEL" \
         "ec_role": "ec_consumer",
         "ec_connector_extra_config": {
             "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'",
-            "proxy_url": "http://localhost:'"$PROXY_PORT"'"
+            "proxy_registry_addr": "tcp://127.0.0.1:'"$PROXY_REGISTRY_PORT"'"
         }
     }' \
     >"${PD_LOG}" 2>&1 &

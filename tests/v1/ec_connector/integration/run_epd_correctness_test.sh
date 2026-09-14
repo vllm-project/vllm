@@ -152,12 +152,14 @@ run_epd_1e_1pd() {
     local ENCODE_PORT=$ENCODE_PORT
     local PREFILL_DECODE_PORT=$PREFILL_DECODE_PORT
     local PROXY_PORT=$ENDPOINT_PORT
+    local REGISTRY_PORT=$((PROXY_PORT + 1))
     
     declare -a PIDS=()
     
     # Start the proxy first: it holds the roster the workers register into.
     echo "Starting EPD proxy on port $PROXY_PORT"
     python -m vllm.distributed.ec_transfer.proxy.epd_proxy --host "0.0.0.0" --port "$PROXY_PORT" \
+        --registry-address "tcp://127.0.0.1:$REGISTRY_PORT" \
         > "$LOG_PATH"/epd_proxy.log 2>&1 &
     PIDS+=($!)
     echo "Waiting for proxy..."
@@ -180,7 +182,7 @@ run_epd_1e_1pd() {
             "ec_role": "ec_producer",
             "ec_connector_extra_config": {
                 "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'",
-                "proxy_url": "http://localhost:'"$PROXY_PORT"'"
+                "proxy_registry_addr": "tcp://127.0.0.1:'"$REGISTRY_PORT"'"
             }
         }' \
         > "$LOG_PATH"/1e1pd_encoder.log 2>&1 &
@@ -202,7 +204,7 @@ run_epd_1e_1pd() {
             "ec_role": "ec_consumer",
             "ec_connector_extra_config": {
                 "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'",
-                "proxy_url": "http://localhost:'"$PROXY_PORT"'"
+                "proxy_registry_addr": "tcp://127.0.0.1:'"$REGISTRY_PORT"'"
             }
         }' \
         > "$LOG_PATH"/1e1pd_pd.log 2>&1 &
@@ -353,12 +355,14 @@ run_epd_1e_1p_1d() {
     local PREFILL_PORT=$PREFILL_PORT
     local DECODE_PORT=$DECODE_PORT
     local PROXY_PORT=$ENDPOINT_PORT
+    local REGISTRY_PORT=$((PROXY_PORT + 1))
     
     declare -a PIDS=()
     
     # Start the proxy first: it holds the roster the workers register into.
     echo "Starting EPD proxy on port $PROXY_PORT"
     python -m vllm.distributed.ec_transfer.proxy.epd_proxy --host "0.0.0.0" --port "$PROXY_PORT" \
+        --registry-address "tcp://127.0.0.1:$REGISTRY_PORT" \
         > "$LOG_PATH"/epd_proxy.log 2>&1 &
     PIDS+=($!)
     echo "Waiting for proxy..."
@@ -381,7 +385,7 @@ run_epd_1e_1p_1d() {
             "ec_role": "ec_producer",
             "ec_connector_extra_config": {
                 "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'",
-                "proxy_url": "http://localhost:'"$PROXY_PORT"'"
+                "proxy_registry_addr": "tcp://127.0.0.1:'"$REGISTRY_PORT"'"
             }
         }' \
         > "$LOG_PATH"/1e1p1d_encoder.log 2>&1 &
@@ -405,7 +409,7 @@ run_epd_1e_1p_1d() {
             "ec_role": "ec_consumer",
             "ec_connector_extra_config": {
                 "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'",
-                "proxy_url": "http://localhost:'"$PROXY_PORT"'"
+                "proxy_registry_addr": "tcp://127.0.0.1:'"$REGISTRY_PORT"'"
             }
         }' \
         --kv-transfer-config '{
@@ -434,7 +438,7 @@ run_epd_1e_1p_1d() {
         }' \
         --ec-transfer-config '{
             "ec_connector_extra_config": {
-                "proxy_url": "http://localhost:'"$PROXY_PORT"'"
+                "proxy_registry_addr": "tcp://127.0.0.1:'"$REGISTRY_PORT"'"
             }
         }' \
         > "$LOG_PATH"/1e1p1d_decode.log 2>&1 &

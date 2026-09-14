@@ -275,6 +275,12 @@ def setup_server(args, *, reuse_port: bool):
         sock_addr = (args.host or "", args.port)
         sock = create_server_socket(sock_addr, reuse_port=reuse_port)
 
+    from vllm.distributed.ec_transfer.proxy.register import (
+        set_registration_address,
+    )
+
+    set_registration_address(args, sock)
+
     # workaround to avoid footguns where uvicorn drops requests with too
     # many concurrent requests active
     set_ulimit()

@@ -35,9 +35,13 @@ ControlResponse = dict[str, Any]
 class ControlClient:
     """Send control requests through reusable, thread-local REQ sockets."""
 
-    def __init__(self, timeout_ms: int) -> None:
+    def __init__(
+        self, timeout_ms: int, dp_rank: int = 0, engine_id: str | None = None
+    ) -> None:
         self._context = zmq.Context()
         self._timeout_ms = timeout_ms
+        self._dp_rank = dp_rank
+        self._engine_id = engine_id
         self._local = threading.local()
         self._topologies: dict[str, list[str]] = {}
         self._closed = False
@@ -84,12 +88,17 @@ class ControlClient:
         if base_addr in self._topologies:
             return self._topologies[base_addr]
         try:
-            reply = self.request(base_addr, {"op": "peers"})
-            ports = reply.get("ports") if isinstance(reply, dict) else None
-            if not isinstance(ports, list) or not ports:
+            request: ControlRequest = {"op": "peers"}
+            if self._engine_id is not None:
+                request = {
+                    "operation": "peers",
+                    "engine_id": self._engine_id,
+                    "dp_rank": self._dp_rank,
+                }
+            reply = self.request(base_addr, request)
+            shards = reply.get("addresses") if isinstance(reply, dict) else None
+            if not isinstance(shards, list) or not shards:
                 raise ValueError("invalid or empty peer list")
-            prefix = base_addr.rsplit(":", 1)[0]
-            shards = [f"{prefix}:{int(port)}" for port in ports]
         except Exception:
             logger.warning(
                 "EC Mooncake consumer at %s did not report its shards",
@@ -248,19 +257,18 @@ class ConsumerControlServer:
     def __init__(
         self,
         host: str,
-        port: int,
         reserve: Callable[[dict[str, Any]], dict[str, Any]],
         status: Callable[[str], dict[str, Any] | None],
         complete: Callable[[str, str], tuple[bool, bool]],
         cancel: Callable[[str, str, bool, bool], bool],
         reap: Callable[[], int],
-        peer_ports: list[int] | None = None,
+        peer_addresses: Callable[[], list[str]],
         device: torch.device | None = None,
         drain_ready: Callable[[], list[str]] = lambda: [],
     ) -> None:
         self.host = host
-        self.port = port
-        self.peer_ports = peer_ports or [port]
+        self.port = 0
+        self._peer_addresses = peer_addresses
         self._device = device
         self.event_port: int | None = None
         self._reserve = reserve
@@ -306,6 +314,9 @@ class ConsumerControlServer:
             socket.setsockopt(zmq.RCVTIMEO, 100)
             try:
                 socket.bind(make_zmq_path("tcp", self.host, self.port))
+                self.port = int(
+                    socket.getsockopt(zmq.LAST_ENDPOINT).decode().rsplit(":", 1)[1]
+                )
                 event_socket.bind(make_zmq_path("tcp", self.host, 0))
                 self.event_port = int(
                     event_socket.getsockopt(zmq.LAST_ENDPOINT)
@@ -377,7 +388,7 @@ class ConsumerControlServer:
                         elif op == "event_port":
                             result = self.event_port
                         elif op == "peers":
-                            result = {"ports": self.peer_ports}
+                            result = {"addresses": self._peer_addresses()}
                         elif op in ("complete", "complete_batch"):
                             items = (
                                 request["items"]

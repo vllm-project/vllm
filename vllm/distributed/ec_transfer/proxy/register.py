@@ -1,24 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Client half of EPD dynamic registration.
-
-An instance announces itself to the proxy once it is serving, then keeps
-announcing on an interval. The repeat is what makes a proxy restart
-survivable: a proxy that comes back with an empty roster refills on its own
-instead of needing every instance restarted.
-"""
+"""Instance registration for the EPD proxy."""
 
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
-from typing import TYPE_CHECKING
+import socket
+import threading
+from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
-import aiohttp
+import zmq
+import zmq.asyncio
 
-from vllm.distributed.ec_transfer.proxy.registry import InstanceRole
+from vllm.distributed.ec_transfer.proxy.registry import (
+    InstanceRecord,
+    InstanceRegistry,
+    InstanceRole,
+)
 from vllm.logger import init_logger
-from vllm.utils.network_utils import get_ip
+from vllm.utils.network_utils import get_ip, make_zmq_path
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -26,144 +27,168 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 DEFAULT_ANNOUNCE_INTERVAL = 30.0
-_RETRY_INTERVAL = 5.0
-_REQUEST_TIMEOUT = 5.0
+_REQUEST_TIMEOUT_MS = 5000
+
+
+def set_registration_address(args: Any, sock: socket.socket) -> None:
+    """Pass the bound HTTP address to workers that register at runtime."""
+    ec_config = getattr(args, "ec_transfer_config", None)
+    if ec_config is None or not ec_config.get_from_extra_config(
+        "proxy_registry_addr", None
+    ):
+        return
+    if sock.family not in (socket.AF_INET, socket.AF_INET6):
+        raise ValueError("EPD registration requires a TCP API server")
+    host, port = sock.getsockname()[:2]
+    if host in ("0.0.0.0", "::"):
+        host = get_ip()
+    scheme = (
+        "https"
+        if getattr(args, "ssl_keyfile", None) and getattr(args, "ssl_certfile", None)
+        else "http"
+    )
+    ec_config.ec_connector_extra_config["_http_address"] = make_zmq_path(
+        scheme, host, port
+    )
 
 
 class ProxyRegistrar:
-    """Keeps one instance present in a proxy's roster.
-
-    Args:
-        proxy_urls: Proxies to announce to. More than one is a proxy that
-            is itself replicated; each gets the same record.
-        role: Which stage this instance serves.
-        url: Base URL other components should reach this instance at.
-        ec_zmq_addrs: Encoder-cache receive addresses, if this instance
-            consumes embeddings over a point-to-point transport.
-        dp_size: Data-parallel replicas behind `url`.
-        interval: Seconds between announcements.
-    """
+    """Periodically announce one instance to the proxy registry."""
 
     def __init__(
         self,
-        proxy_urls: list[str],
-        role: InstanceRole,
-        url: str,
-        ec_zmq_addrs: list[str] | None = None,
-        dp_size: int = 1,
+        registry_addr: str,
+        payload: dict[str, Any],
         interval: float = DEFAULT_ANNOUNCE_INTERVAL,
-    ):
-        self.proxy_urls = [proxy.rstrip("/") for proxy in proxy_urls]
+    ) -> None:
+        self.registry_addr = registry_addr
+        self.payload = payload
         self.interval = interval
-        self.payload = {
-            "role": role.value,
-            "url": url.rstrip("/"),
-            "ec_zmq_addrs": ec_zmq_addrs or [],
-            "dp_size": dp_size,
-        }
-        self._task: asyncio.Task | None = None
-
-    @classmethod
-    def from_vllm_config(
-        cls,
-        vllm_config: VllmConfig,
-        proxy_urls: list[str],
-        role: InstanceRole,
-        url: str,
-        interval: float = DEFAULT_ANNOUNCE_INTERVAL,
-    ) -> ProxyRegistrar:
-        """Build a registrar, asking the EC connector for its receive addresses."""
-        return cls(
-            proxy_urls=proxy_urls,
-            role=role,
-            url=url,
-            ec_zmq_addrs=_receive_addresses(vllm_config),
-            dp_size=vllm_config.parallel_config.data_parallel_size,
-            interval=interval,
-        )
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
 
     def start(self) -> None:
-        """Announce in the background; never block the instance's startup."""
-        if self._task is None and self.proxy_urls:
-            self._task = asyncio.create_task(self._announce_loop())
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(
+            target=self._run, name="epd-register", daemon=True
+        )
+        self._thread.start()
+
+    def _run(self) -> None:
+        if self.payload.get("dp_rank") is not None:
+            self._wait_for_service()
+        if self._stop.is_set():
+            return
+        context = zmq.Context()
+        try:
+            while not self._stop.is_set():
+                self._send(context, "register")
+                self._stop.wait(self.interval)
+            self._send(context, "unregister")
+        finally:
+            context.term()
+
+    def _wait_for_service(self) -> None:
+        parsed = urlsplit(self.payload["url"])
+        assert parsed.hostname is not None and parsed.port is not None
+        while not self._stop.is_set():
+            try:
+                endpoint = (parsed.hostname, parsed.port)
+                with socket.create_connection(endpoint, timeout=1):
+                    return
+            except OSError:
+                self._stop.wait(1)
+
+    def _send(self, context: zmq.Context, operation: str) -> None:
+        try:
+            with context.socket(zmq.REQ) as sock:
+                sock.setsockopt(zmq.LINGER, 0)
+                sock.setsockopt(zmq.RCVTIMEO, _REQUEST_TIMEOUT_MS)
+                sock.setsockopt(zmq.SNDTIMEO, _REQUEST_TIMEOUT_MS)
+                sock.connect(self.registry_addr)
+                sock.send_json({**self.payload, "operation": operation})
+                response = sock.recv_json()
+                if not response.get("ok"):
+                    raise RuntimeError(response.get("error"))
+        except Exception as error:
+            logger.warning("EPD registration failed: %s", error)
 
     async def stop(self) -> None:
-        """Stop announcing and leave the roster, so no request is sent here."""
+        await asyncio.to_thread(self.close)
+
+    def close(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join()
+            self._thread = None
+
+
+class RegistrationServer:
+    """Receive instance announcements on the proxy event loop."""
+
+    def __init__(self, address: str, registry: InstanceRegistry) -> None:
+        self.address = address
+        self.registry = registry
+        self._socket: zmq.asyncio.Socket | None = None
+        self._task: asyncio.Task | None = None
+
+    def start(self) -> None:
+        context = zmq.asyncio.Context.instance()
+        self._socket = context.socket(zmq.REP)
+        self._socket.setsockopt(zmq.LINGER, 0)
+        self._socket.bind(self.address)
+        self._task = asyncio.create_task(self._serve())
+
+    async def stop(self) -> None:
         if self._task is not None:
             self._task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._task
-            self._task = None
-        await self._request("delete")
+            await asyncio.gather(self._task, return_exceptions=True)
+        if self._socket is not None:
+            self._socket.close()
 
-    async def _announce_loop(self) -> None:
-        # The first announcement retries fast so a proxy that is still coming
-        # up costs seconds, not a whole announce interval.
-        while not await self._request("post"):
-            await asyncio.sleep(_RETRY_INTERVAL)
+    async def _serve(self) -> None:
+        assert self._socket is not None
         while True:
-            await asyncio.sleep(self.interval)
-            await self._request("post")
+            try:
+                request = await self._socket.recv_json()
+                result = self._handle(request)
+                await self._socket.send_json({"ok": True, "result": result})
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                await self._socket.send_json({"ok": False, "error": str(error)})
 
-    async def _request(self, method: str) -> bool:
-        """Send `payload` to every proxy. Returns whether all of them took it."""
-        timeout = aiohttp.ClientTimeout(total=_REQUEST_TIMEOUT)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            results = await asyncio.gather(
-                *(
-                    self._request_one(session, method, proxy)
-                    for proxy in self.proxy_urls
-                ),
-                return_exceptions=True,
+    def _handle(self, request: dict[str, Any]) -> dict[str, Any]:
+        operation = request["operation"]
+        if operation == "unregister":
+            self.registry.unregister(
+                request["url"].rstrip("/"),
+                request.get("engine_id"),
+                request.get("dp_rank"),
             )
-        return all(result is True for result in results)
-
-    async def _request_one(
-        self, session: aiohttp.ClientSession, method: str, proxy: str
-    ) -> bool:
-        try:
-            async with session.request(
-                method, f"{proxy}/instances", json=self.payload
-            ) as resp:
-                if resp.status == 200:
-                    return True
-                logger.warning(
-                    "EPD proxy %s rejected registration with %s: %s",
-                    proxy,
-                    resp.status,
-                    await resp.text(),
-                )
-        except Exception as exc:
-            logger.debug("Could not reach EPD proxy %s: %s", proxy, exc)
-        return False
-
-
-def _receive_addresses(vllm_config: VllmConfig) -> list[str]:
-    ec_config = getattr(vllm_config, "ec_transfer_config", None)
-    if ec_config is None or not ec_config.is_ec_consumer:
-        return []
-    from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
-
-    try:
-        connector_cls = ECConnectorFactory.get_connector_class(ec_config)
-    except Exception:
-        logger.warning(
-            "Could not resolve the EC connector class; registering without "
-            "receive addresses. An encoder will not be told where to push.",
-            exc_info=True,
+            return {}
+        if operation == "peers":
+            record = self.registry.find(request["engine_id"], request["dp_rank"])
+            if record is None:
+                raise RuntimeError("EC consumer is not registered")
+            return {"addresses": record.ec_zmq_addrs}
+        if operation != "register":
+            raise ValueError(f"Unknown registration operation: {operation}")
+        self.registry.register(
+            InstanceRecord(
+                role=InstanceRole(request["role"]),
+                url=request["url"].rstrip("/"),
+                ec_zmq_addrs=request.get("ec_zmq_addrs", []),
+                dp_size=request.get("dp_size", 1),
+                engine_id=request.get("engine_id"),
+                dp_rank=request.get("dp_rank"),
+            )
         )
-        return []
-    return connector_cls.receive_addresses(vllm_config)
+        return {}
 
 
 def infer_role(vllm_config: VllmConfig) -> InstanceRole:
-    """Which stage this instance serves, from what it was configured to do.
-
-    An encoder is the one role that runs no language model. Otherwise the KV
-    role decides: an instance that hands its KV to someone else is a prefill
-    instance, and anything left -- including a fused prefill+decode -- serves
-    decode requests.
-    """
     ec_config = getattr(vllm_config, "ec_transfer_config", None)
     if ec_config is not None and ec_config.is_encode_only:
         return InstanceRole.ENCODE
@@ -173,46 +198,43 @@ def infer_role(vllm_config: VllmConfig) -> InstanceRole:
     return InstanceRole.DECODE
 
 
-def maybe_start(state) -> ProxyRegistrar | None:
-    """Start announcing to the proxies named in the EC transfer config.
-
-    Returns None when no proxy was named, which is every deployment that
-    wires its instances up statically.
-    """
-    vllm_config = getattr(state, "vllm_config", None)
-    args = getattr(state, "args", None)
-    if vllm_config is None or args is None:
-        return None
+def registrar_from_vllm_config(
+    vllm_config: VllmConfig,
+    *,
+    ec_zmq_addrs: list[str] | None = None,
+    dp_rank: int | None = None,
+) -> ProxyRegistrar | None:
     ec_config = getattr(vllm_config, "ec_transfer_config", None)
     if ec_config is None:
         return None
-    # An instance with no EC role at all still registers: the proxy has to
-    # know where to forward, whether or not this instance moves embeddings.
-    proxy_urls = ec_config.get_from_extra_config("proxy_url", None)
-    if not proxy_urls:
+    get = ec_config.get_from_extra_config
+    registry_addr = get("proxy_registry_addr", None)
+    url = get("_http_address", None)
+    if not registry_addr or not url:
         return None
-    if isinstance(proxy_urls, str):
-        proxy_urls = [proxy_urls]
+    return ProxyRegistrar(
+        registry_addr,
+        {
+            "role": infer_role(vllm_config).value,
+            "url": url,
+            "engine_id": ec_config.engine_id,
+            "dp_rank": dp_rank,
+            "dp_size": vllm_config.parallel_config.data_parallel_size,
+            "ec_zmq_addrs": ec_zmq_addrs or [],
+        },
+        float(get("proxy_announce_interval", DEFAULT_ANNOUNCE_INTERVAL)),
+    )
 
-    scheme = "https" if getattr(args, "ssl_certfile", None) else "http"
-    host = args.host or "127.0.0.1"
-    if host in ("0.0.0.0", "::"):
-        host = get_ip()
-    registrar = ProxyRegistrar.from_vllm_config(
-        vllm_config=vllm_config,
-        proxy_urls=list(proxy_urls),
-        role=infer_role(vllm_config),
-        url=f"{scheme}://{host}:{args.port}",
-        interval=float(
-            ec_config.get_from_extra_config(
-                "proxy_announce_interval", DEFAULT_ANNOUNCE_INTERVAL
-            )
-        ),
-    )
-    registrar.start()
-    logger.info(
-        "Announcing this %s instance to EPD proxy %s",
-        registrar.payload["role"],
-        ", ".join(registrar.proxy_urls),
-    )
+
+def maybe_start(state) -> ProxyRegistrar | None:
+    """Start frontend registration unless a worker owns runtime addresses."""
+    vllm_config = getattr(state, "vllm_config", None)
+    if vllm_config is None:
+        return None
+    ec_config = getattr(vllm_config, "ec_transfer_config", None)
+    if ec_config is not None and ec_config.ec_connector == "ECMooncakeConnector":
+        return None
+    registrar = registrar_from_vllm_config(vllm_config)
+    if registrar is not None:
+        registrar.start()
     return registrar

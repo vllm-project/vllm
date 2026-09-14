@@ -16,6 +16,7 @@ from vllm.distributed.ec_transfer.proxy.epd_proxy import (
     content_uuid,
     extract_mm_items,
 )
+from vllm.distributed.ec_transfer.proxy.register import RegistrationServer
 from vllm.distributed.ec_transfer.proxy.registry import (
     InstanceRecord,
     InstanceRegistry,
@@ -94,41 +95,16 @@ class TestConsumerAddress:
         assert proxy.route(num_items=0).consumer_zmq == "tcp://p0:20001"
 
 
-class TestRegistrationApi:
+class TestProxyApi:
     @pytest.fixture
     def client(self):
-        with TestClient(build_app(EPDProxyConfig(probe_interval=0))) as client:
+        config = EPDProxyConfig(registry_address="tcp://127.0.0.1:0", probe_interval=0)
+        with TestClient(build_app(config)) as client:
             yield client
 
     def test_proxy_serves_before_anything_registers(self, client):
         assert client.get("/health").status_code == 200
         assert client.get("/instances").json()["encode"]["live"] == []
-
-    def test_an_instance_joins_and_leaves(self, client):
-        body = {"role": "encode", "url": "http://e0:8000"}
-        assert client.post("/instances", json=body).status_code == 200
-        assert client.get("/instances").json()["encode"]["live"] == ["http://e0:8000"]
-        assert client.request("DELETE", "/instances", json=body).json()["found"]
-        assert client.get("/instances").json()["encode"]["live"] == []
-
-    def test_a_consumer_reports_its_receive_addresses(self, client):
-        client.post(
-            "/instances",
-            json={
-                "role": "decode",
-                "url": "http://d0:8000/",
-                "ec_zmq_addrs": ["tcp://d0:20001", "tcp://d0:20002"],
-                "dp_size": 2,
-            },
-        )
-        # The trailing slash would otherwise produce "http://d0:8000//v1/...".
-        assert client.get("/instances").json()["decode"]["live"] == ["http://d0:8000"]
-
-    def test_an_unknown_role_is_rejected(self, client):
-        response = client.post(
-            "/instances", json={"role": "embed", "url": "http://x:8000"}
-        )
-        assert response.status_code == 422
 
     def test_requests_are_refused_until_a_decoder_registers(self, client):
         response = client.post(
@@ -136,6 +112,23 @@ class TestRegistrationApi:
         )
         assert response.status_code == 503
         assert client.get("/v1/models").status_code == 503
+
+
+def test_registration_server_updates_registry(proxy):
+    server = RegistrationServer("tcp://127.0.0.1:0", proxy.registry)
+    payload = {
+        "operation": "register",
+        "role": "decode",
+        "url": "http://d0:8000/",
+        "engine_id": "engine",
+        "dp_rank": 0,
+        "dp_size": 1,
+        "ec_zmq_addrs": ["tcp://d0:20001"],
+    }
+    server._handle(payload)
+    assert proxy.route(0).consumer_zmq == "tcp://d0:20001"
+    server._handle({**payload, "operation": "unregister"})
+    assert proxy.registry.pick(DECODE) is None
 
 
 def test_extract_mm_items_finds_media_across_messages():
