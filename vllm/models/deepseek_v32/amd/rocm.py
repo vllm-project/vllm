@@ -10,6 +10,7 @@ from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.models.deepseek_v32.attention import DeepseekV32Attention, DeepseekV32Indexer
 from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
 from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
@@ -272,7 +273,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         num_actual = attn_metadata.num_actual_tokens  # type: ignore[attr-defined]
         kv_cache = self.kv_cache
         if self._fp8_kv_needs_view:
-            kv_cache = kv_cache.view(torch.float8_e4m3fn)
+            kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
         q_for_attn = self._build_q_for_attn(ql_nope, mqa_q, num_actual)
         attn_out, _ = self.impl.forward_mqa(  # type: ignore[attr-defined]

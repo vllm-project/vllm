@@ -511,7 +511,7 @@ class DeepseekV32Attention(MLAAttention):
             return
 
         if self._fp8_kv_needs_view:
-            kv_cache = kv_cache.view(torch.float8_e4m3fn)
+            kv_cache = kv_cache.view(current_platform.fp8_dtype())
         if self._fp8_query:
             # FlashInfer sparse: single packed fp8 query.
             mqa_q_arg: torch.Tensor | tuple[torch.Tensor, torch.Tensor] = mqa_q[
