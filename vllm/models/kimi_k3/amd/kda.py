@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import replace
+
 import torch
 from einops import rearrange
 from torch import nn
@@ -38,7 +40,9 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.kimi_k3.amd.kda_metadata import KimiK3ROCmKDABackend
+from vllm.models.kimi_k3.amd.ops.kda_checkpoint import store_conv_checkpoints
 from vllm.models.kimi_k3.amd.ops.kda_chunk import (
+    KDA_CHECKPOINT_ALIGNMENT,
     is_fused_kda_chunk_supported,
 )
 from vllm.models.kimi_k3.amd.ops.kda_decode import (
@@ -55,6 +59,7 @@ from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+from vllm.v1.kv_cache_interface import MambaSpec
 
 logger = init_logger(__name__)
 
@@ -77,6 +82,26 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             self.head_dim,
             conv_kernel_size=self.conv_size,
             num_spec=self.num_spec,
+        )
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec:
+        spec = super().get_kv_cache_spec(vllm_config)
+        assert isinstance(spec, MambaSpec)
+        # Only the fused path exports the checkpoint snapshots
+        can_checkpoint = (
+            self.use_prefill_checkpoint
+            and self.use_fused_chunk
+            and self.use_safe_gate
+            and self.num_spec == 0
+        )
+        if can_checkpoint and vllm_config.cache_config.mamba_cache_mode == "align":
+            logger.info_once("Kimi-K3 KDA prefill checkpoint enabled.")
+        return replace(
+            spec,
+            num_prefill_checkpoint_blocks=int(can_checkpoint),
+            prefill_checkpoint_alignment=(
+                KDA_CHECKPOINT_ALIGNMENT if can_checkpoint else None
+            ),
         )
 
     def __init__(
@@ -225,6 +250,12 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         logger.info_once(
             "Kimi-K3 KDA prefill backend: %s",
             "fused" if self.use_fused_chunk else "triton",
+        )
+        # TODO: Remove the extra config arg once tested
+        self.use_prefill_checkpoint = (
+            additional_config.get("kda_prefill_checkpoint", True)
+            if isinstance(additional_config, dict)
+            else True
         )
 
         self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
@@ -551,6 +582,24 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     prefill_has_initial_state = has_initial_state
                     nd_tok = 0
 
+                checkpoint = getattr(m, "checkpoint", None)
+                checkpoint_state = None
+                checkpoint_offsets = None
+                checkpoint_state_indices = None
+                if checkpoint is not None:
+                    assert prefill_query_start_loc is not None
+                    checkpoint_state = recurrent_state
+                    checkpoint_offsets = checkpoint.checkpoint_offsets
+                    checkpoint_state_indices = checkpoint.state_indices
+                    store_conv_checkpoints(
+                        mixed_qkv_ns[nd_tok:],
+                        conv_state,
+                        prefill_query_start_loc,
+                        checkpoint_offsets,
+                        checkpoint_state_indices,
+                        self.conv_size - 1,
+                    )
+
                 (
                     core_attn_out_non_spec,
                     _,
@@ -572,6 +621,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     chunk_offsets=m.chunk_offsets,
                     use_fused_chunk=use_fused_chunk,
                     out=core_attn_out[:, nd_tok:num_actual_tokens] if direct else None,
+                    checkpoint_state=checkpoint_state,
+                    checkpoint_offsets=checkpoint_offsets,
+                    checkpoint_state_indices=checkpoint_state_indices,
                 )
                 # chunk_kda_prefill updates `recurrent_state` in place, so
                 # there is no final state to write back here.

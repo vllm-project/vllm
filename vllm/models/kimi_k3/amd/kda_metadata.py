@@ -7,15 +7,25 @@ The request classification and cudagraph staging intentionally mirror
 differently on device rather than on the host.
 """
 
+from dataclasses import dataclass, fields
+
 import torch
 
 from vllm.logger import init_logger
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import next_power_of_2
+from vllm.utils.math_utils import cdiv, next_power_of_2
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionBackend,
+    GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
+)
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, CommonAttentionMetadata
+from vllm.v1.kv_cache_interface import (
+    MambaSpec,
+    get_mamba_prefill_checkpoint_position,
+    is_mamba_prefill_checkpoint_valid,
 )
 
 logger = init_logger(__name__)
@@ -85,7 +95,119 @@ def prepare_chunk_metadata_device(
     return chunk_indices, chunk_offsets
 
 
+@dataclass
+class KDACheckpointMetadata:
+    checkpoint_offsets: torch.Tensor
+    state_indices: torch.Tensor
+
+
+@dataclass
+class KimiK3ROCmKDAMetadata(GDNAttentionMetadata):
+    checkpoint: KDACheckpointMetadata | None = None
+
+
 class KimiK3ROCmKDAMetadataBuilder(GDNAttentionMetadataBuilder):
+    def build(  # type: ignore[override]
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        num_accepted_tokens: torch.Tensor | None = None,
+        num_decode_draft_tokens_cpu: torch.Tensor | None = None,
+        fast_build: bool = False,
+    ) -> GDNAttentionMetadata:
+        attn_metadata = super().build(
+            common_prefix_len,
+            common_attn_metadata,
+            num_accepted_tokens,
+            num_decode_draft_tokens_cpu,
+            fast_build,
+        )
+        checkpoint_enabled = (
+            self.vllm_config.cache_config.mamba_cache_mode == "align"
+            and isinstance(self.kv_cache_spec, MambaSpec)
+            and self.kv_cache_spec.num_prefill_checkpoint_blocks > 0
+        )
+        if not checkpoint_enabled:
+            return attn_metadata
+        return KimiK3ROCmKDAMetadata(
+            **{f.name: getattr(attn_metadata, f.name) for f in fields(attn_metadata)},
+            checkpoint=self._build_checkpoint_metadata(
+                common_attn_metadata, attn_metadata
+            ),
+        )
+
+    def _build_checkpoint_metadata(
+        self,
+        m: CommonAttentionMetadata,
+        attn_metadata: GDNAttentionMetadata,
+    ) -> KDACheckpointMetadata | None:
+        if attn_metadata.num_prefills == 0:
+            return None
+        # The chunk kernel is handed the prefill tail of a decode-first batch,
+        # so these rows have to be that same contiguous group. A speculative
+        # batch interleaves its non-spec rows instead, which the layer's opt-in
+        # already refuses.
+        if attn_metadata.spec_sequence_masks is not None:
+            return None
+        assert m.seq_lens_cpu_upper_bound is not None
+        num_decodes = attn_metadata.num_decodes
+        request_rows = list(
+            range(num_decodes, num_decodes + attn_metadata.num_prefills)
+        )
+        all_query_lens = m.query_start_loc_cpu.diff().tolist()
+        query_lens = [all_query_lens[row] for row in request_rows]
+        seq_lens = m.seq_lens_cpu_upper_bound.tolist()
+        block_size = self.kv_cache_spec.block_size
+        hash_block_size = self.vllm_config.cache_config.prefix_match_unit or block_size
+        speculative_config = self.vllm_config.speculative_config
+        drop_eagle_block = (
+            speculative_config is not None and speculative_config.use_eagle_block_drop()
+        )
+        checkpoint_offsets = []
+        checkpoint_cols = []
+        for row, query_len in zip(request_rows, query_lens):
+            seq_len = seq_lens[row]
+            query_start = seq_len - query_len
+            checkpoint_position = get_mamba_prefill_checkpoint_position(
+                seq_len,
+                hash_block_size,
+                drop_eagle_block=drop_eagle_block,
+            )
+            offset = checkpoint_position - query_start
+            valid = is_mamba_prefill_checkpoint_valid(
+                query_start=query_start,
+                query_end=seq_len,
+                checkpoint_position=checkpoint_position,
+                hash_block_size=hash_block_size,
+                mamba_block_size=block_size,
+                checkpoint_alignment=self.kv_cache_spec.prefill_checkpoint_alignment,
+            )
+            checkpoint_offsets.append(offset if valid else 0)
+            checkpoint_cols.append(cdiv(seq_len, block_size) - 2 if valid else -1)
+        if not any(checkpoint_offsets):
+            return None
+
+        device = m.query_start_loc.device
+        checkpoint_offsets_tensor = async_tensor_h2d(
+            checkpoint_offsets, device, torch.int32
+        )
+        request_rows_tensor = async_tensor_h2d(request_rows, device, torch.int64)
+        checkpoint_cols_tensor = async_tensor_h2d(checkpoint_cols, device, torch.int64)
+        checkpoint_state_indices = m.block_table_tensor[
+            request_rows_tensor, checkpoint_cols_tensor
+        ].to(torch.int32)
+        # ROCm's `fused_kda_chunk` disables the export for sequences whose
+        # rows are negative
+        checkpoint_state_indices = torch.where(
+            (checkpoint_cols_tensor >= 0) & (checkpoint_state_indices != NULL_BLOCK_ID),
+            checkpoint_state_indices,
+            -1,
+        )
+        return KDACheckpointMetadata(
+            checkpoint_offsets_tensor,
+            checkpoint_state_indices,
+        )
+
     def _build_chunk_metadata(
         self,
         prefill_query_start_loc: torch.Tensor,
