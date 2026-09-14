@@ -108,8 +108,8 @@ SMOKE_PROMPTS = [
 SMOKE_SP = SamplingParams(temperature=0.0, max_tokens=32, ignore_eos=True)
 
 # Methods routed to the V2 runner, using the same target/draft pairs as the GPU
-# suite. Only dense targets are affordable here: a hybrid MTP target spends
-# ~55min JIT-compiling its FLA/Mamba Triton kernels on CPU.
+# suite. MTP needs no separate draft checkpoint: its speculator layer is
+# trained jointly with, and shipped inside, the target model's own weights.
 SMOKE_CONFIGS = [
     pytest.param(
         "meta-llama/Llama-3.2-1B-Instruct",
@@ -131,10 +131,18 @@ SMOKE_CONFIGS = [
         },
         id="dflash",
     ),
+    pytest.param(
+        "Qwen/Qwen3.5-0.8B-Base",
+        {
+            "method": "mtp",
+            "num_speculative_tokens": 3,
+        },
+        id="mtp",
+    ),
 ]
 
-# Measured 1.85 (eagle3) and 1.99 (dflash) on CPU; this floor leaves room for
-# numeric drift while still failing if speculation stops paying off.
+# Measured 1.85 (eagle3), 1.99 (dflash), 2.29 (mtp) on CPU; this floor leaves
+# room for numeric drift while still failing if speculation stops paying off.
 MIN_ACCEPTANCE_LEN = 1.5
 
 

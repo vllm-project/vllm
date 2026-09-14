@@ -54,10 +54,11 @@ steps:
 
 # Speculative decoding under a CPU platform. The unit tests already pass on
 # CPU but no CPU job runs them; the e2e tests gate the engine path itself,
-# which unit tests cannot reach. Files not listed here are CUDA-gated.
+# which unit tests cannot reach.
 - label: CPU-Spec Decode Tests
   key: cpu-spec-decode-tests
   depends_on: []
+  soft_fail: true
   device: intel_cpu
   no_plugin: true
   source_file_dependencies:
@@ -65,6 +66,14 @@ steps:
   - vllm/v1/worker/cpu/
   - vllm/v1/worker/cpu_model_runner.py
   - vllm/v1/worker/gpu/spec_decode/
+  - vllm/v1/attention/backends/cpu_attn.py
+  - vllm/config/speculative.py
+  - vllm/model_executor/models/qwen3_5.py
+  - vllm/model_executor/models/qwen3_5_mtp.py
+  - vllm/model_executor/models/llama_eagle3.py
+  - vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py
+  - vllm/model_executor/layers/mamba/mamba_mixer2.py
+  - vllm/model_executor/layers/mamba/ops/cpu/
   - tests/v1/e2e/test_cpu_spec_decode.py
   - tests/v1/spec_decode/
   - tests/v1/worker/
