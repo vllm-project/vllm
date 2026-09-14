@@ -1711,6 +1711,12 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             "Only ray DP backend supports scaling elastic EP"
         )
         parallel_config = self.vllm_config.parallel_config
+        if new_data_parallel_size > parallel_config.elastic_ep_max_dp_size:
+            raise ValueError(
+                f"Cannot scale to data_parallel_size {new_data_parallel_size}; "
+                "--elastic-ep-max-dp-size is "
+                f"{parallel_config.elastic_ep_max_dp_size}."
+            )
         num_experts = self.vllm_config.model_config.get_num_experts()
         num_physical_experts = (
             num_experts + parallel_config.eplb_config.num_redundant_experts

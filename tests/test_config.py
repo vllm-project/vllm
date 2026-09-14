@@ -19,10 +19,12 @@ import vllm.config.vllm as vllm_config_module
 import vllm.envs as envs
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
+    AttentionConfig,
     CacheConfig,
     CompilationConfig,
     DeviceConfig,
     EngramConfig,
+    HiSparseConfig,
     KernelConfig,
     KVTransferConfig,
     ModelConfig,
@@ -328,6 +330,62 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
     assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
 
 
+def test_hisparse_requires_v2_model_runner():
+    config = object.__new__(VllmConfig)
+    config.attention_config = AttentionConfig(hisparse_config=HiSparseConfig())
+
+    with patch.object(envs, "VLLM_USE_V2_MODEL_RUNNER", None):
+        assert config.use_v2_model_runner
+    with (
+        patch.object(envs, "VLLM_USE_V2_MODEL_RUNNER", False),
+        pytest.raises(ValueError, match="requires Model Runner V2"),
+    ):
+        _ = config.use_v2_model_runner
+
+
+def test_hisparse_rejects_decode_context_parallelism(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "device_count", lambda: 2)
+    with pytest.raises(ValueError, match="decode context parallelism"):
+        VllmConfig(
+            attention_config=AttentionConfig(hisparse_config=HiSparseConfig()),
+            parallel_config=ParallelConfig(
+                tensor_parallel_size=2,
+                decode_context_parallel_size=2,
+            ),
+        )
+
+
+def test_hisparse_rejects_pipeline_parallelism(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "device_count", lambda: 2)
+    with pytest.raises(ValueError, match="pipeline parallelism"):
+        VllmConfig(
+            attention_config=AttentionConfig(hisparse_config=HiSparseConfig()),
+            parallel_config=ParallelConfig(pipeline_parallel_size=2),
+        )
+
+
+def test_hisparse_rejects_disabled_hybrid_kv_cache_manager(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
+    with pytest.raises(ValueError, match="requires the hybrid KV cache manager"):
+        VllmConfig(
+            attention_config=AttentionConfig(hisparse_config=HiSparseConfig()),
+            scheduler_config=SchedulerConfig(
+                max_model_len=2048,
+                is_encoder_decoder=False,
+                disable_hybrid_kv_cache_manager=True,
+            ),
+        )
+
+
+def test_hisparse_rejects_non_cuda(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: False)
+    with pytest.raises(ValueError, match="requires NVIDIA CUDA"):
+        VllmConfig(attention_config=AttentionConfig(hisparse_config=HiSparseConfig()))
+
+
 def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
     """ROCm keeps the DSA models (DeepSeek V3.2/V4, GLM-5.2) on their compiled
     MRV1 paths and off breakable cudagraphs by default."""
@@ -349,18 +407,24 @@ def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
         assert "DeepseekV32ForCausalLM" not in breakable_architectures
         assert "DeepseekV32MTPModel" not in breakable_architectures
         assert "GlmMoeDsaForCausalLM" not in breakable_architectures
+        # V4.1 cannot torch.compile and the ROCm sparse SWA backend only
+        # supports uniform-batch CUDA graphs, so it must opt in or the
+        # default FULL_AND_PIECEWISE serve path cannot start.
+        assert "DeepseekV41ForCausalLM" in breakable_architectures
 
         # The carve-out takes effect via the runner-selection property
         # (warning_once args must be hashable for its lru_cache).
         monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
         config = SimpleNamespace(
-            model_config=SimpleNamespace(architectures=["DeepseekV32ForCausalLM"])
+            model_config=SimpleNamespace(architectures=["DeepseekV32ForCausalLM"]),
+            attention_config=AttentionConfig(),
         )
         assert VllmConfig.use_v2_model_runner.fget(config) is False
     finally:
         default_breakable_cudagraph_architectures.cache_clear()
 
 
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific test")
 @pytest.mark.parametrize(
     ("architecture", "use_v2", "mode", "expected"),
     [
@@ -434,6 +498,7 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
     )
     config = SimpleNamespace(
         model_config=model_config,
+        attention_config=AttentionConfig(),
         speculative_config=SimpleNamespace(method="mtp") if with_mtp else None,
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
         compilation_config=CompilationConfig(
@@ -946,7 +1011,10 @@ def test_models_default_to_v2_model_runner(model_config, expected, monkeypatch):
     monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
     monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
     monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
-    config = SimpleNamespace(model_config=model_config)
+    config = SimpleNamespace(
+        model_config=model_config,
+        attention_config=AttentionConfig(),
+    )
     config._get_v2_model_runner_unsupported_features = lambda: []
 
     assert VllmConfig.use_v2_model_runner.fget(config) is expected
@@ -1139,31 +1207,68 @@ def test_engram_tensor_parallel_size(dp_size: int, across_dp: bool, expected: in
     assert config.get_parallel_size(parallel) == expected
 
 
-def test_engram_rejects_elastic_cross_dp():
+@pytest.mark.parametrize("option", ["embedding_across_dp", "dp_shared_memory"])
+def test_engram_rejects_elastic_cross_dp(option):
     parallel = ParallelConfig(
         tensor_parallel_size=4,
         data_parallel_size=2,
         distributed_executor_backend="mp",
     )
     parallel.enable_elastic_ep = True
-    with pytest.raises(ValueError, match="embedding_across_dp.*elastic EP"):
-        EngramConfig(embedding_across_dp=True).verify_parallel_config(parallel)
+    with pytest.raises(ValueError, match=f"{option}.*elastic EP"):
+        EngramConfig(**{option: True}).verify_parallel_config(parallel)
 
 
-@pytest.mark.parametrize("legacy", [None, "0", "1"])
-def test_engram_cpu_offload_environment_fallback(monkeypatch, legacy):
-    """Explicit settings must override the legacy environment fallback."""
-    monkeypatch.delenv("VLLM_PLE_CPU_OFFLOAD", raising=False)
-    if legacy is not None:
-        monkeypatch.setenv("VLLM_PLE_CPU_OFFLOAD", legacy)
-    assert EngramConfig().cpu_offload == (legacy == "1")
-    assert EngramConfig(cpu_offload=False).cpu_offload is False
-    assert EngramConfig(cpu_offload=True).cpu_offload is True
+def test_engram_dp_shared_memory_requires_cpu_offload():
+    with pytest.raises(ValueError, match="requires cpu_offload"):
+        EngramConfig(cpu_offload=False, dp_shared_memory=True)
+
+
+@pytest.mark.parametrize(
+    "dp_size,load_format,multithread,error",
+    [
+        (1, "auto", False, "requires data_parallel_size > 1"),
+        (2, "dummy", False, "requires load_format"),
+        (2, "sharded_state", False, "requires load_format"),
+        (2, "auto", False, None),
+        (2, "safetensors", True, None),
+        (2, "pt", True, None),
+    ],
+)
+def test_engram_dp_shared_memory_config_validation(
+    monkeypatch, dp_size, load_format, multithread, error
+):
+    """Reject invalid shared configs before distributed init; allow threaded loads."""
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    config = cast(
+        VllmConfig,
+        SimpleNamespace(
+            model_config=SimpleNamespace(
+                architecture="DeepseekV41ForCausalLM",
+                hf_text_config=SimpleNamespace(engram_layer_ids=[1]),
+            ),
+            speculative_config=None,
+            engram_config=EngramConfig(cpu_offload=True, dp_shared_memory=True),
+            parallel_config=ParallelConfig(data_parallel_size=dp_size),
+            load_config=LoadConfig(
+                load_format=load_format,
+                model_loader_extra_config={"enable_multithread_load": multithread},
+            ),
+        ),
+    )
+    if error:
+        with pytest.raises(ValueError, match=error):
+            VllmConfig._resolve_and_verify_engram_config(config)
+    else:
+        VllmConfig._resolve_and_verify_engram_config(config)
 
 
 @pytest.mark.parametrize(
     "architecture, ple_layers, cuda, supported",
     [
+        ("DeepseekV41ForCausalLM", [1], True, True),
+        ("DeepseekV41ForCausalLM", [], True, False),
+        ("DeepseekV41ForCausalLM", [1], False, False),
         ("Qwen4ExpForCausalLM", [1], True, True),
         ("Qwen4ExpForConditionalGeneration", [1], True, True),
         ("Qwen4ExpForCausalLM", [], True, False),
@@ -1182,7 +1287,9 @@ def test_engram_model_support(monkeypatch, architecture, ple_layers, cuda, suppo
             ModelConfig,
             SimpleNamespace(
                 architecture=architecture,
-                hf_text_config=SimpleNamespace(ple_layer_ids=ple_layers),
+                hf_text_config=SimpleNamespace(
+                    ple_layer_ids=ple_layers, engram_layer_ids=ple_layers
+                ),
             ),
         )
         if architecture is not None
@@ -1195,55 +1302,73 @@ def test_engram_model_support(monkeypatch, architecture, ple_layers, cuda, suppo
         with pytest.raises(ValueError, match="requires a model with supported Engram"):
             config.verify_model_config(model)
 
+    resolved = cast(
+        VllmConfig,
+        SimpleNamespace(
+            model_config=model,
+            speculative_config=None,
+            parallel_config=ParallelConfig(),
+            load_config=LoadConfig(load_format="dummy"),
+            engram_config=None,
+        ),
+    )
+    VllmConfig._resolve_and_verify_engram_config(resolved)
+    assert (resolved.engram_config is not None) == supported
+    if supported:
+        assert resolved.engram_config.cpu_offload is True
 
-def test_engram_config_defaults_to_none(monkeypatch):
+
+@pytest.mark.parametrize(
+    ("value", "expected"), [(None, True), ("0", False), ("1", True)]
+)
+def test_engram_cpu_offload_environment_default(monkeypatch, value, expected):
     monkeypatch.delenv("VLLM_PLE_CPU_OFFLOAD", raising=False)
+    if value is not None:
+        monkeypatch.setenv("VLLM_PLE_CPU_OFFLOAD", value)
+    assert EngramConfig().cpu_offload is expected
+    assert EngramConfig(cpu_offload=False).cpu_offload is False
+    assert EngramConfig(cpu_offload=True).cpu_offload is True
+
+
+def test_engram_config_defaults_to_none():
     config = VllmConfig()
     assert config.engram_config is None
     assert config.compute_hash()
 
 
-@pytest.mark.parametrize("legacy", ["0", "1"])
-def test_engram_none_resolves_legacy_offload(monkeypatch, legacy):
-    """Legacy enablement materializes a config before model validation."""
-    monkeypatch.setenv("VLLM_PLE_CPU_OFFLOAD", legacy)
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("enable_dbo,ubatch_size", [(True, 0), (False, 2)])
+def test_deepseek_engram_rejects_microbatching(explicit, enable_dbo, ubatch_size):
+    """Reject overlapping Engram staging even without an explicit EngramConfig."""
     config = cast(
         VllmConfig,
         SimpleNamespace(
             model_config=SimpleNamespace(
-                architecture="Qwen4ExpForCausalLM",
-                hf_text_config=SimpleNamespace(ple_layer_ids=[1]),
+                architecture="DeepseekV41ForCausalLM",
+                hf_text_config=SimpleNamespace(engram_layer_ids=[1]),
             ),
             speculative_config=None,
-            engram_config=None,
-            parallel_config=ParallelConfig(),
+            engram_config=EngramConfig(cpu_offload=False) if explicit else None,
+            parallel_config=ParallelConfig(
+                enable_dbo=enable_dbo, ubatch_size=ubatch_size
+            ),
         ),
     )
-    VllmConfig._resolve_and_verify_engram_config(config)
-    if legacy == "1":
-        assert config.engram_config is not None
-        assert config.engram_config.cpu_offload is True
-    else:
-        assert config.engram_config is None
+    with pytest.raises(
+        ValueError, match="Engram does not support DBO or microbatching"
+    ):
+        VllmConfig._resolve_and_verify_engram_config(config)
 
 
-@pytest.mark.parametrize("legacy", ["0", "1"])
-def test_engram_explicit_config_requires_supported_model(monkeypatch, legacy):
+def test_engram_explicit_config_requires_supported_model():
     """Explicit all-false settings still opt into model validation."""
-    monkeypatch.setenv("VLLM_PLE_CPU_OFFLOAD", legacy)
     with pytest.raises(ValueError, match="requires a model with supported Engram"):
         VllmConfig(engram_config=EngramConfig(cpu_offload=False))
 
 
-def test_engram_legacy_offload_requires_supported_model(monkeypatch):
-    monkeypatch.setenv("VLLM_PLE_CPU_OFFLOAD", "1")
-    with pytest.raises(ValueError, match="requires a model with supported Engram"):
-        VllmConfig()
-
-
 @pytest.mark.parametrize("target_has_ple", [False, True])
-def test_engram_draft_config_validates_target(monkeypatch, target_has_ple):
+@pytest.mark.parametrize("explicit", [False, True])
+def test_engram_draft_config_validates_target(monkeypatch, target_has_ple, explicit):
     """MTP may inherit cross-DP sharding without having its own PLE layers."""
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
     target = SimpleNamespace(
@@ -1258,24 +1383,29 @@ def test_engram_draft_config_validates_target(monkeypatch, target_has_ple):
             speculative_config=SimpleNamespace(
                 draft_model_config=draft, target_model_config=target
             ),
-            engram_config=EngramConfig(embedding_across_dp=True),
+            engram_config=EngramConfig(embedding_across_dp=True) if explicit else None,
             parallel_config=ParallelConfig(),
+            load_config=LoadConfig(load_format="dummy"),
         ),
     )
-    if target_has_ple:
-        VllmConfig._resolve_and_verify_engram_config(config)
-    else:
+    if explicit and not target_has_ple:
         with pytest.raises(ValueError, match="requires a model with supported Engram"):
             VllmConfig._resolve_and_verify_engram_config(config)
+    else:
+        VllmConfig._resolve_and_verify_engram_config(config)
+        assert (config.engram_config is not None) == target_has_ple
+        if target_has_ple:
+            assert config.engram_config.cpu_offload is True
 
 
-def test_engram_hash_tracks_storage_and_sharding():
+def test_engram_hash_tracks_execution_options():
     configs = [
-        EngramConfig(cpu_offload=offload, embedding_across_dp=across_dp)
-        for offload in (False, True)
-        for across_dp in (False, True)
+        EngramConfig(cpu_offload=True),
+        EngramConfig(cpu_offload=False),
+        EngramConfig(cpu_offload=True, embedding_across_dp=True),
+        EngramConfig(cpu_offload=True, dp_shared_memory=True),
     ]
-    assert len({config.compute_hash() for config in configs}) == 4
+    assert len({config.compute_hash() for config in configs}) == len(configs)
 
 
 @pytest.mark.parametrize("port", [1, 29550, 65535])
@@ -2836,18 +2966,188 @@ def test_draft_sample_method_gumbel_is_rejected():
 def _watermarked_vllm_config() -> VllmConfig:
     config = object.__new__(VllmConfig)
     config.watermark_config = WatermarkConfig(key=42)
+    config.attention_config = AttentionConfig()
     config.speculative_config = None
     return config
 
 
-def test_gumbel_watermark_rejects_speculative_decoding():
+def test_target_only_gumbel_allows_speculative_decoding(caplog_vllm, disable_log_dedup):
     config = _watermarked_vllm_config()
-    config.speculative_config = SpeculativeConfig(
-        method="ngram",
-        num_speculative_tokens=1,
+    config.watermark_config = WatermarkConfig(
+        key=42, allow_target_only_watermarking=True
+    )
+    config.speculative_config = SimpleNamespace(
+        method="mtp",
+        draft_sample_method="probabilistic",
+        rejection_sample_method="standard",
+        parallel_drafting=False,
     )
 
-    with pytest.raises(ValueError, match="does not support speculative decoding"):
+    with caplog_vllm.at_level(logging.WARNING):
+        config._check_watermarking_unsupported()
+
+    assert "Target-only watermarking leaves accepted draft tokens" in caplog_vllm.text
+    assert "Context deduplication is not supported" in caplog_vllm.text
+
+
+def test_speculative_watermarking_without_context_dedup_does_not_warn(
+    caplog_vllm, disable_log_dedup
+):
+    config = _watermarked_vllm_config()
+    config.watermark_config = WatermarkConfig(
+        algorithm="dual_key_gumbel", key=42, deduplicate_contexts="none"
+    )
+    config.speculative_config = SimpleNamespace(
+        method="mtp",
+        draft_sample_method="probabilistic",
+        rejection_sample_method="standard",
+        parallel_drafting=False,
+    )
+
+    with caplog_vllm.at_level(logging.WARNING):
+        config._check_watermarking_unsupported()
+
+    assert "Context deduplication is not supported" not in caplog_vllm.text
+
+
+def test_gumbel_rejects_speculative_decoding_without_target_only():
+    config = _watermarked_vllm_config()
+    config.watermark_config = WatermarkConfig(
+        algorithm="gumbel", key=42, allow_target_only_watermarking=False
+    )
+    config.speculative_config = SimpleNamespace(
+        method="mtp",
+        draft_sample_method="probabilistic",
+        rejection_sample_method="standard",
+        parallel_drafting=False,
+    )
+
+    with pytest.raises(ValueError, match="'gumbel'.*allow_target_only_watermarking"):
+        config._check_watermarking_unsupported()
+
+
+def test_dual_key_gumbel_warns_that_configured_alpha_is_unused(
+    caplog_vllm, disable_log_dedup
+):
+    config = _watermarked_vllm_config()
+    config.watermark_config = WatermarkConfig(
+        algorithm="dual_key_gumbel", key=42, alpha=0.25
+    )
+    config.speculative_config = SimpleNamespace(
+        method="mtp",
+        draft_sample_method="probabilistic",
+        rejection_sample_method="standard",
+        parallel_drafting=False,
+    )
+
+    with caplog_vllm.at_level(logging.WARNING):
+        config._check_watermarking_unsupported()
+
+    assert "The configured alpha=0.25 is not used" in caplog_vllm.text
+
+
+@pytest.mark.parametrize(
+    ("alpha", "speculative"),
+    [(0.1, True), (0.25, False)],
+    ids=["default-alpha", "no-specdec"],
+)
+def test_dual_key_gumbel_alpha_warning_is_not_emitted(
+    caplog_vllm, disable_log_dedup, alpha, speculative
+):
+    config = _watermarked_vllm_config()
+    config.watermark_config = WatermarkConfig(
+        algorithm="dual_key_gumbel", key=42, alpha=alpha
+    )
+    if speculative:
+        config.speculative_config = SimpleNamespace(
+            method="mtp",
+            draft_sample_method="probabilistic",
+            rejection_sample_method="standard",
+            parallel_drafting=False,
+        )
+
+    with caplog_vllm.at_level(logging.WARNING):
+        config._check_watermarking_unsupported()
+
+    assert "is not used" not in caplog_vllm.text
+
+
+def test_dual_key_gumbel_requires_probabilistic_drafting():
+    config = _watermarked_vllm_config()
+    config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
+    config.speculative_config = SimpleNamespace(
+        method="mtp",
+        draft_sample_method="greedy",
+        rejection_sample_method="standard",
+        parallel_drafting=False,
+    )
+
+    with pytest.raises(ValueError, match="draft_sample_method='probabilistic'"):
+        config._check_watermarking_unsupported()
+
+
+@pytest.mark.parametrize("method", ["eagle", "eagle3", "mtp"])
+def test_dual_key_gumbel_supports_probabilistic_speculative_decoding(method):
+    config = _watermarked_vllm_config()
+    config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
+    config.speculative_config = SimpleNamespace(
+        method=method,
+        draft_sample_method="probabilistic",
+        rejection_sample_method="standard",
+        parallel_drafting=False,
+    )
+
+    config._check_watermarking_unsupported()
+
+
+def test_dual_key_gumbel_supports_dspark():
+    config = _watermarked_vllm_config()
+    config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
+    config.speculative_config = SimpleNamespace(
+        method="dspark",
+        draft_sample_method="probabilistic",
+        rejection_sample_method="standard",
+        parallel_drafting=True,
+    )
+
+    config._check_watermarking_unsupported()
+
+
+def test_dual_key_gumbel_rejects_non_autoregressive_speculation():
+    config = _watermarked_vllm_config()
+    config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
+    config.speculative_config = SimpleNamespace(
+        method="ngram",
+        draft_sample_method="probabilistic",
+        rejection_sample_method="standard",
+        parallel_drafting=False,
+    )
+
+    with pytest.raises(ValueError, match="autoregressive model-based"):
+        config._check_watermarking_unsupported()
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"rejection_sample_method": "synthetic"}, "rejection_sample_method"),
+        ({"rejection_sample_method": "block"}, "rejection_sample_method"),
+        ({"parallel_drafting": True}, "Parallel speculative drafting"),
+    ],
+)
+def test_dual_key_gumbel_rejects_incompatible_speculative_modes(overrides, match):
+    config = _watermarked_vllm_config()
+    config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
+    values = {
+        "method": "mtp",
+        "draft_sample_method": "probabilistic",
+        "rejection_sample_method": "standard",
+        "parallel_drafting": False,
+        **overrides,
+    }
+    config.speculative_config = SimpleNamespace(**values)
+
+    with pytest.raises(ValueError, match=match):
         config._check_watermarking_unsupported()
 
 
@@ -2864,6 +3164,12 @@ def test_gumbel_watermark_rejects_custom_sampler():
 def test_watermark_key_must_fit_in_64_bits():
     with pytest.raises(ValueError, match="64 bits"):
         WatermarkConfig(key=2**64)
+
+
+@pytest.mark.parametrize("alpha", [-0.1, 1.1])
+def test_watermark_alpha_must_be_a_probability(alpha):
+    with pytest.raises(ValidationError):
+        WatermarkConfig(key=42, algorithm="dual_key_gumbel", alpha=alpha)
 
 
 def test_unknown_watermark_prf_is_rejected():

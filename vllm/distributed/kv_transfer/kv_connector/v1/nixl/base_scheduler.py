@@ -63,6 +63,12 @@ class NixlBaseConnectorScheduler:
         kv_cache_config: "KVCacheConfig",
     ):
         self.vllm_config = vllm_config
+        parallel_config = vllm_config.parallel_config
+        # TP1 PCP+DCP exposes its DCP shards as transfer ranks.
+        self.transfer_tp_size = max(
+            parallel_config.tensor_parallel_size,
+            parallel_config.decode_context_parallel_size,
+        )
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id: EngineId = engine_id
         self.kv_cache_config = kv_cache_config
@@ -93,10 +99,7 @@ class NixlBaseConnectorScheduler:
                 for g in kv_cache_config.transfer_groups
             )
         )
-        self._has_mamba = any(
-            isinstance(g.kv_cache_spec, MambaSpec)
-            for g in kv_cache_config.transfer_groups
-        )
+        self._has_mamba = kv_cache_config.has_mamba_layers
 
         logger.info("Initializing NIXL Scheduler %s", engine_id)
         if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:

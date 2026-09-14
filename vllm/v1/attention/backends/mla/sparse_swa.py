@@ -9,13 +9,13 @@ from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.warmup.jit_warmup import (
     WarmupIntRange,
+    kernel_launcher,
     zip_inputs,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
-    kernel_launcher,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -49,7 +49,7 @@ _LAYER_TYPE_C128A = "c128a"
 # v4.1 ratio-1 / ratio-2 indexer layers: same indexer-path shape as C4A, but
 # their compressed page block is block_size // ratio, so each gets its own plan.
 # v4.1 builders classify layer types themselves (ratio 0 is SWA-only there); see
-# deepseek_v4_1/sparse_mla.py.
+# deepseek_v41/sparse_mla.py.
 _LAYER_TYPE_C1A = "c1a"
 _LAYER_TYPE_C2A = "c2a"
 
