@@ -69,7 +69,8 @@ def _get_populate_write_fn(
 
 
 class SharedOffloadRegion:
-    """Single mmap-backed memory region shared across all workers for a vLLM instance.
+    """Single mmap-backed memory region shared across all workers for a
+    vLLM instance.
 
     Workers coordinate via the filesystem: the first worker to open the file
     with O_EXCL initializes it with ftruncate; the rest open the existing file
@@ -424,14 +425,22 @@ class SharedOffloadRegion:
                 )
 
     def cleanup(self) -> None:
-        """Release resources owned by this process during normal shutdown."""
+        """Release resources owned by this process during normal shutdown.
+
+        Callers must first release every tensor and memoryview derived from this
+        region. They become invalid once this method closes the mmap.
+        """
         self._cleanup_local_resources()
         if self._is_unlink_owner:
             self._unlink_shared_path()
         self._is_unlink_owner = False
 
     def abort_startup_cleanup(self) -> None:
-        """Release local resources and remove a region from failed startup."""
+        """Release local resources and remove a region from failed startup.
+
+        Callers must first release every tensor and memoryview derived from this
+        region. They become invalid once this method closes the mmap.
+        """
         self._cleanup_local_resources()
         self._unlink_shared_path()
         self._is_unlink_owner = False

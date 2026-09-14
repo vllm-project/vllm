@@ -230,6 +230,15 @@ class HiSparseHostPool:
             self.backing, self.registered = allocate_pinned_host_pool(size)
         return self.backing
 
+    def abort_startup_cleanup(self) -> None:
+        """Drop host-tensor references before aborting shared mmap startup."""
+        self.backing = None
+        self.registered = None
+        if self.shared_region is not None:
+            region = self.shared_region
+            self.shared_region = None
+            region.abort_startup_cleanup()
+
 
 def use_shared_hisparse_host_pool(vllm_config: VllmConfig) -> bool:
     """Whether replicated MLA host KV can share one local mmap."""
@@ -345,6 +354,7 @@ def allocate_hisparse_host_pools(
             None,
         )
 
+    tp_group = get_tp_group()
     region = SharedOffloadRegion(
         engine_id=(
             f"hisparse_{vllm_config.instance_id}_"
@@ -354,10 +364,10 @@ def allocate_hisparse_host_pools(
         rank=0,
         kv_bytes_per_chunk=num_blocks * host_block_stride,
         cpu_page_size=sum(tensor_sizes),
-        barrier=get_tp_group().barrier,
+        barrier=tp_group.barrier,
         creator_memory_check=check_hisparse_host_memory,
         populate_only_on_creator=True,
-        unlink_owner=is_local_first_rank(),
+        unlink_owner=tp_group.rank_in_group == 0,
     )
     try:
         for start, end in _hisparse_registration_ranges(
