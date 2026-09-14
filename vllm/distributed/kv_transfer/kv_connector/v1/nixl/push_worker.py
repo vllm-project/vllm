@@ -166,7 +166,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """Pre-process metadata; defer NIXL ops to the writer thread."""
-        if self.pcp_rank > 0:
+        if self.pcp_rank > 0 and not self.pcp_dcp_sharded:
             return
 
         # D-side: track reqs waiting for P to push.
@@ -354,7 +354,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     def _do_send_reg_notif(self, req_id: str, reg_data: dict[str, Any]) -> None:
         engine_id = reg_data["remote_engine_id"]
         notif_msg = PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(reg_data)
-        agents = self._remote_agents.get(engine_id)
+        # _remote_agents is mutated on other threads; snapshot under the lock.
+        with self._handshake_lock:
+            agents = dict(self._remote_agents.get(engine_id) or {})
         if not agents:
             logger.error(
                 "No remote agents for engine %s; cannot send registration for %s",
