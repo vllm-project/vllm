@@ -1,0 +1,30 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# mypy: ignore-errors
+"""vLLM gRPC Server"""
+import warnings
+
+from vllm.entrypoints.launchers.grpc_server import serve_grpc, main
+
+warnings.warn(
+    "`vllm.entrypoints.grpc_server is deprecated and will likely be"
+    "unsupported in a future version. Use the corresponding function from "
+    "`vllm.entrypoints.launchers.grpc_server` instead.",
+    DeprecationWarning,
+    stacklevel=1,
+)
+
+__all__ = ["serve_grpc", "main"]
+
+
+if __name__ == "__main__":
+    warnings.warn(
+        "`python -m vllm.entrypoints.grpc_server is deprecated and "
+        "will likely be unsupported in a future version. "
+        "Please use `vllm serve <model_path> --grpc` instead.",
+        DeprecationWarning,
+        stacklevel=1,
+    )
+
+    main()
