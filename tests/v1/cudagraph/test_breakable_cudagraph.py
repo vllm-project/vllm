@@ -43,6 +43,7 @@ def test_piecewise_capture_builds_fresh_metadata_for_both_passes():
     manager._capture_descs = {CUDAGraphMode.PIECEWISE: [desc]}
     manager._graphs_captured = False
     manager.use_breakable_cg = True
+    manager.ubatch_runner = None
 
     create_calls = []
     forward_calls = []
