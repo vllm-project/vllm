@@ -51,6 +51,7 @@ from vllm.v1.outputs import (
     ECConnectorOutput,
     KVConnectorOutput,
     ModelRunnerOutput,
+    RoutedExpertsLists,
     SamplingMaskLists,
     make_empty_encoder_model_runner_output,
 )
@@ -176,6 +177,55 @@ def test_pending_hisparse_spill_keeps_scheduler_alive():
     assert scheduler.has_requests()
     pending.clear()
     assert not scheduler.has_requests()
+
+
+def test_routed_experts_prompt_start_allows_prompt_boundary():
+    scheduler = create_scheduler(block_size=4, num_blocks=8)
+    scheduler.enable_return_routed_experts = True
+    scheduler.routed_experts_mgr = Mock()
+    scheduler.routed_experts_mgr.attn_gid = 0
+    scheduler.routed_experts_mgr.routed_experts_by_slot = np.zeros(
+        (32, 2, 2), dtype=np.uint8
+    )
+    scheduler.routed_experts_mgr.get.return_value = np.empty(
+        (0, 2, 2), dtype=np.uint8
+    )
+    scheduler._re_block_ids = {}
+
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=3,
+        max_tokens=1,
+        block_size=4,
+        req_ids=["req"],
+    )
+    assert request.sampling_params is not None
+    request.sampling_params.routed_experts_prompt_start = request.num_prompt_tokens
+    scheduler.add_request(request)
+
+    scheduler_output = scheduler.schedule()
+    num_scheduled_tokens = scheduler_output.num_scheduled_tokens[request.request_id]
+    model_output = ModelRunnerOutput(
+        req_ids=[request.request_id],
+        req_id_to_index={request.request_id: 0},
+        sampled_token_ids=[[100]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+        routed_experts=RoutedExpertsLists(
+            routing_data=np.zeros((num_scheduled_tokens, 2, 2), dtype=np.uint8),
+            slot_mapping=np.arange(num_scheduled_tokens),
+        ),
+    )
+
+    engine_core_outputs = scheduler.update_from_output(scheduler_output, model_output)
+
+    scheduler.routed_experts_mgr.get.assert_called_once()
+    assert (
+        scheduler.routed_experts_mgr.get.call_args.kwargs["token_start"]
+        == request.num_prompt_tokens
+    )
+    assert engine_core_outputs[0].outputs[0].routed_experts.shape == (0, 2, 2)
 
 
 @pytest.mark.parametrize(

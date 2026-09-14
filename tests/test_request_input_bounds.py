@@ -121,6 +121,20 @@ def test_duplicate_stop_token_ids_are_deduplicated_in_order():
     assert params.all_stop_token_ids == {7, 9, 42}
 
 
+# --- Routed experts: prompt offsets stay within request bounds -------------
+
+
+def test_routed_experts_prompt_start_rejects_negative_value():
+    with pytest.raises(
+        VLLMValidationError,
+        match="routed_experts_prompt_start.*greater than or equal to 0",
+    ) as exc_info:
+        SamplingParams(routed_experts_prompt_start=-1)
+
+    assert exc_info.value.parameter == "routed_experts_prompt_start"
+    assert exc_info.value.value == -1
+
+
 # --- Bad words: dedup, and the tokenization pass is bounded ----------------
 
 

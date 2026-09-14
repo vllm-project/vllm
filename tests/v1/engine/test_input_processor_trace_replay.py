@@ -100,6 +100,25 @@ def test_trace_request_accepted_when_feature_enabled():
     _validate(enable_trace_replay=True)
 
 
+def test_routed_experts_prompt_start_accepts_prompt_boundary():
+    params = SamplingParams(routed_experts_prompt_start=3)
+
+    InputProcessor._validate_routed_experts_prompt_start(params, prompt_len=3)
+
+
+def test_routed_experts_prompt_start_rejects_past_prompt_len():
+    params = SamplingParams(routed_experts_prompt_start=4)
+
+    with pytest.raises(
+        VLLMValidationError,
+        match="cannot exceed the prompt length of 3 tokens",
+    ) as exc_info:
+        InputProcessor._validate_routed_experts_prompt_start(params, prompt_len=3)
+
+    assert exc_info.value.parameter == "routed_experts_prompt_start"
+    assert exc_info.value.value == 4
+
+
 def test_trace_replay_requires_v2_model_runner():
     config = SimpleNamespace(
         model_config=SimpleNamespace(enable_trace_replay=True),
