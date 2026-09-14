@@ -419,14 +419,22 @@ class SharedOffloadRegion:
                 )
 
     def cleanup(self) -> None:
-        """Release resources owned by this process during normal shutdown."""
+        """Release resources owned by this process during normal shutdown.
+
+        Callers must first release every tensor and memoryview derived from this
+        region. They become invalid once this method closes the mmap.
+        """
         self._cleanup_local_resources()
         if self._is_unlink_owner:
             self._unlink_shared_path()
         self._is_unlink_owner = False
 
     def abort_startup_cleanup(self) -> None:
-        """Release local resources and remove a region from failed startup."""
+        """Release local resources and remove a region from failed startup.
+
+        Callers must first release every tensor and memoryview derived from this
+        region. They become invalid once this method closes the mmap.
+        """
         self._cleanup_local_resources()
         self._unlink_shared_path()
         self._is_unlink_owner = False

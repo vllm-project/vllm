@@ -226,10 +226,13 @@ def test_hisparse_shares_host_pool_only_for_local_tp(monkeypatch):
         assert not hisparse_runtime_module.use_shared_hisparse_host_pool(config)
 
 
+@pytest.mark.parametrize(("tp_rank", "unlink_owner"), [(0, True), (1, False)])
 @pytest.mark.skip_global_cleanup
-def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
+def test_hisparse_shared_host_pool_uses_one_replicated_mmap(
+    monkeypatch, tp_rank, unlink_owner
+):
     page = mmap.PAGESIZE
-    tp_group = MagicMock()
+    tp_group = MagicMock(rank_in_group=tp_rank)
     monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", lambda: tp_group)
 
     class FakeSharedOffloadRegion:
@@ -301,6 +304,7 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
         "barrier": tp_group.barrier,
         "creator_memory_check": hisparse_runtime_module.check_hisparse_host_memory,
         "populate_only_on_creator": True,
+        "unlink_owner": unlink_owner,
     }
     assert region.view_sizes == [24, 40]
     assert [pool.shape for pool in pools] == [(24,), (40,)]
@@ -351,7 +355,7 @@ def test_shared_host_pool_tracks_successful_registrations(
         backing.data_ptr() + i * page for i in range(successful)
     ]
     assert region.is_pinned == bool(successful)
-    assert region.cleanup.call_count == int(fail_registration is not None)
+    assert region.abort_startup_cleanup.call_count == int(fail_registration is not None)
     attempts = 2 if fail_registration is None else fail_registration
     assert (
         cudart.cudaHostRegister.call_args_list
@@ -1166,6 +1170,8 @@ def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
     worker.cache_handles = []
     worker.pinned_host_pools = []
     worker.shared_host_region = object()
+    worker.host_caches = (torch.empty(1),)
+    worker.resident_caches = (torch.empty(1),)
     released = False
 
     def release_pinned_state(runtimes, pinned_host_pools, shared_host_region):
@@ -1173,6 +1179,8 @@ def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
         assert runtimes == []
         assert pinned_host_pools == []
         assert shared_host_region is worker.shared_host_region
+        assert worker.host_caches == ()
+        assert worker.resident_caches == ()
         released = True
 
     monkeypatch.setattr(
@@ -1182,6 +1190,7 @@ def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
     worker.shutdown()
 
     assert released
+    assert worker.shared_host_region is None
 
 
 class _TestReplaySSMMixer(MambaMixer2):
