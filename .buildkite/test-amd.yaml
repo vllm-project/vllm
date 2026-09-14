@@ -3217,7 +3217,7 @@ steps:
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc
   - pytest -v -s entrypoints/scale_out
 
-- label: ":amd: (MI355) Entrypoints Integration (OpenAI API chat_completion)" # TBD
+- label: ":amd: (MI355) Entrypoints Integration (OpenAI API completion)" # TBD
   timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
