@@ -4,10 +4,10 @@
 
 from typing import TYPE_CHECKING
 
-from vllm.utils.math_utils import round_up
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     get_sliding_window_size_in_chunks,
 )
+from vllm.utils.math_utils import round_up
 from vllm.v1.core.kv_cache_utils import (
     resolve_dcp_kv_block_size,
     resolve_kv_cache_block_sizes,
@@ -15,7 +15,6 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     FullAttentionSpec,
-    HiddenStateCacheSpec,
     KVCacheGroupRole,
     KVCacheSpec,
     MLAAttentionSpec,
@@ -145,20 +144,6 @@ def build_offloading_config(
         )
         for (group_id, group), tokens_per_block in zip(
             selected_groups, group_tokens_per_block
-        )
-    )
-
-    groups = tuple(
-        OffloadingGroupConfig(
-            tokens_per_block=tokens_per_block,
-            layer_names=tuple(group.layer_names),
-            sliding_window_size_in_chunks=get_sliding_window_size_in_chunks(
-                next(iter(iter_layer_specs(group.kv_cache_spec))),
-                tokens_per_block * blocks_per_chunk,
-            ),
-        )
-        for group, tokens_per_block in zip(
-            kv_cache_config.kv_cache_groups, group_tokens_per_block
         )
     )
 

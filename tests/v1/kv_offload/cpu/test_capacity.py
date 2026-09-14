@@ -44,6 +44,7 @@ def make_groups(
         OffloadingGroupConfig(
             tokens_per_block=tokens_per_block,
             layer_names=(f"layer.{index}",),
+            group_id=index,
             sliding_window_size_in_chunks=window_chunks,
         )
         for index, (tokens_per_block, window_chunks) in enumerate(shapes)

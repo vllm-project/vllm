@@ -20,11 +20,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingWorker,
 )
 from vllm.v1.kv_offload.config import OffloadingConfig, OffloadingGroupConfig
-from vllm.v1.kv_offload.cpu.common import (
-    CPU_TIER_INFO_LABELS,
-    CPUCacheTierInfo,
-    CPUOffloadingMetrics,
-)
+from vllm.v1.kv_offload.cpu.common import CPUCacheOffloadingInfo, CPUOffloadingMetrics
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
@@ -110,15 +106,6 @@ class CPUOffloadingSpec(OffloadingSpec):
         cls, extra_config: dict[str, Any]
     ) -> dict[str, OffloadingMetricMetadata]:
         definitions: dict[str, OffloadingMetricMetadata] = {
-            CPUOffloadingMetrics.CPU_CONFIG_INFO: OffloadingGaugeMetadata(
-                documentation=(
-                    "Static configuration of this engine's CPU KV offload tier: "
-                    "its size in slots and in bytes, and the KV tokens it holds "
-                    "when full, or 'None' when a slot count does not convert to "
-                    "a token count. Sum across engines for the whole instance."
-                ),
-                labelnames=CPU_TIER_INFO_LABELS,
-            ),
             CPUOffloadingMetrics.CPU_CACHE_USAGE_PERC: OffloadingGaugeMetadata(
                 documentation=(
                     "Fraction of CPU KV-cache space currently pinned by active "
@@ -166,11 +153,12 @@ class CPUOffloadingSpec(OffloadingSpec):
     def config_info_classes(
         cls, extra_config: Mapping[str, Any]
     ) -> tuple[tuple[str, type[OffloadingConfigInfo]], ...]:
-        return ()
+        """Declare the CPU cache as the only config source."""
+        return (("cpu", CPUCacheOffloadingInfo),)
 
     @override
     def config_info(self) -> tuple[OffloadingConfigInfo, ...]:
-        return ()
+        return (self.tier_info,)
 
     def __init__(self, config: OffloadingConfig):
         super().__init__(config)
@@ -220,9 +208,9 @@ class CPUOffloadingSpec(OffloadingSpec):
             "cache_policy_module_path"
         )
 
-    def _build_tier_info(self, config: OffloadingConfig) -> CPUCacheTierInfo:
+    def _build_tier_info(self, config: OffloadingConfig) -> CPUCacheOffloadingInfo:
         """Resolve the tier's static facts, including its token capacity."""
-        return CPUCacheTierInfo(
+        return CPUCacheOffloadingInfo(
             num_chunks=self.num_chunks,
             blocks_per_chunk=self.blocks_per_chunk,
             kv_bytes_per_chunk=self.kv_bytes_per_chunk,
@@ -248,7 +236,6 @@ class CPUOffloadingSpec(OffloadingSpec):
 
             self._manager = CPUOffloadingManager(
                 num_chunks=self.num_chunks,
-                tier_info=self.tier_info,
                 cache_policy=self.eviction_policy,
                 cache_policy_module_path=self.cache_policy_module_path,
                 enable_events=self.kv_events_config.enable_kv_cache_events,
