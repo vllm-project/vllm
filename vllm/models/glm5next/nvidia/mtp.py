@@ -22,8 +22,8 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2MixtureOfExperts
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.models.deepseek_v4.nvidia.model import (
-    make_deepseek_v4_expert_params_mapping,
+from vllm.models.common.deep_gemm_mega_moe import (
+    make_mega_moe_expert_params_mapping,
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -306,7 +306,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             for layer in self.model.layers.values()
         )
         if uses_mega_moe:
-            expert_params_mapping = make_deepseek_v4_expert_params_mapping(
+            expert_params_mapping = make_mega_moe_expert_params_mapping(
                 self.config.n_routed_experts,
                 ckpt_gate_proj_name="gate_proj",
                 ckpt_down_proj_name="down_proj",

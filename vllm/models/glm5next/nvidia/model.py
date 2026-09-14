@@ -77,13 +77,13 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
     sequence_parallel_chunk,
 )
+from vllm.models.common.deep_gemm_mega_moe import (
+    make_mega_moe_expert_params_mapping,
+)
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_reduce_scatter,
     sp_shard,
-)
-from vllm.models.deepseek_v4.nvidia.model import (
-    make_deepseek_v4_expert_params_mapping,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
@@ -241,7 +241,7 @@ class Glm5NextMoE(nn.Module):
 
         if self.use_mega_moe:
             assert vllm_config is not None
-            from vllm.models.deepseek_v4.nvidia.model import (
+            from vllm.models.common.deep_gemm_mega_moe import (
                 DeepGemmMegaMoEExperts,
             )
 
@@ -864,7 +864,7 @@ class Glm5NextModel(nn.Module):
                 0,
             )
             if uses_mega_moe:
-                expert_params_mapping = make_deepseek_v4_expert_params_mapping(
+                expert_params_mapping = make_mega_moe_expert_params_mapping(
                     self.config.n_routed_experts,
                     ckpt_gate_proj_name="gate_proj",
                     ckpt_down_proj_name="down_proj",

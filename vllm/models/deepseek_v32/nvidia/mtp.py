@@ -39,14 +39,14 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
 )
+from vllm.models.common.deep_gemm_mega_moe import (
+    make_mega_moe_expert_params_mapping,
+)
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
     sp_shard,
-)
-from vllm.models.deepseek_v4.nvidia.model import (
-    make_deepseek_v4_expert_params_mapping,
 )
 from vllm.models.deepseek_v32.common.kernels import fused_eh_norm
 from vllm.platforms import current_platform
@@ -374,7 +374,7 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
             for layer in self.model.layers.values()
         )
         if uses_mega_moe:
-            expert_params_mapping = make_deepseek_v4_expert_params_mapping(
+            expert_params_mapping = make_mega_moe_expert_params_mapping(
                 self.config.n_routed_experts,
                 ckpt_gate_proj_name="gate_proj",
                 ckpt_down_proj_name="down_proj",

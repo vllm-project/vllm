@@ -397,10 +397,6 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
         from vllm.utils.deep_gemm import _import_deep_gemm
 
         deep_gemm = _import_deep_gemm()
-        assert self.w13_weight is not None
-        assert self.w13_weight_scale is not None
-        assert self.w2_weight is not None
-        assert self.w2_weight_scale is not None
         w13_scale = deep_gemm.transform_sf_into_required_layout(
             self._ue8m0_uint8_to_float(self.w13_weight_scale.data).contiguous(),
             2 * self.intermediate_size,

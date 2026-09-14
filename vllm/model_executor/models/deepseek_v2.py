@@ -406,7 +406,7 @@ class DeepseekV2MoE(nn.Module):
 
         if self.use_mega_moe:
             assert vllm_config is not None
-            from vllm.models.deepseek_v4.nvidia.model import (
+            from vllm.models.common.deep_gemm_mega_moe import (
                 DeepGemmMegaMoEExperts,
             )
 

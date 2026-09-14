@@ -84,11 +84,13 @@ steps:
   - vllm/models/deepseek_v4/common/ops/
   - vllm/models/deepseek_v4/nvidia/
   - vllm/models/glm5next/nvidia/
-  - vllm/models/kimi_k3/nvidia/
   - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
+  - vllm/models/common/deep_gemm_mega_moe.py
+  - tests/models/test_deepseek_v4_mega_moe.py
   - tests/models/test_deep_gemm_mega_moe.py
   commands:
     - pytest -v -s kernels/test_fused_deepseek_v4_*.py
+    - pytest -v -s models/test_deepseek_v4_mega_moe.py
     - pytest -v -s models/test_deep_gemm_mega_moe.py
 
 # Catch-all for test files at the tests/kernels root. This job collects

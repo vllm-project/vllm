@@ -47,9 +47,6 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
-    should_ignore_layer,
-)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -163,9 +160,6 @@ class DeepseekV4MLP(nn.Module):
 
 def make_deepseek_v4_expert_params_mapping(
     num_experts: int,
-    ckpt_gate_proj_name: str = "w1",
-    ckpt_down_proj_name: str = "w2",
-    ckpt_up_proj_name: str = "w3",
 ) -> list[tuple[str, str, int, str]]:
     return [
         (
@@ -176,58 +170,15 @@ def make_deepseek_v4_expert_params_mapping(
         )
         for expert_id in range(num_experts)
         for shard_id, weight_name in [
-            ("w1", ckpt_gate_proj_name),
-            ("w2", ckpt_down_proj_name),
-            ("w3", ckpt_up_proj_name),
+            ("w1", "w1"),
+            ("w2", "w2"),
+            ("w3", "w3"),
         ]
     ]
 
 
-class DeepGemmMegaMoEExperts(nn.Module):
-    """DeepGEMM expert-parallel MegaMoE for FP4 or BF16 expert weights."""
-
-    _symm_buffer_cache: dict[
-        tuple[int, int, int, int, int, int, int, int, str], object
-    ] = {}
-
-    @staticmethod
-    def source_is_mxfp4(
-        quant_config: QuantizationConfig | None,
-        layer: nn.Module | None = None,
-        prefix: str | None = None,
-    ) -> bool:
-        if quant_config is None:
-            return False
-        if quant_config.get_name() != "compressed-tensors":
-            raise NotImplementedError(
-                "DeepGEMM MegaMoE supports unquantized BF16 or "
-                "compressed-tensors MXFP4 expert checkpoints."
-            )
-        source_format = getattr(quant_config, "quant_format", None)
-        if layer is not None and prefix is not None:
-            get_scheme_dict = getattr(quant_config, "get_scheme_dict", None)
-            expert_prefix = (
-                prefix if prefix.endswith(".experts") else f"{prefix}.experts"
-            )
-            if should_ignore_layer(
-                expert_prefix,
-                ignore=getattr(quant_config, "ignore", ()),
-                fused_mapping=getattr(quant_config, "packed_modules_mapping", {}),
-            ):
-                return False
-            if get_scheme_dict is not None:
-                scheme_dict = get_scheme_dict(layer, expert_prefix)
-                if scheme_dict is not None:
-                    source_format = scheme_dict.get("format") or source_format
-        elif source_format is None:
-            config = getattr(quant_config, "config", None) or {}
-            source_format = config.get("format")
-        if source_format != "mxfp4-pack-quantized":
-            raise NotImplementedError(
-                "DeepGEMM MegaMoE supports unquantized BF16 or "
-                "compressed-tensors MXFP4 expert checkpoints."
-            )
-        return True
+class DeepseekV4MegaMoEExperts(nn.Module):
+    _symm_buffer_cache: dict[tuple[int, int, int, int, int, int, int, int], object] = {}
 
     def __init__(
         self,
@@ -240,8 +191,6 @@ class DeepGemmMegaMoEExperts(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         num_shared_experts: int = 0,
-        mma_type: str = "fp8xfp4",
-        source_mxfp4: bool = False,
         prefix: str = "",
         num_logical_experts: int | None = None,
     ):
@@ -256,12 +205,6 @@ class DeepGemmMegaMoEExperts(nn.Module):
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.num_shared_experts = num_shared_experts
-        if mma_type not in ("fp8xfp4", "bf16xbf16"):
-            raise ValueError(f"Unsupported DeepGEMM MegaMoE MMA type: {mma_type}")
-        if source_mxfp4 and mma_type != "fp8xfp4":
-            raise ValueError("MXFP4 source weights require FP8xFP4 MegaMoE.")
-        self.mma_type = mma_type
-        self.source_mxfp4 = source_mxfp4
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
 
         self.num_logical_experts = (
@@ -271,86 +214,54 @@ class DeepGemmMegaMoEExperts(nn.Module):
         self.eplb_state = EplbLayerState()
 
         weight_attrs = {"weight_loader": self.weight_loader}
-        source_is_packed = source_mxfp4
-        if source_is_packed or mma_type == "fp8xfp4":
-            weight_dtype = torch.uint8
-        else:
-            weight_dtype = torch.bfloat16
-        uses_packed_storage = mma_type == "fp8xfp4"
-        packed_hidden_size = hidden_size // 2 if uses_packed_storage else hidden_size
-        packed_intermediate_size = (
-            intermediate_size // 2 if uses_packed_storage else intermediate_size
-        )
-        w13_weight = nn.Parameter(
+        self.w13_weight = nn.Parameter(
             torch.zeros(
                 num_local_experts,
                 2 * intermediate_size,
-                packed_hidden_size,
-                dtype=weight_dtype,
+                hidden_size // 2,
+                dtype=torch.uint8,
             ),
             requires_grad=False,
         )
-        set_weight_attrs(w13_weight, weight_attrs)
-        if source_is_packed:
-            self.register_parameter("w13_weight_packed", w13_weight)
-            self.w13_weight = None
-        else:
-            self.register_parameter("w13_weight", w13_weight)
-            self.w13_weight_packed = None
+        set_weight_attrs(self.w13_weight, weight_attrs)
 
-        if mma_type == "fp8xfp4":
-            self.w13_weight_scale = nn.Parameter(
-                torch.zeros(
-                    num_local_experts,
-                    2 * intermediate_size,
-                    hidden_size // 32,
-                    dtype=torch.uint8,
-                ),
-                requires_grad=False,
-            )
-            set_weight_attrs(self.w13_weight_scale, weight_attrs)
-            self.w13_weight_scale.quant_method = "block"
-        else:
-            self.w13_weight_scale = None
+        self.w13_weight_scale = nn.Parameter(
+            torch.zeros(
+                num_local_experts,
+                2 * intermediate_size,
+                hidden_size // 32,
+                dtype=torch.uint8,
+            ),
+            requires_grad=False,
+        )
+        set_weight_attrs(self.w13_weight_scale, weight_attrs)
+        self.w13_weight_scale.quant_method = "block"
 
-        w2_weight = nn.Parameter(
+        self.w2_weight = nn.Parameter(
             torch.zeros(
                 num_local_experts,
                 hidden_size,
-                packed_intermediate_size,
-                dtype=weight_dtype,
+                intermediate_size // 2,
+                dtype=torch.uint8,
             ),
             requires_grad=False,
         )
-        set_weight_attrs(w2_weight, weight_attrs)
-        if source_is_packed:
-            self.register_parameter("w2_weight_packed", w2_weight)
-            self.w2_weight = None
-        else:
-            self.register_parameter("w2_weight", w2_weight)
-            self.w2_weight_packed = None
+        set_weight_attrs(self.w2_weight, weight_attrs)
 
-        if mma_type == "fp8xfp4":
-            self.w2_weight_scale = nn.Parameter(
-                torch.zeros(
-                    num_local_experts,
-                    hidden_size,
-                    intermediate_size // 32,
-                    dtype=torch.uint8,
-                ),
-                requires_grad=False,
-            )
-            set_weight_attrs(self.w2_weight_scale, weight_attrs)
-            self.w2_weight_scale.quant_method = "block"
-        else:
-            self.w2_weight_scale = None
+        self.w2_weight_scale = nn.Parameter(
+            torch.zeros(
+                num_local_experts,
+                hidden_size,
+                intermediate_size // 32,
+                dtype=torch.uint8,
+            ),
+            requires_grad=False,
+        )
+        set_weight_attrs(self.w2_weight_scale, weight_attrs)
+        self.w2_weight_scale.quant_method = "block"
 
-        self._transformed_l1_weights: (
-            torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None
-        ) = None
-        self._transformed_l2_weights: (
-            torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None
-        ) = None
+        self._transformed_l1_weights: tuple[torch.Tensor, torch.Tensor] | None = None
+        self._transformed_l2_weights: tuple[torch.Tensor, torch.Tensor] | None = None
         self._transformed_shared_l1_weights: (
             tuple[torch.Tensor, torch.Tensor] | None
         ) = None
@@ -394,20 +305,19 @@ class DeepGemmMegaMoEExperts(nn.Module):
             if shard_id in ("w1", "w3"):
                 if "w13_" not in weight_name:
                     continue
-                shard_size = expert_data.shape[0] // 2
-                shard_offset = 0 if shard_id == "w1" else shard_size
-                expert_data = expert_data.narrow(0, shard_offset, shard_size)
+                shard_offset = 0 if shard_id == "w1" else self.intermediate_size
+                expert_data = expert_data.narrow(
+                    0, shard_offset, self.intermediate_size
+                )
             elif shard_id == "w2":
                 if "w2_" not in weight_name:
                     continue
             else:
                 raise ValueError(f"Unsupported expert shard id: {shard_id}")
 
-            if expert_data.numel() == 1 and loaded_weight.numel() == 1:
-                loaded_weight = loaded_weight.reshape_as(expert_data)
             if expert_data.shape != loaded_weight.shape:
                 raise ValueError(
-                    f"DeepGEMM MegaMoE expert weight shape mismatch for "
+                    f"DeepSeek V4 MegaMoE expert weight shape mismatch for "
                     f"{weight_name}: parameter shard {tuple(expert_data.shape)} "
                     f"vs checkpoint {tuple(loaded_weight.shape)}"
                 )
@@ -423,9 +333,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
         return (sf.to(torch.int32) << 23).view(torch.float32)
 
     def _check_runtime_supported(self) -> None:
-        loader_weight = self.w13_weight_packed if self.source_mxfp4 else self.w13_weight
-        assert loader_weight is not None
-        device = loader_weight.device
+        device = self.w13_weight.device
         if torch.cuda.get_device_capability(device)[0] != 10:
             raise NotImplementedError("DeepGEMM MegaMoE requires SM100 GPUs.")
         if self.hidden_size % 128 != 0 or self.intermediate_size % 128 != 0:
@@ -455,7 +363,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
         )
 
     def _finalize_shared_expert_weights(
-        self, deep_gemm, shared_experts: nn.Module
+        self, deep_gemm, shared_experts: DeepseekV4MLP
     ) -> None:
         gate_up = shared_experts.gate_up_proj
         down = shared_experts.down_proj
@@ -600,73 +508,50 @@ class DeepGemmMegaMoEExperts(nn.Module):
             1,
         ).squeeze(0)
 
-    def finalize_weights(self, shared_experts: nn.Module | None = None) -> None:
+    def finalize_weights(self, shared_experts: DeepseekV4MLP | None = None) -> None:
         from vllm.utils.deep_gemm import _import_deep_gemm
 
         deep_gemm = _import_deep_gemm()
 
         if self._transformed_l1_weights is None:
             self._check_runtime_supported()
-            if self.mma_type == "bf16xbf16":
-                assert self.w13_weight is not None
-                assert self.w2_weight is not None
-                self._transformed_l1_weights, self._transformed_l2_weights = (
-                    deep_gemm.transform_weights_for_mega_moe(
-                        self.w13_weight.data,
-                        self.w2_weight.data,
-                    )
+            # MegaMoE's 1x32 activation scales need 16-byte TMA rows, so
+            # pad each gate/up half and the down projection to a multiple of 512.
+            padded_size = (self.intermediate_size + 511) // 512 * 512
+            padding = padded_size - self.intermediate_size
+            if padding:
+                for param in (self.w13_weight, self.w13_weight_scale):
+                    gate_up = param.data.unflatten(1, (2, self.intermediate_size))
+                    param.data = torch.nn.functional.pad(
+                        gate_up, (0, 0, 0, padding)
+                    ).flatten(1, 2)
+                self.w2_weight.data = torch.nn.functional.pad(
+                    self.w2_weight.data, (0, padding // 2)
                 )
-            else:
-                w13_weight = (
-                    self.w13_weight_packed if self.source_mxfp4 else self.w13_weight
+                self.w2_weight_scale.data = torch.nn.functional.pad(
+                    self.w2_weight_scale.data, (0, padding // 32)
                 )
-                w2_weight = (
-                    self.w2_weight_packed if self.source_mxfp4 else self.w2_weight
+                self.intermediate_size = padded_size
+            w13_scale = deep_gemm.transform_sf_into_required_layout(
+                self._ue8m0_uint8_to_float(self.w13_weight_scale.data).contiguous(),
+                2 * self.intermediate_size,
+                self.hidden_size,
+                (1, 32),
+                self.num_local_experts,
+            )
+            w2_scale = deep_gemm.transform_sf_into_required_layout(
+                self._ue8m0_uint8_to_float(self.w2_weight_scale.data).contiguous(),
+                self.hidden_size,
+                self.intermediate_size,
+                (1, 32),
+                self.num_local_experts,
+            )
+            self._transformed_l1_weights, self._transformed_l2_weights = (
+                deep_gemm.transform_weights_for_mega_moe(
+                    (self.w13_weight.data.view(torch.int8).contiguous(), w13_scale),
+                    (self.w2_weight.data.view(torch.int8).contiguous(), w2_scale),
                 )
-                assert w13_weight is not None
-                assert w2_weight is not None
-                assert self.w13_weight_scale is not None
-                assert self.w2_weight_scale is not None
-                # MegaMoE's 1x32 activation scales need 16-byte TMA rows, so
-                # pad each gate/up half and the down projection to a multiple of 512.
-                padded_size = (self.intermediate_size + 511) // 512 * 512
-                padding = padded_size - self.intermediate_size
-                if padding:
-                    for param in (w13_weight, self.w13_weight_scale):
-                        gate_up = param.data.unflatten(1, (2, self.intermediate_size))
-                        param.data = torch.nn.functional.pad(
-                            gate_up, (0, 0, 0, padding)
-                        ).flatten(1, 2)
-                    w2_weight.data = torch.nn.functional.pad(
-                        w2_weight.data, (0, padding // 2)
-                    )
-                    self.w2_weight_scale.data = torch.nn.functional.pad(
-                        self.w2_weight_scale.data, (0, padding // 32)
-                    )
-                    self.intermediate_size = padded_size
-                w13_scale = deep_gemm.transform_sf_into_required_layout(
-                    self._ue8m0_uint8_to_float(self.w13_weight_scale.data).contiguous(),
-                    2 * self.intermediate_size,
-                    self.hidden_size,
-                    (1, 32),
-                    self.num_local_experts,
-                )
-                w2_scale = deep_gemm.transform_sf_into_required_layout(
-                    self._ue8m0_uint8_to_float(self.w2_weight_scale.data).contiguous(),
-                    self.hidden_size,
-                    self.intermediate_size,
-                    (1, 32),
-                    self.num_local_experts,
-                )
-                self._transformed_l1_weights, self._transformed_l2_weights = (
-                    deep_gemm.transform_weights_for_mega_moe(
-                        (
-                            w13_weight.data.view(torch.int8).contiguous(),
-                            w13_scale,
-                        ),
-                        (w2_weight.data.view(torch.int8).contiguous(), w2_scale),
-                    )
-                )
+            )
             # Drop the original loader-side parameters: the MegaMoE kernels only
             # consume the transformed views above. transform_weights_for_mega_moe
             # allocates a fresh tensor for the L1 weight (see
@@ -675,10 +560,8 @@ class DeepGemmMegaMoEExperts(nn.Module):
             # _transformed_l2_weights still holds it, so the storage stays live
             # after we drop the Parameter.
             self.w13_weight = None
-            self.w13_weight_packed = None
             self.w13_weight_scale = None
             self.w2_weight = None
-            self.w2_weight_packed = None
             self.w2_weight_scale = None
 
         if shared_experts is None or self.num_shared_experts == 0:
@@ -705,36 +588,30 @@ class DeepGemmMegaMoEExperts(nn.Module):
         deep_gemm = _import_deep_gemm()
 
         group = get_ep_group().device_group
-        assert self._transformed_l1_weights is not None
-        l1_weight = self._transformed_l1_weights
-        device = (l1_weight[0] if isinstance(l1_weight, tuple) else l1_weight).device
-        assert device.index is not None
+        device = torch.accelerator.current_device_index()
         key = (
             id(group),
-            device.index,
+            device,
             self.num_experts,
             self.max_num_tokens,
             self.top_k,
             self.hidden_size,
             self.intermediate_size,
             self.num_shared_experts if self.has_fused_shared_experts else 0,
-            self.mma_type,
         )
         symm_buffer = self._symm_buffer_cache.get(key)
         if symm_buffer is None:
-            with torch.accelerator.device_index(device.index):
-                symm_buffer = deep_gemm.get_symm_buffer_for_mega_moe(
-                    group,
-                    self.num_experts,
-                    self.max_num_tokens,
-                    self.top_k,
-                    self.hidden_size,
-                    self.intermediate_size,
-                    num_shared_experts=(
-                        self.num_shared_experts if self.has_fused_shared_experts else 0
-                    ),
-                    mma_type=self.mma_type,
-                )
+            symm_buffer = deep_gemm.get_symm_buffer_for_mega_moe(
+                group,
+                self.num_experts,
+                self.max_num_tokens,
+                self.top_k,
+                self.hidden_size,
+                self.intermediate_size,
+                num_shared_experts=(
+                    self.num_shared_experts if self.has_fused_shared_experts else 0
+                ),
+            )
             self._symm_buffer_cache[key] = symm_buffer
         return symm_buffer
 
@@ -769,21 +646,11 @@ class DeepGemmMegaMoEExperts(nn.Module):
                 return back.view(self.num_local_experts, -1)
 
             raise AssertionError(
-                f"MegaMoE EPLB {name}: non-contiguous expert tensor with "
+                f"DSv4 EPLB {name}: non-contiguous expert tensor with "
                 f"unexpected layout shape={tuple(t.shape)} "
                 f"stride={tuple(t.stride())} dtype={t.dtype}"
             )
 
-        if self.mma_type == "bf16xbf16":
-            assert isinstance(self._transformed_l1_weights, torch.Tensor)
-            assert isinstance(self._transformed_l2_weights, torch.Tensor)
-            return [
-                _to_eplb_view("l1_weight", self._transformed_l1_weights),
-                _to_eplb_view("l2_weight", self._transformed_l2_weights),
-            ]
-
-        assert isinstance(self._transformed_l1_weights, tuple)
-        assert isinstance(self._transformed_l2_weights, tuple)
         return [
             _to_eplb_view("l1_packed", self._transformed_l1_weights[0]),
             _to_eplb_view("l1_scale", self._transformed_l1_weights[1]),
@@ -809,7 +676,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
     ) -> torch.Tensor:
         if hidden_states.shape[0] > self.max_num_tokens:
             raise ValueError(
-                f"DeepGEMM MegaMoE got {hidden_states.shape[0]} tokens, "
+                f"DeepSeek V4 MegaMoE got {hidden_states.shape[0]} tokens, "
                 f"but the symmetric buffer was sized for {self.max_num_tokens}."
             )
         y = torch.empty_like(hidden_states, dtype=torch.bfloat16)
@@ -863,36 +730,23 @@ class DeepGemmMegaMoEExperts(nn.Module):
                 "fp8xfp4",
             )
 
-        if self.mma_type == "bf16xbf16":
-            symm_buffer.x[:num_tokens].copy_(hidden_states)
-            if is_padding is not None:
-                topk_ids = torch.where(is_padding.unsqueeze(1), -1, topk_ids)
-                topk_weights = torch.where(is_padding.unsqueeze(1), 0.0, topk_weights)
-            symm_buffer.topk_idx[:num_tokens].copy_(topk_ids)
-            symm_buffer.topk_weights[:num_tokens].copy_(topk_weights)
-        else:
-            prepare_megamoe_inputs(
-                hidden_states,
-                topk_weights,
-                topk_ids,
-                symm_buffer.x[:num_tokens],
-                symm_buffer.x_sf[:num_tokens],
-                symm_buffer.topk_idx[:num_tokens],
-                symm_buffer.topk_weights[:num_tokens],
-                is_padding=is_padding,
-                shared_x_sf=shared_x_sf,
-                shared_block_m=shared_block_m,
-            )
+        prepare_megamoe_inputs(
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            symm_buffer.x[:num_tokens],
+            symm_buffer.x_sf[:num_tokens],
+            symm_buffer.topk_idx[:num_tokens],
+            symm_buffer.topk_weights[:num_tokens],
+            is_padding=is_padding,
+            shared_x_sf=shared_x_sf,
+            shared_block_m=shared_block_m,
+        )
 
         assert self._transformed_l1_weights is not None
         assert self._transformed_l2_weights is not None
-        kernel = (
-            deep_gemm.bf16_mega_moe
-            if self.mma_type == "bf16xbf16"
-            else deep_gemm.fp8_fp4_mega_moe
-        )
         if self.has_fused_shared_experts:
-            kernel(
+            deep_gemm.fp8_fp4_mega_moe(
                 y,
                 self._transformed_l1_weights,
                 self._transformed_l2_weights,
@@ -903,7 +757,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
                 fast_math=fast_math,
             )
         else:
-            kernel(
+            deep_gemm.fp8_fp4_mega_moe(
                 y,
                 self._transformed_l1_weights,
                 self._transformed_l2_weights,
@@ -914,8 +768,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
         return y
 
 
-DeepGemmMegaMoEExperts.weight_loader.supports_moe_loading = True  # type: ignore[attr-defined]
-DeepseekV4MegaMoEExperts = DeepGemmMegaMoEExperts
+DeepseekV4MegaMoEExperts.weight_loader.supports_moe_loading = True  # type: ignore[attr-defined]
 
 
 class DeepseekV4MoE(nn.Module):
