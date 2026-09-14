@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, ClassVar
 import torch
 
 from vllm.logger import init_logger
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.attention.backends.mla.prefill.base import MLADimensions, MLAPrefillBackend
 
 if TYPE_CHECKING:
@@ -325,7 +326,8 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         # The actual number of partial tiles emitted by the scheduler.
         # Required for correctly sizing the (partial) logits/attn_lse buffers that we
         # reduce over.
-        num_partial_tiles = int(reduce_indptr[-1].item())
+        with gpu_sync_allowed():
+            num_partial_tiles = int(reduce_indptr[-1].item())
         assert num_partial_tiles > 0 or not need_lse
 
         return {
