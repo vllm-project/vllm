@@ -648,9 +648,13 @@ class OffloadingSpec(ABC):
         config_info() must return one entry for each entry here, in the same
         order. Return an empty tuple to emit the info metric with no labels.
 
+        The two halves run in different processes. info_labelvalues() catches
+        a disagreement about the source count at the first scheduler step, not
+        at startup.
+
         Args:
-            extra_config: The kv_connector_extra_config of this engine. It
-                names the config sources, so a spec reads its own list from it.
+            extra_config: The kv_connector_extra_config of this engine. A spec
+                may read its own source list from it.
         """
         raise NotImplementedError
 
