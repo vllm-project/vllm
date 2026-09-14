@@ -1420,6 +1420,7 @@ class VllmConfig:
                     and self.speculative_config.method not in get_args(NgramGPUTypes)
                     and self.speculative_config.method != "draft_model"
                     and self.speculative_config.method != "dspark"
+                    and self.speculative_config.method != "xpress"
                 ):
                     raise ValueError(
                         "Currently, async scheduling is only supported "
@@ -1453,6 +1454,7 @@ class VllmConfig:
                 and self.speculative_config.method not in get_args(NgramGPUTypes)
                 and self.speculative_config.method != "draft_model"
                 and self.speculative_config.method != "dspark"
+                and self.speculative_config.method != "xpress"
             ):
                 logger.warning_once(
                     "Async scheduling not supported with %s-based "
@@ -2850,6 +2852,7 @@ class VllmConfig:
                 "dflash",
                 "dspark",
                 "extract_hidden_states",
+                "xpress",
             ):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
 
@@ -2858,7 +2861,7 @@ class VllmConfig:
             # own speculators.
             if (
                 speculative_config.parallel_drafting
-                and speculative_config.method not in ("dflash", "dspark")
+                and speculative_config.method not in ("dflash", "dspark", "xpress")
             ):
                 unsupported.append("parallel drafting for EAGLE speculative decoding")
 
@@ -2893,8 +2896,10 @@ class VllmConfig:
 
         # DSpark is implemented only by the V2 GPU model runner.
         if self.speculative_config:
-            if self.speculative_config.method == "dspark":
-                unsupported.append("dspark speculative decoding")
+            if self.speculative_config.method in ("dspark", "xpress"):
+                unsupported.append(
+                    f"{self.speculative_config.method} speculative decoding"
+                )
             if self.speculative_config.enable_adaptive_verification:
                 unsupported.append("adaptive draft verification")
 
