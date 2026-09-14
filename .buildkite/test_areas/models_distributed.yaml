@@ -19,7 +19,7 @@ steps:
     case "$$BUILDKITE_PARALLEL_JOB" in
       0)
         TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
-        CUDA_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/sharded_state/test_sharded_state_loader.py -m '(not slow_test)'
+        CUDA_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/sharded_state/test_sharded_state_loader.py -m 'distributed(num_gpus=2)'
         ;;
       1)
         pytest models/transformers/test_backend.py -v -s -m 'distributed(num_gpus=2)'
@@ -64,7 +64,7 @@ steps:
         case "$$BUILDKITE_PARALLEL_JOB" in
           0)
             TARGET_TEST_SUITE=MI300 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
-            HIP_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/sharded_state/test_sharded_state_loader.py -m '(not slow_test)'
+            HIP_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/sharded_state/test_sharded_state_loader.py -m 'distributed(num_gpus=2)'
             ;;
           1)
             pytest models/transformers/test_backend.py -v -s -m 'distributed(num_gpus=2)' &&
