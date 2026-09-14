@@ -9,7 +9,6 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 
 use crate::error::{Error, Result, bail_ext_value_decode};
-use crate::protocol::dtype::{NumpyDtype, TensorDtype};
 use crate::protocol::logprobs::array::decode_array1_u32;
 use crate::protocol::tensor::WireNdArray;
 
@@ -147,6 +146,7 @@ impl WireSamplingMask {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::dtype::{NumpyDtype, TensorDtype};
     use crate::protocol::output::{
         EngineCoreOutput, RequestBatchOutputs, decode_engine_core_outputs,
     };
