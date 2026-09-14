@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, triton
@@ -190,11 +191,7 @@ def _canonical_block_sizes(
     return canonical_bytes_per_block
 
 
-# A single cudaHostRegister of 512 GiB or more fails with
-# cudaErrorMemoryAllocation no matter how much host memory is free (measured on
-# H200: 511.96 GiB registers, 512.15 GiB does not), and lower ceilings have been
-# reported for other setups. Registration time scales with the size registered,
-# so splitting one call into several costs nothing.
+# Bound registration size to avoid driver limits on large host allocations.
 MAX_HOST_REGISTER_CHUNK_BYTES = 64 * 1024**3
 
 
@@ -203,7 +200,8 @@ def pin_mmap_region(region: SharedOffloadRegion) -> None:
 
     Chunks end on block-row boundaries, which are page aligned, so neither the
     driver's page rounding nor any single block transfer straddles two
-    registrations.
+    registrations. Registration is all or nothing: a failed chunk unregisters
+    the chunks before it, so ``region.is_pinned`` means the whole region.
     """
     if not current_platform.is_cuda_alike():
         logger.info(
@@ -214,40 +212,62 @@ def pin_mmap_region(region: SharedOffloadRegion) -> None:
         return
 
     rank = region.rank
+    try:
+        cudart = CudaRTLibrary()
+    except (AssertionError, AttributeError, OSError):
+        logger.warning(
+            "Could not load the CUDA runtime for host registration on rank=%d; "
+            "the offload region stays pageable",
+            rank,
+            exc_info=True,
+        )
+        return
+
     base_ptr = region._base.data_ptr()
     total_size = region.total_size_bytes
     rows_per_chunk = max(MAX_HOST_REGISTER_CHUNK_BYTES // region._row_stride, 1)
     chunk_size = rows_per_chunk * region._row_stride
 
-    cudart = torch.cuda.cudart()
-    pinned = 0
-    while pinned < total_size:
-        size = min(chunk_size, total_size - pinned)
-        address = base_ptr + pinned
-        result = cudart.cudaHostRegister(address, size, 0)
-        if result.value != 0:
-            logger.warning(
-                "cudaHostRegister failed for rank=%d at offset %.2f GB "
-                "(code=%d) — %.2f of %.2f GB pinned, transfers through the "
-                "rest will still work but may be slower (unpinned DMA)",
-                rank,
-                pinned / 1e9,
-                result,
-                pinned / 1e9,
-                total_size / 1e9,
-            )
-            break
-        region.pinned_addresses.append(address)
-        pinned += size
-
-    if region.pinned_addresses:
-        region.is_pinned = True
-        logger.debug(
-            "cudaHostRegister rank=%d %.2f GB in %d chunk(s)",
+    # Register, drain and roll back through the same runtime handle, so a
+    # failed chunk leaves neither a pending error nor a partly pinned region.
+    addresses: list[int] = []
+    for offset in range(0, total_size, chunk_size):
+        address = base_ptr + offset
+        size = min(chunk_size, total_size - offset)
+        result = cudart.cudaHostRegister(address, size)
+        if result == 0:
+            addresses.append(address)
+            continue
+        cudart.cudaGetLastError()
+        logger.warning(
+            "cudaHostRegister failed for rank=%d at %.2f of %.2f GB (code=%d); "
+            "the offload region stays pageable",
             rank,
-            pinned / 1e9,
-            len(region.pinned_addresses),
+            offset / 1e9,
+            total_size / 1e9,
+            result,
         )
+        for registered in reversed(addresses):
+            unregister_result = cudart.cudaHostUnregister(registered)
+            if unregister_result != 0:
+                cudart.cudaGetLastError()
+                logger.warning(
+                    "cudaHostUnregister failed for rank=%d at %#x (code=%d); "
+                    "that chunk stays registered until the process exits",
+                    rank,
+                    registered,
+                    unregister_result,
+                )
+        return
+
+    region.pinned_addresses.extend(addresses)
+    region.is_pinned = True
+    logger.debug(
+        "cudaHostRegister rank=%d %.2f GB in %d chunk(s)",
+        rank,
+        total_size / 1e9,
+        len(addresses),
+    )
 
 
 def _new_descriptor_buffers(
