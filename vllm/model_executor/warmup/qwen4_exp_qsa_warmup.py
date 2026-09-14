@@ -71,6 +71,11 @@ def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
     )
     logger.info("Warmed up Qwen4Exp QSA decode kernels: %s.", profiles)
 
+    if owner.impl.use_q_token_kv_block_sparse_ts:
+        # PrimTS plans compile during graph/eager warmup; only the shared
+        # indexer uses the Triton kernels above on this backend.
+        return
+
     from vllm.models.qwen4_exp.nvidia.ops.qsa import (
         warmup_qsa_sparse_paged_attention,
     )

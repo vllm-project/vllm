@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Triton kernels for Qwen4Exp QSA sparse attention and cache updates."""
+"""Qwen4Exp weight-free QSA kernels and optional FlashInfer bridge."""
 
 from __future__ import annotations
+
+from collections.abc import Callable
+from functools import lru_cache
+from typing import Protocol, cast
 
 import torch
 
@@ -11,6 +15,32 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     triton_scalar_specialization_rep,
 )
 from vllm.triton_utils import HAS_TRITON, tl, triton
+
+_QTokenKvBlockSparseTSAPIs = tuple[
+    Callable[..., int],
+    Callable[..., int],
+    Callable[..., torch.Tensor],
+    Callable[..., "_QTokenKvBlockSparseTSPlan"],
+]
+
+
+class _QTokenKvBlockSparseTSPlan(Protocol):
+    def plan(self, *args: object, **kwargs: object) -> None: ...
+
+    def run(
+        self,
+        q: torch.Tensor,
+        paged_kv_cache: tuple[torch.Tensor, torch.Tensor],
+        block_table: torch.Tensor,
+        indexer_block_ids: torch.Tensor,
+        token_to_request: torch.Tensor,
+        query_positions: torch.Tensor,
+        *,
+        qo_indptr: torch.Tensor | None = None,
+        sm_scale: float | None = None,
+        v_scale: float | None = None,
+        out: torch.Tensor,
+    ) -> torch.Tensor: ...
 
 
 @triton.jit(do_not_specialize=["num_rows", "num_requests"])
@@ -39,6 +69,8 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     num_rows,
     num_cache_blocks,
     num_requests,
+    bmm1_scale,
+    bmm2_scale,
     TOPK: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
     PAGE_TABLE_WIDTH: tl.constexpr,
@@ -78,7 +110,7 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     max_value = tl.full((BLOCK_M,), -1.0e20, dtype=tl.float32)
     normalizer = tl.zeros((BLOCK_M,), dtype=tl.float32)
     accumulator = tl.zeros((BLOCK_M, HEAD_DIM), dtype=tl.float32)
-    softmax_scale_log2: tl.constexpr = (HEAD_DIM**-0.5) * 1.4426950408889634
+    softmax_scale_log2 = bmm1_scale * 1.4426950408889634
 
     tile_end = tl.minimum(NUM_TILES, tl.cdiv(tl.minimum(valid_count, TOPK), BLOCK_N))
 
@@ -149,6 +181,7 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
         accumulator / tl.maximum(normalizer[:, None], 1.0e-20),
         0.0,
     )
+    normalized_output *= bmm2_scale
     output_mask = head_offsets[:, None] < GROUP_SIZE
     if NUM_SPLITS == 1:
         tl.store(
@@ -446,6 +479,206 @@ def _select_config(
     return BLOCK_N, num_warps, num_tiles, num_splits
 
 
+@lru_cache
+def _q_token_kv_block_sparse_ts_apis() -> _QTokenKvBlockSparseTSAPIs | None:
+    """Resolve QToken-KvBlock-Sparse-Attention without a hard dependency.
+
+    The validator is a compatibility sentinel for the caller-owned grouping
+    contract. Workspace sizing and plan preparation perform the validation,
+    so the bridge deliberately does not add another hot-path call.
+    """
+
+    try:
+        from flashinfer.decode import (
+            QTokenKvBlockSparsePagedTSWrapper,
+            get_q_token_kv_block_sparse_workspace_size,
+            make_q_token_kv_block_sparse_qo_indptr,
+            validate_q_token_kv_block_sparse_group_size,
+        )
+    except (AttributeError, ImportError):
+        return None
+    return (
+        validate_q_token_kv_block_sparse_group_size,
+        get_q_token_kv_block_sparse_workspace_size,
+        make_q_token_kv_block_sparse_qo_indptr,
+        QTokenKvBlockSparsePagedTSWrapper,
+    )
+
+
+def has_q_token_kv_block_sparse_ts_attention() -> bool:
+    """Return whether FlashInfer exposes QToken-KvBlock-Sparse-Attention."""
+
+    return _q_token_kv_block_sparse_ts_apis() is not None
+
+
+def q_token_kv_block_sparse_ts_combined_workspace_size(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    block_topk: int,
+    *,
+    max_seq_len_kv: int,
+    o_data_type: torch.dtype | None = None,
+    qo_indptr: torch.Tensor | None = None,
+    seq_len_q: int | None = None,
+    kv_block_size: int = 4,
+) -> int:
+    """Return bytes required for a fixed or packed causal QSA launch."""
+
+    apis = _q_token_kv_block_sparse_ts_apis()
+    if apis is None:
+        raise RuntimeError(
+            "FlashInfer does not provide QToken-KvBlock-Sparse-Attention"
+        )
+    _, get_workspace_size, _, _ = apis
+    return int(
+        get_workspace_size(
+            q,
+            k_cache,
+            block_table,
+            block_topk=block_topk,
+            max_seq_len_kv=max_seq_len_kv,
+            o_data_type=o_data_type,
+            qo_indptr=qo_indptr,
+            seq_len_q=seq_len_q,
+            kv_block_size=kv_block_size,
+        )
+    )
+
+
+@lru_cache(maxsize=1)
+def _q_token_kv_block_sparse_ts_qo_indptr_cached(
+    query_starts: tuple[int, ...],
+    num_query_tokens: int,
+    group_size: int,
+) -> torch.Tensor:
+    """Build one immutable CPU route tensor shared by all QSA layers."""
+
+    apis = _q_token_kv_block_sparse_ts_apis()
+    if apis is None:
+        raise RuntimeError(
+            "FlashInfer does not provide QToken-KvBlock-Sparse-Attention"
+        )
+    _, _, make_qo_indptr, _ = apis
+    return make_qo_indptr(
+        torch.tensor(query_starts, dtype=torch.int32),
+        num_query_tokens,
+        group_size=group_size,
+        device="cpu",
+    )
+
+
+def q_token_kv_block_sparse_ts_qo_indptr(
+    query_start_offsets: tuple[int, ...] | torch.Tensor | None,
+    num_query_tokens: int,
+    group_size: int,
+) -> torch.Tensor:
+    """Return CPU packed-route offsets for a fixed maximum group size.
+
+    Prefill uses this packed-Q representation so request tails remain
+    explicit. Decode omits ``qo_indptr`` and uses the fixed five-dimensional
+    QSA layout; a runtime shape that cannot prove the configured complete MTP
+    group falls back to request-independent fixed Q1.
+    """
+
+    if query_start_offsets is None:
+        raise ValueError("packed QSA requires CPU query boundaries")
+    if isinstance(query_start_offsets, torch.Tensor):
+        query_starts = tuple(int(value) for value in query_start_offsets.tolist())
+    else:
+        query_starts = query_start_offsets
+    return _q_token_kv_block_sparse_ts_qo_indptr_cached(
+        query_starts,
+        num_query_tokens,
+        group_size,
+    )
+
+
+def q_token_kv_block_sparse_ts_prepare_attention(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    indexer_block_ids: torch.Tensor,
+    workspace_buffer: torch.Tensor,
+    out: torch.Tensor,
+    *,
+    max_seq_len_kv: int,
+    qo_indptr: torch.Tensor | None = None,
+    seq_len_q: int | None = None,
+    kv_block_size: int = 4,
+) -> object:
+    """Plan one framework-owned QToken-KvBlock-Sparse-Attention wrapper."""
+
+    apis = _q_token_kv_block_sparse_ts_apis()
+    if apis is None:
+        raise RuntimeError(
+            "FlashInfer does not provide QToken-KvBlock-Sparse-Attention"
+        )
+    _, _, _, wrapper_type = apis
+    use_packed_q = qo_indptr is not None
+    if qo_indptr is not None:
+        if seq_len_q is None:
+            raise ValueError("packed QToken attention requires seq_len_q")
+        batch_size = int(qo_indptr.numel()) - 1
+    else:
+        if q.ndim != 5:
+            raise ValueError("fixed QToken attention requires [B,Nq,G,Hq,D] q")
+        batch_size = int(q.shape[0] * q.shape[1])
+        fixed_seq_len_q = int(q.shape[2])
+        if seq_len_q is not None and seq_len_q != fixed_seq_len_q:
+            raise ValueError("fixed seq_len_q must match q.shape[2]")
+        seq_len_q = fixed_seq_len_q
+    plan = wrapper_type()
+    plan.plan(
+        batch_size,
+        seq_len_q,
+        int(q.shape[-2]),
+        int(k_cache.shape[1]),
+        int(q.shape[-1]),
+        kv_block_size,
+        int(k_cache.shape[2]),
+        int(indexer_block_ids.shape[1]),
+        max_seq_len_kv,
+        device=q.device,
+        workspace_buffer=workspace_buffer,
+        use_packed_q=use_packed_q,
+        q_data_type=q.dtype,
+        kv_data_type=k_cache.dtype,
+        o_data_type=out.dtype,
+    )
+    return plan
+
+
+def q_token_kv_block_sparse_ts_run_prepared(
+    plan: object,
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    indexer_block_ids: torch.Tensor,
+    token_to_request: torch.Tensor,
+    query_positions: torch.Tensor,
+    out: torch.Tensor,
+    *,
+    qo_indptr: torch.Tensor | None = None,
+    sm_scale: float | None = None,
+    v_scale: float | None = None,
+) -> torch.Tensor:
+    """Launch a prepared framework-owned metadata-plus-attention plan."""
+
+    return cast(_QTokenKvBlockSparseTSPlan, plan).run(
+        q,
+        (k_cache, v_cache),
+        block_table,
+        indexer_block_ids,
+        token_to_request,
+        query_positions,
+        qo_indptr=qo_indptr,
+        sm_scale=sm_scale,
+        v_scale=v_scale,
+        out=out,
+    )
+
+
 def qsa_sparse_paged_attention(
     q: torch.Tensor,
     k_cache: torch.Tensor,
@@ -455,8 +688,11 @@ def qsa_sparse_paged_attention(
     token_to_req: torch.Tensor,
     use_prefill_config: bool,
     out: torch.Tensor | None = None,
+    *,
+    bmm1_scale: float | None = None,
+    bmm2_scale: float = 1.0,
 ) -> torch.Tensor:
-    """Run sparse GQA directly over paged BF16 K/V caches.
+    """Run sparse GQA directly over paged BF16 or FP8-E4M3 K/V caches.
 
     logical_indices is the PACKED selection buffer: [rows, selection_width + 1]
     with the trailing column holding each row's valid-entry count (written by
@@ -480,7 +716,10 @@ def qsa_sparse_paged_attention(
         raise ValueError("QSA sparse attention requires valid grouped-query heads")
     head_dim = q.shape[2]
     assert head_dim >= 16 and (head_dim & (head_dim - 1)) == 0
-    assert q.dtype == k_cache.dtype == v_cache.dtype == torch.bfloat16
+    if q.dtype != k_cache.dtype or q.dtype != v_cache.dtype:
+        raise ValueError("QSA sparse attention requires matching Q/K/V dtypes")
+    if q.dtype not in (torch.bfloat16, torch.float8_e4m3fn):
+        raise ValueError("QSA sparse attention supports BF16 and FP8-E4M3 Q/K/V")
     assert logical_indices.dtype == block_table.dtype == torch.int32
     assert token_to_req.dtype == torch.int32
     assert q.device == k_cache.device == v_cache.device
@@ -494,10 +733,19 @@ def qsa_sparse_paged_attention(
         out = torch.empty_like(q)
     if out.shape != q.shape:
         raise ValueError("QSA sparse output must match its query")
-    assert out.dtype == q.dtype and out.device == q.device
+    output_dtype_supported = out.dtype == q.dtype or (
+        q.dtype == torch.float8_e4m3fn and out.dtype in (torch.float16, torch.bfloat16)
+    )
+    if not output_dtype_supported or out.device != q.device:
+        raise ValueError(
+            "QSA sparse output must use the query dtype, or FP16/BF16 for FP8 "
+            "inputs, and reside on the query device"
+        )
     assert out.stride(2) == 1
     if not q.shape[0]:
         return out
+    if bmm1_scale is None:
+        bmm1_scale = head_dim**-0.5
 
     group_size = q.shape[1] // k_cache.shape[2]
     block_m = triton.next_power_of_2(group_size)
@@ -548,6 +796,8 @@ def qsa_sparse_paged_attention(
         q.shape[0],
         k_cache.shape[0],
         block_table.shape[0],
+        bmm1_scale,
+        bmm2_scale,
         TOPK=selection_width,
         PAGE_SIZE=k_cache.shape[1],
         PAGE_TABLE_WIDTH=block_table.shape[1],
@@ -590,6 +840,10 @@ def warmup_qsa_sparse_paged_attention(
 ) -> tuple[tuple[int, int, int], ...]:
     """Compile every production-reachable split-K/merge specialization."""
 
+    if kv_cache.dtype == torch.uint8:
+        # The framework stores FP8 cache bytes; runtime attention views them
+        # as E4M3 before launching, so warmup must use that same pointer type.
+        kv_cache = kv_cache.view(torch.float8_e4m3fn)
     head_dim = kv_cache.shape[-1] // 2
     key_cache, value_cache = kv_cache.transpose(1, 2).split(head_dim, dim=-1)
     num_kv_heads = key_cache.shape[2]
@@ -609,7 +863,7 @@ def warmup_qsa_sparse_paged_attention(
     num_rows = 16
     num_requests = 16
     q_ptr = TritonWarmupTensor(
-        torch.bfloat16, shape=(num_rows, num_query_heads, head_dim)
+        key_cache.dtype, shape=(num_rows, num_query_heads, head_dim)
     )
     k_cache_ptr = TritonWarmupTensor(
         key_cache.dtype,
@@ -674,6 +928,8 @@ def warmup_qsa_sparse_paged_attention(
             num_rows,
             num_cache_blocks,
             num_requests,
+            head_dim**-0.5,
+            1.0,
             TOPK=selection_width,
             PAGE_SIZE=key_cache.shape[1],
             PAGE_TABLE_WIDTH=block_table.shape[1],
@@ -863,6 +1119,10 @@ def qsa_compress_groups_with_ratio(
 
 __all__ = [
     "qsa_compress_groups_with_ratio",
+    "q_token_kv_block_sparse_ts_combined_workspace_size",
+    "q_token_kv_block_sparse_ts_qo_indptr",
+    "q_token_kv_block_sparse_ts_prepare_attention",
+    "q_token_kv_block_sparse_ts_run_prepared",
     "qsa_sparse_paged_attention",
     "qsa_store_cache_rows",
     "warmup_qsa_sparse_paged_attention",

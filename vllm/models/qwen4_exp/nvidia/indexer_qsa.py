@@ -195,6 +195,10 @@ class QSAIndexer(nn.Module):
         """
         return self.output_width + 1
 
+    @property
+    def block_topk(self) -> int:
+        return self.token_topk // self.compress_ratio
+
     def _metadata(
         self,
     ) -> tuple[QSAForwardMetadata, QSAForwardMetadata] | None:
@@ -236,14 +240,14 @@ class QSAIndexer(nn.Module):
         projected_qk: torch.Tensor,
         positions: torch.Tensor,
         out: torch.Tensor | None = None,
+        *,
+        compact_blocks: bool = False,
     ) -> torch.Tensor:
         """Update side caches and select token indices from pre-projected Q/K.
 
-        Returns the packed buffer of shape [num_tokens, output_width + 1]:
-        the leading ``output_width`` columns are ``-1``-padded
-        request-relative token indices, and the trailing column is the row's
-        valid-entry count (the attention kernel's loop bound, never a token
-        index).
+        Compact mode returns [num_tokens, block_topk] logical block IDs for
+        PrimTS. Otherwise return [num_tokens, output_width + 1], with a
+        trailing valid-entry count after the padded token-index columns.
         """
 
         metadata = self._metadata()
@@ -251,14 +255,18 @@ class QSAIndexer(nn.Module):
             # Preserve step-0 indices when later MTP steps reuse the buffer.
             if self.skip_topk and out is not None:
                 return out
+            selection_width = (
+                self.block_topk if compact_blocks else self.packed_output_width
+            )
             result = torch.full(
-                (projected_qk.shape[0], self.packed_output_width),
+                (projected_qk.shape[0], selection_width),
                 -1,
                 dtype=torch.int32,
                 device=projected_qk.device,
             )
-            # Inert rows carry a zero valid count (empty loop bound), not -1.
-            result[:, -1] = 0
+            if not compact_blocks:
+                # Inert expanded rows carry an empty tile-loop bound.
+                result[:, -1] = 0
             if out is not None:
                 out.copy_(result)
                 return out
@@ -389,24 +397,31 @@ class QSAIndexer(nn.Module):
                 raise RuntimeError("QSA top-k reuse requires an output buffer")
             return out
 
+        selection_width = (
+            self.block_topk if compact_blocks else self.packed_output_width
+        )
         if out is None:
             out = torch.empty(
                 num_tokens,
-                self.packed_output_width,
+                selection_width,
                 dtype=torch.int32,
                 device=q.device,
             )
-        elif out.shape != (num_tokens, self.packed_output_width):
+        elif out.shape != (num_tokens, selection_width):
             raise ValueError("QSA selection output has an invalid shape")
 
         num_decode_tokens = compressed_metadata.num_decode_tokens
         decode_query_len = compressed_metadata.decode_query_len
         visible_blocks = compressed_metadata.visible_blocks[:num_tokens]
-        block_indices = torch.empty(
-            num_tokens,
-            self.token_topk // self.compress_ratio,
-            dtype=torch.int32,
-            device=q.device,
+        block_indices = (
+            out
+            if compact_blocks
+            else torch.empty(
+                num_tokens,
+                self.block_topk,
+                dtype=torch.int32,
+                device=q.device,
+            )
         )
 
         # Decode requests occupy the leading rows and share one query length.
@@ -442,14 +457,15 @@ class QSAIndexer(nn.Module):
                 block_indices[prefill_slice],
                 compressed_metadata.max_seq_len,
             )
-        expand_qsa_block_indices(
-            block_indices,
-            compressed_metadata.logical_positions[:num_tokens],
-            visible_blocks,
-            self.compress_ratio,
-            self.token_topk,
-            out,
-        )
+        if not compact_blocks:
+            expand_qsa_block_indices(
+                block_indices,
+                compressed_metadata.logical_positions[:num_tokens],
+                visible_blocks,
+                self.compress_ratio,
+                self.token_topk,
+                out,
+            )
         return out
 
 

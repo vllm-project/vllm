@@ -223,6 +223,16 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
             Qwen4ExpSparseMoeBlock,
             "mlp",
         )
+        for attention in self._iter_qsa_attentions():
+            if attention.qsa_indices_are_blocks:
+                # Expanded Triton rows already freeze the step-0 tail. Compact
+                # selections need its position to reconstruct the same tail.
+                attention.topk_query_positions_buffer = torch.full(
+                    (attention.topk_indices_buffer.shape[0],),
+                    -1,
+                    dtype=torch.int64,
+                    device=attention.topk_indices_buffer.device,
+                )
 
         self.pre_fc_norm_embedding = GemmaRMSNorm(
             self.hidden_size, eps=config.rms_norm_eps
@@ -273,6 +283,9 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
             buffer = attention.topk_indices_buffer
             selected = buffer.index_select(0, row_indices)
             buffer[:num_rows].copy_(selected)
+            positions = attention.topk_query_positions_buffer
+            if positions is not None:
+                positions[:num_rows].copy_(positions.index_select(0, row_indices))
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)

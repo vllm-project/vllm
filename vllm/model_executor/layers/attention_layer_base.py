@@ -31,6 +31,15 @@ class AttentionLayerBase(ABC):
         """
         self.kv_cache = kv_cache
 
+    def unbind_kv_cache(self) -> None:
+        """Release cache views installed by :meth:`bind_kv_cache`.
+
+        Subclasses retaining derived views or cache-dependent state should
+        override this hook and release those references before returning.
+        """
+        kv_cache = self.kv_cache
+        self.kv_cache = torch.tensor([]) if isinstance(kv_cache, torch.Tensor) else []
+
     @abstractmethod
     def get_attn_backend(self) -> type[AttentionBackend]:
         """Get the attention backend class for this layer."""
