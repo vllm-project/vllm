@@ -167,6 +167,10 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             temperature,
             seeds,
         )
+        if dummy_run:
+            # See AutoRegressiveSpeculator.propose: dummy rows must not resolve
+            # slot mappings through stale persistent block-table rows.
+            self.idx_mapping[:num_reqs].fill_(-1)
 
         num_tokens = input_batch.num_tokens
         max_query_len = input_batch.num_scheduled_tokens.max()
