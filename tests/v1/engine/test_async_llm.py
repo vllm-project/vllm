@@ -4,10 +4,11 @@
 import asyncio
 import time
 from contextlib import ExitStack
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 
+import vllm.v1.engine.async_llm as async_llm_module
 from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.config import VllmConfig
@@ -57,6 +58,49 @@ VISION_PROMPT = {
     "prompt": VISION_PROMPT_TEMPLATE,
     "multi_modal_data": {"image": ImageAsset("stop_sign").pil_image},
 }
+
+
+def test_cuda_profiler_requests_reach_engine_core(monkeypatch: pytest.MonkeyPatch):
+    vllm_config = MagicMock()
+    vllm_config.observability_config.otlp_traces_endpoint = None
+    vllm_config.scheduler_config.stream_interval = 1
+    vllm_config.profiler_config.profiler = "cuda"
+    vllm_config.profiler_config.ignore_frontend = False
+
+    renderer = MagicMock()
+    engine_core = MagicMock()
+    engine_core.profile_async = AsyncMock()
+    monkeypatch.setattr(
+        async_llm_module, "maybe_register_config_serialize_by_value", MagicMock()
+    )
+    monkeypatch.setattr(
+        async_llm_module,
+        "load_stat_logger_plugin_factories",
+        MagicMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        async_llm_module,
+        "renderer_from_config",
+        MagicMock(return_value=renderer),
+    )
+    monkeypatch.setattr(async_llm_module, "InputProcessor", MagicMock())
+    monkeypatch.setattr(async_llm_module, "OutputProcessor", MagicMock())
+    monkeypatch.setattr(
+        async_llm_module.EngineCoreClient,
+        "make_async_mp_client",
+        MagicMock(return_value=engine_core),
+    )
+
+    engine = AsyncLLM(vllm_config, MagicMock(), log_stats=False)
+
+    async def profile():
+        await engine.start_profile()
+        await engine.stop_profile()
+
+    asyncio.run(profile())
+
+    assert engine.profiler is None
+    engine_core.profile_async.assert_has_awaits([call(True, None), call(False)])
 
 
 async def generate(

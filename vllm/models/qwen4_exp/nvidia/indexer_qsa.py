@@ -88,7 +88,7 @@ def _supports_fused_pre_indexer(
 
 
 class QSAIndexer(nn.Module):
-    """Replicated Q/K projection plus paged, weight-free QSA selection.
+    """QSA projection weights, side caches, and paged, weight-free selection.
 
     ``prefix`` must be the checkpoint's indexer prefix, normally
     ``model.layers.N.self_attn.indexer``.  Consequently the trainable names are
@@ -147,6 +147,21 @@ class QSAIndexer(nn.Module):
 
         cache_config = vllm_config.cache_config
         cache_prefix = f"{prefix}." if prefix else ""
+        # Plain e4m3 without scales: Q and the compressed K are RMSNormed
+        # before quantization, and the logits kernels dot fp8 x fp8 directly.
+        self.indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(
+            "bf16"
+        )
+        if self.indexer_kv_dtype == "fp8":
+            indexer_dtype = torch.float8_e4m3fn
+        elif self.indexer_kv_dtype == "bf16":
+            indexer_dtype = torch.bfloat16
+        else:
+            raise NotImplementedError(
+                f"indexer_kv_dtype={self.indexer_kv_dtype!r} is not supported "
+                "by the Qwen4Exp QSA indexer (only 'bf16' or 'fp8')."
+            )
+        self.indexer_dtype = indexer_dtype
         self.raw_key_cache = QSAKeyStateCache(
             head_size=self.index_head_dim,
             dtype=torch.bfloat16,
@@ -158,7 +173,7 @@ class QSAIndexer(nn.Module):
         )
         self.compressed_key_cache = QSACompressedKeyCache(
             head_size=self.index_head_dim,
-            dtype=torch.bfloat16,
+            dtype=indexer_dtype,
             compress_ratio=self.compress_ratio,
             prefix=f"{cache_prefix}compressed_key_cache",
             cache_config=cache_config,
@@ -218,11 +233,11 @@ class QSAIndexer(nn.Module):
 
     def forward(
         self,
-        hidden_states: torch.Tensor,
+        projected_qk: torch.Tensor,
         positions: torch.Tensor,
         out: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Select each query row's token indices.
+        """Update side caches and select token indices from pre-projected Q/K.
 
         Returns the packed buffer of shape [num_tokens, output_width + 1]:
         the leading ``output_width`` columns are ``-1``-padded
@@ -237,10 +252,10 @@ class QSAIndexer(nn.Module):
             if self.skip_topk and out is not None:
                 return out
             result = torch.full(
-                (hidden_states.shape[0], self.packed_output_width),
+                (projected_qk.shape[0], self.packed_output_width),
                 -1,
                 dtype=torch.int32,
-                device=hidden_states.device,
+                device=projected_qk.device,
             )
             # Inert rows carry a zero valid count (empty loop bound), not -1.
             result[:, -1] = 0
@@ -258,11 +273,9 @@ class QSAIndexer(nn.Module):
 
         raw_metadata, compressed_metadata = metadata
         num_tokens = raw_metadata.num_actual_tokens
-        hidden_states = hidden_states[:num_tokens]
+        projected_qk = projected_qk[:num_tokens]
         positions = positions[..., :num_tokens]
 
-        # Q/K projection
-        projected_qk, _ = self.index_qk_proj(hidden_states)
         projected_q, raw_keys = projected_qk.split(
             (
                 self.index_n_heads * self.index_head_dim,
@@ -278,6 +291,7 @@ class QSAIndexer(nn.Module):
                 num_tokens,
                 self.index_n_heads,
                 self.index_head_dim,
+                dtype=self.indexer_dtype,
             )
             qsa_pre_indexer(
                 projected_q,
@@ -315,6 +329,7 @@ class QSAIndexer(nn.Module):
                 self.q_layernorm.variance_epsilon,
             ).reshape_as(q)
             q = apply_qsa_rope(self.rotary_emb, positions, q)
+            q = q.to(self.indexer_dtype)
 
             raw_key_cache = raw_key_state_cache.key_cache
             rope_position_cache = raw_key_state_cache.rope_position_cache
