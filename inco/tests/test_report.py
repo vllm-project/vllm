@@ -9,6 +9,7 @@ import pytest
 from bench.report import (
     CSV_COLUMNS,
     integrity_warnings,
+    is_steep,
     interactivity_at_load,
     markdown_table,
     pareto_frontier,
@@ -153,6 +154,44 @@ class TestPlot:
 
         monkeypatch.setattr(builtins, "__import__", fail_matplotlib)
         assert plot_pareto({"baseline": curve}, tmp_path / "none.png") is None
+
+
+class TestLabelPlacement:
+    """Overlaid sweeps trace nearly the same curve and meet outright at low
+    concurrency, so `c=` labels have to be kept off each other and off the
+    line -- which side is free depends on the local slope."""
+
+    SPANS = (100.0, 5000.0)
+
+    def test_the_saturated_tail_reads_as_vertical(self):
+        """Throughput climbing while interactivity barely moves."""
+        xs, ys = [40.0, 38.0, 37.0], [3000.0, 4000.0, 5000.0]
+        assert is_steep(xs, ys, 1, self.SPANS)
+
+    def test_the_low_load_end_reads_as_horizontal(self):
+        """Interactivity collapsing for little throughput."""
+        xs, ys = [95.0, 88.0, 70.0], [95.0, 700.0, 900.0]
+        assert not is_steep(xs, ys, 1, self.SPANS)
+
+    def test_slope_is_judged_in_axis_fractions_not_raw_units(self):
+        """tok/s/gpu is ~50x tok/s/user, so raw units call everything steep."""
+        xs, ys = [95.0, 88.0, 70.0], [95.0, 700.0, 900.0]
+        assert is_steep(xs, ys, 1, (100.0, 100.0))
+
+    def test_an_endpoint_uses_the_segment_it_has(self):
+        xs, ys = [40.0, 38.0, 37.0], [3000.0, 4000.0, 5000.0]
+        assert is_steep(xs, ys, 0, self.SPANS)
+        assert is_steep(xs, ys, len(xs) - 1, self.SPANS)
+
+    def test_the_two_sides_never_coincide(self):
+        from bench.report import _label_placement
+
+        placements = {
+            _label_placement(steep, outward)
+            for steep in (True, False)
+            for outward in (True, False)
+        }
+        assert len(placements) == 4
 
 
 class TestIntegrityWarnings:

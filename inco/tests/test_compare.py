@@ -123,3 +123,32 @@ class TestMain:
         assert (out_dir / "baseline-vs-opt.md").exists()
         assert (out_dir / "baseline-vs-opt.csv").exists()
         assert "Throughput at interactivity SLO" in capsys.readouterr().out
+
+    def test_names_retitle_the_report_without_renaming_the_files(
+        self, tmp_path, run_tree, export_factory, capsys
+    ):
+        """Run labels are directory names; the write-up wants readable ones."""
+        for label in ("baseline", "opt"):
+            run_tree(label, {c: export_factory() for c in (1, 128)})
+        rc = main(
+            [
+                "baseline", "opt",
+                "--artifact-root", str(tmp_path),
+                "--names", "unpruned,REAP 50% pruned",
+            ]
+        )
+        assert rc == 0
+        assert (tmp_path / "comparisons" / "baseline-vs-opt.md").exists()
+        out = capsys.readouterr().out
+        assert "# unpruned vs REAP 50% pruned" in out
+        assert "REAP 50% pruned tok/s/gpu" in out
+
+    def test_a_name_per_run_is_required(
+        self, tmp_path, run_tree, export_factory, capsys
+    ):
+        for label in ("baseline", "opt"):
+            run_tree(label, {c: export_factory() for c in (1, 128)})
+        rc = main(
+            ["baseline", "opt", "--artifact-root", str(tmp_path), "--names", "only-one"]
+        )
+        assert rc == 2
