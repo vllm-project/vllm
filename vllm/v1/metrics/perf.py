@@ -11,7 +11,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import prometheus_client
 import torch
@@ -811,6 +811,102 @@ class MLAAttentionMetrics(ComponentMetrics):
 #### Ffn ####
 
 
+def estimate_num_activated_experts(
+    num_tokens: int,
+    top_k: int,
+    num_experts: int,
+    num_observed_activated_experts: int | None = None,
+) -> int:
+    """Estimate the number of *distinct* MoE experts activated in a step.
+
+    This backs the Sparse Memory Bandwidth Utilization (S-MBU) style
+    accounting of MoE expert-weight bytes: the number of bytes that must be
+    streamed from memory for routed-expert weights is proportional to how
+    many *distinct* experts were touched, not to the (token, expert-slot)
+    activation count `num_tokens * top_k` itself.
+
+    Top-k routing selects `top_k` DISTINCT experts per token (a token never
+    routes to the same expert twice), so this is not simply `num_tokens *
+    top_k` independent draws. Under a uniform-routing assumption, the
+    probability a specific expert is *not* among a given token's `top_k`
+    picks is `1 - top_k / num_experts`; assuming tokens route independently
+    of one another, the probability that expert is untouched across all
+    `num_tokens` tokens is `(1 - top_k / num_experts) ** num_tokens`. Summed
+    over the `num_experts` experts (linearity of expectation):
+
+        E[num_distinct] = num_experts * (1 - (1 - top_k / num_experts) ** num_tokens)
+
+    This is the expected number of distinct experts under a
+    uniform-routing assumption with per-token distinct top-k picks -- a
+    modeled estimate. MoE-CAP's S-MBU indicator sum (arXiv:2412.07067) is
+    the observed quantity it approximates; real per-step routing telemetry
+    (see `num_observed_activated_experts` below) is exact and always
+    preferred when available.
+
+    Args:
+        num_tokens: Number of tokens in the step (already adjusted for
+            expert-parallel sharding by the caller if applicable).
+        top_k: Number of distinct experts routed to per token (i.e.
+            `num_experts_per_tok`).
+        num_experts: Number of routed experts the tokens draw from
+            (already adjusted for expert-parallel sharding by the caller
+            if applicable).
+        num_observed_activated_experts: If real per-step routing telemetry
+            is available (e.g. from an EPLB expert-load window, see
+            `vllm/distributed/eplb/eplb_state.py`, or a lightweight
+            per-step FusedMoE activation counter), pass the true observed
+            number of distinct activated experts here; it takes priority
+            over the analytic estimate below and is the exact quantity
+            MoE-CAP's S-MBU indicator sum reduces to. No such telemetry is
+            wired into the V1 metrics path today, so no current caller
+            passes it; it exists as an extension point for a future patch.
+            The value is clipped to `[0, num_experts]` defensively.
+
+    Returns:
+        The (estimated, or observed if provided) number of distinct
+        experts activated this step, in `[0, num_experts]`.
+
+    Properties of the estimate (absent an observed override):
+        - Exact at `num_tokens == 1`: returns exactly `min(top_k,
+          num_experts)` -- a single token's `top_k` picks are distinct by
+          construction, so there is no estimation error at T=1.
+        - Always `<= min(num_tokens * top_k, num_experts)`, the naive
+          "every activation is a never-before-seen expert until all are
+          exhausted" upper bound this function replaces (see FIXME
+          history on `FfnMetrics`).
+        - Always `>=` the old slot-independent estimate that ignores
+          within-token distinctness (treats each of the `num_tokens *
+          top_k` activations as an independent uniform draw with
+          replacement over `num_experts`): forcing `top_k` picks per token
+          to be distinct can only raise the expected number of distinct
+          experts touched relative to that looser model.
+
+    Note on routing skew:
+        This estimate assumes uniform routing. Routing skew (hot experts)
+        typically reduces the true distinct-expert count below the
+        uniform expectation, though strongly load-balanced routing can
+        slightly exceed it -- real telemetry (the
+        `num_observed_activated_experts` override above) captures either
+        case.
+    """
+    if top_k <= 0 or num_tokens <= 0 or num_experts <= 0:
+        return 0
+
+    if num_observed_activated_experts is not None:
+        return max(0, min(num_observed_activated_experts, num_experts))
+
+    if top_k >= num_experts:
+        # Every token's top-k picks already span every expert.
+        return num_experts
+
+    # (1 - top_k/E) ** num_tokens underflows gracefully to 0.0 for large
+    # num_tokens, so this saturates to num_experts without any
+    # special-casing.
+    prob_expert_untouched = (1 - top_k / num_experts) ** num_tokens
+    expected_distinct = num_experts * (1 - prob_expert_untouched)
+    return round(expected_distinct)
+
+
 class BaseFfnConfigParser(Parser):
     """
     Parses FFN and MoE configuration.
@@ -939,6 +1035,21 @@ class FfnQuantizationConfigParser(Parser):
         return args
 
 
+class FfnMoeActivationEstimatorParser(Parser):
+    """
+    Parses the MoE activated-experts estimation mode used for MBU/MFU
+    weight-byte accounting.
+
+    Provides: moe_activated_experts_estimator
+    """
+
+    def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
+        args.moe_activated_experts_estimator = (
+            vllm_config.observability_config.mfu_moe_activated_experts_estimator
+        )
+        return args
+
+
 class FfnMetrics(ComponentMetrics):
     # From BaseConfigParser
     num_hidden_layers: int = Field(..., gt=0)
@@ -959,6 +1070,11 @@ class FfnMetrics(ComponentMetrics):
 
     # From BaseConfigParser, can be overridden InterleaveMoeLayerStep or MoeLayerFreq
     num_moe_layers: int = Field(..., ge=0)
+
+    # From FfnMoeActivationEstimatorParser
+    moe_activated_experts_estimator: Literal["expected_uniform", "upper_bound"] = Field(
+        "expected_uniform"
+    )
 
     # FIXME: might have to make this more granular
     # (i.e. dense_weight_byte_size, moe_routed_weight_byte_size,
@@ -991,6 +1107,7 @@ class FfnMetrics(ComponentMetrics):
             InterleaveMoeLayerStepParser(),
             MoeLayerFreqParser(),
             FfnQuantizationConfigParser(),
+            FfnMoeActivationEstimatorParser(),
         )
 
     def get_num_flops_breakdown(
@@ -1087,8 +1204,35 @@ class FfnMetrics(ComponentMetrics):
         if Lm:
             # MoE routed expert reads
             if E:
-                # FIXME: Assume perfect load balancing for now.
-                num_activated_experts = min(num_activated_tokens, num_experts)
+                # Number of *distinct* routed experts whose weights must be
+                # streamed from memory this step. `min(num_activated_tokens,
+                # num_experts)` (the historical "assume perfect load
+                # balancing" upper bound) overestimates this whenever
+                # num_activated_tokens exceeds num_experts, since it
+                # implicitly assumes every (token, expert-slot) activation
+                # lands on a never-before-seen expert until all experts are
+                # exhausted. See `estimate_num_activated_experts()` for the
+                # S-MBU-style (sparsity-aware) estimate used by default --
+                # it accounts for top-k routing selecting `E` DISTINCT
+                # experts per token, not `T * E` independent slot draws; set
+                # `moe_activated_experts_estimator="upper_bound"` via
+                # `--mfu-moe-activated-experts-estimator` to restore the
+                # legacy behavior.
+                if self.moe_activated_experts_estimator == "upper_bound":
+                    num_activated_experts = min(num_activated_tokens, num_experts)
+                else:
+                    # Pass the token count (T) and experts-per-token (E)
+                    # factors separately -- rather than their pre-multiplied
+                    # product `num_activated_tokens` -- since the estimator
+                    # needs per-token top-k distinctness, not a flattened
+                    # (token, expert-slot) count. T and E are the un-EP-
+                    # scaled per-step values; EP sharding is applied only to
+                    # `num_experts` above, mirroring the pre-existing
+                    # per-GPU-local-expert-pool approximation also used by
+                    # the legacy `upper_bound` path.
+                    num_activated_experts = estimate_num_activated_experts(
+                        T, E, num_experts
+                    )
 
                 read_bytes["routed_up_gate_input"] = int(
                     num_activated_tokens * D * self.activation_byte_size * Lm
