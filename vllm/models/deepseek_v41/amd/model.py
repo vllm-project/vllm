@@ -54,8 +54,8 @@ from vllm.models.common.ops.sequence_parallel import (
 from vllm.models.deepseek_v4.amd.model import (
     DeepseekV4MoE as DeepseekV4MoEBase,
 )
-from vllm.models.deepseek_v4_1.amd.rocm import DeepseekV41ROCMAiterMLAAttention
-from vllm.models.deepseek_v4_1.attention import DeepseekV4Attention
+from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
+from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
