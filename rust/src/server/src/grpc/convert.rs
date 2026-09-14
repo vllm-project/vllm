@@ -191,6 +191,7 @@ fn build_sampling_params(
 
     // ResponseOptions → logprobs
     if let Some(r) = response {
+        params.routed_experts_prompt_start = r.routed_experts_prompt_start;
         if r.output_logprobs {
             let (count, token_ids) = candidate_logprob_spec(r.output_candidates.as_ref());
             params.logprobs = count;
@@ -315,6 +316,13 @@ pub fn to_sequence_output(
         _ => (vec![], vec![], vec![]),
     };
 
+    let routed_experts =
+        finished
+            .and_then(|finished| finished.routed_experts.as_ref())
+            .map(|data| pb::OpaqueData {
+                data: data.as_bytes().to_vec(),
+            });
+
     Ok(pb::SequenceOutput {
         index: 0, // TODO: multi-sequence (n > 1) not supported
         text: if opts.output_text {
@@ -332,6 +340,7 @@ pub fn to_sequence_output(
         ranks: rank_values,
         candidate_tokens: candidates,
         finish_info,
+        routed_experts,
     })
 }
 
@@ -521,6 +530,8 @@ impl ResponseOpts {
 
 #[cfg(test)]
 mod tests {
+    use prost::Message;
+    use vllm_engine_core_client::protocol::opaque_data::OpaqueData;
     use vllm_engine_core_client::protocol::output::StopReason;
     use vllm_text::{
         FinishReason, Finished, Prompt, SamplingHints, SamplingLimits, lower_sampling_params,
@@ -688,6 +699,19 @@ mod tests {
         assert!(matches!(text.prompt, Prompt::Text(s) if s == "hi"));
     }
 
+    #[test]
+    fn routed_experts_prompt_start_is_forwarded_to_sampling_params() {
+        let req = pb::GenerateRequest {
+            response: Some(pb::ResponseOptions {
+                routed_experts_prompt_start: Some(3),
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+        assert_eq!(text.sampling_params.routed_experts_prompt_start, Some(3));
+    }
+
     fn finished(reason: FinishReason) -> Finished {
         Finished {
             usage: vllm_llm::TokenUsage {
@@ -698,6 +722,7 @@ mod tests {
             finish_reason: reason,
             kv_transfer_params: None,
             ec_transfer_params: None,
+            routed_experts: None,
         }
     }
 
@@ -781,5 +806,38 @@ mod tests {
         let finish = out.finish_info.expect("finish_info should be present");
         assert_eq!(finish.finish_reason, PbFinishReason::Stop as i32);
         assert_eq!(finish.stop_reason, Some(PbStopReason::EosTokenId(30)));
+    }
+
+    #[test]
+    fn sequence_output_only_carries_routed_experts_on_terminal_output() {
+        let mut fin = finished(FinishReason::Length);
+        let expected = vec![1, 2, 3, 4];
+        fin.routed_experts = Some(OpaqueData::new(expected.clone()));
+
+        let terminal = to_sequence_output("", &[10], None, Some(&fin), &ResponseOpts::default())
+            .expect("terminal output");
+        let intermediate = to_sequence_output("", &[9], None, None, &ResponseOpts::default())
+            .expect("intermediate output");
+
+        assert_eq!(
+            terminal.routed_experts,
+            Some(pb::OpaqueData { data: expected })
+        );
+        assert_eq!(intermediate.routed_experts, None);
+    }
+
+    #[test]
+    fn routed_experts_fields_keep_proto_tag_nine() {
+        let request = pb::ResponseOptions {
+            routed_experts_prompt_start: Some(3),
+            ..Default::default()
+        };
+        let response = pb::SequenceOutput {
+            routed_experts: Some(pb::OpaqueData { data: vec![7] }),
+            ..Default::default()
+        };
+
+        assert_eq!(request.encode_to_vec(), vec![0x48, 0x03]);
+        assert_eq!(response.encode_to_vec(), vec![0x4a, 0x03, 0x0a, 0x01, 0x07]);
     }
 }
