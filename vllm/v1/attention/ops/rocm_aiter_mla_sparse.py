@@ -183,6 +183,76 @@ def _paged_mqa_capture_graph_mode_key() -> str:
     return "paged_mqa_capture"
 
 
+def _validate_paged_mqa_length_semantics(
+    *,
+    compressed_max_model_len: int,
+    semantic_uncompressed_max_model_len: int,
+    semantic_compress_ratio: int,
+    compressed_context_lens: torch.Tensor | None,
+    uncompressed_context_lens: torch.Tensor | None,
+    where: str,
+) -> None:
+    if semantic_uncompressed_max_model_len <= 0 or semantic_compress_ratio <= 1:
+        return
+
+    expected_compressed_max_model_len = (
+        semantic_uncompressed_max_model_len // semantic_compress_ratio
+    )
+    capture_active = _paged_mqa_capture_active()
+
+    payload: dict[str, object] = {
+        "where": where,
+        "capture_active": capture_active,
+        "semantic_uncompressed_max_model_len": semantic_uncompressed_max_model_len,
+        "semantic_compress_ratio": semantic_compress_ratio,
+        "expected_compressed_max_model_len": expected_compressed_max_model_len,
+        "observed_compressed_max_model_len": compressed_max_model_len,
+    }
+    if capture_active:
+        if compressed_context_lens is not None and compressed_context_lens.numel() > 0:
+            payload["deferred_max_context_len_compressed_check"] = True
+        if (
+            uncompressed_context_lens is not None
+            and uncompressed_context_lens.numel() > 0
+        ):
+            payload["deferred_max_context_len_uncompressed_check"] = True
+    else:
+        if compressed_context_lens is not None and compressed_context_lens.numel() > 0:
+            payload["max_context_len_compressed"] = int(
+                compressed_context_lens.max().item()
+            )
+        if (
+            uncompressed_context_lens is not None
+            and uncompressed_context_lens.numel() > 0
+        ):
+            payload["max_context_len_uncompressed"] = int(
+                uncompressed_context_lens.max().item()
+            )
+    _paged_mqa_log("PAGED_MQA_SEMANTICS", payload)
+
+    if compressed_max_model_len != expected_compressed_max_model_len:
+        raise RuntimeError(
+            "paged-MQA max_model_len semantic mismatch: "
+            f"observed compressed={compressed_max_model_len}, "
+            f"expected compressed={expected_compressed_max_model_len}, "
+            f"uncompressed={semantic_uncompressed_max_model_len}, "
+            f"compress_ratio={semantic_compress_ratio}"
+        )
+
+    if (
+        not capture_active
+        and compressed_context_lens is not None
+        and compressed_context_lens.numel() > 0
+    ):
+        max_context_len = int(compressed_context_lens.max().item())
+        if max_context_len > compressed_max_model_len:
+            raise RuntimeError(
+                "paged-MQA compressed context exceeds compressed max_model_len: "
+                f"{max_context_len} > {compressed_max_model_len} "
+                f"(where={where})"
+            )
+
+
 def validate_paged_mqa_out_handle(handle: PagedMQAOutHandle) -> None:
     t = handle.tensor
     expected_nbytes = (
@@ -987,6 +1057,8 @@ def rocm_aiter_sparse_attn_indexer_fake(
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor | None,
     skip_k_cache_insert: bool = False,
+    semantic_uncompressed_max_model_len: int = 0,
+    semantic_compress_ratio: int = 1,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -1007,6 +1079,8 @@ def rocm_aiter_sparse_attn_indexer(
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor | None,
     skip_k_cache_insert: bool = False,
+    semantic_uncompressed_max_model_len: int = 0,
+    semantic_compress_ratio: int = 1,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
@@ -1206,6 +1280,14 @@ def rocm_aiter_sparse_attn_indexer(
         paged_mqa_seq_lens, paged_mqa_block_table = _c2_get_persistent_paged_mqa_inputs(
             context_lens=decode_metadata.seq_lens,
             block_tables=decode_metadata.block_table,
+        )
+        _validate_paged_mqa_length_semantics(
+            compressed_max_model_len=int(max_model_len),
+            semantic_uncompressed_max_model_len=semantic_uncompressed_max_model_len,
+            semantic_compress_ratio=semantic_compress_ratio,
+            compressed_context_lens=decode_metadata.seq_lens,
+            uncompressed_context_lens=decode_metadata.global_seq_lens,
+            where="decode_runtime",
         )
         selected_graph_size = _selected_paged_mqa_graph_size()
         graph_rows = _paged_mqa_graph_rows(
