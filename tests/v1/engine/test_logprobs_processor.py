@@ -68,12 +68,7 @@ def test_accepts_exactly_sized_row():
 
 
 def test_prompt_token_id_logprobs_are_popped_once():
-    """Fixed-ID prompt scores ride exactly one output.
-
-    They arrive whole on the prompt's final prefill chunk. RequestOutputKind
-    .DELTA pops them, as it does prompt logprobs, so a streaming request does
-    not re-attach the same array to every later delta.
-    """
+    """DELTA outputs carry fixed-ID prompt scores exactly once."""
     processor = _make_processor(num_logprobs=1)
     assert processor.pop_prompt_token_id_logprobs() is None
 

@@ -41,8 +41,7 @@ class LogprobsProcessor:
     cumulative_logprob: float | None
     num_logprobs: int | None
     num_prompt_logprobs: int | None
-    # Scores for caller-selected prompt token IDs. Emitted whole on the final
-    # prefill chunk rather than accumulated here, so it starts as None.
+    # [num_scored_rows, num_token_ids], set once on the final prefill chunk.
     prompt_token_id_logprobs: np.ndarray | None = None
 
     @classmethod
@@ -193,16 +192,7 @@ class LogprobsProcessor:
             )
 
     def _update_prompt_token_id_logprobs(self, scores: torch.Tensor) -> None:
-        """Store fixed-ID prompt scores from EngineCore.
-
-        Unlike prompt logprobs, these arrive whole: the worker accumulates the
-        prefill chunks and emits the result once, on the final chunk. The IDs
-        are request-wise and caller-supplied, so nothing is detokenized here.
-
-        Args:
-          scores: `[num_scored_rows, num_token_ids]` logprobs, column j holding
-                  the j-th requested token ID.
-        """
+        """Store fixed-ID prompt scores; they arrive whole, not per chunk."""
         self.prompt_token_id_logprobs = scores.numpy()
 
     def pop_prompt_logprobs(self) -> PromptLogprobs | None:
@@ -225,12 +215,7 @@ class LogprobsProcessor:
         return plp
 
     def pop_prompt_token_id_logprobs(self) -> np.ndarray | None:
-        """Pop and return the fixed-ID prompt scores, as pop_prompt_logprobs.
-
-        Returns:
-          None if no IDs were requested or they were already returned.
-          The scores for the whole prompt, otherwise.
-        """
+        """Pop and return the fixed-ID prompt scores."""
         scores = self.prompt_token_id_logprobs
         self.prompt_token_id_logprobs = None
         return scores

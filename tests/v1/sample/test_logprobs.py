@@ -431,12 +431,7 @@ def test_logprob_token_ids_validate_vocab_bounds_invalid(token_ids: list[int]):
 
 
 def test_prompt_logprob_token_ids_bounded_by_max_logprobs():
-    """Candidate count rides the same ceiling as the logprobs counts.
-
-    One logprob per requested ID is returned per scored row, so raising
-    `max_logprobs` is what admits a wider candidate set; this parameter has no
-    limit of its own.
-    """
+    """The candidate count is bounded by max_logprobs."""
     model_config = _model_config(vocab_size=100, max_logprobs=4)
 
     def verify(**kwargs):
@@ -449,8 +444,7 @@ def test_prompt_logprob_token_ids_bounded_by_max_logprobs():
 
     verify(prompt_logprob_token_ids=[1, 2, 3, 4])
 
-    # The message names the value to raise max_logprobs to, since the default
-    # of 20 rejects any realistic candidate set.
+    # The error names the value to raise max_logprobs to.
     with pytest.raises(VLLMValidationError, match=r"max_logprobs.*at least 5"):
         verify(prompt_logprob_token_ids=[1, 2, 3, 4, 5])
 
@@ -1319,13 +1313,7 @@ def test_prompt_logprobs_with_chunking_and_preemption():
 
 
 def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
-    """Fixed-ID prefill scores stay row-aligned across chunks and preemption.
-
-    A request resumed after preemption re-prefills its prompt plus the tokens
-    it has already generated. Those extra rows are not prompt positions, so
-    the worker must skip the resumed prefill rather than emit a second,
-    misaligned result over them.
-    """
+    """Fixed-ID scores stay row-aligned across chunked prefill and preemption."""
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
 
     prompts = [

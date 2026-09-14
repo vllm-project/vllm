@@ -882,9 +882,7 @@ class SamplingParams(
                     value=num_prompt_logprobs,
                 )
 
-        # Validate prompt_logprob_token_ids. One logprob per requested ID is
-        # returned per scored row, so `max_logprobs` bounds it as it does the
-        # counts above.
+        # Validate prompt_logprob_token_ids.
         if self.prompt_logprob_token_ids is not None:
             n = len(self.prompt_logprob_token_ids)
             if n == 0:

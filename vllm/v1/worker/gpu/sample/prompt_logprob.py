@@ -67,9 +67,7 @@ class PromptLogprobsWorker:
             candidate_ids_for_req, prompt_start = request_data
             state_idx = int(input_batch.idx_mapping_np[i])
             prompt_len = int(prompt_lens[state_idx])
-            # NOTE: A request resumed after preemption re-prefills its prompt
-            # plus the tokens it already generated; its scores were emitted
-            # before the preemption. Skip it, as compute_prompt_logprobs does.
+            # Resumed after preemption: its scores were already emitted.
             if prompt_len < int(input_batch.prefill_len_np[i]):
                 continue
             row_start = int(input_batch.query_start_loc_np[i])
@@ -79,23 +77,16 @@ class PromptLogprobsWorker:
             row_start += max(prompt_start - prompt_row_start, 0)
             prefill_end = prompt_row_start + int(input_batch.num_scheduled_tokens[i])
             is_last_chunk = prefill_end >= prompt_len
-            # The final prompt row predicts the first decode token and is not
-            # a prompt-position score, matching the existing prompt-logprobs
-            # output convention.
+            # The last prompt row predicts the first decode token; skip it.
             if is_last_chunk:
                 row_end -= 1
             if row_start >= row_end:
-                # This chunk scores nothing; still emit whatever earlier
-                # chunks accumulated once the prompt is fully prefilled.
+                # Nothing to score here, but flush earlier chunks.
                 if is_last_chunk and pending:
                     out[req_id] = torch.cat(pending)
                     pending.clear()
                 continue
-            ids = torch.as_tensor(
-                candidate_ids_for_req,
-                dtype=torch.int64,
-                device=hidden_states.device,
-            )
+            ids = torch.as_tensor(candidate_ids_for_req, device=hidden_states.device)
             part = compute_prompt_token_id_logprobs_with_chunking(
                 ids,
                 hidden_states[row_start:row_end],
@@ -319,21 +310,11 @@ def compute_prompt_token_id_logprobs_with_chunking(
     logits_fn: Callable[[torch.Tensor], torch.Tensor],
     logprobs_mode: LogprobsMode = "raw_logprobs",
 ) -> torch.Tensor:
-    """Gather caller-selected IDs from prompt logits without prompt-logprob semantics.
-
-    ``candidate_token_ids`` is the request-wise ID list, a 1-D int64 tensor,
-    scored at every row of ``prompt_hidden_states``. Unlike
-    ``compute_prompt_logprobs_with_chunking``, this function does not add the
-    actual target token or compute its rank.
-
-    Returns:
-        ``[num_rows, len(candidate_token_ids)]`` float32 scores.
-    """
+    """Return [num_rows, num_ids] logprobs of candidate_token_ids at every row."""
     num_rows = prompt_hidden_states.shape[0]
     score_chunks: list[torch.Tensor] = []
     logits_mode = logprobs_mode in ("raw_logits", "processed_logits")
-    # compute_token_logprobs indexes token_ids as contiguous rows, so expand the
-    # request-wise IDs once at chunk width and slice the tail chunk out of it.
+    # compute_token_logprobs reads token_ids as contiguous rows.
     ids_block = candidate_token_ids.expand(min(num_rows, CHUNK_SIZE), -1).contiguous()
     for start_idx in range(0, num_rows, CHUNK_SIZE):
         logits = logits_fn(prompt_hidden_states[start_idx : start_idx + CHUNK_SIZE])
@@ -341,9 +322,7 @@ def compute_prompt_token_id_logprobs_with_chunking(
         if logits_mode:
             scores = logits.gather(-1, ids).to(torch.float32)
         else:
-            # Reuses the sampler's kernel: it accumulates the logsumexp in fp32
-            # and emits only the requested columns, so no [tokens, vocab]
-            # tensor is materialized.
+            # fp32 logsumexp; never materializes [tokens, vocab].
             scores = compute_token_logprobs(logits, ids)
         score_chunks.append(scores)
     return torch.cat(score_chunks) if len(score_chunks) > 1 else score_chunks[0]

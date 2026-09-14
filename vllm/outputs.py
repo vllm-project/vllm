@@ -115,11 +115,7 @@ class RequestOutput:
                           For encoder/decoder models, this is the
                           decoder input prompt token ids.
         prompt_logprobs: The log probabilities to return per prompt token.
-        prompt_token_id_logprobs: `[num_scored_rows, len(
-            prompt_logprob_token_ids)]` float32 array of logprobs for the
-            requested token IDs, in the order they were requested. Rows are
-            causal source rows, so row i predicts token i + 1, and only the
-            requested rows are returned.
+        prompt_token_id_logprobs: Logprobs of prompt_logprob_token_ids per row.
         outputs: The output sequences of the request.
         finished: Whether the whole request is finished.
         metrics: Metrics associated with the request.

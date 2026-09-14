@@ -342,10 +342,7 @@ class ModelRunnerOutput:
         default_factory=dict
     )
 
-    # req_id -> [num_scored_rows, num_token_ids] scores for the caller-selected
-    # prompt token IDs. Kept out of prompt_logprobs_dict because it has no
-    # implicit target/rank columns. The IDs themselves are not echoed back: the
-    # caller supplied them, and their order is preserved.
+    # req_id -> [num_scored_rows, num_token_ids] prompt_logprob_token_ids scores.
     prompt_token_id_logprobs_dict: dict[str, torch.Tensor] = field(default_factory=dict)
 
     # [num_reqs, hidden_size]
