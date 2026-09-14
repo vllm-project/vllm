@@ -162,6 +162,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             hidden_states, residual = fused_allreduce_rms_norm(
                 hidden_states, residual, self.post_attention_layernorm
             )
+
         if self.use_sequence_parallel and isinstance(self.mlp, DeepseekV2MoE):
             hidden_states = self.mlp(hidden_states, already_sequence_parallel=True)
         else:
@@ -365,12 +366,6 @@ class DeepseekV32Model(torch.nn.Module):
         loaded_params: set[str] = set()
         _pending_wk_fp8: dict = {}
         for name, loaded_weight in weights:
-            if (
-                uses_mega_moe
-                and ".mlp.experts." in name
-                and name.endswith(".input_global_scale")
-            ):
-                continue
             if "rotary_emb.inv_freq" in name:
                 continue
             # MTP / nextn layers are loaded by the MTP model, not here.
@@ -475,9 +470,6 @@ class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
                 self.moe_mlp_layers.append(layer.mlp)
                 self.moe_layers.append(layer.mlp.experts)
         self.extract_moe_parameters(example_moe)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        return super().load_weights(weights)
 
     def process_weights_after_loading(self) -> None:
         for layer in self.model.layers:

@@ -542,4 +542,3 @@ steps:
   commands:
     - pytest -v -s kernels/moe/test_moe_layer.py
     - pytest -v -s kernels/moe/test_deepep_v2_moe.py
-    - pytest -v -s kernels/moe/test_cutlass_moe.py -k fp4

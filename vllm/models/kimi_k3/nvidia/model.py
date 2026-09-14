@@ -388,39 +388,53 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
         # Weight cache IPC engine: the daemon exported the transformed
         # buffers; reuse them zero-copy and drop the raw packed params.
         if self._mega_l1_packed is not None:
-            assert self._mega_l2_packed is not None
             self._transformed_l1_weights = (self._mega_l1_packed, self._mega_l1_scale)
             self._transformed_l2_weights = (self._mega_l2_packed, self._mega_l2_scale)
-            # Cached transformed weights may include MegaMoE's 512-row padding.
-            self.intermediate_size = self._mega_l2_packed.shape[-1] * 2
             self._drop_raw_mega_weights()
             return
 
-        super().finalize_weights()
-        transformed_l1 = self._transformed_l1_weights
-        transformed_l2 = self._transformed_l2_weights
-        assert isinstance(transformed_l1, tuple)
-        assert isinstance(transformed_l2, tuple)
-        l1_packed, l1_scale = transformed_l1
-        l2_packed, l2_scale = transformed_l2
+        self._check_runtime_supported()
+        from vllm.utils.deep_gemm import _import_deep_gemm
+
+        deep_gemm = _import_deep_gemm()
+        assert self.w13_weight is not None
+        assert self.w13_weight_scale is not None
+        assert self.w2_weight is not None
+        assert self.w2_weight_scale is not None
+        w13_scale = deep_gemm.transform_sf_into_required_layout(
+            self._ue8m0_uint8_to_float(self.w13_weight_scale.data).contiguous(),
+            2 * self.intermediate_size,
+            self.hidden_size,
+            (1, 32),
+            self.num_local_experts,
+        )
+        w2_scale = deep_gemm.transform_sf_into_required_layout(
+            self._ue8m0_uint8_to_float(self.w2_weight_scale.data).contiguous(),
+            self.hidden_size,
+            self.intermediate_size,
+            (1, 32),
+            self.num_local_experts,
+        )
+        self._transformed_l1_weights, self._transformed_l2_weights = (
+            deep_gemm.transform_weights_for_mega_moe(
+                (self.w13_weight.data.view(torch.int8).contiguous(), w13_scale),
+                (self.w2_weight.data.view(torch.int8).contiguous(), w2_scale),
+                activation=self.activation,
+            )
+        )
+        l1_packed, l1_scale = self._transformed_l1_weights
+        l2_packed, l2_scale = self._transformed_l2_weights
         self.register_buffer("_mega_l1_packed", l1_packed, persistent=False)
         self.register_buffer("_mega_l1_scale", l1_scale, persistent=False)
         self.register_buffer("_mega_l2_packed", l2_packed, persistent=False)
         self.register_buffer("_mega_l2_scale", l2_scale, persistent=False)
         self._drop_raw_mega_weights()
 
-    def _transform_weights_kwargs(self) -> dict[str, Any]:
-        return {"activation": self.activation}
-
     def _drop_raw_mega_weights(self) -> None:
         self.w13_weight = None
-        self.w13_weight_packed = None
         self.w13_weight_scale = None
-        self.w13_weight_scale_inv = None
         self.w2_weight = None
-        self.w2_weight_packed = None
         self.w2_weight_scale = None
-        self.w2_weight_scale_inv = None
 
     def get_symm_buffer(self):
         from vllm.utils.deep_gemm import _import_deep_gemm
@@ -536,14 +550,12 @@ def make_kimi_k3_mega_moe_expert_params_mapping(
     for expert_id in range(num_experts):
         for shard_id in ("w1", "w2", "w3"):
             param_prefix = "w13" if shard_id in ("w1", "w3") else "w2"
-            for param_suffix, checkpoint_suffix in (
-                ("weight", "weight_packed"),
-                ("weight_scale", "weight_scale"),
-            ):
+            for suffix in ("weight_packed", "weight_scale"):
+                param_suffix = "weight" if suffix == "weight_packed" else suffix
                 mapping.append(
                     (
                         f"experts.{param_prefix}_{param_suffix}",
-                        f"experts.{expert_id}.{shard_id}.{checkpoint_suffix}",
+                        f"experts.{expert_id}.{shard_id}.{suffix}",
                         expert_id,
                         shard_id,
                     )

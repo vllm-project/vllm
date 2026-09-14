@@ -227,20 +227,20 @@ def test_mega_moe_deferred_reduction_scaling(is_sequence_parallel, expected):
 
 
 @pytest.mark.parametrize(
-    ("quant_config", "prefix", "expected_format", "expected_block_size"),
+    ("quant_config", "prefix", "is_mxfp4", "expected_block_size"),
     [
-        pytest.param(None, "model.layers.0.mlp", None, None, id="bf16"),
+        pytest.param(None, "model.layers.0.mlp", False, None, id="bf16"),
         pytest.param(
             _TestQuantConfig("fp8", weight_block_size=(128, 128)),
             "model.layers.0.mlp",
-            None,
+            False,
             (128, 128),
             id="block-fp8",
         ),
         pytest.param(
             _TestQuantConfig("compressed-tensors", quant_format="mxfp4-pack-quantized"),
             "model.layers.0.mlp",
-            "mxfp4-pack-quantized",
+            True,
             None,
             id="mxfp4",
         ),
@@ -251,22 +251,19 @@ def test_mega_moe_deferred_reduction_scaling(is_sequence_parallel, expected):
                 ignore=(r"re:model.layers.1.*",),
             ),
             "model.layers.1.mtp_block.mlp",
-            None,
+            False,
             None,
             id="ignored-mtp",
         ),
     ],
 )
 def test_mega_moe_checkpoint_format_selection(
-    quant_config, prefix, expected_format, expected_block_size
+    quant_config, prefix, is_mxfp4, expected_block_size
 ):
     layer = torch.nn.Identity()
 
     assert (
-        DeepGemmMegaMoEExperts.source_format_from_quant_config(
-            quant_config, layer, prefix
-        )
-        == expected_format
+        DeepGemmMegaMoEExperts.source_is_mxfp4(quant_config, layer, prefix) is is_mxfp4
     )
     assert (
         DeepGemmMegaMoEExperts.source_weight_block_size_from_quant_config(
@@ -401,32 +398,6 @@ def test_deepseek_v4_mega_moe_expert_mapping():
         ("experts.w2_", "experts.0.down_proj.", 0, "w2"),
         ("experts.w13_", "experts.0.up_proj.", 0, "w3"),
     ]
-
-
-def test_kimi_mega_moe_mapping_and_activation():
-    from vllm.models.kimi_k3.nvidia.model import (
-        KimiK3MegaMoEExperts,
-        make_kimi_k3_mega_moe_expert_params_mapping,
-    )
-
-    suffixes = (("weight", "weight_packed"), ("weight_scale", "weight_scale"))
-    assert make_kimi_k3_mega_moe_expert_params_mapping(1) == [
-        (
-            f"experts.{target}_{param_suffix}",
-            f"experts.0.{source}.{checkpoint_suffix}",
-            0,
-            shard,
-        )
-        for target, source, shard in (
-            ("w13", "w1", "w1"),
-            ("w2", "w2", "w2"),
-            ("w13", "w3", "w3"),
-        )
-        for param_suffix, checkpoint_suffix in suffixes
-    ]
-    experts = KimiK3MegaMoEExperts.__new__(KimiK3MegaMoEExperts)
-    experts.activation = "situ"
-    assert experts._transform_weights_kwargs() == {"activation": "situ"}
 
 
 def test_deepseek_v4_mega_moe_ue8m0_uint8_to_float():

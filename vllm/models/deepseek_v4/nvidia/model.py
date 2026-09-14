@@ -233,26 +233,13 @@ class DeepGemmMegaMoEExperts(nn.Module):
         layer: nn.Module | None = None,
         prefix: str | None = None,
     ) -> bool:
-        return (
-            DeepGemmMegaMoEExperts.source_format_from_quant_config(
-                quant_config, layer, prefix
-            )
-            == "mxfp4-pack-quantized"
-        )
-
-    @staticmethod
-    def source_format_from_quant_config(
-        quant_config: QuantizationConfig | None,
-        layer: nn.Module | None = None,
-        prefix: str | None = None,
-    ) -> str | None:
         if quant_config is None or quant_config.get_name() != "compressed-tensors":
-            return None
+            return False
         source_format = getattr(quant_config, "quant_format", None)
         if layer is not None and prefix is not None:
             get_scheme_dict = getattr(quant_config, "get_scheme_dict", None)
             if get_scheme_dict is None:
-                return None
+                return False
             expert_prefix = (
                 prefix if prefix.endswith(".experts") else f"{prefix}.experts"
             )
@@ -261,14 +248,14 @@ class DeepGemmMegaMoEExperts(nn.Module):
                 ignore=getattr(quant_config, "ignore", ()),
                 fused_mapping=getattr(quant_config, "packed_modules_mapping", {}),
             ):
-                return None
+                return False
             scheme_dict = get_scheme_dict(layer, expert_prefix)
             if scheme_dict is not None:
                 source_format = scheme_dict.get("format") or source_format
         elif source_format is None:
             config = getattr(quant_config, "config", None) or {}
             source_format = config.get("format")
-        return source_format
+        return source_format == "mxfp4-pack-quantized"
 
     def __init__(
         self,
@@ -549,9 +536,6 @@ class DeepGemmMegaMoEExperts(nn.Module):
             )
         return l1, l2
 
-    def _transform_weights_kwargs(self) -> dict[str, typing.Any]:
-        return {}
-
     def _check_runtime_supported(self) -> None:
         loader_weight = self.w13_weight_packed if self.source_mxfp4 else self.w13_weight
         assert loader_weight is not None
@@ -750,7 +734,6 @@ class DeepGemmMegaMoEExperts(nn.Module):
                         deep_gemm.transform_weights_for_mega_moe(
                             self.w13_weight.data,
                             self.w2_weight.data,
-                            **self._transform_weights_kwargs(),
                         )
                     )
             else:
@@ -802,7 +785,6 @@ class DeepGemmMegaMoEExperts(nn.Module):
                             w13_scale,
                         ),
                         (w2_weight.data.view(torch.int8).contiguous(), w2_scale),
-                        **self._transform_weights_kwargs(),
                     )
                 )
             # Drop the original loader-side parameters: the MegaMoE kernels only
@@ -820,10 +802,6 @@ class DeepGemmMegaMoEExperts(nn.Module):
             self.w2_weight_packed = None
             self.w2_weight_scale = None
             self.w2_weight_scale_inv = None
-            self.w13_weight_global_scale = None
-            self.w2_weight_global_scale = None
-            self.w13_input_global_scale = None
-            self.w2_input_global_scale = None
 
         if shared_experts is None or self.num_shared_experts == 0:
             return
