@@ -1549,6 +1549,7 @@ def _v41_combine_case(case, window):
         ("seq_len_below_query_len", 128),
         ("empty_seq_lens", 128),
         ("compress_ratio_zero", 128),
+        ("rows_short_of_query_start_loc", 128),
         ("plain", 96),
         ("plain", 192),
     ],
