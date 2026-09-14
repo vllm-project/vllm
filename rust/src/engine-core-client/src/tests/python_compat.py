@@ -353,7 +353,8 @@ inline_prompt_logprobs = engine_outputs_wire(
                 ).tobytes(),
             ),
             ("int64", [2], np.array([3, 4], dtype=np.int64).tobytes()),
-            None,
+            None,  # cu_num_generated_tokens
+            None,  # cu_num_generated_tokens_tensor
         ),
     )
 )
@@ -376,7 +377,8 @@ multipart_prompt_logprobs = engine_outputs_wire(
                 ).tobytes(),
             ),
             ("int64", [2], np.array([3, 4], dtype=np.int64).tobytes()),
-            None,
+            None,  # cu_num_generated_tokens
+            None,  # cu_num_generated_tokens_tensor
         ),
     )
 )
@@ -454,6 +456,32 @@ ready_response = EngineCoreReadyResponse(
     ),
 )
 
+nixl_stats = {
+    "transfer_duration": [0.01, 0.02],
+    "post_duration": [0.001, 0.002],
+    "bytes_transferred": [4096, 8192],
+    "num_descriptors": [2, 4],
+    "num_failed_transfers": [],
+    "num_failed_notifications": [],
+    "num_kv_expired_reqs": [1],
+}
+mooncake_stats = {
+    "load_get": [
+        {
+            "duration_seconds": 0.05,
+            "num_keys": 3,
+            "num_bytes": 1024,
+            "status": "ok",
+            "num_failed_keys": 0,
+        }
+    ]
+}
+multi_connector_stats = {
+    "NixlConnector": nixl_stats,
+    "MooncakeStoreConnector": mooncake_stats,
+    "UnsupportedConnector": {"sample_count": 1},
+}
+
 print(msgspec.msgpack.encode(request).hex())
 print(msgspec.msgpack.encode(defaults_request).hex())
 print(msgpack.packb(multimodal_request_wire, use_bin_type=True).hex())
@@ -473,4 +501,7 @@ print(
         for frame in encode_output_frames(multipart_prompt_logprobs, size_threshold=1)
     )
 )
+print(msgspec.msgpack.encode(nixl_stats).hex())
+print(msgspec.msgpack.encode(mooncake_stats).hex())
+print(msgspec.msgpack.encode(multi_connector_stats).hex())
 print(msgspec.msgpack.encode(ready_response).hex())

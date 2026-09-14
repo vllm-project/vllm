@@ -26,7 +26,7 @@ __global__ void silu_and_mul_per_block_quant_kernel(
                 "group_size must be a power of 2 for correct reduction");
 
   // Grid: (num_tokens, num_groups)
-  int const token_idx = blockIdx.x;
+  int64_t const token_idx = blockIdx.x;
   int const group_idx = blockIdx.y;
   int const tid = threadIdx.x;  // tid in [0, group_size)
   int const num_tokens = gridDim.x;

@@ -3,7 +3,7 @@
 
 from abc import abstractmethod
 from collections.abc import Iterable, Mapping
-from typing import Annotated, Final, Literal, Protocol, TypeAlias, TypeVar
+from typing import Annotated, Literal, Protocol, TypeAlias, TypeVar
 
 import torch
 import torch.nn as nn
@@ -88,7 +88,7 @@ LlavaNextImageInputs: TypeAlias = (
 
 
 class LlavaNextLikeConfig(LlavaLikeConfig, Protocol):
-    image_grid_pinpoints: Final[list[list[int]]]
+    image_grid_pinpoints: list[list[int]]
 
 
 class LlavaNextProcessingInfo(BaseLlavaProcessingInfo):
@@ -483,7 +483,7 @@ class LlavaNextForConditionalGeneration(
         self,
         image_input: LlavaNextImageInputs,
     ) -> torch.Tensor | list[torch.Tensor]:
-        if image_input["type"] == "image_embeds":
+        if isinstance(image_input, LlavaNextImageEmbeddingInputs):
             return image_input["data"]
 
         patch_embeddings = self._process_image_pixels(image_input)

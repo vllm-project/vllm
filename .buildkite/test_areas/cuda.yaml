@@ -2,7 +2,7 @@ group: CUDA
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H200) CUDA Platform"
+- label: ":nvidia: (H200 MIG 18GB) CUDA Platform"
   key: platform-tests
   timeout_in_minutes: 20
   device: h200_18gb
@@ -17,8 +17,20 @@ steps:
     - pytest -v -s cuda/test_cuda_context.py
     - pytest -v -s cuda/test_platform_no_cuda_init.py
     - pytest -v -s cuda/test_cuda_compatibility_path.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) CUDA Platform"
+      dind: false
+      device: mi355_1
+      working_dir: "/vllm-workspace/tests"
+      timeout_in_minutes: 20
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/
+      - tests/cuda
 
-- label: ":nvidia: (H200) CUDAGraph"
+- label: ":nvidia: (H200 MIG 35GB) CUDAGraph"
   device: h200_35gb
   key: cudagraph
   timeout_in_minutes: 30
@@ -34,3 +46,16 @@ steps:
     - pytest -v -s v1/cudagraph/test_cudagraph_mode.py
     - pytest -v -s v1/cudagraph/test_breakable_cudagraph.py
     - pytest -v -s v1/cudagraph/test_encoder_cudagraph.py
+  mirror:
+    amd:
+      label: ":amd: (MI250) CUDAGraph"
+      device: mi250_1
+      timeout_in_minutes: 45
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - tests/v1/cudagraph
+      - vllm/v1/cudagraph_dispatcher.py
+      - vllm/config/compilation.py
+      - vllm/compilation
+      - vllm/platforms/rocm.py

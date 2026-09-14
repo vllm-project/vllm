@@ -16,6 +16,7 @@ types plus a few local additions:
 import pytest
 from pydantic import ValidationError
 
+import vllm.envs as envs
 from vllm.entrypoints.cohere.protocol import (
     AssistantMessageResponse,
     CitationEndEvent,
@@ -92,6 +93,24 @@ class TestCohereChatV2Request:
                 model="m",
                 messages=[{"role": "user", "content": "hi"}],
                 tool_choice="ANY",  # not REQUIRED/NONE
+            )
+
+    def test_stop_sequences_bounded_by_env_limit(self):
+        messages = [{"role": "user", "content": "hi"}]
+        limit = envs.VLLM_MAX_STOP_STRINGS
+
+        req = CohereChatV2Request(
+            model="m",
+            messages=messages,
+            stop_sequences=[f"s{i}" for i in range(limit)],
+        )
+        assert len(req.stop_sequences) == limit
+
+        with pytest.raises(ValidationError):
+            CohereChatV2Request(
+                model="m",
+                messages=messages,
+                stop_sequences=[f"s{i}" for i in range(limit + 1)],
             )
 
 
