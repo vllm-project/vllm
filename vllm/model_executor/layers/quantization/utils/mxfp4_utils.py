@@ -12,13 +12,6 @@ from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_
 
 logger = init_logger(__name__)
 
-# CK's pre-compiled MXFP4 MoE GEMM kernel instances require the
-# intermediate_size (after TP split) to be a multiple of this value.
-# This arises from FP4 packing (2 values per byte) combined with CK
-# tile size constraints. When violated, AITER raises:
-# "device_gemm ... does not support this GEMM problem".
-CK_MXFP4_MOE_DIM_ALIGNMENT = 256
-
 
 def should_use_cdna4_mx_scale_swizzle() -> bool:
     """Whether to use the CDNA4 swizzled scale layout for mxfp4 on gfx950.

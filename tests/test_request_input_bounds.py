@@ -162,6 +162,40 @@ def test_bad_word_tokenization_limit_can_be_overridden(monkeypatch):
     assert tokenizer.calls == 3
 
 
+class EmptyBaseEncodingTokenizer:
+    max_token_id = 1024
+
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+        return [216] if text.startswith(" ") else []
+
+
+def test_bad_word_rejects_empty_base_tokenization():
+    params = SamplingParams(bad_words=["\x16"])
+
+    with pytest.raises(
+        VLLMValidationError,
+        match="must tokenize to at least one token",
+    ) as exc_info:
+        params.update_from_tokenizer(EmptyBaseEncodingTokenizer())
+
+    assert exc_info.value.parameter == "bad_words"
+
+
+class EmptyPrefixedEncodingTokenizer:
+    max_token_id = 1024
+
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+        return [] if text.startswith(" ") else [321]
+
+
+def test_bad_word_skips_empty_optional_prefixed_tokenization():
+    params = SamplingParams(bad_words=["word"])
+
+    params.update_from_tokenizer(EmptyPrefixedEncodingTokenizer())
+
+    assert params.bad_words_token_ids == [[321]]
+
+
 # --- Beam search: beam width / n honor the sequence cap --------------------
 
 
@@ -271,3 +305,19 @@ def test_encode_messages_preserves_small_chat_prompt(encoding_module):
         "<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜></think>"
         "Hi<｜end▁of▁sentence｜>Again<｜end▁of▁sentence｜>"
     )
+
+
+@pytest.mark.parametrize(
+    "encoding_module",
+    ENCODING_MODULES,
+    ids=["deepseek_v32", "deepseek_v4"],
+)
+def test_encode_messages_unknown_role_raises_value_error(encoding_module):
+    # An invalid role (e.g. uppercase "SYSTEM") is a client error and must be
+    # raised as ValueError so the OpenAI serving layer maps it to HTTP 400
+    # instead of NotImplementedError, which would map to HTTP 501.
+    with pytest.raises(ValueError, match="Invalid role: SYSTEM"):
+        encoding_module.encode_messages(
+            [{"role": "SYSTEM", "content": "Hello"}],
+            thinking_mode="chat",
+        )

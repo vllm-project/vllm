@@ -19,6 +19,7 @@ import vllm.version
 from vllm.config import ProfilerConfig
 from vllm.config.profiler import _is_uri_path
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -120,11 +121,13 @@ class WorkerProfiler(ABC):
             and self._running
             and self._profiling_for_iters > self._max_iters
         ):
-            # Automatically stop the profiler after max iters
-            # will be marked as not running, but leave as active so that stop
-            # can clean up properly
+            # Automatically stop the profiler after max iters. Go through the
+            # public stop() (not _call_stop() directly) so _active and the
+            # iteration counters reset too -- otherwise a later start_profile
+            # is silently ignored forever, since start() bails out early
+            # whenever _active is still True.
             logger.info_once("Max profiling iterations reached. Stopping profiler...")
-            self._call_stop()
+            self.stop()
             return
 
     def _profiler_step(self) -> bool:
@@ -257,9 +260,14 @@ class TorchProfilerWrapper(WorkerProfiler):
         sort_key: str,
         row_limit: int | None = None,
     ) -> str:
+        group_by_input_shape = (
+            current_platform.is_cpu()
+            and self.profiler_config.torch_profiler_record_shapes
+        )
+        averages = self.profiler.key_averages(group_by_input_shape=group_by_input_shape)
         if row_limit is None:  # use profiler default row limit of 100
-            return self.profiler.key_averages().table(sort_by=sort_key)
-        return self.profiler.key_averages().table(
+            return averages.table(sort_by=sort_key)
+        return averages.table(
             sort_by=sort_key,
             row_limit=row_limit,
         )

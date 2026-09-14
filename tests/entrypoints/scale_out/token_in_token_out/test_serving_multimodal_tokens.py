@@ -37,6 +37,7 @@ def server():
         "4096",
         "--enforce-eager",
         "--no-enable-prefix-caching",
+        "--enable-scale-out",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:

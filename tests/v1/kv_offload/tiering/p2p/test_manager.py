@@ -15,7 +15,14 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from vllm.v1.kv_offload.base import LookupResult, ReqContext, ScheduleEndContext
+from vllm.utils.hashing import sha256
+from vllm.v1.core.kv_cache_utils import DEFAULT_NONE_HASH_SEED, init_none_hash
+from vllm.v1.kv_offload.base import (
+    LookupResult,
+    OffloadPolicy,
+    ReqContext,
+    ScheduleEndContext,
+)
 from vllm.v1.kv_offload.tiering.base import JobResult, TransferJob
 from vllm.v1.kv_offload.tiering.p2p import manager as manager_module
 from vllm.v1.kv_offload.tiering.p2p.manager import (
@@ -84,17 +91,17 @@ def _req_context(kv_params: dict | None = None) -> ReqContext:
 def _job_metadata(
     job_id: int,
     keys: list[bytes] | None = None,
-    block_ids: list[int] | None = None,
+    chunk_ids: list[int] | None = None,
     kv_params: dict | None = None,
 ) -> TransferJob:
     if keys is None:
         keys = [b"key1"]
-    if block_ids is None:
-        block_ids = list(range(len(keys)))
+    if chunk_ids is None:
+        chunk_ids = list(range(len(keys)))
     return TransferJob(
         job_id=job_id,
         keys=keys,
-        block_ids=np.array(block_ids),
+        chunk_ids=np.array(chunk_ids),
         is_promotion=False,
         req_context=_req_context(kv_params),
     )
@@ -123,23 +130,12 @@ def _init_offloading_spec() -> SimpleNamespace:
 
 
 # ---------------------------------------------------------------------------
-# Tests for __init__ PYTHONHASHSEED assertion
+# Tests for __init__ hash seed resolution
 # ---------------------------------------------------------------------------
 
 
-class TestInitHashSeedAssertion:
-    def test_missing_pythonhashseed_raises(self, monkeypatch):
-        """P2P instance refuses to start when PYTHONHASHSEED is unset."""
-        monkeypatch.delenv("PYTHONHASHSEED", raising=False)
-        with pytest.raises(ValueError, match="PYTHONHASHSEED"):
-            P2PSecondaryTierManager(
-                offloading_spec=_init_offloading_spec(),
-                primary_kv_view=memoryview(bytearray(16)),
-            )
-
-    def test_pythonhashseed_set_succeeds(self, monkeypatch):
-        """With PYTHONHASHSEED set, __init__ records it for the handshake."""
-        monkeypatch.setenv("PYTHONHASHSEED", "12345")
+class TestInitHashSeed:
+    def _build(self, monkeypatch) -> P2PSecondaryTierManager:
         monkeypatch.setattr(manager_module, "NixlTransport", lambda *a, **k: object())
         monkeypatch.setattr(manager_module, "ZmqTransport", lambda *a, **k: object())
         monkeypatch.setattr(
@@ -147,11 +143,39 @@ class TestInitHashSeedAssertion:
             "from_offloading_spec",
             lambda **k: SimpleNamespace(get_run_config=lambda: {}),
         )
-        mgr = P2PSecondaryTierManager(
+        return P2PSecondaryTierManager(
             offloading_spec=_init_offloading_spec(),
             primary_kv_view=memoryview(bytearray(16)),
         )
-        assert mgr._hash_seed == "12345"
+
+    def test_missing_pythonhashseed_uses_default(self, monkeypatch):
+        """P2P falls back to the deterministic default seed when unset."""
+        monkeypatch.delenv("PYTHONHASHSEED", raising=False)
+        mgr = self._build(monkeypatch)
+        init_none_hash(sha256)
+        assert mgr._get_hash_seed() == DEFAULT_NONE_HASH_SEED
+
+    def test_pythonhashseed_set_succeeds(self, monkeypatch):
+        """With PYTHONHASHSEED set, the handshake advertises it."""
+        monkeypatch.setenv("PYTHONHASHSEED", "12345")
+        mgr = self._build(monkeypatch)
+        init_none_hash(sha256)
+        assert mgr._get_hash_seed() == "12345"
+
+    def test_seed_resolved_after_init_none_hash(self, monkeypatch):
+        """The seed is read lazily, not at construction time.
+
+        This tier is built before init_none_hash runs, and a non-cryptographic
+        hash algorithm seeds NONE_HASH randomly, so resolving in __init__ would
+        advertise a value that does not match the NONE_HASH actually in use.
+        """
+        monkeypatch.delenv("PYTHONHASHSEED", raising=False)
+        mgr = self._build(monkeypatch)
+        assert mgr._hash_seed is None
+        monkeypatch.setattr(
+            manager_module, "get_none_hash_seed", lambda: "random-seed-abc"
+        )
+        assert mgr._get_hash_seed() == "random-seed-abc"
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +243,28 @@ class TestLookup:
         mgr = _make_manager()
         ctx = _req_context(kv_params=_remote_decoder_kv_params())
         assert mgr.lookup(b"key", ctx) is LookupResult.MISS
+
+
+# ---------------------------------------------------------------------------
+# Tests for on_new_request offload policy
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "kv_params,expected",
+    [
+        (_remote_decoder_kv_params(), OffloadPolicy.REQUEST_LEVEL),
+        (None, OffloadPolicy.CHUNK_LEVEL),
+        (_remote_prefiller_kv_params(), OffloadPolicy.CHUNK_LEVEL),
+        ({"remote_decoder": {}}, OffloadPolicy.CHUNK_LEVEL),
+    ],
+    ids=["producer", "plain", "consumer", "producer_no_id"],
+)
+def test_on_new_request_policy(monkeypatch, kv_params, expected):
+    """Only a producer leg carrying a kv_request_id widens to REQUEST_LEVEL."""
+    mgr = _make_manager()
+    monkeypatch.setattr(mgr, "_get_or_create_session", lambda peer_id: None)
+    assert mgr.on_new_request(_req_context(kv_params=kv_params)).policy is expected
 
 
 # ---------------------------------------------------------------------------
@@ -320,7 +366,7 @@ class TestSubmitStore:
         job = _job_metadata(
             job_id=1,
             keys=[b"k1", b"k2"],
-            block_ids=[3, 4],
+            chunk_ids=[3, 4],
             kv_params=_remote_decoder_kv_params(kv_request_id="req-1"),
         )
         mgr.submit_store(job)
@@ -351,7 +397,7 @@ class TestSubmitStore:
         job = _job_metadata(
             job_id=7,
             keys=[b"k1", b"k2"],
-            block_ids=[3, 4],
+            chunk_ids=[3, 4],
             kv_params=_remote_decoder_kv_params(kv_request_id="req-1"),
         )
         mgr.submit_store(job)
@@ -394,7 +440,7 @@ class TestSubmitLoad:
         """Empty key list succeeds immediately."""
         mgr = _make_manager()
         job = _job_metadata(
-            job_id=1, keys=[], block_ids=[], kv_params=_remote_prefiller_kv_params()
+            job_id=1, keys=[], chunk_ids=[], kv_params=_remote_prefiller_kv_params()
         )
         mgr.submit_load(job)
         assert mgr._finished_jobs == [JobResult(job_id=1, success=True)]
@@ -417,7 +463,7 @@ class TestSubmitLoad:
         job = _job_metadata(
             job_id=42,
             keys=[b"k1", b"k2"],
-            block_ids=[5, 6],
+            chunk_ids=[5, 6],
             kv_params=_remote_prefiller_kv_params(kv_request_id="req-42"),
         )
         mgr.submit_load(job)
@@ -1109,7 +1155,7 @@ class TestBidirectionalManager:
             _job_metadata(
                 job_id=100,
                 keys=[b"a-block"],
-                block_ids=[0],
+                chunk_ids=[0],
                 kv_params=a_prefiller_params,
             )
         )
@@ -1117,7 +1163,7 @@ class TestBidirectionalManager:
             _job_metadata(
                 job_id=200,
                 keys=[b"b-block"],
-                block_ids=[0],
+                chunk_ids=[0],
                 kv_params=b_prefiller_params,
             )
         )
@@ -1127,7 +1173,7 @@ class TestBidirectionalManager:
             _job_metadata(
                 job_id=101,
                 keys=[b"b-block"],
-                block_ids=[0],
+                chunk_ids=[0],
                 kv_params=a_decoder_params,
             )
         )
@@ -1135,7 +1181,7 @@ class TestBidirectionalManager:
             _job_metadata(
                 job_id=201,
                 keys=[b"a-block"],
-                block_ids=[0],
+                chunk_ids=[0],
                 kv_params=b_decoder_params,
             )
         )
@@ -1527,7 +1573,7 @@ class TestConnectionDeathMidTransfer:
             _job_metadata(
                 job_id=900,
                 keys=[b"a-block"],
-                block_ids=[0],
+                chunk_ids=[0],
                 kv_params=a_prefiller_params,
             )
         )
@@ -1535,7 +1581,7 @@ class TestConnectionDeathMidTransfer:
             _job_metadata(
                 job_id=901,
                 keys=[b"b-block"],
-                block_ids=[0],
+                chunk_ids=[0],
                 kv_params=a_decoder_params,
             )
         )

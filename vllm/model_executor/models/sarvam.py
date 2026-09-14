@@ -28,6 +28,7 @@ from itertools import islice
 import torch
 from torch import nn
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -54,7 +55,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.sequence import IntermediateTensors
 
 from .bailing_moe import BailingMoeForCausalLM
-from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
+from .interfaces import (
+    EagleModelMixin,
+    MixtureOfExperts,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+)
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -318,6 +325,7 @@ class SarvamMLAMoE(nn.Module):
 
         self.score_function = getattr(config, "score_function", "sigmoid")
         self.num_shared_experts = getattr(config, "num_shared_experts", 1)
+        self.shared_experts: SarvamMLAMLP | None
         if self.num_shared_experts > 0:
             if hasattr(config, "moe_shared_expert_intermediate_size"):
                 shared_int = config.moe_shared_expert_intermediate_size
@@ -442,7 +450,19 @@ class SarvamMLABlock(nn.Module):
         return hidden_states, residual
 
 
-class SarvamMLAModel(nn.Module):
+# PEP 563 stringifies annotations in this module, so the decorator cannot infer
+# these; they are the set DeepSeek-V2 infers for the same forward signature.
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": 0,
+        "positions": 0,
+        "intermediate_tensors": 0,
+        "inputs_embeds": 0,
+    }
+)
+class SarvamMLAModel(nn.Module, EagleModelMixin):
+    """Sarvam MLA backbone with stage-local EAGLE3 auxiliary capture."""
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
             # .experts.gate_up_proj must be handled by MoERunner.load_weights for EP
@@ -508,7 +528,17 @@ class SarvamMLAModel(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        """Run this stage and optionally return its auxiliary hidden states.
+
+        Auxiliary captures are local to this stage, matching Qwen3 MoE.
+        Pipeline transport carries only hidden states and residual; EAGLE3
+        capture across pipeline stages is not supported by this model.
+
+        Returns:
+            Intermediate tensors on non-final stages. On the final stage,
+            normalized hidden states, paired with auxiliary states if captured.
+        """
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -521,12 +551,22 @@ class SarvamMLAModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
+        aux_hidden_states = self._maybe_add_hidden_state(
+            [], self.start_layer, hidden_states, residual
+        )
+        for layer_idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
+        ):
             hidden_states, residual = layer(
                 hidden_states,
                 positions,
                 residual,
             )
+            self._maybe_add_hidden_state(
+                aux_hidden_states, layer_idx + 1, hidden_states, residual
+            )
+
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
@@ -535,6 +575,9 @@ class SarvamMLAModel(nn.Module):
             hidden_states = self.norm(hidden_states)
         else:
             hidden_states, _ = self.norm(hidden_states, residual)
+
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
     def load_weights(
@@ -548,6 +591,9 @@ class SarvamMLAModel(nn.Module):
 
 
 class SarvamMixtureOfExperts(MixtureOfExperts):
+    moe_layers: list[MoERunner]
+    moe_mlp_layers: list[SarvamMLAMoE]
+
     def extract_moe_parameters(self, example_moe: SarvamMLAMoE | None) -> None:
         if example_moe is None:
             raise RuntimeError("No SarvamMLAMoE layer found in model.layers.")
@@ -584,14 +630,10 @@ class SarvamMixtureOfExperts(MixtureOfExperts):
             if hasattr(fused, "update_expert_map"):
                 fused.update_expert_map()
 
-    def set_eplb_state(self, eplb_state) -> None:
-        self.eplb_state = eplb_state
-        for moe in self.moe_layers:
-            if hasattr(moe, "set_eplb_state"):
-                moe.set_eplb_state(eplb_state)
 
-
-class SarvamMLAForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SarvamMixtureOfExperts):
+class SarvamMLAForCausalLM(
+    nn.Module, SupportsPP, SupportsLoRA, SupportsEagle3, SarvamMixtureOfExperts
+):
     packed_modules_mapping = {
         "q_proj": ["q_proj"],
         "q_a_proj": ["q_a_proj"],
@@ -658,7 +700,8 @@ class SarvamMLAForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SarvamMixtureOfE
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        """Return backbone outputs, including auxiliary states when captured."""
         return self.model(
             input_ids=input_ids,
             positions=positions,
@@ -679,10 +722,7 @@ class SarvamMLAForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SarvamMixtureOfE
         self,
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.tie_word_embeddings else None),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 
 

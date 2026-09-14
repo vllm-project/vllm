@@ -16,6 +16,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
     CrossAttentionManager,
     FullAttentionManager,
+    HiSparseSourceManager,
     MambaManager,
     SingleTypeKVCacheManager,
     SinkFullAttentionManager,
@@ -27,6 +28,7 @@ from vllm.v1.kv_cache_interface import (
     CrossAttentionSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
+    KVCacheGroupRole,
     KVCacheSpec,
     KVCacheSpecKind,
     MambaSpec,
@@ -34,7 +36,6 @@ from vllm.v1.kv_cache_interface import (
     SinkFullAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
-    TQFullAttentionSpec,
     UniformTypeKVCacheSpecs,
     get_kv_cache_spec_kind,
 )
@@ -85,7 +86,6 @@ class _TrulyUnregisteredSpec(KVCacheSpec):
 
 spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
     FullAttentionSpec: FullAttentionManager,
-    TQFullAttentionSpec: FullAttentionManager,
     MLAAttentionSpec: FullAttentionManager,
     HiddenStateCacheSpec: FullAttentionManager,
     SlidingWindowSpec: SlidingWindowManager,
@@ -98,7 +98,6 @@ spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
 
 spec_uniform_base_map: dict[type[KVCacheSpec], type[KVCacheSpec]] = {
     FullAttentionSpec: FullAttentionSpec,
-    TQFullAttentionSpec: FullAttentionSpec,
     MLAAttentionSpec: FullAttentionSpec,
     HiddenStateCacheSpec: FullAttentionSpec,
     SlidingWindowSpec: SlidingWindowSpec,
@@ -112,13 +111,6 @@ spec_uniform_base_map: dict[type[KVCacheSpec], type[KVCacheSpec]] = {
 spec_args_map: dict[type[KVCacheSpec], dict[str, Any]] = {
     FullAttentionSpec: dict(
         block_size=64, num_kv_heads=8, head_size=128, dtype=torch.bfloat16
-    ),
-    TQFullAttentionSpec: dict(
-        block_size=64,
-        num_kv_heads=8,
-        head_size=128,
-        dtype=torch.bfloat16,
-        tq_slot_size=256,
     ),
     MLAAttentionSpec: dict(
         block_size=64, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
@@ -185,6 +177,19 @@ class TestKVCacheSpecRegistry:
                 KVCacheSpecRegistry.get_uniform_type_base_spec(spec)
                 is spec_uniform_base_map[spec_cls]
             )
+
+    @pytest.mark.parametrize("role", list(KVCacheGroupRole))
+    def test_mla_manager_selection_by_role(self, role):
+        """Only the source role overrides ordinary MLA manager selection."""
+        expected = (
+            HiSparseSourceManager
+            if role == KVCacheGroupRole.HISPARSE_SOURCE
+            else FullAttentionManager
+        )
+        assert (
+            KVCacheSpecRegistry.get_manager_class(make_spec(MLAAttentionSpec), role)
+            is expected
+        )
 
     @pytest.mark.parametrize("spec_cls", list(spec_manager_map))
     def test_custom_spec_register(self, spec_cls):
@@ -262,7 +267,6 @@ class TestKVCacheSpecRegistry:
     def test_full_attention_family_specs_are_uniform(self):
         specs = [
             make_spec(FullAttentionSpec),
-            make_spec(TQFullAttentionSpec),
             make_spec(MLAAttentionSpec),
             make_spec(HiddenStateCacheSpec),
             make_spec(SinkFullAttentionSpec),

@@ -101,7 +101,7 @@ class ColQwen3_5ProcessingInfo(Qwen3_5ProcessingInfo):
             spatial_merge_size,
             video_needs_metadata=self._supports_video,
             expected_hidden_size=self._get_expected_hidden_size(),
-            embeds_from_ec_connector=self.embeds_from_ec_connector,
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
 
 
@@ -121,13 +121,13 @@ class ColQwen3_5Model(
     linear projection layer for per-token embeddings. It supports:
     - "token_embed" task: Per-token embeddings for late interaction scoring
 
-    The model produces per-token embeddings by:
+    The model produces L2-normalized per-token embeddings by:
     1. Running the Qwen3.5 backbone (vision + language) to get hidden states
-    2. Projecting hidden states through a linear layer (hidden_size -> embed_dim)
-    3. L2 normalization is handled by the pooler via PoolerNormalize
+    2. Projection and L2-normalization via the pooler (TokenEmbeddingPoolerHead)
 
     Attributes:
-        custom_text_proj: Linear projection from hidden_size to embed_dim
+        custom_text_proj: Linear projection from hidden_size to embed_dim.
+            This is passed to the pooler as pooler.head.projector.
     """
 
     # Mark this as a pooling model so vLLM routes to pooler path
@@ -140,6 +140,7 @@ class ColQwen3_5Model(
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "language_model.": "language_model.model.",
+            "mtp.": None,
         }
     )
 
@@ -186,7 +187,7 @@ class ColQwen3_5Model(
         assert pooler_config is not None
         self.pooler = pooler_for_token_embed(
             pooler_config,
-            projector=None,
+            projector=self.custom_text_proj,
         )
 
     def forward(
@@ -197,24 +198,14 @@ class ColQwen3_5Model(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor:
-        """Run forward pass producing per-token embeddings."""
-        hidden_states = super().forward(
+        """Run forward pass returning hidden states for pooler."""
+        return super().forward(
             input_ids=input_ids,
             positions=positions,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
             **kwargs,
         )
-
-        if not isinstance(hidden_states, torch.Tensor):
-            return hidden_states  # type: ignore
-
-        proj_dtype = self.custom_text_proj.weight.dtype
-        if hidden_states.dtype != proj_dtype:
-            hidden_states = hidden_states.to(proj_dtype)
-
-        # Project to embedding dimension (normalization handled by pooler)
-        return self.custom_text_proj(hidden_states)
 
     # Names used for the projection layer across different ColQwen3.5 variants
     _PROJ_LAYER_NAMES = {
@@ -238,10 +229,7 @@ class ColQwen3_5Model(
             else:
                 model_weights.append((name, weight))
 
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=["mtp."],
-        )
+        loader = AutoWeightsLoader(self)
         loaded = loader.load_weights(model_weights, mapper=self.hf_to_vllm_mapper)
 
         for name, weight in proj_weights:
@@ -251,5 +239,8 @@ class ColQwen3_5Model(
                 weight = weight.to(device=param.device, dtype=param.dtype)
                 default_weight_loader(param, weight)
                 loaded.add(f"custom_text_proj.{param_name}")
+                # Also mark as loaded under pooler path since custom_text_proj
+                # is assigned to pooler.head.projector
+                loaded.add(f"pooler.head.projector.{param_name}")
 
         return loaded

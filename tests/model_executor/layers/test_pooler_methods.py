@@ -3,17 +3,23 @@
 """Unit tests for sequence and token pooling methods and their factories."""
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 import torch
+from transformers import PretrainedConfig
 
+from vllm.config import PoolerConfig, set_current_vllm_config
+from vllm.model_executor.layers.pooler import PoolingParamsUpdate
 from vllm.model_executor.layers.pooler.seqwise.methods import (
     CLSPool,
     LastPool,
     MeanPool,
     get_seq_pooling_method,
 )
+from vllm.model_executor.layers.pooler.special import DispatchPooler
 from vllm.model_executor.layers.pooler.tokwise.methods import (
     AllPool,
     StepPool,
@@ -52,6 +58,8 @@ def _make_pooling_cursor(
         prompt_lens_cpu=prompt_lens_cpu,
         seq_lens_cpu=seq_lens_cpu,
         num_scheduled_tokens_cpu=num_scheduled_tokens_cpu,
+        partial_prefill=not torch.equal(prompt_lens_cpu, num_scheduled_tokens_cpu),
+        finished_mask=torch.eq(prompt_lens_cpu, seq_lens_cpu).tolist(),
     )
 
 
@@ -99,6 +107,38 @@ def _make_metadata(
         pooling_states=pooling_states,
         pooling_cursor=cursor,
     )
+
+
+def test_build_pooling_cursor_caches_cpu_status() -> None:
+    metadata = PoolingMetadata(
+        prompt_lens=torch.tensor([3, 4, 2], dtype=torch.long),
+        prompt_token_ids=None,
+        prompt_token_ids_cpu=None,
+        pooling_params=[PoolingParams(task="embed") for _ in range(3)],
+        pooling_states=[PoolingStates() for _ in range(3)],
+    )
+    metadata.build_pooling_cursor(
+        np.array([3, 2, 2], dtype=np.int32),
+        seq_lens_cpu=torch.tensor([3, 2, 1], dtype=torch.long),
+        device=_CPU,
+    )
+
+    cursor = metadata.get_pooling_cursor()
+
+    assert cursor.is_partial_prefill() is True
+    assert cursor.get_finished_mask() == [True, False, False]
+    assert cursor[:1].is_partial_prefill() is False
+    assert cursor[1:2].is_partial_prefill() is True
+    assert cursor[1:].get_finished_mask() == [False, False]
+
+
+def test_pooling_params_update_combines_token_id_requirements() -> None:
+    update = PoolingParamsUpdate() | PoolingParamsUpdate(requires_token_ids=True)
+    params = PoolingParams(task="embed")
+
+    update.apply(params)
+
+    assert params.requires_token_ids is True
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +302,50 @@ class _FakeSchedulerConfig:
 @dataclass
 class _FakeVllmConfig:
     scheduler_config: _FakeSchedulerConfig
+
+
+@pytest.mark.parametrize("tok_pooling_type", ["ALL", "STEP"])
+def test_dispatch_seq_cls_honors_token_pooling_type(tok_pooling_type):
+    """Filter STEP rows before classification; preserve all rows for resolved ALL."""
+    pooler_config = PoolerConfig(
+        seq_pooling_type="LAST", tok_pooling_type=tok_pooling_type
+    )
+    config = SimpleNamespace(
+        scheduler_config=_FakeSchedulerConfig(),
+        model_config=SimpleNamespace(
+            pooler_config=pooler_config,
+            head_dtype=None,
+            hf_config=PretrainedConfig(num_labels=3),
+        ),
+    )
+    classifier = torch.nn.Linear(4, 3)
+    with set_current_vllm_config(config):
+        pooler = DispatchPooler.for_seq_cls(pooler_config, classifier=classifier)
+
+    token_ids = [[2, 99, 3, 99], [4, 99], [5, 6]]
+    params = [
+        PoolingParams(
+            task="token_classify",
+            use_activation=False,
+            step_tag_id=99 if tok_pooling_type == "STEP" else None,
+        )
+        for _ in token_ids
+    ]
+    metadata = _make_metadata([4, 2, 2], token_ids=token_ids, pooling_params=params)
+    hidden = torch.arange(32, dtype=torch.float32).reshape(8, 4)
+    outputs = pooler(hidden, metadata)
+
+    expected_rows = (
+        [[1, 3], [5], []]
+        if tok_pooling_type == "STEP"
+        else [[0, 1, 2, 3], [4, 5], [6, 7]]
+    )
+    assert len(outputs) == len(expected_rows)
+    for output, rows in zip(outputs, expected_rows):
+        torch.testing.assert_close(output, classifier(hidden[rows]))
+    assert pooler.get_pooling_updates("token_classify").requires_token_ids == (
+        tok_pooling_type == "STEP"
+    )
 
 
 class TestAllPool:
