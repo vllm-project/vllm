@@ -179,15 +179,20 @@ class TestGetActFn:
             "multi_label_classification",
         ],
     )
+    @pytest.mark.parametrize("legacy_metadata", [False, True])
     def test_sentence_transformers_activation_overrides_problem_type(
-        self, problem_type
+        self, problem_type, legacy_metadata
     ):
+        activation = "torch.nn.modules.activation.Sigmoid"
+        metadata = (
+            {"sbert_ce_default_activation_function": activation}
+            if legacy_metadata
+            else {"sentence_transformers": {"activation_fn": activation}}
+        )
         cfg = self._make_config(
             problem_type=problem_type,
             num_labels=2,
-            sentence_transformers={
-                "activation_fn": "torch.nn.modules.activation.Sigmoid"
-            },
+            **metadata,
         )
         result = get_act_fn(cfg)
         logits = torch.tensor([[1.0, 2.0]])

@@ -529,6 +529,11 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         )
 
         tok_params = request.build_tok_params(self.model_config)
+        if (
+            self.sentence_transformers_config is not None
+            and "truncate_prompt_tokens" not in request.model_fields_set
+        ):
+            tok_params = tok_params.with_kwargs(truncate_prompt_tokens=-1)
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
         seq_priority = self._priority_to_seq(ctx.priorities, num_requests)
 
@@ -569,9 +574,19 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         max_tokens_per_query, max_tokens_per_doc = self._get_token_limits(
             pooling_params=ctx.pooling_params
         )
-        tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
-            **(ctx.tokenization_kwargs or {})
-        )
+        tok_params = self.renderer.default_cmpl_tok_params
+        if (
+            self.sentence_transformers_config is not None
+            and tok_params.truncate_prompt_tokens is None
+        ):
+            tok_params = tok_params.with_kwargs(truncate_prompt_tokens=-1)
+        tokenization_kwargs = dict(ctx.tokenization_kwargs or {})
+        if (
+            self.sentence_transformers_config is not None
+            and tokenization_kwargs.get("truncation") is False
+        ):
+            tokenization_kwargs["truncation"] = "do_not_truncate"
+        tok_params = tok_params.with_kwargs(**tokenization_kwargs)
         prompt_extras = ctx.pooling_params.extra_kwargs
 
         seq_lora_requests = self._lora_request_to_seq(ctx.lora_request, num_requests)
@@ -613,12 +628,6 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         arrival_time = time.time()
 
         tok_params = render_params["tok_params"]
-        if (
-            self.sentence_transformers_config is not None
-            and tok_params.truncate_prompt_tokens is None
-        ):
-            tok_params = tok_params.with_kwargs(truncate_prompt_tokens=-1)
-
         params = render_params["params"]
         prompt_extras = render_params["prompt_extras"]
 
@@ -634,7 +643,34 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             else None,
         )
 
+        prompt_length = len(engine_prompt["prompt_token_ids"])
         tok_params.apply_post_tokenization(self.tokenizer, engine_prompt)
+
+        max_length = tok_params.truncate_prompt_tokens
+        if max_length is not None and max_length < 0:
+            max_length = tok_params.max_input_tokens
+        sentence_transformers_config = self.sentence_transformers_config
+        if (
+            sentence_transformers_config is not None
+            and sentence_transformers_config.uses_message_format
+            and max_length is not None
+            and prompt_length >= max_length
+            and all(
+                isinstance(data, str) or all(part["type"] == "text" for part in data)
+                for data in (render_params["data_1"], render_params["data_2"])
+            )
+        ):
+            chat_template_kwargs = (
+                prompt_extras.get("chat_template_kwargs", {}) if prompt_extras else {}
+            ) or {}
+            if chat_template_kwargs.get("restore_suffix", True):
+                suffix = self._get_sentence_transformers_chat_suffix(
+                    render_params["chat_template"], chat_template_kwargs
+                )
+                end = min(prompt_length, max_length)
+                keep = min(len(suffix), end)
+                if keep:
+                    engine_prompt["prompt_token_ids"][end - keep : end] = suffix[-keep:]
 
         if token_type_ids := engine_prompt.pop("token_type_ids", None):
             params = params.clone()
@@ -671,6 +707,59 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             priorities=render_params["priorities"],
         )
 
+    def _get_sentence_transformers_chat_suffix(
+        self,
+        chat_template: str | None,
+        chat_template_kwargs: dict[str, Any],
+    ) -> list[int]:
+        # Match ST Transformer._chat_template_suffix_ids: common tokens after
+        # two different text fillers are the template tail, not document text.
+        template_kwargs = {
+            key: value
+            for key, value in chat_template_kwargs.items()
+            if key
+            not in {
+                "padding",
+                "truncation",
+                "max_length",
+                "return_tensors",
+                "restore_suffix",
+            }
+        }
+        renders: list[list[int]] = []
+        try:
+            for filler in ("0", "1 2 3 4"):
+                messages = [
+                    ConversationMessage(
+                        role=role,
+                        content=cast(Any, [{"type": "text", "text": filler}]),
+                    )
+                    for role in ("query", "document")
+                ]
+                text = safe_apply_chat_template(
+                    self.model_config,
+                    self.tokenizer,
+                    messages,
+                    chat_template=chat_template,
+                    tools=None,
+                    tokenize=False,
+                    **template_kwargs,
+                )
+                renders.append(self.tokenizer.encode(text, add_special_tokens=False))
+        except Exception:
+            logger.debug(
+                "Unable to derive the Sentence Transformers chat suffix.", exc_info=True
+            )
+            return []
+
+        first, second = renders
+        count = 0
+        for left, right in zip(reversed(first), reversed(second)):
+            if left != right:
+                break
+            count += 1
+        return first[-count:] if 0 < count < min(len(first), len(second)) else []
+
     def get_score_prompt(
         self,
         data_1: ScoreData,
@@ -689,6 +778,12 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             sentence_transformers_config is not None
             and sentence_transformers_config.uses_message_format
         )
+        if uses_message_format and chat_template_kwargs:
+            chat_template_kwargs = {
+                key: value
+                for key, value in chat_template_kwargs.items()
+                if key != "restore_suffix"
+            }
 
         prompt_1 = prompt_2 = ""
         messages: list[ConversationMessage] | None = None
