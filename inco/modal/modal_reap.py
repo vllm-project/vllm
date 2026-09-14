@@ -334,6 +334,254 @@ def evaluate(
     return f"{model}\n{table}\n\nsaved to {out}/{name}.{{json,txt}}"
 
 
+@app.function(
+    image=image,
+    gpu=GPU,
+    timeout=TIMEOUT_S,
+    volumes={"/cache/hf": hf_cache, "/artifacts": artifacts},
+    secrets=HF_SECRETS,
+)
+def evalplus_eval(
+    model: str = "Qwen/Qwen3-30B-A3B-Instruct-2507",
+    dataset: str = "humaneval",
+    greedy: bool = True,
+    temperature: float = 0.0,
+    max_new_tokens: int = 1280,
+    tp: int = 1,
+) -> str:
+    """Run EvalPlus on one dataset, reporting both base and plus pass@1.
+
+    Preferred over `evaluate()` for code benchmarks. EvalPlus applies the
+    tokenizer's chat template, sanitizes generations with tree-sitter before
+    execution, and scores against the expanded plus test suites -- none of
+    which lm-eval's `humaneval`/`mbpp` tasks do. lm-eval's `mbpp_plus` in
+    particular reads `test_list` rather than the expanded `test`, so it is not
+    MBPP+ at all.
+
+    One dataset per call, deliberately: each call builds its own `LLM`, and two
+    in a single container would OOM because the first is never released.
+
+    Args:
+        model: HF repo id, or a checkpoint path on the artifacts volume.
+        dataset: Either ``humaneval`` or ``mbpp``.
+        greedy: Greedy decoding, as the EvalPlus leaderboard uses. Forces
+            ``temperature=0``, ``bs=1``, ``n_samples=1`` inside `run_codegen`.
+        temperature: Only consulted when ``greedy`` is False.
+        max_new_tokens: Must stay under `VllmDecoder`'s hardcoded
+            ``max_model_len=2048``. See the patch note below.
+        tp: Tensor parallel size.
+
+    Returns:
+        A one-line-per-metric summary of base and plus pass@1.
+    """
+    import json
+
+    # Patch before evalplus.provider.base is imported: it binds MAX_NEW_TOKENS
+    # as a default argument at import time, so a later assignment is ignored.
+    # The vendored fork ships 16384 while VllmDecoder hardcodes
+    # max_model_len=2048, which makes every vllm-backend request invalid --
+    # why reap's own eval.py only ever uses the hf and openai backends.
+    import evalplus.config
+
+    evalplus.config.MAX_NEW_TOKENS = max_new_tokens
+
+    from evalplus.evaluate import evaluate as evalplus_evaluator
+
+    label = model.rstrip("/").split("/")[-1]
+    out = f"/artifacts/evalplus/{label}"
+    os.makedirs(out, exist_ok=True)
+
+    mode = "greedy" if greedy else f"t{temperature}"
+    output_file = f"{out}/{dataset}-{mode}.json"
+    print(f"[evalplus] {model} | {dataset} | {mode}", flush=True)
+
+    evalplus_evaluator(
+        dataset=dataset,
+        output_file=output_file,
+        model=model,
+        # Stamped with the decoding mode so `resume` cannot silently serve
+        # generations produced under different sampling settings.
+        root=f"{out}/codegen-{mode}",
+        backend="vllm",
+        greedy=greedy,
+        temperature=0.0 if greedy else temperature,
+        tp=tp,
+        trust_remote_code=True,
+    )
+
+    with open(output_file) as handle:
+        scores = json.load(handle).get("pass_at_k", {})
+    base = scores.get("base", {}).get("pass@1")
+    plus = scores.get("plus", {}).get("pass@1")
+
+    table = "\n".join(
+        [
+            f"{model}",
+            f"{dataset} ({mode})",
+            f"  {dataset} pass@1      = {base}",
+            f"  {dataset}+ pass@1     = {plus}",
+        ]
+    )
+    print(table, flush=True)
+    with open(f"{out}/{dataset}-{mode}.txt", "w") as handle:
+        handle.write(table + "\n")
+    artifacts.commit()
+    return f"{table}\n\nsaved to {output_file}"
+
+
+@app.function(
+    image=image,
+    gpu=GPU,
+    timeout=TIMEOUT_S,
+    volumes={"/cache/hf": hf_cache, "/artifacts": artifacts},
+    secrets=HF_SECRETS,
+)
+def expert_activation(
+    model: str = "Qwen/Qwen3-30B-A3B-Instruct-2507",
+    num_seqs: int = 256,
+    seq_len: int = 16,
+    batch_sizes: str = "1,2,4,8,16,32,64,128,256",
+    repeats: int = 64,
+    seed: int = 42,
+) -> str:
+    """Count distinct experts activated per MoE layer vs decode batch size.
+
+    Shows why pruning buys throughput only at scale: one token routes to
+    `top_k` experts, so a batch of B decoding sequences touches at most
+    `B * top_k` of them. Past saturation every expert is read every forward
+    pass, and halving the expert count halves MoE weight traffic.
+
+    A single forward pass over `num_seqs` sequences yields every layer's
+    router logits; decode at batch B is emulated by subsampling B sequences'
+    final-position decisions, averaged over `repeats` draws. The whole curve
+    therefore costs one forward pass, not one per batch size.
+
+    Args:
+        model: HF repo id, or a checkpoint path on the artifacts volume.
+        num_seqs: Sequences in the forward pass; caps the largest batch size.
+        seq_len: Tokens per sequence. Only the final position is counted.
+        batch_sizes: Comma-separated decode batch sizes to report.
+        repeats: Random subsamples averaged per batch size.
+        seed: Seed for prompt selection and subsampling.
+
+    Returns:
+        A markdown table of mean distinct experts per layer per batch size.
+    """
+    import json
+
+    import numpy as np
+    import torch
+    from datasets import load_dataset
+    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+
+    sizes = sorted(int(b) for b in batch_sizes.split(",") if b.strip())
+    if max(sizes) > num_seqs:
+        raise ValueError(f"batch size {max(sizes)} exceeds num_seqs={num_seqs}")
+
+    cfg = AutoConfig.from_pretrained(model, trust_remote_code=True)
+    n_exp, top_k = cfg.num_experts, cfg.num_experts_per_tok
+    print(
+        f"[experts] {model} | E={n_exp} top_k={top_k} "
+        f"layers={cfg.num_hidden_layers}",
+        flush=True,
+    )
+
+    # Only prompts at least `seq_len` tokens long, so every position is a real
+    # token and no padding mask is needed.
+    tok = AutoTokenizer.from_pretrained(model)
+    rows = load_dataset("theblackcat102/evol-codealpaca-v1", split="train")
+    kept: list[list[int]] = []
+    for row in rows:
+        ids = tok(row["instruction"], add_special_tokens=False)["input_ids"]
+        if len(ids) >= seq_len:
+            kept.append(ids[:seq_len])
+        if len(kept) == num_seqs:
+            break
+    if len(kept) < num_seqs:
+        raise ValueError(f"only {len(kept)} prompts reached {seq_len} tokens")
+
+    # transformers 4.55 predates the `dtype` alias; it wants `torch_dtype`.
+    lm = AutoModelForCausalLM.from_pretrained(
+        model,
+        torch_dtype=torch.bfloat16,
+        device_map="cuda",
+        trust_remote_code=True,
+    ).eval()
+    with torch.no_grad():
+        out = lm(
+            input_ids=torch.tensor(kept, device="cuda"),
+            output_router_logits=True,
+        )
+
+    # topk over logits == topk over the router softmax (monotonic), so
+    # selection is unaffected by normalisation.
+    picks = torch.stack(
+        [
+            logits.view(num_seqs, seq_len, n_exp)[:, -1, :]
+            .topk(top_k, dim=-1)
+            .indices
+            for logits in out.router_logits
+        ]
+    )  # (layers, num_seqs, top_k)
+    n_layers = picks.shape[0]
+
+    gen = torch.Generator(device="cpu").manual_seed(seed)
+    curve: dict[int, float] = {}
+    for size in sizes:
+        means = []
+        for _ in range(repeats):
+            idx = torch.randperm(num_seqs, generator=gen)[:size].to(picks.device)
+            sel = picks[:, idx, :].reshape(n_layers, -1)
+            seen = torch.zeros(
+                n_layers, n_exp, dtype=torch.bool, device=sel.device
+            )
+            seen.scatter_(1, sel, True)
+            means.append(seen.sum(1).float().mean().item())
+        curve[size] = sum(means) / len(means)
+
+    lines = [
+        f"{model}",
+        f"E={n_exp} top_k={top_k} layers={n_layers} "
+        f"({num_seqs} seqs x {seq_len} tok, {repeats} draws)",
+        "",
+        "| decode batch | tokens | experts/layer | % of E | vs full |",
+        "|---|---|---|---|---|",
+    ]
+    for size, mean in curve.items():
+        lines.append(
+            f"| {size} | {size} | {mean:.1f} | {mean / n_exp * 100:.1f}% | "
+            f"{mean / n_exp:.3f} |"
+        )
+    table = "\n".join(lines)
+    print(table, flush=True)
+
+    label = model.rstrip("/").split("/")[-1]
+    out_dir = "/artifacts/experts"
+    os.makedirs(out_dir, exist_ok=True)
+    # The picks are the only thing the forward pass is needed for; saving them
+    # lets any other batch grid be recomputed locally without a GPU.
+    np.save(f"{out_dir}/{label}.picks.npy", picks.cpu().numpy().astype("int16"))
+    with open(f"{out_dir}/{label}.json", "w") as handle:
+        json.dump(
+            {
+                "model": model,
+                "num_experts": n_exp,
+                "top_k": top_k,
+                "layers": n_layers,
+                "num_seqs": num_seqs,
+                "seq_len": seq_len,
+                "repeats": repeats,
+                "experts_per_layer": curve,
+            },
+            handle,
+            indent=2,
+        )
+    with open(f"{out_dir}/{label}.txt", "w") as handle:
+        handle.write(table + "\n")
+    artifacts.commit()
+    return f"{table}\n\nsaved to {out_dir}/{label}.{{json,txt,picks.npy}}"
+
+
 @app.local_entrypoint()
 def main(
     model: str = "Qwen/Qwen3-30B-A3B-Instruct-2507",

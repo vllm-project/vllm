@@ -360,6 +360,57 @@ So the default `batch_size 8` is already near the limit on an 80GB card. The
 product `batch_size x model_max_length` is what matters: `bs=16 @ seq=1024`
 costs the same as `bs=8 @ seq=2048`.
 
+### Saliency heatmaps from the calibration dump
+
+The layerwise observer writes every metric it accumulated -- `reap`,
+`ean_sum`, `expert_frequency` and the rest -- next to the checkpoint, one
+tensor of 128 experts per layer, 6.4 MB total. Pruning consumes only the
+per-layer ranking, so the dump is the whole decision and can be plotted
+without touching a GPU:
+
+```bash
+$M volume get inco-reap \
+  pruned/Qwen3-30B-A3B-Instruct-2507/evol-codealpaca-v1/layerwise/observations_1024_cosine-seed_42.pt \
+  ./inco/results/saliency/
+$R/.venv-inco/bin/python $R/inco/scripts/plot_reap_saliency.py
+# -> inco/results/saliency/reap-saliency-heatmap.png
+```
+
+Four panels: saliency by expert index, the retained/pruned mask at 50%, the
+same rows sorted within each layer, and absolute saliency per layer. Note the
+dump is keyed by sample count (`observations_1024_...` vs
+`observations_16_...`), so unlike the checkpoint directory it does *not* alias
+across calibration sizes.
+
+**Absolute saliency is not comparable across layers.** The median expert grows
+105x from layer 0 (0.103) to layer 47 (10.79), because `reap` is
+`mean(||expert_output|| * router_weight)` and activation norms grow with depth.
+Layers 1-3 each hold one expert worth 81x / 38x / 16x their layer median, so
+normalizing by the layer *max* -- the obvious choice -- flattens those layers
+to near-white and hides everything else. The plot divides by the layer median
+on a log colour scale instead.
+
+**What the heatmap shows:**
+
+- **Pruning is not index-structured.** Every index quartile retains 49.6-50.2%
+  of its experts, and no expert index is kept in all 48 layers or dropped in
+  all 48 (retention per index ranges 14-39 of 48 layers). The mask panel looks
+  like noise because it is: saliency is a per-layer property, not a property of
+  an expert slot.
+- **The kept half carries ~2/3 of the saliency mass** (mean 0.669, range 0.608
+  at layer 18 to 0.835 at layer 1). Deleting half the experts removes about a
+  third of the measured saliency, not half -- which is the premise REAP trades
+  on.
+- **Deep layers are more concentrated.** The p90/p10 spread within a layer
+  widens from ~3.2 in layer 0 to ~5.2 in layer 47, and 15 of the 23
+  experts above 4x their layer median live in layers 42-47. Uniform per-layer
+  ratios therefore cut deeper into the useful mass in early layers than late
+  ones; `--perserve_super_experts` exists for exactly the late-layer outliers.
+
+This is a picture of the ranking, not of quality. It explains *which* experts
+went and how much saliency mass the cut left behind; what that costs on task
+accuracy is the lm-eval section below.
+
 ### Published checkpoints, for reference
 
 Cerebras has not released a pruned `Qwen3-30B-A3B`, but
@@ -659,6 +710,187 @@ Prompt-set presets live in `src/speculators/data_generation/configs.py:106`
 comparison above puts that effect at ~0.05 OBQA / ~0.08 MC average. `--dataset` takes a local JSONL or
 an `hf:` spec, so the calibration corpus can be reused as the regeneration
 prompt set to match the drafter to the target's retained strengths.
+
+### Real run: 5000 on-policy evol-codealpaca samples
+
+Both of the above are now implemented in `modal_speculators.py`, whose defaults
+are the upstream dflash2 recipe (5000 samples, 5 epochs, from
+`examples/train/dflash2_qwen3_8b_ultrachat_online_5k.sh`). The function is
+`pipeline`, not `smoke`; `--skip-regen` restores the old off-policy path.
+
+```bash
+$M run --detach $R/inco/modal/modal_speculators.py --label dflash2-reap50-code-5k
+```
+
+The pipeline gained two steps ahead of `prepare-data`:
+
+* **Step 0 — prompts.** 5000 `instruction` fields from
+  `theblackcat102/evol-codealpaca-v1` written as `{"prompt": ...}` rows, which
+  is the schema `load_input_dataset` assumes for an unregistered dataset
+  (`prompt_field="prompt"`). Shuffled with seed 42: file order in these corpora
+  tracks their source subsets, so a bare first-N samples one subset rather than
+  the corpus. Runs *before* the server, under `/opt/spec` because `datasets`
+  lives there — a wrong dataset id then costs seconds instead of a 5-minute
+  weight load.
+* **Step 1b — `regenerate-responses`** against the target on localhost, seed
+  42, Qwen3 non-thinking sampling, `--max-tokens 1024`. Nonzero rc raises:
+  without that, `prepare-data` silently falls through to whatever `dataset`
+  points at and the draft trains on the wrong distribution.
+
+Its output is already `input_ids` + `loss_mask`, so `prepare-data` takes the
+pretokenized passthrough (`preprocessing.py:498`) and never renders.
+
+~65 min end to end on one H100: ~19 min regeneration (4.5 samples/s, 3.8k
+output tok/s), a few minutes for prepare-data plus extraction, 41.6 min to
+train.
+
+| stage | count |
+|---|---|
+| prompts written | 5000 |
+| prepared examples | 4985 (`dataset_info.json`) |
+| hidden-state shards | 4938 (`hs_0`..`hs_4937`) |
+
+The ~15 lost rows are in `regen.errors.jsonl`; the 47 further lost between
+prepare-data and extraction are `--validate-outputs` rejections.
+
+**67% of generations hit the 1024-token cap.** evol-codealpaca answers are long
+code-plus-explanation, so most samples end at the cap rather than at EOS, and
+the draft sees few EOS tokens. Arguably aligned with the serving workload,
+which runs `ignore_eos:true` and never lets the model finish either — but it is
+a property of this checkpoint, not a neutral default.
+
+### Result: val metrics per epoch
+
+`checkpoints/{epoch}/val_metrics.json`, 4985 samples, block_size 8:
+
+| epoch | val loss | accept_rate | accept_len | eal |
+|---|---|---|---|---|
+| 0 | 2.572 | 0.209 | 1.936 | 2.542 |
+| 1 | 2.226 | 0.269 | 2.274 | 2.953 |
+| 2 | 2.028 | 0.318 | 2.571 | 3.245 |
+| 3 | 1.885 | 0.358 | 2.813 | 3.476 |
+| 4 | 1.821 | **0.391** | **3.022** | **3.637** |
+
+Against the 64-sample off-policy smoke run (`val/eal` 1.109, `val/accept_rate`
+0.020), on-policy regeneration is the whole difference between a draft that
+barely lands a token and one accepting 39% at depth.
+
+**Quote the val numbers, not the train numbers.** At epoch 4 `train/eal` was
+6.519 and `train/accept_rate` 0.701, against 3.637 / 0.391 on validation — five
+epochs over 4985 samples leaves a large fit gap. The number that belongs in a
+throughput claim is neither: it is measured acceptance in vLLM at 1024/512,
+which is lower again because acceptance falls with batch size.
+
+**It had not converged.** Every metric was still improving monotonically at
+epoch 4 and the per-epoch `eal` gain was decaying but positive (+0.411, +0.292,
++0.231, +0.161). Stopping at 5 epochs is the upstream recipe, not a plateau, so
+more epochs or more samples are the obvious next lever.
+
+**The run dir holds ~2x the hidden-state bytes it needs.** 14908 files =
+4938 `hs_*.safetensors` + 4985 `chatcmpl-*.safetensors` + 4985 `.lock`: the
+connector's per-request intermediates are not cleaned up. At 16 KB/token
+measured (`[904, 4, 2048]` bf16 for a 904-token sample) that is worth deleting
+before the next run.
+
+---
+
+## Serving the drafter — acceptance and throughput
+
+`modal_speculators.py::acceptance` serves a target with and without its drafter
+in one container and sweeps concurrency against both. vLLM wants the *drafter*
+checkpoint as the served model: a speculators config makes it swap in the
+config's own `verifier.name_or_path` for model and tokenizer and derive
+`method=dflash` with 7 speculative tokens
+(`transformers_utils/config.py:740`). Passing the target plus
+`--speculative-config` instead would need `trust_remote_code` for the draft's
+`auto_map`.
+
+```bash
+$M run --detach $R/inco/modal/modal_speculators.py::acceptance --label specdec-reap50-v5
+
+$M run --detach $R/inco/modal/modal_speculators.py::acceptance \
+  --label specdec-dense-v5 --model Qwen/Qwen3-30B-A3B-Instruct-2507 \
+  --drafter /spec/dflash2-dense-code-5k/checkpoints/4 \
+  --kv-cache-gib 10 --gpu-memory-utilization 0.92
+```
+
+Workload: 64 HumanEval+ and 64 MBPP+ prompts, shuffled seed 42. ISL 66 mean
+(HumanEval+ 107, MBPP+ 24; bimodal, median 39, max 263), OSL ~375 mean capped
+at 512, greedy, natural stopping. **This is not the 1024/512 shape** -- prefill
+is ~15% of the tokens here, so these tok/s do not belong on the same axes as
+the aiperf sweeps.
+
+### Four settings this measurement does not work without
+
+Each was found by getting a wrong answer first.
+
+* **`--no-async-scheduling` in *both* phases.** `async_scheduling` defaults to
+  None, which resolves to True unless something blocks it, and
+  `config/vllm.py:1345` blocks it only for `method="dflash"`. Omitting the flag
+  therefore gives the no-draft phase a scheduler the drafted phase is not
+  allowed to have. Worth 1.51x to the baseline at c=1.
+* **A graph ceiling sized for the drafted batch.** The verify pass carries
+  `concurrency x (1 + num_speculative_tokens)` rows, and
+  `max_cudagraph_capture_size` defaults to 512 = exactly 64 x 8. Every point
+  above c=64 ran the draft eager while the baseline kept its graphs, which
+  manufactured a throughput peak at c=48 and a crossover at c=80. Now sized
+  from `max_num_seqs x (1 + spec_tokens)` and passed to both phases.
+* **`--no-enable-prefix-caching`.** The prompt pool repeats 2-6x within a
+  point at high concurrency, so with caching those repeats read their prefills
+  out of the cache.
+* **Whole-pool request counts.** `requests = pool x ceil(max(24, 8c) / pool)`,
+  giving >=8 waves everywhere and an identical workload at every concurrency.
+  A fixed 128 prompts gave c=64 two waves, and two runs of that config
+  disagreed by 46%; a bare `8 x c` made the prompt mix a function of
+  concurrency, since a prefix of a source-grouped pool is all HumanEval+.
+
+`_integrity_warnings` re-checks both of `bench/report.py`'s rules (>=4 waves,
+tok/s/user never rising with concurrency) and stores them in `results.json`.
+
+### Results: REAP-50% and unpruned, drafted vs not
+
+Both runs audited `async_scheduling=False`, `spec_method=dflash`,
+`num_speculative_tokens=7`, no integrity warnings. KV pinned 32 GiB (pruned)
+and 10 GiB (unpruned -- 58.3 GiB of weights leaves no more); neither model is
+KV-bound at these lengths, c=96 needs 74k tokens of a 99k-305k pool.
+
+| c | REAP draft | REAP plain | ratio | acc_len | unpr draft | unpr plain | ratio | acc_len |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 400 | 168 | 2.38x | 3.894 | 382 | 165 | 2.32x | 4.008 |
+| 2 | 664 | 282 | 2.36x | 3.926 | 597 | 274 | 2.17x | 4.006 |
+| 4 | 1105 | 440 | 2.51x | 3.900 | 945 | 413 | 2.29x | 4.012 |
+| 8 | 1940 | 726 | 2.67x | 3.956 | 1530 | 660 | 2.32x | 4.014 |
+| 16 | 3207 | 1202 | 2.67x | 3.927 | 2457 | 1022 | 2.40x | 4.016 |
+| 32 | 5920 | 2062 | 2.87x | 3.924 | 4261 | 1625 | 2.62x | 3.990 |
+| 48 | 7861 | 2846 | 2.76x | 3.918 | 6001 | 2198 | 2.73x | 4.004 |
+| 64 | 9457 | 3623 | 2.61x | 3.921 | 7218 | 2770 | 2.61x | 4.006 |
+| 80 | 10659 | 4285 | 2.49x | 3.921 | 8353 | 3282 | 2.55x | 4.006 |
+| 96 | 11580 | 5004 | 2.31x | 3.922 | 9314 | 3776 | 2.47x | 4.006 |
+
+* **The drafter is worth 2.2-2.9x on both models**, peaking at c=32-48. Below
+  that the draft's fixed per-step cost is unamortised; above it, rejected
+  tokens start costing real compute. Ceiling is the accepted length, so the
+  peak captures 73% of ideal and the ends 58-61%.
+* **Every curve rises monotonically to c=96.** No saturation, no crossover.
+  Both earlier claims to the contrary were the graph-ceiling artifact.
+* **Pruning is worth ~1.25x on top, and the two stack**: pruned+drafted 11,580
+  against unpruned undrafted 3,777 is 3.1x.
+* **Acceptance is flat in load and near-identical between models** --
+  3.89-3.96 pruned, 3.99-4.02 unpruned, across a 96x range of concurrency.
+  Validation had the pruned drafter 3% *ahead* (3.637 vs 3.524); serving puts
+  it 2% behind. The two disagree in sign, so the honest claim is that pruning
+  does not measurably change draftability.
+* Serving acceptance exceeds validation for both (3.92 vs 3.64, 4.01 vs 3.52):
+  serving is greedy, while the training data was regenerated at temperature
+  0.7, and a greedier target is easier to predict.
+
+Plot: `python -m bench.plot_specdec results/spec/results-reap-v5.json
+results/spec/results-unpruned-v5.json --labels "REAP-50%,unpruned"`.
+
+**No repeats.** One measurement per point, so 0.1-0.2x differences between the
+two models' speedup curves are inside the run-to-run variation seen elsewhere
+here (11% at a matched config). The acceptance gap, 2% in the same direction
+at all ten points, is the more trustworthy of the two.
 
 ---
 

@@ -132,6 +132,32 @@ def interactivity_at_load(
     return None
 
 
+def is_steep(xs, ys, i: int, spans: tuple[float, float]) -> bool:
+    """Does the curve run more vertically than horizontally at point `i`?
+
+    Measured in axis fractions, not data units, so the answer matches what the
+    reader sees rather than the units throughput happens to be in.
+    """
+    lo, hi = max(i - 1, 0), min(i + 1, len(xs) - 1)
+    dx = abs(xs[hi] - xs[lo]) / spans[0]
+    dy = abs(ys[hi] - ys[lo]) / spans[1]
+    return dy > dx
+
+
+def _label_placement(steep: bool, outward: bool):
+    """Where a ``c=`` label sits relative to its marker.
+
+    `outward` sends the label up-and-right, away from the origin; the other
+    side is down-and-left. Overlaid sweeps trace nearly the same curve, so
+    giving each one its own side is what keeps the labels apart. Whether that
+    side is reached horizontally or vertically depends on the local slope --
+    a label above a near-vertical curve lands on the next marker up.
+    """
+    if steep:
+        return ((7, 0), "left", "center") if outward else ((-7, 0), "right", "center")
+    return ((0, 6), "center", "bottom") if outward else ((0, -7), "center", "top")
+
+
 def plot_pareto(
     runs: dict[str, Sequence[SweepPoint]],
     path: str | Path,
@@ -149,20 +175,36 @@ def plot_pareto(
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(7.5, 5.5), dpi=150)
+    fig, ax = plt.subplots(figsize=(9, 6), dpi=150)
+    drawn = []
     for label, points in runs.items():
         ordered = sorted(points, key=lambda p: p.concurrency)
         xs = [p.tokens_per_s_per_user for p in ordered]
         ys = [p.tokens_per_s_per_gpu for p in ordered]
         ax.plot(xs, ys, marker="o", label=label)
-        if annotate:
-            for point, x, y in zip(ordered, xs, ys):
+        drawn.append((ordered, xs, ys))
+
+    if annotate:
+        ax.margins(x=0.08, y=0.05)
+        spans = tuple(hi - lo or 1.0 for lo, hi in (ax.get_xlim(), ax.get_ylim()))
+        # The upper curve takes the outer side. Ranking by throughput rather
+        # than by argument order means the faster run keeps the free half of
+        # the plot whichever way round the runs were passed.
+        rank = sorted(range(len(drawn)), key=lambda i: -max(drawn[i][2]))
+        for side, index in enumerate(rank):
+            ordered, xs, ys = drawn[index]
+            for i, (point, x, y) in enumerate(zip(ordered, xs, ys)):
+                offset, ha, va = _label_placement(
+                    is_steep(xs, ys, i, spans), outward=side % 2 == 0
+                )
                 ax.annotate(
                     f"c={point.concurrency}",
                     (x, y),
                     textcoords="offset points",
-                    xytext=(5, 4),
+                    xytext=offset,
                     fontsize=7,
+                    ha=ha,
+                    va=va,
                 )
     ax.set_xlabel("tokens/s/user  (interactivity)")
     ax.set_ylabel("tokens/s/gpu  (throughput)")
@@ -232,3 +274,66 @@ def summarize(
                 f"| {best.concurrency} |"
             )
     return "\n".join(chunks)
+
+
+def plot_expert_activation(
+    runs: dict[str, tuple[dict[int, float], int]],
+    path: str | Path,
+    title: str = "Distinct experts activated per MoE layer",
+) -> Path | None:
+    """Save the expert-activation curve. None when matplotlib is unavailable.
+
+    x is decode batch size (tokens per forward step), y is the mean number of
+    distinct experts selected per layer. A dashed ceiling marks each model's
+    expert count, so both the divergence and the approach to saturation are
+    readable off one axis.
+
+    Args:
+        runs: Label -> (batch size -> mean distinct experts, total experts).
+        path: Destination PNG.
+        title: Plot title.
+
+    Returns:
+        The written path, or None if matplotlib is missing.
+    """
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return None
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(9, 6), dpi=150)
+
+    for i, (label, (curve, n_experts)) in enumerate(runs.items()):
+        color = f"C{i}"
+        xs = sorted(curve)
+        ax.plot(xs, [curve[x] for x in xs], marker="o", color=color, label=label)
+        ax.axhline(n_experts, color=color, linestyle="--", linewidth=1, alpha=0.4)
+        ax.annotate(
+            f"{n_experts} experts",
+            (xs[-1], n_experts),
+            textcoords="offset points",
+            xytext=(0, 4),
+            fontsize=8,
+            color="gray",
+            ha="right",
+        )
+
+    ax.set_xscale("log", base=2)
+    ax.set_xticks(sorted(next(iter(runs.values()))[0]))
+    ax.get_xaxis().set_major_formatter(plt.matplotlib.ticker.ScalarFormatter())
+    ax.set_xlabel("decode batch size  (tokens per forward step)")
+    ax.set_ylabel("distinct experts activated per layer")
+    ax.set_title(title)
+    ax.set_ylim(0, max(n for _, n in runs.values()) * 1.12)
+    ax.grid(alpha=0.3)
+    ax.legend()
+
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+    return path

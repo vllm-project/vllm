@@ -124,15 +124,27 @@ def main(argv: list[str] | None = None) -> int:
         help="interactivity SLOs in tokens/s/user",
     )
     parser.add_argument("--out", default=None, help="directory for comparison outputs")
+    parser.add_argument(
+        "--names",
+        default="",
+        help="comma-separated display names, one per run; run labels by default",
+    )
     args = parser.parse_args(argv)
 
     runs = load_runs(args.labels, args.artifact_root, args.num_gpus)
     out_dir = Path(args.out or Path(args.artifact_root) / "comparisons")
     name = "-vs-".join(args.labels)
 
+    names = [n.strip() for n in args.names.split(",") if n.strip()]
+    if names and len(names) != len(args.labels):
+        print(f"{len(names)} names for {len(args.labels)} runs", file=sys.stderr)
+        return 2
+    if names:
+        runs = dict(zip(names, runs.values()))
+
     body = "\n\n".join(
         [
-            f"# {name}",
+            f"# {' vs '.join(runs)}",
             "## Throughput at interactivity SLO",
             delta_table(runs, tuple(args.slo)),
             "## Per-concurrency detail",
@@ -143,7 +155,9 @@ def main(argv: list[str] | None = None) -> int:
     (out_dir / f"{name}.md").write_text(body + "\n")
     flat = [p for points in runs.values() for p in points]
     report.write_csv(flat, out_dir / f"{name}.csv")
-    plot = report.plot_pareto(runs, out_dir / f"{name}.png", title=name)
+    plot = report.plot_pareto(
+        runs, out_dir / f"{name}.png", title=" vs ".join(runs)
+    )
 
     print(body)
     print(f"\n[out] {out_dir / f'{name}.md'}")
