@@ -1451,6 +1451,23 @@ class KVCacheConfig:
         )
 
     @cached_property
+    def prefix_cacheable_group_ids(self) -> tuple[int, ...]:
+        """IDs of transferable groups eligible for hash-addressed stores."""
+        return tuple(
+            group_id
+            for group_id in self.transfer_group_ids
+            if self.kv_cache_groups[group_id].kv_cache_spec.prefix_cacheable
+        )
+
+    @cached_property
+    def prefix_cacheable_groups(self) -> tuple[KVCacheGroupSpec, ...]:
+        """Transferable groups eligible for hash-addressed stores."""
+        return tuple(
+            self.kv_cache_groups[group_id]
+            for group_id in self.prefix_cacheable_group_ids
+        )
+
+    @cached_property
     def transfer_groups(self) -> tuple[KVCacheGroupSpec, ...]:
         """Cache groups that participate in external KV transfer."""
         return tuple(

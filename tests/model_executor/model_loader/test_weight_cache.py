@@ -7,6 +7,7 @@ warm restarts (weights mapped from the daemon via CUDA IPC) must both serve
 identical outputs.
 """
 
+import glob
 import os
 import shutil
 import subprocess
@@ -21,7 +22,6 @@ import pytest
 
 from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
-from vllm.model_executor.model_loader.weight_cache.protocol import get_socket_path
 from vllm.platforms import current_platform
 
 DAEMON_TIMEOUT_S = 600
@@ -79,9 +79,7 @@ class WeightCacheDaemon:
         # Poll for the socket files rather than a log line: model loading can
         # pull in JIT compilers that swap the process's stderr and swallow
         # everything logged afterwards, making log-based readiness flaky.
-        expected = [
-            get_socket_path(gpu_id, self.socket_dir) for gpu_id in range(self.tp_size)
-        ]
+        pattern = os.path.join(self.socket_dir, "vllm_weight_cache_*.sock")
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             if self._proc.poll() is not None:
@@ -89,7 +87,7 @@ class WeightCacheDaemon:
                     f"Weight cache daemon exited with {self._proc.returncode}:\n"
                     f"{self._logs()}"
                 )
-            if all(os.path.exists(path) for path in expected):
+            if len(glob.glob(pattern)) >= self.tp_size:
                 return
             time.sleep(1.0)
         raise TimeoutError(

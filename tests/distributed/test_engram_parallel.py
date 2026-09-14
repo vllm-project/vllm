@@ -10,7 +10,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from vllm.models.deepseek_v4_1.common.engram_parallel import exchange_heads_for_tokens
+from vllm.models.deepseek_v41.common.engram_parallel import exchange_heads_for_tokens
 
 
 def _exchange_worker(rank: int, world_size: int, prepad: bool, rendezvous: str):
@@ -70,7 +70,7 @@ def test_all_to_all_preserves_token_and_head_order(world_size, prepad, tmp_path)
 def _cuda_exchange_worker(rank, tp_size, port):
     from tests.utils import init_test_distributed_environment
     from vllm.distributed import cleanup_dist_env_and_memory, get_tp_group
-    from vllm.models.deepseek_v4_1.common.engram import Engram
+    from vllm.models.deepseek_v41.common.engram import Engram
 
     torch.accelerator.set_device_index(rank)
     init_test_distributed_environment(tp_size, 4 // tp_size, rank, str(port), rank)
