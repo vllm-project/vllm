@@ -321,7 +321,7 @@ pub fn to_sequence_output(
         finished
             .and_then(|finished| finished.routed_experts.as_ref())
             .map(|data| pb::OpaqueData {
-                data: data.as_bytes().to_vec(),
+                data: data.bytes().clone(),
             });
 
     Ok(pb::SequenceOutput {
@@ -842,7 +842,9 @@ mod tests {
 
         assert_eq!(
             terminal.routed_experts,
-            Some(pb::OpaqueData { data: expected })
+            Some(pb::OpaqueData {
+                data: expected.into(),
+            })
         );
         assert_eq!(intermediate.routed_experts, None);
     }
@@ -854,7 +856,9 @@ mod tests {
             ..Default::default()
         };
         let response = pb::SequenceOutput {
-            routed_experts: Some(pb::OpaqueData { data: vec![7] }),
+            routed_experts: Some(pb::OpaqueData {
+                data: vec![7].into(),
+            }),
             ..Default::default()
         };
 
