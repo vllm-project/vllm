@@ -210,6 +210,7 @@ class FlashInferMLABackend(MLACommonBackend):
 
 class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
     can_return_lse_for_decode: bool = True
+    supports_dcp: bool = True
     # DCP is the only path that consumes LSE. It uses monolithic CuTeDSL,
     # whose public LSE contract is natural-log.
     lse_base_on_e: bool = True
@@ -324,7 +325,6 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         extra_kwargs: dict[str, Any] = {}
         decode_backend: str | None
         if self.dcp_world_size > 1:
-            assert self.cp_kv_cache_interleave_size == 1
             causal_seqlens_kv_global = attn_metadata.decode.dcp_tot_seq_lens
             assert causal_seqlens_kv_global is not None
             if not attn_metadata.causal and query_len > 1:

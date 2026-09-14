@@ -1,32 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import cast
+from typing import TYPE_CHECKING
 
 from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.serving import (
     OpenAIModelRegistry,
     OpenAIServingModels,
 )
-from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import encode_mm_kwargs_item
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
+    extract_mm_features,
+)
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateRequest,
     MultiModalFeatures,
-    PlaceholderRangeInfo,
 )
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.inputs import (
-    EngineInput,
-    MultiModalHashes,
-    MultiModalInput,
-    MultiModalPlaceholders,
-)
+from vllm.inputs import EngineInput
 from vllm.logger import init_logger
+from vllm.multimodal.parse import MultiModalDataParser
 from vllm.renderers.inputs.preprocess import (
     extract_prompt_components,
     extract_prompt_len,
@@ -36,6 +34,9 @@ from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
+if TYPE_CHECKING:
+    from vllm.entrypoints.mcp.tool_server import ToolServer
+
 
 class ServingRender(BaseServing):
     def __init__(
@@ -44,6 +45,7 @@ class ServingRender(BaseServing):
         online_renderer: "OnlineRenderer",
         *,
         request_logger: RequestLogger | None = None,
+        tool_server: "ToolServer | None" = None,
     ) -> None:
         super().__init__(
             models=models,
@@ -52,12 +54,16 @@ class ServingRender(BaseServing):
         )
 
         self.online_renderer = online_renderer
+        self.tool_server = tool_server
 
         self._merge_inline_system = (
             AnthropicServingMessages._detect_merge_inline_system(
                 online_renderer.chat_template
             )
         )
+
+        self._placeholder_metadata_parser: MultiModalDataParser | None = None
+        self._placeholder_metadata_parser_failed = False
 
         self.default_sampling_params = (
             online_renderer.model_config.get_diff_sampling_param()
@@ -231,41 +237,93 @@ class ServingRender(BaseServing):
 
         return generate_requests
 
-    @staticmethod
+    async def render_responses_request(
+        self,
+        request: ResponsesRequest,
+    ) -> GenerateRequest | ErrorResponse:
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
+        if request.previous_response_id is not None:
+            return self.create_error_response(
+                message=(
+                    "previous_response_id is not supported by the stateless "
+                    "render endpoint."
+                ),
+                err_type="invalid_request_error",
+                param="previous_response_id",
+            )
+
+        result = await self.online_renderer.render_responses(
+            request,
+            previous_messages=None,
+            previous_response_outputs=None,
+            tool_server=self.tool_server,
+            skip_mm_cache=True,
+        )
+        if isinstance(result, ErrorResponse):
+            return result
+
+        engine_input = result.engine_input
+        prompt_components = extract_prompt_components(self.model_config, engine_input)
+        token_ids = prompt_components.token_ids
+        if not token_ids:
+            return self.create_error_response("No token_ids rendered")
+
+        input_length = extract_prompt_len(self.model_config, engine_input)
+        max_tokens = get_max_tokens(
+            self.model_config.max_model_len,
+            request.max_output_tokens,
+            input_length,
+            self.default_sampling_params,
+            self.override_max_tokens,
+            truncate_prompt_tokens=(-1 if request.truncation != "disabled" else None),
+        )
+        params = request.to_sampling_params(max_tokens, self.default_sampling_params)
+
+        return GenerateRequest(
+            request_id=request.request_id,
+            token_ids=list(token_ids),
+            features=self._extract_mm_features(engine_input),
+            sampling_params=params,
+            model=request.model,
+            stream=bool(request.stream),
+            cache_salt=request.cache_salt,
+            priority=request.priority,
+            kv_transfer_params=request.kv_transfer_params,
+            ec_transfer_params=request.ec_transfer_params,
+            token_offsets=engine_input.get("prompt_token_offsets"),
+        )
+
+    def _placeholder_metadata_fields(self, modality: str) -> set[str]:
+        """Fields the EC consumer still requires after embeddings transfer."""
+        if self._placeholder_metadata_parser_failed:
+            return set()
+        if self._placeholder_metadata_parser is None:
+            try:
+                from vllm.multimodal import MULTIMODAL_REGISTRY
+
+                self._placeholder_metadata_parser = (
+                    MULTIMODAL_REGISTRY.create_processor(
+                        self.model_config
+                    ).info.data_parser
+                )
+            except Exception:
+                logger.debug(
+                    "Could not load placeholder metadata fields; "
+                    "mm_metadata will use keep_on_cpu fields only."
+                )
+                self._placeholder_metadata_parser_failed = True
+                return set()
+        return set(
+            self._placeholder_metadata_parser.placeholder_metadata_fields(modality)
+        )
+
     def _extract_mm_features(
+        self,
         engine_input: EngineInput,
     ) -> MultiModalFeatures | None:
-        """Extract multimodal metadata from a rendered engine prompt.
-
-        Returns ``None`` for text-only prompts.
-        """
-        if engine_input.get("type") != "multimodal":
-            return None
-
-        # At this point engine_input is a MultiModalInput TypedDict.
-        mm_engine_input = cast(MultiModalInput, engine_input)
-        mm_hashes: MultiModalHashes = mm_engine_input["mm_hashes"]
-        raw_placeholders: MultiModalPlaceholders = mm_engine_input["mm_placeholders"]
-
-        mm_placeholders = {
-            modality: [
-                PlaceholderRangeInfo(offset=p.offset, length=p.length) for p in ranges
-            ]
-            for modality, ranges in raw_placeholders.items()
-        }
-
-        # Serialize tensor data per modality.
-        kwargs_data: dict[str, list[str | None]] | None = None
-        if raw_mm_kwargs := mm_engine_input.get("mm_kwargs"):
-            kwargs_data = {}
-            for modality, items in raw_mm_kwargs.items():
-                kwargs_data[modality] = [
-                    encode_mm_kwargs_item(item) if item is not None else None
-                    for item in items
-                ]
-
-        return MultiModalFeatures(
-            mm_hashes=mm_hashes,
-            mm_placeholders=mm_placeholders,
-            kwargs_data=kwargs_data,
+        return extract_mm_features(
+            engine_input,
+            metadata_fields_for=self._placeholder_metadata_fields,
         )

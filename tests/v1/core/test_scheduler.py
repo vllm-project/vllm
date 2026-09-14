@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
 from concurrent.futures import Future
+from types import SimpleNamespace
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 
@@ -17,7 +19,12 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
+    HiSparseConnector,
+    HiSparseConnectorScheduler,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalKwargsItem,
@@ -32,6 +39,7 @@ from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.engine import FinishReason
+from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -43,6 +51,7 @@ from vllm.v1.outputs import (
     ECConnectorOutput,
     KVConnectorOutput,
     ModelRunnerOutput,
+    SamplingMaskLists,
     make_empty_encoder_model_runner_output,
 )
 from vllm.v1.request import Request, RequestStatus
@@ -143,6 +152,30 @@ def test_get_num_unfinished_requests():
     for i, request in enumerate(requests):
         scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_STOPPED)
         assert scheduler.get_num_unfinished_requests() == len(requests) - i - 1
+
+
+def _bind_hisparse_connector(scheduler):
+    connector = object.__new__(HiSparseConnector)
+    connector.connector_scheduler = HiSparseConnectorScheduler(async_speculative=False)
+    from tests.v1.core.test_prefix_caching import make_hisparse_kv_cache_manager
+
+    coordinator = get_hisparse_coordinator(make_hisparse_kv_cache_manager(16, 16))
+    connector.connector_scheduler.bind_coordinator(coordinator)
+    composite = object.__new__(MultiConnector)
+    composite._connectors = (connector,)
+    scheduler.connector = composite
+    return coordinator
+
+
+def test_pending_hisparse_spill_keeps_scheduler_alive():
+    """A final host spill must complete after the last request finishes."""
+    scheduler = create_scheduler()
+    coordinator = _bind_hisparse_connector(scheduler)
+    pending = coordinator.pending_spills
+    pending[0] = Mock()
+    assert scheduler.has_requests()
+    pending.clear()
+    assert not scheduler.has_requests()
 
 
 @pytest.mark.parametrize(
@@ -667,6 +700,51 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
     assert output2.num_scheduled_tokens[requests[2].request_id] == 800 - 224 - 224
 
 
+def test_update_from_output_routes_sampling_masks_by_request():
+    """Each request receives the sampler row at its own batch index."""
+    scheduler = create_scheduler()
+    scheduler.return_sampling_mask = True
+    requests = create_requests(num_requests=3, max_tokens=10)
+    for req in requests:
+        req.num_computed_tokens = req.num_tokens
+        scheduler.requests[req.request_id] = req
+        scheduler.running.append(req)
+        req.status = RequestStatus.RUNNING
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={req.request_id: 1 for req in requests},
+        total_num_scheduled_tokens=3,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    model_output = ModelRunnerOutput(
+        req_ids=[req.request_id for req in requests],
+        req_id_to_index={req.request_id: i for i, req in enumerate(requests)},
+        sampled_token_ids=[[1], [3], [4]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+        sampling_masks=SamplingMaskLists(
+            np.array([1, 2, 3, 4, 5, 6], dtype=np.int32), np.array([0, 2, 3, 6])
+        ),
+    )
+
+    outputs = scheduler.update_from_output(scheduler_output, model_output)[0].outputs
+
+    assert [out.request_id for out in outputs] == [req.request_id for req in requests]
+    assert [out.new_sampling_mask.token_ids.tolist() for out in outputs] == [
+        [1, 2],
+        [3],
+        [4, 5, 6],
+    ]
+    assert all(out.new_sampling_mask.offsets is None for out in outputs)
+
+
 def test_stop_via_update_from_output():
     """Test stopping behavior through update_from_output"""
     scheduler = create_scheduler(num_speculative_tokens=1)
@@ -840,11 +918,10 @@ def test_stop_via_update_from_output():
 
 
 def test_check_stop_min_tokens():
-    """Test that requests don't stop when min_tokens requirement isn't met."""
+    """Test that sampled stop tokens still finish under min_tokens."""
     from vllm.v1.core.sched.utils import check_stop
 
-    # Test case 1: num_output_tokens < min_tokens
-    # Should return False (don't stop)
+    # Test case 1: regular tokens below min_tokens should keep running.
     sampling_params = SamplingParams(
         ignore_eos=False,
         max_tokens=20,
@@ -857,30 +934,41 @@ def test_check_stop_min_tokens():
         sampling_params=sampling_params,
         pooling_params=None,
     )
-    # Simulate having generated 3 output tokens (less than min_tokens=5)
-    request.append_output_token_ids([10, 11, EOS_TOKEN_ID])  # EOS token present
+    request.append_output_token_ids([10, 11, 12])
 
     result = check_stop(request, max_model_len=100)
     assert result is False, "Should not stop when num_output_tokens<min_tokens"
 
-    # Test case 2: num_output_tokens >= min_tokens
-    # Should follow normal stopping logic (stop on EOS)
-    request.append_output_token_ids(
-        [
-            10,
-            11,
-            12,
-            13,
-            14,
-            EOS_TOKEN_ID,
-        ]
-    )  # 6 tokens > min_tokens
+    # Test case 2: if EOS is sampled, it should stop even below min_tokens.
+    request_eos = Request(
+        request_id="eos",
+        prompt_token_ids=[0, 1, 2],
+        sampling_params=sampling_params,
+        pooling_params=None,
+    )
+    request_eos.append_output_token_ids([10, 11, EOS_TOKEN_ID])
+    result = check_stop(request_eos, max_model_len=100)
+    assert result is True, "Sampled EOS should stop even below min_tokens"
+    assert request_eos.status == RequestStatus.FINISHED_STOPPED
 
-    result = check_stop(request, max_model_len=100)
-    assert result is True, "Should stop on EOS when min_tokens met"
-    assert request.status == RequestStatus.FINISHED_STOPPED
+    # Test case 3: ignore_eos should still prevent EOS-based stopping.
+    sampling_params_ignore_eos = SamplingParams(
+        ignore_eos=True,
+        max_tokens=20,
+        min_tokens=5,
+    )
+    sampling_params_ignore_eos.update_from_generation_config({}, EOS_TOKEN_ID)
+    request_ignore_eos = Request(
+        request_id="ignore-eos",
+        prompt_token_ids=[0, 1, 2],
+        sampling_params=sampling_params_ignore_eos,
+        pooling_params=None,
+    )
+    request_ignore_eos.append_output_token_ids([EOS_TOKEN_ID])
+    result = check_stop(request_ignore_eos, max_model_len=100)
+    assert result is False, "ignore_eos should still suppress EOS stopping"
 
-    # Test case 3: min_tokens = 0, should follow normal stopping logic
+    # Test case 4: min_tokens = 0 should follow normal stopping logic.
     sampling_params_no_min = SamplingParams(
         ignore_eos=False,
         max_tokens=20,
@@ -899,7 +987,7 @@ def test_check_stop_min_tokens():
     assert result is True, "Should stop on EOS when min_tokens=0"
     assert request_no_min.status == RequestStatus.FINISHED_STOPPED
 
-    # Test case 4: min_tokens > 0 with stop token (not EOS)
+    # Test case 5: if a stop token is sampled, it should stop immediately.
     sampling_params_stop = SamplingParams(
         ignore_eos=False,
         max_tokens=20,
@@ -913,20 +1001,65 @@ def test_check_stop_min_tokens():
         sampling_params=sampling_params_stop,
         pooling_params=None,
     )
-    # Only 3 output tokens, less than min_tokens=5, but has stop token
     request_stop.append_output_token_ids([10, 11, 42])
     result = check_stop(request_stop, max_model_len=100)
-    assert result is False, "Should not stop when num_output_tokens<min_tokens"
-
-    # Test case 5: min_tokens met, should stop on stop token
-    request_stop.append_output_token_ids(
-        [10, 11, 12, 13, 14, 42]
-    )  # 6 tokens >= min_tokens=5
-
-    result = check_stop(request_stop, max_model_len=100)
-    assert result is True, "Should stop on stop token when min_tokens met"
+    assert result is True, "Sampled stop tokens should stop even below min_tokens"
     assert request_stop.status == RequestStatus.FINISHED_STOPPED
     assert request_stop.stop_reason == 42
+
+
+def test_check_stop_length_cap_below_min_tokens():
+    """Length caps must finish a request even below min_tokens.
+
+    Guards against requests hanging forever when min_tokens cannot be
+    satisfied: min_tokens only defers EOS/stop tokens, so a request that
+    reaches max_model_len (or a max_tokens clamped below min_tokens) must
+    still finish as FINISHED_LENGTH_CAPPED instead of spinning in the
+    scheduler with zero new tokens to schedule.
+    """
+    from vllm.v1.core.sched.utils import check_stop
+
+    # Reaching max_model_len below min_tokens must stop the request.
+    sampling_params = SamplingParams(
+        ignore_eos=True,
+        max_tokens=500,
+        min_tokens=500,
+    )
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
+    request = Request(
+        request_id="0",
+        prompt_token_ids=[0, 1, 2],
+        sampling_params=sampling_params,
+        pooling_params=None,
+    )
+    # 7 output tokens: num_tokens == 10 == max_model_len, min_tokens unmet.
+    request.append_output_token_ids([10, 11, 12, 13, 14, 15, 16])
+
+    result = check_stop(request, max_model_len=10)
+    assert result is True, "Should stop at max_model_len even below min_tokens"
+    assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
+
+    # Reaching max_tokens below min_tokens must stop the request. This can
+    # happen when max_tokens is clamped to the context window after
+    # SamplingParams validation (e.g. max_tokens=None on a long prompt).
+    sampling_params_capped = SamplingParams(
+        ignore_eos=True,
+        max_tokens=500,
+        min_tokens=500,
+    )
+    sampling_params_capped.max_tokens = 3
+    sampling_params_capped.update_from_generation_config({}, EOS_TOKEN_ID)
+    request_capped = Request(
+        request_id="1",
+        prompt_token_ids=[0, 1, 2],
+        sampling_params=sampling_params_capped,
+        pooling_params=None,
+    )
+    request_capped.append_output_token_ids([10, 11, 12])
+
+    result = check_stop(request_capped, max_model_len=100)
+    assert result is True, "Should stop at max_tokens even below min_tokens"
+    assert request_capped.status == RequestStatus.FINISHED_LENGTH_CAPPED
 
 
 @pytest.mark.parametrize(
@@ -1076,6 +1209,45 @@ def test_preempt_during_execution():
     # sampled token id.
     assert len(requests[1].output_token_ids) == 1
     assert requests[1].output_token_ids[0] == 42
+
+
+def test_pending_hisparse_reclamation_defers_preemption(monkeypatch):
+    """Pending reclamation must stall rather than preempt its owning request."""
+    scheduler = create_scheduler(enable_prefix_caching=False)
+    request = create_requests(num_requests=1, num_tokens=16, block_size=16)[0]
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    monkeypatch.setattr(
+        scheduler.kv_cache_manager, "allocate_slots", Mock(return_value=None)
+    )
+    coordinator = _bind_hisparse_connector(scheduler)
+    monkeypatch.setattr(
+        scheduler.connector, "build_connector_meta", Mock(return_value=None)
+    )
+    monkeypatch.setattr(
+        coordinator,
+        "has_pending_reclamation",
+        Mock(return_value=True),
+    )
+
+    deferred_output = scheduler.schedule()
+
+    assert not deferred_output.num_scheduled_tokens
+    assert scheduler.running == [request]
+    assert request.status == RequestStatus.RUNNING
+    assert request.num_preemptions == 0
 
 
 def test_prefix_cache_query_not_inflated_by_connector_defer():
@@ -1726,6 +1898,22 @@ def test_spec_decode_padding_first_decode_step():
     assert out.scheduled_spec_decode_tokens[r2.request_id] == [-1] * num_spec
 
 
+def test_spec_decode_padding_resumed_request_without_running_requests():
+    """Pad a synchronously resumed request even without local running work."""
+    num_spec = 3
+    scheduler = create_scheduler(
+        num_speculative_tokens=num_spec,
+        use_kv_connector=mock_kv(matched_tokens=32, is_async=False),
+    )
+    (resumed,) = create_requests(num_requests=1, num_tokens=33, max_tokens=16)
+
+    scheduler.add_request(resumed)
+    out = scheduler.schedule()
+
+    assert out.num_scheduled_tokens[resumed.request_id] == 1 + num_spec
+    assert out.scheduled_spec_decode_tokens[resumed.request_id] == [-1] * num_spec
+
+
 def test_spec_decode_padding_skipped_for_diffusion():
     """Diffusion spec tokens are the fixed-size denoising canvas, not
     rejectable drafts: a first-decode-step request must keep its 1-token span
@@ -1757,6 +1945,52 @@ def test_spec_decode_padding_skipped_for_diffusion():
 
     assert out.scheduled_spec_decode_tokens[r1.request_id] == [1, 2, 3]
     # r2 keeps its true 1-token span; no placeholder drafts are attached.
+    assert out.num_scheduled_tokens[r2.request_id] == 1
+    assert r2.request_id not in out.scheduled_spec_decode_tokens
+
+
+@pytest.mark.parametrize("aligned_tokens", [1, 2, 3])
+def test_spec_decode_padding_dropped_when_recurrent_alignment_clips(
+    aligned_tokens: int,
+):
+    """A clipped padded request must drop its padding, not shorten it.
+
+    The sampler derives a request's row window from its draft count, so a
+    padded request that keeps fewer than 1 + num_spec query rows would select
+    the preceding request's hidden states.
+    """
+    num_spec = 3
+    scheduler = create_scheduler(
+        num_speculative_tokens=num_spec,
+        enable_prefix_caching=True,
+        block_size=16,
+    )
+    r1, r2 = create_requests(
+        num_requests=2, num_tokens=33, same_prompt=True, max_tokens=16
+    )
+
+    scheduler.add_request(r1)
+    out = scheduler.schedule()
+    assert out.num_scheduled_tokens[r1.request_id] == 33
+    _model_output(scheduler, out, [[100]])
+    scheduler.update_draft_token_ids(DraftTokenIds([r1.request_id], [[1, 2, 3]]))
+
+    # Model the recurrent align split that clips a padded 1+3 prompt tail at
+    # the next cache boundary. The real QSA block size produces all three cases
+    # depending on prompt length modulo four.
+    scheduler.need_mamba_block_aligned_split = True
+    original_split = scheduler._mamba_block_aligned_split
+
+    def align_prompt_tail(request, num_new_tokens, *args):
+        if request is r2:
+            return aligned_tokens
+        return original_split(request, num_new_tokens, *args)
+
+    scheduler._mamba_block_aligned_split = align_prompt_tail
+    scheduler.add_request(r2)
+    out = scheduler.schedule()
+
+    assert out.scheduled_spec_decode_tokens[r1.request_id] == [1, 2, 3]
     assert out.num_scheduled_tokens[r2.request_id] == 1
     assert r2.request_id not in out.scheduled_spec_decode_tokens
 
@@ -5479,6 +5713,68 @@ def test_free_encoder_inputs_respects_unconfirmed_placeholders():
     assert manager.get_cached_input_ids(request) == set()
 
 
+def test_free_encoder_inputs_notifies_the_ec_connector():
+    """The connector learns the item is consumed, not just that the request ended.
+
+    Connectors hold per-item transfer state (remote buffers, reservations);
+    waiting for `request_finished` pins it for the whole generation.
+    """
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    mm_start_pos, mm_length = 50, 100
+    request = create_requests(
+        num_requests=1,
+        num_tokens=mm_start_pos + mm_length + 10,
+        mm_positions=[[PlaceholderRange(offset=mm_start_pos, length=mm_length)]],
+    )[0]
+    scheduler.encoder_cache_manager.allocate(request, 0)
+    scheduler.ec_connector = Mock()
+
+    request.num_computed_tokens = mm_start_pos + mm_length - 1
+    scheduler._free_encoder_inputs(request)
+    scheduler.ec_connector.update_state_after_free.assert_not_called()
+
+    request.num_computed_tokens = mm_start_pos + mm_length
+    scheduler._free_encoder_inputs(request)
+    scheduler.ec_connector.update_state_after_free.assert_called_once_with(request, 0)
+
+
+def test_unavailable_encoder_input_fails_the_request_as_retryable():
+    """An encoder input the connector gave up on must end the request.
+
+    `FinishReason.ERROR` is the retryable channel the KV connector already uses
+    for load failures, so the caller can re-issue; deferring instead parked the
+    request until the client timed out.
+    """
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    request = create_requests(
+        num_requests=1,
+        num_tokens=160,
+        mm_positions=[[PlaceholderRange(offset=50, length=100)]],
+    )[0]
+    scheduler.add_request(request)
+    scheduler.ec_connector = Mock()
+    scheduler.ec_connector.take_unavailable_requests.return_value = {request.request_id}
+    # `request_finished` reports (delay_free, params) for the request teardown.
+    scheduler.ec_connector.request_finished.return_value = (False, None)
+
+    scheduler_output = scheduler.schedule()
+    outputs = scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    assert request.status == RequestStatus.FINISHED_ERROR
+    engine_outputs = outputs[0].outputs
+    assert [o.finish_reason for o in engine_outputs] == [FinishReason.ERROR]
+
+
 def test_free_encoder_inputs_defers_for_eagle_lookahead():
     """With EAGLE speculative decoding, the encoder input is retained one extra
     position so the drafter's +1 look-ahead mm-embedding gather (which reads one
@@ -5676,9 +5972,8 @@ def test_ec_connector_ensure_cache_available_defers_request(use_kv_connector):
 
     # ensure_cache_available must have been called with (request, num_computed_tokens=0)
     # for a brand-new request that has no cached tokens yet.
-    scheduler.ec_connector.ensure_cache_available.assert_called_once_with(
-        request_deferred, 0
-    )
+    ensure_call = scheduler.ec_connector.ensure_cache_available.call_args
+    assert ensure_call.args == (request_deferred, 0)
     # Deferred request must NOT be scheduled
     assert request_deferred.request_id not in output.num_scheduled_tokens
     _assert_right_encoder_cache_allocated(scheduler, expected_total_allocated=0)
@@ -5708,6 +6003,31 @@ def test_ec_connector_ensure_cache_available_defers_request(use_kv_connector):
     )
     # No local encoder compute — all loaded externally
     _assert_right_encoder_inputs(output, expected_total_reqs=0)
+
+
+def test_ec_connector_defers_running_request_for_async_reload():
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=32,
+        use_ec_connector=True,
+        ec_role="ec_consumer",
+    )
+    request = create_requests(
+        num_requests=1,
+        num_tokens=128,
+        mm_positions=[[PlaceholderRange(offset=48, length=32)]],
+        req_ids=["request"],
+    )[0]
+    scheduler.ec_connector.ensure_cache_available = Mock(side_effect=[True, False])
+
+    scheduler.add_request(request)
+    first_output = scheduler.schedule()
+    assert first_output.num_scheduled_tokens[request.request_id] == 32
+
+    second_output = scheduler.schedule()
+    assert request.request_id not in second_output.num_scheduled_tokens
+    ensure_call = scheduler.ec_connector.ensure_cache_available.call_args
+    assert ensure_call.args[:2] == (request, 32)
 
 
 def test_ec_connector_pending_prefetch_only_checks_future_mm_features():
@@ -6175,3 +6495,92 @@ def test_encoder_input_skipped_when_connector_already_has_the_item(ec_role: str)
 
     assert output.num_scheduled_tokens[req_id] > 0
     assert not output.scheduled_encoder_inputs.get(req_id)
+
+
+class _RecordingGrammar:
+    """Records what reaches ``validate_tokens`` and raises on a negative id.
+
+    llguidance raises ``OverflowError`` on a negative token id, so this mirrors
+    the real failure: the tests below fail on the unpatched scheduler (the -1
+    padding reaches ``validate_tokens``) and pass once it is stripped first.
+    """
+
+    def __init__(self) -> None:
+        self.seen: list[list[int]] = []
+
+    def validate_tokens(self, tokens: list[int]) -> list[int]:
+        if any(t < 0 for t in tokens):
+            raise OverflowError("llguidance rejects negative token ids")
+        self.seen.append(list(tokens))
+        return tokens
+
+
+def _decode_ready_request(scheduler):
+    """Add one request and advance it out of prefill into decode."""
+    request = create_requests(num_requests=1, num_tokens=1)[0]
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    return request
+
+
+def test_update_draft_token_ids_strips_ngram_padding(monkeypatch):
+    """ngram_gpu pads unfilled draft slots with -1; update_draft_token_ids must
+    strip them before grammar.validate_tokens (which otherwise raises)."""
+    scheduler = create_scheduler(num_speculative_tokens=4)
+    request = _decode_ready_request(scheduler)
+
+    grammar = _RecordingGrammar()
+    request.structured_output_request = SimpleNamespace(grammar=grammar)
+    monkeypatch.setattr(
+        scheduler.structured_output_manager, "should_advance", lambda req: True
+    )
+
+    scheduler.update_draft_token_ids(
+        DraftTokenIds([request.request_id], [[10, 11, -1, -1]])
+    )
+
+    assert grammar.seen == [[10, 11]]
+    assert request.spec_token_ids == [10, 11]
+
+
+def test_update_draft_token_ids_in_output_strips_padding(monkeypatch):
+    """Same guard on the output path; the -1 pad-back for the rejected count
+    is preserved (only the input to validate_tokens is stripped)."""
+    scheduler = create_scheduler(num_speculative_tokens=4)
+    request = _decode_ready_request(scheduler)
+
+    grammar = _RecordingGrammar()
+    request.structured_output_request = SimpleNamespace(grammar=grammar)
+    monkeypatch.setattr(
+        scheduler.structured_output_manager, "should_advance", lambda req: True
+    )
+
+    scheduler_output = SimpleNamespace(
+        scheduled_spec_decode_tokens={request.request_id: [0, 0, 0, 0]}
+    )
+    scheduler.update_draft_token_ids_in_output(
+        DraftTokenIds([request.request_id], [[10, 11, -1, -1]]),
+        scheduler_output,
+    )
+
+    # The grammar only saw the stripped prefix, never a -1.
+    assert grammar.seen == [[10, 11]]
+    # Two drafts were rejected (4 scheduled - 2 valid), padded back with -1.
+    assert scheduler_output.scheduled_spec_decode_tokens[request.request_id] == [
+        10,
+        11,
+        -1,
+        -1,
+    ]
+    assert scheduler_output.num_invalid_spec_tokens == {request.request_id: 2}

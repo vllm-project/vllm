@@ -4,16 +4,18 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
 
 import regex as re
 
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
-from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser
 from vllm.tokenizers import TokenizerLike
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 logger = init_logger(__name__)
 

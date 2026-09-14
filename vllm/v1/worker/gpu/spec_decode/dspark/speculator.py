@@ -135,19 +135,28 @@ class DSparkSpeculator(DFlashSpeculator):
             buf.index_copy_(1, self._d2t_scatter_index, logits.to(buf.dtype))
             logits = buf
 
-        # sample_pos is the predicted token's position Q; the target verifies
-        # it with the predecessor's Gumbel key (Q-1). Pass Q-1.
-        return gumbel_sample(
+        # sample_pos is the predicted token's position P. Sampling keys a draw
+        # by the position before the sampled token, P-1.
+        sampled = gumbel_sample(
             logits,
             idx_map,
             self.temperature,
             self.seeds,
             sample_pos - 1,
             apply_temperature=True,
+            is_drafting=True,
             logits_cache=self.draft_logits,
             logits_cache_col=self._step_cols[step],
             use_fp64=self.use_fp64_gumbel,
         )
+        if self.draft_watermarker is not None:
+            sampled = self.draft_watermarker.sample(
+                logits,
+                sampled,
+                idx_map,
+                self.temperature,
+            )
+        return sampled
 
     def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
         if self._draft_topk is not None:

@@ -47,7 +47,7 @@ class LoRAParserAction(argparse.Action):
             if item in [None, ""]:  # Skip if item is None or empty string
                 continue
             if "=" in item and "," not in item:  # Old format: name=path
-                name, path = item.split("=")
+                name, path = item.split("=", 1)
                 lora_list.append(LoRAModulePath(name, path))
             else:  # Assume JSON format
                 try:
@@ -368,6 +368,16 @@ class FrontendArgs(BaseFrontendArgs):
             del frontend_kwargs["disable_access_log_for_endpoints"]["nargs"]
 
         return frontend_kwargs
+
+
+def resolve_default_chat_template_kwargs(
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    """Resolve renderer defaults, including the dedicated Cohere format flag."""
+    kwargs = dict(args.default_chat_template_kwargs or {})
+    if getattr(args, "cohere_format", None):
+        kwargs.setdefault("cohere_format", args.cohere_format)
+    return kwargs
 
 
 def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
