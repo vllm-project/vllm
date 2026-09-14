@@ -54,11 +54,10 @@ fn decode_fastokens_byte_level(
     let tokens: Vec<&str> = token_ids
         .iter()
         .filter(|&&id| !(skip_special_tokens && t.is_special_token(id)))
-        .map(|&id| {
-            t.id_to_token(id)
-                .ok_or_else(|| tokenizer_error!("decoding failed: unknown token ID: {id}"))
-        })
-        .collect::<Result<_>>()?;
+        // Match HF and fastokens: model vocabularies may contain undefined
+        // tokenizer IDs, which contribute no decoded text.
+        .filter_map(|&id| t.id_to_token(id))
+        .collect();
     Ok(decode_byte_level(tokens))
 }
 
@@ -150,6 +149,7 @@ pub struct HuggingFaceTokenizer {
     backend: Backend,
     special_token_ids: Arc<[u32]>,
     added_vocab: Box<[(String, u32)]>,
+    vocab_size: usize,
 }
 
 impl HuggingFaceTokenizer {
@@ -174,10 +174,13 @@ impl HuggingFaceTokenizer {
             ids.dedup();
             Arc::from(ids)
         };
+        // HF materializes the merged vocabulary to count it, so cache the result.
+        let vocab_size = tokenizer.get_vocab_size(true);
         Self {
             backend: Backend::Hf(Box::new(tokenizer)),
             special_token_ids,
             added_vocab,
+            vocab_size,
         }
     }
 
@@ -205,6 +208,7 @@ impl HuggingFaceTokenizer {
             Arc::from(ids)
         };
         let byte_level = tokenizer.decoder().is_some_and(is_byte_level_only);
+        let vocab_size = tokenizer.vocab_size();
         let backend = if byte_level {
             Backend::FastokensByteLevel(Box::new(tokenizer))
         } else {
@@ -214,6 +218,7 @@ impl HuggingFaceTokenizer {
             backend,
             special_token_ids,
             added_vocab,
+            vocab_size,
         }
     }
 
@@ -299,10 +304,7 @@ impl Tokenizer for HuggingFaceTokenizer {
     }
 
     fn vocab_size(&self) -> usize {
-        match &self.backend {
-            Backend::Hf(t) => t.get_vocab_size(true),
-            Backend::Fastokens(t) | Backend::FastokensByteLevel(t) => t.vocab_size(),
-        }
+        self.vocab_size
     }
 
     fn id_to_token(&self, id: u32) -> Option<String> {
@@ -334,6 +336,7 @@ mod tests {
     use tokenizers::{AddedToken, Tokenizer as HfTokenizer};
 
     use super::{HuggingFaceTokenizer, Tokenizer};
+    use crate::{TokenAnchor, TokenAttribution};
 
     const REGULAR_TOKEN: &str = "<|regular|>";
     const SPECIAL_TOKEN: &str = "<|special|>";
@@ -552,6 +555,20 @@ mod tests {
     }
 
     #[test]
+    fn hf_vocab_size_counts_added_tokens() {
+        let mut tokenizer = tiny_bpe_tokenizer();
+        tokenizer.add_special_tokens(&[AddedToken::from("<|im_end|>", true)]);
+        let expected = tokenizer.get_vocab_size(true);
+
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("tokenizer.json");
+        tokenizer.save(&path, false).expect("save tokenizer json");
+
+        let wrapper = HuggingFaceTokenizer::new_hf(&path).expect("load hf wrapper");
+        assert_eq!(wrapper.vocab_size(), expected);
+    }
+
+    #[test]
     fn hf_constructor_resolves_added_token_ids() {
         let mut tokenizer = tiny_bpe_tokenizer();
         tokenizer.add_special_tokens(&[AddedToken::from("<|im_end|>", true)]);
@@ -700,10 +717,50 @@ mod tests {
     }
 
     #[test]
-    fn fast_byte_level_errors_on_unknown_id() {
+    fn fast_byte_level_skips_undefined_ids() {
         let t = tiny_byte_level_bpe();
-        let err = super::decode_fastokens_byte_level(&t, &[999], false)
-            .expect_err("unknown id must error");
-        assert!(format!("{err:?}").contains("999"));
+        assert_eq!(
+            super::decode_fastokens_byte_level(&t, &[1, 2, 999, 3, 3, 4], false)
+                .expect("with the id"),
+            super::decode_fastokens_byte_level(&t, &[1, 2, 3, 3, 4], false)
+                .expect("without the id")
+        );
+    }
+
+    #[test]
+    fn decode_stream_anchors_undefined_ids_zero_width() {
+        let wrapper = HuggingFaceTokenizer::from_fastokens_backend(tiny_byte_level_bpe());
+        assert!(matches!(
+            wrapper.backend,
+            super::Backend::FastokensByteLevel(_)
+        ));
+
+        let mut stream = wrapper.create_decode_stream(&[], false, 0);
+        for id in [999, 1, 999, 2] {
+            stream.push_token(id).expect("push token");
+        }
+        let (_, full) = stream.flush(None).expect("flush");
+        assert_eq!(full.text, "He");
+        assert_eq!(
+            full.attributions.as_slice(),
+            [
+                TokenAttribution {
+                    token_id: 999,
+                    anchor: TokenAnchor::ZeroWidth { byte_offset: 0 }
+                },
+                TokenAttribution {
+                    token_id: 1,
+                    anchor: TokenAnchor::Visible { byte_offset: 0 }
+                },
+                TokenAttribution {
+                    token_id: 999,
+                    anchor: TokenAnchor::ZeroWidth { byte_offset: 1 }
+                },
+                TokenAttribution {
+                    token_id: 2,
+                    anchor: TokenAnchor::Visible { byte_offset: 1 }
+                },
+            ]
+        );
     }
 }

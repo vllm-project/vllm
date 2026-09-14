@@ -7,7 +7,7 @@
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal, TypeAlias
+from typing import Annotated, Literal, TypeAlias, TypedDict
 
 import regex as re
 import torch
@@ -22,7 +22,7 @@ from transformers.models.internvl.video_processing_internvl import (
 )
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.interns1_vit import InternS1VisionModel
@@ -146,6 +146,11 @@ class InternS1VideoEmbeddingInputs(TensorSchema):
 
 
 InternS1VideoInputs: TypeAlias = InternS1VideoPixelInputs | InternS1VideoEmbeddingInputs
+
+
+class InternS1MultiModalInputs(TypedDict, total=False):
+    images: InternS1ImageInputs | None
+    videos: InternS1VideoInputs | None
 
 
 def resolve_interns1_min_max_num(
@@ -312,6 +317,7 @@ class InternS1DummyInputsBuilder(BaseDummyInputsBuilder[InternS1ProcessingInfo])
 
         image_overrides = mm_options.get("image")
         video_overrides = mm_options.get("video")
+        assert video_overrides is None or isinstance(video_overrides, VideoDummyOptions)
 
         return {
             "image": self._get_dummy_images(
@@ -474,22 +480,24 @@ class InternS1MultiModalProcessor(BaseMultiModalProcessor[InternS1ProcessingInfo
         video_token = hf_processor.video_token
 
         tokenizer = self.info.get_tokenizer()
-        video_token_id = cached_encode(tokenizer, video_token, add_special_tokens=False)
-        assert len(video_token_id) == 1
-        video_token_id = video_token_id[0]
+        video_token_ids = cached_encode(
+            tokenizer, video_token, add_special_tokens=False
+        )
+        assert len(video_token_ids) == 1
+        video_token_id = video_token_ids[0]
 
         out_mm_data = out_mm_kwargs.get_data()
         if "video_num_patches" in out_mm_data:
-            video_num_patches = out_mm_data["video_num_patches"]
-            assert isinstance(video_num_patches, torch.Tensor)
-            video_num_patches = video_num_patches.tolist()
+            video_num_patches_tensor = out_mm_data["video_num_patches"]
+            assert isinstance(video_num_patches_tensor, torch.Tensor)
+            video_num_patches: list[int] = video_num_patches_tensor.tolist()
         else:
             video_num_patches = []
 
         if "image_num_patches" in out_mm_data:
-            image_num_patches = out_mm_data["image_num_patches"]
-            assert isinstance(image_num_patches, torch.Tensor)
-            image_num_patches = image_num_patches.tolist()
+            image_num_patches_tensor = out_mm_data["image_num_patches"]
+            assert isinstance(image_num_patches_tensor, torch.Tensor)
+            image_num_patches: list[int] = image_num_patches_tensor.tolist()
         else:
             image_num_patches = []
 
@@ -602,8 +610,8 @@ class InternS1ForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "language_model"),
             )
 
-        self.img_context_token_id = None
-        self.video_context_token_id = None
+        self.img_context_token_id: int | None = None
+        self.video_context_token_id: int | None = None
 
         self.visual_token_mask = None
         self.make_empty_intermediate_tensors = (
@@ -756,8 +764,10 @@ class InternS1ForConditionalGeneration(
         ]
         return image_embeds.split(image_feature_sizes)
 
-    def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
-        modalities = {}
+    def _parse_and_validate_multimodal_inputs(
+        self, **kwargs: object
+    ) -> InternS1MultiModalInputs:
+        modalities: InternS1MultiModalInputs = {}
 
         # Preserve the order of modalities if there are multiple of them
         # from the order of kwargs.
@@ -789,12 +799,14 @@ class InternS1ForConditionalGeneration(
         for modality in modalities:
             if modality == "images":
                 image_input = modalities["images"]
-                image_embeddings = self._process_vision_input(image_input)
-                multimodal_embeddings += tuple(image_embeddings)
+                if image_input is not None:
+                    image_embeddings = self._process_vision_input(image_input)
+                    multimodal_embeddings += tuple(image_embeddings)
             if modality == "videos":
                 video_input = modalities["videos"]
-                video_embeddings = self._process_vision_input(video_input)
-                multimodal_embeddings += tuple(video_embeddings)
+                if video_input is not None:
+                    video_embeddings = self._process_vision_input(video_input)
+                    multimodal_embeddings += tuple(video_embeddings)
 
         return multimodal_embeddings
 
