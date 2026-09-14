@@ -5,7 +5,6 @@ import http.client
 import json
 import os
 import random
-import re
 import sys
 import time
 import urllib.error
@@ -129,7 +128,10 @@ class HttpTransport:
                     response_body = response.read().decode()
                 break
             except urllib.error.HTTPError as error:
-                response_body = error.read().decode()
+                try:
+                    response_body = error.read().decode()
+                except (http.client.IncompleteRead, OSError):
+                    response_body = ""
                 if error.code == 429 and attempt < self.max_retries:
                     delay = self._rate_limit_delay(error, response_body)
                     print(
@@ -941,11 +943,36 @@ def retry_source_note(source_build: Mapping[str, Any], ci_name: str) -> str:
     original_number = metadata.get("github-retry-source-build")
     if not original_number:
         return ""
-    original_url = re.sub(r"\d+$", str(original_number), str(source_build["web_url"]))
+    web_url = str(source_build["web_url"])
+    original_url = web_url.rstrip("0123456789") + str(original_number)
     return (
         f" Build #{source_build['number']} was itself a retry of "
         f"[Buildkite {ci_name} #{original_number}]({original_url})."
     )
+
+
+def strip_buildkite_log_markers(log: str) -> str:
+    # Drop ESC _bk;t=<ms> BEL timestamps and ESC [ ... m/K color codes,
+    # matching .buildkite/scripts/ci-clean-log.sh.
+    cleaned: list[str] = []
+    index = 0
+    while index < len(log):
+        if log.startswith("\x1b_bk;t=", index):
+            end = log.find("\x07", index)
+            if end == -1:
+                break
+            index = end + 1
+            continue
+        if log.startswith("\x1b[", index):
+            end = index + 2
+            while end < len(log) and log[end] in "0123456789;":
+                end += 1
+            if end < len(log) and log[end] in "mK":
+                index = end + 1
+                continue
+        cleaned.append(log[index])
+        index += 1
+    return "".join(cleaned)
 
 
 def unknown_step_keys_from_log(
@@ -958,12 +985,15 @@ def unknown_step_keys_from_log(
     except ApiError as error:
         print(f"Could not fetch the bootstrap job log: {error}", file=sys.stderr)
         return None
-    log = re.sub(r"\x1b_bk;t=\d*\x07", "", log)
-    log = re.sub(r"\x1b\[[0-9;]*[mK]", "", log)
-    match = re.search(r"ValueError: Unknown CI step key\(s\): (.*)", log)
-    if not match:
+    log = strip_buildkite_log_markers(log)
+    marker = "ValueError: Unknown CI step key(s): "
+    start = log.find(marker)
+    if start == -1:
         return None
-    keys = [key.strip() for key in match.group(1).strip().split(",")]
+    end = log.find("\n", start)
+    if end == -1:
+        end = len(log)
+    keys = [key.strip() for key in log[start + len(marker) : end].split(",")]
     return ", ".join(f"`{key}`" for key in keys if key)
 
 

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import http.client
 import io
 import json
 import unittest
@@ -236,6 +237,20 @@ class FakeHttpResponse:
         return json.dumps(self.response).encode()
 
 
+class FailingReadHttpResponse:
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    def __enter__(self) -> "FailingReadHttpResponse":
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        return None
+
+    def read(self) -> bytes:
+        raise self.error
+
+
 class RunCiCommandTest(unittest.TestCase):
     @patch("run_ci_command.urllib.request.urlopen")
     def test_http_transport_retries_buildkite_rate_limit(self, urlopen: Any) -> None:
@@ -324,6 +339,22 @@ class RunCiCommandTest(unittest.TestCase):
 
         self.assertEqual(delays, [])
         self.assertEqual(urlopen.call_count, 1)
+
+    @patch("run_ci_command.urllib.request.urlopen")
+    def test_http_transport_normalizes_response_timeout(self, urlopen: Any) -> None:
+        urlopen.return_value = FailingReadHttpResponse(TimeoutError("timed out"))
+
+        with self.assertRaisesRegex(ApiError, "API request failed"):
+            HttpTransport().request("https://api.buildkite.com/v2/builds")
+
+    @patch("run_ci_command.urllib.request.urlopen")
+    def test_http_transport_normalizes_incomplete_read(self, urlopen: Any) -> None:
+        urlopen.return_value = FailingReadHttpResponse(
+            http.client.IncompleteRead(b"partial")
+        )
+
+        with self.assertRaisesRegex(ApiError, "API request failed"):
+            HttpTransport().request("https://api.buildkite.com/v2/builds")
 
     def test_only_exact_ci_commands_are_accepted(self) -> None:
         commands = (
@@ -1343,6 +1374,65 @@ class RunCiCommandTest(unittest.TestCase):
         run(make_event(COMMAND_RETRY_FAILED, "author"), github, buildkite)
 
         self.assertEqual(buildkite.created_builds, [])
+        self.assertEqual(
+            github.comments[0],
+            "✅ [Buildkite CI #87079](https://buildkite.example/builds/87079) "
+            "failed during CI setup (`bootstrap`), so its test failure set is "
+            "incomplete and nothing was retried.\n"
+            "\n"
+            "See the [bootstrap log](https://buildkite.example/jobs/"
+            "bootstrap-job) for the reason. Build #87079 was itself a retry of "
+            "[Buildkite CI #87066](https://buildkite.example/builds/87066).\n"
+            "\n"
+            "Use `/ci run` for the new commit.",
+        )
+
+    @patch("run_ci_command.urllib.request.urlopen")
+    def test_ci_retry_new_head_links_bootstrap_log_when_log_read_fails(
+        self,
+        urlopen: Any,
+    ) -> None:
+        github = FakeGitHub(
+            permission="read",
+            pr=make_pr(labels=[{"name": "ready"}]),
+        )
+        buildkite = BuildkiteClient("token", "vllm", "ci")
+        urlopen.side_effect = [
+            FakeHttpResponse([]),
+            FakeHttpResponse(
+                [
+                    {
+                        "commit": "old-commit",
+                        "created_at": "2026-07-28T01:00:00Z",
+                        "finished_at": "2026-07-28T02:00:00Z",
+                        "meta_data": {"github-retry-source-build": "87066"},
+                        "number": 87079,
+                        "pull_request": {"id": 42},
+                        "state": "failed",
+                        "web_url": "https://buildkite.example/builds/87079",
+                    }
+                ]
+            ),
+            FakeHttpResponse(
+                {
+                    "items": [
+                        {
+                            "id": "bootstrap-job",
+                            "state": "failed",
+                            "step_key": "bootstrap",
+                            "type": "script",
+                            "web_url": "https://buildkite.example/jobs/bootstrap-job",
+                        }
+                    ],
+                    "links": {"next": None},
+                }
+            ),
+            FailingReadHttpResponse(TimeoutError("timed out")),
+        ]
+
+        run(make_event(COMMAND_RETRY_FAILED, "author"), github, buildkite)
+
+        self.assertEqual(urlopen.call_count, 4)
         self.assertEqual(
             github.comments[0],
             "✅ [Buildkite CI #87079](https://buildkite.example/builds/87079) "
