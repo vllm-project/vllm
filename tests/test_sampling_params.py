@@ -6,6 +6,7 @@ import pytest
 
 from vllm import SamplingParams
 from vllm.exceptions import VLLMValidationError
+from vllm.sampling_params import merge_request_extra_args
 
 
 @dataclass
@@ -62,6 +63,33 @@ def test_extra_args_rejects_nested_integer_overflow(value):
 def test_extra_args_accepts_messagepack_integer_boundaries(value):
     extra_args = {"kv_transfer_params": {"nested": [{"x": value}]}}
     assert SamplingParams(extra_args=extra_args).extra_args == extra_args
+
+
+@pytest.mark.parametrize("bad_value", ["x", 1, 1.5, ["x"], True])
+@pytest.mark.parametrize("key", ["kv_transfer_params", "ec_transfer_params"])
+def test_extra_args_rejects_non_dict_transfer_params(key, bad_value):
+    with pytest.raises(VLLMValidationError, match=f"{key} must be a dict"):
+        SamplingParams(extra_args={key: bad_value})
+
+
+def test_merge_request_extra_args_rejects_reserved_xargs_keys():
+    with pytest.raises(VLLMValidationError, match="top-level field"):
+        merge_request_extra_args({"kv_transfer_params": "x"})
+    with pytest.raises(VLLMValidationError, match="top-level field"):
+        merge_request_extra_args({"ec_transfer_params": {"do_remote_prefill": True}})
+
+
+def test_merge_request_extra_args_overlays_typed_fields():
+    kv = {"do_remote_prefill": True}
+    merged = merge_request_extra_args(
+        {"custom": 1, "kv_cache_report_mode": "full"},
+        kv_transfer_params=kv,
+    )
+    assert merged == {
+        "custom": 1,
+        "kv_cache_report_mode": "full",
+        "kv_transfer_params": kv,
+    }
 
 
 def test_extra_args_preserves_custom_objects_and_shared_containers():

@@ -32,6 +32,7 @@ from vllm.sampling_params import (
     SamplingParams,
     StructuredOutputsParams,
     ThinkingTokenBudget,
+    merge_request_extra_args,
 )
 from vllm.utils import random_uuid
 from vllm.utils.collection_utils import is_list_of
@@ -361,13 +362,11 @@ class CompletionRequest(OpenAIBaseModel):
 
         echo_without_generation = self.echo and self.max_tokens == 0
 
-        extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
-        if self.kv_transfer_params:
-            # Pass in kv_transfer_params via extra_args
-            extra_args["kv_transfer_params"] = self.kv_transfer_params
-        if self.ec_transfer_params:
-            # Pass in ec_transfer_params via extra_args
-            extra_args["ec_transfer_params"] = self.ec_transfer_params
+        extra_args = merge_request_extra_args(
+            self.vllm_xargs,
+            kv_transfer_params=self.kv_transfer_params,
+            ec_transfer_params=self.ec_transfer_params,
+        )
         return SamplingParams.from_optional(
             n=self.n,
             presence_penalty=self.presence_penalty,

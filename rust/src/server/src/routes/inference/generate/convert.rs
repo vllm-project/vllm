@@ -60,11 +60,11 @@ pub(super) fn prepare_generate_request(
     sampling_params.vllm_xargs = merge_kv_transfer_params(
         sampling_params.vllm_xargs,
         request.kv_transfer_params.as_ref(),
-    );
+    )?;
     sampling_params.vllm_xargs = merge_ec_transfer_params(
         sampling_params.vllm_xargs,
         request.ec_transfer_params.as_ref(),
-    );
+    )?;
 
     let text_request = TextRequest {
         request_id: ctx.request_id.clone(),

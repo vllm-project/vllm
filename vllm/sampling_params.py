@@ -31,6 +31,34 @@ MAX_LOGPROB_TOKEN_IDS = 128
 """Upper bound on `SamplingParams.logprob_token_ids` list length. Must match
 the per-request row width allocated by the sampler's `LogprobTokenIdsState`."""
 
+TRANSFER_EXTRA_ARG_KEYS = ("kv_transfer_params", "ec_transfer_params")
+"""Reserved extra_args keys that have typed top-level request fields."""
+
+
+def merge_request_extra_args(
+    vllm_xargs: dict[str, Any] | None,
+    kv_transfer_params: dict[str, Any] | None = None,
+    ec_transfer_params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Copy ``vllm_xargs`` and overlay typed transfer fields.
+
+    Reserved transfer keys must be sent as top-level request fields. A
+    caller-controlled ``vllm_xargs`` entry would otherwise bypass the typed
+    field and can plant a non-dict that later crashes EngineCore.
+    """
+    extra_args: dict[str, Any] = dict(vllm_xargs) if vllm_xargs else {}
+    for reserved in TRANSFER_EXTRA_ARG_KEYS:
+        if reserved in extra_args:
+            raise VLLMValidationError(
+                f"{reserved!r} must be sent as a top-level field, not via vllm_xargs",
+                parameter="vllm_xargs",
+            )
+    if kv_transfer_params:
+        extra_args["kv_transfer_params"] = kv_transfer_params
+    if ec_transfer_params:
+        extra_args["ec_transfer_params"] = ec_transfer_params
+    return extra_args
+
 
 def _verify_num_sequences(value: int, parameter_name: str) -> None:
     if not isinstance(value, int):
@@ -662,6 +690,13 @@ class SamplingParams(
             )
 
     def _verify_extra_args(self) -> None:
+        for key in TRANSFER_EXTRA_ARG_KEYS:
+            value = self.extra_args.get(key) if self.extra_args else None
+            if value is not None and not isinstance(value, dict):
+                raise VLLMValidationError(
+                    f"{key} must be a dict",
+                    parameter=key,
+                )
         # JSON accepts arbitrary integers, but the engine's MessagePack
         # transport only supports signed/unsigned 64-bit integers.
         pending: list[Any] = [self.extra_args]
