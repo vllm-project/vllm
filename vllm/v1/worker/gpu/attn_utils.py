@@ -354,6 +354,8 @@ def compute_mm_prefix_ranges(
     req_ids: list[str],
     mm_features: dict[str, list[MultiModalFeatureSpec]],
     sliding_window: int | None = None,
+    mm_prefix_ranges_cache: dict[int | None, dict[str, list[tuple[int, int]]]]
+    | None = None,
 ) -> dict[int, list[tuple[int, int]]]:
     """Compute PrefixLM bidirectional ranges for multimodal tokens.
 
@@ -361,14 +363,29 @@ def compute_mm_prefix_ranges(
     from attending across the entire image span.
     """
     req_doc_ranges: dict[int, list[tuple[int, int]]] = {}
+    cached_ranges = (
+        None
+        if mm_prefix_ranges_cache is None
+        else mm_prefix_ranges_cache.setdefault(sliding_window, {})
+    )
     for req_idx, req_id in enumerate(req_ids):
-        image_doc_ranges = []
-        for mm_feature in mm_features.get(req_id, ()):
-            if mm_feature.modality not in ("image", "video"):
-                continue
-            for r in mm_feature.mm_position.extract_embeds_range():
-                if sliding_window is not None and (r[1] - r[0] + 1) > sliding_window:
-                    continue
-                image_doc_ranges.append(r)
+        if cached_ranges is not None and req_id in cached_ranges:
+            image_doc_ranges = cached_ranges[req_id]
+        else:
+            image_doc_ranges = []
+            features = mm_features.get(req_id)
+            if features is not None:
+                for mm_feature in features:
+                    if mm_feature.modality not in ("image", "video"):
+                        continue
+                    for r in mm_feature.mm_position.extract_embeds_range():
+                        if (
+                            sliding_window is not None
+                            and (r[1] - r[0] + 1) > sliding_window
+                        ):
+                            continue
+                        image_doc_ranges.append(r)
+                if cached_ranges is not None:
+                    cached_ranges[req_id] = image_doc_ranges
         req_doc_ranges[req_idx] = image_doc_ranges
     return req_doc_ranges
