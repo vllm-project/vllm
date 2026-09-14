@@ -11,6 +11,7 @@ use serde_with::SerializeDisplay;
 use validator::Validate;
 use vllm_chat::ReasoningEffort;
 use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
+use vllm_text::TruncationSide;
 
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
@@ -115,6 +116,10 @@ pub struct ChatCompletionRequest {
     pub user: Option<String>,
 
     // -------- vLLM Sampling Parameters --------
+    /// Whether to apply the engine's configured watermark to this request.
+    #[serde(default = "default_true")]
+    pub watermarking: bool,
+
     /// Use beam search instead of sampling
     #[serde(default)]
     pub use_beam_search: bool,
@@ -158,6 +163,9 @@ pub struct ChatCompletionRequest {
 
     /// Truncate prompt tokens to this length
     pub truncate_prompt_tokens: Option<i64>,
+
+    /// Which side to truncate from when truncate_prompt_tokens is active
+    pub truncation_side: Option<TruncationSide>,
 
     /// Number of prompt logprobs to return
     pub prompt_logprobs: Option<i32>,
@@ -278,6 +286,7 @@ impl Default for ChatCompletionRequest {
             include_reasoning: true,
             parallel_tool_calls: None,
             user: None,
+            watermarking: true,
             use_beam_search: false,
             top_k: None,
             min_p: None,
@@ -290,6 +299,7 @@ impl Default for ChatCompletionRequest {
             skip_special_tokens: true,
             spaces_between_special_tokens: true,
             truncate_prompt_tokens: None,
+            truncation_side: None,
             prompt_logprobs: None,
             allowed_token_ids: None,
             bad_words: None,

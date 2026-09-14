@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use validator::Validate;
 use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
-use vllm_text::Prompt;
+use vllm_text::{Prompt, TruncationSide};
 
 use crate::routes::openai::utils::types::{
     LogProbs, Normalizable, PromptLogprobs, StreamOptions, StreamResponseEnvelope, StringOrArray,
@@ -90,6 +90,10 @@ pub struct CompletionRequest {
     pub user: Option<String>,
 
     // -------- vLLM Sampling Parameters --------
+    /// Whether to apply the engine's configured watermark to this request.
+    #[serde(default = "default_true")]
+    pub watermarking: bool,
+
     /// Options for streaming response
     pub stream_options: Option<StreamOptions>,
 
@@ -137,6 +141,9 @@ pub struct CompletionRequest {
 
     /// Truncate prompt tokens to this length
     pub truncate_prompt_tokens: Option<i64>,
+
+    /// Which side to truncate from when truncate_prompt_tokens is active
+    pub truncation_side: Option<TruncationSide>,
 
     /// Restrict output to these token IDs only
     pub allowed_token_ids: Option<Vec<u32>>,

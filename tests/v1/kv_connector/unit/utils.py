@@ -155,6 +155,7 @@ def create_scheduler(
     vllm_config: VllmConfig,
     num_blocks: int = 10000,
     kv_cache_config: KVCacheConfig | None = None,
+    hash_block_size: int | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Initialize Scheduler For Testing."""
     block_size = vllm_config.cache_config.block_size
@@ -185,6 +186,7 @@ def create_scheduler(
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
         block_size=block_size,
+        hash_block_size=hash_block_size,
     )
 
 
@@ -465,6 +467,7 @@ def make_kv_cache_config(
     mamba_enabled: bool = False,
     sw_size: int = 128,
     num_blocks: int = 100,
+    mamba_cache_mode: Literal["all", "align", "none"] = "none",
 ) -> KVCacheConfig:
     kv_cache_groups = [
         KVCacheGroupSpec(
@@ -498,6 +501,7 @@ def make_kv_cache_config(
                     block_size=block_size,
                     shapes=((16,), (16,)),
                     dtypes=(torch.float16,),
+                    mamba_cache_mode=mamba_cache_mode,
                 ),
             )
         )
@@ -537,12 +541,14 @@ def make_nixl_scheduler(
         sched._heartbeat_interval = kv_lease_duration // 6
         # Fields touched by build_connector_meta / request_finished:
         sched._reqs_need_recv = {}
+        sched._hisparse_host_blocks_to_recv = {}
         sched._reqs_need_send = {}
         sched._reqs_in_batch = set()
         sched._reqs_not_processed = set()
         sched._reqs_need_save = {}
         sched.use_host_buffer = False
         sched.engine_id = "test-engine"
+        sched.transfer_tp_size = 1
         sched.side_channel_host = "localhost"
         sched.side_channel_port = 5555
         sched.blocks_per_sw = []
@@ -582,6 +588,7 @@ def make_nixl_push_scheduler(
     sched.decoder_kv_blocks_ttl = decoder_kv_blocks_ttl
     sched.use_host_buffer = False
     sched.engine_id = "decode-engine"
+    sched.transfer_tp_size = 1
     sched.side_channel_host = "127.0.0.1"
     sched.side_channel_port = 5600
     sched.is_bidirectional_kv_xfer_enabled = is_bidirectional_kv_xfer_enabled
