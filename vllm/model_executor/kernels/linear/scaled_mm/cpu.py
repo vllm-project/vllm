@@ -261,6 +261,8 @@ class CPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if getattr(layer, "_cpu_skip_gemm_dispatch", False):
+            return
         # Skip the base class process (FP8 padding / fnuz normalization)
         # which is GPU-oriented.  Instead, VNNI-prepack weights for AMX.
         params = self._get_layer_params(layer)
