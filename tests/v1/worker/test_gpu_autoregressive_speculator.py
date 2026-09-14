@@ -351,6 +351,8 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
     speculator = object.__new__(_TestSpeculator)
     speculator.num_speculative_steps = 4
     speculator.current_draft_step = torch.tensor(0)
+    speculator.slot_mapping_observer = None
+    speculator.host_mirror_forward_observer = None
     speculator.input_buffers = SimpleNamespace(
         positions=torch.arange(2),
         query_start_loc=torch.arange(3),
