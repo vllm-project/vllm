@@ -57,6 +57,22 @@ llm.collective_rpc("reload_weights")
 llm.wake_up(tags=["kv_cache"])
 ```
 
+#### Draining running requests
+
+Use `llm.sleep(level=1, mode="wait")` to finish running requests before
+releasing GPU memory. Requests still in the waiting queue remain queued until
+`wake_up()`. The `wait` mode is also available with the in-process engine
+(`VLLM_ENABLE_V1_MULTIPROCESSING=0`) for a single data-parallel replica,
+including tensor-parallel execution.
+
+The in-process engine continues applying stop strings and collecting token
+and logprob outputs during the drain. Buffered results are returned by the next
+`LLMEngine.step()`, or by `llm.wait_for_completion()` after waking the engine.
+Streaming deltas produced during the drain are combined per request.
+
+Wake a sleeping engine before requesting another drain. In-process data
+parallelism (`data_parallel_size > 1`) does not yet support `mode="wait"`.
+
 #### RLHF weight updates
 
 During RLHF training, vLLM allows you to selectively wake up only the model weights or the KV cache using the tags argument in wake_up(). This fine-grained control is especially useful when updating model weights: by waking up just the weights (e.g., llm.wake_up(tags=["weights"])), you avoid allocating memory for the KV cache until after the weight update is complete. This approach helps prevent GPU out-of-memory (OOM) errors, particularly with large models, by minimizing peak memory usage during weight synchronization and update operations.

@@ -29,9 +29,9 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tracing import init_tracer
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine import EngineCoreRequest, PauseMode
-from vllm.v1.engine.core_client import EngineCoreClient
+from vllm.v1.engine.core_client import EngineCoreClient, InprocClient
 from vllm.v1.engine.input_processor import InputProcessor
-from vllm.v1.engine.output_processor import OutputProcessor
+from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.executor import Executor
 from vllm.v1.metrics.loggers import StatLoggerFactory, StatLoggerManager
@@ -87,6 +87,7 @@ class LLMEngine:
         else:
             self.dp_group = None
         self.should_execute_dummy_batch = False
+        self._drained_outputs: dict[str, RequestOutputCollector] = {}
 
         self.renderer = renderer = renderer_from_config(self.vllm_config)
 
@@ -191,10 +192,17 @@ class LLMEngine:
         )
 
     def get_num_unfinished_requests(self) -> int:
-        return self.output_processor.get_num_unfinished_requests()
+        undelivered = sum(
+            isinstance(collector.output, (RequestOutput, PoolingRequestOutput))
+            and collector.output.finished
+            for collector in self._drained_outputs.values()
+        )
+        return self.output_processor.get_num_unfinished_requests() + undelivered
 
     def has_unfinished_requests(self) -> bool:
-        has_unfinished = self.output_processor.has_unfinished_requests()
+        has_unfinished = bool(
+            self._drained_outputs or self.output_processor.has_unfinished_requests()
+        )
         if self.dp_group is None:
             return has_unfinished or self.engine_core.dp_engines_running()
         return self.has_unfinished_requests_dp(has_unfinished)
@@ -217,6 +225,8 @@ class LLMEngine:
     def abort_request(self, request_ids: list[str], internal: bool = False) -> None:
         """Remove request_ids from EngineCore and Detokenizer."""
 
+        for request_id in request_ids:
+            self._drained_outputs.pop(request_id, None)
         request_ids = self.output_processor.abort_requests(request_ids, internal)
         self.engine_core.abort_requests(request_ids)
 
@@ -302,6 +312,17 @@ class LLMEngine:
         return req_id
 
     def step(self) -> list[RequestOutput | PoolingRequestOutput]:
+        if self._drained_outputs:
+            outputs = [
+                output
+                for collector in self._drained_outputs.values()
+                if (output := collector.get_nowait()) is not None
+            ]
+            self._drained_outputs.clear()
+            return outputs
+        return self._step()
+
+    def _step(self) -> list[RequestOutput | PoolingRequestOutput]:
         if self.should_execute_dummy_batch:
             self.should_execute_dummy_batch = False
             self.engine_core.execute_dummy_batch()
@@ -369,7 +390,34 @@ class LLMEngine:
         """
         self.engine_core.reset_encoder_cache()
 
+    def _drain_inproc_requests(self, client: InprocClient) -> None:
+        states = list(self.output_processor.request_states.values())
+        for state in states:
+            request_id = (
+                state.parent_req.external_req_id
+                if state.parent_req is not None
+                else state.external_req_id
+            )
+            collector = self._drained_outputs.get(request_id)
+            if collector is None:
+                collector = RequestOutputCollector(state.output_kind, request_id)
+                self._drained_outputs[request_id] = collector
+            state.queue = collector
+        try:
+            client.drain_requests(self._step)
+        finally:
+            for state in states:
+                state.queue = None
+            self._drained_outputs = {
+                request_id: collector
+                for request_id, collector in self._drained_outputs.items()
+                if collector.output is not None
+            }
+
     def sleep(self, level: int = 1, mode: PauseMode = "abort"):
+        if mode == "wait" and isinstance(self.engine_core, InprocClient):
+            self._drain_inproc_requests(self.engine_core)
+            mode = "keep"
         if level >= 1:
             self.renderer.clear_mm_cache()
         self.engine_core.sleep(level, mode)
