@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections import deque
+from dataclasses import dataclass
+
 import numpy as np
 import torch
 
@@ -11,6 +14,10 @@ from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
 logger = init_logger(__name__)
+
+# Keep enough consumption-time snapshots to cover async PP in-flight
+# batches (`max_concurrent_batches` is `pp_size + 1`) with headroom.
+_DEFAULT_MAX_SNAPSHOTS = 8
 
 
 def get_pp_safe_draft_load_config(load_config: LoadConfig) -> LoadConfig:
@@ -26,48 +33,135 @@ def get_pp_safe_draft_load_config(load_config: LoadConfig) -> LoadConfig:
     return load_config
 
 
-class DraftTokensHandler:
-    def __init__(self, device: torch.device | None = None):
-        self.device = device
-        self.copy_stream = torch.cuda.Stream(device)
-        # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
-        self.copy_event = torch.cuda.Event(blocking=True)
+@dataclass
+class _DraftSnapshot:
+    step_id: int | None
+    req_ids: list[str]
+    num_draft_tokens: int
+    draft_tokens_np: np.ndarray | None
+    copy_event: torch.cuda.Event | None
 
-        self.req_ids: list[str] = []
-        self.draft_tokens_np: np.ndarray | None = None
-        self.num_draft_tokens: int = 0
+    def to_draft_token_ids(self) -> DraftTokenIds:
+        if self.draft_tokens_np is not None:
+            if self.copy_event is not None:
+                self.copy_event.synchronize()
+            draft_token_ids = self.draft_tokens_np.tolist()
+        else:
+            draft_token_ids = [[-1] * self.num_draft_tokens for _ in self.req_ids]
+        return DraftTokenIds(self.req_ids, draft_token_ids)
+
+
+class DraftTokensHandler:
+    def __init__(
+        self,
+        device: torch.device | None = None,
+        max_snapshots: int = _DEFAULT_MAX_SNAPSHOTS,
+    ):
+        self.device = device
+        self.copy_stream: torch.cuda.Stream | None = None
+        if device is not None and device.type == "cuda":
+            self.copy_stream = torch.cuda.Stream(device)
+
+        self._max_snapshots = max(1, max_snapshots)
+        # Consumption-time snapshots tagged with scheduler step identity.
+        self._consumed: deque[_DraftSnapshot] = deque(maxlen=self._max_snapshots)
+        # Latest proposal-time drafts for the non-async post_step path.
+        self._proposed: _DraftSnapshot | None = None
+
+    def _copy_drafts(
+        self, draft_tokens: torch.Tensor
+    ) -> tuple[np.ndarray, torch.cuda.Event | None]:
+        if self.copy_stream is None:
+            return draft_tokens.detach().cpu().numpy(), None
+
+        current_stream = torch.cuda.current_stream(self.device)
+        self.copy_stream.wait_stream(current_stream)
+        copy_event = torch.cuda.Event(blocking=True)
+        with torch.cuda.stream(self.copy_stream):
+            draft_tokens_np = async_copy_to_np(draft_tokens)
+            # draft_tokens is a temporary allocation on the main stream and
+            # read here on copy_stream; without record_stream, the caching
+            # allocator may reuse its memory before the async copy executes.
+            draft_tokens.record_stream(self.copy_stream)
+            copy_event.record()
+        return draft_tokens_np, copy_event
+
+    def snapshot_consumed_drafts(
+        self,
+        step_id: int,
+        input_batch: InputBatch,
+        draft_tokens: torch.Tensor,
+    ) -> None:
+        """Record drafts that prepare_inputs fed into input_ids for this step.
+
+        Tagged with the scheduler step so the engine can retrieve the matching
+        snapshot later by equality. Batches without structured-output requests
+        are not stored, so they cannot evict a useful snapshot.
+        """
+        if not input_batch.has_structured_output_reqs:
+            return
+
+        draft_tokens_np, copy_event = self._copy_drafts(draft_tokens)
+        self._consumed.append(
+            _DraftSnapshot(
+                step_id=step_id,
+                req_ids=list(input_batch.req_ids),
+                num_draft_tokens=draft_tokens.shape[1],
+                draft_tokens_np=draft_tokens_np,
+                copy_event=copy_event,
+            )
+        )
 
     def set_draft_tokens(
         self, input_batch: InputBatch, draft_tokens: torch.Tensor
     ) -> None:
-        self.req_ids = input_batch.req_ids
-        self.num_draft_tokens = draft_tokens.shape[1]
+        req_ids = list(input_batch.req_ids)
+        num_draft_tokens = draft_tokens.shape[1]
         if not input_batch.has_structured_output_reqs:
             # No draft token validation needs to be performed by
             # the scheduler for this batch.
-            self.draft_tokens_np = None
+            self._proposed = _DraftSnapshot(
+                step_id=None,
+                req_ids=req_ids,
+                num_draft_tokens=num_draft_tokens,
+                draft_tokens_np=None,
+                copy_event=None,
+            )
             return
 
         # For spec decoding + structured outputs, we must transfer the
         # draft tokens back to the scheduler for grammar validation.
-        current_stream = torch.cuda.current_stream(self.device)
-        self.copy_stream.wait_stream(current_stream)
-        with torch.cuda.stream(self.copy_stream):
-            self.draft_tokens_np = async_copy_to_np(draft_tokens)
-            # draft_tokens is a temporary allocation on the main stream and read here on
-            # copy_stream; without record_stream, the caching allocator may reuse its
-            # memory before the async copy executes.
-            draft_tokens.record_stream(self.copy_stream)
-            self.copy_event.record()
+        draft_tokens_np, copy_event = self._copy_drafts(draft_tokens)
+        self._proposed = _DraftSnapshot(
+            step_id=None,
+            req_ids=req_ids,
+            num_draft_tokens=num_draft_tokens,
+            draft_tokens_np=draft_tokens_np,
+            copy_event=copy_event,
+        )
 
-    def get_draft_tokens(self) -> DraftTokenIds | None:
-        if self.draft_tokens_np is not None:
-            self.copy_event.synchronize()
-            draft_token_ids = self.draft_tokens_np.tolist()
-        else:
-            # This case only happens when async scheduling is disabled.
-            draft_token_ids = [[-1] * self.num_draft_tokens for _ in self.req_ids]
-        return DraftTokenIds(self.req_ids, draft_token_ids)
+    def get_draft_tokens(self, step_id: int | None = None) -> DraftTokenIds | None:
+        """Return draft tokens for grammar validation.
+
+        If ``step_id`` is set, look up the consumption-time snapshot for that
+        scheduler step by equality. A miss returns None so placeholders stay
+        -1 and fail-closed invalidation can pin acceptance via is_valid_draft.
+        If ``step_id`` is None, return the latest proposal-time drafts (the
+        non-async post_step path).
+        """
+        if step_id is not None:
+            for snapshot in reversed(self._consumed):
+                if snapshot.step_id == step_id:
+                    return snapshot.to_draft_token_ids()
+            logger.debug(
+                "Draft-token snapshot miss for scheduler step %s",
+                step_id,
+            )
+            return None
+
+        if self._proposed is None:
+            return DraftTokenIds([], [])
+        return self._proposed.to_draft_token_ids()
 
 
 def get_parallel_drafting_token_id(hf_config) -> int:

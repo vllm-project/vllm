@@ -30,6 +30,7 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     PlaceholderRange,
 )
+from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
@@ -208,6 +209,24 @@ def test_schedule(enable_prefix_caching: bool, prompt_logprobs: int | None):
     assert len(scheduler.running) == len(requests)
     for i, request in enumerate(requests):
         assert scheduler.running[i] == request
+
+
+def test_scheduler_output_step_identity_defaults_to_zero():
+    output = SchedulerOutput.make_empty()
+    assert output.scheduler_step == 0
+
+
+def test_scheduler_output_carries_step_identity():
+    if not current_platform.device_type:
+        pytest.skip("No inferred device type in this environment")
+
+    scheduler = create_scheduler()
+    request = create_requests(num_requests=1)[0]
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert output.scheduler_step == scheduler.current_step
+    assert output.scheduler_step == 1
 
 
 def test_scheduler_stats_route_to_existing_output_client():

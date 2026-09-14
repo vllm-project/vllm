@@ -259,8 +259,10 @@ class Executor(ABC):
     def execute_dummy_batch(self) -> None:
         self.collective_rpc("execute_dummy_batch")
 
-    def take_draft_token_ids(self) -> DraftTokenIds | None:
-        output: list[DraftTokenIds] = self.collective_rpc("take_draft_token_ids")
+    def take_draft_token_ids(self, step_id: int | None = None) -> DraftTokenIds | None:
+        output: list[DraftTokenIds] = self.collective_rpc(
+            "take_draft_token_ids", kwargs={"step_id": step_id}
+        )
         return output[0]
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
