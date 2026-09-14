@@ -11,6 +11,7 @@ from vllm.assets.base import get_vllm_public_assets
 from vllm.assets.image import VLM_IMAGES_DIR
 from vllm.config import ModelConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.platforms import current_platform
 
 from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
 from ....utils import large_gpu_test
@@ -102,6 +103,15 @@ def _run_test(
 
 
 @pytest.mark.core_model
+@pytest.mark.skipif(
+    current_platform.is_xpu(),
+    reason=(
+        "vllm-xpu-kernels paged_decode_default.conf is missing the "
+        "8,96,64,false,true,false tuple needed by VLM2Vec-Full at "
+        "block_size=64. Re-enable once vllm-xpu-kernels ships the updated "
+        "config. See github.com/vllm-project/vllm-xpu-kernels/pull/587."
+    ),
+)
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 def test_models_text(
