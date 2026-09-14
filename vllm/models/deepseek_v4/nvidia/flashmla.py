@@ -30,6 +30,7 @@ from vllm.v1.attention.ops.flashmla import (
     flash_mla_sparse_fwd,
     flash_mla_with_kvcache,
 )
+from vllm.v1.hisparse.runtime import build_hisparse_prefill_staging_plan
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -52,6 +53,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
     """FlashMLA sparse MLA attention layer for DeepSeek V4 (CUDA)."""
 
     backend_cls = DeepseekV4FlashMLABackend
+    supports_hisparse = True
     swa_backend_cls = DeepseekSparseSWAFlashMLABackend
 
     def __init__(self, *args, **kwargs) -> None:
@@ -193,14 +195,34 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             if self.compress_ratio == 4:
                 # C4A: local indices differ per layer (filled by Indexer).
                 assert self.topk_indices_buffer is not None
-                global_indices, topk_lens = compute_global_topk_indices_and_lens(
-                    self.topk_indices_buffer[:num_decode_tokens],
-                    swa_metadata.token_to_req_indices,
-                    attn_metadata.block_table[:num_decodes],
-                    block_size,
-                    is_valid,
-                )
-                topk_indices = global_indices.view(num_decode_tokens, 1, -1)
+                if self.hisparse_cache is not None:
+                    hisparse_cache = self.hisparse_cache
+                    # Indexer padding is -1, and the resolver bounds-checks it
+                    # while producing topk_lens, so the separate is_valid mask
+                    # is unnecessary on this path.
+                    global_indices, topk_lens = cast(
+                        tuple[torch.Tensor, torch.Tensor],
+                        hisparse_cache.swap_in(
+                            attn_metadata.req_id_per_token[:num_decode_tokens],
+                            block_table=attn_metadata.block_table[:num_decodes],
+                            logical_topk_indices=self.topk_indices_buffer[
+                                :num_decode_tokens
+                            ],
+                            block_size=block_size,
+                            return_valid_counts=True,
+                        ),
+                    )
+                    kv_cache = hisparse_cache.runtime.hot.attention_cache
+                    topk_indices = global_indices.view(num_decode_tokens, 1, -1)
+                else:
+                    global_indices, topk_lens = compute_global_topk_indices_and_lens(
+                        self.topk_indices_buffer[:num_decode_tokens],
+                        swa_metadata.token_to_req_indices,
+                        attn_metadata.block_table[:num_decodes],
+                        block_size,
+                        is_valid,
+                    )
+                    topk_indices = global_indices.view(num_decode_tokens, 1, -1)
             else:
                 # C128A: pre-computed during metadata build.
                 topk_indices = attn_metadata.c128a_global_decode_topk_indices
@@ -281,8 +303,10 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
 
         # Use pre-computed prefill metadata.
         seq_lens = swa_metadata.prefill_seq_lens
+        seq_lens_cpu = swa_metadata.prefill_seq_lens_cpu
         gather_lens = swa_metadata.prefill_gather_lens
         assert seq_lens is not None
+        assert seq_lens_cpu is not None
         assert gather_lens is not None
 
         # Derive prefill-local token offsets from the full query_start_loc_cpu.
@@ -325,13 +349,55 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             if not swa_only:
                 # Gather compressed KV
                 assert attn_metadata is not None
-                block_table = attn_metadata.block_table[num_decodes:]
+                block_table = attn_metadata.block_table[num_decodes:][
+                    chunk_start:chunk_end
+                ]
+                cache = compressed_k_cache
+                assert cache is not None
+                if self.hisparse_cache is not None:
+                    compressed_seq_lens = (
+                        seq_lens[chunk_start:chunk_end] // self.compress_ratio
+                    )
+                    compressed_seq_lens_cpu = (
+                        seq_lens_cpu[chunk_start:chunk_end] // self.compress_ratio
+                    )
+                    staging_block_capacity = int(
+                        (
+                            (compressed_seq_lens_cpu + cache.shape[1] - 1)
+                            // cache.shape[1]
+                        ).sum()
+                    )
+                    plan = build_hisparse_prefill_staging_plan(
+                        block_table,
+                        compressed_seq_lens,
+                        cache.shape[1],
+                        staging_block_capacity,
+                    )
+                    hisparse_cache = self.hisparse_cache
+                    resident_cache = None
+                    if (
+                        hisparse_cache.view is not None
+                        and hisparse_cache.block_table is not None
+                    ):
+                        plan.ensure_gpu_sources(
+                            hisparse_cache.block_table[num_decodes:][
+                                chunk_start:chunk_end
+                            ],
+                            hisparse_cache.view.block_size,
+                        )
+                        resident_cache = hisparse_cache.view.cache
+                    cache = hisparse_cache.runtime.gather_prefill_cache(
+                        cache,
+                        plan,
+                        resident_cache=resident_cache,
+                    )
+                    block_table = plan.block_table
                 dequantize_and_gather_k_cache(
                     kv[:chunk_size],
-                    compressed_k_cache,
+                    cache,
                     seq_lens=seq_lens[chunk_start:chunk_end] // self.compress_ratio,
                     gather_lens=None,
-                    block_table=block_table[chunk_start:chunk_end],
+                    block_table=block_table,
                     block_size=attn_metadata.block_size // self.compress_ratio,
                     offset=0,
                 )
