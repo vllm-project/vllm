@@ -27,6 +27,7 @@ from vllm.lora.lora_model import LoRAModel
 from vllm.lora.lora_weights import LoRALayerWeights
 from vllm.lora.model_manager import LoRAModelManager, LRUCacheLoRAModelManager
 from vllm.lora.peft_helper import PEFTHelper
+from vllm.lora.worker_manager import WorkerLoRAManager
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
@@ -114,6 +115,28 @@ def make_payload(manager, targets=None):
             b.append(torch.full(b_shape, index + 2.5, dtype=torch.bfloat16))
         factors[module.module_name] = (a, b)
     return plan, factors
+
+
+def test_worker_manager_exposes_complete_local_adapter_lifecycle(manager):
+    worker = object.__new__(WorkerLoRAManager)
+    worker._adapter_manager = manager
+    helper = PEFTHelper(r=4, lora_alpha=12, target_modules=["o_proj"])
+
+    plan = worker.get_local_adapter_plan(helper)
+    factors = {}
+    for module in plan.modules:
+        lora_a, lora_b = [], []
+        for a_shape, b_shape in module.factor_shapes:
+            lora_a.append(torch.ones(a_shape, dtype=torch.bfloat16))
+            lora_b.append(torch.ones(b_shape, dtype=torch.bfloat16))
+        factors[module.module_name] = (lora_a, lora_b)
+
+    assert worker.add_local_adapter(17, plan, factors)
+    assert worker.list_adapters() == {17}
+    assert worker.activate_adapter(17)
+    assert not worker.activate_adapter(17)
+    assert worker.remove_adapter(17)
+    assert worker.list_adapters() == set()
 
 
 def test_native_mla_and_variable_slice_plan_uses_actual_wrapper_metadata(manager):
