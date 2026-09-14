@@ -40,10 +40,9 @@ def humming_update_schema_hadamard_block_size(
 ) -> "HummingWeightSchema":
     assert shape_k > 0
     block_size = 256
-    for group_size in (
-        weight_schema.weight_scale_group_size,
-        input_schema.input_scale_group_size,
-    ):
+    weight_group_size = weight_schema.weight_scale_group_size
+    input_group_size = input_schema.input_scale_group_size
+    for group_size in (weight_group_size, input_group_size):
         if group_size is not None and group_size > 0:
             block_size = min(block_size, group_size)
     block_size = 1 << (block_size.bit_length() - 1)
