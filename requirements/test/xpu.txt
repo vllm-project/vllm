@@ -67,9 +67,7 @@ azure-storage-blob==12.30.1
 blake3==1.0.9
     # via -r requirements/test/../common.txt
 blobfile==3.2.0
-    # via
-    #   -r requirements/test/xpu.in
-    #   gpt-oss
+    # via -r requirements/test/xpu.in
 bm25s==0.3.10
     # via
     #   -r requirements/test/xpu.in
@@ -259,7 +257,7 @@ googleapis-common-protos==1.75.1
     #   google-api-core
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-exporter-otlp-proto-http
-gpt-oss==0.0.5
+gpt-oss==0.0.9
     # via -r requirements/test/xpu.in
 graphql-core==3.2.11
     # via hypothesis-graphql
@@ -379,7 +377,6 @@ jinja2==3.1.6
     # via
     #   -c requirements/xpu.txt
     #   fastapi
-    #   gpt-oss
     #   lm-eval
     #   torch
 jiter==0.16.0
@@ -409,6 +406,10 @@ jsonschema-rs==0.49.9
     # via schemathesis
 jsonschema-specifications==2025.9.1
     # via jsonschema
+jupyter-client==8.10.0
+    # via gpt-oss
+jupyter-core==5.9.1
+    # via jupyter-client
 kiwisolver==1.5.1
     # via matplotlib
 lark==1.2.2
@@ -529,7 +530,6 @@ numpy==2.2.6
     #   datasets
     #   decord
     #   evaluate
-    #   gpt-oss
     #   librosa
     #   lm-eval
     #   matplotlib
@@ -580,7 +580,6 @@ openai==3.2.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-    #   gpt-oss
 openai-harmony==0.0.8
     # via
     #   -c requirements/common.txt
@@ -662,7 +661,6 @@ pandas==3.0.5
     # via
     #   datasets
     #   evaluate
-    #   gpt-oss
 partial-json-parser==0.2.1.1.post7
     # via -r requirements/test/../common.txt
 pathvalidate==3.3.1
@@ -674,7 +672,9 @@ pillow==12.3.0
     #   mistral-common
     #   torchvision
 platformdirs==4.11.3
-    # via pooch
+    # via
+    #   jupyter-core
+    #   pooch
 pluggy==1.6.0
     # via
     #   pytest
@@ -813,6 +813,7 @@ pytest-timeout==2.4.0
 python-dateutil==2.9.0.post0
     # via
     #   botocore
+    #   jupyter-client
     #   matplotlib
     #   pandas
     #   typepy
@@ -848,6 +849,7 @@ pyzmq==27.1.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
+    #   jupyter-client
 rapidfuzz==3.14.5
     # via
     #   -r requirements/test/xpu.in
@@ -1072,12 +1074,13 @@ torchvision==0.28.0+xpu
     # via
     #   open-clip-torch
     #   timm
+tornado==6.5.8
+    # via jupyter-client
 tqdm==4.70.0
     # via
     #   -r requirements/test/../common.txt
     #   datasets
     #   evaluate
-    #   gpt-oss
     #   huggingface-hub
     #   lm-eval
     #   modelscope
@@ -1088,6 +1091,10 @@ tqdm==4.70.0
     #   pqdm
     #   sentence-transformers
     #   transformers
+traitlets==5.16.1
+    # via
+    #   jupyter-client
+    #   jupyter-core
 transformers==5.16.1
     # via
     #   -c requirements/common.txt
@@ -1139,6 +1146,7 @@ typing-extensions==4.16.0
     #   grpcio
     #   httpx2
     #   huggingface-hub
+    #   jupyter-client
     #   lm-eval
     #   mcp
     #   mcp-types

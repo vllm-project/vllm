@@ -39,9 +39,9 @@ from vllm.distributed.parallel_state import (
     initialize_model_parallel,
 )
 from vllm.forward_context import set_forward_context
-from vllm.models.deepseek_v4_1.common.engram import EngramLayout
-from vllm.models.deepseek_v4_1.nvidia import engram as engram_ops
-from vllm.models.deepseek_v4_1.nvidia.engram import (
+from vllm.models.deepseek_v41.common.engram import EngramLayout
+from vllm.models.deepseek_v41.nvidia import engram as engram_ops
+from vllm.models.deepseek_v41.nvidia.engram import (
     Engram,
     ParallelEngramEmbedding,
     engram_head_shard_rank,
@@ -473,8 +473,8 @@ def _check_dummy_hash_model_forward(
     vllm_config, engram, head_sizes, weight, scales, dp_shared_memory
 ):
     """A metadata-less replica joins DP sharding but skips a shared lookup."""
-    from vllm.models.deepseek_v4_1.common.engram import NgramHashState
-    from vllm.models.deepseek_v4_1.nvidia import model as model_ops
+    from vllm.models.deepseek_v41.common.engram import NgramHashState
+    from vllm.models.deepseek_v41.nvidia import model as model_ops
 
     dp_rank = vllm_config.parallel_config.data_parallel_rank
     if dp_shared_memory and dp_rank != 1:
