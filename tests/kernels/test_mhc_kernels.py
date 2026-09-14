@@ -32,6 +32,7 @@ from vllm.model_executor.layers.mhc import (
     MHCFusedPostPreOp,
     MHCPreDelayedOp,
     MHCPreOp,
+    _apply_mhc_norm,
 )
 from vllm.models.deepseek_v4.nvidia.model import (
     DeepseekV4DecoderLayer,
@@ -1647,3 +1648,132 @@ def test_mhc_fused_post_pre_delayed_falls_back_for_large_batches():
 
     assert not rocm_aiter_ops.mhc_fused_post_pre_delayed_prefers_unfused(1)
     assert rocm_aiter_ops.mhc_fused_post_pre_delayed_prefers_unfused(1 << 20)
+
+
+def _mhc_pre_inputs(
+    num_tokens: int, hidden_size: int, hc_mult: int, dtype=torch.bfloat16
+):
+    """Inputs shaped the way mhc_pre_torch's own assertions require."""
+    hc_mult3 = hc_mult * 2 + hc_mult * hc_mult
+    hc_hidden = hc_mult * hidden_size
+    residual = (torch.randn(num_tokens, hc_mult, hidden_size) * 0.02).to(dtype)
+    fn = (torch.randn(hc_mult3, hc_hidden) * 0.02).to(torch.float32)
+    hc_scale = (torch.randn(3) * 0.1).to(torch.float32)
+    hc_base = (torch.randn(hc_mult3) * 0.1).to(torch.float32)
+    return residual, fn, hc_scale, hc_base
+
+
+@pytest.mark.parametrize("num_tokens", [1, 8])
+@pytest.mark.parametrize("hidden_size", [4096])
+@pytest.mark.parametrize("hc_mult", [4])
+def test_mhc_pre_native_applies_norm(
+    num_tokens, hidden_size, hc_mult, default_vllm_config
+):
+    """forward_native must return a normalized layer_input.
+
+    forward_cuda gets the norm from the fused kernel and forward_hip applies it
+    explicitly; forward_native has to do the same, because CustomOp.forward_oot
+    and forward_cpu both fall back to it. Without this, every out-of-tree
+    backend (and vLLM's own CPU backend) feeds an un-normalized residual mix
+    into attention and MLP/MoE, which is silent -- no NaN, no exception, just
+    wrong numbers.
+    """
+    set_random_seed(0)
+    residual, fn, hc_scale, hc_base = _mhc_pre_inputs(num_tokens, hidden_size, hc_mult)
+    norm_weight = (torch.randn(hidden_size) * 0.1 + 1.0).to(torch.bfloat16)
+    norm_eps = 1e-6
+
+    op = MHCPreOp()
+    _, _, layer_input = op.forward_native(
+        residual,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps=1e-6,
+        hc_pre_eps=1e-6,
+        hc_sinkhorn_eps=1e-6,
+        hc_post_mult_value=1.0,
+        sinkhorn_repeat=20,
+        n_splits=1,
+        norm_weight=norm_weight,
+        norm_eps=norm_eps,
+    )
+
+    # Same call without a norm gives the raw mix; normalizing it here is what
+    # the contract says layer_input should be.
+    _, _, raw_mix = op.forward_native(
+        residual,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps=1e-6,
+        hc_pre_eps=1e-6,
+        hc_sinkhorn_eps=1e-6,
+        hc_post_mult_value=1.0,
+        sinkhorn_repeat=20,
+        n_splits=1,
+        norm_weight=None,
+        norm_eps=norm_eps,
+    )
+    expected = _apply_mhc_norm(raw_mix, norm_weight, norm_eps)
+
+    # Guard against a vacuous assertion: the norm must actually change the mix.
+    assert not torch.allclose(raw_mix.float(), expected.float(), atol=1e-4)
+    torch.testing.assert_close(
+        layer_input.float(), expected.float(), atol=1e-2, rtol=1e-2
+    )
+
+
+@pytest.mark.parametrize("num_tokens", [1, 8])
+@pytest.mark.parametrize("hidden_size", [4096])
+@pytest.mark.parametrize("hc_mult", [4])
+def test_mhc_fused_post_pre_native_applies_norm(
+    num_tokens, hidden_size, hc_mult, default_vllm_config
+):
+    """Same contract for the fused post+pre op's forward_native."""
+    set_random_seed(0)
+    residual, fn, hc_scale, hc_base = _mhc_pre_inputs(num_tokens, hidden_size, hc_mult)
+    x = (torch.randn(num_tokens, hidden_size) * 0.02).to(torch.bfloat16)
+    # post_layer_mix broadcasts against x.unsqueeze(-2) -> [T, 1, hidden]
+    post_layer_mix = (torch.randn(num_tokens, hc_mult, 1) * 0.1).to(torch.float32)
+    comb_res_mix = (torch.randn(num_tokens, hc_mult, hc_mult) * 0.1).to(torch.float32)
+    norm_weight = (torch.randn(hidden_size) * 0.1 + 1.0).to(torch.bfloat16)
+    norm_eps = 1e-6
+
+    op = MHCFusedPostPreOp()
+    kwargs = dict(
+        fn=fn,
+        hc_scale=hc_scale,
+        hc_base=hc_base,
+        rms_eps=1e-6,
+        hc_pre_eps=1e-6,
+        hc_sinkhorn_eps=1e-6,
+        hc_post_mult_value=1.0,
+        sinkhorn_repeat=20,
+        n_splits=1,
+        tile_n=1,
+    )
+    *_, layer_input = op.forward_native(
+        x,
+        residual,
+        post_layer_mix,
+        comb_res_mix,
+        norm_weight=norm_weight,
+        norm_eps=norm_eps,
+        **kwargs,
+    )
+    *_, raw_mix = op.forward_native(
+        x,
+        residual,
+        post_layer_mix,
+        comb_res_mix,
+        norm_weight=None,
+        norm_eps=norm_eps,
+        **kwargs,
+    )
+    expected = _apply_mhc_norm(raw_mix, norm_weight, norm_eps)
+
+    assert not torch.allclose(raw_mix.float(), expected.float(), atol=1e-4)
+    torch.testing.assert_close(
+        layer_input.float(), expected.float(), atol=1e-2, rtol=1e-2
+    )
