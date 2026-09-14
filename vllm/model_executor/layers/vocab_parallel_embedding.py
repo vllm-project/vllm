@@ -27,6 +27,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     method_has_implemented_embedding,
     resolve_quant_method,
 )
+from vllm.model_executor.layers.quantization.utils.fp8_utils import is_fp8
 from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
@@ -240,6 +241,7 @@ class VocabParallelEmbedding(PluggableLayer):
         quant_config: quant config for the layer
         prefix: full name of the layer in the state dict
         disable_tp: If true, tensor parallelism will be disabled for this layer.
+        reduce_results: Whether to all-reduce contributions from vocabulary shards.
         quant_method: Preselected quantization method for model-specific layers.
         parallel_group: Process group used to shard and reduce the embedding.
     """  # noqa: E501
@@ -257,6 +259,7 @@ class VocabParallelEmbedding(PluggableLayer):
         prefix: str = "",
         *,
         disable_tp: bool = False,
+        reduce_results: bool = True,
         quant_method: QuantizeMethodBase | None = None,
         parallel_group: GroupCoordinator | None = None,
     ):
@@ -265,6 +268,7 @@ class VocabParallelEmbedding(PluggableLayer):
         # Keep the input dimensions.
         self.disable_tp = disable_tp
         self.parallel_group = parallel_group
+        self.reduce_results = reduce_results
         if disable_tp:
             tp_rank, self.tp_size = 0, 1
         elif parallel_group is not None:
@@ -508,6 +512,7 @@ class VocabParallelEmbedding(PluggableLayer):
         param[loaded_weight.shape[0] :].data.fill_(0)
 
     def forward(self, input_):
+        """Look up IDs, optionally reducing contributions from vocabulary shards."""
         if self.tp_size == 1:
             return self.quant_method.embedding(self, input_.long())
 
@@ -535,24 +540,20 @@ class VocabParallelEmbedding(PluggableLayer):
                 self.shard_indices.added_vocab_end_index,
             )
             output_parallel = self.quant_method.embedding(self, masked_input.long())
-            if output_parallel.dtype in (
-                torch.float8_e4m3fn,
-                torch.float8_e5m2,
-            ):
-                # Each vocab token has one owner, so FP8 bytes can use int8 SUM.
-                comm_output = output_parallel.view(torch.int8)
-                comm_output.masked_fill_(input_mask.unsqueeze(-1), 0)
-                output = (
-                    self.parallel_group.all_reduce(comm_output)
-                    if self.parallel_group is not None
-                    else tensor_model_parallel_all_reduce(comm_output)
-                )
-                return output.view(output_parallel.dtype)
+
+        output_dtype = output_parallel.dtype
+        if is_fp8(output_dtype):
+            # Each vocab token has one owner, so FP8 bytes can use int8 SUM.
+            output_parallel = output_parallel.view(torch.int8)
+        if not self.use_fused_embedding:
             output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
-        # Reduce across all the model parallel GPUs.
-        if self.parallel_group is not None:
-            return self.parallel_group.all_reduce(output_parallel)
-        return tensor_model_parallel_all_reduce(output_parallel)
+        if self.reduce_results:
+            output_parallel = (
+                self.parallel_group.all_reduce(output_parallel)
+                if self.parallel_group is not None
+                else tensor_model_parallel_all_reduce(output_parallel)
+            )
+        return output_parallel.view(output_dtype)
 
     def extra_repr(self) -> str:
         s = f"num_embeddings={self.num_embeddings}"
