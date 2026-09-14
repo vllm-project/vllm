@@ -193,12 +193,12 @@ class EMABackpressureDetector(BackpressureDetector):
 
     # EMA smoothing factor: higher values (→1) react faster to latency
     # spikes but are noisier; lower values (→0) smooth more but lag.
-    DEFAULT_ALPHA = 0.3
+    DEFAULT_ALPHA = 0.15
 
     # Number of store completions to collect before seeding the EMA.
     # During warmup, pressure is never signalled; the EMA is initialized
     # to the mean of the warmup samples to avoid cold-start false positives.
-    DEFAULT_WARMUP_COMPLETIONS = 3
+    DEFAULT_WARMUP_COMPLETIONS = 10
 
     # When under pressure and no completions arrive, the EMA decays
     # toward zero so the detector can eventually recover.  The half-life
@@ -215,11 +215,11 @@ class EMABackpressureDetector(BackpressureDetector):
     # detector enters a "healthy" fast-path that bypasses policy checks.
     _HEALTHY_THRESHOLD = 10
 
-    LOCAL_HIGH_WATER_S = 0.005
-    LOCAL_LOW_WATER_S = 0.001
+    LOCAL_HIGH_WATER_S = 0.010
+    LOCAL_LOW_WATER_S = 0.002
 
-    NETWORK_HIGH_WATER_S = 0.020
-    NETWORK_LOW_WATER_S = 0.005
+    NETWORK_HIGH_WATER_S = 0.050
+    NETWORK_LOW_WATER_S = 0.010
 
     _NETWORK_TIER_TYPES = frozenset({"obj"})
 
