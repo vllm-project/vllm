@@ -17,6 +17,7 @@ mod server_info;
 mod sleep;
 mod tokenize;
 mod version;
+mod weight_transfer;
 mod world_size;
 
 use std::sync::Arc;
@@ -139,6 +140,28 @@ fn build_router_with_options(
             .route("/reset_mm_cache", post(cache::reset_mm_cache))
             .route("/reset_encoder_cache", post(cache::reset_encoder_cache))
             .route("/collective_rpc", post(collective_rpc::collective_rpc))
+            .route(
+                "/init_weight_transfer_engine",
+                post(weight_transfer::init_weight_transfer_engine),
+            )
+            .route(
+                "/start_weight_update",
+                post(weight_transfer::start_weight_update),
+            )
+            .route(
+                "/start_draft_weight_update",
+                post(weight_transfer::start_draft_weight_update),
+            )
+            .route("/update_weights", post(weight_transfer::update_weights))
+            .route(
+                "/finish_weight_update",
+                post(weight_transfer::finish_weight_update),
+            )
+            .route(
+                "/update_weight_version",
+                post(weight_transfer::update_weight_version),
+            )
+            .route("/weight_info", get(weight_transfer::weight_info))
             .route("/abort_requests", post(abort_requests::abort_requests))
             .route("/sleep", post(sleep::sleep))
             .route("/wake_up", post(sleep::wake_up))
