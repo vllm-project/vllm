@@ -1255,6 +1255,12 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
   elseif(VLLM_GPU_LANG STREQUAL "HIP")
     target_compile_definitions(_C_stable_libtorch PRIVATE USE_ROCM)
+    # gfx1151/Wave32: force device-lib (__ockl) reductions to inline so their
+    # constant wavefront-size control folds and the illegal wave64 DPP wave-shift
+    # dead branch is eliminated before codegen (fixes sampler.cu build).
+    target_compile_options(_C_stable_libtorch PRIVATE
+      "$<$<COMPILE_LANGUAGE:HIP>:SHELL:-mllvm -amdgpu-early-inline-all=true>"
+      "$<$<COMPILE_LANGUAGE:HIP>:SHELL:-mllvm -amdgpu-function-calls=false>")
     if(FUSED_KDA_DECODE_HIP_SRC)
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_FUSED_KDA_DECODE=1)
