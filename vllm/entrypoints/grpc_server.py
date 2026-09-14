@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import warnings
 
-from vllm.entrypoints.launchers.grpc_server import serve_grpc, main
+from vllm.entrypoints.launchers.grpc_server import main, serve_grpc
 
 warnings.warn(
     "`vllm.entrypoints.grpc_server is deprecated and will likely be "
@@ -12,7 +12,7 @@ warnings.warn(
     stacklevel=1,
 )
 
-__all__ = ["serve_grpc", "main"]
+__all__ = ["main", "serve_grpc"]
 
 
 if __name__ == "__main__":
