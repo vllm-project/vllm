@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.mamba.mamba_mixer2 import share_replayssm_ring_trackers
@@ -744,6 +744,35 @@ def get_uniform_decode_token_count(
     if not has_prefill and is_uniform_query_len(num_reqs, num_tokens, max_query_len):
         return max_query_len
     return None
+
+
+def is_residual_scattered_for_sp(
+    vllm_config: VllmConfig, num_input_tokens: int
+) -> bool:
+    """Check if the residual tensor is scattered for sequence parallelism.
+
+    The residual tensor is scattered across tensor parallel ranks when sequence
+    parallelism and tensor parallelism is enabled. SP is only supported in
+    full-graph compilation mode.
+    """
+    if not vllm_config.compilation_config.pass_config.enable_sp:
+        return False
+
+    tp = vllm_config.parallel_config.tensor_parallel_size
+
+    if tp == 1:
+        return False
+
+    assert (
+        vllm_config.compilation_config.use_inductor_graph_partition
+        or not vllm_config.compilation_config.splitting_ops
+    ), "Sequence parallelism requires full-graph compilation"
+
+    # When sequence parallelism is enabled, we always pad num_input_tokens
+    # to be a multiple of tensor_parallel_size (tp) earlier.
+    assert num_input_tokens % tp == 0
+
+    return True
 
 
 @dataclass

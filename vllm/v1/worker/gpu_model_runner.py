@@ -115,7 +115,7 @@ from vllm.multimodal.utils import (
 from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
-from vllm.sequence import IntermediateTensors, get_intermediate_tensor_num_tokens
+from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.tracing import instrument
 from vllm.utils import length_from_prompt_token_ids_or_embeds
@@ -230,6 +230,7 @@ from vllm.v1.worker.ubatch_utils import (
 )
 from vllm.v1.worker.utils import (
     EncoderTimingStats,
+    is_residual_scattered_for_sp,
     raise_if_nan_logits,
 )
 from vllm.v1.worker.workspace import lock_workspace
@@ -3380,19 +3381,23 @@ class GPUModelRunner(
     ) -> IntermediateTensors:
         assert self.intermediate_tensors is not None
 
+        tp = self.vllm_config.parallel_config.tensor_parallel_size
+        is_rs = is_residual_scattered_for_sp(self.vllm_config, num_tokens)
+
+        # When sequence parallelism is enabled, the "residual" tensor is
+        # sharded across TP ranks. All-gather it here because downstream
+        # QKV + Attention needs the full residual before the SP split point.
         if sync_self:
             assert intermediate_tensors is not None
-            received_tensors: dict[str, torch.Tensor] = {}
             for k, v in intermediate_tensors.items():
-                received_num_tokens = min(num_tokens, v.shape[0])
-                received_tensors[k] = v[:received_num_tokens]
-                self.intermediate_tensors[k][:received_num_tokens].copy_(
-                    v[:received_num_tokens], non_blocking=True
-                )
+                is_scattered = k == "residual" and is_rs
+                if is_scattered:
+                    local_len = num_tokens // tp
+                    v = get_tp_group().all_gather(v[:local_len], dim=0)
 
-            num_tokens = get_intermediate_tensor_num_tokens(
-                IntermediateTensors(received_tensors)
-            )
+                self.intermediate_tensors[k][:num_tokens].copy_(
+                    v[:num_tokens], non_blocking=True
+                )
 
         return IntermediateTensors(
             {k: v[:num_tokens] for k, v in self.intermediate_tensors.items()}
@@ -4497,13 +4502,15 @@ class GPUModelRunner(
 
                 sample_hidden_states = hidden_states[logits_indices]
                 if not get_pp_group().is_last_rank:
+                    all_gather_tensors = {
+                        "residual": not is_residual_scattered_for_sp(
+                            self.vllm_config, num_tokens_padded
+                        )
+                    }
                     get_pp_group().send_tensor_dict(
                         hidden_states.tensors,
-                        all_gather_group=(
-                            None
-                            if self.pp_intermediate_tensors_are_sequence_sharded
-                            else get_tp_group()
-                        ),
+                        all_gather_group=get_tp_group(),
+                        all_gather_tensors=all_gather_tensors,
                     )
                     logits = None
                 else:
@@ -5485,9 +5492,6 @@ class GPUModelRunner(
                     self.model, self.vllm_config, CUDAGraphMode.NONE, self.device
                 )
 
-        self.pp_intermediate_tensors_are_sequence_sharded = getattr(
-            self.get_model(), "pp_intermediate_tensors_are_sequence_sharded", False
-        )
         get_offloader().post_init()
 
     def _setup_eagle3_aux_hidden_state_outputs(self) -> None:

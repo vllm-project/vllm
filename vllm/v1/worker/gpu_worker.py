@@ -505,6 +505,15 @@ class Worker(WorkerBase):
         self.pp_intermediate_tensors_are_sequence_sharded = getattr(
             self.get_model(), "pp_intermediate_tensors_are_sequence_sharded", False
         )
+        if (
+            self.vllm_config.parallel_config.pipeline_parallel_size > 1
+            and self.pp_intermediate_tensors_are_sequence_sharded
+            and not self.use_v2_model_runner
+        ):
+            raise ValueError(
+                "Sequence-sharded pipeline transport requires the V2 model runner. "
+                "Set VLLM_USE_V2_MODEL_RUNNER=1."
+            )
 
         if has_ec_transfer():
             get_ec_transfer().start_worker_services()
