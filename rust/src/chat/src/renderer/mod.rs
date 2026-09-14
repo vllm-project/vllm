@@ -10,8 +10,10 @@ use vllm_text::Prompt;
 use crate::error::Result;
 use crate::request::{ChatRequest, ReasoningEffort};
 
+mod deepseek;
 pub mod deepseek_v32;
 pub mod deepseek_v4;
+pub mod deepseek_v41;
 pub mod harmony;
 pub mod hf;
 mod inkling;
@@ -22,6 +24,7 @@ mod test_utils;
 
 pub use deepseek_v4::DeepSeekV4ChatRenderer;
 pub use deepseek_v32::DeepSeekV32ChatRenderer;
+pub use deepseek_v41::DeepSeekV41ChatRenderer;
 pub use harmony::HarmonyChatRenderer;
 pub use inkling::InklingChatRenderer;
 pub use kimi_k3::KimiK3ChatRenderer;

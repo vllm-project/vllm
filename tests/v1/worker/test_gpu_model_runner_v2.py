@@ -8,6 +8,7 @@ import pytest
 import torch
 
 import vllm.v1.worker.gpu.model_runner as model_runner_module
+from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -37,6 +38,7 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
         parallel_config=parallel_config,
         cache_config=SimpleNamespace(mamba_cache_mode="none"),
     )
+    runner.jit_warmup_registry = JitWarmupRegistry(runner.vllm_config)
     runner.model_state = SimpleNamespace(
         get_additional_cg_support=lambda: (),
         num_new_sampled_tokens_per_step=1,
@@ -84,7 +86,7 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
     monkeypatch.setattr(
         model_runner_module,
         "init_attn_backend",
-        lambda *args: ([], attn_cg_support, [8, 262144]),
+        lambda *args, **kwargs: ([], attn_cg_support, [8, 262144]),
     )
     monkeypatch.setattr(
         model_runner_module,
@@ -237,6 +239,7 @@ def _make_capture_runner(captured: bool) -> GPUModelRunner:
     runner.attn_groups = None
     runner.kv_cache_config = None
     runner.use_aux_hidden_state_outputs = False
+    runner.kv_connector = model_runner_module.NO_OP_KV_CONNECTOR
     return runner
 
 
