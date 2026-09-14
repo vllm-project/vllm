@@ -98,7 +98,7 @@ __launch_bounds__(TPB) __global__
 
     for (int ii = threadIdx.x; ii < num_cols; ii += TPB)
     {
-        const int idx = thread_row_offset + ii;
+        const int64_t idx = thread_row_offset + ii;
         const float val = toFloat(input[idx]);
         threadData = max(val, threadData);
     }
@@ -114,7 +114,7 @@ __launch_bounds__(TPB) __global__
 
     for (int ii = threadIdx.x; ii < num_cols; ii += TPB)
     {
-        const int idx = thread_row_offset + ii;
+        const int64_t idx = thread_row_offset + ii;
         const float val = toFloat(input[idx]);
         threadData += expf(val - float_max);
     }
@@ -129,7 +129,7 @@ __launch_bounds__(TPB) __global__
 
     for (int ii = threadIdx.x; ii < num_cols; ii += TPB)
     {
-        const int idx = thread_row_offset + ii;
+        const int64_t idx = thread_row_offset + ii;
         const float val = toFloat(input[idx]);
         float softmax_val = expf(val - float_max) * normalizing_factor;
         // Clamp NaN/Inf to 0 to prevent duplicate expert IDs downstream.
@@ -152,7 +152,7 @@ __launch_bounds__(TPB) __global__
 
     for (int ii = threadIdx.x; ii < num_cols; ii += TPB)
     {
-        const int idx = thread_row_offset + ii;
+        const int64_t idx = thread_row_offset + ii;
         const float val = toFloat(input[idx]);
         float sigmoid_val = 1.0f / (1.0f + __expf(-val));
         // Clamp NaN/Inf to 0 to prevent duplicate expert IDs downstream.
@@ -199,7 +199,7 @@ __launch_bounds__(TPB) __global__ void moeTopK(
         cub_kvp inp_kvp;
         for (int expert = threadIdx.x; expert < num_experts; expert += TPB)
         {
-            const int idx = thread_read_offset + expert;
+            const int64_t idx = thread_read_offset + expert;
             inp_kvp.key = expert;
 
             // Apply correction bias if provided
