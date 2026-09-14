@@ -451,27 +451,6 @@ pub struct ServerUnsupportedArgs {
     )]
     pub enable_tokenizer_info_endpoint: Option<Noop>,
 
-    /// If set to True, log model outputs (generations).
-    /// Requires `--enable-log-requests`. As with `--enable-log-requests`,
-    /// information is only logged at INFO level at maximum.
-    #[arg(
-        long,
-        visible_alias = "no-enable-log-outputs",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_log_outputs: Option<Unsupported>,
-
-    /// If set to False, output deltas will not be logged. Relevant only if
-    /// --enable-log-outputs is set.
-    #[arg(
-        long,
-        visible_alias = "no-enable-log-deltas",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_log_deltas: Option<Unsupported>,
-
     /// If set to True, log the stack trace of error responses
     #[arg(
         long,
