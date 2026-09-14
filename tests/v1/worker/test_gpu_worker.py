@@ -225,9 +225,11 @@ def test_execute_model_waits_previous_pp_send_before_forward(
     assert worker._pp_send_work == [tensor_handle]
 
 
-@pytest.mark.parametrize("sequence_sharded", [False, True])
+@pytest.mark.parametrize(
+    "sequence_sharded,compiler_sp", [(False, False), (True, False), (False, True)]
+)
 def test_pp_transport_uses_same_layout_for_send_and_receive(
-    monkeypatch, sequence_sharded
+    monkeypatch, sequence_sharded, compiler_sp
 ):
     from vllm.sequence import IntermediateTensors
 
@@ -249,22 +251,43 @@ def test_pp_transport_uses_same_layout_for_send_and_receive(
             torch.testing.assert_close(received[key], tensor)
         return IntermediateTensors(tensors)
 
+    determine_batch = Mock(
+        return_value=(None, SimpleNamespace(num_tokens=4), None, None, None)
+    )
+    monkeypatch.setattr(
+        gpu_worker, "is_residual_scattered_for_sp", lambda config, n: True
+    )
     worker = SimpleNamespace(
         _pp_send_work=[],
         pp_intermediate_tensors_are_sequence_sharded=sequence_sharded,
         vllm_config=SimpleNamespace(
-            parallel_config=SimpleNamespace(distributed_executor_backend="mp"),
+            parallel_config=SimpleNamespace(
+                distributed_executor_backend="mp", pipeline_parallel_size=2
+            ),
+            compilation_config=SimpleNamespace(
+                pass_config=SimpleNamespace(enable_sp=compiler_sp)
+            ),
         ),
-        model_runner=SimpleNamespace(execute_model=forward),
-        use_v2_model_runner=False,
+        model_runner=SimpleNamespace(
+            execute_model=forward,
+            is_pooling_model=False,
+            _determine_batch_execution_and_padding=determine_batch,
+        ),
+        use_v2_model_runner=not compiler_sp,
         annotate_profile=lambda _: nullcontext(),
     )
-    scheduler_output = SimpleNamespace(total_num_scheduled_tokens=4)
+    scheduler_output = SimpleNamespace(
+        total_num_scheduled_tokens=4, num_scheduled_tokens={"req": 4}
+    )
     execute = inspect.unwrap(gpu_worker.Worker.execute_model)
     assert execute(worker, scheduler_output) is None
     expected_group = None if sequence_sharded else tp
-    pp.irecv_tensor_dict.assert_called_once_with(all_gather_group=expected_group)
+    expected_overrides = {"residual": False} if compiler_sp else {}
+    pp.irecv_tensor_dict.assert_called_once_with(
+        all_gather_group=expected_group, all_gather_tensors=expected_overrides
+    )
     pp.isend_tensor_dict.assert_called_once_with(
-        tensors, all_gather_group=expected_group
+        tensors, all_gather_group=expected_group, all_gather_tensors=expected_overrides
     )
     assert worker._pp_send_work == pp.isend_tensor_dict.return_value[1:]
+    assert determine_batch.call_count == int(compiler_sp)

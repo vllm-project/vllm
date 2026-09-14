@@ -3416,18 +3416,3 @@ def test_revision_resolved_when_weights_match_model(mock_resolve):
     assert isinstance(config.revision, ResolvedRevision)
     assert config.revision.resolved == REVISION
     mock_resolve.assert_any_call(model, None, config.hf_token)
-
-
-@pytest.mark.parametrize(
-    "pass_config", [{"enable_sp": True}, {"fuse_gemm_comms": True}]
-)
-def test_reject_compiler_sequence_parallel_with_pipeline_parallel(pass_config):
-    with pytest.raises(ValueError, match="Compiler sequence parallelism"):
-        VllmConfig(
-            parallel_config=ParallelConfig(
-                tensor_parallel_size=2,
-                pipeline_parallel_size=2,
-                distributed_executor_backend="mp",
-            ),
-            compilation_config=CompilationConfig(pass_config=pass_config),
-        )
