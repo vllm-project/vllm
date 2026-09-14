@@ -15,9 +15,6 @@ DEVICES = [
     f"{DEVICE_TYPE}:{i}"
     for i in range(1 if torch.accelerator.device_count() == 1 else 2)
 ]
-CUDA_DEVICES = [
-    f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
-]
 
 
 @pytest.mark.skipif(not is_uva_available(), reason="UVA is not available.")
@@ -65,7 +62,7 @@ def test_gpu_write(device):
 
 
 @pytest.mark.skipif(not is_uva_available(), reason="UVA is not available.")
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 def test_staged_write_uses_uva_contents_for_uva_target(device, monkeypatch):
     def fail_async_tensor_h2d(*args, **kwargs):
         pytest.fail("UVA-backed targets should not copy write contents to the GPU")
@@ -152,7 +149,7 @@ def test_uva_pool_copy_to_gpu_preserves_shape_and_out(use_out, input_type):
         )
         values = expected.numpy() if input_type == "numpy" else expected
         out = (
-            torch.empty(expected.shape, dtype=torch.int32, device="cuda")
+            torch.empty(expected.shape, dtype=torch.int32, device=DEVICE_TYPE)
             if use_out
             else None
         )
@@ -167,7 +164,7 @@ def test_uva_pool_copy_to_gpu_preserves_shape_and_out(use_out, input_type):
 @pytest.mark.parametrize("dtype", [torch.int32, torch.int64, torch.float32])
 def test_staged_write_inflight(uva_target, dtype):
     """Preserve every generation until its consumer finishes before slot reuse."""
-    device = torch.device("cuda:0")
+    device = torch.device(f"{DEVICE_TYPE}:0")
     with torch.accelerator.device_index(device.index):
         state = StagedWriteTensor(
             (4, 4096),
@@ -177,9 +174,9 @@ def test_staged_write_inflight(uva_target, dtype):
             uva_instead_of_gpu=uva_target,
         )
         assert (state.write_contents is not None) == uva_target
-        stream = torch.cuda.Stream()
-        stream.wait_stream(torch.cuda.current_stream())
-        pending: list[tuple[torch.cuda.Event, torch.Tensor, torch.Tensor]] = []
+        stream = torch.Stream(device=device)
+        stream.wait_stream(torch.accelerator.current_stream())
+        pending: list[tuple[torch.Event, torch.Tensor, torch.Tensor]] = []
         expected = torch.zeros((4, 4096), dtype=dtype, device="cpu")
         for step in range(24):
             if len(pending) == 2:
@@ -194,13 +191,13 @@ def test_staged_write_inflight(uva_target, dtype):
                 values += 0.25
             expected[row, 2 : 2 + length] = values
             expected[3, 1:4] = step
-            with torch.cuda.stream(stream):
+            with stream:
                 state.stage_write(row, 2, values.tolist())
                 state.stage_write(3, 1, [step] * 3)
                 state.apply_write()
                 # A GPU consumer observes this generation before the next update.
                 snapshot = state.gpu.clone()
-                event = torch.cuda.Event()
+                event = torch.Event()
                 event.record(stream)
             pending.append((event, snapshot, expected.clone()))
         for event, snapshot, reference in pending:
