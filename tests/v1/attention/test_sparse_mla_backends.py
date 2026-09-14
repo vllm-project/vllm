@@ -32,6 +32,7 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
     GLOBAL_TOPK_MASK_MAX_BYTES,
     SparseMLACommonImpl,
     SparseMLAPrefillMetadata,
+    _is_masked_mha_available,
     _masked_mha_workspace_fits,
     _topk_mask_shape,
     _use_dense_mha_prefill,
@@ -1080,6 +1081,7 @@ def test_flashmla_forward_bf16_kv_slices_req_id_to_mqa_tokens():
         _convert_logical_to_physical_topk=_convert_topk,
         index_group=None,
         index_group_index=0,
+        pcp_dcp_kv_gather=False,
     )
 
     out, _ = FlashMLASparseImpl._forward_bf16_kv(
@@ -1164,6 +1166,33 @@ def test_masked_mha_workspace_guards_long_routing_policy(
     )
 
 
+@pytest.mark.parametrize(
+    ("model_dims", "kv_cache_dtype", "fa_version", "expected"),
+    [
+        pytest.param((128, 512, 128, 64, 128), "auto", 4, True, id="deepseek_v32"),
+        pytest.param((64, 512, 192, 64, 256), "auto", 4, True, id="glm5"),
+        pytest.param((64, 512, 256, 0, 256), "auto", 4, True, id="glm53_flash_nope"),
+        pytest.param((64, 512, 256, 0, 256), "fp8", 4, False, id="quantized_kv"),
+        pytest.param((64, 512, 256, 0, 256), "auto", 3, False, id="no_fa4"),
+        pytest.param((64, 512, 256, 64, 256), "auto", 4, False, id="rope_320"),
+        pytest.param((128, 512, 256, 0, 256), "auto", 4, False, id="wrong_heads"),
+    ],
+)
+def test_is_masked_mha_available_model_dims(
+    monkeypatch, model_dims, kv_cache_dtype, fa_version, expected
+):
+    """The allow-list gates masked MHA per exact model geometry: the DeepSeek-V3.2,
+    GLM-5 and NoPE GLM-5.3-Flash layouts on an SM100-family GPU with FA4 and an
+    unquantized KV cache, nothing else."""
+    import vllm.model_executor.layers.attention.sparse_mla_attention as mod
+
+    monkeypatch.setattr(
+        mod.current_platform, "is_device_capability_family", lambda family: True
+    )
+    monkeypatch.setattr(mod, "get_flash_attn_version", lambda **kwargs: fa_version)
+    assert _is_masked_mha_available(*model_dims, kv_cache_dtype) is expected
+
+
 def test_masked_mha_workspace_fits_accounts_for_batch_and_context():
     """Request count and context chunk length are independent multipliers."""
     base = dict(batch_size=2, max_query_len=2048, max_context_chunk_seq_len=2048)
@@ -1197,6 +1226,7 @@ PREFILL_BATCH_SPECS = {
     [
         pytest.param(128, 128, 64, 128, id="deepseek_hd192_v128"),
         pytest.param(64, 192, 64, 256, id="glm5_hd256_v256"),
+        pytest.param(64, 256, 0, 256, id="glm53_flash_nope_hd256_v256"),
     ],
 )
 def test_sparse_backend_prefill_correctness(
@@ -3257,6 +3287,7 @@ def test_flashmla_fp8_metadata_excludes_zero_token_decode_padding(monkeypatch):
         device=torch.device(DEVICE_TYPE),
         dummy_block_table=torch.zeros(7, 1, device=DEVICE_TYPE),
         max_model_len_tensor=torch.zeros(7, device=DEVICE_TYPE),
+        pcp_dcp_kv_gather=False,
     )
     query_start_loc_cpu = torch.tensor([0, 110, 220, 330, 440, 550, 660, 660])
     common_metadata = SimpleNamespace(
@@ -3363,6 +3394,7 @@ def test_flashmla_fp8_paths_accept_decode_subset(monkeypatch, use_mixed_batch: b
         index_group=None,
         index_group_index=0,
         dcp_world_size=1,
+        pcp_dcp_kv_gather=False,
         need_to_return_lse_for_decode=False,
         _fp8_flash_mla_kernel=run_kernel,
         _convert_logical_to_physical_topk=(
