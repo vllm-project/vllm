@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 from tqdm import tqdm
 
+from vllm.benchmarks.lib.profiling import profile
 from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
 from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import TextPrompt, TokensPrompt
@@ -54,7 +55,8 @@ def add_cli_args(parser: FlexibleArgumentParser):
     parser.add_argument(
         "--profile",
         action="store_true",
-        help="profile the generation process of a single batch",
+        help="Profile one batch after warmup using --profiler-config "
+        "(torch, cuda, or proton).",
     )
     parser.add_argument(
         "--output-json",
@@ -124,9 +126,8 @@ def main(args: argparse.Namespace):
 
     def run_to_completion(do_profile: bool = False):
         if do_profile:
-            llm.start_profile()
-            llm_generate()
-            llm.stop_profile()
+            with profile(llm, enabled=True):
+                llm_generate()
         else:
             start_time = time.perf_counter()
             llm_generate()

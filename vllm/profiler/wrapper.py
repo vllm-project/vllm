@@ -21,6 +21,7 @@ from vllm.config import ProfilerConfig
 from vllm.config.profiler import _is_uri_path
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.profiler.proton import ProtonPhaseManager
 
 logger = init_logger(__name__)
 
@@ -395,6 +396,11 @@ class ProtonProfilerWrapper(WorkerProfiler):
         self._data = profiler_config.proton_data
         self._backend = profiler_config.proton_backend
         self._mode = profiler_config.proton_mode
+        self._periodic_flushing = (
+            self._mode is not None
+            and self._mode.split(":", 1)[0].lower() == "periodic_flushing"
+        )
+        self._flush_interval = profiler_config.proton_flush_interval
         self._hook = profiler_config.proton_hook
         self._output_format = profiler_config.proton_output_format
         self._graph_attribution = profiler_config.proton_graph_attribution
@@ -409,8 +415,10 @@ class ProtonProfilerWrapper(WorkerProfiler):
         # worker cannot overwrite profiles left by an earlier server process.
         self._instance_id = f"pid{os.getpid()}_{uuid4().hex}"
         self._run_id = 0
+        self._phase_manager: ProtonPhaseManager | None = None
         self._graph_session = False
-        self._phase = 0
+        self._steps_in_phase = 0
+        self._part_id = 0
         self._active_output_path: str | None = None
         self._session_storage_path = os.path.join(
             self._output_dir,
@@ -462,7 +470,8 @@ class ProtonProfilerWrapper(WorkerProfiler):
             context=self._context,
             data=self._data,
             backend=self._backend,
-            mode=self._mode,
+            # vLLM owns phase export/cleanup in periodic mode.
+            mode=None if self._periodic_flushing else self._mode,
             hook=self._hook,
         )
         if session_id is None:
@@ -490,17 +499,19 @@ class ProtonProfilerWrapper(WorkerProfiler):
             self._session_id = self._create_session(self._session_storage_path)
         else:
             self._proton.activate(session=self._session_id)
+        if self._phase_manager is None:
+            self._phase_manager = ProtonPhaseManager(
+                self._proton,
+                self._session_id,
+                self._output_format,
+                asynchronous=self._periodic_flushing,
+            )
         self._graph_session = True
 
         try:
             yield
         finally:
-            captured_phase = self._phase
-            try:
-                self._phase = self._proton.data.advance_phase(self._session_id)
-            finally:
-                self._proton.deactivate(session=self._session_id, flushing=True)
-            self._proton.data.clear(self._session_id, captured_phase)
+            self._phase_manager.discard()
 
     @override
     def _start(self) -> None:
@@ -508,24 +519,55 @@ class ProtonProfilerWrapper(WorkerProfiler):
             f"{self._output_path}_{self._instance_id}_run{self._run_id}"
         )
         self._run_id += 1
-        if self._graph_session:
+        self._steps_in_phase = 0
+        self._part_id = 0
+        if self._phase_manager is not None:
             assert self._session_id is not None
+            self._phase_manager.drain()
             self._proton.activate(session=self._session_id)
         else:
-            self._session_id = self._create_session(self._active_output_path)
-
-    def _write_graph_phase(self, phase: int) -> None:
-        assert self._active_output_path is not None
-        output_format = self._output_format or "hatchet"
-        output_path = f"{self._active_output_path}.{output_format}"
-        if output_format == "hatchet_msgpack":
-            with open(output_path, "wb") as output_file:
-                output_file.write(
-                    self._proton.data.get_msgpack(self._session_id, phase)
+            self._session_id = self._create_session(
+                self._session_storage_path
+                if self._periodic_flushing
+                else self._active_output_path
+            )
+            if self._periodic_flushing:
+                self._phase_manager = ProtonPhaseManager(
+                    self._proton,
+                    self._session_id,
+                    self._output_format,
+                    asynchronous=True,
                 )
-        else:
-            with open(output_path, "w", encoding="utf-8") as output_file:
-                json.dump(self._proton.data.get(self._session_id, phase), output_file)
+
+    def _next_phase_output_path(self) -> str:
+        assert self._active_output_path is not None
+        if not self._periodic_flushing:
+            return self._active_output_path
+        output_path = f"{self._active_output_path}.part_{self._part_id}"
+        self._part_id += 1
+        return output_path
+
+    @override
+    def _profiler_step(self) -> bool:
+        if self._periodic_flushing:
+            # step() runs before inference; seal the preceding worker steps.
+            # At the iteration limit, stop() below will export the final phase.
+            if self._max_iters > 0 and self._profiling_for_iters >= self._max_iters:
+                return True
+            if self._steps_in_phase == self._flush_interval:
+                assert self._phase_manager is not None
+                try:
+                    self._phase_manager.rotate(self._next_phase_output_path())
+                except Exception:
+                    logger.exception("Failed to export a periodic Proton profile part.")
+                self._steps_in_phase = 0
+            assert self._phase_manager is not None
+            try:
+                self._phase_manager.poll()
+            except Exception:
+                logger.exception("Failed to export a periodic Proton profile part.")
+            self._steps_in_phase += 1
+        return True
 
     def _finalize_session(self, session_id: int) -> None:
         if self._output_format is None:
@@ -537,17 +579,14 @@ class ProtonProfilerWrapper(WorkerProfiler):
     def _stop(self) -> None:
         assert self._session_id is not None
         session_id = self._session_id
-        if self._graph_session:
-            completed_phase = self._phase
+        if self._phase_manager is not None:
+            assert self._active_output_path is not None
             try:
-                self._phase = self._proton.data.advance_phase(session_id)
+                self._phase_manager.export(self._next_phase_output_path())
             finally:
-                self._proton.deactivate(session=session_id, flushing=True)
-            try:
-                self._write_graph_phase(completed_phase)
-            finally:
-                self._proton.data.clear(session_id, completed_phase)
                 self._active_output_path = None
+            if not self.has_cuda_graph_session:
+                self._finalize_phase_session()
             return
 
         try:
@@ -559,22 +598,31 @@ class ProtonProfilerWrapper(WorkerProfiler):
                 self._session_id = None
                 self._active_output_path = None
 
+    def _finalize_phase_session(self) -> None:
+        assert self._session_id is not None
+        assert self._phase_manager is not None
+        self._phase_manager.close()
+        session_id = self._session_id
+        self._session_id = None
+        self._phase_manager = None
+        self._graph_session = False
+        try:
+            self._finalize_session(session_id)
+        finally:
+            for output_path in glob(f"{self._session_storage_path}.*"):
+                with suppress(FileNotFoundError):
+                    os.remove(output_path)
+
     @override
     def shutdown(self) -> None:
         super().shutdown()
-        if self._graph_session and self._session_id is not None:
-            session_id = self._session_id
-            self._session_id = None
+        if self._phase_manager is not None and self._session_id is not None:
             try:
-                self._finalize_session(session_id)
+                self._finalize_phase_session()
             except Exception:
                 logger.exception(
-                    "Failed to finalize Proton CUDA graph session during shutdown."
+                    "Failed to finalize Proton phase session during shutdown."
                 )
-            finally:
-                for output_path in glob(f"{self._session_storage_path}.*"):
-                    with suppress(FileNotFoundError):
-                        os.remove(output_path)
 
     @override
     def annotate_context_manager(self, name: str):

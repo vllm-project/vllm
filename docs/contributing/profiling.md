@@ -113,12 +113,57 @@ so distributed workers, restarted servers, and repeated profiling runs do not
 overwrite one another. A `profile_prefix` is included when supplied. Each
 profile is written by `/stop_profile` and is ready to inspect immediately.
 
+### Benchmark with Proton
+
+For offline benchmarks, pass both `--profile` and `--profiler-config` to the
+benchmark itself. For example, profile one batch after warmup:
+
+```bash
+vllm bench latency --model facebook/opt-125m \
+    --input-len 32 --output-len 16 --batch-size 4 \
+    --num-iters-warmup 2 --profile \
+    --profiler-config '{"profiler": "proton", "proton_profiler_dir": "./proton_latency", "proton_graph_attribution": true}'
+```
+
+To profile a throughput workload:
+
+```bash
+vllm bench throughput --model facebook/opt-125m \
+    --dataset-name random --random-input-len 32 --random-output-len 16 \
+    --num-prompts 16 --num-warmups 2 --profile \
+    --profiler-config '{"profiler": "proton", "proton_profiler_dir": "./proton_throughput", "proton_graph_attribution": true}'
+```
+
+The throughput command also supports `--async-engine` with the same profiling
+configuration. Warmup requests are excluded from the profiling interval. Offline
+benchmarks stop the profiler on completion or a request error so collected
+activity can be flushed and exported. Profiling adds overhead, so use a separate
+run without `--profile` for performance measurements.
+
+For `bench serve`, configure Proton on the **server**, as shown above, and only
+pass `--profile` to the client:
+
+```bash
+vllm bench serve --model meta-llama/Llama-3.1-8B-Instruct \
+    --backend vllm --endpoint /v1/completions \
+    --dataset-name random --random-input-len 32 --random-output-len 16 \
+    --num-prompts 16 --num-warmups 2 --profile
+```
+
+Use the model name served by your server. Profiles are written to the server's
+`proton_profiler_dir`, not the benchmark client's filesystem. Each benchmark run
+starts and stops a profiling interval; repeated runs produce separate files.
+
+### Proton configuration
+
 The Proton-specific options are:
 
 - `proton_context`: `shadow` (default) or `python`
 - `proton_data`: `tree` (default) or `trace`
 - `proton_backend`: `cupti` or automatic
-- `proton_mode`: an optional backend mode string
+- `proton_mode`: an optional mode string; `periodic_flushing` enables vLLM-managed
+  periodic output
+- `proton_flush_interval`: worker steps per periodic output part (default: 100)
 - `proton_hook`: `triton` to record Triton launch metadata, or unset
 - `proton_output_format`: `hatchet`, `hatchet_msgpack`, `chrome_trace`, or unset
 - `proton_graph_attribution`: observe CUDA graph capture for replay attribution;
@@ -141,19 +186,71 @@ Proton requires `proton_graph_attribution: true` to collect replayed kernels.
 For Chrome traces, disable CUDA graphs with `--enforce-eager`.
 
 CUDA graph-attributed profiles support repeated `start_profile`/`stop_profile`
-runs. Each stop flushes and writes one tree-data phase while preserving the
+runs. Without periodic flushing, each stop writes one tree-data phase, preserving the
 graph-aware session. Without `proton_graph_attribution`, each `stop_profile`
 instead finalizes and writes an independent Proton session.
 
 CUDA graph attribution requires Triton 3.7 or newer. It uses the phase data API
 to discard graph-capture activity and separate profiling runs. The `hatchet_msgpack`
 output format and `periodic_flushing` mode also require Triton 3.7 or newer.
-`periodic_flushing` cannot be combined with graph attribution because both
-manage the session's data phases. Ordinary Proton profiling remains available
-with Triton 3.6.
+Ordinary Proton profiling remains available with Triton 3.6.
 
 Graph attribution retains capture metadata for the worker lifetime. With eager
-execution or no graphs to capture, profiling uses ordinary independent sessions.
+execution or no graphs to capture, each profiling run uses an independent session.
+
+### Periodic output
+
+For long benchmarks, enable `periodic_flushing` to export completed activity
+during the run and release its memory:
+
+```bash
+vllm bench throughput --model facebook/opt-125m \
+    --dataset-name random --random-input-len 32 --random-output-len 128 \
+    --num-prompts 16 --num-warmups 2 --profile \
+    --profiler-config '{
+        "profiler": "proton",
+        "proton_profiler_dir": "./proton_periodic",
+        "proton_graph_attribution": true,
+        "proton_mode": "periodic_flushing",
+        "proton_flush_interval": 32
+    }'
+```
+
+This works with latency, synchronous/asynchronous throughput, and serving
+benchmarks. For serving, put the profiler configuration on the server and pass
+`--profile` to `bench serve`. Eager execution is also supported: use
+`--enforce-eager` and omit `proton_graph_attribution`.
+
+The interval counts worker steps, not requests or seconds. At the next step
+after the interval, vLLM advances the phase while collection continues. Worker
+steps poll Proton's phase-completion status and queue completed phases for a
+background exporter. GPU buffers may complete later than the phase boundary,
+especially for short workloads, so the interval does not set a deadline for
+files to appear. Stopping synchronously flushes the remaining activity and waits
+for all queued exports, even for a run shorter than the interval. Delayed
+profiling starts counting once collection begins.
+Idle worker steps can produce parts without GPU activity. A part containing only
+eager execution, such as prefill, has no graph-capture attribution.
+
+Each run produces files named `proton_..._run0.part_0.hatchet`,
+`proton_..._run0.part_1.hatchet`, and so on. The part counter resets for each
+run. Files become visible only after they have been fully written. Capture
+activity is discarded, while graph metadata survives phase boundaries and
+subsequent runs.
+
+Periodic output supports `tree` data with `hatchet` or `hatchet_msgpack`.
+Select the format with `proton_output_format`, or the equivalent mode string
+`periodic_flushing:format=hatchet_msgpack`; specifying conflicting formats is
+an error. Chrome traces are not supported by this mode.
+
+vLLM owns periodic phase advancement, export, and cleanup, and does not enable
+Proton's native periodic exporter. Periodic boundaries do not synchronize the
+GPU or wait for disk writes. A single background thread serializes, writes, and
+clears completed phases; profiling and serialization still add overhead.
+If flushing or exporting fails, vLLM logs the failure and retains the phase and
+its original output path for retry. Pending data can increase memory use if GPU
+buffers complete slowly or the output device cannot keep up. A failed stop
+retains the session so a later profiling run or shutdown can retry the export.
 
 Inspect tree profiles with:
 
