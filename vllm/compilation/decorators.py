@@ -4,6 +4,8 @@
 import contextlib
 import hashlib
 import inspect
+import json
+import math
 import os
 import sys
 from collections.abc import Callable, Generator
@@ -34,6 +36,9 @@ from .monitor import monitor_profiling_run, monitor_torch_compile
 
 # shape_id parameter was added to mark_unbacked in PyTorch 2.11.0
 _SUPPORTS_SHAPE_ID = is_torch_equal_or_newer("2.11.0")
+# external_data was added to the AOT save/load APIs in PyTorch 2.11.0
+_SUPPORTS_AOT_EXTERNAL_DATA = is_torch_equal_or_newer("2.11.0")
+_MAX_AOT_EXTERNAL_STATE_DEPTH = 32
 
 if TYPE_CHECKING:
     # Only added on nightly/2.10 so wrap
@@ -264,6 +269,193 @@ def _model_hash_key(fn: Callable[..., Any]) -> str:
     return sha256_hash.hexdigest()
 
 
+class _UnsupportedAOTExternalState(Exception):
+    pass
+
+
+def _normalize_aot_external_state(
+    value: Any,
+    *,
+    next_wrapped: Callable[..., Any] | None = None,
+    next_depth: int | None = None,
+    _depth: int = 0,
+) -> tuple[Any, ...]:
+    """Normalize immutable decorator state deterministically."""
+    if _depth > _MAX_AOT_EXTERNAL_STATE_DEPTH:
+        raise _UnsupportedAOTExternalState("maximum depth exceeded")
+
+    value_type = type(value)
+    if value is None:
+        return ("none",)
+    if value_type is bool:
+        return ("bool", "1" if value else "0")
+    if value_type is int:
+        return ("int", str(value))
+    if value_type is float:
+        if not math.isfinite(value):
+            raise _UnsupportedAOTExternalState("non-finite float")
+        return ("float", value.hex())
+    if value_type is str:
+        return ("str", value)
+    if value_type is bytes:
+        return ("bytes", value.hex())
+
+    if inspect.isfunction(value):
+        # Function identities are not stable across processes. Only the
+        # validated edge to the next wrapper has a stable chain position.
+        if value is next_wrapped and next_depth is not None:
+            return ("wrapped", str(next_depth))
+        raise _UnsupportedAOTExternalState("function")
+
+    # Keep the state protocol narrow: exact tuples provide immutable, ordered
+    # nesting; other containers may be mutable, unordered, or carry custom state.
+    if value_type is not tuple:
+        raise _UnsupportedAOTExternalState(value_type.__qualname__)
+
+    return (
+        "tuple",
+        tuple(
+            _normalize_aot_external_state(
+                item,
+                next_wrapped=next_wrapped,
+                next_depth=next_depth,
+                _depth=_depth + 1,
+            )
+            for item in value
+        ),
+    )
+
+
+def _is_canonical_function(function: Callable[..., Any]) -> bool:
+    """Return whether standard pickle can resolve this function by name."""
+    module = getattr(function, "__module__", None)
+    qualname = getattr(function, "__qualname__", None)
+    if not isinstance(module, str) or not module:
+        return False
+    if not isinstance(qualname, str) or not qualname or "<locals>" in qualname:
+        return False
+
+    resolved: Any = sys.modules.get(module)
+    if resolved is None:
+        return False
+    try:
+        # Static lookup avoids binding descriptors while walking the qualname.
+        for name in qualname.split("."):
+            resolved = inspect.getattr_static(resolved, name)
+    except AttributeError:
+        return False
+    return resolved is function
+
+
+def _get_forward_external_data(model: Any) -> dict[str, Any] | None:
+    """Build stable external references for a decorated model ``forward``.
+
+    Return ``None`` when the complete wrapper chain cannot be described safely.
+    """
+    try:
+        # Instance-level overrides cannot be reconstructed from class metadata.
+        if "forward" in vars(model):
+            return None
+        bound_forward = model.forward
+        static_forward = inspect.getattr_static(type(model), "forward")
+        effective_forward = (
+            bound_forward.__func__ if inspect.ismethod(bound_forward) else bound_forward
+        )
+        if (
+            not inspect.isfunction(static_forward)
+            or effective_forward is not static_forward
+        ):
+            return None
+
+        # This mapping handles inner wrappers only; the outer function still
+        # needs to be picklable through its module and qualified name.
+        if not _is_canonical_function(effective_forward):
+            return None
+
+        # Validate the complete chain before creating any external references,
+        # rejecting cycles and pathologically deep decorator stacks.
+        chain: list[Callable[..., Any]] = []
+        seen: set[int] = set()
+        current = effective_forward
+        for depth in range(_MAX_AOT_EXTERNAL_STATE_DEPTH + 1):
+            if not inspect.isfunction(current) or id(current) in seen:
+                return None
+            module = getattr(current, "__module__", None)
+            qualname = getattr(current, "__qualname__", None)
+            if not isinstance(module, str) or not module:
+                return None
+            if not isinstance(qualname, str) or not qualname:
+                return None
+            seen.add(id(current))
+            chain.append(current)
+
+            wrapped = getattr(current, "__wrapped__", None)
+            if wrapped is None:
+                break
+            if depth == _MAX_AOT_EXTERNAL_STATE_DEPTH:
+                return None
+            current = wrapped
+
+        # Defaults and named closure values are compile-time wrapper state. Put
+        # every layer into the fingerprint so configuration changes invalidate
+        # all external keys for the chain.
+        chain_state: list[tuple[Any, ...]] = []
+        for depth, forward in enumerate(chain):
+            next_wrapped = chain[depth + 1] if depth + 1 < len(chain) else None
+            closure = forward.__closure__ or ()
+            if len(forward.__code__.co_freevars) != len(closure):
+                raise _UnsupportedAOTExternalState("invalid closure")
+            closure_values = []
+            for name, cell in zip(forward.__code__.co_freevars, closure):
+                try:
+                    closure_values.append((name, cell.cell_contents))
+                except ValueError as exc:
+                    raise _UnsupportedAOTExternalState("empty closure cell") from exc
+            state = (
+                ("module", forward.__module__),
+                ("qualname", forward.__qualname__),
+                ("defaults", forward.__defaults__),
+                (
+                    "kwdefaults",
+                    tuple(sorted(forward.__kwdefaults__.items()))
+                    if forward.__kwdefaults__ is not None
+                    else None,
+                ),
+                ("closure", tuple(closure_values)),
+            )
+            chain_state.append(
+                _normalize_aot_external_state(
+                    state,
+                    next_wrapped=next_wrapped,
+                    next_depth=depth + 1 if next_wrapped is not None else None,
+                )
+            )
+
+        chain_fingerprint = hashlib.sha256(
+            json.dumps(
+                ("chain", tuple(chain_state)),
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        external_data: dict[str, Any] = {}
+        # Canonical functions remain on standard pickle. Only shadowed inner
+        # wrappers need identity-based external references.
+        for depth, forward in enumerate(chain):
+            if depth == 0 or _is_canonical_function(forward):
+                continue
+            key = (
+                f"aot:model-forward:{forward.__module__}:{forward.__qualname__}:"
+                f"wrapped:{depth}:{chain_fingerprint}"
+            )
+            external_data[key] = forward
+        return external_data
+    except _UnsupportedAOTExternalState:
+        # A partial map could leave unresolved functions in the artifact, so
+        # unsupported state falls back to the original path as a whole.
+        return None
+
+
 def _verify_source_unchanged(
     source_info: "SourceInfo", vllm_config: VllmConfig
 ) -> None:
@@ -298,9 +490,22 @@ def _try_load_aot_compiled_fn(
                 set_current_vllm_config(model.vllm_config),
                 open(aot_compilation_path, "rb") as f,
             ):
-                loaded_fn = torch.compiler.load_compiled_function(
-                    f, f_globals=model.forward.__globals__
+                external_data = (
+                    _get_forward_external_data(model)
+                    if _SUPPORTS_AOT_EXTERNAL_DATA
+                    else None
                 )
+                if external_data:
+                    loaded_fn = torch.compiler.load_compiled_function(
+                        f,
+                        f_globals=model.forward.__globals__,
+                        external_data=external_data,
+                    )
+                else:
+                    loaded_fn = torch.compiler.load_compiled_function(
+                        f,
+                        f_globals=model.forward.__globals__,
+                    )
             _verify_source_unchanged(loaded_fn.source_info(), model.vllm_config)
             ds_config = model.compilation_config.dynamic_shapes_config
             if not ds_config.evaluate_guards:
@@ -713,7 +918,17 @@ def _support_torch_compile(
             # File saving should be atomic, so we will save to a temporary location
             # first. Should be upstreamed to PyTorch 2.12 as well.
             tmp_file = f"{self._aot_compilation_path}.{os.getpid()}.tmp"
-            self.aot_compiled_fn.save_compiled_function(tmp_file)
+            external_data = (
+                _get_forward_external_data(self)
+                if _SUPPORTS_AOT_EXTERNAL_DATA
+                else None
+            )
+            if external_data:
+                self.aot_compiled_fn.save_compiled_function(
+                    tmp_file, external_data=external_data
+                )
+            else:
+                self.aot_compiled_fn.save_compiled_function(tmp_file)
             os.replace(tmp_file, self._aot_compilation_path)
             compilation_counter.num_aot_artifacts_saved += 1
             logger.info_once(
