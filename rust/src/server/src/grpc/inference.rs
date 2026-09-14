@@ -31,6 +31,7 @@ pub struct InferenceServiceImpl {
 
 struct PreparedGrpcRequest {
     text_request: TextRequest,
+    response_opts: ResponseOpts,
     request_span: Span,
     started_at: Instant,
 }
@@ -131,9 +132,14 @@ impl InferenceServiceImpl {
         info!(parent: &request_span, "gRPC inference request received");
 
         let result = async {
+            let response = proto_request.response.clone();
             let media = std::mem::take(&mut proto_request.media);
             let mut text_request =
                 convert::to_text_request(proto_request, stream, self.state.served_model_names())?;
+            let response_opts = ResponseOpts::from_proto_and_sampling(
+                response.as_ref(),
+                &text_request.sampling_params,
+            );
             text_request.arrival_time = Some(arrival_time);
             text_request.data_parallel_rank = data_parallel_rank;
 
@@ -171,13 +177,13 @@ impl InferenceServiceImpl {
             }
             apply_encoder_cache_placeholders(&mut text_request);
 
-            Ok(text_request)
+            Ok((text_request, response_opts))
         }
         .instrument(request_span.clone())
         .await;
 
-        let text_request = match result {
-            Ok(text_request) => text_request,
+        let (text_request, response_opts) = match result {
+            Ok(prepared) => prepared,
             Err(status) => {
                 warn!(
                     parent: &request_span,
@@ -192,6 +198,7 @@ impl InferenceServiceImpl {
 
         Ok(PreparedGrpcRequest {
             text_request,
+            response_opts,
             request_span,
             started_at,
         })
@@ -224,9 +231,9 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
     ) -> Result<Response<pb::GenerateResponse>, Status> {
         let data_parallel_rank = data_parallel_rank_from_metadata(&request)?;
         let proto_req = request.into_inner();
-        let response_opts = ResponseOpts::from_proto(proto_req.response.as_ref());
         let PreparedGrpcRequest {
             text_request,
+            response_opts,
             request_span,
             started_at,
         } = self.prepare_request(proto_req, data_parallel_rank, false, "Generate").await?;
@@ -257,6 +264,8 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
             finish_reason: collected.finish_reason,
             kv_transfer_params: collected.kv_transfer_params,
             ec_transfer_params: collected.ec_transfer_params,
+            routed_experts: collected.routed_experts,
+            sampling_mask: collected.sampling_mask,
         };
 
         let outputs = convert::to_sequence_output(
@@ -285,9 +294,9 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
     ) -> Result<Response<Self::GenerateStreamStream>, Status> {
         let data_parallel_rank = data_parallel_rank_from_metadata(&request)?;
         let proto_req = request.into_inner();
-        let response_opts = ResponseOpts::from_proto(proto_req.response.as_ref());
         let PreparedGrpcRequest {
             text_request,
+            response_opts,
             request_span,
             started_at,
         } = self

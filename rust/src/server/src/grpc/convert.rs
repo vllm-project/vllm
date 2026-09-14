@@ -15,6 +15,9 @@ use vllm_text::{
 };
 
 use super::pb;
+use crate::routes::GenerateSamplingParams;
+
+const MAX_NATIVE_SAMPLING_PARAMS_BYTES: usize = 1024 * 1024;
 
 // ========================================================================================
 // Request conversion
@@ -63,8 +66,11 @@ pub fn to_text_request(
     let response = req.response.as_ref();
     let kv = req.kv.as_ref();
 
-    let mut sampling_params =
-        build_sampling_params(req.temperature, sampling, decoding, stopping, response)?;
+    let mut sampling_params = match decode_native_sampling_params(&req.native_sampling_params_json)?
+    {
+        Some(sampling_params) => sampling_params,
+        None => build_sampling_params(req.temperature, sampling, decoding, stopping, response)?,
+    };
 
     // Thread KVCacheParameters → SamplingParams fields.
     if let Some(kv) = kv {
@@ -111,6 +117,27 @@ pub fn to_text_request(
         lora_request: None,
         arrival_time: None,
     })
+}
+
+fn decode_native_sampling_params(payload: &[u8]) -> Result<Option<SamplingParams>, Status> {
+    if payload.is_empty() {
+        return Ok(None);
+    }
+    if payload.len() > MAX_NATIVE_SAMPLING_PARAMS_BYTES {
+        return Err(Status::invalid_argument(format!(
+            "native_sampling_params_json exceeds {MAX_NATIVE_SAMPLING_PARAMS_BYTES} bytes"
+        )));
+    }
+
+    let native = serde_json::from_slice::<GenerateSamplingParams>(payload).map_err(|error| {
+        Status::invalid_argument(format!("native_sampling_params_json is invalid: {error}"))
+    })?;
+    if native.n.unwrap_or(1) != 1 {
+        return Err(Status::invalid_argument(
+            "native sampling parameter n must be 1",
+        ));
+    }
+    Ok(Some(native.inner))
 }
 
 fn build_sampling_params(
@@ -191,6 +218,7 @@ fn build_sampling_params(
 
     // ResponseOptions → logprobs
     if let Some(r) = response {
+        params.routed_experts_prompt_start = r.routed_experts_prompt_start;
         if r.output_logprobs {
             let (count, token_ids) = candidate_logprob_spec(r.output_candidates.as_ref());
             params.logprobs = Some(count);
@@ -311,6 +339,17 @@ pub fn to_sequence_output(
         _ => (vec![], vec![], vec![]),
     };
 
+    let routed_experts =
+        finished
+            .and_then(|finished| finished.routed_experts.as_ref())
+            .map(|data| pb::OpaqueData {
+                data: data.as_bytes().to_vec(),
+            });
+    let sampling_mask = finished
+        .and_then(|finished| finished.sampling_mask.as_ref())
+        .map(|rows| rows.iter().map(|row| pb::TokenIds { ids: row.clone() }).collect())
+        .unwrap_or_default();
+
     Ok(pb::SequenceOutput {
         index: 0, // TODO: multi-sequence (n > 1) not supported
         text: if opts.output_text {
@@ -328,6 +367,8 @@ pub fn to_sequence_output(
         ranks: rank_values,
         candidate_tokens: candidates,
         finish_info,
+        routed_experts,
+        sampling_mask,
     })
 }
 
@@ -513,12 +554,31 @@ impl ResponseOpts {
             },
         }
     }
+
+    pub fn from_proto_and_sampling(
+        response: Option<&pb::ResponseOptions>,
+        sampling: &SamplingParams,
+    ) -> Self {
+        let mut options = Self::from_proto(response);
+        if sampling.logprobs.is_some()
+            || sampling.logprob_token_ids.as_ref().is_some_and(|ids| !ids.is_empty())
+        {
+            options.output_logprobs = true;
+        }
+        if sampling.prompt_logprobs.is_some() {
+            options.prompt_logprobs = true;
+            options.prompt_token_ids = true;
+        }
+        options
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use prost::Message;
+    use vllm_engine_core_client::protocol::opaque_data::OpaqueData;
     use vllm_engine_core_client::protocol::output::StopReason;
-    use vllm_text::{FinishReason, Finished, Prompt};
+    use vllm_text::{FinishReason, Finished, Prompt, SamplingParams};
 
     use super::pb::finish_info::{FinishReason as PbFinishReason, StopReason as PbStopReason};
     use super::{ResponseOpts, pb, to_finish_info, to_sequence_output, to_text_request};
@@ -591,6 +651,75 @@ mod tests {
     }
 
     #[test]
+    fn native_sampling_json_is_the_sampling_authority() {
+        let req = pb::GenerateRequest {
+            temperature: Some(0.2),
+            sampling: Some(pb::RandomSampling {
+                top_k: 42,
+                seed: Some(7),
+                ..Default::default()
+            }),
+            native_sampling_params_json: serde_json::to_vec(&serde_json::json!({
+                "temperature": 0.9,
+                "top_k": 0,
+                "seed": i64::MAX,
+                "bad_words": ["blocked"]
+            }))
+            .expect("serialize native sampling"),
+            ..base_request()
+        };
+
+        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+
+        assert_eq!(text.sampling_params.temperature, Some(0.9));
+        assert_eq!(text.sampling_params.top_k, Some(0));
+        assert_eq!(text.sampling_params.seed, Some(i64::MAX));
+        assert_eq!(
+            text.sampling_params.bad_words,
+            Some(vec!["blocked".to_string()])
+        );
+    }
+
+    #[test]
+    fn native_sampling_json_rejects_invalid_payloads() {
+        for payload in [b"not-json".to_vec(), b"[]".to_vec()] {
+            let error = to_text_request(
+                pb::GenerateRequest {
+                    native_sampling_params_json: payload,
+                    ..base_request()
+                },
+                false,
+                &["test-model".to_string()],
+            )
+            .expect_err("invalid native sampling payload");
+
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        }
+    }
+
+    #[test]
+    fn native_sampling_logprobs_shape_grpc_responses() {
+        let sampling = SamplingParams {
+            logprobs: Some(2),
+            prompt_logprobs: Some(1),
+            ..Default::default()
+        };
+
+        let options = ResponseOpts::from_proto_and_sampling(None, &sampling);
+
+        assert!(options.output_logprobs);
+        assert!(options.prompt_logprobs);
+        assert!(options.prompt_token_ids);
+
+        let token_ids_only = SamplingParams {
+            logprob_token_ids: Some(vec![42]),
+            ..Default::default()
+        };
+        let options = ResponseOpts::from_proto_and_sampling(None, &token_ids_only);
+        assert!(options.output_logprobs);
+    }
+
+    #[test]
     fn bypass_prefix_cache_maps_to_skip_reading_prefix_cache() {
         let req = pb::GenerateRequest {
             kv: Some(pb::KvCacheParameters {
@@ -618,6 +747,19 @@ mod tests {
         assert!(matches!(text.prompt, Prompt::Text(s) if s == "hi"));
     }
 
+    #[test]
+    fn routed_experts_prompt_start_is_forwarded_to_sampling_params() {
+        let req = pb::GenerateRequest {
+            response: Some(pb::ResponseOptions {
+                routed_experts_prompt_start: Some(3),
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+        assert_eq!(text.sampling_params.routed_experts_prompt_start, Some(3));
+    }
+
     fn finished(reason: FinishReason) -> Finished {
         Finished {
             usage: vllm_llm::TokenUsage {
@@ -628,6 +770,8 @@ mod tests {
             finish_reason: reason,
             kv_transfer_params: None,
             ec_transfer_params: None,
+            routed_experts: None,
+            sampling_mask: None,
         }
     }
 
@@ -711,5 +855,72 @@ mod tests {
         let finish = out.finish_info.expect("finish_info should be present");
         assert_eq!(finish.finish_reason, PbFinishReason::Stop as i32);
         assert_eq!(finish.stop_reason, Some(PbStopReason::EosTokenId(30)));
+    }
+
+    #[test]
+    fn sequence_output_only_carries_routed_experts_on_terminal_output() {
+        let mut fin = finished(FinishReason::Length);
+        let expected = vec![1, 2, 3, 4];
+        fin.routed_experts = Some(OpaqueData::new(expected.clone()));
+
+        let terminal = to_sequence_output("", &[10], None, Some(&fin), &ResponseOpts::default())
+            .expect("terminal output");
+        let intermediate = to_sequence_output("", &[9], None, None, &ResponseOpts::default())
+            .expect("intermediate output");
+
+        assert_eq!(
+            terminal.routed_experts,
+            Some(pb::OpaqueData { data: expected })
+        );
+        assert_eq!(intermediate.routed_experts, None);
+    }
+
+    #[test]
+    fn sequence_output_only_carries_sampling_mask_on_terminal_output() {
+        let mut fin = finished(FinishReason::Length);
+        fin.sampling_mask = Some(vec![vec![1, 10], vec![2, 20]]);
+
+        let terminal =
+            to_sequence_output("", &[10, 20], None, Some(&fin), &ResponseOpts::default())
+                .expect("terminal output");
+        let intermediate = to_sequence_output("", &[9], None, None, &ResponseOpts::default())
+            .expect("intermediate output");
+
+        assert_eq!(
+            terminal.sampling_mask,
+            vec![
+                pb::TokenIds { ids: vec![1, 10] },
+                pb::TokenIds { ids: vec![2, 20] }
+            ]
+        );
+        assert!(intermediate.sampling_mask.is_empty());
+    }
+
+    #[test]
+    fn routed_experts_fields_keep_proto_tag_nine() {
+        let request = pb::ResponseOptions {
+            routed_experts_prompt_start: Some(3),
+            ..Default::default()
+        };
+        let response = pb::SequenceOutput {
+            routed_experts: Some(pb::OpaqueData { data: vec![7] }),
+            ..Default::default()
+        };
+
+        assert_eq!(request.encode_to_vec(), vec![0x48, 0x03]);
+        assert_eq!(response.encode_to_vec(), vec![0x4a, 0x03, 0x0a, 0x01, 0x07]);
+    }
+
+    #[test]
+    fn sampling_mask_uses_additive_proto_tag_ten() {
+        let response = pb::SequenceOutput {
+            sampling_mask: vec![pb::TokenIds { ids: vec![7, 8] }],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            response.encode_to_vec(),
+            vec![0x52, 0x04, 0x0a, 0x02, 0x07, 0x08]
+        );
     }
 }
