@@ -39,6 +39,7 @@ from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_p
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import get_tokenizer
 from vllm.utils.async_utils import make_async_with_semaphore, merge_async_iterators
+from vllm.v1.sample.logits_processor.whisper import WHISPER_TIMESTAMP_RULES_KEY
 
 from ..transcription.protocol import (
     TranscriptionResponse,
@@ -323,11 +324,34 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 value=type(dec_prompt).__name__,
             )
 
-        dec_prompt["prompt"] = dec_prompt["prompt"].replace(
-            "<|notimestamps|>", "<|0.00|>"
-        )
+        dec_prompt["prompt"] = dec_prompt["prompt"].replace("<|notimestamps|>", "")
 
         return prompt
+
+    def _enable_whisper_timestamp_rules(
+        self,
+        sampling_params: SamplingParams | BeamSearchParams,
+        begin_index: int,
+    ) -> None:
+        if getattr(self.model_config.hf_config, "model_type", None) != "whisper":
+            return
+
+        no_timestamps_token_ids = self.tokenizer.encode(
+            "<|notimestamps|>", add_special_tokens=False
+        )
+        if len(no_timestamps_token_ids) != 1 or self.tokenizer.eos_token_id is None:
+            raise VLLMValidationError(
+                "Whisper tokenizer must define single no-timestamps and EOS tokens"
+            )
+
+        extra_args = dict(getattr(sampling_params, "extra_args", None) or {})
+        extra_args[WHISPER_TIMESTAMP_RULES_KEY] = {
+            "eos_token_id": self.tokenizer.eos_token_id,
+            "no_timestamps_token_id": no_timestamps_token_ids[0],
+            "max_initial_timestamp_index": 50,
+            "begin_index": begin_index,
+        }
+        sampling_params.extra_args = extra_args
 
     @staticmethod
     def _get_decoder_prompt_len(engine_inputs: list[EngineInput]) -> int:
@@ -498,11 +522,10 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         max_model_len = self.model_config.max_model_len
         list_result_generator: list[AsyncGenerator[RequestOutput, None]] | None = None
 
-        input_len = (
-            SpeechToTextBaseServing._get_decoder_prompt_len(engine_inputs)
-            if request.use_beam_search
-            else 0
+        decoder_prompt_len = SpeechToTextBaseServing._get_decoder_prompt_len(
+            engine_inputs
         )
+        input_len = decoder_prompt_len if request.use_beam_search else 0
 
         # Unlike most decoder-only models, whisper generation length is not
         # constrained by the size of the input audio, which is mapped to a
@@ -527,6 +550,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
         if request.response_format == "verbose_json":
             sampling_params.logprobs = 1
+            self._enable_whisper_timestamp_rules(
+                sampling_params, begin_index=decoder_prompt_len
+            )
 
         engine_request_ids = [
             request_id if len(engine_inputs) == 1 else f"{request_id}-{idx}"
