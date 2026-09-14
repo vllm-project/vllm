@@ -42,6 +42,7 @@ from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
 class StubWatermarker(Watermarker):
     context_width = 1
+    supports_greedy = False
 
     def _sample_watermarked(self, logits, contexts):
         return WatermarkSample(torch.tensor([7, 7]), logits + 10)
@@ -336,8 +337,8 @@ def test_gpu_sampler_warns_about_unexpected_greedy_watermarking(
     assert messages == [
         (
             "Watermarking is enabled, but greedy decoding "
-            "(temperature=0) cannot be watermarked. This request will use "
-            "ordinary greedy sampling."
+            "(temperature=0) is not supported by this watermarker. "
+            "This request will use ordinary greedy sampling."
         )
     ]
     vllm_logger._print_warning_once.cache_clear()
@@ -351,13 +352,14 @@ def test_gpu_sampler_respects_mixed_request_watermarking(
     sampler.add_request(1, SamplingParams(watermarking=False))
     sampler.apply_staged_writes()
     sampler._get_contexts = lambda expanded_idx_mapping: torch.zeros(
-        2, 1, dtype=torch.int64
+        len(expanded_idx_mapping), 1, dtype=torch.int64
     )
     monkeypatch.setattr(
         "vllm.v1.watermarking.watermarker.gumbel_sample",
         lambda *args, **kwargs: torch.tensor([3, 4]),
     )
     logits = torch.zeros(2, 8)
+    logits[1, 3] = 1.0  # unwatermarked row will pick token 3
 
     sampled, output_logits = sampler._sample_random(
         logits,
@@ -963,8 +965,13 @@ def test_gpu_sampler_uses_fused_gumbel_for_repeated_contexts():
 
 
 def test_gpu_sampler_skips_watermarking_for_greedy_batch(monkeypatch):
+    """Watermarkers with supports_greedy=False (e.g. Gumbel) must not run for
+    greedy requests. Watermarkers with supports_greedy=True (e.g. SBW) are
+    included in enabled and handled correctly by gumbel_sample's temp=0 path."""
+
     class StubWatermarker:
         context_width = 1
+        supports_greedy = False
 
         def sample(self, logits, contexts, random_sampler=None, skip_mask=None):
             raise AssertionError("watermarker should not run for greedy requests")
