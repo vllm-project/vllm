@@ -159,6 +159,11 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         output_bias = self.base_layer.bias if self.base_layer.skip_bias_add else None
         return output, output_bias
 
+    def _get_mla_no_lora_flag(self) -> torch.Tensor:
+        if current_platform.is_cpu():
+            return torch.tensor([self.punica_wrapper.no_lora], device="cpu")
+        return cast(Any, self.punica_wrapper).token_mapping_meta.no_lora_flag_cpu
+
     def apply_mla_kv_b_lora_linear(
         self,
         input_: torch.Tensor,
@@ -173,7 +178,7 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
             self.lora_b_stacked[0],
             output,
             token_lora_mapping,
-            cast(Any, self.punica_wrapper).token_mapping_meta.no_lora_flag_cpu,
+            self._get_mla_no_lora_flag(),
         )
 
     def apply_mla_kv_b_lora_q(
@@ -191,7 +196,7 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
             self.lora_b_stacked[0],
             output,
             token_lora_mapping,
-            cast(Any, self.punica_wrapper).token_mapping_meta.no_lora_flag_cpu,
+            self._get_mla_no_lora_flag(),
             v_head_dim,
         )
 
@@ -210,7 +215,7 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
             self.lora_b_stacked[0],
             output,
             token_lora_mapping,
-            cast(Any, self.punica_wrapper).token_mapping_meta.no_lora_flag_cpu,
+            self._get_mla_no_lora_flag(),
             qk_nope_head_dim,
         )
 
