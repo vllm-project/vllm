@@ -42,6 +42,7 @@ def make_manager(
     ("mode", "piecewise_capture_available", "expected"),
     [
         ("FULL_DECODE_ONLY", True, "FULL_DECODE_ONLY"),
+        ("FULL_DECODE_ONLY", False, "FULL_DECODE_ONLY"),
         ("FULL", True, "FULL_AND_PIECEWISE"),
         ("FULL", False, "FULL_DECODE_ONLY"),
         ("FULL_AND_PIECEWISE", True, "FULL_AND_PIECEWISE"),
