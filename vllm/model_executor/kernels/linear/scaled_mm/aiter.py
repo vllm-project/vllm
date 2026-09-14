@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from typing import ClassVar
+
 import torch
 
 from vllm import _custom_ops as ops
@@ -456,4 +458,172 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
 
         return gemm_a8w8_blockscale_op(
             A, B, As, Bs, list(self.weight_group_shape), output_dtype=out_dtype
+        )
+
+
+class AiterPreshuffledFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+    """Aiter FP8 block-scaled GEMM using a pre-shuffled (bpreshuffle) weight."""
+
+    # gemm_a8w8_blockscale_bpreshuffle reads the activation scale column-major.
+    wants_transposed_act_scale: ClassVar[bool] = True
+
+    # process_weights_after_loading shuffles layer.weight to layout (16, 16).
+    preshuffles_weight: ClassVar[bool] = True
+
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        return AiterPreshuffledPerTokenFp8ScaledMMLinearKernel.is_supported(
+            compute_capability
+        )
+
+    @classmethod
+    def can_implement(cls, config: FP8ScaledMMLinearLayerConfig):
+        can_implement_base, reason = super().can_implement(config)
+        if not can_implement_base:
+            return can_implement_base, reason
+
+        act_quant_desc = config.activation_quant_key.scale
+        if act_quant_desc.group_shape != GroupShape(1, 128):
+            return (
+                False,
+                (
+                    "Supports only dynamic per token group activation "
+                    "quantization with group_shape=(1,128)."
+                ),
+            )
+
+        # bpreshuffle GEMM requires aiter fp8 linear to be enabled and an fp8
+        # 2D weight with N and K divisible by 128. Require a tuned config as the
+        # fallback can trigger faults or numerical errors.
+        if not rocm_aiter_ops.is_linear_fp8_enabled():
+            return (
+                False,
+                (
+                    "requires setting `VLLM_ROCM_USE_AITER=1` "
+                    "and `VLLM_ROCM_USE_AITER_LINEAR=1`."
+                ),
+            )
+
+        n, k = config.weight_shape
+        if not (n % 128 == 0 and k % 128 == 0):
+            return (
+                False,
+                (
+                    f"requires N and K dimensions divisible by 128, received "
+                    f"N={n} and K={k}."
+                ),
+            )
+
+        if not rocm_aiter_ops.is_blockscale_bpreshuffle_tuned(n, k):
+            return (
+                False,
+                (
+                    f"requires a tuned aiter blockscale bpreshuffle config for "
+                    f"N={n} and K={k}."
+                ),
+            )
+
+        return True, None
+
+    @staticmethod
+    def _reads_weight_directly(layer: torch.nn.Module) -> bool:
+        """True when something other than apply_weights consumes layer.weight.
+
+        Such a weight must stay in the plain layout: ``is_bmm`` marks a stack
+        of matrices (wo_a), ``skip_weight_relayout`` marks MLA's kv_b_proj.
+        Both are stamped after construction, so can_implement cannot see them.
+        """
+        return bool(
+            getattr(layer, "is_bmm", False)
+            or getattr(layer, "skip_weight_relayout", False)
+        )
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+
+        if self._reads_weight_directly(layer):
+            return
+
+        params = FP8BlockParams.from_layer(layer)
+        if params.weight_scale_inv is not None:
+            ws, attr = params.weight_scale_inv, params.WEIGHT_SCALE_INV
+        else:
+            ws, attr = params.weight_scale, params.WEIGHT_SCALE
+        if ws is not None and ws.dtype == torch.float8_e8m0fnu:
+            replace_parameter(layer, attr, _upcast_e8m0_to_fp32(ws).contiguous())
+
+        weight = params.weight
+        # runtime safety net
+        assert (
+            weight.dim() == 2
+            and weight.dtype == current_platform.fp8_dtype()
+            and weight.shape[0] % 128 == 0
+            and weight.shape[1] % 128 == 0
+        ), (
+            "AiterPreshuffledFp8BlockScaledMMKernel requires a 2D fp8 weight "
+            "with N and K divisible by 128."
+        )
+
+        shuffled_weight = rocm_aiter_ops.shuffle_weight(
+            weight.contiguous(), layout=(16, 16)
+        )
+        replace_parameter(
+            layer,
+            params.WEIGHT,
+            torch.nn.Parameter(shuffled_weight.data, requires_grad=False),
+        )
+
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        params = self._get_layer_params(layer)
+        Bs = (
+            params.weight_scale
+            if params.weight_scale_inv is None
+            else params.weight_scale_inv
+        )
+
+        # Left unshuffled above; kv_b_proj still reaches here from MLA's
+        # prefill-context path.
+        plain = self._reads_weight_directly(layer)
+
+        x_2d = x.view(-1, x.shape[-1])
+        A, As = rocm_aiter_ops.group_fp8_quant(x_2d, transpose_scale=not plain)
+        if plain:
+            output = rocm_aiter_ops.gemm_a8w8_blockscale(
+                A,
+                params.weight,
+                As,
+                Bs,
+                list(self.weight_group_shape),
+                output_dtype=self.config.out_dtype,
+            )
+        else:
+            output = rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
+                A, params.weight, As, Bs, output_dtype=self.config.out_dtype
+            )
+        if bias is not None:
+            output = output + bias
+        return output.view(*x.shape[:-1], params.weight.shape[0])
+
+    def apply_block_scaled_mm(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+    ) -> torch.Tensor:
+        """Block-scaled GEMM for callers that pre-quantize their activations.
+
+        ``As`` must be column-major; a row-major one will not raise, it just
+        returns wrong numbers for M > 1.
+        """
+        return rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
+            A, B, As, Bs, output_dtype=self.config.out_dtype
         )

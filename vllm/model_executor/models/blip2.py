@@ -6,6 +6,7 @@ from typing import Annotated, Literal, TypeAlias
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers import (
     BatchFeature,
     Blip2Config,
@@ -21,6 +22,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import MultiModalDataItems
@@ -141,14 +143,13 @@ class Blip2QFormerMultiHeadAttention(nn.Module):
 
         query_layer = self.transpose_for_scores(mixed_query_layer)
 
-        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
-        attention_probs = torch.softmax(attention_scores * self.scaling, dim=-1)
-
-        # This is actually dropping out entire tokens to attend to, which might
-        # seem a bit unusual, but is taken from the original Transformer paper.
-        attention_probs_dropped = self.dropout(attention_probs)
-
-        context_layer = torch.matmul(attention_probs_dropped, value_layer)
+        context_layer = F.scaled_dot_product_attention(
+            query_layer,
+            key_layer,
+            value_layer,
+            dropout_p=self.dropout.p if self.training else 0.0,
+            scale=self.scaling,
+        )
 
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
         context_layer = context_layer.view(
@@ -687,28 +688,22 @@ class Blip2ForConditionalGeneration(
             tower_model="vision_model",
         )
 
-    def get_num_mm_encoder_tokens(
+    def get_mm_lora_token_counts(
         self,
-        num_image_tokens: int,
-    ) -> int:
-        if num_image_tokens <= 0:
-            return 0
-        assert num_image_tokens % self.config.num_query_tokens == 0, (
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
+        if num_mm_embeds <= 0:
+            return 0, 0
+        assert num_mm_embeds % self.config.num_query_tokens == 0, (
             "The number of image tokens must be a multiple of "
             "the number of query tokens."
         )
-        num_images = num_image_tokens / self.config.num_query_tokens
-        return num_images * self._vision_tokens_per_image
-
-    def get_num_mm_connector_tokens(
-        self,
-        num_vision_tokens: int,
-    ) -> int:
-        if num_vision_tokens <= 0:
-            return 0
-        assert num_vision_tokens % self._vision_tokens_per_image == 0, (
-            "The number of vision tokens must be a multiple of "
-            "the number of tokens per image."
+        num_images = num_mm_embeds // self.config.num_query_tokens
+        return (
+            num_images * self._vision_tokens_per_image,
+            num_images * self.config.num_query_tokens,
         )
-        num_images = num_vision_tokens / self._vision_tokens_per_image
-        return num_images * self.config.num_query_tokens

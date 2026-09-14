@@ -88,18 +88,16 @@ def compute_retention_mask(
     ks = (scales * tokens_per_frame).round().long().clamp(min=1, max=tokens_per_frame)
 
     # 4. Retain the smallest-similarity tokens per frame.
+    budgets = ks.tolist()
     mask_2d = torch.zeros(T, tokens_per_frame, dtype=torch.bool, device=device)
-    for i in range(T):
-        k_i = int(ks[i].item())
-        if k_i <= 0:
-            continue
+    for i, k_i in enumerate(budgets):
         _, idx = torch.topk(similarity[i], k=k_i, largest=False, sorted=False)
         mask_2d[i].scatter_(0, idx, True)
 
     # 5. Reconcile rounding/clamp drift to the exact target count by score.
     flat_mask = mask_2d.view(-1)
     flat_sim = similarity.view(-1)
-    current = int(flat_mask.sum().item())
+    current = sum(budgets)
     if current > target_retained:
         drop_n = current - target_retained
         retained_idx = flat_mask.nonzero(as_tuple=False).squeeze(-1)

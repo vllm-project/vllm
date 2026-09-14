@@ -20,7 +20,6 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     fi_moe_largest_bucket,
-    trtllm_moe_pack_topk_ids_weights,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
@@ -199,11 +198,10 @@ class TrtLlmBf16ExpertsModular(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsModular)
         import flashinfer
         from flashinfer.fused_moe import WeightLayout
 
-        # Pack topk ids and weights into format expected by the TRTLLM kernel.
-        packed_topk_ids = trtllm_moe_pack_topk_ids_weights(topk_ids, topk_weights)
+        topk_ids = topk_ids.to(dtype=torch.int32)
 
         result = flashinfer.fused_moe.trtllm_bf16_routed_moe(
-            topk_ids=packed_topk_ids,
+            topk_ids=(topk_ids, topk_weights),
             hidden_states=hidden_states,
             gemm1_weights=w1,
             gemm2_weights=w2,

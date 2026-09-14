@@ -55,6 +55,8 @@ where = ["."]
 include = ["vllm*"]
 
 [tool.ruff.lint.per-file-ignores]
+# `vllm` is the only installed package; everything else is standalone scripts
+"!vllm/**" = ["INP"]
 "vllm/third_party/**" = ["ALL"]
 "vllm/version.py" = ["F401"]
 "vllm/_version.py" = ["ALL"]
@@ -77,6 +79,8 @@ select = [
     "I",
     # flake8-logging-format
     "G",
+    # flake8-no-pep420
+    "INP",
 ]
 ignore = [
     # star imports

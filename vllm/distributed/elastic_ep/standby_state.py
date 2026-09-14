@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
+from vllm.distributed.device_communicators.pynccl import defer_comm_warmup_on_rocm
 from vllm.distributed.parallel_state import (
     _init_stateless_group,
     _node_count,
@@ -78,26 +79,34 @@ def create_standby_groups(
     )
     standby_dp_ranks = all_ranks.transpose(1, 3).reshape(-1, new_dp_size).unbind(0)
     standby_dp_ranks = [x.tolist() for x in standby_dp_ranks]
-    _STANDBY_DP = _init_stateless_group(
-        standby_dp_ranks, "dp", master_ip, backend, coord_store=coord_store
-    )
 
-    standby_ep_ranks = (
-        all_ranks.transpose(1, 2).reshape(-1, new_dp_size * tp_size).unbind(0)
-    )
-    standby_ep_ranks = [x.tolist() for x in standby_ep_ranks]
-    _STANDBY_EP = _init_stateless_group(
-        standby_ep_ranks, "ep", master_ip, backend, coord_store, use_all2all=use_all2all
-    )
+    # Deferred to commit so the warm-up runs while the engine is paused.
+    with defer_comm_warmup_on_rocm():
+        _STANDBY_DP = _init_stateless_group(
+            standby_dp_ranks, "dp", master_ip, backend, coord_store=coord_store
+        )
 
-    if enable_eplb:
-        _STANDBY_EPLB = _init_stateless_group(
+        standby_ep_ranks = (
+            all_ranks.transpose(1, 2).reshape(-1, new_dp_size * tp_size).unbind(0)
+        )
+        standby_ep_ranks = [x.tolist() for x in standby_ep_ranks]
+        _STANDBY_EP = _init_stateless_group(
             standby_ep_ranks,
-            "eplb",
+            "ep",
             master_ip,
             backend,
-            coord_store=coord_store,
+            coord_store,
+            use_all2all=use_all2all,
         )
+
+        if enable_eplb:
+            _STANDBY_EPLB = _init_stateless_group(
+                standby_ep_ranks,
+                "eplb",
+                master_ip,
+                backend,
+                coord_store=coord_store,
+            )
 
 
 def pop_standby_groups() -> dict:

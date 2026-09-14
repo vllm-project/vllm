@@ -3,7 +3,7 @@
 
 from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Final, Literal, Protocol, TypeAlias, TypeVar
+from typing import Annotated, Literal, Protocol, TypeAlias, TypeVar
 
 import torch
 import torch.nn as nn
@@ -28,6 +28,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import (
@@ -159,14 +160,14 @@ class LlavaMultiModalProjector(nn.Module):
 
 
 class LlavaLikeConfig(Protocol):
-    vision_config: Final[PretrainedConfig]
-    image_token_index: Final[int]
-    vision_feature_select_strategy: Final[str]
-    vision_feature_layer: Final[int | list[int]]
+    vision_config: PretrainedConfig
+    image_token_index: int
+    vision_feature_select_strategy: str
+    vision_feature_layer: int | list[int]
 
 
 class LlavaLikeProcessor(Protocol):
-    image_token: Final[str]
+    image_token: str
 
 
 class BaseLlavaProcessingInfo(BaseProcessingInfo):
@@ -286,6 +287,7 @@ class BaseLlavaMultiModalProcessor(BaseMultiModalProcessor[_I]):
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
             else:
+                assert isinstance(images, ImageProcessorItems)
                 image_size = images.get_image_size(item_idx)
                 num_image_tokens = self.info.get_num_image_tokens(
                     image_width=image_size.width,
@@ -372,6 +374,7 @@ class PixtralHFMultiModalProcessor(BaseMultiModalProcessor[PixtralHFProcessingIn
         image_end_id = vocab[processor.image_end_token]
 
         assert isinstance(hf_config.vision_config, PixtralVisionConfig)
+        assert isinstance(hf_config, LlavaConfig)
         encoder_info = PixtralHFEncoderInfo(hf_config)
 
         def get_replacement(item_idx: int):
@@ -642,7 +645,7 @@ class LlavaForConditionalGeneration(
         self,
         image_input: LlavaImageInputs,
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
-        if image_input["type"] == "image_embeds":
+        if isinstance(image_input, LlavaImageEmbeddingInputs):
             return image_input["data"]
 
         image_features = self._process_image_pixels(image_input)
@@ -737,18 +740,12 @@ class LlavaForConditionalGeneration(
             tower_model="vision_tower",
         )
 
-    def get_num_mm_encoder_tokens(
+    def get_mm_lora_token_counts(
         self,
-        num_image_tokens: int,
-    ) -> int:
-        # LLaVA's vision encoder outputs one token per patch without
-        # spatial merging or pixel shuffle
-        return num_image_tokens
-
-    def get_num_mm_connector_tokens(
-        self,
-        num_vision_tokens: int,
-    ) -> int:
-        # LLaVA's MLP projector outputs the same number of tokens
-        # as it receives from the vision encoder (1:1 mapping)
-        return num_vision_tokens
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
+        return num_mm_embeds, num_mm_embeds

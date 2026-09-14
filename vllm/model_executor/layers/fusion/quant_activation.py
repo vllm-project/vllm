@@ -8,7 +8,7 @@ expose_input_quant_key; the kernel validates and reads the activation via
 as_quantized_activation.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 
@@ -33,6 +33,16 @@ class QuantizedActivation:
     orig_dtype: torch.dtype
     orig_shape: torch.Size
     quant_key: QuantKey
+
+    def weak_ref(self) -> "QuantizedActivation":
+        """Return a copy with non-owning tensor references for CUDA graph replay."""
+        from vllm.utils.torch_utils import weak_ref_tensor
+
+        return replace(
+            self,
+            data=weak_ref_tensor(self.data),
+            scale=weak_ref_tensor(self.scale),
+        )
 
 
 def expose_input_quant_key(layer: torch.nn.Module, kernel) -> None:

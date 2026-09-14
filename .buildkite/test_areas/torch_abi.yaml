@@ -4,7 +4,7 @@ depends_on:
 steps:
 - label: ":nvidia: (L4) Torch Stable ABI Audit"
   key: torch-stable-abi-audit
-  timeout_in_minutes: 5
+  timeout_in_minutes: 10
   source_file_dependencies:
   - .buildkite/check-torch-abi.py
   - csrc/

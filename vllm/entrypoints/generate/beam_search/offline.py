@@ -82,6 +82,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         temperature = params.temperature
         ignore_eos = params.ignore_eos
         length_penalty = params.length_penalty
+        self.llm_engine.vllm_config._check_watermarking_unsupported(beam_search=True)
 
         tokenizer = self.renderer.get_tokenizer()
         eos_token_id = tokenizer.eos_token_id
@@ -185,7 +186,9 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             best_beams = sorted_completed[:beam_width]
 
             for beam in best_beams:
-                beam.text = tokenizer.decode(beam.tokens)
+                beam.text = tokenizer.decode(
+                    beam.tokens, skip_special_tokens=params.skip_special_tokens
+                )
 
             outputs.append(BeamSearchOutput(sequences=best_beams))
 

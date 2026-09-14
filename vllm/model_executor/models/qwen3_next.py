@@ -141,17 +141,30 @@ class Qwen3NextSparseMoeBlock(nn.Module):
 
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
 
-        shared_expert_group_size = get_quark_ocp_mx_group_size(
-            quant_config,
-            f"{prefix}.shared_expert.down_proj",
-        )
-        self.replicate_shared_expert = _should_replicate_misaligned_shared_expert(
-            config.shared_expert_intermediate_size,
-            self.tp_size,
-            shared_expert_group_size,
-            parallel_config.enable_expert_parallel,
-            self.is_sequence_parallel,
-        )
+        # Resolve shared-expert fusion first (when enabled, TP alignment constraint no
+        # longer applies)
+        self.is_fused_shared_expert_enabled = False
+        if config.shared_expert_intermediate_size > 0:
+            self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
+                quant_config,
+                prefix,
+                shared_expert_name="shared_expert",
+            )
+
+        if self.is_fused_shared_expert_enabled:
+            self.replicate_shared_expert = False
+        else:
+            shared_expert_group_size = get_quark_ocp_mx_group_size(
+                quant_config,
+                f"{prefix}.shared_expert.down_proj",
+            )
+            self.replicate_shared_expert = _should_replicate_misaligned_shared_expert(
+                config.shared_expert_intermediate_size,
+                self.tp_size,
+                shared_expert_group_size,
+                parallel_config.enable_expert_parallel,
+                self.is_sequence_parallel,
+            )
         if self.tp_size > config.num_experts:
             raise ValueError(
                 f"Tensor parallel size {self.tp_size} is greater than "
@@ -182,17 +195,6 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             quant_config=None,
             prefix=f"{prefix}.shared_expert_gate",
         )
-
-        self.is_fused_shared_expert_enabled = False
-        if (
-            config.shared_expert_intermediate_size > 0
-            and not self.replicate_shared_expert
-        ):
-            self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
-                quant_config,
-                prefix,
-                shared_expert_name="shared_expert",
-            )
 
         if (
             self.is_fused_shared_expert_enabled

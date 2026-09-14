@@ -116,6 +116,7 @@ impl ChatRenderer for HarmonyChatRenderer {
     fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
         Ok(RenderedPrompt {
             prompt: Prompt::TokenIds(self.render_token_ids(request)?),
+            media_order: None,
             effective_template_kwargs: request_template_kwargs(request),
         })
     }

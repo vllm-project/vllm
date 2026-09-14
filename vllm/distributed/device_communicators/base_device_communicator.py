@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from weakref import WeakValueDictionary
 
 import torch
@@ -156,6 +158,16 @@ class All2AllManagerBase:
 
     def destroy(self):
         pass
+
+    def stage_ep_size(self) -> None:
+        pass
+
+    def commit_ep_size(self) -> None:
+        pass
+
+    @contextmanager
+    def mask_remote_ranks(self) -> Iterator[None]:
+        yield
 
 
 class DeviceCommunicatorBase:

@@ -142,6 +142,8 @@ class ParallelConfig:
     """IP of the data parallel master."""
     data_parallel_rpc_port: int = Field(default=29550, ge=1, le=65535)
     """Fixed port for data parallel messaging, shared by all nodes."""
+    dp_sync_interval: int = Field(default=16, ge=1)
+    """Steps between DP finish-sync all-reduces; must match across DP ranks."""
     data_parallel_master_port: int = 29500
     """Port of the data parallel master."""
     data_parallel_backend: DataParallelBackend = "mp"
@@ -214,6 +216,8 @@ class ParallelConfig:
 
     enable_elastic_ep: bool = False
     """Enable elastic expert parallelism with stateless NCCL groups for DP/EP."""
+    elastic_ep_max_dp_size: int = Field(default=None, ge=1)  # type: ignore[assignment]
+    """Maximum data parallel size supported by elastic expert parallelism."""
 
     enable_dbo: bool = False
     """Enable dual batch overlap for the model executor."""
@@ -391,7 +395,14 @@ class ParallelConfig:
         in (rank i+1, block j) only after (rank i, block j) is fully occupied.
     Block_size should be greater than or equal to cp_kv_cache_interleave_size.
     Block_size should be divisible by cp_kv_cache_interleave_size.
+
+    When --cp-kv-cache-interleave-size is omitted (None), the interleave size
+    is resolved automatically based on NIXL transfer requirements.
+    Explicit settings take priority.
     """
+
+    _allow_auto_resolve_cp_interleave_size: bool = True
+    """Whether NIXL may select the interleave size automatically."""
 
     data_parallel_index: int = Field(init=False)
     """Equal to the data parallel rank but not used for torch process groups
@@ -426,7 +437,9 @@ class ParallelConfig:
     )
     """The configurations for fault tolerance."""
 
-    @field_validator("disable_nccl_for_dp_synchronization", mode="wrap")
+    @field_validator(
+        "disable_nccl_for_dp_synchronization", "elastic_ep_max_dp_size", mode="wrap"
+    )
     @classmethod
     def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
         """Skip validation if the value is `None` when initialisation is delayed."""
@@ -545,8 +558,6 @@ class ParallelConfig:
         tp = self.tensor_parallel_size
         pcp = self.prefill_context_parallel_size
         dcp = self.decode_context_parallel_size
-        if pcp > 1 and self.data_parallel_size > 1:
-            raise ValueError("PCP does not support data parallelism yet.")
         if pcp == 1:
             # DCP reuses the TP ranks when PCP is disabled.
             if tp % dcp != 0:
@@ -934,6 +945,18 @@ class ParallelConfig:
                     " for dense models."
                 )
 
+        max_dp_size = self.elastic_ep_max_dp_size
+        self.elastic_ep_max_dp_size = (
+            max_dp_size
+            if self.enable_elastic_ep and max_dp_size is not None
+            else self.data_parallel_size
+        )
+        if self.elastic_ep_max_dp_size < self.data_parallel_size:
+            raise ValueError(
+                "--elastic-ep-max-dp-size must be greater than or equal to "
+                f"the initial data_parallel_size ({self.data_parallel_size})."
+            )
+
         self.data_parallel_index = self.data_parallel_rank
 
         if self.distributed_executor_backend == "external_launcher":
@@ -1063,6 +1086,17 @@ class ParallelConfig:
         if self.ray_workers_use_nsight and not self.use_ray:
             raise ValueError(
                 "Unable to use nsight profiling unless workers run with Ray."
+            )
+
+        # A batch below one token per microbatch cannot be split, so the
+        # thresholds have to keep it out rather than the split having to cope.
+        if self.use_ubatching and (
+            min(self.dbo_decode_token_threshold, self.dbo_prefill_token_threshold)
+            < self.num_ubatches
+        ):
+            raise ValueError(
+                "dbo_decode_token_threshold and dbo_prefill_token_threshold must "
+                f"be at least the number of microbatches ({self.num_ubatches})."
             )
 
         return self

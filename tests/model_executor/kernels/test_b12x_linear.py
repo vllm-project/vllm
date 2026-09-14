@@ -785,6 +785,11 @@ def test_b12x_backend_preserves_w4a16_fallback(monkeypatch) -> None:
 
     monkeypatch.setattr(linear_mod.current_platform, "_enum", PlatformEnum.CUDA)
     monkeypatch.setattr(linear_mod, "_get_linear_backend", lambda: "b12x")
+    monkeypatch.setitem(
+        linear_mod._POSSIBLE_NVFP4_KERNELS,
+        PlatformEnum.CUDA,
+        [B12xNvFp4LinearKernel, MarlinNvFp4LinearKernel],
+    )
     monkeypatch.setattr(
         MarlinNvFp4LinearKernel,
         "is_supported",

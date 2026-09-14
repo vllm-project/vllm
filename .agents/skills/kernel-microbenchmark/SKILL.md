@@ -42,6 +42,25 @@ description: Build, debug, and interpret vLLM GPU kernel microbenchmarks for CUD
 - Keep metadata setup, plan construction, allocation, random input generation,
   and logging outside the timed region unless that overhead is the experiment.
 
+## Sanity-Check Reference Numbers
+
+Use these as rough reference points for large, well-shaped workloads, not as
+gold standards, guaranteed peaks, or hard limits. Hardware SKU, clocks, shape,
+precision conventions, and the FLOP/byte accounting can move the result. A
+large gap is a prompt to investigate, not proof that a kernel is poor.
+
+| Kernel regime | Hardware | Rough reference |
+| --- | --- | ---: |
+| Memory-bound, large batch | Blackwell | 6 TB/s |
+| BF16 GEMM | Blackwell | 2 PFLOP/s |
+| BF16 attention | B200 | 1.6 PFLOP/s |
+| FP8 GEMM | Blackwell | 4 PFLOP/s |
+| FP8 attention | B300 | 2.8 PFLOP/s |
+
+The BF16 attention reference is approximately the 1613 TFLOP/s result reported
+by the FlashAttention-4 paper. Compare kernels only with matching workload and
+throughput conventions.
+
 ## Multi-GPU Benchmarks
 
 - State whether the run is local or multi-node and report the GPU topology,

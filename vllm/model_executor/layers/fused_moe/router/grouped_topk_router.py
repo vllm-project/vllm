@@ -90,7 +90,7 @@ def grouped_topk(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if (
         envs.VLLM_USE_FUSED_MOE_GROUPED_TOPK
-        and current_platform.is_cuda()
+        and (current_platform.is_cuda() or current_platform.is_xpu())
         and num_expert_group <= 32
         and topk <= 32
         and e_score_correction_bias is not None

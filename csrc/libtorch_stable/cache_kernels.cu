@@ -456,14 +456,14 @@ __global__ void concat_and_cache_mla_kernel(
 // Grouped variant of concat_and_cache_mla: inserts the context K/V for every
 // draft layer in a single launch. Grid is (num_tokens, num_layers); each layer
 // reads its own cache base pointer from kv_cache_ptrs (same pointer-array
-// pattern as copy_blocks_kernel). bf16 only, so it is a raw 16-bit copy with no
-// scaling or quantization; scalar_t is uint16_t for portability.
-template <typename scalar_t>
+// pattern as copy_blocks_kernel).
+template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
 __global__ void concat_and_cache_mla_grouped_kernel(
     const scalar_t* __restrict__ kv_c,  // [num_layers, num_tokens,
                                         // kv_lora_rank]
     const scalar_t* __restrict__ k_pe,  // [num_layers, num_tokens, pe_dim]
     const int64_t* __restrict__ kv_cache_ptrs,  // [num_layers]
+    const float* __restrict__ kv_scales,        // [num_layers] or nullptr
     const int64_t* __restrict__ slot_mapping,   // [num_layers, num_tokens]
     const int64_t kv_c_layer_stride, const int64_t kv_c_token_stride,
     const int64_t k_pe_layer_stride, const int64_t k_pe_token_stride,
@@ -481,12 +481,16 @@ __global__ void concat_and_cache_mla_grouped_kernel(
   const int64_t block_idx = slot_idx / block_size;
   const int64_t block_offset = slot_idx % block_size;
 
-  scalar_t* __restrict__ kv_cache =
-      reinterpret_cast<scalar_t*>(kv_cache_ptrs[layer_idx]);
+  cache_t* __restrict__ kv_cache =
+      reinterpret_cast<cache_t*>(kv_cache_ptrs[layer_idx]);
   const scalar_t* __restrict__ kv_c_layer =
       kv_c + layer_idx * kv_c_layer_stride;
   const scalar_t* __restrict__ k_pe_layer =
       k_pe + layer_idx * k_pe_layer_stride;
+  float scale = 0.0f;
+  if constexpr (kv_dt != Fp8KVCacheDataType::kAuto) {
+    scale = kv_scales[layer_idx];
+  }
 
   auto copy = [&](const scalar_t* __restrict__ src, int64_t src_token_stride,
                   int size, int offset) {
@@ -494,7 +498,12 @@ __global__ void concat_and_cache_mla_grouped_kernel(
       const int64_t src_idx = token_idx * src_token_stride + i;
       const int64_t dst_idx =
           block_idx * block_stride + block_offset * entry_stride + i + offset;
-      kv_cache[dst_idx] = src[src_idx];
+      if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
+        kv_cache[dst_idx] = src[src_idx];
+      } else {
+        kv_cache[dst_idx] =
+            fp8::scaled_convert<cache_t, scalar_t, kv_dt>(src[src_idx], scale);
+      }
     }
   };
 
@@ -1001,20 +1010,55 @@ void concat_and_cache_mla_grouped(
     torch::stable::Tensor& k_pe,  // [num_layers, num_tokens, pe_dim]
     torch::stable::Tensor& kv_cache_ptrs,  // [num_layers] int64, on device
     torch::stable::Tensor& slot_mapping,   // [num_layers, num_tokens] int64
-    int64_t block_size, int64_t block_stride, int64_t entry_stride) {
-  int num_layers = kv_c.size(0);
-  int num_tokens = kv_c.size(1);
-  int kv_lora_rank = kv_c.size(2);
-  int pe_dim = k_pe.size(2);
+    int64_t block_size, int64_t block_stride, int64_t entry_stride,
+    std::optional<torch::stable::Tensor> kv_scales,  // [num_layers] or None
+    const std::string& kv_cache_dtype) {
+  const bool use_fp8 = kv_cache_dtype == "fp8" ||
+                       kv_cache_dtype == "fp8_e4m3" ||
+                       kv_cache_dtype == "fp8_e5m2";
+#ifdef USE_ROCM
+  STD_TORCH_CHECK(kv_cache_dtype != "fp8_e5m2",
+                  "concat_and_cache_mla_grouped does not support fp8_e5m2 "
+                  "KV cache on ROCm");
+#endif
+  STD_TORCH_CHECK(
+      use_fp8 || kv_cache_dtype == "auto" || kv_cache_dtype == "bfloat16",
+      "concat_and_cache_mla_grouped only supports BF16 and plain "
+      "FP8 KV cache; got ",
+      kv_cache_dtype);
 
   STD_TORCH_CHECK(
       kv_c.scalar_type() == torch::headeronly::ScalarType::BFloat16 &&
           k_pe.scalar_type() == torch::headeronly::ScalarType::BFloat16,
-      "concat_and_cache_mla_grouped only supports a bf16 KV cache; got kv_c=",
+      "concat_and_cache_mla_grouped requires BF16 inputs; got kv_c=",
       kv_c.scalar_type(), ", k_pe=", k_pe.scalar_type());
   STD_TORCH_CHECK(
-      kv_cache_ptrs.scalar_type() == torch::headeronly::ScalarType::Long,
-      "kv_cache_ptrs must be int64");
+      kv_cache_ptrs.scalar_type() == torch::headeronly::ScalarType::Long &&
+          slot_mapping.scalar_type() == torch::headeronly::ScalarType::Long,
+      "cache pointers and slot mapping must be int64");
+
+  const int num_layers = kv_c.size(0);
+  const int num_tokens = kv_c.size(1);
+  const int kv_lora_rank = kv_c.size(2);
+  const int pe_dim = k_pe.size(2);
+  const float* kv_scales_ptr = nullptr;
+  if (use_fp8) {
+    STD_TORCH_CHECK(kv_scales.has_value(),
+                    "FP8 grouped cache insert requires kv_scales");
+    STD_TORCH_CHECK(
+        kv_scales->scalar_type() == torch::headeronly::ScalarType::Float,
+        "kv_scales must be float32");
+    STD_TORCH_CHECK(kv_scales->numel() == num_layers,
+                    "kv_scales must contain one scale per layer");
+    STD_TORCH_CHECK(kv_scales->is_cuda() && kv_scales->get_device_index() ==
+                                                kv_c.get_device_index(),
+                    "kv_scales must be on the same CUDA device as kv_c");
+    STD_TORCH_CHECK(kv_scales->is_contiguous(), "kv_scales must be contiguous");
+    kv_scales_ptr = kv_scales->const_data_ptr<float>();
+  } else {
+    STD_TORCH_CHECK(!kv_scales.has_value(),
+                    "BF16 grouped cache insert does not use kv_scales");
+  }
 
   if (num_tokens == 0 || num_layers == 0) {
     return;
@@ -1030,17 +1074,40 @@ void concat_and_cache_mla_grouped(
       kv_c.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
 
-  dim3 grid(num_tokens, num_layers);
-  dim3 block(std::min(kv_lora_rank, 512));
-  vllm::concat_and_cache_mla_grouped_kernel<uint16_t>
-      <<<grid, block, 0, stream>>>(
-          reinterpret_cast<const uint16_t*>(kv_c.data_ptr()),
-          reinterpret_cast<const uint16_t*>(k_pe.data_ptr()),
-          kv_cache_ptrs.const_data_ptr<int64_t>(),
-          slot_mapping.const_data_ptr<int64_t>(), kv_c_layer_stride,
-          kv_c_token_stride, k_pe_layer_stride, k_pe_token_stride,
-          slot_layer_stride, block_stride, entry_stride, kv_lora_rank, pe_dim,
-          block_size);
+  const dim3 grid(num_tokens, num_layers);
+  const dim3 block(std::min(kv_lora_rank, 512));
+
+  if (!use_fp8) {
+    vllm::concat_and_cache_mla_grouped_kernel<uint16_t, uint16_t,
+                                              vllm::Fp8KVCacheDataType::kAuto>
+        <<<grid, block, 0, stream>>>(
+            reinterpret_cast<const uint16_t*>(kv_c.data_ptr()),
+            reinterpret_cast<const uint16_t*>(k_pe.data_ptr()),
+            kv_cache_ptrs.const_data_ptr<int64_t>(), nullptr,
+            slot_mapping.const_data_ptr<int64_t>(), kv_c_layer_stride,
+            kv_c_token_stride, k_pe_layer_stride, k_pe_token_stride,
+            slot_layer_stride, block_stride, entry_stride, kv_lora_rank, pe_dim,
+            block_size);
+    return;
+  }
+
+#define LAUNCH_GROUPED_FP8(KV_DTYPE)                                           \
+  vllm::concat_and_cache_mla_grouped_kernel<__nv_bfloat16, uint8_t, KV_DTYPE>  \
+      <<<grid, block, 0, stream>>>(                                            \
+          reinterpret_cast<const __nv_bfloat16*>(kv_c.data_ptr()),             \
+          reinterpret_cast<const __nv_bfloat16*>(k_pe.data_ptr()),             \
+          kv_cache_ptrs.const_data_ptr<int64_t>(), kv_scales_ptr,              \
+          slot_mapping.const_data_ptr<int64_t>(), kv_c_layer_stride,           \
+          kv_c_token_stride, k_pe_layer_stride, k_pe_token_stride,             \
+          slot_layer_stride, block_stride, entry_stride, kv_lora_rank, pe_dim, \
+          block_size)
+
+  if (kv_cache_dtype == "fp8_e5m2") {
+    LAUNCH_GROUPED_FP8(vllm::Fp8KVCacheDataType::kFp8E5M2);
+  } else {
+    LAUNCH_GROUPED_FP8(vllm::Fp8KVCacheDataType::kFp8E4M3);
+  }
+#undef LAUNCH_GROUPED_FP8
 }
 
 namespace vllm {
@@ -1268,6 +1335,9 @@ __global__ void gather_and_maybe_dequant_cache_page(
 #define CALL_GATHER_CACHE_576(SCALAR_T, CACHE_T, KV_DTYPE) \
   CALL_GATHER_CACHE(SCALAR_T, CACHE_T, KV_DTYPE, 576)
 
+#define CALL_GATHER_CACHE_512(SCALAR_T, CACHE_T, KV_DTYPE) \
+  CALL_GATHER_CACHE(SCALAR_T, CACHE_T, KV_DTYPE, 512)
+
 #define CALL_GATHER_CACHE_320(SCALAR_T, CACHE_T, KV_DTYPE) \
   CALL_GATHER_CACHE(SCALAR_T, CACHE_T, KV_DTYPE, 320)
 
@@ -1305,10 +1375,9 @@ void gather_and_maybe_dequant_cache(
         seq_starts.value().scalar_type() == torch::headeronly::ScalarType::Int,
         "seq_starts must be int32");
   }
-  STD_TORCH_CHECK(
-      head_dim == 320 || head_dim == 576,
-      "gather_and_maybe_dequant_cache only support the head_dim to 320 or 576 "
-      "for better performance")
+  STD_TORCH_CHECK(head_dim == 320 || head_dim == 512 || head_dim == 576,
+                  "gather_and_maybe_dequant_cache only support the head_dim to "
+                  "320 or 512 or 576 for better performance")
 
   STD_TORCH_CHECK(src_cache.device() == dst.device(),
                   "src_cache and dst must be on the same device");
@@ -1344,6 +1413,9 @@ void gather_and_maybe_dequant_cache(
   if (head_dim == 576) {
     DISPATCH_BY_KV_CACHE_DTYPE(dst.scalar_type(), kv_cache_dtype,
                                CALL_GATHER_CACHE_576);
+  } else if (head_dim == 512) {
+    DISPATCH_BY_KV_CACHE_DTYPE(dst.scalar_type(), kv_cache_dtype,
+                               CALL_GATHER_CACHE_512);
   } else {
     DISPATCH_BY_KV_CACHE_DTYPE(dst.scalar_type(), kv_cache_dtype,
                                CALL_GATHER_CACHE_320);
@@ -1386,7 +1458,11 @@ __global__ void cp_gather_and_upconvert_fp8_kv_cache_page(
     const int32_t block_size, const int32_t total_tokens,
     const int64_t block_table_stride, const int64_t cache_block_stride,
     const int64_t cache_entry_stride, const int64_t dst_entry_stride,
-    const int32_t* __restrict__ seq_starts) {
+    const int32_t* __restrict__ seq_starts,
+    const uint8_t* __restrict__ host_cache,
+    const int32_t* __restrict__ host_row_ids,
+    const int32_t* __restrict__ device_row_ids,
+    const int64_t host_entry_stride) {
   constexpr int32_t warps_per_cta = 16;
   __shared__ GatherPageTask page;
   __shared__ int32_t physical_block;
@@ -1412,8 +1488,22 @@ __global__ void cp_gather_and_upconvert_fp8_kv_cache_page(
        page_token < page.page_token_end; page_token += warps_per_cta) {
     const int32_t output_token =
         page.output_token_begin + page_token - page.page_token_begin;
-    const uint8_t* token_ptr = src_cache + physical_block * cache_block_stride +
-                               page_token * cache_entry_stride;
+    const int32_t source_row = physical_block * block_size + page_token;
+    const uint8_t* token_ptr;
+    if (device_row_ids == nullptr) {
+      token_ptr = src_cache + physical_block * cache_block_stride +
+                  page_token * cache_entry_stride;
+    } else {
+      const int32_t device_row = device_row_ids[source_row];
+      if (device_row >= 0) {
+        token_ptr = src_cache + (device_row / block_size) * cache_block_stride +
+                    (device_row % block_size) * cache_entry_stride;
+      } else {
+        token_ptr =
+            host_cache +
+            static_cast<int64_t>(host_row_ids[source_row]) * host_entry_stride;
+      }
+    }
     __nv_bfloat16* dst_ptr = dst + output_token * dst_entry_stride;
     gather_and_upconvert_fp8_token(token_ptr, dst_ptr, lane_id);
   }
@@ -1622,7 +1712,10 @@ void cp_gather_and_upconvert_fp8_kv_cache(
     torch::stable::Tensor const& block_table,  // [BATCH, BLOCK_INDICES]
     torch::stable::Tensor const& workspace_starts,  // [BATCH]
     int64_t batch_size,
-    std::optional<torch::stable::Tensor> seq_starts = std::nullopt) {
+    std::optional<torch::stable::Tensor> seq_starts = std::nullopt,
+    std::optional<torch::stable::Tensor> host_cache = std::nullopt,
+    std::optional<torch::stable::Tensor> host_row_ids = std::nullopt,
+    std::optional<torch::stable::Tensor> device_row_ids = std::nullopt) {
   torch::stable::accelerator::DeviceGuard device_guard(
       src_cache.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
@@ -1642,6 +1735,12 @@ void cp_gather_and_upconvert_fp8_kv_cache(
         "seq_starts must be int32");
   }
 
+  const bool has_host_rows = host_cache.has_value();
+  STD_TORCH_CHECK(
+      has_host_rows == host_row_ids.has_value() &&
+          has_host_rows == device_row_ids.has_value(),
+      "host_cache, host_row_ids, and device_row_ids must be provided together");
+
   STD_TORCH_CHECK(src_cache.device() == dst.device(),
                   "src_cache and dst must be on the same device");
   STD_TORCH_CHECK(src_cache.device() == block_table.device(),
@@ -1651,6 +1750,43 @@ void cp_gather_and_upconvert_fp8_kv_cache(
   if (seq_starts.has_value()) {
     STD_TORCH_CHECK(src_cache.device() == seq_starts.value().device(),
                     "src_cache and seq_starts must be on the same device");
+  }
+  const uint8_t* host_cache_ptr = nullptr;
+  const int32_t* host_row_ids_ptr = nullptr;
+  const int32_t* device_row_ids_ptr = nullptr;
+  int64_t host_entry_stride = 0;
+  if (has_host_rows) {
+    auto const& host = host_cache.value();
+    auto const& host_rows = host_row_ids.value();
+    auto const& device_rows = device_row_ids.value();
+    STD_TORCH_CHECK(
+        host.device().is_cpu() &&
+            host.scalar_type() == torch::headeronly::ScalarType::Byte &&
+            host.dim() == 2 && host.is_contiguous() &&
+            host.size(1) == src_cache.size(2),
+        "host_cache must be a contiguous uint8 CPU row matrix matching "
+        "src_cache");
+    cudaPointerAttributes attributes{};
+    const cudaError_t pointer_status =
+        cudaPointerGetAttributes(&attributes, host.const_data_ptr());
+    if (pointer_status != cudaSuccess) {
+      cudaGetLastError();
+    }
+    STD_TORCH_CHECK(
+        pointer_status == cudaSuccess && attributes.type == cudaMemoryTypeHost,
+        "host_cache must be CUDA-accessible pinned memory");
+    STD_TORCH_CHECK(
+        host_rows.is_cuda() && device_rows.is_cuda() &&
+            host_rows.scalar_type() == torch::headeronly::ScalarType::Int &&
+            device_rows.scalar_type() == torch::headeronly::ScalarType::Int &&
+            host_rows.is_contiguous() && device_rows.is_contiguous() &&
+            host_rows.numel() == device_rows.numel() && host_rows.dim() <= 2 &&
+            device_rows.dim() <= 2,
+        "host/device row maps must be matching contiguous CUDA int32 tensors");
+    host_cache_ptr = reinterpret_cast<const uint8_t*>(host.const_data_ptr());
+    host_row_ids_ptr = host_rows.const_data_ptr<int32_t>();
+    device_row_ids_ptr = device_rows.const_data_ptr<int32_t>();
+    host_entry_stride = host.stride(0);
   }
   auto dtype = src_cache.scalar_type();
   STD_TORCH_CHECK(
@@ -1694,7 +1830,8 @@ void cp_gather_and_upconvert_fp8_kv_cache(
       workspace_starts.const_data_ptr<int32_t>(),
       static_cast<int32_t>(batch_size), block_size, total_tokens,
       block_table_stride, cache_block_stride, cache_entry_stride,
-      dst_entry_stride, seq_starts_ptr);
+      dst_entry_stride, seq_starts_ptr, host_cache_ptr, host_row_ids_ptr,
+      device_row_ids_ptr, host_entry_stride);
 }
 
 void cp_gather_and_upconvert_nvfp4_kv_cache(

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for the EAGLE speculator's draft attention metadata builder.
 
-These tests guard the regression where ``_build_draft_attn_metadata`` did
+These tests guard the regression where ``_build_uniform_attn_metadata`` did
 not populate ``seq_lens_cpu_upper_bound`` on the per-step
 ``CommonAttentionMetadata``. Several downstream attention backends and
 helpers (``split_decodes_prefills_and_extends``, the MLA indexer,
@@ -13,11 +13,14 @@ backends (e.g. ``ROCM_AITER_FA`` with eagle/eagle3 spec decode):
     AssertionError: assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
 """
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
 import torch
 
+from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode import speculator as base_speculator
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 
@@ -30,7 +33,7 @@ def _make_fake_speculator(
     draft_max_seq_len: int = 1024,
 ) -> SimpleNamespace:
     """Build a fake EagleSpeculator with just the attributes used by
-    ``_build_draft_attn_metadata``. We deliberately avoid constructing a
+    ``_build_uniform_attn_metadata``. We deliberately avoid constructing a
     real ``EagleSpeculator`` because that requires a full ``VllmConfig``
     and a draft model.
     """
@@ -46,8 +49,9 @@ def _make_fake_speculator(
         cp_rank=0,
         cp_interleave=1,
     )
-    return SimpleNamespace(
-        arange=torch.arange(max_num_reqs + 1, dtype=torch.int32, device="cpu"),
+    fake = SimpleNamespace(
+        arange_np=np.arange(max_num_reqs + 1, dtype=np.int32),
+        draft_is_prefilling=torch.zeros(max_num_reqs, dtype=torch.bool),
         block_tables=fake_block_tables,
         input_buffers=fake_input_buffers,
         attn_groups=[],
@@ -55,21 +59,42 @@ def _make_fake_speculator(
         max_model_len=max_model_len,
         draft_max_seq_len=draft_max_seq_len,
     )
+    # The uniform wrapper delegates through self; bind the real implementation.
+    fake._build_attn_metadata = MethodType(EagleSpeculator._build_attn_metadata, fake)
+    return fake
 
 
-def _run_build(fake, *, num_reqs, num_reqs_padded, num_tokens_padded, base, step):
+def _run_build(
+    fake,
+    *,
+    num_reqs,
+    num_reqs_padded,
+    base,
+    step,
+    num_query_per_req=1,
+    cg_mode=CUDAGraphMode.FULL,
+):
     captured: dict[str, object] = {}
 
     def fake_build_attn_metadata(**kwargs):
         captured.update(kwargs)
         return {}
 
+    # Request padding only occurs under FULL graphs, where the captured batch
+    # is a uniform decode of num_reqs_padded * num_query_per_req tokens.
+    batch_desc = BatchExecutionDescriptor(
+        cg_mode=cg_mode,
+        num_tokens=num_reqs_padded * num_query_per_req,
+        num_reqs=num_reqs_padded,
+        uniform_token_count=num_query_per_req,
+    )
+
     with patch.object(base_speculator, "build_attn_metadata", fake_build_attn_metadata):
-        EagleSpeculator._build_draft_attn_metadata(
+        EagleSpeculator._build_uniform_attn_metadata(
             fake,  # type: ignore[arg-type]
+            batch_desc=batch_desc,
             num_reqs=num_reqs,
-            num_reqs_padded=num_reqs_padded,
-            num_tokens_padded=num_tokens_padded,
+            num_query_per_req=num_query_per_req,
             seq_lens_cpu_upper_bound=base,
             step=step,
         )
@@ -84,9 +109,7 @@ def test_build_draft_attn_metadata_sets_seq_lens_cpu_upper_bound():
     fake = _make_fake_speculator()
     base = torch.tensor([100, 200, 300, 0], dtype=torch.int32)
 
-    captured = _run_build(
-        fake, num_reqs=3, num_reqs_padded=4, num_tokens_padded=4, base=base, step=2
-    )
+    captured = _run_build(fake, num_reqs=3, num_reqs_padded=4, base=base, step=2)
 
     bound = captured["seq_lens_cpu_upper_bound"]
     assert isinstance(bound, torch.Tensor), (
@@ -101,20 +124,19 @@ def test_build_draft_attn_metadata_sets_seq_lens_cpu_upper_bound():
     assert torch.equal(bound, torch.tensor([102, 202, 302, 0], dtype=torch.int32))
 
 
-def test_build_draft_attn_metadata_handles_zero_unpadded_reqs():
-    """Edge case: when ``num_reqs == 0`` the upper-bound tensor must
-    still be a valid all-zero tensor of length ``num_reqs_padded``."""
+def test_build_draft_attn_metadata_zeroes_padded_upper_bound_tail():
+    """The padded tail of the upper-bound tensor is zeroed, so it stays a
+    valid tensor of length ``num_reqs_padded`` regardless of padding."""
     fake = _make_fake_speculator()
     base = torch.zeros(2, dtype=torch.int32)
 
-    captured = _run_build(
-        fake, num_reqs=0, num_reqs_padded=2, num_tokens_padded=2, base=base, step=1
-    )
+    captured = _run_build(fake, num_reqs=1, num_reqs_padded=2, base=base, step=1)
 
     bound = captured["seq_lens_cpu_upper_bound"]
     assert isinstance(bound, torch.Tensor)
     assert bound.shape == (2,)
-    assert torch.equal(bound, torch.zeros(2, dtype=torch.int32))
+    # base is all zeros, so the real entry is 0 + step and the pad entry is 0.
+    assert torch.equal(bound, torch.tensor([1, 0], dtype=torch.int32))
 
 
 def test_build_draft_attn_metadata_clamps_to_max_model_len():
@@ -123,9 +145,7 @@ def test_build_draft_attn_metadata_clamps_to_max_model_len():
     fake = _make_fake_speculator(max_model_len=1024)
     base = torch.tensor([1023, 500], dtype=torch.int32)
 
-    captured = _run_build(
-        fake, num_reqs=2, num_reqs_padded=2, num_tokens_padded=2, base=base, step=3
-    )
+    captured = _run_build(fake, num_reqs=2, num_reqs_padded=2, base=base, step=3)
 
     bound = captured["seq_lens_cpu_upper_bound"]
     # 1023 + 3 = 1026 -> clamped to 1024; 500 + 3 = 503 unaffected.
@@ -144,13 +164,15 @@ def test_build_draft_attn_metadata_recomputes_dcp_local_seq_lens():
         assert (num_reqs, dcp_size, dcp_rank, cp_interleave) == (3, 2, 1, 4)
         out[:num_reqs].copy_(torch.tensor([1, 4, 8], dtype=torch.int32))
         out[num_reqs:].zero_()
+        return out
 
-    with patch.object(base_speculator, "prepare_dcp_local_seq_lens", fake_prepare):
+    with patch.object(
+        base_speculator, "maybe_prepare_dcp_local_seq_lens", fake_prepare
+    ):
         captured = _run_build(
             fake,
             num_reqs=3,
             num_reqs_padded=4,
-            num_tokens_padded=4,
             base=torch.tensor([5, 9, 16]),
             step=0,
         )

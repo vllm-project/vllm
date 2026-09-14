@@ -23,11 +23,6 @@ _config_instance: V1Config | None = None
 _config_lock = threading.Lock()
 
 
-def is_false(value: str) -> bool:
-    """Check if the given string value is equivalent to 'false'."""
-    return value.lower() in ("false", "0", "no", "n", "off")
-
-
 def lmcache_get_or_create_config() -> V1Config:
     """Get the LMCache configuration from the environment variable
     `LMCACHE_CONFIG_FILE`. If the environment variable is not set, this
@@ -95,75 +90,6 @@ def mla_enabled(model_config: "ModelConfig") -> bool:
         and isinstance(model_config.use_mla, bool)
         and model_config.use_mla
     )
-
-
-def create_lmcache_metadata(
-    vllm_config=None, model_config=None, parallel_config=None, cache_config=None
-):
-    """
-    Create LMCacheEngineMetadata from vLLM configuration.
-
-    This function extracts common metadata creation logic that was duplicated
-    across multiple files.
-
-    Args:
-        vllm_config (VllmConfig): vLLM configuration object containing model,
-                                  parallel, and cache configs (alternative to
-                                  individual config parameters)
-        model_config (ModelConfig): Model configuration (alternative to
-                                    vllm_config)
-        parallel_config (ParallelConfig): Parallel configuration (alternative
-                                          to vllm_config)
-        cache_config (CacheConfig): Cache configuration (alternative to
-                                    vllm_config)
-    """
-    # Third Party
-    # First Party
-    from lmcache.config import LMCacheEngineMetadata
-
-    from vllm.utils.torch_utils import get_kv_cache_torch_dtype
-
-    config = lmcache_get_or_create_config()
-    # Support both vllm_config object and individual config parameters
-    if vllm_config is not None:
-        model_cfg = vllm_config.model_config
-        parallel_cfg = vllm_config.parallel_config
-        cache_cfg = vllm_config.cache_config
-    else:
-        if model_config is None or parallel_config is None or cache_config is None:
-            raise ValueError(
-                "Either vllm_config must be provided, or all of "
-                "model_config, parallel_config, and cache_config must be provided."
-            )
-        model_cfg = model_config
-        parallel_cfg = parallel_config
-        cache_cfg = cache_config
-
-    # Get KV cache dtype
-    kv_dtype = get_kv_cache_torch_dtype(cache_cfg.cache_dtype, model_cfg.dtype)
-
-    # Check if MLA is enabled
-    use_mla = mla_enabled(model_cfg)
-
-    # Construct KV shape (for memory pool)
-    num_layer = model_cfg.get_num_layers(parallel_cfg)
-    chunk_size = config.chunk_size
-    num_kv_head = model_cfg.get_num_kv_heads(parallel_cfg)
-    head_size = model_cfg.get_head_size()
-    kv_shape = (num_layer, 1 if use_mla else 2, chunk_size, num_kv_head, head_size)
-
-    # Create metadata
-    metadata = LMCacheEngineMetadata(
-        model_cfg.model,
-        parallel_cfg.world_size,
-        parallel_cfg.rank,
-        "vllm",
-        kv_dtype,
-        kv_shape,
-        use_mla,
-    )
-
-    return metadata, config
 
 
 def extract_mm_features(

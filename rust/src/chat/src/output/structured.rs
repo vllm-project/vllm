@@ -16,6 +16,7 @@ use super::{AssistantEvent, AssistantEventStream};
 use crate::error::Error;
 use crate::event::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessage, AssistantToolCall, ChatEvent,
+    ChatTokenUsage,
 };
 use crate::{FinishReason, Result};
 
@@ -80,10 +81,11 @@ impl StructuredEventState {
         &mut self,
         kind: AssistantBlockKind,
         delta: String,
+        token_count: Option<usize>,
     ) -> Result<Vec<ChatEvent>> {
         let mut events = Vec::new();
         self.close_open_tool_call(&mut events);
-        self.push_text_delta(kind, delta, &mut events);
+        self.push_text_delta(kind, delta, token_count, &mut events);
         Ok(events)
     }
 
@@ -146,7 +148,7 @@ impl StructuredEventState {
     /// Close any open block and emit the terminal `Done` event.
     fn finish(
         &mut self,
-        usage: vllm_llm::TokenUsage,
+        usage: ChatTokenUsage,
         finish_reason: FinishReason,
         kv_transfer_params: Option<serde_json::Value>,
         ec_transfer_params: Option<serde_json::Value>,
@@ -170,6 +172,7 @@ impl StructuredEventState {
         &mut self,
         kind: AssistantBlockKind,
         delta: String,
+        token_count: Option<usize>,
         events: &mut Vec<ChatEvent>,
     ) {
         if delta.is_empty() {
@@ -184,6 +187,7 @@ impl StructuredEventState {
                     index: open_block.index,
                     kind,
                     delta,
+                    token_count,
                 });
             }
             // Otherwise, close the currently open block (if any) and start a
@@ -197,7 +201,12 @@ impl StructuredEventState {
                     text: delta.clone(),
                 });
                 events.push(ChatEvent::BlockStart { index, kind });
-                events.push(ChatEvent::BlockDelta { index, kind, delta });
+                events.push(ChatEvent::BlockDelta {
+                    index,
+                    kind,
+                    delta,
+                    token_count,
+                });
             }
         }
     }
@@ -274,8 +283,12 @@ pub(crate) async fn structured_chat_event_stream(
                 })
                 .await;
             }
-            AssistantEvent::TextDelta { kind, delta } => {
-                for next in state.process_text_delta(kind, delta)? {
+            AssistantEvent::TextDelta {
+                kind,
+                delta,
+                token_count,
+            } => {
+                for next in state.process_text_delta(kind, delta, token_count)? {
                     y.yield_ok(next).await;
                 }
             }
@@ -321,7 +334,7 @@ mod tests {
     use super::structured_chat_event_stream;
     use crate::FinishReason;
     use crate::error::Error;
-    use crate::event::{AssistantBlockKind, AssistantMessageExt as _, ChatEvent};
+    use crate::event::{AssistantBlockKind, AssistantMessageExt as _, ChatEvent, ChatTokenUsage};
     use crate::output::AssistantEvent;
 
     #[tokio::test]
@@ -335,11 +348,11 @@ mod tests {
                 delta: r#"{"city":"Paris"}"#.to_string(),
             }),
             Ok(AssistantEvent::Done {
-                usage: vllm_llm::TokenUsage {
+                usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
                     prompt_token_count: 1,
                     output_token_count: 1,
                     cached_token_count: 0,
-                },
+                }),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -390,11 +403,11 @@ mod tests {
                 delta: r#"{"b":2}"#.to_string(),
             }),
             Ok(AssistantEvent::Done {
-                usage: vllm_llm::TokenUsage {
+                usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
                     prompt_token_count: 1,
                     output_token_count: 1,
                     cached_token_count: 0,
-                },
+                }),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -433,6 +446,7 @@ mod tests {
             Ok(AssistantEvent::TextDelta {
                 kind: AssistantBlockKind::Text,
                 delta: "before".to_string(),
+                token_count: None,
             }),
             Ok(AssistantEvent::ToolCallStart {
                 id: "call_1".to_string(),
@@ -442,11 +456,11 @@ mod tests {
                 delta: r#"{"city":"Paris"}"#.to_string(),
             }),
             Ok(AssistantEvent::Done {
-                usage: vllm_llm::TokenUsage {
+                usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
                     prompt_token_count: 1,
                     output_token_count: 1,
                     cached_token_count: 0,
-                },
+                }),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -492,13 +506,14 @@ mod tests {
             Ok(AssistantEvent::TextDelta {
                 kind: AssistantBlockKind::Text,
                 delta: "done".to_string(),
+                token_count: None,
             }),
             Ok(AssistantEvent::Done {
-                usage: vllm_llm::TokenUsage {
+                usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
                     prompt_token_count: 1,
                     output_token_count: 1,
                     cached_token_count: 0,
-                },
+                }),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -562,11 +577,11 @@ mod tests {
                 delta: r#"{"b":2}"#.to_string(),
             }),
             Ok(AssistantEvent::Done {
-                usage: vllm_llm::TokenUsage {
+                usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
                     prompt_token_count: 1,
                     output_token_count: 1,
                     cached_token_count: 0,
-                },
+                }),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
@@ -595,5 +610,55 @@ mod tests {
         let tool_calls = message.tool_calls().collect::<Vec<_>>();
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].name, "first");
+    }
+
+    #[tokio::test]
+    async fn structured_stream_forwards_reasoning_token_count() {
+        let events = stream::iter(vec![
+            Ok(AssistantEvent::Start {
+                prompt_token_ids: vec![].into(),
+                prompt_logprobs: None,
+            }),
+            Ok(AssistantEvent::TextDelta {
+                kind: AssistantBlockKind::Reasoning,
+                delta: "think".to_string(),
+                token_count: Some(3),
+            }),
+            Ok(AssistantEvent::Done {
+                usage: ChatTokenUsage {
+                    engine: vllm_llm::TokenUsage {
+                        prompt_token_count: 1,
+                        output_token_count: 4,
+                        cached_token_count: 0,
+                    },
+                    reasoning_tokens: 3,
+                },
+                finish_reason: FinishReason::stop_eos(),
+                kv_transfer_params: None,
+                ec_transfer_params: None,
+            }),
+        ]);
+
+        let events = structured_chat_event_stream(events, true)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<crate::Result<Vec<_>>>()
+            .unwrap();
+
+        assert!(matches!(events[0], ChatEvent::Start { .. }));
+        assert!(matches!(
+            events[2],
+            ChatEvent::BlockDelta {
+                kind: AssistantBlockKind::Reasoning,
+                token_count: Some(3),
+                ..
+            }
+        ));
+        let ChatEvent::Done { usage, .. } = &events[4] else {
+            panic!("expected done");
+        };
+        assert_eq!(usage.reasoning_tokens, 3);
+        assert_eq!(usage.output_token_count, 4);
     }
 }

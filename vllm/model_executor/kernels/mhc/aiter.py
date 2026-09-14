@@ -104,6 +104,90 @@ def _mhc_pre_aiter_fake(
     return post_mix, comb_mix, layer_input
 
 
+def mhc_pre_delayed_aiter(
+    residual: torch.Tensor,
+    fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    rms_eps: float,
+    hc_pre_eps: float,
+    hc_sinkhorn_eps: float,
+    hc_post_mult_value: float,
+    sinkhorn_repeat: int,
+    pre_mix: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """mHC pre with the pre-mix carried in from the previous sublayer.
+
+    Matches ``mhc_pre_delayed_torch``: the stream collapse uses *pre_mix*
+    rather than the gate computed here, and that gate is returned as the
+    pre-mix for the next sublayer seam.
+
+    Args:
+        residual: shape (..., hc_mult, hidden_size), dtype torch.bfloat16
+        fn: shape (hc_mult3, hc_mult * hidden_size), dtype torch.float32
+        hc_scale: shape (3,), dtype torch.float32
+        hc_base: shape (hc_mult3,), dtype torch.float32
+        rms_eps: RMS normalization epsilon
+        hc_pre_eps: pre-mix epsilon
+        hc_sinkhorn_eps: sinkhorn epsilon
+        hc_post_mult_value: post-mix multiplier value
+        sinkhorn_repeat: number of sinkhorn iterations
+        pre_mix: shape (..., hc_mult) from the previous sublayer, or None at
+            model entry to select residual stream zero.
+
+    Returns:
+        post_mix: shape (..., hc_mult, 1), dtype torch.float32
+        comb_mix: shape (..., hc_mult, hc_mult), dtype torch.float32
+        layer_input: shape (..., hidden_size), dtype torch.bfloat16
+        next_pre_mix: shape (..., hc_mult), dtype torch.float32
+    """
+    hidden_size = residual.shape[-1]
+    assert hidden_size % 256 == 0
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    return rocm_aiter_ops.mhc_pre_delayed(
+        residual,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_mult_value,
+        sinkhorn_repeat,
+        pre_mix,
+    )
+
+
+def _mhc_pre_delayed_aiter_fake(
+    residual: torch.Tensor,
+    fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    rms_eps: float,
+    hc_pre_eps: float,
+    hc_sinkhorn_eps: float,
+    hc_post_mult_value: float,
+    sinkhorn_repeat: int,
+    pre_mix: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    hc_mult = residual.shape[-2]
+    hidden_size = residual.shape[-1]
+    outer_shape = residual.shape[:-2]
+    return (
+        torch.empty(
+            *outer_shape, hc_mult, 1, dtype=torch.float32, device=residual.device
+        ),
+        torch.empty(
+            *outer_shape, hc_mult, hc_mult, dtype=torch.float32, device=residual.device
+        ),
+        torch.empty(
+            *outer_shape, hidden_size, dtype=torch.bfloat16, device=residual.device
+        ),
+        torch.empty(*outer_shape, hc_mult, dtype=torch.float32, device=residual.device),
+    )
+
+
 def mhc_post_aiter(
     x: torch.Tensor,
     residual: torch.Tensor,
@@ -225,6 +309,12 @@ direct_register_custom_op(
     op_func=mhc_pre_aiter,
     mutates_args=[],
     fake_impl=_mhc_pre_aiter_fake,
+)
+direct_register_custom_op(
+    op_name="mhc_pre_delayed_aiter",
+    op_func=mhc_pre_delayed_aiter,
+    mutates_args=[],
+    fake_impl=_mhc_pre_delayed_aiter_fake,
 )
 direct_register_custom_op(
     op_name="mhc_post_aiter",

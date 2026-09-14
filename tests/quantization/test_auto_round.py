@@ -666,6 +666,96 @@ def test_inc_resolve_scheme_selects_wna16() -> None:
     assert isinstance(scheme, INCWna16Scheme)
 
 
+@pytest.mark.parametrize("bits", [2, 3])
+@pytest.mark.parametrize(
+    "packing_format", ["auto_round:auto_gptq", "auto_round:auto_awq"]
+)
+def test_wna16_cuda_low_bit_linear_routes_to_humming(
+    monkeypatch, bits, packing_format
+) -> None:
+    expected_method = object()
+    captured = {}
+
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes."
+        "inc_wna16_scheme._build_humming_linear_method",
+        lambda layer_config: captured.update({"layer_config": layer_config})
+        or expected_method,
+    )
+
+    layer_config = make_layer_config(bits=bits, packing_format=packing_format)
+    method = INCWna16Scheme().get_linear_method(
+        make_config(), object(), "model.layers.0.mlp.down_proj", layer_config
+    )
+
+    assert method is expected_method
+    assert captured["layer_config"] is layer_config
+
+
+@pytest.mark.parametrize("bits", [2, 3])
+def test_wna16_cuda_low_bit_moe_routes_to_humming(monkeypatch, bits) -> None:
+    expected_method = object()
+    captured = {}
+
+    class DummyMoeConfig:
+        pass
+
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes."
+        "inc_wna16_scheme._build_humming_moe_method",
+        lambda layer, layer_config: captured.update(
+            {"layer": layer, "layer_config": layer_config}
+        )
+        or expected_method,
+    )
+
+    layer = object.__new__(RoutedExperts)
+    layer.moe_config = DummyMoeConfig()
+    layer_config = make_layer_config(bits=bits)
+    method = INCWna16Scheme().get_moe_method(
+        make_config(), layer, "model.layers.0.mlp", layer_config
+    )
+
+    assert method is expected_method
+    assert captured["layer"] is layer
+    assert captured["layer_config"] is layer_config
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="This test only exercises the CUDA Marlin path.",
+)
+@pytest.mark.parametrize("bits", [4, 8])
+def test_wna16_cuda_high_bit_skips_humming(monkeypatch, bits) -> None:
+    """4/8-bit int stays on the Marlin/GPTQ/AWQ path even on CUDA so a single
+    model can mix high-bit Marlin and low-bit humming layers."""
+    called = {"humming": False}
+
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes."
+        "inc_wna16_scheme._build_humming_linear_method",
+        lambda layer_config: called.update({"humming": True}),
+    )
+
+    method = INCWna16Scheme().get_linear_method(
+        make_config(),
+        object(),
+        "model.layers.0.mlp.down_proj",
+        make_layer_config(bits=bits),
+    )
+
+    assert called["humming"] is False
+    assert isinstance(method, INCLinearMethod)
+
+
 def test_inc_config_accepts_mxfp_family_llm_compressor() -> None:
     config = INCConfig.from_config(
         {
@@ -1447,8 +1537,7 @@ def test_inc_ark_linear_method_xpu_int2_create_weights(monkeypatch) -> None:
     assert layer.scales.dtype == torch.bfloat16
     assert layer.qzeros.shape == (1, 4)
     assert layer.qzeros.dtype == torch.int32
-    assert layer.g_idx.shape == (64,)
-    assert layer.g_idx.dtype == torch.int32
+    assert not hasattr(layer, "g_idx")
     assert layer.in_features == 64
     assert layer.out_features == 64
     assert layer.params_dtype == torch.bfloat16
@@ -2354,7 +2443,7 @@ def test_calls_kernel_at_threshold(monkeypatch, w4a8_layer) -> None:
         w_scale,
         w_zp,
         group_size,
-        g_idx,
+        group_idx,
         bias,
     ) = captured["gemm_args"]
     assert quant_x.dtype is torch.int8
@@ -2366,7 +2455,7 @@ def test_calls_kernel_at_threshold(monkeypatch, w4a8_layer) -> None:
     assert qweight is layer.qweight
     assert w_zp is layer.qzeros
     assert group_size == 128
-    assert g_idx is None
+    assert group_idx is None
     assert bias is None
 
     # The kernel emits fp16; the result is cast back to the activation dtype.

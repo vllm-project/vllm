@@ -206,12 +206,22 @@ class RelPosMultiHeadAttention(EncoderMultiHeadAttention):
         q_with_bias_u = (q + self.pos_bias_u).transpose(1, 2)
         q_with_bias_v = (q + self.pos_bias_v).transpose(1, 2)
 
-        matrix_ac = torch.matmul(q_with_bias_u, k.transpose(-2, -1))
         matrix_bd = torch.matmul(q_with_bias_v, p.transpose(-2, -1))
         matrix_bd = self._rel_shift(matrix_bd)
 
-        attn_scores = matrix_ac + matrix_bd
-        attn_scores.mul_(self.scale)
+        batch_size, num_heads, query_len, key_len = matrix_bd.shape
+        attn_scores = torch.baddbmm(
+            matrix_bd.reshape(-1, query_len, key_len),
+            q_with_bias_u.reshape(-1, query_len, self.d_k),
+            k.transpose(-2, -1).reshape(-1, self.d_k, key_len),
+            beta=self.scale,
+            alpha=self.scale,
+        ).view(
+            batch_size,
+            num_heads,
+            query_len,
+            key_len,
+        )
 
         output, attn = self.forward_attention(attn_scores, v, mask=mask)
         output = self.forward_output(output, residual, sz_b, len_q)

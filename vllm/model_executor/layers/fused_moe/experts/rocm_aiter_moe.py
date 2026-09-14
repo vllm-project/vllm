@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import IntEnum
 from functools import lru_cache
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -28,6 +29,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
     kMxfp4Static,
 )
+
+if TYPE_CHECKING:
+    from aiter import ActivationType
 
 
 class QuantMethod(IntEnum):
@@ -246,6 +250,11 @@ def rocm_aiter_fused_experts(
     num_local_tokens: torch.Tensor | None = None,
     output_dtype: torch.dtype | None = None,
     moe_sorting_dispatch_policy: int = 0,
+    shared_w1: torch.Tensor | None = None,
+    shared_w2: torch.Tensor | None = None,
+    shared_w1_scale: torch.Tensor | None = None,
+    shared_w2_scale: torch.Tensor | None = None,
+    shared_expert_id: int = -1,
 ) -> torch.Tensor:
     """ROCm AITER fused MoE expert computation."""
     if quant_config is None:
@@ -253,6 +262,7 @@ def rocm_aiter_fused_experts(
 
     # Gate/up interleave hint; only the SWIGLUOAI activations override it.
     activation_interleave = None
+    activation_method: ActivationMethod | ActivationType
     if activation == MoEActivation.SILU:
         activation_method = ActivationMethod.SILU
     elif activation == MoEActivation.GELU:
@@ -266,6 +276,8 @@ def rocm_aiter_fused_experts(
         activation_method = rocm_aiter_ops.get_aiter_activation_type("situ")
     else:
         raise ValueError(f"Unsupported activation: {activation}")
+    if activation_method is None:
+        raise ValueError(f"AITER does not support activation: {activation}")
 
     # All AITER Fused MoE kernels are expecting the following datatypes
     topk_weights = topk_weights.to(torch.float32)
@@ -412,8 +424,18 @@ def rocm_aiter_fused_experts(
             bias1=quant_config.w1_bias if quant_config.use_mxfp4_w4a16 else None,
             bias2=quant_config.w2_bias if quant_config.use_mxfp4_w4a16 else None,
             moe_sorting_dispatch_policy=moe_sorting_dispatch_policy,
+            swiglu_limit=(
+                0.0
+                if moe_config.swiglu_limit is None
+                else float(moe_config.swiglu_limit)
+            ),
             beta=moe_config.activation_situ_beta,
             linear_beta=moe_config.activation_situ_linear_beta,
+            shared_w1=shared_w1,
+            shared_w2=shared_w2,
+            shared_w1_scale=shared_w1_scale,
+            shared_w2_scale=shared_w2_scale,
+            shared_expert_id=shared_expert_id,
         )
 
 

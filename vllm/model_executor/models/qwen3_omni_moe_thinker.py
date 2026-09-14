@@ -199,10 +199,9 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
         # Audio encoder uses 20 heads. Shard across TP when divisible
         # (e.g. TP=2/4); otherwise keep unreplicated (e.g. TP=8).
         tp_size = get_tensor_model_parallel_world_size()
-        self.disable_tp = self.num_heads % tp_size != 0
-        self.num_local_heads = (
-            self.num_heads if self.disable_tp else self.num_heads // tp_size
-        )
+        disable_tp = self.num_heads % tp_size != 0
+        effective_tp = 1 if disable_tp else tp_size
+        self.num_local_heads = self.num_heads // effective_tp
 
         if (self.head_dim * self.num_heads) != self.embed_dim:
             raise ValueError(
@@ -218,16 +217,16 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
             total_num_heads=self.num_heads,
             total_num_kv_heads=self.num_heads,
             bias=True,
+            disable_tp=disable_tp,
             prefix=f"{prefix}.qkv_proj",
-            disable_tp=self.disable_tp,
         )
 
         self.out_proj = RowParallelLinear(
             input_size=self.embed_dim,
             output_size=self.embed_dim,
             bias=True,
+            disable_tp=disable_tp,
             prefix=f"{prefix}.out_proj",
-            disable_tp=self.disable_tp,
         )
 
         self.attn = MMEncoderAttention(
@@ -278,16 +277,20 @@ class Qwen3OmniMoeAudioEncoderLayer(nn.Module):
         )
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
         self.activation_fn = _ACTIVATION_REGISTRY[config.activation_function]
+        tp_size = get_tensor_model_parallel_world_size()
+        disable_tp = config.encoder_attention_heads % tp_size != 0
         self.fc1 = ColumnParallelLinear(
             self.embed_dim,
             config.encoder_ffn_dim,
             bias=True,
+            disable_tp=disable_tp,
             prefix=f"{prefix}.fc1",
         )
         self.fc2 = RowParallelLinear(
             config.encoder_ffn_dim,
             self.embed_dim,
             bias=True,
+            disable_tp=disable_tp,
             prefix=f"{prefix}.fc2",
         )
         self.final_layer_norm = nn.LayerNorm(self.embed_dim)
@@ -1001,7 +1004,7 @@ class Qwen3Omni_VisionTransformer(nn.Module):
 
         # Move cu_seqlens to GPU; grid_thw may be on CPU during profile_run
         # and FA3 vit attention requires cu_seqlens on CUDA.
-        cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
+        cu_seqlens = async_tensor_h2d(cu_seqlens, self.device)
         hidden_states = hidden_states.unsqueeze(1)
         rotary_pos_emb_cos = rotary_pos_emb_cos.to(hidden_states.device)
         rotary_pos_emb_sin = rotary_pos_emb_sin.to(hidden_states.device)
@@ -1574,8 +1577,8 @@ class Qwen3OmniMoeConditionalGenerationMixin(Qwen2_5OmniConditionalGenerationMix
         input_features = audio_input["input_features"]
         # audio_feature_lengths is keep_on_cpu; the audio tower derives
         # device placement from feature_lens, so move it explicitly.
-        audio_feature_lengths = audio_input["audio_feature_lengths"].to(
-            input_features.device, non_blocking=True
+        audio_feature_lengths = async_tensor_h2d(
+            audio_input["audio_feature_lengths"], input_features.device
         )
 
         audio_output_lengths = _get_feat_extract_output_lengths(audio_feature_lengths)

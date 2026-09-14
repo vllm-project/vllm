@@ -5,3 +5,4 @@ self-hosted-runner:
     - vllm-runners
     # Not yet in actionlint's known-label set.
     - macos-26
+    - ubuntu-slim

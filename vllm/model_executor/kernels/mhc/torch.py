@@ -3,6 +3,48 @@
 import torch
 
 
+def mhc_pre_delayed_torch(
+    residual: torch.Tensor,
+    fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    rms_eps: float,
+    hc_pre_eps: float,
+    hc_sinkhorn_eps: float,
+    hc_post_mult_value: float,
+    sinkhorn_repeat: int,
+    pre_mix: torch.Tensor | None = None,
+    x: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Reference for mHC pre using coefficients from the previous sublayer."""
+    hc_mult = residual.shape[1]
+    x = (residual.flatten(1) if x is None else x).float()
+    mixes = (x @ fn.t()) * torch.rsqrt(x.square().mean(-1, keepdim=True) + rms_eps)
+    pre = (
+        torch.sigmoid(mixes[:, :hc_mult] * hc_scale[0] + hc_base[:hc_mult]) + hc_pre_eps
+    )
+    post = (
+        torch.sigmoid(
+            mixes[:, hc_mult : 2 * hc_mult] * hc_scale[1]
+            + hc_base[hc_mult : 2 * hc_mult]
+        )
+        * hc_post_mult_value
+    )
+    comb = mixes[:, 2 * hc_mult :].view(-1, hc_mult, hc_mult) * hc_scale[2]
+    comb = comb + hc_base[2 * hc_mult :].view(1, hc_mult, hc_mult)
+    comb = torch.softmax(comb, dim=-1) + hc_sinkhorn_eps
+    comb = comb / (comb.sum(dim=-2, keepdim=True) + hc_sinkhorn_eps)
+    for _ in range(sinkhorn_repeat - 1):
+        comb = comb / (comb.sum(dim=-1, keepdim=True) + hc_sinkhorn_eps)
+        comb = comb / (comb.sum(dim=-2, keepdim=True) + hc_sinkhorn_eps)
+    layer_input = (
+        residual[:, 0]
+        if pre_mix is None
+        else (pre_mix.unsqueeze(-1) * residual.float()).sum(dim=1).to(residual.dtype)
+    )
+    return post.unsqueeze(-1), comb, layer_input, pre
+
+
 def mhc_pre_torch(
     residual: torch.Tensor,
     fn: torch.Tensor,

@@ -1,8 +1,17 @@
 #!/bin/bash
 
-# This script build the CPU docker image and run the offline inference inside the container.
-# It serves a sanity check for compilation and basic model usage.
-set -ex
+# Run the Arm CPU test suites against the image built by cpu-arm64-image-build.
+set -euxo pipefail
+
+SHARD_ID=${1:?Usage: run-cpu-test-arm.sh SHARD_ID IMAGE}
+IMAGE=${2:?Usage: run-cpu-test-arm.sh SHARD_ID IMAGE}
+if [[ ! "$SHARD_ID" =~ ^[0-2]$ ]]; then
+    echo "SHARD_ID must be 0, 1, or 2" >&2
+    exit 2
+fi
+
+JOB_SUFFIX=${BUILDKITE_JOB_ID:-local-$SHARD_ID}
+CONTAINER_NAME="cpu-test-${JOB_SUFFIX//[^a-zA-Z0-9_.-]/-}"
 
 # allow to bind to different cores
 CORE_RANGE=${CORE_RANGE:-0-31}
@@ -13,26 +22,25 @@ export CMAKE_BUILD_PARALLEL_LEVEL=32
 # Setup cleanup
 remove_docker_container() {
     set -e;
-    docker rm -f cpu-test || true;
+    docker rm -f "$CONTAINER_NAME" || true;
 }
 trap remove_docker_container EXIT
 remove_docker_container
 
-# Try building the docker image
-docker build --tag cpu-test --target vllm-test -f docker/Dockerfile.cpu .
+docker pull "$IMAGE"
 
 # Run the image
-docker run -itd --cpuset-cpus="$CORE_RANGE" --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=16 --env VLLM_CPU_CI_ENV=1 -e E2E_OMP_THREADS="$OMP_CORE_RANGE" --shm-size=4g --name cpu-test cpu-test
+docker run -itd --cpuset-cpus="$CORE_RANGE" --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=16 --env VLLM_CPU_CI_ENV=1 -e E2E_OMP_THREADS="$OMP_CORE_RANGE" --shm-size=4g --name "$CONTAINER_NAME" "$IMAGE"
 
-function cpu_tests() {
-  set -e
-
-  docker exec cpu-test bash -c "
+print_packages() {
+  docker exec "$CONTAINER_NAME" bash -c "
     set -e
     pip list"
+}
 
-  # Run kernel tests
-  docker exec cpu-test bash -c "
+kernel_tests() {
+  set -e
+  docker exec "$CONTAINER_NAME" bash -c "
     set -e
     pytest -x -v -s tests/kernels/test_onednn.py
     pytest -x -v -s tests/kernels/attention/test_cpu_attn.py
@@ -43,32 +51,37 @@ function cpu_tests() {
     pytest -x -v -s tests/kernels/mamba/test_cpu_short_conv.py
     pytest -x -v -s tests/kernels/mamba/test_causal_conv1d.py
     pytest -x -v -s tests/kernels/mamba/test_mamba_ssm.py"
+}
 
-  # skip tests requiring model downloads if HF_TOKEN is not set
-  # due to rate-limits
-  if [ -z "$HF_TOKEN" ]; then
+model_tests() {
+  set -e
+  if [ -z "${HF_TOKEN:-}" ]; then
     echo "Warning: HF_TOKEN is not set. Skipping tests that require model downloads."
     return
   fi
 
-  # offline inference
-  docker exec cpu-test bash -c "
+  docker exec "$CONTAINER_NAME" bash -c "
     set -e
     python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m"
 
-  # Test encoder-decoder and encoder-only models
-  docker exec cpu-test bash -c "
+  docker exec "$CONTAINER_NAME" bash -c "
     set -e
     pytest -x -v -s tests/models/multimodal/generation/test_whisper.py -m cpu_model
     pytest -x -v -s 'tests/models/language/pooling/test_embedding.py::test_models[sentence-transformers/all-MiniLM-L12-v2]'"
 
-  # Run quantized model tests
-  docker exec cpu-test bash -c "
+  docker exec "$CONTAINER_NAME" bash -c "
     set -e
     pytest -x -v -s tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_logprobs"
+}
 
-  # basic online serving
-  docker exec cpu-test bash -c '
+serving_tests() {
+  set -e
+  if [ -z "${HF_TOKEN:-}" ]; then
+    echo "Warning: HF_TOKEN is not set. Skipping tests that require model downloads."
+    return
+  fi
+
+  docker exec "$CONTAINER_NAME" bash -c '
     set -e
     VLLM_CPU_OMP_THREADS_BIND=$E2E_OMP_THREADS vllm serve Qwen/Qwen3-0.6B --max-model-len 2048 &
     server_pid=$!
@@ -81,8 +94,7 @@ function cpu_tests() {
       --endpoint /v1/completions
     kill -s SIGTERM $server_pid &'
 
-  # smoke test for Gated DeltaNet
-  docker exec cpu-test bash -c '
+  docker exec "$CONTAINER_NAME" bash -c '
     set -e
     VLLM_CPU_OMP_THREADS_BIND=$E2E_OMP_THREADS vllm serve Qwen/Qwen3.5-0.8B --max-model-len 2048 &
     server_pid=$!
@@ -94,10 +106,13 @@ function cpu_tests() {
       --num-prompts 20 \
       --endpoint /v1/completions
     kill -s SIGTERM $server_pid &'
-
 }
 
-# All of CPU tests are expected to be finished less than 40 mins.
-export -f cpu_tests
-timeout 2h bash -c cpu_tests
-
+print_packages
+export CONTAINER_NAME
+export -f kernel_tests model_tests serving_tests
+case "$SHARD_ID" in
+  0) timeout 30m bash -c kernel_tests ;;
+  1) timeout 30m bash -c model_tests ;;
+  2) timeout 30m bash -c serving_tests ;;
+esac

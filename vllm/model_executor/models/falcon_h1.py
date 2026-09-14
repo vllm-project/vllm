@@ -449,8 +449,10 @@ class FalconH1Model(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers"
         )
+        # FalconH1ParallelHybrid recomputes residual internally each layer,
+        # it is never threaded across the PP boundary.
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
+            ["hidden_states"], config.hidden_size
         )
         if get_pp_group().is_last_rank:
             self.final_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
