@@ -35,7 +35,7 @@ from vllm.multimodal.inputs import (
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor, xxhash, xxhash_cbor
 from vllm.utils.mem_constants import GiB_bytes
-from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     FreeKVCacheBlockQueue,
@@ -61,6 +61,7 @@ from vllm.v1.hisparse.layout import (
 )
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
+    CircularBufferSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
     HiSparseHotSpec,
@@ -322,6 +323,45 @@ def test_kv_cache_config_selects_only_transferable_groups():
         first_blocks,
         third_blocks,
     )
+
+
+def test_kv_cache_config_selects_prefix_cacheable_groups():
+    """Prefix stores exclude scratch state without changing transfer groups."""
+    full_group = KVCacheGroupSpec(["full"], new_kv_cache_spec())
+    qsa_group = KVCacheGroupSpec(
+        ["qsa"],
+        CircularBufferSpec(
+            block_size=4,
+            num_kv_heads=1,
+            head_size=64,
+            head_size_v=0,
+            dtype=torch.float16,
+        ),
+    )
+    disabled_group = KVCacheGroupSpec(
+        ["disabled"], new_kv_cache_spec(), enable_kv_transfer=False
+    )
+    config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[full_group, qsa_group, disabled_group],
+    )
+    assert config.transfer_group_ids == (0, 1)
+    assert config.select_transfer_block_ids(([1], [2], [3])) == ([1], [2])
+    assert config.prefix_cacheable_group_ids == (0,)
+    assert config.prefix_cacheable_groups == (full_group,)
+
+
+def test_kv_cache_blocks_selects_requested_groups():
+    blocks = KVCacheBlocks(
+        (
+            [KVCacheBlock(1)],
+            [KVCacheBlock(2)],
+            [KVCacheBlock(3)],
+        )
+    )
+
+    assert blocks.get_block_ids(group_ids=(0, 2)) == ([1], [3])
 
 
 def new_sliding_window_spec(
@@ -4095,9 +4135,9 @@ def test_draft_group_not_annotated_without_spec_decode():
 
 
 def test_unidentifiable_draft_with_mamba_warns(caplog_vllm):
-    # No group carries the draft marker, so every consumer falls back to
-    # flagging all groups -- including Mamba ones, which then can never report
-    # a hit. That is silent today; it must at least be visible.
+    # No group carries the draft marker, so consumers fall back to
+    # conservative behavior that silently breaks reuse for Mamba groups.
+    # That must at least be visible.
     groups = get_kv_cache_groups(
         _spec_decode_grouping_config(), _hybrid_specs_with_draft(draft=False)
     )
@@ -4106,7 +4146,20 @@ def test_unidentifiable_draft_with_mamba_warns(caplog_vllm):
     assert "no KV cache group could be identified as the draft model's" in (
         caplog_vllm.text
     )
-    assert "Mamba groups" in caplog_vllm.text
+
+
+def test_unidentifiable_draft_without_mamba_does_not_warn(caplog_vllm):
+    # Pure-attention models degrade gracefully under the consumers'
+    # conservative fallback (a one-block hit drop at most), so the warning
+    # stays silent to avoid noise on every unannotated EAGLE deployment.
+    specs = {
+        "target.attn.0": new_mla_spec(block_size=64),
+        "target.attn.1": new_mla_spec(block_size=64),
+    }
+    groups = get_kv_cache_groups(_spec_decode_grouping_config(), specs)
+
+    assert not any(g.is_eagle_group for g in groups)
+    assert "could be identified as the draft model's" not in caplog_vllm.text
 
 
 def test_no_warning_when_draft_group_is_identified(caplog_vllm):
