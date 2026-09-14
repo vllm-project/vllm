@@ -13,8 +13,8 @@ from vllm import LLM, SamplingParams
 from vllm.inputs import TokensPrompt
 from vllm.platforms import current_platform
 
-from ..models.utils import dummy_hf_overrides
-from ..utils import create_new_process_for_each_test
+from ...models.utils import dummy_hf_overrides
+from ...utils import create_new_process_for_each_test
 
 
 @dataclass(frozen=True)
