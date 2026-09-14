@@ -2182,12 +2182,7 @@ def _warn_if_unannotated_eagle_mamba(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> None:
-    """Warn when the flag-all eagle fallback will silently disable reuse.
-
-    With no group annotated, consumers flag every group as a draft group. That
-    widens a Mamba group's required lookup window to two consecutive chunks,
-    which align-mode checkpointing never produces, so reuse drops to zero with
-    no error and no metric to show it.
+    """Warn when no KV cache group could be identified as the draft model's.
 
     Args:
         vllm_config: Config supplying the speculative method, if any.
@@ -2210,13 +2205,8 @@ def _warn_if_unannotated_eagle_mamba(
         return
     logger.warning(
         "Speculative decoding (method=%s) is enabled but no KV cache group "
-        "could be identified as the draft model's, so every group -- "
-        "including Mamba groups %s -- will be treated as a draft group. A "
-        "Mamba group cannot satisfy the widened lookup window that implies, "
-        "so prefix-cache reuse across requests will be disabled and any "
-        "external KV offload tier will store without ever serving a hit.",
+        "could be identified as the draft model's.",
         spec_config.method,
-        mamba_groups,
     )
 
 

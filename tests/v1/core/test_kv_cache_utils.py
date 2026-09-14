@@ -4135,9 +4135,9 @@ def test_draft_group_not_annotated_without_spec_decode():
 
 
 def test_unidentifiable_draft_with_mamba_warns(caplog_vllm):
-    # No group carries the draft marker, so every consumer falls back to
-    # flagging all groups -- including Mamba ones, which then can never report
-    # a hit. That is silent today; it must at least be visible.
+    # No group carries the draft marker, so consumers fall back to
+    # conservative behavior that silently breaks reuse for Mamba groups.
+    # That must at least be visible.
     groups = get_kv_cache_groups(
         _spec_decode_grouping_config(), _hybrid_specs_with_draft(draft=False)
     )
@@ -4146,7 +4146,20 @@ def test_unidentifiable_draft_with_mamba_warns(caplog_vllm):
     assert "no KV cache group could be identified as the draft model's" in (
         caplog_vllm.text
     )
-    assert "Mamba groups" in caplog_vllm.text
+
+
+def test_unidentifiable_draft_without_mamba_does_not_warn(caplog_vllm):
+    # Pure-attention models degrade gracefully under the consumers'
+    # conservative fallback (a one-block hit drop at most), so the warning
+    # stays silent to avoid noise on every unannotated EAGLE deployment.
+    specs = {
+        "target.attn.0": new_mla_spec(block_size=64),
+        "target.attn.1": new_mla_spec(block_size=64),
+    }
+    groups = get_kv_cache_groups(_spec_decode_grouping_config(), specs)
+
+    assert not any(g.is_eagle_group for g in groups)
+    assert "could be identified as the draft model's" not in caplog_vllm.text
 
 
 def test_no_warning_when_draft_group_is_identified(caplog_vllm):
