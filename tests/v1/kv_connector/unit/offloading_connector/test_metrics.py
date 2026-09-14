@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Mapping
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -21,9 +23,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
 )
 from vllm.v1.kv_offload.base import (
     KV_OFFLOAD_CONFIG_INFO,
+    CanonicalKVCaches,
+    OffloadingConfigInfo,
     OffloadingCounterMetadata,
     OffloadingGaugeMetadata,
     OffloadingHistogramMetadata,
+    OffloadingManager,
+    OffloadingSpec,
+    OffloadingWorker,
 )
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 from vllm.v1.kv_offload.tiering.base import TieringOffloadingMetrics
@@ -805,3 +812,86 @@ def test_scheduler_stats_report_the_info_metric(request_runner):
     assert stats is not None
     assert stats.data[_StatsKey.TYPES][KV_OFFLOAD_CONFIG_INFO] == _MetricType.GAUGE
     assert stats.data[_StatsKey.DATA][KV_OFFLOAD_CONFIG_INFO] == {(): 1}
+
+
+@dataclass(frozen=True)
+class _CPUCacheInfo(OffloadingConfigInfo):
+    num_chunks: int
+    policy: str
+
+
+@dataclass(frozen=True)
+class _FsTierInfo(OffloadingConfigInfo):
+    path: str
+
+
+class _MultiSourceOffloadingSpec(OffloadingSpec):
+    """Spec with a CPU cache and two file-system tiers.
+
+    This is the shape a tiering spec reports once every source publishes its own
+    configuration.
+    """
+
+    def __init__(self):
+        self.extra_config: Mapping[str, Any] = {}
+
+    def get_manager(self) -> OffloadingManager:
+        raise NotImplementedError
+
+    def get_worker(self, kv_caches: CanonicalKVCaches) -> OffloadingWorker:
+        raise NotImplementedError
+
+    @classmethod
+    def config_info_classes(
+        cls, extra_config: Mapping[str, Any]
+    ) -> tuple[tuple[str, type[OffloadingConfigInfo]], ...]:
+        return (("cpu", _CPUCacheInfo), ("fs", _FsTierInfo), ("fs", _FsTierInfo))
+
+    def config_info(self) -> tuple[OffloadingConfigInfo, ...]:
+        return (
+            _CPUCacheInfo(num_chunks=512, policy="lru"),
+            _FsTierInfo(path="/mnt/a"),
+            _FsTierInfo(path="/mnt/b"),
+        )
+
+
+def test_prom_metrics_binds_the_info_labels_of_every_config_source():
+    """The spec class declares the label names in the API-server process, the
+    spec instance reports the values in the engine process, and Prometheus binds
+    the two by position."""
+    with patch.object(
+        OffloadingSpecFactory,
+        "get_spec_cls",
+        return_value=_MultiSourceOffloadingSpec,
+    ):
+        prom_metrics = OffloadPromMetrics(
+            vllm_config=_FakeVllmConfig(store_threshold=0),  # type: ignore[arg-type]
+            metric_types={
+                Gauge: _FakeMetric,
+                Counter: _FakeMetric,
+                Histogram: _FakeMetric,
+            },
+            labelnames=["model_name", "engine"],
+            per_engine_labelvalues={0: ["model", "0"]},
+        )
+
+    gauge_def = prom_metrics._offloading_metric_defs[KV_OFFLOAD_CONFIG_INFO]
+    assert gauge_def.kwargs["labelnames"] == [
+        "model_name",
+        "engine",
+        "cpu0_num_chunks",
+        "cpu0_policy",
+        "fs1_path",
+        "fs2_path",
+    ]
+
+    stats = OffloadingConnectorStats()
+    stats.set_gauge(
+        KV_OFFLOAD_CONFIG_INFO, 1, _MultiSourceOffloadingSpec().info_labelvalues()
+    )
+    prom_metrics.observe(stats.data)
+
+    labelvalues = ("512", "lru", "/mnt/a", "/mnt/b")
+    gauge = prom_metrics.offloading_metrics[(0, KV_OFFLOAD_CONFIG_INFO, labelvalues)]
+    assert gauge.set_values == [1]
+    assert gauge.labelvalues == ("model", "0") + labelvalues
