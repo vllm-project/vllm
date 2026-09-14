@@ -246,6 +246,7 @@ class ReqMeta:
     remote_block_size: int | None = None
     # Remote producer pipeline-parallel size (push mode, D side).
     pp_size: int = 1
+    hisparse_host_block_ids: list[int] | None = None
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):
@@ -274,6 +275,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         self,
         local_block_ids: BlockIds,
         kv_transfer_params: dict[str, Any],
+        hisparse_host_block_ids: list[int] | None = None,
         local_num_computed_blocks: tuple[int, ...] = (),
     ) -> ReqMeta:
         return ReqMeta(
@@ -284,6 +286,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             dcp_size=kv_transfer_params.get("dcp_size", 1),
             remote_block_size=kv_transfer_params.get("remote_block_size"),
             pp_size=kv_transfer_params.get("pp_size", 1),
+            hisparse_host_block_ids=hisparse_host_block_ids,
             local_num_computed_blocks=local_num_computed_blocks,
         )
 
@@ -302,11 +305,13 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         request_id: ReqId,
         local_block_ids: BlockIds,
         kv_transfer_params: dict[str, Any],
+        hisparse_host_block_ids: list[int] | None = None,
         local_num_computed_blocks: tuple[int, ...] = (),
     ):
         req = self._add_new_req(
             local_block_ids,
             kv_transfer_params,
+            hisparse_host_block_ids,
             local_num_computed_blocks,
         )
         req.remote = RemoteMeta(
