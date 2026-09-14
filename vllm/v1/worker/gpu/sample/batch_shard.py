@@ -352,7 +352,6 @@ def _pack_sampler_output_kernel(
     num_sampled_ptr,
     num_rejected_ptr,
     num_nans_ptr,
-    local_cu_num_logits_ptr,
     max_num_logits_per_req,
     num_src_cols,
     BLOCK_SIZE: tl.constexpr,
@@ -372,15 +371,8 @@ def _pack_sampler_output_kernel(
     num_rejected = tl.load(num_rejected_ptr + req_idx)
     tl.store(row_ptr + max_num_logits_per_req + 1, num_rejected.to(tl.int64))
     if num_nans_ptr is not None:
-        # num_nans is per logits row; reduce it per request. The replicated
-        # samplers report per-row counts that downstream zips per request,
-        # so a per-request sum is the well-defined equivalent.
-        start = tl.load(local_cu_num_logits_ptr + req_idx)
-        num_req_logits = tl.load(local_cu_num_logits_ptr + req_idx + 1) - start
-        nans = tl.load(num_nans_ptr + start + cols, mask=cols < num_req_logits, other=0)
-        tl.store(
-            row_ptr + max_num_logits_per_req + 2, tl.sum(nans.to(tl.int64), axis=0)
-        )
+        num_nans = tl.load(num_nans_ptr + req_idx)
+        tl.store(row_ptr + max_num_logits_per_req + 2, num_nans.to(tl.int64))
 
 
 @triton.jit(do_not_specialize=["max_num_logits_per_req", "gathered_stride"])
@@ -627,7 +619,6 @@ def gather_sampler_output(
             local_output.num_sampled,
             local_output.num_rejected,
             local_output.num_nans if gather_num_nans else None,
-            local_batch.cu_num_logits if gather_num_nans else None,
             max_num_logits_per_req,
             num_src_cols,
             BLOCK_SIZE=block_size,

@@ -78,6 +78,8 @@ logger = init_logger(__name__)
 
 
 class Scheduler(SchedulerInterface):
+    enable_nan_fault_tolerance = False
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -335,6 +337,9 @@ class Scheduler(SchedulerInterface):
 
         self.has_mamba_layers = kv_cache_config.has_mamba_layers
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
+        self.enable_nan_fault_tolerance = (
+            self.parallel_config.fault_tolerance_config.enable_nan_fault_tolerance
+        )
         # Blocks that async KV loads will overwrite this step, skipped from
         # zeroing since the zeroing could race the out-of-band write.
         self._skip_zero_block_ids: set[int] = set()
@@ -731,6 +736,7 @@ class Scheduler(SchedulerInterface):
                         request,
                         num_new_tokens,
                         num_lookahead_tokens=self.num_lookahead_tokens,
+                        delay_cache_blocks=self.enable_nan_fault_tolerance,
                     )
 
                     if new_blocks is not None:
@@ -1164,7 +1170,13 @@ class Scheduler(SchedulerInterface):
                     new_computed_blocks=new_computed_blocks,
                     num_lookahead_tokens=effective_lookahead_tokens,
                     num_external_computed_tokens=num_external_computed_tokens,
-                    delay_cache_blocks=load_kv_async,
+                    # NaN fault tolerance must not expose KV blocks to prefix
+                    # cache lookups until the corresponding forward has been
+                    # validated. Async scheduling may enqueue another batch
+                    # before this batch's output is processed.
+                    delay_cache_blocks=(
+                        load_kv_async or self.enable_nan_fault_tolerance
+                    ),
                     num_encoder_tokens=num_encoder_tokens,
                     full_sequence_must_fit=self.scheduler_reserve_full_isl,
                     reserved_blocks=reserved_blocks,
@@ -1942,6 +1954,8 @@ class Scheduler(SchedulerInterface):
         # to avoid expensive operations inside the loop.
         stopped_running_reqs: set[Request] = set()
         stopped_preempted_reqs: set[Request] = set()
+        nan_abort_req_ids: set[str] = set()
+        nan_block_ids_to_evict: set[int] = set()
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             request = self.requests.get(req_id)
@@ -2031,6 +2045,21 @@ class Scheduler(SchedulerInterface):
             status_before_stop = request.status
             num_output_tokens_before = len(request._output_token_ids)
 
+            # NaN abort must happen before check_stop/_free_request so
+            # get_block_ids still returns the request's blocks.
+            if num_nans_in_logits is not None and req_id in num_nans_in_logits:
+                request.num_nans_in_logits = num_nans_in_logits[req_id]
+                if self.enable_nan_fault_tolerance and request.num_nans_in_logits > 0:
+                    logger.warning(
+                        "Request %s aborted: %d NaN values in logits",
+                        req_id,
+                        request.num_nans_in_logits,
+                    )
+                    nan_abort_req_ids.add(req_id)
+                    for group in self.kv_cache_manager.get_block_ids(req_id):
+                        nan_block_ids_to_evict.update(group)
+                    continue
+
             # Check for stop and update request status.
             if new_token_ids:
                 new_token_ids, stopped = self._update_request_with_output(
@@ -2051,6 +2080,20 @@ class Scheduler(SchedulerInterface):
                 # a consumed prompt also means every item in it was encoded.
                 request.status = RequestStatus.FINISHED_STOPPED
                 stopped = True
+
+            # Publish newly computed KV only after this forward has been
+            # validated. This is essential with async scheduling: the next
+            # batch may already have been launched by the time this output is
+            # consumed, so scheduling-time cache publication is unsafe when a
+            # NaN output can invalidate the blocks.
+            if (
+                status_before_stop == RequestStatus.RUNNING
+                and not output_is_stale
+                and self.enable_nan_fault_tolerance
+            ):
+                self.kv_cache_manager.cache_blocks(
+                    request, self._num_tokens_to_cache_after_output(request)
+                )
 
             if new_token_ids and self.structured_output_manager.should_advance(
                 request, new_token_ids=new_token_ids
@@ -2158,10 +2201,6 @@ class Scheduler(SchedulerInterface):
                     new_sampling_mask = sampling_masks.slice_request(
                         req_index, len(new_token_ids)
                     )
-
-            if num_nans_in_logits is not None and req_id in num_nans_in_logits:
-                request.num_nans_in_logits = num_nans_in_logits[req_id]
-
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             if should_emit_output:
@@ -2210,6 +2249,12 @@ class Scheduler(SchedulerInterface):
             # An encoder input the connector can no longer obtain. Failing is
             # retryable: re-issuing the request re-runs the encode.
             error_req_ids.update(self.ec_connector.take_unavailable_requests())
+        error_req_ids.update(nan_abort_req_ids)
+
+        # Evict NaN-corrupted blocks from the prefix cache before freeing,
+        # mirroring the KV-load-failure recovery path.
+        if nan_block_ids_to_evict:
+            self.kv_cache_manager.evict_blocks(nan_block_ids_to_evict)
 
         if error_req_ids:
             error_reqs = self.finish_requests(
@@ -2223,6 +2268,7 @@ class Scheduler(SchedulerInterface):
                         finish_reason=request.get_finished_reason(),
                         events=request.take_events(),
                         trace_headers=request.trace_headers,
+                        num_nans_in_logits=request.num_nans_in_logits,
                     )
                 )
 
@@ -2378,6 +2424,10 @@ class Scheduler(SchedulerInterface):
                 del new_token_ids[num_new:]  # Trim new tokens if needed.
                 break
         return new_token_ids, stopped
+
+    def _num_tokens_to_cache_after_output(self, request: Request) -> int:
+        """Return the finalized token boundary for post-validation caching."""
+        return request.num_computed_tokens - request.num_in_flight_tokens
 
     def _free_encoder_inputs(self, request: Request) -> None:
         cached_encoder_input_ids = self.encoder_cache_manager.get_cached_input_ids(
