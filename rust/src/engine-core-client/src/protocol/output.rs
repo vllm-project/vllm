@@ -13,6 +13,7 @@ use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 use super::utility::UtilityOutput;
 use crate::error::{Error, Result, ext_value_decode};
 use crate::protocol::logprobs::MaybeWireLogprobs;
+use crate::protocol::sampling_mask::MaybeWireSamplingMask;
 use crate::protocol::stats::{PrefillStats, SchedulerStats};
 use crate::protocol::{OpaqueValue, decode_msgpack};
 
@@ -125,7 +126,7 @@ pub struct EngineCoreOutput {
     #[serde(default)]
     pub mm_cache_miss_hashes: Option<Vec<String>>,
     #[serde(default)]
-    pub new_sampling_mask: Option<OpaqueValue>,
+    pub new_sampling_mask: Option<MaybeWireSamplingMask>,
     /// Per-request speculative-decoding acceptance metrics, set on the final
     /// output when `--per-request-spec-decode-metrics` is enabled. Opaque here;
     /// the Rust frontend does not yet surface it in responses.
@@ -147,6 +148,9 @@ impl EngineCoreOutput {
             .transpose()?;
         self.new_prompt_logprobs_tensors = (self.new_prompt_logprobs_tensors.take())
             .map(|value| value.resolve(frames, "new_prompt_logprobs_tensors"))
+            .transpose()?;
+        self.new_sampling_mask = (self.new_sampling_mask.take())
+            .map(|value| value.resolve(frames, "new_sampling_mask"))
             .transpose()?;
         Ok(())
     }
