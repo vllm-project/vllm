@@ -113,7 +113,7 @@ mkdir -p "$EC_SHARED_STORAGE_PATH"
 #
 # E and P register dynamically; D is configured statically.
 ###############################################################################
-python -m vllm.distributed.ec_transfer.proxy.epd_proxy \
+python "${GIT_ROOT}/examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py" \
     --host "0.0.0.0" \
     --port "$PROXY_PORT" \
     --registry-address "tcp://127.0.0.1:$PROXY_REGISTRY_PORT" \

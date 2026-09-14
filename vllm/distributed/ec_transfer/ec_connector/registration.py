@@ -4,50 +4,22 @@
 
 from __future__ import annotations
 
-import asyncio
 import socket
 import threading
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 import zmq
-import zmq.asyncio
 
-from vllm.distributed.ec_transfer.proxy.registry import (
-    InstanceRecord,
-    InstanceRegistry,
-    InstanceRole,
-)
 from vllm.logger import init_logger
-from vllm.utils.network_utils import get_ip, make_zmq_path
 
 if TYPE_CHECKING:
-    from vllm.config import ECTransferConfig, VllmConfig
+    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
 DEFAULT_ANNOUNCE_INTERVAL = 30.0
 _REQUEST_TIMEOUT_MS = 5000
-
-
-def set_registration_address(args: Any, ec_config: ECTransferConfig) -> None:
-    """Pass the frontend CLI address to workers that register at runtime."""
-    if getattr(args, "uds", None):
-        raise ValueError("EPD registration requires a TCP API server")
-    port = getattr(args, "port", None)
-    if not port:
-        raise ValueError("EPD registration requires an explicit nonzero --port")
-    host = getattr(args, "host", None)
-    if not host or host in ("0.0.0.0", "::"):
-        host = get_ip()
-    scheme = (
-        "https"
-        if getattr(args, "ssl_keyfile", None) and getattr(args, "ssl_certfile", None)
-        else "http"
-    )
-    ec_config.ec_connector_extra_config["_http_address"] = make_zmq_path(
-        scheme, host, port
-    )
 
 
 class ProxyRegistrar:
@@ -118,78 +90,14 @@ class ProxyRegistrar:
             self._thread = None
 
 
-class RegistrationServer:
-    """Receive instance announcements on the proxy event loop."""
-
-    def __init__(self, address: str, registry: InstanceRegistry) -> None:
-        self.address = address
-        self.registry = registry
-        self._socket: zmq.asyncio.Socket | None = None
-        self._task: asyncio.Task | None = None
-
-    def start(self) -> None:
-        context = zmq.asyncio.Context.instance()
-        self._socket = context.socket(zmq.REP)
-        self._socket.setsockopt(zmq.LINGER, 0)
-        self._socket.bind(self.address)
-        self._task = asyncio.create_task(self._serve())
-
-    async def stop(self) -> None:
-        if self._task is not None:
-            self._task.cancel()
-            await asyncio.gather(self._task, return_exceptions=True)
-        if self._socket is not None:
-            self._socket.close()
-
-    async def _serve(self) -> None:
-        assert self._socket is not None
-        while True:
-            try:
-                request = await self._socket.recv_json()
-                result = self._handle(request)
-                await self._socket.send_json({"ok": True, "result": result})
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                await self._socket.send_json({"ok": False, "error": str(error)})
-
-    def _handle(self, request: dict[str, Any]) -> dict[str, Any]:
-        operation = request["operation"]
-        if operation == "unregister":
-            self.registry.unregister(
-                request["url"].rstrip("/"),
-                request.get("engine_id"),
-                request.get("dp_rank"),
-            )
-            return {}
-        if operation == "peers":
-            record = self.registry.find(request["engine_id"], request["dp_rank"])
-            if record is None:
-                raise RuntimeError("EC consumer is not registered")
-            return {"addresses": record.ec_zmq_addrs}
-        if operation != "register":
-            raise ValueError(f"Unknown registration operation: {operation}")
-        self.registry.register(
-            InstanceRecord(
-                role=InstanceRole(request["role"]),
-                url=request["url"].rstrip("/"),
-                ec_zmq_addrs=request.get("ec_zmq_addrs", []),
-                dp_size=request.get("dp_size", 1),
-                engine_id=request.get("engine_id"),
-                dp_rank=request.get("dp_rank"),
-            )
-        )
-        return {}
-
-
-def infer_role(vllm_config: VllmConfig) -> InstanceRole:
+def infer_role(vllm_config: VllmConfig) -> str:
     ec_config = getattr(vllm_config, "ec_transfer_config", None)
     if ec_config is not None and ec_config.is_encode_only:
-        return InstanceRole.ENCODE
+        return "encode"
     kv_config = getattr(vllm_config, "kv_transfer_config", None)
     if kv_config is not None and kv_config.is_kv_producer:
-        return InstanceRole.PREFILL
-    return InstanceRole.DECODE
+        return "prefill"
+    return "decode"
 
 
 def registrar_from_vllm_config(
@@ -209,7 +117,7 @@ def registrar_from_vllm_config(
     return ProxyRegistrar(
         registry_addr,
         {
-            "role": infer_role(vllm_config).value,
+            "role": infer_role(vllm_config),
             "url": url,
             "engine_id": ec_config.engine_id,
             "dp_rank": dp_rank,

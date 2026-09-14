@@ -10,7 +10,7 @@ from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.distributed.ec_transfer.proxy.register import ProxyRegistrar
+    from vllm.distributed.ec_transfer.ec_connector.registration import ProxyRegistrar
 
 _EC_CONNECTOR_AGENT: ECConnectorBase | None = None
 _EC_REGISTRAR: "ProxyRegistrar | None" = None
@@ -45,7 +45,7 @@ def ensure_ec_transfer_initialized(vllm_config: "VllmConfig") -> None:
         if vllm_config.ec_transfer_config.get_from_extra_config(
             "proxy_registry_addr", None
         ):
-            from vllm.distributed.ec_transfer.proxy.register import (
+            from vllm.distributed.ec_transfer.ec_connector.registration import (
                 start_worker_registration,
             )
 

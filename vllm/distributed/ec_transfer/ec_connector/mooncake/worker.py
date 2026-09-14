@@ -49,7 +49,7 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake.transfer import (
     MooncakeTransfer,
     ensure_mooncake_available,
 )
-from vllm.distributed.ec_transfer.proxy.register import (
+from vllm.distributed.ec_transfer.ec_connector.registration import (
     ProxyRegistrar,
     registrar_from_vllm_config,
 )

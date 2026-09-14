@@ -158,7 +158,7 @@ run_epd_1e_1pd() {
     
     # Start the proxy first: it holds the roster the workers register into.
     echo "Starting EPD proxy on port $PROXY_PORT"
-    python -m vllm.distributed.ec_transfer.proxy.epd_proxy --host "0.0.0.0" --port "$PROXY_PORT" \
+    python "${GIT_ROOT}/examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py" --host "0.0.0.0" --port "$PROXY_PORT" \
         --registry-address "tcp://127.0.0.1:$REGISTRY_PORT" \
         > "$LOG_PATH"/epd_proxy.log 2>&1 &
     PIDS+=($!)
@@ -361,7 +361,7 @@ run_epd_1e_1p_1d() {
     
     # E and P register dynamically; D is configured statically.
     echo "Starting EPD proxy on port $PROXY_PORT"
-    python -m vllm.distributed.ec_transfer.proxy.epd_proxy --host "0.0.0.0" --port "$PROXY_PORT" \
+    python "${GIT_ROOT}/examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py" --host "0.0.0.0" --port "$PROXY_PORT" \
         --registry-address "tcp://127.0.0.1:$REGISTRY_PORT" \
         --decode-servers-urls "http://127.0.0.1:$DECODE_PORT" \
         > "$LOG_PATH"/epd_proxy.log 2>&1 &

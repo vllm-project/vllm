@@ -107,7 +107,7 @@ mkdir -p "$EC_SHARED_STORAGE_PATH"
 # Starts first and empty: every worker below registers itself once it is
 # serving, so nothing here has to name them.
 ###############################################################################
-python -m vllm.distributed.ec_transfer.proxy.epd_proxy \
+python "${GIT_ROOT}/examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py" \
     --host "0.0.0.0" \
     --port "$PROXY_PORT" \
     --registry-address "tcp://127.0.0.1:$PROXY_REGISTRY_PORT" \

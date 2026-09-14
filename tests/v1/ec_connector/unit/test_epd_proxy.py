@@ -5,22 +5,24 @@
 import asyncio
 from unittest.mock import AsyncMock, Mock
 
+import msgspec
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from vllm.distributed.ec_transfer.proxy.epd_proxy import (
+from examples.disaggregated.disaggregated_encoder import (
+    disagg_epd_proxy as proxy_module,
+)
+from examples.disaggregated.disaggregated_encoder.disagg_epd_proxy import (
     EPDProxy,
     EPDProxyConfig,
-    build_app,
-    content_uuid,
-    extract_mm_items,
-)
-from vllm.distributed.ec_transfer.proxy.register import RegistrationServer
-from vllm.distributed.ec_transfer.proxy.registry import (
     InstanceRecord,
     InstanceRegistry,
     InstanceRole,
+    RegistrationServer,
+    build_app,
+    content_uuid,
+    extract_mm_items,
 )
 
 ENCODE = InstanceRole.ENCODE
@@ -55,16 +57,16 @@ class TestRouting:
         proxy.registry.register(InstanceRecord(DECODE, "http://d0:8000"))
         assert proxy.route(num_items=0).prefill is None
 
-    def test_one_encoder_is_assigned_per_item(self, proxy):
+    def test_encoder_roster_tracks_new_instances(self, proxy):
         proxy.registry.register(InstanceRecord(DECODE, "http://d0:8000"))
         for index in range(2):
             proxy.registry.register(InstanceRecord(ENCODE, f"http://e{index}:8000"))
-        route = proxy.route(num_items=3)
-        assert [record.url for record in route.encoders] == [
+        assert proxy.route(num_items=3).encoder_urls == [
             "http://e0:8000",
             "http://e1:8000",
-            "http://e0:8000",
         ]
+        proxy.registry.unregister("http://e0:8000")
+        assert proxy.route(num_items=3).encoder_urls == ["http://e1:8000"]
 
     def test_static_decode_requires_a_registered_prefill(self):
         app = build_app(EPDProxyConfig(decode_servers_urls=["http://d0:8000/"]))
@@ -91,7 +93,7 @@ class TestConsumerAddress:
         )
         route = proxy.route(num_items=0)
         assert route.consumer_zmq is None
-        assert proxy._headers(route, "req", route.decode)["X-data-parallel-rank"] == "1"
+        assert route.dp_rank == 1
 
     def test_decode_is_the_consumer_when_prefill_is_not_split_out(self, proxy):
         proxy.registry.register(
@@ -161,7 +163,7 @@ def test_extract_mm_items_finds_media_across_messages():
 
 
 @pytest.mark.parametrize("push", [False, True])
-def test_encoder_handles_and_json_metadata_survive_rewrite(proxy, push):
+def test_encoder_handles_and_json_metadata_survive_rewrite(proxy, push, monkeypatch):
     """Keep main's hash-keyed handles and per-item push IDs after the proxy move."""
     proxy.registry.register(InstanceRecord(ENCODE, "http://encoder"))
     proxy.registry.register(
@@ -174,20 +176,28 @@ def test_encoder_handles_and_json_metadata_survive_rewrite(proxy, push):
     handle = {"metadata": {"image_grid_thw": [[1, 2, 3]]}, "peer_port": 5601}
     response = Mock(
         status=200,
-        json=AsyncMock(return_value={"ec_transfer_params": {"engine-hash": handle}}),
+        read=AsyncMock(
+            return_value=msgspec.json.encode(
+                {"ec_transfer_params": {"engine-hash": handle}}
+            )
+        ),
     )
-    proxy.session = Mock(post=AsyncMock(return_value=response))
+    session = Mock(post=AsyncMock(return_value=response))
+    monkeypatch.setattr(proxy_module, "encode_session", session)
     original = {"messages": [{"role": "user", "content": [IMAGE_ITEM, IMAGE_ITEM]}]}
-    prepared = asyncio.run(
-        proxy._through_encode_and_prefill(original, proxy.route(2), "request")
+    route = proxy.route(2)
+    prepared, _, _ = asyncio.run(
+        proxy_module.prepare_for_decode(
+            original, "request", route.encoder_urls, None, route.consumer_zmq
+        )
     )
     assert "ec_transfer_params" not in original
     assert prepared["ec_transfer_params"][content_uuid(IMAGE_ITEM)] == handle
     items = prepared["ec_transfer_params"]["ec_items"]
     assert [item["mm_hash"] for item in items] == ["engine-hash", "engine-hash"]
     assert items[0]["transfer_id"] != items[1]["transfer_id"]
-    for index, call in enumerate(proxy.session.post.call_args_list):
-        sent = call.kwargs["json"].get("ec_transfer_params")
+    for index, call in enumerate(session.post.call_args_list):
+        sent = msgspec.json.decode(call.kwargs["data"]).get("ec_transfer_params")
         if push:
             assert sent == {
                 "consumer_zmq": "tcp://decode:14579",

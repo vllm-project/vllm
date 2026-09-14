@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from vllm.distributed.ec_transfer.proxy.registry import (
+from examples.disaggregated.disaggregated_encoder.disagg_epd_proxy import (
     InstanceRecord,
     InstanceRegistry,
     InstanceRole,
@@ -35,7 +35,7 @@ async def _probe_round(registry, healthy: set[str], now: float = 0.0):
     with (
         patch.object(InstanceRegistry, "_probe", fake_probe),
         patch(
-            "vllm.distributed.ec_transfer.proxy.registry.time.monotonic",
+            "examples.disaggregated.disaggregated_encoder.disagg_epd_proxy.time.monotonic",
             return_value=now,
         ),
     ):
@@ -151,7 +151,7 @@ class TestSelfRegistration:
             ssl_certfile="cert.pem" if ssl else None,
         )
         with patch(
-            "vllm.distributed.ec_transfer.proxy.register.get_ip",
+            "vllm.utils.network_utils.get_ip",
             return_value="192.0.2.1",
         ):
             config = AsyncEngineArgs.from_cli_args(args).ec_transfer_config
@@ -201,7 +201,7 @@ class TestSelfRegistration:
         )
 
     def test_a_statically_wired_deployment_announces_nothing(self):
-        from vllm.distributed.ec_transfer.proxy import register as mod
+        from vllm.distributed.ec_transfer.ec_connector import registration as mod
 
         with patch.object(mod.ProxyRegistrar, "start"):
             assert mod.start_worker_registration(self._state().vllm_config) is None
@@ -213,7 +213,7 @@ class TestSelfRegistration:
             )
 
     def test_an_instance_with_no_ec_role_does_not_register(self):
-        from vllm.distributed.ec_transfer.proxy import register as mod
+        from vllm.distributed.ec_transfer.ec_connector import registration as mod
 
         state = self._state(
             ec_extra={
@@ -228,7 +228,7 @@ class TestSelfRegistration:
     @pytest.mark.parametrize("backend", ["ECExampleConnector", "ECCPUConnector"])
     def test_worker_registration_is_owned_by_one_rank(self, rank, backend):
         from vllm.distributed.ec_transfer import ec_transfer_state as state_mod
-        from vllm.distributed.ec_transfer.proxy import register as mod
+        from vllm.distributed.ec_transfer.ec_connector import registration as mod
 
         config = self._state(
             ec_role="ec_consumer",
@@ -257,11 +257,11 @@ class TestSelfRegistration:
             factory.return_value.shutdown.assert_called_once()
 
     def test_roles_follow_what_the_instance_was_configured_to_do(self):
-        from vllm.distributed.ec_transfer.proxy.register import infer_role
+        from vllm.distributed.ec_transfer.ec_connector.registration import infer_role
 
         encode = self._state(ec_role="ec_producer").vllm_config
-        assert infer_role(encode) is InstanceRole.ENCODE
+        assert infer_role(encode) == InstanceRole.ENCODE
         prefill = self._state(ec_role="ec_consumer", kv_role="kv_producer").vllm_config
-        assert infer_role(prefill) is InstanceRole.PREFILL
+        assert infer_role(prefill) == InstanceRole.PREFILL
         decode = self._state(kv_role="kv_consumer").vllm_config
-        assert infer_role(decode) is InstanceRole.DECODE
+        assert infer_role(decode) == InstanceRole.DECODE

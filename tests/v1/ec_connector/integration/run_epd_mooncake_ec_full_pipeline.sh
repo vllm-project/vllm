@@ -189,7 +189,7 @@ run_epd_mooncake() {
   cleanup_instances
 
   echo "Starting EPD proxy on $ENDPOINT_PORT"
-  "$PYTHON_BIN" -m vllm.distributed.ec_transfer.proxy.epd_proxy \
+  "$PYTHON_BIN" "${GIT_ROOT}/examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py" \
     --host "0.0.0.0" \
     --port "$ENDPOINT_PORT" \
     --registry-address "$EPD_REGISTRY_ADDR" \

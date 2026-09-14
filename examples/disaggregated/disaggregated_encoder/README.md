@@ -99,10 +99,14 @@ If you run a separate prefill instance, you will need --kv-transfer-config to fa
 
 ## Proxy
 
+All proxy logic lives in `disagg_epd_proxy.py`. Without `--registry-address`,
+the existing static `--encode-servers-urls`, `--prefill-servers-urls`, and
+`--decode-servers-urls` configuration remains available.
+
 Start the proxy first, with no topology:
 
 ```bash
-python -m vllm.distributed.ec_transfer.proxy.epd_proxy \
+python examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py \
     --port 8000 --registry-address tcp://proxy-host:14580
 ```
 
