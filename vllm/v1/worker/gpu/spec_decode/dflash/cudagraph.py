@@ -66,6 +66,7 @@ def _prepare_dflash_inputs_to_capture(
             kv_cache_config=kv_cache_config,
             for_cudagraph_capture=True,
             causal=causal,
+            replay_start=input_batch.replay_start,
         )
     return AttentionState(attn_metadata, slot_mappings_by_layer)
 
