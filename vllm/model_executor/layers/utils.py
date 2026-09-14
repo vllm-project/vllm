@@ -252,7 +252,7 @@ def use_aiter_triton_gemm(n, m, k, dtype):
 def rocm_unquantized_gemm_impl(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
-    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx950, on_gfx1250
+    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx950, on_gfx1151, on_gfx1250
 
     n = x.numel() // x.size(-1)
     m = weight.shape[0]
@@ -307,6 +307,20 @@ def rocm_unquantized_gemm_impl(
         from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
 
         return gemm_a16w16(x, weight, bias)
+
+    if (
+        envs.VLLM_ROCM_USE_SKINNY_GEMM
+        and on_gfx1151()
+        and m == 1
+        and n == 1
+        and x.dtype in [torch.float16, torch.bfloat16]
+    ):
+        x_flat = x.reshape(-1)
+        w_flat = weight.reshape(-1)
+        out = (x_flat * w_flat).sum(dtype=x.dtype)
+        if bias is not None:
+            out = out + bias.reshape(-1)[0]
+        return out.reshape(*x.shape[:-1], 1)
 
     use_skinny = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
