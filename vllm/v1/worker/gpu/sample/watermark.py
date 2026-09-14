@@ -288,6 +288,28 @@ def _philox_gumbel_from_logits(logits, word):
 
 
 @triton.jit
+def philox_context_uniform(
+    contexts_row_ptr,
+    key_0,
+    key_1,
+    CONTEXT_WIDTH: tl.constexpr,
+):
+    state_0, state_1, state_2, state_3 = _philox_context_state(
+        contexts_row_ptr, key_0, key_1, CONTEXT_WIDTH
+    )
+    output_0, _, _, _ = _philox_candidate_words(
+        tl.full((), 0, tl.uint32),
+        state_0,
+        state_1,
+        state_2,
+        state_3,
+        key_0,
+        key_1,
+    )
+    return _uint32_to_uniform(output_0)
+
+
+@triton.jit
 def _gumbel_value(logits_ptr, output, mask):
     logits = tl.load(logits_ptr, mask=mask, other=float("-inf")).to(tl.float32)
     return _philox_gumbel_from_logits(logits, output)

@@ -102,6 +102,48 @@ def test_dual_key_detector_default_alpha():
     assert DualKeyGumbelWatermarkDetector(key=42).alpha == 0.2
 
 
+def test_dual_key_detector_routes_scores_with_the_acceptance_stream():
+    token_ids = [1, 2, 3, 4, 5, 6]
+    detector = DualKeyGumbelWatermarkDetector(
+        key=42,
+        context_width=1,
+        deduplicate_contexts=False,
+        acceptance_threshold=0.5,
+    )
+    contexts, targets = detector._prepare_inputs(token_ids)
+    scores = torch.stack(
+        [
+            -torch.log1p(
+                -prf.uniform(contexts, targets.unsqueeze(-1))
+                .squeeze(-1)
+                .to(torch.float64)
+            )
+            for prf in (detector.prf, detector.key_b_prf)
+        ],
+        dim=-1,
+    )
+    acceptance_uniforms = detector.acceptance_prf.uniform(
+        contexts, torch.zeros_like(targets).unsqueeze(-1)
+    ).squeeze(-1)
+    expected_scores = torch.where(acceptance_uniforms < 0.5, scores[:, 0], scores[:, 1])
+
+    detection = detector.detect(token_ids)
+
+    assert torch.any(acceptance_uniforms < 0.5)
+    assert torch.any(acceptance_uniforms >= 0.5)
+    assert detection.score == pytest.approx(expected_scores.sum().item())
+    assert detection.p_value == pytest.approx(
+        _gamma_survival_integer_shape(detection.score, detection.num_scored_tokens)
+    )
+
+
+def test_dual_key_detector_rejects_invalid_acceptance_threshold():
+    with pytest.raises(
+        ValueError, match="acceptance_threshold must be between 0 and 1"
+    ):
+        DualKeyGumbelWatermarkDetector(key=42, acceptance_threshold=1.1)
+
+
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
 )

@@ -4,7 +4,10 @@ import torch
 
 from vllm.triton_utils import tl, tldevice, triton
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_block_argmax, tl_rand32
-from vllm.v1.worker.gpu.sample.watermark import philox_gumbel_block_argmax
+from vllm.v1.worker.gpu.sample.watermark import (
+    philox_context_uniform,
+    philox_gumbel_block_argmax,
+)
 
 
 @triton.jit
@@ -533,11 +536,18 @@ def _rejection_kernel(
     # [num_logits, num_blocks]
     local_residual_mass_ptr,
     local_residual_mass_stride,
+    contexts_ptr,
+    contexts_stride,
+    watermarking_ptr,
+    acceptance_key_0,
+    acceptance_key_1,
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
     SYNTHETIC_MODE: tl.constexpr,
     USE_BLOCK_VERIFICATION: tl.constexpr,
+    CONTEXT_WIDTH: tl.constexpr,
+    KEYED_ACCEPTANCE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx).to(tl.int64)
@@ -568,6 +578,22 @@ def _rejection_kernel(
         if verifying:
             pos = tl.load(pos_ptr + logit_idx)
             u = tl_rand32(seed, pos, includes_zero=False)
+            if KEYED_ACCEPTANCE:
+                is_watermarked = (
+                    tl.load(
+                        watermarking_ptr + req_state_idx,
+                        mask=req_state_idx >= 0,
+                        other=0,
+                    )
+                    != 0
+                )
+                if is_watermarked & (not is_greedy):
+                    u = philox_context_uniform(
+                        contexts_ptr + logit_idx * contexts_stride,
+                        acceptance_key_0.to(tl.uint32),
+                        acceptance_key_1.to(tl.uint32),
+                        CONTEXT_WIDTH,
+                    )
             if is_greedy:
                 # Greedy sampling. Accept IFF draft matches target argmax.
                 # NOTE: Target argmax is stored directly so that resampling
@@ -1009,6 +1035,7 @@ def rejection_sample(
     contexts: torch.Tensor | None = None,
     watermarking: torch.Tensor | None = None,
     watermark_key: int | None = None,
+    acceptance_key: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
     assert draft_logits is None or (
@@ -1026,6 +1053,9 @@ def rejection_sample(
     watermarking_bytes: torch.Tensor | None = None
     watermark_key_0 = 0
     watermark_key_1 = 0
+    acceptance_key_0 = 0
+    acceptance_key_1 = 0
+    assert acceptance_key is None or watermark
     if contexts is not None:
         assert watermarking is not None and watermark_key is not None
         assert contexts.ndim == 2 and contexts.shape[0] == num_logits
@@ -1040,6 +1070,9 @@ def rejection_sample(
         watermarking_bytes = watermarking.view(torch.uint8)
         watermark_key_0 = watermark_key & 0xFFFFFFFF
         watermark_key_1 = watermark_key >> 32
+        if acceptance_key is not None:
+            acceptance_key_0 = acceptance_key & 0xFFFFFFFF
+            acceptance_key_1 = acceptance_key >> 32
     draft_logits_stride_0 = 0
     draft_logits_stride_1 = 0
     if has_draft_logits := draft_logits is not None:
@@ -1211,11 +1244,18 @@ def rejection_sample(
         cumulative_log_p,
         local_residual_mass,
         local_residual_mass.stride(0) if local_residual_mass is not None else 0,
+        contexts,
+        contexts_stride,
+        watermarking_bytes,
+        acceptance_key_0,
+        acceptance_key_1,
         vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
         HAS_DRAFT_LOGITS=has_draft_logits,
         SYNTHETIC_MODE=synthetic_conditional_rates is not None,
         USE_BLOCK_VERIFICATION=use_block_verification,
+        CONTEXT_WIDTH=context_width,
+        KEYED_ACCEPTANCE=acceptance_key is not None,
         num_warps=1,
     )
 

@@ -23,6 +23,7 @@ from vllm.v1.watermarking.spec_decode import (
     _resolve_watermark_key,
     create_speculative_draft_watermarker,
     create_speculative_target_watermarker,
+    speculative_acceptance_watermark_key,
     speculative_target_watermark_key,
 )
 from vllm.v1.watermarking.watermarker import Watermarker, WatermarkSample
@@ -122,7 +123,8 @@ def test_dual_key_watermarker_uses_domain_separated_keys():
     assert watermarker.alpha == 0.1
     assert draft.prf.key == derive_watermark_key(42, b"key_a")
     assert target.prf.key == derive_watermark_key(42, b"key_b")
-    assert target.prf.key != draft.prf.key
+    assert watermarker.acceptance_key == derive_watermark_key(42, b"acceptance")
+    assert len({draft.prf.key, target.prf.key, watermarker.acceptance_key}) == 3
 
 
 def test_dual_key_watermarker_routes_tokens_with_alpha():
@@ -233,6 +235,21 @@ def test_config_key_resolution_matches_the_model_runner(algorithm: str):
 
 def test_config_key_resolution_returns_none_when_watermarking_is_disabled():
     assert speculative_target_watermark_key(None) is None
+    assert speculative_acceptance_watermark_key(None) is None
+
+
+def test_acceptance_key_resolution_is_limited_to_dual_key_watermarking():
+    assert speculative_acceptance_watermark_key(
+        WatermarkConfig(algorithm="dual_key_gumbel", key=42)
+    ) == derive_watermark_key(42, b"acceptance")
+    assert (
+        speculative_acceptance_watermark_key(
+            WatermarkConfig(
+                algorithm="gumbel", key=42, allow_target_only_watermarking=True
+            )
+        )
+        is None
+    )
 
 
 def test_target_only_speculative_watermarking_skips_draft_watermarker():
@@ -260,6 +277,7 @@ def test_target_only_speculative_watermarking_skips_draft_watermarker():
 def test_dual_key_derivation_is_stable():
     assert derive_watermark_key(32, b"key_a") == 16368605726115524094
     assert derive_watermark_key(32, b"key_b") == 4799302812959726346
+    assert derive_watermark_key(32, b"acceptance") == 5531831157947172955
 
 
 def test_sampling_params_can_disable_watermarking():

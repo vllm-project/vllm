@@ -82,11 +82,14 @@ class RejectionSampler:
         device: torch.device,
         *,
         watermark_key: int | None = None,
+        acceptance_key: int | None = None,
     ):
         self.sampler = sampler
         self.watermark_key = watermark_key
+        self.acceptance_key = acceptance_key
         if watermark_key is not None:
             assert isinstance(sampler, GPUWatermarkSampler)
+        assert acceptance_key is None or watermark_key is not None
         self.num_speculative_steps = spec_config.num_speculative_tokens
         self.enable_adaptive_verification = spec_config.enable_adaptive_verification
         rejection_sample_method = spec_config.rejection_sample_method
@@ -163,6 +166,7 @@ class RejectionSampler:
             ),
             "watermarking": self.sampler.watermarking.gpu,
             "watermark_key": self.watermark_key,
+            "acceptance_key": self.acceptance_key,
         }
 
     def _verify(

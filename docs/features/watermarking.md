@@ -140,17 +140,27 @@ vllm serve MODEL \
 
 ### Dual-key Gumbel-max
 
-Dual-key Gumbel-max derives independent keys A and B from one configured master
-key. During ordinary generation, each token uses key A with probability
-`1 - alpha` and key B with probability `alpha`. The algorithm-specific `alpha`
-parameter defaults to 0.1. Detection scores every token against both keys.
+Dual-key Gumbel-max derives independent draft, target, and acceptance streams
+from one configured master key. During ordinary generation, each token uses key
+A with probability `1 - alpha` and key B with probability `alpha`. The
+algorithm-specific `alpha` parameter defaults to 0.1. Detection scores every
+token against both keys.
 
-The same two key streams support speculative decoding without changing its
-acceptance rate. In this mode, the speculative protocol selects the key instead
-of `alpha`: draft tokens use key A, while rejection recovery and bonus tokens
-use key B. The ordinary target-to-draft probability-ratio test remains unchanged,
-implementing [SynthID-Text Supplementary Algorithm
+The same streams support speculative decoding without changing its acceptance
+rate. In this mode, the speculative protocol selects the token key instead of
+`alpha`: draft tokens use key A, while rejection recovery and bonus tokens use
+key B. The target-to-draft probability-ratio test remains unchanged, but its
+uniform acceptance coin comes from the independent acceptance stream. This
+follows [pseudorandom acceptance](https://arxiv.org/abs/2602.01428) applied to
+[SynthID-Text Supplementary Algorithm
 6](https://media.springernature.com/original/springer-static/esm/art%3A10.1038%2Fs41586-024-08025-4/MediaObjects/41586_2024_8025_MOESM1_ESM.pdf).
+
+`DualKeyGumbelWatermarkDetector` can use that stream to choose one token score
+instead of averaging both scores. Pass an `acceptance_threshold` calibrated on
+held-out watermarked and unwatermarked text at the desired false-positive rate.
+The threshold is a statistical source classifier, not the actual token-specific
+acceptance ratio; target bonus tokens also have no acceptance decision. Omitting
+the threshold retains weighted score fusion through the detector's `alpha`.
 
 Select `dual_key_gumbel` together with probabilistic drafting:
 

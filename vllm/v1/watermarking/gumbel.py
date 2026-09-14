@@ -115,6 +115,8 @@ class DualKeyGumbelWatermarker(Watermarker, SupportsSpeculativeDecoding):
         self.target_watermarker = GumbelWatermarker(
             derive_watermark_key(key, b"key_b"), context_width, prf
         )
+        self.acceptance_key = derive_watermark_key(key, b"acceptance")
+        self.acceptance_prf = create_prf(prf, self.acceptance_key)
         self._routing_logits_cache: dict[torch.device, torch.Tensor] = {}
 
     def _routing_logits(self, device: torch.device) -> torch.Tensor:
@@ -205,9 +207,11 @@ class GumbelWatermarkDetector(WatermarkDetector):
 
 
 class DualKeyGumbelWatermarkDetector(GumbelWatermarkDetector):
-    """Detect a dual-key watermark with weighted early fusion.
+    """Detect a dual-key watermark with weighted or acceptance-routed scores.
 
-    ``alpha`` is the weight assigned to key B; key A receives ``1 - alpha``.
+    ``alpha`` is the weight assigned to key B when ``acceptance_threshold`` is
+    unset. A calibrated acceptance threshold instead routes each token to key A
+    or key B using the independently keyed acceptance uniform.
     """
 
     def __init__(
@@ -218,9 +222,12 @@ class DualKeyGumbelWatermarkDetector(GumbelWatermarkDetector):
         prf: WatermarkPRFName = "philox",
         deduplicate_contexts: bool = True,
         alpha: float = 0.2,
+        acceptance_threshold: float | None = None,
     ) -> None:
         if not 0 <= alpha <= 1:
             raise ValueError("alpha must be between 0 and 1")
+        if acceptance_threshold is not None and not 0 <= acceptance_threshold <= 1:
+            raise ValueError("acceptance_threshold must be between 0 and 1")
         super().__init__(
             derive_watermark_key(key, b"key_a"),
             context_width,
@@ -229,7 +236,9 @@ class DualKeyGumbelWatermarkDetector(GumbelWatermarkDetector):
             deduplicate_contexts,
         )
         self.key_b_prf = create_prf(prf, derive_watermark_key(key, b"key_b"))
+        self.acceptance_prf = create_prf(prf, derive_watermark_key(key, b"acceptance"))
         self.alpha = alpha
+        self.acceptance_threshold = acceptance_threshold
 
     def _score_tokens(
         self, contexts: torch.Tensor, targets: torch.Tensor
@@ -245,10 +254,22 @@ class DualKeyGumbelWatermarkDetector(GumbelWatermarkDetector):
             ],
             dim=-1,
         )
-        weights = scores.new_tensor([1 - self.alpha, self.alpha])
-        return scores @ weights
+        if self.acceptance_threshold is None:
+            weights = scores.new_tensor([1 - self.alpha, self.alpha])
+            return scores @ weights
+
+        acceptance_uniforms = self.acceptance_prf.uniform(
+            contexts, torch.zeros_like(targets).unsqueeze(-1)
+        ).squeeze(-1)
+        return torch.where(
+            acceptance_uniforms < self.acceptance_threshold,
+            scores[:, 0],
+            scores[:, 1],
+        )
 
     def _get_p_value(self, score: float, num_scored_tokens: int) -> float:
+        if self.acceptance_threshold is not None:
+            return _gamma_survival_integer_shape(score, num_scored_tokens)
         variance = (1 - self.alpha) ** 2 + self.alpha**2
         if self.alpha in (0, 0.5, 1):
             return _gamma_survival_integer_shape(

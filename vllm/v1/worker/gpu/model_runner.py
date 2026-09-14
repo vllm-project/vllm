@@ -81,6 +81,7 @@ from vllm.v1.watermarking import create_watermarker
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.watermarking.spec_decode import (
     create_speculative_target_watermarker,
+    speculative_acceptance_watermark_key,
     speculative_target_watermark_key,
 )
 from vllm.v1.worker.block_table import get_block_table_width
@@ -499,6 +500,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.speculative_config,
                     self.device,
                     watermark_key=speculative_target_watermark_key(
+                        self.vllm_config.watermark_config
+                    ),
+                    acceptance_key=speculative_acceptance_watermark_key(
                         self.vllm_config.watermark_config
                     ),
                 )

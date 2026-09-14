@@ -6,7 +6,7 @@ import math
 import pytest
 import torch
 
-from vllm.v1.watermarking import GumbelWatermarker
+from vllm.v1.watermarking import DualKeyGumbelWatermarker, GumbelWatermarker
 from vllm.v1.watermarking.spec_decode import watermarked_rejection_sample
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.watermark import philox_gumbel_sample
@@ -169,6 +169,41 @@ def test_watermarked_bonus_uses_target_key():
 
     assert num_sampled.item() == 2
     assert sampled[0, 1] == expected.token_ids[0]
+
+
+def test_dual_key_watermark_uses_keyed_acceptance_coin():
+    draft_probs = torch.tensor([0.5, 0.5], device="cuda")
+    draft_logits = draft_probs.log()
+    contexts = torch.tensor([[10, 11], [11, 0]], dtype=torch.int64, device="cuda")
+    watermarker = DualKeyGumbelWatermarker(key=42, context_width=2)
+    acceptance_uniform = watermarker.acceptance_prf.uniform(
+        contexts[:1].cpu(), torch.zeros((1, 1), dtype=torch.int64)
+    ).item()
+
+    for expected_accepted, ratio in (
+        (True, (acceptance_uniform + 1) / 2),
+        (False, acceptance_uniform / 2),
+    ):
+        target_prob = draft_probs[0] * ratio
+        target_probs = torch.stack((target_prob, 1 - target_prob))
+        inputs = _build_rejection_sample_inputs(
+            target_probs.log(),
+            draft_logits,
+            num_speculative_steps=1,
+            temperature=1.0,
+            num_trials=1,
+        )
+        inputs["draft_sampled"][1] = 0
+
+        _, num_sampled = watermarked_rejection_sample(
+            **inputs,
+            num_speculative_steps=1,
+            contexts=contexts,
+            watermarking=torch.tensor([True], device="cuda"),
+            watermarker=watermarker,
+        )
+
+        assert (num_sampled.item() == 2) is expected_accepted
 
 
 def test_watermarked_recovery_uses_target_key():

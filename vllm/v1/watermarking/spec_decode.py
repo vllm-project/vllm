@@ -3,9 +3,12 @@
 
 import torch
 
-from vllm.config.watermarking import WatermarkConfig
+from vllm.config.watermarking import WatermarkConfig, derive_watermark_key
 from vllm.v1.watermarking.factory import create_watermarker
-from vllm.v1.watermarking.gumbel import GumbelWatermarker
+from vllm.v1.watermarking.gumbel import (
+    DualKeyGumbelWatermarker,
+    GumbelWatermarker,
+)
 from vllm.v1.watermarking.prfs import PhiloxPRF
 from vllm.v1.watermarking.watermarker import (
     SupportsSpeculativeDecoding,
@@ -115,6 +118,14 @@ def speculative_target_watermark_key(
     )
 
 
+def speculative_acceptance_watermark_key(
+    watermark_config: WatermarkConfig | None,
+) -> int | None:
+    if watermark_config is None or not watermark_config.supports_speculative_decoding:
+        return None
+    return derive_watermark_key(watermark_config.key, b"acceptance")
+
+
 def watermarked_rejection_sample(
     target_logits: torch.Tensor,
     draft_logits: torch.Tensor | None,
@@ -134,6 +145,10 @@ def watermarked_rejection_sample(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Use the target key for rejection recovery and bonus tokens."""
     assert contexts.shape == (target_logits.shape[0], watermarker.context_width)
+    acceptance_key = None
+    if isinstance(watermarker, DualKeyGumbelWatermarker):
+        acceptance_key = watermarker.acceptance_key
+    target_watermarker = create_speculative_target_watermarker(watermarker)
     return rejection_sample(
         target_logits,
         draft_logits,
@@ -149,5 +164,6 @@ def watermarked_rejection_sample(
         use_fp64=use_fp64,
         contexts=contexts,
         watermarking=watermarking,
-        watermark_key=_resolve_watermark_key(watermarker),
+        watermark_key=_resolve_watermark_key(target_watermarker),
+        acceptance_key=acceptance_key,
     )
