@@ -8254,9 +8254,7 @@ def test_drafts_unused_with_async_placeholders():
     assert not scheduler._drafts_unused(request, 17, 3)
 def test_nan_fault_tolerance_aborts_request():
     """NaN fault tolerance aborts requests with NaN logits."""
-    scheduler = create_scheduler()
-    scheduler.parallel_config.fault_tolerance_config.enable_nan_fault_tolerance = True
-    scheduler.observability_config.enable_detect_nans_in_logits = True
+    scheduler = create_scheduler(enable_nan_fault_tolerance=True)
 
     requests = create_requests(num_requests=2)
     for req in requests:
@@ -8277,18 +8275,19 @@ def test_nan_fault_tolerance_aborts_request():
             requests[1].request_id: 0,
         },
     )
-    scheduler.update_from_output(output, model_output)
+    engine_outputs = scheduler.update_from_output(output, model_output)[0].outputs
 
     assert len(scheduler.running) == 1
     assert scheduler.running[0].request_id == requests[1].request_id
     assert requests[0].status == RequestStatus.FINISHED_ERROR
+    error_output = next(out for out in engine_outputs if out.finish_reason is not None)
+    assert error_output.num_nans_in_logits == 3
 
 
 def test_nan_fault_tolerance_disabled_does_not_abort():
     """Without fault tolerance, NaN logits are recorded but not aborted."""
     scheduler = create_scheduler()
     scheduler.observability_config.enable_detect_nans_in_logits = True
-    scheduler.parallel_config.fault_tolerance_config.enable_nan_fault_tolerance = False
 
     requests = create_requests(num_requests=2)
     for req in requests:
@@ -8321,9 +8320,8 @@ def test_nan_fault_tolerance_chunked_prefill():
         max_num_batched_tokens=15,
         max_num_seqs=15,
         enable_chunked_prefill=True,
+        enable_nan_fault_tolerance=True,
     )
-    scheduler.parallel_config.fault_tolerance_config.enable_nan_fault_tolerance = True
-    scheduler.observability_config.enable_detect_nans_in_logits = True
 
     requests = create_requests(num_requests=1, num_tokens=30)
     scheduler.add_request(requests[0])
@@ -8354,6 +8352,13 @@ def test_nan_fault_tolerance_implies_detect():
     args = EngineArgs(model="facebook/opt-125m", enable_nan_fault_tolerance=True)
     assert args.enable_detect_nans_in_logits is True
     assert args.fault_tolerance_config.enable_nan_fault_tolerance is True
+
+    nested_args = EngineArgs(
+        model="facebook/opt-125m",
+        fault_tolerance_config={"enable_nan_fault_tolerance": True},
+    )
+    assert nested_args.enable_detect_nans_in_logits is True
+    assert nested_args.fault_tolerance_config.enable_nan_fault_tolerance is True
 
 
 def test_nan_env_var_deprecation():
