@@ -1092,17 +1092,20 @@ def test_cdi_sampling_switches_to_slice_or_keeps_unknown(monkeypatch, discovery_
         assert all(event["gpu.uuid"] == "MIG-assigned" for event in attributes)
 
 
-def test_bundled_nvml_load_does_not_import_vllm_or_torch():
+def test_bundled_nvml_load_does_not_import_vllm_or_torch(tmp_path):
+    # Match test images: the collector is outside the installed vLLM package.
+    helper = tmp_path / "ci_gpu_relocated.py"
+    helper.write_text((SCRIPTS_DIR / "ci_gpu.py").read_text())
     result = subprocess.run(
         [
             sys.executable,
             "-c",
-            "import sys; import ci_gpu; "
+            "import sys; import ci_gpu_relocated as ci_gpu; "
             "binding = ci_gpu.load_nvml(); "
             "assert callable(binding.nvmlDeviceGetMemoryInfo); "
             "assert 'vllm' not in sys.modules; assert 'torch' not in sys.modules",
         ],
-        env={**os.environ, "PYTHONPATH": str(SCRIPTS_DIR)},
+        env={**os.environ, "PYTHONPATH": f"{tmp_path}{os.pathsep}{SCRIPTS_DIR}"},
         capture_output=True,
         text=True,
         timeout=5,

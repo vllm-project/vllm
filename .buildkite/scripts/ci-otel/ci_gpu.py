@@ -92,7 +92,12 @@ def visible_mig_devices() -> list[str]:
 
 def load_nvml():
     """Load the standalone bundled binding without importing vLLM or Torch."""
-    path = Path(__file__).resolve().parents[3] / "vllm/third_party/pynvml.py"
+    # Test images install vLLM as a wheel and keep only tests/helpers in the
+    # checkout. Finding the top-level package does not execute its __init__.
+    package = importlib.util.find_spec("vllm")
+    if package is None or package.origin is None:
+        raise ImportError("Installed vLLM package unavailable")
+    path = Path(package.origin).parent / "third_party/pynvml.py"
     spec = importlib.util.spec_from_file_location("ci_nvml", path)
     if spec is None or spec.loader is None:
         raise ImportError("Bundled NVML binding unavailable")
