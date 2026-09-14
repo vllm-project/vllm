@@ -9,5 +9,4 @@ server_args: >-
   --quantization humming
   --kernel-config.enable_flashinfer_autotune=False
 env:
-  VLLM_HUMMING_ONLINE_QUANT_CONFIG: '{"dtype":"int5","hadamard_block_size":-1}'
-  VLLM_HUMMING_INPUT_QUANT_CONFIG: '{"dtype":"float8e4m3"}'
+  VLLM_HUMMING_ONLINE_QUANT_CONFIG: '{"dtype":"int6","hadamard_block_size":-1}'

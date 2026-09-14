@@ -39,7 +39,7 @@ def humming_update_schema_hadamard_block_size(
     shape_k: int,
 ) -> "HummingWeightSchema":
     assert shape_k > 0
-    block_size = 256
+    block_size = 32
     weight_group_size = weight_schema.weight_scale_group_size
     input_group_size = input_schema.input_scale_group_size
     for group_size in (weight_group_size, input_group_size):
