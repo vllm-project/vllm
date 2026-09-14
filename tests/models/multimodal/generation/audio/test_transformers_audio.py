@@ -11,8 +11,8 @@ from vllm.envs import disable_envs_cache
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.audio import AudioResampler
 
-from ....conftest import HfRunner, VllmRunner
-from ...utils import check_logprobs_close
+from .....conftest import HfRunner, VllmRunner
+from ....utils import check_logprobs_close
 
 AUDIO_ASSET = AudioAsset("mary_had_lamb")
 

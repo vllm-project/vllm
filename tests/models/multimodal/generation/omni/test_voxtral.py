@@ -11,11 +11,11 @@ from transformers import VoxtralForConditionalGeneration
 
 from vllm.tokenizers.mistral import MistralTokenizer
 
-from ....conftest import AudioTestAssets
-from ....utils import RemoteOpenAIServer
-from ...utils import check_logprobs_close
+from .....conftest import AudioTestAssets
+from .....utils import RemoteOpenAIServer
+from ....utils import check_logprobs_close
 from .test_ultravox import MULTI_AUDIO_PROMPT, run_multi_audio_test
-from .vlm_utils import model_utils
+from ..vlm_utils import model_utils
 
 MODEL_NAME = "mistralai/Voxtral-Mini-3B-2507"
 MISTRAL_FORMAT_ARGS = [

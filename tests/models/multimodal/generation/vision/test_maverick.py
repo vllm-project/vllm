@@ -23,7 +23,7 @@ from vllm import LLM, SamplingParams
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.kv_cache_interface import ChunkedLocalAttentionSpec, FullAttentionSpec
 
-from ....utils import multi_gpu_test
+from .....utils import multi_gpu_test
 
 # Sample prompts for testing
 PROMPTS: list[str] = [
