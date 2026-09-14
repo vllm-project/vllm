@@ -25,6 +25,7 @@ def mock_cuda_platform():
         mock_platform = MagicMock()
         mock_platform.is_cuda.return_value = is_cuda
         mock_platform.is_xpu.return_value = False
+        mock_platform.is_rocm.return_value = False
         device_capability = (
             DeviceCapability(*capability) if capability is not None else None
         )
@@ -50,6 +51,33 @@ def mock_cuda_platform():
 
 
 @pytest.fixture
+def mock_rocm_platform():
+    """
+    Fixture that returns a factory for creating mocked ROCm platforms.
+
+    Usage:
+        def test_something(mock_rocm_platform):
+            with mock_rocm_platform(capability=(9, 4)):
+                # test code
+    """
+
+    @contextmanager
+    def _mock_platform(capability: tuple[int, int] | None = None):
+        mock_platform = MagicMock()
+        mock_platform.is_cuda.return_value = False
+        mock_platform.is_xpu.return_value = False
+        mock_platform.is_rocm.return_value = True
+        device_capability = (
+            DeviceCapability(*capability) if capability is not None else None
+        )
+        mock_platform.get_device_capability.return_value = device_capability
+        with patch("vllm.platforms.current_platform", mock_platform):
+            yield mock_platform
+
+    return _mock_platform
+
+
+@pytest.fixture
 def mock_xpu_platform():
     """
     Fixture that returns a factory for creating mocked XPU platforms.
@@ -65,6 +93,7 @@ def mock_xpu_platform():
         mock_platform = MagicMock()
         mock_platform.is_cuda.return_value = False
         mock_platform.is_xpu.return_value = True
+        mock_platform.is_rocm.return_value = False
         with patch("vllm.platforms.current_platform", mock_platform):
             yield mock_platform
 
