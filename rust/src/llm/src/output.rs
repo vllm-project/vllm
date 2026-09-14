@@ -11,6 +11,7 @@ use futures::stream::FusedStream;
 use futures::{Stream, StreamExt as _, pin_mut};
 use serde::{Deserialize, Serialize};
 use vllm_engine_core_client::protocol::logprobs::Logprobs;
+use vllm_engine_core_client::protocol::opaque_data::OpaqueData;
 use vllm_engine_core_client::protocol::output::{EngineCoreFinishReason, StopReason};
 use vllm_engine_core_client::{AbortCause, EngineCoreOutputStream};
 
@@ -44,6 +45,8 @@ pub struct CollectedGenerateOutput {
     /// Connector-specific encoder cache transfer parameters for disaggregated
     /// serving.
     pub ec_transfer_params: Option<serde_json::Value>,
+    /// Routing decisions returned for prompt and generated token positions.
+    pub routed_experts: Option<OpaqueData>,
 }
 
 /// Prompt-scoped metadata emitted only once on the first [`GenerateOutput`] for
@@ -155,6 +158,8 @@ pub struct GenerateOutput {
     /// Connector-specific encoder cache transfer parameters for disaggregated
     /// serving.
     pub ec_transfer_params: Option<serde_json::Value>,
+    /// Opaque routing decisions emitted by engine-core.
+    pub routed_experts: Option<OpaqueData>,
 }
 
 impl GenerateOutput {
@@ -202,6 +207,7 @@ impl GenerateOutput {
             cached_token_count: 0,
             kv_transfer_params: None,
             ec_transfer_params: None,
+            routed_experts: None,
         }
     }
 }
@@ -291,6 +297,7 @@ impl Stream for GenerateOutputStream {
             cached_token_count,
             kv_transfer_params: raw.kv_transfer_params,
             ec_transfer_params: raw.ec_transfer_params,
+            routed_experts: raw.routed_experts_payload,
         };
 
         Poll::Ready(Some(Ok(output)))
@@ -341,6 +348,7 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
 
             while let Some(output) = stream.next().await.transpose()? {
                 cached_token_count = cached_token_count.max(output.cached_token_count);
+                let routed_experts = output.routed_experts;
                 if let Some(info) = output.prompt_info {
                     if prompt_token_ids.is_none() {
                         prompt_token_ids = Some(info.prompt_token_ids.to_vec());
@@ -374,7 +382,13 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                         },
                         kv_transfer_params: None,
                         ec_transfer_params: None,
+                        routed_experts: None,
                     });
+                }
+
+                if let Some(routed_experts) = routed_experts {
+                    let collected = collected.as_mut().expect("generate output must exist");
+                    collected.routed_experts = Some(routed_experts);
                 }
 
                 if let Some(finish_reason) = output.finish_reason {

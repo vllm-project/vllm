@@ -12,6 +12,7 @@ use uuid::Uuid;
 use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
 };
+use vllm_engine_core_client::protocol::opaque_data::OpaqueData;
 use vllm_engine_core_client::protocol::output::{
     EngineCoreEvent, EngineCoreEventType, EngineCoreFinishReason, EngineCoreOutput,
     EngineCoreOutputs, RequestBatchOutputs,
@@ -334,15 +335,18 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
                                     Some(prompt_logprobs()),
                                 )
                             },
-                            request_output_with_logprobs_and_kv(
-                                &request.request_id,
-                                vec![44],
-                                Some(EngineCoreFinishReason::Stop),
-                                Some(logprobs_for_position(44, -0.3, 1, 88, -0.4)),
-                                None,
-                                Some(serde_json::json!({"connector": "x"})),
-                                None,
-                            ),
+                            EngineCoreOutput {
+                                routed_experts_payload: Some(OpaqueData::new(vec![1, 2, 3, 4])),
+                                ..request_output_with_logprobs_and_kv(
+                                    &request.request_id,
+                                    vec![44],
+                                    Some(EngineCoreFinishReason::Stop),
+                                    Some(logprobs_for_position(44, -0.3, 1, 88, -0.4)),
+                                    None,
+                                    Some(serde_json::json!({"connector": "x"})),
+                                    None,
+                                )
+                            },
                         ],
                         ..Default::default()
                     }
@@ -374,6 +378,10 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
     assert_eq!(
         collected.kv_transfer_params,
         Some(serde_json::json!({"connector": "x"}))
+    );
+    assert_eq!(
+        collected.routed_experts,
+        Some(OpaqueData::new(vec![1, 2, 3, 4]))
     );
 }
 

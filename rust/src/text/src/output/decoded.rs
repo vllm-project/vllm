@@ -8,6 +8,7 @@ use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tracing::{Level, debug, trace};
 use vllm_engine_core_client::AbortCause;
+use vllm_engine_core_client::protocol::opaque_data::OpaqueData;
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_llm::{FinishReason, GenerateOutput, TokenUsage};
 use vllm_tokenizer::{DecodedText, DynTokenizer, IncrementalDecoder};
@@ -50,6 +51,8 @@ pub struct Finished {
     /// Connector-specific encoder cache transfer parameters for disaggregated
     /// serving.
     pub ec_transfer_params: Option<serde_json::Value>,
+    /// Routing decisions for the returned prompt suffix and generated tokens.
+    pub routed_experts: Option<OpaqueData>,
 }
 
 /// Sample metadata emitted by one engine output update.
@@ -120,6 +123,7 @@ pub async fn decoded_text_event_stream(
     let mut sampled_token_ids = Vec::new();
     let mut output_token_count: usize = 0;
     let mut sampled_logprobs: Option<DecodedLogprobs> = None;
+    let mut routed_experts: Option<OpaqueData> = None;
 
     while let Some(next) = raw_stream.next().await {
         let output = next?;
@@ -169,6 +173,9 @@ pub async fn decoded_text_event_stream(
 
         let kv_transfer_params = output.kv_transfer_params;
         let ec_transfer_params = output.ec_transfer_params;
+        if let Some(payload) = output.routed_experts {
+            routed_experts = Some(payload);
+        }
         let mut finish_reason = output.finish_reason;
         let mut stop_str_matched = false;
         let suppress_terminal_stop_token = finish_reason.as_ref().is_some_and(|r| r.is_stop())
@@ -293,6 +300,7 @@ pub async fn decoded_text_event_stream(
                     finish_reason: reason,
                     kv_transfer_params,
                     ec_transfer_params,
+                    routed_experts,
                 })),
             })
             .await;
@@ -472,6 +480,7 @@ mod tests {
                             finish_reason: FinishReason::Length,
                             kv_transfer_params: None,
                             ec_transfer_params: None,
+                            routed_experts: None,
                         }),
                     ),
                 ],
@@ -503,6 +512,7 @@ mod tests {
                             ))),
                             kv_transfer_params: None,
                             ec_transfer_params: None,
+                            routed_experts: None,
                         }),
                     ),
                 ],

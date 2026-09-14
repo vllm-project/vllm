@@ -27,6 +27,7 @@ pub mod handshake;
 pub mod logprobs;
 pub mod lora;
 pub mod multimodal;
+pub mod opaque_data;
 pub mod output;
 pub mod request;
 pub mod sampling;
