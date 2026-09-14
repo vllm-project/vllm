@@ -990,6 +990,20 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 "cross-attention."
             )
 
+    def _get_kv_cache_descales(
+        self,
+        layer: AttentionLayer,
+        num_decodes: int,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        # AITER treats non-null descales as an instruction to dequantize.
+        if not is_quantized_kv_cache(self.kv_cache_dtype):
+            return None, None
+        descale_shape = (num_decodes, self.num_kv_heads)
+        return (
+            layer._k_scale.expand(descale_shape),
+            layer._v_scale.expand(descale_shape),
+        )
+
     def extend_for_sliding_window(
         self,
         attn_metadata: AiterFlashAttentionMetadata,
@@ -1338,13 +1352,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 assert attn_metadata.decode_metadata is not None
                 decode_max_query_len = attn_metadata.decode_metadata.max_query_len
                 decode_query_len = attn_metadata.decode_metadata.uniform_query_len
-                if is_quantized_kv_cache(self.kv_cache_dtype):
-                    descale_shape = (num_decodes, key_cache.shape[2])
-                    k_descale = layer._k_scale.expand(descale_shape)
-                    v_descale = layer._v_scale.expand(descale_shape)
-                else:
-                    k_descale = None
-                    v_descale = None
 
                 # check if we can use the gluon paged-attention decode kernel
                 use_gluon = (
@@ -1367,6 +1374,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     or decode_max_query_len > 1
                     or self.sinks is not None
                 ):
+                    k_descale, v_descale = self._get_kv_cache_descales(
+                        layer, num_decodes
+                    )
                     assert not rocm_aiter_ops.is_shuffle_kv_cache_enabled(), (
                         "Shuffle KV cache layout is not supported with sliding "
                         "window, sinks, or speculative decoding (multi-token decode)."
@@ -1444,6 +1454,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 use_unified_attention = self.head_size < _MIN_HEAD_SIZE_FOR_LL4MI
 
                 if use_unified_attention:
+                    k_descale, v_descale = self._get_kv_cache_descales(
+                        layer, num_decodes
+                    )
                     assert not rocm_aiter_ops.is_shuffle_kv_cache_enabled(), (
                         "unified_attention fallback with shuffle layout "
                         "is not supported yet."
