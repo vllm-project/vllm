@@ -40,7 +40,6 @@ def _make_llm(**overrides) -> LLM:
         model=MODEL,
         dtype="bfloat16",
         max_model_len=1024,
-        enforce_eager=True,
         disable_log_stats=False,
     )
     base.update(overrides)
