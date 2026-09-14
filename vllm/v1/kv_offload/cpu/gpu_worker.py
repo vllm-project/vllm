@@ -39,10 +39,13 @@ logger = init_logger(__name__)
 def _select_swap_blocks_fn(
     layer_refs_per_group: list[list[CanonicalKVCacheRef]],
     gpu_to_cpu: bool,
+    host_memory_is_pinned: bool = True,
 ):
     """Resolve the swap_blocks function for a handler at init time."""
     # GPU->CPU is bandwidth-bound; the dedicated copy engine beats Triton.
-    if gpu_to_cpu:
+    # The Triton kernel dereferences CPU pointers on the GPU, which is only
+    # valid for pinned host memory.
+    if gpu_to_cpu or not host_memory_is_pinned:
         return ops.swap_blocks_batch
     # Fall back to the C++ DMA path on platforms where Triton isn't usable
     # (e.g. ROCm host mappings) or where GPU kernels cannot directly
@@ -299,6 +302,7 @@ class SingleDirectionOffloadingHandler:
         layer_refs_per_group: list[list[CanonicalKVCacheRef]],
         gpu_to_cpu: bool,
         canonical_layout: bool = False,
+        host_memory_is_pinned: bool = True,
     ):
         """
         Initialize a SingleDirectionOffloadingHandler.
@@ -313,6 +317,8 @@ class SingleDirectionOffloadingHandler:
             gpu_to_cpu: if True, transfer from GPU to CPU; otherwise CPU to GPU.
             canonical_layout: if True, CPU pages use the canonical layout
                 described by the refs' mappings.
+            host_memory_is_pinned: whether the CPU tensors are pinned, so GPU
+                kernels may dereference them directly.
         """
         assert len(gpu_tensors) == len(cpu_tensors)
         assert len(gpu_tensors) > 0
@@ -349,7 +355,7 @@ class SingleDirectionOffloadingHandler:
         self.gpu_to_cpu: bool = gpu_to_cpu
         self.layer_refs_per_group = layer_refs_per_group
         self._swap_blocks_batch = _select_swap_blocks_fn(
-            layer_refs_per_group, gpu_to_cpu
+            layer_refs_per_group, gpu_to_cpu, host_memory_is_pinned
         )
 
         # GPU blocks may be smaller
@@ -696,7 +702,7 @@ class SingleDirectionOffloadingHandler:
             last_event = last_transfer.end_event
             # assure job will start only after the previous one completes
             stream.wait_event(last_event)
-        # CPU->GPU reads from host pinned memory, which is never written
+        # CPU->GPU reads from host memory, which is never written
         # by a concurrent GPU stream, so CU_MEMCPY_SRC_ACCESS_ORDER_ANY is
         # safe and lets the driver pipeline source reads. GPU->CPU reads
         # from the live GPU KV cache, which the compute stream keeps
@@ -814,6 +820,9 @@ class CPUOffloadingWorker(OffloadingWorker):
         logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
         if mmap_region is not None and pin_memory:
             pin_mmap_region(mmap_region)
+        host_memory_is_pinned = pin_memory and (
+            mmap_region is None or mmap_region.is_pinned
+        )
 
         canonical_bytes_per_block = (
             _canonical_block_sizes(kv_caches.group_data_refs, len(kv_caches.tensors))
@@ -863,6 +872,7 @@ class CPUOffloadingWorker(OffloadingWorker):
             layer_refs_per_group=kv_caches.group_data_refs,
             gpu_to_cpu=True,
             canonical_layout=canonical_layout,
+            host_memory_is_pinned=host_memory_is_pinned,
         )
 
         self._load_handler = SingleDirectionOffloadingHandler(
@@ -872,6 +882,7 @@ class CPUOffloadingWorker(OffloadingWorker):
             layer_refs_per_group=kv_caches.group_data_refs,
             gpu_to_cpu=False,
             canonical_layout=canonical_layout,
+            host_memory_is_pinned=host_memory_is_pinned,
         )
 
     def submit_store(
