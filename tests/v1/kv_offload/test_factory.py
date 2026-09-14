@@ -184,7 +184,7 @@ def test_cpu_spec_tier_info_converts_slots_to_tokens(blocks_per_chunk: int):
         cpu_bytes_to_use=alignment * 12,
         worker_kv_bytes_per_block=alignment,
         blocks_per_chunk=blocks_per_chunk,
-        groups=(OffloadingGroupConfig(tokens_per_block, ("layer",)),),
+        groups=(OffloadingGroupConfig(tokens_per_block, ("layer",), 0),),
     )
 
     assert isinstance(spec, CPUOffloadingSpec)
@@ -209,7 +209,7 @@ def test_cpu_spec_tier_info_capacity_accounts_for_tensor_parallel_copies(
         cpu_bytes_to_use=alignment * 12,
         worker_kv_bytes_per_block=alignment,
         world_size=world_size,
-        groups=(OffloadingGroupConfig(tokens_per_block, ("layer",)),),
+        groups=(OffloadingGroupConfig(tokens_per_block, ("layer",), 0),),
     )
 
     assert isinstance(spec, CPUOffloadingSpec)
@@ -235,7 +235,7 @@ def test_cpu_spec_tier_info_capacity_dedups_a_replicated_layout(monkeypatch):
         worker_kv_bytes_per_block=alignment,
         world_size=4,
         replicated_layout=True,
-        groups=(OffloadingGroupConfig(tokens_per_block, ("layer",)),),
+        groups=(OffloadingGroupConfig(tokens_per_block, ("layer",), 0),),
     )
 
     assert isinstance(spec, CPUOffloadingSpec)
@@ -262,7 +262,7 @@ def test_cpu_spec_tier_info_zero_capacity_is_exact_not_unknown():
     """A tier sized to nothing holds zero tokens; that is known, not unknown."""
     spec = _create_spec(
         worker_kv_bytes_per_block=0,
-        groups=(OffloadingGroupConfig(16, ("layer",)),),
+        groups=(OffloadingGroupConfig(16, ("layer",), 0),),
     )
 
     assert isinstance(spec, CPUOffloadingSpec)
@@ -272,11 +272,11 @@ def test_cpu_spec_tier_info_zero_capacity_is_exact_not_unknown():
 
 def test_cpu_spec_tier_info_capacity_shrinks_when_a_second_group_shares_slots():
     """Two groups take two chunks for one request, so the capacity halves."""
-    one_group = _create_spec(groups=(OffloadingGroupConfig(16, ("full_layer",)),))
+    one_group = _create_spec(groups=(OffloadingGroupConfig(16, ("full_layer",), 0),))
     two_groups = _create_spec(
         groups=(
-            OffloadingGroupConfig(16, ("full_layer",)),
-            OffloadingGroupConfig(16, ("swa_layer",)),
+            OffloadingGroupConfig(16, ("full_layer",), 0),
+            OffloadingGroupConfig(16, ("swa_layer",), 1),
         ),
     )
 
