@@ -26,10 +26,12 @@ class InMemoryLookupManager(AsyncLookupManager):
         super().__init__(tier_type="test")
         self._existing = existing_keys or set()
         self._results_ready = threading.Event()
+        self.batch_lookup_calls = 0
 
     def batch_lookup(
         self, keys: list[OffloadKey], req_context: ReqContext
     ) -> Iterable[bool]:
+        self.batch_lookup_calls += 1
         results = [k in self._existing for k in keys]
         self._results_ready.set()
         return results
@@ -104,11 +106,42 @@ class TestAsyncLookupManager:
         assert _key(1) not in mgr._lookup_state
         mgr.shutdown()
 
+    def test_stale_result_ignored_after_cleanup_and_key_reuse(self):
+        key = _key(1)
+        mgr = InMemoryLookupManager()
+        ctx_a = _ctx("req_a")
+        ctx_b = _ctx("req_b")
+        assert mgr.lookup(key, ctx_a) is None
+        stale_generation = mgr._lookup_state[key].generation
+        mgr.cleanup("req_a")
+
+        assert mgr.lookup(key, ctx_b) is None
+        generation = mgr._lookup_state[key].generation
+        assert generation != stale_generation
+
+        mgr._pending_results.put([(key, stale_generation, True)])
+        mgr.drain_results()
+        assert mgr.lookup(key, ctx_b) is None
+
+        mgr._pending_results.put([(key, generation, False)])
+        mgr.drain_results()
+        assert mgr.lookup(key, ctx_b) is False
+        mgr.shutdown()
+
     def test_flush_no_queue_post_when_empty(self):
         mgr = InMemoryLookupManager()
         mgr.flush()
         assert mgr._lookup_queue.empty()
         mgr.shutdown()
+
+    def test_flush_skips_lookup_cleaned_up_before_submit(self):
+        mgr = InMemoryLookupManager()
+        mgr.lookup(_key(1), _ctx("req_a"))
+        mgr.cleanup("req_a")
+        mgr.flush()
+        mgr.shutdown()
+
+        assert mgr.batch_lookup_calls == 0
 
     def test_repeated_lookup_same_key_no_duplicate_batch(self):
         mgr = InMemoryLookupManager(existing_keys={_key(1)})
@@ -220,7 +253,8 @@ class TestAsyncLookupManager:
 
         # (b) A stray/duplicate result for the now-decided key violates the
         # enqueue-once invariant and must trip the assert.
-        mgr._pending_results.put([(_key(1), True)])
+        generation = mgr._lookup_state[_key(1)].generation
+        mgr._pending_results.put([(_key(1), generation, True)])
         with pytest.raises(AssertionError):
             mgr.drain_results()
         mgr.shutdown()

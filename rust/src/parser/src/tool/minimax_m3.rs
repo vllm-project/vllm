@@ -12,6 +12,7 @@ use super::parameters::{ParamElement, ParamInput, ToolSchemas};
 use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len, take_until_marker};
 use super::{Result, ToolCallDelta, ToolParser, ToolParserOutput};
 use crate::tool::Tool;
+use crate::utils::recursion::ParserRecursionGuard;
 
 const NAMESPACE: &str = "]<]minimax[>[";
 const TOOL_CALL_START: &str = "]<]minimax[>[<tool_call>";
@@ -279,6 +280,7 @@ fn parse_invoke_params(invoke_body: &str) -> ModalResult<Vec<(String, ParamInput
 /// Parse a MiniMax M3 parameter element.
 fn parameter_element(input: &mut &str) -> ModalResult<ParamElement> {
     let name = open_element_tag(input)?.to_string();
+    let _guard = ParserRecursionGuard::enter()?;
     let value = element_body(input, &name)?;
     close_element_tag(input, &name)?;
     Ok(ParamElement { name, value })
@@ -389,10 +391,11 @@ mod tests {
 
     use super::{
         ELEMENT_END_START, ELEMENT_START, INVOKE_END, INVOKE_START, MinimaxM3ToolParser,
-        TOOL_CALL_END, TOOL_CALL_START, ToolParser,
+        TOOL_CALL_END, TOOL_CALL_START, ToolParser, parse_invoke_params,
     };
     use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
     use crate::tool::{Tool, ToolParserEvent, ToolParserTestExt as _};
+    use crate::utils::recursion::MAX_PARSER_RECURSION_DEPTH;
 
     fn element(name: &str, body: &str) -> String {
         format!("{ELEMENT_START}{name}>{body}{ELEMENT_END_START}{name}>")
@@ -506,6 +509,23 @@ mod tests {
             ),
         ]
         .join("")
+    }
+
+    fn nested_element(depth: usize) -> String {
+        format!(
+            "{}leaf{}",
+            format!("{ELEMENT_START}node>").repeat(depth),
+            format!("{ELEMENT_END_START}node>").repeat(depth)
+        )
+    }
+
+    #[test]
+    fn minimax_m3_recursion_limit_accepts_boundary_and_rejects_next_depth() {
+        assert!(parse_invoke_params(&nested_element(MAX_PARSER_RECURSION_DEPTH)).is_ok());
+        assert!(matches!(
+            parse_invoke_params(&nested_element(MAX_PARSER_RECURSION_DEPTH + 1)),
+            Err(winnow::error::ErrMode::Cut(_))
+        ));
     }
 
     #[test]

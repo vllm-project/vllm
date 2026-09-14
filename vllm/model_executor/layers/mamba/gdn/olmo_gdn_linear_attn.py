@@ -546,20 +546,10 @@ def olmo_hybrid_gdn_full_forward(
     )
 
 
-def olmo_hybrid_gdn_full_forward_fake(
-    hidden_states: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    """Fake implementation for torch.compile."""
-    return
-
-
 direct_register_custom_op(
     op_name="olmo_hybrid_gdn_full_forward",
     op_func=olmo_hybrid_gdn_full_forward,
     mutates_args=["output"],
-    fake_impl=olmo_hybrid_gdn_full_forward_fake,
 )
 
 
