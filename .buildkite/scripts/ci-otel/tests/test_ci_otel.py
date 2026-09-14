@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -394,6 +395,35 @@ def test_shell_wrapper_preserves_failure_status(tmp_path):
     )
 
     assert result.returncode == 1
+
+
+def test_shell_wrapper_does_not_write_bytecode_to_helper_tree(tmp_path):
+    helper_dir = tmp_path / "ci-otel"
+    shutil.copytree(
+        SCRIPTS_DIR,
+        helper_dir,
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
+    shell = (
+        f'. "{helper_dir / "ci_otel.sh"}"; '
+        f"ci_otel_start 1 {_quoted('true')}; ci_otel_finish 0"
+    )
+
+    result = subprocess.run(
+        ["/bin/sh", "-c", shell],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "CI_INFRA_OTEL_DIR": str(helper_dir),
+            "CI_INFRA_GPU_SAMPLING": "0",
+            "CI_INFRA_OTEL_SPOOL_DIR": str(tmp_path / "spans"),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert list(helper_dir.rglob("*.pyc")) == []
 
 
 def test_ci_otel_run_records_command_and_preserves_status(tmp_path):
