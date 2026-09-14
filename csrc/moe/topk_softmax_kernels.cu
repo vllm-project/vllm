@@ -199,7 +199,7 @@ __launch_bounds__(TPB) __global__ void moeTopK(
         cub_kvp inp_kvp;
         for (int expert = threadIdx.x; expert < num_experts; expert += TPB)
         {
-            const int idx = thread_read_offset + expert;
+            const int64_t idx = thread_read_offset + expert;
             inp_kvp.key = expert;
 
             // Apply correction bias if provided
