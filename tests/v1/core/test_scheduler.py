@@ -6610,15 +6610,19 @@ def test_cost_aware_preemption_victim():
     fake_block = type("FakeBlock", (), {"ref_cnt": 1})
 
     fake_blocks = {
-        requests[0].request_id: [fake_block() for _ in range(8)],
-        requests[1].request_id: [fake_block() for _ in range(2)],
-        requests[2].request_id: [fake_block() for _ in range(8)],
+        requests[0].request_id: [[fake_block() for _ in range(8)]],
+        requests[1].request_id: [[fake_block() for _ in range(2)]],
+        requests[2].request_id: [[fake_block() for _ in range(8)]],
     }
 
     with patch.object(
         scheduler.kv_cache_manager,
-        "req_to_blocks",
-        fake_blocks,
+        "get_blocks",
+        side_effect=lambda request_id: type(
+            "FakeKVCacheBlocks",
+            (),
+            {"blocks": fake_blocks[request_id]},
+        )(),
     ):
         victim = scheduler._select_preemption_victim()
 

@@ -1481,11 +1481,15 @@ class Scheduler(SchedulerInterface):
 
         Higher score means the request is a better preemption victim.
         """
-        blocks = self.kv_cache_manager.req_to_blocks.get(
-            request.request_id, []
-        )
+        blocks = self.kv_cache_manager.get_blocks(
+            request.request_id
+        ).blocks
 
-        num_reclaimable_blocks = sum(block.ref_cnt == 1 for block in blocks)
+        num_reclaimable_blocks = sum(
+            block.ref_cnt == 1
+            for block_group in blocks
+            for block in block_group
+        )
 
         # After preemption, num_computed_tokens is reset to zero, so estimate
         # the amount of work that will have to be recomputed before doing so.
@@ -1505,7 +1509,11 @@ class Scheduler(SchedulerInterface):
     def _select_preemption_victim(self) -> Request:
         """Select the running request with the highest preemption score."""
         assert self.running
-        return max(self.running, key=self._get_preemption_score)
+
+        return max(
+            enumerate(self.running),
+            key=lambda item: (self._get_preemption_score(item[1]), item[0]),
+        )[1]
 
     def _preempt_request(
         self, request: Request, timestamp: float, drop_stale_output: bool = False
