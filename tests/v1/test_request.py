@@ -6,7 +6,6 @@ from array import array
 
 import numpy as np
 import pytest
-
 from vllm import SamplingParams
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.kv_hints import KvHintAction, KvHintsEnvelope
@@ -227,3 +226,21 @@ def test_prefill_token_ids_shares_prompt_until_outputs():
     request.append_output_token_ids(4)
     assert request.prefill_token_ids is request._all_token_ids
     assert request.prefill_token_ids == [1, 2, 3, 4]
+
+
+@pytest.mark.parametrize("bad_value", ["x", 1, ["x"], True])
+@pytest.mark.parametrize("key", ["kv_transfer_params", "ec_transfer_params"])
+def test_request_ignores_non_dict_transfer_params(key, bad_value):
+    """EngineCore must not crash if extra_args carries a non-dict transfer blob."""
+    sampling_params = SamplingParams(max_tokens=1)
+    sampling_params.extra_args = {key: bad_value}
+
+    request = Request(
+        request_id="request-1",
+        prompt_token_ids=[1, 2, 3],
+        sampling_params=sampling_params,
+        pooling_params=None,
+    )
+
+    assert request.kv_transfer_params is None
+    assert request.ec_transfer_params is None

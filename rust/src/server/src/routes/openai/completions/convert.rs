@@ -147,9 +147,9 @@ pub(super) fn prepare_completion_request(
             skip_reading_prefix_cache: None,
             routed_experts_prompt_start: request.routed_experts_prompt_start,
             vllm_xargs: merge_kv_transfer_params(
-                merge_ec_transfer_params(request.vllm_xargs, request.ec_transfer_params.as_ref()),
+                merge_ec_transfer_params(request.vllm_xargs, request.ec_transfer_params.as_ref())?,
                 request.kv_transfer_params.as_ref(),
-            ),
+            )?,
             stream_interval: request.stream_interval,
         },
         decode_options: TextDecodeOptions {

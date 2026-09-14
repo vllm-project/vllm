@@ -82,10 +82,14 @@ where
 /// Merge `kv_transfer_params` into the `vllm_xargs` map, mirroring the Python
 /// vLLM behavior where `kv_transfer_params` is injected into `extra_args` for
 /// engine-core consumption.
+///
+/// Rejects a caller-supplied `kv_transfer_params` key inside `vllm_xargs`;
+/// that field must be sent as a top-level request field.
 pub fn merge_kv_transfer_params(
     mut xargs: Option<HashMap<String, Value>>,
     kv_transfer_params: Option<&HashMap<String, Value>>,
-) -> Option<HashMap<String, Value>> {
+) -> Result<Option<HashMap<String, Value>>, ApiError> {
+    reject_reserved_xarg(xargs.as_ref(), "kv_transfer_params")?;
     if let Some(kv_params) = kv_transfer_params {
         let map = xargs.get_or_insert_with(HashMap::new);
         map.insert(
@@ -94,16 +98,20 @@ pub fn merge_kv_transfer_params(
             serde_json::to_value(kv_params).unwrap(),
         );
     }
-    xargs
+    Ok(xargs)
 }
 
 /// Merge `ec_transfer_params` into the `vllm_xargs` map, mirroring the Python
 /// vLLM behavior where `ec_transfer_params` is injected into `extra_args` for
 /// engine-core consumption.
+///
+/// Rejects a caller-supplied `ec_transfer_params` key inside `vllm_xargs`;
+/// that field must be sent as a top-level request field.
 pub fn merge_ec_transfer_params(
     mut xargs: Option<HashMap<String, Value>>,
     ec_transfer_params: Option<&HashMap<String, Value>>,
-) -> Option<HashMap<String, Value>> {
+) -> Result<Option<HashMap<String, Value>>, ApiError> {
+    reject_reserved_xarg(xargs.as_ref(), "ec_transfer_params")?;
     if let Some(ec_params) = ec_transfer_params {
         let map = xargs.get_or_insert_with(HashMap::new);
         map.insert(
@@ -112,7 +120,20 @@ pub fn merge_ec_transfer_params(
             serde_json::to_value(ec_params).unwrap(),
         );
     }
-    xargs
+    Ok(xargs)
+}
+
+fn reject_reserved_xarg(
+    xargs: Option<&HashMap<String, Value>>,
+    reserved: &'static str,
+) -> Result<(), ApiError> {
+    if xargs.is_some_and(|map| map.contains_key(reserved)) {
+        return Err(ApiError::invalid_request(
+            format!("'{reserved}' must be sent as a top-level field, not via vllm_xargs"),
+            Some("vllm_xargs"),
+        ));
+    }
+    Ok(())
 }
 
 pub fn resolve_session_id(
@@ -215,11 +236,13 @@ pub fn resolve_base_request_id(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::convert::Infallible;
 
     use axum::extract::Query;
     use axum::http::Uri;
     use futures::{StreamExt as _, stream};
+    use serde_json::json;
     use tokio::time::{Instant, sleep};
 
     use super::*;
@@ -355,5 +378,47 @@ mod tests {
             ]
         "#]]
         .assert_debug_eq(&frames);
+    }
+
+    #[test]
+    fn merge_kv_rejects_reserved_xargs_key() {
+        let mut xargs = HashMap::new();
+        xargs.insert("kv_transfer_params".to_string(), json!("x"));
+        let err = merge_kv_transfer_params(Some(xargs), None).unwrap_err();
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest {
+                param: Some("vllm_xargs"),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn merge_ec_rejects_reserved_xargs_key() {
+        let mut xargs = HashMap::new();
+        xargs.insert("ec_transfer_params".to_string(), json!({"a": 1}));
+        let err = merge_ec_transfer_params(Some(xargs), None).unwrap_err();
+        assert!(matches!(
+            err,
+            ApiError::InvalidRequest {
+                param: Some("vllm_xargs"),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn merge_kv_overlays_typed_field() {
+        let mut xargs = HashMap::new();
+        xargs.insert("custom".to_string(), json!(1));
+        let mut kv = HashMap::new();
+        kv.insert("do_remote_prefill".to_string(), json!(true));
+        let merged = merge_kv_transfer_params(Some(xargs), Some(&kv)).unwrap().unwrap();
+        assert_eq!(merged["custom"], json!(1));
+        assert_eq!(
+            merged["kv_transfer_params"]["do_remote_prefill"],
+            json!(true)
+        );
     }
 }
