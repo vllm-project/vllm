@@ -44,5 +44,12 @@ def test_device_count_respects_env_after_platform_import():
         )
 
 
+def test_driver_level_cuda_init_forces_spawn():
+    """Test that cuInit without PyTorch CUDA init still forces spawn."""
+    result = run_script("check_cuda_driver_init_forces_spawn.py")
+    if result.returncode != 0:
+        pytest.fail(f"Driver-level CUDA init was not detected:\n{result.stderr}")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
