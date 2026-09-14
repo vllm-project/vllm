@@ -165,7 +165,10 @@ def dry_core(
     # (llama.cpp step 1). A breaker at column c is j = N-1-c tokens from
     # the end.
     rep_limit = n_r.clone()
-    any_breakers = any(bm is not None and bool(bm.any()) for bm in breaker_masks)
+    # `bm is not None` alone: _breaker_mask returns None for a request with
+    # no breakers, so the extra `bool(bm.any())` was a per-request host sync
+    # that could only confirm what the None already said.
+    any_breakers = any(bm is not None for bm in breaker_masks)
     if any_breakers:
         Bwin = torch.stack(
             [
