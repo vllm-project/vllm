@@ -426,13 +426,6 @@ class FlashAttnMLASparseFA4Backend(AttentionBackend):
         if vllm_config is None:
             return None
 
-        # Both FA4 lanes gather straight from the layer's paged
-        # ``kv_c_and_k_pe_cache``, while a HiSparse group hands out rows of its
-        # own hot cache; the impl refuses that combination, so keep backend
-        # selection from picking it and falling over at layer construction.
-        if vllm_config.attention_config.hisparse_config is not None:
-            return "FA4 sparse MLA does not support HiSparse"
-
         if vllm_config.model_config is None:
             return None
 
@@ -489,6 +482,8 @@ class FlashAttnMLASparseFA4MetadataBuilder(
 ):
     metadata_cls = FlashAttnMLASparseMetadata
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    # Without this the shared builder makes every HiSparse MTP step a prefill batch.
+    hisparse_supports_multi_token_decode: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -498,6 +493,10 @@ class FlashAttnMLASparseFA4MetadataBuilder(
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+
+        if vllm_config.attention_config.hisparse_config is not None:
+            # Ragged decode windows would take the resolver's per-step Python loop.
+            self.require_uniform_decodes = True  # type: ignore[misc]
 
         num_q_heads = self.model_config.get_num_attention_heads(
             vllm_config.parallel_config
@@ -575,15 +574,6 @@ class FlashAttnMLASparseFA4Impl(SparseMLACommonImpl[FlashAttnMLASparseMetadata])
         assert self.topk_indices_buffer is not None, (
             "Indexer or topk_indices_buffer required for sparse MLA"
         )
-        if isinstance(self.index_group, HiSparseMLAIndexGroup):
-            # Both lanes below read the layer's paged ``kv_c_and_k_pe_cache``,
-            # while a HiSparse group converts the top-k list into rows of its
-            # own hot attention cache. Serving HiSparse needs the per-lane
-            # staging the other sparse impls do; until then, refuse the
-            # combination here rather than silently gathering the wrong rows.
-            raise NotImplementedError(
-                "FlashAttnMLASparseFA4Impl does not support HiSparse."
-            )
         self.supports_quant_query_input = False
 
         vllm_config = get_current_vllm_config()
@@ -610,6 +600,11 @@ class FlashAttnMLASparseFA4Impl(SparseMLACommonImpl[FlashAttnMLASparseMetadata])
         num_decode_toks = attn_metadata.num_decode_tokens
 
         assert self.topk_indices_buffer is not None
+        if isinstance(index_group := self.index_group, HiSparseMLAIndexGroup):
+            return self._forward_mqa_hisparse(
+                index_group, ql_nope, q_pe, kv_c_and_k_pe_cache, attn_metadata
+            )
+
         kv_rows, block_stride_rows = flat_kv_row_view(
             kv_c_and_k_pe_cache, attn_metadata.block_size
         )
@@ -645,6 +640,87 @@ class FlashAttnMLASparseFA4Impl(SparseMLACommonImpl[FlashAttnMLASparseMetadata])
             )
         assert lse is None or lse.shape == (out.shape[0], out.shape[1])
         return out, lse
+
+    def _forward_mqa_hisparse(
+        self,
+        index_group: HiSparseMLAIndexGroup,
+        ql_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: FlashAttnMLASparseMetadata,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Both lanes over HiSparse's hot cache, or a staged copy of the host rows."""
+        assert self.dcp_world_size == 1
+        assert not self.need_to_return_lse_for_decode
+        assert self.topk_indices_buffer is not None
+        layer_index = self.index_group_index
+        num_actual_toks = q_pe.shape[0]
+        num_decode_toks = attn_metadata.num_decode_tokens
+        topk_indices = self.topk_indices_buffer[:num_actual_toks]
+        hot_cache = index_group.physical_kv_cache(layer_index).view(
+            kv_c_and_k_pe_cache.dtype
+        )
+
+        outputs: list[torch.Tensor] = []
+        if num_decode_toks > 0:
+            # Once per forward; pass to FA4 unsliced, CUDA graphs capture the pointers.
+            physical_topk, valid_counts = (
+                index_group.convert_decode_logical_to_physical_topk(
+                    layer_index,
+                    topk_indices[:num_decode_toks],
+                    attn_metadata,
+                    return_valid_counts=True,
+                )
+            )
+            hot_rows, block_stride_rows = flat_kv_row_view(
+                hot_cache, attn_metadata.block_size
+            )
+            # The flat row view matches the resolver only while blocks are contiguous.
+            assert block_stride_rows == attn_metadata.block_size
+            out, _ = self._decode(
+                ql_nope[:num_decode_toks],
+                q_pe[:num_decode_toks],
+                hot_rows,
+                physical_topk,
+                valid_counts,
+            )
+            outputs.append(out)
+
+        if num_decode_toks < num_actual_toks:
+            cache = index_group.cache(layer_index)
+            if num_decode_toks == 0 and cache.all_context_pages_resident:
+                physical_topk, valid_counts = (
+                    index_group.convert_logical_to_physical_topk(
+                        layer_index,
+                        topk_indices,
+                        attn_metadata,
+                        block_stride_rows=None,
+                        return_valid_counts=True,
+                    )
+                )
+                prefill_cache = hot_cache
+            else:
+                prefill_cache, block_table, req_ids = index_group.stage_prefill_rows(
+                    layer_index, kv_c_and_k_pe_cache, attn_metadata
+                )
+                # The staged tensor is dense, so its blocks need no row stride.
+                physical_topk, valid_counts = triton_convert_req_index_to_global_index(
+                    req_ids,
+                    block_table,
+                    topk_indices[num_decode_toks:],
+                    BLOCK_SIZE=attn_metadata.block_size,
+                    NUM_TOPK_TOKENS=topk_indices.shape[1],
+                    return_valid_counts=True,
+                )
+            out, _ = self._prefill(
+                torch.cat((ql_nope[num_decode_toks:], q_pe[num_decode_toks:]), dim=-1),
+                prefill_cache,
+                physical_topk,
+                valid_counts,
+            )
+            outputs.append(out)
+
+        return (torch.cat(outputs) if len(outputs) > 1 else outputs[0]), None
 
     def _decode(
         self,
@@ -689,10 +765,11 @@ class FlashAttnMLASparseFA4Impl(SparseMLACommonImpl[FlashAttnMLASparseMetadata])
     def _prefill(
         self,
         query: torch.Tensor,
-        kv_c_and_k_pe_cache: torch.Tensor,
+        kv_cache: torch.Tensor,
         topk_indices: torch.Tensor,
         valid_counts: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """``kv_cache`` is any contiguous ``[blocks, block_size, 576]`` BF16 tensor."""
         from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
         if self._workspace_buffer is None:
@@ -700,7 +777,7 @@ class FlashAttnMLASparseFA4Impl(SparseMLACommonImpl[FlashAttnMLASparseMetadata])
         # BF16 KV only, so bmm1 is the plain softmax scale and bmm2 is 1.0.
         kernel_out = trtllm_batch_decode_with_kv_cache_mla(
             query=query.unsqueeze(1),
-            kv_cache=kv_c_and_k_pe_cache.unsqueeze(1),
+            kv_cache=kv_cache.unsqueeze(1),
             workspace_buffer=self._workspace_buffer,
             qk_nope_head_dim=self.qk_nope_head_dim,
             kv_lora_rank=self.kv_lora_rank,
@@ -732,3 +809,33 @@ class FlashAttnMLASparseFA4Impl(SparseMLACommonImpl[FlashAttnMLASparseMetadata])
             out.masked_fill_(empty_rows.view(-1, 1, 1), 0.0)
             lse.masked_fill_(empty_rows.view(-1, 1), float("-inf"))
         return out, lse
+
+    def autotune_hisparse_decode(self, layer: AttentionLayer) -> None:
+        """Compile the FA4 decode kernel before graph capture; dummy runs skip it."""
+        assert isinstance(self.index_group, HiSparseMLAIndexGroup)
+        assert self.topk_indices_buffer is not None
+        runtime = self.index_group.cache(self.index_group_index).runtime
+        hot = runtime.hot
+        kv_rows, _ = flat_kv_row_view(hot.attention_cache, hot.block_size)
+        num_tokens = runtime.max_num_reqs
+        topk_tokens = self.topk_indices_buffer.shape[1]
+        device, dtype = kv_rows.device, kv_rows.dtype
+        ql_nope = torch.zeros(
+            (num_tokens, self.num_heads, self.kv_lora_rank),
+            dtype=dtype,
+            device=device,
+        )
+        q_pe = torch.zeros(
+            (num_tokens, self.num_heads, self.qk_rope_head_dim),
+            dtype=dtype,
+            device=device,
+        )
+        topk_indices = (
+            torch.arange(topk_tokens, dtype=torch.int32, device=device)
+            .expand(num_tokens, -1)
+            .contiguous()
+        )
+        valid_counts = torch.full(
+            (num_tokens,), topk_tokens, dtype=torch.int32, device=device
+        )
+        self._decode(ql_nope, q_pe, kv_rows, topk_indices, valid_counts)
