@@ -29,7 +29,8 @@ the readings. Subsecond tests may have no sample. Missing readings never become
 zero utilization. MIG parent-device memory and utilization are omitted because
 they cannot be attributed to the job's partition. When the environment identifies
 an assigned MIG UUID, the collector queries that instance's used/total memory
-through vLLM's bundled NVML binding in a bounded subprocess. Numeric
+through vLLM's standalone bundled NVML binding in a bounded subprocess.
+The binding is loaded directly to avoid vLLM/Torch import side effects. Numeric
 `CUDA_VISIBLE_DEVICES` indices are resolved against explicit MIG UUIDs in
 `NVIDIA_VISIBLE_DEVICES`. For CDI assignments without an explicit UUID, a bounded
 helper initializes the CUDA driver and reads only CUDA-visible device UUIDs,

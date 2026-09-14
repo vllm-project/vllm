@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import csv
 import ctypes
+import importlib.util
 import io
 import json
 import math
@@ -18,6 +19,7 @@ import sys
 import threading
 import time
 import uuid as uuid_module
+from pathlib import Path
 
 from ci_otel import Span, export_spans, record_spans
 
@@ -88,9 +90,21 @@ def visible_mig_devices() -> list[str]:
     return list(dict.fromkeys(devices))[:MAX_DEVICES]
 
 
+def load_nvml():
+    """Load the standalone bundled binding without importing vLLM or Torch."""
+    path = Path(__file__).resolve().parents[3] / "vllm/third_party/pynvml.py"
+    spec = importlib.util.spec_from_file_location("ci_nvml", path)
+    if spec is None or spec.loader is None:
+        raise ImportError("Bundled NVML binding unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def cuda_visible_mig_devices() -> list[str]:
     """Discover CDI assignments in a subprocess without creating CUDA contexts."""
-    from vllm.third_party import pynvml
+    pynvml = load_nvml()
 
     driver = ctypes.CDLL("libcuda.so.1")
     count = ctypes.c_int()
@@ -121,7 +135,7 @@ def cuda_visible_mig_devices() -> list[str]:
 
 def query_mig_samples(devices: list[str], timestamp_ns: int) -> list[dict]:
     # Use the binding already shipped with vLLM; never initialize CUDA/Torch.
-    from vllm.third_party import pynvml
+    pynvml = load_nvml()
 
     events = []
     pynvml.nvmlInit()
@@ -239,6 +253,7 @@ def collect(parent_pid: int, stop: threading.Event) -> None:
                         mig_devices = []
                     if mig_devices:
                         query = [sys.executable, __file__, "--query-mig", *mig_devices]
+                        continue  # Do not create an extra parent-device series.
                 if not samples:
                     break
                 events.extend(samples)

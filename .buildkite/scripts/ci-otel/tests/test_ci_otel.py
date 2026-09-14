@@ -858,7 +858,7 @@ def test_mig_memory_uses_assigned_handle_without_parent_metrics(monkeypatch, use
         nvmlDeviceGetMemoryInfo=get_memory,
         NVMLError=RuntimeError,
     )
-    monkeypatch.setitem(sys.modules, "vllm.third_party", SimpleNamespace(pynvml=nvml))
+    monkeypatch.setattr(ci_gpu, "load_nvml", lambda: nvml)
     samples = ci_gpu.query_mig_samples(["MIG-a"], 1234)
     assert handles == ["MIG-a"]
     assert closed == [True]
@@ -885,7 +885,7 @@ def test_mig_memory_never_substitutes_parent_or_permission_failure(monkeypatch, 
         nvmlDeviceGetMemoryInfo=unavailable,
         NVMLError=RuntimeError,
     )
-    monkeypatch.setitem(sys.modules, "vllm.third_party", SimpleNamespace(pynvml=nvml))
+    monkeypatch.setattr(ci_gpu, "load_nvml", lambda: nvml)
     samples = ci_gpu.query_mig_samples(["MIG-a"], 1234)
     if is_mig:
         assert samples[0]["attributes"]["gpu.status"] == "unavailable_mig_memory"
@@ -1036,7 +1036,7 @@ def test_cdi_discovery_uses_only_cuda_visible_uuids(monkeypatch, is_mig):
         nvmlDeviceIsMigDeviceHandle=lambda handle: is_mig,
         NVMLError=RuntimeError,
     )
-    monkeypatch.setitem(sys.modules, "vllm.third_party", SimpleNamespace(pynvml=nvml))
+    monkeypatch.setattr(ci_gpu, "load_nvml", lambda: nvml)
     expected = "MIG-00010203-0405-0607-0809-0a0b0c0d0e0f"
     assert ci_gpu.cuda_visible_mig_devices() == ([expected] if is_mig else [])
     assert identifiers == [expected]
@@ -1089,3 +1089,22 @@ def test_cdi_sampling_switches_to_slice_or_keeps_unknown(monkeypatch, discovery_
         assert all("gpu.memory.used" not in event for event in attributes)
     else:
         assert any(event.get("gpu.memory.used") == 123 for event in attributes)
+        assert all(event["gpu.uuid"] == "MIG-assigned" for event in attributes)
+
+
+def test_bundled_nvml_load_does_not_import_vllm_or_torch():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; import ci_gpu; "
+            "binding = ci_gpu.load_nvml(); "
+            "assert callable(binding.nvmlDeviceGetMemoryInfo); "
+            "assert 'vllm' not in sys.modules; assert 'torch' not in sys.modules",
+        ],
+        env={**os.environ, "PYTHONPATH": str(SCRIPTS_DIR)},
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
