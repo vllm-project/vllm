@@ -116,7 +116,9 @@ def test_a_decode_retry_does_not_inherit_the_previous_handles(proxy, monkeypatch
 
     first, _, _ = asyncio.run(proxy.prepare_for_decode(body, *args))
     reported = first["ec_transfer_params"]
-    assert [handle] == [value for key, value in reported.items() if key != "ec_items"]
+    assert {key: value for key, value in reported.items() if key != "ec_items"} == {
+        "encoder-side-hash": handle
+    }
     assert "ec_transfer_params" not in body
 
     # Attempt 2's encode reports nothing: decode must be told nothing.
@@ -186,10 +188,13 @@ async def test_http_roundtrip_preserves_payload_and_response_bytes(
         seen[stage].append(body)
         if stage == "encode":
             item = body["messages"][0]["content"][0]
+            mm_hash = item["uuid"]
+            if body.get("mm_processor_kwargs"):
+                mm_hash += "-processed"
             return web.json_response(
                 {
                     "ec_transfer_params": {
-                        item["uuid"]: {
+                        mm_hash: {
                             "metadata": {"image_grid_thw": [[1, 2, 2]]},
                             "peer_port": len(seen[stage]),
                         }
@@ -287,7 +292,11 @@ async def test_http_roundtrip_preserves_payload_and_response_bytes(
             "image_embeds": {"image_grid_thw": [1, 2, 2]},
             "uuid": proxy.content_uuid(item),
         }
-    assert final["ec_transfer_params"][proxy.content_uuid(item)]["peer_port"] in (3, 4)
+    mm_hash = proxy.content_uuid(item)
+    if request_options:
+        mm_hash += "-processed"
+    assert set(final["ec_transfer_params"]) - {"ec_items"} == {mm_hash}
+    assert final["ec_transfer_params"][mm_hash]["peer_port"] in (3, 4)
     if prefill:
         assert final["kv_transfer_params"] == {"remote_block_ids": [2]}
 
