@@ -115,6 +115,10 @@ class RayGaugeWrapper(RayPrometheusMetric):
         # ray metrics doesn't have set_to_current time, https://docs.ray.io/en/latest/_modules/ray/util/metrics.html
         return self.set(time.time())
 
+    def remove(self, *labels):
+        # Ray metrics cannot delete series; callers zero the series first.
+        pass
+
 
 class RayCounterWrapper(RayPrometheusMetric):
     """Wraps around ray.util.metrics.Counter to provide same API as
