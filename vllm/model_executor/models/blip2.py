@@ -6,6 +6,7 @@ from typing import Annotated, Literal, TypeAlias
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers import (
     BatchFeature,
     Blip2Config,
@@ -141,14 +142,13 @@ class Blip2QFormerMultiHeadAttention(nn.Module):
 
         query_layer = self.transpose_for_scores(mixed_query_layer)
 
-        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
-        attention_probs = torch.softmax(attention_scores * self.scaling, dim=-1)
-
-        # This is actually dropping out entire tokens to attend to, which might
-        # seem a bit unusual, but is taken from the original Transformer paper.
-        attention_probs_dropped = self.dropout(attention_probs)
-
-        context_layer = torch.matmul(attention_probs_dropped, value_layer)
+        context_layer = F.scaled_dot_product_attention(
+            query_layer,
+            key_layer,
+            value_layer,
+            dropout_p=self.dropout.p if self.training else 0.0,
+            scale=self.scaling,
+        )
 
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
         context_layer = context_layer.view(
@@ -467,26 +467,6 @@ class Blip2DummyInputsBuilder(BaseDummyInputsBuilder[Blip2ProcessingInfo]):
 
 
 class Blip2MultiModalProcessor(BaseMultiModalProcessor[Blip2ProcessingInfo]):
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        if not mm_data:
-            # HF processor always adds placeholders even when there's no image
-            tokenizer = self.info.get_tokenizer()
-            prompt_ids = tokenizer.encode(prompt)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
-
-        return super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
-        )
-
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
@@ -527,6 +507,8 @@ class Blip2MultiModalProcessor(BaseMultiModalProcessor[Blip2ProcessingInfo]):
 class Blip2ForConditionalGeneration(
     nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP, SupportsQuant
 ):
+    supports_tower_connector_lora = True
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):

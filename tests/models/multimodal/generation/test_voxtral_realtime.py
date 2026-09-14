@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from fractions import Fraction
+
 import pytest
 import pytest_asyncio
 from mistral_common.protocol.transcription.request import (
@@ -75,7 +77,8 @@ def assert_encoder_kv_cache_spec(engine: LLM) -> None:
     assert audio_config.block_pool_size == 4
     assert isinstance(spec, SlidingWindowSpec)
     assert spec.block_size == 16
-    assert spec.num_kv_heads == 128
+    assert spec.num_kv_heads == 32
+    assert spec.tokens_per_state == Fraction(1, 4)
     # cdiv(750, 4) == 188 pooled tokens cover the model's window; the extra
     # +1 is an eviction margin (see whisper_causal.py get_kv_cache_spec).
     assert spec.sliding_window == cdiv(750, 4) + 1 == 189

@@ -330,15 +330,43 @@ fn native_k3_kwargs_take_precedence() {
 #[test]
 fn standard_none_disables_thinking() {
     let mut request = crate::request::ChatRequest::for_test();
-    request.chat_options.template_kwargs.extend([
-        ("enable_thinking".to_string(), json!(false)),
-        ("reasoning_effort".to_string(), json!("none")),
-    ]);
+    request
+        .chat_options
+        .template_kwargs
+        .insert("reasoning_effort".to_string(), json!("none"));
 
     let rendered = render_request(&request);
 
     assert!(!rendered.contains("type=\"thinking-effort\""));
     assert!(rendered.ends_with("<|open|>response<|sep|>"));
+}
+
+#[test]
+fn native_thinking_true_overrides_standard_none() {
+    let mut request = crate::request::ChatRequest::for_test();
+    request.chat_options.template_kwargs.extend([
+        ("thinking".to_string(), json!(true)),
+        ("reasoning_effort".to_string(), json!("none")),
+    ]);
+
+    let rendered = render_request(&request);
+
+    assert!(rendered.contains("thinking_effort=max"));
+    assert!(rendered.ends_with("<|open|>think<|sep|>"));
+}
+
+#[test]
+fn enable_thinking_true_overrides_standard_none() {
+    let mut request = crate::request::ChatRequest::for_test();
+    request.chat_options.template_kwargs.extend([
+        ("enable_thinking".to_string(), json!(true)),
+        ("reasoning_effort".to_string(), json!("none")),
+    ]);
+
+    let rendered = render_request(&request);
+
+    assert!(rendered.contains("thinking_effort=max"));
+    assert!(rendered.ends_with("<|open|>think<|sep|>"));
 }
 
 #[test]

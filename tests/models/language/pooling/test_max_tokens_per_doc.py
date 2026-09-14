@@ -14,8 +14,6 @@ import requests
 from tests.utils import VLLM_PATH, RemoteOpenAIServer
 from vllm.entrypoints.pooling.scoring.protocol import RerankResponse
 
-os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
-
 TEMPLATE_DIR = str(VLLM_PATH / "examples/pooling/score/template")
 ExpectedPromptTokens = int | tuple[int, ...]
 
@@ -82,10 +80,10 @@ RERANK_CONFIGS = [
         ],
         # This model has produced both prompt-token totals in CI/local cache;
         # keep truncation checks exact while tolerating the boundary delta.
-        without_truncated_prompt_tokens=(285, 286),
-        with_max_tokens_per_query_prompt_tokens=(155, 156),
-        with_max_tokens_per_doc_prompt_tokens=155,
-        with_max_tokens_per_query_and_doc_prompt_tokens=25,
+        without_truncated_prompt_tokens=(284, 285),
+        with_max_tokens_per_query_prompt_tokens=(154, 155),
+        with_max_tokens_per_doc_prompt_tokens=154,
+        with_max_tokens_per_query_and_doc_prompt_tokens=24,
     ),
     # 4. late-interaction
     TestConfig(
@@ -96,10 +94,10 @@ RERANK_CONFIGS = [
             "512",
             "--trust-remote-code",
         ],
-        without_truncated_prompt_tokens=285,
-        with_max_tokens_per_query_prompt_tokens=155,
-        with_max_tokens_per_doc_prompt_tokens=155,
-        with_max_tokens_per_query_and_doc_prompt_tokens=25,
+        without_truncated_prompt_tokens=284,
+        with_max_tokens_per_query_prompt_tokens=154,
+        with_max_tokens_per_doc_prompt_tokens=154,
+        with_max_tokens_per_query_and_doc_prompt_tokens=24,
     ),
     # 5. jinaai/jina-reranker-v3
     TestConfig(
@@ -128,7 +126,10 @@ def assert_prompt_tokens(actual: int, expected: ExpectedPromptTokens) -> None:
 @pytest.fixture(scope="module", params=RERANK_CONFIGS, ids=lambda c: c.model)
 def server(request):
     config: TestConfig = request.param
-    with RemoteOpenAIServer(config.model, config.args) as remote_server:
+    env_dict = {"VLLM_LOGGING_LEVEL": "WARNING"}
+    with RemoteOpenAIServer(
+        config.model, config.args, env_dict=env_dict
+    ) as remote_server:
         yield config, remote_server
 
 

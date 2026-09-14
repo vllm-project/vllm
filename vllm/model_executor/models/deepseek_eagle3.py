@@ -285,9 +285,7 @@ class Eagle3DeepseekV2ForCausalLM(LocalArgmaxMixin, DeepseekV2ForCausalLM):
             base_vocab_size = getattr(self.config, "vocab_size", None)
             self.config.draft_vocab_size = base_vocab_size
 
-        target_layer_num = vllm_config.model_config.get_num_layers(
-            vllm_config.parallel_config
-        )
+        target_layer_num = vllm_config.model_config.get_total_num_hidden_layers()
 
         # Store target layer count in draft config
         self.config.target_layer_count = target_layer_num
@@ -384,18 +382,17 @@ class Eagle3DeepseekV2ForCausalLM(LocalArgmaxMixin, DeepseekV2ForCausalLM):
             model_weights[name] = loaded_weight
             process_eagle_weight(self, name)
 
-        skip_substrs = []
+        orig_to_new_substr: dict[str, str | None] = {}
         if not includes_draft_id_mapping:
-            skip_substrs.append("draft_id_to_target_id")
+            orig_to_new_substr["draft_id_to_target_id"] = None
         if not includes_embed_tokens:
-            skip_substrs.append("embed_tokens")
+            orig_to_new_substr["embed_tokens"] = None
 
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=None,
-            skip_substrs=skip_substrs,
+        loader = AutoWeightsLoader(self)
+        loader.load_weights(
+            model_weights.items(),
+            mapper=WeightsMapper(orig_to_new_substr=orig_to_new_substr),
         )
-        loader.load_weights(model_weights.items())
 
 
 # Aliases for compatibility

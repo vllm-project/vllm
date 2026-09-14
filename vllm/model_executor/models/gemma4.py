@@ -352,15 +352,19 @@ class Gemma4MoE(nn.Module):
             )
 
         # MoERunner experts with custom Gemma4 routing
+        intermediate_size = getattr(
+            config,
+            "moe_intermediate_size",
+            getattr(config, "expert_intermediate_size", None),
+        )
+        if intermediate_size is None:
+            raise ValueError("Gemma4 MoE requires an expert intermediate size")
+
         self.experts = FusedMoEFactory(
             num_experts=config.num_experts,
             top_k=config.top_k_experts,
             hidden_size=config.hidden_size,
-            intermediate_size=getattr(
-                config,
-                "moe_intermediate_size",
-                getattr(config, "expert_intermediate_size", None),
-            ),
+            intermediate_size=intermediate_size,
             renormalize=True,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
@@ -409,18 +413,41 @@ class Gemma4Attention(nn.Module):
         # Q/K norms with learnable weights handle scaling implicitly.
         self.scaling = 1.0
 
-        # QKVParallelLinear handles GQA correctly for all layer types.
-        # k_eq_v layers load K weights into both K and V slots via
-        # _weight_iterator remapping — no structural difference needed.
-        self.qkv_proj = QKVParallelLinear(
-            hidden_size,
-            self.head_dim,
-            self.total_num_heads,
-            self.total_num_kv_heads,
-            bias=config.attention_bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj",
+        layer_idx = extract_layer_index(prefix)
+        num_kv_shared_layers = getattr(config, "num_kv_shared_layers", 0)
+        first_kv_shared_layer_idx = config.num_hidden_layers - num_kv_shared_layers
+        self.is_kv_shared_layer = (
+            num_kv_shared_layers > 0 and layer_idx >= first_kv_shared_layer_idx
         )
+
+        if self.is_kv_shared_layer:
+            # K/V come from the target layer's cache, so like HF this layer
+            # only has q_proj (and no k_norm/v_norm).
+            self.q_proj = ColumnParallelLinear(
+                hidden_size,
+                self.total_num_heads * self.head_dim,
+                bias=config.attention_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.q_proj",
+            )
+        else:
+            # QKVParallelLinear handles GQA correctly for all layer types.
+            # k_eq_v layers load K weights into both K and V slots via
+            # _weight_iterator remapping — no structural difference needed.
+            self.qkv_proj = QKVParallelLinear(
+                hidden_size,
+                self.head_dim,
+                self.total_num_heads,
+                self.total_num_kv_heads,
+                bias=config.attention_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkv_proj",
+            )
+            self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+            # V norm: no learnable scale (pure normalization only)
+            self.v_norm = RMSNorm(
+                self.head_dim, eps=config.rms_norm_eps, has_weight=False
+            )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
@@ -429,14 +456,10 @@ class Gemma4Attention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        # Q/K norms: output = norm(x) * weight (learnable per-head scale)
+        # Q norm: output = norm(x) * weight (learnable per-head scale)
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        # V norm: no learnable scale (pure normalization only)
-        self.v_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, has_weight=False)
 
         # Determine layer type and sliding window
-        layer_idx = extract_layer_index(prefix)
         layer_type = config.layer_types[layer_idx]
         self.is_sliding = layer_type == "sliding_attention"
         sliding_window = config.sliding_window if self.is_sliding else None
@@ -462,30 +485,25 @@ class Gemma4Attention(nn.Module):
         # KV sharing: layers in the last `num_kv_shared_layers` share KV
         # cache with earlier layers of the same type.
         kv_sharing_target_layer_name = None
-        self.is_kv_shared_layer = False
-        num_kv_shared_layers = getattr(config, "num_kv_shared_layers", 0)
-        if num_kv_shared_layers > 0:
-            first_kv_shared_layer_idx = config.num_hidden_layers - num_kv_shared_layers
-            if layer_idx >= first_kv_shared_layer_idx:
-                self.is_kv_shared_layer = True
-                # Find the last non-shared layer of the same attention type
-                prev_layers = config.layer_types[:first_kv_shared_layer_idx]
-                current_layer_type = config.layer_types[layer_idx]
-                kv_shared_layer_index = (
-                    len(prev_layers) - 1 - prev_layers[::-1].index(current_layer_type)
-                )
-                if kv_shared_layer_index >= 0:
-                    if ".layers." in prefix:
-                        param_name_before_layers = prefix.split(".layers.")[0]
-                    else:
-                        raise ValueError(
-                            "Unexpected prefix format for Gemma4Attention: "
-                            f"'{prefix}'. Expected to contain '.layers.'."
-                        )
-                    kv_sharing_target_layer_name = (
-                        f"{param_name_before_layers}.layers."
-                        f"{kv_shared_layer_index}.self_attn.attn"
+        if self.is_kv_shared_layer:
+            # Find the last non-shared layer of the same attention type
+            prev_layers = config.layer_types[:first_kv_shared_layer_idx]
+            current_layer_type = config.layer_types[layer_idx]
+            kv_shared_layer_index = (
+                len(prev_layers) - 1 - prev_layers[::-1].index(current_layer_type)
+            )
+            if kv_shared_layer_index >= 0:
+                if ".layers." in prefix:
+                    param_name_before_layers = prefix.split(".layers.")[0]
+                else:
+                    raise ValueError(
+                        "Unexpected prefix format for Gemma4Attention: "
+                        f"'{prefix}'. Expected to contain '.layers.'."
                     )
+                kv_sharing_target_layer_name = (
+                    f"{param_name_before_layers}.layers."
+                    f"{kv_shared_layer_index}.self_attn.attn"
+                )
 
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -520,19 +538,24 @@ class Gemma4Attention(nn.Module):
         hidden_states: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-        # Unified QKV path (works for both k_eq_v and standard layers).
-        # For k_eq_v, K weights are loaded into both K and V slots of
-        # qkv_proj, so V == K automatically.
-        qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        if self.is_kv_shared_layer:
+            # Shared KV: only Q is projected; K/V come from the target layer.
+            q, _ = self.q_proj(hidden_states)
+            q = q.unflatten(-1, (self.num_heads, self.head_dim))
+            q = self.q_norm(q)
+            q = q.flatten(-2, -1)
+            q, _ = self.rotary_emb(positions, q, None)
+            attn_output = self.attn(q, None, None)
+        else:
+            # For k_eq_v, K weights are loaded into both K and V slots of
+            # qkv_proj, so V == K automatically.
+            qkv, _ = self.qkv_proj(hidden_states)
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        # Q norm (always applied)
-        q = q.unflatten(-1, (self.num_heads, self.head_dim))
-        q = self.q_norm(q)
-        q = q.flatten(-2, -1)
+            q = q.unflatten(-1, (self.num_heads, self.head_dim))
+            q = self.q_norm(q)
+            q = q.flatten(-2, -1)
 
-        if not self.is_kv_shared_layer:
-            # Non-shared: apply K norm + RoPE, V norm
             k = k.unflatten(-1, (self.num_kv_heads, self.head_dim))
             k = self.k_norm(k)
             k = k.flatten(-2, -1)
@@ -541,11 +564,8 @@ class Gemma4Attention(nn.Module):
             v = v.unflatten(-1, (self.num_kv_heads, self.head_dim))
             v = self.v_norm(v)
             v = v.flatten(-2, -1)
-        else:
-            # Shared: only apply RoPE to Q
-            q = self.rotary_emb(positions, q, k)[0]
+            attn_output = self.attn(q, k, v)
 
-        attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
 
         return output
@@ -624,6 +644,11 @@ class Gemma4DecoderLayer(nn.Module):
         self.enable_moe_block = getattr(config, "enable_moe_block", False) or getattr(
             config, "use_second_mlp_block", False
         )
+        self.router: Gemma4Router | None
+        self.moe: Gemma4MoE | None
+        self.post_feedforward_layernorm_1: RMSNorm | None
+        self.post_feedforward_layernorm_2: RMSNorm | None
+        self.pre_feedforward_layernorm_2: RMSNorm | None
         if self.enable_moe_block:
             self.router = Gemma4Router(
                 config,
@@ -652,6 +677,9 @@ class Gemma4DecoderLayer(nn.Module):
             self.pre_feedforward_layernorm_2 = None
 
         # Per-Layer Embedding (PLE) components — present in each decoder layer
+        self.per_layer_input_gate: ReplicatedLinear | None
+        self.per_layer_projection: ReplicatedLinear | None
+        self.post_per_layer_input_norm: RMSNorm | None
         if (
             self.hidden_size_per_layer_input is not None
             and self.hidden_size_per_layer_input > 0
@@ -716,6 +744,11 @@ class Gemma4DecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
 
         if self.enable_moe_block:
+            assert self.post_feedforward_layernorm_1 is not None
+            assert self.pre_feedforward_layernorm_2 is not None
+            assert self.router is not None
+            assert self.moe is not None
+            assert self.post_feedforward_layernorm_2 is not None
             hidden_states_1 = self.post_feedforward_layernorm_1(hidden_states)
 
             hidden_states_2 = self.pre_feedforward_layernorm_2(residual)
@@ -731,6 +764,8 @@ class Gemma4DecoderLayer(nn.Module):
 
         # Apply PLE (Per-Layer Embedding) if configured
         if per_layer_input is not None and self.per_layer_input_gate is not None:
+            assert self.per_layer_projection is not None
+            assert self.post_per_layer_input_norm is not None
             gate = self.per_layer_input_gate(hidden_states)
             gate = torch.nn.functional.gelu(gate, approximate="tanh")
             gated_per_layer = gate * per_layer_input
@@ -865,6 +900,7 @@ class Gemma4SelfDecoderLayers(nn.Module):
         """
         if self.per_layer_model_projection is None:
             return None
+        assert self.per_layer_projection_norm is not None
         per_layer_projection = self.per_layer_model_projection(inputs_embeds)
         per_layer_projection = per_layer_projection * self.per_layer_projection_scale
         per_layer_projection = per_layer_projection.reshape(
@@ -971,6 +1007,9 @@ class Gemma4Model(nn.Module, EagleModelMixin):
         )
 
         # Per-Layer Embedding (PLE) components
+        self.embed_tokens_per_layer: VocabParallelEmbedding | None
+        self.per_layer_model_projection: ColumnParallelLinear | None
+        self.per_layer_projection_norm: RMSNorm | None
         if (
             self.hidden_size_per_layer_input is not None
             and self.hidden_size_per_layer_input > 0
@@ -1415,9 +1454,9 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                 if shard_name not in name:
                     continue
                 stacked_name = name.replace(shard_name, param_name)
-                # k_eq_v layers use separate q_proj/k_proj instead of
-                # packed qkv_proj. If the stacked param doesn't exist,
-                # skip this mapping and fall through to direct load.
+                # KV-shared layers have a plain q_proj instead of a packed
+                # qkv_proj: fall through to the direct load, which also
+                # skips the redundant K/V tensors original checkpoints ship.
                 if stacked_name not in params_dict:
                     continue
                 if is_pp_missing_parameter(stacked_name, self):
@@ -1472,9 +1511,10 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                 else:
                     if name.endswith(".bias") and name not in params_dict:
                         continue
-                    name = maybe_remap_kv_scale_name(name, params_dict)
-                    if name is None:
+                    remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                    if remapped_name is None:
                         continue
+                    name = remapped_name
                     if is_pp_missing_parameter(name, self):
                         continue
                     # Skip if name doesn't exist in params_dict (e.g., individual
@@ -1510,9 +1550,8 @@ class Gemma4ForCausalLM(
             ".moe.experts.down_proj": ".moe.down_proj",
         },
     )
-    # Note: qkv_proj packing applies to non-k_eq_v layers (sliding
-    # attention and full attention without k_eq_v). k_eq_v layers use
-    # separate q_proj + k_proj without packing.
+    # KV-shared layers only have q_proj, so qkv_proj packing applies to
+    # the other layers.
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -1693,16 +1732,16 @@ class Gemma4ForCausalLM(
 
                 yield name, weight
 
-        # Skip multimodal weights — handled by the multimodal wrapper.
-        # Also skip lm_head when weights are tied.
-        skip = [
-            "audio_tower.",
-            "vision_tower.",
-            "embed_audio.",
-            "embed_vision.",
-        ]
-        if self.config.tie_word_embeddings:
-            skip.append("lm_head.")
-
-        loader = AutoWeightsLoader(self, skip_substrs=skip)
-        return loader.load_weights(_weight_iterator())
+        # Drop multimodal weights, which are handled by the multimodal wrapper.
+        # `_weight_iterator` already applies this model's renames by hand, so
+        # `hf_to_vllm_mapper` is deliberately not passed here.
+        mapper = WeightsMapper(
+            orig_to_new_substr={
+                "audio_tower.": None,
+                "vision_tower.": None,
+                "embed_audio.": None,
+                "embed_vision.": None,
+            }
+        )
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(_weight_iterator(), mapper=mapper)

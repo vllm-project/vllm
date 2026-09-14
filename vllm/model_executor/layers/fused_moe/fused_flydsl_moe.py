@@ -6,13 +6,11 @@ import functools
 import json
 import os
 
-import flydsl.compiler as flyc
-import flydsl.expr as fx
 import torch
 from aiter.fused_moe import moe_sorting as aiter_moe_sorting
-from aiter.ops.flydsl.kernels.moe_gemm_2stage import (
-    compile_moe_gemm1,
-    compile_moe_gemm2,
+from aiter.ops.flydsl.kernels.moe_2stage_a16wmix import (
+    flydsl_a16w4_gemm1,
+    flydsl_a16w4_gemm2,
 )
 
 from vllm.logger import init_logger
@@ -21,33 +19,58 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
-_FLYDSL_MOE_GEMM1_CACHE: dict = {}
-_FLYDSL_MOE_GEMM2_CACHE: dict = {}
-
+# Valid tiles for the aiter a16w-mix int4 kernels (aiter#4646): stage1 requires
+# tile_n in {64,128} and tile_k in {128,256} (k_wave=1); stage2 requires tile_n2==128
+# and tile_k2 in {128,256}. The pre-#4646 defaults (tile_k=512/64, tile_n2=256) are no
+# longer registered and make the port emit an empty-fragment kernel.
 _FLYDSL_MOE_DEFAULT_CONFIG = {
-    1: {"tile_m": 16, "tile_n": 64, "tile_k": 512, "tile_n2": 256, "tile_k2": 256},
-    2: {"tile_m": 16, "tile_n": 64, "tile_k": 512, "tile_n2": 256, "tile_k2": 128},
-    4: {"tile_m": 16, "tile_n": 64, "tile_k": 512, "tile_n2": 256, "tile_k2": 128},
-    8: {"tile_m": 16, "tile_n": 64, "tile_k": 512, "tile_n2": 256, "tile_k2": 256},
-    16: {"tile_m": 16, "tile_n": 64, "tile_k": 128, "tile_n2": 128, "tile_k2": 256},
-    24: {"tile_m": 16, "tile_n": 64, "tile_k": 128, "tile_n2": 256, "tile_k2": 256},
-    32: {"tile_m": 16, "tile_n": 64, "tile_k": 128, "tile_n2": 256, "tile_k2": 256},
-    48: {"tile_m": 16, "tile_n": 64, "tile_k": 128, "tile_n2": 256, "tile_k2": 256},
+    1: {"tile_m": 16, "tile_n": 64, "tile_k": 128, "tile_n2": 128, "tile_k2": 128},
+    2: {"tile_m": 16, "tile_n": 64, "tile_k": 128, "tile_n2": 128, "tile_k2": 128},
+    4: {"tile_m": 16, "tile_n": 64, "tile_k": 128, "tile_n2": 128, "tile_k2": 128},
+    8: {"tile_m": 16, "tile_n": 64, "tile_k": 128, "tile_n2": 128, "tile_k2": 128},
+    16: {"tile_m": 16, "tile_n": 64, "tile_k": 128, "tile_n2": 128, "tile_k2": 128},
+    24: {"tile_m": 16, "tile_n": 64, "tile_k": 128, "tile_n2": 128, "tile_k2": 128},
+    32: {"tile_m": 16, "tile_n": 64, "tile_k": 128, "tile_n2": 128, "tile_k2": 128},
+    48: {"tile_m": 16, "tile_n": 64, "tile_k": 128, "tile_n2": 128, "tile_k2": 128},
     64: {"tile_m": 16, "tile_n": 64, "tile_k": 128, "tile_n2": 128, "tile_k2": 128},
-    128: {"tile_m": 16, "tile_n": 64, "tile_k": 128, "tile_n2": 256, "tile_k2": 256},
-    256: {"tile_m": 16, "tile_n": 128, "tile_k": 128, "tile_n2": 256, "tile_k2": 256},
-    512: {"tile_m": 16, "tile_n": 64, "tile_k": 128, "tile_n2": 256, "tile_k2": 256},
-    1024: {"tile_m": 32, "tile_n": 64, "tile_k": 128, "tile_n2": 256, "tile_k2": 256},
-    2048: {"tile_m": 64, "tile_n": 64, "tile_k": 64, "tile_n2": 256, "tile_k2": 64},
-    4096: {"tile_m": 32, "tile_n": 64, "tile_k": 128, "tile_n2": 256, "tile_k2": 256},
-    8192: {"tile_m": 64, "tile_n": 64, "tile_k": 64, "tile_n2": 256, "tile_k2": 64},
+    128: {"tile_m": 16, "tile_n": 64, "tile_k": 128, "tile_n2": 128, "tile_k2": 128},
+    256: {"tile_m": 16, "tile_n": 128, "tile_k": 128, "tile_n2": 128, "tile_k2": 128},
+    512: {"tile_m": 16, "tile_n": 64, "tile_k": 128, "tile_n2": 128, "tile_k2": 128},
+    1024: {"tile_m": 32, "tile_n": 64, "tile_k": 128, "tile_n2": 128, "tile_k2": 128},
+    2048: {"tile_m": 64, "tile_n": 64, "tile_k": 128, "tile_n2": 128, "tile_k2": 128},
+    4096: {"tile_m": 32, "tile_n": 64, "tile_k": 128, "tile_n2": 128, "tile_k2": 128},
+    8192: {"tile_m": 64, "tile_n": 64, "tile_k": 128, "tile_n2": 128, "tile_k2": 128},
 }
 
+# aiter#4646's a16w-mix int4 kernels only register a fixed tile set. Tiles from before
+# the bump (default config or tuned JSONs) carry tile_k=512/64 and tile_n2=256, which
+# emit an empty-fragment kernel (IndexError at emit / wrong output). Snap any resolved
+# tiles to the nearest registered value so a stale tuned config can't crash the kernel.
+_FLYDSL_INT4_TILE_M = (16, 32, 64, 128)
+_FLYDSL_INT4_TILE_N1 = (64, 128)
+_FLYDSL_INT4_TILE_K = (128, 256)
 
-def _as_flydsl_ptr(tensor: torch.Tensor | None):
-    """Adapt a torch tensor to the pointer ABI expected by AITER FlyDSL."""
-    data_ptr = None if tensor is None else tensor.data_ptr()
-    return flyc.from_c_void_p(fx.Uint8, data_ptr)
+
+def _snap_flydsl_int4_tiles(tile_m, tile_n, tile_k, tile_n2, tile_k2):
+    def _nearest(v, allowed):
+        return min(allowed, key=lambda a: (abs(a - v), a))
+
+    snapped = (
+        _nearest(tile_m, _FLYDSL_INT4_TILE_M),
+        _nearest(tile_n, _FLYDSL_INT4_TILE_N1),
+        _nearest(tile_k, _FLYDSL_INT4_TILE_K),
+        128,  # stage2 N tile is only registered at 128
+        _nearest(tile_k2, _FLYDSL_INT4_TILE_K),
+    )
+    if snapped != (tile_m, tile_n, tile_k, tile_n2, tile_k2):
+        logger.warning_once(
+            "FlyDSL int4 MoE tiles %s are not registered post-aiter#4646; "
+            "using %s. Retune the config for the a16w-mix kernel.",
+            (tile_m, tile_n, tile_k, tile_n2, tile_k2),
+            snapped,
+            scope="local",
+        )
+    return snapped
 
 
 def moe_sorting(
@@ -185,6 +208,9 @@ def fused_flydsl_moe_impl(
     tile_k = tuned_config["tile_k"]
     tile_n2 = tuned_config["tile_n2"]
     tile_k2 = tuned_config["tile_k2"]
+    tile_m, tile_n, tile_k, tile_n2, tile_k2 = _snap_flydsl_int4_tiles(
+        tile_m, tile_n, tile_k, tile_n2, tile_k2
+    )
 
     routing = build_routing_buffers(
         topk_ids=topk_ids,
@@ -202,123 +228,76 @@ def fused_flydsl_moe_impl(
         blocks,
     ) = routing
 
-    scale_x_1d = torch.empty((0,), device=device, dtype=torch.float32)
+    # aiter#4646 (v0.1.20) removed compile_moe_gemm{1,2} + the flyc.compile pointer ABI
+    # and replaced them with the a16w-mix wrappers, which compile+launch internally
+    # (functools-cached) and take torch tensors directly. w_dtype="int4" is the a16wi4
+    # (W4A16) path. The stage-1 intermediate now lives in sorted
+    # [sorted_size, inter_dim] layout, and topk weighting is applied in stage-2 via
+    # sorted_weights (the port has no stage-1 doweight).
     sorted_weights_1d = sorted_weights.view(-1).contiguous()
-    out_stage1 = torch.empty(
-        (tokens, topk, inter_dim), device=device, dtype=out_torch_dtype
+    empty_scale = torch.empty((0,), device=device, dtype=torch.uint8)
+    cumsum_tensor = num_valid_ids.to(torch.int32).contiguous()
+    m_indices = sorted_token_ids.to(torch.int32).contiguous()
+
+    # stage1: bf16 A x int4 W1 + SiLU -> bf16 sorted intermediate.
+    inter_sorted = torch.empty(
+        (sorted_size, inter_dim), device=device, dtype=torch.bfloat16
+    )
+    w1_scale_u8 = (
+        w1_scale.view(torch.uint8).contiguous().view(-1)
+        if w1_scale is not None
+        else empty_scale
+    )
+    flydsl_a16w4_gemm1(
+        a_bf16=hidden_states.to(torch.bfloat16).contiguous(),
+        w1_u8=w1.view(torch.uint8).contiguous(),
+        w1_scale_u8=w1_scale_u8,
+        sorted_expert_ids=sorted_expert_ids,
+        cumsum_tensor=cumsum_tensor,
+        m_indices=m_indices,
+        inter_sorted_bf16=inter_sorted,
+        n_tokens=tokens,
+        NE=num_experts,
+        D_HIDDEN=model_dim,
+        D_INTER=inter_dim,
+        topk=topk,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        waves_per_eu=None,
+        act="silu",
+        w_dtype="int4",
+        w_layout="standard",
     )
 
-    stream = torch.cuda.current_stream()
-
-    key1 = (
-        model_dim,
-        inter_dim,
-        num_experts,
-        topk,
-        in_dtype,
-        out_dtype,
-        group_size,
-        tile_m,
-        tile_n,
-        tile_k,
-        bool(doweight_stage1),
-        False,
+    # stage2: bf16 inter x int4 W2 -> weighted reduce into [tokens, model_dim].
+    out_stage2 = torch.zeros((tokens, model_dim), device=device, dtype=out_torch_dtype)
+    w2_scale_u8 = (
+        w2_scale.view(torch.uint8).contiguous().view(-1)
+        if w2_scale is not None
+        else empty_scale
     )
-
-    compiled_exe1 = _FLYDSL_MOE_GEMM1_CACHE.get(key1)
-    args1 = (
-        _as_flydsl_ptr(out_stage1),
-        _as_flydsl_ptr(hidden_states),
-        _as_flydsl_ptr(w1),
-        _as_flydsl_ptr(scale_x_1d),
-        _as_flydsl_ptr(w1_scale),
-        _as_flydsl_ptr(sorted_token_ids),
-        _as_flydsl_ptr(sorted_expert_ids),
-        _as_flydsl_ptr(sorted_weights_1d),
-        _as_flydsl_ptr(num_valid_ids),
-        tokens,
-        inter_dim,
-        model_dim,
-        int(blocks),
-        stream,
+    flydsl_a16w4_gemm2(
+        inter_sorted_bf16=inter_sorted,
+        w2_u8=w2.view(torch.uint8).contiguous(),
+        w2_scale_u8=w2_scale_u8,
+        sorted_expert_ids=sorted_expert_ids,
+        cumsum_tensor=cumsum_tensor,
+        sorted_token_ids=sorted_token_ids,
+        sorted_weights=sorted_weights_1d,
+        flat_out=out_stage2.view(-1),
+        M_logical=tokens,
+        max_sorted=sorted_size,
+        NE=num_experts,
+        D_HIDDEN=model_dim,
+        D_INTER=inter_dim,
+        topk=topk,
+        tile_m=tile_m,
+        tile_n=tile_n2,
+        tile_k=tile_k2,
+        waves_per_eu=None,
+        w_dtype="int4",
     )
-    if compiled_exe1 is None:
-        exe1 = compile_moe_gemm1(
-            model_dim=model_dim,
-            inter_dim=inter_dim,
-            experts=num_experts,
-            topk=topk,
-            in_dtype=in_dtype,
-            out_dtype=out_dtype,
-            group_size=group_size,
-            tile_m=tile_m,
-            tile_n=tile_n,
-            tile_k=tile_k,
-            doweight_stage1=bool(doweight_stage1),
-            use_cshuffle_epilog=False,
-            scale_is_bf16=scale_is_bf16,
-        )
-        compiled_exe1 = flyc.compile(exe1, *args1)
-        _FLYDSL_MOE_GEMM1_CACHE[key1] = compiled_exe1
-    else:
-        compiled_exe1(*args1)
-
-    a2_1d = out_stage1.view(-1).contiguous()
-    a2_scale_1d = torch.empty((0,), device=device, dtype=torch.float32)
-    out_stage2 = torch.empty((tokens, model_dim), device=device, dtype=out_torch_dtype)
-    doweight_stage2 = not bool(doweight_stage1)
-
-    key2 = (
-        model_dim,
-        inter_dim,
-        num_experts,
-        topk,
-        in_dtype,
-        out_dtype,
-        group_size,
-        tile_m,
-        tile_n2,
-        tile_k2,
-        bool(doweight_stage2),
-    )
-
-    compiled_exe2 = _FLYDSL_MOE_GEMM2_CACHE.get(key2)
-    args2 = (
-        _as_flydsl_ptr(out_stage2),
-        _as_flydsl_ptr(a2_1d),
-        _as_flydsl_ptr(w2),
-        _as_flydsl_ptr(a2_scale_1d),
-        _as_flydsl_ptr(w2_scale),
-        _as_flydsl_ptr(sorted_token_ids),
-        _as_flydsl_ptr(sorted_expert_ids),
-        _as_flydsl_ptr(sorted_weights_1d),
-        _as_flydsl_ptr(num_valid_ids),
-        tokens,
-        model_dim,
-        inter_dim,
-        int(blocks),
-        stream,
-    )
-    out_stage2.zero_()
-    if compiled_exe2 is None:
-        exe2 = compile_moe_gemm2(
-            model_dim=model_dim,
-            inter_dim=inter_dim,
-            experts=num_experts,
-            topk=topk,
-            in_dtype=in_dtype,
-            out_dtype=out_dtype,
-            group_size=group_size,
-            tile_m=tile_m,
-            tile_n=tile_n2,
-            tile_k=tile_k2,
-            doweight_stage2=bool(doweight_stage2),
-            scale_is_bf16=scale_is_bf16,
-        )
-        compiled_exe2 = flyc.compile(exe2, *args2)
-        _FLYDSL_MOE_GEMM2_CACHE[key2] = compiled_exe2
-    else:
-        compiled_exe2(*args2)
     return out_stage2
 
 

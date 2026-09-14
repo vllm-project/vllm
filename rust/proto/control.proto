@@ -5,9 +5,19 @@ syntax = "proto3";
 package vllm;
 
 service Control {
+  // Server and model discovery.
   rpc GetServerInfo (GetServerInfoRequest) returns (ServerInfo) {}
   rpc GetModelInfo (GetModelInfoRequest) returns (ModelInfo) {}
+
+  // Request lifecycle.
   rpc Abort (AbortRequest) returns (AbortResponse) {}
+
+  // LoRA lifecycle.
+  rpc LoadLora (LoadLoraRequest) returns (LoadLoraResponse) {}
+  rpc UnloadLora (UnloadLoraRequest) returns (UnloadLoraResponse) {}
+  rpc ListLoras (ListLorasRequest) returns (ListLorasResponse) {}
+
+  // KV event discovery.
   rpc GetKvEventSources (GetKvEventSourcesRequest) returns (GetKvEventSourcesResponse) {}
 
   // Reinforcement-learning lifecycle and weight updates.
@@ -55,6 +65,7 @@ message ParallelismInfo {
   uint32 data_parallel_size = 3;
   uint32 data_parallel_rank = 4;
   uint32 decode_context_parallel_size = 5;
+  uint64 world_size = 6;
 }
 
 message GetModelInfoRequest {}
@@ -77,6 +88,26 @@ message AbortRequest {
 }
 
 message AbortResponse {}
+
+// ======================================================================================
+// LoRA lifecycle
+// ======================================================================================
+
+message LoraAdapter {
+  int64 lora_id = 1;
+  string lora_name = 2;
+  string source_path = 3;
+}
+
+message LoadLoraRequest {
+  string lora_name = 1;
+  string source_path = 2;
+}
+message LoadLoraResponse { LoraAdapter adapter = 1; }
+message UnloadLoraRequest { string lora_name = 1; }
+message UnloadLoraResponse { LoraAdapter adapter = 1; }
+message ListLorasRequest {}
+message ListLorasResponse { repeated LoraAdapter adapters = 1; }
 
 // ======================================================================================
 // Reinforcement-learning control
