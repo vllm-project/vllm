@@ -8,6 +8,7 @@ import torch
 from vllm.config.model import LogprobsMode
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.sample.logprob import (
@@ -25,8 +26,8 @@ class PromptLogprobsWorker:
 
         self.uses_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=bool)
         self.num_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=np.int32)
-        # req_id -> (candidate token IDs, first prompt row to score)
-        self.prompt_logprob_token_ids: dict[str, tuple[list[int], int]] = {}
+        # req_id -> (pinned candidate token IDs, first prompt row to score)
+        self.prompt_logprob_token_ids: dict[str, tuple[torch.Tensor, int]] = {}
         self.in_progress_prompt_token_id_logprobs: dict[str, list[torch.Tensor]] = {}
         # req_idx -> list of in-progress LogprobsTensors
         self.in_progress_prompt_logprobs: dict[str, list[LogprobsTensors]] = {}
@@ -38,8 +39,13 @@ class PromptLogprobsWorker:
         if uses_prompt_logprobs:
             self.in_progress_prompt_logprobs[req_id] = []
         if sampling_params.prompt_logprob_token_ids is not None:
+            ids = torch.tensor(
+                sampling_params.prompt_logprob_token_ids,
+                dtype=torch.int64,
+                pin_memory=PIN_MEMORY,
+            )
             self.prompt_logprob_token_ids[req_id] = (
-                list(sampling_params.prompt_logprob_token_ids),
+                ids,
                 sampling_params.prompt_logprob_start or 0,
             )
             self.in_progress_prompt_token_id_logprobs[req_id] = []
@@ -80,26 +86,19 @@ class PromptLogprobsWorker:
             # The last prompt row predicts the first decode token; skip it.
             if is_last_chunk:
                 row_end -= 1
-            if row_start >= row_end:
-                # Nothing to score here, but flush earlier chunks.
-                if is_last_chunk and pending:
-                    out[req_id] = torch.cat(pending)
-                    pending.clear()
-                continue
-            ids = torch.as_tensor(candidate_ids_for_req, device=hidden_states.device)
-            part = compute_prompt_token_id_logprobs_with_chunking(
-                ids,
-                hidden_states[row_start:row_end],
-                logits_fn,
-                self.logprobs_mode,
-            )
-            if not is_last_chunk:
-                pending.append(part)
-                continue
-            if pending:
-                part = torch.cat([*pending, part])
+            if row_start < row_end:
+                ids = candidate_ids_for_req.to(hidden_states.device, non_blocking=True)
+                pending.append(
+                    compute_prompt_token_id_logprobs_with_chunking(
+                        ids,
+                        hidden_states[row_start:row_end],
+                        logits_fn,
+                        self.logprobs_mode,
+                    )
+                )
+            if is_last_chunk and pending:
+                out[req_id] = torch.cat(pending) if len(pending) > 1 else pending[0]
                 pending.clear()
-            out[req_id] = part
         return out
 
     def compute_prompt_logprobs(
