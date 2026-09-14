@@ -21,6 +21,7 @@ from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.launch_key_debug import _LaunchKeyReceipts, _object_fields
 from vllm.v1.worker.gpu.spec_decode.uno import (
     UNO_LORA_ID,
+    UNO_SAMPLING_MODES,
     UnoSpeculator,
     prepare_uno_inputs_reference,
 )
@@ -718,6 +719,41 @@ def test_draft_warmup_request_counts_are_independent_of_k():
     assert draft_warmup_request_counts(1) == [1]
     assert draft_warmup_request_counts(0) == []
     assert draft_warmup_request_counts(-1) == []
+
+
+@pytest.mark.parametrize("use_flashinfer", [False, True])
+def test_uno_served_sampling_modes_have_warmup_entries(use_flashinfer):
+    """CPU_OBSERVED/CUDA_UNVERIFIED: every admitted mode reaches warmup.
+
+    The unfixed enumerator returns a valid plan but omits all-greedy requests;
+    this must fail on that behavior before reading any newly added fields.
+    """
+    from vllm.v1.worker.gpu.spec_decode.uno import (
+        enumerate_uno_served_launches,
+        sampler_branch_for_mode,
+    )
+
+    plan = enumerate_uno_served_launches(
+        max_num_reqs=4,
+        k=8,
+        max_num_tokens=2048,
+        max_model_len=4096,
+        num_sm=82,
+        use_flashinfer=use_flashinfer,
+    )
+    covered = {(call.mode.name, call.sampler_branch) for call in plan.sampler_warmups}
+    assert ("greedy", "native_verification") in covered, (
+        "all-greedy verification has no startup warmup entry"
+    )
+    expected = {
+        (mode.name, branch)
+        for mode in UNO_SAMPLING_MODES
+        for branch in (
+            "native_verification",
+            sampler_branch_for_mode(mode, use_flashinfer=use_flashinfer),
+        )
+    }
+    assert expected <= covered, f"served modes omitted from warmup: {expected - covered}"
 
 
 @pytest.mark.parametrize("use_flashinfer", [False, True])
