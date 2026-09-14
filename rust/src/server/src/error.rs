@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use axum::Json;
+use axum::extract::rejection::JsonRejection;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use thiserror_ext::{AsReport as _, Construct, Macro};
@@ -67,6 +68,12 @@ impl ApiError {
         };
 
         ErrorResponse { error }
+    }
+}
+
+impl From<JsonRejection> for ApiError {
+    fn from(error: JsonRejection) -> Self {
+        Self::json_parse_error(error.body_text())
     }
 }
 

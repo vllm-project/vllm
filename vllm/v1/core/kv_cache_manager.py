@@ -67,20 +67,30 @@ class KVCacheBlocks:
     def get_block_ids(
         self,
         allow_none: Literal[False] = False,
+        *,
+        group_ids: Sequence[int] | None = None,
     ) -> tuple[list[int], ...]: ...
 
     @overload
     def get_block_ids(
         self,
         allow_none: Literal[True] = True,
+        *,
+        group_ids: Sequence[int] | None = None,
     ) -> tuple[list[int], ...] | None: ...
 
     def get_block_ids(
         self,
         allow_none: bool = False,
+        *,
+        group_ids: Sequence[int] | None = None,
     ) -> tuple[list[int], ...] | None:
         """
         Converts the KVCacheBlocks instance to block_ids.
+
+        Args:
+            allow_none: Return None when every selected group is empty.
+            group_ids: KV cache groups to include. Includes all groups by default.
 
         Returns:
             tuple[list[int], ...]: A tuple of lists where:
@@ -88,9 +98,14 @@ class KVCacheBlocks:
                 - each inner list contains the block_ids of the blocks in that
                   group
         """
-        if allow_none and all(len(group) == 0 for group in self.blocks):
+        groups = (
+            self.blocks
+            if group_ids is None
+            else tuple(self.blocks[group_id] for group_id in group_ids)
+        )
+        if allow_none and all(len(group) == 0 for group in groups):
             return None
-        return tuple([blk.block_id for blk in group] for group in self.blocks)
+        return tuple([blk.block_id for blk in group] for group in groups)
 
     def get_unhashed_block_ids(self) -> list[int]:
         """Get block_ids of unhashed blocks from KVCacheBlocks instance."""
