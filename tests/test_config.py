@@ -40,7 +40,8 @@ from vllm.config.mamba import MambaBackendEnum
 from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.transformers_utils.config import (
     get_pooling_config,
     try_get_dense_modules,
@@ -909,71 +910,101 @@ def test_data_parallel_rpc_port_has_fixed_default():
     assert ParallelConfig().data_parallel_rpc_port == 29550
 
 
+def test_all2all_backend_has_portable_default():
+    assert ParallelConfig().all2all_backend == "allgather_reducescatter"
+
+
+def _pretend_cuda_host(monkeypatch, cpu_arch, capability) -> None:
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "get_cpu_architecture", lambda: cpu_arch)
+    # `is_device_capability_family` is a classmethod, so it reads the capability
+    # off the class rather than the instance patched above.
+    monkeypatch.setattr(
+        type(current_platform),
+        "get_device_capability",
+        staticmethod(
+            lambda device_id=0: DeviceCapability(
+                major=capability[0], minor=capability[1]
+            )
+        ),
+    )
+
+
 @pytest.mark.parametrize(
-    ("is_cuda", "enable_expert_parallel", "expected_backend"),
+    ("cpu_arch", "capability", "expected"),
     [
-        (True, True, "flashinfer_nvlink_one_sided"),
-        # Without expert parallel the naive AllGather+ReduceScatter path
-        # dispatches through the generic manager interface, which the
-        # one-sided manager does not implement.
-        (True, False, "allgather_reducescatter"),
-        (False, True, "allgather_reducescatter"),
-        (False, False, "allgather_reducescatter"),
+        # GB200 and GB300: datacenter Blackwell on a Grace host.
+        (CpuArchEnum.ARM, (10, 0), "flashinfer_nvlink_one_sided"),
+        (CpuArchEnum.ARM, (10, 3), "flashinfer_nvlink_one_sided"),
+        # HGX B200/B300 share the compute capability but not the Grace host.
+        (CpuArchEnum.X86, (10, 0), "allgather_reducescatter"),
+        (CpuArchEnum.X86, (10, 3), "allgather_reducescatter"),
+        # GB10 is a Grace-Blackwell superchip too, but not a 10.x part.
+        (CpuArchEnum.ARM, (12, 1), "allgather_reducescatter"),
+        # GH200 is Grace, but Hopper.
+        (CpuArchEnum.ARM, (9, 0), "allgather_reducescatter"),
+        (CpuArchEnum.X86, (9, 0), "allgather_reducescatter"),
     ],
 )
-def test_all2all_backend_default_needs_cuda_and_expert_parallel(
-    monkeypatch, is_cuda, enable_expert_parallel, expected_backend
+def test_all2all_backend_defaults_to_one_sided_only_on_gb200_gb300(
+    monkeypatch, cpu_arch, capability, expected
 ):
-    """Only CUDA with expert parallel gets the one-sided backend; everything
-    else keeps the portable default (#53952)."""
-    monkeypatch.setattr("vllm.platforms.current_platform.is_cuda", lambda: is_cuda)
-    monkeypatch.setattr(
-        "vllm.platforms.current_platform.has_device_capability", lambda _: True
-    )
+    """x86 HGX B200/B300 report the same compute capability as GB200/GB300, so
+    the default needs the Grace host to stay off unbenchmarked parts."""
+    from vllm.config.parallel import _prefers_one_sided_all2all
+
+    _pretend_cuda_host(monkeypatch, cpu_arch, capability)
+    _prefers_one_sided_all2all.cache_clear()
+    try:
+        default_factory = get_field(ParallelConfig, "all2all_backend").default_factory
+        assert default_factory() == expected
+    finally:
+        _prefers_one_sided_all2all.cache_clear()
+
+
+def test_one_sided_all2all_default_requires_expert_parallel(monkeypatch):
+    """The all2all backend is only used by expert parallelism, so the GB200
+    default must not leak into non-EP deployments."""
+    from vllm.config.parallel import _prefers_one_sided_all2all
+
+    _pretend_cuda_host(monkeypatch, CpuArchEnum.ARM, (10, 0))
     monkeypatch.setattr(
         "vllm.utils.flashinfer.has_flashinfer_nvlink_one_sided", lambda: True
     )
-    config = ParallelConfig(enable_expert_parallel=enable_expert_parallel)
-    assert config.all2all_backend == expected_backend
+    _prefers_one_sided_all2all.cache_clear()
+    try:
+        assert ParallelConfig().all2all_backend == "allgather_reducescatter"
+        assert (
+            ParallelConfig(enable_expert_parallel=True).all2all_backend
+            == "flashinfer_nvlink_one_sided"
+        )
+    finally:
+        _prefers_one_sided_all2all.cache_clear()
 
 
-def test_all2all_backend_falls_back_before_blackwell(monkeypatch):
-    """No unquantized MoE kernel accepts this backend below SM100, so the
-    backend oracle would raise while loading the model (L4, DP+EP)."""
-    monkeypatch.setattr("vllm.platforms.current_platform.is_cuda", lambda: True)
-    monkeypatch.setattr(
-        "vllm.platforms.current_platform.has_device_capability", lambda _: False
-    )
-    config = ParallelConfig(enable_expert_parallel=True)
-    assert config.all2all_backend == "allgather_reducescatter"
+def test_one_sided_all2all_default_falls_back_without_flashinfer(monkeypatch):
+    """FlashInferNVLinkOneSidedManager asserts on the missing module, so an
+    image without it must degrade instead of failing startup."""
+    from vllm.config.parallel import _prefers_one_sided_all2all
 
-
-def test_all2all_backend_falls_back_without_flashinfer_one_sided(monkeypatch):
-    """FlashInferNVLinkOneSidedManager asserts on this module, so a CUDA
-    install without it must keep serving instead of failing at startup."""
-    monkeypatch.setattr("vllm.platforms.current_platform.is_cuda", lambda: True)
-    monkeypatch.setattr(
-        "vllm.platforms.current_platform.has_device_capability", lambda _: True
-    )
+    _pretend_cuda_host(monkeypatch, CpuArchEnum.ARM, (10, 0))
     monkeypatch.setattr(
         "vllm.utils.flashinfer.has_flashinfer_nvlink_one_sided", lambda: False
     )
-    config = ParallelConfig(enable_expert_parallel=True)
-    assert config.all2all_backend == "allgather_reducescatter"
+    _prefers_one_sided_all2all.cache_clear()
+    try:
+        config = ParallelConfig(enable_expert_parallel=True)
+        assert config.all2all_backend == "allgather_reducescatter"
+    finally:
+        _prefers_one_sided_all2all.cache_clear()
 
 
-def test_all2all_backend_explicit_one_sided_downgrades_without_expert_parallel(
-    monkeypatch,
-):
-    """Without expert parallel, DP deployments reach naive_dp_ep.prepare(),
-    which dispatches through the generic manager interface, so an explicit
-    request must be downgraded rather than crash there."""
-    monkeypatch.setattr("vllm.platforms.current_platform.is_cuda", lambda: True)
-    config = ParallelConfig(
-        all2all_backend="flashinfer_nvlink_one_sided",
-        enable_expert_parallel=False,
-    )
-    assert config.all2all_backend == "allgather_reducescatter"
+def test_engine_args_resolves_all2all_backend_default():
+    """EngineArgs is a stdlib dataclass, so mirroring the Pydantic class
+    attribute would hand it a FieldInfo instead of a backend name."""
+    from vllm.engine.arg_utils import EngineArgs
+
+    assert isinstance(EngineArgs().all2all_backend, str)
 
 
 @pytest.mark.parametrize("port", [1, 29550, 65535])
