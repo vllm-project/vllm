@@ -10,6 +10,23 @@ import torch
 import torch.nn.functional as F
 
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
+
+
+@triton.jit
+def _relu2_routed_kernel(x, y, ids, emap, N: tl.constexpr, K: tl.constexpr):
+    token = tl.program_id(0)
+    cols = tl.program_id(1) * 1024 + tl.arange(0, 1024)
+    for slot in tl.static_range(K):
+        row = token * K + slot
+        expert = tl.load(ids + row)
+        local_expert = tl.load(emap + expert, mask=expert >= 0, other=-1)
+        if local_expert >= 0:
+            offsets = row * N + cols
+            value = tl.load(x + offsets, mask=cols < N, other=0).to(tl.float32)
+            value = tl.where(value < 0.0, 0.0, value)
+            tl.store(y + offsets, value * value, mask=cols < N)
+
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.config import (
@@ -399,8 +416,15 @@ def apply_moe_activation(
     elif activation == MoEActivation.GELU_TANH_NO_MUL:
         output.copy_(F.gelu(input, approximate="tanh"))
     elif activation == MoEActivation.RELU2_NO_MUL:
-        F.relu(input, inplace=True)
-        torch.square(input, out=output)
+        if topk_ids is not None and expert_map is not None:
+            n, topk = input.shape[1], topk_ids.shape[1]
+            grid = (topk_ids.shape[0], triton.cdiv(n, 1024))
+            _relu2_routed_kernel[grid](
+                input, output, topk_ids, expert_map, n, topk, num_warps=4
+            )
+        else:
+            F.relu(input, inplace=True)
+            torch.square(input, out=output)
     else:
         raise ValueError(f"Unsupported FusedMoe activation: {activation}")
 
