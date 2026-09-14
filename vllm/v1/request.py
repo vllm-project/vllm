@@ -311,6 +311,14 @@ class Request:
     def has_encoder_inputs(self) -> bool:
         return self.num_encoder_inputs > 0
 
+    @property
+    def last_mm_feature_end(self) -> int:
+        """Token position immediately after the final multimodal feature."""
+        if not self.mm_features:
+            return 0
+        position = self.mm_features[-1].mm_position
+        return position.offset + position.length
+
     def get_max_cache_hit_length(self, bound: int | None = None) -> int:
         """Longest prefix cache hit allowed, optionally tightened by bound."""
         # The last token is always recomputed to produce logits.

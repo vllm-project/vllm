@@ -34,6 +34,12 @@ vllm serve <hybrid-model> \
 
 Choose a value that divides the block size of every prefix-cacheable KV cache group, and that is a multiple of the per-state compression ratio for models that use one, such as sparse MLA. vLLM validates both at startup and names the offending sizes in the error. Read the served block size from the startup log. 64 is a reasonable starting point.
 
+### Incremental multimodal requests
+
+With APC enabled, hybrid Mamba models also retain a checkpoint at the final multimodal feature boundary, rounded down to the Mamba block grid. A follow-up request that appends another image can reuse this state even when the producer has a long text tail. No additional checkpoint flag is required.
+
+This adds at most one prefill split and one retained checkpoint per uninterrupted multimodal prefill. A shared prefix shorter than one Mamba block still cannot reuse a state.
+
 ## Example workloads
 
 We describe two example workloads, where APC can provide huge performance benefit:

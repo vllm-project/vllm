@@ -90,6 +90,7 @@ class KVCacheCoordinator(ABC):
     """Coordinate the KV cache of different KV cache groups."""
 
     enable_partial_hash_hits = False
+    _has_mamba_align_group = False
 
     def __init__(
         self,
@@ -370,6 +371,8 @@ class KVCacheCoordinator(ABC):
             self.scheduler_block_size,
             use_eagle=bool(self.drop_eagle_group_ids),
         )
+        if self._has_mamba_align_group and request.last_mm_feature_end:
+            boundaries = tuple(sorted({*boundaries, request.last_mm_feature_end}))
         for group_id, manager in enumerate(self.single_type_managers):
             if not manager.enable_caching:
                 continue
@@ -691,6 +694,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # managers in every group. TP needs hashing finer than the Mamba block;
         # DCP accepts equality because it scales the effective full-attention
         # block instead.
+        self._has_mamba_align_group = any(
+            isinstance(g.kv_cache_spec, MambaSpec)
+            and g.kv_cache_spec.mamba_cache_mode == "align"
+            for g in kv_cache_config.kv_cache_groups
+        )
         self.enable_partial_hash_hits = (
             allow_partial_hash_hits
             and partial_hash_hits_enabled(
