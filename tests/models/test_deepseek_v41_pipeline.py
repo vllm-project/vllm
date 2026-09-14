@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from vllm.models.deepseek_v4_1.common.pipeline import (
+from vllm.models.deepseek_v41.common.pipeline import (
     get_sharing_dependencies,
     validate_local_sharing,
 )
