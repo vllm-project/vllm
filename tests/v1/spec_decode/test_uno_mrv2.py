@@ -9,6 +9,7 @@ preparation and adapter scope; model/sampler/graph numerics require GPU tests.
 
 import inspect
 from contextlib import contextmanager, nullcontext
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock
@@ -753,7 +754,34 @@ def test_uno_served_sampling_modes_have_warmup_entries(use_flashinfer):
             sampler_branch_for_mode(mode, use_flashinfer=use_flashinfer),
         )
     }
-    assert expected <= covered, f"served modes omitted from warmup: {expected - covered}"
+    assert expected <= covered, (
+        f"served modes omitted from warmup: {expected - covered}"
+    )
+
+
+def test_uno_new_sampling_mode_cannot_disappear_when_filter_keys_are_shared(
+    monkeypatch,
+):
+    """A declaration still needs a real call when an older mode shares its keys."""
+    from vllm.v1.worker.gpu.spec_decode import uno
+
+    added_mode = replace(uno.UNO_SAMPLING_MODES[0], name="new_served_mode")
+    monkeypatch.setattr(
+        uno, "UNO_SAMPLING_MODES", (*uno.UNO_SAMPLING_MODES, added_mode)
+    )
+    plan = uno.enumerate_uno_served_launches(
+        max_num_reqs=4,
+        k=8,
+        max_num_tokens=2048,
+        max_model_len=4096,
+        num_sm=82,
+        use_flashinfer=False,
+    )
+    assert {
+        call.sampler_branch
+        for call in plan.sampler_warmups
+        if call.mode.name == added_mode.name
+    } == {"native_verification", "triton"}
 
 
 @pytest.mark.parametrize("use_flashinfer", [False, True])
@@ -772,10 +800,7 @@ def test_uno_served_launches_cover_sampler_flags_and_integer_buckets(use_flashin
 
     assert plan.prepare_request_counts == tuple(range(1, 17))
     assert {warmup.mode.name for warmup in plan.sampler_warmups} == {
-        "top_p_only",
-        "top_k_top_p",
-        "top_k_only",
-        "neither",
+        mode.name for mode in UNO_SAMPLING_MODES
     }
     if not use_flashinfer:
         assert {warmup.source for warmup in plan.sampler_warmups} >= {
@@ -789,20 +814,17 @@ def test_uno_served_launches_cover_sampler_flags_and_integer_buckets(use_flashin
         if warmup.sampler_branch != "native_verification"
     }
     expected_branches = {
+        "top_p_only": "flashinfer" if use_flashinfer else "triton",
         "top_k_top_p": "flashinfer" if use_flashinfer else "triton",
         "top_k_only": "flashinfer" if use_flashinfer else "triton",
         "neither": "triton",
+        "greedy": "triton",
     }
-    if use_flashinfer:
-        expected_branches["top_p_only"] = "flashinfer"
-    assert branches == expected_branches
-    assert len(plan.sampler_keys) == (44 if use_flashinfer else 46)
+    assert {name: branches[name] for name in expected_branches} == expected_branches
     for has_k in (False, True):
         assert ("_topp_sb_stats_kernel", has_k, 32) in plan.sampler_keys
         assert ("_topp_sb_stats_kernel", has_k, 4) in plan.sampler_keys
-    assert (("_topk_topp_kernel", "one", True, False, False) in plan.sampler_keys) is (
-        not use_flashinfer
-    )
+    assert ("_topk_topp_kernel", "one", True, False, False) in plan.sampler_keys
     assert (
         "_topk_topp_kernel",
         "multiple_of_16",
@@ -818,7 +840,7 @@ def test_uno_served_launches_cover_sampler_flags_and_integer_buckets(use_flashin
 def test_uno_warmup_shares_filter_keys_without_prefill_verification(
     max_num_reqs, use_flashinfer
 ):
-    """Every real filter key is warmed without duplicate native/Triton calls."""
+    """Shared filter keys retain a warmup call for every served sampling mode."""
     from vllm.v1.worker.gpu.spec_decode.uno import (
         UNO_SAMPLING_MODES,
         _sampler_kernel_keys,
@@ -835,22 +857,25 @@ def test_uno_warmup_shares_filter_keys_without_prefill_verification(
         use_flashinfer=use_flashinfer,
     )
     covered = set()
+    observed_modes = set()
     for call in plan.sampler_warmups:
         if call.sampler_branch == "native_verification":
             assert call.num_rows > call.num_reqs
         else:
             assert call.num_rows == call.num_reqs
+        mode_key = (call.mode.name, call.sampler_branch)
         if call.kernel_keys:
-            assert set(call.kernel_keys) - covered, (
-                "duplicate native/Triton filter call"
+            assert set(call.kernel_keys) - covered or mode_key not in observed_modes, (
+                "duplicate sampler call with no new mode or launch key"
             )
             covered.update(call.kernel_keys)
+        observed_modes.add(mode_key)
 
     # Exhaust the small bounded domain independently of the representative
     # shape enumerator; partial verification includes totals below max_num_reqs.
     served_keys = set()
     for mode in UNO_SAMPLING_MODES:
-        for num_reqs in range(1, max_num_reqs + 1):
+        for num_reqs in range(mode.min_num_reqs, max_num_reqs + 1):
             for num_rows in range(num_reqs, num_reqs * 9 + 1):
                 branch = (
                     "native_verification"
@@ -858,6 +883,20 @@ def test_uno_warmup_shares_filter_keys_without_prefill_verification(
                     else sampler_branch_for_mode(mode, use_flashinfer=use_flashinfer)
                 )
                 served_keys.update(_sampler_kernel_keys(mode, num_rows, 82, branch))
+        if mode.logprobs is not None and mode.min_num_reqs <= max_num_reqs:
+            # Logprob widths vary independently of the sampler row layout.
+            for count in range(21):
+                counted_mode = replace(mode, logprobs=count)
+                for branch, num_rows in (
+                    ("native_verification", mode.min_num_reqs + 1),
+                    (
+                        sampler_branch_for_mode(mode, use_flashinfer=use_flashinfer),
+                        mode.min_num_reqs,
+                    ),
+                ):
+                    served_keys.update(
+                        _sampler_kernel_keys(counted_mode, num_rows, 82, branch)
+                    )
     assert covered == served_keys
 
 
@@ -865,7 +904,7 @@ def test_uno_warmup_shares_filter_keys_without_prefill_verification(
 def test_uno_warmup_filter_calls_add_uncovered_keys_across_sampler_branches(
     max_num_reqs,
 ):
-    """Native verification and ordinary Triton sampling share filter keys."""
+    """Each additional call must cover a new mode or an unwarmed launch key."""
     from vllm.v1.worker.gpu.spec_decode.uno import enumerate_uno_served_launches
 
     plan = enumerate_uno_served_launches(
@@ -877,16 +916,19 @@ def test_uno_warmup_filter_calls_add_uncovered_keys_across_sampler_branches(
         use_flashinfer=False,
     )
     covered = set()
+    observed_modes = set()
     for call in plan.sampler_warmups:
         if not call.kernel_keys:
             continue
         keys = set(call.kernel_keys)
+        mode_key = (call.mode.name, call.sampler_branch)
         # Check only the global filter-call contract here: shape validation
         # must not mask a repeated call whose entire key set is already warm.
-        assert keys - covered, (
-            f"duplicate filter call from {call.sampler_branch}: {call.kernel_keys}"
+        assert keys - covered or mode_key not in observed_modes, (
+            f"duplicate sampler call for {mode_key}: {call.kernel_keys}"
         )
         covered.update(keys)
+        observed_modes.add(mode_key)
     assert covered == plan.served_sampler_keys
 
 
@@ -896,6 +938,13 @@ def test_uno_warmup_filter_calls_add_uncovered_keys_across_sampler_branches(
         {"max_num_reqs": 2, "k": 0, "max_num_tokens": 4, "max_model_len": 4},
         {"max_num_reqs": 4, "k": 2, "max_num_tokens": 3, "max_model_len": 4},
         {"max_num_reqs": 4, "k": 2, "max_num_tokens": 8, "max_model_len": 0},
+        {
+            "max_num_reqs": 4,
+            "k": 2,
+            "max_num_tokens": 8,
+            "max_model_len": 16,
+            "max_num_logprobs": -1,
+        },
     ],
 )
 def test_uno_served_launch_enumerator_rejects_unbounded_axes(kwargs):
@@ -903,6 +952,32 @@ def test_uno_served_launch_enumerator_rejects_unbounded_axes(kwargs):
 
     with pytest.raises(ValueError):
         enumerate_uno_served_launches(**kwargs, num_sm=82, use_flashinfer=False)
+
+
+@pytest.mark.parametrize("max_num_logprobs", [0, 20, 1025])
+def test_uno_logprobs_warmup_covers_every_bounded_gather_width(max_num_logprobs):
+    """A new logprob axis needs a bound and every reachable gather specialization."""
+    from vllm.v1.worker.gpu.spec_decode.uno import (
+        _sampler_kernel_keys,
+        _served_logprobs_counts,
+    )
+
+    bounds = {"max_num_logprobs": max_num_logprobs}
+    assert set(inspect.signature(_served_logprobs_counts).parameters) == set(bounds)
+    counts = _served_logprobs_counts(**bounds)
+    assert all(0 <= count <= max_num_logprobs for count in counts)
+    mode = next(mode for mode in UNO_SAMPLING_MODES if mode.name == "greedy_logprobs")
+
+    def keys(counts):
+        return {
+            key
+            for count in counts
+            for key in _sampler_kernel_keys(
+                replace(mode, logprobs=count), 1, 82, "triton"
+            )
+        }
+
+    assert keys(counts) == keys(range(max_num_logprobs + 1))
 
 
 @pytest.mark.parametrize(
@@ -961,7 +1036,8 @@ def test_warmup_kernels_runs_two_full_verifications(
         is_pooling_model=False,
         is_encoder_decoder=False,
         is_last_pp_rank=True,
-        model_config=SimpleNamespace(get_vocab_size=lambda: 64),
+        model_config=SimpleNamespace(get_vocab_size=lambda: 64, enforce_eager=False),
+        cudagraph_manager=SimpleNamespace(needs_capture=lambda: True),
         model_state=SimpleNamespace(max_encoder_len=0),
         scheduler_config=SimpleNamespace(
             max_num_seqs=num_reqs, max_num_batched_tokens=2048
@@ -1017,9 +1093,68 @@ def test_warmup_kernels_runs_two_full_verifications(
         ), "startup must execute the two-request full verification exactly once"
 
 
-@pytest.mark.parametrize("top_k", [None, 50])
+@pytest.mark.parametrize(
+    "enforce_eager,needs_capture",
+    [(True, True), (False, False), (False, True)],
+)
+def test_uno_startup_reaches_sampler_plan_when_decoder_capture_will_not_run(
+    monkeypatch, enforce_eager, needs_capture
+):
+    """Eager and graph-disabled startup must execute the same bounded plan."""
+    from vllm.v1.worker.gpu import model_runner as model_runner_module
+    from vllm.v1.worker.gpu import warmup
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.spec_decode.uno import UnoServedLaunches
+
+    runner = object.__new__(GPUModelRunner)
+    runner.speculator = object.__new__(UnoSpeculator)
+    runner.speculator.k = 8
+    runner.speculator.report_draft_warmup = Mock()
+    runner.sampler = SimpleNamespace(use_flashinfer=False)
+    runner.model_config = SimpleNamespace(
+        enforce_eager=enforce_eager, logprobs_mode="raw_logprobs", max_logprobs=20
+    )
+    runner.cudagraph_manager = SimpleNamespace(needs_capture=lambda: needs_capture)
+    runner.max_num_reqs = 4
+    runner.max_num_tokens = 64
+    runner.max_model_len = 128
+    runner.vocab_size = 64
+    runner.device = torch.device("cpu")
+    adaptive = object()
+    runner.adaptive_verification = adaptive
+    runner._dummy_run = Mock(return_value=(None, None))
+    enumerate_launches = Mock(return_value=UnoServedLaunches((1,), ()))
+
+    monkeypatch.setattr(warmup, "_warmup_kernels", lambda *_: None)
+    monkeypatch.setattr(model_runner_module, "num_compute_units", lambda _: 82)
+    monkeypatch.setattr(
+        model_runner_module, "enumerate_uno_served_launches", enumerate_launches
+    )
+    warmup.warmup_kernels(runner, Mock(), Mock())
+
+    if enforce_eager or not needs_capture:
+        enumerate_launches.assert_called_once()
+        runner._dummy_run.assert_called_once_with(1)
+    else:
+        enumerate_launches.assert_not_called()
+        runner._dummy_run.assert_not_called()
+    assert runner.adaptive_verification is adaptive
+
+
+@pytest.mark.parametrize(
+    "mode_name",
+    [
+        "top_p_only",
+        "top_k_top_p",
+        "greedy",
+        "sampled_unit_temperature",
+        "mixed_unfiltered",
+    ],
+)
 @pytest.mark.parametrize("use_flashinfer", [False, True])
-def test_uno_warmup_executes_native_verification_s4(monkeypatch, top_k, use_flashinfer):
+def test_uno_warmup_executes_native_verification_s4(
+    monkeypatch, mode_name, use_flashinfer
+):
     """CPU_OBSERVED/CUDA_UNVERIFIED: drive real rejection/filter launch callers.
 
     CUDA-labelled CPU storage reaches the production CUDA launch selector;
@@ -1047,14 +1182,12 @@ def test_uno_warmup_executes_native_verification_s4(monkeypatch, top_k, use_flas
             w
             for w in plan.sampler_warmups
             if w.sampler_branch == "native_verification"
-            and w.num_reqs == 2
-            and w.num_rows == 18
-            and w.mode.top_k == top_k
-            and w.mode.top_p is not None
+            and w.mode.name == mode_name
+            and (w.mode.top_p is None or (w.num_reqs == 2 and w.num_rows == 18))
         ),
         None,
     )
-    assert warmup is not None, "verification must warm S=4 independently of FlashInfer"
+    assert warmup is not None, f"native verification is not warmed for {mode_name}"
 
     class CudaLabelledTensor(torch.Tensor):
         @property
@@ -1064,6 +1197,9 @@ def test_uno_warmup_executes_native_verification_s4(monkeypatch, top_k, use_flas
     class ArrayState:
         def __init__(self, values, dtype):
             self.np = np.asarray(values, dtype=dtype)
+
+        def copy_to_uva(self):
+            pass
 
         @property
         def gpu(self):
@@ -1097,6 +1233,14 @@ def test_uno_warmup_executes_native_verification_s4(monkeypatch, top_k, use_flas
         ("thinking_budget_state", "apply"),
     ):
         setattr(sampler, attribute, SimpleNamespace(**{method: lambda *_: None}))
+    sampler.logit_bias_state.use_logit_bias = np.zeros(2, dtype=bool)
+    sampler.bad_words_state.num_bad_words = ArrayState([0, 0], np.int32)
+    sampler.thinking_budget_state.enabled = False
+    sampler.penalties_state.use_penalty = np.zeros(2, dtype=bool)
+    sampler.penalties_state._new_penalties_reqs = []
+    for name in ("repetition_penalty", "frequency_penalty", "presence_penalty"):
+        setattr(sampler.penalties_state, name, ArrayState([1.0, 1.0], np.float32))
+    sampler.penalties_state.apply_staged_writes = lambda: None
     rejection = object.__new__(rejection_module.RejectionSampler)
     rejection.sampler = sampler
     rejection.num_speculative_steps = 8
@@ -1111,9 +1255,9 @@ def test_uno_warmup_executes_native_verification_s4(monkeypatch, top_k, use_flas
     runner.device = torch.device("cpu")
     runner.input_buffers = InputBuffers(2, 18, runner.device)
     runner.model = SimpleNamespace(
-        compute_logits=lambda hidden: torch.ones((hidden.shape[0], 64)).as_subclass(
-            CudaLabelledTensor
-        )
+        compute_logits=lambda hidden: torch.ones(
+            (hidden.shape[0], 64), dtype=torch.bfloat16
+        ).as_subclass(CudaLabelledTensor)
     )
 
     launches = []
@@ -1139,35 +1283,40 @@ def test_uno_warmup_executes_native_verification_s4(monkeypatch, top_k, use_flas
     monkeypatch.setattr(topk_topp_triton, "num_compute_units", lambda _: 82)
     for name in ("_TRITON_SPLIT_CACHE", "_TRITON_BUFFER_CACHE", "_TRITON_TABLE_CACHE"):
         monkeypatch.setattr(topk_topp_triton, name, {})
+    rejection_arg_names = {}
     for name in (
         "_compute_local_logits_stats_kernel",
         "_rejection_kernel",
         "_resample_kernel",
         "_insert_resampled_kernel",
     ):
+        rejection_arg_names[name] = getattr(rejection_sampler_utils, name).arg_names
         monkeypatch.setattr(rejection_sampler_utils, name, LaunchRecorder(name))
     monkeypatch.setattr(
         rejection_module,
         "get_num_sampled_and_rejected",
-        lambda num_sampled, *_: (num_sampled, torch.full((2,), 8)),
+        lambda num_sampled, *_: (num_sampled, torch.full_like(num_sampled, 8)),
     )
 
-    assert runner._warm_up_uno_sampler(torch.empty((2, 3)), warmup=warmup) == (
-        "native_verification"
-    )
+    assert runner._warm_up_uno_sampler(
+        torch.empty((warmup.num_reqs, 3)), warmup=warmup
+    ) == ("native_verification")
     split_launches = [(name, args, kw) for name, args, kw in launches if "_sb_" in name]
-    assert {name for name, _, _ in split_launches} == {
-        "_topp_sb_stats_kernel",
-        "_topp_sb_step_kernel",
-        "_topp_sb_mask_kernel",
-    }
-    assert all(
-        kw["S"] == 4 and kw["HAS_K"] == (top_k is not None)
-        for _, _, kw in split_launches
-    )
-    assert [args[6] for name, args, _ in split_launches if "_step_" in name] == list(
-        range(5)
-    )
+    if warmup.mode.top_p is None:
+        assert split_launches == []
+    else:
+        assert {name for name, _, _ in split_launches} == {
+            "_topp_sb_stats_kernel",
+            "_topp_sb_step_kernel",
+            "_topp_sb_mask_kernel",
+        }
+        assert all(
+            kw["S"] == 4 and kw["HAS_K"] == warmup.mode.topk_enabled
+            for _, _, kw in split_launches
+        )
+        assert [
+            args[6] for name, args, _ in split_launches if "_step_" in name
+        ] == list(range(5))
     verification_launches = [
         (name, args, kw) for name, args, kw in launches if "HAS_DRAFT_LOGITS" in kw
     ]
@@ -1181,6 +1330,20 @@ def test_uno_warmup_executes_native_verification_s4(monkeypatch, top_k, use_flas
         any(arg is runner.speculator.draft_logits for arg in args)
         for _, args, _ in verification_launches
     )
+    for name, args, kwargs in verification_launches:
+        bound = dict(zip(rejection_arg_names[name], args)) | kwargs
+        expected_dtype = (
+            torch.float32 if warmup.mode.needs_logits_processing else torch.bfloat16
+        )
+        assert bound["target_logits_ptr"].dtype == expected_dtype
+        if name != "_compute_local_logits_stats_kernel":
+            assert bound["cumulative_log_p_ptr"] is None
+            assert bound["USE_BLOCK_VERIFICATION"] is False
+        if name == "_compute_local_logits_stats_kernel":
+            assert bound["BLOCK_SIZE"] == 8192
+        elif name == "_resample_kernel":
+            assert bound["BLOCK_SIZE"] == 1024
+            assert bound["USE_FP64"] is False
     assert sampler.use_flashinfer is use_flashinfer
     assert states.seeds_set.tolist() == [True, False]
     assert states.top_k.np.tolist() == [64, 64]
@@ -1249,6 +1412,8 @@ def test_draft_warmup_runs_every_shape_through_the_real_dummy_run(monkeypatch):
     runner.max_num_reqs = 4
     runner.max_num_tokens = 64
     runner.max_model_len = 128
+    runner.model_config = SimpleNamespace(logprobs_mode="raw_logprobs", max_logprobs=20)
+    runner.vocab_size = 64
     runner.device = torch.device("cuda", 0)
     runner.sampler = SimpleNamespace(use_flashinfer=False)
     monkeypatch.setattr(
@@ -1387,6 +1552,8 @@ def test_draft_warmup_reports_execution_not_a_nonlast_rank_plan(monkeypatch):
     runner.max_num_reqs = 2
     runner.max_num_tokens = 8
     runner.max_model_len = 32
+    runner.model_config = SimpleNamespace(logprobs_mode="raw_logprobs", max_logprobs=20)
+    runner.vocab_size = 64
     runner.device = torch.device("cpu")
     runner._dummy_run = lambda _tokens: (None, None)
     runner._warm_up_uno_sampler = Mock(side_effect=AssertionError("non-last rank"))
@@ -1403,10 +1570,11 @@ def test_draft_warmup_reports_execution_not_a_nonlast_rank_plan(monkeypatch):
 
 
 @pytest.mark.parametrize("use_flashinfer", [False, True])
+@pytest.mark.parametrize("max_logprobs", [-1, 0, 20, 80])
 def test_draft_warmup_enumerator_uses_the_production_sampler_capability(
-    monkeypatch, use_flashinfer
+    monkeypatch, use_flashinfer, max_logprobs
 ):
-    """The only production enumerator caller passes the installed backend."""
+    """The production caller passes its backend, logprobs mode, and finite bound."""
     from vllm.v1.worker.gpu import model_runner as model_runner_module
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
     from vllm.v1.worker.gpu.spec_decode.uno import UnoServedLaunches
@@ -1418,6 +1586,10 @@ def test_draft_warmup_enumerator_uses_the_production_sampler_capability(
     runner.max_num_reqs = 4
     runner.max_num_tokens = 64
     runner.max_model_len = 128
+    runner.model_config = SimpleNamespace(
+        logprobs_mode="processed_logprobs", max_logprobs=max_logprobs
+    )
+    runner.vocab_size = 64
     runner.device = torch.device("cpu")
     call_args: list[dict[str, object]] = []
 
@@ -1433,22 +1605,30 @@ def test_draft_warmup_enumerator_uses_the_production_sampler_capability(
     runner._warm_up_draft_kernels()
 
     assert call_args[0]["use_flashinfer"] is use_flashinfer
+    assert call_args[0]["logprobs_mode"] == "processed_logprobs"
+    assert call_args[0]["max_num_logprobs"] == (
+        64 if max_logprobs < 0 else min(max_logprobs, 64)
+    )
 
 
 @pytest.mark.parametrize(
     ("use_flashinfer", "expected_branch"),
     [(True, "flashinfer"), (False, "triton")],
 )
+@pytest.mark.parametrize("fail", [False, True])
 def test_uno_sampler_warmup_keeps_the_served_sampler_backend(
-    use_flashinfer, expected_branch
+    use_flashinfer, expected_branch, fail
 ):
-    """Warmup neither injects a seed nor changes the sampler's backend flag."""
+    """Warmup restores persistent state after success or a sampler failure."""
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
     from vllm.v1.worker.gpu.spec_decode.uno import UnoSamplerWarmup, UnoSamplingMode
 
     class ArrayState:
         def __init__(self, values):
             self.np = np.asarray(values)
+
+        def copy_to_uva(self):
+            pass
 
     states = SimpleNamespace(
         vocab_size=100,
@@ -1458,6 +1638,7 @@ def test_uno_sampler_warmup_keeps_the_served_sampler_backend(
         min_p=ArrayState([0.0, 0.0]),
         seeds=ArrayState([19, 23]),
         seeds_set=np.asarray([True, False]),
+        num_logprobs=np.asarray([-1, -1]),
         apply_staged_writes=Mock(),
     )
     flashinfer_calls: list[bool] = []
@@ -1466,6 +1647,19 @@ def test_uno_sampler_warmup_keeps_the_served_sampler_backend(
         use_flashinfer=use_flashinfer,
         needs_logits_processing=np.zeros(2, dtype=bool),
         sampling_states=states,
+        logit_bias_state=SimpleNamespace(use_logit_bias=np.ones(2, dtype=bool)),
+        bad_words_state=SimpleNamespace(num_bad_words=ArrayState([2, 2])),
+        thinking_budget_state=SimpleNamespace(
+            enabled=True, use_thinking_budget=np.ones(2, dtype=bool)
+        ),
+        penalties_state=SimpleNamespace(
+            _new_penalties_reqs=[],
+            use_penalty=np.zeros(2, dtype=bool),
+            repetition_penalty=ArrayState([1.0, 1.0]),
+            frequency_penalty=ArrayState([0.0, 0.0]),
+            presence_penalty=ArrayState([0.0, 0.0]),
+            apply_staged_writes=Mock(),
+        ),
     )
 
     def sample_random(*args, **kwargs):
@@ -1483,6 +1677,9 @@ def test_uno_sampler_warmup_keeps_the_served_sampler_backend(
     runner.device = torch.device("cpu")
 
     def dummy_sampler_run(_hidden, *, num_reqs):
+        assert not sampler.logit_bias_state.use_logit_bias[:num_reqs].any()
+        assert not sampler.bad_words_state.num_bad_words.np[:num_reqs].any()
+        assert not sampler.thinking_budget_state.use_thinking_budget[:num_reqs].any()
         has_filters = (states.top_k.np[:num_reqs] < states.vocab_size).any() or (
             states.top_p.np[:num_reqs] < 1.0
         ).any()
@@ -1499,6 +1696,8 @@ def test_uno_sampler_warmup_keeps_the_served_sampler_backend(
                 and not states.seeds_set[:num_reqs].any()
             ),
         )
+        if fail:
+            raise RuntimeError("sampler failure")
 
     runner._dummy_sampler_run = dummy_sampler_run
     warmup = UnoSamplerWarmup(
@@ -1512,12 +1711,25 @@ def test_uno_sampler_warmup_keeps_the_served_sampler_backend(
     before_seeds = states.seeds.np.copy()
     before_seeds_set = states.seeds_set.copy()
 
-    branch = runner._warm_up_uno_sampler(torch.empty(1, 3), warmup=warmup)
+    if fail:
+        with pytest.raises(RuntimeError, match="sampler failure"):
+            runner._warm_up_uno_sampler(torch.empty(1, 3), warmup=warmup)
+    else:
+        branch = runner._warm_up_uno_sampler(torch.empty(1, 3), warmup=warmup)
+        assert branch == expected_branch
 
-    assert branch == expected_branch
     assert sampler.use_flashinfer is use_flashinfer
     assert states.seeds.np.tolist() == before_seeds.tolist()
     assert states.seeds_set.tolist() == before_seeds_set.tolist()
+    assert states.temperature.np.tolist() == [1.0, 1.0]
+    assert states.top_k.np.tolist() == [100, 100]
+    assert states.top_p.np.tolist() == [1.0, 1.0]
+    assert states.num_logprobs.tolist() == [-1, -1]
+    assert sampler.needs_logits_processing.tolist() == [False, False]
+    assert sampler.penalties_state.use_penalty.tolist() == [False, False]
+    assert sampler.logit_bias_state.use_logit_bias.tolist() == [True, True]
+    assert sampler.bad_words_state.num_bad_words.np.tolist() == [2, 2]
+    assert sampler.thinking_budget_state.use_thinking_budget.tolist() == [True, True]
     if use_flashinfer:
         assert flashinfer_calls == [True]
         assert triton_top_p_launches == []
@@ -1527,22 +1739,31 @@ def test_uno_sampler_warmup_keeps_the_served_sampler_backend(
 
 
 @pytest.mark.parametrize("use_flashinfer", [True, False])
-def test_sampler_selects_flashinfer_without_an_explicit_seed(
-    monkeypatch, use_flashinfer
+@pytest.mark.parametrize("logprobs_mode", ["raw_logprobs", "processed_logprobs"])
+@pytest.mark.parametrize("mode", UNO_SAMPLING_MODES, ids=lambda mode: mode.name)
+def test_uno_mode_branch_matches_production_sampler(
+    monkeypatch, use_flashinfer, logprobs_mode, mode
 ):
-    """The actual production sampler chooses FlashInfer before Triton filters."""
+    """Declared warmup branches must match the sampler's actual request dispatch."""
     from vllm.v1.worker.gpu.sample import sampler as sampler_module
+    from vllm.v1.worker.gpu.spec_decode.uno import sampler_branch_for_mode
 
     subject = object.__new__(sampler_module.Sampler)
     subject.use_flashinfer = use_flashinfer
-    subject.logprobs_mode = "raw_logprobs"
+    subject.logprobs_mode = logprobs_mode
     subject.use_fp64_gumbel = False
+    params = [mode.sampling_params(i) for i in range(mode.min_num_reqs)]
+    top_k = torch.tensor([p.top_k for p in params])
+    top_p = torch.tensor([p.top_p for p in params])
     subject.sampling_states = SimpleNamespace(
-        get_top_k_top_p=lambda *_args: (None, torch.tensor([0.9])),
-        any_greedy=lambda *_args: False,
-        any_explicit_seed=lambda *_args: False,
-        temperature=SimpleNamespace(gpu=torch.ones(1)),
-        seeds=SimpleNamespace(gpu=torch.zeros(1, dtype=torch.int64)),
+        get_top_k_top_p=lambda *_args: (
+            top_k if any(p.top_k != -1 for p in params) else None,
+            top_p if any(p.top_p != 1.0 for p in params) else None,
+        ),
+        any_greedy=lambda *_args: any(p.temperature == 0.0 for p in params),
+        any_explicit_seed=lambda *_args: any(p.seed is not None for p in params),
+        temperature=SimpleNamespace(gpu=torch.tensor([p.temperature for p in params])),
+        seeds=SimpleNamespace(gpu=torch.zeros(len(params), dtype=torch.int64)),
     )
     subject.apply_sampling_params = lambda logits, *_args, **_kwargs: logits
     calls: list[str] = []
@@ -1569,17 +1790,23 @@ def test_sampler_selects_flashinfer_without_an_explicit_seed(
     )
 
     subject.sample(
-        torch.ones((1, 4)),
-        torch.tensor([0]),
-        torch.tensor([0]),
-        np.asarray([0]),
-        torch.tensor([0]),
-        torch.tensor([0]),
-        torch.tensor([0]),
+        torch.ones((len(params), 4)),
+        torch.arange(len(params)),
+        torch.arange(len(params)),
+        np.arange(len(params)),
+        torch.zeros(len(params), dtype=torch.int64),
+        torch.zeros(len(params), dtype=torch.int64),
+        torch.zeros(len(params), dtype=torch.int64),
+        return_logprobs=mode.logprobs is not None,
     )
 
+    expected_branch = sampler_branch_for_mode(
+        mode, use_flashinfer=use_flashinfer, logprobs_mode=logprobs_mode
+    )
     assert calls == (
-        ["flashinfer"] if use_flashinfer else ["triton_filter", "triton_sample"]
+        ["flashinfer"]
+        if expected_branch == "flashinfer"
+        else ["triton_filter", "triton_sample"]
     )
 
 
@@ -1695,6 +1922,7 @@ def _self_check_sampler(use_flashinfer=False):
 
     return SimpleNamespace(
         use_flashinfer=use_flashinfer,
+        logprobs_mode="raw_logprobs",
         _sample_random=sample_random,
         calls=calls,
     )
@@ -1702,10 +1930,21 @@ def _self_check_sampler(use_flashinfer=False):
 
 def _run_self_check_sampler_branch(runner, sampling_params):
     """Send a mocked scheduler pass through the sampler branch observer."""
-    use_flashinfer = runner.sampler.use_flashinfer and (
-        sampling_params.top_k != -1 or sampling_params.top_p != 1.0
+    params = (
+        sampling_params if isinstance(sampling_params, tuple) else (sampling_params,)
+    )
+    use_flashinfer = (
+        runner.sampler.use_flashinfer
+        and any(p.top_k != -1 or p.top_p != 1.0 for p in params)
+        and all(p.temperature != 0.0 and p.seed is None for p in params)
+        and not (
+            any(p.logprobs is not None for p in params)
+            and runner.sampler.logprobs_mode
+            in ("processed_logprobs", "processed_logits")
+        )
     )
     runner.sampler._sample_random(None, None, None, None, None, None, use_flashinfer)
+    return "flashinfer" if use_flashinfer else "triton"
 
 
 def test_uno_startup_jit_self_check_reports_compile_without_forcing_warn_abort(
@@ -1770,10 +2009,8 @@ def test_uno_startup_jit_self_check_reports_compile_without_forcing_warn_abort(
     assert runner.speculator._step == 0
     assert not result.passed
     assert result.monitor_armed
-    assert result.sampler_calls == {
-        name: 1 for name in ("top_p_only", "top_k_top_p", "top_k_only", "neither")
-    }
-    assert len(result.compilations) == 4
+    assert result.sampler_calls == {mode.name: 1 for mode in UNO_SAMPLING_MODES}
+    assert len(result.compilations) == len(UNO_SAMPLING_MODES)
     assert any(
         "kernel=%s" in call.args[0]
         and call.args[3] == "_prepare_uno_inputs_kernel"
@@ -1822,7 +2059,7 @@ def test_uno_startup_jit_self_check_uses_the_production_k8_batch_shape(
     result = warmup.run_uno_served_jit_self_check(runner, Mock(), Mock())
 
     assert result.passed
-    assert observed_tokens == [11, 11, 11, 11]
+    assert observed_tokens == [11] * len(UNO_SAMPLING_MODES)
 
 
 @pytest.mark.parametrize("entrypoint", ["kernels", "self_check"])
@@ -1841,6 +2078,8 @@ def test_uno_startup_suspends_adaptive_verification_for_helper_and_restores_it(
         decode_query_len=9,
         device=torch.device("cpu"),
         sampler=_self_check_sampler(),
+        model_config=SimpleNamespace(enforce_eager=False),
+        cudagraph_manager=SimpleNamespace(needs_capture=lambda: True),
     )
     observed = []
 
@@ -1860,7 +2099,7 @@ def test_uno_startup_suspends_adaptive_verification_for_helper_and_restores_it(
         monkeypatch.setattr(warmup, "run_mixed_prefill_decode_warmup", record_helper)
         invoke = warmup.run_uno_served_jit_self_check
     invoke(runner, Mock(), Mock())
-    assert len(observed) == (1 if entrypoint == "kernels" else 4)
+    assert len(observed) == (1 if entrypoint == "kernels" else len(UNO_SAMPLING_MODES))
     assert runner.adaptive_verification is adaptive
 
 
@@ -2006,6 +2245,7 @@ def test_uno_startup_jit_self_check_restores_rng_state(monkeypatch):
 
     def sampled(*args, **_kwargs):
         torch.rand(4)
+        np.random.randint(0, 1000, size=4)
         _run_self_check_sampler_branch(runner, _kwargs["sampling_params"])
         args[2](None)
         return True
@@ -2014,9 +2254,14 @@ def test_uno_startup_jit_self_check_restores_rng_state(monkeypatch):
     monkeypatch.setattr(warmup, "run_mixed_prefill_decode_warmup", sampled)
     torch.manual_seed(1234)
     before = torch.random.get_rng_state()
+    numpy_before = np.random.get_state()
     result = warmup.run_uno_served_jit_self_check(runner, Mock(), Mock())
     assert result.passed
     assert torch.equal(torch.random.get_rng_state(), before)
+    numpy_after = np.random.get_state()
+    assert numpy_after[0] == numpy_before[0]
+    np.testing.assert_array_equal(numpy_after[1], numpy_before[1])
+    assert numpy_after[2:] == numpy_before[2:]
 
 
 def test_uno_startup_jit_self_check_proves_flashinfer_branches(monkeypatch):
@@ -2034,29 +2279,48 @@ def test_uno_startup_jit_self_check_proves_flashinfer_branches(monkeypatch):
     )
     monkeypatch.setattr(jit_monitor, "_active", True)
     monkeypatch.setattr(warmup.torch.accelerator, "synchronize", lambda: None)
+    observed_launches = {}
 
     @contextmanager
-    def no_triton_launches():
-        yield {}
+    def recorded_sampler_launches():
+        observed_launches.clear()
+        yield observed_launches
 
     def sampled(*args, **kwargs):
-        _run_self_check_sampler_branch(runner, kwargs["sampling_params"])
+        params = kwargs["sampling_params"]
+        branch = _run_self_check_sampler_branch(runner, params)
+        params = params if isinstance(params, tuple) else (params,)
+        if branch == "triton" and any(p.top_k != -1 or p.top_p != 1.0 for p in params):
+            observed_launches.update(
+                _topk_topp_kernel=1,
+                _topp_sb_stats_kernel=1,
+                _topp_sb_step_kernel=1,
+                _topp_sb_mask_kernel=1,
+            )
         args[2](None)
         return True
 
-    monkeypatch.setattr(warmup, "capture_topk_topp_launches", no_triton_launches)
+    monkeypatch.setattr(warmup, "capture_topk_topp_launches", recorded_sampler_launches)
     monkeypatch.setattr(warmup, "run_mixed_prefill_decode_warmup", sampled)
 
     result = warmup.run_uno_served_jit_self_check(runner, Mock(), Mock())
 
     assert result.passed
-    assert result.sampler_branches == {
+    expected = {
         "top_p_only": ("flashinfer",),
         "top_k_top_p": ("flashinfer",),
         "top_k_only": ("flashinfer",),
         "neither": ("triton",),
+        "greedy": ("triton",),
+        "mixed_greedy": ("triton",),
+        "seeded_top_p_only": ("triton",),
     }
-    assert result.sampler_launches == {name: {} for name in result.sampler_branches}
+    assert {name: result.sampler_branches[name] for name in expected} == expected
+    assert all(
+        result.sampler_launches[name] == {}
+        for name, branches in result.sampler_branches.items()
+        if branches == ("flashinfer",)
+    )
 
 
 def test_uno_self_check_launch_counter_only_records_an_armed_scope(monkeypatch):

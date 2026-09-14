@@ -4,8 +4,8 @@
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -34,6 +34,9 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.uno_prepare import prepare_uno_inputs_fused
 from vllm.v1.worker.utils import AttentionGroup
+
+if TYPE_CHECKING:
+    from vllm.sampling_params import SamplingParams
 
 logger = init_logger(__name__)
 UNO_LORA_ID = 1_000_003
@@ -154,11 +157,16 @@ def draft_warmup_request_counts(max_num_reqs: int) -> list[int]:
 
 @dataclass(frozen=True)
 class UnoSamplingMode:
-    """One top-k/top-p branch the serving sampler can select."""
+    """A served request-state combination that startup must exercise."""
 
     name: str
     top_k: int | None
     top_p: float | None
+    temperature: float = 0.9
+    mixed_greedy: bool = False
+    logprobs: int | None = None
+    penalties: bool = False
+    explicit_seed: bool = False
 
     @property
     def topk_enabled(self) -> bool:
@@ -168,25 +176,90 @@ class UnoSamplingMode:
     def topp_enabled(self) -> bool:
         return self.top_p is not None
 
+    @property
+    def min_num_reqs(self) -> int:
+        return 2 if self.mixed_greedy else 1
 
-UNO_SAMPLING_MODES = (
-    UnoSamplingMode("top_p_only", None, 0.9),
-    UnoSamplingMode("top_k_top_p", 50, 0.9),
-    UnoSamplingMode("top_k_only", 50, None),
-    UnoSamplingMode("neither", None, None),
+    @property
+    def needs_logits_processing(self) -> bool:
+        return (
+            self.temperature not in (0.0, 1.0)
+            or self.topk_enabled
+            or self.topp_enabled
+            or self.penalties
+        )
+
+    def sampling_params(self, req_index: int = 0) -> "SamplingParams":
+        from vllm import SamplingParams
+
+        temperature = (
+            0.0 if self.mixed_greedy and req_index % 2 == 0 else self.temperature
+        )
+        return SamplingParams(
+            max_tokens=2,
+            temperature=temperature,
+            top_k=-1 if self.top_k is None else self.top_k,
+            top_p=1.0 if self.top_p is None else self.top_p,
+            logprobs=self.logprobs,
+            repetition_penalty=1.1 if self.penalties else 1.0,
+            presence_penalty=0.1 if self.penalties else 0.0,
+            frequency_penalty=0.1 if self.penalties else 0.0,
+            seed=0 if self.explicit_seed else None,
+        )
+
+
+UNO_SAMPLING_MODES = tuple(
+    replace(
+        mode,
+        name=mode.name
+        + ("_logprobs" if logprobs is not None else "")
+        + ("_penalties" if penalties else ""),
+        logprobs=logprobs,
+        penalties=penalties,
+    )
+    for mode in (
+        UnoSamplingMode("top_p_only", None, 0.9),
+        UnoSamplingMode("top_k_top_p", 50, 0.9),
+        UnoSamplingMode("top_k_only", 50, None),
+        UnoSamplingMode("neither", None, None),
+        UnoSamplingMode("greedy", None, None, temperature=0.0),
+        UnoSamplingMode("sampled_unit_temperature", None, None, temperature=1.0),
+        UnoSamplingMode("mixed_greedy", 50, 0.9, mixed_greedy=True),
+        UnoSamplingMode(
+            "mixed_unfiltered", None, None, temperature=1.0, mixed_greedy=True
+        ),
+    )
+    for logprobs in (None, 1)
+    for penalties in (False, True)
+) + (
+    UnoSamplingMode("seeded_top_p_only", None, 0.9, explicit_seed=True),
+    UnoSamplingMode("seeded_top_k_top_p", 50, 0.9, explicit_seed=True),
+    UnoSamplingMode("seeded_top_k_only", 50, None, explicit_seed=True),
 )
 
 
-def sampler_branch_for_mode(mode: UnoSamplingMode, *, use_flashinfer: bool) -> str:
+def sampler_branch_for_mode(
+    mode: UnoSamplingMode,
+    *,
+    use_flashinfer: bool,
+    logprobs_mode: str = "raw_logprobs",
+) -> str:
     """Return the ``Sampler._sample_random`` branch serving will take.
 
-    The Uno warmup installs a non-greedy temperature and no explicit request
-    seed. Those are the only request-state conditions in addition to the
-    sampler's FlashInfer capability that select this branch. Keeping the
-    decision beside the launch enumerator prevents startup from quietly
-    warming Triton while a default CUDA deployment serves FlashInfer.
+    Keep the same request-state conditions as ``Sampler.sample``. Greedy
+    sampling still uses the Triton/gumbel path; temperature is runtime data.
     """
-    if use_flashinfer and (mode.topk_enabled or mode.topp_enabled):
+    if (
+        use_flashinfer
+        and (mode.topk_enabled or mode.topp_enabled)
+        and mode.temperature != 0.0
+        and not mode.mixed_greedy
+        and not mode.explicit_seed
+        and not (
+            mode.logprobs is not None
+            and logprobs_mode in ("processed_logits", "processed_logprobs")
+        )
+    ):
         return "flashinfer"
     return "triton"
 
@@ -280,7 +353,9 @@ def _served_sampler_shapes(
         if num_rows <= min(max_rows, num_reqs * min(k + 1, max_model_len)):
             assert 1 <= num_reqs <= max_num_reqs
             assert num_reqs <= num_rows <= max_num_tokens
-            assert (num_rows + num_reqs - 1) // num_reqs <= min(k + 1, max_model_len)
+            max_request_rows = (num_rows + num_reqs - 1) // num_reqs
+            assert max_request_rows <= k + 1
+            assert max_request_rows <= max_model_len
             shapes.setdefault((num_reqs, num_rows), source)
 
     for num_reqs in range(1, max_num_reqs + 1):
@@ -302,16 +377,37 @@ def _served_sampler_shapes(
     )
 
 
+def _served_logprobs_counts(max_num_logprobs: int) -> tuple[int, ...]:
+    """Cover each bounded logprob gather width and plain-integer bucket."""
+    from vllm.v1.worker.gpu.sample.logprob import _MAX_TOPK_BLOCK
+
+    if max_num_logprobs < 0:
+        raise ValueError("Uno logprobs warmup requires a finite nonnegative bound")
+    representatives: dict[tuple[int, str], int] = {}
+    for count in range(max_num_logprobs + 1):
+        assert 0 <= count <= max_num_logprobs
+        num_columns = count + 1
+        block_size = min(1 << (num_columns - 1).bit_length(), _MAX_TOPK_BLOCK)
+        key = (block_size, _triton_integer_bucket(num_columns))
+        representatives.setdefault(key, count)
+    return tuple(representatives.values())
+
+
 def _sampler_kernel_keys(
     mode: UnoSamplingMode,
     num_rows: int,
     num_sm: int,
     sampler_branch: str,
+    logprobs_mode: str = "raw_logprobs",
 ) -> tuple[tuple[object, ...], ...]:
-    """Return the real top-k/top-p kernel keys selected for one call."""
-    if sampler_branch == "flashinfer":
-        return ()
-    if sampler_branch not in ("triton", "native_verification"):
+    """Return varying filter and rejection keys for one configured engine.
+
+    Rejection keeps the engine's draft-logits, block-verification, synthetic,
+    FP64, vocab and K settings. Its three target-logits consumers additionally
+    specialize on the pointer dtype: processing copies to FP32, while greedy
+    and unit-temperature unfiltered batches retain the model's logits dtype.
+    """
+    if sampler_branch not in ("flashinfer", "triton", "native_verification"):
         raise ValueError(f"unknown Uno sampler branch: {sampler_branch!r}")
     # Use the production split arithmetic and branch threshold rather than
     # recreating either in a CPU-only test.
@@ -319,12 +415,51 @@ def _sampler_kernel_keys(
         _SPLIT_MAX_BATCH,
         _topp_split_count,
     )
+    from vllm.v1.worker.gpu.sample.logprob import _MAX_TOPK_BLOCK
 
+    keys: list[tuple[object, ...]] = []
+    logits_dtype = "fp32" if mode.needs_logits_processing else "model_dtype"
+    if mode.penalties:
+        keys.append(("_penalties_kernel",))
+    if mode.temperature not in (0.0, 1.0):
+        keys.append(("_temperature_kernel",))
+    if mode.logprobs is not None:
+        logprobs_dtype = (
+            logits_dtype
+            if logprobs_mode in ("processed_logits", "processed_logprobs")
+            else "model_dtype"
+        )
+        if logprobs_mode not in ("raw_logits", "processed_logits"):
+            num_columns = mode.logprobs + 1
+            block_size = min(1 << (num_columns - 1).bit_length(), _MAX_TOPK_BLOCK)
+            keys.append(
+                (
+                    "_topk_log_softmax_kernel",
+                    logprobs_dtype,
+                    block_size,
+                    _triton_integer_bucket(num_columns),
+                )
+            )
+        keys.append(("_ranks_kernel", logprobs_dtype))
+        if sampler_branch == "native_verification":
+            keys.append(("_flatten_sampled_kernel",))
+    if sampler_branch == "flashinfer":
+        return tuple(keys)
+    if sampler_branch == "triton":
+        keys.append(("_gumbel_sample_kernel", logits_dtype))
+    if sampler_branch == "native_verification":
+        keys.extend(
+            (name, "target_logits_dtype", logits_dtype)
+            for name in (
+                "_compute_local_logits_stats_kernel",
+                "_rejection_kernel",
+                "_resample_kernel",
+            )
+        )
     if not mode.topk_enabled and not mode.topp_enabled:
-        return ()
+        return tuple(keys)
 
     use_split = mode.topp_enabled and num_rows <= _SPLIT_MAX_BATCH
-    keys: list[tuple[object, ...]] = []
     if not (use_split and not mode.topk_enabled):
         keys.append(
             (
@@ -357,6 +492,8 @@ def enumerate_uno_served_launches(
     max_model_len: int,
     num_sm: int,
     use_flashinfer: bool,
+    logprobs_mode: str = "raw_logprobs",
+    max_num_logprobs: int = 20,
 ) -> UnoServedLaunches:
     """Build the complete bounded Uno warmup plan from serving behavior.
 
@@ -371,35 +508,46 @@ def enumerate_uno_served_launches(
 
     prepare_counts = tuple(draft_warmup_request_counts(max_num_reqs))
     shapes = _served_sampler_shapes(max_num_reqs, k, max_num_tokens, max_model_len)
+    logprobs_counts = _served_logprobs_counts(max_num_logprobs)
     # Verification always applies native filters in RejectionSampler._verify.
     # Select it first, then ordinary sampling fills any remaining shared keys.
-    candidates = [
+    candidates = (
         UnoSamplerWarmup(
             num_reqs,
             num_rows,
             mode,
             source,
             branch,
-            _sampler_kernel_keys(mode, num_rows, num_sm, branch),
+            _sampler_kernel_keys(mode, num_rows, num_sm, branch, logprobs_mode),
         )
-        for mode in UNO_SAMPLING_MODES
+        for declared_mode in UNO_SAMPLING_MODES
+        for mode in (
+            tuple(replace(declared_mode, logprobs=count) for count in logprobs_counts)
+            if declared_mode.logprobs is not None
+            else (declared_mode,)
+        )
         for branch in (
             "native_verification",
-            sampler_branch_for_mode(mode, use_flashinfer=use_flashinfer),
+            sampler_branch_for_mode(
+                mode, use_flashinfer=use_flashinfer, logprobs_mode=logprobs_mode
+            ),
         )
         for num_reqs, num_rows, source in shapes
-        if (num_rows > num_reqs) == (branch == "native_verification")
-    ]
-    served_sampler_keys = frozenset(
-        key for candidate in candidates for key in candidate.kernel_keys
+        if num_reqs >= mode.min_num_reqs
+        and (num_rows > num_reqs) == (branch == "native_verification")
     )
+    served_sampler_keys: set[tuple[object, ...]] = set()
+    served_modes: set[tuple[str, str]] = set()
     covered: set[tuple[object, ...]] = set()
     selected: list[UnoSamplerWarmup] = []
     selected_modes: set[tuple[str, str]] = set()
     for candidate in candidates:
         mode_key = (candidate.mode.name, candidate.sampler_branch)
-        if set(candidate.kernel_keys).difference(covered) or (
-            not candidate.kernel_keys and mode_key not in selected_modes
+        served_sampler_keys.update(candidate.kernel_keys)
+        served_modes.add(mode_key)
+        if (
+            set(candidate.kernel_keys).difference(covered)
+            or mode_key not in selected_modes
         ):
             selected.append(candidate)
             covered.update(candidate.kernel_keys)
@@ -407,12 +555,15 @@ def enumerate_uno_served_launches(
 
     selected_keys = frozenset(key for warmup in selected for key in warmup.kernel_keys)
     missing = served_sampler_keys.difference(selected_keys)
-    if missing:
+    missing_modes = served_modes.difference(selected_modes)
+    if missing or missing_modes:
         raise RuntimeError(
             "Uno sampler warmup selection missed served Triton keys: "
-            f"{sorted(missing)!r}"
+            f"{sorted(missing)!r}; missing modes: {sorted(missing_modes)!r}"
         )
-    return UnoServedLaunches(prepare_counts, tuple(selected), served_sampler_keys)
+    return UnoServedLaunches(
+        prepare_counts, tuple(selected), frozenset(served_sampler_keys)
+    )
 
 
 class UnoSpeculator(DraftModelSpeculator):
@@ -615,13 +766,18 @@ class UnoSpeculator(DraftModelSpeculator):
         logger.info(
             "Uno draft kernels warmed: %d prepare request shapes (1..%d "
             "requests at num_speculative_tokens=%d), %d sampler calls, and "
-            "%d sampler launch keys. Any later 'JIT compilation during "
-            "inference' warning names a shape this missed.",
+            "%d sampler launch keys; sampling modes=%s. Any later 'JIT "
+            "compilation during inference' warning names a shape this missed.",
             prepare_shapes,
             self.max_num_reqs,
             self.k,
             sampler_calls,
             sampler_keys,
+            ",".join(
+                sorted(
+                    {mode.removeprefix("verification/") for mode in sampler_branches}
+                )
+            ),
         )
 
     def _log_draft_graph_coverage(self) -> None:

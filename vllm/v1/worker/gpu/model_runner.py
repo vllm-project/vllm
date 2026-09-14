@@ -1039,35 +1039,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_rows = warmup.num_rows
         assert sample_hidden_states.shape[0] == num_reqs
 
-        states = self.sampler.sampling_states
-        saved_needs_processing = self.sampler.needs_logits_processing[:num_reqs].copy()
-        saved_temperature = states.temperature.np[:num_reqs].copy()
-        saved_top_k = states.top_k.np[:num_reqs].copy()
-        saved_top_p = states.top_p.np[:num_reqs].copy()
-        saved_min_p = states.min_p.np[:num_reqs].copy()
-        saved_seeds = states.seeds.np[:num_reqs].copy()
-        saved_seeds_set = states.seeds_set[:num_reqs].copy()
-        from vllm.v1.worker.gpu.warmup import capture_sampler_branches
+        from vllm.v1.worker.gpu.warmup import (
+            capture_sampler_branches,
+            uno_sampler_warmup_state,
+        )
 
         observed_branches: list[str] = []
-        try:
-            self.sampler.needs_logits_processing[:num_reqs] = True
-            states.temperature.np[:num_reqs] = 0.9
-            states.top_k.np[:num_reqs] = (
-                states.vocab_size
-                if warmup.mode.top_k is None
-                else min(warmup.mode.top_k, states.vocab_size)
-            )
-            states.top_p.np[:num_reqs] = (
-                1.0 if warmup.mode.top_p is None else warmup.mode.top_p
-            )
-            states.min_p.np[:num_reqs] = 0.0
-            # An explicit request seed forces the native/Triton sampler path.
-            # Clear it instead, so this startup call follows the served
-            # FlashInfer decision for the installed sampling mode.
-            states.seeds_set[:num_reqs] = False
-            states.apply_staged_writes()
-
+        with uno_sampler_warmup_state(self.sampler, warmup.mode, num_reqs):
             row_count_tensor = torch.from_numpy(
                 self._sampler_row_counts(num_reqs, num_rows)
             ).to(self.device)
@@ -1085,15 +1063,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     num_reqs=num_reqs,
                     **kwargs,
                 )
-        finally:
-            self.sampler.needs_logits_processing[:num_reqs] = saved_needs_processing
-            states.temperature.np[:num_reqs] = saved_temperature
-            states.top_k.np[:num_reqs] = saved_top_k
-            states.top_p.np[:num_reqs] = saved_top_p
-            states.min_p.np[:num_reqs] = saved_min_p
-            states.seeds.np[:num_reqs] = saved_seeds
-            states.seeds_set[:num_reqs] = saved_seeds_set
-            states.apply_staged_writes()
         if set(observed_branches) != {warmup.sampler_branch}:
             raise RuntimeError(
                 "Uno sampler warmup reached a different branch than serving: "
@@ -1178,6 +1147,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_sm=num_compute_units(self.device.index),
             use_flashinfer=bool(
                 self.sampler is not None and self.sampler.use_flashinfer
+            ),
+            logprobs_mode=self.model_config.logprobs_mode,
+            max_num_logprobs=(
+                self.vocab_size
+                if self.model_config.max_logprobs < 0
+                else min(self.model_config.max_logprobs, self.vocab_size)
             ),
         )
         if not plan.prepare_request_counts:

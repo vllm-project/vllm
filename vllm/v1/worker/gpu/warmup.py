@@ -3,8 +3,8 @@
 
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -28,6 +28,9 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import Request
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.spec_decode.uno import UnoSamplingMode
 
 logger = init_logger(__name__)
 
@@ -176,7 +179,8 @@ def uno_self_check_token_count(max_num_tokens: int, decode_query_len: int) -> in
 
 @contextmanager
 def preserve_rng_state(device: torch.device | None) -> Iterator[None]:
-    """Restore CPU and Uno CUDA generators after a startup-only operation."""
+    """Restore request-seed, CPU and CUDA generators after startup checks."""
+    numpy_state = np.random.get_state()
     cpu_state = torch.random.get_rng_state()
     cuda_state = None
     device_index = None
@@ -188,9 +192,91 @@ def preserve_rng_state(device: torch.device | None) -> Iterator[None]:
     try:
         yield
     finally:
+        np.random.set_state(numpy_state)
         torch.random.set_rng_state(cpu_state)
         if cuda_state is not None:
             torch.cuda.set_rng_state(cuda_state, device_index)
+
+
+@contextmanager
+def uno_sampler_warmup_state(
+    sampler: Any, mode: "UnoSamplingMode", num_reqs: int
+) -> Iterator[None]:
+    """Install declared request parameters and restore every modified state."""
+    assert num_reqs >= mode.min_num_reqs
+    states = sampler.sampling_states
+    state_arrays = {
+        name: getattr(states, name).np
+        for name in ("temperature", "top_k", "top_p", "min_p", "seeds")
+    }
+    state_arrays.update(
+        seeds_set=states.seeds_set,
+        num_logprobs=states.num_logprobs,
+        needs_logits_processing=sampler.needs_logits_processing,
+        use_logit_bias=sampler.logit_bias_state.use_logit_bias,
+        num_bad_words=sampler.bad_words_state.num_bad_words.np,
+    )
+    thinking_budget = sampler.thinking_budget_state
+    if thinking_budget.enabled:
+        state_arrays["use_thinking_budget"] = thinking_budget.use_thinking_budget
+    penalties = sampler.penalties_state
+    assert not penalties._new_penalties_reqs, "Uno warmup requires committed state"
+    state_arrays["use_penalty"] = penalties.use_penalty
+    for name in ("repetition_penalty", "frequency_penalty", "presence_penalty"):
+        state_arrays[name] = getattr(penalties, name).np
+    saved = {name: array[:num_reqs].copy() for name, array in state_arrays.items()}
+    penalty_buffers = (
+        (penalties.prompt_bin_mask, penalties.output_bin_counts)
+        if mode.penalties
+        else ()
+    )
+    saved_buffers = [buffer[:num_reqs].clone() for buffer in penalty_buffers]
+    try:
+        for name in ("use_logit_bias", "num_bad_words", "use_thinking_budget"):
+            if name in state_arrays:
+                state_arrays[name][:num_reqs] = 0
+        for buffer in penalty_buffers:
+            buffer[:num_reqs].zero_()
+        for req_index in range(num_reqs):
+            params = mode.sampling_params(req_index)
+            top_k = params.top_k
+            if top_k <= 0 or top_k > states.vocab_size:
+                top_k = states.vocab_size
+            states.temperature.np[req_index] = params.temperature
+            states.top_k.np[req_index] = top_k
+            states.top_p.np[req_index] = params.top_p
+            states.min_p.np[req_index] = 0.0
+            states.seeds_set[req_index] = params.seed is not None
+            if params.seed is not None:
+                states.seeds.np[req_index] = params.seed
+            states.num_logprobs[req_index] = (
+                -1 if params.logprobs is None else params.logprobs
+            )
+            penalties.use_penalty[req_index] = mode.penalties
+            for name in (
+                "repetition_penalty",
+                "frequency_penalty",
+                "presence_penalty",
+            ):
+                getattr(penalties, name).np[req_index] = getattr(params, name)
+            sampler.needs_logits_processing[req_index] = (
+                params.temperature not in (0.0, 1.0)
+                or top_k != states.vocab_size
+                or params.top_p != 1.0
+                or mode.penalties
+            )
+        states.apply_staged_writes()
+        penalties.apply_staged_writes()
+        sampler.bad_words_state.num_bad_words.copy_to_uva()
+        yield
+    finally:
+        for name, array in state_arrays.items():
+            array[:num_reqs] = saved[name]
+        for buffer, saved_buffer in zip(penalty_buffers, saved_buffers):
+            buffer[:num_reqs].copy_(saved_buffer)
+        states.apply_staged_writes()
+        penalties.apply_staged_writes()
+        sampler.bad_words_state.num_bad_words.copy_to_uva()
 
 
 def _reserved_block_count(
@@ -254,7 +340,9 @@ def run_mixed_prefill_decode_warmup(
     *,
     mixed_step_context: AbstractContextManager[object] | None = None,
     req_id_prefix: str = "_v2_mixed_warmup",
-    sampling_params: SamplingParams | None = None,
+    sampling_params: SamplingParams
+    | tuple[SamplingParams, SamplingParams]
+    | None = None,
 ) -> bool:
     """Run a V2 mixed prefill+decode step through normal scheduler inputs."""
     if model_runner.is_pooling_model or model_runner.max_num_reqs < 2 or num_tokens < 3:
@@ -304,6 +392,11 @@ def run_mixed_prefill_decode_warmup(
 
     if sampling_params is None:
         sampling_params = SamplingParams(max_tokens=2, temperature=0.0)
+    decode_params, prefill_params = (
+        sampling_params
+        if isinstance(sampling_params, tuple)
+        else (sampling_params, sampling_params)
+    )
 
     decode_prefill_output = SchedulerOutput.make_empty()
     decode_prefill_output.scheduled_new_reqs = [
@@ -311,7 +404,7 @@ def run_mixed_prefill_decode_warmup(
             req_id=decode_req_id,
             prompt_token_ids=decode_token_ids,
             mm_features=[],
-            sampling_params=sampling_params,
+            sampling_params=decode_params,
             pooling_params=None,
             block_ids=tuple(_alloc_blocks(n) for n in decode_prefill_block_counts),
             num_computed_tokens=0,
@@ -341,7 +434,7 @@ def run_mixed_prefill_decode_warmup(
             req_id=prefill_req_id,
             prompt_token_ids=prefill_token_ids,
             mm_features=[],
-            sampling_params=sampling_params,
+            sampling_params=prefill_params,
             pooling_params=None,
             block_ids=tuple(_alloc_blocks(n) for n in prefill_block_counts),
             num_computed_tokens=0,
@@ -390,6 +483,16 @@ def warmup_kernels(
     model_runner.adaptive_verification = None
     try:
         _warmup_kernels(model_runner, worker_execute_model, worker_sample_tokens)
+        from vllm.v1.worker.gpu.spec_decode.uno import UnoSpeculator
+
+        if isinstance(getattr(model_runner, "speculator", None), UnoSpeculator):
+            graph_manager = model_runner.cudagraph_manager
+            assert graph_manager is not None
+            if (
+                model_runner.model_config.enforce_eager
+                or not graph_manager.needs_capture()
+            ):
+                model_runner._warm_up_draft_kernels()
     finally:
         model_runner.adaptive_verification = adaptive_verification
 
@@ -453,6 +556,11 @@ def run_uno_served_jit_self_check(
                 model_runner.decode_query_len,
             )
             for mode in UNO_SAMPLING_MODES:
+                max_logprobs = getattr(
+                    getattr(model_runner, "model_config", None), "max_logprobs", 20
+                )
+                if mode.logprobs is not None and max_logprobs >= 0:
+                    mode = replace(mode, logprobs=min(mode.logprobs, max_logprobs))
                 expected_branch = sampler_branch_for_mode(
                     mode,
                     use_flashinfer=bool(
@@ -461,6 +569,11 @@ def run_uno_served_jit_self_check(
                             "use_flashinfer",
                             False,
                         )
+                    ),
+                    logprobs_mode=getattr(
+                        getattr(model_runner, "sampler", None),
+                        "logprobs_mode",
+                        "raw_logprobs",
                     ),
                 )
                 sample_call_count = 0
@@ -484,11 +597,10 @@ def run_uno_served_jit_self_check(
                         counted_sample_tokens,
                         check_tokens,
                         req_id_prefix=f"_uno_jit_self_check_{mode.name}",
-                        sampling_params=SamplingParams(
-                            max_tokens=2,
-                            temperature=0.9,
-                            top_k=-1 if mode.top_k is None else mode.top_k,
-                            top_p=1.0 if mode.top_p is None else mode.top_p,
+                        sampling_params=(
+                            (mode.sampling_params(0), mode.sampling_params(1))
+                            if mode.mixed_greedy
+                            else mode.sampling_params()
                         ),
                     )
                 torch.accelerator.synchronize()
