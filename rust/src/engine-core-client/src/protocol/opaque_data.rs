@@ -16,12 +16,8 @@ impl OpaqueData {
         Self(data.into())
     }
 
-    pub fn as_bytes(&self) -> &[u8] {
+    pub fn bytes(&self) -> &Bytes {
         &self.0
-    }
-
-    pub fn into_vec(self) -> Vec<u8> {
-        self.0.to_vec()
     }
 }
 

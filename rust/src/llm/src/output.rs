@@ -45,8 +45,6 @@ pub struct CollectedGenerateOutput {
     /// Connector-specific encoder cache transfer parameters for disaggregated
     /// serving.
     pub ec_transfer_params: Option<serde_json::Value>,
-    /// Routing decisions returned for prompt and generated token positions.
-    pub routed_experts: Option<OpaqueData>,
 }
 
 /// Prompt-scoped metadata emitted only once on the first [`GenerateOutput`] for
@@ -348,7 +346,6 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
 
             while let Some(output) = stream.next().await.transpose()? {
                 cached_token_count = cached_token_count.max(output.cached_token_count);
-                let routed_experts = output.routed_experts;
                 if let Some(info) = output.prompt_info {
                     if prompt_token_ids.is_none() {
                         prompt_token_ids = Some(info.prompt_token_ids.to_vec());
@@ -382,13 +379,7 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
                         },
                         kv_transfer_params: None,
                         ec_transfer_params: None,
-                        routed_experts: None,
                     });
-                }
-
-                if let Some(routed_experts) = routed_experts {
-                    let collected = collected.as_mut().expect("generate output must exist");
-                    collected.routed_experts = Some(routed_experts);
                 }
 
                 if let Some(finish_reason) = output.finish_reason {

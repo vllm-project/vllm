@@ -114,6 +114,7 @@ pub async fn decoded_text_event_stream(
     tokenizer: DynTokenizer,
     mut raw_stream: impl Stream<Item = vllm_llm::Result<GenerateOutput>> + Unpin,
     mut decode_options: TextDecodeOptions,
+    capture_routed_experts: bool,
     intermediate: bool,
     mut y: TryYielder<DecodedTextEvent, Error>,
 ) -> crate::Result<()> {
@@ -124,6 +125,7 @@ pub async fn decoded_text_event_stream(
     let mut output_token_count: usize = 0;
     let mut sampled_logprobs: Option<DecodedLogprobs> = None;
     let mut routed_experts: Option<OpaqueData> = None;
+    let mut pending_stop: Option<(FinishReason, Option<usize>)> = None;
 
     while let Some(next) = raw_stream.next().await {
         let output = next?;
@@ -176,11 +178,21 @@ pub async fn decoded_text_event_stream(
         if let Some(payload) = output.routed_experts {
             routed_experts = Some(payload);
         }
-        let mut finish_reason = output.finish_reason;
+        let engine_finished = output.finish_reason.is_some();
+        let finishing_pending_stop = pending_stop.is_some() && engine_finished;
+        if pending_stop.is_some() && !engine_finished {
+            continue;
+        }
+        let (mut finish_reason, mut truncate_output_to) = match pending_stop.take() {
+            Some((reason, truncate_output_to)) => (Some(reason), truncate_output_to),
+            None => (output.finish_reason, None),
+        };
         let mut stop_str_matched = false;
         let suppress_terminal_stop_token = finish_reason.as_ref().is_some_and(|r| r.is_stop())
             && !decode_options.include_stop_str_in_output;
-        let decodable_token_ids = if suppress_terminal_stop_token {
+        let decodable_token_ids = if finishing_pending_stop {
+            &[]
+        } else if suppress_terminal_stop_token {
             // Match Python V1 token-stop detokenization by keeping the stop token
             // in metadata while excluding it from user-visible text.
             output.token_ids.split_last().map(|(_, rest)| rest).unwrap_or(&[])
@@ -189,7 +201,6 @@ pub async fn decoded_text_event_stream(
         };
 
         let mut decoded = DecodedText::default();
-        let mut truncate_output_to = None;
         let mut truncate_tokens_to = None;
         for (tok_idx, &token_id) in decodable_token_ids.iter().enumerate() {
             let new_bytes = decoder.push_token(token_id)?;
@@ -218,8 +229,16 @@ pub async fn decoded_text_event_stream(
             decoded.append(chunk);
         }
 
-        let mut new_token_ids = output.token_ids;
-        let mut new_logprobs = output.logprobs;
+        let mut new_token_ids = if finishing_pending_stop {
+            Vec::new()
+        } else {
+            output.token_ids
+        };
+        let mut new_logprobs = if finishing_pending_stop {
+            None
+        } else {
+            output.logprobs
+        };
 
         // Trim tokens and logprobs if we matched stop string.
         if let Some(num_tokens) = truncate_tokens_to {
@@ -250,6 +269,25 @@ pub async fn decoded_text_event_stream(
                     .positions
                     .extend_from_slice(&dlp.positions);
             }
+        }
+
+        if stop_str_matched && capture_routed_experts && !engine_finished {
+            pending_stop = Some((
+                finish_reason.take().expect("stop match must set finish reason"),
+                truncate_output_to,
+            ));
+            if intermediate {
+                y.yield_ok(DecodedTextEvent::TextDelta {
+                    decoded,
+                    sampled: SampledDelta {
+                        token_ids: new_token_ids,
+                        logprobs: decoded_logprobs,
+                    },
+                    finished: None,
+                })
+                .await;
+            }
+            continue;
         }
 
         if let Some(reason) = finish_reason {
@@ -381,10 +419,17 @@ mod tests {
             Some(FinishReason::Length),
         ))]);
         let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
-        decoded_text_event_stream("test".into(), tokenizer, raw_stream, decode_options, false)
-            .collect_output()
-            .await
-            .unwrap()
+        decoded_text_event_stream(
+            "test".into(),
+            tokenizer,
+            raw_stream,
+            decode_options,
+            false,
+            false,
+        )
+        .collect_output()
+        .await
+        .unwrap()
     }
 
     /// Convert ASCII string to token IDs (one byte per token).
@@ -436,6 +481,7 @@ mod tests {
             tokenizer,
             stream::iter(outputs.into_iter().map(Ok)),
             decode_options,
+            false,
             true,
         )
         .collect::<Vec<_>>()
@@ -566,6 +612,7 @@ mod tests {
             raw_stream,
             opts(&["ll"], 0),
             false,
+            false,
         )
         .collect_output()
         .await
@@ -577,6 +624,38 @@ mod tests {
             *dropped_cause.lock().unwrap(),
             Some(AbortCause::StopStringMatched)
         );
+    }
+
+    #[tokio::test]
+    async fn stream_stop_string_keeps_terminal_routed_experts() {
+        let prompt: Arc<[u32]> = Arc::from([]);
+        let mut terminal = GenerateOutput::for_test(None, vec![], Some(FinishReason::Length));
+        terminal.routed_experts = Some(OpaqueData::new(vec![1, 2, 3]));
+        let raw_stream = stream::iter(
+            [
+                GenerateOutput::for_test(Some(prompt), ascii_tokens("hello"), None),
+                terminal,
+            ]
+            .into_iter()
+            .map(Ok),
+        );
+        let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
+
+        let output = decoded_text_event_stream(
+            "test".into(),
+            tokenizer,
+            raw_stream,
+            opts(&["ll"], 0),
+            true,
+            false,
+        )
+        .collect_output()
+        .await
+        .unwrap();
+
+        assert_eq!(output.text, "he");
+        assert!(output.finish_reason.is_stop());
+        assert_eq!(output.routed_experts, Some(OpaqueData::new(vec![1, 2, 3])));
     }
 
     #[tokio::test]

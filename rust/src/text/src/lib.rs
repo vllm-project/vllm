@@ -224,11 +224,14 @@ impl TextLlm {
     pub async fn generate(&self, request: TextRequest) -> Result<impl TextOutputStream> {
         let (text_request, raw_stream) = self.generate_inner(request).await?;
         let tokenizer = self.processor.tokenizer();
+        let capture_routed_experts =
+            text_request.sampling_params.routed_experts_prompt_start.is_some();
         let decoded_stream = output::decoded_text_event_stream(
             text_request.request_id,
             tokenizer,
             raw_stream,
             text_request.decode_options,
+            capture_routed_experts,
             text_request.intermediate,
         );
 

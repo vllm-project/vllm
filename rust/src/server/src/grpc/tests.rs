@@ -874,7 +874,7 @@ async fn generate_methods_round_trip_large_routed_experts_payload() {
             streamed_payload = Some(payload.data);
         }
     }
-    assert_eq!(streamed_payload, Some(expected));
+    assert_eq!(streamed_payload, Some(expected.into()));
 
     engine_task.await.expect("mock engine task");
     server_task.abort();
