@@ -501,7 +501,7 @@ def test_vit_cudagraph_video(model_id, vllm_runner, video_assets):
         assert isinstance(output_text, str)
 
 
-def _check_eonly_encoder_outputs(worker, batches, eager_token_budget=None):
+def _check_eonly_encoder_outputs(worker, batches):
     """Compare real E-only replay with eager, retaining outputs across replay."""
     import torch
 
@@ -514,34 +514,11 @@ def _check_eonly_encoder_outputs(worker, batches, eager_token_budget=None):
     retained: list[tuple[torch.Tensor, torch.Tensor]] = []
     max_error = 0.0
     stats = []
-    batch_shape_drift = []
     with torch.inference_mode():
         for batch in batches:
             kwargs = {key: value.to(runner.device) for key, value in batch.items()}
             actual = manager.execute(kwargs)
-            standalone = runner.model.embed_multimodal(**kwargs)
-            expected = standalone
-            if eager_token_budget is not None and len(standalone) > 1:
-                pixels, grids = kwargs["pixel_values"], kwargs["image_grid_thw"]
-                target_patches = (
-                    eager_token_budget * runner.model.visual.spatial_merge_size**2
-                )
-                # Qwen2.5 BF16 GEMMs vary with batch size. Use an ordinary
-                # eager batch of real duplicate items with the same shape.
-                last_patches = int(grids[-1].prod().item())
-                missing = target_patches - pixels.shape[0]
-                assert missing > 0 and missing % last_patches == 0
-                repeats = missing // last_patches
-                eager_kwargs = {
-                    "pixel_values": torch.cat(
-                        [pixels] + [pixels[-last_patches:]] * repeats
-                    ),
-                    "image_grid_thw": torch.cat([grids, grids[-1:].repeat(repeats, 1)]),
-                }
-                assert eager_kwargs["pixel_values"].shape[0] == target_patches
-                augmented = runner.model.embed_multimodal(**eager_kwargs)
-                assert len(augmented) == len(standalone) + repeats
-                expected = augmented[: len(standalone)]
+            expected = runner.model.embed_multimodal(**kwargs)
             assert len(actual) == len(expected)
             for output, reference in zip(actual, expected):
                 assert torch.isfinite(output).all()
@@ -552,16 +529,6 @@ def _check_eonly_encoder_outputs(worker, batches, eager_token_budget=None):
                 torch.testing.assert_close(output, snapshot, rtol=0, atol=0)
             retained.extend((output, output.clone()) for output in actual)
             stats.append(manager.get_cumulative_stats())
-            batch_shape_drift.append(
-                {
-                    "graph_vs_standalone": max(
-                        (a - b).abs().max().item() for a, b in zip(actual, standalone)
-                    ),
-                    "eager_batch_vs_standalone": max(
-                        (a - b).abs().max().item() for a, b in zip(expected, standalone)
-                    ),
-                }
-            )
     assert stats[0]["graph_hits"] > 0
     assert stats[1]["graph_hits"] > stats[0]["graph_hits"]
     assert stats[2]["graph_misses"] > stats[1]["graph_misses"]
@@ -569,11 +536,7 @@ def _check_eonly_encoder_outputs(worker, batches, eager_token_budget=None):
     assert stats[4]["graph_hits"] > stats[3]["graph_hits"]
     assert stats[5]["graph_hits"] > stats[4]["graph_hits"]
     assert stats[6]["graph_hits"] > stats[5]["graph_hits"]
-    return {
-        "max_abs_error": max_error,
-        "stats": stats,
-        "batch_shape_drift": batch_shape_drift,
-    }
+    return {"max_abs_error": max_error, "stats": stats}
 
 
 @pytest.mark.parametrize(
@@ -646,11 +609,7 @@ def test_eonly_vit_cudagraph_outputs(
             )
         )
         results = model.llm.collective_rpc(
-            partial(
-                _check_eonly_encoder_outputs,
-                batches=inputs,
-                eager_token_budget=256 if model_id == "qwen2_5_vl" else None,
-            )
+            partial(_check_eonly_encoder_outputs, batches=inputs)
         )
         for result in results:
             assert result["stats"][0]["token_budgets"] == token_budgets
