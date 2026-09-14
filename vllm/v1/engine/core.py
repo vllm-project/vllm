@@ -87,6 +87,7 @@ from vllm.v1.fault_tolerance.engine_core_sentinel import (
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.forward_pass_metrics import (
+    FPM_HEARTBEAT_INTERVAL_SECONDS,
     FPM_IDLE_POLL_INTERVAL_SECONDS,
     FPM_SHUTDOWN_TIMEOUT_SECONDS,
     ForwardPassMetricsEmitter,
@@ -1000,7 +1001,14 @@ class EngineCore:
         return self.is_scheduler_paused() or self.model_executor.is_sleeping
 
     def execute_dummy_batch(self):
-        self.model_executor.execute_dummy_batch()
+        emitter = self.forward_pass_metrics_emitter
+        if emitter is None:
+            self.model_executor.execute_dummy_batch()
+            return
+        iteration_id = emitter.begin_dummy_iteration(self.scheduler)
+        samples = self.model_executor.execute_dummy_batch(iteration_id)
+        assert samples is not None
+        emitter.complete_timing_samples(samples)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_executor.add_lora(lora_request)
@@ -1497,6 +1505,8 @@ class EngineCoreProc(EngineCore):
             emitter = self.forward_pass_metrics_emitter
             if emitter is not None and self.input_queue.empty():
                 emitter.poll_timing(self.model_executor)
+                if self.input_queue.empty():
+                    emitter.publish_idle(self.scheduler)
             # Notify callbacks waiting for engine to become idle.
             self._notify_idle_state_callbacks()
             if self.input_queue.empty():
@@ -1507,15 +1517,20 @@ class EngineCoreProc(EngineCore):
                     logger.debug("EngineCore waiting for work.")
                     waited = True
             block = self.process_input_queue_block
-            poll_timing = block and emitter is not None and emitter.has_pending_timing()
+            poll_metrics = block and emitter is not None
             try:
-                if poll_timing:
-                    req = self.input_queue.get(timeout=FPM_IDLE_POLL_INTERVAL_SECONDS)
+                if block and emitter is not None:
+                    timeout = (
+                        FPM_IDLE_POLL_INTERVAL_SECONDS
+                        if emitter.has_pending_timing()
+                        else FPM_HEARTBEAT_INTERVAL_SECONDS
+                    )
+                    req = self.input_queue.get(timeout=timeout)
                 else:
                     req = self.input_queue.get(block=block)
                 self._handle_client_request(*req)
             except queue.Empty:
-                if poll_timing:
+                if poll_metrics:
                     continue
                 break
             if not block:

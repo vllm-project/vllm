@@ -12,6 +12,10 @@ need small lifecycle hooks.
 on the recorded CUDA stream, including host-submission gaps. It excludes
 EngineCore scheduling and metrics serialization/publication, and does not
 measure independent work on other streams.
+
+DP dummy steps carry measured timing and empty scheduled metrics. Only the
+engine's idle path emits zero-duration records; queued metrics may still be
+nonempty, for example while scheduling is paused.
 """
 
 from __future__ import annotations
@@ -19,7 +23,7 @@ from __future__ import annotations
 import queue
 import threading
 import time
-from collections import OrderedDict, deque
+from collections import deque
 from collections.abc import Callable, Iterable
 from contextlib import suppress
 from copy import copy
@@ -96,7 +100,7 @@ class ForwardPassMetrics(
     dp_rank: int = 0
     counter_id: int = 0
     timing_scope: str = FPM_TIMING_SCOPE_MODEL_STEP_CUDA
-    # CUDA-timeline interval spanning execution, sampling and drafting, in seconds.
+    # CUDA-timeline interval in seconds; zero denotes engine-confirmed idle.
     wall_time: float = 0.0
     scheduled_requests: ScheduledRequestMetrics = ScheduledRequestMetrics()
     queued_requests: QueuedRequestMetrics = QueuedRequestMetrics()
@@ -162,11 +166,10 @@ class ForwardPassMetricsTimer:
     def _make_event() -> torch.Event:
         return torch.Event(enable_timing=True)
 
-    def start(self, scheduler_output: SchedulerOutput) -> None:
+    def start(self, iteration_id: int | None) -> None:
         if self._active is not None:
             raise RuntimeError("A forward-pass timing interval is already active")
-        iteration_id = scheduler_output.forward_pass_metrics_iteration_id
-        if iteration_id is None or scheduler_output.total_num_scheduled_tokens == 0:
+        if iteration_id is None:
             return
         try:
             start_event, end_event = self._event_pool.get_nowait()
@@ -285,15 +288,8 @@ class ZmqForwardPassMetricsPublisher:
     SHUTDOWN_TIMEOUT_SECONDS = 1.0
     STARTUP_TIMEOUT_SECONDS = 5.0
 
-    def __init__(
-        self,
-        endpoint: str,
-        worker_id: str,
-        dp_rank: int,
-    ) -> None:
+    def __init__(self, endpoint: str) -> None:
         self._queue = queue.Queue[ForwardPassMetrics | None](maxsize=FPM_MAX_QUEUE_SIZE)
-        self._worker_id = worker_id
-        self._dp_rank = dp_rank
         self._sequence = count()
         self._endpoint = endpoint
         self._stop = threading.Event()
@@ -348,24 +344,13 @@ class ZmqForwardPassMetricsPublisher:
             return
 
         self._ready.set()
-        last_publish = time.monotonic()
         try:
             # Metrics are best-effort observability data. On shutdown, exit
             # instead of draining a potentially large backlog.
             while not self._stop.is_set():
-                try:
-                    metrics = self._queue.get(
-                        timeout=FPM_HEARTBEAT_INTERVAL_SECONDS,
-                    )
-                    if metrics is None:
-                        break
-                except queue.Empty:
-                    if time.monotonic() - last_publish < FPM_HEARTBEAT_INTERVAL_SECONDS:
-                        continue
-                    metrics = ForwardPassMetrics(
-                        worker_id=self._worker_id,
-                        dp_rank=self._dp_rank,
-                    )
+                metrics = self._queue.get()
+                if metrics is None:
+                    break
 
                 try:
                     sequence = next(self._sequence)
@@ -378,7 +363,6 @@ class ZmqForwardPassMetricsPublisher:
                         ),
                         flags=zmq.NOBLOCK,
                     )
-                    last_publish = time.monotonic()
                 except zmq.Again:
                     pass
                 except Exception:
@@ -404,21 +388,19 @@ class ForwardPassMetricsEmitter:
         worker_id: str,
         dp_rank: int,
         publisher: _MetricsPublisher,
-        max_pending_iterations: int = 16,
         correct_async_spec_lengths: bool = False,
     ) -> None:
-        if max_pending_iterations <= 0:
-            raise ValueError("max_pending_iterations must be positive")
         self._worker_id = worker_id
         self._dp_rank = dp_rank
         self._publisher = publisher
         self._iteration_ids = count()
-        self._max_pending_iterations = max_pending_iterations
         self._correct_async_spec_lengths = correct_async_spec_lengths
         self._spec_requests: dict[int, dict[str, tuple[Any, int]]] = {}
-        self._pending: OrderedDict[int, _PendingIteration] = OrderedDict()
+        # Keep snapshots until timing arrives; DP dummy steps bypass batch_queue.
+        self._pending: dict[int, _PendingIteration] = {}
         self._timing_poll: ForwardPassTimingPoll | None = None
         self._next_timing_poll = 0.0
+        self._next_idle_publish = 0.0
 
     @classmethod
     def from_vllm_config(
@@ -444,17 +426,12 @@ class ForwardPassMetricsEmitter:
                 "forward-pass-metrics-port plus data-parallel rank exceeds 65535"
             )
         worker_id = config.forward_pass_metrics_worker_id or vllm_config.instance_id
-        publisher = ZmqForwardPassMetricsPublisher(
-            endpoint=f"tcp://*:{port}",
-            worker_id=worker_id,
-            dp_rank=dp_rank,
-        )
+        publisher = ZmqForwardPassMetricsPublisher(endpoint=f"tcp://*:{port}")
         logger.info("Forward-pass metrics publisher bound to tcp://*:%d", port)
         return cls(
             worker_id=worker_id,
             dp_rank=dp_rank,
             publisher=publisher,
-            max_pending_iterations=max(16, vllm_config.max_concurrent_batches * 4),
             correct_async_spec_lengths=bool(
                 vllm_config.scheduler_config.async_scheduling
                 and vllm_config.speculative_config is not None
@@ -476,23 +453,12 @@ class ForwardPassMetricsEmitter:
                 for rid in scheduler_output.num_scheduled_tokens
                 if (request := requests.get(rid)) is not None
             }
-            # Even a dropped iteration can reject tokens included
-            # in a later snapshot. Keep this until its CPU output is settled.
+            # Track CPU output settlement independently of timing collection.
             self._spec_requests[id(scheduler_output)] = generations
         if scheduler_output.total_num_scheduled_tokens == 0:
             return
-        if len(self._pending) >= self._max_pending_iterations:
-            stale_iteration_id, _ = self._pending.popitem(last=False)
-            logger.warning_once(
-                "Forward-pass metrics pending state reached its bound; "
-                "dropping stale iterations (first dropped iteration: %d)",
-                stale_iteration_id,
-            )
-        iteration_id = next(self._iteration_ids)
+        iteration_id = self._begin_timing(_extract_scheduled_metrics(scheduler_output))
         scheduler_output.forward_pass_metrics_iteration_id = iteration_id
-        self._pending[iteration_id] = _PendingIteration(
-            scheduled=_extract_scheduled_metrics(scheduler_output)
-        )
         if self._correct_async_spec_lengths:
             pending = self._pending[iteration_id]
             pending.request_generations = generations
@@ -502,6 +468,32 @@ class ForwardPassMetricsEmitter:
                 for index, rid in enumerate(cached.req_ids)
                 if not cached.is_context_phase(rid)
             }
+
+    def _begin_timing(self, scheduled: ScheduledRequestMetrics) -> int:
+        iteration_id = next(self._iteration_ids)
+        self._pending[iteration_id] = _PendingIteration(scheduled=scheduled)
+        return iteration_id
+
+    def begin_dummy_iteration(self, scheduler: SchedulerInterface) -> int:
+        iteration_id = self._begin_timing(ScheduledRequestMetrics())
+        self._pending[iteration_id].queued = _extract_queued_metrics(scheduler)
+        return iteration_id
+
+    def publish_idle(self, scheduler: SchedulerInterface) -> None:
+        """Publish only when EngineCore has established there is no work."""
+        if self.has_pending_timing():
+            return
+        now = time.monotonic()
+        if now < self._next_idle_publish:
+            return
+        self._publisher.publish(
+            ForwardPassMetrics(
+                worker_id=self._worker_id,
+                dp_rank=self._dp_rank,
+                queued_requests=_extract_queued_metrics(scheduler),
+            )
+        )
+        self._next_idle_publish = now + FPM_HEARTBEAT_INTERVAL_SECONDS
 
     def before_update(
         self, scheduler_output: SchedulerOutput, model_output: ModelRunnerOutput

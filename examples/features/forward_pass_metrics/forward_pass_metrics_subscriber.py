@@ -92,11 +92,11 @@ def compact(value: int | float) -> str:
 
 
 def print_metrics(sequence: int, metrics: ForwardPassMetrics) -> None:
-    if metrics.wall_time == 0.0:
-        print(f"{sequence:>10} {'-':>7}   idle (heartbeat)", flush=True)
-        return
-
     prefix = f"{sequence:>10} {compact(metrics.wall_time * 1000):>7}"
+    idle = metrics.wall_time == 0.0
+    if idle:
+        print(f"{sequence:>10} {'-':>7}   idle (heartbeat)", flush=True)
+        prefix = " " * len(prefix)
     for label, counts, prefill_kv in (
         (
             "S",
@@ -105,6 +105,8 @@ def print_metrics(sequence: int, metrics: ForwardPassMetrics) -> None:
         ),
         ("Q", metrics.queued_requests, "-"),
     ):
+        if idle and label == "S":
+            continue
         if label == "Q" and not (
             counts.num_prefill_requests or counts.num_decode_requests
         ):

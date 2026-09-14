@@ -257,8 +257,16 @@ class Executor(ABC):
         )
         return output[0]
 
-    def execute_dummy_batch(self) -> None:
-        self.collective_rpc("execute_dummy_batch")
+    def execute_dummy_batch(
+        self, forward_pass_metrics_iteration_id: int | None = None
+    ) -> tuple[tuple[int, float], ...] | None:
+        if forward_pass_metrics_iteration_id is None:
+            self.collective_rpc("execute_dummy_batch")
+            return None
+        outputs: list[tuple[tuple[int, float], ...]] = self.collective_rpc(
+            "execute_dummy_batch", args=(forward_pass_metrics_iteration_id,)
+        )
+        return tuple(sample for samples in outputs for sample in samples)
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         output: list[DraftTokenIds] = self.collective_rpc("take_draft_token_ids")

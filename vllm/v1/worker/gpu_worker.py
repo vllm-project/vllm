@@ -1206,7 +1206,11 @@ class Worker(WorkerBase):
                     scheduler_output, intermediate_tensors
                 )
             else:
-                timer.start(scheduler_output)
+                timer.start(
+                    scheduler_output.forward_pass_metrics_iteration_id
+                    if forward_pass
+                    else None
+                )
                 try:
                     output = self.model_runner.execute_model(
                         scheduler_output, intermediate_tensors
@@ -1323,9 +1327,24 @@ class Worker(WorkerBase):
                     # Recreate it so the next profile_prefix is honored.
                     self.profiler = None
 
-    def execute_dummy_batch(self) -> None:
+    def execute_dummy_batch(
+        self, forward_pass_metrics_iteration_id: int | None = None
+    ) -> tuple[tuple[int, float], ...] | None:
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
-        self.model_runner._dummy_run(num_tokens, uniform_decode=True)
+        timer = self.model_runner.forward_pass_metrics_timer
+        if forward_pass_metrics_iteration_id is None or timer is None:
+            self.model_runner._dummy_run(num_tokens, uniform_decode=True)
+            return None if forward_pass_metrics_iteration_id is None else ()
+        # Recycle ready events before recording the next dummy interval.
+        samples = timer.drain_samples()
+        timer.start(forward_pass_metrics_iteration_id)
+        try:
+            self.model_runner._dummy_run(num_tokens, uniform_decode=True)
+        except Exception:
+            timer.cancel()
+            raise
+        timer.finish()
+        return samples
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)

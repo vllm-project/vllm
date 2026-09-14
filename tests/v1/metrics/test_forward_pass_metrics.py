@@ -286,11 +286,7 @@ def test_timer_hot_drain_never_synchronizes_pending_event():
         return event
 
     timer = ForwardPassMetricsTimer(num_event_pairs=1, event_factory=event_factory)
-    scheduler_output = SchedulerOutput.make_empty()
-    scheduler_output.total_num_scheduled_tokens = 1
-    scheduler_output.forward_pass_metrics_iteration_id = 4
-
-    timer.start(scheduler_output)
+    timer.start(4)
     timer.finish()
     assert timer.drain_samples() == ()
     assert sum(event.synchronize_calls for event in events) == 0
@@ -300,7 +296,7 @@ def test_timer_hot_drain_never_synchronizes_pending_event():
     assert sum(event.synchronize_calls for event in events) == 0
     assert len(events) == 2
 
-    timer.start(scheduler_output)
+    timer.start(4)
     timer.finish()
     with timer._drain_lock:
         assert timer.drain_samples() == ()
@@ -325,7 +321,7 @@ def test_sampling_finishes_existing_timing_after_draft_without_waiting():
     timer = ForwardPassMetricsTimer(1, event_factory=event_factory)
     scheduled = _make_scheduler_output("decode", computed_tokens=100)
     scheduled.forward_pass_metrics_iteration_id = 3
-    timer.start(scheduled)
+    timer.start(scheduled.forward_pass_metrics_iteration_id)
     output = ModelRunnerOutput(req_ids=[], req_id_to_index={})
 
     def sample_and_draft(grammar):
@@ -418,6 +414,7 @@ def test_idle_input_arrival_does_not_wait_for_timing(enabled):
     core = SimpleNamespace(
         has_work=lambda: bool(handled),
         is_running=lambda: True,
+        scheduler=_FakeScheduler(),
         forward_pass_metrics_emitter=emitter,
         model_executor=SimpleNamespace(start_forward_pass_timing_poll=start_poll),
         input_queue=SimpleNamespace(empty=lambda: True, get=receive),
@@ -573,6 +570,243 @@ def test_fpm_requires_model_config():
             device_config=DeviceConfig(device="cuda"),
             observability_config=ObservabilityConfig(forward_pass_metrics_port=20380),
         )
+
+
+@pytest.mark.parametrize("num_pending", [1, 16, 32])
+def test_dummy_metrics_keep_queued_snapshot_and_delay_idle_until_timing_ready(
+    num_pending,
+):
+    from vllm.v1.engine.core import EngineCore
+
+    publisher = _FakeMetricsPublisher()
+    emitter = ForwardPassMetricsEmitter("worker", 0, publisher)
+    scheduler = _FakeScheduler()
+    scheduler.waiting = [SimpleNamespace(status=RequestStatus.WAITING, num_tokens=12)]
+    ids = []
+
+    def execute_dummy(iteration_id):
+        ids.append(iteration_id)
+        # A later dummy returns a previous step's timing, never a GPU wait.
+        if len(ids) <= num_pending:
+            return ()
+        return tuple((previous_id, 0.01) for previous_id in ids[:-1])
+
+    core = SimpleNamespace(
+        forward_pass_metrics_emitter=emitter,
+        scheduler=scheduler,
+        model_executor=SimpleNamespace(execute_dummy_batch=execute_dummy),
+    )
+    for length in range(12, 12 + num_pending):
+        scheduler.waiting[0].num_tokens = length
+        EngineCore.execute_dummy_batch(core)
+        emitter.publish_idle(scheduler)
+        assert not publisher.published
+    scheduler.waiting[0].num_tokens = 37
+    EngineCore.execute_dummy_batch(core)
+    assert [m.queued_requests.sum_prefill_tokens for m in publisher.published] == list(
+        range(12, 12 + num_pending)
+    )
+    assert all(
+        m.scheduled_requests == ScheduledRequestMetrics() and m.wall_time == 0.01
+        for m in publisher.published
+    )
+    emitter.publish_idle(scheduler)
+    assert len(publisher.published) == num_pending
+    emitter.complete_timing_samples(((ids[-1], 0.02),))
+    emitter.publish_idle(scheduler)
+    emitter.publish_idle(scheduler)  # Idle publication is rate-limited.
+    assert len(publisher.published) == num_pending + 2
+    assert publisher.published[-2].queued_requests.sum_prefill_tokens == 37
+    assert publisher.published[-1].wall_time == 0.0
+    assert publisher.published[-1].queued_requests.sum_prefill_tokens == 37
+
+
+def test_real_output_can_collect_a_backlog_of_dummy_timings():
+    publisher = _FakeMetricsPublisher()
+    emitter = ForwardPassMetricsEmitter("worker", 0, publisher)
+    scheduler = _FakeScheduler()
+    scheduler.waiting = [SimpleNamespace(status=RequestStatus.WAITING, num_tokens=12)]
+    dummy_ids = [emitter.begin_dummy_iteration(scheduler) for _ in range(32)]
+    scheduler.waiting.clear()
+    real = _make_scheduler_output("prefill", prompt_tokens=4)
+    emitter.begin_iteration(scheduler, real)
+    emitter.complete_iteration(
+        scheduler,
+        real,
+        ModelRunnerOutput(
+            req_ids=["prefill"],
+            req_id_to_index={"prefill": 0},
+            forward_pass_timing_samples=tuple((i, 0.01) for i in dummy_ids),
+        ),
+    )
+    assert len(publisher.published) == 32
+    assert all(
+        m.scheduled_requests == ScheduledRequestMetrics()
+        and m.queued_requests.sum_prefill_tokens == 12
+        and m.wall_time == 0.01
+        for m in publisher.published
+    )
+    assert emitter.has_pending_timing()
+    emitter.publish_idle(scheduler)
+    assert len(publisher.published) == 32
+    emitter.complete_timing_samples(((real.forward_pass_metrics_iteration_id, 0.02),))
+    assert len(publisher.published) == 33
+    assert publisher.published[-1].scheduled_requests.sum_prefill_tokens == 4
+    assert publisher.published[-1].queued_requests == QueuedRequestMetrics()
+    assert not emitter.has_pending_timing()
+
+
+@pytest.mark.parametrize(
+    "blocker",
+    [None, "global", "batch", "scheduler", "timing", "input", "input_during_poll"],
+)
+def test_engine_idle_metrics_require_global_quiescence_and_drained_timing(blocker):
+    from vllm.v1.engine.core import EngineCoreProc
+
+    publisher = _FakeMetricsPublisher()
+    emitter = ForwardPassMetricsEmitter("worker", 0, publisher)
+    # Paused/streaming state can retain a queue while the engine stops stepping.
+    scheduler = SimpleNamespace(
+        requests={},
+        skipped_waiting=[],
+        waiting=[SimpleNamespace(status=RequestStatus.WAITING, num_tokens=12)],
+        has_requests=lambda: blocker == "scheduler",
+    )
+    arrived = [blocker == "input"]
+    if blocker in ("timing", "input_during_poll"):
+        pending_id = emitter.begin_dummy_iteration(scheduler)
+
+    def start_poll():
+        if blocker == "input_during_poll":
+            arrived[0] = True
+            return lambda: ((pending_id, 0.01),)
+        return lambda: None
+
+    handled: list[tuple[str, str]] = []
+    core = SimpleNamespace(
+        engines_running=blocker == "global",
+        scheduler=scheduler,
+        batch_queue=[None] if blocker == "batch" else [],
+        forward_pass_metrics_emitter=emitter,
+        model_executor=SimpleNamespace(start_forward_pass_timing_poll=start_poll),
+        is_running=lambda: True,
+        process_input_queue_block=True,
+        _notify_idle_state_callbacks=lambda: None,
+        aborts_queue=SimpleNamespace(mutex=nullcontext(), queue=[]),
+    )
+    core.has_work = lambda: bool(handled) or EngineCoreProc.has_work(core)
+    core._handle_client_request = lambda *request: handled.append(request)
+    core.input_queue = SimpleNamespace(
+        empty=lambda: not arrived[0] or bool(handled),
+        get=lambda **kwargs: ("request", "new"),
+    )
+    EngineCoreProc._process_input_queue(core)
+    idle = [m for m in publisher.published if m.wall_time == 0.0]
+    assert len(idle) == (1 if blocker is None else 0)
+    if idle:
+        assert idle[0].queued_requests.sum_prefill_tokens == 12
+
+
+@pytest.mark.parametrize("timed", [False, True])
+def test_worker_dummy_timing_wraps_complete_dummy_run_without_synchronizing(timed):
+    from vllm.v1.worker.gpu_worker import Worker
+
+    events = []
+    timestamps = iter((10.0, 30.0))
+
+    def make_event():
+        event = _FakeTimingEvent(timestamps)
+        events.append(event)
+        return event
+
+    timer = ForwardPassMetricsTimer(1, event_factory=make_event)
+
+    def dummy_run(num_tokens, *, uniform_decode):
+        assert num_tokens == 4 and uniform_decode
+        assert events[0].timestamp == (10 if timed else 0)
+        assert events[1].timestamp == 0  # End must follow the full draft path.
+
+    worker = SimpleNamespace(
+        model_runner=SimpleNamespace(
+            uniform_decode_query_len=4,
+            forward_pass_metrics_timer=timer,
+            _dummy_run=dummy_run,
+        )
+    )
+    result = Worker.execute_dummy_batch(worker, 7 if timed else None)
+    assert result == (() if timed else None)
+    assert not any(event.synchronize_calls for event in events)
+    if timed:
+        events[1].complete = True
+        assert timer.drain_samples() == ((7, 0.02),)
+    else:
+        assert timer.drain_samples() == ()
+
+
+def test_continuous_dummy_recycles_ready_event_pairs():
+    from vllm.v1.worker.gpu_worker import Worker
+
+    events = []
+    timestamps = iter(range(6))
+
+    def make_event():
+        event = _FakeTimingEvent(timestamps)
+        events.append(event)
+        return event
+
+    timer = ForwardPassMetricsTimer(1, event_factory=make_event)
+    worker = SimpleNamespace(
+        model_runner=SimpleNamespace(
+            forward_pass_metrics_timer=timer,
+            _dummy_run=lambda *a, **k: setattr(events[1], "complete", True),
+        )
+    )
+    for iteration_id in range(3):
+        samples = Worker.execute_dummy_batch(worker, iteration_id)
+        assert samples == (() if iteration_id == 0 else ((iteration_id - 1, 0.001),))
+        assert len(events) == 2
+    assert timer.drain_samples() == ((2, 0.001),)
+
+
+@pytest.mark.parametrize("multiproc", [False, True])
+@pytest.mark.parametrize("timed", [False, True])
+def test_dummy_executor_piggybacks_timing_on_existing_rpc(multiproc, timed):
+    from vllm.v1.executor.abstract import Executor
+    from vllm.v1.executor.multiproc_executor import MultiprocExecutor
+
+    calls = []
+
+    def rpc(method, **kwargs):
+        calls.append((method, kwargs))
+        return ((6, 0.01),) if multiproc else [(), ((6, 0.01),)]
+
+    executor = SimpleNamespace(collective_rpc=rpc, output_rank=1)
+    cls = MultiprocExecutor if multiproc else Executor
+    result = cls.execute_dummy_batch(executor, 7 if timed else None)
+    assert result == (((6, 0.01),) if timed else None)
+    expected: dict[str, object] = {"unique_reply_rank": 1} if multiproc else {}
+    if timed:
+        expected["args"] = (7,)
+    assert calls == [("execute_dummy_batch", expected)]
+
+
+def test_subscriber_preserves_queued_state_in_idle_metrics(capsys):
+    from examples.features.forward_pass_metrics.forward_pass_metrics_subscriber import (
+        print_metrics,
+    )
+
+    print_metrics(
+        3,
+        ForwardPassMetrics(
+            queued_requests=QueuedRequestMetrics(
+                num_prefill_requests=1, sum_prefill_tokens=12
+            )
+        ),
+    )
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 2 and "idle" in lines[0]
+    assert " Q " in lines[1] and "1/12/-/0" in lines[1]
+    assert all(len(line) <= 80 for line in lines)
 
 
 def test_emitter_joins_delayed_timing_with_original_snapshots():
@@ -762,38 +996,6 @@ def test_async_sd_rejection_does_not_cross_request_generation(preempted):
     assert publisher.published[-1].scheduled_requests.sum_decode_kv_tokens == 20
 
 
-def test_async_sd_correction_survives_dropped_sample():
-    scheduler = _FakeScheduler()
-    scheduler.requests["decode"].num_preemptions = 0
-    publisher = _FakeMetricsPublisher()
-    emitter = ForwardPassMetricsEmitter(
-        "worker",
-        0,
-        publisher,
-        max_pending_iterations=1,
-        correct_async_spec_lengths=True,
-    )
-    first = _make_scheduler_output("decode", computed_tokens=100)
-    first.scheduled_spec_decode_tokens = {"decode": [-1] * 3}
-    emitter.begin_iteration(scheduler, first)
-    second = _make_scheduler_output("decode", computed_tokens=104)
-    emitter.begin_iteration(scheduler, second)
-    result = ModelRunnerOutput(
-        req_ids=["decode"],
-        req_id_to_index={"decode": 0},
-        sampled_token_ids=[[1]],
-    )
-    emitter.before_update(first, result)
-    emitter.complete_iteration(scheduler, first, result)
-    result.forward_pass_timing_samples = (
-        (second.forward_pass_metrics_iteration_id, 0.01),
-    )
-    emitter.before_update(second, result)
-    emitter.complete_iteration(scheduler, second, result)
-    assert publisher.published[-1].scheduled_requests.sum_decode_kv_tokens == 101
-    assert not emitter._spec_requests
-
-
 def test_zmq_publisher_frames_payload_and_stops_cleanly():
     port = get_open_port()
     endpoint = f"tcp://127.0.0.1:{port}"
@@ -801,7 +1003,7 @@ def test_zmq_publisher_frames_payload_and_stops_cleanly():
     subscriber = context.socket(zmq.SUB)
     subscriber.setsockopt(zmq.SUBSCRIBE, b"")
     subscriber.connect(endpoint)
-    publisher = ZmqForwardPassMetricsPublisher(endpoint, "worker", 0)
+    publisher = ZmqForwardPassMetricsPublisher(endpoint)
     try:
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:
@@ -822,15 +1024,23 @@ def test_zmq_publisher_frames_payload_and_stops_cleanly():
     assert not publisher._thread.is_alive()
 
 
-def test_zmq_publisher_emits_idle_heartbeat(monkeypatch):
+def test_zmq_publisher_does_not_infer_idle_from_silence(monkeypatch):
     monkeypatch.setattr(fpm_module, "FPM_HEARTBEAT_INTERVAL_SECONDS", 0.01)
     endpoint = f"tcp://127.0.0.1:{get_open_port()}"
     subscriber = zmq.Context.instance().socket(zmq.SUB)
     subscriber.setsockopt(zmq.SUBSCRIBE, b"")
     subscriber.connect(endpoint)
-    publisher = ZmqForwardPassMetricsPublisher(endpoint, "worker", 2)
+    publisher = ZmqForwardPassMetricsPublisher(endpoint)
+    emitter = ForwardPassMetricsEmitter("worker", 2, publisher)
     try:
-        assert subscriber.poll(2_000, zmq.POLLIN)
+        assert not subscriber.poll(300, zmq.POLLIN)
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            emitter.publish_idle(_FakeScheduler())
+            if subscriber.poll(50, zmq.POLLIN):
+                break
+        else:
+            pytest.fail("timed out waiting for explicit idle metrics")
         _, _, payload = subscriber.recv_multipart()
         metrics = decode_forward_pass_metrics(payload)
         assert metrics.worker_id == "worker"
@@ -847,6 +1057,6 @@ def test_zmq_publisher_reports_bind_failure_from_its_thread():
     blocker.bind(endpoint)
     try:
         with pytest.raises(RuntimeError, match="Failed to bind"):
-            ZmqForwardPassMetricsPublisher(endpoint, "worker", 0)
+            ZmqForwardPassMetricsPublisher(endpoint)
     finally:
         blocker.close(linger=0)

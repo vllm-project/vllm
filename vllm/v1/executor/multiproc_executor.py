@@ -363,8 +363,19 @@ class MultiprocExecutor(Executor):
             ec_output_aggregator=self.ec_output_aggregator,
         )
 
-    def execute_dummy_batch(self) -> None:
-        self.collective_rpc("execute_dummy_batch", unique_reply_rank=self.output_rank)
+    def execute_dummy_batch(
+        self, forward_pass_metrics_iteration_id: int | None = None
+    ) -> tuple[tuple[int, float], ...] | None:
+        if forward_pass_metrics_iteration_id is None:
+            self.collective_rpc(
+                "execute_dummy_batch", unique_reply_rank=self.output_rank
+            )
+            return None
+        return self.collective_rpc(
+            "execute_dummy_batch",
+            args=(forward_pass_metrics_iteration_id,),
+            unique_reply_rank=self.output_rank,
+        )
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         # OPTIMIZATION: Get output only from a single worker (output_rank)
