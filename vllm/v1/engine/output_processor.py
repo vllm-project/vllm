@@ -420,9 +420,7 @@ class RequestState:
         sampling_mask = None
         if self.sampling_mask_chunks and (delta or finished):
             sampling_mask = SamplingMask(
-                [chunk.token_ids.tolist() for chunk in self.sampling_mask_chunks][
-                    : len(token_ids)
-                ]
+                [chunk.token_ids.tolist() for chunk in self.sampling_mask_chunks]
             )
             if delta:
                 self.sampling_mask_chunks.clear()
