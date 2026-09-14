@@ -415,12 +415,12 @@ fn is_historical_developer(
 /// Skips merged user-content tails and dropped historical developers so the
 /// caller can tell a following assistant turn apart from the end of the
 /// conversation.
-fn next_rendered_entry<'a>(
-    messages: &'a [ChatMessage],
+fn next_rendered_entry(
+    messages: &[ChatMessage],
     message_index: usize,
     drop_historical_developers: bool,
     last_user_like_message_index: Option<usize>,
-) -> Option<&'a ChatMessage> {
+) -> Option<&ChatMessage> {
     let mut next_index = message_index + 1;
     while next_index < messages.len()
         && (is_following_user_content(messages, next_index)
