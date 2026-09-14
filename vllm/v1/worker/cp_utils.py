@@ -29,16 +29,24 @@ def check_attention_cp_compatibility(
         layer_type = cast(type[Any], AttentionLayerBase)
         layers = get_layers_from_vllm_config(vllm_config, layer_type)
         for layer_name, layer in layers.items():
-            check_pcp = target_layer_names is None or layer_name in target_layer_names
+            # Draft-model layers (EAGLE/MTP/DFlash/DSpark) live in the same
+            # forward context as the target's, but a draft collapses PCP and
+            # DCP, so its KV is never CP-sharded and CP requirements do not
+            # apply to it. The backend check below already scopes itself to
+            # target_layer_names; the impl checks must too, or a DSpark draft's
+            # full-attention layers are held to the target's interleave size.
+            is_target_layer = (
+                target_layer_names is None or layer_name in target_layer_names
+            )
             get_attn_backend = getattr(layer, "get_attn_backend", None)
-            if pcp_size > 1 and check_pcp and get_attn_backend is not None:
+            if pcp_size > 1 and is_target_layer and get_attn_backend is not None:
                 backend = get_attn_backend()
                 assert backend.supports_pcp(), (
                     "PCP requires attention backend support, "
                     f"but {backend.get_name()} does not support PCP."
                 )
             layer_impl = getattr(layer, "impl", None)
-            if layer_impl is None:
+            if layer_impl is None or not is_target_layer:
                 continue
             if vllm_config.speculative_config is not None and interleave_size > 1:
                 assert layer_impl.supports_mtp_with_cp_non_trivial_interleave_size, (
