@@ -74,7 +74,9 @@ def _run_ar(
     tensor_cpu[3][dp_rank] = cudagraph_mode
     tensor = tensor_cpu.to(device, non_blocking=True)
     dist.all_reduce(tensor, group=group)
-    if dead_dp_ranks := get_dp_group().dead_dp_ranks:
+    if parallel_config.enable_fault_tolerance and (
+        dead_dp_ranks := get_dp_group().dead_dp_ranks
+    ):
         # A dead rank's column stays 0 after the SUM allreduce; rewrite it
         # with aggregate-neutral values (0 is not neutral for min / all(==1)).
         int_max = torch.iinfo(tensor.dtype).max
