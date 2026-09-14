@@ -45,6 +45,12 @@ requires_gfx950 = pytest.mark.skipif(
     not _on_gfx950(),
     reason="optimized sparse decode partial is gfx950-only",
 )
+# combine_topk_swa_indices is selected by the source on every ROCm arch, so its
+# tests run wherever the kernel does.
+requires_rocm_cdna3_or_newer = pytest.mark.skipif(
+    not _on_split_decode_arch(),
+    reason="V4.1 combine kernel needs an AMD gfx942/gfx950 device",
+)
 
 NOPE_HEAD_DIM = 448
 ROPE_HEAD_DIM = 64
@@ -1542,7 +1548,7 @@ def _v41_combine_case(case, window):
     return ti, qsl, sl, gl, window, ratio, topk, 100000, 4096
 
 
-@requires_gfx950
+@requires_rocm_cdna3_or_newer
 @pytest.mark.parametrize(
     "case,window",
     [
@@ -1567,7 +1573,7 @@ def test_v41_combine_topk_swa_indices_matches_torch(case, window) -> None:
     assert torch.equal(got_indices, ref_indices)
 
 
-@requires_gfx950
+@requires_rocm_cdna3_or_newer
 def test_v41_combine_topk_swa_indices_does_not_write_past_the_rows() -> None:
     """The token loop is bounded by the row count, and the length store is unmasked.
 
@@ -1628,7 +1634,7 @@ def test_v41_combine_topk_swa_indices_does_not_write_past_the_rows() -> None:
     assert torch.all(indices[rows:] == sentinel)
 
 
-@requires_gfx950
+@requires_rocm_cdna3_or_newer
 def test_v41_combine_topk_swa_indices_stays_in_bounds_on_short_rows() -> None:
     """Fewer rows than query_start_loc claims: stay inside the buffers.
 
