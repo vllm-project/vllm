@@ -1171,14 +1171,11 @@ _PER_REQUEST_STATS = RequestStateStats(
 )
 
 
-def _make_simple_context_with_output(
+def _make_request_output(
     text,
     token_ids,
-    response_parser=None,
     metrics: RequestStateStats | None = None,
 ):
-    """Create a SimpleContext with a RequestOutput containing the given text."""
-    ctx = SimpleContext(response_parser=response_parser)
     completion = CompletionOutput(
         index=0,
         text=text,
@@ -1188,7 +1185,7 @@ def _make_simple_context_with_output(
         finish_reason=None,
         stop_reason=None,
     )
-    req_output = RequestOutput(
+    return RequestOutput(
         request_id="req",
         prompt="hi",
         prompt_token_ids=[7, 8],
@@ -1196,7 +1193,19 @@ def _make_simple_context_with_output(
         outputs=[completion],
         finished=False,
         num_cached_tokens=0,
+        metrics=metrics,
     )
+
+
+def _make_simple_context_with_output(
+    text,
+    token_ids,
+    response_parser=None,
+    metrics: RequestStateStats | None = None,
+):
+    """Create a SimpleContext with a RequestOutput containing the given text."""
+    ctx = SimpleContext(response_parser=response_parser)
+    req_output = _make_request_output(text, token_ids, metrics)
     ctx.append_output(req_output)
     ctx.request_metrics = metrics
     return ctx
@@ -1242,16 +1251,26 @@ async def _make_full_metrics_response(
         enable_per_request_metrics=enable_per_request_metrics
     )
     request = ResponsesRequest(input="hi", tools=[], stream=False, store=False)
-    context = _make_simple_context_with_output(
-        "hello", [10, 20], metrics=_PER_REQUEST_STATS
-    )
+    sampling_params = SamplingParams(max_tokens=16)
+    context = SimpleContext()
     context.request_metrics_cover_all_generation_turns = (
         request_metrics_cover_all_generation_turns
     )
+
+    async def generate(*args, **kwargs):
+        yield _make_request_output("hello", [10, 20], _PER_REQUEST_STATS)
+
+    serving.engine_client.generate.side_effect = generate
+    result_generator = serving._generate_with_builtin_tools(
+        request_id=request.request_id,
+        engine_input=tokens_input([7, 8]),
+        sampling_params=sampling_params,
+        context=context,
+    )
     response = await serving.responses_full_generator(
         request=request,
-        sampling_params=SamplingParams(max_tokens=16),
-        result_generator=_empty_context_generator(),
+        sampling_params=sampling_params,
+        result_generator=result_generator,
         context=context,
         model_name="test-model",
         tokenizer=MagicMock(),

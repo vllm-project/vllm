@@ -128,7 +128,9 @@ the top level. Streaming responses include it in the final response carried by
 the `response.completed` event; intermediate events do not include metrics.
 
 Metrics are omitted for Responses requests that perform multiple
-model-generation turns, such as built-in tool-call workflows.
+model-generation turns, such as built-in tool-call workflows, because the
+response retains timing data for only one generation turn while token usage is
+accumulated across all turns.
 
 ## Relationship to Prometheus Metrics
 
