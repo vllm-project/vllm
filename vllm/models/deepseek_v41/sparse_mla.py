@@ -229,3 +229,34 @@ class DeepseekV4FlashMLABackend(DeepseekV4SparseMLABackend):
     @staticmethod
     def get_builder_cls() -> type[DeepseekV4FlashMLAMetadataBuilder]:
         return DeepseekV4FlashMLAMetadataBuilder
+
+
+class FlashMLAMegaAttnBackend(DeepseekV4FlashMLABackend):
+    """FlashMLA's mega-attention kernel: Q RoPE + sparse attention + inverse
+    RoPE + FP8 cast of the output, in one launch.
+
+    Same metadata and KV-cache geometry as ``FLASHMLA_SPARSE_DSV41`` -- what
+    differs is the attention layer's interface contract (it takes an unnormed,
+    unroped Q and returns an already-inverse-RoPE'd, quantized output) and the
+    extra ``nvfp4_ds_mla`` compressed-cache record only this kernel can read.
+    SM100 only; the kernel has no SM90 instantiation.
+    """
+
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "fp8_ds_mla",
+        "fp8",  # alias for fp8_ds_mla
+        "nvfp4_ds_mla",  # V4.1 fp8 SWA cache + NVFP4 compressed cache
+    ]
+
+    @staticmethod
+    def get_name() -> str:
+        return "FLASHMLA_MEGA_ATTN_DSV41"
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [128]
+
+    @classmethod
+    def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+        return capability.major == 10

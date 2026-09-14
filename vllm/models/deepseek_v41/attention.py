@@ -31,6 +31,9 @@ from vllm.models.deepseek_v41.common.ops import (
     fused_indexer_q_rope_quant,
     indexer_k_norm_rope_store,
 )
+from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
+    rope_quant_insert,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import (
@@ -42,6 +45,7 @@ from vllm.config import (
     VllmConfig,
     get_current_vllm_config,
 )
+from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
@@ -53,6 +57,7 @@ from vllm.models.deepseek_v41.common.rope import build_deepseek_v4_rope
 from vllm.models.deepseek_v41.compressor import DeepseekCompressor
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.deep_gemm import fp8_einsum
 from vllm.utils.multi_stream_utils import (
     execute_in_parallel,
     maybe_execute_in_parallel,
@@ -122,34 +127,40 @@ def _use_v41_mxfp8_kv_record() -> bool:
 
 def _resolve_dsv4_kv_cache_dtype(
     use_fp8_ds_mla_layout: bool,
-    kv_cache_dtype: str,
+    kv_cache_dtype: CacheDType,
     cache_config: CacheConfig | None,
-) -> tuple[str, torch.dtype]:
+    packed_kv_cache_dtype: CacheDType = "fp8_ds_mla",
+) -> tuple[CacheDType, torch.dtype]:
     """Map ``(layout, --kv-cache-dtype)`` to ``(cache_dtype_str, torch_dtype)``.
 
     Both layouts are paged; they differ in the per-token block format. The
-    ``fp8_ds_mla`` format is UE8M0 block-scaled fp8 packed as ``uint8`` (the
-    canonical ``fp8_ds_mla`` string is written back onto ``cache_config`` so the
-    page-size specs pick the 576B per-token slot). Plain-row backends store each
-    token's KV row in its element dtype: bf16 or per-tensor FP8 E4M3.
+    packed formats are ``uint8``-backed: ``fp8_ds_mla`` is UE8M0 block-scaled
+    fp8 throughout, ``nvfp4_ds_mla`` keeps that sliding-window record and
+    stores the compressed cache as NVFP4. An unspecific ``--kv-cache-dtype``
+    (``auto`` / ``fp8``) resolves to ``packed_kv_cache_dtype``, the record this
+    layer's kernel prefers, and the canonical string is written back onto
+    ``cache_config`` so the page-size specs pick the right per-token slot.
+    Plain-row backends store each token's KV row in its element dtype: bf16 or
+    per-tensor FP8 E4M3.
     """
     if use_fp8_ds_mla_layout:
-        # fp8_ds_mla block format: UE8M0 block-scaled fp8 packed as uint8.
-        if kv_cache_dtype == "auto":
-            kv_cache_dtype = "fp8"
-        if not kv_cache_dtype.startswith("fp8"):
+        if kv_cache_dtype in ("auto", "fp8"):
+            kv_cache_dtype = packed_kv_cache_dtype
+        elif not kv_cache_dtype.endswith("_ds_mla"):
             raise ValueError(
-                "DeepseekV4 fp8_ds_mla layout only supports fp8 "
-                f"kv-cache, got {kv_cache_dtype}. Please set "
-                "`--kv-cache-dtype fp8` or select a backend that supports "
-                "bfloat16 KV cache."
+                "DeepseekV4 packed KV layouts only support fp8 kv-cache, got "
+                f"{kv_cache_dtype}. Please set `--kv-cache-dtype fp8` or "
+                "select a backend that supports bfloat16 KV cache."
             )
-        if kv_cache_dtype != "fp8_ds_mla":
-            if cache_config is not None:
-                cache_config.cache_dtype = "fp8_ds_mla"
-            kv_cache_dtype = "fp8_ds_mla"
-            logger.info_once("Using DeepSeek's fp8_ds_mla KV cache format.")
+        if cache_config is not None and cache_config.cache_dtype != kv_cache_dtype:
+            cache_config.cache_dtype = kv_cache_dtype
+        logger.info_once("Using DeepSeek's %s KV cache format.", kv_cache_dtype)
         return kv_cache_dtype, torch.uint8
+    if kv_cache_dtype.endswith("_ds_mla"):
+        raise ValueError(
+            f"{kv_cache_dtype} is a packed FlashMLA DeepSeek V4.1 KV cache "
+            "format; the selected backend stores plain KV rows."
+        )
 
     # Plain bf16 / per-tensor fp8 KV row (FlashInfer).
     if kv_cache_dtype.startswith("fp8"):
@@ -183,6 +194,20 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     # workspace allocated in _forward_prefill and is also read by the dummy-run
     # path to pre-reserve that workspace.
     PREFILL_CHUNK_SIZE: ClassVar[int] = 4
+    # ---- attention-interface contract, declared by the platform subclass ----
+    # True when ``forward_mqa``'s ``q`` is the raw wq_b output -- neither
+    # Q-normed nor RoPE'd -- because the attention kernel applies both itself.
+    # The layer then only inserts KV before calling it.
+    accepts_unnormed_unroped_query: ClassVar[bool] = False
+    # True when ``forward_mqa`` fills a QuantizedActivation whose inverse RoPE
+    # and FP8 cast already happened inside the attention kernel, so ``wo_a``
+    # consumes it directly and only ``wo_b`` is left. False means bf16
+    # ``[N, padded_heads, head_dim]`` output that still needs ``_o_proj``.
+    produces_inv_roped_quantized_output: ClassVar[bool] = False
+    # The packed KV record this layer's kernel prefers when --kv-cache-dtype is
+    # unspecific ("auto" / "fp8"). Mega attention overrides it: its kernel is
+    # the one that can read an NVFP4 compressed cache.
+    packed_kv_cache_dtype: ClassVar[CacheDType] = "fp8_ds_mla"
 
     @classmethod
     @abstractmethod
@@ -208,8 +233,19 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-        """Inverse-RoPE + wo_a + wo_b output projection (platform-specific)."""
+    def _o_proj(
+        self,
+        attn_out: "torch.Tensor | QuantizedActivation",
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        """Project whatever ``_alloc_attn_out`` produced through wo_a and wo_b.
+
+        Takes the buffer whole, so each layer owns the shape it allocated: the
+        bf16 layers slice off their padding heads and apply the inverse RoPE,
+        while a layer declaring ``produces_inv_roped_quantized_output`` gets a
+        QuantizedActivation whose inverse RoPE and FP8 cast the attention
+        kernel already did, and only has wo_a and wo_b left.
+        """
         raise NotImplementedError
 
     def _uses_fp8_ds_mla_layout(self) -> bool:
@@ -454,11 +490,27 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # Resolve the kv-cache dtype from this backend's block format. The same
         # resolution drives the SWA cache tensor dtype below.
         self.kv_cache_dtype, self.kv_cache_torch_dtype = _resolve_dsv4_kv_cache_dtype(
-            self._uses_fp8_ds_mla_layout(), cache_config.cache_dtype, cache_config
+            self._uses_fp8_ds_mla_layout(),
+            cache_config.cache_dtype,
+            cache_config,
+            self.packed_kv_cache_dtype,
         )
         self.kv_mxfp8 = _use_v41_mxfp8_kv_record()
-        self.kv_bytes_per_token = 528 if self.kv_mxfp8 else 584
+        self.swa_bytes_per_token = 528 if self.kv_mxfp8 else 584
+        # nvfp4_ds_mla keeps the MXFP8 sliding-window record and stores the
+        # compressed cache as NVFP4 (256 B of e2m1 pairs + 32 e4m3 scales).
+        self.compressed_bytes_per_token = (
+            288 if self.kv_cache_dtype == "nvfp4_ds_mla" else self.swa_bytes_per_token
+        )
+        # One alignment for every page in the block: the block stride is their
+        # sum, and 512 satisfies both TMA strides in play (512 for the V4.1
+        # fp8 record, 256 for NVFP4).
         self.kv_page_alignment = 512 if self.kv_mxfp8 else 576
+        if self.kv_cache_dtype == "nvfp4_ds_mla" and not self.kv_mxfp8:
+            raise ValueError(
+                "nvfp4_ds_mla needs the V4.1 KV records, which FlashMLA "
+                "decodes only on SM100."
+            )
 
         self.swa_cache_layer = DeepseekV4SWACache(
             head_dim=self.head_dim,
@@ -468,7 +520,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             cache_config=cache_config,
             backend_cls=self.swa_backend_cls,
             block_size=32,
-            packed_bytes_per_token=self.kv_bytes_per_token,
+            packed_bytes_per_token=self.swa_bytes_per_token,
             packed_page_alignment=self.kv_page_alignment,
         )
 
@@ -564,14 +616,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         hidden_states: torch.Tensor,
         llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # Pre-allocate attention output with FlashMLA-padded head count.
-        # The op writes into `o_padded`; we slice to n_local_heads after.
-        num_tokens = hidden_states.shape[0]
-        o_padded = torch.empty(
-            (num_tokens, self.padded_heads, self.head_dim),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
+        # The eager attention region writes into a caller-owned buffer
+        # (breakable_cudagraph needs in-place outputs); its shape and how it is
+        # projected afterwards follow the interface contract above.
+        attn_out = self._alloc_attn_out(hidden_states.shape[0], hidden_states)
 
         # Keep the attention input preparation in the captured graph. Only the
         # sparse indexer and MLA attention run in the eager break below.
@@ -588,12 +636,40 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             kv_score,
             indexer_weights,
             positions,
-            o_padded,
+            attn_out,
         )
-        o = o_padded[:, : self.n_local_heads, :]
+        return self._o_proj(attn_out, positions)
 
-        # Inverse-RoPE + wo_a + wo_b output projection (platform-specific).
-        return self._o_proj(o, positions)
+    def _alloc_attn_out(
+        self, num_tokens: int, hidden_states: torch.Tensor
+    ) -> "torch.Tensor | QuantizedActivation":
+        """The buffer ``forward_mqa`` fills, per the interface contract."""
+        return torch.empty(
+            (num_tokens, self.padded_heads, self.head_dim),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+
+    def _wo_a_einsum(self, attn_out: "QuantizedActivation") -> torch.Tensor:
+        """Grouped ``wo_a`` over an already-quantized attention output.
+
+        The activation's scale is DeepGEMM's packed-ue8m0 MN-major layout, so
+        this consumes the attention kernel's output with no repacking.
+        """
+        z = torch.empty(
+            (attn_out.data.shape[0], self.n_local_groups, self.o_lora_rank),
+            dtype=torch.bfloat16,
+            device=attn_out.data.device,
+        )
+        groups = self.n_local_groups
+        fp8_einsum(
+            "bhr,hdr->bhd",
+            (attn_out.data[:, :groups], attn_out.scale[:, :groups]),
+            (self.wo_a.weight, self.wo_a.weight_scale),
+            z,
+            recipe=self._einsum_recipe,
+        )
+        return z
 
     @cached_property
     def _can_fuse_query_quant(self) -> bool:
@@ -647,7 +723,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         kv_score: torch.Tensor,
         indexer_weights: torch.Tensor,
         positions: torch.Tensor,
-        o_padded: torch.Tensor,
+        attn_out: "torch.Tensor | QuantizedActivation",
     ) -> None:
         """Wide eager region: the whole of ``_prepare_and_attn`` runs eagerly.
 
@@ -662,7 +738,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             kv_score,
             indexer_weights,
             positions,
-            o_padded,
+            attn_out,
         )
 
     def _prepare_and_attn(
@@ -674,7 +750,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         kv_score: torch.Tensor,
         indexer_weights: torch.Tensor,
         positions: torch.Tensor,
-        o_padded: torch.Tensor,
+        attn_out: "torch.Tensor | QuantizedActivation",
     ) -> None:
         """Attention input preparation followed by the sparse indexer and MLA.
 
@@ -693,7 +769,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             q = self._wq_b_proj(qr, qr_scale).view(
                 -1, self.n_local_heads, self.head_dim
             )
-            return self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
+            return self._prepare_q_and_insert_kv(q, kv, positions, attn_metadata)
 
         index_q: torch.Tensor | None = None
         index_q_scale: torch.Tensor | None = None
@@ -746,7 +822,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             q,
             kv,
             positions,
-            o_padded,
+            attn_out,
         )
 
     def _fused_wqa_wkv_gemm(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -843,6 +919,49 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # MLA attention writes into the pre-allocated `out` buffer
         # ([num_tokens, padded_heads, head_dim]).
         self.forward_mqa(q, kv, positions, out)
+
+    def _prepare_q_and_insert_kv(
+        self,
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        positions: torch.Tensor,
+        attn_metadata: (
+            dict[str, AttentionMetadata] | list[dict[str, AttentionMetadata]] | None
+        ),
+    ) -> torch.Tensor:
+        """Ready ``q`` for the attention kernel and publish this step's KV.
+
+        With ``accepts_unnormed_unroped_query`` the kernel applies the Q norm
+        and RoPE itself, so only the KV half runs here and ``q`` is handed on
+        untouched.
+        """
+        if self.accepts_unnormed_unroped_query:
+            self._insert_swa_kv(kv, positions, attn_metadata)
+            return q
+        return self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
+
+    def _insert_swa_kv(
+        self,
+        kv: torch.Tensor,
+        positions: torch.Tensor,
+        attn_metadata: (
+            dict[str, AttentionMetadata] | list[dict[str, AttentionMetadata]] | None
+        ),
+    ) -> None:
+        """RoPE + quantize + insert this step's KV into the SWA cache."""
+        if not isinstance(attn_metadata, dict):
+            return  # profile run: no slots reserved
+        swa_metadata = cast(
+            "DeepseekSparseSWAMetadata", attn_metadata[self.swa_cache_layer.prefix]
+        )
+        rope_quant_insert(
+            kv,
+            positions,
+            self.rotary_emb.cos_sin_cache,
+            self.swa_cache_layer.kv_cache,
+            swa_metadata.slot_mapping,
+            compress_ratio=1,
+        )
 
     def _fused_qnorm_rope_kv_insert(
         self,
@@ -954,7 +1073,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # fp8_ds_mla is a UE8M0 block-scaled uint8 layout whose page rounds up
         # to the decode kernel's TMA stride; plain bf16 / per-tensor fp8 rows
         # use natural element-size pages.
-        uses_fp8_ds_mla_layout = self.kv_cache_dtype == "fp8_ds_mla"
+        uses_fp8_ds_mla_layout = self.kv_cache_dtype in ("fp8_ds_mla", "nvfp4_ds_mla")
         return MLAAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
@@ -967,7 +1086,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
             # Packed record width; head_size stays semantic (512).
             state_content_bytes=(
-                self.kv_bytes_per_token if uses_fp8_ds_mla_layout else None
+                self.compressed_bytes_per_token if uses_fp8_ds_mla_layout else None
             ),
         )
 
@@ -1009,7 +1128,10 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # head_dim already carries the fp8 scale padding
         # tokens_per_state=1 for V3.2, >1 for DeepseekV4; same cache layout.
-        uses_fp8_ds_mla_layout = vllm_config.cache_config.cache_dtype == "fp8_ds_mla"
+        uses_fp8_ds_mla_layout = vllm_config.cache_config.cache_dtype in (
+            "fp8_ds_mla",
+            "nvfp4_ds_mla",
+        )
         return MLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
