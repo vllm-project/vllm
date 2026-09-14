@@ -753,25 +753,26 @@ class NixlBaseConnectorWorker:
         # transfers into the matching sub-range of a PP=1 remote's regions.
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self._remote_region_offset = 0
-        if self.pp_size > 1 and self._is_hma_required and not self._supports_pp_hma:
-            raise NotImplementedError(
-                "NixlConnector (pull) does not support pipeline_parallel_size "
-                "> 1 with hybrid KV cache layouts (HMA); use NixlPushConnector "
-                "for PP + HMA."
-            )
-        # PP push routes HMA (hybrid) attention layouts by layer name;
-        # Mamba/SSM hybrids are not yet supported under PP.
-        if self.pp_size > 1 and self._has_mamba:
-            raise NotImplementedError(
-                "NixlPushConnector does not support pipeline_parallel_size > 1 "
-                "with Mamba/SSM hybrid KV cache layouts yet."
-            )
-        # Decode-side PP is unsupported (completions counted per consumer rank).
-        if vllm_config.kv_transfer_config.kv_role == "kv_consumer" and self.pp_size > 1:
-            raise NotImplementedError(
-                "NixlPushConnector consumer (decode) does not support "
-                "pipeline_parallel_size > 1."
-            )
+        if self.pp_size > 1:
+            if self._is_hma_required and not self._supports_pp_hma:
+                raise NotImplementedError(
+                    "NixlConnector (pull) does not support pipeline_parallel_size "
+                    "> 1 with hybrid KV cache layouts (HMA); use NixlPushConnector "
+                    "for PP + HMA."
+                )
+            # PP push routes HMA (hybrid) attention layouts by layer name;
+            # Mamba/SSM hybrids are not yet supported under PP.
+            if self._has_mamba:
+                raise NotImplementedError(
+                    "NixlPushConnector does not support pipeline_parallel_size > 1 "
+                    "with Mamba/SSM hybrid KV cache layouts yet."
+                )
+            # Decode-side PP is unsupported (completions counted per consumer rank).
+            if vllm_config.kv_transfer_config.kv_role == "kv_consumer":
+                raise NotImplementedError(
+                    "NixlPushConnector consumer (decode) does not support "
+                    "pipeline_parallel_size > 1."
+                )
         # Keep heartbeat handshakes to a PP-sharded producer notif-only.
         self._hb_handshake_notif_only = False
 
