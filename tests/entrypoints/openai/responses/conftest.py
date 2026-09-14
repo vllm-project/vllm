@@ -33,6 +33,7 @@ def pairs_of_event_types() -> dict[str, str]:
     # fmt: off
     event_pairs = {
         "response.completed": "response.created",
+        "response.incomplete": "response.created",
         "response.output_item.done": "response.output_item.added",
         "response.content_part.done": "response.content_part.added",
         "response.output_text.done": "response.output_text.delta",
@@ -150,9 +151,10 @@ def _validate_event_ordering(events: list) -> None:
     assert events[0].type == "response.created", (
         f"First event must be response.created, got {events[0].type}"
     )
-    # Last event must be response.completed
-    assert events[-1].type == "response.completed", (
-        f"Last event must be response.completed, got {events[-1].type}"
+    # Last event must be a terminal response event.
+    terminal_types = ("response.completed", "response.incomplete")
+    assert events[-1].type in terminal_types, (
+        f"Last event must be one of {terminal_types}, got {events[-1].type}"
     )
 
     # response.in_progress, if present, must be the second event
@@ -165,14 +167,14 @@ def _validate_event_ordering(events: list) -> None:
             f"found at indices {in_progress_indices}"
         )
 
-    # Exactly one created and one completed
+    # Exactly one created and one terminal event.
     created_count = sum(1 for e in events if e.type == "response.created")
-    completed_count = sum(1 for e in events if e.type == "response.completed")
+    terminal_count = sum(1 for e in events if e.type in terminal_types)
     assert created_count == 1, (
         f"Expected exactly 1 response.created, got {created_count}"
     )
-    assert completed_count == 1, (
-        f"Expected exactly 1 response.completed, got {completed_count}"
+    assert terminal_count == 1, (
+        f"Expected exactly 1 terminal event, got {terminal_count}"
     )
 
 
@@ -187,6 +189,7 @@ def _validate_field_consistency(events: list) -> None:
         "response.created",
         "response.in_progress",
         "response.completed",
+        "response.incomplete",
     }
 
     active_item_id: str | None = None
