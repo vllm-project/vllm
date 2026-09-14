@@ -77,9 +77,12 @@ watermarked. The watermark signal is diluted in proportion to the share of
 output tokens supplied by accepted drafts; rejected drafts do not dilute it
 because their recovery tokens are watermarked.
 
-Speculative-decoding token paths do not currently support generation-side
-context deduplication. The configured `deduplicate_contexts` policy is not
-applied to accepted drafts, rejection-recovery tokens, or bonus tokens.
+The configured `deduplicate_contexts` policy also applies to speculative
+decoding. Draft proposals use ordinary sampling when their context is repeated,
+then follow the normal acceptance test. Rejection-recovery and bonus tokens use
+the ordinary draw from their existing residual or target distribution when their
+context is repeated. Context deduplication therefore does not force draft
+rejection or otherwise change the verification rule.
 
 For `dual_key_gumbel`, `alpha` has no effect under speculative decoding. The
 speculative protocol selects the key for each token instead.

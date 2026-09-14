@@ -51,12 +51,14 @@ def _repeated_context_mask_kernel(
     req_indices_ptr,
     prompt_lens_ptr,
     total_lens_ptr,
+    history_offsets_ptr,
     contexts_ptr,
     context_stride,
     CONTEXT_WIDTH: tl.constexpr,
     MAX_HISTORY: tl.constexpr,
     INCLUDE_PROMPT: tl.constexpr,
     SKIP_PARTIAL_CONTEXT: tl.constexpr,
+    HAS_HISTORY_OFFSETS: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
@@ -71,12 +73,16 @@ def _repeated_context_mask_kernel(
         return
     sequence_start = 0 if INCLUDE_PROMPT else prompt_len
     history_len = total_len - sequence_start
+    history_offset = 0
+    if HAS_HISTORY_OFFSETS:
+        history_offset = tl.load(history_offsets_ptr + row)
 
     offsets = tl.arange(0, BLOCK)
     repeated = tl.full((), 0, tl.int32)
     scan_start = 0
     if MAX_HISTORY > 0:
-        scan_start = tl.maximum(history_len - MAX_HISTORY, 0)
+        remaining_history = tl.maximum(MAX_HISTORY - history_offset, 0)
+        scan_start = tl.maximum(history_len - remaining_history, 0)
     # Aligned loop bounds let the per-lane offsets fold into immediates.
     aligned_start = (scan_start // BLOCK) * BLOCK
     for block_start in tl.range(aligned_start, history_len, BLOCK):
@@ -108,6 +114,7 @@ def _repeated_context_mask_cpu(
     max_history: int | None = None,
     include_prompt: bool = False,
     skip_partial_context: bool = False,
+    history_offsets: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Reference implementation; the parity tests check the Triton kernel against it."""
     repeated = torch.zeros(len(req_indices), dtype=torch.bool)
@@ -124,8 +131,11 @@ def _repeated_context_mask_cpu(
         history_tokens = all_token_ids[req_idx, sequence_start:total_len].tolist()
         prefix = [-1] * contexts.shape[-1]
         current_context = tuple(contexts[row].tolist())
+        history_offset = 0 if history_offsets is None else int(history_offsets[row])
         history_start = (
-            max(0, len(history_tokens) - max_history) if max_history is not None else 0
+            max(0, len(history_tokens) - max(0, max_history - history_offset))
+            if max_history is not None
+            else 0
         )
         for history_pos, token_id in enumerate(history_tokens):
             if history_pos >= history_start and (
@@ -146,6 +156,7 @@ def repeated_context_mask(
     max_history: int | None = None,
     include_prompt: bool = False,
     skip_partial_context: bool = False,
+    history_offsets: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Return, per row, whether the row's context already occurred in its history.
 
@@ -163,6 +174,8 @@ def repeated_context_mask(
         include_prompt: Search the prompt as well as the generated tokens.
         skip_partial_context: Mark contexts containing start padding so they use
             ordinary sampling.
+        history_offsets: Number of newer, non-committed positions preceding each
+            context. These positions count toward `max_history`.
     """
     if max_history is not None and max_history < 1:
         raise ValueError("max_history must be positive or None")
@@ -176,6 +189,7 @@ def repeated_context_mask(
             max_history,
             include_prompt,
             skip_partial_context,
+            history_offsets,
         )
 
     if contexts.stride(-1) != 1:
@@ -188,12 +202,14 @@ def repeated_context_mask(
         req_indices,
         prompt_lens,
         total_lens,
+        history_offsets,
         contexts,
         contexts.stride(0),
         CONTEXT_WIDTH=contexts.shape[-1],
         MAX_HISTORY=0 if max_history is None else max_history,
         INCLUDE_PROMPT=include_prompt,
         SKIP_PARTIAL_CONTEXT=skip_partial_context,
+        HAS_HISTORY_OFFSETS=history_offsets is not None,
         BLOCK=512,
     )
     return repeated

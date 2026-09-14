@@ -121,8 +121,9 @@ class GPUWatermarkSampler(Sampler):
         self,
         expanded_idx_mapping: torch.Tensor,
         contexts: torch.Tensor,
+        expanded_local_pos: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return repeated_context_mask(
+        repeated = repeated_context_mask(
             self.req_states.all_token_ids.gpu,
             expanded_idx_mapping,
             self.req_states.prompt_len.gpu,
@@ -130,8 +131,36 @@ class GPUWatermarkSampler(Sampler):
             contexts,
             self.deduplicate_contexts_max_history,
             include_prompt=self.deduplicate_contexts == "all",
-            skip_partial_context=self.deduplicate_contexts == "all",
+            skip_partial_context=False,
+            history_offsets=expanded_local_pos,
         )
+        if self.deduplicate_contexts == "all":
+            repeated |= (contexts < 0).any(dim=-1)
+        if expanded_local_pos is None:
+            return repeated
+
+        max_offset = self.num_speculative_tokens
+        if self.deduplicate_contexts_max_history is not None:
+            max_offset = min(max_offset, self.deduplicate_contexts_max_history + 1)
+        for offset in range(1, max_offset):
+            prior_contexts = torch.cat((contexts[:offset], contexts[:-offset]), dim=0)
+            prior_requests = torch.cat(
+                (
+                    expanded_idx_mapping[:offset],
+                    expanded_idx_mapping[:-offset],
+                ),
+                dim=0,
+            )
+            prior_local_pos = torch.cat(
+                (expanded_local_pos[:offset], expanded_local_pos[:-offset]), dim=0
+            )
+            repeated |= (
+                (expanded_local_pos >= offset)
+                & (expanded_idx_mapping == prior_requests)
+                & (expanded_local_pos == prior_local_pos + offset)
+                & (contexts == prior_contexts).all(dim=-1)
+            )
+        return repeated
 
     def _get_contexts(
         self,

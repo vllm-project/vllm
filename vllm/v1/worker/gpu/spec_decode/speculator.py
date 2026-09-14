@@ -194,6 +194,9 @@ class DraftModelSpeculator(BaseSpeculator):
                 self.max_num_reqs,
                 device,
                 watermark_config.allow_target_only_watermarking,
+                self.num_speculative_steps,
+                watermark_config.deduplicate_contexts,
+                watermark_config.deduplicate_contexts_max_history,
             )
 
         self.supports_mm_inputs = False
@@ -427,6 +430,7 @@ class DraftModelSpeculator(BaseSpeculator):
                     sampled,
                     idx_mapping,
                     temperature,
+                    draft_step,
                 )
         elif self.use_local_argmax_reduction:
             return self.model.get_top_tokens(hidden_states)
@@ -466,11 +470,18 @@ class DraftModelSpeculator(BaseSpeculator):
             self.acceptance_estimator.step(idx_mapping, num_sampled, num_rejected)
 
     def prepare_watermarking(
-        self, contexts: torch.Tensor, watermarking: torch.Tensor
+        self,
+        contexts: torch.Tensor,
+        watermarking: torch.Tensor,
+        all_token_ids: torch.Tensor,
+        prompt_lens: torch.Tensor,
+        total_lens: torch.Tensor,
     ) -> None:
         if self.draft_watermarker is None:
             return
-        self.draft_watermarker.prepare(contexts, watermarking)
+        self.draft_watermarker.prepare(
+            contexts, watermarking, all_token_ids, prompt_lens, total_lens
+        )
 
     def _copy_request_inputs(
         self,
