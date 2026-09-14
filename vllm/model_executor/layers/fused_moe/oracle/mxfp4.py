@@ -66,7 +66,7 @@ if has_triton_kernels():
         )
 
 
-def pack_deepgemm_mxfp4_scales(
+def _pack_deepgemm_mxfp4_scales(
     w13_weight: torch.Tensor,
     w2_weight: torch.Tensor,
     w13_weight_scale: torch.Tensor,
@@ -911,7 +911,7 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     """Convert loaded weights into backend-specific kernel format."""
 
     if mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
-        w13_weight_scale, w2_weight_scale = pack_deepgemm_mxfp4_scales(
+        w13_weight_scale, w2_weight_scale = _pack_deepgemm_mxfp4_scales(
             w13_weight,
             w2_weight,
             w13_weight_scale,
@@ -1521,7 +1521,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         )
 
     if mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
-        w13_weight_scale, w2_weight_scale = pack_deepgemm_mxfp4_scales(
+        w13_weight_scale, w2_weight_scale = _pack_deepgemm_mxfp4_scales(
             w13_weight,
             w2_weight,
             w13_weight_scale,
