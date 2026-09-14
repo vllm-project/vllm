@@ -5,6 +5,12 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from openai.types.responses import (
+    FunctionTool,
+    NamespaceTool,
+    ToolChoiceAllowed,
+    ToolChoiceFunction,
+)
 from xgrammar import Grammar, StructuralTag
 from xgrammar.testing import _is_grammar_accept_string
 
@@ -226,6 +232,100 @@ def test_hermes_required_tool_calls_use_empty_separator():
 
     assert tag is not None
     assert tag.format.separator == ""
+
+
+@pytest.mark.parametrize("model", ["hermes", "qwen_3"])
+@pytest.mark.parametrize(
+    "choice", ["auto", "required", "named", "flat_named", "allowed"]
+)
+def test_namespace_structural_tag_enforces_local_schema(model, choice):
+    """Namespace functions retain their schema root and native call framing."""
+    namespace = NamespaceTool(
+        type="namespace",
+        name="weather",
+        description="Weather tools",
+        tools=[
+            {
+                "type": "function",
+                "name": "forecast",
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"$ref": "#/$defs/City"}},
+                    "required": ["city"],
+                    "additionalProperties": False,
+                    "$defs": {"City": {"type": "string", "enum": ["Vienna"]}},
+                },
+            }
+        ],
+    )
+    top_level = FunctionTool(
+        type="function",
+        name="get_time",
+        strict=True,
+        parameters={
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    )
+    if choice == "named":
+        tool_choice = ToolChoiceFunction.model_validate(
+            {"type": "function", "name": "forecast", "namespace": "weather"}
+        )
+    elif choice == "flat_named":
+        tool_choice = ToolChoiceFunction(type="function", name="weather__forecast")
+    elif choice == "allowed":
+        tool_choice = ToolChoiceAllowed(
+            type="allowed_tools",
+            mode="required",
+            tools=[{"type": "function", "name": "forecast", "namespace": "weather"}],
+        )
+    else:
+        tool_choice = choice
+    tag = get_model_structural_tag(
+        model, [namespace, top_level], tool_choice, reasoning=False
+    )
+    grammar = Grammar.from_structural_tag(tag)
+    call = (
+        '<tool_call>\n{"name": "weather__forecast", '
+        '"arguments": {"city": "Vienna"}}\n</tool_call>'
+    )
+    assert _is_grammar_accept_string(grammar, call)
+    assert not _is_grammar_accept_string(grammar, call.replace("Vienna", "Oslo"))
+    assert not _is_grammar_accept_string(
+        grammar, call.replace('"city": "Vienna"', '"city": 1')
+    )
+    assert not _is_grammar_accept_string(
+        grammar, call.replace("weather__forecast", "forecast")
+    )
+    assert _is_grammar_accept_string(
+        grammar, '<tool_call>\n{"name": "get_time", "arguments": {}}\n</tool_call>'
+    ) == (choice in ("auto", "required"))
+
+
+def test_namespace_strict_function_enables_auto_structural_tag():
+    namespace = NamespaceTool(
+        type="namespace",
+        name="weather",
+        description="Weather tools",
+        tools=[{"type": "function", "name": "forecast", "strict": False}],
+    )
+    assert (
+        get_model_structural_tag("hermes", [namespace], "auto", reasoning=False) is None
+    )
+    namespace.tools[0].strict = True
+    tag = get_model_structural_tag("hermes", [namespace], "auto", reasoning=False)
+    grammar = Grammar.from_structural_tag(tag)
+    assert _is_grammar_accept_string(grammar, "No tool call needed.")
+    assert _is_grammar_accept_string(
+        grammar,
+        '<tool_call>\n{"name": "weather__forecast", "arguments": {}}\n</tool_call>',
+    )
+    assert not _is_grammar_accept_string(
+        grammar,
+        '<tool_call>\n{"name": "forecast", "arguments": {}}\n</tool_call>',
+    )
 
 
 # ---------------------------------------------------------------------------
