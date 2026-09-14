@@ -456,33 +456,6 @@ def ep_gather(
     return
 
 
-def build_psum_group_end(expert_num_tokens: torch.Tensor, align_m: int) -> torch.Tensor:
-    """Prefix-sum end offsets for DeepGEMM's psum ``grouped_layout``.
-
-    ``group_end[i] = aligned_start[i] + expert_num_tokens[i]``, matching the
-    per-expert-contiguous buffer :func:`ep_scatter` builds (each expert's block
-    is padded up to ``align_m``, so ``aligned_start[i]`` is the exclusive
-    prefix sum of the aligned counts — the same cumsum as
-    ``_fwd_kernel_ep_scatter_1``). DeepGEMM's ``MGroupedContiguousWithPsumLayout``
-    scheduler treats group ``i`` as occupying rows
-    ``[align(group_end[i-1], BLOCK_M), group_end[i])`` and issues M-blocks only
-    up to each group's real end, skipping the padding tail instead of computing
-    over it (as the per-row ``m_indices`` layout does on SM100).
-
-    Args:
-        expert_num_tokens: Real (unaligned) per-local-expert token counts,
-            shape ``[local_num_experts]``.
-        align_m: Per-expert row alignment used by the scatter (``align_used``).
-
-    Returns:
-        Contiguous int32 tensor of shape ``[local_num_experts]``.
-    """
-    ent = expert_num_tokens.to(torch.int32)
-    aligned = ((ent + align_m - 1) // align_m) * align_m
-    aligned_start = torch.cumsum(aligned, dim=0) - aligned
-    return (aligned_start + ent).to(torch.int32)
-
-
 def deepgemm_moe_permute(
     aq: torch.Tensor,
     aq_scale: torch.Tensor,
@@ -492,7 +465,6 @@ def deepgemm_moe_permute(
     expert_tokens_meta: mk.ExpertTokensMetadata | None,
     aq_out: torch.Tensor | None = None,
     block_size: int | None = None,
-    build_psum_layout: bool = False,
 ):
     assert aq.ndim == 2
     assert topk_ids.dtype.is_signed, "The kernel uses -1 to represent invalid topk_ids"
@@ -554,18 +526,11 @@ def deepgemm_moe_permute(
     if expert_tokens_meta is not None:
         expert_num_tokens = expert_tokens_meta.expert_num_tokens
     if expert_num_tokens is None:
-        # A cudagraph-decode carrier may hold only psum_recv_per_rank and leave
-        # expert_num_tokens None; count locally as in the meta-absent case.
+        # A DeepEP v2 cudagraph-decode carrier leaves expert_num_tokens None
+        # (no CPU sync in that mode); count locally as in the meta-absent case.
         expert_num_tokens = count_expert_num_tokens(
             topk_ids, local_num_experts, expert_map
         )
-
-    # Built before ep_scatter mutates expert_start_loc via atomic_add.
-    group_end = (
-        build_psum_group_end(expert_num_tokens, align_used)
-        if build_psum_layout
-        else None
-    )
 
     ep_scatter(
         recv_x=aq,
@@ -583,7 +548,7 @@ def deepgemm_moe_permute(
         pack_ue8m0=pack_ue8m0,
     )
 
-    return aq_out, aq_scale_out, expert_ids, inv_perm, align_used, group_end
+    return aq_out, aq_scale_out, expert_ids, inv_perm, align_used
 
 
 def deepgemm_unpermute_and_reduce(
