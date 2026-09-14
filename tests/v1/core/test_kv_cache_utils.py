@@ -3094,6 +3094,7 @@ def test_hidden_state_group_preserves_hybrid_prefix_cache_granularity():
     ) == (544, 136)
 
 
+@pytest.mark.skip_global_cleanup
 def test_hidden_state_extraction_group_billed_at_own_width():
     """Hidden-state extraction must not pay for unused slots in a wide MLA group.
 
@@ -3130,8 +3131,12 @@ def test_hidden_state_extraction_group_billed_at_own_width():
 
     specs = {f"mla.{i}": mla_spec for i in range(n_mla)}
     specs.update({f"mamba.{i}": mamba_spec for i in range(n_mamba)})
-    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=max_model_len))
-    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    vllm_config = _grouping_config()
+    vllm_config.model_config = SimpleNamespace(max_model_len=max_model_len)
+    vllm_config.parallel_config = SimpleNamespace(
+        decode_context_parallel_size=1, pipeline_parallel_size=1
+    )
+    vllm_config.attention_config = SimpleNamespace(hisparse_config=None)
 
     groups_without_hidden = get_kv_cache_groups(vllm_config, specs)
     assert any(len(group.layer_names) > 1 for group in groups_without_hidden)
