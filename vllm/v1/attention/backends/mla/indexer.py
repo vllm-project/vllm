@@ -1182,24 +1182,24 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 factor = self.kv_cache_spec.block_size // kernel_block_size
                 indexer_block_table = (block_table[:, ::factor] // factor).contiguous()
             padded_num_tokens = num_tokens
-            token_slot_mapping = slot_mapping
+            local_slot_mapping = slot_mapping
             if self.use_pcp:
                 # The gathered layout holds each rank's local tokens, padded, in
                 # rank order, so this rank's segment lines up with query_start_loc.
                 padded_num_tokens = slot_mapping.shape[0] // self.pcp_world_size
-                token_slot_mapping = slot_mapping[
+                local_slot_mapping = slot_mapping[
                     self.pcp_rank * padded_num_tokens : (self.pcp_rank + 1)
                     * padded_num_tokens
                 ]
             compressed_slot_mapping = get_compressed_slot_mapping(
                 num_tokens,
+                local_slot_mapping,
                 query_start_loc,
                 seq_lens,
                 indexer_block_table,
                 self.kv_cache_spec.num_states,
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,
-                token_slot_mapping=token_slot_mapping,
             )
             if self.pcp_world_size > 1:
                 compressed_slot_mapping = get_pcp_group().all_gather(
