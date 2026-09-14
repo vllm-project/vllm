@@ -226,6 +226,7 @@ def _bincount_kernel(
     prompt_bin_mask_stride,
     output_bin_counts_ptr,
     output_bin_counts_stride,
+    vocab_size,
     BLOCK_SIZE: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
@@ -241,8 +242,11 @@ def _bincount_kernel(
     if block_idx * BLOCK_SIZE < prompt_len:
         mask = block < prompt_len
         prompt_tokens = tl.load(
-            all_token_ids_ptr + req_state_idx * all_token_ids_stride + block, mask=mask
+            all_token_ids_ptr + req_state_idx * all_token_ids_stride + block,
+            mask=mask,
+            other=-1,
         )
+        mask &= (prompt_tokens >= 0) & (prompt_tokens < vocab_size)
         idx = prompt_tokens // 32
         bit_idx = prompt_tokens % 32
         bit = tl.full((BLOCK_SIZE,), 1, tl.int32) << bit_idx
@@ -256,8 +260,11 @@ def _bincount_kernel(
         mask = block < prefill_len
         mask &= block >= prompt_len
         output_tokens = tl.load(
-            all_token_ids_ptr + req_state_idx * all_token_ids_stride + block, mask=mask
+            all_token_ids_ptr + req_state_idx * all_token_ids_stride + block,
+            mask=mask,
+            other=-1,
         )
+        mask &= (output_tokens >= 0) & (output_tokens < vocab_size)
         tl.atomic_add(
             output_bin_counts_ptr
             + req_state_idx * output_bin_counts_stride
@@ -293,6 +300,7 @@ def bincount(
         prompt_bin_mask.stride(0),
         output_bin_counts,
         output_bin_counts.stride(0),
+        output_bin_counts.shape[1],
         BLOCK_SIZE=BLOCK_SIZE,
     )
 
