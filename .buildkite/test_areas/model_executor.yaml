@@ -2,10 +2,11 @@ group: Model Executor
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H200 MIG 35GB) Model Executor"
+- label: ":nvidia: (H200 MIG 35GB) Model Executor Shard %N"
   device: h200_35gb
   key: model-executor
-  timeout_in_minutes: 60
+  timeout_in_minutes: 30
+  parallelism: 5
   source_file_dependencies:
   - vllm/engine/arg_utils.py
   - vllm/config/model.py
@@ -26,11 +27,33 @@ steps:
     # init) fails fast with a traceback instead of running until the global
     # build timeout. The `thread` method also handles hangs inside C/CUDA
     # calls that the signal method cannot interrupt.
-    - pytest -v -s model_executor -m '(not slow_test)' --timeout=900 --timeout-method=thread
-    - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py --timeout=900 --timeout-method=thread
+    # Every branch runs whole directories, so the area needs no -m filter and
+    # every test file is provably claimed by exactly one shard. p90 per branch
+    # from build 88881; sleep_mode/ is unmeasured (its slow_test cases have
+    # never run) and sits on the branch with the most headroom.
+    - |
+      case "$$BUILDKITE_PARALLEL_JOB" in
+        0)
+          pytest -v -s model_executor/model_loader/tensorizer_loader --timeout=900 --timeout-method=thread   # 14.6m
+          pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py --timeout=900 --timeout-method=thread  # 2.9m
+          ;;
+        1)
+          pytest -v -s model_executor/model_loader/sharded_state model_executor/model_loader/weights model_executor/model_loader/registry --timeout=900 --timeout-method=thread  # 12.7m
+          ;;
+        2)
+          pytest -v -s model_executor/model_loader/reload model_executor/model_loader/params model_executor/model_loader/fastsafetensors_loader model_executor/model_loader/instanttensor_loader model_executor/model_loader/runai_streamer_loader --timeout=900 --timeout-method=thread  # 11.1m
+          ;;
+        3)
+          pytest -v -s model_executor/layers model_executor/mrope model_executor/kernels model_executor/utils model_executor/models model_executor/custom_ops --timeout=900 --timeout-method=thread  # 7.2m
+          ;;
+        4)
+          pytest -v -s model_executor/sleep_mode model_executor/warmup model_executor/quantization model_executor/moe model_executor/offloader --timeout=900 --timeout-method=thread  # 1.9m + sleep_mode
+          ;;
+        *) exit 2 ;;
+      esac
   mirror:
     amd:
-      label: ":amd: (MI300) Model Executor"
+      label: ":amd: (MI300) Model Executor Shard %N"
       dind: false
       device: mi300_1
       timeout_in_minutes: 60
