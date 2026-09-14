@@ -3281,6 +3281,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.vllm_config = Mock()
     scheduler.vllm_config.model_config.enable_return_routed_experts = False
     scheduler.enable_return_routed_experts = False
+    scheduler.return_sampling_mask = False
     scheduler.recompute_kv_load_failures = False
     scheduler.defer_block_free = False
     scheduler.make_stats = Mock(return_value=None)
@@ -3700,6 +3701,7 @@ def test_mamba_align_eagle_schedules_encoder_at_boundary():
     )
     scheduler.need_mamba_block_aligned_split = True
     scheduler.use_eagle = True
+    scheduler.num_prefill_lookahead = 1
     scheduler.max_num_encoder_input_tokens = 2048
     scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=2048)
 
@@ -5340,8 +5342,9 @@ def test_free_encoder_inputs_defers_for_eagle_lookahead():
     worker-side token-embedding fallback is only a backstop."""
     scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
     # create_scheduler only builds ngram spec configs; force the eagle path that
-    # _free_encoder_inputs keys off (self.use_eagle).
+    # _free_encoder_inputs keys off (its read-ahead deferral).
     scheduler.use_eagle = True
+    scheduler.num_prefill_lookahead = 1
     mm_positions = [[PlaceholderRange(offset=50, length=100)]]
     request = create_requests(
         num_requests=1,

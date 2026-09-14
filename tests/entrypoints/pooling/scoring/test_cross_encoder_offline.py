@@ -8,7 +8,6 @@ import torch
 
 from tests.models.utils import softmax
 from vllm import LLM, PoolingParams
-from vllm.distributed import cleanup_dist_env_and_memory
 
 MODEL_NAME = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
 PROMPT = "The chef prepared a delicious meal."
@@ -24,23 +23,20 @@ TEXTS_2 = [
 
 
 @pytest.fixture(scope="module")
-def llm():
-    # pytest caches the fixture so we use weakref.proxy to
-    # enable garbage collection
-    llm = LLM(
-        model=MODEL_NAME,
+def llm(vllm_runner):
+    with vllm_runner(
+        MODEL_NAME,
+        max_model_len=None,
         max_num_batched_tokens=32768,
         tensor_parallel_size=1,
         gpu_memory_utilization=0.75,
         enforce_eager=True,
         seed=0,
-    )
-
-    yield weakref.proxy(llm)
-
-    del llm
-
-    cleanup_dist_env_and_memory()
+        enable_chunked_prefill=None,
+    ) as runner:
+        # pytest caches yielded fixtures until after teardown, so use a proxy to
+        # avoid retaining the LLM while VllmRunner.__exit__ releases ROCm memory.
+        yield weakref.proxy(runner.llm)
 
 
 @pytest.fixture(scope="module")

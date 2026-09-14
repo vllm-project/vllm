@@ -93,8 +93,8 @@ if find_spec("flashinfer"):
             _flashinfer_comm, "create_allreduce_fusion_workspace"
         ):
             flashinfer_comm = _flashinfer_comm
-    except ImportError:
-        pass
+    except Exception as e:
+        logger.debug_once("flashinfer.comm import failed: %s", e)
 
 if hasattr(torch.ops._C, "scaled_fp4_quant"):
     STATIC_FP4_QUANT_OP = torch.ops._C.scaled_fp4_quant.out

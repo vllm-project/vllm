@@ -46,7 +46,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     UsageInfo,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.utils.api_utils import sanitize_message
+from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.renderers.online_renderer import OnlineRenderer
 
@@ -539,6 +539,9 @@ class AnthropicServingMessages(OpenAIServingChat):
             req.tool_choice = None
             return
 
+        req.parallel_tool_calls = (
+            not anthropic_request.tool_choice.disable_parallel_tool_use
+        )
         tool_choice_type = anthropic_request.tool_choice.type
         if tool_choice_type == "auto":
             req.tool_choice = "auto"

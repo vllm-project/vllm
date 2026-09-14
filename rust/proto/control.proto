@@ -9,6 +9,21 @@ service Control {
   rpc GetModelInfo (GetModelInfoRequest) returns (ModelInfo) {}
   rpc Abort (AbortRequest) returns (AbortResponse) {}
   rpc GetKvEventSources (GetKvEventSourcesRequest) returns (GetKvEventSourcesResponse) {}
+
+  // Reinforcement-learning lifecycle and weight updates.
+  rpc PauseGeneration (PauseGenerationRequest) returns (PauseGenerationResponse) {}
+  rpc ResumeGeneration (ResumeGenerationRequest) returns (ResumeGenerationResponse) {}
+  rpc IsPaused (IsPausedRequest) returns (IsPausedResponse) {}
+  rpc Sleep (SleepRequest) returns (SleepResponse) {}
+  rpc WakeUp (WakeUpRequest) returns (WakeUpResponse) {}
+  rpc IsSleeping (IsSleepingRequest) returns (IsSleepingResponse) {}
+  rpc InitWeightTransferEngine (InitWeightTransferEngineRequest) returns (InitWeightTransferEngineResponse) {}
+  rpc StartWeightUpdate (StartWeightUpdateRequest) returns (StartWeightUpdateResponse) {}
+  rpc StartDraftWeightUpdate (StartDraftWeightUpdateRequest) returns (StartDraftWeightUpdateResponse) {}
+  rpc UpdateWeights (UpdateWeightsRequest) returns (UpdateWeightsResponse) {}
+  rpc FinishWeightUpdate (FinishWeightUpdateRequest) returns (FinishWeightUpdateResponse) {}
+  rpc UpdateWeightVersion (UpdateWeightVersionRequest) returns (UpdateWeightVersionResponse) {}
+  rpc GetWeightVersion (GetWeightVersionRequest) returns (GetWeightVersionResponse) {}
 }
 
 message GetServerInfoRequest {}
@@ -23,6 +38,14 @@ message ServerInfo {
   uint64 total_kv_blocks = 7;
   uint64 max_running_requests = 8;
   uint64 max_batched_tokens = 9;
+  RlCapabilities rl_capabilities = 11;
+}
+
+message RlCapabilities {
+  bool weight_transfer_enabled = 1;
+  string weight_transfer_backend = 2;
+  bool sleep_mode_enabled = 3;
+  bool draft_weight_updates_enabled = 4;
 }
 
 message ParallelismInfo {
@@ -52,6 +75,64 @@ message AbortRequest {
 }
 
 message AbortResponse {}
+
+// ======================================================================================
+// Reinforcement-learning control
+// ======================================================================================
+
+enum PauseMode {
+  PAUSE_MODE_UNSPECIFIED = 0;
+  PAUSE_MODE_ABORT = 1;
+  PAUSE_MODE_WAIT = 2;
+  PAUSE_MODE_KEEP = 3;
+}
+
+message PauseGenerationRequest {
+  PauseMode mode = 1;
+  optional bool clear_cache = 2;
+}
+message PauseGenerationResponse {}
+
+message ResumeGenerationRequest {}
+message ResumeGenerationResponse {}
+
+message IsPausedRequest {}
+message IsPausedResponse { bool paused = 1; }
+
+message SleepRequest {
+  optional uint32 level = 1;
+  PauseMode mode = 2;
+}
+message SleepResponse {}
+
+message WakeUpRequest { repeated string tags = 1; }
+message WakeUpResponse {}
+
+message IsSleepingRequest {}
+message IsSleepingResponse { bool sleeping = 1; }
+
+// The payloads are backend-specific JSON objects. Tensor data remains on the
+// configured NCCL, IPC, or sparse-NCCL transport rather than crossing gRPC.
+message InitWeightTransferEngineRequest { bytes init_info_json = 1; }
+message InitWeightTransferEngineResponse {}
+
+message StartWeightUpdateRequest {}
+message StartWeightUpdateResponse {}
+
+message StartDraftWeightUpdateRequest {}
+message StartDraftWeightUpdateResponse {}
+
+message UpdateWeightsRequest { bytes update_info_json = 1; }
+message UpdateWeightsResponse {}
+
+message FinishWeightUpdateRequest { optional string weight_version = 1; }
+message FinishWeightUpdateResponse {}
+
+message UpdateWeightVersionRequest { string weight_version = 1; }
+message UpdateWeightVersionResponse {}
+
+message GetWeightVersionRequest {}
+message GetWeightVersionResponse { string weight_version = 1; }
 
 // ======================================================================================
 // KV discovery

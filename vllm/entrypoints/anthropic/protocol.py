@@ -95,6 +95,7 @@ class AnthropicToolChoice(BaseModel):
 
     type: Literal["auto", "any", "tool", "none"]
     name: str | None = None
+    disable_parallel_tool_use: bool | None = None
 
     @model_validator(mode="after")
     def validate_name_required_for_tool(self) -> "AnthropicToolChoice":

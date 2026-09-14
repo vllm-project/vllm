@@ -1340,15 +1340,14 @@ class MolmoForCausalLM(
 
         self.img_patch_id = None
 
+        self.lm_head = ParallelLMHead(
+            config.embedding_size or config.vocab_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "lm_head"),
+        )
         if self.config.weight_tying:
-            self.lm_head = self.model.transformer.wte
-        else:
-            self.lm_head = ParallelLMHead(
-                config.embedding_size or config.vocab_size,
-                config.hidden_size,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
+            self.lm_head = self.lm_head.tie_weights(self.model.transformer.wte)
 
         self.logits_processor = LogitsProcessor(
             config.embedding_size or config.vocab_size

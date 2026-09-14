@@ -612,7 +612,6 @@ class Platform:
         For hybrid models, also aligns block_size with mamba page sizes.
         """
         from vllm.config.cache import CacheConfig
-        from vllm.config.vllm import set_current_vllm_config
 
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
@@ -627,10 +626,9 @@ class Platform:
 
         # Phase 1: Pick block size from backend (skip if user set --block-size)
         if not cache_config.user_specified_block_size:
-            with set_current_vllm_config(vllm_config):
-                preferred = backend_cls.get_preferred_block_size(
-                    CacheConfig.DEFAULT_BLOCK_SIZE
-                )
+            preferred = backend_cls.get_preferred_block_size_for_config(
+                CacheConfig.DEFAULT_BLOCK_SIZE, vllm_config
+            )
             if preferred != CacheConfig.DEFAULT_BLOCK_SIZE:
                 logger.info(
                     "Setting kv cache block size to %d for %s backend.",
@@ -689,13 +687,15 @@ class Platform:
 
         def per_token_page_bytes(dtype: "torch.dtype", cache_dtype: str) -> int:
             """Bytes one token occupies in one layer, for the given dtype."""
-            return FullAttentionSpec(
+            spec = FullAttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
                 head_size=model_config.get_head_size(),
                 dtype=dtype,
                 kv_quant_mode=get_kv_quant_mode(cache_dtype),
-            ).page_size_bytes
+            )
+            # The backend owns its packing
+            return backend_cls.customize_spec(spec).page_size_bytes
 
         primary_dtype = (
             STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
@@ -811,23 +811,18 @@ class Platform:
             # when all attention layers are TQ. With mixed skip+TQ the skip
             # layers still use the standard layout — take max so mamba
             # padding covers the largest actual page.
-            from vllm.model_executor.layers.quantization.turboquant.config import (
-                TurboQuantConfig,
+            from vllm.v1.attention.backends.turboquant_attn import (
+                TurboQuantAttentionBackend,
             )
-            from vllm.v1.kv_cache_interface import TQFullAttentionSpec
 
-            tq_cfg = TurboQuantConfig.from_cache_dtype(
-                cache_config.cache_dtype, model_config.get_head_size()
-            )
-            tq_page = TQFullAttentionSpec(
+            tq_spec = FullAttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
                 head_size=model_config.get_head_size(),
-                head_size_v=model_config.get_head_size(),
                 dtype=kv_cache_dtype,
                 kv_quant_mode=kv_quant_mode,
-                tq_slot_size=tq_cfg.slot_size_aligned,
-            ).page_size_bytes
+            )
+            tq_page = TurboQuantAttentionBackend.customize_spec(tq_spec).page_size_bytes
             if cache_config.kv_cache_dtype_skip_layers:
                 skip_page = FullAttentionSpec(
                     block_size=1,
@@ -842,12 +837,15 @@ class Platform:
             else:
                 attn_page_size_1_token = tq_page
         else:
-            attn_page_size_1_token = FullAttentionSpec(
+            attn_spec = FullAttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
                 head_size=model_config.get_head_size(),
                 dtype=kv_cache_dtype,
                 kv_quant_mode=kv_quant_mode,
+            )
+            attn_page_size_1_token = backend_cls.customize_spec(
+                attn_spec
             ).page_size_bytes
 
         # Compute mamba page size
@@ -1199,6 +1197,23 @@ class Platform:
         Returns if the graph mode is supported by the current platform.
         """
         return False
+
+    @classmethod
+    def check_runner_kv_caches_multi_layer(cls) -> None:
+        """
+        Check whether the platform's ModelRunner can handle multiple attention
+        layers that share the same layer index (e.g. cross attention and self
+        attention in the same decoder block of an encoder-decoder model such as
+        BART).
+
+        Platforms that have verified that their ``runner_kv_caches`` is not
+        impacted by this case should override this to a no-op. Otherwise the
+        default implementation raises ``NotImplementedError``.
+        """
+        raise NotImplementedError(
+            "Multiple attention layers with the same layer index are not "
+            "supported on the current platform."
+        )
 
     @classmethod
     def support_deep_gemm(cls) -> bool:

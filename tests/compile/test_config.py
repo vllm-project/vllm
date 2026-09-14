@@ -252,6 +252,11 @@ def test_splitting_ops_dynamic():
     # populated when the engine decides to use piecewise compilation.
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
     assert config.compilation_config.splitting_ops_contain_attention()
+    splitting_ops = config.compilation_config.splitting_ops
+    assert splitting_ops is not None
+    assert {
+        "vllm::qwen_gdn_attention_core_fused_norm_packed",
+    } <= set(splitting_ops)
 
     # When use_inductor_graph_partition=True
     config = VllmConfig(

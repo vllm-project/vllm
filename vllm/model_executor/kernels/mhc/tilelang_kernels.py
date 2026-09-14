@@ -1,28 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from __future__ import annotations
+
 import math
 from functools import cache
-from typing import TYPE_CHECKING, Any
 
 import torch
 
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_tilelang
+from vllm.tilelang_utils import T, tilelang, tilelang_jit
 from vllm.utils.math_utils import cdiv
-
-# TileLang is used for MHC on CUDA and ROCm. Keep non-GPU imports cheap so
-# registering the Python wrapper modules does not require TileLang everywhere.
-if TYPE_CHECKING or current_platform.is_cuda_alike():
-    if not has_tilelang():
-        raise ImportError(
-            "tilelang is required for mhc but is not installed. Install it with "
-            "`pip install tilelang`."
-        )
-    import tilelang
-    import tilelang.language as T
-else:
-    tilelang = None  # type: ignore[assignment]
-    T = None  # type: ignore[assignment]
 
 ENABLE_PDL = current_platform.is_arch_support_pdl() and current_platform.is_cuda()
 
@@ -40,18 +28,7 @@ def compute_num_split(block_k: int, k: int | None, grid_size: int) -> int:
     return split_k
 
 
-pass_configs: dict[tilelang.PassConfigKey, Any] = {
-    tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-}
-
-if current_platform.is_cuda():
-    pass_configs[tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL] = 10
-
-
-@tilelang.jit(
-    pass_configs=pass_configs,
-)
+@tilelang_jit
 def mhc_pre_big_fuse_tilelang(
     gemm_out_mul,
     gemm_out_sqrsum,
@@ -191,9 +168,7 @@ def mhc_pre_big_fuse_tilelang(
 # Copied from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/mhc.py#L478
 
 
-@tilelang.jit(
-    pass_configs=pass_configs,
-)
+@tilelang_jit
 def mhc_pre_big_fuse_with_norm_tilelang(
     gemm_out_mul,
     gemm_out_sqrsum,
@@ -353,9 +328,7 @@ def mhc_pre_big_fuse_with_norm_tilelang(
             T.pdl_trigger()
 
 
-@tilelang.jit(
-    pass_configs=pass_configs,
-)
+@tilelang_jit
 def mhc_pre_big_fuse_broadcast_with_norm_tilelang(
     gemm_out_mul,
     gemm_out_sqrsum,
@@ -517,9 +490,7 @@ def mhc_pre_big_fuse_broadcast_with_norm_tilelang(
             T.pdl_trigger()
 
 
-@tilelang.jit(
-    pass_configs=pass_configs,
-)
+@tilelang_jit
 def mhc_fused_tilelang(
     comb_mix,
     residual_in,
@@ -640,9 +611,7 @@ def mhc_fused_tilelang(
             T.pdl_trigger()
 
 
-@tilelang.jit(
-    pass_configs=pass_configs,
-)
+@tilelang_jit
 def mhc_post_tilelang(
     a,
     b,
@@ -695,9 +664,7 @@ def mhc_post_tilelang(
             T.pdl_trigger()
 
 
-@tilelang.jit(
-    pass_configs=pass_configs,
-)
+@tilelang_jit
 def hc_prenorm_gemm_tilelang(
     x,
     fn,
@@ -781,9 +748,7 @@ def hc_prenorm_gemm_tilelang(
             T.pdl_trigger()
 
 
-@tilelang.jit(
-    pass_configs=pass_configs,
-)
+@tilelang_jit
 def hc_prenorm_gemm_block_m_tilelang(
     x,
     fn,
@@ -878,9 +843,7 @@ def hc_prenorm_gemm_block_m_tilelang(
             T.pdl_trigger()
 
 
-@tilelang.jit(
-    pass_configs=pass_configs,
-)
+@tilelang_jit
 def hc_head_fuse_tilelang(
     residual,
     fn,

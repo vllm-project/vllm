@@ -2097,6 +2097,11 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         args.ignore_eos = True
 
     if args.dataset_name == "timed_trace":
+        if args.backend not in ("vllm", "openai"):
+            raise ValueError(
+                "timed_trace dataset passes pre-tokenized prompts (list[int])"
+                " and requires a completions backend ('vllm' or 'openai')."
+            )
         # timed_trace carries per-request timestamps;
         # ignore EOS so generation runs to the trace's specified output length,
         # and default to using those timestamps for scheduling unless the user

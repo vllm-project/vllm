@@ -3,6 +3,18 @@
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import cdiv
+
+_DSPARK_SWA_INDEX_ALIGNMENT = 64
+
+
+def get_dspark_swa_index_width(
+    window_size: int,
+    num_speculative_tokens: int,
+) -> int:
+    """Return the padded width of non-causal DSpark SWA indices."""
+    width = max(int(window_size), 0) + max(int(num_speculative_tokens), 0)
+    return cdiv(width, _DSPARK_SWA_INDEX_ALIGNMENT) * _DSPARK_SWA_INDEX_ALIGNMENT
 
 
 @triton.jit

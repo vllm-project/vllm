@@ -386,6 +386,10 @@ jobs:
                 users: ['hongxiayang', 'tjtanaa', 'vllmellm', 'giuseppegrossi'],
                 message: 'CC {users} for ROCm-related issue',
               },
+              cohere: {
+                users: ['walterbm', 'ekagra-ranjan', 'andrewbcohere', 'jasonozuzu-cohere'],
+                message: 'CC {users} for Cohere-related issue',
+              },
               mistral: {
                 users: ['patrickvonplaten', 'juliendenize', 'andylolu2', 'NickLucche'],
                 message: 'CC {users} for Mistral-related issue',

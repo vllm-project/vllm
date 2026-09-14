@@ -123,14 +123,10 @@ __device__ __forceinline__ void copyChunk8(void* dst, const scalar_t* src,
                                            int rope_elem_base = 0) {
   uint4 const v = *reinterpret_cast<const uint4*>(src);
   if constexpr (FP8 || APPLY_ROPE) {
-#if (!defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 800) && !defined(USE_ROCM)
-    // _typeConvert<BFloat16> is unavailable on pre-Ampere. Kimi K3 uses
-    // bf16 inputs, so discard unsupported conversion paths in those builds.
-    if constexpr (std::is_same_v<scalar_t, c10::BFloat16>) {
+    using Converter = vllm::_typeConvert<scalar_t>;
+    if constexpr (!Converter::exists) {
       return;
     } else {
-#endif
-      using Converter = vllm::_typeConvert<scalar_t>;
       auto const* p =
           reinterpret_cast<typename Converter::packed_hip_type const*>(&v);
       float f[kVecElems];
@@ -175,17 +171,15 @@ __device__ __forceinline__ void copyChunk8(void* dst, const scalar_t* src,
       }
       *reinterpret_cast<uint2*>(dst) = out;
 #else
-    uint8_t out[kVecElems];
+      uint8_t out[kVecElems];
   #pragma unroll
-    for (int i = 0; i < kVecElems; i++) {
-      float s = fminf(fmaxf(f[i] * scale_inv, -kFp8Max), kFp8Max);
-      out[i] = rocm_cvt_float_to_fp8_e4m3(s);
-    }
-    *reinterpret_cast<uint2*>(dst) = *reinterpret_cast<uint2 const*>(out);
+      for (int i = 0; i < kVecElems; i++) {
+        float s = fminf(fmaxf(f[i] * scale_inv, -kFp8Max), kFp8Max);
+        out[i] = rocm_cvt_float_to_fp8_e4m3(s);
+      }
+      *reinterpret_cast<uint2*>(dst) = *reinterpret_cast<uint2 const*>(out);
 #endif
-#if (!defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 800) && !defined(USE_ROCM)
     }
-#endif
   } else {
     *reinterpret_cast<uint4*>(dst) = v;
   }
@@ -197,28 +191,32 @@ __device__ __forceinline__ void copyChunk8(void* dst, const scalar_t* src,
 template <typename scalar_t>
 __device__ __forceinline__ void copyChunk8UnitFp8(uint8_t* dst,
                                                   const scalar_t* src) {
-#ifndef USE_ROCM
-  uint4 const input = *reinterpret_cast<const uint4*>(src);
   using Converter = vllm::_typeConvert<scalar_t>;
-  auto const* input2 =
-      reinterpret_cast<typename Converter::packed_hip_type const*>(&input);
-  uint2 output;
-  auto* output2 = reinterpret_cast<__nv_fp8x2_storage_t*>(&output);
+  if constexpr (!Converter::exists) {
+    return;
+  } else {
+#ifndef USE_ROCM
+    uint4 const input = *reinterpret_cast<const uint4*>(src);
+    auto const* input2 =
+        reinterpret_cast<typename Converter::packed_hip_type const*>(&input);
+    uint2 output;
+    auto* output2 = reinterpret_cast<__nv_fp8x2_storage_t*>(&output);
   #pragma unroll
-  for (int i = 0; i < 4; ++i) {
-    if constexpr (std::is_same_v<scalar_t, c10::BFloat16>) {
-      output2[i] = __nv_cvt_bfloat16raw2_to_fp8x2(
-          static_cast<__nv_bfloat162_raw>(input2[i]), __NV_SATFINITE,
-          __NV_E4M3);
-    } else {
-      output2[i] = __nv_cvt_halfraw2_to_fp8x2(
-          static_cast<__half2_raw>(input2[i]), __NV_SATFINITE, __NV_E4M3);
+    for (int i = 0; i < 4; ++i) {
+      if constexpr (std::is_same_v<scalar_t, c10::BFloat16>) {
+        output2[i] = __nv_cvt_bfloat16raw2_to_fp8x2(
+            static_cast<__nv_bfloat162_raw>(input2[i]), __NV_SATFINITE,
+            __NV_E4M3);
+      } else {
+        output2[i] = __nv_cvt_halfraw2_to_fp8x2(
+            static_cast<__half2_raw>(input2[i]), __NV_SATFINITE, __NV_E4M3);
+      }
     }
-  }
-  *reinterpret_cast<uint2*>(dst) = output;
+    *reinterpret_cast<uint2*>(dst) = output;
 #else
-  copyChunk8<scalar_t, true>(dst, src, 1.0f);
+    copyChunk8<scalar_t, true>(dst, src, 1.0f);
 #endif
+  }
 }
 
 // Concat + store one head's full key: dst[e] = [k_nope | k_pe], e in [0, 192).
@@ -360,12 +358,10 @@ __device__ __forceinline__ void writeDsMlaCache(
   scalar_t* row16 = reinterpret_cast<scalar_t*>(row);
   scalar_t* rope_dst = row16 + kKvLoraRank / 2 + 8 + laneId * 2;
   if constexpr (APPLY_ROPE) {
-#if (!defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 800) && !defined(USE_ROCM)
-    if constexpr (std::is_same_v<scalar_t, c10::BFloat16>) {
+    using Converter = vllm::_typeConvert<scalar_t>;
+    if constexpr (!Converter::exists) {
       return;
     } else {
-#endif
-      using Converter = vllm::_typeConvert<scalar_t>;
       using packed_t = typename Converter::packed_hip_type;
       packed_t const src = *reinterpret_cast<packed_t const*>(pe + laneId * 2);
       float2 const xy = Converter::convert(src);
@@ -374,9 +370,7 @@ __device__ __forceinline__ void writeDsMlaCache(
           static_cast<float>(cos_sin[laneId + kQkRopeHeadDim / 2]);
       *reinterpret_cast<packed_t*>(rope_dst) = Converter::convert(
           make_float2(xy.x * cos - xy.y * sin, xy.x * sin + xy.y * cos));
-#if (!defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 800) && !defined(USE_ROCM)
     }
-#endif
   } else {
     *reinterpret_cast<int32_t*>(rope_dst) =
         *reinterpret_cast<const int32_t*>(pe + laneId * 2);

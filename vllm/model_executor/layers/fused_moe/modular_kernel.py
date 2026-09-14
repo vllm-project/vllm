@@ -1023,8 +1023,15 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         if capture_fn is None:
             self._routing_replay_buffer = None
             return
+        # Allocate for per-rank batches gathered across the DP or EP group.
+        dispatch_group_size = (
+            self.moe_config.ep_size
+            if self.moe_config.use_ep
+            else self.moe_config.dp_size
+        )
+        max_num_replay_tokens = self.moe_config.max_num_tokens * dispatch_group_size
         self._routing_replay_buffer = torch.empty(
-            (self.moe_config.max_num_tokens, self.moe_config.experts_per_token),
+            (max_num_replay_tokens, self.moe_config.experts_per_token),
             dtype=torch.int16,
             device=self.moe_config.device,
         )

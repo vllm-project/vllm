@@ -84,8 +84,11 @@ class DFlashSpeculator(DraftModelSpeculator):
         self.sample_pos = torch.zeros(
             max_num_sampled_tokens, dtype=torch.int64, device=device
         )
-        self.sample_idx_mapping = torch.zeros(
-            max_num_sampled_tokens, dtype=torch.int32, device=device
+        # -1 marks an inert sampling row. CUDA graph capture can execute the
+        # full buffer before a real batch has populated it, so zero would make
+        # every padding row scatter into request slot 0.
+        self.sample_idx_mapping = torch.full(
+            (max_num_sampled_tokens,), -1, dtype=torch.int32, device=device
         )
         # [0, 1, ..., N-1, 0, 1, ..., N-1, ...] -> the per-token column index into
         # draft_logits[req, step, :].
@@ -255,7 +258,6 @@ class DFlashSpeculator(DraftModelSpeculator):
             num_tokens_across_dp,
             cudagraph_runtime_mode,
         )
-
         num_sample = num_reqs * self.num_speculative_steps
         sample_hidden_states = last_hidden_states[self.sample_indices[:num_sample]]
         # sample_pos is the predicted token's position Q; verification keys
@@ -520,6 +522,7 @@ def _prepare_dflash_inputs_kernel(
 
     num_rejected = tl.load(num_rejected_ptr + req_idx)
     valid_ctx_end = ctx_end - num_rejected
+    num_valid_ctx = valid_ctx_end - ctx_start
 
     num_sampled = tl.load(num_sampled_ptr + req_idx)
     if num_sampled > 0:
@@ -533,20 +536,34 @@ def _prepare_dflash_inputs_kernel(
 
     j = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     is_ctx = j < num_ctx
-    is_query = (j >= num_ctx) & (j < num_ctx + num_query_per_req)
-    query_off = j - num_ctx
+    is_valid_ctx = j < num_valid_ctx
+    is_query = (j >= num_valid_ctx) & (j < num_valid_ctx + num_query_per_req)
+    query_off = j - num_valid_ctx
 
     # --- Context positions / slots ---
     ctx_pos_idx = ctx_start + tl.where(is_ctx, j, 0)
-    ctx_pos = tl.load(target_positions_ptr + ctx_pos_idx, mask=is_ctx, other=0)
+    ctx_pos = tl.load(target_positions_ptr + ctx_pos_idx, mask=is_valid_ctx, other=0)
     ctx_block_num = ctx_pos // block_size
     ctx_block_num = tl.minimum(ctx_block_num, block_table_stride - 1)
     ctx_block_id = tl.load(
         block_table_ptr + req_idx * block_table_stride + ctx_block_num,
-        mask=is_ctx,
+        mask=is_valid_ctx,
         other=0,
     ).to(tl.int64)
-    ctx_slot = ctx_block_id * block_size + (ctx_pos % block_size)
+    # Block 0 is the null block. Old sliding-window context positions can map
+    # to it after eviction; rejected suffix rows are invalid context as well.
+    # Neither kind of row may write draft KV into physical block 0.
+    ctx_resident = is_valid_ctx & (ctx_block_id != 0)
+    ctx_slot = tl.where(
+        ctx_resident,
+        ctx_block_id * block_size + (ctx_pos % block_size),
+        PAD_SLOT_ID,
+    )
+    # Stored over the full [0, num_ctx) span while the loads above are masked to
+    # [0, num_valid_ctx): the rejected suffix rows in between get position 0 and
+    # PAD_SLOT_ID. That is intentional — those rows write no KV and their
+    # positions are never consumed, but the span must stay fully initialized so
+    # a replayed graph cannot observe a stale value from an earlier batch.
     tl.store(out_context_positions_ptr + ctx_start + j, ctx_pos, mask=is_ctx)
     tl.store(out_context_slot_mapping_ptr + ctx_start + j, ctx_slot, mask=is_ctx)
 
@@ -563,7 +580,14 @@ def _prepare_dflash_inputs_kernel(
         mask=is_query,
         other=0,
     ).to(tl.int64)
-    q_slot = q_block_id * block_size + (query_pos % block_size)
+    # A null block is never a writable cache slot. This can occur when a
+    # sliding-window block table contains evicted/global padding entries.
+    q_resident = is_query & (q_block_id != 0)
+    q_slot = tl.where(
+        q_resident,
+        q_block_id * block_size + (query_pos % block_size),
+        PAD_SLOT_ID,
+    )
 
     tl.store(out_input_ids_ptr + query_idx, input_id, mask=is_query)
     clamped_query_pos = tl.minimum(query_pos, max_model_len - 1)

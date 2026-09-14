@@ -68,6 +68,23 @@ pull_request_rules:
       add:
         - ci/build
 
+- name: label-cohere
+  description: Automatically apply cohere label
+  conditions:
+    - label != stale
+    - or:
+      - files~=^examples/.*cohere.*\.py
+      - files~=^tests/.*cohere.*\.py
+      - files~=^vllm/model_executor/models/.*cohere.*\.py
+      - files~=^vllm/tool_parsers/.*cohere.*\.py
+      - files~=^vllm/reasoning/.*cohere.*\.py
+      - files~=^vllm/transformers_utils/.*cohere.*\.py
+      - title~=(?i)Cohere
+  actions:
+    label:
+      add:
+        - cohere
+
 - name: label-deepseek
   description: Automatically apply deepseek label
   conditions:

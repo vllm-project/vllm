@@ -130,14 +130,6 @@ class Mxfp4MoeBackend(Enum):
     HUMMING = "HUMMING"
 
 
-# AITER backends group
-AITER_BACKENDS = (
-    Mxfp4MoeBackend.AITER_MXFP4_BF16,
-    Mxfp4MoeBackend.AITER_MXFP4_FP8,
-    Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
-)
-
-
 # Backends that share the same TRTLLM weight format
 TRTLLM_BACKENDS = (
     Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
@@ -644,20 +636,7 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
     activation: MoEActivation | None = None,
 ) -> tuple[int, int]:
     """Round up hidden_size and intermediate_size based on backend requirements."""
-    if backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and activation == MoEActivation.SITU:
-        # K3's AITER A16W4 SiTU kernel handles K3's native intermediate size
-        # (moe_intermediate 3072; e.g. 384/partition at TP8). Align to 128 (a
-        # no-op for K3's shapes) rather than the generic ROCm 256 round-up,
-        # which would inflate weights and OOM.
-        intermediate_size = round_up(intermediate_size, 128)
-        hidden_size = round_up(hidden_size, 128)
-    elif (
-        backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and activation == MoEActivation.SILU
-    ):
-        # AITER's A16W4 SiLU kernel handles native dimensions aligned to 128.
-        intermediate_size = round_up(intermediate_size, 128)
-        hidden_size = round_up(hidden_size, 128)
-    elif backend == Mxfp4MoeBackend.EMULATION:
+    if backend == Mxfp4MoeBackend.EMULATION:
         # Emulation has no kernel tile; it only needs OCP MX block alignment so the
         # per-block scale buffers (`dim // OCP_MX_BLOCK_SIZE`) aren't floor-truncated
         # by a non-block-aligned TP/DP shard (e.g. 2880 // 4 = 720).
@@ -683,8 +662,18 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
         intermediate_size = round_up(intermediate_size, 128)
         hidden_size = round_up(hidden_size, 128)
     elif current_platform.is_rocm():
-        intermediate_size = round_up(intermediate_size, 256)
-        hidden_size = round_up(hidden_size, 256)
+        if backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and (
+            activation == MoEActivation.SITU or activation == MoEActivation.SILU
+        ):
+            # K3's AITER A16W4 SiTU kernel handles K3's native intermediate size
+            # (moe_intermediate 3072; e.g. 384/partition at TP8). Align to 128 (a
+            # no-op for K3's shapes) rather than the generic ROCm 256 round-up,
+            # which would inflate weights and OOM.
+            intermediate_size = round_up(intermediate_size, 128)
+            hidden_size = round_up(hidden_size, 128)
+        else:
+            intermediate_size = round_up(intermediate_size, 256)
+            hidden_size = round_up(hidden_size, 256)
     elif backend == Mxfp4MoeBackend.CPU:
         # CPU AMX kernel uses BLOCK_N=32, align to 32
         intermediate_size = round_up(intermediate_size, 32)
@@ -1280,6 +1269,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     w13_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
     _cache_permute_indices: dict[torch.Size, torch.Tensor] | None = None,
+    activation: MoEActivation | None = None,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -1479,12 +1469,40 @@ def convert_weight_to_mxfp4_moe_kernel_format(
 
         import os
 
-        from aiter.ops.shuffle import shuffle_scale as _shuf_s
-        from aiter.ops.shuffle import shuffle_weight as _shuf_w
-
         # TODO: Remove this once AITER is fixed
         # Necessary for AITER side from crashing
         os.environ["AITER_BF16_FP8_MOE_BOUND"] = "0"
+
+        if activation == MoEActivation.SITU:
+            from aiter.utility.fp4_utils import e8m0_shuffle
+
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            fp4_dtype = torch.float4_e2m1fn_x2
+            e8m0_dtype = torch.float8_e8m0fnu
+            # a8w4 uses gate/up-interleaved flydsl kernels;
+            # default a16w4 keeps the separated layout.
+            guinterleave = rocm_aiter_ops.is_fused_moe_situv2_a8w4_enabled()
+            w13 = rocm_aiter_ops.shuffle_weight_a16w4(
+                w13_weight.data.view(fp4_dtype), 16, guinterleave
+            )
+            w2 = rocm_aiter_ops.shuffle_weight_a16w4(
+                w2_weight.data.view(fp4_dtype), 16, False
+            )
+            w13_scale_raw = w13_weight_scale.data.view(e8m0_dtype)
+            w2_scale_raw = w2_weight_scale.data.view(e8m0_dtype)
+            w13_scale = rocm_aiter_ops.shuffle_scale_a16w4(
+                w13_scale_raw.view(-1, w13_scale_raw.shape[-1]),
+                num_experts,
+                guinterleave,
+            )
+            w2_scale = e8m0_shuffle(w2_scale_raw.view(-1, w2_scale_raw.shape[-1]))
+            w13.is_shuffled = True
+            w2.is_shuffled = True
+            return (w13, w2, w13_scale, w2_scale, w13_bias, w2_bias)
+
+        from aiter.ops.shuffle import shuffle_scale as _shuf_s
+        from aiter.ops.shuffle import shuffle_weight as _shuf_w
 
         w13_weight = torch.nn.Parameter(
             _shuf_w(

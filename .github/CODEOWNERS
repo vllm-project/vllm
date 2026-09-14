@@ -17,6 +17,7 @@
 /vllm/kernels/ @ProExpertProg @tjtanaa
 /vllm/kernels/helion @ProExpertProg @zou3519
 /vllm/multimodal @DarkLight1337 @ywang96 @NickLucche @tjtanaa @shen-shanshan
+/vllm/multimodal/media @Isotr0py
 /vllm/vllm_flash_attn @LucasWilkinson @MatthewBonanni
 /CMakeLists.txt @tlrmchlsmth @LucasWilkinson @Harry-Chen
 /cmake @tlrmchlsmth @LucasWilkinson @Harry-Chen
@@ -104,6 +105,7 @@
 /tests/kernels/ir @ProExpertProg @tjtanaa
 /tests/models @DarkLight1337 @ywang96 @AndreasKaratzas
 /tests/multimodal @DarkLight1337 @ywang96 @NickLucche @shen-shanshan
+/tests/multimodal/media @Isotr0py
 /tests/quantization @mgoin @robertgshaw2-redhat @yewentao256 @pavanimajety @zyongye @AndreasKaratzas
 /tests/test_inputs.py @DarkLight1337 @ywang96
 /tests/entrypoints/llm/test_struct_output_generate.py @mgoin @russellb @aarnphm

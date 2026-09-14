@@ -56,6 +56,7 @@ from vllm.transformers_utils.processors.cohere_asr import (
     CohereASRProcessor,
 )
 from vllm.utils.collection_utils import is_list_of
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.attention.backend import (
     AttentionType,
 )
@@ -1770,10 +1771,9 @@ class CohereASRModel(nn.Module):
                 out = self.encoder_decoder_proj(out)
 
             # Convert padded tensor to packed
-            outs = []
-            for i, feat in enumerate(out):
-                feat_len = encoder_output_length[i]
-                outs.append(feat[:feat_len, :])
+            with gpu_sync_allowed():
+                lengths = encoder_output_length.tolist()
+            outs = [feat[:length, :] for feat, length in zip(out, lengths)]
 
             return outs
         else:
