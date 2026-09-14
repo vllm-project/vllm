@@ -86,6 +86,14 @@ class AttentionConfig:
     indexer). Quantized formats (fp8, mxfp4, nvfp4) require indexer kernel
     support in the backend."""
 
+    indexer_sparse_logits: bool = False
+    """DeepSeek V4.1 two-level indexer: score only the candidate blocks with
+    DeepGEMM's sparse MQA-logits kernels instead of computing dense logits over
+    the whole context and masking them. Requires `indexer_kv_dtype="mxfp4"`,
+    an SM100-class GPU and DeepGEMM >= 2.8. The sparse path costs
+    O(candidate blocks) per query regardless of context length, so it pays off
+    for long contexts (roughly 32K tokens and beyond) and is slower below."""
+
     hisparse_config: HiSparseConfig | None = None
     """HiSparse host-resident KV configuration. Setting this enables experimental
     Model Runner V2-only HiSparse sparse-MLA decode hot-buffering."""

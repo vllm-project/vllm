@@ -43,6 +43,7 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
+    DeepseekV32IndexerPrefillChunkMetadata,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
@@ -316,6 +317,86 @@ def kv_cache_as_quant_view(
             stride=(page_bytes, fp4_bytes, fp4_bytes, 1),
         )
     return kv_cache.unsqueeze(-2)
+
+
+def reserve_indexer_workspaces(
+    total_seq_lens: int, head_dim: int, use_fp4_cache: bool, device: torch.device
+) -> None:
+    """Profiling run of an indexer without context parallel: claim the prefill
+    K-gather and top-k workspaces and the peak dense-logits allocation so the
+    memory estimate covers them."""
+    values_spec, scales_spec = _gather_workspace_shapes(
+        total_seq_lens, head_dim, current_platform.fp8_dtype(), use_fp4_cache
+    )
+    current_workspace_manager().get_simultaneous(
+        values_spec,
+        scales_spec,
+        ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
+    )
+    # FP8 elements so elements == bytes.
+    max_logits_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+    torch.empty(max_logits_elems, dtype=torch.uint8, device=device)
+
+
+def get_prefill_k_workspaces(
+    total_seq_lens: int, head_dim: int, use_fp4_cache: bool
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Shared K-gather workspace ``(values, scales)`` for an indexer without
+    context parallel."""
+    values_spec, scales_spec = _gather_workspace_shapes(
+        total_seq_lens, head_dim, current_platform.fp8_dtype(), use_fp4_cache
+    )
+    k_quant, k_scale = current_workspace_manager().get_simultaneous(
+        values_spec, scales_spec
+    )
+    return k_quant, k_scale
+
+
+def gather_prefill_chunk_k(
+    kv_cache: torch.Tensor,
+    k_quant_full: torch.Tensor,
+    k_scale_full: torch.Tensor,
+    chunk: DeepseekV32IndexerPrefillChunkMetadata,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Gather one prefill chunk's paged K into the packed workspace."""
+    assert chunk.local_cu_seq_lens is not None
+    k_quant = k_quant_full[: chunk.max_local_total_seq_lens]
+    k_scale = k_scale_full[: chunk.max_local_total_seq_lens]
+    if not chunk.skip_kv_gather and chunk.local_total_seq_lens > 0:
+        ops.cp_gather_indexer_k_quant_cache(
+            kv_cache,
+            k_quant,
+            k_scale,
+            chunk.block_table,
+            chunk.local_cu_seq_lens,
+        )
+    return k_quant, k_scale
+
+
+def dense_mha_skips_topk(
+    forward_context,
+    attn_metadata: dict,
+    dense_mha_metadata_layer_name: LayerNameType,
+) -> bool:
+    """Whether the main MLA runs dense MHA for this batch and will not read
+    the top-k indices, so the indexer can leave its buffer untouched.
+
+    The indexer and main MLA may classify the same short extend differently
+    because they use independent decode thresholds; only the main MLA route
+    knows whether the indices are consumed.
+    """
+    if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
+        return False
+    dense_mha_layer = _resolve_layer_name(dense_mha_metadata_layer_name)
+    if not dense_mha_layer:
+        return False
+    mla_metadata = attn_metadata.get(dense_mha_layer)
+    prefill_metadata = getattr(mla_metadata, "prefill", None)
+    return (
+        getattr(prefill_metadata, "use_dense_mha", False)
+        and getattr(mla_metadata, "num_decode_tokens", -1) == 0
+        and not torch.cuda.is_current_stream_capturing()
+    )
 
 
 @eager_break_during_capture
