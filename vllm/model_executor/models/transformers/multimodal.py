@@ -1236,17 +1236,31 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         video_grid_thw = torch.stack(video_grid_thw) if video_grid_thw else None
 
         # `get_rope_index` doesn't always accept arbitrary `kwargs`
-        kwargs = {}
-        if not hasattr(self, "_get_rope_index_accepts_mm_token_type_ids"):
+        if not hasattr(self, "_get_rope_index_kwarg_names"):
             import inspect
 
-            sig = inspect.signature(self.model.get_rope_index)
-            params = sig.parameters
-            self._get_rope_index_accepts_mm_token_type_ids = (
-                "mm_token_type_ids" in params
-                or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+            params = inspect.signature(self.model.get_rope_index).parameters
+            self._get_rope_index_kwarg_names = (
+                None
+                if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+                else frozenset(params)
             )
-        if self._get_rope_index_accepts_mm_token_type_ids:
+
+        kwarg_names = self._get_rope_index_kwarg_names
+
+        def accepts_kwarg(name: str) -> bool:
+            return kwarg_names is None or name in kwarg_names
+
+        # Drop a grid the model can't accept only when there is nothing to pass.
+        kwargs = {
+            name: value
+            for name, value in (
+                ("image_grid_thw", image_grid_thw),
+                ("video_grid_thw", video_grid_thw),
+            )
+            if value is not None or accepts_kwarg(name)
+        }
+        if accepts_kwarg("mm_token_type_ids"):
             mm_token_type_ids = torch.zeros(len(input_tokens), dtype=torch.int)
             for feature in mm_features:
                 position = feature.mm_position
@@ -1257,8 +1271,6 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
 
         mrope_positions, mrope_position_delta = self.model.get_rope_index(
             input_ids=torch.tensor(input_tokens).unsqueeze(0),
-            image_grid_thw=image_grid_thw,
-            video_grid_thw=video_grid_thw,
             **kwargs,
         )
 
