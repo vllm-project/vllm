@@ -81,7 +81,7 @@ struct LamportComm {
 };
 
 __device__ __forceinline__ bool is_neg_zero(float v) {
-  return *reinterpret_cast<uint32_t*>(&v) == 0x80000000;
+  return __float_as_uint(v) == 0x80000000;
 }
 
 __device__ __forceinline__ bool is_neg_zero(float4 v) {
@@ -90,12 +90,7 @@ __device__ __forceinline__ bool is_neg_zero(float4 v) {
 }
 
 __device__ __forceinline__ float4 get_neg_zero() {
-  float4 vec;
-#pragma unroll
-  for (int i = 0; i < 4; ++i) {
-    reinterpret_cast<uint32_t*>(&vec)[i] = 0x80000000;
-  }
-  return vec;
+  return make_float4(-0.0f, -0.0f, -0.0f, -0.0f);
 }
 
 template <int Dim>
