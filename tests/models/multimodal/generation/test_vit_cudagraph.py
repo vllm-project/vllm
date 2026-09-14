@@ -563,20 +563,9 @@ def test_eonly_vit_cudagraph_outputs(
         [second.resize((896, 896))],
         [second.resize((224, 224))],
     ]
-    inputs = [
-        dict(processor.image_processor(images=images, return_tensors="pt"))
-        for images in batches
-    ]
     frames = sample_frames_from_video(video_assets[0].np_ndarrays, 2)
     video = np.stack(
         [np.asarray(Image.fromarray(frame).resize((224, 224))) for frame in frames]
-    )
-    inputs.append(
-        dict(
-            processor.video_processor(
-                videos=[video], do_sample_frames=False, return_tensors="pt"
-            )
-        )
     )
     with vllm_runner(
         config.model,
@@ -594,6 +583,26 @@ def test_eonly_vit_cudagraph_outputs(
             "encoder_cudagraph_max_frames_per_batch": 2,
         },
     ) as model:
+        mm_config = model.llm.llm_engine.vllm_config.model_config.multimodal_config
+        processor_kwargs = mm_config.merge_mm_processor_kwargs({})
+        inputs = [
+            dict(
+                processor.image_processor(
+                    images=images, return_tensors="pt", **processor_kwargs
+                )
+            )
+            for images in batches
+        ]
+        inputs.append(
+            dict(
+                processor.video_processor(
+                    videos=[video],
+                    do_sample_frames=False,
+                    return_tensors="pt",
+                    **processor_kwargs,
+                )
+            )
+        )
         results = model.llm.collective_rpc(
             partial(_check_eonly_encoder_outputs, batches=inputs)
         )
