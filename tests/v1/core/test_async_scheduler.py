@@ -228,6 +228,105 @@ def test_prefix_caching_for_prefill_dedup():
     assert scheduler.get_num_unfinished_requests() == 0
 
 
+def test_nan_fault_tolerance_commits_prefix_cache_after_async_output():
+    """Unvalidated async KV must not be visible to another request."""
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        enable_prefix_caching=True,
+        max_num_batched_tokens=64,
+        enable_nan_fault_tolerance=True,
+    )
+
+    requests = create_requests(
+        num_requests=2,
+        num_tokens=32,
+        max_tokens=1,
+        same_prompt=True,
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    # Both requests must compute the prompt. If the first request published its
+    # blocks during scheduling, the second request would incorrectly hit them.
+    scheduler_output = scheduler.schedule()
+    assert scheduler_output.num_scheduled_tokens == {"0": 32, "1": 32}
+
+    model_output = ModelRunnerOutput(
+        req_ids=[request.request_id for request in requests],
+        req_id_to_index={request.request_id: i for i, request in enumerate(requests)},
+        sampled_token_ids=[[], []],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+        num_nans_in_logits={request.request_id: 0 for request in requests},
+    )
+    scheduler.update_from_output(scheduler_output, model_output)
+
+    # A later request can use the cache only after the clean output was
+    # processed; prompt_length - 1 gives one full block for this test.
+    (next_request,) = create_requests(
+        num_requests=1,
+        num_tokens=32,
+        max_tokens=1,
+        same_prompt=True,
+        req_ids=["next"],
+    )
+    scheduler.add_request(next_request)
+    next_output = scheduler.schedule()
+    assert next_output.num_scheduled_tokens[next_request.request_id] == 16
+
+
+def test_nan_fault_tolerance_caches_only_completed_async_prefill_chunks():
+    """A later in-flight prefill chunk must remain invisible until validated."""
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        enable_prefix_caching=True,
+        enable_nan_fault_tolerance=True,
+        max_num_batched_tokens=16,
+        max_model_len=64,
+    )
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=48,
+        max_tokens=1,
+        same_prompt=True,
+    )
+    scheduler.add_request(request)
+
+    first_output = scheduler.schedule()
+    second_output = scheduler.schedule()
+    assert first_output.num_scheduled_tokens == {request.request_id: 16}
+    assert second_output.num_scheduled_tokens == {request.request_id: 16}
+    assert request.num_in_flight_tokens == 32
+    manager = scheduler.kv_cache_manager.coordinator.single_type_managers[0]
+    assert manager.num_cached_block.get(request.request_id, 0) == 0
+
+    clean_model_output = ModelRunnerOutput(
+        req_ids=[request.request_id],
+        req_id_to_index={request.request_id: 0},
+        sampled_token_ids=[[]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+        num_nans_in_logits={request.request_id: 0},
+    )
+    scheduler.update_from_output(first_output, clean_model_output)
+    assert request.num_in_flight_tokens == 16
+    assert manager.num_cached_block[request.request_id] == 1
+
+    (matching_request,) = create_requests(
+        num_requests=1,
+        num_tokens=48,
+        max_tokens=1,
+        same_prompt=True,
+        req_ids=["matching"],
+    )
+    _, num_cached_tokens, _ = scheduler.kv_cache_manager.get_computed_blocks(
+        matching_request
+    )
+    assert num_cached_tokens == 16
+
+
 def test_prefix_caching_for_multi_turn():
     CHUNK_SIZE = 1000
     BLOCK_SIZE = 16
