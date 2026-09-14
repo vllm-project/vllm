@@ -121,27 +121,45 @@ AttnTypeStr = Literal[
 
 
 @config(config=ConfigDict(arbitrary_types_allowed=True))
+# [CN] vLLM 的模型配置中枢：把 HF config、命令行参数、量化与多模态
+# [CN] 设置统一收敛成一份自洽的运行时配置。三条设计主线：
+# [CN]   1) __post_init__ 负责"填充"：拉取 HF config 并推导各项取值；
+# [CN]   2) 各级 validator 负责"纠错"：非法组合在起 worker 前就拦下；
+# [CN]   3) 大量 property 负责"回答"：把能力探测变成声明式查询。
+
 class ModelConfig:
     """Configuration for the model."""
+
+    # [CN] 模型标识：HF repo id 或本地路径，随后会被重定向规则改写。
 
     model: str = "Qwen/Qwen3-0.6B"
     """Name or path of the Hugging Face model to use. It is also used as the
     content for `model_name` tag in metrics output when `served_model_name` is
     not specified."""
+    # [CN] 权重来源与架构配置分离，允许用 A 的 config 配 B 的权重。
+
     model_weights: str = ""
     """Original model weights path. Used when the model is pulled from object
     storage (e.g., RunAI) to preserve the original URI while `model` points to
     the local directory."""
+    # [CN] 执行后端（generate / pooling / draft 等），auto 按架构判定。
+
     runner: RunnerOption = "auto"
     """The type of model runner to use. Each vLLM instance only supports one
     model runner, even if the same model can be used for multiple types."""
+    # [CN] 是否把模型类换成 vLLM 自己的实现，auto 表示能转就转。
+
     convert: ConvertOption = "auto"
     """Convert the model using adapters defined in
     [vllm.model_executor.models.adapters][]. The most common use case is to
     adapt a text generation model to be used for pooling tasks."""
+    # [CN] None 表示复用 model 的同名 tokenizer，靠 type: ignore 绕过检查。
+
     tokenizer: str = None  # type: ignore[assignment]
     """Name or path of the Hugging Face tokenizer to use. If unspecified, model
     name or path will be used."""
+    # [CN] auto 优先选 fast 版本；个别模型 fast 版有 bug 需显式指定 slow。
+
     tokenizer_mode: TokenizerMode | str = "auto"
     """Tokenizer mode:
 
@@ -163,9 +181,14 @@ class ModelConfig:
     [fastokens](https://github.com/crusoecloud/fastokens) implementation, set
     `VLLM_USE_FASTOKENS=1` instead — that override applies to any mode that
     loads an HF fast tokenizer (`hf`, `deepseek_v32`, `deepseek_v4`, …)."""
+    # [CN] 默认关：它会下载并执行 HF repo 里的远端代码。
+
     trust_remote_code: bool = False
     """Trust remote code (e.g., from HuggingFace) when downloading the model
     and tokenizer."""
+    # [CN] auto 的推导见 _resolve_auto_dtype：在显存、性能与数值稳定性
+    # [CN] 之间权衡，而不是照搬 config 里写的那个 dtype。
+
     dtype: ModelDType | torch.dtype = "auto"
     """Data type for model weights and activations:
 
@@ -176,16 +199,25 @@ class ModelConfig:
     - "bfloat16" for a balance between precision and range.
     - "float" is shorthand for FP32 precision.
     - "float32" for FP32 precision."""
+    # [CN] 0 表示不设种子，但也不自动退化成 None，保持行为可预测。
+
     seed: int = 0
     """Random seed for reproducibility.
 
     We must set the global seed because otherwise,
     different tensor parallel workers would sample different tokens,
     leading to inconsistent results."""
+    # [CN] init=False 的派生字段，由 __post_init__ 拉取后填充。
+
     hf_config: PretrainedConfig = field(init=False)
     """The Hugging Face config of the model."""
+    # [CN] 多模态模型里"语言主干"的那份配置。绝大多数能力探测应查它，
+    # [CN] 而不是最外层的 hf_config。
+
     hf_text_config: PretrainedConfig = field(init=False)
     """The Hugging Face config of the text model (same as hf_config for text models)."""
+    # [CN] 记录权重层面是否已解开 embedding 与 lm_head，避免重复解绑。
+
     word_embeddings_untied_by_checkpoint: bool = field(default=False, init=False)
     """Whether `tie_word_embeddings` was overridden to `False` because the checkpoint
     contains an `lm_head` of its own. The two may still turn out to be identical, in
@@ -193,24 +225,36 @@ class ModelConfig:
     hf_config_path: str | None = None
     """Name or path of the Hugging Face config to use. If unspecified, model
     name or path will be used."""
+    # [CN] 允许读取本地媒体文件的根目录，留空即禁止，防目录穿越。
+
     allowed_local_media_path: str = ""
     """Allowing API requests to read local images or videos from directories
     specified by the server file system. This is a security risk. Should only
     be enabled in trusted environments."""
+    # [CN] 远程媒体域名白名单，None 表示沿用默认而非"全都允许"。
+
     allowed_media_domains: list[str] | None = None
     """If set, only media URLs that belong to this domain can be used for
     multi-modal inputs. """
+    # [CN] 模型权重与 config 的 git revision（分支 / tag / commit）。
+
     revision: str | None = None
     """The specific model version to use. It can be a branch name, a tag name,
     or a commit id. If unspecified, will use the default version."""
+    # [CN] 单独指定"代码"的 revision：远程代码与权重可来自不同提交。
+
     code_revision: str | None = None
     """The specific revision to use for the model code on the Hugging Face Hub.
     It can be a branch name, a tag name, or a commit id. If unspecified, will
     use the default version."""
+    # [CN] tokenizer 的 revision，与上面两者互不影响。
+
     tokenizer_revision: str | None = None
     """The specific revision to use for the tokenizer on the Hugging Face Hub.
     It can be a branch name, a tag name, or a commit id. If unspecified, will
     use the default version."""
+    # [CN] 上下文长度上限，None 由 config 推导，-1 在 SoLid 场景另有含义。
+
     max_model_len: int = Field(default=None, ge=-1)  # type: ignore[assignment]
     """Model context length (prompt and output). If unspecified, will be
     automatically derived from the model config.
@@ -224,20 +268,30 @@ class ModelConfig:
     - -1 or 'auto' -> Automatically choose the maximum model length that fits in
       GPU memory. This will use the model's maximum context length if it fits,
       otherwise it will find the largest length that can be accommodated."""
+    # [CN] 投机解码时目标模型的长度上限，可与主模型不同。
+
     spec_target_max_model_len: int | None = None
     """Specify the maximum length for spec decoding draft models."""
+    # [CN] 字符串形式的量化方法，与下面 dict 形式的配置二选一。
+
     quantization: QuantizationMethods | str | None = None
     """Method used to quantize the weights. If `None`, we first check the
     `quantization_config` attribute in the model config file. If that is
     `None`, we assume the model weights are not quantized and use `dtype` to
     determine the data type of the weights."""
+    # [CN] 结构化量化参数，支持一次性给多份子配置。
+
     quantization_config: dict[str, Any] | QuantizationConfigArgs | None = None
     """User-facing quantization configuration. Carries per-layer-kind specs
     (linear, moe) and ignore patterns; see :class:`QuantizationConfigArgs`.
     Auto-populated from the matching online shorthand when `quantization` is
     one of the values in `ONLINE_QUANT_SHORTHAND_NAMES`."""
+    # [CN] 已废弃方法默认直接报错，复现旧结果时必须显式放行。
+
     allow_deprecated_quantization: bool = False
     """Whether to allow deprecated quantization methods."""
+    # [CN] 禁用 CUDA graph 与编译。调试用，生产环境会掉吞吐。
+
     enforce_eager: bool = False
     """Whether to always use eager-mode PyTorch. If True, we will disable CUDA
     graph and always execute the model in eager mode. If False, we will use
@@ -246,15 +300,23 @@ class ModelConfig:
 
     NOTE: This disables both `torch.compile` and CUDA graphs, and is
     equivalent to setting `-cc.mode=none -cc.cudagraph_mode=none`."""
+    # [CN] 把每个 token 命中的专家分布一并回传，用于分析 MoE 负载。
+
     enable_return_routed_experts: bool = False
     """Whether to return routed experts."""
+    # [CN] 把禁用掩码本身也回传，用来排查允许名单是否生效。
+
     return_sampling_mask: bool = False
     """Whether to return the post-processing token support for each sample."""
+    # [CN] 单步返回候选数的上限，和请求里的取值取小。
+
     max_logprobs: int = Field(default=20, ge=-1)
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
     OpenAI Chat Completions API. -1 means no cap, i.e. all (output_length *
     vocab_size) logprobs are allowed to be returned and it may cause OOM."""
+    # [CN] 另一种模式会先归一化，数值更稳但不再是原始对数概率。
+
     logprobs_mode: LogprobsMode = "raw_logprobs"
     """Indicates the content returned in the logprobs and prompt_logprobs.
     Supported mode:
@@ -270,16 +332,22 @@ class ModelConfig:
     equivalent exponential-race sampling. FP64 preserves lower-tail sampling
     events that fp32 uniform/exponential draws can truncate, at the cost of
     significantly lower throughput on most GPUs."""
+    # [CN] 录制请求序列并重放，用于做性能收敛测试。
+
     enable_trace_replay: bool = False
     """Whether to allow requests to set
     `SamplingParams.trace_decode_token_ids`, which forces decoding to follow a
     predetermined token sequence while still computing real logprobs. Reserved
     for debugging and RL workflows: enabling it reserves a per-request trace
     buffer, so it is off by default."""
+    # [CN] 忽略滑窗参数，所有层都按全局注意力处理。
+
     disable_sliding_window: bool = False
     """Whether to disable sliding window. If True, we will disable the sliding
     window functionality of the model, capping to sliding window size. If the
     model does not support sliding window, this argument is ignored."""
+    # [CN] 级联注意力默认关闭：省算力但对个别模型有数值差异。
+
     disable_cascade_attn: bool = True
     """Disable cascade attention for V1. While cascade attention does not
     change the mathematical correctness, disabling it could be useful for
@@ -287,16 +355,23 @@ class ModelConfig:
     must opt in to cascade attention by setting this to False. Even when this
     is set to False, cascade attention will only be used when the heuristic
     tells that it's beneficial."""
+    # [CN] 引擎一侧不建分词器，外部直接给 token id。
+    # [CN] 注意服务层仍需要自己的分词器来解码输出。
+
     skip_tokenizer_init: bool = False
     """Skip initialization of tokenizer and detokenizer. Expects valid
     `prompt_token_ids` and `None` for prompt from the input. The generated
     output will contain token ids."""
+    # [CN] 允许直接传 embedding 而不是 token id。
+
     enable_prompt_embeds: bool = False
     """If `True`, enables passing text embeddings as inputs via the
     `prompt_embeds` key.
 
     WARNING: The vLLM engine may crash if incorrect shape of embeddings is passed.
     Only enable this flag for trusted users!"""
+    # [CN] 对外使用的名字，可以有多个别名，与真实路径解耦。
+
     served_model_name: str | list[str] | None = None
     """The model name(s) used in the API. If multiple names are provided, the
     server will respond to any of the provided names. The model name in the
@@ -305,6 +380,8 @@ class ModelConfig:
     that this name(s) will also be used in `model_name` tag content of
     prometheus metrics, if multiple names provided, metrics tag will take the
     first one."""
+    # [CN] 配置文件的格式流派，mistral 那套和 hf 差别很大。
+
     config_format: str | ConfigFormat = "auto"
     """The format of the model config to load:
 
@@ -312,13 +389,19 @@ class ModelConfig:
       to load in mistral format.
     - "hf" will load the config in hf format.
     - "mistral" will load the config in mistral format."""
+    # [CN] 布尔真表示从本地缓存读取，字符串则是凭据本身。
+
     hf_token: bool | str | None = None
     """The token to use as HTTP bearer authorization for remote files . If
     `True`, will use the token generated when running `hf auth login`
     (stored in `~/.cache/huggingface/token`)."""
+    # [CN] 直接改写原始配置里的字段，取值也可以是可调用对象。
+
     hf_overrides: HfOverrides = field(default_factory=dict)
     """If a dictionary, contains arguments to be forwarded to the Hugging Face
     config. If a callable, it is called to update the HuggingFace config."""
+    # [CN] 把某个架构名重定向到自定义模型类，不必改动源码。
+
     model_class_overrides: dict[str, str] = field(default_factory=dict)
     """Override the model class used for one or more architectures, mapping the
     architecture name to a `"module:class"` target (the same format accepted by
@@ -326,6 +409,8 @@ class ModelConfig:
     e.g. `{"GlmMoeDsaForCausalLM":
     "vllm.models.deepseek_v32.nvidia.model:DeepseekV32ForCausalLM"}`. This
     argument is for development and debugging purposes only."""
+    # [CN] 决定默认采样参数从哪里读取，会影响 diff 采样的结果。
+
     generation_config: str = "auto"
     """The folder path to the generation config. Defaults to `"auto"`, the
     generation config will be loaded from model path. If set to `"vllm"`, no
@@ -333,23 +418,33 @@ class ModelConfig:
     path, the generation config will be loaded from the specified folder path.
     If `max_new_tokens` is specified in generation config, then it sets a
     server-wide limit on the number of output tokens for all requests."""
+    # [CN] 逐项改写生成配置里的默认值，优先级最高。
+
     override_generation_config: dict[str, Any] = field(default_factory=dict)
     """Overrides or sets generation config. e.g. `{"temperature": 0.5}`. If
     used with `--generation-config auto`, the override parameters will be
     merged with the default config from the model. If used with
     `--generation-config vllm`, only the override parameters are used."""
+    # [CN] 休眠模式：空闲时让出显存，请求到来时再恢复。
+
     enable_sleep_mode: bool = False
     """Enable sleep mode for the engine (only cuda and
     hip platforms are supported)."""
+    # [CN] 不同后端在是否卸到主机内存这件事上策略不同。
+
     sleep_mode_backend: str = "cumem"
     """Mechanism used to free and restore GPU state for sleep mode. ``"cumem"``
     (default) uses the built-in ``CuMemAllocator`` and is behavior-compatible
     with prior releases. Additional backends (CUDA checkpoint, CRIU, durable
     snapshot) may be registered in-tree or by plugins (RFC #34303)."""
+    # [CN] 挂起通信域，这是通信资源能否被回收的前提。
+
     enable_nccl_comm_suspend: bool = False
     """Enable releasing NCCL communicator memory during sleep mode
     (``ncclCommSuspend``/``ncclCommResume``). Experimental; when disabled
     (the default) sleep still releases weights/KV-cache memory as before."""
+    # [CN] 换成支持归还的分配器，显存才可能真正回落。
+
     enable_cumem_allocator: bool = False
     """Enable the custom cumem allocator to leverage advanced GPU memory
     allocation features such as multi-node NVLink support.
@@ -357,6 +452,9 @@ class ModelConfig:
     Sleep mode automatically enables this allocator. Only cuda and hip
     platforms are supported.
     """
+    # [CN] 选 vLLM 实现、官方 transformers 后端，或指定具体名字。
+    # [CN] 走后端可以支持新模型而不用写模型代码。
+
     model_impl: str | ModelImpl = "auto"
     """Which implementation of the model to use:
 
@@ -366,11 +464,17 @@ class ModelConfig:
     - "transformers" will use the Transformers model implementation.
     - "terratorch" will use the TerraTorch model implementation.
     """
+    # [CN] 追加的 logits 处理器，允许是类，也允许是导入路径。
+
     logits_processors: list[str | type[LogitsProcessor]] | None = None
     """One or more logits processors' fully-qualified class names or class
     definitions"""
+    # [CN] 用于扩展输入输出的处理阶段。
+
     io_processor_plugin: str | None = None
     """IOProcessor plugin name to load at model startup"""
+    # [CN] 渲染环节的 worker 数量，可以按需上调。
+
     renderer_num_workers: int = 1
     """Number of worker threads in the renderer thread pool. The pool is
     consumed by the async renderer path (e.g. the OpenAI-compatible API
@@ -383,11 +487,15 @@ class ModelConfig:
     this setting has no effect there."""
 
     # Pooler config
+    # [CN] 池化模型的任务参数，用于向量、分类、打分。
+
     pooler_config: PoolerConfig | None = None
     """Pooler config which controls the behaviour of output pooling in pooling
     models."""
 
     # Multimodal config and init vars
+    # [CN] 那些入参最终都会汇总到这个配置里。
+
     multimodal_config: MultiModalConfig | None = None
     """Configuration for multimodal model. If `None`, this will be inferred
     from the architecture of `self.model`."""
