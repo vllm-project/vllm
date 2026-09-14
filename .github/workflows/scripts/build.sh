@@ -20,7 +20,7 @@ export MAX_JOBS=1
 # Do not add +PTX here: vLLM filters torch's top-level PTX flag when it
 # converts global gencode flags into per-kernel arch lists. If a specific
 # kernel needs PTX, add +PTX to that kernel's CMake arch list instead.
-export TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6 8.9 9.0 10.0 12.0"
+export TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6 8.9 9.0 10.0 12.0 12.1"
 
 bash tools/check_repo.sh
 
