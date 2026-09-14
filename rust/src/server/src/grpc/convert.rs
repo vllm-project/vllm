@@ -527,6 +527,7 @@ impl ResponseOpts {
 
 #[cfg(test)]
 mod tests {
+    use prost::Message;
     use vllm_engine_core_client::protocol::output::StopReason;
     use vllm_text::{
         FinishReason, Finished, Prompt, SamplingHints, SamplingLimits, lower_sampling_params,
