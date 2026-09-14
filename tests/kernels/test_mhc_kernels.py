@@ -474,7 +474,7 @@ def test_deepseek_v41_decoder_mixes_match_torch(
         reference,
     )
     monkeypatch.setattr(
-        "vllm.models.deepseek_v4_1.nvidia.model.mhc_fused_post_pre_delayed_tilelang",
+        "vllm.models.deepseek_v41.nvidia.model.mhc_fused_post_pre_delayed_tilelang",
         fused_reference,
     )
     expected = decoder(x, positions, None, **kwargs)
