@@ -125,3 +125,31 @@ class TestProviderReinitialization:
 
         assert [s.name for s in child_exporter.get_finished_spans()] == ["after_reinit"]
         assert not parent_exporter.get_finished_spans()
+
+
+class TestExporterSelection:
+    """`OTEL_EXPORTER_OTLP_PROTOCOL` is the variable most deployments set.
+
+    Ignoring it silently builds a gRPC exporter against an HTTP endpoint, which
+    fails without ever delivering a span.
+    """
+
+    def test_generic_protocol_env_is_honoured(self, monkeypatch):
+        from vllm.tracing import otel
+
+        monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", raising=False)
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
+
+        exporter = otel.get_span_exporter("http://localhost:4318/v1/traces")
+
+        assert "proto.http" in type(exporter).__module__
+
+    def test_traces_specific_protocol_wins(self, monkeypatch):
+        from vllm.tracing import otel
+
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "http/protobuf")
+
+        exporter = otel.get_span_exporter("http://localhost:4318/v1/traces")
+
+        assert "proto.http" in type(exporter).__module__

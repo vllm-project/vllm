@@ -34,6 +34,7 @@ try:
     )
     from opentelemetry.propagate import inject
     from opentelemetry.sdk.environment_variables import (
+        OTEL_EXPORTER_OTLP_PROTOCOL,
         OTEL_EXPORTER_OTLP_TRACES_PROTOCOL,
     )
     from opentelemetry.sdk.resources import Resource
@@ -100,6 +101,12 @@ def init_otel_tracer(
 
     atexit.register(trace_provider.shutdown)
 
+    logger.info(
+        "OTel tracing initialized: endpoint=%s exporter=%s",
+        otlp_traces_endpoint,
+        type(span_exporter).__module__,
+    )
+
     tracer = trace_provider.get_tracer(instrumenting_module_name)
     return tracer
 
@@ -112,7 +119,10 @@ def get_tracer(instrumenting_module_name: str) -> Tracer:
 
 
 def get_span_exporter(endpoint):
-    protocol = os.environ.get(OTEL_EXPORTER_OTLP_TRACES_PROTOCOL, "grpc")
+    protocol = os.environ.get(
+        OTEL_EXPORTER_OTLP_TRACES_PROTOCOL,
+        os.environ.get(OTEL_EXPORTER_OTLP_PROTOCOL, "grpc"),
+    )
     if protocol == "grpc":
         exporter = OTLPGrpcExporter(endpoint=endpoint, insecure=True)
     elif protocol == "http/protobuf":
