@@ -878,7 +878,9 @@ def test_rswa_selection_does_not_reuse_causal_result(blackwell_selection):
     config = EngineArgs(
         model="google/gemma-4-31B-it",
         dtype="bfloat16",
-        attention_config={"backend": "TRITON_FLASHINFER"},
+        attention_config=AttentionConfig(
+            backend=AttentionBackendEnum.TRITON_FLASHINFER
+        ),
     ).create_engine_config()
     with set_current_vllm_config(config):
         assert (
