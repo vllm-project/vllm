@@ -499,3 +499,73 @@ def test_vit_cudagraph_video(model_id, vllm_runner, video_assets):
 
         # Ensure the output is a string
         assert isinstance(output_text, str)
+
+
+def _check_eonly_encoder_outputs(worker, batches):
+    """Compare real E-only replay with eager, retaining outputs across replay."""
+    import torch
+
+    from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
+
+    runner = worker.model_runner
+    assert isinstance(runner, MMEncoderModelRunner)
+    manager = runner.model_state.encoder_runner.cudagraph_manager
+    assert manager is not None and manager.is_captured()
+    retained: list[tuple[torch.Tensor, torch.Tensor]] = []
+    max_error = 0.0
+    stats = []
+    with torch.inference_mode():
+        for batch in batches:
+            kwargs = {key: value.to(runner.device) for key, value in batch.items()}
+            actual = manager.execute(kwargs)
+            expected = runner.model.embed_multimodal(**kwargs)
+            assert len(actual) == len(expected)
+            for output, reference in zip(actual, expected):
+                assert torch.isfinite(output).all()
+                # Two BF16 ulps at unit scale, fixed before model validation.
+                torch.testing.assert_close(output, reference, rtol=0.016, atol=0.016)
+                max_error = max(max_error, (output - reference).abs().max().item())
+            for output, snapshot in retained:
+                torch.testing.assert_close(output, snapshot, rtol=0, atol=0)
+            retained.extend((output, output.clone()) for output in actual)
+            stats.append(manager.get_cumulative_stats())
+    assert stats[0]["graph_hits"] > 0
+    assert stats[1]["graph_hits"] > stats[0]["graph_hits"]
+    assert stats[2]["graph_misses"] > stats[1]["graph_misses"]
+    assert stats[3]["graph_hits"] > stats[2]["graph_hits"]
+    return {"max_abs_error": max_error, "stats": stats}
+
+
+@pytest.mark.parametrize("model_id", ["qwen2_5_vl", "qwen3_vl", "qwen3_5"])
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA graphs")
+def test_eonly_vit_cudagraph_outputs(model_id, vllm_runner, image_assets, monkeypatch):
+    """Exercise startup capture, mixed image order, fallback and output ownership."""
+    from transformers import AutoProcessor
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    config = MODEL_CONFIGS[model_id]
+    processor = AutoProcessor.from_pretrained(config.model).image_processor
+    first, second = [asset.pil_image for asset in image_assets]
+    batches = [
+        [first.resize((224, 224))],
+        [second.resize((448, 224)), first.resize((224, 224))],
+        [second.resize((896, 896))],
+        [second.resize((224, 224))],
+    ]
+    inputs = [dict(processor(images=images, return_tensors="pt")) for images in batches]
+    with vllm_runner(
+        config.model,
+        dtype=config.dtype,
+        mm_encoder_only=True,
+        max_model_len=4096,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"image": 2, "video": 0},
+        compilation_config={
+            "cudagraph_mode": "NONE",
+            "cudagraph_mm_encoder": True,
+            "encoder_cudagraph_token_budgets": [256],
+            "encoder_cudagraph_max_vision_items_per_batch": 2,
+        },
+    ) as model:
+        results = model.llm.collective_rpc(_check_eonly_encoder_outputs, args=(inputs,))
+        print(f"E-only {model_id}: {results}")
