@@ -694,6 +694,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # managers in every group. TP needs hashing finer than the Mamba block;
         # DCP accepts equality because it scales the effective full-attention
         # block instead.
+        self._has_mamba_align_group = any(
+            isinstance(g.kv_cache_spec, MambaSpec)
+            and g.kv_cache_spec.mamba_cache_mode == "align"
+            for g in kv_cache_config.kv_cache_groups
+        )
         self.enable_partial_hash_hits = (
             allow_partial_hash_hits
             and partial_hash_hits_enabled(
@@ -707,6 +712,16 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         for manager in self.single_type_managers:
             manager.cache_hit_alignment_tokens = cache_hit_alignment_tokens
         self.verify_and_split_kv_cache_groups()
+
+    def get_replay_boundaries(self, request: Request) -> tuple[int, ...]:
+        boundaries = set(super().get_replay_boundaries(request))
+        # An incremental multimodal sibling commonly diverges while appending
+        # the next item, before the producer's end-of-prompt state. Keep the
+        # last MM boundary as a conservative, application-independent replay
+        # point. Managers align it to their supported cache-hit granularity.
+        if self._has_mamba_align_group and request.last_mm_feature_end:
+            boundaries.add(request.last_mm_feature_end)
+        return tuple(sorted(boundaries))
 
     @property
     def _cache_hit_alignment_tokens(self) -> int:
