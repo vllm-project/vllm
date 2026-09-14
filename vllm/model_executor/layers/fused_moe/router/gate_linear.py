@@ -4,14 +4,10 @@ import torch
 from torch.nn.parameter import Parameter
 
 import vllm._custom_ops as ops
-from vllm.config import get_current_vllm_config_or_none
-from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
-
-logger = init_logger(__name__)
 
 
 @PluggableLayer.register("gate_linear")
@@ -22,7 +18,7 @@ class GateLinear(ReplicatedLinear):
        K divisible by 8)
     2. fp32 specialized kernel (SM90+ or gfx950, bf16/fp32 in, fp32 out,
        M<=32, model-specific shapes)
-    3. experimental bf16x3 CuteDSL kernel (opt-in, SM100, bf16 in, fp32 weight)
+    3. bf16x3 CuteDSL kernel (SM100, bf16 in, fp32 weight)
     4. cuBLAS bf16×bf16→fp32 (SM90+ + bf16 weight + fp32 out_dtype)
     5. F.linear via ReplicatedLinear (ultimate fallback)
 
@@ -85,11 +81,6 @@ class GateLinear(ReplicatedLinear):
         self.allow_specialized_router_gemm = can_use_specialized_kernels
 
         # fp32 specialized kernel eligibility (exact dims, fp32 weight)
-        vllm_config = get_current_vllm_config_or_none()
-        enable_bf16x3_router_gemm = (
-            vllm_config is not None
-            and vllm_config.kernel_config.enable_bf16x3_router_gemm
-        )
         self.allow_fp32_router_gemm = (
             not bias
             and self.weight.dtype == torch.float32
@@ -108,10 +99,7 @@ class GateLinear(ReplicatedLinear):
             and current_platform.is_cuda()
             and is_blackwell
             and input_size % 8 == 0
-            and enable_bf16x3_router_gemm
         )
-        if self.allow_bf16x3_router_gemm:
-            logger.info_once("Enabled experimental SM100 BF16x3 router GEMM.")
 
         # Fused bf16 x bf16 -> fp32 GEMM eligibility. torch.mm's out_dtype
         # epilogue folds the fp32 cast into the GEMM, removing the standalone
@@ -198,7 +186,7 @@ class GateLinear(ReplicatedLinear):
             )
             return output, None
 
-        # Tier 3: experimental bf16x3 CuteDSL kernel for fp32 router weights
+        # Tier 3: bf16x3 CuteDSL kernel for fp32 router weights
         if self.allow_bf16x3_router_gemm and x.dtype == torch.bfloat16:
             from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_cutedsl import (  # noqa: E501
                 bf16x3_router_gemm,
@@ -251,10 +239,10 @@ def fp32_router_gemm_dispatch_impl(
 
     if allow_bf16x3_router_gemm and x.dtype == torch.bfloat16:
         from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_cutedsl import (  # noqa: E501
-            bf16x3_router_gemm,
+            _bf16x3_router_gemm,
         )
 
-        return bf16x3_router_gemm(x, weight)
+        return _bf16x3_router_gemm(x, weight)
 
     return torch.nn.functional.linear(x.float(), weight)
 

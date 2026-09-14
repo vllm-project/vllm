@@ -51,6 +51,10 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backends.mla.index_group import (
+    SparseMLAIndexGroupBuilder,
+    get_sparse_mla_index_group_max_rows,
+)
 
 from .glm4_moe_lite import (
     Glm4MixtureOfExperts,
@@ -108,6 +112,14 @@ class Glm4MoeLiteMultiTokenPredictorLayer(nn.Module):
             )
         else:
             topk_indices_buffer = None
+        index_group_builder = (
+            SparseMLAIndexGroupBuilder(
+                topk_indices_buffer,
+                get_sparse_mla_index_group_max_rows(vllm_config),
+            )
+            if topk_indices_buffer is not None
+            else None
+        )
 
         self.shared_head = SharedHead(
             config=config, prefix=prefix, quant_config=quant_config
@@ -117,6 +129,7 @@ class Glm4MoeLiteMultiTokenPredictorLayer(nn.Module):
             prefix=prefix,
             config=self.config,
             topk_indices_buffer=topk_indices_buffer,
+            index_group_builder=index_group_builder,
         )
 
     def forward(
