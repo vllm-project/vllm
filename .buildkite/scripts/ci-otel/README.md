@@ -27,9 +27,17 @@ These are device readings during each test's time interval, not process-level
 kernel attribution. Other processes and overlapping tests can contribute to
 the readings. Subsecond tests may have no sample. Missing readings never become
 zero utilization. MIG parent-device memory and utilization are omitted because
-they cannot be attributed to the job's partition. The initial implementation
-covers NVIDIA commands in the existing tracing rollout; CPU jobs and AMD
-mirrors do not collect GPU samples.
+they cannot be attributed to the job's partition. When the environment identifies
+an assigned MIG UUID, the collector queries that instance's used/total memory
+through vLLM's standalone bundled NVML binding in a bounded subprocess.
+The binding is loaded directly to avoid vLLM/Torch import side effects. Numeric
+`CUDA_VISIBLE_DEVICES` indices are resolved against explicit MIG UUIDs in
+`NVIDIA_VISIBLE_DEVICES`. For CDI assignments without an explicit UUID, a bounded
+helper initializes the CUDA driver and reads only CUDA-visible device UUIDs,
+without creating CUDA contexts or importing Torch. NVML verifies each MIG handle.
+Discovery or permission failures remain unknown; NVML sibling instances are never
+enumerated. MIG utilization stays absent.
+CPU jobs and AMD mirrors do not collect GPU samples.
 
 Run the helper tests without loading vLLM or requiring a GPU:
 
