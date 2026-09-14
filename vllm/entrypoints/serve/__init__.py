@@ -54,6 +54,12 @@ def register_vllm_dev_api_routers(app: FastAPI):
 
     attach_rlhf_router(app)
 
+    from .dev.runtime_config.api_router import (
+        attach_router as attach_runtime_config_router,
+    )
+
+    attach_runtime_config_router(app)
+
     from .dev.rpc.api_router import attach_router as attach_rpc_router
 
     attach_rpc_router(app)

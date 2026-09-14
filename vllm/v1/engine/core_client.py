@@ -191,6 +191,14 @@ class EngineCoreClient(ABC):
     def reset_encoder_cache(self) -> None:
         raise NotImplementedError
 
+    def get_runtime_config(self) -> dict[str, int]:
+        raise NotImplementedError
+
+    def update_runtime_config(
+        self, max_num_running_seqs: int | None = None
+    ) -> dict[str, int]:
+        raise NotImplementedError
+
     def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
         raise NotImplementedError
 
@@ -281,6 +289,14 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def reset_encoder_cache_async(self) -> None:
+        raise NotImplementedError
+
+    async def get_runtime_config_async(self) -> dict[str, int]:
+        raise NotImplementedError
+
+    async def update_runtime_config_async(
+        self, max_num_running_seqs: int | None = None
+    ) -> dict[str, int]:
         raise NotImplementedError
 
     async def sleep_async(self, level: int = 1, mode: PauseMode = "abort") -> None:
@@ -392,6 +408,14 @@ class InprocClient(EngineCoreClient):
 
     def reset_encoder_cache(self) -> None:
         self.engine_core.reset_encoder_cache()
+
+    def get_runtime_config(self) -> dict[str, int]:
+        return self.engine_core.get_runtime_config()
+
+    def update_runtime_config(
+        self, max_num_running_seqs: int | None = None
+    ) -> dict[str, int]:
+        return self.engine_core.update_runtime_config(max_num_running_seqs)
 
     def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
         if mode == "wait":
@@ -998,6 +1022,14 @@ class SyncMPClient(MPClient):
     def reset_encoder_cache(self) -> None:
         self.call_utility("reset_encoder_cache")
 
+    def get_runtime_config(self) -> dict[str, int]:
+        return self.call_utility("get_runtime_config")
+
+    def update_runtime_config(
+        self, max_num_running_seqs: int | None = None
+    ) -> dict[str, int]:
+        return self.call_utility("update_runtime_config", max_num_running_seqs)
+
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.call_utility("add_lora", lora_request)
 
@@ -1253,6 +1285,16 @@ class AsyncMPClient(MPClient):
 
     async def reset_encoder_cache_async(self) -> None:
         await self.call_utility_async("reset_encoder_cache")
+
+    async def get_runtime_config_async(self) -> dict[str, int]:
+        return await self.call_utility_async("get_runtime_config")
+
+    async def update_runtime_config_async(
+        self, max_num_running_seqs: int | None = None
+    ) -> dict[str, int]:
+        return await self.call_utility_async(
+            "update_runtime_config", max_num_running_seqs
+        )
 
     async def sleep_async(self, level: int = 1, mode: PauseMode = "abort") -> None:
         await self.call_utility_async("sleep", level, mode)

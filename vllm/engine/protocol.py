@@ -180,6 +180,18 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
+    async def get_runtime_config(self) -> dict[str, int]:
+        """Return settings that can be changed without restarting the engine."""
+        ...
+
+    @abstractmethod
+    async def update_runtime_config(
+        self, max_num_running_seqs: int | None = None
+    ) -> dict[str, int]:
+        """Update settings that stay within startup-time resource capacity."""
+        ...
+
+    @abstractmethod
     async def sleep(self, level: int = 1, mode: "PauseMode" = "abort") -> None:
         """Sleep the engine"""
         ...
