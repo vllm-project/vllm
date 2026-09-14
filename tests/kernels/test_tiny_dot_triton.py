@@ -4,8 +4,7 @@
 
 A Qwen MoE shared_expert_gate is a ReplicatedLinear(hidden_size, 1), so it
 reaches rocm_unquantized_gemm_impl with m == n == 1 and is served by
-_tiny_dot_triton instead of BLAS. The K values below are the ones that gate
-actually uses.
+_tiny_dot_triton instead of BLAS.
 """
 
 from __future__ import annotations
@@ -15,19 +14,24 @@ import torch
 
 from vllm.model_executor.layers.utils import _TINY_DOT_MAX_K, _tiny_dot_triton
 
-
-@pytest.mark.skipif(
+requires_gpu = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Triton kernel requires a GPU"
 )
+
+
+@requires_gpu
 @pytest.mark.parametrize("K", [32, 1024, 2048, 4096, 65536, _TINY_DOT_MAX_K])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-def test_tiny_dot_matches_eager(K: int, dtype: torch.dtype):
+@pytest.mark.parametrize("apply_sigmoid", [False, True])
+def test_tiny_dot_matches_eager(K: int, dtype: torch.dtype, apply_sigmoid: bool):
     torch.manual_seed(0)
     x = (torch.randn(K, dtype=dtype, device="cuda") * 0.05).contiguous()
     w = (torch.randn(K, dtype=dtype, device="cuda") * 0.05).contiguous()
 
     ref = (x * w).sum(dtype=x.dtype)
-    got = _tiny_dot_triton(x, w)
+    if apply_sigmoid:
+        ref = torch.sigmoid(ref)
+    got = _tiny_dot_triton(x, w, apply_sigmoid=apply_sigmoid)
 
     # Both paths accumulate in fp32, so the only difference is the rounding
     # of the final store; the bound just has to clear bf16 ulp at this scale.

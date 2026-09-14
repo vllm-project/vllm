@@ -47,10 +47,15 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.utils import (
+    tiny_sigmoid_dot,
+    tiny_sigmoid_dot_supported,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -108,6 +113,14 @@ class Qwen2MoeMLP(nn.Module):
             )
         self.act_fn = SiluAndMul()
         self.expert_gate = expert_gate
+        # The fused gate below reads expert_gate.weight directly instead of
+        # calling the layer, so it needs a plain unquantized weight and no bias.
+        self.use_tiny_sigmoid_dot = (
+            expert_gate is not None
+            and expert_gate.bias is None
+            and isinstance(expert_gate.quant_method, UnquantizedLinearMethod)
+            and tiny_sigmoid_dot_supported()
+        )
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
@@ -115,7 +128,12 @@ class Qwen2MoeMLP(nn.Module):
         out, _ = self.down_proj(out)
 
         if self.expert_gate is not None:
-            out = F.sigmoid(self.expert_gate(x)[0]) * out
+            # The gate is a Linear(hidden_size, 1), so on a single token it
+            # degenerates to a dot product, sigmoid included.
+            if self.use_tiny_sigmoid_dot and x.shape[0] == 1:
+                out = tiny_sigmoid_dot(x, self.expert_gate.weight) * out
+            else:
+                out = F.sigmoid(self.expert_gate(x)[0]) * out
 
         return out
 

@@ -10,8 +10,12 @@ shared_expert_gate produces:
   - eager fused: (x*w).sum(dtype=x.dtype), the two-launch fallback.
   - Triton: _tiny_dot_triton, the single-launch production pick.
 
+With --sigmoid every arm is followed by a sigmoid, which is how the gate is
+actually used; the Triton arm folds it into the kernel while the other two
+pay another launch for it.
+
 Usage:
-    python benchmarks/kernels/bench_tiny_dot.py --k 2048 --dtype bf16
+    python benchmarks/kernels/bench_tiny_dot.py --k 2048 --dtype bf16 --sigmoid
 """
 
 from __future__ import annotations
@@ -37,6 +41,11 @@ def main() -> None:
         help="Hidden dim K (2048 = Qwen3.5-A3B shared_expert_gate)",
     )
     p.add_argument("--dtype", choices=["bf16", "fp16"], default="bf16")
+    p.add_argument(
+        "--sigmoid",
+        action="store_true",
+        help="Gate the dot with a sigmoid, as the shared_expert_gate does",
+    )
     args = p.parse_args()
 
     dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float16
@@ -45,14 +54,17 @@ def main() -> None:
     x_flat = x.reshape(-1).contiguous()
     w_flat = w.reshape(-1).contiguous()
 
+    def gate(out: torch.Tensor) -> torch.Tensor:
+        return torch.sigmoid(out) if args.sigmoid else out
+
     def blas() -> torch.Tensor:
-        return torch.nn.functional.linear(x, w)
+        return gate(torch.nn.functional.linear(x, w))
 
     def eager_fused() -> torch.Tensor:
-        return (x.reshape(-1) * w.reshape(-1)).sum(dtype=x.dtype)
+        return gate((x.reshape(-1) * w.reshape(-1)).sum(dtype=x.dtype))
 
     def triton_fast() -> torch.Tensor:
-        return _tiny_dot_triton(x_flat, w_flat)
+        return _tiny_dot_triton(x_flat, w_flat, apply_sigmoid=args.sigmoid)
 
     for fn in (blas, eager_fused, triton_fast):
         fn()
@@ -62,7 +74,7 @@ def main() -> None:
     t_eager = time_us(eager_fused)
     t_triton = time_us(triton_fast)
 
-    print(f"Shape 1x1xK={args.k}, dtype={dtype}")
+    print(f"Shape 1x1xK={args.k}, dtype={dtype}, sigmoid={args.sigmoid}")
     print(f"  {'config':<20} {'time_us':>10}  {'vs BLAS':>10}")
     print("  " + "-" * 44)
     print(f"  {'BLAS':<20} {t_blas:>10.2f}  {'(ref)':>10}")
