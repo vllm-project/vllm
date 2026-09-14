@@ -313,7 +313,7 @@ fn build_sampling_params(
 /// - `top_n(k)` → `(Some(k), None)` — return top-k candidates by probability
 /// - `all` → `(Some(-1), None)` — return the full vocabulary
 /// - nonempty `token_ids` → `(None, Some(ids))` — let the engine derive the count
-/// - absent or empty `token_ids` → `(Some(1), None)` — use the default candidate count
+/// - absent or empty `token_ids` → `(Some(0), None)` — return only the sampled/scored token
 fn candidate_logprob_spec(
     candidates: Option<&pb::CandidateTokens>,
 ) -> (Option<i32>, Option<Vec<u32>>) {
@@ -325,7 +325,7 @@ fn candidate_logprob_spec(
             // of the numeric top-logprobs count and its max_logprobs cap.
             (None, Some(ids.ids.clone()))
         }
-        _ => (Some(1), None),
+        _ => (Some(0), None),
     }
 }
 
@@ -692,10 +692,10 @@ mod tests {
             ),
             (
                 Some(Select::TokenIds(pb::TokenIds { ids: vec![] })),
-                Some(1),
+                Some(0),
                 None,
             ),
-            (None, Some(1), None),
+            (None, Some(0), None),
             (Some(Select::TopN(0)), Some(0), None),
             (Some(Select::TopN(2)), Some(2), None),
         ];
