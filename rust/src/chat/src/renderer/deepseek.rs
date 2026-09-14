@@ -776,7 +776,10 @@ fn write_chat_content(
                 match part {
                     ChatContentPart::ImageUrl { .. } if dialect == DsDialect::V41 => {
                         out.push_str(DEEPSEEK_V41_IMAGE_PLACEHOLDER);
-                        media_order.push(MediaPartSource::new(message_index, index));
+                        media_order.push(MediaPartSource {
+                            message_index,
+                            content_part_index: index,
+                        });
                     }
                     _ => out.push_str(part.as_text()?),
                 }

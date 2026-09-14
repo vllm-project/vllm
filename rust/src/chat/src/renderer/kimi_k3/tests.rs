@@ -312,7 +312,8 @@ fn media_order_follows_reordered_tool_results() {
     request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
     let renderer = KimiK3ChatRenderer::new(Arc::new(test_tokenizer()));
 
-    let (rendered, media_order) = renderer.render_with_media_order(&request).unwrap();
+    let rendered = renderer.render(&request).unwrap();
+    let media_order = rendered.media_order.unwrap();
     let Prompt::TokenIds(token_ids) = rendered.prompt else {
         panic!("kimi k3 renderer should return token IDs")
     };

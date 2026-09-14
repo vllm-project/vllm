@@ -60,7 +60,10 @@ impl<'a> K3TokenWriter<'a> {
 
     fn image(&mut self, message_index: usize, content_part_index: usize) -> Result<()> {
         self.control(IMAGE_PLACEHOLDER)?;
-        self.media_order.push(MediaPartSource::new(message_index, content_part_index));
+        self.media_order.push(MediaPartSource {
+            message_index,
+            content_part_index,
+        });
         Ok(())
     }
 

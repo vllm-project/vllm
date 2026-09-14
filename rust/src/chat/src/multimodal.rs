@@ -16,7 +16,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
 
-use itertools::izip;
+use itertools::{Either, izip};
 use llm_multimodal::{
     AsyncMultiModalTracker, AudioClip, AudioPreProcessor, EncoderFieldLayouts, FieldLayout,
     ImageFrame, MediaConnector, MediaConnectorConfig, MediaContentPart, Modality, ModelMetadata,
@@ -543,11 +543,11 @@ impl MultimodalModelInfo {
 pub(crate) async fn finalize_rendered_prompt(
     request: &ChatRequest,
     rendered: RenderedPrompt,
-    media_order: Vec<MediaPartSource>,
     info: Option<&MultimodalModelInfo>,
     model_dtype: ModelDtype,
 ) -> Result<(Prompt, Option<MmFeatures>)> {
-    if media_order.is_empty() {
+    let media_parts = extract_media_parts(request, rendered.media_order.as_deref())?;
+    if media_parts.is_empty() {
         return Ok((rendered.prompt, None));
     }
     let info = info.ok_or(Error::UnsupportedMultimodalRenderer)?;
@@ -559,7 +559,6 @@ pub(crate) async fn finalize_rendered_prompt(
             .map_err(|error| multimodal!("{error}"))?,
         Prompt::TokenIds(token_ids) => token_ids,
     };
-    let media_parts = extract_media_parts(request, &media_order)?;
     let prepared = info.prepare_multimodal(media_parts, &mut prompt_token_ids, model_dtype).await?;
 
     Ok((Prompt::TokenIds(prompt_token_ids), Some(prepared)))
@@ -568,15 +567,15 @@ pub(crate) async fn finalize_rendered_prompt(
 /// Resolve media parts in the placeholder order reported by the renderer.
 fn extract_media_parts(
     request: &ChatRequest,
-    media_order: &[MediaPartSource],
+    media_order: Option<&[MediaPartSource]>,
 ) -> Result<Vec<MediaContentPart>> {
-    media_order
-        .iter()
-        .map(|source| {
-            let message = request.messages.get(source.message_index()).ok_or_else(|| {
+    let parts = match media_order {
+        // Resolve exactly the sources selected by the renderer, in placeholder order.
+        Some(media_order) => Either::Left(media_order.iter().map(|source| -> Result<_> {
+            let message = request.messages.get(source.message_index).ok_or_else(|| {
                 multimodal!(
                     "renderer reported missing chat message {} for multimodal content",
-                    source.message_index()
+                    source.message_index
                 )
             })?;
             let content = match message {
@@ -591,41 +590,59 @@ fn extract_media_parts(
             let ChatContent::Parts(parts) = content else {
                 bail_multimodal!("renderer reported multimodal content in a text-only chat message")
             };
-            let part = parts.get(source.content_part_index()).ok_or_else(|| {
+            let part = parts.get(source.content_part_index).ok_or_else(|| {
                 multimodal!(
                     "renderer reported missing content part {} in chat message {}",
-                    source.content_part_index(),
-                    source.message_index()
+                    source.content_part_index,
+                    source.message_index
                 )
             })?;
-            match part {
-                ChatContentPart::Text { .. } => {
-                    bail_multimodal!("renderer reported a text part as multimodal content")
-                }
-                ChatContentPart::ImageUrl {
-                    image_url,
-                    detail,
-                    uuid,
-                } => Ok(MediaContentPart::ImageUrl {
-                    url: image_url.clone(),
-                    detail: *detail,
-                    uuid: uuid.clone(),
-                }),
-                ChatContentPart::VideoUrl { video_url, uuid } => Ok(MediaContentPart::VideoUrl {
-                    url: video_url.clone(),
-                    uuid: uuid.clone(),
-                }),
-                ChatContentPart::InputAudio { data, format, uuid } => {
-                    Ok(MediaContentPart::AudioUrl {
-                        url: input_audio_data_url(data, format.as_deref())?,
-                        uuid: uuid.clone(),
-                    })
-                }
-                ChatContentPart::AudioUrl { audio_url, uuid } => Ok(MediaContentPart::AudioUrl {
-                    url: audio_url.clone(),
-                    uuid: uuid.clone(),
-                }),
+            Ok(part)
+        })),
+        // Fall back to all media in request message and content-part order (e.g. Jinja).
+        None => Either::Right(request.messages.iter().flat_map(|message| {
+            let content = match message {
+                ChatMessage::System { content }
+                | ChatMessage::Developer { content, .. }
+                | ChatMessage::User { content }
+                | ChatMessage::ToolResponse { content, .. } => Some(content),
+                ChatMessage::Assistant { .. } => None,
+            };
+            match content {
+                Some(ChatContent::Parts(parts)) => parts.as_slice(),
+                _ => &[],
             }
+            .iter()
+            .filter(|part| part.is_multimodal())
+            .map(Ok)
+        })),
+    };
+    parts
+        .map(|part| match part? {
+            ChatContentPart::Text { .. } => {
+                bail_multimodal!("renderer reported a text part as multimodal content")
+            }
+            ChatContentPart::ImageUrl {
+                image_url,
+                detail,
+                uuid,
+            } => Ok(MediaContentPart::ImageUrl {
+                url: image_url.clone(),
+                detail: *detail,
+                uuid: uuid.clone(),
+            }),
+            ChatContentPart::VideoUrl { video_url, uuid } => Ok(MediaContentPart::VideoUrl {
+                url: video_url.clone(),
+                uuid: uuid.clone(),
+            }),
+            ChatContentPart::InputAudio { data, format, uuid } => Ok(MediaContentPart::AudioUrl {
+                url: input_audio_data_url(data, format.as_deref())?,
+                uuid: uuid.clone(),
+            }),
+            ChatContentPart::AudioUrl { audio_url, uuid } => Ok(MediaContentPart::AudioUrl {
+                url: audio_url.clone(),
+                uuid: uuid.clone(),
+            }),
         })
         .collect()
 }
@@ -1023,41 +1040,69 @@ mod tests {
     }
 
     #[test]
-    fn extract_media_parts_follows_renderer_order() {
+    fn extract_media_parts_uses_request_order_or_explicit_selection() {
         let request = ChatRequest {
             messages: vec![
-                ChatMessage::user(vec![ChatContentPart::ImageUrl {
-                    image_url: "data:image/png;base64,image-b".to_string(),
-                    detail: None,
-                    uuid: Some("image-b".to_string()),
-                }]),
+                ChatMessage::user(vec![
+                    ChatContentPart::text("before image"),
+                    ChatContentPart::ImageUrl {
+                        image_url: "data:image/png;base64,image-b".to_string(),
+                        detail: None,
+                        uuid: Some("image-b".to_string()),
+                    },
+                ]),
                 ChatMessage::user(vec![ChatContentPart::ImageUrl {
                     image_url: "data:image/png;base64,image-a".to_string(),
                     detail: None,
                     uuid: Some("image-a".to_string()),
                 }]),
+                ChatMessage::assistant_text("answer"),
+                ChatMessage::user("follow-up"),
             ],
             ..ChatRequest::for_test()
         };
-        let media_order = [MediaPartSource::new(1, 0), MediaPartSource::new(0, 0)];
+        let media_order = [
+            MediaPartSource {
+                message_index: 1,
+                content_part_index: 0,
+            },
+            MediaPartSource {
+                message_index: 0,
+                content_part_index: 1,
+            },
+        ];
 
-        let media_parts = extract_media_parts(&request, &media_order).unwrap();
-        let uuids = media_parts
-            .into_iter()
-            .map(|part| match part {
-                MediaContentPart::ImageUrl { uuid, .. } => uuid,
-                _ => panic!("expected image URL"),
-            })
-            .collect::<Vec<_>>();
+        let selections = [None, Some(&media_order[..]), Some(&[][..])];
+        let uuids = selections.map(|order| {
+            extract_media_parts(&request, order)
+                .unwrap()
+                .into_iter()
+                .map(|part| match part {
+                    MediaContentPart::ImageUrl { uuid, .. } => uuid,
+                    _ => panic!("expected image URL"),
+                })
+                .collect::<Vec<_>>()
+        });
 
         expect_test::expect![[r#"
             [
-                Some(
-                    "image-a",
-                ),
-                Some(
-                    "image-b",
-                ),
+                [
+                    Some(
+                        "image-b",
+                    ),
+                    Some(
+                        "image-a",
+                    ),
+                ],
+                [
+                    Some(
+                        "image-a",
+                    ),
+                    Some(
+                        "image-b",
+                    ),
+                ],
+                [],
             ]
         "#]]
         .assert_debug_eq(&uuids);

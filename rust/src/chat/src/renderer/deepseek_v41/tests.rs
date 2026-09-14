@@ -112,7 +112,8 @@ fn media_order_follows_reordered_tool_results() {
         ..ChatRequest::for_test()
     };
 
-    let (rendered, media_order) = renderer.render_with_media_order(&request).unwrap();
+    let rendered = renderer.render(&request).unwrap();
+    let media_order = rendered.media_order.unwrap();
     let prompt = rendered.prompt.into_text().unwrap();
 
     assert!(prompt.find("result-a").unwrap() < prompt.find("result-b").unwrap());
@@ -142,7 +143,8 @@ fn media_order_excludes_dropped_historical_developer_content() {
         ..ChatRequest::for_test()
     };
 
-    let (rendered, media_order) = renderer.render_with_media_order(&request).unwrap();
+    let rendered = renderer.render(&request).unwrap();
+    let media_order = rendered.media_order.unwrap();
     let prompt = rendered.prompt.into_text().unwrap();
 
     assert!(!prompt.contains("<｜deepseek_image｜>"));

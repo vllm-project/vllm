@@ -111,20 +111,22 @@ impl ChatRequestProcessor {
         &self,
         request: &ChatRequest,
         rendered: RenderedPrompt,
-        media_order: Vec<MediaPartSource>,
     ) -> Result<(Prompt, Option<MmFeatures>)> {
+        let media_is_empty = rendered.media_order.as_ref().map_or_else(
+            || !request.has_multimodal(),
+            |media_order| media_order.is_empty(),
+        );
         match self.model_dtype {
             Some(model_dtype) => {
                 multimodal::finalize_rendered_prompt(
                     request,
                     rendered,
-                    media_order,
                     self.backend.multimodal_model_info(),
                     model_dtype,
                 )
                 .await
             }
-            None if media_order.is_empty() => Ok((rendered.prompt, None)),
+            None if media_is_empty => Ok((rendered.prompt, None)),
             None => Err(Error::UnsupportedMultimodalRenderer),
         }
     }
@@ -150,8 +152,7 @@ impl ChatRequestProcessor {
     async fn prepare_text_request(&self, request: ChatRequest) -> Result<TextRequest> {
         // Stamp before rendering so render and tokenize count toward TTFT/e2e.
         let arrival_time = vllm_llm::current_unix_timestamp_secs();
-        let (rendered, media_order) =
-            self.backend.chat_renderer().render_with_media_order(&request)?;
+        let rendered = self.backend.chat_renderer().render(&request)?;
         let reasoning_parser_kwargs =
             request
                 .sampling_params
@@ -160,8 +161,7 @@ impl ChatRequestProcessor {
                 .then(|| ReasoningParserKwargs {
                     chat_template_kwargs: rendered.effective_template_kwargs.clone(),
                 });
-        let (prompt, mm_features) =
-            self.finalize_rendered_prompt(&request, rendered, media_order).await?;
+        let (prompt, mm_features) = self.finalize_rendered_prompt(&request, rendered).await?;
         Ok(TextRequest {
             request_id: request.request_id,
             prompt,
