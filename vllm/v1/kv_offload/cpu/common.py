@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass, fields
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass
 
 import numpy as np
 
@@ -13,13 +14,14 @@ class CPUOffloadingMetrics:
     CPU_ALLOCATION_SIZE = "vllm:kv_offload_cpu_allocation_size"
     CPU_CACHE_WRITE_USAGE_PERC = "vllm:kv_offload_cpu_cache_write_usage_perc"
     CPU_CACHE_READ_USAGE_PERC = "vllm:kv_offload_cpu_cache_read_usage_perc"
-    CPU_CONFIG_INFO = "vllm:kv_offload_cpu_config_info"
 
 
 @dataclass(frozen=True)
-class CPUCacheTierInfo:
-    """
-    Static, per-engine facts about the CPU offload tier.
+class CPUCacheOffloadingInfo:
+    """Static, per-engine facts about the CPU offload tier.
+
+    CPUOffloadingManager publishes these facts as info metric labels. See
+    OffloadingManager.config_info().
     """
 
     # Chunk count, not GPU blocks; see blocks_per_chunk.
@@ -29,21 +31,23 @@ class CPUCacheTierInfo:
     # Page-aligned bytes per chunk. With num_chunks this is the tier's exact
     # size in bytes, the only capacity valid for every model shape.
     kv_bytes_per_chunk: int
-    # KV tokens the tier can serve when it is full and every request reaches
-    # max_model_len. The largest value the capacity takes, because a longer
-    # request spreads the fixed per-request chunks (one Mamba state, one sliding
-    # window) over more tokens. None when max_model_len is not known.
+    # Upper bound on the KV tokens the tier holds, over the request lengths up
+    # to max_model_len. None when max_model_len is not known.
     # See _capacity_tokens_at_max_len.
     capacity_tokens_at_max_len: int | None
 
-    def as_labelvalues(self) -> tuple[str, ...]:
-        """Render label values in CPU_TIER_INFO_LABELS order."""
-        return tuple(str(getattr(self, name)) for name in CPU_TIER_INFO_LABELS)
+    def as_config_info(self) -> Mapping[str, str | int]:
+        """Render the facts as info metric labels, one label for each field.
 
-
-# Derived from CPUCacheTierInfo so the declaration and the emission cannot drift;
-# the offloading metrics path binds label values positionally.
-CPU_TIER_INFO_LABELS: tuple[str, ...] = tuple(f.name for f in fields(CPUCacheTierInfo))
+        Every key carries the "cpu_" prefix, so a fact keeps one name whether
+        the CPU cache runs alone or as the primary tier of a tiering manager.
+        An unknown token capacity reads "None", because a label value holds a
+        string, and a dropped label would change the label set.
+        """
+        return {
+            f"cpu_{name}": "None" if value is None else value
+            for name, value in asdict(self).items()
+        }
 
 
 class CPULoadStoreSpec(BlockIDsLoadStoreSpec):
