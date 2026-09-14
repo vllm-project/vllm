@@ -427,20 +427,12 @@ class RoutedExpertsManager:
         array_bytes = token_count * np.prod(self.routed_experts_by_slot.shape[1:])
         array_bytes *= self.routed_experts_by_slot.dtype.itemsize
         if array_bytes > MAX_ROUTED_EXPERTS_ARRAY_BYTES:
-            logger.warning(
-                "Omitting routed-experts payload of %d bytes; limit is %d bytes.",
-                array_bytes,
-                MAX_ROUTED_EXPERTS_ARRAY_BYTES,
+            raise ValueError(
+                f"Routed-experts payload of {array_bytes} bytes exceeds the "
+                f"in-memory limit of {MAX_ROUTED_EXPERTS_ARRAY_BYTES} bytes."
             )
-            return None
         routed_experts = self.get(block_ids, num_tokens, token_start=token_start)
-        try:
-            return self.serialize(routed_experts)
-        except ValueError:
-            logger.warning(
-                "Omitting routed-experts payload that exceeds transport limit."
-            )
-            return None
+        return self.serialize(routed_experts)
 
     def get(
         self,

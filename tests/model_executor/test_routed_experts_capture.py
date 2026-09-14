@@ -101,8 +101,8 @@ def _make_model_config(hf_config):
         ),
     )
     model_config.get_num_experts = lambda: hf_config.num_experts
-    model_config.get_num_experts_per_tok = lambda: (
-        ModelConfig.get_num_experts_per_tok(model_config)
+    model_config.get_num_experts_per_tok = lambda: ModelConfig.get_num_experts_per_tok(
+        model_config
     )
     model_config.get_total_num_hidden_layers = lambda: hf_config.num_hidden_layers
     return model_config
@@ -192,21 +192,29 @@ def test_terminal_routed_experts_omit_payload_when_current_step_capture_is_missi
     manager.get.assert_not_called()
 
 
-def test_terminal_routed_experts_omit_oversized_payload_before_copy(monkeypatch):
+def test_terminal_routed_experts_reject_oversized_payload_before_copy(monkeypatch):
     manager = RoutedExpertsManager.__new__(RoutedExpertsManager)
     manager.routed_experts_by_slot = np.zeros((8, 3, 2), dtype=np.uint8)
     manager.get = Mock()
     monkeypatch.setattr(_REC_MODULE + ".MAX_ROUTED_EXPERTS_ARRAY_BYTES", 5)
 
-    payload = manager.serialize_terminal(
-        [4, 5],
-        3,
-        1,
-        current_step_captured=True,
-    )
+    with pytest.raises(ValueError, match="exceeds the in-memory limit"):
+        manager.serialize_terminal([4, 5], 3, 1, current_step_captured=True)
 
-    assert payload is None
     manager.get.assert_not_called()
+
+
+def test_terminal_routed_experts_propagates_transport_limit_error(monkeypatch):
+    manager = RoutedExpertsManager.__new__(RoutedExpertsManager)
+    expected = np.arange(12, dtype=np.uint8).reshape(2, 3, 2)
+    manager.routed_experts_by_slot = np.zeros((8, 3, 2), dtype=np.uint8)
+    manager.get = Mock(return_value=expected)
+    monkeypatch.setattr(_REC_MODULE + ".MAX_ROUTED_EXPERTS_PAYLOAD_BYTES", 1)
+
+    with pytest.raises(ValueError, match="63 MiB transport limit"):
+        manager.serialize_terminal([4, 5], 3, 1, current_step_captured=True)
+
+    manager.get.assert_called_once_with([4, 5], 3, token_start=1)
 
 
 def test_terminal_routed_experts_serialize_complete_payload_for_error_step():
