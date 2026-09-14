@@ -1624,8 +1624,8 @@ class NixlBaseConnectorWorker:
                         (cache.data_ptr(), physical_page_size, physical_page_size)
                     ]
                 elif storage_is_block_major and (
-                    not page_contiguous
-                    and ((packed_storage and is_mla_region) or not self._is_csa_linear)
+                    (self._has_packed_cache and packed_storage and is_mla_region)
+                    or (not page_contiguous and not self._is_csa_linear)
                 ):
                     # TODO(Lucas): handle TP slicing for packed_storage; for now
                     # restrict to MLA (DSv4) where kv is replicated.
