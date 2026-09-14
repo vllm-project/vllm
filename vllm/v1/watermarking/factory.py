@@ -11,6 +11,9 @@ from vllm.v1.watermarking.watermarker import Watermarker
 
 
 def create_watermarker(config: WatermarkConfig) -> Watermarker:
+    # context_width is set to a scheme-specific default by validate_watermark_settings
+    # before this function is called; assert here to satisfy the type checker.
+    assert config.context_width is not None
     if config.algorithm == "gumbel":
         return GumbelWatermarker(config.key, config.context_width, config.prf)
     if config.algorithm == "dual_key_gumbel":
