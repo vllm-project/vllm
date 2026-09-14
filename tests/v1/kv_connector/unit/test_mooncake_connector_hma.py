@@ -470,7 +470,9 @@ def _make_pull_meta(d_req_id: str, local_block_ids: list[list[int]]) -> PullReqM
     )
 
 
-@pytest.mark.cpu_test
+# The tests below construct a MooncakeConnectorWorker, whose __init__
+# requires an accelerator device, so (like the worker tests in
+# test_mooncake_connector.py) they run on the GPU KV-connectors job only.
 @pytest.mark.parametrize(
     "swa_enabled,disable_hma,expected_is_hma",
     [
@@ -485,7 +487,6 @@ def test_worker_is_hma_required(swa_enabled, disable_hma, expected_is_hma):
     assert worker._is_hma_required is expected_is_hma
 
 
-@pytest.mark.cpu_test
 def test_worker_failed_recv_reports_request_level_failure_with_hma():
     """With HMA, load failures report the request, not ambiguous block IDs."""
     worker = _make_kv_consumer_worker(swa_enabled=True)
@@ -500,7 +501,6 @@ def test_worker_failed_recv_reports_request_level_failure_with_hma():
     assert results.finished_recving == {"d-req-1"}
 
 
-@pytest.mark.cpu_test
 def test_worker_failed_recv_reports_block_ids_without_hma():
     """Without HMA, load failures keep reporting block-level errors."""
     worker = _make_kv_consumer_worker(swa_enabled=False)
