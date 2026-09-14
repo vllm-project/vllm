@@ -8,7 +8,10 @@ import vllm._custom_ops as ops
 from tests.kernels.utils import opcheck
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
-from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+from vllm.model_executor.layers.fusion.quant_activation import (
+    InputQuantScales,
+    QuantizedActivation,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
@@ -93,6 +96,9 @@ class MockLinearFp8Static(torch.nn.Module):
         super().__init__()
         self.input_quant_key = kFp8StaticTensorSym
         self.input_scale = input_scale
+        self._input_quant_scales = lambda layer: InputQuantScales(
+            static_scale=layer.input_scale
+        )
 
 
 class MockLinearFp8Dynamic128(torch.nn.Module):
