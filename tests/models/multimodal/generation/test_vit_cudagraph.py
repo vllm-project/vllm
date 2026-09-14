@@ -533,19 +533,29 @@ def _check_eonly_encoder_outputs(worker, batches):
     assert stats[1]["graph_hits"] > stats[0]["graph_hits"]
     assert stats[2]["graph_misses"] > stats[1]["graph_misses"]
     assert stats[3]["graph_hits"] > stats[2]["graph_hits"]
+    assert stats[4]["graph_hits"] > stats[3]["graph_hits"]
     return {"max_abs_error": max_error, "stats": stats}
 
 
-@pytest.mark.parametrize("model_id", ["qwen2_5_vl", "qwen3_vl", "qwen3_5"])
+@pytest.mark.parametrize(
+    "model_id",
+    params_with_marks(
+        {key: MODEL_CONFIGS[key] for key in ("qwen2_5_vl", "qwen3_vl", "qwen3_5")}
+    ),
+)
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA graphs")
-def test_eonly_vit_cudagraph_outputs(model_id, vllm_runner, image_assets, monkeypatch):
-    """Exercise startup capture, mixed image order, fallback and output ownership."""
+def test_eonly_vit_cudagraph_outputs(
+    model_id, vllm_runner, image_assets, video_assets, monkeypatch
+):
+    """Exercise startup capture, image/video replay, fallback and output ownership."""
+    import numpy as np
+    from PIL import Image
     from transformers import AutoProcessor
 
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     config = MODEL_CONFIGS[model_id]
-    processor = AutoProcessor.from_pretrained(config.model).image_processor
+    processor = AutoProcessor.from_pretrained(config.model)
     first, second = [asset.pil_image for asset in image_assets]
     batches = [
         [first.resize((224, 224))],
@@ -553,7 +563,21 @@ def test_eonly_vit_cudagraph_outputs(model_id, vllm_runner, image_assets, monkey
         [second.resize((896, 896))],
         [second.resize((224, 224))],
     ]
-    inputs = [dict(processor(images=images, return_tensors="pt")) for images in batches]
+    inputs = [
+        dict(processor.image_processor(images=images, return_tensors="pt"))
+        for images in batches
+    ]
+    frames = sample_frames_from_video(video_assets[0].np_ndarrays, 2)
+    video = np.stack(
+        [np.asarray(Image.fromarray(frame).resize((224, 224))) for frame in frames]
+    )
+    inputs.append(
+        dict(
+            processor.video_processor(
+                videos=[video], do_sample_frames=False, return_tensors="pt"
+            )
+        )
+    )
     with vllm_runner(
         config.model,
         dtype=config.dtype,
@@ -561,12 +585,13 @@ def test_eonly_vit_cudagraph_outputs(model_id, vllm_runner, image_assets, monkey
         enable_prefix_caching=False,
         max_model_len=4096,
         max_num_seqs=2,
-        limit_mm_per_prompt={"image": 2, "video": 0},
+        limit_mm_per_prompt={"image": 2, "video": 1},
         compilation_config={
             "cudagraph_mode": "NONE",
             "cudagraph_mm_encoder": True,
             "encoder_cudagraph_token_budgets": [256],
             "encoder_cudagraph_max_vision_items_per_batch": 2,
+            "encoder_cudagraph_max_frames_per_batch": 2,
         },
     ) as model:
         results = model.llm.collective_rpc(
