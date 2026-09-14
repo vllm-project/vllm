@@ -259,11 +259,11 @@ class Glm5NextMoE(nn.Module):
         if self.is_sequence_parallel and not already_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
-        # The router is always external (self.gate); main's MoERunner expects
-        # pre-computed router_logits, so compute them here unconditionally.
-        router_logits, _ = self.gate(hidden_states)
+        # MoERunner holds the gate (passed to FusedMoEFactory) and computes
+        # the router logits itself, so nothing is precomputed here (matches
+        # DeepseekV2MoE; `router_logits` is a placeholder).
         final_hidden_states = self.experts(
-            hidden_states=hidden_states, router_logits=router_logits
+            hidden_states=hidden_states, router_logits=hidden_states
         )
 
         if self.is_sequence_parallel and not already_sequence_parallel:
@@ -402,6 +402,50 @@ class Glm5NextDecoderLayer(nn.Module):
             self.mhc_pre_op = MHCPreOp()
             self.mhc_post_op = MHCPostOp()
             self.mhc_fused_post_pre_op = MHCFusedPostPreOp()
+
+            if vllm_config.kernel_config.enable_jit_warmup:
+                from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+                    _HC_PRENORM_GEMM_TILELANG_KERNEL,
+                    _MHC_FUSED_TILELANG_KERNEL,
+                    _MHC_POST_TILELANG_KERNEL,
+                    _MHC_PRE_BIG_FUSE_TILELANG_KERNEL,
+                )
+                from vllm.utils.deep_gemm import is_deep_gemm_supported
+
+                include_pre_gemm_splits = is_deep_gemm_supported()
+                _MHC_PRE_BIG_FUSE_TILELANG_KERNEL.register_warmup(
+                    vllm_config,
+                    hidden_size=self.hidden_size,
+                    hc_mult=self.n,
+                    use_norm_weight=True,
+                    include_pre_gemm_splits=include_pre_gemm_splits,
+                    include_broadcast_splits=False,
+                    rms_eps=self.rms_norm_eps,
+                    hc_pre_eps=self.hc_eps,
+                    hc_sinkhorn_eps=self.hc_eps,
+                    hc_post_mult_value=self.mhc_post_mult_value,
+                    sinkhorn_repeat=self.mhc_sinkhorn_iterations,
+                    norm_eps=(
+                        self.input_layernorm.variance_epsilon,
+                        self.post_attention_layernorm.variance_epsilon,
+                    ),
+                )
+                if not include_pre_gemm_splits:
+                    _HC_PRENORM_GEMM_TILELANG_KERNEL.register_warmup(
+                        vllm_config,
+                        hidden_size=self.hidden_size,
+                        hc_mult=self.n,
+                        n_out=self.n * (2 + self.n),
+                    )
+                _MHC_POST_TILELANG_KERNEL.register_warmup(
+                    hidden_size=self.hidden_size,
+                    hc_mult=self.n,
+                )
+                _MHC_FUSED_TILELANG_KERNEL.register_warmup(
+                    vllm_config,
+                    hidden_size=self.hidden_size,
+                    hc_mult=self.n,
+                )
 
     def forward(
         self,
