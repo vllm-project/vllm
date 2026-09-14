@@ -8,7 +8,7 @@ import torch
 
 from tests.v1.attention.utils import create_vllm_config
 from vllm.models.deepseek_v4.sparse_mla import DeepseekV4SparseMLABackend
-from vllm.models.deepseek_v4_1.sparse_mla import (
+from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4SparseMLABackend as DeepseekV41SparseMLABackend,
 )
 from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -212,6 +212,7 @@ def test_index_conversion_warmup_uses_physical_block_stride():
         ),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=1,
+            prefill_context_parallel_size=1,
             cp_kv_cache_interleave_size=1,
         ),
     )
