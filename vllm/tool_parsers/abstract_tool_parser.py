@@ -169,11 +169,10 @@ class ToolParser:
         request: ChatCompletionRequest | ResponsesRequest,
         *,
         reasoning: bool = False,
-        non_strict: bool = False,
     ):
         if self.structural_tag_model is None:
             return None
-        if not envs.VLLM_ENFORCE_STRICT_TOOL_CALLING and not non_strict:
+        if not envs.VLLM_ENFORCE_STRICT_TOOL_CALLING:
             return None
         from vllm.tool_parsers.structural_tag_registry import get_model_structural_tag
 
@@ -182,7 +181,6 @@ class ToolParser:
             tools=request.tools,
             tool_choice=request.tool_choice,
             reasoning=reasoning,
-            non_strict=non_strict,
         )
 
     def extract_tool_calls(

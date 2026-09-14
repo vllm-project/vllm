@@ -36,9 +36,20 @@ class Glm47MoeModelToolParser(Glm47MoeParserToolAdapter):  # type: ignore[valid-
         ):
             return super().adjust_request(request)
         # Without structural tags (no strict tools, strict tool calling off),
-        # attach a non-strict structural tag so auto/required/named tool
-        # choices still emit well-formed GLM XML.
-        structural_tag = self.get_structural_tag(request, non_strict=True)
+        # attach the non-strict structural tag so auto/required/named tool
+        # choices still emit well-formed GLM XML. The dedicated registration
+        # key keeps the strict glm_4_7 path on the xgrammar builtin.
+        from vllm.tool_parsers.structural_tag_registry import (
+            get_model_structural_tag,
+        )
+
+        structural_tag = get_model_structural_tag(
+            model="glm_4_7_nonstrict",
+            tools=request.tools,
+            tool_choice=request.tool_choice,
+            reasoning=False,
+            non_strict=True,
+        )
         if structural_tag is None:
             return super().adjust_request(request)
         request.structured_outputs = StructuredOutputsParams(

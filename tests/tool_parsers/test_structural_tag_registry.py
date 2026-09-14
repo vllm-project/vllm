@@ -808,7 +808,7 @@ def _glm47_call(name: str, *args: str) -> str:
 
 def _glm47_grammar(tool_choice, tools=None, reasoning: bool = False):
     tag = get_model_structural_tag(
-        model="glm_4_7",
+        model="glm_4_7_nonstrict",
         tools=tools if tools is not None else _glm47_tools(),
         tool_choice=tool_choice,
         reasoning=reasoning,
@@ -914,12 +914,11 @@ def test_glm47_non_strict_reasoning_gates_on_think_close():
 
 
 def test_glm47_non_strict_builds_tag_for_auto_without_strict_tools(sample_tools):
-    # The non_strict flag bypasses the "auto without strict tools => no tag"
-    # gate, and the request must be served by the vLLM-registered glm_4_7
-    # builder: an unregistered (xgrammar builtin) model would instead raise
-    # ValueError for non_strict=True.
+    # The dedicated glm_4_7_nonstrict key bypasses the "auto without strict
+    # tools => no tag" gate, while glm_4_7 keeps dispatching to the xgrammar
+    # builtin (which would raise ValueError for non_strict=True).
     tag = get_model_structural_tag(
-        model="glm_4_7",
+        model="glm_4_7_nonstrict",
         tools=sample_tools,
         tool_choice="auto",
         reasoning=False,
@@ -961,7 +960,7 @@ def test_vllm_builtin_structural_tags_accept_non_strict(
 
 
 @pytest.mark.parametrize("tool_choice", ["auto", "required"])
-def test_glm47_strict_mode_delegates_to_xgrammar_builtin(
+def test_glm47_strict_mode_matches_xgrammar_builtin(
     tool_choice: str,
     sample_tools_strict: list[ChatCompletionToolsParam],
 ):
@@ -991,67 +990,6 @@ def test_glm47_strict_mode_delegates_to_xgrammar_builtin(
     assert ours.model_dump() == expected.model_dump()
 
 
-def test_glm47_strict_mode_rebuilds_xgrammar_tool_protocol(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    # The strict path must reconstruct the xgrammar Chat Completions protocol
-    # from the normalized tools: description/parameters/strict preserved and
-    # a forced choice filtered down to the named tool.
-    captured: list[dict] = []
-
-    def fake_xgrammar_tag(**kwargs):
-        captured.append(kwargs)
-        return None
-
-    monkeypatch.setattr(
-        "vllm.tool_parsers.structural_tag_registry.get_xgrammar_model_structural_tag",
-        fake_xgrammar_tag,
-    )
-
-    tools = [
-        ChatCompletionToolsParam(
-            type="function",
-            function={
-                "name": "get_weather",
-                "description": "Get weather",
-                "parameters": {"type": "object", "properties": {}},
-            },
-        ),
-        ChatCompletionToolsParam(
-            type="function",
-            function={"name": "run_command"},
-        ),
-    ]
-
-    get_model_structural_tag(
-        model="glm_4_7",
-        tools=tools,
-        tool_choice=ChatCompletionNamedToolChoiceParam(
-            type="function",
-            function=ChatCompletionNamedFunction(name="get_weather"),
-        ),
-        reasoning=False,
-    )
-
-    assert len(captured) == 1
-    assert captured[0]["model"] == "glm_4_7"
-    assert captured[0]["tools"] == [
-        {
-            "type": "function",
-            "function": {
-                "name": "get_weather",
-                "description": "Get weather",
-                "parameters": {"type": "object", "properties": {}},
-            },
-        }
-    ]
-    assert captured[0]["tool_choice"] == {
-        "type": "function",
-        "function": {"name": "get_weather"},
-    }
-    assert captured[0]["reasoning"] is False
-
-
 def _glm47_parser(tools, monkeypatch: pytest.MonkeyPatch) -> Glm47MoeModelToolParser:
     monkeypatch.setattr(envs, "VLLM_ENFORCE_STRICT_TOOL_CALLING", False)
     return Glm47MoeModelToolParser(MagicMock(), tools=tools)
@@ -1070,7 +1008,16 @@ def test_glm47_get_structural_tag_non_strict_bypasses_strict_gate(
     )
 
     assert parser.get_structural_tag(request) is None
-    assert parser.get_structural_tag(request, non_strict=True) is not None
+    assert (
+        get_model_structural_tag(
+            model="glm_4_7_nonstrict",
+            tools=sample_tools,
+            tool_choice="required",
+            reasoning=False,
+            non_strict=True,
+        )
+        is not None
+    )
 
 
 def test_glm47_adjust_request_attaches_non_strict_structural_tag(
