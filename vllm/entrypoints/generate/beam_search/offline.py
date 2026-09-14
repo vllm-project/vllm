@@ -186,7 +186,9 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             best_beams = sorted_completed[:beam_width]
 
             for beam in best_beams:
-                beam.text = tokenizer.decode(beam.tokens)
+                beam.text = tokenizer.decode(
+                    beam.tokens, skip_special_tokens=params.skip_special_tokens
+                )
 
             outputs.append(BeamSearchOutput(sequences=best_beams))
 

@@ -452,7 +452,7 @@ def _unwrap_spec(spec: KVCacheSpec) -> KVCacheSpec:
 
 
 def partial_hash_hits_enabled(
-    kv_cache_groups: list[KVCacheGroupSpec],
+    kv_cache_groups: Sequence[KVCacheGroupSpec],
     hash_block_size: int,
     dcp_world_size: int = 1,
 ) -> bool:
