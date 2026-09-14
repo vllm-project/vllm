@@ -3,9 +3,174 @@
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import direct_register_custom_op
 
 AWQ_TRITON_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
+AWQ_FUSED_FP32_SUPPORTED = current_platform.is_cuda() and (
+    current_platform.is_device_capability(89)
+)
+
+
+@triton.jit
+def awq_gemm_fused_fp32_kernel(
+    input_ptr,
+    qweight_ptr,
+    scales_ptr,
+    zeros_ptr,
+    output_ptr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    GROUP_SIZE: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    pid_m = pid // num_pid_n
+    pid_n = pid % num_pid_n
+
+    offsets_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offsets_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    packed_offsets_n = pid_n * (BLOCK_SIZE_N // 8) + tl.arange(0, BLOCK_SIZE_N // 8)
+    mask_m = offsets_m < M
+    mask_n = offsets_n < N
+    packed_mask_n = packed_offsets_n < N // 8
+
+    reverse_order = ((tl.arange(0, 2) * 4)[None, :] + tl.arange(0, 4)[:, None]).reshape(
+        8
+    )
+    shifts = reverse_order * 4
+    shifts = tl.broadcast_to(shifts[None, :], (BLOCK_SIZE_K * (BLOCK_SIZE_N // 8), 8))
+    shifts = tl.reshape(shifts, (BLOCK_SIZE_K, BLOCK_SIZE_N))
+
+    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    offsets_k_base = tl.arange(0, BLOCK_SIZE_K)
+    for k_block in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+        offsets_k = k_block * BLOCK_SIZE_K + offsets_k_base
+        mask_k = offsets_k < K
+        inputs = tl.load(
+            input_ptr + offsets_m[:, None] * K + offsets_k[None, :],
+            mask=mask_m[:, None] & mask_k[None, :],
+            other=0.0,
+        )
+        packed = tl.load(
+            qweight_ptr + offsets_k[:, None] * (N // 8) + packed_offsets_n[None, :],
+            mask=mask_k[:, None] & packed_mask_n[None, :],
+            other=0,
+        )
+        packed = tl.interleave(packed, packed)
+        packed = tl.interleave(packed, packed)
+        packed = tl.interleave(packed, packed)
+        weights = (packed >> shifts) & 0xF
+
+        group_offsets = offsets_k // GROUP_SIZE
+        packed_zeros = tl.load(
+            zeros_ptr + group_offsets[:, None] * (N // 8) + packed_offsets_n[None, :],
+            mask=mask_k[:, None] & packed_mask_n[None, :],
+            other=0,
+        )
+        packed_zeros = tl.interleave(packed_zeros, packed_zeros)
+        packed_zeros = tl.interleave(packed_zeros, packed_zeros)
+        packed_zeros = tl.interleave(packed_zeros, packed_zeros)
+        zeros = (packed_zeros >> shifts) & 0xF
+        scales = tl.load(
+            scales_ptr + group_offsets[:, None] * N + offsets_n[None, :],
+            mask=mask_k[:, None] & mask_n[None, :],
+            other=0.0,
+        )
+        weights = ((weights - zeros) * scales).to(inputs.dtype)
+        accumulator = tl.dot(inputs, weights, accumulator)
+
+    output = accumulator.to(output_ptr.type.element_ty)
+    tl.store(
+        output_ptr + offsets_m[:, None] * N + offsets_n[None, :],
+        output,
+        mask=mask_m[:, None] & mask_n[None, :],
+    )
+
+
+def _awq_gemm_fused_fp32_impl(
+    inputs: torch.Tensor,
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    qzeros: torch.Tensor,
+) -> torch.Tensor:
+    m, k = inputs.shape
+    n = qweight.shape[1] * 8
+    group_size = k // scales.shape[0]
+    if inputs.dtype != torch.float16 or scales.dtype != torch.float16:
+        raise ValueError("fused AWQ GEMM supports FP16 inputs and scales only")
+    if qweight.dtype != torch.int32 or qzeros.dtype != torch.int32:
+        raise ValueError("fused AWQ GEMM requires int32 packed weights and zeros")
+    if not all(tensor.is_contiguous() for tensor in (inputs, qweight, scales, qzeros)):
+        raise ValueError("fused AWQ GEMM requires contiguous tensors")
+    if qweight.shape[0] != k:
+        raise ValueError("fused AWQ GEMM weight K does not match the input")
+    if scales.shape != (k // group_size, n):
+        raise ValueError("fused AWQ GEMM scales have an invalid shape")
+    if qzeros.shape != (k // group_size, n // 8):
+        raise ValueError("fused AWQ GEMM zeros have an invalid shape")
+    if group_size != 128:
+        raise ValueError("fused AWQ GEMM supports group_size=128 only")
+    if k % 32 != 0 or n % 32 != 0:
+        raise ValueError("fused AWQ GEMM requires K and N aligned to 32")
+
+    block_m, block_n = (32, 32) if m <= 128 else (128, 64)
+    output = torch.empty((m, n), device=inputs.device, dtype=inputs.dtype)
+    grid = (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
+    awq_gemm_fused_fp32_kernel[grid](
+        inputs,
+        qweight,
+        scales,
+        qzeros,
+        output,
+        M=m,
+        N=n,
+        K=k,
+        GROUP_SIZE=group_size,
+        BLOCK_SIZE_M=block_m,
+        BLOCK_SIZE_N=block_n,
+        BLOCK_SIZE_K=32,
+        num_warps=4,
+        num_stages=2,
+    )
+    return output
+
+
+def _awq_gemm_fused_fp32_fake(
+    inputs: torch.Tensor,
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    qzeros: torch.Tensor,
+) -> torch.Tensor:
+    del scales, qzeros
+    return torch.empty(
+        (inputs.size(0), qweight.size(1) * 8),
+        dtype=inputs.dtype,
+        device=inputs.device,
+    )
+
+
+direct_register_custom_op(
+    op_name="awq_gemm_fused_fp32",
+    op_func=_awq_gemm_fused_fp32_impl,
+    mutates_args=[],
+    fake_impl=_awq_gemm_fused_fp32_fake,
+    dispatch_key=current_platform.dispatch_key,
+)
+
+
+def awq_gemm_fused_fp32(
+    inputs: torch.Tensor,
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    qzeros: torch.Tensor,
+) -> torch.Tensor:
+    return torch.ops.vllm.awq_gemm_fused_fp32(inputs, qweight, scales, qzeros)
 
 
 @triton.jit
