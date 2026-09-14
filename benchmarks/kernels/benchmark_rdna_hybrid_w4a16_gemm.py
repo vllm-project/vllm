@@ -52,11 +52,11 @@ WEIGHT_SHAPES = {
 # ---------------------------------------------------------------------------
 # Weight packing
 # ---------------------------------------------------------------------------
-def prepare_hybrid_weights(K, N, group_size, device="cuda"):
+def prepare_hybrid_weights(K, N, group_size, dtype=torch.float16, device="cuda"):
     """Create random weights for benchmarking.
 
-    Returns (w_q_skinny, w_s_skinny, w_fp16, w_zp). The triton path derives
-    its int32 view from w_q_skinny, so no separate int32 buffer is returned.
+    Returns (w_q_skinny, w_s_skinny, w_dense, w_zp). The triton path derives its
+    int32 view from w_q_skinny, so no separate int32 buffer is returned.
     """
     num_groups = K // group_size
 
@@ -65,23 +65,23 @@ def prepare_hybrid_weights(K, N, group_size, device="cuda"):
         0, 2**31, (N, K // 8), dtype=torch.int32, device=device
     )
     w_q_skinny = w_q_skinny_i32.view(torch.int8).contiguous()
-    w_s_skinny = torch.randn(N, num_groups, dtype=torch.float16, device=device) * 0.01
+    w_s_skinny = torch.randn(N, num_groups, dtype=dtype, device=device) * 0.01
 
     # Raw per-group zero-points for asymmetric benchmarks
     w_zp = torch.randint(0, 16, (N, num_groups), dtype=torch.int32, device=device).to(
-        torch.float16
+        dtype
     )
 
-    # FP16 baseline for F.linear
-    w_fp16 = torch.randn(N, K, dtype=torch.float16, device=device) * 0.01
+    # Unquantized baseline for F.linear
+    w_dense = torch.randn(N, K, dtype=dtype, device=device) * 0.01
 
-    return w_q_skinny, w_s_skinny, w_fp16, w_zp
+    return w_q_skinny, w_s_skinny, w_dense, w_zp
 
 
 # ---------------------------------------------------------------------------
 # Benchmark
 # ---------------------------------------------------------------------------
-PROVIDERS = ["torch-fp16", "hybrid-w4a16", "hybrid-w4a16-zp"]
+PROVIDERS = ["torch-dense", "hybrid-w4a16", "hybrid-w4a16-zp"]
 
 
 @triton.testing.perf_report(
@@ -93,22 +93,21 @@ PROVIDERS = ["torch-fp16", "hybrid-w4a16", "hybrid-w4a16-zp"]
         line_vals=PROVIDERS,
         line_names=PROVIDERS,
         ylabel="TFLOP/s (larger is better)",
-        plot_name="FP16 vs Hybrid W4A16",
+        plot_name="Dense vs Hybrid W4A16",
         args={},
     )
 )
-def benchmark(batch_size, provider, N, K, group_size, weights):
+def benchmark(batch_size, provider, N, K, group_size, dtype, weights):
     M = batch_size
     device = "cuda"
-    dtype = torch.float16
     a = torch.randn((M, K), device=device, dtype=dtype)
 
     quantiles = [0.5, 0.2, 0.8]
 
-    if provider == "torch-fp16":
-        w_fp16 = weights["w_fp16"]
+    if provider == "torch-dense":
+        w_dense = weights["w_dense"]
         ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(
-            lambda: torch.nn.functional.linear(a, w_fp16),
+            lambda: torch.nn.functional.linear(a, w_dense),
             quantiles=quantiles,
         )
     elif provider in ("hybrid-w4a16", "hybrid-w4a16-zp"):
@@ -168,21 +167,28 @@ if __name__ == "__main__":
     )
     parser.add_argument("--tp-sizes", nargs="+", type=int, default=[1])
     parser.add_argument("--group-size", type=int, default=128)
+    parser.add_argument(
+        "--dtype", type=str, default="float16", choices=["float16", "bfloat16"]
+    )
     parser.add_argument("--save-path", type=str, default=None)
     args = parser.parse_args()
+
+    dtype = getattr(torch, args.dtype)
 
     for K, N, model in prepare_shapes(args):
         group_size = args.group_size
         print(f"\n{'=' * 70}")
-        print(f"{model}, N={N} K={K}, group_size={group_size}")
+        print(f"{model}, N={N} K={K}, group_size={group_size}, dtype={args.dtype}")
         print(f"{'=' * 70}")
 
-        w_q_skinny, w_s_skinny, w_fp16, w_zp = prepare_hybrid_weights(K, N, group_size)
+        w_q_skinny, w_s_skinny, w_dense, w_zp = prepare_hybrid_weights(
+            K, N, group_size, dtype
+        )
 
         weights = {
             "w_q_skinny": w_q_skinny,
             "w_s_skinny": w_s_skinny,
-            "w_fp16": w_fp16,
+            "w_dense": w_dense,
             "w_zp": w_zp,
         }
 
@@ -195,6 +201,7 @@ if __name__ == "__main__":
             N=N,
             K=K,
             group_size=group_size,
+            dtype=dtype,
             weights=weights,
         )
 
