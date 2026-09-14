@@ -645,7 +645,7 @@ class ParserEngine(Parser):
         for offset, token_id in enumerate(token_ids):
             if token_id in end_ids:
                 return offset
-        return None
+        return len(token_ids)
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         end_id = self._reasoning_end_token_id
