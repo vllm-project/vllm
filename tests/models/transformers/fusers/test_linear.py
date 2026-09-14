@@ -1145,11 +1145,16 @@ def test_merged_column_fuser_supports_any_number_of_linears(
     from vllm.model_executor import parameter
     from vllm.model_executor.layers import linear
     from vllm.model_executor.layers.linear import MergedColumnParallelLinear
-    from vllm.model_executor.layers.utils import dispatch_cpu_unquantized_gemm
+    from vllm.model_executor.layers.utils import default_unquantized_gemm
     from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
 
     monkeypatch.setattr(linear, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(linear, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(
+        linear,
+        "dispatch_unquantized_gemm",
+        lambda linear_backend="auto": default_unquantized_gemm,
+    )
     monkeypatch.setattr(parameter, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(parameter, "get_tensor_model_parallel_world_size", lambda: 1)
     with torch.device("meta"):
@@ -1176,7 +1181,6 @@ def test_merged_column_fuser_supports_any_number_of_linears(
 
     merged = getattr(fused, fuser.merged_name)
     assert isinstance(merged, MergedColumnParallelLinear)
-    dispatch_cpu_unquantized_gemm(merged, remove_weight=False)
     for actual, reference in zip(fused(x), expected):
         torch.testing.assert_close(actual, reference)
 
