@@ -32,6 +32,7 @@ Sorted alphabetically by GitHub handle:
 - [@ivanium](https://github.com/ivanium): KV Connector and offload
 - [@jeejeelee](https://github.com/jeejeelee): LoRA, new model support
 - [@jikunshang](https://github.com/jikunshang): Intel CPU/XPU integration
+- [@jperezdealgaba](https://github.com/jperezdealgaba): Security
 - [@khluu](https://github.com/khluu): CI infrastructure
 - [@LucasWilkinson](https://github.com/LucasWilkinson): Kernels and performance
 - [@markmc](https://github.com/markmc): Observability
@@ -44,7 +45,6 @@ Sorted alphabetically by GitHub handle:
 - [@pavanimajety](https://github.com/pavanimajety): NVIDIA GPU integration
 - [@ProExpertProg](https://github.com/ProExpertProg): Compilation, startup UX
 - [@robertgshaw2-redhat](https://github.com/robertgshaw2-redhat): Core, distributed, disagg
-- [@russellb](https://github.com/russellb): Structured output, engine core, security
 - [@sfeng33](https://github.com/sfeng33): Tool use and reasoning parser
 - [@shen-shanshan](https://github.com/shen-shanshan): AMD GPU / ROCm integration, multimodality, ViT CUDA graph
 - [@simon-mo](https://github.com/simon-mo): Project lead, API entrypoints, community
@@ -82,6 +82,7 @@ Committers who have contributed to vLLM significantly in the past (thank you!) b
 - [@pcmoritz](https://github.com/pcmoritz): MoE
 - [@rkooo567](https://github.com/rkooo567): Chunked prefill
 - [@ruisearch42](https://github.com/ruisearch42): Pipeline parallelism, Ray Support
+- [@russellb](https://github.com/russellb): Structured output, engine core, security
 - [@sighingnow](https://github.com/sighingnow): Qwen models, new model support
 - [@sroy745](https://github.com/sroy745): Speculative decoding
 - [@Yard1](https://github.com/Yard1): kernels and performance
@@ -100,7 +101,7 @@ If you have PRs touching the area, please feel free to ping the area owner for r
 - KV Cache Manager: memory management layer within scheduler maintaining KV cache logical block data
     - @heheda12345, @WoosukKwon
 - AsyncLLM: the zmq based protocol hosting engine core and making it accessible for entrypoints
-    - @robertgshaw2-redhat, @njhill, @russellb
+    - @robertgshaw2-redhat, @njhill
 - ModelRunner, Executor, Worker: the abstractions for engine wrapping model implementation
     - @WoosukKwon, @tlrmchlsmth, @heheda12345, @LucasWilkinson, @ProExpertProg, @MatthewBonanni
 - KV Connector: Connector interface and implementation for KV cache offload and transfer
@@ -153,7 +154,7 @@ If you have PRs touching the area, please feel free to ping the area owner for r
 - Spec Decode: Covers model definition, attention, sampler, and scheduler related to n-grams, EAGLE, and MTP.
     - @WoosukKwon, @benchislett, @MatthewBonanni
 - Structured Output: The structured output implementation
-    - @russellb, @aarnphm
+    - @aarnphm
 - RL: The RL related features such as collective rpc, sleep mode, etc.
     - @youkaichao, @zhuohan123
 - LoRA: @jeejeelee
@@ -167,7 +168,7 @@ If you have PRs touching the area, please feel free to ping the area owner for r
 - Documentation: @hmellor, @DarkLight1337, @simon-mo
 - Benchmarks: @ywang96, @simon-mo
 - CI, Build, Release Process: @khluu, @njhill, @simon-mo, @Harry-Chen, @vadiklyutiy
-- Security: @russellb
+- Security: @jperezdealgaba
 
 ### External Kernels Integration
 
