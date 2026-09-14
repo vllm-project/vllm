@@ -54,6 +54,17 @@ class FixFunctionalizationPass(VllmInductorPass):
             if not is_func(node, auto_functionalized):
                 continue  # Avoid deep if-elif nesting
 
+            # Preserve wrappers whose users cannot be rewritten, before any edits.
+            if any(
+                not is_func(user, operator.getitem)
+                and (
+                    not is_func(user, control_deps)
+                    or node in tree_leaves((user.args[1:], user.kwargs))
+                )
+                for user in node.users
+            ):
+                continue
+
             kwargs = node.kwargs
             at_target = node.args[0]
 

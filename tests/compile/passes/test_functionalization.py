@@ -3,6 +3,7 @@
 
 import copy
 import operator
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -304,6 +305,61 @@ def test_defunctionalize_preserves_control_dependencies(use_return_value):
     assert ordered.args[0] == (independent, mutation, arg)
     assert find_auto_fn_maybe(graph.nodes, target) is None
     torch.testing.assert_close(module(x.clone(), x.clone()), expected)
+
+
+@pytest.mark.parametrize(
+    "use", ["dependencies", "output", "payload", "dependencies_and_payload"]
+)
+def test_fix_functionalization_preserves_unsupported_users(use, monkeypatch):
+    """Keep unsupported wrapper uses intact while optimizing ordinary nodes."""
+    TestFunctionWithMutatedArgsAndReturn.register_test_custom_op()
+    target = torch.ops.vllm.function_with_mutated_args_and_return.default
+    # This graph uses only the test op, so native kernels are not required.
+    monkeypatch.setattr(torch.ops, "_C", Mock())
+    graph = torch.fx.Graph()
+    x, y = graph.placeholder("x"), graph.placeholder("y")
+    wrappers, returned, outputs = [], [], []
+    for arg in (x, y):
+        wrapper = graph.call_function(
+            auto_functionalized, args=(target,), kwargs={"x": arg}
+        )
+        ret = graph.call_function(operator.getitem, args=(wrapper, 0))
+        mut = graph.call_function(operator.getitem, args=(wrapper, 1))
+        wrappers.append(wrapper)
+        returned.append(ret)
+        outputs.append(graph.call_function(torch.ops.aten.add.Tensor, args=(ret, mut)))
+    protected, ordinary = wrappers
+    graph.output((protected if use == "output" else outputs[0], outputs[1]))
+    module = torch.fx.GraphModule(torch.nn.Module(), graph)
+    if use == "dependencies":
+        preserve_node_ordering(
+            graph, {output: OrderedSet([y, protected]) for output in outputs}
+        )
+    elif "payload" in use:
+        dependency = protected if use == "dependencies_and_payload" else y
+        preserve_node_ordering(graph, {returned[0]: OrderedSet([dependency])})
+    module.recompile()
+    inputs = [
+        torch.arange(4, dtype=torch.float32, device=current_platform.device_type)
+        for _ in range(2)
+    ]
+    expected = module(*[arg.clone() for arg in inputs])
+
+    FixFunctionalizationPass(VllmConfig())(graph)
+    graph.lint()
+    module.recompile()
+    remaining = [node for node in graph.nodes if is_func(node, auto_functionalized)]
+    assert remaining == ([] if use == "dependencies" else [protected])
+    assert ordinary not in graph.nodes
+    actual_inputs = [arg.clone() for arg in inputs]
+    torch.testing.assert_close(module(*actual_inputs), expected)
+    if use == "dependencies":
+        mutation = next(node for node in graph.nodes if is_func(node, target))
+        controls = [node for node in graph.nodes if is_func(node, control_deps)]
+        assert len(controls) == 2
+        assert all(node.args[0] == (y, mutation, x) for node in controls)
+    else:
+        torch.testing.assert_close(actual_inputs[0], inputs[0])
 
 
 MODELS_AND_DO_FUSION = {
