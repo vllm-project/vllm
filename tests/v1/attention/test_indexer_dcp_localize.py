@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import numpy as np
 import pytest
 import torch
 
@@ -12,7 +13,7 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_filter_and_convert_dcp_index,
 )
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
-from vllm.v1.attention.ops.common import CPTritonContext, correct_attn_out
+from vllm.v1.attention.ops.dcp import CPTritonContext, correct_attn_out
 
 
 def _local_count(length: int, rank: int, world: int, interleave: int) -> int:
@@ -642,7 +643,10 @@ def test_sparse_prefill_dcp_metadata_localizes_causal_bounds():
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
-def test_dcp_filter_compacts_valid_slots_for_sparse_kernel():
+@pytest.mark.parametrize("block_stride_rows", [None, 12])
+def test_dcp_filter_compacts_valid_slots_for_sparse_kernel(
+    block_stride_rows: int | None,
+):
     block_size = 4
     num_topk = 128
     dcp_size = 2
@@ -658,6 +662,7 @@ def test_dcp_filter_compacts_valid_slots_for_sparse_kernel():
         dcp_size=dcp_size,
         dcp_rank=0,
         BLOCK_SIZE=block_size,
+        BLOCK_STRIDE_ROWS=block_stride_rows,
         NUM_TOPK_TOKENS=num_topk,
         return_valid_counts=True,
     )
@@ -668,23 +673,30 @@ def test_dcp_filter_compacts_valid_slots_for_sparse_kernel():
     assert (out[0, valid:] == -1).all()
     # In-kernel compaction packs valid slots to the front; prefix order is
     # unspecified, so compare as a set.
-    assert set(out[0, :valid].cpu().tolist()) == {40, 41, 42, 43}
+    block_stride_rows = block_stride_rows or block_size
+    expected_base = 10 * block_stride_rows
+    assert set(out[0, :valid].cpu().tolist()) == set(
+        range(expected_base, expected_base + block_size)
+    )
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 @pytest.mark.parametrize("interleave", [1, 2])
 @pytest.mark.parametrize("dcp_rank", [0, 1])
-def test_dcp_filter_compaction_matches_reference(interleave: int, dcp_rank: int):
-    """In-kernel compaction (atomic slot allocator across multiple column tiles)
-    must, for every row, produce exactly the rank-owned physical slots packed
-    into [0, valid_count) with -1 in the tail -- the same SET a reference filter
-    + sort/gather produces. Uses wide rows (> BLOCK_N valid slots) so the
-    cross-tile atomic allocation is exercised, with interior -1 gaps."""
+# 384 is not a power of two, so it exercises the multi-tile atomic allocator
+# rather than the single-tile path 1024 takes.
+@pytest.mark.parametrize("num_topk", [1024, 384])
+def test_dcp_filter_compaction_matches_reference(
+    interleave: int, dcp_rank: int, num_topk: int
+):
+    """In-kernel compaction must, for every row, produce exactly the rank-owned
+    physical slots packed into [0, valid_count) with -1 in the tail -- the same
+    SET a reference filter + sort/gather produces. Uses wide rows (> BLOCK_N
+    valid slots), with interior -1 gaps."""
     device = torch.device("cuda")
     torch.manual_seed(7)
     dcp_size = 2
     block_size = 8
-    num_topk = 1024  # > BLOCK_N(128) -> multiple tiles per row
     num_rows = 5
     max_blocks = 64
     seq = max_blocks * block_size
@@ -698,7 +710,9 @@ def test_dcp_filter_compaction_matches_reference(interleave: int, dcp_rank: int)
         (num_rows, num_topk), -1, dtype=torch.int32, device=device
     )
     for r in range(num_rows):
-        n_valid = int(torch.randint(200, 600, (1,)).item())
+        # Ids are distinct, so a row holds at most `seq` valid entries.
+        hi = min(num_topk * 3 // 4, seq)
+        n_valid = int(torch.randint(num_topk // 4, hi, (1,)).item())
         perm = torch.randperm(seq, device=device)[:n_valid].to(torch.int32)
         token_indices[r, :n_valid] = perm
 
@@ -949,3 +963,58 @@ def test_sparse_decode_dcp_short_context_matches_non_dcp():
     dcp_out, dcp_lse = _dcp_lse_merge(local_outs, local_lses)
     torch.testing.assert_close(dcp_out, ref_out, atol=1e-5, rtol=1e-5)
     torch.testing.assert_close(dcp_lse, ref_lse, atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.parametrize("dcp_world_size", [2, 4, 8])
+@pytest.mark.parametrize("interleave", [1, 64])
+@pytest.mark.parametrize("rows_per_req", [1, 2])
+@pytest.mark.parametrize(
+    "req_lens", [[7], [8, 8], [1, 9], [63, 64, 65], [255, 256, 257], [256, 1, 2730]]
+)
+def test_pcp_plan_deinterleave_restores_global_order(
+    monkeypatch, dcp_world_size, interleave, rows_per_req, req_lens
+):
+    """Gathering block-interleaved shards must restore each request's token order."""
+    from vllm.v1.attention.backends.mla.indexer import build_pcp_global_chunk_plan
+
+    monkeypatch.setattr("vllm.v1.attention.backends.mla.indexer.PIN_MEMORY", False)
+    monkeypatch.setattr(
+        "vllm.v1.attention.backends.mla.indexer.async_copy_to_gpu",
+        lambda x, device: x.to(device),
+    )
+    scheduled = np.array(req_lens, dtype=np.int64)
+    shard_rows = np.array(
+        [
+            max(
+                _local_count(g, r, dcp_world_size, interleave)
+                for r in range(dcp_world_size)
+            )
+            for g in req_lens
+        ]
+    )
+    rows = np.repeat(np.arange(len(scheduled)), rows_per_req)
+    plan = build_pcp_global_chunk_plan(
+        rows, shard_rows[rows], dcp_world_size, torch.device("cpu"), interleave
+    )
+
+    starts = np.concatenate([[0], np.cumsum(scheduled)])
+
+    # Build each rank's padded shard exactly as the cache gather would.
+    padded_cu = plan.padded_local_cu[::rows_per_req].tolist()
+    shards = torch.zeros(dcp_world_size, plan.padded_local_total, 1)
+    for r in range(dcp_world_size):
+        for i, g in enumerate(req_lens):
+            owned = [t for t in range(g) if (t // interleave) % dcp_world_size == r]
+            for local, t in enumerate(owned):
+                shards[r, padded_cu[i] + local, 0] = starts[i] + t
+
+    gathered = shards.reshape(dcp_world_size * plan.padded_local_total, 1)
+    restored = gathered[plan.deinterleave_idx]
+    # The layout is padded per request; only the real positions are read.
+    row_start = plan.row_start_cu.tolist()
+    for row, i in enumerate(rows):
+        g = req_lens[i]
+        torch.testing.assert_close(
+            restored[row_start[row] : row_start[row] + g, 0],
+            torch.arange(starts[i], starts[i] + g, dtype=torch.float32),
+        )

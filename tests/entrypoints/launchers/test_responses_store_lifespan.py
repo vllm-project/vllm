@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from fastapi import FastAPI
 
+from vllm.entrypoints.launchers.utils.server_utils import lifespan
 from vllm.entrypoints.openai.responses.store.service import ResponsesStoreService
-from vllm.entrypoints.serve.utils.server_utils import lifespan
 
 
 @pytest.mark.asyncio
@@ -19,7 +19,7 @@ async def test_lifespan_starts_and_closes_responses_store(monkeypatch) -> None:
     create_service = Mock(return_value=service)
     monkeypatch.setattr(ResponsesStoreService, "from_cli_args", create_service)
     monkeypatch.setattr(
-        "vllm.entrypoints.serve.utils.server_utils.freeze_gc_heap",
+        "vllm.entrypoints.launchers.utils.server_utils.freeze_gc_heap",
         Mock(),
     )
 
@@ -43,7 +43,7 @@ async def test_lifespan_leaves_responses_store_disabled(monkeypatch) -> None:
     create_service = Mock()
     monkeypatch.setattr(ResponsesStoreService, "from_cli_args", create_service)
     monkeypatch.setattr(
-        "vllm.entrypoints.serve.utils.server_utils.freeze_gc_heap",
+        "vllm.entrypoints.launchers.utils.server_utils.freeze_gc_heap",
         Mock(),
     )
 

@@ -238,6 +238,7 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
         vocab_size=1024,
         block_sizes=[1],
         kernel_block_sizes=[1],
+        max_num_blocks_per_req=[1024],
     )
     reqs: list[CachedRequestState] = []
     req_id_reqs = {}
@@ -332,6 +333,7 @@ def test_swap_states_in_input_batch(device: str, batch_size: int, swap_list: lis
         vocab_size=1024,
         block_sizes=[1],
         kernel_block_sizes=[1],
+        max_num_blocks_per_req=[1024],
     )
     ref_input_batch: InputBatch = InputBatch(
         max_num_reqs=batch_size,
@@ -341,6 +343,7 @@ def test_swap_states_in_input_batch(device: str, batch_size: int, swap_list: lis
         vocab_size=1024,
         block_sizes=[1],
         kernel_block_sizes=[1],
+        max_num_blocks_per_req=[1024],
     )
 
     reqs: list[CachedRequestState] = []
@@ -409,6 +412,7 @@ def test_pooling_prompt_lens_not_aliased(device: str):
         vocab_size=VOCAB_SIZE,
         block_sizes=[16],
         kernel_block_sizes=[16],
+        max_num_blocks_per_req=[64],
         is_pooling_model=True,
     )
 
@@ -444,6 +448,7 @@ def test_placeholder_spec_token_ids_written_verbatim():
         vocab_size=VOCAB_SIZE,
         block_sizes=[16],
         kernel_block_sizes=[16],
+        max_num_blocks_per_req=[1],
     )
     req = CachedRequestState(
         req_id="req",
@@ -470,15 +475,14 @@ def test_placeholder_spec_token_ids_written_verbatim():
 
 
 @pytest.mark.parametrize(
-    ("pooling_params", "expect_device_prompt_token_ids", "expect_cpu_prompt_token_ids"),
+    ("pooling_params", "expect_cpu_prompt_token_ids"),
     [
-        ({"task": "classify"}, False, False),
-        ({"task": "classify", "requires_token_ids": True}, True, True),
+        ({"task": "classify"}, False),
+        ({"task": "classify", "requires_token_ids": True}, True),
     ],
 )
 def test_pooling_metadata_token_id_buffers(
     pooling_params: dict[str, object],
-    expect_device_prompt_token_ids: bool,
     expect_cpu_prompt_token_ids: bool,
 ):
     from vllm.pooling_params import PoolingParams
@@ -491,6 +495,7 @@ def test_pooling_metadata_token_id_buffers(
         vocab_size=VOCAB_SIZE,
         block_sizes=[16],
         kernel_block_sizes=[16],
+        max_num_blocks_per_req=[64],
         is_pooling_model=True,
     )
     req = _construct_pooling_request(0, PoolingParams(**pooling_params))
@@ -498,13 +503,8 @@ def test_pooling_metadata_token_id_buffers(
     input_batch.refresh_metadata()
 
     metadata = input_batch.get_pooling_metadata()
-    if expect_device_prompt_token_ids:
-        assert input_batch.sampling_metadata.prompt_token_ids is not None
-        assert metadata.prompt_token_ids is not None
-        assert metadata.get_prompt_token_ids()[0].tolist() == req.prompt_token_ids
-    else:
-        assert input_batch.sampling_metadata.prompt_token_ids is None
-        assert metadata.prompt_token_ids is None
+    assert input_batch.sampling_metadata.prompt_token_ids is None
+    assert metadata.prompt_token_ids is None
 
     if expect_cpu_prompt_token_ids:
         assert metadata.prompt_token_ids_cpu is not None

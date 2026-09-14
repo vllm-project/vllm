@@ -33,9 +33,11 @@ def test_defaults(parser):
     [
         [
             "--responses-store-config",
-            '{"enabled": true, "disk_enabled": false, '
-            '"memory_capacity_mb": 2, "memory_ttl_seconds": 0, '
-            '"cleanup_max_bytes_mb": 1, "cleanup_interval_seconds": 1}',
+            (
+                '{"enabled": true, "disk_enabled": false, '
+                '"memory_capacity_mb": 2, "memory_ttl_seconds": 0, '
+                '"cleanup_max_bytes_mb": 1, "cleanup_interval_seconds": 1}'
+            ),
         ],
         [
             "--responses-store-config.enabled",

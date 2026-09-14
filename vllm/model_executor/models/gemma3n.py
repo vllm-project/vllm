@@ -44,18 +44,14 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-)
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.utils import KVSharingFastPrefillMetadata
 
 from .interfaces import SupportsQuant
 from .utils import (
     AutoWeightsLoader,
+    WeightsMapper,
     extract_layer_index,
-    is_pp_missing_parameter,
     make_layers,
     maybe_prefix,
 )
@@ -81,7 +77,7 @@ class Gemma3nAltUp(nn.Module):
         altup_num_inputs: int,
         altup_coef_clip: float,
         altup_active_idx: int,
-        quant_config: QuantizationConfig,
+        quant_config: QuantizationConfig | None,
         prefix: str,
     ):
         super().__init__()
@@ -118,8 +114,10 @@ class Gemma3nAltUp(nn.Module):
             hidden_size=hidden_size,
             eps=rms_norm_eps,
         )
-        self.router_input_scale = torch.tensor(
-            hidden_size**-1.0, dtype=self.modality_router.weight.dtype
+        self.register_buffer(
+            "router_input_scale",
+            torch.tensor(hidden_size**-1.0, dtype=self.modality_router.weight.dtype),
+            persistent=False,
         )
         self.correct_output_scale = nn.Parameter(
             torch.zeros(hidden_size, dtype=torch.float32)
@@ -309,15 +307,36 @@ class Gemma3nAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
 
-        self.qkv_proj = QKVParallelLinear(
-            hidden_size,
-            self.head_dim,
-            self.total_num_heads,
-            self.total_num_kv_heads,
-            bias=config.attention_bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj",
+        layer_idx = extract_layer_index(prefix)
+        first_kv_shared_layer_idx = (
+            config.num_hidden_layers - config.num_kv_shared_layers
         )
+        self.is_kv_shared_layer = layer_idx >= first_kv_shared_layer_idx
+
+        if self.is_kv_shared_layer:
+            # K/V come from the target layer's cache, so like HF this layer
+            # only has q_proj (and no k_norm/v_norm).
+            self.q_proj = ColumnParallelLinear(
+                hidden_size,
+                self.total_num_heads * self.head_dim,
+                bias=config.attention_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.q_proj",
+            )
+        else:
+            self.qkv_proj = QKVParallelLinear(
+                hidden_size,
+                self.head_dim,
+                self.total_num_heads,
+                self.total_num_kv_heads,
+                bias=config.attention_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkv_proj",
+            )
+            self.k_norm = RMSNorm(hidden_size=self.head_dim, eps=config.rms_norm_eps)
+            self.v_norm = RMSNorm(
+                hidden_size=self.head_dim, eps=config.rms_norm_eps, has_weight=False
+            )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
@@ -326,12 +345,7 @@ class Gemma3nAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
         self.q_norm = RMSNorm(hidden_size=self.head_dim, eps=config.rms_norm_eps)
-        self.k_norm = RMSNorm(hidden_size=self.head_dim, eps=config.rms_norm_eps)
-        self.v_norm = RMSNorm(
-            hidden_size=self.head_dim, eps=config.rms_norm_eps, has_weight=False
-        )
 
-        layer_idx = extract_layer_index(prefix)
         layer_type = config.layer_types[layer_idx]
         is_sliding = layer_type == "sliding_attention"
         self.sliding_window = config.sliding_window if is_sliding else None
@@ -348,13 +362,8 @@ class Gemma3nAttention(nn.Module):
             if is_sliding:
                 rope_parameters["rope_theta"] = config.rope_local_base_freq
 
-        first_kv_shared_layer_idx = (
-            config.num_hidden_layers - config.num_kv_shared_layers
-        )
-        self.is_kv_shared = layer_idx >= first_kv_shared_layer_idx
-
         kv_sharing_target_layer_name = None
-        if self.is_kv_shared:
+        if self.is_kv_shared_layer:
             # Last full attention layer is 1 before sharing
             # Last sliding attention layer is 2 before sharing
             offset = 2 if self.sliding_window is not None else 1
@@ -407,21 +416,30 @@ class Gemma3nAttention(nn.Module):
         hidden_states: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        if self.is_kv_shared_layer:
+            # Shared KV: only Q is projected; K/V come from the target layer.
+            q, _ = self.q_proj(hidden_states)
+            q = q.unflatten(-1, (self.num_heads, self.head_dim))
+            q = self.q_norm(q)
+            q = q.flatten(-2, -1)
+            q, _ = self.rotary_emb(positions, q, None)
+            attn_output = self.attn(q, None, None)
+        else:
+            qkv, _ = self.qkv_proj(hidden_states)
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        q = q.unflatten(-1, (self.num_heads, self.head_dim))
-        q = self.q_norm(q)
-        q = q.flatten(-2, -1)
-        k = k.unflatten(-1, (self.num_kv_heads, self.head_dim))
-        k = self.k_norm(k)
-        k = k.flatten(-2, -1)
-        v = v.unflatten(-1, (self.num_kv_heads, self.head_dim))
-        v = self.v_norm(v)
-        v = v.flatten(-2, -1)
+            q = q.unflatten(-1, (self.num_heads, self.head_dim))
+            q = self.q_norm(q)
+            q = q.flatten(-2, -1)
+            k = k.unflatten(-1, (self.num_kv_heads, self.head_dim))
+            k = self.k_norm(k)
+            k = k.flatten(-2, -1)
+            v = v.unflatten(-1, (self.num_kv_heads, self.head_dim))
+            v = self.v_norm(v)
+            v = v.flatten(-2, -1)
 
-        q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v)
+            q, k = self.rotary_emb(positions, q, k)
+            attn_output = self.attn(q, k, v)
 
         output, _ = self.o_proj(attn_output)
         return output
@@ -601,9 +619,13 @@ class Gemma3nSelfDecoder(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.embed_tokens",
         )
-        self.embed_scale = torch.tensor(
-            config.hidden_size**0.5,
-            dtype=self.embed_tokens.weight.dtype,
+        self.register_buffer(
+            "embed_scale",
+            torch.tensor(
+                config.hidden_size**0.5,
+                dtype=self.embed_tokens.weight.dtype,
+            ),
+            persistent=False,
         )
         # Additional per-layer embeddings (PLE)
         self.embed_tokens_per_layer = VocabParallelEmbedding(
@@ -612,9 +634,13 @@ class Gemma3nSelfDecoder(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.per_layer_embed_tokens",
         )
-        self.embed_scale_per_layer = torch.tensor(
-            config.hidden_size_per_layer_input**0.5,
-            dtype=self.embed_tokens.weight.dtype,
+        self.register_buffer(
+            "embed_scale_per_layer",
+            torch.tensor(
+                config.hidden_size_per_layer_input**0.5,
+                dtype=self.embed_tokens.weight.dtype,
+            ),
+            persistent=False,
         )
         self.per_layer_model_projection = ColumnParallelLinear(
             config.hidden_size,
@@ -629,12 +655,18 @@ class Gemma3nSelfDecoder(nn.Module):
             hidden_size=config.hidden_size_per_layer_input,
             eps=config.rms_norm_eps,
         )
-        self.per_layer_input_scale = torch.rsqrt(torch.tensor(2.0)).to(
-            self.embed_tokens.weight.dtype
+        self.register_buffer(
+            "per_layer_input_scale",
+            torch.rsqrt(torch.tensor(2.0)).to(self.embed_tokens.weight.dtype),
+            persistent=False,
         )
-        self.per_layer_projection_scale = torch.tensor(
-            config.hidden_size**0.5,
-            dtype=self.embed_tokens.weight.dtype,
+        self.register_buffer(
+            "per_layer_projection_scale",
+            torch.tensor(
+                config.hidden_size**0.5,
+                dtype=self.embed_tokens.weight.dtype,
+            ),
+            persistent=False,
         )
         self.altup_projections = nn.ModuleList(
             [
@@ -783,11 +815,49 @@ class Gemma3nCrossDecoder(nn.Module):
         return hidden_states
 
 
+def _kv_sharing_weights_mapper(config: Gemma3nTextConfig) -> WeightsMapper:
+    """KV-shared layers only have q_proj, so qkv_proj packing applies to the
+    other layers. Original checkpoints still ship K/V tensors for the shared
+    layers (fine-tuned ones omit them); those are dropped."""
+    first_kv_shared_layer_idx = config.num_hidden_layers - config.num_kv_shared_layers
+    return WeightsMapper(
+        orig_to_new_substr={
+            f"layers.{i}.self_attn.{name}.": None
+            for i in range(first_kv_shared_layer_idx, config.num_hidden_layers)
+            for name in ("k_proj", "v_proj", "k_norm")
+        },
+        orig_to_new_stacked={
+            f"layers.{i}.self_attn.{shard}_proj.": (
+                f"layers.{i}.self_attn.qkv_proj.",
+                shard,
+            )
+            for i in range(first_kv_shared_layer_idx)
+            for shard in ("q", "k", "v")
+        },
+    )
+
+
 # This disables torch.compile if --kv-sharing-fast-prefill passed
 @support_torch_compile(
     enable_if=lambda vllm_config: not vllm_config.cache_config.kv_sharing_fast_prefill
 )
 class Gemma3nTextModel(nn.Module, SupportsQuant):
+    # Decoder layers, altup_unembed_projections and norm live on the text
+    # model; every other submodule lives under self_decoder.
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "embed_tokens.": "self_decoder.embed_tokens.",
+            "embed_tokens_per_layer.": "self_decoder.embed_tokens_per_layer.",
+            "per_layer_model_projection.": "self_decoder.per_layer_model_projection.",
+            "per_layer_projection_norm.": "self_decoder.per_layer_projection_norm.",
+            "altup_projections.": "self_decoder.altup_projections.",
+        },
+        orig_to_new_stacked={
+            ".gate_proj": (".gate_up_proj", 0),
+            ".up_proj": (".gate_up_proj", 1),
+        },
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -795,6 +865,9 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
+        self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | _kv_sharing_weights_mapper(
+            config
+        )
 
         self.altup_unembed_projections = nn.ModuleList(
             [
@@ -1036,61 +1109,19 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
         return self.norm(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            # decoder layer weights, altup_unembed_projections and rmsnorm
-            # are initialized in text model, others are in self decoder
-            if (
-                not name.startswith("layers")
-                and not name.startswith("altup_unembed_projections")
-                and not name.startswith("norm")
-            ):
-                name = f"self_decoder.{name}"
-
-            for param_name, shard_name, shard_id in stacked_params_mapping:
-                if shard_name not in name:
-                    continue
-                # Avoid spurious match with ".up_proj".
-                if "altup_projections" in name:
-                    continue
-                name = name.replace(shard_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                # Remapping the name of FP8 kv-scale.
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class Gemma3nForCausalLM(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={
+            "embed_audio.": None,
+            "embed_vision.": None,
+            "audio_tower.": None,
+            "vision_tower.": None,
+        }
+    )
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -1147,10 +1178,5 @@ class Gemma3nForCausalLM(nn.Module):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_substrs=(
-                ["embed_audio.", "embed_vision.", "audio_tower.", "vision_tower."]
-            ),
-        )
-        return loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

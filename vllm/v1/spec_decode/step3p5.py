@@ -107,7 +107,9 @@ class Step3p5MTPProposer(EagleProposer):
             if block_table is None:
                 continue
             n_blocks = block_table.shape[1]
-            bn = (new_positions_1d // block_size).clamp(max=n_blocks - 1).to(torch.long)
+            bn = new_positions_1d // block_size
+            bn.clamp_(max=n_blocks - 1)
+            bn = bn.to(torch.long)
             block_ids = block_table[:batch_size].gather(1, bn.unsqueeze(1)).squeeze(1)
             sm = block_ids * block_size + (new_positions_1d % block_size)
             sm.masked_fill_(exceeds, PADDING_SLOT_ID)
@@ -384,8 +386,6 @@ class Step3p5MTPProposer(EagleProposer):
 
         if self.num_speculative_tokens > 1 and num_rejected_tokens_gpu is not None:
             common_attn_metadata.seq_lens -= num_rejected_tokens_gpu
-            common_attn_metadata._seq_lens_cpu = None
-            common_attn_metadata._num_computed_tokens_cpu = None
 
         block_size = self.block_size
         assert block_size > 0, "block_size has not been initialized."

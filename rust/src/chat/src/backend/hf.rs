@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::sync::Arc;
 
 use tracing::info;
@@ -10,13 +13,14 @@ use crate::backend::{
     NewChatOutputProcessorOptions,
 };
 use crate::error::Result;
-use crate::multimodal::MultimodalModelInfo;
+use crate::multimodal::{MultimodalConfigFiles, MultimodalModelInfo};
 use crate::output::{
     DefaultChatOutputProcessor, HarmonyChatOutputProcessor, validate_harmony_parser_overrides,
 };
 use crate::renderer::hf::{HfChatRenderer, MultimodalRenderInfo};
 use crate::renderer::{
-    DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer, HarmonyChatRenderer,
+    DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DeepSeekV41ChatRenderer, DynChatRenderer,
+    HarmonyChatRenderer, InklingChatRenderer, KimiK3ChatRenderer,
 };
 use crate::request::ChatRequest;
 use crate::{DynChatOutputProcessor, RendererSelection};
@@ -46,9 +50,14 @@ impl HfChatBackend {
             MultimodalModelInfo::from_paths(
                 model_id.clone(),
                 (!model_type.is_empty()).then_some(model_type.to_string()),
-                files.config_path.as_deref(),
-                files.preprocessor_config_path.as_deref(),
+                MultimodalConfigFiles {
+                    config: files.config_path.as_deref(),
+                    preprocessor_config: files.preprocessor_config_path.as_deref(),
+                    video_preprocessor_config: files.video_preprocessor_config_path.as_deref(),
+                    processor_config: files.processor_config_path.as_deref(),
+                },
                 tokenizer.clone(),
+                options.limit_mm_per_prompt.clone(),
             )?
         };
         let multimodal_render_info = resolve_multimodal_render_info(multimodal_model_info.as_ref());
@@ -63,7 +72,10 @@ impl HfChatBackend {
             )?),
             RendererSelection::DeepSeekV32 => Arc::new(DeepSeekV32ChatRenderer::new()),
             RendererSelection::DeepSeekV4 => Arc::new(DeepSeekV4ChatRenderer::new()),
+            RendererSelection::DeepSeekV41 => Arc::new(DeepSeekV41ChatRenderer::new()),
             RendererSelection::Harmony => Arc::new(HarmonyChatRenderer::new()?),
+            RendererSelection::Inkling => Arc::new(InklingChatRenderer::new(tokenizer.clone())?),
+            RendererSelection::KimiK3 => Arc::new(KimiK3ChatRenderer::new(tokenizer.clone())),
         };
 
         info!(
@@ -117,9 +129,12 @@ pub(super) async fn load_model_backends(
     model_id: &str,
     options: LoadModelBackendsOptions,
 ) -> Result<LoadedModelBackends> {
-    let files = ResolvedModelFiles::new(model_id).await?;
-    let text_backend =
-        HfTextBackend::from_resolved_model_files(files.clone(), model_id.to_string())?;
+    let files = ResolvedModelFiles::new(model_id, options.revision.as_deref()).await?;
+    let text_backend = HfTextBackend::from_resolved_model_files(
+        files.clone(),
+        model_id.to_string(),
+        options.generation_config,
+    )?;
     let tokenizer = text_backend.tokenizer();
     let text_backend: DynTextBackend = Arc::new(text_backend);
 
@@ -139,8 +154,12 @@ pub(super) async fn load_model_backends(
 fn resolve_multimodal_render_info(
     info: Option<&MultimodalModelInfo>,
 ) -> Option<MultimodalRenderInfo> {
+    use llm_multimodal::Modality;
+
     info.map(|info| MultimodalRenderInfo {
-        placeholder_token: info.placeholder_token().to_string(),
+        image_token: info.placeholder_token(Modality::Image).map(str::to_string),
+        video_token: info.placeholder_token(Modality::Video).map(str::to_string),
+        audio_token: info.placeholder_token(Modality::Audio).map(str::to_string),
     })
 }
 
@@ -192,6 +211,8 @@ mod tests {
             tokenizer_config_path: Some(tokenizer_config_path),
             generation_config_path: None,
             preprocessor_config_path: None,
+            video_preprocessor_config_path: None,
+            processor_config_path: None,
             chat_template_path: None,
             config_path: Some(config_path),
         }
@@ -210,11 +231,14 @@ mod tests {
             resolved_files(config_json, tokenizer_config_json),
             "test-model".to_string(),
             LoadModelBackendsOptions {
+                revision: None,
+                generation_config: Default::default(),
                 renderer,
                 language_model_only: false,
                 chat_template_content_format: Default::default(),
                 chat_template: None,
                 default_chat_template_kwargs: HashMap::new(),
+                limit_mm_per_prompt: HashMap::new(),
             },
             test_tokenizer(),
         )

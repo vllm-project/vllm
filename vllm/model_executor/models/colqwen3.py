@@ -104,6 +104,7 @@ class ColQwen3ProcessingInfo(Qwen3VLProcessingInfo):
             spatial_merge_size,
             video_needs_metadata=self._supports_video,
             expected_hidden_size=self._get_expected_hidden_size(),
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
 
 

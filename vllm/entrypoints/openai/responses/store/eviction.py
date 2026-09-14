@@ -75,8 +75,8 @@ class CapacityTriggerDecision:
 
 @dataclass(frozen=True, slots=True)
 class EvictionSelectionBudget:
-    """The number of candidates for single-batch 
-        elimination tasks and the byte limit 
+    """The number of candidates for single-batch
+        elimination tasks and the byte limit
         for planned releases."""
 
     max_candidates: int
@@ -103,7 +103,7 @@ class CapacityWaterMarks:
 
     def __post_init__(self) -> None:
         if not (
-            0 <= self.low_watermark_bytes < self.high_watermark_bytes <= self.max_bytes 
+            0 <= self.low_watermark_bytes < self.high_watermark_bytes <= self.max_bytes
         ):
             raise ValueError(
                 "Capacity watermarks must satisfy "
@@ -313,9 +313,9 @@ class EvictionPolicy:
         high_watermark_reached = used_bytes >= watermarks.high_watermark_bytes
 
         should_evict = has_expired_candidates or high_watermark_reached
-        target_used_bytes = ( 
+        target_used_bytes = (
                             watermarks.low_watermark_bytes
-                            if high_watermark_reached else None 
+                            if high_watermark_reached else None
                             )
         if has_expired_candidates and high_watermark_reached:
             trigger_reason = EvictionTriggerReason.TTL_AND_HIGH_WATERMARK
@@ -325,7 +325,7 @@ class EvictionPolicy:
             trigger_reason = EvictionTriggerReason.HIGH_WATERMARK
         else:
             trigger_reason = None
-        
+
         return EvictionTriggerDecision(
             should_evict=should_evict,
             has_expired_candidates=has_expired_candidates,
@@ -371,7 +371,7 @@ class EvictionPolicy:
         projected_used_bytes = used_bytes - old_size_bytes + new_size_bytes
 
         """
-        When a single record exceeds the maximum capacity, 
+        When a single record exceeds the maximum capacity,
         clearing other sessions cannot accommodate it either.
         """
         should_reject = new_size_bytes > watermarks.max_bytes

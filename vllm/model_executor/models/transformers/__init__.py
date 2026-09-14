@@ -18,9 +18,10 @@
 
 from typing import TYPE_CHECKING
 
+import torch.nn.functional as F
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
-from vllm.model_executor.models.transformers.base import Base
+from vllm.model_executor.models.transformers.base import VLLM_ATTN_ATTR, Base
 from vllm.model_executor.models.transformers.causal import CausalMixin
 from vllm.model_executor.models.transformers.legacy import LegacyMixin
 from vllm.model_executor.models.transformers.moe import MoEMixin
@@ -39,7 +40,28 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 if TYPE_CHECKING:
     import torch
 
-    from vllm.model_executor.layers.attention import Attention
+    from vllm.model_executor.layers.attention import Attention, MLAAttention
+
+
+def check_sinks(
+    module: "torch.nn.Module",
+    self_attn: "Attention | MLAAttention",
+    s_aux: "torch.Tensor | None",
+):
+    """Fail loudly if the model applies a sink the attention layer will not.
+
+    Only the attention impl can fold a sink into the softmax denominator, so a sink
+    that never reached `Attention` is dropped and every softmax is subtly wrong.
+    """
+    if s_aux is None or getattr(self_attn, "has_sink", False):
+        return
+    raise ValueError(
+        f"{type(module).__name__} applies attention sinks, but they were not passed "
+        f"to {type(self_attn).__name__}, so the output would be wrong. Either the "
+        "Transformers modeling backend could not find the parameter holding them, or "
+        "vLLM does not support sinks for this kind of attention. Please open an issue "
+        "at https://github.com/vllm-project/vllm/issues/new"
+    )
 
 
 def vllm_attention_forward(
@@ -49,22 +71,58 @@ def vllm_attention_forward(
     key: "torch.Tensor",
     value: "torch.Tensor",
     attention_mask: "torch.Tensor",
-    # Transformers kwargs
-    scaling: float | None = None,
-    # vLLM kwargs
-    attention_instances: dict[int, "Attention"] | None = None,
     **kwargs,
 ):
-    self_attn = attention_instances[module.layer_idx]
-    if scaling is not None:
-        self_attn.impl.scale = float(scaling)
+    self_attn = getattr(module, VLLM_ATTN_ATTR)
+    check_sinks(module, self_attn, kwargs.get("s_aux"))
     hidden = query.shape[-2]
+    head_dim_qk = query.shape[-1]
+    head_dim_v = value.shape[-1]
     query, key, value = (x.transpose(1, 2) for x in (query, key, value))
     query, key, value = (x.reshape(hidden, -1) for x in (query, key, value))
-    return self_attn.forward(query, key, value), None
+    # Pad `value` up to the query/key head size when it is smaller (expanded
+    # MLA). A larger last dim just means `value` isn't split per head, e.g.
+    # packed grouped/multi-query projections, and needs no padding.
+    pad_value = head_dim_v < head_dim_qk
+    if pad_value:
+        value = F.pad(value.view(-1, head_dim_v), (0, head_dim_qk - head_dim_v))
+        value = value.reshape(hidden, -1)
+    attn_output = self_attn.forward(query, key, value)
+    if pad_value:
+        attn_output = attn_output.view(-1, head_dim_qk)[..., :head_dim_v]
+        attn_output = attn_output.reshape(hidden, -1)
+    return attn_output, None
 
 
-ALL_ATTENTION_FUNCTIONS["vllm"] = vllm_attention_forward
+def vllm_mla_attention_forward(
+    # Transformers args
+    module: "torch.nn.Module",
+    query: "torch.Tensor",
+    kv_c_normed: "torch.Tensor",
+    k_pe: "torch.Tensor",
+    attention_mask: "torch.Tensor",
+    **kwargs,
+):
+    self_attn = getattr(module, VLLM_ATTN_ATTR)
+    check_sinks(module, self_attn, kwargs.get("s_aux"))
+    # [batch=1, heads, num_tokens, qk_head_dim] -> [num_tokens, heads, qk_head_dim]
+    query = query.transpose(1, 2).flatten(0, 1)
+    num_tokens, num_heads = query.shape[:2]
+    # [batch=1, num_tokens, kv_lora_rank] -> [num_tokens, kv_lora_rank]
+    kv_c_normed = kv_c_normed.reshape(-1, kv_c_normed.shape[-1])
+    # [batch=1, heads=1, num_tokens, qk_rope] -> [num_tokens, 1, qk_rope]
+    k_pe = k_pe.reshape(-1, 1, k_pe.shape[-1])
+    attn_output = self_attn.forward(
+        query,
+        kv_c_normed,
+        k_pe,
+        output_shape=(num_tokens, num_heads * self_attn.v_head_dim),
+    )
+    return attn_output, None
+
+
+ALL_ATTENTION_FUNCTIONS.register("vllm", vllm_attention_forward)
+ALL_ATTENTION_FUNCTIONS.register("vllm_mla", vllm_mla_attention_forward)
 
 
 # Text only models

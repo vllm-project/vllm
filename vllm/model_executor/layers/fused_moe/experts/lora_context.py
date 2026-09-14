@@ -43,6 +43,11 @@ class MoELoRAContext:
     # try_get_optimal_moe_lora_config for Triton kernel tile configs.
     use_tuned_config: bool
 
+    # Shared MoE LoRA: w13 lora_A and w2 lora_B are shared across all experts
+    # (stored collapsed with expert-dim 1). When True, LoRAExpertsMixin expands
+    # them to local_num_experts via a stride-0 view before the kernel.
+    enable_moe_shared_loras: bool = False
+
     # Optional dual-stream support for overlapping each (base GEMM, LoRA)
     # pair. When aux_stream is None, the experts.apply() path runs the
     # original sequential schedule. When set, base GEMM runs on the default

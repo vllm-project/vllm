@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import os
+import sqlite3
 import tempfile
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
@@ -42,6 +43,20 @@ logger = init_logger(__name__)
 _T = TypeVar("_T")
 
 CACHE = None
+
+
+def strip_speculative_padding(token_ids: list[int]) -> list[int]:
+    """Drop speculative-decoding padding from a token block.
+
+    ngram and other speculative backends pad rejected draft positions with a
+    -1 sentinel. Structured-output grammars treat every entry as a real token
+    id, so the sentinels (and everything after the first one) are removed here,
+    before tokens reach any backend, rather than inside a single backend.
+    """
+    for i, token_id in enumerate(token_ids):
+        if token_id < 0:
+            return token_ids[:i]
+    return token_ids
 
 
 def compile_regex_with_timeout(fn: Callable[[str], _T], pattern: str) -> _T:
@@ -214,19 +229,81 @@ def get_outlines_cache_path() -> str:
     return os.path.join(tempdir, ".cache", "outlines")
 
 
+class OutlinesDiskCache:
+    """SQLite-backed cache for outlines_core.Index objects.
+
+    Uses outlines_core's native binary serialization (via Rust serde)
+    instead of pickle, eliminating arbitrary code execution risk on
+    deserialization.
+    """
+
+    _TYPE_INDEX = "I"
+    _TYPE_STRING = "S"
+
+    def __init__(self, path: str):
+        os.makedirs(path, exist_ok=True)
+        db_path = os.path.join(path, "outlines_cache.db")
+        self._db = sqlite3.connect(db_path, check_same_thread=False)
+        self._db.execute("PRAGMA journal_mode=WAL")
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS cache "
+            "(key TEXT PRIMARY KEY, type_tag TEXT NOT NULL, value BLOB NOT NULL)"
+        )
+        self._db.commit()
+
+    def __contains__(self, key: str) -> bool:
+        row = self._db.execute("SELECT 1 FROM cache WHERE key=?", (key,)).fetchone()
+        return row is not None
+
+    def __getitem__(self, key: str):
+        row = self._db.execute(
+            "SELECT type_tag, value FROM cache WHERE key=?", (key,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(key)
+        type_tag, data = row
+        if type_tag == self._TYPE_STRING:
+            return data.decode("utf-8")
+        return oc.Index.from_binary(data)
+
+    def __setitem__(self, key: str, value):
+        if isinstance(value, str):
+            type_tag = self._TYPE_STRING
+            data = value.encode("utf-8")
+        else:
+            type_tag = self._TYPE_INDEX
+            data = value.__reduce__()[1][0]
+        self._db.execute(
+            "INSERT OR REPLACE INTO cache (key, type_tag, value) VALUES (?, ?, ?)",
+            (key, type_tag, data),
+        )
+        self._db.commit()
+
+    def get(self, key: str, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def set(self, key: str, value):
+        self[key] = value
+
+    def clear(self):
+        self._db.execute("DELETE FROM cache")
+        self._db.commit()
+
+
 def get_outlines_cache():
     """Get the Cache instance to be used for index caching"""
 
     cache_dir = get_outlines_cache_path()
     if envs.VLLM_V1_USE_OUTLINES_CACHE:
-        from diskcache import Cache
-
         logger.warning(
             "Enabling outlines cache. This is an unbounded on-disk "
             "cache. It may consume a lot of disk space and should "
             "not be used with untrusted clients."
         )
-        cache = Cache(cache_dir, eviction_policy="none", cull_limit=0)
+        cache = OutlinesDiskCache(cache_dir)
         outlines_version = importlib.metadata.version("outlines_core")
 
         cached_version = cache.get("__version__", None)

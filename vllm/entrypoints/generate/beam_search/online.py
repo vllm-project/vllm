@@ -32,6 +32,7 @@ class BeamSearchOnlineMixin(ABC):
         params: BeamSearchParams,
         lora_request: LoRARequest | None = None,
         trace_headers: Mapping[str, str] | None = None,
+        session_id: str | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         beam_width = params.beam_width
         max_tokens = params.max_tokens
@@ -90,6 +91,7 @@ class BeamSearchOnlineMixin(ABC):
                             request_id_item,
                             lora_request=lora_request_item,
                             trace_headers=trace_headers,
+                            session_id=session_id,
                         )
                     )
                 )
@@ -195,7 +197,9 @@ class BeamSearchOnlineMixin(ABC):
                 tokens = beam.tokens[tokenized_length:-1]
             else:
                 tokens = beam.tokens[tokenized_length:]
-            beam.text = tokenizer.decode(tokens)
+            beam.text = tokenizer.decode(
+                tokens, skip_special_tokens=params.skip_special_tokens
+            )
 
         yield RequestOutput(
             request_id=request_id,

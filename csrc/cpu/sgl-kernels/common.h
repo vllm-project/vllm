@@ -1,11 +1,16 @@
 // Adapted from
 // https://github.com/sgl-project/sglang/tree/main/sgl-kernel/csrc/cpu
+//
+// Synced from
+// https://github.com/sgl-project/sglang/tree/7c248dde7fe1f3b5100966f8143f97a9932c22a4/sgl-kernel/csrc/cpu
+// Sync date: 2026-07-29
 
 // clang-format off
 
 #pragma once
 
 #include <ATen/ATen.h>
+#include <ATen/Dispatch.h>
 #include <ATen/Parallel.h>
 
 #if defined(_OPENMP)
@@ -48,6 +53,14 @@ namespace {
       }                                                                  \
     }                                                                    \
   }()
+
+// Half + BFloat16, plus one extra scalar type
+#define AT_DISPATCH_CASE_REDUCED_FLOATING_TYPES_AND(SCALARTYPE, ...) \
+  AT_DISPATCH_CASE_REDUCED_FLOATING_TYPES(__VA_ARGS__)               \
+  AT_DISPATCH_CASE(SCALARTYPE, __VA_ARGS__)
+
+#define AT_DISPATCH_REDUCED_FLOATING_TYPES_AND(SCALARTYPE, TYPE, NAME, ...) \
+  AT_DISPATCH_SWITCH(TYPE, NAME, AT_DISPATCH_CASE_REDUCED_FLOATING_TYPES_AND(SCALARTYPE, __VA_ARGS__))
 
 // dispatch: bfloat16, float16, int8_t, fp8_e4m3, uint8_t(mxfp4/int4)
 #define CPU_DISPATCH_PACKED_TYPES(TYPE, ...)                     \
@@ -322,6 +335,36 @@ inline void parallel_2d(int m, int n, const func_t& f) {
     int end_m = std::min(m, begin_m + thread_block_m);
     int begin_n = ith_n * thread_block_n;
     int end_n = std::min(n, begin_n + thread_block_n);
+
+    f(begin_m, end_m, begin_n, end_n);
+  }
+#else
+  f(0, m, 0, n);
+#endif
+}
+
+// Like parallel_2d but with explicit nth_m x nth_n decomposition.
+// Caller is responsible for choosing nth_m and nth_n.
+//
+// Cherry-picked from a newer sglang commit than this file's last full sync
+// (needed by mhc.cpp's phase-1 tiling); not part of a full common.h resync.
+template <typename func_t>
+inline void parallel_2d_tiled(int m, int n, int nth_m, int nth_n, const func_t& f) {
+  const int nth = nth_m * nth_n;
+#if defined(_OPENMP)
+#pragma omp parallel num_threads(nth)
+  {
+    int ith = omp_get_thread_num();
+    int ith_m = ith / nth_n;
+    int ith_n = ith % nth_n;
+
+    int thread_block_m = div_up(m, nth_m);
+    int thread_block_n = div_up(n, nth_n);
+
+    int begin_m = std::min(ith_m * thread_block_m, m);
+    int end_m = std::min(begin_m + thread_block_m, m);
+    int begin_n = std::min(ith_n * thread_block_n, n);
+    int end_n = std::min(begin_n + thread_block_n, n);
 
     f(begin_m, end_m, begin_n, end_n);
   }

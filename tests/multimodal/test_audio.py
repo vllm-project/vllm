@@ -14,9 +14,11 @@ from vllm.multimodal.audio import (
     AudioResampler,
     AudioSpec,
     ChannelReduction,
+    _get_torchaudio_resampler,
     normalize_audio,
     resample_audio_pyav,
     resample_audio_scipy,
+    resample_audio_torchaudio,
     split_audio,
 )
 
@@ -76,6 +78,46 @@ def test_resample_audio_scipy_resamples_last_axis_for_multichannel():
     assert np.isfinite(out).all()
 
 
+def test_resample_audio_torchaudio(dummy_audio):
+    out_down = resample_audio_torchaudio(dummy_audio, orig_sr=4, target_sr=2)
+    out_up = resample_audio_torchaudio(dummy_audio, orig_sr=2, target_sr=4)
+    out_same = resample_audio_torchaudio(dummy_audio, orig_sr=4, target_sr=4)
+
+    assert len(out_down) == 3
+    assert len(out_up) == 10
+    assert np.all(out_same == dummy_audio)
+
+
+def test_resample_audio_torchaudio_non_divisible_sample_rates():
+    audio = np.arange(441, dtype=float)
+    out = resample_audio_torchaudio(audio, orig_sr=44100, target_sr=16000)
+
+    expected_len = math.ceil(len(audio) * 16000 / 44100)
+    assert len(out) == expected_len
+
+    assert isinstance(out, np.ndarray)
+    assert np.isfinite(out).all()
+
+
+def test_resample_audio_torchaudio_resamples_last_axis_for_multichannel():
+    audio = np.arange(2 * 441, dtype=float).reshape(2, 441)
+    out = resample_audio_torchaudio(audio, orig_sr=44100, target_sr=16000)
+
+    expected_len = math.ceil(audio.shape[-1] * 16000 / 44100)
+    assert out.shape == (2, expected_len)
+    assert np.isfinite(out).all()
+
+
+def test_resample_audio_torchaudio_short_input_needs_no_padding():
+    # Unlike the PyAV resampler, torchaudio produces output for inputs
+    # shorter than libswresample's minimum frame size.
+    audio = np.arange(8, dtype=float)
+    out = resample_audio_torchaudio(audio, orig_sr=44100, target_sr=16000)
+
+    assert len(out) == math.ceil(len(audio) * 16000 / 44100)
+    assert np.isfinite(out).all()
+
+
 def test_audio_resampler_pyav_calls_resample(dummy_audio):
     resampler = AudioResampler(target_sr=22050, method="pyav")
     with patch("vllm.multimodal.audio.resample_audio_pyav") as mock_resample:
@@ -98,10 +140,46 @@ def test_audio_resampler_scipy_calls_resample(dummy_audio):
         assert np.all(out == dummy_audio)
 
 
+def test_audio_resampler_torchaudio(dummy_audio):
+    resampler = AudioResampler(target_sr=22050, method="torchaudio")
+    out_down = resampler.resample(dummy_audio, orig_sr=44100)
+
+    expected_len = math.ceil(len(dummy_audio) * 22050 / 44100)
+    assert len(out_down) == expected_len
+    assert np.isfinite(out_down).all()
+
+
+def test_resample_audio_torchaudio_caches_kernel():
+    # The sinc kernel is rebuilt per (orig_sr, target_sr) pair; repeated
+    # requests at the same pair must reuse the cached one.
+    _get_torchaudio_resampler.cache_clear()
+    audio = np.arange(441, dtype=float)
+
+    resample_audio_torchaudio(audio, orig_sr=44100, target_sr=16000)
+    resample_audio_torchaudio(audio, orig_sr=44100, target_sr=16000)
+    resample_audio_torchaudio(audio, orig_sr=48000, target_sr=16000)
+
+    info = _get_torchaudio_resampler.cache_info()
+    assert info.misses == 2
+    assert info.hits == 1
+
+
+def test_audio_resampler_default_is_torchaudio():
+    # Deliberate behavior change: torchaudio is the default resampling backend
+    # for both AudioResampler and the data parser that wraps it.
+    assert AudioResampler(target_sr=16000).method == "torchaudio"
+
+    from vllm.multimodal.parse import MultiModalDataParser
+
+    parser = MultiModalDataParser(target_sr=16000)
+    assert parser.audio_resampler.method == "torchaudio"
+
+
 def test_audio_resampler_invalid_method(dummy_audio):
-    resampler = AudioResampler(target_sr=22050, method="invalid")
-    with pytest.raises(ValueError):
-        resampler.resample(dummy_audio, orig_sr=44100)
+    # Validated eagerly so a bad method fails at construction, not on the
+    # first audio request.
+    with pytest.raises(ValueError, match="Invalid resampling method"):
+        AudioResampler(target_sr=22050, method="invalid")
 
 
 def test_audio_resampler_no_target_sr(dummy_audio):
@@ -743,6 +821,23 @@ class TestAudioChunking:
         # Current implementation evaluates non-overlapping 1600-sample windows
         # from start_idx, so the quietest scanned window starts at 19200.
         assert split_idx == 19200
+
+    def test_split_audio_rejects_multi_channel(self):
+        """Chunking is mono-only; stereo must fail loudly rather than silently.
+
+        find_split_point searches axis 0, so (channels, time) input would skip
+        the energy search entirely and split at fixed boundaries instead.
+        """
+        stereo = np.ones((2, 16000 * 65), dtype=np.float32)
+
+        with pytest.raises(ValueError, match="expects mono audio"):
+            split_audio(
+                audio_data=stereo,
+                sample_rate=16000,
+                max_clip_duration_s=30.0,
+                overlap_duration_s=1.0,
+                min_energy_window_size=1600,
+            )
 
     def test_split_audio_preserves_boundaries(self):
         """Verify first and last samples are preserved when chunking."""

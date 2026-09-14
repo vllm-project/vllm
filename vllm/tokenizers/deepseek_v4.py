@@ -3,7 +3,7 @@
 import copy
 from typing import Any
 
-from transformers import PreTrainedTokenizerFast
+from transformers import TokenizersBackend
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 
@@ -19,24 +19,22 @@ def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
     dsv4_tokenizer = copy.copy(tokenizer)
 
     added_vocab = tokenizer.get_added_vocab()
-    added_vocab_size = len(added_vocab)
-    tokenizer_vocab_size = tokenizer.vocab_size
 
     class _DeepseekV4Tokenizer(tokenizer.__class__):  # type: ignore
         def apply_chat_template(
             self,
             messages: list["ChatCompletionMessageParam"],
             tools: list[dict[str, Any]] | None = None,
-            incremental_context: (
-                list["ChatCompletionMessageParam"] | None
-            ) = None,
+            incremental_context: (list["ChatCompletionMessageParam"] | None) = None,
             use_incremental_token: bool = False,
             **kwargs,
         ) -> str | list[int]:
-            thinking = kwargs.get("thinking", False)
-            enable_thinking = kwargs.get("enable_thinking", False)
-            thinking = thinking or enable_thinking
-            thinking_mode = "thinking" if thinking else "chat"
+            thinking = kwargs.get("thinking")
+            enable_thinking = kwargs.get("enable_thinking")
+            thinking_enabled = bool(thinking) or bool(enable_thinking)
+            if "thinking" not in kwargs and "enable_thinking" not in kwargs:
+                thinking_enabled = True
+            thinking_mode = "thinking" if thinking_enabled else "chat"
 
             conversation = kwargs.get("conversation", messages)
             messages = conversation.copy()
@@ -50,12 +48,14 @@ def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
 
             reasoning_effort = kwargs.get("reasoning_effort")
             if not isinstance(reasoning_effort, str):
-                reasoning_effort = None
+                reasoning_effort = "high" if thinking_enabled else None
             elif reasoning_effort == "none":
                 thinking_mode = "chat"
                 reasoning_effort = None
-            elif reasoning_effort in ("max", "xhigh"):
+            elif reasoning_effort == "max":
                 reasoning_effort = "max"
+            elif reasoning_effort in ("low", "minimal", "medium"):
+                reasoning_effort = "low"
             else:
                 reasoning_effort = "high"
 
@@ -68,8 +68,10 @@ def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
             prompt_str = encode_messages(
                 messages,
                 context=incremental_context,
-                add_default_bos_token=(incremental_context is None and not incremental_continuation),
-                **encode_config
+                add_default_bos_token=(
+                    incremental_context is None and not incremental_continuation
+                ),
+                **encode_config,
             )  # type: ignore
 
             if kwargs.get("tokenize", True):
@@ -87,9 +89,6 @@ def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
         def num_special_tokens_to_add(self) -> int:
             return len(self.encode(""))
 
-        def __len__(self) -> int:
-            return tokenizer_vocab_size + added_vocab_size
-
         def get_added_vocab(self) -> dict[str, int]:
             return added_vocab.copy()
 
@@ -105,5 +104,5 @@ def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
 class DeepseekV4Tokenizer(TokenizerLike):
     @classmethod
     def from_pretrained(cls, *args, **kwargs) -> HfTokenizer:
-        tokenizer = PreTrainedTokenizerFast.from_pretrained(*args, **kwargs)
+        tokenizer = TokenizersBackend.from_pretrained(*args, **kwargs)
         return get_cached_tokenizer(get_deepseek_v4_tokenizer(tokenizer))

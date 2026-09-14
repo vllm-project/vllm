@@ -1,5 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::BTreeSet;
 
+use bytes::Bytes;
 use enum_as_inner::EnumAsInner;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_default::DefaultFromSerde;
@@ -97,6 +101,8 @@ pub struct EngineCoreOutput {
     #[serde(default)]
     pub kv_transfer_params: Option<serde_json::Value>,
     #[serde(default)]
+    pub ec_transfer_params: Option<serde_json::Value>,
+    #[serde(default)]
     pub trace_headers: Option<OpaqueValue>,
     /// Breakdown of the scheduled prefill computation, set on the first output
     /// of a newly scheduled prefill and elided for subsequent decode outputs.
@@ -107,6 +113,24 @@ pub struct EngineCoreOutput {
     /// Number of NaNs seen in logits. Values above zero indicate corruption.
     #[serde(default)]
     pub num_nans_in_logits: u32,
+    /// Multi-modal hashes the engine could not find in its receiver cache,
+    /// because the frontend sent `data: None` for an item the engine had
+    /// already evicted. Non-empty makes the output retryable: a frontend that
+    /// keeps a metadata-only shadow of the engine cache drops these entries and
+    /// resends the request with the item data attached.
+    ///
+    /// TODO: always `None` here, since this client has no multi-modal processor
+    /// cache and always sends item data inline. Act on it once the Rust
+    /// frontend grows one.
+    #[serde(default)]
+    pub mm_cache_miss_hashes: Option<Vec<String>>,
+    #[serde(default)]
+    pub new_sampling_mask: Option<OpaqueValue>,
+    /// Per-request speculative-decoding acceptance metrics, set on the final
+    /// output when `--per-request-spec-decode-metrics` is enabled. Opaque here;
+    /// the Rust frontend does not yet surface it in responses.
+    #[serde(default)]
+    pub spec_decode_metrics: Option<OpaqueValue>,
 }
 
 impl EngineCoreOutput {
@@ -117,10 +141,7 @@ impl EngineCoreOutput {
 
     /// Resolve all wire-format fields in-place by looking up aux frames and
     /// decoding raw-view payloads as needed.
-    fn resolve_in_place<Frame>(&mut self, frames: &[Frame]) -> Result<()>
-    where
-        Frame: AsRef<[u8]>,
-    {
+    fn resolve_in_place(&mut self, frames: &[Bytes]) -> Result<()> {
         self.new_logprobs = (self.new_logprobs.take())
             .map(|value| value.resolve(frames, "new_logprobs"))
             .transpose()?;
@@ -223,10 +244,7 @@ impl From<DpControlOutput> for EngineCoreOutputs {
 impl EngineCoreOutputs {
     /// Resolve all wire-format fields in-place by looking up aux frames and
     /// decoding raw-view payloads as needed.
-    fn resolve_in_place<Frame>(&mut self, frames: &[Frame]) -> Result<()>
-    where
-        Frame: AsRef<[u8]>,
-    {
+    fn resolve_in_place(&mut self, frames: &[Bytes]) -> Result<()> {
         if let Self::RequestBatch(batch) = self {
             for output in &mut batch.outputs {
                 output.resolve_in_place(frames)?;
@@ -342,10 +360,7 @@ impl<'de> Deserialize<'de> for EngineCoreOutputs {
 
 /// Decode one ordinary or multipart engine-core output message into the strong
 /// typed public protocol shape.
-pub fn decode_engine_core_outputs<Frame>(frames: &[Frame]) -> Result<EngineCoreOutputs>
-where
-    Frame: AsRef<[u8]>,
-{
+pub fn decode_engine_core_outputs(frames: &[Bytes]) -> Result<EngineCoreOutputs> {
     let first_frame = frames.first().ok_or_else(|| ext_value_decode!("missing output frame"))?;
 
     let mut outputs: EngineCoreOutputs = decode_msgpack(first_frame.as_ref())?;
@@ -367,17 +382,9 @@ mod tests {
             outputs: vec![EngineCoreOutput {
                 request_id: "req-1".to_string(),
                 new_token_ids: vec![42],
-                new_logprobs: None,
-                new_prompt_logprobs_tensors: None,
-                pooling_output: None,
                 finish_reason: Some(EngineCoreFinishReason::Length),
                 stop_reason: Some(StopReason::Text("stop".to_string())),
-                events: None,
-                kv_transfer_params: None,
-                trace_headers: None,
-                prefill_stats: None,
-                routed_experts: None,
-                num_nans_in_logits: 0,
+                ..Default::default()
             }],
             finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
             ..Default::default()
@@ -426,10 +433,14 @@ mod tests {
                             stop_reason: None,
                             events: None,
                             kv_transfer_params: None,
+                            ec_transfer_params: None,
                             trace_headers: None,
                             prefill_stats: None,
                             routed_experts: None,
                             num_nans_in_logits: 0,
+                            mm_cache_miss_hashes: None,
+                            new_sampling_mask: None,
+                            spec_decode_metrics: None,
                         },
                     ],
                     scheduler_stats: None,

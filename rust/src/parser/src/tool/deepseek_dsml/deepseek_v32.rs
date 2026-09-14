@@ -1,5 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use super::{DeepSeekDsmlToolParser, DsmlTokens};
-use crate::tool::{Result, StructuralTagModel, Tool, ToolParser, ToolParserOutput};
+use crate::tool::{Result, StructuralTagBuilder, Tool, ToolParser, ToolParserOutput};
 
 /// Tool parser for DeepSeek V3.2 models.
 ///
@@ -44,8 +47,8 @@ impl ToolParser for DeepSeekV32ToolParser {
         true
     }
 
-    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
-        Some(StructuralTagModel::DeepSeekV32)
+    fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
+        Some(xgrammar_structural_tag::Model::DeepSeekV32.builder())
     }
 
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
@@ -68,6 +71,7 @@ mod tests {
 
     use super::DeepSeekV32ToolParser;
     use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
+    use crate::tool::tests::assert_tool_framing_preserves_body_whitespace;
     use crate::tool::{ToolParser, ToolParserTestExt as _};
 
     fn build_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {
@@ -441,5 +445,13 @@ mod tests {
 
         assert_eq!(streamed.normal_text(), complete.normal_text());
         assert_eq!(streamed.calls(), complete.calls());
+    }
+
+    #[test]
+    fn tool_framing_preserves_body_whitespace_across_chunk_boundaries() {
+        assert_tool_framing_preserves_body_whitespace::<DeepSeekV32ToolParser>(
+            "\n\n",
+            "<｜DSML｜function_calls><｜DSML｜invoke name=\"get_weather\"></｜DSML｜invoke></｜DSML｜function_calls>",
+        );
     }
 }

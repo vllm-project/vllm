@@ -4,25 +4,27 @@
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
-import numpy as np
 import torch
 
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
+from vllm.model_executor.layers.attention.sparse_mla_attention import (
+    SparseMLACommonImpl,
+    SparseMLACommonMetadata,
+    SparseMLACommonMetadataBuilder,
+)
 from vllm.platforms.interface import DeviceCapability
-from vllm.utils.torch_utils import np_to_pinned_tensor
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
     AttentionLayer,
-    AttentionMetadata,
-    AttentionMetadataBuilder,
-    CommonAttentionMetadata,
+    MLAAttentionImpl,
     MultipleOf,
-    SparseMLAAttentionImpl,
 )
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
+from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
 from vllm.v1.attention.backends.mla.sparse_utils import (
+    flat_kv_row_view,
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -50,7 +52,7 @@ class FlashAttnMLASparseBackend(AttentionBackend):
         return FlashAttnMLASparseMetadataBuilder
 
     @staticmethod
-    def get_impl_cls() -> type[SparseMLAAttentionImpl[Any]]:
+    def get_impl_cls() -> type[MLAAttentionImpl[Any]]:
         return FlashAttnMLASparseImpl
 
     @classmethod
@@ -97,41 +99,21 @@ class FlashAttnMLASparseBackend(AttentionBackend):
             if vllm_config.parallel_config.decode_context_parallel_size > 1:
                 return "FlashAttention MLA Sparse does not support DCP for now"
 
-            hf_config = vllm_config.model_config.hf_config
-            if not hasattr(hf_config, "index_topk"):
+            hf_text_config = vllm_config.model_config.hf_text_config
+            if not hasattr(hf_text_config, "index_topk"):
                 return "FlashAttention MLA Sparse requires model with index_topk"
         return None
 
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        return (num_blocks, block_size, head_size)
-
 
 @dataclass
-class FlashAttnMLASparseMetadata(AttentionMetadata):
-    num_reqs: int
-    max_query_len: int
-    max_seq_len: int
-
-    num_actual_tokens: int
-    query_start_loc: torch.Tensor
-    slot_mapping: torch.Tensor
-
-    block_table: torch.Tensor
-    req_id_per_token: torch.Tensor
-    block_size: int = 64
-    topk_tokens: int = 2048
+class FlashAttnMLASparseMetadata(SparseMLACommonMetadata):
+    pass
 
 
 class FlashAttnMLASparseMetadataBuilder(
-    AttentionMetadataBuilder[FlashAttnMLASparseMetadata]
+    SparseMLACommonMetadataBuilder[FlashAttnMLASparseMetadata]
 ):
+    metadata_cls = FlashAttnMLASparseMetadata
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(
@@ -141,55 +123,16 @@ class FlashAttnMLASparseMetadataBuilder(
         vllm_config: VllmConfig,
         device: torch.device,
     ) -> None:
-        self.vllm_config = vllm_config
-        self.layer_names = layer_names
-        self.kv_cache_spec = kv_cache_spec
-        self.model_config = vllm_config.model_config
-        self.device = device
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
-        self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
-
-        self.topk_tokens = vllm_config.model_config.hf_config.index_topk
-        self.req_id_per_token_buffer = torch.empty(
-            (vllm_config.scheduler_config.max_num_batched_tokens,),
-            dtype=torch.int32,
-            device=device,
+        num_q_heads = self.model_config.get_num_attention_heads(
+            vllm_config.parallel_config
         )
-
-    def build(
-        self,
-        common_prefix_len: int,
-        common_attn_metadata: CommonAttentionMetadata,
-        fast_build: bool = False,
-    ) -> FlashAttnMLASparseMetadata:
-        cm = common_attn_metadata
-        num_tokens = cm.num_actual_tokens
-        starts = np.asarray(cm.query_start_loc_cpu, dtype=np.int32)
-        seg_lengths = np.diff(starts)
-        req_id_per_token = np.repeat(
-            np.arange(seg_lengths.shape[0], dtype=np.int32), seg_lengths
-        )
-
-        self.req_id_per_token_buffer.fill_(0)
-        self.req_id_per_token_buffer[: req_id_per_token.shape[0]].copy_(
-            np_to_pinned_tensor(req_id_per_token), non_blocking=True
-        )
-
-        return FlashAttnMLASparseMetadata(
-            num_reqs=cm.num_reqs,
-            max_query_len=cm.max_query_len,
-            max_seq_len=cm.max_seq_len,
-            num_actual_tokens=cm.num_actual_tokens,
-            query_start_loc=cm.query_start_loc,
-            slot_mapping=cm.slot_mapping,
-            block_table=cm.block_table_tensor,
-            req_id_per_token=self.req_id_per_token_buffer[:num_tokens],
-            block_size=self.kv_cache_spec.block_size,
-            topk_tokens=self.topk_tokens,
-        )
+        threshold = {16: 128, 32: 128, 64: 256, 128: 256}.get(num_q_heads, 256)
+        self._init_reorder_batch_threshold(threshold, supports_spec_as_decode=True)
 
 
-class FlashAttnMLASparseImpl(SparseMLAAttentionImpl[FlashAttnMLASparseMetadata]):
+class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
     def __init__(
         self,
         num_heads: int,
@@ -217,22 +160,25 @@ class FlashAttnMLASparseImpl(SparseMLAAttentionImpl[FlashAttnMLASparseMetadata])
                 "FlashAttnMLASparseImpl currently supports only FP16/BF16 KV cache."
             )
 
-        self.num_heads = num_heads
-        self.head_size = head_size
-        self.scale = float(scale)
-        self.num_kv_heads = num_kv_heads
-        self.kv_cache_dtype = kv_cache_dtype
-        self.kv_lora_rank: int = mla_args["kv_lora_rank"]
-        self.qk_rope_head_dim: int = mla_args["qk_rope_head_dim"]
-        self.topk_indices_buffer: torch.Tensor | None = (
-            indexer.topk_indices_buffer if indexer is not None else topk_indices_buffer
+        super().__init__(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            alibi_slopes,
+            sliding_window,
+            kv_cache_dtype,
+            logits_soft_cap,
+            attn_type,
+            kv_sharing_target_layer_name,
+            indexer=indexer,
+            topk_indices_buffer=topk_indices_buffer,
+            **mla_args,
         )
         assert self.topk_indices_buffer is not None, (
             "Indexer or topk_indices_buffer required for sparse MLA"
         )
         self.supports_quant_query_input = False
-        self.dcp_world_size = -1
-        self.q_pad_num_heads = None
 
     def forward_mqa(
         self,
@@ -250,25 +196,121 @@ class FlashAttnMLASparseImpl(SparseMLAAttentionImpl[FlashAttnMLASparseMetadata])
 
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
+        index_group = self.index_group
+        if isinstance(index_group, HiSparseMLAIndexGroup):
+            num_decode_tokens = attn_metadata.num_decode_tokens
+            outputs = []
+            if num_decode_tokens:
+                physical_topk, valid_counts = (
+                    index_group.convert_decode_logical_to_physical_topk(
+                        self.index_group_index,
+                        topk_indices[:num_decode_tokens],
+                        attn_metadata,
+                        return_valid_counts=True,
+                    )
+                )
+                outputs.append(
+                    self._run_mqa_kernel(
+                        q_nope[:num_decode_tokens],
+                        q_rope[:num_decode_tokens],
+                        index_group.physical_kv_cache(self.index_group_index).view(
+                            kv_c_and_k_pe_cache.dtype
+                        ),
+                        physical_topk,
+                        valid_counts,
+                        attn_metadata.block_size,
+                    )
+                )
+            if num_decode_tokens < num_actual_toks:
+                cache = index_group.cache(self.index_group_index)
+                if num_decode_tokens == 0 and cache.all_context_pages_resident:
+                    physical_topk, valid_counts = (
+                        index_group.convert_logical_to_physical_topk(
+                            self.index_group_index,
+                            topk_indices,
+                            attn_metadata,
+                            block_stride_rows=None,
+                            return_valid_counts=True,
+                        )
+                    )
+                    prefill_cache = index_group.physical_kv_cache(
+                        self.index_group_index
+                    ).view(kv_c_and_k_pe_cache.dtype)
+                else:
+                    prefill_cache, block_table, req_ids = (
+                        index_group.stage_prefill_rows(
+                            self.index_group_index,
+                            kv_c_and_k_pe_cache,
+                            attn_metadata,
+                        )
+                    )
+                    physical_topk, valid_counts = (
+                        triton_convert_req_index_to_global_index(
+                            req_ids,
+                            block_table,
+                            topk_indices[num_decode_tokens:],
+                            BLOCK_SIZE=attn_metadata.block_size,
+                            NUM_TOPK_TOKENS=topk_indices.shape[1],
+                            return_valid_counts=True,
+                        )
+                    )
+                outputs.append(
+                    self._run_mqa_kernel(
+                        q_nope[num_decode_tokens:],
+                        q_rope[num_decode_tokens:],
+                        prefill_cache,
+                        physical_topk,
+                        valid_counts,
+                        attn_metadata.block_size,
+                    )
+                )
+            return torch.cat(outputs) if len(outputs) > 1 else outputs[0], None
+
+        kv_rows, block_stride_rows = flat_kv_row_view(
+            kv_c_and_k_pe_cache, attn_metadata.block_size
+        )
         topk_indices, valid_counts = triton_convert_req_index_to_global_index(
             attn_metadata.req_id_per_token[:num_actual_toks],
             attn_metadata.block_table,
             topk_indices,
             BLOCK_SIZE=attn_metadata.block_size,
+            BLOCK_STRIDE_ROWS=block_stride_rows,
             NUM_TOPK_TOKENS=topk_indices.shape[1],
             return_valid_counts=True,
         )
+        return (
+            self._run_mqa_kernel(
+                q_nope,
+                q_rope,
+                kv_rows,
+                topk_indices,
+                valid_counts,
+                attn_metadata.block_size,
+                cache_is_flat=True,
+            ),
+            None,
+        )
+
+    def _run_mqa_kernel(
+        self,
+        q_nope: torch.Tensor,
+        q_rope: torch.Tensor,
+        kv_cache: torch.Tensor,
+        topk_indices: torch.Tensor,
+        valid_counts: torch.Tensor,
+        block_size: int,
+        *,
+        cache_is_flat: bool = False,
+    ) -> torch.Tensor:
+        kv_rows = (
+            kv_cache if cache_is_flat else flat_kv_row_view(kv_cache, block_size)[0]
+        )
 
         cu_seqlens_q = torch.arange(
-            0, num_actual_toks + 1, dtype=torch.int32, device=q_rope.device
+            0, q_rope.shape[0] + 1, dtype=torch.int32, device=q_rope.device
         )
-        kv_cache = kv_c_and_k_pe_cache.view(
-            -1, attn_metadata.block_size, self.head_size
-        )
-        k_cache = kv_cache[:, :, self.kv_lora_rank :].view(
-            -1, 1, 1, self.qk_rope_head_dim
-        )
-        v_cache = kv_cache[:, :, : self.kv_lora_rank].view(-1, 1, 1, self.kv_lora_rank)
+        k_cache = kv_rows[:, self.kv_lora_rank :].unsqueeze(1).unsqueeze(1)
+        v_cache = kv_rows[:, : self.kv_lora_rank].unsqueeze(1).unsqueeze(1)
 
         out = flash_attn_varlen_func(
             q=q_rope,
@@ -284,4 +326,4 @@ class FlashAttnMLASparseImpl(SparseMLAAttentionImpl[FlashAttnMLASparseMetadata])
             causal=True,
             fa_version=3,
         )
-        return out, None
+        return out

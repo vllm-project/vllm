@@ -49,4 +49,5 @@ def mock_request():
     req = MagicMock(spec=ChatCompletionRequest)
     req.tools = []
     req.tool_choice = "auto"
+    req.include_reasoning = True
     return req

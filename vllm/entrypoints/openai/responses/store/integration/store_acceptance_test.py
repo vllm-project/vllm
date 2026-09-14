@@ -1041,9 +1041,9 @@ def flatten_strings(value: Any) -> list[str]:
     if isinstance(value, dict):
         result = []
         for key, item in value.items():
-            if key in {"text", "output_text", "content"}:
-                result.extend(flatten_strings(item))
-            elif isinstance(item, (dict, list)):
+            if key in {"text", "output_text", "content"} or isinstance(
+                item, (dict, list)
+            ):
                 result.extend(flatten_strings(item))
         return result
     return []

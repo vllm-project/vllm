@@ -19,7 +19,7 @@ Run:
 """
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, PythonBackend
 
 from vllm import LLM
 
@@ -34,7 +34,7 @@ def init_tokenizer_and_llm(model_name: str):
 
 def get_prompt_embeds(
     chat: list[dict[str, str]],
-    tokenizer: PreTrainedTokenizer,
+    tokenizer: PythonBackend,
     embedding_layer: torch.nn.Module,
 ):
     token_ids = tokenizer.apply_chat_template(
@@ -45,7 +45,7 @@ def get_prompt_embeds(
 
 
 def single_prompt_inference(
-    llm: LLM, tokenizer: PreTrainedTokenizer, embedding_layer: torch.nn.Module
+    llm: LLM, tokenizer: PythonBackend, embedding_layer: torch.nn.Module
 ):
     chat = [{"role": "user", "content": "Please tell me about the capital of France."}]
     prompt_embeds = get_prompt_embeds(chat, tokenizer, embedding_layer)
@@ -64,7 +64,7 @@ def single_prompt_inference(
 
 
 def batch_prompt_inference(
-    llm: LLM, tokenizer: PreTrainedTokenizer, embedding_layer: torch.nn.Module
+    llm: LLM, tokenizer: PythonBackend, embedding_layer: torch.nn.Module
 ):
     chats = [
         [{"role": "user", "content": "Please tell me about the capital of France."}],

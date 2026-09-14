@@ -3,6 +3,7 @@
 import math
 from dataclasses import dataclass
 from enum import Enum
+from functools import lru_cache
 from typing import Literal
 
 import numpy as np
@@ -10,6 +11,7 @@ import numpy.typing as npt
 import torch
 
 from vllm.utils.import_utils import PlaceholderModule
+from vllm.utils.torch_utils import set_default_torch_num_threads
 
 try:
     import av as av
@@ -25,6 +27,11 @@ try:
     import soxr as soxr
 except ImportError:
     soxr = PlaceholderModule("soxr")  # type: ignore[assignment]
+
+try:
+    import torchaudio
+except ImportError:
+    torchaudio = PlaceholderModule("torchaudio")  # type: ignore[assignment]
 
 
 # ============================================================
@@ -274,14 +281,73 @@ def resample_audio_soxr(
     return soxr.resample(audio, orig_sr_int, target_sr_int)
 
 
+@lru_cache(maxsize=32)
+def _get_torchaudio_resampler(
+    orig_sr: int, target_sr: int
+) -> "torchaudio.transforms.Resample":
+    # `torchaudio.transforms.Resample` precomputes its kernel for a fixed
+    # (orig_sr, target_sr) pair; cache instances so repeated requests at a
+    # common input rate skip the kernel rebuild.
+    return torchaudio.transforms.Resample(orig_sr, target_sr)
+
+
+def resample_audio_torchaudio(
+    audio: npt.NDArray[np.floating],
+    *,
+    orig_sr: float,
+    target_sr: float,
+) -> npt.NDArray[np.floating]:
+    """Resample audio using torchaudio's bandlimited sinc interpolation.
+
+    Unlike the PyAV resampler, this handles any input length without padding
+    and applies the kernel over the trailing axis, so 2D ``(channels,
+    samples)`` input needs no per-channel loop.
+
+    Args:
+        audio: Input audio. Can be:
+            - 1D array ``(samples,)``: mono audio
+            - 2D array ``(channels, samples)``: stereo audio
+        orig_sr: Original sample rate in Hz.
+        target_sr: Target sample rate in Hz.
+
+    Returns:
+        Resampled audio with the same shape as the input (1D → 1D, 2D → 2D).
+    """
+    orig_sr_int = int(round(orig_sr))
+    target_sr_int = int(round(target_sr))
+
+    if orig_sr_int == target_sr_int:
+        return audio
+
+    # The kernel is float32; cast the input to match (same coercion as the
+    # PyAV path).
+    tensor = torch.as_tensor(audio, dtype=torch.float32)
+    # Resampling runs in the API/server parent process. Keep it from
+    # touching OpenMP or oneDNN thread state: both poison subsequently
+    # forked engine-core processes, which then segfault on their first
+    # parallel CPU op.
+    with set_default_torch_num_threads(1), torch.backends.mkldnn.flags(enabled=False):
+        resampler = _get_torchaudio_resampler(orig_sr_int, target_sr_int)
+        return resampler(tensor).numpy()
+
+
 class AudioResampler:
     """Resample audio data to a target sample rate."""
+
+    _METHODS = ("pyav", "scipy", "soxr", "torchaudio")
 
     def __init__(
         self,
         target_sr: float | None = None,
-        method: Literal["pyav", "scipy", "soxr"] = "pyav",
+        method: Literal["pyav", "scipy", "soxr", "torchaudio"] = "torchaudio",
     ):
+        # Eager validation so a bad method fails at construction rather than
+        # on the first audio request.
+        if method not in self._METHODS:
+            raise ValueError(
+                f"Invalid resampling method: {method!r}. "
+                f"Supported methods: {list(self._METHODS)}."
+            )
         self.target_sr = target_sr
         self.method = method
 
@@ -310,10 +376,14 @@ class AudioResampler:
             )
         elif self.method == "soxr":
             return resample_audio_soxr(audio, orig_sr=orig_sr, target_sr=self.target_sr)
+        elif self.method == "torchaudio":
+            return resample_audio_torchaudio(
+                audio, orig_sr=orig_sr, target_sr=self.target_sr
+            )
         else:
             raise ValueError(
                 f"Invalid resampling method: {self.method}. "
-                "Supported methods are 'pyav', 'scipy', and 'soxr'."
+                f"Supported methods are {list(self._METHODS)}."
             )
 
 
@@ -336,8 +406,8 @@ def split_audio(
     for splitting.
 
     Args:
-        audio_data: Audio array to split. Can be 1D (mono) or multi-dimensional.
-                   Splits along the last dimension (time axis).
+        audio_data: 1D mono audio array to split. ASR models consume mono, so
+                   callers must downmix before chunking.
         sample_rate: Sample rate of the audio in Hz.
         max_clip_duration_s: Maximum duration of each chunk in seconds.
         overlap_duration_s: Overlap duration in seconds between consecutive chunks.
@@ -345,8 +415,10 @@ def split_audio(
         min_energy_window_size: Window size in samples for finding low-energy regions.
 
     Returns:
-        List of audio chunks. Each chunk is a numpy array with the same shape
-        as the input except for the last (time) dimension.
+        List of 1D audio chunks.
+
+    Raises:
+        AssertionError: If ``audio_data`` is not 1D.
 
     Example:
         >>> audio = np.random.randn(1040000)  # 65 seconds at 16kHz
@@ -360,6 +432,11 @@ def split_audio(
         >>> len(chunks)
         3
     """
+    if audio_data.ndim > 1:
+        raise ValueError(
+            f"split_audio expects mono audio, got shape {audio_data.shape}"
+        )
+
     chunk_size = int(sample_rate * max_clip_duration_s)
     overlap_size = int(sample_rate * overlap_duration_s)
     chunks = []
@@ -402,7 +479,7 @@ def find_split_point(
     RMS energy in sliding windows.
 
     Args:
-        wav: Audio array. Can be 1D or multi-dimensional.
+        wav: 1D mono audio array.
         start_idx: Start index of search region (inclusive).
         end_idx: End index of search region (exclusive).
         min_energy_window: Window size in samples for energy calculation.

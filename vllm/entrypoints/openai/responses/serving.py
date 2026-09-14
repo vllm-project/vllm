@@ -8,11 +8,10 @@ from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Se
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from http import HTTPStatus
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from fastapi import Request
 from openai.types.responses import (
-    ResponseFunctionToolCall,
     ResponseOutputItem,
     ResponseOutputMessage,
     ResponseOutputText,
@@ -20,44 +19,28 @@ from openai.types.responses import (
     response_text_delta_event,
 )
 from openai.types.responses.response_output_text import Logprob, LogprobTopLogprob
-from openai.types.responses.tool import Mcp, Tool
-from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import TypeAdapter
 
 from vllm import envs
 from vllm.config.utils import replace
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
-
-from vllm.entrypoints.generate.base.serving import (
-    GenerateBaseServing,
-    GenerationError,
+from vllm.entrypoints.chat_utils import (
+    ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.mcp.tool_server import ToolServer
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
-    ErrorResponse,
     RequestResponseMetadata,
 )
+from vllm.entrypoints.generate.base.serving import GenerateBaseServing
+from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.openai.parser.harmony_utils import (
-    build_harmony_preamble,
-    extract_instructions_from_messages,
-    get_user_message,
-    has_custom_tools,
-    render_for_completion,
-)
 from vllm.entrypoints.openai.responses.context import (
     ConversationContext,
     HarmonyContext,
     ParsableContext,
     SimpleContext,
 )
-from vllm.entrypoints.openai.responses.harmony import (
-    construct_harmony_previous_input_messages,
-    harmony_to_response_output,
-    response_input_to_harmony,
-)
+from vllm.entrypoints.openai.responses.harmony import harmony_to_response_output
 from vllm.entrypoints.openai.responses.protocol import (
     InputTokensDetails,
     OutputTokensDetails,
@@ -84,27 +67,33 @@ from vllm.entrypoints.openai.responses.streaming_events import (
 from vllm.entrypoints.openai.responses.utils import (
     build_response_output_items,
     construct_input_messages,
-    construct_tool_dicts,
     extract_function_tool_names,
     extract_tool_types,
 )
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.exceptions import VLLMValidationError
-from vllm.inputs import EngineInput, tokens_input
+from vllm.exceptions import GenerationError, VLLMValidationError
+from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import CompletionOutput
 from vllm.parser import Parser, ParserManager
-from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.renderers import TokenizeParams
+from vllm.renderers.online_renderer import (
+    OnlineRenderer,
+    ResponsesPreviousMessages,
+    ResponsesRenderResult,
+)
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
 from vllm.utils.collection_utils import as_list
 
 logger = init_logger(__name__)
+
 
 @dataclass(slots=True)
 class _SessionTokenState:
@@ -135,9 +124,7 @@ class _SessionTokenState:
 
         prompt_token_ids = engine_input.get("prompt_token_ids")
         if prompt_token_ids is None:
-            raise ValueError(
-                "Incremental token reuse requires tokenized text input."
-            )
+            raise ValueError("Incremental token reuse requires tokenized text input.")
 
         reused_prompt_token_ids = self.reused_prompt_token_ids
         if reused_prompt_token_ids is None:
@@ -158,9 +145,7 @@ class _SessionTokenState:
 
         prompt_token_ids = engine_input.get("prompt_token_ids")
         if prompt_token_ids is None:
-            raise ValueError(
-                "Session token storage requires tokenized text input."
-            )
+            raise ValueError("Session token storage requires tokenized text input.")
 
         self.prompt_token_ids = prompt_token_ids
         self.output_token_ids.clear()
@@ -180,9 +165,7 @@ class _SessionTokenState:
 
         tool_delta_token_ids = engine_input.get("prompt_token_ids")
         if tool_delta_token_ids is None:
-            raise ValueError(
-                "Incremental tool tokenization requires tokenized input."
-            )
+            raise ValueError("Incremental tool tokenization requires tokenized input.")
 
         prompt_token_ids = self.prompt_token_ids
         if prompt_token_ids is None:
@@ -194,8 +177,7 @@ class _SessionTokenState:
 
         # 模型输出通常不包含触发停止的 EOS。
         if eos_token_id is not None and (
-            not prompt_token_ids
-            or prompt_token_ids[-1] != eos_token_id
+            not prompt_token_ids or prompt_token_ids[-1] != eos_token_id
         ):
             prompt_token_ids.append(eos_token_id)
 
@@ -219,51 +201,11 @@ class _SessionTokenState:
         delta_token_ids.extend(self.output_token_ids)
 
         if eos_token_id is not None and (
-            not delta_token_ids
-            or delta_token_ids[-1] != eos_token_id
+            not delta_token_ids or delta_token_ids[-1] != eos_token_id
         ):
             delta_token_ids.append(eos_token_id)
 
         return delta_token_ids
-
-
-def _extract_allowed_tools_from_mcp_requests(
-    tools: list[Tool],
-) -> dict[str, list[str] | None]:
-    """
-    Extract allowed_tools mapping from MCP tool requests.
-
-    Returns a dictionary mapping server_label to allowed_tools list.
-    Handles both list format and McpAllowedToolsMcpToolFilter object format.
-
-    Special handling:
-    - If allowed_tools is None, returns None (allows all tools)
-    - If allowed_tools contains "*", returns None (allows all tools)
-    - Otherwise, returns the list of specific tool names
-
-    This function can be reused for both harmony and non-harmony MCP calls.
-    """
-    allowed_tools_map: dict[str, list[str] | None] = {}
-    for tool in tools:
-        if not isinstance(tool, Mcp):
-            continue
-
-        # allowed_tools can be a list or an object with tool_names
-        # Extract the actual list of tool names
-        allowed_tools_val = None
-        if tool.allowed_tools is not None:
-            if isinstance(tool.allowed_tools, list):
-                allowed_tools_val = tool.allowed_tools
-            elif hasattr(tool.allowed_tools, "tool_names"):
-                # It's an McpAllowedToolsMcpToolFilter object
-                allowed_tools_val = tool.allowed_tools.tool_names
-
-        # Normalize "*" to None (both mean "allow all tools")
-        if allowed_tools_val is not None and "*" in allowed_tools_val:
-            allowed_tools_val = None
-
-        allowed_tools_map[tool.server_label] = allowed_tools_val
-    return allowed_tools_map
 
 
 class OpenAIServingResponses(GenerateBaseServing):
@@ -344,6 +286,11 @@ class OpenAIServingResponses(GenerateBaseServing):
         # never remove responses from the store.
         self.response_store: dict[str, ResponsesResponse] = {}
         self.response_store_lock = asyncio.Lock()
+
+        # HACK(woosuk): This is a hack. We should use a better store.
+        # FIXME: If enable_store=True, this may cause a memory leak since we
+        # never remove messages from the store.
+        self.msg_store: dict[str, ResponsesPreviousMessages] = {}
 
         # HACK(wuhang): This is a hack. We should use a better store.
         # FIXME: If enable_store=True, this may cause a memory leak since we
@@ -429,7 +376,42 @@ class OpenAIServingResponses(GenerateBaseServing):
                 status_code=HTTPStatus.BAD_REQUEST,
                 param="background",
             )
+        if request.previous_input_messages and request.previous_response_id:
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message="Only one of `previous_input_messages` and "
+                "`previous_response_id` can be set.",
+                status_code=HTTPStatus.BAD_REQUEST,
+                param="previous_response_id",
+            )
         return None
+
+    async def _render_resolved_response_inputs(
+        self,
+        request: ResponsesRequest,
+        prev_response: ResponsesResponse | None,
+        *,
+        skip_mm_cache: bool = False,
+    ) -> ResponsesRenderResult | ErrorResponse:
+        previous_messages: ResponsesPreviousMessages | None = None
+        previous_response_outputs: list[ResponseOutputItem] | None = None
+        if prev_response is not None:
+            stored_messages = (
+                self.msg_store[prev_response.id]
+                if self.use_harmony
+                else self.msg_store.get(prev_response.id)
+            )
+            if stored_messages is not None:
+                previous_messages = stored_messages.copy()
+            previous_response_outputs = list(prev_response.output)
+
+        return await self.online_renderer.render_responses(
+            request,
+            previous_messages=previous_messages,
+            previous_response_outputs=previous_response_outputs,
+            tool_server=self.tool_server,
+            skip_mm_cache=skip_mm_cache,
+        )
 
     def _make_incremental_context_miss_error(
         self,
@@ -475,8 +457,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             return self.create_error_response(
                 err_type="invalid_request_error",
                 message=(
-                    "Incremental token reuse is not supported for "
-                    "Harmony models."
+                    "Incremental token reuse is not supported for Harmony models."
                 ),
                 status_code=HTTPStatus.BAD_REQUEST,
                 param="use_incremental_token",
@@ -555,11 +536,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         if maybe_validation_error is not None:
             return maybe_validation_error
 
-        # If the engine is dead, raise the engine's DEAD_ERROR.
-        # This is required for the streaming case, where we return a
-        # success status before we actually start generating text :).
-        if self.engine_client.errored:
-            raise self.engine_client.dead_error
+        self._preflight()
 
         if request.store and not self.enable_store:
             # Disable the store option.
@@ -570,20 +547,37 @@ class OpenAIServingResponses(GenerateBaseServing):
             # value).
             request.store = False
 
-        session_token_state = await self._make_session_token_state(
-            request,
-            raw_request,
-        )
-        if isinstance(session_token_state, ErrorResponse):
-            return session_token_state
+        # Handle the previous response ID.
+        prev_response_id = request.previous_response_id
+        if prev_response_id is not None:
+            async with self.response_store_lock:
+                prev_response = self.response_store.get(prev_response_id)
+            if prev_response is None:
+                return self._make_not_found_error(prev_response_id)
+        else:
+            prev_response = None
 
         lora_request = self._maybe_get_adapters(request)
         model_name = self.models.model_name(lora_request)
 
-        if self.use_harmony:
-            messages, engine_inputs = self._make_request_with_harmony(request)
+        session_token_state = await self._make_session_token_state(request, raw_request)
+        if isinstance(session_token_state, ErrorResponse):
+            return session_token_state
+
+        if request.use_incremental_token:
+            assert session_token_state is not None
+            messages, engine_inputs = await self._make_incremental_request(
+                request, session_token_state
+            )
         else:
-            messages, engine_inputs = await self._make_request(request, session_token_state)
+            render_result = await self._render_resolved_response_inputs(
+                request,
+                prev_response,
+            )
+            if isinstance(render_result, ErrorResponse):
+                return render_result
+            messages = render_result.messages
+            engine_inputs = [render_result.engine_input]
 
         request_metadata = RequestResponseMetadata(request_id=request.request_id)
         if raw_request:
@@ -648,6 +642,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 if raw_request is None
                 else await self._get_trace_headers(raw_request.headers)
             )
+            session_id = self._get_session_id(request, raw_request)
 
             chat_template_kwargs = self._effective_chat_template_kwargs(request)
             response_parser = self._make_response_parser(
@@ -683,6 +678,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                         response_parser=response_parser,
                     )
 
+            reasoning_parser_kwargs = None
             if (
                 context.response_parser is not None
                 and context.response_parser.reasoning_parser is not None
@@ -710,18 +706,26 @@ class OpenAIServingResponses(GenerateBaseServing):
                 engine_input=engine_input,
                 sampling_params=sampling_params,
                 context=context,
+                tok_params=(
+                    request.build_tok_params(self.model_config)
+                    if isinstance(context, HarmonyContext)
+                    else None
+                ),
                 lora_request=lora_request,
-                priority=request.priority,
+                priority=self._get_priority(request, raw_request),
                 trace_headers=trace_headers,
-                reasoning_parser_kwargs=reasoning_parser_kwargs
-                if self.parser and self.parser.reasoning_parser_cls is not None
-                else None,
+                session_id=session_id,
+                reasoning_parser_kwargs=reasoning_parser_kwargs,
                 session_token_state=session_token_state,
             )
             generators.append(generator)
 
         assert len(generators) == 1
         (result_generator,) = generators
+
+        # Store the input messages.
+        if request.store:
+            self.msg_store[request.request_id] = messages
 
         if request.background:
             created_time = int(time.time())
@@ -803,92 +807,72 @@ class OpenAIServingResponses(GenerateBaseServing):
             session_token_state=session_token_state,
         )
 
-    async def _make_request(
+    async def _make_incremental_request(
         self,
         request: ResponsesRequest,
-        session_token_state: _SessionTokenState | None,
+        session_token_state: _SessionTokenState,
     ):
-        is_incremental = request.use_incremental_token
-        if is_incremental:
-            assert session_token_state is not None
-
-        # tools 和 instructions 已经位于存储的历史 token 中。
-        tool_dicts = (
-            None
-            if is_incremental
-            else construct_tool_dicts(request.tools, request.tool_choice)
-        )
-        # Construct the input messages.
-        messages = construct_input_messages(
-            request_instructions=(
-                None if is_incremental else request.instructions
-            ),
-            request_input=request.input,
-        )
+        messages = construct_input_messages(request_input=request.input)
         chat_template_kwargs = self._effective_chat_template_kwargs(request)
-        if is_incremental:
-            chat_template_kwargs["use_incremental_token"] = True
+        chat_template_kwargs["use_incremental_token"] = True
         _, engine_inputs = await self.online_renderer.preprocess_chat(
             request,
             messages,
             default_template=self.chat_template,
             default_template_content_format=self.chat_template_content_format,
             default_template_kwargs=chat_template_kwargs,
-            tool_dicts=tool_dicts,
+            tool_dicts=None,
             parser=self.parser,
         )
-        if is_incremental:
-            assert session_token_state is not None
-            (engine_input,) = engine_inputs
-            session_token_state.merge_prompt(
-                engine_input,
-                self.renderer.get_bos_token_id(),
-            )
+        (engine_input,) = engine_inputs
+        session_token_state.merge_prompt(engine_input, self.renderer.get_bos_token_id())
         return messages, engine_inputs
 
     async def _render_next_turn(
         self,
         request: ResponsesRequest,
         messages: list[ResponseInputOutputItem],
-        tool_dicts: list[dict[str, Any]] | None,
-        parser: type[Parser] | None,
-        chat_template: str | None,
-        chat_template_content_format: ChatTemplateContentFormatOption,
-        session_token_state: _SessionTokenState | None,
-        new_item_count: int,
-    ):
-        incremental_tool_turn = request.use_incremental_token
-
-        if incremental_tool_turn:
-            assert session_token_state is not None
+        new_item_count: int = 0,
+    ) -> list[EngineInput]:
+        if request.use_incremental_token:
             assert new_item_count > 0
             split_index = len(messages) - new_item_count
-
             context_messages = construct_input_messages(
                 request_input=messages[:split_index],
             )
             new_messages = construct_input_messages(
                 request_input=messages[split_index:],
             )
-        else:
-            context_messages = None
-            new_messages = construct_input_messages(
-                request_input=messages,
-            )
-
-        chat_template_kwargs = self._effective_chat_template_kwargs(request)
-        if incremental_tool_turn:
+            chat_template_kwargs = self._effective_chat_template_kwargs(request)
             chat_template_kwargs["incremental_context"] = context_messages
-        _, engine_inputs = await self.online_renderer.preprocess_chat(
-            request,
-            new_messages,
-            default_template=chat_template,
-            default_template_content_format=chat_template_content_format,
-            default_template_kwargs=chat_template_kwargs,
-            tool_dicts=None if incremental_tool_turn else tool_dicts,
-            parser=parser,
+            _, engine_inputs = await self.online_renderer.preprocess_chat(
+                request,
+                new_messages,
+                default_template=self.chat_template,
+                default_template_content_format=self.chat_template_content_format,
+                default_template_kwargs=chat_template_kwargs,
+                tool_dicts=None,
+                parser=self.parser,
+            )
+            return engine_inputs
+
+        render_request = request.model_copy(
+            update={
+                "input": list(messages),
+                "instructions": None,
+                "previous_input_messages": None,
+                "previous_response_id": None,
+            }
         )
-        return engine_inputs
+        render_result = await self.online_renderer.render_responses(
+            render_request,
+            previous_messages=None,
+            previous_response_outputs=None,
+            tool_server=self.tool_server,
+        )
+        if isinstance(render_result, ErrorResponse):
+            raise VLLMValidationError(render_result.error.message)
+        return [render_result.engine_input]
 
     async def _generate_with_builtin_tools(
         self,
@@ -896,13 +880,16 @@ class OpenAIServingResponses(GenerateBaseServing):
         engine_input: EngineInput,
         sampling_params: SamplingParams,
         context: ConversationContext,
+        tok_params: TokenizeParams | None = None,
         lora_request: LoRARequest | None = None,
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
+        session_id: str | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
         session_token_state: _SessionTokenState | None = None,
     ):
         max_model_len = self.model_config.max_model_len
+        cache_salt = cast(str | None, engine_input.get("cache_salt"))
 
         orig_priority = priority
         sub_request = 0
@@ -927,6 +914,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 lora_request=lora_request,
                 trace_headers=trace_headers,
                 priority=priority,
+                session_id=session_id,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
             )
 
@@ -951,19 +939,19 @@ class OpenAIServingResponses(GenerateBaseServing):
             # Create inputs for the next turn.
             # Render the next prompt token ids and update sampling_params.
             if isinstance(context, HarmonyContext):
-                token_ids = context.render_for_completion()
-                engine_input = tokens_input(token_ids)
+                engine_input = self.online_renderer.render_responses_harmony_messages(
+                    context.messages,
+                    cache_salt=cache_salt,
+                    tok_params=tok_params,
+                )
 
-                sampling_params.max_tokens = max_model_len - len(token_ids)
+                sampling_params.max_tokens = max_model_len - self._extract_prompt_len(
+                    engine_input
+                )
             elif isinstance(context, ParsableContext):
                 (engine_input,) = await self._render_next_turn(
                     context.request,
                     context.response_messages,
-                    context.tool_dicts,
-                    context.parser_cls,
-                    context.chat_template,
-                    context.chat_template_content_format,
-                    session_token_state,
                     new_item_count=len(tool_output),
                 )
 
@@ -989,24 +977,6 @@ class OpenAIServingResponses(GenerateBaseServing):
             # OPTIMIZATION
             priority = orig_priority - 1
             sub_request += 1
-
-    def _make_request_with_harmony(
-        self,
-        request: ResponsesRequest,
-    ):
-        if request.tool_choice not in ("auto", "none"):
-            raise NotImplementedError(
-                "Only 'auto' or 'none' tool_choice is supported "
-                "in response API with Harmony"
-            )
-
-        arrival_time = time.time()
-        messages = self._construct_input_messages_with_harmony(request)
-        prompt_token_ids = render_for_completion(messages)
-        engine_input = tokens_input(prompt_token_ids, cache_salt=request.cache_salt)
-        engine_input["arrival_time"] = arrival_time
-
-        return messages, [engine_input]
 
     async def _initialize_tool_sessions(
         self,
@@ -1112,6 +1082,8 @@ class OpenAIServingResponses(GenerateBaseServing):
             if final_output.finish_reason == "length":
                 status = "incomplete"
 
+            # TODO: Build final response items from the accumulated streaming
+            # parser results instead of reparsing the complete output.
             output = self._make_response_output_items(
                 request,
                 final_output,
@@ -1140,13 +1112,10 @@ class OpenAIServingResponses(GenerateBaseServing):
             num_reasoning_tokens == 0
             and isinstance(context, (SimpleContext, ParsableContext))
             and context.response_parser is not None
-            and context.response_parser.reasoning_parser is not None
         ):
             accumulated = getattr(context, "_accumulated_token_ids", []) or []
-            num_reasoning_tokens = (
-                context.response_parser.reasoning_parser.count_reasoning_tokens(
-                    accumulated
-                )
+            num_reasoning_tokens = context.response_parser.count_reasoning_tokens(
+                accumulated
             )
 
         usage = ResponseUsage(
@@ -1184,6 +1153,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             status=status,
             usage=usage,
             kv_transfer_params=context.kv_transfer_params,
+            ec_transfer_params=context.ec_transfer_params,
         )
 
         if request.store:
@@ -1192,7 +1162,6 @@ class OpenAIServingResponses(GenerateBaseServing):
                 # If the response is already cancelled, don't update it.
                 if stored_response is None or stored_response.status != "cancelled":
                     self.response_store[response.id] = response
-
         if session_token_state is not None and session_token_state.should_save:
             delta_token_ids = session_token_state.build_delta(
                 self.renderer.get_eos_token_id()
@@ -1332,6 +1301,9 @@ class OpenAIServingResponses(GenerateBaseServing):
                 enable_auto_tools=self.enable_auto_tools,
                 model_output_token_ids=final_output.token_ids,
             )
+            if not request.include_reasoning:
+                reasoning = None
+                logprobs = None
             return build_response_output_items(
                 reasoning=reasoning,
                 content=content,
@@ -1359,104 +1331,6 @@ class OpenAIServingResponses(GenerateBaseServing):
                 type="message",
             )
         ]
-
-    def _get_harmony_builtin_tool_descriptions(
-        self, request: ResponsesRequest, tool_types: set[str]
-    ) -> dict[str, str | None]:
-        # Extract allowed_tools from MCP tool requests
-        allowed_tools_map = _extract_allowed_tools_from_mcp_requests(request.tools)
-
-        # Get filtered tool descriptions first.
-        # If get_tool_description returns None (due to filtering), the tool is disabled.
-        browser_description = (
-            self.tool_server.get_tool_description(
-                "browser", allowed_tools_map.get("web_search_preview")
-            )
-            if "web_search_preview" in tool_types
-            and self.tool_server is not None
-            and self.tool_server.has_tool("browser")
-            else None
-        )
-        python_description = (
-            self.tool_server.get_tool_description(
-                "python", allowed_tools_map.get("code_interpreter")
-            )
-            if "code_interpreter" in tool_types
-            and self.tool_server is not None
-            and self.tool_server.has_tool("python")
-            else None
-        )
-        container_description = (
-            self.tool_server.get_tool_description(
-                "container", allowed_tools_map.get("container")
-            )
-            if "container" in tool_types
-            and self.tool_server is not None
-            and self.tool_server.has_tool("container")
-            else None
-        )
-        return {
-            "browser_description": browser_description,
-            "python_description": python_description,
-            "container_description": container_description,
-        }
-
-    def _construct_input_messages_with_harmony(
-        self,
-        request: ResponsesRequest,
-    ) -> list[OpenAIHarmonyMessage]:
-        messages: list[OpenAIHarmonyMessage] = []
-        request_input = request.input
-
-        tool_types = extract_tool_types(request.tools)
-        with_custom_tools = has_custom_tools(tool_types)
-        instructions = request.instructions
-        if instructions is None and isinstance(request_input, list):
-            instructions, request_input = extract_instructions_from_messages(
-                request_input
-             )
-        tool_descriptions = self._get_harmony_builtin_tool_descriptions(
-            request, tool_types
-        )
-        tools = request.tools if with_custom_tools else None
-        messages.extend(
-            build_harmony_preamble(
-                instructions=instructions,
-                tools=tools,
-                reasoning_effort=(
-                    request.reasoning.effort if request.reasoning else None
-                ),
-                with_custom_tools=with_custom_tools,
-                **tool_descriptions,
-            )
-        )
-        messages += construct_harmony_previous_input_messages(request)
-
-        # Append the new input.
-        # Responses API supports simple text inputs without chat format.
-        if isinstance(request_input, str):
-            # Skip empty string input when previous_input_messages supplies
-            # the full conversation history --- an empty trailing user message
-            # confuses the model into thinking nothing was sent.
-            if request_input or not request.previous_input_messages:
-                messages.append(get_user_message(request_input))
-        else:
-            if prev_response is not None:
-                prev_outputs = copy(prev_response.output)
-            else:
-                prev_outputs = []
-            for response_msg in request_input:
-                new_msg = response_input_to_harmony(response_msg, prev_outputs)
-                if new_msg is not None:
-                    messages.append(new_msg)
-
-                # User passes in a tool call request and its output. We need
-                # to add the tool call request to prev_outputs so that
-                # response_input_to_harmony can find the tool call request when
-                # parsing the tool call output.
-                if isinstance(response_msg, ResponseFunctionToolCall):
-                    prev_outputs.append(response_msg)
-        return messages
 
     async def _run_background_request_stream(
         self,
@@ -1597,10 +1471,14 @@ class OpenAIServingResponses(GenerateBaseServing):
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         processor = SimpleStreamingEventProcessor(tools=request.tools)
 
+        hide_stream_metadata = not request.include_reasoning and self.parser is not None
+
         def _get_logprobs(
             output: CompletionOutput,
         ) -> list[response_text_delta_event.Logprob]:
             if not request.is_include_output_logprobs():
+                return []
+            if hide_stream_metadata:
                 return []
             return self._create_stream_response_logprobs(
                 token_ids=output.token_ids,
