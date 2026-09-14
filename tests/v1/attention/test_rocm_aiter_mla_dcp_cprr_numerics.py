@@ -61,7 +61,7 @@ MODEL = "deepseek-ai/DeepSeek-R1"
 
 
 def _gpu_available() -> bool:
-    return is_aiter_found() and torch.cuda.is_available()
+    return is_aiter_found() and torch.accelerator.is_available()
 
 
 def _on_gfx950() -> bool:
@@ -208,19 +208,16 @@ def _make_ctx_layer(vllm_config):
     mgr = object.__new__(MLADCPManager)
     mgr.init_kv_gather = lambda *a, **k: None
 
-    class _CtxLayer:
-        pass
-
-    layer = _CtxLayer()
-    layer.non_causal_multi_token_decode = False
-    layer.q_lora_rank = None
-    layer.kv_lora_rank = KV_LORA_RANK
-    layer.qk_nope_head_dim = QK_NOPE_HEAD_DIM
-    layer.qk_rope_head_dim = QK_ROPE_HEAD_DIM
-    layer.v_head_dim = QK_NOPE_HEAD_DIM
-    layer.dcp_manager = mgr
-    layer.prefill_backend = _PrefillBackendStub()
-    return layer
+    return SimpleNamespace(
+        non_causal_multi_token_decode=False,
+        q_lora_rank=None,
+        kv_lora_rank=KV_LORA_RANK,
+        qk_nope_head_dim=QK_NOPE_HEAD_DIM,
+        qk_rope_head_dim=QK_ROPE_HEAD_DIM,
+        v_head_dim=QK_NOPE_HEAD_DIM,
+        dcp_manager=mgr,
+        prefill_backend=_PrefillBackendStub(),
+    )
 
 
 def _ensure_workspace_manager(device: torch.device) -> None:
@@ -370,7 +367,7 @@ def _run_shard(
 
     impl = _build_impl(builder.num_heads, dcp, kern_rank)
     o, lse = impl.forward_mqa(q_flat, kv_flat, md, _Layer(device))
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     return md, o, lse, local_len
 
 
@@ -381,7 +378,7 @@ def _numerics(heads_per_rank: int, sabotage: bool = False):
     from vllm.config import set_current_vllm_config
 
     device = torch.device("cuda", 0)
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device.index)
     torch.manual_seed(0)
     _ensure_workspace_manager(device)
 
