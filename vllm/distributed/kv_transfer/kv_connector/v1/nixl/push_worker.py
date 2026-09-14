@@ -135,7 +135,56 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
     # --- Lifecycle ----------------------------------------------------- #
 
+    def _stop_push_writer(self):
+        self._push_writer_stop.set()
+        self._push_writer_wake.set()
+        if self._push_writer_thread is not None:
+            self._push_writer_thread.join(timeout=2)
+            if self._push_writer_thread.is_alive():
+                raise RuntimeError("NIXL push writer did not stop")
+            self._push_writer_thread = None
+
+    @staticmethod
+    def _clear_queue(work_queue):
+        while True:
+            try:
+                work_queue.get_nowait()
+            except queue.Empty:
+                return
+
+    def _discard_push_work(self):
+        self._clear_queue(self._reg_send_inbox)
+        self._clear_queue(self._finished_blocks_inbox)
+        self._clear_queue(self._deferred_push_inbox)
+        self._clear_queue(self._pending_completion_notifs)
+        self._clear_queue(self._evict_finished_inbox)
+        self._push_finished_blocks.clear()
+        self._pending_d_registrations.clear()
+
+    def _pending_lifecycle_work(self) -> tuple[str, ...]:
+        """Extend the base drain check with push-mode's writer-owned state."""
+        return super()._pending_lifecycle_work() + self._pending_names(
+            (
+                "_sending_transfers",
+                "_push_finished_blocks",
+                "_pending_d_registrations",
+                "_reg_send_inbox",
+                "_finished_blocks_inbox",
+                "_pending_completion_notifs",
+                "_evict_finished_inbox",
+                "_deferred_push_inbox",
+            )
+        )
+
+    def _release_push_handles(self) -> None:
+        with self._sending_transfers_lock:
+            for handles in self._sending_transfers.values():
+                for handle in handles:
+                    self.nixl_wrapper.release_xfer_handle(handle)
+            self._sending_transfers.clear()
+
     def register_kv_caches(self, kv_caches: dict[str, "torch.Tensor"]):
+        self._push_writer_stop.clear()
         super().register_kv_caches(kv_caches)
         if self._mixed_mem_types:
             raise NotImplementedError(
@@ -157,11 +206,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         if self._push_writer_thread is not None:
             self._push_writer_thread.join(timeout=2)
             self._push_writer_thread = None
-        with self._sending_transfers_lock:
-            for handles in self._sending_transfers.values():
-                for handle in handles:
-                    self.nixl_wrapper.release_xfer_handle(handle)
-            self._sending_transfers.clear()
         super().shutdown()
 
     # --- Engine-main-thread entry point -------------------------------- #
