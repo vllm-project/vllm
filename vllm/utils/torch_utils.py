@@ -88,6 +88,13 @@ def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
     return kv_cache_dtype.endswith("per_token_head")
 
 
+def is_meta_module(module: torch.nn.Module) -> bool:
+    """Return True if module contains any meta parameters or buffers."""
+    return any(p.is_meta for p in module.parameters()) or any(
+        b.is_meta for b in module.buffers()
+    )
+
+
 def is_strictly_contiguous(t: torch.Tensor) -> bool:
     """
     Check if tensor is contiguous AND has no degenerate strides.
@@ -494,15 +501,6 @@ def get_kv_cache_quant_algo_string(quant_cfg: dict[str, Any]) -> str | None:
                     list(MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP.keys()),
                 )
                 return "auto"
-    return None
-
-
-def get_kv_cache_quant_algo_dtype(quant_cfg: dict[str, Any]) -> torch.dtype | None:
-    """Get the KV cache quantization algorithm dtype from the quantization config."""
-    kv_algo_str = get_kv_cache_quant_algo_string(quant_cfg)
-    if kv_algo_str is not None and kv_algo_str != "auto":
-        # Only convert if we have a valid dtype string (not "auto" fallback)
-        return STR_DTYPE_TO_TORCH_DTYPE[kv_algo_str]
     return None
 
 
