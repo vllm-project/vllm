@@ -6,8 +6,6 @@ import dataclasses
 import functools
 import os
 from argparse import Namespace
-from logging import Logger
-from string import Template
 from typing import Any
 
 from fastapi import Request
@@ -15,11 +13,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask, BackgroundTasks
 
-from vllm import envs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.generate.base.protocol import StreamOptions
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
-from vllm.logger import current_formatter_type, init_logger
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -281,11 +278,6 @@ def redact_sensitive_args(args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def log_non_default_args(args: Namespace | EngineArgs):
-    non_default_args = get_non_default_args(args)
-    logger.info("non-default args: %s", redact_sensitive_args(non_default_args))
-
-
 def should_include_usage(
     stream_options: StreamOptions | None, enable_force_include_usage: bool
 ) -> tuple[bool, bool]:
@@ -320,31 +312,6 @@ def process_lora_modules(
         else:
             lora_modules += default_mm_lora_paths
     return lora_modules
-
-
-def log_version_and_model(lgr: Logger, version: str, model_name: str) -> None:
-    if envs.VLLM_DISABLE_LOG_LOGO or (formatter := current_formatter_type(lgr)) is None:
-        message = "vLLM server version %s, serving model %s"
-    else:
-        logo_template = Template(
-            "\n       ${w}█     █     █▄   ▄█${r}\n"
-            " ${o}▄▄${r} ${b}▄█${r} ${w}█     █     █ ▀▄▀ █${r}  version ${w}%s${r}\n"
-            "  ${o}█${r}${b}▄█▀${r} ${w}█     █     █     █${r}  model   ${w}%s${r}\n"
-            "   ${b}▀▀${r}  ${w}▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀${r}\n"
-        )
-        colors = {
-            "w": "\033[1m",  # bold, default foreground
-            "o": "\033[93m",  # orange
-            "b": "\033[94m",  # blue
-            "r": "\033[0m",  # reset
-        }
-        if formatter != "color":
-            # monochrome logo (no ansi escape codes)
-            colors = dict.fromkeys(colors, "")
-
-        message = logo_template.substitute(colors)
-
-    lgr.info(message, version, model_name)
 
 
 async def validate_json_request(raw_request: Request):
