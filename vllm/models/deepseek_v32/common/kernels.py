@@ -81,7 +81,7 @@ def _fp8_quant_and_cache_write(
     kv_cache_ptr,
     kv_cache_scale_ptr,
     cache_block_size,
-    cache_stride,
+    cache_block_stride,
     offsets,
     HEAD_DIM: tl.constexpr,
     SHUFFLE: tl.constexpr,
@@ -94,7 +94,7 @@ def _fp8_quant_and_cache_write(
 
     block_idx = slot_idx // cache_block_size
     block_offset = slot_idx % cache_block_size
-    block_start = block_idx * cache_block_size * cache_stride
+    block_start = block_idx * cache_block_stride
 
     # Shuffled layout: [blk/BLOCK_TILE, HEAD_DIM/HEAD_TILE, BLOCK_TILE, HEAD_TILE],
     # so one contiguous run holds BLOCK_TILE tokens x HEAD_TILE bytes and the
@@ -156,8 +156,9 @@ def _fused_norm_rope_kernel(
     index_k_out_ptr,
     index_k_out_stride,
     INDEX_K_HALF_ROT_DIM: tl.constexpr,
-    # Cache params (shared by indexer K and MLA)
+    # Cache params
     slot_mapping_ptr,
+    indexer_slot_mapping_ptr,
     # Index K FP8 cache
     indexer_cache_ptr,
     indexer_cache_scale_ptr,
@@ -433,8 +434,8 @@ def _fused_norm_rope_kernel(
             )
 
         # PCP inserts index K after gathering; other paths write it directly.
-        if indexer_cache_ptr is not None and slot_mapping_ptr is not None:
-            slot_idx = tl.load(slot_mapping_ptr + tok_idx)
+        if indexer_cache_ptr is not None and indexer_slot_mapping_ptr is not None:
+            slot_idx = tl.load(indexer_slot_mapping_ptr + tok_idx)
             _fp8_quant_and_cache_write(
                 result,
                 index_k_mask,
@@ -469,8 +470,9 @@ def fused_norm_rope(
     index_k_layer_norm_eps: float,
     index_k_rope_cos_sin_cache: torch.Tensor | None,
     topk_indices_buffer: torch.Tensor,
-    # Cache params for fused writes (single slot_mapping for both caches)
+    # Cache params for fused writes
     slot_mapping: torch.Tensor | None = None,
+    indexer_slot_mapping: torch.Tensor | None = None,
     indexer_k_cache: torch.Tensor | None = None,
     indexer_cache_shuffled: bool = False,
     mla_kv_cache: torch.Tensor | None = None,
@@ -515,6 +517,8 @@ def fused_norm_rope(
     # --- Indexer K cache setup ---
     if indexer_k_cache is not None:
         assert slot_mapping is not None
+        if indexer_slot_mapping is None:
+            indexer_slot_mapping = slot_mapping
         idx_cache_scale_view = indexer_k_cache.view(torch.uint8).view(torch.float32)
         idx_cache_block_size = indexer_k_cache.shape[1]
         idx_cache_stride = indexer_k_cache.shape[2]
@@ -526,6 +530,7 @@ def fused_norm_rope(
                 f"indexer K cache block size {idx_cache_block_size} must be a "
                 f"multiple of {_INDEXER_CACHE_BLOCK_TILE} for the shuffled layout"
             )
+        idx_cache_stride = indexer_k_cache.stride(0)
         if indexer_k_cache.dtype == torch.uint8:
             indexer_k_cache = indexer_k_cache.view(_FP8_DTYPE)
         # The head tile is a byte count; the kernel indexes the cache in elements.
@@ -634,6 +639,7 @@ def fused_norm_rope(
         index_k_rope_cos_sin_cache.shape[-1] // 2,
         # Cache params
         slot_mapping,
+        indexer_slot_mapping,
         indexer_k_cache,
         idx_cache_scale_view,
         idx_cache_block_size,

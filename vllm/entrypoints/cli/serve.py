@@ -54,7 +54,7 @@ class ServeSubcommand(CLISubcommand):
             args.model = args.model_tag
 
         if getattr(args, "grpc", False):
-            from vllm.entrypoints.grpc_server import serve_grpc
+            from vllm.entrypoints.launchers.grpc_server import serve_grpc
 
             uvloop.run(serve_grpc(args))
             return
