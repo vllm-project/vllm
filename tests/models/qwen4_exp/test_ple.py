@@ -1333,8 +1333,8 @@ def test_fused_conv_correctness(
     )
     residual_reference = outer_residual + residual_reference
 
-    torch.testing.assert_close(
-        residual_kernel.float(), residual_reference.float(), atol=3e-2, rtol=3e-2
+    assert torch.equal(
+        residual_kernel[:num_real_tokens], residual_reference[:num_real_tokens]
     )
     assert torch.equal(conv_state, state_reference)
     assert torch.equal(conv_state[NULL_BLOCK_ID], null_state)

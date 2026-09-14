@@ -452,7 +452,7 @@ def _ple_conv_kernel(
         mask=c_mask,
         other=0.0,
     )
-    ple_output = outer_residual + ple_output
+    ple_output = outer_residual.to(tl.float32) + ple_output.to(tl.float32)
     if launch_pdl:
         tl.extra.cuda.gdc_launch_dependents()
     tl.store(
