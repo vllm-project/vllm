@@ -30,11 +30,24 @@ pub use inkling::InklingChatRenderer;
 pub use kimi_k3::KimiK3ChatRenderer;
 pub use selection::RendererSelection;
 
+/// Location of one multimodal content part in the source chat request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MediaPartSource {
+    /// Zero-based message index in the source request.
+    pub message_index: usize,
+    /// Zero-based content-part index within the source message.
+    pub content_part_index: usize,
+}
+
 /// Rendered chat prompt submitted to the text backend.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderedPrompt {
     /// The rendered prompt, either as text or already tokenized.
     pub prompt: Prompt,
+    /// Media sources in rendered placeholder order.
+    /// `None` uses the message and content-part order in the request (e.g. Jinja).
+    /// `Some` uses exactly the listed sources; an empty list omits all media.
+    pub media_order: Option<Vec<MediaPartSource>>,
     /// Effective chat-template kwargs visible to the renderer after applying
     /// server defaults, request overrides, and typed reasoning controls.
     pub effective_template_kwargs: HashMap<String, Value>,

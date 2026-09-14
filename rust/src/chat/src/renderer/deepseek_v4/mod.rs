@@ -24,6 +24,7 @@ impl ChatRenderer for DeepSeekV4ChatRenderer {
 
         Ok(RenderedPrompt {
             prompt: Prompt::Text(deepseek::render_request(request, DsDialect::V4)?),
+            media_order: None,
             effective_template_kwargs: request_template_kwargs(request),
         })
     }

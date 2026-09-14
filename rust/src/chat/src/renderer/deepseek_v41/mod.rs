@@ -21,9 +21,12 @@ impl DeepSeekV41ChatRenderer {
 impl ChatRenderer for DeepSeekV41ChatRenderer {
     fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
         request.validate()?;
+        let (prompt, media_order) =
+            deepseek::render_request_with_media_order(request, DsDialect::V41)?;
 
         Ok(RenderedPrompt {
-            prompt: Prompt::Text(deepseek::render_request(request, DsDialect::V41)?),
+            prompt: Prompt::Text(prompt),
+            media_order: Some(media_order),
             effective_template_kwargs: request_template_kwargs(request),
         })
     }
