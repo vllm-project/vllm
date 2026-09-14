@@ -221,7 +221,7 @@ def matmul_kernel_descriptor_persistent(
 
 def matmul_descriptor_persistent(
     a: torch.Tensor, b: torch.Tensor, bias: torch.Tensor | None = None
-):
+) -> torch.Tensor:
     """Persistent matmul using tensor descriptors (Intel XPU fast path).
 
     Args:

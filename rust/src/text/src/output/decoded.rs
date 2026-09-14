@@ -201,11 +201,14 @@ pub async fn decoded_text_event_stream(
 
                 break;
             }
+        }
 
-            // TODO: avoid generating a chunk every time a token is pushed
-            if intermediate && let Some(chunk) = decoder.next_chunk() {
-                decoded.append(chunk);
-            }
+        // Coalesce output per nonterminal engine update; terminal updates flush below.
+        if intermediate
+            && finish_reason.is_none()
+            && let Some(chunk) = decoder.next_chunk()
+        {
+            decoded.append(chunk);
         }
 
         let mut new_token_ids = output.token_ids;
