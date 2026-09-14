@@ -1087,7 +1087,7 @@ steps:
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc
   - pytest -v -s entrypoints/scale_out
 
-- label: ":amd: (MI300) Entrypoints Integration (API Server OpenAI - Part 1)" # TBD
+- label: ":amd: (MI300) Entrypoints Integration (OpenAI API completion)" # TBD
   timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
@@ -1100,9 +1100,10 @@ steps:
   - tests/entrypoints/openai
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
   - pytest -v -s entrypoints/openai/ --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
 
-- label: ":amd: (MI300) Entrypoints Integration (API Server OpenAI - Part 2)" # TBD
+- label: ":amd: (MI300) Entrypoints Integration (OpenAI API chat_completion)" # TBD
   timeout_in_minutes: 55
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
@@ -1116,7 +1117,6 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/chat_completion
-  - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
 
 - label: ":amd: (MI300) Entrypoints Integration (API Server Generate)" # TBD
   timeout_in_minutes: 65
@@ -3237,7 +3237,7 @@ steps:
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc
   - pytest -v -s entrypoints/scale_out
 
-- label: ":amd: (MI355) Entrypoints Integration (API Server OpenAI - Part 1)" # TBD
+- label: ":amd: (MI355) Entrypoints Integration (OpenAI API completion)" # TBD
   timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
@@ -3250,9 +3250,10 @@ steps:
   - tests/entrypoints/openai
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
   - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
 
-- label: ":amd: (MI355) Entrypoints Integration (API Server OpenAI - Part 2)" # TBD
+- label: ":amd: (MI355) Entrypoints Integration (OpenAI API chat_completion)" # TBD
   timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
@@ -3266,7 +3267,6 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/chat_completion
-  - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
 
 - label: ":amd: (MI355) Entrypoints Integration (API Server Generate)" # TBD
   timeout_in_minutes: 40
