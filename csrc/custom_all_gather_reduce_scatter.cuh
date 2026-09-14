@@ -117,6 +117,15 @@ DINLINE void mnnvl_multimem_publish_flag(FlagType* flag_addr, FlagType flag) {
 #endif
 }
 
+DINLINE FlagType mnnvl_multimem_acquire_flag(FlagType* flag_addr) {
+#if !defined(USE_ROCM)
+  return ld_flag_acquire(flag_addr);
+#else
+  return __scoped_atomic_load_n(flag_addr, __ATOMIC_ACQUIRE,
+                                __MEMORY_SCOPE_DEVICE);
+#endif
+}
+
 template <bool ready, int ngpus>
 __global__ void mnnvl_multimem_barrier_kernel(Signal* local_signal,
                                               Signal* multicast_signal,
@@ -130,7 +139,7 @@ __global__ void mnnvl_multimem_barrier_kernel(Signal* local_signal,
   mnnvl_multimem_publish_flag(&multicast_counters[rank], flag);
 #pragma unroll
   for (int peer = 0; peer < ngpus; ++peer) {
-    while (ld_flag_acquire(&local_counters[peer]) != flag);
+    while (mnnvl_multimem_acquire_flag(&local_counters[peer]) != flag);
   }
   local_signal->_flag[0] = flag;
 }
