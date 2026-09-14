@@ -47,8 +47,9 @@ logger = init_logger(__name__)
 # Reap unbound store batches that have been parked without a FetchMsg
 # binding them to a session for longer than this. Protects against the
 # prefiller buffering blocks for a decoder that never asks (decoder died,
-# network partition, lost kv_request_id). Must be longer than the per-store
-# deadline so the store-timeout path fires first for individual jobs.
+# network partition, lost kv_request_id). Applies only while a batch is
+# unbound: binding hands it to the session, which times the job out under
+# _STORE_TIMEOUT_S instead.
 # Overridable per tier via the ``unbound_store_timeout_s`` config key.
 _UNBOUND_STORE_TIMEOUT_S = 60.0
 
@@ -261,15 +262,20 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             **kwargs: Reserved for future tier-specific options.
 
         Raises:
-            ValueError: If ``unbound_store_timeout_s`` is not positive.
+            ValueError: If ``unbound_store_timeout_s`` is not a positive
+                number, or anything convertible to one.
         """
         super().__init__(offloading_spec, primary_kv_view, tier_type)
-        if unbound_store_timeout_s <= 0:
+        try:
+            timeout_s = float(unbound_store_timeout_s)
+        except (TypeError, ValueError):
+            timeout_s = float("nan")
+        if not timeout_s > 0:
             raise ValueError(
-                f"unbound_store_timeout_s must be positive, "
-                f"got {unbound_store_timeout_s}"
+                f"unbound_store_timeout_s must be a positive number, got "
+                f"{unbound_store_timeout_s!r}"
             )
-        self._unbound_store_timeout_s = float(unbound_store_timeout_s)
+        self._unbound_store_timeout_s = timeout_s
 
         # Block hashes chain from NONE_HASH (see v1/core/kv_cache_utils.py).
         # Peers whose seeds differ compute different hashes for identical
