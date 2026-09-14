@@ -11,8 +11,13 @@ from vllm.sampling_params import BeamSearchParams
 
 class _Tokenizer:
     eos_token_id = 0
+    special_token_id = eos_token_id
 
-    def decode(self, token_ids: list[int]) -> str:
+    def decode(self, token_ids: list[int], skip_special_tokens: bool = False) -> str:
+        if skip_special_tokens:
+            token_ids = [
+                token_id for token_id in token_ids if token_id != self.special_token_id
+            ]
         return " ".join(str(token_id) for token_id in token_ids)
 
 
@@ -72,3 +77,34 @@ async def test_beam_search_handles_extra_logprob_candidates() -> None:
     assert outputs[0].outputs[0].finish_reason == "stop"
     assert outputs[0].outputs[0].token_ids == []
     assert outputs[0].outputs[0].cumulative_logprob == pytest.approx(-0.1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("skip_special_tokens", "expected_text"),
+    [
+        pytest.param(True, "", id="skip"),
+        pytest.param(False, "0", id="keep"),
+    ],
+)
+async def test_beam_search_respects_skip_special_tokens(
+    skip_special_tokens: bool, expected_text: str
+) -> None:
+    prompt = {
+        "type": "token",
+        "prompt": "prompt",
+        "prompt_token_ids": [1],
+    }
+    params = BeamSearchParams(
+        beam_width=1,
+        max_tokens=1,
+        ignore_eos=True,
+        skip_special_tokens=skip_special_tokens,
+    )
+
+    outputs = [
+        output async for output in _Serving().beam_search(prompt, "request", params)
+    ]
+
+    assert outputs[0].outputs[0].text == expected_text
+    assert outputs[0].outputs[0].token_ids == [_Tokenizer.special_token_id]
