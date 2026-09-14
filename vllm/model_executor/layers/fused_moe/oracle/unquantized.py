@@ -327,11 +327,11 @@ def select_unquantized_moe_backend(
                 "VLLM_ROCM_USE_AITER_MOE=1 was requested, but %s "
                 "Falling back to try the remaining available MoE backends: %s.",
                 _make_log_unsupported(backend, reason),
-                [
+                ", ".join(
                     b.value
                     for b in AVAILABLE_BACKENDS
                     if b != UnquantizedMoeBackend.AITER
-                ],
+                ),
             )
             if UnquantizedMoeBackend.AITER in AVAILABLE_BACKENDS:
                 AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.AITER)
