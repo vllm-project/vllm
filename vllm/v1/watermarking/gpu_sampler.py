@@ -8,7 +8,6 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
-from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.watermarking.watermarker import RandomSampler, Watermarker
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.sample.sampler import Sampler
@@ -41,11 +40,15 @@ class GPUWatermarkSampler(Sampler):
     ) -> None:
         super().add_request(req_idx, prompt_len, sampling_params)
         self.watermarking.np[req_idx] = sampling_params.watermarking
-        if sampling_params.watermarking and sampling_params.temperature == 0:
+        if (
+            sampling_params.watermarking
+            and sampling_params.temperature == 0
+            and not self.watermarker.supports_greedy
+        ):
             logger.warning_once(
                 "Watermarking is enabled, but greedy decoding "
-                "(temperature=0) cannot be watermarked. This request will use "
-                "ordinary greedy sampling."
+                "(temperature=0) is not supported by this watermarker. "
+                "This request will use ordinary greedy sampling."
             )
 
     def apply_staged_writes(self) -> None:
@@ -62,10 +65,21 @@ class GPUWatermarkSampler(Sampler):
         top_p: torch.Tensor | None,
         use_flashinfer: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        enabled = self.watermarking.np[idx_mapping_np] & (
-            self.sampling_states.temperature.np[idx_mapping_np] != 0
-        )
+        watermarking = self.watermarking.np[idx_mapping_np]
+        if self.watermarker.supports_greedy:
+            # Bias-based watermarkers (e.g. SBW) can watermark greedy requests:
+            # +delta shifts the argmax toward green tokens. gumbel_sample
+            # already handles temperature=0 as a plain argmax, so no special
+            # casing is needed.
+            enabled = watermarking
+        else:
+            # Noise-based watermarkers (e.g. Gumbel) must skip greedy requests:
+            # Gumbel noise would corrupt the argmax.
+            enabled = watermarking & (
+                self.sampling_states.temperature.np[idx_mapping_np] != 0
+            )
         if not np.any(enabled):
+            # No watermarked requests: delegate entirely to normal sampler.
             return super()._sample_random(
                 processed_logits,
                 expanded_idx_mapping,
@@ -75,6 +89,8 @@ class GPUWatermarkSampler(Sampler):
                 top_p,
                 use_flashinfer,
             )
+
+        from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 
         processed_logits = apply_top_k_top_p(processed_logits, top_k, top_p)
         contexts = self._get_contexts(expanded_idx_mapping)
@@ -88,12 +104,12 @@ class GPUWatermarkSampler(Sampler):
         needs_mixed_sampling = repeated_contexts is not None or not np.all(enabled)
         skip_mask = None
         if needs_mixed_sampling:
-            watermarking = self.watermarking.gpu[expanded_idx_mapping] & (
+            watermarking_gpu = self.watermarking.gpu[expanded_idx_mapping] & (
                 temperatures != 0
             )
             if repeated_contexts is not None:
-                watermarking &= ~repeated_contexts
-            skip_mask = ~watermarking
+                watermarking_gpu &= ~repeated_contexts
+            skip_mask = ~watermarking_gpu
 
         random_sampler = RandomSampler(
             expanded_idx_mapping=expanded_idx_mapping,

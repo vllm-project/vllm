@@ -270,6 +270,7 @@ def test_sampling_params_can_disable_watermarking():
 def test_gpu_sampler_warns_when_watermarking_is_enabled_for_greedy(monkeypatch):
     sampler = object.__new__(GPUWatermarkSampler)
     sampler.watermarking = SimpleNamespace(np=np.ones(1, dtype=bool))
+    sampler.watermarker = SimpleNamespace(supports_greedy=False)
     messages: list[str] = []
     monkeypatch.setattr(Sampler, "add_request", lambda *args, **kwargs: None)
     monkeypatch.setattr(
@@ -282,8 +283,9 @@ def test_gpu_sampler_warns_when_watermarking_is_enabled_for_greedy(monkeypatch):
 
     assert messages == [
         (
-            "Watermarking is enabled, but greedy decoding (temperature=0) cannot be "
-            "watermarked. This request will use ordinary greedy sampling."
+            "Watermarking is enabled, but greedy decoding "
+            "(temperature=0) is not supported by this watermarker. "
+            "This request will use ordinary greedy sampling."
         )
     ]
 
@@ -301,7 +303,7 @@ def test_gpu_sampler_respects_mixed_request_watermarking(monkeypatch):
     )
     sampler.use_fp64_gumbel = False
     sampler._get_contexts = lambda expanded_idx_mapping: torch.zeros(
-        2, 1, dtype=torch.int64
+        len(expanded_idx_mapping), 1, dtype=torch.int64
     )
     sampler._get_repeated_contexts = lambda expanded_idx_mapping, contexts: torch.zeros(
         2, dtype=torch.bool
@@ -311,6 +313,7 @@ def test_gpu_sampler_respects_mixed_request_watermarking(monkeypatch):
         lambda *args, **kwargs: torch.tensor([3, 4]),
     )
     logits = torch.zeros(2, 8)
+    logits[1, 3] = 1.0  # unwatermarked row will pick token 3
 
     sampled, output_logits = sampler._sample_random(
         logits,
@@ -322,9 +325,9 @@ def test_gpu_sampler_respects_mixed_request_watermarking(monkeypatch):
         False,
     )
 
-    assert torch.equal(sampled, torch.tensor([7, 4]))
-    assert torch.equal(output_logits[0], torch.full((8,), 10.0))
-    assert torch.equal(output_logits[1], logits[1])
+    assert torch.equal(sampled, torch.tensor([7, 4]))  # wm=7, unwm=mock[1]=4
+    assert torch.equal(output_logits[0], torch.full((8,), 10.0))  # biased: 0+10
+    assert torch.equal(output_logits[1], logits[1])  # unbiased: original
 
 
 def test_gpu_sampler_skips_watermarking_for_repeated_contexts(monkeypatch):
@@ -841,8 +844,13 @@ def test_gpu_sampler_uses_fused_gumbel_for_repeated_contexts():
 
 
 def test_gpu_sampler_skips_watermarking_for_greedy_batch(monkeypatch):
+    """Watermarkers with supports_greedy=False (e.g. Gumbel) must not run for
+    greedy requests. Watermarkers with supports_greedy=True (e.g. SBW) are
+    included in enabled and handled correctly by gumbel_sample's temp=0 path."""
+
     class StubWatermarker:
         context_width = 1
+        supports_greedy = False
 
         def sample(self, logits, contexts, random_sampler=None, skip_mask=None):
             raise AssertionError("watermarker should not run for greedy requests")
