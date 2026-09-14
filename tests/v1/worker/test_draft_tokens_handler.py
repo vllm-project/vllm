@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
+from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
@@ -164,3 +165,32 @@ def test_ring_buffer_evicts_oldest_and_misses():
     got = handler.get_draft_tokens(step_id=3)
     assert got is not None
     assert got.req_ids == ["c"]
+
+
+def test_worker_wrapper_drops_unsupported_step_id():
+    wrapper = WorkerWrapperBase(rpc_rank=0)
+    seen: list[tuple] = []
+
+    class PluginWorker:
+        def take_draft_token_ids(self):
+            seen.append(())
+            return "legacy"
+
+    wrapper.worker = PluginWorker()
+    assert wrapper.take_draft_token_ids(step_id=7) == "legacy"
+    assert seen == [()]
+
+
+def test_worker_wrapper_forwards_step_id_when_supported():
+    wrapper = WorkerWrapperBase(rpc_rank=0)
+    seen: list[int | None] = []
+
+    class Worker:
+        def take_draft_token_ids(self, step_id: int | None = None):
+            seen.append(step_id)
+            return "ok"
+
+    wrapper.worker = Worker()
+    assert wrapper.take_draft_token_ids(step_id=7) == "ok"
+    assert wrapper.take_draft_token_ids() == "ok"
+    assert seen == [7, None]
