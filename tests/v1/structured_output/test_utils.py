@@ -56,6 +56,35 @@ def unsupported_object_schemas():
 
 
 @pytest.fixture
+def unsupported_allof_schemas():
+    return [
+        {
+            "$defs": {
+                "Base": {
+                    "type": "object",
+                    "properties": {"x": {"type": "integer", "minimum": 10}},
+                    "required": ["x"],
+                }
+            },
+            "allOf": [
+                {"$ref": "#/$defs/Base"},
+                {
+                    "type": "object",
+                    "properties": {"y": {"type": "string"}},
+                    "required": ["y"],
+                },
+            ],
+        },
+        {
+            "allOf": [
+                {"type": "string", "minLength": 1},
+                {"type": "string", "maxLength": 5},
+            ],
+        },
+    ]
+
+
+@pytest.fixture
 def supported_schema():
     return {
         "type": "object",
@@ -96,6 +125,7 @@ def supported_schema():
         "unsupported_number_schemas",
         "unsupported_array_schemas",
         "unsupported_object_schemas",
+        "unsupported_allof_schemas",
     ],
 )
 def test_unsupported_json_features_by_type(schema_type, request):
@@ -110,3 +140,18 @@ def test_supported_json_features(supported_schema):
     assert not has_xgrammar_unsupported_json_features(supported_schema), (
         "Schema should be supported"
     )
+
+
+def test_supported_single_branch_allof():
+    # A single-branch `allOf` is enforced correctly by xgrammar and must not
+    # be flagged as unsupported.
+    schema = {
+        "allOf": [
+            {
+                "type": "object",
+                "properties": {"x": {"type": "integer"}},
+                "required": ["x"],
+            },
+        ],
+    }
+    assert not has_xgrammar_unsupported_json_features(schema)
