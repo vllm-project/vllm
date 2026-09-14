@@ -22,11 +22,14 @@ def _selector_walk_kernel(
     seeds_ptr,
     tokens_ptr,
     realized_scores_ptr,
+    confidence_logits_ptr,
+    realized_confidence_ptr,
     num_steps: tl.constexpr,
     top_k: tl.constexpr,
     BLOCK_K: tl.constexpr,
     SAMPLE_PROBABILISTIC: tl.constexpr,
     USE_FP64: tl.constexpr,
+    USE_CONFIDENCE: tl.constexpr,
 ):
     row = tl.program_id(0)
     offsets = tl.arange(0, BLOCK_K)
@@ -38,6 +41,17 @@ def _selector_walk_kernel(
     previous = 0
     for step in range(num_steps):
         flat = row * num_steps + step
+        if USE_CONFIDENCE:
+            confidence_logit = tl.load(
+                confidence_logits_ptr + flat * top_k + previous,
+                mask=valid,
+                other=0.0,
+            ).to(tl.float32)
+            tl.store(
+                realized_confidence_ptr + flat,
+                tl.sigmoid(confidence_logit),
+                mask=valid,
+            )
         score_base = (flat * top_k + previous) * top_k
         scores = tl.load(
             scores_ptr + score_base + offsets,
@@ -129,6 +143,31 @@ class DFlash2Speculator(DFlashSpeculator):
         self._cached_candidate_ids = torch.zeros(
             self._selector_scores.shape, dtype=torch.int64, device=device
         )
+        self.enable_adaptive_verification = (
+            self.speculative_config.enable_adaptive_verification
+        )
+        self.draft_token_confidence_probs = (
+            torch.empty_like(self.draft_tokens, dtype=torch.float32)
+            if self.enable_adaptive_verification
+            else None
+        )
+
+    def load_draft_model(
+        self,
+        target_model: torch.nn.Module,
+        target_attn_layer_names: set[str],
+    ) -> torch.nn.Module:
+        model = super().load_draft_model(target_model, target_attn_layer_names)
+        if (
+            self.enable_adaptive_verification
+            and model.model.candidate_selector.confidence_head is None
+        ):
+            raise ValueError(
+                "DFlash2 adaptive verification requires a trained confidence head "
+                "in the draft checkpoint. Disable enable_adaptive_verification "
+                "to use fixed-budget drafting."
+            )
+        return model
 
     def draft_logits_spec(self, vllm_config: VllmConfig) -> tuple[torch.dtype, float]:
         # fp32 so the walk and the rejection that checks it read the same
@@ -141,6 +180,7 @@ class DFlash2Speculator(DFlashSpeculator):
         candidate_ids: torch.Tensor,
         scores: torch.Tensor,
         num_reqs: int,
+        confidence_logits: torch.Tensor | None = None,
     ) -> None:
         block_k = triton.next_power_of_2(self.selector_top_k)
         _selector_walk_kernel[(num_reqs,)](
@@ -152,11 +192,16 @@ class DFlash2Speculator(DFlashSpeculator):
             self.seeds,
             self.draft_tokens,
             self._selector_scores,
+            confidence_logits if confidence_logits is not None else scores,
+            self.draft_token_confidence_probs
+            if self.draft_token_confidence_probs is not None
+            else self._selector_scores,
             num_steps=self.num_speculative_steps,
             top_k=self.selector_top_k,
             BLOCK_K=block_k,
             SAMPLE_PROBABILISTIC=self.draft_logits is not None,
             USE_FP64=self.use_fp64_gumbel,
+            USE_CONFIDENCE=confidence_logits is not None,
             num_warps=1,
         )
 
@@ -206,12 +251,13 @@ class DFlash2Speculator(DFlashSpeculator):
         )
         unary_logits = unary_logits.view_as(candidate_ids)
         anchor_token_ids = self.input_buffers.input_ids[self._anchor_indices[:num_reqs]]
-        scores = self.model.model.candidate_selector(
+        scores, confidence_logits = self.model.model.candidate_selector(
             candidate_ids,
             unary_logits,
             hidden_states,
             anchor_token_ids,
+            compute_confidence=self.enable_adaptive_verification,
         )
-        self._sample_path(candidate_ids, scores, num_reqs)
+        self._sample_path(candidate_ids, scores, num_reqs, confidence_logits)
         if self.draft_logits is not None:
             self._cache_draft_logits(candidate_ids, num_sample)
