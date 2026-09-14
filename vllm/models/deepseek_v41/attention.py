@@ -26,7 +26,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.models.common.ops import fused_q_kv_rmsnorm
-from vllm.models.deepseek_v4_1.common.ops import (
+from vllm.models.deepseek_v41.common.ops import (
     MXFP4_BLOCK_SIZE,
     fused_indexer_q_rope_quant,
     indexer_k_norm_rope_store,
@@ -49,8 +49,8 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.utils import extract_layer_index
-from vllm.models.deepseek_v4_1.common.rope import build_deepseek_v4_rope
-from vllm.models.deepseek_v4_1.compressor import DeepseekCompressor
+from vllm.models.deepseek_v41.common.rope import build_deepseek_v4_rope
+from vllm.models.deepseek_v41.compressor import DeepseekCompressor
 from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import (
     execute_in_parallel,
@@ -156,7 +156,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     ``DeepseekV4FlashInferSM120Attention`` /
     ``DeepseekV4FlashInferMLAAttention`` (CUDA) or
     ``DeepseekV41ROCMAiterMLAAttention`` (ROCm) — selected by the platform-specific
-    deepseek_v4_1 model module. The base is never instantiated directly.
+    deepseek_v41 model module. The base is never instantiated directly.
     """
 
     # Provided by the platform subclass.
@@ -536,7 +536,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 "FLASHMLA_SPARSE_DSV41",
                 "ROCM_FLASHMLA_SPARSE_DSV4",
             ):
-                from vllm.models.deepseek_v4_1.common.ops.cache_utils import (
+                from vllm.models.deepseek_v41.common.ops.cache_utils import (
                     _COMBINE_TOPK_SWA_INDICES_KERNEL,
                 )
 
@@ -581,7 +581,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
     @cached_property
     def _can_fuse_query_quant(self) -> bool:
-        from vllm.models.deepseek_v4_1.common.ops.query_quant import (
+        from vllm.models.deepseek_v41.common.ops.query_quant import (
             can_fuse_query_quant,
         )
 
@@ -600,7 +600,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         """
         qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
         if self.q_lora_rank % 32 == 0 and self._can_fuse_query_quant:
-            from vllm.models.deepseek_v4_1.common.ops.query_quant import (
+            from vllm.models.deepseek_v41.common.ops.query_quant import (
                 fused_q_kv_rmsnorm_quant,
             )
 

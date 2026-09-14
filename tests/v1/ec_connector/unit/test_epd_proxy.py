@@ -21,7 +21,6 @@ from examples.disaggregated.disaggregated_encoder.disagg_epd_proxy import (
     InstanceRole,
     RegistrationServer,
     build_app,
-    content_uuid,
     extract_mm_items,
 )
 
@@ -192,7 +191,7 @@ def test_encoder_handles_and_json_metadata_survive_rewrite(proxy, push, monkeypa
         )
     )
     assert "ec_transfer_params" not in original
-    assert prepared["ec_transfer_params"][content_uuid(IMAGE_ITEM)] == handle
+    assert prepared["ec_transfer_params"]["engine-hash"] == handle
     items = prepared["ec_transfer_params"]["ec_items"]
     assert [item["mm_hash"] for item in items] == ["engine-hash", "engine-hash"]
     assert items[0]["transfer_id"] != items[1]["transfer_id"]
