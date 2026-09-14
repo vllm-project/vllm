@@ -707,7 +707,9 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             )
 
         self.pcp_dcp_kv_gather = False
-        self.gathered_kv_workspace: torch.Tensor | None = None
+        self._workspace_specs: list[tuple[tuple[int, ...], torch.dtype]] = [
+            (q_concat_shape, torch.bfloat16)
+        ]
         if kv_cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS:
             # Reserve workspace during initialization
             assert vllm_config is not None and vllm_config.model_config is not None
@@ -725,20 +727,31 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 # shards into a workspace of the full prefill size.
                 shard_rows //= parallel_config.decode_context_parallel_size
             self.prefill_workspace_shape = (shard_rows, head_size)
-            specs = [
-                (q_concat_shape, torch.bfloat16),
-                (self.prefill_workspace_shape, torch.bfloat16),
-            ]
+            self._workspace_specs.append((self.prefill_workspace_shape, torch.bfloat16))
             if self.pcp_dcp_kv_gather:
-                specs.append(((prefill_workspace_size, head_size), torch.bfloat16))
-            buffers = current_workspace_manager().get_simultaneous(*specs)
-            self.q_concat_buffer, self.prefill_bf16_workspace = buffers[:2]
-            if self.pcp_dcp_kv_gather:
-                self.gathered_kv_workspace = buffers[2]
-        else:
-            (self.q_concat_buffer,) = current_workspace_manager().get_simultaneous(
-                (q_concat_shape, torch.bfloat16),
-            )
+                self._workspace_specs.append(
+                    ((prefill_workspace_size, head_size), torch.bfloat16)
+                )
+        # Reserve capacity without retaining views that prevent old storage
+        # from being released when another layer grows the shared workspace.
+        self._get_workspace_buffers()
+
+    def _get_workspace_buffers(self) -> list[torch.Tensor]:
+        return current_workspace_manager().get_simultaneous(*self._workspace_specs)
+
+    @property
+    def q_concat_buffer(self) -> torch.Tensor:
+        return self._get_workspace_buffers()[0]
+
+    @property
+    def prefill_bf16_workspace(self) -> torch.Tensor:
+        return self._get_workspace_buffers()[1]
+
+    @property
+    def gathered_kv_workspace(self) -> torch.Tensor | None:
+        if not self.pcp_dcp_kv_gather:
+            return None
+        return self._get_workspace_buffers()[2]
 
     def _forward_bf16_kv(
         self,
