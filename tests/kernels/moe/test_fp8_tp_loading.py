@@ -7,6 +7,9 @@ import torch
 
 import vllm.distributed as distributed
 from tests.kernels.moe.utils import make_dummy_moe_config
+from vllm.model_executor.layers.fused_moe import (
+    unquantized_fused_moe_method as unquantized_module,
+)
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization import fp8 as fp8_module
@@ -30,6 +33,11 @@ def _make_fp8_tp_experts(
     if mock_backend:
         monkeypatch.setattr(
             fp8_module, "select_fp8_moe_backend", lambda **kwargs: (None, None)
+        )
+        monkeypatch.setattr(
+            unquantized_module,
+            "select_unquantized_moe_backend",
+            lambda **kwargs: (None, None),
         )
     monkeypatch.setattr(
         fp8_module, "get_tensor_model_parallel_world_size", lambda: tp_size
@@ -191,8 +199,11 @@ def test_fp8_skipped_layer_keeps_original_tp_layout(monkeypatch, default_vllm_co
             ignored_layers=["model.layers.0.mlp.experts"],
         ),
     )
+    assert isinstance(layer.quant_method, unquantized_module.UnquantizedFusedMoEMethod)
     assert not layer.moe_config.tp_shard_with_padding
     assert layer.moe_config.intermediate_size_per_partition == 160
+    assert layer.w13_weight.shape == (2, 320, 256)
+    assert layer.w2_weight.shape == (2, 256, 160)
 
 
 def test_fp8_block_aligned_tp_rejects_presharded_weights(monkeypatch):
