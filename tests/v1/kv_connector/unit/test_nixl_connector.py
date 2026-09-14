@@ -3202,16 +3202,19 @@ def test_recv_failure_waits_for_sibling_transfer(recv_worker, sibling_state):
     worker._pending_recv_notifs = {"request": [("prefill", b"request:1")]}
     worker.nixl_wrapper.check_xfer_state.side_effect = ["ERR", "PROC", sibling_state]
 
-    assert worker.get_finished() == (set(), set())
+    results = worker.get_transfer_results()
+    assert results.finished_recving == results.failed_recving == set()
     assert worker.get_block_ids_with_load_errors() == set()
     assert "request" in worker._recving_metadata
     worker.nixl_wrapper.release_xfer_handle.assert_called_once_with(101)
 
-    assert worker.get_finished() == (set(), {"request"})
+    results = worker.get_transfer_results()
+    assert results.finished_recving == results.failed_recving == {"request"}
     assert worker.get_block_ids_with_load_errors() == {1, 2, 3}
     worker.nixl_wrapper.send_notif.assert_not_called()
 
-    assert worker.get_finished() == (set(), set())
+    results = worker.get_transfer_results()
+    assert results.finished_recving == results.failed_recving == set()
     assert worker.get_block_ids_with_load_errors() == set()
 
 
@@ -3225,11 +3228,13 @@ def test_recv_failure_waits_for_unpollable_handle_to_be_released(recv_worker):
         None,
     ]
 
-    assert worker.get_finished() == (set(), set())
+    results = worker.get_transfer_results()
+    assert results.finished_recving == results.failed_recving == set()
     assert worker.get_block_ids_with_load_errors() == set()
     assert "request" in worker._recving_metadata
 
-    assert worker.get_finished() == (set(), {"request"})
+    results = worker.get_transfer_results()
+    assert results.finished_recving == results.failed_recving == {"request"}
     assert worker.get_block_ids_with_load_errors() == {1, 2, 3}
     assert worker.nixl_wrapper.release_xfer_handle.call_count == 2
 
