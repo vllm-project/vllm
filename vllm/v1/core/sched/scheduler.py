@@ -123,6 +123,13 @@ class Scheduler(SchedulerInterface):
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
+        # Admission into RUNNING. Separate from max_num_running_reqs, which
+        # is the model-runner slot count.
+        self.max_num_active_reqs = (
+            self.scheduler_config.max_num_active_seqs
+            if self.scheduler_config.max_num_active_seqs is not None
+            else self.max_num_running_reqs
+        )
         self.max_num_scheduled_tokens = (
             self.scheduler_config.max_num_scheduled_tokens
             if self.scheduler_config.max_num_scheduled_tokens is not None
@@ -862,7 +869,7 @@ class Scheduler(SchedulerInterface):
                 # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
                 # in `running` but still hold a model-runner request slot.
                 num_running = len(self.running) + self.num_waiting_for_streaming_input
-                if num_running >= self.max_num_running_reqs:
+                if num_running >= self.max_num_active_reqs:
                     break
 
                 request_queue = self._select_waiting_queue_for_scheduling()
