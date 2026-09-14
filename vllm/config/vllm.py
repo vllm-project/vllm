@@ -1510,6 +1510,13 @@ class VllmConfig:
                     "mtp speculative decoding, and not DFlash2 and LiLiCorr "
                     "candidate-head drafters yet."
                 )
+            if watermark_config.algorithm == "sbw":
+                # SBW has no speculative-decoding path: the in-kernel recovery
+                # draw supports only the Philox-PRF Gumbel watermarker, and SBW
+                # defines no draft/target role split.
+                raise ValueError(
+                    "SBW watermarking does not support speculative decoding yet."
+                )
             if (
                 not watermark_config.allow_target_only_watermarking
                 and not watermark_config.supports_speculative_decoding
