@@ -1,10 +1,14 @@
 # vllm-frontend-rs
 
-This is a Rust drop-in alternative frontend for vLLM. The current goal is to rebuild the northbound serving layer in Rust while still talking to the core Python vLLM engine process(es) via ZMQ over the existing engine boundary.
+This is a Rust drop-in alternative frontend for vLLM. The current goal is to
+rebuild the northbound serving layer in Rust while still talking to the core
+Python vLLM engine process(es) via ZMQ over the existing engine boundary.
 
-It should still be considered experimental, and is not feature-complete. We are working to add more functionality from the python front-end.
+It should still be considered experimental, and is not feature-complete. We are
+working to add more functionality from the python front-end.
 
-See <https://github.com/Inferact/vllm-frontend-rs> for the original commit history before it was moved into the main vllm repo.
+See <https://github.com/Inferact/vllm-frontend-rs> for the original commit
+history before it was moved into the main vllm repo.
 
 ## Architecture
 
@@ -34,8 +38,9 @@ The component is organized as a Cargo workspace with several crates, layered bot
 ```
 
 `vllm-rs` integrates into Python `vllm` as a Rust frontend subprocess.
-Python owns process startup and launches the Rust API server as a Python-supervised worker, while
-passing the inherited listening socket and transport addresses into `vllm-rs`.
+Python owns process startup and launches the Rust API server as a
+Python-supervised worker, while passing the inherited listening socket and
+transport addresses into `vllm-rs`.
 
 For example:
 
@@ -46,11 +51,23 @@ VLLM_USE_RUST_FRONTEND=1 vllm serve Qwen/Qwen3-0.6B
 For a controlled eager-versus-decode-Graph comparison, see
 [the CUDA Graph validation guide](docs/decode_graph_validation.md).
 
+### RL weight synchronization
+
+With `VLLM_SERVER_DEV_MODE=1`, the Rust frontend supports the HTTP weight-transfer
+lifecycle used by `HTTPVLLMWeightSyncClient`: initialization, starting an update,
+transferring weights, and finishing the update. It also supports draft-model
+updates and `/update_weight_version` and `/weight_info` for version tracking.
+
+For trainer-side usage, see the [IPC](../examples/rl/rlhf_http_ipc.py) and
+[NCCL](../examples/rl/rlhf_http_nccl.py) examples. Configure the weight-transfer
+backend on the server and pause generation during updates, as shown there.
+
 ### External Engine
 
-`vllm-rs serve` can be run standalone with `--data-parallel-size-local 0` when the Python engines
-are started elsewhere and this node should run only the Rust frontend. The frontend still uses
-the global `--data-parallel-size` to determine how many engines it expects to join the shared handshake.
+`vllm-rs serve` can be run standalone with `--data-parallel-size-local 0` when
+the Python engines are started elsewhere and this node should run only the Rust
+frontend. The frontend still uses the global `--data-parallel-size` to determine
+how many engines it expects to join the shared handshake.
 
 ```bash
 vllm serve Qwen/Qwen3-0.6B \

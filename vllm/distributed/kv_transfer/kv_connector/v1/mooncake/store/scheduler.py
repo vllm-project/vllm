@@ -71,19 +71,27 @@ class MooncakeStoreScheduler:
         )
         self.client = LookupKeyClient(vllm_config)
         self.kv_cache_config = kv_cache_config
+        self._store_group_ids = kv_cache_config.prefix_cacheable_group_ids
+        # Map scheduler group IDs to store group indices. Groups outside the
+        # store projection, such as the QSA ring, map to None and are skipped.
+        self._store_group_id_by_kv_cache_group_id = {
+            group_id: store_group_id
+            for store_group_id, group_id in enumerate(self._store_group_ids)
+        }
+        store_groups = kv_cache_config.prefix_cacheable_groups
 
         # Align with the engine's own scheduler_block_size and hash_block_size.
         self._block_size, self._hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
         )
         self.enable_partial_hash_hits = partial_hash_hits_enabled(
-            kv_cache_config.kv_cache_groups,
+            store_groups,
             self._hash_block_size,
             vllm_config.parallel_config.decode_context_parallel_size,
         )
         mamba_groups = {
             group_id: group.kv_cache_spec
-            for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+            for group_id, group in enumerate(store_groups)
             if isinstance(group.kv_cache_spec, MambaSpec)
         }
         assert all(
@@ -173,8 +181,8 @@ class MooncakeStoreScheduler:
         """Update state after block allocation."""
         local_block_ids: tuple[list[int], ...] = ()
         if num_external_tokens > 0:
-            local_block_ids = self.kv_cache_config.select_transfer_block_ids(
-                blocks.get_block_ids()
+            local_block_ids = blocks.get_block_ids(
+                group_ids=self._store_group_ids,
             )
 
         self._unfinished_requests[request.request_id] = (request, local_block_ids)
@@ -239,10 +247,7 @@ class MooncakeStoreScheduler:
             request_real = request_tuple[0]  # type: ignore[index]
 
             unfolded_block_ids = tuple(
-                blocks.copy()
-                for blocks in self.kv_cache_config.select_transfer_block_ids(
-                    request.block_ids
-                )
+                request.block_ids[group_id].copy() for group_id in self._store_group_ids
             )
 
             prefill_tokens = _new_req_prefill_tokens(request)
@@ -278,8 +283,8 @@ class MooncakeStoreScheduler:
             for i, req_id in enumerate(cached_reqs.req_ids):
                 new_block_ids = cached_reqs.new_block_ids[i]
                 if new_block_ids:
-                    new_block_ids = self.kv_cache_config.select_transfer_block_ids(
-                        new_block_ids
+                    new_block_ids = tuple(
+                        new_block_ids[group_id] for group_id in self._store_group_ids
                     )
 
                 req_meta = None
@@ -438,7 +443,9 @@ class MooncakeStoreScheduler:
             assert block_ids is not None, (
                 f"Missing current block table for store request {req_meta.req_id}"
             )
-            req_meta.block_ids = block_ids
+            req_meta.block_ids = tuple(
+                block_ids[group_id] for group_id in self._store_group_ids
+            )
 
     def _reference_save_blocks(self, meta: MooncakeStoreConnectorMetadata) -> None:
         """Take a GPU block reference for every store job this step emits.
@@ -509,12 +516,15 @@ class MooncakeStoreScheduler:
             return False
 
         pinned_block_ids: list[int] = []
-        for group_id, block_id, _ in partial_tail_offloads:
-            if group_id not in self._boundary_state_group_ids:
+        remapped_offloads: list[tuple[int, int, int]] = []
+        for group_id, block_id, boundary in partial_tail_offloads:
+            store_group_id = self._store_group_id_by_kv_cache_group_id.get(group_id)
+            if store_group_id not in self._boundary_state_group_ids:
                 return False
             if block_id == NULL_BLOCK_ID:
                 return False
             pinned_block_ids.append(block_id)
+            remapped_offloads.append((store_group_id, block_id, boundary))
         pinned_block_ids = list(dict.fromkeys(pinned_block_ids))
 
         pool = self._gpu_block_pool
@@ -530,12 +540,14 @@ class MooncakeStoreScheduler:
         self._finished_partial_tail_metas[request.request_id] = ReqMeta(
             req_id=request.request_id,
             token_len_chunk=0,
-            block_ids=tuple(group.copy() for group in block_ids),
+            block_ids=tuple(
+                block_ids[group_id].copy() for group_id in self._store_group_ids
+            ),
             block_hashes=list(request.block_hashes),
             can_save=True,
             num_prompt_tokens=tracker.prefill_end_tokens,
             store_job_id=store_job_id,
-            boundary_state_offloads=partial_tail_offloads,
+            boundary_state_offloads=remapped_offloads,
         )
         tracker.has_pending_offload = True
         # The store job owns exact block refs, so request cleanup need not wait.
@@ -574,9 +586,10 @@ class MooncakeStoreScheduler:
                     continue
                 if block_id == NULL_BLOCK_ID:
                     continue
-                if group_id not in self._boundary_state_group_ids:
+                store_group_id = self._store_group_id_by_kv_cache_group_id.get(group_id)
+                if store_group_id not in self._boundary_state_group_ids:
                     continue
-                accepted.append((group_id, block_id, boundary_tokens))
+                accepted.append((store_group_id, block_id, boundary_tokens))
             if not accepted:
                 continue
             tracker.has_pending_offload = True
