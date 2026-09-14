@@ -260,9 +260,25 @@ AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 
 
-def count_nans_per_row(logits: torch.Tensor) -> torch.Tensor:
-    """Per-row NaN counts, left on device."""
-    return logits.isnan().sum(dim=-1, dtype=torch.int32)
+def count_nans_per_request(
+    logits: torch.Tensor,
+    cumulative_row_ends: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Count NaNs per request without synchronizing the device."""
+    counts = logits.isnan().sum(dim=-1, dtype=torch.int32)
+    if cumulative_row_ends is None:
+        return counts
+
+    prefix_sum = torch.empty(
+        counts.shape[0] + 1, dtype=counts.dtype, device=counts.device
+    )
+    prefix_sum[0] = 0
+    torch.cumsum(counts, dim=0, out=prefix_sum[1:])
+
+    row_starts = torch.empty_like(cumulative_row_ends)
+    row_starts[0] = 0
+    row_starts[1:] = cumulative_row_ends[:-1]
+    return prefix_sum[cumulative_row_ends] - prefix_sum[row_starts]
 
 
 def nans_to_dict(counts: list[int], req_id_to_index: dict[str, int]) -> dict[str, int]:
@@ -3669,6 +3685,7 @@ class GPUModelRunner(
         scheduler_output: "SchedulerOutput",
         sampler_output: SamplerOutput,
         logits: torch.Tensor | None,
+        spec_decode_metadata: SpecDecodeMetadata | None,
         hidden_states: torch.Tensor,
         num_scheduled_tokens: int,
     ) -> tuple[
@@ -3684,12 +3701,23 @@ class GPUModelRunner(
         num_nans: torch.Tensor | None = None
         num_nans_in_logits: dict[str, int] = {}
         if self.observability_config.enable_detect_nans_in_logits:
+            cumulative_row_ends = (
+                spec_decode_metadata.cu_num_sampled_tokens
+                if spec_decode_metadata is not None
+                else None
+            )
             if self.use_async_scheduling:
                 # Keep the counts on device; they ride the async output copy
                 # stream rather than blocking here.
-                num_nans = None if logits is None else count_nans_per_row(logits)
+                num_nans = (
+                    None
+                    if logits is None
+                    else count_nans_per_request(logits, cumulative_row_ends)
+                )
             else:
-                num_nans_in_logits = self._get_nans_in_logits(logits)
+                num_nans_in_logits = self._get_nans_in_logits(
+                    logits, cumulative_row_ends
+                )
 
         num_reqs = self.input_batch.num_reqs
         discard_sampled_tokens_req_indices = np.nonzero(
@@ -4704,6 +4732,7 @@ class GPUModelRunner(
                 scheduler_output,
                 sampler_output,
                 logits,
+                spec_decode_metadata,
                 hidden_states,
                 scheduler_output.total_num_scheduled_tokens,
             )
@@ -5688,7 +5717,11 @@ class GPUModelRunner(
 
         return prompt_logprobs_dict
 
-    def _get_nans_in_logits(self, logits: torch.Tensor | None) -> dict[str, int]:
+    def _get_nans_in_logits(
+        self,
+        logits: torch.Tensor | None,
+        cumulative_row_ends: torch.Tensor | None = None,
+    ) -> dict[str, int]:
         """Count NaNs per request, reading the result back to the host.
 
         Only used under sync scheduling, The async path keeps the counts
@@ -5698,7 +5731,11 @@ class GPUModelRunner(
             # Reporting per-request NaN counts requires them on the host; this
             # path is opt-in diagnostics, so the D2H is intended.
             with gpu_sync_allowed():
-                counts = [] if logits is None else count_nans_per_row(logits).tolist()
+                counts = (
+                    []
+                    if logits is None
+                    else count_nans_per_request(logits, cumulative_row_ends).tolist()
+                )
             num_nans_in_logits = nans_to_dict(counts, self.input_batch.req_id_to_index)
             if envs.VLLM_RAISE_ON_LOGIT_NANS:
                 raise_if_nan_logits(num_nans_in_logits)

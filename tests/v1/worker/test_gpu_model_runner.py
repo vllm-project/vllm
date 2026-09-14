@@ -721,6 +721,18 @@ def test_get_nans_in_logits(model_runner, dist_init, monkeypatch):
     result = model_runner._get_nans_in_logits(logits)
     assert result == {"req_0": 2, "req_1": 0}
 
+    cumulative_row_ends = torch.tensor([2, 3], device=DEVICE_TYPE)
+    result = model_runner._get_nans_in_logits(logits, cumulative_row_ends)
+    assert result == {"req_0": 2, "req_1": 1}
+
+    logits = torch.tensor(
+        [[float("nan"), 0.0], [float("nan"), float("nan")]],
+        device=DEVICE_TYPE,
+    )
+    cumulative_row_ends = torch.tensor([2, 2], device=DEVICE_TYPE)
+    result = model_runner._get_nans_in_logits(logits, cumulative_row_ends)
+    assert result == {"req_0": 3, "req_1": 0}
+
 
 def test_update_states_no_changes(model_runner, dist_init):
     req_id = "req_0"

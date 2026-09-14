@@ -1531,6 +1531,7 @@ class KVCacheConfig:
             return self.num_blocks
         assert self.hisparse_host_num_blocks is not None
         return self.hisparse_host_num_blocks
+
     force_zeroing: bool = False
     """Force zeroing of newly allocated KV cache blocks, regardless of model
     type. Set by --enable-nan-fault-tolerance."""
