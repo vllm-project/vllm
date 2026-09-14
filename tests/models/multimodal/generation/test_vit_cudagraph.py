@@ -543,6 +543,7 @@ def test_eonly_vit_cudagraph_outputs(model_id, vllm_runner, image_assets, monkey
     from transformers import AutoProcessor
 
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     config = MODEL_CONFIGS[model_id]
     processor = AutoProcessor.from_pretrained(config.model).image_processor
     first, second = [asset.pil_image for asset in image_assets]
