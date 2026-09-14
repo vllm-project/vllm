@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import inspect
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 import numpy as np
@@ -52,8 +54,39 @@ from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 logger = init_logger(__name__)
 
 # The DSA indexer K cache is always quantized; "auto" means fp8 (V3.2 layout)
-# and mxfp4 is the opt-in Blackwell path.
+# and mxfp4 is opt-in on Blackwell datacenter GPUs and ROCm gfx950.
 DSA_INDEXER_KV_DTYPES = ("fp8", "mxfp4")
+
+
+@lru_cache(maxsize=1)
+def aiter_mxfp4_available() -> bool:
+    """Whether installed AITER exposes stride-capable FlyDSL FP4 kernels."""
+    try:
+        from aiter.ops.flydsl.kernels.mqa_logits import (
+            pa_mqa_logits_fp4 as decode,
+        )
+        from aiter.ops.flydsl.kernels.mqa_logits import (
+            pa_mqa_logits_fp4_common as common,
+        )
+        from aiter.ops.flydsl.kernels.mqa_logits import (
+            pa_mqa_logits_fp4_prefill as prefill,
+        )
+
+        if "byte_offset" not in inspect.signature(common._i32_buffer).parameters:
+            return False
+        required = {"kv_page_stride", "kv_scale_page_stride", "block_table_stride"}
+        for module, name in (
+            (decode, "pa_mqa_logits_fp4"),
+            (prefill, "pa_mqa_logits_fp4_prefill"),
+        ):
+            for prefix in ("build_", "compile_"):
+                suffix = "_module" if prefix == "build_" else ""
+                function = getattr(module, prefix + name + suffix)
+                if not required.issubset(inspect.signature(function).parameters):
+                    return False
+        return True
+    except (ImportError, AttributeError, TypeError, ValueError):
+        return False
 
 
 def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
@@ -65,6 +98,25 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
             f"sparse indexer (expected one of {DSA_INDEXER_KV_DTYPES})."
         )
     use_fp4 = kv_dtype == "mxfp4"
+    if use_fp4 and current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx950
+
+        if not on_gfx950():
+            raise ValueError("ROCm indexer_kv_dtype='mxfp4' requires gfx950")
+        parallel = vllm_config.parallel_config
+        if (
+            parallel.decode_context_parallel_size != 1
+            or parallel.prefill_context_parallel_size != 1
+        ):
+            raise ValueError("ROCm MXFP4 indexer requires DCP=PCP=1")
+        if not aiter_mxfp4_available():
+            logger.warning(
+                "indexer_kv_dtype='mxfp4' was requested, but the installed "
+                "AITER build lacks stride-capable FlyDSL FP4 kernels; "
+                "falling back to the fp8 indexer."
+            )
+            return False
+        return True
     if use_fp4 and not current_platform.is_device_capability_family(100):
         raise ValueError(
             "indexer_kv_dtype='mxfp4' requires Blackwell datacenter GPUs "
@@ -368,6 +420,8 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     max_local_total_seq_lens: int = 0
 
     pcp_deinterleave_idx: torch.Tensor | None = None
+    query_start_loc: torch.Tensor | None = None
+    query_slice_start: int = 0
 
 
 class BuildPrefillChunkMetadataKernel(
@@ -737,6 +791,9 @@ def _supports_native_decode(next_n: int) -> bool:
 
 
 def _use_flattening(vllm_config: VllmConfig) -> bool:
+    if current_platform.is_rocm() and dsa_indexer_uses_fp4(vllm_config):
+        # Expand uncompressed causal bounds before dividing each by C4.
+        return True
     speculative_config = vllm_config.speculative_config
     next_n = 1 + vllm_config.num_speculative_tokens
     return not _supports_native_decode(next_n) or (
@@ -861,6 +918,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 "DCP is not supported with sparse indexer KV compression "
                 f"(compress_ratio={self.compress_ratio})."
             )
+
+        if current_platform.is_rocm() and self.indexer_uses_fp4:
+            if self.compress_ratio != 4 or self.kv_cache_spec.num_states != 64:
+                raise ValueError("ROCm MXFP4 indexer requires C4 and 64-token pages")
 
         # Pre-allocate buffers for CUDA graph compatibility when
         if self.compress_ratio > 1:
@@ -1632,6 +1693,8 @@ def build_prefill_chunk_metadata(
         local_cu_seq_lens=local_cu_seq_lens,
         local_total_seq_lens=local_total_seq_lens,
         max_local_total_seq_lens=max_local_total_seq_lens,
+        query_start_loc=query_start_loc,
+        query_slice_start=qs_start,
     )
 
 
