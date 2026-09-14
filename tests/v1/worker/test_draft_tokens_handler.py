@@ -194,3 +194,17 @@ def test_worker_wrapper_forwards_step_id_when_supported():
     assert wrapper.take_draft_token_ids(step_id=7) == "ok"
     assert wrapper.take_draft_token_ids() == "ok"
     assert seen == [7, None]
+
+
+def test_worker_wrapper_drops_positional_only_step_id():
+    wrapper = WorkerWrapperBase(rpc_rank=0)
+    seen: list[tuple] = []
+
+    class PluginWorker:
+        def take_draft_token_ids(self, step_id: int | None = None, /):
+            seen.append((step_id,))
+            return "legacy"
+
+    wrapper.worker = PluginWorker()
+    assert wrapper.take_draft_token_ids(step_id=7) == "legacy"
+    assert seen == [(None,)]

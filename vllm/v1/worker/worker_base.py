@@ -44,8 +44,12 @@ def _callable_accepts_kwarg(func: Callable[..., Any], name: str) -> bool:
         params = inspect.signature(func).parameters
     except (TypeError, ValueError):
         return False
-    if name in params:
-        return True
+    param = params.get(name)
+    if param is not None:
+        return param.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
     return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
