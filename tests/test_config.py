@@ -3154,7 +3154,8 @@ def test_watermarking_forces_model_runner_v2(monkeypatch):
 def test_mtp_draft_uses_model_weights_not_local_cache(mock_model_config_cls):
     """Regression test: MTP + runai_streamer should use model_weights (original
     S3 URL) for the draft model, not model (local cache dir set by
-    pull_runai_model_from_obj_storage)."""
+    pull_runai_model_from_obj_storage), and inherit the target's HF auth token.
+    """
     from unittest.mock import MagicMock
 
     s3_url = "s3://my-bucket/Qwen3-35B-A3B-FP8"
@@ -3173,6 +3174,7 @@ def test_mtp_draft_uses_model_weights_not_local_cache(mock_model_config_cls):
     target_config.hf_text_config.model_type = "deepseek_v3"
     target_config.quantization = None
     target_config.max_model_len = 4096
+    target_config.hf_token = "hf_test_token"
 
     SpeculativeConfig(
         method="mtp",
@@ -3183,6 +3185,7 @@ def test_mtp_draft_uses_model_weights_not_local_cache(mock_model_config_cls):
 
     actual_model = mock_model_config_cls.call_args.kwargs["model"]
     assert actual_model == s3_url
+    assert mock_model_config_cls.call_args.kwargs["hf_token"] == "hf_test_token"
 
 
 def _make_qwen3_omni_dspark_configs():
