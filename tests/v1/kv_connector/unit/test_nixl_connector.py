@@ -2683,7 +2683,8 @@ def test_reinitialize_rebuilds_transport_from_retained_caches():
     worker._nixl_wrapper_cls = MagicMock(return_value=replacement)
     worker._nixl_config = MagicMock()
     worker.quiesce = MagicMock()
-    worker._new_handshake_executor = MagicMock()
+    executor = MagicMock()
+    worker._create_handshake_executor = MagicMock(return_value=executor)
     worker.register_kv_caches = MagicMock()
     worker._publish_handshake_metadata = MagicMock()
     worker._refresh_local_scheduler = MagicMock()
@@ -2692,7 +2693,8 @@ def test_reinitialize_rebuilds_transport_from_retained_caches():
 
     assert worker.nixl_wrapper is replacement
     worker.quiesce.assert_not_called()
-    worker._new_handshake_executor.assert_called_once_with()
+    worker._create_handshake_executor.assert_called_once_with()
+    assert worker._handshake_initiation_executor is executor
     worker.register_kv_caches.assert_called_once_with(caches)
     worker._publish_handshake_metadata.assert_called_once_with()
 
@@ -2706,7 +2708,7 @@ def test_reinitialize_releases_replacement_state_on_failure():
     worker._nixl_wrapper_cls = MagicMock(return_value=MagicMock())
     worker._nixl_config = MagicMock()
     worker.quiesce = MagicMock()
-    worker._new_handshake_executor = MagicMock()
+    worker._create_handshake_executor = MagicMock(return_value=MagicMock())
     worker.register_kv_caches = MagicMock(side_effect=RuntimeError("register"))
     worker._release_transport_state = MagicMock()
     worker._refresh_local_scheduler = MagicMock()

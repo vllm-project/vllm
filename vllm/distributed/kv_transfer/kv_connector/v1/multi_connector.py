@@ -494,7 +494,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def _run_on_connectors(
         self, operation: Callable[[KVConnectorBase_V1], None]
     ) -> tuple[list[KVConnectorBase_V1], BaseException | None]:
-        completed = []
+        completed: list[KVConnectorBase_V1] = []
         first_error: BaseException | None = None
         if not self._connectors:
             return completed, first_error

@@ -1757,6 +1757,7 @@ class NixlBaseConnectorWorker:
         for handles in self._recving_transfers.values():
             for handle in handles:
                 self.nixl_wrapper.release_xfer_handle(handle)
+        self._recving_transfers.clear()
         self._release_push_handles()
         for handle in self.src_xfer_handles_by_block_size.values():
             self.nixl_wrapper.release_dlist_handle(handle)
@@ -1775,7 +1776,6 @@ class NixlBaseConnectorWorker:
 
     def _clear_transport_state(self) -> None:
         """Clear metadata that is rebuilt when the transport is reinitialized."""
-        self._recving_transfers.clear()
         self.src_xfer_handles_by_block_size.clear()
         self.src_xfer_handles_by_tp_ratio.clear()
         self._dram_src_handles_by_tp_ratio.clear()

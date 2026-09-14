@@ -447,6 +447,7 @@ class NixlBaseConnectorScheduler:
                     if metadata is not None:
                         metadata[target_rank] = payload
                     else:
+                        assert metadata_lock is not None
                         with metadata_lock:
                             self._encoded_handshake_data[target_rank] = payload
                     sock.send_multipart((identity, b"", b"ok", b""))
