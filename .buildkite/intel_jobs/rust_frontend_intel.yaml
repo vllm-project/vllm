@@ -32,10 +32,6 @@ steps:
   - tests/entrypoints/openai/test_return_token_ids.py
   - tests/entrypoints/serve/instrumentator/test_uds.py
   - tests/v1/sample/test_logprobs_e2e.py
-  # test_include_reasoning_true_streaming is excluded below: Qwen3's
-  # chain-of-thought length is not fully deterministic on XPU, which can
-  # exhaust the test's max_tokens budget before any content is emitted
-  # (see #56739).
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
