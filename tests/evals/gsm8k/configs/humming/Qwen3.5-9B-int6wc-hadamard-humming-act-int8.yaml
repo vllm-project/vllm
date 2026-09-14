@@ -1,5 +1,5 @@
 model_name: "Qwen/Qwen3.5-9B"
-accuracy_threshold: 0.90
+accuracy_threshold: 0.88
 num_questions: 1319
 num_fewshot: 5
 gen_prefix: " <think>\n\n</think>\n"
@@ -10,4 +10,4 @@ server_args: >-
   --kernel-config.enable_flashinfer_autotune=False
 env:
   VLLM_HUMMING_ONLINE_QUANT_CONFIG: '{"dtype":"int6","hadamard_block_size":-1}'
-  VLLM_HUMMING_INPUT_QUANT_CONFIG: '{"dtype":"float8e4m3"}'
+  VLLM_HUMMING_INPUT_QUANT_CONFIG: '{"dtype":"int8"}'
