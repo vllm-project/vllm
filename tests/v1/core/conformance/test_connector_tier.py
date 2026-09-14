@@ -68,6 +68,12 @@ class ConnectorHarness:
     #: rather than re-deriving from raw tokens. Drives the expected failures:
     #: a re-deriver drops every partitioning dimension by construction.
     keys_from_block_hashes: bool
+    #: Why THIS connector's arms fail, and the fix that will flip them. The
+    #: condition that applies it is generic, so the citation has to live with
+    #: the harness: a second re-deriver inheriting ExampleConnector's reason
+    #: would point at a fix that never flips it. Required for a re-deriver,
+    #: unused otherwise.
+    rederivation_reason: str | None = None
 
     @classmethod
     @contextmanager
@@ -85,6 +91,11 @@ class ConnectorHarness:
 class ExampleConnectorHarness(ConnectorHarness):
     name = "ExampleConnector"
     keys_from_block_hashes = False
+    rederivation_reason = (
+        "#53496: ExampleConnector keys storage on raw prompt tokens, so it "
+        "drops every partitioning dimension and keys prompt_embeds requests "
+        "on an empty prompt."
+    )
 
     @classmethod
     @contextmanager
@@ -198,21 +209,25 @@ def harness(request) -> Iterator[ConnectorHarness]:
         yield ready
 
 
+def test_rederiving_harnesses_cite_their_own_fix():
+    """The xfail condition is generic, so the citation cannot be. A re-deriving
+    harness that inherited another connector's reason would point whoever hits
+    the XPASS at a fix that never flips it, which is the same failure the
+    coverage gate refuses for exempt re-derivers."""
+    for name, harness_cls in HARNESS_CLASSES.items():
+        if harness_cls.keys_from_block_hashes:
+            continue
+        assert harness_cls.rederivation_reason, (
+            f"{name} re-derives its keys, so it must state why its arms fail "
+            "and cite the fix that will flip them"
+        )
+
+
 def test_harness_manifest_keys_match_harness_names():
     """The manifest key is what the gate matches against the connector
     registry, so it has to be the connector's registered name."""
     for name, harness_cls in HARNESS_CLASSES.items():
         assert harness_cls.name == name
-
-
-#: Why a re-deriving connector fails an arm, and the fix that will flip it.
-#: Cited on the mark so whoever hits the XPASS knows which marks to delete,
-#: the same standard the coverage gate holds exempt re-derivers to.
-REDERIVATION_REASON = (
-    "#53496: ExampleConnector keys storage on raw prompt tokens, so it drops "
-    "every partitioning dimension and keys prompt_embeds requests on an empty "
-    "prompt."
-)
 
 
 def _cases(negative: bool) -> list:
@@ -229,7 +244,11 @@ def _cases(negative: bool) -> list:
             if not harness_cls.keys_from_block_hashes and (
                 negative or dim.name == "prompt_embeds"
             ):
-                marks.append(pytest.mark.xfail(strict=True, reason=REDERIVATION_REASON))
+                marks.append(
+                    pytest.mark.xfail(
+                        strict=True, reason=harness_cls.rederivation_reason
+                    )
+                )
             elif negative and dim.negative_bug:
                 marks.append(pytest.mark.xfail(strict=True, reason=dim.negative_bug))
             cases.append(pytest.param(name, dim, id=f"{name}-{dim.name}", marks=marks))
