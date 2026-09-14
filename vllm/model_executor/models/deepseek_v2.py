@@ -410,11 +410,6 @@ class DeepseekV2MoE(nn.Module):
                 DeepGemmMegaMoEExperts,
             )
 
-            source_weight_block_size = (
-                DeepGemmMegaMoEExperts.source_weight_block_size_from_quant_config(
-                    quant_config, self, prefix
-                )
-            )
             source_mxfp4 = DeepGemmMegaMoEExperts.source_is_mxfp4(
                 quant_config, self, prefix
             )
@@ -437,7 +432,6 @@ class DeepseekV2MoE(nn.Module):
                 hidden_size=config.hidden_size,
                 intermediate_size=config.moe_intermediate_size,
                 mma_type=("fp8xfp4" if source_mxfp4 else "bf16xbf16"),
-                source_weight_block_size=source_weight_block_size,
                 source_mxfp4=source_mxfp4,
                 prefix=f"{prefix}.experts",
             )

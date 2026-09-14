@@ -42,14 +42,11 @@ class _TestQuantConfig:
         name: str,
         *,
         quant_format: str | None = None,
-        weight_block_size: tuple[int, int] | None = None,
         ignore: tuple[str, ...] = (),
     ) -> None:
         self.name = name
         self.quant_format = quant_format
-        self.weight_block_size = weight_block_size
         self.ignore = ignore
-        self.is_checkpoint_fp8_serialized = weight_block_size is not None
 
     def get_name(self) -> str:
         return self.name
@@ -227,21 +224,13 @@ def test_mega_moe_deferred_reduction_scaling(is_sequence_parallel, expected):
 
 
 @pytest.mark.parametrize(
-    ("quant_config", "prefix", "is_mxfp4", "expected_block_size"),
+    ("quant_config", "prefix", "is_mxfp4"),
     [
-        pytest.param(None, "model.layers.0.mlp", False, None, id="bf16"),
-        pytest.param(
-            _TestQuantConfig("fp8", weight_block_size=(128, 128)),
-            "model.layers.0.mlp",
-            False,
-            (128, 128),
-            id="block-fp8",
-        ),
+        pytest.param(None, "model.layers.0.mlp", False, id="bf16"),
         pytest.param(
             _TestQuantConfig("compressed-tensors", quant_format="mxfp4-pack-quantized"),
             "model.layers.0.mlp",
             True,
-            None,
             id="mxfp4",
         ),
         pytest.param(
@@ -252,37 +241,34 @@ def test_mega_moe_deferred_reduction_scaling(is_sequence_parallel, expected):
             ),
             "model.layers.1.mtp_block.mlp",
             False,
-            None,
             id="ignored-mtp",
         ),
     ],
 )
-def test_mega_moe_checkpoint_format_selection(
-    quant_config, prefix, is_mxfp4, expected_block_size
-):
+def test_mega_moe_checkpoint_format_selection(quant_config, prefix, is_mxfp4):
     layer = torch.nn.Identity()
 
     assert (
         DeepGemmMegaMoEExperts.source_is_mxfp4(quant_config, layer, prefix) is is_mxfp4
     )
-    assert (
-        DeepGemmMegaMoEExperts.source_weight_block_size_from_quant_config(
-            quant_config, layer, prefix
-        )
-        == expected_block_size
-    )
 
 
-def test_mega_moe_rejects_nvfp4_checkpoint():
-    quant_config = _TestQuantConfig(
-        "compressed-tensors", quant_format="nvfp4-pack-quantized"
-    )
-
+@pytest.mark.parametrize(
+    "quant_config",
+    [
+        pytest.param(_TestQuantConfig("fp8"), id="fp8"),
+        pytest.param(
+            _TestQuantConfig("compressed-tensors", quant_format="nvfp4-pack-quantized"),
+            id="nvfp4",
+        ),
+    ],
+)
+def test_mega_moe_rejects_unsupported_checkpoint(quant_config):
     with pytest.raises(
         NotImplementedError,
-        match="supports BF16, MXFP4, or serialized block-FP8 checkpoints",
+        match="supports unquantized BF16 or compressed-tensors MXFP4",
     ):
-        DeepGemmMegaMoEExperts.source_weight_block_size_from_quant_config(
+        DeepGemmMegaMoEExperts.source_is_mxfp4(
             quant_config,
             torch.nn.Identity(),
             "model.layers.0.mlp",
@@ -290,29 +276,20 @@ def test_mega_moe_rejects_nvfp4_checkpoint():
 
 
 @pytest.mark.parametrize(
-    ("mma_type", "source_kwargs", "param_name", "dtype", "conversion"),
+    ("mma_type", "source_kwargs", "param_name", "dtype"),
     [
-        pytest.param("bf16xbf16", {}, "w13_weight", torch.bfloat16, None, id="bf16"),
-        pytest.param(
-            "bf16xbf16",
-            {"source_weight_block_size": (128, 128)},
-            "w13_weight",
-            torch.float8_e4m3fn,
-            "_dequantize_block_fp8_weights",
-            id="block-fp8",
-        ),
+        pytest.param("bf16xbf16", {}, "w13_weight", torch.bfloat16, id="bf16"),
         pytest.param(
             "fp8xfp4",
             {"source_mxfp4": True},
             "w13_weight_packed",
             torch.uint8,
-            None,
             id="mxfp4",
         ),
     ],
 )
 def test_mega_moe_checkpoint_loading_and_finalization(
-    monkeypatch, mma_type, source_kwargs, param_name, dtype, conversion
+    monkeypatch, mma_type, source_kwargs, param_name, dtype
 ):
     experts = _make_checkpoint_experts(mma_type, **source_kwargs)
     param = getattr(experts, param_name)
@@ -335,10 +312,6 @@ def test_mega_moe_checkpoint_loading_and_finalization(
         expected_l2 = (torch.empty(1, dtype=torch.int8), torch.empty(1))
 
     monkeypatch.setattr(experts, "_check_runtime_supported", lambda: None)
-    if conversion is not None:
-        monkeypatch.setattr(
-            experts, conversion, lambda *args: (expected_l1, expected_l2)
-        )
     monkeypatch.setattr(
         "vllm.utils.deep_gemm._import_deep_gemm",
         lambda: SimpleNamespace(
