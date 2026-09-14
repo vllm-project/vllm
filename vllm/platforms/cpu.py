@@ -31,6 +31,61 @@ else:
     VllmConfig = None
 
 
+def _cpu_mamba_backend(vllm_config: VllmConfig) -> str:
+    """Return the CPU state backend selected by the model configuration."""
+    model_config = vllm_config.model_config
+    if model_config is None:
+        return "none"
+
+    hf_config = getattr(model_config, "hf_text_config", None)
+    model_type = str(getattr(hf_config, "model_type", "")).lower()
+    architecture = str(getattr(model_config, "architecture", "")).lower()
+    layer_types = getattr(hf_config, "layer_types", None)
+    has_linear_attention = isinstance(layer_types, (list, tuple)) and (
+        "linear_attention" in layer_types
+    )
+
+    try:
+        has_inner_state = bool(model_config.has_inner_state)
+    except (AttributeError, RuntimeError):
+        has_inner_state = False
+
+    if not (has_inner_state or has_linear_attention):
+        return "none"
+
+    fallback_backend = model_type or architecture or "unknown"
+    if not has_linear_attention:
+        return fallback_backend
+
+    try:
+        model_cls, _ = model_config.registry.resolve_model_cls(
+            model_config.architecture,
+            model_config=model_config,
+        )
+    except Exception:
+        return fallback_backend
+
+    try:
+        state_dtypes = model_cls.get_mamba_state_dtype_from_config(vllm_config)
+    except Exception:
+        return fallback_backend
+
+    if not isinstance(state_dtypes, tuple) or len(state_dtypes) != 2:
+        return fallback_backend
+
+    if vllm_config.cache_config.mamba_ssm_cache_dtype == "float16":
+        cache_dtype = torch.float16
+    elif vllm_config.cache_config.mamba_ssm_cache_dtype == "bfloat16":
+        cache_dtype = torch.bfloat16
+    else:
+        return fallback_backend
+
+    if state_dtypes[1] == cache_dtype:
+        return "gdn"
+
+    return fallback_backend
+
+
 def get_max_threads(pid=0):
     if hasattr(os, "sched_getaffinity"):
         return len(os.sched_getaffinity(pid))
@@ -148,14 +203,26 @@ class CpuPlatform(Platform):
 
         cache_config = vllm_config.cache_config
 
+        is_deepseek_v4 = (
+            model_config is not None
+            and getattr(model_config.hf_config, "model_type", None) == "deepseek_v4"
+        )
+
         # The CPU MLA decode kernel only compiles with block_size=16 today
         # (see csrc/cpu/mla_decode.cpp). If the model uses MLA we override
         # the default block size regardless of user preference to avoid a
         # runtime kernel dispatch failure. AMX MLA has no such constraint
         # (same AMX-available condition as get_attn_backend_cls), so it's
-        # excluded from this override.
-        cpu_mla_enabled = model_config is not None and getattr(
-            model_config, "use_mla", False
+        # excluded from this override. DeepSeek-V4 is also excluded here and
+        # handled in its own branch below: its sparse-MLA and indexer
+        # backends declare block_size=256 as their only supported kernel
+        # block size (DeepseekV4SparseMLABackend/DeepseekV4IndexerBackend),
+        # so it needs the same override-regardless-of-preference treatment
+        # as CPU MLA, just with a different value.
+        cpu_mla_enabled = (
+            not is_deepseek_v4
+            and model_config is not None
+            and getattr(model_config, "use_mla", False)
         )
         amx_mla_enabled = (
             cpu_mla_enabled
@@ -164,6 +231,21 @@ class CpuPlatform(Platform):
             and vllm_config.attention_config.backend != AttentionBackendEnum.CPU_MLA
         )
         reference_cpu_mla_enabled = cpu_mla_enabled and not amx_mla_enabled
+        # DeepSeek-V4's CPU attention/indexer kernels
+        # (csrc/cpu/sgl-kernels/{flash_mla,store_cache,compressor,
+        # paged_mqa_logits,topk}.cpp) are AMX-kernel-backed and built on the
+        # same paged/position-indexed conventions as the GPU/XPU backends
+        # (block_table/slot_mapping addressing throughout, chunk metadata
+        # that already carries per-token causal offsets for partial/extend
+        # continuation) -- so they support chunked prefill and prefix
+        # caching the same way. `amx_mla_enabled` above deliberately
+        # excludes DeepSeek-V4 (it has its own block-size requirements,
+        # unrelated to chunked-prefill support), so it can't be reused here.
+        amx_mla_or_dsv4_enabled = amx_mla_enabled or (
+            is_deepseek_v4
+            and cls.get_cpu_architecture() == CpuArchEnum.X86
+            and torch.cpu._is_amx_tile_supported()
+        )
         if reference_cpu_mla_enabled:
             if cache_config.user_specified_block_size and cache_config.block_size != 16:
                 logger.warning(
@@ -172,6 +254,17 @@ class CpuPlatform(Platform):
                     cache_config.block_size,
                 )
             cache_config.block_size = 16
+        elif is_deepseek_v4:
+            if (
+                cache_config.user_specified_block_size
+                and cache_config.block_size != 256
+            ):
+                logger.warning(
+                    "DeepSeek-V4 CPU backend requires block_size=256, "
+                    "overriding user-specified block_size=%s.",
+                    cache_config.block_size,
+                )
+            cache_config.block_size = 256
         elif not cache_config.user_specified_block_size:
             cache_config.block_size = 128
 
@@ -181,16 +274,27 @@ class CpuPlatform(Platform):
                 "otherwise the performance is not optimized."
             )
 
-        # Accelerated GDN (AMX tiles or AVX-512BF16 VDPBF16PS) requires
-        # float32 SSM state.
+        # Accelerated GDN uses AMX tiles or AVX-512BF16 VDPBF16PS.
         if (
             torch.cpu._is_avx512_bf16_supported()
             and cache_config.mamba_ssm_cache_dtype != "float32"
         ):
-            cache_config.mamba_ssm_cache_dtype = "float32"
-            logger.warning(
-                "Reset SSM cache type to float32 for accelerated GDN mamba attention."
-            )
+            mamba_backend = _cpu_mamba_backend(vllm_config)
+            if (
+                cache_config.mamba_ssm_cache_dtype in ("float16", "bfloat16")
+                and mamba_backend == "gdn"
+            ):
+                logger.info(
+                    "Using %s SSM state storage for the CPU accelerated GDN backend.",
+                    cache_config.mamba_ssm_cache_dtype,
+                )
+            else:
+                cache_config.mamba_ssm_cache_dtype = "float32"
+                logger.warning(
+                    "Reset SSM cache type to float32 for accelerated GDN mamba "
+                    "backend '%s'.",
+                    mamba_backend,
+                )
 
         # Lagecy setting
         env_key = "VLLM_CPU_KVCACHE_SPACE"
@@ -373,7 +477,11 @@ class CpuPlatform(Platform):
             vllm_config.parallel_config.tensor_parallel_size
         )
 
-        if model_config is not None and model_config.use_mla and not amx_mla_enabled:
+        if (
+            model_config is not None
+            and model_config.use_mla
+            and not amx_mla_or_dsv4_enabled
+        ):
             logger.info_once(
                 "MLA is enabled on a non-GPU platform; forcing chunked "
                 "prefill and prefix caching to be disabled."

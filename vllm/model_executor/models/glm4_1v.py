@@ -28,7 +28,7 @@
 compatible with HuggingFace weights."""
 
 import math
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
 from functools import partial
 from typing import Annotated, Any, Literal, TypeAlias
 
@@ -83,6 +83,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
     VideoItem,
 )
@@ -709,10 +710,11 @@ class Glm4vVisionTransformer(nn.Module):
     def rot_pos_emb(
         self, grid_thw: list[list[int]]
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        device = self.device
         pos_ids = []
         for t, h, w in grid_thw:
-            hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
-            wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
+            hpos_ids = torch.arange(h, device=device).unsqueeze(1).expand(-1, w)
+            wpos_ids = torch.arange(w, device=device).unsqueeze(0).expand(h, -1)
             hpos_ids = (
                 hpos_ids.reshape(
                     h // self.spatial_merge_size,
@@ -740,7 +742,6 @@ class Glm4vVisionTransformer(nn.Module):
         # Use pre-computed cos_sin_cache from RotaryEmbedding
         cos, sin = self.rotary_pos_emb.get_cos_sin(max_grid_size)
 
-        pos_ids = pos_ids.to(cos.device, non_blocking=True)
         cos_combined = cos[pos_ids].flatten(1)
         sin_combined = sin[pos_ids].flatten(1)
         return cos_combined, sin_combined, pos_ids
@@ -2077,6 +2078,7 @@ class Glm4vForConditionalGeneration(
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
@@ -2377,19 +2379,16 @@ class Glm4vForConditionalGeneration(
             tower_model="visual.",
         )
 
-    def get_num_mm_encoder_tokens(
+    def get_mm_lora_token_counts(
         self,
-        num_image_tokens: int,
-    ) -> int:
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
         merge_size = self.config.vision_config.spatial_merge_size
-        return num_image_tokens * (merge_size**2)
-
-    def get_num_mm_connector_tokens(
-        self,
-        num_vision_tokens: int,
-    ) -> int:
-        merge_size = self.config.vision_config.spatial_merge_size
-        return num_vision_tokens // (merge_size**2)
+        return num_mm_embeds * (merge_size**2), num_mm_embeds
 
 
 @MULTIMODAL_REGISTRY.register_processor(

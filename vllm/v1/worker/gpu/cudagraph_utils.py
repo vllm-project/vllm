@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
+import itertools
 from collections import defaultdict
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable
+from contextlib import ExitStack
+from dataclasses import dataclass, replace
 from itertools import groupby, product
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 
@@ -16,7 +18,8 @@ from vllm.compilation.breakable_cudagraph import (
     is_breakable_cudagraph_enabled,
 )
 from vllm.compilation.counter import compilation_counter
-from vllm.compilation.cuda_graph import CUDAGraphWrapper
+from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
+from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
@@ -32,17 +35,21 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import current_stream
+from vllm.v1.hisparse.binding import release_hisparse_profiling_cache
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
+from vllm.v1.worker.gpu.cp_utils import maybe_prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.utils import AttentionGroup
+from vllm.v1.worker.ubatch_utils import check_ubatch_thresholds, get_num_ubatches
+from vllm.v1.worker.utils import AttentionGroup, clear_layer_kv_caches
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
+    from vllm.v1.worker.gpu.ubatch_utils import UBatchRunner
 
 logger = init_logger(__name__)
 
@@ -65,6 +72,19 @@ class BatchExecutionDescriptor:
     # uniform_token_count unset, so this is what keeps a prefill batch out of one.
     max_query_len: int | None = None
     num_active_loras: int = 0
+    # Number of microbatches the batch is split into (DBO). 1 means no splitting.
+    num_ubatches: int = 1
+
+
+def make_cudagraph_stats(
+    batch_desc: BatchExecutionDescriptor, num_tokens: int
+) -> CUDAGraphStat:
+    return CUDAGraphStat(
+        num_unpadded_tokens=num_tokens,
+        num_padded_tokens=batch_desc.num_tokens,
+        num_paddings=batch_desc.num_tokens - num_tokens,
+        runtime_mode=str(batch_desc.cg_mode),
+    )
 
 
 class CreateForwardFn(Protocol):
@@ -86,11 +106,13 @@ def _is_compatible(
     uniform_token_count: int | None,
     num_active_loras: int,
     max_query_len: int | None,
+    num_ubatches: int,
 ) -> bool:
     # desc.uniform_token_count=None (PIECEWISE) can handle any uniform_token_count
     # desc.num_reqs=None means no request padding needed (PIECEWISE)
     # desc.max_query_len=None means the graph does not constrain query length; a
     # caller that does not track max_query_len must not match one that does
+    # A graph captured for N microbatches can only serve a batch split N ways.
     return (
         (
             desc.uniform_token_count is None
@@ -103,6 +125,16 @@ def _is_compatible(
         and (desc.num_reqs is None or desc.num_reqs >= num_reqs)
         and desc.num_tokens >= num_tokens
         and desc.num_active_loras == num_active_loras
+        and desc.num_ubatches == num_ubatches
+    )
+
+
+def has_compiled_submodule(model: nn.Module) -> bool:
+    """Whether any submodule is an active @support_torch_compile module."""
+    return any(
+        isinstance(m, TorchCompileWithNoGuardsWrapper)
+        and not getattr(m, "do_not_compile", True)
+        for m in model.modules()
     )
 
 
@@ -115,6 +147,7 @@ class CudaGraphManager:
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
+        ubatch_runner: "UBatchRunner | None" = None,
     ):
         self.vllm_config = vllm_config
         self.device = device
@@ -124,6 +157,8 @@ class CudaGraphManager:
         self.cudagraph_mode = cudagraph_mode
         self.decode_query_len = decode_query_len
         self.varlen_decode = varlen_decode
+        # DBO supports FULL CUDA graphs only.
+        self.ubatch_runner = ubatch_runner
 
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
@@ -183,6 +218,33 @@ class CudaGraphManager:
         # Counts above the largest captured case clamp to it.
         return self._lora_dispatch_map.get(num_active_loras, self._max_lora_case)
 
+    def _maybe_ubatch_twin(
+        self, desc: BatchExecutionDescriptor
+    ) -> BatchExecutionDescriptor | None:
+        """Return a microbatched capture candidate when eligible.
+
+        Uniform query lengths preserve the captured request split. Use the DP
+        dispatch thresholds so all ranks generate the same candidates.
+        """
+        if self.ubatch_runner is None or desc.cg_mode != CUDAGraphMode.FULL:
+            return None
+        if desc.num_reqs is None:
+            return None
+        uniform_token_count, remainder = divmod(desc.num_tokens, desc.num_reqs)
+        if remainder or desc.uniform_token_count not in (None, uniform_token_count):
+            return None
+        parallel_config = self.vllm_config.parallel_config
+        num_ubatches = get_num_ubatches(parallel_config)
+        if desc.num_tokens < num_ubatches:
+            return None
+        if not check_ubatch_thresholds(
+            parallel_config, desc.num_tokens, uniform_decode=True
+        ):
+            return None
+        return replace(
+            desc, num_ubatches=num_ubatches, uniform_token_count=uniform_token_count
+        )
+
     def _init_candidates(self) -> None:
         """Build priority-ordered candidate lists for each token count."""
         capture_sizes = self.compilation_config.cudagraph_capture_sizes
@@ -208,21 +270,23 @@ class CudaGraphManager:
             speculative_config
             and speculative_config.uses_dynamic_speculative_decoding()
         ):
-            num_spec_per_batch_size = (
-                speculative_config.num_speculative_tokens_per_batch_size
-            )
-            # uses_dynamic_speculative_decoding() guarantees this is set.
-            assert num_spec_per_batch_size is not None
             # decode_query_len = num_speculative_steps + num_new_sampled_tokens
             # _per_step. Recover num_new_sampled_tokens_per_step
             # from the values the manager already has.
             num_new_sampled_tokens_per_step = (
                 self.decode_query_len - self.vllm_config.num_speculative_tokens
             )
-            # Each entry is (range_start, range_end, num_speculative_tokens).
-            decode_query_lens = [
-                x[2] + num_new_sampled_tokens_per_step for x in num_spec_per_batch_size
-            ]
+            dense_schedule = build_dynamic_sd_schedule_lookup(
+                speculative_config.num_speculative_tokens_per_batch_size,
+                vllm_max_batch_size=self.max_num_reqs,
+                vllm_num_speculative_tokens=self.vllm_config.num_speculative_tokens,
+            )
+            decode_query_lens = sorted(
+                {
+                    num_spec + num_new_sampled_tokens_per_step
+                    for num_spec in dense_schedule[1:]
+                }
+            )
         else:
             decode_query_lens = [self.decode_query_len]
 
@@ -269,7 +333,17 @@ class CudaGraphManager:
                     if desc not in descs_by_mode[decode_mode]:
                         descs_by_mode[decode_mode].append(desc)
 
-            if mixed_mode:
+                    ubatch_desc = self._maybe_ubatch_twin(desc)
+                    if ubatch_desc is not None and (
+                        ubatch_desc not in descs_by_mode[decode_mode]
+                    ):
+                        descs_by_mode[decode_mode].append(ubatch_desc)
+
+            # recoverSSM cannot capture a dummy query wider than its workspace.
+            if mixed_mode and (
+                not self.vllm_config.cache_config.use_kda_recoverssm
+                or num_tokens <= max_decode_tokens
+            ):
                 # for PIECEWISE graphs there is no limit on requests when replaying
                 # i.e. no request padding is needed, so we leave it as None.
                 # For breakable PW graphs, break-point kernels read the real batch
@@ -285,6 +359,10 @@ class CudaGraphManager:
                     num_active_loras=num_active_loras,
                 )
                 descs_by_mode[mixed_mode].append(desc)
+
+                ubatch_desc = self._maybe_ubatch_twin(desc)
+                if ubatch_desc is not None:
+                    descs_by_mode[mixed_mode].append(ubatch_desc)
 
         for mode, descs in descs_by_mode.items():
             descs.sort(key=lambda d: d.num_tokens, reverse=True)
@@ -309,6 +387,13 @@ class CudaGraphManager:
     def needs_capture(self) -> bool:
         return len(self._capture_descs) > 0
 
+    def _capture_stream(self, desc: BatchExecutionDescriptor) -> torch.cuda.Stream:
+        """Capture on the stream used by the microbatch threads."""
+        if desc.num_ubatches > 1:
+            assert self.ubatch_runner is not None
+            return self.ubatch_runner.capture_stream
+        return current_stream()
+
     @torch.inference_mode()
     def capture(
         self,
@@ -324,7 +409,10 @@ class CudaGraphManager:
                 because attention backends may mutate or lazily initialize
                 metadata during warmup.
         """
-        with graph_capture(device=self.device):
+        with graph_capture(device=self.device), ExitStack() as stack:
+            if self.ubatch_runner is not None:
+                # Join parked threads on failure to avoid blocking later captures.
+                stack.callback(self.ubatch_runner.abort_pending_run)
             # Capture in order: PIECEWISE first, then FULL. PIECEWISE has larger
             # activations so FULL activations should fit in already allocated
             # buffers in the graph pool.
@@ -352,7 +440,9 @@ class CudaGraphManager:
 
                     # Capture
                     logger.debug(
-                        "CG Capture: mode=%s, batch_desc=%s", desc.cg_mode.name, desc
+                        "CG Capture: mode=%s, batch_desc=%s",
+                        desc.cg_mode.name,
+                        desc,
                     )
                     if (
                         desc.cg_mode == CUDAGraphMode.PIECEWISE
@@ -380,7 +470,7 @@ class CudaGraphManager:
                             torch.accelerator.synchronize()
                             free_before = torch.accelerator.get_memory_info()[0]
                         with torch.cuda.graph(
-                            graph, self.pool, stream=current_stream()
+                            graph, self.pool, stream=self._capture_stream(desc)
                         ):
                             forward_fn(CUDAGraphMode.NONE)
                             # Join offloader's copy stream after forward to avoid
@@ -394,6 +484,7 @@ class CudaGraphManager:
                             self._capture_mem_samples.append(free_before - free_after)
                         self.graphs[desc] = graph
                         compilation_counter.num_cudagraph_captured += 1
+
         self._graphs_captured = True
 
     def captured_token_counts(self) -> list[int]:
@@ -409,6 +500,7 @@ class CudaGraphManager:
         uniform_token_count: int | None,
         num_active_loras: int,
         max_query_len: int | None = None,
+        num_ubatches: int = 1,
     ) -> BatchExecutionDescriptor:
         """Find matching cudagraph descriptor from priority-ordered candidates."""
 
@@ -423,6 +515,7 @@ class CudaGraphManager:
                     uniform_token_count,
                     effective_loras,
                     max_query_len,
+                    num_ubatches,
                 ):
                     return desc
         return BatchExecutionDescriptor(
@@ -430,6 +523,7 @@ class CudaGraphManager:
             num_tokens=num_tokens,
             num_reqs=num_reqs,
             num_active_loras=effective_loras,
+            num_ubatches=num_ubatches,
         )
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor):
@@ -472,6 +566,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
+        ubatch_runner: "UBatchRunner | None" = None,
     ):
         super().__init__(
             vllm_config,
@@ -480,6 +575,7 @@ class ModelCudaGraphManager(CudaGraphManager):
             decode_query_len,
             lora_capture_cases=lora_capture_cases,
             varlen_decode=varlen_decode,
+            ubatch_runner=ubatch_runner,
         )
         self.hidden_states: torch.Tensor | None = None
         self.aux_hidden_states: list[torch.Tensor] = []
@@ -505,6 +601,45 @@ class ModelCudaGraphManager(CudaGraphManager):
         self.use_aux_hidden_state_outputs = use_aux_hidden_state_outputs
         if self.use_breakable_cg:
             self.init_breakable_cg_runner(model)
+
+        if self.cudagraph_mode.has_piecewise_cudagraphs() and not (
+            self.use_breakable_cg or has_compiled_submodule(model)
+        ):
+            raise RuntimeError(
+                f"{type(model).__name__}: piecewise CUDA graphs "
+                f"(cudagraph_mode={self.cudagraph_mode.name}) unavailable, "
+                "model is not torch-compiled and breakable CUDA graph is off. "
+                "Set VLLM_USE_BREAKABLE_CUDAGRAPH=1 or cudagraph_mode=NONE/FULL."
+            )
+
+        def store_capture_output(num_tokens: int, model_output: Any) -> None:
+            """Copy outputs to persistent buffers, allocating on first use."""
+            if self.is_last_pp_rank:
+                # Last PP rank (common case).
+                if self.use_aux_hidden_state_outputs:
+                    hidden_states, aux_hidden_states = model_output
+                else:
+                    hidden_states = model_output
+                    aux_hidden_states = []
+                if self.hidden_states is None:
+                    self.hidden_states = torch.empty_like(hidden_states)
+                self.hidden_states[:num_tokens] = hidden_states
+                if self.use_aux_hidden_state_outputs and not self.aux_hidden_states:
+                    self.aux_hidden_states = [
+                        torch.empty_like(x) for x in aux_hidden_states
+                    ]
+                for i, aux in enumerate(aux_hidden_states):
+                    self.aux_hidden_states[i][:num_tokens] = aux
+            else:
+                # Non-last PP rank.
+                assert isinstance(model_output, IntermediateTensors)
+                intermediate_tensors = model_output
+                if self.intermediate_tensors is None:
+                    self.intermediate_tensors = IntermediateTensors.empty_like(
+                        intermediate_tensors
+                    )
+                for k, v in intermediate_tensors.tensors.items():
+                    self.intermediate_tensors[k][:num_tokens] = v
 
         def create_forward_fn(
             desc: BatchExecutionDescriptor,
@@ -534,6 +669,30 @@ class ModelCudaGraphManager(CudaGraphManager):
                 model_inputs["inputs_embeds"] = None
                 assert intermediate_tensors is not None
                 model_inputs["intermediate_tensors"] = intermediate_tensors[:num_tokens]
+
+            if desc.num_ubatches > 1:
+                # Prepare and park threads before capture; finish runs inside it.
+                assert self.ubatch_runner is not None
+                ubatch_state = self.ubatch_runner.prepare(
+                    InputBatch.make_dummy(num_reqs, num_tokens, input_buffers),
+                    block_tables.get_dummy_block_tables(num_reqs),
+                    block_tables.get_dummy_slot_mappings(num_tokens),
+                    cg_mode=CUDAGraphMode.FULL,
+                    for_capture=True,
+                )
+                # Capture with dummy rows marked as padding.
+                input_buffers.is_padding.fill_(True)
+                finish = self.ubatch_runner.begin_capturable_run(
+                    model, model_inputs, ubatch_state, for_capture=True
+                )
+
+                def ubatch_forward_fn(cg_mode: CUDAGraphMode) -> None:
+                    assert cg_mode != CUDAGraphMode.PIECEWISE, (
+                        "DBO does not support PIECEWISE cudagraphs"
+                    )
+                    store_capture_output(num_tokens, finish())
+
+                return ubatch_forward_fn
 
             attn_metadata, slot_mappings = prepare_inputs_to_capture(
                 num_reqs,
@@ -581,32 +740,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     # model outputs. No need to keep track of the hidden states.
                     return None
 
-                if self.is_last_pp_rank:
-                    # Last PP rank (common case).
-                    if self.use_aux_hidden_state_outputs:
-                        hidden_states, aux_hidden_states = model_output
-                    else:
-                        hidden_states = model_output
-                        aux_hidden_states = []
-                    if self.hidden_states is None:
-                        self.hidden_states = torch.empty_like(hidden_states)
-                    self.hidden_states[:num_tokens] = hidden_states
-                    if self.use_aux_hidden_state_outputs and not self.aux_hidden_states:
-                        self.aux_hidden_states = [
-                            torch.empty_like(x) for x in aux_hidden_states
-                        ]
-                    for i, aux in enumerate(aux_hidden_states):
-                        self.aux_hidden_states[i][:num_tokens] = aux
-                else:
-                    # Non-last PP rank.
-                    assert isinstance(model_output, IntermediateTensors)
-                    intermediate_tensors = model_output
-                    if self.intermediate_tensors is None:
-                        self.intermediate_tensors = IntermediateTensors.empty_like(
-                            intermediate_tensors
-                        )
-                    for k, v in intermediate_tensors.tensors.items():
-                        self.intermediate_tensors[k][:num_tokens] = v
+                store_capture_output(num_tokens, model_output)
 
             return forward_fn
 
@@ -652,17 +786,15 @@ def prepare_inputs_to_capture(
         slot_mappings, kv_cache_config
     )
 
-    # HACK(woosuk): Special handling for DCP.
-    if block_tables.cp_size > 1:
-        prepare_dcp_local_seq_lens(
-            input_buffers.dcp_local_seq_lens,
-            input_batch.seq_lens,
-            num_reqs,
-            block_tables.cp_size,
-            block_tables.cp_rank,
-            block_tables.cp_interleave,
-        )
-        input_batch.dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[:num_reqs]
+    input_batch.dcp_local_seq_lens = maybe_prepare_dcp_local_seq_lens(
+        input_buffers.dcp_local_seq_lens,
+        input_batch.seq_lens,
+        input_batch.num_reqs,
+        block_tables.cp_size,
+        block_tables.cp_rank,
+        block_tables.cp_interleave,
+        num_reqs_padded=input_batch.num_reqs_after_padding,
+    )
 
     # NOTE(woosuk): Attention metadata is required not just by standard attention
     # kernels, but also by specialized attention-like operations (e.g., Inkling's sconv,
@@ -785,7 +917,7 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
             mem_samples: list[int] = []
             manager._capture_mem_samples = mem_samples
 
-            measured = int(runner.capture_model())
+            measured = int(runner.capture_model(profile_only=True))
 
             # The measured delta covers PIECEWISE, encoder and speculator graphs
             # plus the sampled FULL graphs; swap the sampled FULL cost for the
@@ -860,6 +992,14 @@ def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
     torch.accelerator.synchronize()
     if hasattr(runner.model_state, "_mamba_ctx"):
         runner.model_state._mamba_ctx = None
+    # Invalidate the align-mode Mamba group metadata cached from the
+    # profiling KVCacheConfig: the real (e.g. PP-projected) config may
+    # place Mamba layers into a different group layout, so it must be
+    # re-derived from the real config.
+    if hasattr(runner.model_state, "_mamba_group_ids"):
+        runner.model_state._mamba_group_ids = []
+    if hasattr(runner.model_state, "_mamba_spec"):
+        runner.model_state._mamba_spec = None
     if hasattr(runner, "kv_caches"):
         runner.kv_caches.clear()
     if hasattr(runner, "attn_groups"):
@@ -872,14 +1012,13 @@ def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
     # capture_model() re-captures them.
     if runner.model_state.supports_mm_inputs:
         runner.model_state.encoder_runner.clear()
-    # Detach profiling KV tensors held by attention layers.
-    for layer in runner.compilation_config.static_forward_context.values():
-        if hasattr(layer, "kv_cache"):
-            kv_cache = layer.kv_cache
-            layer.kv_cache = (
-                torch.tensor([]) if isinstance(kv_cache, torch.Tensor) else []
-            )
-            del kv_cache
+    # Detach profiling KV tensors held by attention layers. The layers live
+    # in the static forward context for compiled models.
+    layers: Iterable[Any] = runner.compilation_config.static_forward_context.values()
+    if (model := getattr(runner, "model", None)) is not None:
+        layers = itertools.chain(layers, model.modules())
+    clear_layer_kv_caches(layers)
+    release_hisparse_profiling_cache(runner.compilation_config.static_forward_context)
     runner.cache_config.num_gpu_blocks = None
     runner.maybe_remove_all_loras(runner.lora_config)
     gc.collect()
