@@ -46,6 +46,74 @@ disabled, an error will occur while starting vLLM.
 
 ## Examples
 
+### Correlate logs with OpenTelemetry traces
+
+Set `VLLM_LOGGING_TRACE_CONTEXT=1` before starting vLLM to include
+`trace_id` (32 hexadecimal characters), `span_id` (16 hexadecimal characters),
+and `trace_sampled` in the default text logs. This is disabled by default.
+It requires `opentelemetry-api`; it does not initialize a tracer or export logs.
+
+```bash
+VLLM_LOGGING_TRACE_CONTEXT=1 VLLM_LOGGING_COLOR=0 \
+    vllm serve facebook/opt-125m \
+    --otlp-traces-endpoint=http://localhost:4317
+```
+
+Only logs emitted within an active OpenTelemetry context carry valid IDs.
+Logs outside a span omit the trace header entirely. Unsampled
+spans still supply IDs, but might not be available in the trace backend.
+In particular, creating a request span retrospectively does not attach its
+context to earlier logs. Worker batch logs may cover multiple requests and
+cannot be assigned a single request trace automatically. This switch does not
+add request middleware or context propagation across process/thread boundaries.
+
+The switch applies to the built-in vLLM logging configuration. For a custom
+`VLLM_LOGGING_CONFIG_PATH`, add this filter to the handlers that need correlation
+and include `%(trace_context)s` before `%(message)s` in the format. This field
+includes a trailing space when a valid context exists and is empty otherwise.
+For structured logging, `trace_id`, `span_id`, and `trace_sampled` remain
+available as record attributes (zero IDs and `False` outside a span):
+
+```json
+"filters": {
+  "trace_context": {
+    "()": "vllm.logging_utils.trace_context.TraceContextFilter"
+  }
+}
+```
+
+Add `"filters": ["trace_context"]` to the handler definition. For queue-based
+logging, attach the filter to the producer's `QueueHandler` so that context is
+captured before crossing threads. Uvicorn access logs use separate handlers;
+the default switch does not change them.
+
+To verify without a GPU or a collector, run in an installed vLLM environment:
+
+```bash
+VLLM_LOGGING_TRACE_CONTEXT=1 VLLM_LOGGING_COLOR=0 .venv/bin/python - <<'PY'
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
+from vllm.logger import init_logger
+
+provider = TracerProvider()
+provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
+logger = init_logger("vllm.correlation_check")
+with provider.get_tracer("verification").start_as_current_span("log-check"):
+    logger.info("inside span")
+logger.info("outside span")
+provider.shutdown()
+PY
+```
+
+The `inside span` log IDs must match the console-exported span IDs (ignoring
+the exporter's `0x` prefix); the `outside span` log must omit the trace header.
+Repeat with `VLLM_LOGGING_TRACE_CONTEXT=0` to verify the original log format.
+For platform validation, collect stdout with your logging agent, parse these
+fields, and configure a trace lookup using `trace_id`. Export spans to the same
+observability platform using the existing OTLP configuration. Log collection
+and the platform's log-to-trace link must be configured separately.
+
 ### Example 1: Customize vLLM root logger
 
 For this example, we will customize the vLLM root logger to use
