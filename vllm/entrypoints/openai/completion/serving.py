@@ -299,6 +299,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
         # cache statistics must be tracked per prompt rather than taken from
         # the first result.
         num_cached_tokens_by_prompt: list[int | None] = [None] * num_prompts
+        cached_tokens_observed = [False] * num_prompts
 
         stream_options = request.stream_options
         include_usage, include_continuous_usage = should_include_usage(
@@ -312,8 +313,9 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 prompt_token_ids = res.prompt_token_ids
                 prompt_logprobs = res.prompt_logprobs
 
-                if num_cached_tokens_by_prompt[prompt_idx] is None:
+                if not cached_tokens_observed[prompt_idx]:
                     num_cached_tokens_by_prompt[prompt_idx] = res.num_cached_tokens
+                    cached_tokens_observed[prompt_idx] = True
 
                 prompt_text = res.prompt
                 if prompt_text is None:
