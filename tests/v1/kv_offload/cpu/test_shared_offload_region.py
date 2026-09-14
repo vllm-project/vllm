@@ -770,6 +770,25 @@ def test_joiner_owner_unlinks_without_barrier(iid):
         _cleanup_file(path)
 
 
+def test_no_barrier_unlink_owner_failure_removes_joined_path(iid, monkeypatch):
+    """A terminal joiner must remove the path when mapping fails."""
+    initializer = _make_region(iid, unlink_owner=False)
+    path = initializer.mmap_path
+    monkeypatch.setattr(
+        region_module.mmap,
+        "mmap",
+        MagicMock(side_effect=OSError("scheduler mmap failed")),
+    )
+    try:
+        with pytest.raises(OSError, match="scheduler mmap failed"):
+            _make_region(iid, rank=None, unlink_owner=True)
+
+        assert not os.path.exists(path)
+    finally:
+        initializer.cleanup()
+        _cleanup_file(path)
+
+
 def test_cleanup_disarms_unlink_owner(iid, monkeypatch):
     """A cleanup owner must not try to unlink the path on a second cleanup."""
     unlink = MagicMock(wraps=os.unlink)
@@ -900,6 +919,7 @@ def test_creator_memory_check_runs_only_for_creator(iid):
         kv_bytes_per_chunk=PAGE_SIZE,
         cpu_page_size=PAGE_SIZE,
         creator_memory_check=checked_sizes.append,
+        unlink_owner=False,
     )
     joiner: SharedOffloadRegion | None = None
     try:
@@ -1008,6 +1028,47 @@ def test_backing_file_unlinked_after_barrier(iid):
         t[:, :] = 7
         assert memoryview(region.mmap_obj)[0] == 7, "mapping must stay valid"
         del t
+    finally:
+        region.cleanup()
+        _cleanup_file(path)
+
+
+def test_base_tensor_failure_after_barrier_aborts_region(iid, monkeypatch):
+    """Post-barrier setup errors must release the mapping and shared path."""
+    path = f"/dev/shm/vllm_offload_{iid}.mmap"
+    real_mmap = mmap.mmap
+    mapped_fds: list[int] = []
+    mapped_objects: list[mmap.mmap] = []
+
+    def record_mmap(fd, *args, **kwargs):
+        mapped_fds.append(fd)
+        mapped_obj = real_mmap(fd, *args, **kwargs)
+        mapped_objects.append(mapped_obj)
+        return mapped_obj
+
+    def fail_frombuffer(*args, **kwargs):
+        raise RuntimeError("base tensor failed")
+
+    monkeypatch.setattr(region_module.mmap, "mmap", record_mmap)
+    monkeypatch.setattr(region_module.torch, "frombuffer", fail_frombuffer)
+
+    with pytest.raises(RuntimeError, match="base tensor failed"):
+        _make_region(iid, barrier=lambda: None, unlink_owner=False)
+
+    assert len(mapped_objects) == 1
+    assert mapped_objects[0].closed
+    with pytest.raises(OSError):
+        os.fstat(mapped_fds[0])
+    assert not os.path.exists(path)
+
+
+def test_unlink_owner_tolerates_path_removed_by_peer(iid):
+    """An already-unlinked path is a successful ownership handoff."""
+    path = f"/dev/shm/vllm_offload_{iid}.mmap"
+    region = _make_region(iid, barrier=lambda: os.unlink(path))
+    try:
+        assert region._is_unlink_owner is False
+        assert not os.path.exists(path)
     finally:
         region.cleanup()
         _cleanup_file(path)

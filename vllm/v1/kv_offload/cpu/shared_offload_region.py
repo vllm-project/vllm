@@ -80,8 +80,8 @@ class SharedOffloadRegion:
 
     File path: /dev/shm/vllm_offload_{engine_id}.mmap. The caller-selected
     unlink owner removes the path after the optional barrier; without a
-    barrier, it removes the path as soon as its mapping is ready. Mappings
-    taken before the unlink stay valid.
+    barrier, it must be the last expected opener and removes the path as soon
+    as its mapping is ready. Mappings taken before the unlink stay valid.
 
     Creator-only population pre-faults the entire region before the barrier
     and requires that barrier to keep joiners from using unpopulated pages.
@@ -186,7 +186,10 @@ class SharedOffloadRegion:
             if barrier is not None and not created_path:
                 self.abort_startup_cleanup()
             elif barrier is None and not created_path:
-                self._cleanup_local_resources()
+                if self._is_unlink_owner:
+                    self.abort_startup_cleanup()
+                else:
+                    self._cleanup_local_resources()
             raise
 
         if barrier is not None:
@@ -199,26 +202,30 @@ class SharedOffloadRegion:
                 self.abort_startup_cleanup()
                 raise
 
-        # The owner is responsible for removing the name regardless of
-        # whether this region participates in a barrier.  With a barrier,
-        # unlink only after rendezvous; without one, this is safe once this
-        # process has mapped the file (for example, the tiering scheduler is
-        # the last participant to open it).
-        if self._is_unlink_owner:
-            os.unlink(self.mmap_path)
-            self._is_unlink_owner = False
-            logger.info("Unlinked mmap file %s", self.mmap_path)
-
-        self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
-        self._views = []
-        self._canonical_offset = 0
-        self.is_pinned = False
-        self.pinned_addresses: list[int] = []
-
-        if populate_only_on_creator:
-            return
-
         try:
+            # The owner is responsible for removing the name regardless of
+            # whether this region participates in a barrier. With a barrier,
+            # unlink only after rendezvous; without one, this is safe once this
+            # process has mapped the file (for example, the tiering scheduler is
+            # the last participant to open it).
+            if self._is_unlink_owner:
+                try:
+                    os.unlink(self.mmap_path)
+                except FileNotFoundError:
+                    pass
+                else:
+                    logger.info("Unlinked mmap file %s", self.mmap_path)
+                self._is_unlink_owner = False
+
+            self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
+            self._views = []
+            self._canonical_offset = 0
+            self.is_pinned = False
+            self.pinned_addresses: list[int] = []
+
+            if populate_only_on_creator:
+                return
+
             self._initialize_buffer(rank, cpu_page_size)
         except Exception:
             self.abort_startup_cleanup()
