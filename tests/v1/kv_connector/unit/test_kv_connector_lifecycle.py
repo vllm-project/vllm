@@ -3,8 +3,6 @@
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (  # noqa: E501
     ExampleConnectorMetadata,
 )
@@ -15,7 +13,6 @@ from vllm.distributed.kv_transfer.kv_transfer_state import (
 )
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 
 # Importing utils registers TestExampleConnector with the factory
@@ -78,71 +75,3 @@ def test_kv_connector_mixin_clears_metadata():
     finally:
         # Ensure we clean up the global connector between tests
         ensure_kv_transfer_shutdown()
-
-
-def _make_active_connector(vllm_config):
-    mock_kv_connector = MagicMock()
-    with (
-        patch(
-            "vllm.v1.worker.gpu.kv_connector.get_kv_transfer_group",
-            return_value=mock_kv_connector,
-        ),
-        patch(
-            "vllm.v1.worker.gpu.kv_connector.has_kv_transfer_group",
-            return_value=True,
-        ),
-    ):
-        connector = ActiveKVConnector(vllm_config, {})
-    return connector, mock_kv_connector
-
-
-def _called_names(mock_kv_connector):
-    return [name for name, _args, _kwargs in mock_kv_connector.mock_calls]
-
-
-def test_active_connector_start_loads_is_sole_load_entry():
-    """pre_forward and post_forward never start loads; start_loads is the
-    only entry into start_load_kv."""
-    vllm_config = create_vllm_config()
-    connector, mock_kv_connector = _make_active_connector(vllm_config)
-
-    scheduler_output = _make_empty_scheduler_output()
-    connector.pre_forward(scheduler_output)
-    mock_kv_connector.start_load_kv.assert_not_called()
-
-    connector.start_loads()
-    assert mock_kv_connector.start_load_kv.call_count == 1
-
-    connector.post_forward(set())
-    # post_forward finalizes the step but must not start another load.
-    assert mock_kv_connector.start_load_kv.call_count == 1
-    mock_kv_connector.clear_connector_metadata.assert_called_once()
-
-
-@pytest.mark.parametrize("has_sync_kv_loads", [False, True])
-def test_active_connector_no_forward_starts_loads_once(has_sync_kv_loads):
-    """no_forward drives the full step lifecycle with exactly one load start,
-    ordered before finish_forward for sync loads and after for async."""
-    vllm_config = create_vllm_config()
-    connector, mock_kv_connector = _make_active_connector(vllm_config)
-
-    scheduler_output = _make_empty_scheduler_output()
-    scheduler_output.has_sync_kv_loads = has_sync_kv_loads
-    connector.no_forward(scheduler_output)
-
-    names = _called_names(mock_kv_connector)
-    assert names.count("start_load_kv") == 1
-    if has_sync_kv_loads:
-        assert names.index("start_load_kv") < names.index("finish_forward")
-    else:
-        assert names.index("finish_forward") < names.index("start_load_kv")
-    assert "clear_connector_metadata" in names
-
-
-def test_active_connector_start_loads_respects_disabled():
-    vllm_config = create_vllm_config()
-    with patch("vllm.v1.worker.gpu.kv_connector.kv_transfer_state"):
-        connector, mock_kv_connector = _make_active_connector(vllm_config)
-        connector.set_disabled(True)
-        connector.start_loads()
-        mock_kv_connector.start_load_kv.assert_not_called()

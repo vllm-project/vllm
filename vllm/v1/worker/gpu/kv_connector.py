@@ -32,9 +32,6 @@ class KVConnector:
     def pre_forward(self, scheduler_output: "SchedulerOutput", **kwargs: Any) -> None:
         pass
 
-    def start_loads(self, **kwargs: Any) -> None:
-        pass
-
     def finish_forward(self) -> None:
         pass
 
@@ -63,6 +60,7 @@ class ActiveKVConnector(KVConnector):
         self.kv_connector.register_kv_caches(kv_caches_dict)
         self.kv_connector.set_host_xfer_buffer_ops(copy_kv_blocks)
 
+        self._pending_load_kwargs: dict[str, Any] | None = None
         self._disabled = False
 
     def pre_forward(self, scheduler_output: "SchedulerOutput", **kwargs: Any) -> None:
@@ -73,27 +71,34 @@ class ActiveKVConnector(KVConnector):
         assert kv_connector_metadata is not None
         self.kv_connector.handle_preemptions(kv_connector_metadata)
         self.kv_connector.bind_connector_metadata(kv_connector_metadata)
+        self._pending_load_kwargs = kwargs
 
-    def start_loads(self, **kwargs: Any) -> None:
-        """Start this step's KV loads.
+        if scheduler_output.has_sync_kv_loads:
+            # Sync loads need to run before this step's forward.
+            self._start_load_kv()
+        # Otherwise defer submission until finish_forward.
 
-        Called by the model runner exactly once per step: before the model
-        forward when ``has_sync_kv_loads`` is set, otherwise right after the
-        forward launch to keep the load submission off the critical path.
-        """
+    def _start_load_kv(self) -> None:
+        load_kwargs = self._pending_load_kwargs
+        assert load_kwargs is not None
+        self._pending_load_kwargs = None
+        # TODO: sort out KV Connectors' use of forward_context
+        if is_forward_context_available():
+            self.kv_connector.start_load_kv(get_forward_context(), **load_kwargs)
+        else:
+            with set_forward_context(None, self.vllm_config):
+                self.kv_connector.start_load_kv(get_forward_context(), **load_kwargs)
+
+    def finish_forward(self) -> None:
         if self._disabled:
             return
 
-        # TODO: sort out KV Connectors' use of forward_context
-        if is_forward_context_available():
-            self.kv_connector.start_load_kv(get_forward_context(), **kwargs)
-        else:
-            with set_forward_context(None, self.vllm_config):
-                self.kv_connector.start_load_kv(get_forward_context(), **kwargs)
-
-    def finish_forward(self) -> None:
-        if not self._disabled:
-            self.kv_connector.finish_forward()
+        self.kv_connector.finish_forward()
+        # Submit deferred loads while the forward context is still active,
+        # before sampling and draft execution. Save finalization stays in
+        # post_forward so it can include the draft model's KV saves.
+        if self._pending_load_kwargs is not None:
+            self._start_load_kv()
 
     def reset_capture_state(self) -> None:
         self.kv_connector.reset_capture_state()
@@ -124,16 +129,10 @@ class ActiveKVConnector(KVConnector):
         if self._disabled:
             return EMPTY_MODEL_RUNNER_OUTPUT
 
-        sync_loads = scheduler_output.has_sync_kv_loads
         self.pre_forward(scheduler_output)
-        if sync_loads:
-            self.start_loads()
         self.finish_forward()
-        if not sync_loads:
-            self.start_loads()
-        kv_connector_output = self.post_forward(
-            scheduler_output.finished_req_ids, wait_for_save=False
-        )
+        finished_req_ids = scheduler_output.finished_req_ids
+        kv_connector_output = self.post_forward(finished_req_ids, wait_for_save=False)
         return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
 
     def set_disabled(self, disabled: bool) -> None:

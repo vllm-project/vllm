@@ -57,15 +57,13 @@ def test_no_forward_enqueues_deferred_hisparse_transfers():
     connector = object.__new__(ActiveKVConnector)
     connector._disabled = False
     connector.pre_forward = MagicMock()
-    connector.start_loads = MagicMock()
     connector.finish_forward = MagicMock()
     connector.post_forward = MagicMock(return_value=None)
 
-    scheduler_output = SimpleNamespace(finished_req_ids=set(), has_sync_kv_loads=False)
+    scheduler_output = SimpleNamespace(finished_req_ids=set())
     connector.no_forward(scheduler_output)
 
     connector.pre_forward.assert_called_once_with(scheduler_output)
-    connector.start_loads.assert_called_once_with()
     connector.finish_forward.assert_called_once_with()
 
 
