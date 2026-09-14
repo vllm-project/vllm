@@ -39,6 +39,36 @@ Multi-lora shrink/expand Triton kernel tuning follows a similar methodology from
    vLLM's [benchmark_lora.py](https://github.com/vllm-project/vllm/blob/main/benchmarks/kernels/benchmark_lora.py)
    can be used to search for configurations for different shapes.
 
+### Fused MoE LoRA Tuning
+
+For models with fused MoE + LoRA (e.g., Nemotron-3-Nano), use
+[tune_lora_moe.py](https://github.com/vllm-project/vllm/blob/main/benchmarks/kernels/tune_lora_moe.py)
+which tunes the fused shrink+expand kernel via coordinate descent:
+
+```bash
+# Tune for Nemotron-3-Nano
+python benchmarks/kernels/tune_lora_moe.py \
+    --hidden-size 2688 --intermediate-size 1856 \
+    --lora-rank 16 --max-loras 8 --top-k 6 --num-experts 128 \
+    --batch-sizes 1 16 32 64 128 256 512 1024 2048 \
+    --w13-slices 1 --op-types w13_fused w2_fused \
+    --save-dir ./tuned_lora_configs
+
+# Benchmark tuned configs
+python benchmarks/kernels/tune_lora_moe.py \
+    --benchmark --config-dir ./tuned_lora_configs \
+    --hidden-size 2688 --intermediate-size 1856 \
+    --lora-rank 16 --max-loras 8 --top-k 6 --num-experts 128 \
+    --batch-sizes 32 --op-types w13_fused w2_fused --w13-slices 1
+```
+
+Key options:
+
+- `--active-loras N`: Number of concurrently active LoRA adapters (default: max-loras)
+- `--num-expert-hit N`: Limit expert selection to N experts for realistic routing sparsity
+- `--routing uniform|random`: Expert routing distribution
+- W2 automatically uses `mul_routed_weight=True` (matching the serve)
+
 ## Config Files
 
 ### File Naming
