@@ -21,7 +21,11 @@ from vllm.platforms.cpu import CpuPlatform
 from vllm.platforms.cuda import CudaPlatform
 from vllm.platforms.interface import DeviceCapability
 from vllm.platforms.rocm import RocmPlatform, on_mi3xx
-from vllm.utils.torch_utils import set_default_torch_dtype, set_random_seed
+from vllm.utils.torch_utils import (
+    current_stream,
+    set_default_torch_dtype,
+    set_random_seed,
+)
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import _cached_get_attn_backend
 
@@ -255,6 +259,7 @@ def test_mha_attn_varlen_forward(
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA graphs")
 def test_mha_attn_graph_replay_keeps_padding_finite(default_vllm_config):
     """Padding must not carry graph-pool NaNs into subsequent encoder blocks."""
+    stream = current_stream()
     set_random_seed(0)
     with set_default_torch_dtype(torch.bfloat16):
         attn = MMEncoderAttention(16, 64, scale=64**-0.5)
@@ -265,14 +270,10 @@ def test_mha_attn_graph_replay_keeps_padding_finite(default_vllm_config):
     ]
     cu_seqlens = torch.tensor([0, 256, 256], device="cuda", dtype=torch.int32)
     max_seqlen = torch.tensor(256, dtype=torch.int32, device="cpu")
-    stream = torch.cuda.Stream()
-    stream.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(stream):
-        attn(q, k, v, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph, stream=stream):
-            output = attn(q, k, v, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
-    torch.cuda.current_stream().wait_stream(stream)
+    attn(q, k, v, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        output = attn(q, k, v, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
 
     output.fill_(float("nan"))
     cu_seqlens.copy_(torch.tensor([0, 128, 128], device="cuda", dtype=torch.int32))
