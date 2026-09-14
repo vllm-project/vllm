@@ -20,6 +20,7 @@ This file only keeps the MoE-shaped integration angle for those helpers.
 
 import importlib
 import math
+import os
 import warnings
 from typing import Any, NamedTuple
 
@@ -528,6 +529,22 @@ def test_aiter_moe_enablement_follows_env(
         rocm_aiter_ops.refresh_env_variables()
 
         assert rocm_aiter_ops.is_fused_moe_enabled() is expected
+
+
+def test_situv2_a8w4_flag_is_forwarded_to_aiter(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    _assert_aiter_supported()
+
+    with monkeypatch.context() as mp:
+        mp.delenv("AITER_SITUV2_A8W4", raising=False)
+
+        mp.setenv("VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4", "1")
+        _reload_envs()
+        rocm_aiter_ops.refresh_env_variables()
+        assert os.environ.get("AITER_SITUV2_A8W4") == "1"
 
 
 @pytest.mark.parametrize(

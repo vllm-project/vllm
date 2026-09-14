@@ -1791,7 +1791,13 @@ class rocm_aiter_ops:
         cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
         cls._MOE_SITUV2_A8W4 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4
+        cls._sync_situv2_a8w4_env()
         cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
+
+    @classmethod
+    def _sync_situv2_a8w4_env(cls) -> None:
+        if cls._MOE_SITUV2_A8W4:
+            os.environ["AITER_SITUV2_A8W4"] = "1"
 
     @staticmethod
     def get_aiter_activation_type(activation_str: str) -> "ActivationType | None":
@@ -3747,4 +3753,5 @@ class rocm_aiter_ops:
         )
 
 
+rocm_aiter_ops._sync_situv2_a8w4_env()
 rocm_aiter_ops.register_ops_once()
