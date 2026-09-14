@@ -8,7 +8,8 @@ import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import nullcontext
-from typing import Literal
+from dataclasses import replace
+from typing import Literal, cast
 from uuid import uuid4
 
 import torch
@@ -172,6 +173,34 @@ TorchProfilerActivityMap = {
     "PrivateUse1": torch.profiler.ProfilerActivity.PrivateUse1,
     "XPU": torch.profiler.ProfilerActivity.XPU,
 }
+
+
+def default_torch_profiler_activities(device_type: str) -> list[TorchProfilerActivity]:
+    """CPU plus the accelerator activity for a runner device.
+
+    ``cuda`` covers CUDA and ROCm; ``xpu`` selects Intel GPU events. Device
+    types torch cannot profile fall back to CPU-only.
+    """
+    accelerator = device_type.upper()
+    if accelerator == "CPU" or accelerator not in TorchProfilerActivityMap:
+        return ["CPU"]
+    return ["CPU", cast(TorchProfilerActivity, accelerator)]
+
+
+def graph_capture_profiler_config(profiler_config: ProfilerConfig) -> ProfilerConfig:
+    """Apply one-shot graph-capture overrides to a profiler config."""
+    return replace(
+        profiler_config,
+        delay_iterations=0,
+        max_iterations=0,
+        warmup_iterations=0,
+        wait_iterations=0,
+        torch_profiler_record_shapes=True,
+        torch_profiler_with_stack=True,
+        torch_profiler_dir=os.path.join(
+            profiler_config.torch_profiler_dir, "capture_traces"
+        ),
+    )
 
 
 class TorchProfilerWrapper(WorkerProfiler):

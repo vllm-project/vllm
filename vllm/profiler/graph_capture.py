@@ -23,6 +23,11 @@ import torch
 from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import init_logger
+from vllm.profiler.wrapper import (
+    TorchProfilerWrapper,
+    default_torch_profiler_activities,
+    graph_capture_profiler_config,
+)
 
 logger = init_logger(__name__)
 
@@ -38,43 +43,37 @@ _active_binding: contextvars.ContextVar[_CaptureBinding | None] = (
 )
 
 
-def _make_profiler(
+def make_graph_capture_profiler(
     vllm_config: VllmConfig,
-    subsystem: str | None,
+    subsystem: str | None = None,
 ) -> AbstractContextManager[Any]:
+    """Build the one-shot capture profiler, or a nullcontext when disabled.
+
+    The single construction site for capture profilers, so callers that still
+    pass the profiler down their capture loops by hand inherit the same config
+    overrides and device activities as ``graph_capture_profiler``.
+    """
     profiler_config = vllm_config.profiler_config
     local_rank = get_world_group().local_rank
     if local_rank != 0 or not profiler_config.capture_torch_profiler:
         logger.info_once(
-            "Rank %d: Torch profiler disabled for CUDA graph capture", local_rank
+            "Rank %d: Torch profiler disabled for GPU graph capture", local_rank
         )
         return nullcontext()
 
-    trace_dir = profiler_config.torch_profiler_dir + "/capture_traces"
+    capture_config = graph_capture_profiler_config(profiler_config)
     worker_name = f"graph_capture_rank_{local_rank}"
     if subsystem:
         worker_name += f"_{subsystem}"
-    logger.info_once(
-        "Rank %d: Torch profiler enabled for %s CUDA graph capture, "
-        "traces will be saved to: %s",
-        local_rank,
-        subsystem or "decoder",
-        trace_dir,
-    )
-    return torch.profiler.profile(
-        activities=[
-            torch.profiler.ProfilerActivity.CPU,
-            torch.profiler.ProfilerActivity.CUDA,
-        ],
-        record_shapes=True,
-        profile_memory=True,
-        with_stack=True,
-        on_trace_ready=torch.profiler.tensorboard_trace_handler(
-            trace_dir,
-            worker_name=worker_name,
-            use_gzip=True,
+    wrapper = TorchProfilerWrapper(
+        capture_config,
+        worker_name=worker_name,
+        local_rank=local_rank,
+        activities=default_torch_profiler_activities(
+            vllm_config.device_config.device_type
         ),
     )
+    return wrapper.profiler
 
 
 @contextmanager
@@ -95,7 +94,7 @@ def graph_capture_profiler(
             ``capture_32_FULL``.
     """
     binding = _CaptureBinding(
-        profiler=_make_profiler(vllm_config, subsystem),
+        profiler=make_graph_capture_profiler(vllm_config, subsystem),
         label_prefix=label_prefix,
     )
     token = _active_binding.set(binding)

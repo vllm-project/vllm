@@ -20,7 +20,12 @@ from vllm.config.profiler import _is_uri_path
 from vllm.platforms import current_platform
 from vllm.profiler import graph_capture
 from vllm.profiler.graph_capture import graph_capture_profiler, graph_capture_step
-from vllm.profiler.wrapper import ProtonProfilerWrapper, WorkerProfiler
+from vllm.profiler.wrapper import (
+    ProtonProfilerWrapper,
+    WorkerProfiler,
+    default_torch_profiler_activities,
+    graph_capture_profiler_config,
+)
 from vllm.v1.core.sched.output import CachedRequestData
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker
@@ -357,7 +362,9 @@ def bound_graph_capture(label_prefix=None):
     """Enter a graph-capture binding backed by a mock profiler."""
     profiler = MagicMock()
     with (
-        patch.object(graph_capture, "_make_profiler", return_value=profiler),
+        patch.object(
+            graph_capture, "make_graph_capture_profiler", return_value=profiler
+        ),
         graph_capture_profiler(MagicMock(), label_prefix=label_prefix),
     ):
         yield profiler
@@ -389,9 +396,11 @@ class TestGraphCaptureProfiler:
     def test_annotation_label(
         self, annotation, label_prefix, num_tokens, mode, expected
     ):
-        with bound_graph_capture(label_prefix) as profiler:
-            with graph_capture_step(num_tokens, mode):
-                pass
+        with (
+            bound_graph_capture(label_prefix) as profiler,
+            graph_capture_step(num_tokens, mode),
+        ):
+            pass
 
         annotation.assert_called_once_with(expected)
         profiler.__enter__.assert_called_once()
@@ -410,9 +419,8 @@ class TestGraphCaptureProfiler:
         assert annotation.call_count == 3
 
     def test_binding_cleared_when_capture_raises(self):
-        with pytest.raises(RuntimeError):
-            with bound_graph_capture():
-                raise RuntimeError("capture failed")
+        with pytest.raises(RuntimeError), bound_graph_capture():
+            raise RuntimeError("capture failed")
 
         assert graph_capture._active_binding.get() is None
 
@@ -425,21 +433,74 @@ class TestGraphCaptureProfiler:
         ],
     )
     def test_trace_file_name_per_subsystem(self, subsystem, expected):
-        config = MagicMock()
-        config.profiler_config.capture_torch_profiler = True
-        config.profiler_config.torch_profiler_dir = "/traces"
+        config = MagicMock(
+            profiler_config=ProfilerConfig(
+                profiler="torch",
+                torch_profiler_dir="/traces",
+                capture_torch_profiler=True,
+            ),
+            device_config=SimpleNamespace(device_type="xpu"),
+        )
+        profiler = MagicMock()
+        wrapper = MagicMock(profiler=profiler)
 
         with (
             patch.object(
                 graph_capture, "get_world_group", return_value=MagicMock(local_rank=0)
             ),
-            patch.object(torch.profiler, "profile"),
-            patch.object(torch.profiler, "tensorboard_trace_handler") as handler,
+            patch.object(
+                graph_capture, "TorchProfilerWrapper", return_value=wrapper
+            ) as wrapper_cls,
         ):
-            graph_capture._make_profiler(config, subsystem)
+            result = graph_capture.make_graph_capture_profiler(config, subsystem)
 
-        assert handler.call_args.args == ("/traces/capture_traces",)
-        assert handler.call_args.kwargs["worker_name"] == expected
+        assert result is profiler
+        capture_config = wrapper_cls.call_args.args[0]
+        assert capture_config.torch_profiler_dir == "/traces/capture_traces"
+        assert wrapper_cls.call_args.kwargs["worker_name"] == expected
+        # Activities follow the runner device, not a hardcoded CUDA list.
+        assert wrapper_cls.call_args.kwargs["activities"] == ["CPU", "XPU"]
+        wrapper.start.assert_not_called()
+
+    def test_capture_config_overrides(self):
+        config = ProfilerConfig(
+            profiler="torch",
+            torch_profiler_dir="/traces",
+            delay_iterations=2,
+            max_iterations=3,
+            warmup_iterations=4,
+            wait_iterations=5,
+            torch_profiler_record_shapes=False,
+            torch_profiler_with_stack=False,
+            torch_profiler_with_flops=True,
+            torch_profiler_with_memory=True,
+            torch_profiler_use_gzip=False,
+            ignore_frontend=True,
+        )
+
+        capture_config = graph_capture_profiler_config(config)
+
+        assert capture_config.delay_iterations == 0
+        assert capture_config.max_iterations == 0
+        assert capture_config.warmup_iterations == 0
+        assert capture_config.wait_iterations == 0
+        assert capture_config.torch_profiler_record_shapes
+        assert capture_config.torch_profiler_with_stack
+        assert capture_config.torch_profiler_with_flops
+        assert capture_config.torch_profiler_with_memory
+        assert not capture_config.torch_profiler_use_gzip
+
+    @pytest.mark.parametrize(
+        "device_type,expected",
+        [
+            ("cuda", ["CPU", "CUDA"]),
+            ("xpu", ["CPU", "XPU"]),
+            ("cpu", ["CPU"]),
+            ("tpu", ["CPU"]),
+        ],
+    )
+    def test_activities_follow_runner_device(self, device_type, expected):
+        assert default_torch_profiler_activities(device_type) == expected
 
     @pytest.mark.parametrize("local_rank,enabled", [(0, False), (1, True)])
     def test_no_profiler_when_disabled_or_off_rank(self, local_rank, enabled):
@@ -451,7 +512,9 @@ class TestGraphCaptureProfiler:
             "get_world_group",
             return_value=MagicMock(local_rank=local_rank),
         ):
-            assert isinstance(graph_capture._make_profiler(config, None), nullcontext)
+            profiler = graph_capture.make_graph_capture_profiler(config, None)
+
+        assert isinstance(profiler, nullcontext)
 
 
 def make_proton(session_id: int | None = 7):
