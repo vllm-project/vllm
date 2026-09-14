@@ -289,16 +289,16 @@ def test_cutedsl_indexer_q_writes_stay_within_num_tokens(use_fp4, n_head):
             dtype=torch.uint8,
             device=device,
         )
-        mod.fused_indexer_q_rope_quant_mxfp4_cutedsl(
-            positions[:num_tokens],
-            q[:num_tokens],
-            cos_sin_cache,
-            weights[:num_tokens],
-            1.0,
-            1.0,
-            outputs["q_packed"][:num_tokens],
-            outputs["q_scale"][:num_tokens],
-            weights_out[:num_tokens],
+        mod._INDEXER_Q_MXFP4_KERNEL(
+            positions=positions[:num_tokens],
+            q=q[:num_tokens],
+            cos_sin_cache=cos_sin_cache,
+            weights=weights[:num_tokens],
+            weights_softmax_scale=1.0,
+            weights_head_scale=1.0,
+            q_packed=outputs["q_packed"][:num_tokens],
+            q_scale=outputs["q_scale"][:num_tokens],
+            weights_out=weights_out[:num_tokens],
         )
     else:
         outputs["q_fp8"] = torch.full(
@@ -307,15 +307,15 @@ def test_cutedsl_indexer_q_writes_stay_within_num_tokens(use_fp4, n_head):
             dtype=torch.uint8,
             device=device,
         )
-        mod.fused_indexer_q_rope_quant_fp8_cutedsl(
-            positions[:num_tokens],
-            q[:num_tokens],
-            cos_sin_cache,
-            weights[:num_tokens],
-            1.0,
-            1.0,
-            outputs["q_fp8"][:num_tokens].view(torch.float8_e4m3fn),
-            weights_out[:num_tokens],
+        mod._INDEXER_Q_FP8_KERNEL(
+            positions=positions[:num_tokens],
+            q=q[:num_tokens],
+            cos_sin_cache=cos_sin_cache,
+            weights=weights[:num_tokens],
+            weights_softmax_scale=1.0,
+            weights_head_scale=1.0,
+            q_fp8=outputs["q_fp8"][:num_tokens].view(torch.float8_e4m3fn),
+            weights_out=weights_out[:num_tokens],
         )
     torch.accelerator.synchronize()
 
@@ -359,7 +359,7 @@ def test_indexer_k_inserts_only_valid_groups_into_padded_pages(
     num_tokens, compress_ratio, use_fp4, cache_dtype
 ):
     """Insert group ends and preserve skipped slots, graph rows, and page padding."""
-    from vllm.models.deepseek_v4_1.common.ops.indexer_k_store import (
+    from vllm.models.deepseek_v41.common.ops.indexer_k_store import (
         indexer_k_norm_rope_store,
     )
 
@@ -442,7 +442,7 @@ def test_indexer_k_inserts_only_valid_groups_into_padded_pages(
 @torch.inference_mode()
 def test_indexer_k_cuda_graph_replay_reads_current_projection(use_fp4):
     """Replay must consume updated keys and slot mapping through the captured API."""
-    from vllm.models.deepseek_v4_1.common.ops.indexer_k_store import (
+    from vllm.models.deepseek_v41.common.ops.indexer_k_store import (
         indexer_k_norm_rope_store,
     )
 
@@ -501,7 +501,7 @@ def test_indexer_k_store_roundtrips_through_rocm_gather(block_size, compress_rat
     ``block_size > 1``, so a row-major store would feed the indexer permuted
     key bytes and randomize its top-k. Assert the write/read pair is exact.
     """
-    from vllm.models.deepseek_v4_1.common.ops.indexer_k_store import (
+    from vllm.models.deepseek_v41.common.ops.indexer_k_store import (
         indexer_k_norm_rope_store,
     )
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
