@@ -195,7 +195,6 @@ impl pb::control_server::Control for ControlServiceImpl {
             max_batched_tokens: ready.max_num_batched_tokens,
             max_loras: ready.max_loras,
             rl_capabilities: Some(self.rl_capabilities()),
-            supports_native_sampling_params_json: true,
         }))
     }
 

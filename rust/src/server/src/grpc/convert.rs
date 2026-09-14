@@ -17,8 +17,6 @@ use vllm_text::{
 use super::pb;
 use crate::routes::GenerateSamplingParams;
 
-const MAX_NATIVE_SAMPLING_PARAMS_BYTES: usize = 1024 * 1024;
-
 // ========================================================================================
 // Request conversion
 // ========================================================================================
@@ -127,11 +125,6 @@ pub fn to_text_request(
 fn decode_native_sampling_params(payload: &[u8]) -> Result<Option<GenerateSamplingParams>, Status> {
     if payload.is_empty() {
         return Ok(None);
-    }
-    if payload.len() > MAX_NATIVE_SAMPLING_PARAMS_BYTES {
-        return Err(Status::invalid_argument(format!(
-            "native_sampling_params_json exceeds {MAX_NATIVE_SAMPLING_PARAMS_BYTES} bytes"
-        )));
     }
 
     serde_json::from_slice::<GenerateSamplingParams>(payload)
