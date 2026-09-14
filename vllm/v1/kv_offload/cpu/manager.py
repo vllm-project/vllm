@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import OrderedDict
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 
 from typing_extensions import override
@@ -22,7 +22,7 @@ from vllm.v1.kv_offload.base import (
     get_offload_group_idx,
 )
 from vllm.v1.kv_offload.cpu.common import (
-    CPUCacheTierInfo,
+    CPUCacheOffloadingInfo,
     CPULoadStoreSpec,
     CPUOffloadingMetrics,
 )
@@ -58,7 +58,7 @@ class CPUOffloadingManager(OffloadingManager):
     def __init__(
         self,
         num_chunks: int,
-        tier_info: CPUCacheTierInfo | None = None,
+        tier_info: CPUCacheOffloadingInfo | None = None,
         cache_policy: str = "lru",
         cache_policy_module_path: str | None = None,
         enable_events: bool = False,
@@ -67,10 +67,10 @@ class CPUOffloadingManager(OffloadingManager):
     ):
         self.medium: Medium = Medium.CPU
         self._num_chunks: int = num_chunks
-        # Rendered once: the label values are static, and re-deriving them per
-        # step would be wasted work on the scheduler path.
-        self._info_labelvalues: tuple[str, ...] | None = (
-            tier_info.as_labelvalues() if tier_info is not None else None
+        # Rendered once: the facts are static, and the scheduler reads them on
+        # its own path.
+        self._config_info: Mapping[str, str | int] = (
+            tier_info.as_config_info() if tier_info is not None else {}
         )
         self._num_allocated_chunks: int = 0
         self._free_list: list[int] = []
@@ -446,13 +446,13 @@ class CPUOffloadingManager(OffloadingManager):
             yield from self.events
             self.events.clear()
 
+    @override
+    def config_info(self) -> Mapping[str, str | int | float | bool]:
+        """Report the CPU cache facts, or nothing when a caller passes none."""
+        return self._config_info
+
     def get_stats(self) -> OffloadingConnectorStats | None:
         stats = OffloadingConnectorStats()
-
-        if self._info_labelvalues is not None:
-            stats.set_gauge(
-                CPUOffloadingMetrics.CPU_CONFIG_INFO, 1, self._info_labelvalues
-            )
 
         # Compute cache usage.
         num_used = (

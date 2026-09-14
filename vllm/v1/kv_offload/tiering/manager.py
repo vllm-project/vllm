@@ -43,7 +43,7 @@ from vllm.v1.kv_offload.base import (
     RequestOffloadingContext,
     ScheduleEndContext,
 )
-from vllm.v1.kv_offload.cpu.common import CPUCacheTierInfo, CPULoadStoreSpec
+from vllm.v1.kv_offload.cpu.common import CPUCacheOffloadingInfo, CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.tiering.base import (
@@ -96,7 +96,7 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         self,
         num_chunks: int,
         mmap_region: SharedOffloadRegion,
-        tier_info: CPUCacheTierInfo | None = None,
+        tier_info: CPUCacheOffloadingInfo | None = None,
         cache_policy: str = "lru",
         cache_policy_module_path: str | None = None,
         enable_events: bool = False,

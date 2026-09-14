@@ -7,10 +7,6 @@ from dataclasses import dataclass
 import numpy as np
 import pytest
 
-from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
-    OffloadingConnectorStats,
-    _StatsKey,
-)
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
     LookupResult,
@@ -22,7 +18,7 @@ from vllm.v1.kv_offload.base import (
     make_offload_key,
 )
 from vllm.v1.kv_offload.cpu.common import (
-    CPUCacheTierInfo,
+    CPUCacheOffloadingInfo,
     CPULoadStoreSpec,
     CPUOffloadingMetrics,
 )
@@ -48,7 +44,7 @@ def make_cpu_manager(
     enable_events: bool = False,
     store_threshold: int = 0,
     max_tracker_size: int = 64_000,
-    tier_info: CPUCacheTierInfo | None = None,
+    tier_info: CPUCacheOffloadingInfo | None = None,
 ) -> CPUOffloadingManager:
     return CPUOffloadingManager(
         num_chunks=num_chunks,
@@ -245,35 +241,40 @@ def test_filter_reused_manager_reports_stores_skipped_counter():
     assert stats.reduce()[CPUOffloadingMetrics.STORES_SKIPPED] == 0
 
 
-def _config_info(stats: OffloadingConnectorStats) -> dict[tuple[str, ...], int]:
-    """The CPU_CONFIG_INFO label-tuple -> value map from a stats payload."""
-    return stats.data[_StatsKey.DATA].get(CPUOffloadingMetrics.CPU_CONFIG_INFO, {})
+def test_cpu_manager_publishes_the_cache_facts_as_config_info():
+    """The manager is the info source, so the facts must reach config_info().
 
-
-def test_cpu_manager_reports_tier_info_as_info_gauge():
-    """The tier's static facts ride every stats payload as an info gauge.
-
-    Label values are bound positionally downstream, so they must come out in
-    CPU_TIER_INFO_LABELS order with the value pinned to 1.
+    The frontend turns these keys into Prometheus label names, so a renamed
+    key renames a label. The "cpu_" prefix keeps one name for the cache,
+    standalone or as the primary tier of a tiering manager.
     """
-    tier_info = CPUCacheTierInfo(
-        num_chunks=4,
-        blocks_per_chunk=2,
-        kv_bytes_per_chunk=16384,
-        capacity_tokens_at_max_len=128,
-    )
-    manager = make_cpu_manager(num_chunks=4, tier_info=tier_info)
-
-    stats = manager.get_stats()
-    assert stats is not None
-    assert _config_info(stats) == {("4", "2", "16384", "128"): 1}
-
-
-def test_cpu_manager_renders_unknown_token_capacity_as_none():
-    """An unknown capacity must survive as a label, not crash or vanish."""
     manager = make_cpu_manager(
         num_chunks=4,
-        tier_info=CPUCacheTierInfo(
+        tier_info=CPUCacheOffloadingInfo(
+            num_chunks=4,
+            blocks_per_chunk=2,
+            kv_bytes_per_chunk=16384,
+            capacity_tokens_at_max_len=128,
+        ),
+    )
+
+    assert manager.config_info() == {
+        "cpu_num_chunks": 4,
+        "cpu_blocks_per_chunk": 2,
+        "cpu_kv_bytes_per_chunk": 16384,
+        "cpu_capacity_tokens_at_max_len": 128,
+    }
+
+
+def test_cpu_manager_renders_an_unknown_token_capacity_as_none():
+    """An unknown capacity stays a label value, and drops no label.
+
+    A missing key would change the label set, and a Prometheus metric binds
+    its label names once.
+    """
+    manager = make_cpu_manager(
+        num_chunks=4,
+        tier_info=CPUCacheOffloadingInfo(
             num_chunks=4,
             blocks_per_chunk=1,
             kv_bytes_per_chunk=16384,
@@ -281,18 +282,18 @@ def test_cpu_manager_renders_unknown_token_capacity_as_none():
         ),
     )
 
-    stats = manager.get_stats()
-    assert stats is not None
-    assert _config_info(stats) == {("4", "1", "16384", "None"): 1}
+    assert manager.config_info()["cpu_capacity_tokens_at_max_len"] == "None"
 
 
-def test_cpu_manager_omits_tier_info_when_not_supplied():
-    """Callers that pass no tier info keep their previous metric surface."""
+def test_cpu_manager_reports_no_config_info_without_the_cache_facts():
+    """A caller that passes no facts keeps the empty default.
+
+    The scheduler still sends an info payload, so the metric appears with the
+    engine labels alone.
+    """
     manager = make_cpu_manager(num_chunks=4)
 
-    stats = manager.get_stats()
-    assert stats is not None
-    assert _config_info(stats) == {}
+    assert manager.config_info() == {}
 
 
 def test_cpu_manager_reports_cache_usage_gauge():
