@@ -6,6 +6,7 @@ from collections.abc import Mapping
 import pytest
 import torch
 from PIL import Image as PILImage
+from transformers.models.gemma4 import Gemma4AudioFeatureExtractor
 
 from vllm.exceptions import VLLMValidationError
 from vllm.model_executor.models.gemma4_mm import (
@@ -209,8 +210,8 @@ def test_limit_mm_per_prompt(
         )
 
 
-def test_dummy_audio_length_falls_back_when_fft_length_is_absent():
-    """The unified audio feature extractor has no ``fft_length``.
+def test_dummy_audio_length_falls_back_for_the_unified_extractor():
+    """The unified audio feature extractor does not define ``fft_length``.
 
     ``Gemma4DummyInputsBuilder.get_dummy_mm_data`` read that attribute
     unconditionally, so memory profiling raised ``AttributeError`` for every
@@ -231,16 +232,17 @@ def test_dummy_audio_length_falls_back_when_fft_length_is_absent():
     assert _dummy_audio_num_samples(_UnifiedProcessor()) == 120 * 16000
 
 
-def test_dummy_audio_length_still_uses_fft_length_when_present():
+def test_dummy_audio_length_still_uses_fft_length_for_the_tower_extractor():
     """The mel/tower extractor keeps its existing behaviour."""
 
-    class _TowerFeatureExtractor:
-        fft_length = 400
-        sampling_rate = 16000
+    class _TowerFeatureExtractor(Gemma4AudioFeatureExtractor):
+        def __init__(self):  # noqa: D107 - bypass the real feature-extractor init
+            self.fft_length = 512
+            self.sampling_rate = 16000
 
     class _TowerProcessor:
         feature_extractor = _TowerFeatureExtractor()
         audio_seq_length = 750
         audio_ms_per_token = 40
 
-    assert _dummy_audio_num_samples(_TowerProcessor()) == 400
+    assert _dummy_audio_num_samples(_TowerProcessor()) == 512
