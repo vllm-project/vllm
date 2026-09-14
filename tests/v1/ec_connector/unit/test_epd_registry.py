@@ -124,6 +124,52 @@ class TestLiveness:
 class TestSelfRegistration:
     """What an instance reports, and when it reports at all."""
 
+    @pytest.mark.parametrize(
+        "host,ssl,expected",
+        [
+            (None, False, "http://192.0.2.1:8000"),
+            ("0.0.0.0", False, "http://192.0.2.1:8000"),
+            ("::", False, "http://192.0.2.1:8000"),
+            ("127.0.0.1", False, "http://127.0.0.1:8000"),
+            ("2001:db8::1", True, "https://[2001:db8::1]:8000"),
+        ],
+    )
+    def test_registration_uses_frontend_cli_address(self, host, ssl, expected):
+        from argparse import Namespace
+
+        from vllm.engine.arg_utils import AsyncEngineArgs
+
+        state = self._state(
+            ec_role="ec_consumer",
+            ec_extra={"proxy_registry_addr": "tcp://proxy:14580"},
+        )
+        args = Namespace(
+            ec_transfer_config=state.vllm_config.ec_transfer_config,
+            host=host,
+            port=8000,
+            ssl_keyfile="key.pem" if ssl else None,
+            ssl_certfile="cert.pem" if ssl else None,
+        )
+        with patch(
+            "vllm.distributed.ec_transfer.proxy.register.get_ip",
+            return_value="192.0.2.1",
+        ):
+            config = AsyncEngineArgs.from_cli_args(args).ec_transfer_config
+        assert config.get_from_extra_config("_http_address", None) == expected
+
+    @pytest.mark.parametrize("options", [{"port": 0}, {"uds": "/tmp/vllm.sock"}])
+    def test_unsupported_addresses_are_rejected_only_for_registration(self, options):
+        from argparse import Namespace
+
+        from vllm.engine.arg_utils import AsyncEngineArgs
+
+        ec_config = self._state(ec_role="ec_consumer").vllm_config.ec_transfer_config
+        args = Namespace(ec_transfer_config=ec_config, **options)
+        assert AsyncEngineArgs.from_cli_args(args).ec_transfer_config is ec_config
+        ec_config.ec_connector_extra_config["proxy_registry_addr"] = "tcp://proxy:14580"
+        with pytest.raises(ValueError, match="EPD registration requires"):
+            AsyncEngineArgs.from_cli_args(args)
+
     @staticmethod
     def _state(ec_extra=None, ec_role=None, kv_role=None, port=8000):
         from types import SimpleNamespace

@@ -22,7 +22,7 @@ from vllm.logger import init_logger
 from vllm.utils.network_utils import get_ip, make_zmq_path
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ECTransferConfig, VllmConfig
 
 logger = init_logger(__name__)
 
@@ -30,17 +30,15 @@ DEFAULT_ANNOUNCE_INTERVAL = 30.0
 _REQUEST_TIMEOUT_MS = 5000
 
 
-def set_registration_address(args: Any, sock: socket.socket) -> None:
-    """Pass the bound HTTP address to workers that register at runtime."""
-    ec_config = getattr(args, "ec_transfer_config", None)
-    if ec_config is None or not ec_config.get_from_extra_config(
-        "proxy_registry_addr", None
-    ):
-        return
-    if sock.family not in (socket.AF_INET, socket.AF_INET6):
+def set_registration_address(args: Any, ec_config: ECTransferConfig) -> None:
+    """Pass the frontend CLI address to workers that register at runtime."""
+    if getattr(args, "uds", None):
         raise ValueError("EPD registration requires a TCP API server")
-    host, port = sock.getsockname()[:2]
-    if host in ("0.0.0.0", "::"):
+    port = getattr(args, "port", None)
+    if not port:
+        raise ValueError("EPD registration requires an explicit nonzero --port")
+    host = getattr(args, "host", None)
+    if not host or host in ("0.0.0.0", "::"):
         host = get_ip()
     scheme = (
         "https"

@@ -1805,6 +1805,15 @@ class EngineArgs:
         engine_args = cls(
             **{attr: getattr(args, attr) for attr in attrs if hasattr(args, attr)}
         )
+        ec_config = engine_args.ec_transfer_config
+        if ec_config is not None and ec_config.get_from_extra_config(
+            "proxy_registry_addr", None
+        ):
+            from vllm.distributed.ec_transfer.proxy.register import (
+                set_registration_address,
+            )
+
+            set_registration_address(args, ec_config)
         return engine_args
 
     def create_model_config(self) -> ModelConfig:

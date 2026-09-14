@@ -117,6 +117,12 @@ EC transfer config:
 }
 ```
 
+The HTTP address is derived from the instance's `--host`, `--port`, and SSL
+options; no separate HTTP address configuration is needed. An unspecified or
+wildcard host uses the instance IP. Use a fixed port: dynamic registration does
+not support `--port 0` or Unix domain sockets. The address must be reachable from
+the proxy.
+
 A separate D instance in E+P+D needs no EC registration config. Instead,
 pass its HTTP address to the proxy:
 
