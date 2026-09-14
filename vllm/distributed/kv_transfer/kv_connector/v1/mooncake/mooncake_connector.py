@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import logging
+import queue
 import threading
 import time
 from collections import defaultdict
@@ -582,6 +583,11 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
 
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """Get block IDs whose KV pull failed, so they can be recomputed."""
+        assert self.connector_worker is not None
+        return self.connector_worker.get_block_ids_with_load_errors()
+
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, MooncakeConnectorMetadata)
@@ -1034,6 +1040,9 @@ class MooncakeConnectorWorker:
 
         self.finished_sending_reqs: set[ReqId] = set()
         self.finished_recving_reqs: set[ReqId] = set()
+        # Blocks of requests whose KV pull failed. Drained by the worker thread
+        # in get_block_ids_with_load_errors(), filled from the receiver loop.
+        self._invalid_block_ids: queue.Queue[set[int]] = queue.Queue()
 
         self.xfer_stats = MooncakeKVConnectorStats()
 
@@ -1942,10 +1951,13 @@ class MooncakeConnectorWorker:
             logger.debug("pulling kv_caches for %s finished", ok_reqs)
 
         if response.err_reqs:
-            logger.error(
-                "pulling kv_caches for %s failed: %s",
-                response.err_reqs,
-                response.err_msg,
+            self.fail_pull_reqs(
+                {
+                    req_id: pull_metas[req_id]
+                    for req_id in response.err_reqs
+                    if req_id in pull_metas
+                },
+                response.err_msg or "unknown transfer error",
             )
 
     async def _connect_to_prefiller_bootstrap(self, remote_bootstrap_addr: str):
@@ -1975,6 +1987,38 @@ class MooncakeConnectorWorker:
         # Always notify others regardless of connection success or failure.
         self._pending_bootstrap_queries[remote_bootstrap_addr].set()
         del self._pending_bootstrap_queries[remote_bootstrap_addr]
+
+    def fail_pull_reqs(
+        self, pull_metas: dict[ReqId, PullReqMeta], err_msg: str
+    ) -> None:
+        """Give up on these pulls and let the scheduler recompute them.
+
+        The base connector requires a failed request to still be reported by
+        get_finished(), with its blocks reported no later than the same pass.
+        """
+        if not pull_metas:
+            return
+        for req_id, pull_meta in pull_metas.items():
+            invalid = {
+                block_id
+                for block_ids in pull_meta.local_block_ids
+                for block_id in block_ids
+            }
+            if invalid:
+                self._invalid_block_ids.put(invalid)
+            self.finished_recving_reqs.add(pull_meta.d_req_id)
+            self.xfer_stats.record_failed_transfer()
+            logger.error("Failed to pull kv_caches for %s: %s", req_id, err_msg)
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """Return and clear the blocks that failed to load."""
+        invalid_block_ids: set[int] = set()
+        while True:
+            try:
+                invalid_block_ids |= self._invalid_block_ids.get_nowait()
+            except queue.Empty:
+                break
+        return invalid_block_ids
 
     def receive_kv(
         self,
@@ -2023,10 +2067,10 @@ class MooncakeConnectorWorker:
             await self._pending_bootstrap_queries[remote_bootstrap_addr].wait()
 
         if remote_engine_id not in self._remote_agents:
-            logger.error(
-                "Failed to find remote engine_id %s from bootstrap server %s",
-                remote_engine_id,
-                remote_bootstrap_addr,
+            self.fail_pull_reqs(
+                pull_metas,
+                f"failed to find remote engine_id {remote_engine_id} from "
+                f"bootstrap server {remote_bootstrap_addr}",
             )
             return
 
