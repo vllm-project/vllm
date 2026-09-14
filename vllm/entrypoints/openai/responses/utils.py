@@ -336,7 +336,13 @@ def _construct_message_from_response_item(
                     prev_assistant_msg["content"] = text
                     return None
             return {"role": "assistant", "content": text}
-    return item  # type: ignore[arg-type]
+    if isinstance(item, dict) and "role" in item:
+        return item  # type: ignore[return-value]
+    item_type = item.get("type") if isinstance(item, dict) else item.type
+    raise VLLMValidationError(
+        f"Unsupported input item type: {item_type}",
+        parameter="input",
+    )
 
 
 def extract_function_tool_names(tools: list[Tool]) -> frozenset[str]:
