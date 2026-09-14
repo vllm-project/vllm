@@ -123,12 +123,13 @@ def _combine_topk_swa_indices_kernel(
 
     base = tl.load(query_start_loc_ptr)
     query_start = tl.load(query_start_loc_ptr + batch_idx) - base
-    # V4.1's mixed prefill metadata can make query_start_loc claim more tokens
-    # than topk_indices has rows; without this the strided loop reads past the end.
-    query_end = tl.minimum(
-        tl.load(query_start_loc_ptr + batch_idx + 1) - base, num_tokens
-    )
-    query_len = query_end - query_start
+    query_claimed_end = tl.load(query_start_loc_ptr + batch_idx + 1) - base
+    # Positions come from the metadata as written. V4.1's mixed prefill metadata
+    # can make query_start_loc claim more tokens than topk_indices has rows, so
+    # the loop stops at the rows that exist -- but clamping query_len here would
+    # shift start_pos and with it every token's position.
+    query_len = query_claimed_end - query_start
+    query_end = tl.minimum(query_claimed_end, num_tokens)
     seq_len = tl.load(seq_lens_ptr + batch_idx)
     gather_len = tl.load(gather_lens_ptr + batch_idx)
     start_pos = seq_len - query_len
