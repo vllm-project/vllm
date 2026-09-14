@@ -104,9 +104,9 @@ def test_sheared_bias_architecture_selection(monkeypatch, major, expected):
 def test_fa4_support_accepts_paged_kv_architectures(monkeypatch, major):
     """Architectures with a usable attention path are left alone.
 
-    SM8x is not rejected: it has no paged-KV FA4 forward either, but a
-    FlexAttention fallback can serve Inkling there, so the guard leaves it
-    open rather than blocking that path.
+    SM8x is not rejected: it has no paged-KV FA4 forward either, but the
+    shared Triton relative-attention kernels can serve Inkling there, so the
+    guard leaves it open rather than blocking that path.
     """
     monkeypatch.setattr(
         current_platform,
