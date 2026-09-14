@@ -32,16 +32,31 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding import (
     store_client,
 )
 from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.data import (
-    EmbeddingKeyMetadata,
-    EmbeddingPoolKey,
     TensorSpec,
+    build_embedding_namespace,
+    make_embedding_key,
 )
 
 pytestmark = pytest.mark.cpu_test
-KEY = EmbeddingKeyMetadata(
-    "test", "model", "revision", "encoder", "torch.float32", "v2"
+KEY = (
+    "test@embedding@model:model@revision:revision"
+    "@encoder:encoder@dtype:torch.float32@protocol:v2"
 )
 SPEC = TensorSpec((2, 2), "torch.float32", 16)
+
+
+def test_embedding_key_combines_namespace_and_identifier():
+    config = create_ec_vllm_config(ec_role="ec_producer")
+    config.ec_transfer_config.ec_connector_extra_config.update(
+        embedding_cache_prefix="team@cache", embedding_model_identity="shared/model"
+    )
+    config.model_config.revision = "rev:1"
+    config.model_config.dtype = torch.float32
+    config.model_config.multimodal_config = None
+    assert make_embedding_key(build_embedding_namespace(config), "image@1") == (
+        "team@cache@embedding@model:shared/model@revision:rev:1"
+        "@encoder:encoder:default@dtype:torch.float32@protocol:v2@id:image@1"
+    )
 
 
 def test_shared_reuse_requires_content_stable_identifiers():
@@ -175,12 +190,12 @@ def test_reuse_pipeline(backend, mode):
     else:
         hits = set()
     for key in hits:
-        backend.store_client.put_tensor(EmbeddingPoolKey(KEY, key), torch.ones(2, 2))
+        backend.store_client.put_tensor(make_embedding_key(KEY, key), torch.ones(2, 2))
     if mode in ("get-failure", "lease-expired"):
         read = native.get_into_ranges
 
         def failed_read(pointers, keys, dst, src, sizes):
-            if keys == [[EmbeddingPoolKey(KEY, "b").to_string()]] and src == [[[304]]]:
+            if keys == [[make_embedding_key(KEY, "b")]] and src == [[[304]]]:
                 if mode == "lease-expired":
                     # Native ranged GET checks the lease after the transfer.
                     read(pointers, keys, dst, src, sizes)
@@ -276,9 +291,9 @@ def test_reuse_pipeline(backend, mode):
 
 @pytest.mark.parametrize("mismatch", ["revision", "shape"])
 def test_incompatible_output_is_a_miss(backend, mismatch):
-    backend.store_client.put_tensor(EmbeddingPoolKey(KEY, "a"), torch.ones(2, 2))
+    backend.store_client.put_tensor(make_embedding_key(KEY, "a"), torch.ones(2, 2))
     if mismatch == "revision":
-        backend.key_metadata = replace(KEY, model_revision="other")
+        backend.namespace = KEY.replace("@revision:revision", "@revision:other")
     expected = replace(SPEC, shape=(4, 1)) if mismatch == "shape" else SPEC
     outputs: dict[str, torch.Tensor] = {}
     assert not backend.resolve_inputs({"a": expected}, outputs, "cpu")
@@ -315,11 +330,17 @@ def test_native_io_owners(backend, operation):
     owner = weakref.ref(tensor)
     rejected = operation == "rejected-put"
     if operation == "get":
-        native.get_into_ranges = MagicMock(return_value=[[[-800]]])
-        with pytest.raises(store_client.EmbeddingStoreError, match="unconfirmed"):
-            client.get_tensor_payload(
-                EmbeddingPoolKey(KEY, "a"), tensor.data_ptr(), 16, 304, owner=tensor
-            )
+        key = make_embedding_key(KEY, "a")
+        client.put_tensor(key, tensor)
+        read = native.get_into_ranges
+        native.get_into_ranges = lambda ptrs, keys, dst, src, sizes: (
+            [[[-800]]] if src == [[[304]]] else read(ptrs, keys, dst, src, sizes)
+        )
+        with (
+            patch.object(store_client.torch, "empty", return_value=tensor),
+            pytest.raises(store_client.EmbeddingStoreError, match="unconfirmed"),
+        ):
+            client.load_tensor(key, SPEC, "cpu")
     else:
         if operation == "unregister":
             native.unregister_buffer = MagicMock(return_value=-500)
@@ -358,8 +379,12 @@ def test_publication_budget_charges_and_releases_backing_storage(backend):
     del tensor
     gc.collect()
     assert owner() is not None
+    backend._save(make_embedding_key(KEY, "a"), backend._pending["a"][1])
     future.set_result(None)
-    backend.reap()
+    backend._step_candidates = {"b"}
+    backend.save_output("b", torch.ones(2, 2))
+    assert "a" not in backend._pending and "b" in backend._pending
+    backend.shutdown()
     gc.collect()
     assert owner() is None and backend._pending_bytes == 0
 
@@ -377,7 +402,7 @@ def test_completion_race_preserves_failure_and_reclaims_other_items(backend):
     with patch.object(backend._executor, "submit", side_effect=[racing, other]):
         assert backend._enqueue_save("race", torch.ones(2, 2))
         assert backend._enqueue_save("other", torch.ones(2, 2))
-    assert not backend._drain_completed()
+    backend.reap()
     assert backend._pending_bytes == 32
     other.set_result(None)
     with pytest.raises(store_client.EmbeddingStoreError):
@@ -436,6 +461,6 @@ def test_readiness_and_shutdown_do_not_block_p2p_completion(backend):
     native.close.assert_called_once_with()
     assert not backend.store_client.store.registered and backend._pending_bytes == 0
 
-    assert backend.store_client.store.objects[EmbeddingPoolKey(KEY, "a").to_string()][
+    assert backend.store_client.store.objects[make_embedding_key(KEY, "a")][
         304:
     ] == struct.pack("<4f", 0, 1, 2, 3)

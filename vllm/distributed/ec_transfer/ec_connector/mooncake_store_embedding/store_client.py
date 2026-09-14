@@ -8,7 +8,6 @@ Tensor codec adapted from vLLM PR #47302 (0d1f71f5d36c).
 from __future__ import annotations
 
 import ctypes
-import math
 import struct
 import threading
 from collections.abc import Callable, Iterator
@@ -16,9 +15,10 @@ from contextlib import contextmanager
 from enum import IntEnum
 from typing import Any
 
+import torch
+
 from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.data import (
     MOONCAKE_TENSOR_METADATA_NBYTES,
-    EmbeddingPoolKey,
     TensorSpec,
 )
 from vllm.distributed.mooncake_store import MooncakeStoreConfig, setup_mooncake_store
@@ -78,11 +78,6 @@ _MOONCAKE_DTYPE_TO_TORCH_DTYPE = {
 }
 _TORCH_DTYPE_TO_MOONCAKE_DTYPE = {
     value: key for key, value in _MOONCAKE_DTYPE_TO_TORCH_DTYPE.items()
-}
-_SUPPORTED_EMBEDDING_DTYPE_NBYTES = {
-    "torch.float16": 2,
-    "torch.bfloat16": 2,
-    "torch.float32": 4,
 }
 
 
@@ -152,21 +147,17 @@ class MooncakeEmbeddingStoreClient:
         buffers: list[tuple[Any, int, int]],
         *,
         safe_rejections: frozenset[_MooncakeErrorCode],
-    ) -> Iterator[Callable[[Any], None]]:
+    ) -> Iterator[Callable[[int], None]]:
         self._check_healthy()
         registered = []
         submitted = False
         confirmed = False
 
-        def confirm(results: Any) -> None:
+        def confirm(result: int) -> None:
             nonlocal confirmed
-
-            def terminal(value: Any) -> bool:
-                if isinstance(value, (list, tuple)):
-                    return bool(value) and all(terminal(x) for x in value)
-                return type(value) is int and (value >= 0 or value in safe_rejections)
-
-            if not terminal(results):
+            if type(result) is not int or (
+                result < 0 and result not in safe_rejections
+            ):
                 raise EmbeddingStoreError(
                     "Mooncake I/O completion is unconfirmed; retaining buffers"
                 )
@@ -174,15 +165,12 @@ class MooncakeEmbeddingStoreClient:
 
         try:
             for owner, addr, size in buffers:
-                if owner is None:
-                    raise ValueError("registered I/O requires a buffer owner")
-                if addr not in registered:
-                    ret = self.store.register_buffer(addr, size)
-                    if ret != 0:
-                        raise EmbeddingStoreOperationError(
-                            f"Failed to register embedding buffer: {ret}"
-                        )
-                    registered.append(addr)
+                ret = self.store.register_buffer(addr, size)
+                if ret != 0:
+                    raise EmbeddingStoreOperationError(
+                        f"Failed to register embedding buffer: {ret}"
+                    )
+                registered.append(addr)
             submitted = True
             yield confirm
         except BaseException as error:
@@ -200,7 +188,7 @@ class MooncakeEmbeddingStoreClient:
             if not submitted or confirmed:
                 try:
                     for addr in reversed(registered):
-                        self.unregister_tensor(addr)
+                        self._unregister_buffer(addr)
                 except BaseException:
                     with self._lifetime_lock:
                         self._unsafe_owners.extend(owner for owner, _, _ in buffers)
@@ -218,15 +206,14 @@ class MooncakeEmbeddingStoreClient:
                 f"failed to close embedding Mooncake Store: {ret}"
             )
 
-    def exists(self, pool_key: EmbeddingPoolKey) -> bool:
+    def exists(self, pool_key: str) -> bool:
         return self.batch_exists([pool_key])[0]
 
-    def batch_exists(self, pool_keys: list[EmbeddingPoolKey]) -> list[bool]:
+    def batch_exists(self, keys: list[str]) -> list[bool]:
         self._check_healthy()
-        if not pool_keys:
+        if not keys:
             return []
 
-        keys = [pool_key.to_string() for pool_key in pool_keys]
         states = self.store.batch_is_exist(keys)
         if len(states) != len(keys):
             raise RuntimeError(
@@ -234,18 +221,33 @@ class MooncakeEmbeddingStoreClient:
             )
         return [state == 1 for state in states]
 
-    def get_tensor_meta(self, pool_key: EmbeddingPoolKey) -> TensorSpec:
+    def load_tensor(
+        self, pool_key: str, expected: TensorSpec, device: torch.device | str
+    ) -> torch.Tensor:
         buffer = (ctypes.c_ubyte * MOONCAKE_TENSOR_METADATA_NBYTES)()
-        self.get_tensor_payload(
+        self._get_range(
             pool_key,
             ctypes.addressof(buffer),
             MOONCAKE_TENSOR_METADATA_NBYTES,
             0,
             owner=buffer,
         )
-        return _decode_mooncake_tensor_metadata(pool_key, bytes(buffer))
+        _validate_mooncake_tensor_metadata(pool_key, bytes(buffer), expected)
+        target = torch.empty(
+            expected.shape,
+            dtype=getattr(torch, expected.dtype.removeprefix("torch.")),
+            device=device,
+        )
+        self._get_range(
+            pool_key,
+            target.data_ptr(),
+            expected.nbytes,
+            MOONCAKE_TENSOR_METADATA_NBYTES,
+            owner=target,
+        )
+        return target
 
-    def put_tensor(self, pool_key: EmbeddingPoolKey, tensor: Any) -> None:
+    def put_tensor(self, pool_key: str, tensor: torch.Tensor) -> None:
         self._check_healthy()
         if not tensor.is_contiguous():
             raise EmbeddingStoreOperationError("embedding tensor must be contiguous")
@@ -260,23 +262,19 @@ class MooncakeEmbeddingStoreClient:
         with self._registered_io(
             buffers, safe_rejections=_SAFE_PUT_REJECTIONS
         ) as confirm:
-            results = self.store.batch_put_from_multi_buffers(
-                [pool_key.to_string()],
+            [result] = self.store.batch_put_from_multi_buffers(
+                [pool_key],
                 [[header_ptr, tensor.data_ptr()]],
                 [[len(metadata), data_size]],
                 self.replicate_config,
             )
-            if len(results) != 1:
+            confirm(result)
+            if result < 0:
                 raise EmbeddingStoreOperationError(
-                    "Mooncake put returned an unexpected number of results"
-                )
-            confirm(results)
-            if results[0] < 0:
-                raise EmbeddingStoreOperationError(
-                    f"failed to put embedding tensor for {pool_key.to_string()}"
+                    f"failed to put embedding tensor for {pool_key}"
                 )
 
-    def unregister_tensor(self, addr: int) -> None:
+    def _unregister_buffer(self, addr: int) -> None:
         try:
             ret = self.store.unregister_buffer(addr)
         except Exception as error:
@@ -288,9 +286,9 @@ class MooncakeEmbeddingStoreClient:
                 f"failed to unregister embedding buffer addr={addr:#x}: {ret}"
             )
 
-    def get_tensor_payload(
+    def _get_range(
         self,
-        pool_key: EmbeddingPoolKey,
+        pool_key: str,
         addr: int,
         size: int,
         src_offset: int,
@@ -300,39 +298,26 @@ class MooncakeEmbeddingStoreClient:
         with self._registered_io(
             [(owner, addr, size)], safe_rejections=_SAFE_GET_REJECTIONS
         ) as confirm:
-            key = pool_key.to_string()
-            results = self.store.get_into_ranges(
+            [[[result]]] = self.store.get_into_ranges(
                 [addr],
-                [[key]],
+                [[pool_key]],
                 [[[0]]],
                 [[[src_offset]]],
                 [[[size]]],
             )
-            confirm(results)
-            result = _single_range_result(results)
+            confirm(result)
             if result != size:
                 raise EmbeddingStoreOperationError(
-                    "failed to get embedding tensor payload for "
-                    f"{pool_key.to_string()}: {result}"
+                    f"failed to get embedding tensor payload for {pool_key}: {result}"
                 )
             return result
 
 
-def _single_range_result(results: Any) -> int:
-    try:
-        return int(results[0][0][0])
-    except (IndexError, TypeError, ValueError):
-        return -1
-
-
-def _decode_mooncake_tensor_metadata(
-    pool_key: EmbeddingPoolKey,
+def _validate_mooncake_tensor_metadata(
+    pool_key: str,
     metadata: bytes,
-) -> TensorSpec:
-    if len(metadata) < MOONCAKE_TENSOR_METADATA_NBYTES:
-        raise EmbeddingStoreOperationError(
-            f"embedding tensor metadata is too small: {len(metadata)}"
-        )
+    expected: TensorSpec,
+) -> None:
     (
         magic,
         version,
@@ -350,26 +335,23 @@ def _decode_mooncake_tensor_metadata(
         or header_size != MOONCAKE_TENSOR_METADATA_NBYTES
     ):
         raise EmbeddingStoreOperationError(
-            f"invalid Mooncake tensor metadata header for {pool_key.to_string()}"
+            f"invalid Mooncake tensor metadata header for {pool_key}"
         )
-    if ndim <= 0 or ndim > 8:
+    if ndim != len(expected.shape) or not 0 < ndim <= 8:
         raise EmbeddingStoreOperationError(
-            f"invalid embedding tensor ndim for {pool_key.to_string()}: {ndim}"
+            f"invalid embedding tensor ndim for {pool_key}: {ndim}"
         )
-    if dtype not in _MOONCAKE_DTYPE_TO_TORCH_DTYPE:
+    if _MOONCAKE_DTYPE_TO_TORCH_DTYPE.get(dtype) != expected.dtype:
         raise EmbeddingStoreOperationError(
-            f"unsupported Mooncake tensor dtype for {pool_key.to_string()}: {dtype}"
+            f"unexpected Mooncake tensor dtype for {pool_key}: {dtype}"
         )
-    dtype_name = _MOONCAKE_DTYPE_TO_TORCH_DTYPE[dtype]
     if layout_kind != 0:
         raise EmbeddingStoreOperationError(
-            "unsupported embedding tensor layout for "
-            f"{pool_key.to_string()}: {layout_kind}"
+            f"unsupported embedding tensor layout for {pool_key}: {layout_kind}"
         )
     if data_offset != MOONCAKE_TENSOR_METADATA_NBYTES:
         raise EmbeddingStoreOperationError(
-            "invalid embedding tensor data offset for "
-            f"{pool_key.to_string()}: {data_offset}"
+            f"invalid embedding tensor data offset for {pool_key}: {data_offset}"
         )
     global_shape = struct.unpack_from(
         "<8q",
@@ -381,32 +363,19 @@ def _decode_mooncake_tensor_metadata(
         metadata,
         _MOONCAKE_TENSOR_LOCAL_SHAPE_OFFSET,
     )
-    if global_shape != local_shape:
+    if global_shape != local_shape or local_shape[:ndim] != expected.shape:
         raise EmbeddingStoreOperationError(
-            f"embedding tensor global/local shape mismatch for {pool_key.to_string()}"
+            f"embedding tensor shape mismatch for {pool_key}: expected={expected.shape}"
         )
-    shape = tuple(int(dim) for dim in local_shape[:ndim])
-    if any(dim <= 0 for dim in shape):
-        raise EmbeddingStoreOperationError(
-            f"invalid embedding tensor shape for {pool_key.to_string()}: {shape}"
-        )
-    expected_data_bytes = (
-        math.prod(shape) * _SUPPORTED_EMBEDDING_DTYPE_NBYTES[dtype_name]
-    )
-    if data_bytes <= 0 or data_bytes != expected_data_bytes:
+    if data_bytes != expected.nbytes:
         raise EmbeddingStoreOperationError(
             "embedding tensor shape/dtype do not match payload size for "
-            f"{pool_key.to_string()}: expected={expected_data_bytes} "
+            f"{pool_key}: expected={expected.nbytes} "
             f"actual={data_bytes}"
         )
-    return TensorSpec(
-        shape=shape,
-        dtype=dtype_name,
-        nbytes=int(data_bytes),
-    )
 
 
-def _encode_mooncake_tensor_metadata(tensor: Any) -> bytes:
+def _encode_mooncake_tensor_metadata(tensor: torch.Tensor) -> bytes:
     dtype = str(tensor.dtype)
     if dtype not in _TORCH_DTYPE_TO_MOONCAKE_DTYPE:
         raise EmbeddingStoreOperationError(
@@ -433,9 +402,4 @@ def _encode_mooncake_tensor_metadata(tensor: Any) -> bytes:
     dims = shape + (-1,) * (8 - len(shape))
     tensor_shape = struct.pack("<8q", *dims)
     axes = b"\0" * (32 * 4)
-    metadata = header + tensor_shape + tensor_shape + struct.pack("<II", 0, 0) + axes
-    if len(metadata) != MOONCAKE_TENSOR_METADATA_NBYTES:
-        raise EmbeddingStoreOperationError(
-            f"invalid Mooncake tensor metadata size: {len(metadata)}"
-        )
-    return metadata
+    return header + tensor_shape + tensor_shape + struct.pack("<II", 0, 0) + axes

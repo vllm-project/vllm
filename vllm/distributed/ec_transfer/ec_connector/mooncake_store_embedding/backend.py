@@ -7,19 +7,14 @@ from __future__ import annotations
 import threading
 import traceback
 from collections.abc import Mapping
-from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 
 import torch
 
 from vllm.logger import init_logger
 
-from .data import (
-    MOONCAKE_TENSOR_METADATA_NBYTES,
-    EmbeddingKeyMetadata,
-    EmbeddingPoolKey,
-    TensorSpec,
-)
+from .data import TensorSpec, make_embedding_key
 from .store_client import (
     EmbeddingStoreError,
     EmbeddingStoreOperationError,
@@ -46,13 +41,13 @@ class MooncakeEmbeddingStoreBackend:
     def __init__(
         self,
         store_client: MooncakeEmbeddingStoreClient,
-        key_metadata: EmbeddingKeyMetadata,
+        namespace: str,
         *,
         max_pending_items: int,
         max_pending_bytes: int,
     ) -> None:
         self.store_client = store_client
-        self.key_metadata = key_metadata
+        self.namespace = namespace
         self.max_pending_items = max_pending_items
         self.max_pending_bytes = max_pending_bytes
         self._executor = ThreadPoolExecutor(
@@ -63,24 +58,13 @@ class MooncakeEmbeddingStoreBackend:
         self._pending_lock = threading.Lock()
         self._pending_bytes = 0
         self._step_candidates: set[str] = set()
-        self._step_outputs: dict[str, torch.Tensor] = {}
         self._closed = False
         self._fatal_error: BaseException | None = None
 
-    def record_output(self, identifier: str, tensor: torch.Tensor) -> None:
+    def save_output(self, identifier: str, tensor: torch.Tensor) -> None:
         if identifier in self._step_candidates:
-            self._step_outputs.setdefault(identifier, tensor)
-
-    def publish_outputs(self) -> None:
-        """Publish outputs recorded in this Encoder step."""
-        outputs, self._step_outputs = self._step_outputs, {}
-        self._step_candidates.clear()
-        for identifier, tensor in outputs.items():
+            self.reap()
             self._enqueue_save(identifier, tensor)
-
-    def reap(self) -> None:
-        for identifier, reason in self._drain_completed().items():
-            logger.warning("Store PUT failed for %s: %s", identifier, reason)
 
     def resolve_inputs(
         self,
@@ -90,13 +74,12 @@ class MooncakeEmbeddingStoreBackend:
     ) -> set[str]:
         """Load outputs before encoding; unresolved items retain normal computation."""
         self._step_candidates = set(expected_tensors)
-        self._step_outputs.clear()
         candidates = [key for key in expected_tensors if key not in encoder_cache]
         if not candidates:
             return set()
 
         pool_keys = [
-            EmbeddingPoolKey(self.key_metadata, identifier) for identifier in candidates
+            make_embedding_key(self.namespace, identifier) for identifier in candidates
         ]
         try:
             exists = self.store_client.batch_exists(pool_keys)
@@ -114,25 +97,10 @@ class MooncakeEmbeddingStoreBackend:
             if not hit:
                 continue
             try:
-                tensor_meta = self.store_client.get_tensor_meta(pool_key)
-                expected = expected_tensors[identifier]
-                if tensor_meta != expected:
-                    raise ValueError(
-                        f"Store tensor {tensor_meta} does not match {expected}"
-                    )
-                target = torch.empty(
-                    expected.shape,
-                    dtype=_resolve_torch_dtype(expected.dtype),
-                    device=device,
+                target = self.store_client.load_tensor(
+                    pool_key, expected_tensors[identifier], device
                 )
-                self.store_client.get_tensor_payload(
-                    pool_key,
-                    target.data_ptr(),
-                    tensor_meta.nbytes,
-                    MOONCAKE_TENSOR_METADATA_NBYTES,
-                    owner=target,
-                )
-            except (EmbeddingStoreOperationError, ValueError, OSError):
+            except (EmbeddingStoreOperationError, OSError):
                 logger.warning(
                     "Mooncake embedding Store GET failed for identifier=%s; "
                     "falling back to encoder",
@@ -167,26 +135,21 @@ class MooncakeEmbeddingStoreBackend:
                 _record_tensor_ready_event(tensor),
                 budget_bytes,
             )
-            try:
-                future = self._executor.submit(
-                    self._save, EmbeddingPoolKey(self.key_metadata, identifier), save
-                )
-            except RuntimeError:
-                save.release()
-                logger.warning("Failed to enqueue Mooncake Store PUT", exc_info=True)
-                return False
+            future = self._executor.submit(
+                self._save, make_embedding_key(self.namespace, identifier), save
+            )
             self._pending[identifier] = (future, save)
             self._pending_bytes += budget_bytes
         return True
 
-    def _save(self, pool_key: EmbeddingPoolKey, save: _StoreSave) -> None:
-        tensor = None
+    def _save(self, pool_key: str, save: _StoreSave) -> None:
         try:
             if self.store_client.exists(pool_key):
                 return
             tensor = save.tensor
             assert tensor is not None
-            _wait_tensor_ready_event(save.ready_event)
+            if save.ready_event is not None:
+                save.ready_event.synchronize()
             self.store_client.put_tensor(pool_key, tensor)
         except BaseException as error:
             # Returned client frames can otherwise keep tensors via a Future's
@@ -197,8 +160,7 @@ class MooncakeEmbeddingStoreBackend:
             tensor = None
             save.release()
 
-    def _drain_completed(self) -> dict[str, str]:
-        failures: dict[str, str] = {}
+    def reap(self) -> None:
         with self._pending_lock:
             for identifier, (future, save) in list(self._pending.items()):
                 # Observe once; a racing completion is handled on the next poll.
@@ -206,10 +168,8 @@ class MooncakeEmbeddingStoreBackend:
                     continue
                 try:
                     future.result()  # Already done: never waits on Store I/O.
-                except CancelledError:
-                    failures[identifier] = "Store publication cancelled"
                 except (EmbeddingStoreOperationError, OSError) as error:
-                    failures[identifier] = str(error)
+                    logger.warning("Store PUT failed for %s: %s", identifier, error)
                 except BaseException as error:
                     # The client may still own unsafe native-I/O buffers. Keep
                     # their charge and fatal result until worker termination.
@@ -217,12 +177,10 @@ class MooncakeEmbeddingStoreBackend:
                         self._fatal_error = error
                     continue
                 del self._pending[identifier]
-                save.release()  # Also clears owners of cancelled queued work.
                 self._pending_bytes -= save.budget_bytes
             fatal = self._fatal_error
         if fatal is not None:
             raise fatal
-        return failures
 
     def shutdown(self) -> None:
         with self._pending_lock:
@@ -234,24 +192,9 @@ class MooncakeEmbeddingStoreBackend:
         self.store_client.close()
 
 
-def _resolve_torch_dtype(dtype: str) -> torch.dtype:
-    if dtype == "torch.float16":
-        return torch.float16
-    if dtype == "torch.bfloat16":
-        return torch.bfloat16
-    if dtype == "torch.float32":
-        return torch.float32
-    raise ValueError(f"unsupported embedding tensor dtype: {dtype}")
-
-
 def _record_tensor_ready_event(tensor: torch.Tensor) -> torch.Event | None:
     if tensor.device.type != "cuda":
         return None
     event = torch.Event()
     event.record(torch.accelerator.current_stream(tensor.device))
     return event
-
-
-def _wait_tensor_ready_event(event: torch.Event | None) -> None:
-    if event is not None:
-        event.synchronize()

@@ -101,12 +101,14 @@ class MooncakeECConfig:
         if not isinstance(shared_reuse, bool):
             raise ValueError("cross_encoder_cache must be a boolean")
         if shared_reuse:
-            if not ec_config.is_ec_producer or ec_config.is_ec_consumer:
-                raise ValueError("cross_encoder_cache requires an Encoder producer")
+            if not ec_config.is_encode_only:
+                raise ValueError(
+                    "cross_encoder_cache requires an Encoder-only producer"
+                )
             if not vllm_config.use_v2_model_runner:
                 raise ValueError("cross_encoder_cache requires Model Runner V2")
             if vllm_config.lora_config is not None:
-                raise ValueError("cross_encoder_cache does not support dynamic LoRA")
+                raise ValueError("cross_encoder_cache does not support LoRA")
             mm_config = vllm_config.model_config.multimodal_config
             if mm_config is not None and mm_config.mm_processor_cache_gb == 0:
                 raise ValueError(

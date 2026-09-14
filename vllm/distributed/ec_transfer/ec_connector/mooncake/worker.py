@@ -50,7 +50,7 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake.transfer import (
     ensure_mooncake_available,
 )
 from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.data import (
-    build_embedding_key_metadata,
+    build_embedding_namespace,
 )
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_ip
@@ -96,7 +96,7 @@ class ECMooncakeWorker:
         config = MooncakeECConfig.from_vllm_config(vllm_config)
         self._store_config = (
             (
-                build_embedding_key_metadata(vllm_config),
+                build_embedding_namespace(vllm_config),
                 config.store_max_pending_items,
                 config.store_max_pending_bytes,
             )
@@ -198,10 +198,10 @@ class ECMooncakeWorker:
                 create_mooncake_embedding_store_client,
             )
 
-            key_metadata, max_items, max_bytes = self._store_config
+            namespace, max_items, max_bytes = self._store_config
             self._output_store = MooncakeEmbeddingStoreBackend(
                 create_mooncake_embedding_store_client(),
-                key_metadata,
+                namespace,
                 max_pending_items=max_items,
                 max_pending_bytes=max_bytes,
             )
@@ -909,7 +909,7 @@ class ECMooncakeWorker:
         tensor = encoder_cache[mm_hash]
         self._bind_push_source(tensor, mm_hash)
         if self._output_store is not None:
-            self._output_store.record_output(mm_hash, tensor)
+            self._output_store.save_output(mm_hash, tensor)
 
     def build_connector_worker_meta(self) -> ECMooncakeWorkerMetadata | None:
         if self.is_consumer and not self._is_receiving_rank:
@@ -938,8 +938,6 @@ class ECMooncakeWorker:
         self._failed_saves = set()
         self._completed_loads = set()
         self._failed_loads = set()
-        if self._output_store is not None:
-            self._output_store.publish_outputs()
         return meta
 
     def close(self) -> None:
