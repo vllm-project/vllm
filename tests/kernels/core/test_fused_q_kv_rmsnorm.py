@@ -125,7 +125,7 @@ def test_fused_q_kv_rmsnorm_quant_matches_separate(num_tokens, q_size, dtype):
     from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
         mxfp8_e4m3_quantize,
     )
-    from vllm.models.deepseek_v4_1.common.ops.query_quant import (
+    from vllm.models.deepseek_v41.common.ops.query_quant import (
         fused_q_kv_rmsnorm_quant,
     )
 
@@ -198,15 +198,15 @@ def test_shared_query_quant_preserves_projection(
         mxfp8_e4m3_quantize,
     )
     from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Dynamic
-    from vllm.models.deepseek_v4_1.attention import (
+    from vllm.models.deepseek_v41.attention import (
         DeepseekV4Attention,
         DeepseekV4Indexer,
     )
-    from vllm.models.deepseek_v4_1.common.ops.query_quant import (
+    from vllm.models.deepseek_v41.common.ops.query_quant import (
         can_fuse_query_quant,
         fused_q_kv_rmsnorm_quant,
     )
-    from vllm.models.deepseek_v4_1.quant_config import DeepseekV4FP8Config
+    from vllm.models.deepseek_v41.quant_config import DeepseekV4FP8Config
 
     cls: (
         type[FlashInferCutedslMxfp8LinearKernel]
