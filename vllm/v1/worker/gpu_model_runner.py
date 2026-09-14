@@ -6861,7 +6861,7 @@ class GPUModelRunner(
             profiler = torch.profiler.profile(
                 activities=[
                     torch.profiler.ProfilerActivity.CPU,
-                    torch.profiler.ProfilerActivity.CUDA,
+                    getattr(torch.profiler.ProfilerActivity, self.device.type.upper()),
                 ],
                 record_shapes=True,
                 profile_memory=True,
@@ -6873,7 +6873,7 @@ class GPUModelRunner(
                 ),
             )
             logger.info_once(
-                "Rank %d: Torch profiler enabled for CUDA graph capture, "
+                "Rank %d: Torch profiler enabled for GPU graph capture, "
                 "traces will be saved to: %s",
                 local_rank,
                 trace_dir,
@@ -6881,7 +6881,7 @@ class GPUModelRunner(
         else:
             profiler = nullcontext()
             logger.info_once(
-                "Rank %d: Torch profiler disabled for CUDA graph capture", local_rank
+                "Rank %d: Torch profiler disabled for GPU graph capture", local_rank
             )
 
         with self._freeze_gc(), graph_capture(device=self.device):
