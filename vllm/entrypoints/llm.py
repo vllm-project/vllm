@@ -780,15 +780,24 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             mm_processor_kwargs=mm_processor_kwargs,
         )
 
-    def start_profile(self, profile_prefix: str | None = None) -> None:
-        """Start profiling with optional custom trace prefix.
+    def start_profile(
+        self,
+        profile_prefix: str | None = None,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ) -> None:
+        """Start profiling with optional per-session overrides.
 
         Args:
             profile_prefix: Optional prefix for the trace file names. If provided,
                            trace files will be named as "<prefix>_dp<X>_pp<Y>_tp<Z>".
                            If not provided, default naming will be used.
+            delay_iterations: Optional number of engine iterations to skip before
+                profiling starts.
+            max_iterations: Optional maximum number of engine iterations to profile.
+                Zero means no limit.
         """
-        self.llm_engine.start_profile(profile_prefix)
+        self.llm_engine.start_profile(profile_prefix, delay_iterations, max_iterations)
 
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
