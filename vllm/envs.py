@@ -154,7 +154,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
-    VLLM_PLE_CPU_OFFLOAD: bool = False
+    VLLM_PLE_CPU_OFFLOAD: bool = True
     VLLM_DISABLE_COMPILE_CACHE: bool = False
     VLLM_REPLICATE_EMBED: bool = False
     VLLM_USE_LAYERNAME: bool = True
@@ -261,7 +261,6 @@ if TYPE_CHECKING:
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = True
     VLLM_ENABLE_RESPONSES_API_STORE: bool = False
     VLLM_ENABLE_COHERE_API: bool = False
-    VLLM_ENABLE_SCALE_OUT_ENDPOINTS: bool | None = None
     VLLM_HAS_FLASHINFER_CUBIN: bool = False
     VLLM_ROCM_FP8_MFMA_PAGE_ATTN: bool = False
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
@@ -316,7 +315,6 @@ if TYPE_CHECKING:
     VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool = False
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = True
-    VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
     VLLM_XPU_FORCE_N_CONTIG_WEIGHT: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
@@ -351,15 +349,6 @@ def maybe_convert_bool(value: str | None) -> bool | None:
     if value is None:
         return None
     return bool(int(value))
-
-
-def maybe_convert_scale_out_endpoints(value: str | None) -> bool | None:
-    if value is None:
-        return None
-    normalized = value.strip()
-    if normalized not in ("0", "1"):
-        raise ValueError("VLLM_ENABLE_SCALE_OUT_ENDPOINTS must be 0 or 1")
-    return maybe_convert_bool(normalized)
 
 
 def maybe_convert_json_str_or_file(value: str | None) -> dict[str, Any] | None:
@@ -1859,12 +1848,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_COHERE_API": lambda: bool(
         int(os.getenv("VLLM_ENABLE_COHERE_API", "0"))
     ),
-    # If set to 1, expose the scale-out endpoints on `vllm serve`.
-    # The dedicated `vllm launch render` server exposes render and derender
-    # endpoints when this variable is unset or set to 1.
-    "VLLM_ENABLE_SCALE_OUT_ENDPOINTS": lambda: maybe_convert_scale_out_endpoints(
-        os.getenv("VLLM_ENABLE_SCALE_OUT_ENDPOINTS") or None
-    ),
     # If set, use the fp8 mfma in rocm paged attention.
     "VLLM_ROCM_FP8_MFMA_PAGE_ATTN": lambda: bool(
         int(os.getenv("VLLM_ROCM_FP8_MFMA_PAGE_ATTN", "0"))
@@ -2060,11 +2043,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LOG_MODEL_INSPECTION": lambda: bool(
         int(os.getenv("VLLM_LOG_MODEL_INSPECTION", "0"))
     ),
-    # Keep Qwen4Exp PLE embedding tables in pinned CPU memory and gather their
-    # rows through UVA on a dedicated CUDA stream.
-    # Legacy fallback for EngramConfig.cpu_offload, which takes precedence.
-    # This environment variable may be removed in a future release.
-    "VLLM_PLE_CPU_OFFLOAD": lambda: bool(int(os.getenv("VLLM_PLE_CPU_OFFLOAD", "0"))),
+    # Store n-gram embedding tables in pinned CPU memory for UVA lookup.
+    "VLLM_PLE_CPU_OFFLOAD": lambda: bool(int(os.getenv("VLLM_PLE_CPU_OFFLOAD", "1"))),
     # Debug logging for --enable-mfu-metrics
     "VLLM_DEBUG_MFU_METRICS": lambda: bool(
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
@@ -2128,10 +2108,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # memory allocation. Enabled by default as of v0.21.0
     "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS": lambda: bool(
         int(os.getenv("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "1"))
-    ),
-    # NIXL EP environment variables
-    "VLLM_NIXL_EP_MAX_NUM_RANKS": lambda: int(
-        os.getenv("VLLM_NIXL_EP_MAX_NUM_RANKS", "32")
     ),
     # Whether enable XPU graph on Intel GPU
     "VLLM_XPU_ENABLE_XPU_GRAPH": lambda: bool(
@@ -2297,7 +2273,6 @@ def compile_factors() -> dict[str, object]:
         "VLLM_CONFIG_ROOT",
         "LD_LIBRARY_PATH",
         "VLLM_SERVER_DEV_MODE",
-        "VLLM_ENABLE_SCALE_OUT_ENDPOINTS",
         "VLLM_DP_MASTER_IP",
         "VLLM_DP_MASTER_PORT",
         "VLLM_NIXL_SIDE_CHANNEL_HOST",
