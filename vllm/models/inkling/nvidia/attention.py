@@ -28,13 +28,17 @@ from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionBackend,
     FlashAttentionMetadata,
 )
+from vllm.v1.attention.backends.triton_attn import (
+    TritonAttentionBackend,
+    TritonAttentionMetadata,
+)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
     SlidingWindowSpec,
 )
 
-from ..common.triton_rel_attention import inkling_triton_rel_attention
+from ..common.ops.triton_rel_attention import inkling_triton_rel_attention
 from ..configs import InklingModelConfig
 from .layernorm import InklingRMSNorm
 from .ops.fa4_rel_attention import (
@@ -190,6 +194,8 @@ class InklingAttention(nn.Module, AttentionLayerBase):
             _INKLING_FA4_REL_ATTENTION_KERNEL.register_warmup()
 
     def get_attn_backend(self) -> type[AttentionBackend]:
+        if self._use_triton_attention:
+            return TritonAttentionBackend
         return FlashAttentionBackend
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
@@ -240,7 +246,9 @@ class InklingAttention(nn.Module, AttentionLayerBase):
             conv_meta = attn_metadata[self.conv_owner.prefix]
             md = attn_metadata[self.prefix]
             assert isinstance(conv_meta, InklingSconvMetadata)
-            slot_mapping = cast(FlashAttentionMetadata, md).slot_mapping
+            slot_mapping = cast(
+                FlashAttentionMetadata | TritonAttentionMetadata, md
+            ).slot_mapping
             assert self.kv_cache.numel() > 0
             assert self.conv_owner.kv_cache.numel() > 0
             # One launch: K/V sconv (conv-cache insert + conv + residual),
@@ -291,7 +299,9 @@ class InklingAttention(nn.Module, AttentionLayerBase):
     ) -> None:
         attn_metadata = get_forward_context().attn_metadata
         assert isinstance(attn_metadata, dict)
-        md = cast(FlashAttentionMetadata, attn_metadata[self.prefix])
+        md = cast(
+            FlashAttentionMetadata | TritonAttentionMetadata, attn_metadata[self.prefix]
+        )
         nt = md.num_actual_tokens
         key_cache, value_cache = self._split_kv_cache()
         max_seqlen_q = bucket_max_seqlen_q(md.max_query_len)

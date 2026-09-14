@@ -15,14 +15,16 @@ with causal (and optionally sliding-window) masking handled by the backend.
 import importlib
 from collections.abc import Callable
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
 
-from vllm.models.inkling.common.triton_rel_attention import (
+from vllm.config import CUDAGraphMode
+from vllm.models.inkling.common.ops.triton_rel_attention import (
     inkling_triton_rel_attention,
 )
-from vllm.models.inkling.common.triton_rel_attention_decode import (
+from vllm.models.inkling.common.ops.triton_rel_attention_decode import (
     use_split_kv_decode,
 )
 from vllm.models.inkling.nvidia.attention import (
@@ -37,14 +39,18 @@ from vllm.models.inkling.nvidia.ops.fa4_rel_attention import (
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
+from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionBackend,
-    FlashAttentionMetadata,
 )
 from vllm.v1.attention.backends.flex_attention import (
     FlexAttentionImpl,
     FlexAttentionMetadata,
     physical_to_logical_mapping,
+)
+from vllm.v1.attention.backends.triton_attn import (
+    TritonAttentionBackend,
+    TritonAttentionMetadata,
 )
 
 _cap = current_platform.get_device_capability() if current_platform.is_cuda() else None
@@ -66,17 +72,27 @@ def test_log_scaling_tau_matches_reference():
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
-def test_split_packed_kv_cache():
+@pytest.mark.parametrize("layout", ["HND", "NHD"])
+def test_split_packed_kv_cache(layout):
     attention = InklingAttention.__new__(InklingAttention)
     torch.nn.Module.__init__(attention)
     attention.head_dim = 8
     attention.kv_cache = torch.arange(2 * 3 * 4 * 16).reshape(2, 3, 4, 16)
+    if layout == "NHD":
+        attention.kv_cache = (
+            attention.kv_cache.transpose(1, 2).contiguous().transpose(1, 2)
+        )
 
     key_cache, value_cache = attention._split_kv_cache()
 
     assert key_cache.shape == value_cache.shape == (2, 4, 3, 8)
     torch.testing.assert_close(key_cache, attention.kv_cache[..., :8].transpose(1, 2))
     torch.testing.assert_close(value_cache, attention.kv_cache[..., 8:].transpose(1, 2))
+    for cache in (key_cache, value_cache):
+        assert (
+            cache.untyped_storage().data_ptr()
+            == attention.kv_cache.untyped_storage().data_ptr()
+        )
 
 
 @pytest.mark.parametrize(
@@ -92,6 +108,11 @@ def test_sm8x_triton_attention_selection(monkeypatch, major, expected):
     _use_sm8x_triton_attention.cache_clear()
     try:
         assert _use_sm8x_triton_attention() is expected
+        attention = InklingAttention.__new__(InklingAttention)
+        torch.nn.Module.__init__(attention)
+        attention._use_triton_attention = _use_sm8x_triton_attention()
+        backend = TritonAttentionBackend if expected else FlashAttentionBackend
+        assert attention.get_attn_backend() is backend
     finally:
         _use_sm8x_triton_attention.cache_clear()
 
@@ -575,30 +596,59 @@ def test_sm8x_triton_matches_flex_and_reference(monkeypatch, local_extent, seq_l
     case = _make_sm8x_comparison_case(seq_lens, rel_extent=rel_extent)
     q = case["q"]
     flex_impl, flex_metadata = _make_flex_reference(case, local_extent)
-    metadata = FlashAttentionMetadata(
-        num_actual_tokens=q.shape[0],
-        max_query_len=max(case["q_lens"]),
-        query_start_loc=case["query_start_loc"],
-        max_seq_len=max(case["kv_lens"]),
-        seq_lens=case["seq_lens"],
-        block_table=case["block_table"],
-        slot_mapping=flex_metadata.slot_mapping,
-        use_cascade=False,
-        common_prefix_len=0,
-        cu_prefix_query_lens=None,
-        prefix_kv_lens=None,
-        suffix_kv_lens=None,
-    )
     attention = InklingAttention.__new__(InklingAttention)
     torch.nn.Module.__init__(attention)
     attention.prefix = "test.layer"
     attention.rel_extent = rel_extent
     attention.head_dim = q.shape[-1]
+    attention.num_heads = q.shape[1]
+    attention.num_kv_heads = case["key_cache"].shape[2]
+    attention.is_local = local_extent is not None
+    attention.local_extent = local_extent
+    attention.kv_cache_torch_dtype = q.dtype
     attention.scaling = 1.0 / attention.head_dim
     attention.window_size = (-1, -1) if local_extent is None else (local_extent - 1, 0)
     attention._use_triton_attention = True
     attention.kv_cache = case["packed"]
-    assert attention.get_attn_backend() is FlashAttentionBackend
+    backend = attention.get_attn_backend()
+    assert backend is TritonAttentionBackend
+
+    # Use the selected backend's real builder, including the per-layer head
+    # count, instead of hand-constructing metadata from another backend.
+    vllm_config = MagicMock()
+    vllm_config.model_config.get_num_attention_heads.return_value = (
+        2 * attention.num_heads
+    )
+    vllm_config.model_config.get_num_kv_heads.return_value = attention.num_kv_heads
+    vllm_config.model_config.get_head_size.return_value = attention.head_dim
+    vllm_config.model_config.rswa_window = None
+    vllm_config.compilation_config.static_forward_context = {
+        attention.prefix: attention
+    }
+    vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+    vllm_config.cache_config.block_size = case["key_cache"].shape[1]
+    builder = backend.get_builder_cls()(
+        attention.get_kv_cache_spec(vllm_config),
+        [attention.prefix],
+        vllm_config,
+        q.device,
+    )
+    metadata = builder.build(
+        0,
+        CommonAttentionMetadata(
+            query_start_loc=case["query_start_loc"],
+            query_start_loc_cpu=case["query_start_loc"].cpu(),
+            seq_lens=case["seq_lens"],
+            num_reqs=len(case["q_lens"]),
+            num_actual_tokens=q.shape[0],
+            max_query_len=max(case["q_lens"]),
+            max_seq_len=max(case["kv_lens"]),
+            block_table_tensor=case["block_table"],
+            slot_mapping=flex_metadata.slot_mapping,
+        ),
+    )
+    assert isinstance(metadata, TritonAttentionMetadata)
+    assert builder.num_heads_q == attention.num_heads
     monkeypatch.setattr(
         "vllm.models.inkling.nvidia.attention.get_forward_context",
         lambda: SimpleNamespace(attn_metadata={attention.prefix: metadata}),

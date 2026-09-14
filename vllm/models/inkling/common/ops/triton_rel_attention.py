@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import torch
 
-from vllm.models.inkling.common.triton_rel_attention_decode import (
+from vllm.models.inkling.common.ops.triton_rel_attention_decode import (
     inkling_rel_attention_split_kv_decode,
     use_split_kv_decode,
 )
