@@ -861,8 +861,19 @@ class MoRIIOConnectorScheduler:
                     req, existing_blocks = self._reqs_need_pending_save[req_id]
                     updated_blocks = list(existing_blocks) + (block_ids)
                     self._reqs_need_pending_save[req_id] = (req, updated_blocks)
+                    # Detect the final prefill chunk by prompt-token progress,
+                    # not by block count. Speculative lookahead blocks inflate
+                    # the accumulated block tally, so a block-count test could
+                    # flag an earlier chunk as final when the last real chunk is
+                    # <= num_lookahead tokens. num_computed_tokens is advanced in
+                    # _update_after_schedule AFTER build_connector_meta runs, so
+                    # it excludes the current chunk here — add this step's
+                    # scheduled tokens to get the post-chunk prompt progress.
+                    num_scheduled = scheduler_output.num_scheduled_tokens.get(
+                        req_id, 0
+                    )
                     if (
-                        len(self._reqs_need_pending_save[req_id][1]) * self.block_size
+                        req.num_computed_tokens + num_scheduled
                         >= req.num_prompt_tokens
                     ):
                         # Final chunk: live kv_transfer_params may be cleared,
@@ -895,7 +906,12 @@ class MoRIIOConnectorScheduler:
 
         for req_id, (req, block_ids) in self._reqs_need_save.items():
             kv_params = self._req_kv_params.get(req_id, req.kv_transfer_params or {})
-            if req.num_prompt_tokens > len(block_ids) * self.block_size:
+            # Final-chunk detection by prompt-token progress (lookahead-immune),
+            # not block count. num_computed_tokens excludes the current chunk at
+            # build_connector_meta time (advanced later in _update_after_schedule),
+            # so add this step's scheduled tokens.
+            num_scheduled = scheduler_output.num_scheduled_tokens.get(req_id, 0)
+            if req.num_computed_tokens + num_scheduled < req.num_prompt_tokens:
                 # not last chunk prefill
                 self._reqs_need_pending_save[req_id] = (req, block_ids)
                 continue
