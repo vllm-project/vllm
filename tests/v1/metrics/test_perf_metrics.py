@@ -1629,12 +1629,80 @@ def test_attention_metrics_hybrid_sliding_window_per_gpu():
     pp_flops = pp_metrics.get_num_flops_breakdown(ctx, per_gpu=True)
     pp_read_bytes = pp_metrics.get_read_bytes_breakdown(ctx, per_gpu=True)
 
-    # Under PP=2, 30 layers -> 15 layers per GPU.
-    # SWA layers = round(15 * 15 / 30) = 8, Full layers = 15 - 8 = 7.
-    # Total attention layers = 7 + 8 = 15, preserving L_full + L_swa == L.
+    # Under PP=2, each global count is halved: 30 layers -> 15 per GPU, and the
+    # 15 SWA / 15 full split becomes 7.5 each. Gemma 2 alternates, so an even
+    # split is the correct average stage; deriving it after reducing L instead
+    # produced a lopsided 8/7.
     q = pp_metrics.num_attention_heads
     d = pp_metrics.head_dim
-    expected_pp_attn = 2 * q * d * (7 * 4096 + 8 * sw)
+    expected_pp_attn = int(2 * q * d * (7.5 * 4096 + 7.5 * sw))
     assert pp_flops["attn_qk"] == expected_pp_attn
     assert pp_flops["attn_av"] == expected_pp_attn
     assert "attn_input" in pp_read_bytes
+
+
+def test_attention_metrics_minority_swa_survives_pipeline_parallelism():
+    """A minority SWA sublayer must not round away under PP.
+
+    Regression test for a 6-layer model with a single sliding-window layer at
+    pp_size=2: deriving the split after reducing L gave
+    round(3 * 1 / 6) == 0, billing all three per-GPU layers as full attention
+    and dropping the sliding-window contribution entirely.
+    """
+    sw = 512
+    context_len = 4096
+    hf_config = Qwen3Config(
+        hidden_size=2048,
+        num_attention_heads=16,
+        num_key_value_heads=16,
+        num_hidden_layers=6,
+    )
+    hf_config.sliding_window = sw
+    hf_config.layer_types = ["sliding_attention"] + ["full_attention"] * 5
+
+    pp_vllm = create_mock_vllm_config(hf_config, pipeline_parallel_size=2)
+    pp_metrics = AttentionMetrics.from_vllm_config(pp_vllm)
+    assert pp_metrics.num_swa_layers == 1
+
+    ctx = ExecutionContext.from_single_request(
+        num_tokens=1, context_len=context_len, is_prefill=False
+    )
+    pp_flops = pp_metrics.get_num_flops_breakdown(ctx, per_gpu=True)
+
+    # 5 full and 1 SWA layer, each halved by PP=2: 2.5 full and 0.5 SWA.
+    q = pp_metrics.num_attention_heads
+    d = pp_metrics.head_dim
+    expected = int(2 * q * d * (2.5 * context_len + 0.5 * sw))
+    assert pp_flops["attn_qk"] == expected
+    assert pp_flops["attn_av"] == expected
+
+    # The sliding-window layer must change the result, i.e. it is not being
+    # billed at the full context length.
+    all_full = int(2 * q * d * 3 * context_len)
+    assert pp_flops["attn_qk"] < all_full
+
+
+def test_attention_metrics_per_gpu_layers_sum_to_whole_model():
+    """Per-GPU counts times pp_size must account for every layer.
+
+    Flooring the layer count per stage silently drops the remainder, so a model
+    whose layers do not divide evenly across stages under-reports its FLOPs.
+    """
+    hf_config = Qwen3Config(
+        hidden_size=2048,
+        num_attention_heads=16,
+        num_key_value_heads=16,
+        num_hidden_layers=7,
+    )
+    pp_size = 2
+    vllm_config = create_mock_vllm_config(hf_config, pipeline_parallel_size=pp_size)
+    metrics = AttentionMetrics.from_vllm_config(vllm_config)
+
+    ctx = ExecutionContext.from_single_request(
+        num_tokens=8, context_len=1024, is_prefill=True
+    )
+    per_gpu = metrics.get_num_flops_breakdown(ctx, per_gpu=True)
+    whole = metrics.get_num_flops_breakdown(ctx, per_gpu=False)
+
+    for key, value in whole.items():
+        assert per_gpu[key] * pp_size == pytest.approx(value, rel=1e-9)

@@ -546,15 +546,42 @@ class AttentionMetrics(ComponentMetrics):
             AttentionQuantizationConfigParser(),
         )
 
+    def _layer_counts(self, per_gpu: bool) -> tuple[float, float, float]:
+        """Return ``(L, L_full, L_swa)``, the layer counts to bill for.
+
+        Per-GPU counts divide each global count by ``pp_size`` independently.
+        Deriving the sublayer split after reducing ``L`` instead rounds a
+        minority sublayer away: a 6-layer model with 1 sliding-window layer at
+        ``pp_size=2`` yields ``round(3 * 1 / 6) == 0``, billing all three layers
+        as full attention. Dividing each count separately keeps
+        ``L_full + L_swa == L`` and keeps the per-GPU values summing back to the
+        whole model across stages.
+
+        The counts are fractional because these metrics are built from config
+        alone (see ``from_vllm_config``); no pipeline rank is available, so a
+        per-GPU figure is the average stage rather than a specific one. A model
+        whose layers do not divide evenly across stages has no single integer
+        answer here.
+        """
+        L = float(self.num_hidden_layers)
+        L_swa = float(self.num_swa_layers)
+        L_full = L - L_swa
+
+        if per_gpu:
+            L /= self.pp_size
+            L_swa /= self.pp_size
+            L_full /= self.pp_size
+
+        return L, L_full, L_swa
+
     def get_num_flops_breakdown(
         self, ctx: ExecutionContext, per_gpu: bool = True
     ) -> dict[str, int]:
         """Compute FLOPs breakdown for attention layers.
 
         Accounts for hybrid models by splitting total layers into full-attention
-        (L_full) and sliding-window (L_swa) sublayers. When per_gpu=True, divides
-        L by pp_size first, then derives L_swa proportionally to preserve the
-        L_full + L_swa == L invariant under integer division.
+        (L_full) and sliding-window (L_swa) sublayers. See ``_layer_counts`` for
+        how those are scaled under pipeline parallelism.
 
         Args:
             ctx: Execution context describing the current batch.
@@ -563,8 +590,7 @@ class AttentionMetrics(ComponentMetrics):
         Returns:
             Dict with keys: qkv_proj, out_proj, attn_qk, attn_av.
         """
-        L, D, q, kv, d = (
-            self.num_hidden_layers,
+        D, q, kv, d = (
             self.hidden_size,
             self.num_attention_heads,
             self.num_key_value_heads,
@@ -573,24 +599,20 @@ class AttentionMetrics(ComponentMetrics):
         T = ctx.total_num_tokens()
         TC_full = ctx.total_token_context_product()
 
-        L_swa = self.num_swa_layers
-        L_full = L - L_swa
+        L, L_full, L_swa = self._layer_counts(per_gpu)
 
         if per_gpu:
-            L //= self.pp_size
-            L_swa = round(L * self.num_swa_layers / self.num_hidden_layers)
-            L_full = L - L_swa
             # tensor parallel along heads
             q = max(1, q // self.tp_size)
             kv = max(1, kv // self.tp_size)
 
         flops = {
-            "qkv_proj": 2 * T * D * (q + 2 * kv) * d * L,
-            "out_proj": 2 * T * D * q * d * L,
+            "qkv_proj": int(2 * T * D * (q + 2 * kv) * d * L),
+            "out_proj": int(2 * T * D * q * d * L),
         }
 
-        attn_qk = 0
-        attn_av = 0
+        attn_qk = 0.0
+        attn_av = 0.0
         if L_full > 0:
             attn_qk += 2 * q * TC_full * d * L_full
             attn_av += 2 * q * TC_full * d * L_full
@@ -600,8 +622,8 @@ class AttentionMetrics(ComponentMetrics):
             attn_qk += 2 * q * TC_swa * d * L_swa
             attn_av += 2 * q * TC_swa * d * L_swa
 
-        flops["attn_qk"] = attn_qk
-        flops["attn_av"] = attn_av
+        flops["attn_qk"] = int(attn_qk)
+        flops["attn_av"] = int(attn_av)
 
         return flops
 
@@ -610,9 +632,8 @@ class AttentionMetrics(ComponentMetrics):
     ) -> dict[str, int]:
         """Compute read-memory-traffic breakdown for attention layers.
 
-        Splits layers into full-attention and sliding-window sublayers using
-        the same proportional derivation as get_num_flops_breakdown to preserve
-        the L_full + L_swa == L invariant under pipeline parallelism.
+        Splits layers into full-attention and sliding-window sublayers using the
+        same counts as get_num_flops_breakdown; see ``_layer_counts``.
 
         Args:
             ctx: Execution context describing the current batch.
@@ -622,8 +643,7 @@ class AttentionMetrics(ComponentMetrics):
             Dict with keys: qkv_input, qkv_weight, attn_input (conditional),
             out_input, out_weight.
         """
-        L, D, q, kv, d = (
-            self.num_hidden_layers,
+        D, q, kv, d = (
             self.hidden_size,
             self.num_attention_heads,
             self.num_key_value_heads,
@@ -631,23 +651,19 @@ class AttentionMetrics(ComponentMetrics):
         )
         T = ctx.total_num_tokens()
 
-        L_swa = self.num_swa_layers
-        L_full = L - L_swa
+        L, L_full, L_swa = self._layer_counts(per_gpu)
 
         if per_gpu:
-            L //= self.pp_size
-            L_swa = round(L * self.num_swa_layers / self.num_hidden_layers)
-            L_full = L - L_swa
             # tensor parallel along heads
             q = max(1, q // self.tp_size)
             kv = max(1, kv // self.tp_size)
 
         read_bytes = {}
 
-        read_bytes["qkv_input"] = T * D * self.activation_byte_size * L
+        read_bytes["qkv_input"] = int(T * D * self.activation_byte_size * L)
         read_bytes["qkv_weight"] = int(D * (q + 2 * kv) * d * self.weight_byte_size * L)
 
-        attn_input = 0
+        attn_input = 0.0
 
         # Full attention layers
         if L_full > 0:
@@ -689,9 +705,9 @@ class AttentionMetrics(ComponentMetrics):
                 )
 
         if ctx.prefill_num_tokens > 0 or ctx.decode_num_tokens > 0:
-            read_bytes["attn_input"] = attn_input
+            read_bytes["attn_input"] = int(attn_input)
 
-        read_bytes["out_input"] = T * q * d * self.activation_byte_size * L
+        read_bytes["out_input"] = int(T * q * d * self.activation_byte_size * L)
         read_bytes["out_weight"] = int(q * d * D * self.weight_byte_size * L)
 
         return read_bytes
@@ -699,9 +715,13 @@ class AttentionMetrics(ComponentMetrics):
     def get_write_bytes_breakdown(
         self, ctx: ExecutionContext, per_gpu: bool = True
     ) -> dict[str, int]:
-        """Calculate write memory traffic for attention layers."""
-        L, D, q, kv, d = (
-            self.num_hidden_layers,
+        """Calculate write memory traffic for attention layers.
+
+        Writes do not depend on the attention window, so only the total layer
+        count is needed; it comes from ``_layer_counts`` so all three breakdowns
+        bill the same number of layers.
+        """
+        D, q, kv, d = (
             self.hidden_size,
             self.num_attention_heads,
             self.num_key_value_heads,
@@ -709,16 +729,17 @@ class AttentionMetrics(ComponentMetrics):
         )
         T = ctx.total_num_tokens()
 
+        L, _, _ = self._layer_counts(per_gpu)
+
         if per_gpu:
-            L //= self.pp_size
             # tensor parallel along heads
             q = max(1, q // self.tp_size)
             kv = max(1, kv // self.tp_size)
 
         return {
-            "qkv_output": T * (q + 2 * kv) * d * self.activation_byte_size * L,
-            "kv_cache": 2 * T * kv * d * self.cache_byte_size * L,
-            "out_output": T * D * self.activation_byte_size * L,
+            "qkv_output": int(T * (q + 2 * kv) * d * self.activation_byte_size * L),
+            "kv_cache": int(2 * T * kv * d * self.cache_byte_size * L),
+            "out_output": int(T * D * self.activation_byte_size * L),
         }
 
 
