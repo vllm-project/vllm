@@ -1212,12 +1212,27 @@ def _get_kv_cache_groups_glm5_next(
         for name, spec in kv_cache_spec.items()
         if not isinstance(spec, (MambaSpec, KpoolTailSpec))
     }
-    if not mamba_specs or not all(
-        type(spec) is MLAAttentionSpec for spec in attn_specs.values()
-    ):
+    foreign_specs = {
+        name: spec
+        for name, spec in attn_specs.items()
+        if type(spec) is not MLAAttentionSpec
+    }
+    mla_specs = cast(
+        dict[str, MLAAttentionSpec],
+        {k: v for k, v in attn_specs.items() if k not in foreign_specs},
+    )
+    foreign_group: KVCacheGroupSpec | None = None
+    if foreign_specs:
+        # Plain attention layers from an attached draft model keep their own
+        # page geometry in a separate group.
+        if not all(isinstance(spec, AttentionSpec) for spec in foreign_specs.values()):
+            return None
+        foreign_uniform = UniformTypeKVCacheSpecs.from_specs(foreign_specs)
+        if foreign_uniform is None:
+            return None
+        foreign_group = KVCacheGroupSpec(list(foreign_specs), foreign_uniform)
+    if not mamba_specs:
         return None
-
-    mla_specs = cast(dict[str, MLAAttentionSpec], attn_specs)
     idx_pages = {
         spec.page_size_bytes for spec in mla_specs.values() if spec.tokens_per_state > 1
     }
@@ -1230,7 +1245,7 @@ def _get_kv_cache_groups_glm5_next(
     mla_pages = {mla_specs[name].page_size_bytes for name in mla_names}
     assert len(mla_pages) == 1
     mla_page = mla_pages.pop()
-    uniform_spec = UniformTypeKVCacheSpecs.from_specs(attn_specs)
+    uniform_spec = UniformTypeKVCacheSpecs.from_specs(mla_specs)
     assert uniform_spec is not None
 
     tail_group: KVCacheGroupSpec | None = None
@@ -1268,8 +1283,9 @@ def _get_kv_cache_groups_glm5_next(
         mamba_grouped_names[index % num_groups].append(name)
 
     return (
-        [KVCacheGroupSpec(list(attn_specs), uniform_spec)]
+        [KVCacheGroupSpec(list(mla_specs), uniform_spec)]
         + ([tail_group] if tail_group is not None else [])
+        + ([foreign_group] if foreign_group is not None else [])
         + create_kv_cache_group_specs(padded_specs, mamba_grouped_names)
     )
 
@@ -1286,6 +1302,7 @@ def _glm5_next_tensor_layout(
         int,
         list[str],
         int,
+        KVCacheGroupSpec | None,
     ]
     | None
 ):
@@ -1300,15 +1317,21 @@ def _glm5_next_tensor_layout(
     ]
     attn_group: KVCacheGroupSpec | None = None
     tail_group: KVCacheGroupSpec | None = None
+    foreign_groups: list[KVCacheGroupSpec] = []
     for group in uniform_groups:
         inner = cast(UniformTypeKVCacheSpecs, group.kv_cache_spec).kv_cache_specs
         if all(type(spec) is MLAAttentionSpec for spec in inner.values()):
             attn_group = group
         elif all(isinstance(spec, KpoolTailSpec) for spec in inner.values()):
             tail_group = group
+        elif all(isinstance(spec, AttentionSpec) for spec in inner.values()):
+            # Plain attention layers of an attached draft model.
+            foreign_groups.append(group)
     if attn_group is None or not mamba_groups:
         return None
     if len(uniform_groups) + len(mamba_groups) != len(kv_cache_groups):
+        return None
+    if len(foreign_groups) > 1:
         return None
 
     attn_uniform = cast(UniformTypeKVCacheSpecs, attn_group.kv_cache_spec)
@@ -1359,6 +1382,16 @@ def _glm5_next_tensor_layout(
         idx_page,
         tail_names,
         tail_page,
+        foreign_groups[0] if foreign_groups else None,
+    )
+
+
+def _glm5_foreign_bytes_per_block(foreign_group: KVCacheGroupSpec | None) -> int:
+    if foreign_group is None:
+        return 0
+    return sum(
+        _get_per_layer_spec(foreign_group, name).page_size_bytes
+        for name in foreign_group.layer_names
     )
 
 
@@ -1590,8 +1623,12 @@ def _get_kv_cache_bytes_per_block(
 ) -> int:
     """Return the largest cache group's bytes per block."""
     if (glm5_layout := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
-        _, _, mla_names, idx_names, mla_page, idx_page, _, _ = glm5_layout
-        return len(mla_names) * mla_page + len(idx_names) * idx_page
+        _, _, mla_names, idx_names, mla_page, idx_page, _, _, foreign = glm5_layout
+        return (
+            len(mla_names) * mla_page
+            + len(idx_names) * idx_page
+            + _glm5_foreign_bytes_per_block(foreign)
+        )
 
     bytes_per_block = max(
         sum(
@@ -1689,8 +1726,13 @@ def get_kv_cache_config_from_groups(
             idx_page,
             tail_names,
             _,
+            foreign_group,
         ) = glm5_layout
-        bytes_per_block = len(mla_names) * mla_page + len(idx_names) * idx_page
+        bytes_per_block = (
+            len(mla_names) * mla_page
+            + len(idx_names) * idx_page
+            + _glm5_foreign_bytes_per_block(foreign_group)
+        )
         num_blocks = may_override_num_blocks(
             vllm_config, available_memory // bytes_per_block
         )
@@ -1732,6 +1774,19 @@ def get_kv_cache_config_from_groups(
                     UniformTypeKVCacheSpecs, tail_group.kv_cache_spec
                 ).kv_cache_specs
                 add_tensor(tail_name, tail_specs[tail_name], offset)
+
+        if foreign_group is not None:
+            # Draft layers get their own layer-outermost region past the
+            # target's slots; their group owns its block ids independently.
+            foreign_specs = cast(
+                UniformTypeKVCacheSpecs, foreign_group.kv_cache_spec
+            ).kv_cache_specs
+            offset = (len(mla_names) * mla_page + len(idx_names) * idx_page) * (
+                num_blocks
+            )
+            for name in foreign_group.layer_names:
+                add_tensor(name, foreign_specs[name], offset)
+                offset += foreign_specs[name].page_size_bytes * num_blocks
 
         return KVCacheConfig(
             num_blocks=num_blocks,
@@ -2396,6 +2451,7 @@ def _max_memory_usage_bytes_from_groups(
             idx_page,
             tail_names,
             _,
+            foreign_group,
         ) = glm5_layout
         uniform_spec = cast(UniformTypeKVCacheSpecs, attn_group.kv_cache_spec)
         total_blocks = uniform_spec.max_memory_usage_pages(vllm_config)
@@ -2408,7 +2464,15 @@ def _max_memory_usage_bytes_from_groups(
         )
         if tail_names:
             total_blocks += 1
-        return total_blocks * (len(mla_names) * mla_page + len(idx_names) * idx_page)
+        if foreign_group is not None:
+            total_blocks += cast(
+                UniformTypeKVCacheSpecs, foreign_group.kv_cache_spec
+            ).max_memory_usage_pages(vllm_config)
+        return total_blocks * (
+            len(mla_names) * mla_page
+            + len(idx_names) * idx_page
+            + _glm5_foreign_bytes_per_block(foreign_group)
+        )
 
     bytes_per_block = _pool_bytes_per_block(kv_cache_groups)
     total_blocks = 0

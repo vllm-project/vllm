@@ -3416,3 +3416,21 @@ def test_revision_resolved_when_weights_match_model(mock_resolve):
     assert isinstance(config.revision, ResolvedRevision)
     assert config.revision.resolved == REVISION
     mock_resolve.assert_any_call(model, None, config.hf_token)
+
+
+@pytest.mark.parametrize(
+    ("draft_is_moe", "expected_ep"),
+    [(True, True), (False, False)],
+)
+def test_draft_parallel_config_inherits_ep_only_for_moe_drafters(
+    draft_is_moe: bool, expected_ep: bool
+):
+    """A dense drafter (DFlash / EAGLE head) has no experts to shard, so it must
+    not inherit expert parallelism from an MoE target."""
+    target_parallel_config = ParallelConfig(
+        tensor_parallel_size=1, enable_expert_parallel=True
+    )
+    draft_parallel_config = SpeculativeConfig.create_draft_parallel_config(
+        target_parallel_config, 1, draft_is_moe=draft_is_moe
+    )
+    assert draft_parallel_config.enable_expert_parallel is expected_ep
