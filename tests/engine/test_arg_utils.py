@@ -4,12 +4,15 @@
 import json
 from argparse import ArgumentError
 from contextlib import AbstractContextManager, nullcontext
+from dataclasses import dataclass, field, make_dataclass
 from typing import Annotated, Literal
 
 import pytest
 from pydantic import Field
 
 from vllm.config import AttentionConfig, CompilationConfig, ModelConfig, config
+from vllm.config_specs import CLI
+from vllm.config_specs.cli import add_cli_args as add_declared_cli_args
 from vllm.engine.arg_utils import (
     EngineArgs,
     _expand_json_human_readable_numbers,
@@ -319,6 +322,82 @@ def test_hf_token_get_kwargs():
     assert kwargs["nargs"] == "?"
     assert kwargs["const"] is True
     assert "action" not in kwargs
+
+
+@pytest.mark.parametrize(
+    ("annotation", "cli_args", "expected"),
+    [
+        (bool, ["--value"], True),
+        (int | None, ["--value", "42"], 42),
+        (Literal["a", "b"], ["--value", "b"], "b"),
+        (Literal[1, 2], ["--value", "2"], 2),
+        (str | type[object] | None, ["--value", "pkg.Scheduler"], "pkg.Scheduler"),
+    ],
+)
+def test_declared_cli_supported_annotations(annotation, cli_args, expected):
+    declaration = make_dataclass(
+        "Declaration",
+        [("value", annotation, field(default=None, metadata={"cli": CLI(0)}))],
+    )
+
+    parser = FlexibleArgumentParser()
+    add_declared_cli_args(
+        parser,
+        declaration,
+        title="declaration",
+        human_readable_int=int,
+        optional_type=optional_type,
+    )
+
+    assert parser.parse_args(cli_args).value == expected
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        ModelConfig.__annotations__["hf_token"],
+        Literal["a", "b"] | None,
+        Literal[True, False],
+        list[str],
+        Annotated[int, []],
+    ],
+)
+def test_declared_cli_rejects_unsupported_annotations(annotation):
+    declaration = make_dataclass(
+        "Declaration",
+        [("value", annotation, field(default=None, metadata={"cli": CLI(0)}))],
+    )
+
+    with pytest.raises(ValueError, match=r"annotation.*Declaration\.value"):
+        add_declared_cli_args(
+            FlexibleArgumentParser(),
+            declaration,
+            title="declaration",
+            human_readable_int=int,
+            optional_type=optional_type,
+        )
+
+
+def test_declared_cli_invalid_group_is_not_partially_registered():
+    @dataclass
+    class Declaration:
+        valid: int = field(default=1, metadata={"cli": CLI(0)})
+        invalid: list[str] = field(default_factory=list, metadata={"cli": CLI(1)})
+
+    parser = FlexibleArgumentParser()
+    help_before = parser.format_help()
+
+    with pytest.raises(ValueError):
+        add_declared_cli_args(
+            parser,
+            Declaration,
+            title="declaration",
+            human_readable_int=int,
+            optional_type=optional_type,
+        )
+
+    assert parser.format_help() == help_before
+    assert "--valid" not in parser.format_help()
 
 
 @pytest.mark.parametrize(
