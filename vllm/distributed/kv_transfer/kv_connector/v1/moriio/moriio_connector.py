@@ -1226,6 +1226,8 @@ class MoRIIOConnectorWorker:
 
         # KV Caches and moriio tracking data.
         self.kv_caches: dict[str, torch.Tensor] = {}
+        self.kv_layer_mr_offset: dict[str, int] = {}
+        self.layer_base_addr_index: dict[str, int] = {}
 
         # Map of engine_id -> kv_caches_base_addr. For TP case, each local
         # rank will still only pull from a single remote TP worker.
@@ -1695,6 +1697,50 @@ class MoRIIOConnectorWorker:
             self.layer_to_spec,
         )
 
+    def _build_shared_kv_mr(
+        self, kv_caches: dict[str, torch.Tensor]
+    ) -> tuple[torch.Tensor, dict[str, int]]:
+        page_size = 4096
+        backing = next(iter(kv_caches.values())).view(torch.uint8)
+        nbytes = backing.untyped_storage().nbytes()
+        base = torch.as_strided(backing, (nbytes,), (1,), 0)
+        ptr = base.data_ptr()
+        slack = ptr % page_size
+        end = 0
+        for layer_name in kv_caches:
+            _, region_len = next(
+                iter(self._iter_layer_registration_regions(layer_name))
+            )
+            end = max(end, kv_caches[layer_name].data_ptr() - ptr + region_len)
+        reg_nbytes = ((slack + end + page_size - 1) // page_size) * page_size
+        if reg_nbytes > nbytes:
+            raise ValueError(
+                f"shared KV backing too small for page-aligned MR: "
+                f"need {reg_nbytes}, have {nbytes}"
+            )
+        reg = torch.as_strided(base, (reg_nbytes,), (1,), 0 if slack == 0 else -slack)
+        mr_ptr = reg.data_ptr()
+        return reg, {
+            name: cache.data_ptr() - mr_ptr for name, cache in kv_caches.items()
+        }
+
+    def _remote_layer_mr_offset(
+        self,
+        layer_name: str,
+        remote_moriio_meta: MoRIIOAgentMetadata,
+        remote_engine_id: EngineId | None,
+    ) -> int:
+        if not self.kv_layer_mr_offset or not remote_engine_id:
+            return 0
+        idx = self.layer_base_addr_index[layer_name]
+        metas = self.layer_name_to_remote_kv_cache_metadata.get(
+            remote_engine_id, {}
+        ).get(layer_name)
+        if not metas or idx >= len(remote_moriio_meta.kv_caches_base_addr):
+            return 0
+        mr_base = self.moriio_wrapper.get_unpack_memory_metadata(metas[0]).data
+        return remote_moriio_meta.kv_caches_base_addr[idx] - mr_base
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in moriio."""
 
@@ -1754,8 +1800,11 @@ class MoRIIOConnectorWorker:
         self.dst_num_blocks[self.engine_id] = self.num_blocks
         kv_caches_base_addr = []
         caches_data = []
+        self.layer_base_addr_index = {}
+        base_addr_idx = 0
 
         for layer_name in kv_caches:
+            self.layer_base_addr_index[layer_name] = base_addr_idx
             geometry = self._get_layer_transfer_geometry(layer_name)
             if geometry.block_size != self.block_size:
                 raise ValueError(
@@ -1767,12 +1816,21 @@ class MoRIIOConnectorWorker:
                 base_addr = cache.data_ptr()
                 caches_data.append((base_addr, region_len, cache.device.index, ""))
                 kv_caches_base_addr.append(base_addr)
+                base_addr_idx += 1
+
+        shared_backing = len({id(t.untyped_storage()) for t in kv_caches.values()}) == 1
+        shared_mr = None
+        if shared_backing:
+            reg_tensor, self.kv_layer_mr_offset = self._build_shared_kv_mr(kv_caches)
+            shared_mr = self.moriio_wrapper.register_local_tensor(reg_tensor)
 
         for layer_name, kv_cache in kv_caches.items():
             if layer_name not in self.layer_name_to_local_kv_cache_metadata:
                 self.layer_name_to_local_kv_cache_metadata[layer_name] = []
 
-            moriio_mem_metadata = self.moriio_wrapper.register_local_tensor(kv_cache)
+            moriio_mem_metadata = shared_mr or (
+                self.moriio_wrapper.register_local_tensor(kv_cache)
+            )
             self.layer_name_to_local_kv_cache_metadata[layer_name].append(
                 moriio_mem_metadata
             )
@@ -2488,6 +2546,7 @@ class MoRIIOConnectorWorker:
         remote_block_ids: list[int],
         remote_moriio_meta: MoRIIOAgentMetadata,
         remote_tp_size: int | None = None,
+        remote_engine_id: EngineId | None = None,
     ) -> tuple[list[int], list[int], list[int]]:
         """Compute transfer offsets for block data.
 
@@ -2509,7 +2568,7 @@ class MoRIIOConnectorWorker:
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             is_mla=self._is_mla_cache_layer(layer_name),
         )
-        return compute_block_transfer_offsets(
+        local, remote, sizes = compute_block_transfer_offsets(
             layer_name=layer_name,
             kv_cache=self.kv_caches[layer_name],
             layer_to_spec=self.layer_to_spec,
@@ -2520,6 +2579,14 @@ class MoRIIOConnectorWorker:
                 local, remote, sizes, assume_sorted=False
             ),
         )
+        if self.kv_layer_mr_offset:
+            local_off = self.kv_layer_mr_offset[layer_name]
+            remote_off = self._remote_layer_mr_offset(
+                layer_name, remote_moriio_meta, remote_engine_id
+            )
+            local = [x + local_off for x in local]
+            remote = [x + remote_off for x in remote]
+        return local, remote, sizes
 
     @staticmethod
     def _is_sq_full_status(status) -> bool:
@@ -2592,6 +2659,7 @@ class MoRIIOConnectorWorker:
                 remote_block_ids,
                 remote_moriio_meta,
                 remote_tp_size=remote_tp_size,
+                remote_engine_id=remote_dp_engine_id,
             )
             # TODO : apply multi-session batch-read when moriio support it
             #

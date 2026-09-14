@@ -30,7 +30,7 @@ vllm serve --config config.yaml
 
 | Model | Architecture | Supported | Recipe |
 | ------------------------------------ | ---------------------------------------- | --------- | ------ |
-| openai/gpt-oss-20b | GptOssForCausalLM | ✅ | — |
+| openai/gpt-oss-20b | GptOssForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/openai/gpt-oss-20b?hardware=xeon6) |
 | meta-llama/Llama-3.1-8B | LlamaForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/meta-llama/Llama-3.1-8B?hardware=xeon6) |
 | meta-llama/Llama-3.1-8B-Instruct | LlamaForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/meta-llama/Llama-3.1-8B-Instruct?hardware=xeon6) |
 | meta-llama/Llama-3.2-1B | LlamaForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/meta-llama/Llama-3.2-1B?hardware=xeon6) |
@@ -48,13 +48,13 @@ vllm serve --config config.yaml
 | TheBloke/TinyLlama-1.1B-Chat-v1.0-AWQ | LlamaForCausalLM | ✅ | — |
 | TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ | LlamaForCausalLM | ✅ | — |
 | ibm-granite/granite-3.2-2b-instruct | GraniteForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/ibm-granite/granite-3.2-2b-instruct?hardware=xeon6) |
-| Qwen/Qwen3-1.7B | Qwen3ForCausalLM | ✅ | — |
+| Qwen/Qwen3-1.7B | Qwen3ForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/Qwen/Qwen3-1.7B?hardware=xeon6) |
 | Qwen/Qwen3-4B | Qwen3ForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/Qwen/Qwen3-4B?hardware=xeon6) |
-| Qwen/Qwen3-8B | Qwen3ForCausalLM | ✅ | — |
+| Qwen/Qwen3-8B | Qwen3ForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/Qwen/Qwen3-8B?hardware=xeon6) |
 | Qwen/Qwen3-14B | Qwen3ForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/Qwen/Qwen3-14B?hardware=xeon6) |
 | Qwen/Qwen3-14B-FP8 | Qwen3ForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/Qwen/Qwen3-14B?hardware=xeon6&variant=fp8) |
 | Qwen/Qwen3-14B-AWQ | Qwen3ForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/Qwen/Qwen3-14B?hardware=xeon6&variant=awq) |
-| Qwen/Qwen3-30B-A3B | Qwen3MoeForCausalLM | ✅ | — |
+| Qwen/Qwen3-30B-A3B | Qwen3MoeForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/Qwen/Qwen3-30B-A3B?hardware=xeon6) |
 | Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 | Qwen3MoeForCausalLM | ✅ | — |
 | Qwen/QwQ-32B | Qwen2ForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/Qwen/QwQ-32B?hardware=xeon6) |
 | Qwen/QwQ-32B-AWQ | Qwen2ForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/Qwen/QwQ-32B?hardware=xeon6&variant=awq) |

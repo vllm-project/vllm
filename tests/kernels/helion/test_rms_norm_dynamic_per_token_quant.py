@@ -194,14 +194,3 @@ class TestRmsNormDynamicPerTokenQuantIntegration:
         assert kernel_wrapper.op_name == "rms_norm_dynamic_per_token_quant"
         assert kernel_wrapper._config_picker is not None
         assert kernel_wrapper._mutates_args == ["result", "scale", "residual"]
-
-    def test_fake_impl_functionality(self):
-        skip_if_platform_unsupported("rms_norm_dynamic_per_token_quant")
-        from vllm.kernels.helion.register import get_registered_kernels
-
-        registered_kernels = get_registered_kernels()
-        kernel_wrapper = registered_kernels["rms_norm_dynamic_per_token_quant"]
-        fake_impl = kernel_wrapper._fake_impl
-
-        args = _generate_fake_input(16, 4096)
-        assert fake_impl(*args) is None

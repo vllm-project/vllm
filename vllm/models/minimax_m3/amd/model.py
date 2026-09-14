@@ -87,10 +87,24 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
+from vllm.models.minimax_m3.amd.indexer_aiter import (
+    MiniMaxM3AiterIndexer,
+    select_aiter_indexer_impl_cls,
+)
 from vllm.models.minimax_m3.amd.ops import (
     gemma_fused_add_rmsnorm,
     gemma_rmsnorm,
     swiglu_oai_split,
+)
+from vllm.models.minimax_m3.amd.ops.sparse_pa import (
+    ASM_PAGE_SIZE,
+    minimax_m3_alloc_sparse_block_table,
+    minimax_m3_sparse_block_page_stride,
+)
+from vllm.models.minimax_m3.amd.sparse_attention_msa import (
+    MiniMaxM3SparseAiterPADecodeMetadata,
+    MiniMaxM3SparseAiterPAImpl,
+    MiniMaxM3SparseAiterPAPrefillMetadata,
 )
 from vllm.models.minimax_m3.common.indexer import MiniMaxM3Indexer
 from vllm.models.minimax_m3.common.mm_preprocess import (
@@ -101,8 +115,10 @@ from vllm.models.minimax_m3.common.mm_preprocess import (
 from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3SparseBackend,
     MiniMaxM3SparseImpl,
+    MiniMaxM3SparseMetadata,
+    minimax_m3_rebase_slots_to_page16,
     minimax_m3_use_aiter_sparse_pa,
-    select_main_impl_cls,
+    select_main_backend_and_impl_cls,
 )
 from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLVisionModel
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -587,6 +603,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         prefix: str = "",
         cache_config: CacheConfig | None = None,
         topk_indices_buffer: torch.Tensor | None = None,
+        sparse_table_buffers: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -675,18 +692,45 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # attributes so FP8 KV reads can honor vLLM's per-layer descale contract.
         set_default_quant_scales(self, register_buffer=True)
 
+        # Indexer side-cache dtype, mirroring --kv-cache-dtype for the main cache
+        # (--attention-config '{"indexer_kv_dtype": ...}'). fp8 e4m3 is what the
+        # AITER indexer needs; bf16 keeps the Triton indexer.
+        self.indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(
+            "bf16"
+        )
+
         # Shared top-k buffer: the indexer writes the selected blocks into it and
         # the attend impl reads them back (no Python value crosses the break).
         self.topk_indices_buffer = topk_indices_buffer
-        self.attn_backend = MiniMaxM3SparseBackend
-        # Indexer and main attention are separate impls. On ROCm the SM100 gate
-        # is always False, so both pick Triton and the index cache stays bf16.
-        # impl is AttentionImplBase (broader than AttentionLayerBase's annotation).
-        self.impl: MiniMaxM3SparseImpl = select_main_impl_cls(  # type: ignore[assignment]
+        # Indexer and main attention are separate impls. The AITER indexer is
+        # ROCm-only, so it is selected here rather than inside the neutral
+        # MiniMaxM3Indexer, which knows nothing about it and would pick Triton.
+        indexer_impl_cls = select_aiter_indexer_impl_cls(
+            topk_blocks=sparse_cfg["sparse_topk_blocks"],
+            sparse_block_size=sparse_cfg["sparse_block_size"],
+            num_index_heads=self.num_idx_heads,
+            index_head_dim=self.idx_head_dim,
+            indexer_kv_dtype=self.indexer_kv_dtype,
+            score_type=sparse_cfg.get("sparse_score_type", "max"),
+        )
+        # The attend gate below needs this: an emitted table is what lets it
+        # serve more than one KV head per rank. Buffers to write the table into
+        # only arrive when the model already resolved the attend to the AITER
+        # path the table addresses, so that is not rechecked here.
+        self.indexer_emits_table = (
+            indexer_impl_cls is not None and sparse_table_buffers is not None
+        )
+        # The backend names the metadata builder, which for the AITER path is
+        # the one that rebases the block table the indexer's top-k resolves
+        # through, so both have to come from the same selection.
+        self.attn_backend, main_impl_cls = select_main_backend_and_impl_cls(
             topk_blocks=sparse_cfg["sparse_topk_blocks"],
             kv_cache_dtype=self.kv_cache_dtype,
             num_kv_heads=self.num_kv_heads,
-        )(
+            emits_sparse_block_table=self.indexer_emits_table,
+        )
+        # impl is AttentionImplBase (broader than AttentionLayerBase's annotation).
+        self.impl: MiniMaxM3SparseImpl = main_impl_cls(  # type: ignore[assignment]
             self.num_heads,
             self.head_dim,
             self.scaling,
@@ -695,13 +739,14 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             topk_blocks=sparse_cfg["sparse_topk_blocks"],
             sparse_block_size=sparse_cfg["sparse_block_size"],
         )
-        self.use_aiter_sparse_pa = minimax_m3_use_aiter_sparse_pa(self.num_kv_heads)
+        self.use_aiter_sparse_pa = minimax_m3_use_aiter_sparse_pa(
+            self.num_kv_heads, emits_sparse_block_table=self.indexer_emits_table
+        )
         self.kv_cache_k = torch.tensor([])
         self.kv_cache_v = torch.tensor([])
         self._aiter_sparse_pa_cache_data_ptr = 0
-        # Self-contained nn.Module: owns its side cache, selects its impl in init
-        # (Triton on ROCm, where the SM100 gate is always False).
-        self.indexer = MiniMaxM3Indexer(
+        self._aiter_sparse_pa_block_page_stride = 0
+        indexer_kwargs = dict(
             num_kv_heads=self.num_kv_heads,
             scale=self.scaling,
             topk_blocks=sparse_cfg["sparse_topk_blocks"],
@@ -713,8 +758,24 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             local_blocks=sparse_cfg.get("sparse_local_block", 0),
             score_type=sparse_cfg.get("sparse_score_type", "max"),
             cache_config=cache_config,
+            indexer_kv_dtype=self.indexer_kv_dtype,
             topk_indices_buffer=topk_indices_buffer,
         )
+        self.sparse_bt_buffer: torch.Tensor | None = None
+        self.sparse_ctx_buffer: torch.Tensor | None = None
+        if indexer_impl_cls is None:
+            # Self-contained nn.Module: owns its side cache, selects its impl.
+            self.indexer = MiniMaxM3Indexer(**indexer_kwargs)
+        else:
+            if self.indexer_emits_table:
+                assert sparse_table_buffers is not None
+                self.sparse_bt_buffer, self.sparse_ctx_buffer = sparse_table_buffers
+            self.indexer = MiniMaxM3AiterIndexer(
+                impl_cls=indexer_impl_cls,
+                sparse_bt_buffer=self.sparse_bt_buffer,
+                sparse_ctx_buffer=self.sparse_ctx_buffer,
+                **indexer_kwargs,
+            )
 
         # Register the main K/V cache so the KV-cache manager allocates it.
         compilation_config = vllm_config.compilation_config
@@ -755,34 +816,47 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         if is_quantized_kv_cache(self.kv_cache_dtype):
             kv_cache = kv_cache.view(self.impl.kv_cache_fp8_dtype)
         key_cache, value_cache = kv_cache.unbind(1)
-        if not key_cache.is_contiguous() or not value_cache.is_contiguous():
-            raise RuntimeError(
-                "MiniMax-M3 AITER sparse PA requires K/V-separated KV cache "
-                "storage. Set VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT=1 before "
-                "initializing the engine."
-            )
 
-        x = 16 // key_cache.element_size()
+        x = 16 // kv_cache.element_size()
         if self.head_dim % x != 0:
             raise RuntimeError(
                 "MiniMax-M3 AITER sparse PA requires head_dim divisible by "
                 f"16 / dtype_size, got head_dim={self.head_dim}, x={x}"
             )
-        num_blocks = key_cache.shape[0]
-        num_phys16 = num_blocks * 8
-        self.kv_cache_k = key_cache.view(
+
+        num_blocks, _, block_size, _ = kv_cache.shape
+        pages_in_side = block_size // 16
+        if key_cache.is_contiguous() and value_cache.is_contiguous():
+            k_src, v_src = key_cache, value_cache
+            block_pages, v_page_offset = pages_in_side, 0
+        elif kv_cache.is_contiguous():
+            k_src = v_src = kv_cache
+            block_pages, v_page_offset = 2 * pages_in_side, pages_in_side
+        else:
+            raise RuntimeError(
+                "MiniMax-M3 AITER sparse PA needs each K/V head slot stored as "
+                "whole 16-token pages, but the resolved KV cache layout gives "
+                "neither dense planes nor block-contiguous pages."
+            )
+
+        num_phys16 = num_blocks * block_pages
+        self.kv_cache_k = k_src.view(
             num_phys16,
             self.num_kv_heads,
             self.head_dim // x,
             16,
             x,
         )
-        self.kv_cache_v = value_cache.view(
+        # Offsetting V by half a block lets both sides share one page id.
+        self.kv_cache_v = v_src.view(
             num_phys16,
             self.num_kv_heads,
             16 // x,
             self.head_dim,
             x,
+        )[v_page_offset:]
+        self._aiter_sparse_pa_block_page_stride = minimax_m3_sparse_block_page_stride(
+            self.kv_cache_k, self.kv_cache_v
         )
         self._aiter_sparse_pa_cache_data_ptr = self.kv_cache.data_ptr()
 
@@ -807,6 +881,21 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         )
 
         key_cache, value_cache = self.get_aiter_sparse_pa_kv_cache()
+        if value_cache.shape[0] != key_cache.shape[0]:
+            attn_metadata = get_forward_context().attn_metadata
+            page16_slot_mapping = None
+            if isinstance(attn_metadata, dict):
+                main_md = attn_metadata[self.layer_name]
+                assert isinstance(main_md, MiniMaxM3SparseMetadata)
+                page16_slot_mapping = main_md.page16_slot_mapping
+            if (
+                page16_slot_mapping is None
+                or page16_slot_mapping.shape != slot_mapping.shape
+            ):
+                page16_slot_mapping = minimax_m3_rebase_slots_to_page16(
+                    slot_mapping, self.kv_cache.shape[2]
+                )
+            slot_mapping = page16_slot_mapping
         kv_cache_dtype = (
             self.kv_cache_dtype
             if is_quantized_kv_cache(self.kv_cache_dtype)
@@ -914,7 +1003,13 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                 )
         else:
             index_slot_mapping = fwd_slot_mapping[self.indexer.index_cache.prefix]
-            index_q = qkv.new_empty((num_tokens, self.index_q_size))
+            # index_q matches the index-K cache dtype (e4m3 for the AITER fp8
+            # score path); the fused kernel emits fp8 directly when this buffer
+            # is e4m3.
+            index_q = qkv.new_empty(
+                (num_tokens, self.index_q_size),
+                dtype=self.indexer.index_cache.dtype,
+            )
             if self.use_aiter_sparse_pa:
                 ops.fused_minimax_m3_qknorm_rope_kv_insert(
                     qkv,
@@ -993,9 +1088,68 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # top-k into the shared ``topk_indices_buffer``; the attend reads it back.
         # When skip_index_topk is set (ATOM index_topk_freq), reuse the selection
         # the preceding compute layer wrote into the shared buffer this forward.
+        decode_sparse_table: tuple[torch.Tensor, torch.Tensor] | None = None
         if not self.skip_index_topk:
             assert index_query is not None
-            self.indexer(index_query)
+            # The AITER indexer emits the attend table into its persistent
+            # buffers, resolving its selection through the page-16 rebase of the
+            # attend's block table. The Triton indexer can instead fuse decode
+            # top-k with main's per-forward sparse-table allocation.
+            if self.indexer_emits_table:
+                attn_metadata = get_forward_context().attn_metadata
+                decode_page16 = prefill_page16 = None
+                if isinstance(attn_metadata, dict):
+                    main_md = attn_metadata[self.layer_name]
+                    assert isinstance(main_md, MiniMaxM3SparseMetadata)
+                    # Rebased once per step by the AITER attend's builder, which
+                    # this path selected along with the impl.
+                    d, p = main_md.decode, main_md.prefill
+                    if d is not None:
+                        assert isinstance(d, MiniMaxM3SparseAiterPADecodeMetadata)
+                        decode_page16 = d.page16_block_table
+                    if p is not None:
+                        assert isinstance(p, MiniMaxM3SparseAiterPAPrefillMetadata)
+                        prefill_page16 = p.page16_block_table
+                self.indexer(
+                    index_query,
+                    decode_page16_block_table=decode_page16,
+                    prefill_page16_block_table=prefill_page16,
+                )
+            else:
+                attn_metadata = get_forward_context().attn_metadata
+                if self.use_aiter_sparse_pa and isinstance(attn_metadata, dict):
+                    main_md = attn_metadata[self.layer_name]
+                    assert isinstance(main_md, MiniMaxM3SparseMetadata)
+                    if main_md.num_decodes > 0:
+                        d = main_md.decode
+                        assert d is not None
+                        topk = self.topk_indices_buffer
+                        assert topk is not None
+                        decode_sparse_table = minimax_m3_alloc_sparse_block_table(
+                            topk[:, : main_md.num_decode_tokens, :]
+                        )
+                        block_page_stride = self._aiter_sparse_pa_block_page_stride
+                        assert block_page_stride > 0
+                        self.indexer(
+                            index_query,
+                            attention_block_table=d.block_table,
+                            sparse_block_table_out=decode_sparse_table[0],
+                            sparse_context_lens_out=decode_sparse_table[1],
+                            block_page_stride=block_page_stride,
+                        )
+                    else:
+                        self.indexer(index_query)
+                else:
+                    self.indexer(index_query)
+        if self.use_aiter_sparse_pa:
+            assert isinstance(self.impl, MiniMaxM3SparseAiterPAImpl)
+            return self.impl.forward(
+                self,
+                query,
+                self.kv_cache,
+                output,
+                decode_sparse_table=decode_sparse_table,
+            )
         return self.impl.forward(self, query, self.kv_cache, output)
 
 
@@ -1009,6 +1163,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
         force_sparse_attn: bool = False,
         force_moe: bool = False,
         topk_indices_buffer: torch.Tensor | None = None,
+        sparse_table_buffers: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -1029,6 +1184,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
                 prefix=f"{prefix}.self_attn",
                 cache_config=cache_config,
                 topk_indices_buffer=topk_indices_buffer,
+                sparse_table_buffers=sparse_table_buffers,
             )
         else:
             self.self_attn = MiniMaxM3Attention(
@@ -1117,15 +1273,52 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         # layers (mirrors DeepseekV4); the indexer writes its per-head decode/
         # prefill block selection into it, the attend reads it back.
         sparse_cfg = getattr(config, "sparse_attention_config", None)
+        self.sparse_table_buffers: tuple[torch.Tensor, torch.Tensor] | None = None
         if sparse_cfg is not None:
             tp_size = get_tensor_model_parallel_world_size()
             num_index_heads = max(1, sparse_cfg["sparse_num_index_heads"] // tp_size)
+            max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
             self.topk_indices_buffer = torch.empty(
                 num_index_heads,
-                vllm_config.scheduler_config.max_num_batched_tokens,
+                max_tokens,
                 sparse_cfg["sparse_topk_blocks"],
                 dtype=torch.int32,
             )
+
+            num_kv_heads = max(1, config.num_key_value_heads // tp_size)
+            indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(
+                "bf16"
+            )
+            # Probed with the head count the layer will pass (it derives
+            # num_idx_heads from num_kv_heads, not from sparse_num_index_heads),
+            # so this cannot land on the other side of the MFMA column limit
+            # from the selection the layer makes.
+            emits_table = (
+                select_aiter_indexer_impl_cls(
+                    topk_blocks=sparse_cfg["sparse_topk_blocks"],
+                    sparse_block_size=sparse_cfg["sparse_block_size"],
+                    num_index_heads=num_kv_heads,
+                    index_head_dim=sparse_cfg["sparse_index_dim"],
+                    indexer_kv_dtype=indexer_kv_dtype,
+                    score_type=sparse_cfg.get("sparse_score_type", "max"),
+                )
+                is not None
+            )
+            if emits_table and minimax_m3_use_aiter_sparse_pa(
+                num_kv_heads, emits_sparse_block_table=True
+            ):
+                # One row per (token, kv head): the table addresses the attend's
+                # cache, not the index cache.
+                rows = max_tokens * num_kv_heads
+                self.sparse_table_buffers = (
+                    torch.empty(
+                        rows,
+                        sparse_cfg["sparse_topk_blocks"]
+                        * (sparse_cfg["sparse_block_size"] // ASM_PAGE_SIZE),
+                        dtype=torch.int32,
+                    ),
+                    torch.empty(rows, dtype=torch.int32),
+                )
         else:
             self.topk_indices_buffer = None
 
@@ -1137,6 +1330,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 cache_config=cache_config,
                 quant_config=quant_config,
                 topk_indices_buffer=self.topk_indices_buffer,
+                sparse_table_buffers=self.sparse_table_buffers,
             ),
             prefix=f"{prefix}.layers",
         )
