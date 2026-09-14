@@ -8,6 +8,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig, replace
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed import get_dcp_group
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
@@ -147,6 +148,19 @@ class DFlashSpeculator(DraftModelSpeculator):
 
     def capture(self) -> None:
         logger.info("Capturing model for %s speculator...", self._speculator_name)
+        if self.vllm_config.parallel_config.decode_context_parallel_size > 1:
+            # Under DCP the draft is sharded, so the graph captured below
+            # contains a context-parallel collective. Capture is only safe if
+            # every rank enters it aligned: a rank still finishing earlier work
+            # can have its collective recorded into a peer's graph, which
+            # faults at capture. Quiesce the device, then align on the DCP
+            # group's CPU communicator -- GroupCoordinator.barrier() is used
+            # rather than torch.distributed.barrier() precisely because an NCCL
+            # barrier allocates secret GPU tensors and can move the current
+            # device out from under capture. Boot-time only, once per
+            # speculator.
+            torch.accelerator.synchronize()
+            get_dcp_group().barrier()
         # Padded sample rows must not scatter into a live request during capture.
         self.sample_indices.zero_()
         self.sample_pos.zero_()
