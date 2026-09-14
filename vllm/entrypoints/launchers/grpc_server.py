@@ -9,10 +9,10 @@ Starts a gRPC server backed by AsyncLLM, using the VllmEngineServicer
 from the smg-grpc-servicer package.
 
 Usage:
-    python -m vllm.entrypoints.grpc_server --model <model_path>
+    python -m vllm.entrypoints.launchers.grpc_server --model <model_path>
 
 Example:
-    python -m vllm.entrypoints.grpc_server \
+    python -m vllm.entrypoints.launchers.grpc_server \
         --model meta-llama/Llama-2-7b-hf \
         --host 0.0.0.0 \
         --port 50051
@@ -166,7 +166,7 @@ async def serve_grpc(args: argparse.Namespace):
 
 
 def main():
-    """Main entry point for python -m vllm.entrypoints.grpc_server."""
+    """Main entry point for python -m vllm.entrypoints.launchers.grpc_server."""
     parser = FlexibleArgumentParser(
         description="vLLM gRPC Server",
     )
