@@ -184,7 +184,7 @@ class Glm5NextMoE(nn.Module):
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
         if self.use_mega_moe and not parallel_config.enable_expert_parallel:
             raise NotImplementedError(
-                "GLM-5.3 MegaMoE requires expert parallel. Enable it with "
+                "DeepGEMM MegaMoE requires expert parallel. Enable it with "
                 "--enable-expert-parallel, or pick a different MoE backend."
             )
 
