@@ -224,7 +224,6 @@ def test_local_registration_does_not_clone_factors(manager, monkeypatch):
     monkeypatch.setattr(torch.Tensor, "clone", fail_clone)
     assert manager.add_local_adapter(1, plan, factors)
     assert manager.lora_index_to_id == [None, None]
-    assert manager._staged_local_adapters == {1}
     assert manager.activate_adapter(1)
     assert manager.lora_index_to_id == [1, None]
 
@@ -269,6 +268,16 @@ def test_bad_local_payload_cannot_mutate_cache_or_active_slot(manager, failure):
     assert all(torch.equal(a, b) for a, b in zip(before, after))
 
 
+def test_local_activation_requires_its_reserved_physical_slot(manager):
+    plan, factors = make_payload(manager)
+    manager.add_local_adapter(1, plan, factors)
+    del manager._local_adapter_slots[1]
+
+    with pytest.raises(RuntimeError, match="no reserved GPU slot"):
+        manager.activate_adapter(1)
+    assert manager.lora_index_to_id == [None, None]
+
+
 def test_local_cache_and_gpu_capacity_never_evict_active_generation(manager):
     plan, factors = make_payload(manager)
     for adapter_id in (1, 2):
@@ -310,7 +319,6 @@ def test_lru_eviction_releases_local_slot_and_receiver_buffers(manager):
 
     assert 1 not in manager.list_adapters()
     assert 1 not in manager._local_adapter_slots
-    assert 1 not in manager._staged_local_adapters
     assert manager.lora_index_to_id == [None, None]
     assert all(
         torch.count_nonzero(a) == torch.count_nonzero(b) == 0

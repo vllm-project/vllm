@@ -137,7 +137,6 @@ class LoRAModelManager:
         # Local transport writes directly into these receiver-owned slots.
         # A reserved slot remains invisible to request mappings until activation.
         self._local_adapter_slots: dict[int, int] = {}
-        self._staged_local_adapters: set[int] = set()
         self.vocab_size = vocab_size
 
         self.is_pooling_model = is_pooling_model(self.model)
@@ -534,7 +533,6 @@ class LoRAModelManager:
             raise RuntimeError("No free local adapter cache slots")
 
         local_slots = self._local_adapter_slots
-        staged = self._staged_local_adapters
         occupied = set(local_slots.values())
         try:
             index = next(
@@ -568,9 +566,7 @@ class LoRAModelManager:
             local_plan=plan,
         )
         local_slots[lora_id] = index
-        staged.add(lora_id)
         self._local_adapter_slots = local_slots
-        self._staged_local_adapters = staged
         return True
 
     def _validate_local_factors(
@@ -601,39 +597,13 @@ class LoRAModelManager:
         assert plan is not None
         if lora.rank != plan.rank:
             raise ValueError("Local adapter rank does not match its plan")
-        local_slots = self._local_adapter_slots
-        if lora.id in local_slots:
-            if len(self._active_adapters) >= self.lora_slots:
-                raise RuntimeError("No free local adapter GPU slots")
-            index = local_slots[lora.id]
-            if self.lora_index_to_id[index] is not None:
-                raise RuntimeError("Reserved local adapter GPU slot is occupied")
-            self._active_adapters[lora.id] = None
-            self.lora_index_to_id[index] = lora.id
-            self._staged_local_adapters.discard(lora.id)
-            return True
-        factors = {
-            name: (weights.lora_a, weights.lora_b)
-            for name, weights in lora.loras.items()
-        }
-        self._validate_local_factors(plan, factors)
+        if lora.id not in self._local_adapter_slots:
+            raise RuntimeError("Local adapter has no reserved GPU slot")
         if len(self._active_adapters) >= self.lora_slots:
             raise RuntimeError("No free local adapter GPU slots")
-        try:
-            index = self.lora_index_to_id.index(None)
-        except ValueError:
-            raise RuntimeError("No free local adapter GPU slots") from None
-        try:
-            for name, module in self.modules.items():
-                if name in factors:
-                    lora_a, lora_b = factors[name]
-                    module.set_lora_shard(index, plan.rank, lora_a, lora_b)
-                else:
-                    module.reset_lora(index)
-        except (RuntimeError, ValueError, NotImplementedError):
-            for module in self.modules.values():
-                module.reset_lora(index)
-            raise
+        index = self._local_adapter_slots[lora.id]
+        if self.lora_index_to_id[index] is not None:
+            raise RuntimeError("Reserved local adapter GPU slot is occupied")
         # The caller must fence GPU copies before acknowledging activation.
         self._active_adapters[lora.id] = None
         self.lora_index_to_id[index] = lora.id
@@ -751,7 +721,6 @@ class LoRAModelManager:
         """Remove all LoRAModels from the manager."""
         self._registered_adapters.clear()
         self._local_adapter_slots.clear()
-        self._staged_local_adapters.clear()
         self.lora_index_to_id = [None] * self.lora_slots
         self._active_adapters.clear()
         self._last_mapping = None
@@ -1616,7 +1585,6 @@ class LoRAModelManager:
         if index is not None:
             for module in self.modules.values():
                 module.reset_lora(index)
-            self._staged_local_adapters.discard(adapter_id)
 
     def add_adapter(self, adapter: LoRAModel) -> bool:
         logger.debug("Adding lora. Model id: %d, int id: %d", adapter.id, adapter.id)
