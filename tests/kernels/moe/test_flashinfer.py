@@ -28,6 +28,7 @@ from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    activation_to_flashinfer_type,
     rotate_weights_for_fi_trtllm_fp8_per_tensor_moe,
     swap_w13_to_w31,
 )
@@ -492,3 +493,15 @@ def test_trtllm_fp8_swiglu_clamp_support(
     assert supported == expected, reason
     if not expected:
         assert "SwiGLU" in reason
+
+
+def test_gelu_tanh_maps_to_tanh_activation():
+    fi_core = pytest.importorskip("flashinfer.fused_moe.core")
+    assert (
+        activation_to_flashinfer_type(MoEActivation.GELU_TANH)
+        == fi_core.ActivationType.GegluTanh
+    )
+    assert (
+        activation_to_flashinfer_type(MoEActivation.GELU)
+        == fi_core.ActivationType.Geglu
+    )
