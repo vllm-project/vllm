@@ -508,7 +508,8 @@ def preprocess_mamba_align_fused_kernel(
     state_idx_ptr,
     num_computed_tokens_ptr,
     query_start_loc_ptr,
-    num_accepted_tokens_ptr,
+    num_accepted_tokens_in_ptr,
+    num_accepted_tokens_out_ptr,
     src_col_ptr,
     src_off_ptr,
     num_reqs,
@@ -519,7 +520,7 @@ def preprocess_mamba_align_fused_kernel(
     state_idx (with accepted-token reset) in a single launch (V2 align).
 
     Per batch_idx (0..num_reqs-1), resolving req slot via idx_mapping:
-      1. Read pre-advance state_idx and num_accepted (last step's values).
+      1. Read pre-advance state_idx and num_accepted (last step's values from snapshot).
       2. Store the pre-copy src columns for ``precopy_mamba_align_fused_kernel``:
          - src_col = state_idx (the previous running block column)
          - src_off = max(num_accepted - 1, 0) (the accepted-token bias)
@@ -532,7 +533,7 @@ def preprocess_mamba_align_fused_kernel(
     req_indices = tl.load(idx_mapping_ptr + offsets, mask=mask, other=0)
 
     state_idx = tl.load(state_idx_ptr + req_indices, mask=mask, other=-1)
-    num_accepted = tl.load(num_accepted_tokens_ptr + req_indices, mask=mask, other=1)
+    num_accepted = tl.load(num_accepted_tokens_in_ptr + req_indices, mask=mask, other=1)
 
     src_off = tl.maximum(num_accepted - 1, 0)
     tl.store(src_col_ptr + req_indices, state_idx, mask=mask)
@@ -545,7 +546,7 @@ def preprocess_mamba_align_fused_kernel(
     new_state_idx = (computed_after + MAMBA_BLOCK_SIZE - 1) // MAMBA_BLOCK_SIZE - 1
     tl.store(state_idx_ptr + req_indices, new_state_idx, mask=mask)
     should_reset = (state_idx >= 0) & (state_idx != new_state_idx)
-    tl.store(num_accepted_tokens_ptr + req_indices, 1, mask=mask & should_reset)
+    tl.store(num_accepted_tokens_out_ptr + req_indices, 1, mask=mask & should_reset)
 
 
 @triton.jit(do_not_specialize=["num_reqs"])

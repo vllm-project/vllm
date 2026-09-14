@@ -136,3 +136,65 @@ def test_recoverssm_align_tracks_mixed_batch_state_and_neutralizes_copy_bias() -
     assert state._mamba_state_idx_gpu.tolist() == expected_state_indices
     expected_accepted = [9, 1, 9, 2, 9]
     assert state.num_accepted_tokens_gpu.tolist() == expected_accepted
+
+
+@pytest.mark.skip_global_cleanup
+def test_preprocess_state_snapshots_num_accepted_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = object.__new__(MambaHybridModelState)
+    state._align_mode = True
+    state.max_num_reqs = 4
+    state.num_accepted_tokens_gpu = torch.tensor([3, 2, 4, 1], dtype=torch.int32)
+    state._num_accepted_tokens_preprocess_snapshot = torch.zeros(4, dtype=torch.int32)
+    state._mamba_state_idx_gpu = torch.zeros(4, dtype=torch.int32)
+    state._mamba_src_col_gpu = torch.zeros(4, dtype=torch.int32)
+    state._mamba_src_off_gpu = torch.zeros(4, dtype=torch.int32)
+
+    mamba_spec = SimpleNamespace(block_size=16)
+    state._get_mamba_group_info = Mock(return_value=([0], mamba_spec))  # type: ignore[method-assign]
+    mock_ctx = Mock()
+    state._ensure_align_ctx = Mock(return_value=mock_ctx)  # type: ignore[method-assign]
+
+    kernel_mock = Mock()
+    mock_kernel_item = Mock()
+    kernel_mock.__getitem__ = Mock(return_value=mock_kernel_item)
+    monkeypatch.setattr(
+        mamba_hybrid, "preprocess_mamba_align_fused_kernel", kernel_mock
+    )
+
+    input_batch = SimpleNamespace(
+        num_reqs=2,
+        idx_mapping=torch.tensor([0, 1], dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
+    )
+    num_computed_tokens = torch.tensor([10, 20], dtype=torch.int32)
+
+    state.preprocess_state(
+        input_batch=input_batch,  # type: ignore[arg-type]
+        block_tables=(),
+        kv_cache_config=Mock(),
+        num_computed_tokens=num_computed_tokens,
+    )
+
+    # Verify snapshot was copied from num_accepted_tokens_gpu
+    torch.testing.assert_close(
+        state._num_accepted_tokens_preprocess_snapshot,
+        state.num_accepted_tokens_gpu,
+    )
+    # Verify the kernel was called with snapshot as in_ptr and
+    # num_accepted_tokens_gpu as out_ptr
+    mock_kernel_item.assert_called_once_with(
+        input_batch.idx_mapping,
+        state._mamba_state_idx_gpu,
+        num_computed_tokens,
+        input_batch.query_start_loc,
+        state._num_accepted_tokens_preprocess_snapshot,
+        state.num_accepted_tokens_gpu,
+        state._mamba_src_col_gpu,
+        state._mamba_src_off_gpu,
+        input_batch.num_reqs,
+        BLOCK_SIZE=256,
+        MAMBA_BLOCK_SIZE=16,
+    )
+    mock_ctx.run_fused_precopy.assert_called_once()

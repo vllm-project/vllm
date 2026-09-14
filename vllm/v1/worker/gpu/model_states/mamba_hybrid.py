@@ -107,6 +107,9 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_src_off_gpu = torch.zeros(
                 self.max_num_reqs, dtype=torch.int32, device=self.device
             )
+            self._num_accepted_tokens_preprocess_snapshot = torch.ones(
+                self.max_num_reqs, dtype=torch.int32, device=self.device
+            )
             self._mamba_ctx: MambaSpecDecodeGPUContext | None = None
             self._mamba_group_ids: list[int] = []
             self._mamba_spec: MambaSpec | None = None
@@ -201,12 +204,12 @@ class MambaHybridModelState(DefaultModelState):
         mamba_group_ids, mamba_spec = self._get_mamba_group_info(kv_cache_config)
         ctx = self._ensure_align_ctx(kv_cache_config, mamba_group_ids, block_tables)
 
-        # The state-advance + pre-copy kernels run every step; they fast-exit per
-        # request when src_col < 0 or src_col == dst_col, so no copy happens on
-        # steps that don't cross a block boundary. (Skipping the launch entirely
-        # would need a V1-style async-D2H of the actual num_computed, since
-        # num_computed_tokens_np is an optimistic mirror under async scheduling;
-        # the launch cost is ~0.3% of TPOT, so the GPU fast-exit suffices.)
+        # Snapshot num_accepted_tokens_gpu into a dedicated buffer before launching
+        # the fused preprocess kernel to avoid race conditions with asynchronous
+        # model runner and sampler updates under async scheduling and CUDA graphs.
+        num_accepted_snapshot = self._num_accepted_tokens_preprocess_snapshot
+        num_accepted_snapshot.copy_(self.num_accepted_tokens_gpu)
+
         block = 256
         grid = (triton.cdiv(num_reqs, block),)
         preprocess_mamba_align_fused_kernel[grid](
@@ -214,6 +217,7 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_state_idx_gpu,
             num_computed_tokens,
             input_batch.query_start_loc,
+            num_accepted_snapshot,
             self.num_accepted_tokens_gpu,
             self._mamba_src_col_gpu,
             self._mamba_src_off_gpu,
