@@ -826,6 +826,10 @@ class NvmlCudaPlatform(CudaPlatformBase):
         process (no entry for our PID, e.g. a container whose PID namespace
         NVML does not see, WDDM, MIG, or an NVML error) so that callers fall
         back to device-level accounting.
+
+        Keep this on the per-process query: ``nvmlDeviceGetMemoryInfo`` is
+        ``NVMLError_NotSupported`` on integrated parts such as GB10 (DGX Spark),
+        where this per-process path is exactly what still works.
         """
         try:
             physical_device_id = cls.visible_device_id_to_physical_device_id(device_id)
