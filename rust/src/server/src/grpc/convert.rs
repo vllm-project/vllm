@@ -4,10 +4,9 @@
 //! Conversion between gRPC protobuf types and internal `vllm-text`
 //! request/response types.
 
+use thiserror_ext::AsReport as _;
 use tonic::Status;
-use url::Url;
 use uuid::Uuid;
-use vllm_chat::MediaContentPart;
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_text::{
@@ -16,95 +15,6 @@ use vllm_text::{
 };
 
 use super::pb;
-
-pub fn media_parts_from_request(
-    media: Vec<pb::MediaItem>,
-) -> Result<Vec<MediaContentPart>, Status> {
-    let mut parts = Vec::with_capacity(media.len());
-    for (index, item) in media.into_iter().enumerate() {
-        let modality = item.modality();
-        if modality == pb::Modality::Unspecified {
-            return Err(Status::invalid_argument(format!(
-                "media[{index}].modality is required"
-            )));
-        }
-        let uuid = (!item.uuid.is_empty()).then_some(item.uuid);
-        let mime_type = (!item.mime_type.is_empty()).then_some(item.mime_type);
-        let source = item.source.ok_or_else(|| {
-            Status::invalid_argument(format!("media[{index}].source is required"))
-        })?;
-        match &source {
-            pb::media_item::Source::Url(url) => {
-                validate_media_uri(index, "url", url, &["http", "https"])?;
-            }
-            pb::media_item::Source::DataUri(uri) => {
-                validate_media_uri(index, "data_uri", uri, &["data"])?;
-            }
-            pb::media_item::Source::RawBytes(_) => {}
-        }
-        let part = match (modality, source) {
-            (
-                pb::Modality::Image,
-                pb::media_item::Source::Url(url) | pb::media_item::Source::DataUri(url),
-            ) => MediaContentPart::ImageUrl {
-                url,
-                detail: None,
-                uuid,
-            },
-            (pb::Modality::Image, pb::media_item::Source::RawBytes(data)) => {
-                MediaContentPart::ImageData {
-                    data,
-                    mime_type,
-                    uuid,
-                    detail: None,
-                }
-            }
-            (
-                pb::Modality::Video,
-                pb::media_item::Source::Url(url) | pb::media_item::Source::DataUri(url),
-            ) => MediaContentPart::VideoUrl { url, uuid },
-            (pb::Modality::Video, pb::media_item::Source::RawBytes(data)) => {
-                MediaContentPart::VideoData {
-                    data,
-                    mime_type,
-                    uuid,
-                }
-            }
-            (
-                pb::Modality::Audio,
-                pb::media_item::Source::Url(url) | pb::media_item::Source::DataUri(url),
-            ) => MediaContentPart::AudioUrl { url, uuid },
-            (pb::Modality::Audio, pb::media_item::Source::RawBytes(data)) => {
-                MediaContentPart::AudioData {
-                    data,
-                    mime_type,
-                    uuid,
-                }
-            }
-            (pb::Modality::Unspecified, _) => unreachable!("modality validated above"),
-        };
-        parts.push(part);
-    }
-    Ok(parts)
-}
-
-fn validate_media_uri(
-    index: usize,
-    field: &str,
-    value: &str,
-    allowed_schemes: &[&str],
-) -> Result<(), Status> {
-    let uri = Url::parse(value).map_err(|_| {
-        Status::invalid_argument(format!("media[{index}].{field} is not a valid URI"))
-    })?;
-    if !allowed_schemes.contains(&uri.scheme()) {
-        return Err(Status::invalid_argument(format!(
-            "media[{index}].{field} must use the {} scheme",
-            allowed_schemes.join(" or ")
-        )));
-    }
-    Ok(())
-}
 
 // ========================================================================================
 // Request conversion
@@ -283,7 +193,7 @@ fn build_sampling_params(
     if let Some(r) = response {
         if r.output_logprobs {
             let (count, token_ids) = candidate_logprob_spec(r.output_candidates.as_ref());
-            params.logprobs = Some(count);
+            params.logprobs = count;
             params.logprob_token_ids = token_ids;
         }
         if r.prompt_logprobs {
@@ -300,7 +210,7 @@ fn build_sampling_params(
                 ));
             }
             let (count, _) = candidate_logprob_spec(r.prompt_candidates.as_ref());
-            params.prompt_logprobs = Some(count);
+            params.prompt_logprobs = count;
         }
     }
 
@@ -310,18 +220,22 @@ fn build_sampling_params(
 /// Map the proto `CandidateTokens` selector to a `(logprobs_count,
 /// logprob_token_ids)` pair.
 ///
-/// - `top_n(k)` → `(k, None)` — return top-k candidates by probability
-/// - `all` → `(-1, None)` — return the full vocabulary
-/// - `token_ids(n)` → `(1, Some(vec of n token ids))` — return logprobs for specific tokens (the
-///   count `n` is stored in the proto as the number of token IDs that follow, but the actual IDs
-///   are carried via `logprob_token_ids` on `SamplingParams`)
-/// - absent → `(1, None)` — just the sampled/scored token
-fn candidate_logprob_spec(candidates: Option<&pb::CandidateTokens>) -> (i32, Option<Vec<u32>>) {
+/// - `top_n(k)` → `(Some(k), None)` — return top-k candidates by probability
+/// - `all` → `(Some(-1), None)` — return the full vocabulary
+/// - nonempty `token_ids` → `(None, Some(ids))` — let the engine derive the count
+/// - absent or empty `token_ids` → `(Some(0), None)` — return only the sampled/scored token
+fn candidate_logprob_spec(
+    candidates: Option<&pb::CandidateTokens>,
+) -> (Option<i32>, Option<Vec<u32>>) {
     match candidates.and_then(|c| c.select.as_ref()) {
-        Some(pb::candidate_tokens::Select::TopN(n)) => (*n as i32, None),
-        Some(pb::candidate_tokens::Select::All(true)) => (-1, None),
-        Some(pb::candidate_tokens::Select::TokenIds(ids)) => (1, Some(ids.ids.clone())),
-        _ => (1, None),
+        Some(pb::candidate_tokens::Select::TopN(n)) => (Some(*n as i32), None),
+        Some(pb::candidate_tokens::Select::All(true)) => (Some(-1), None),
+        Some(pb::candidate_tokens::Select::TokenIds(ids)) if !ids.ids.is_empty() => {
+            // Match Python HTTP: selected IDs have their own limit, independent
+            // of the numeric top-logprobs count and its max_logprobs cap.
+            (None, Some(ids.ids.clone()))
+        }
+        _ => (Some(0), None),
     }
 }
 
@@ -350,6 +264,9 @@ fn convert_structured_output(
             StructuredOutputsParams::structural_tag(tag.clone())
         }
     };
+    params
+        .validate()
+        .map_err(|error| Status::invalid_argument(error.to_report_string()))?;
     Ok(Some(params))
 }
 
@@ -605,7 +522,10 @@ impl ResponseOpts {
 #[cfg(test)]
 mod tests {
     use vllm_engine_core_client::protocol::output::StopReason;
-    use vllm_text::{FinishReason, Finished, Prompt};
+    use vllm_text::{
+        FinishReason, Finished, Prompt, SamplingHints, SamplingLimits, lower_sampling_params,
+    };
+    use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::pb::finish_info::{FinishReason as PbFinishReason, StopReason as PbStopReason};
     use super::{ResponseOpts, pb, to_finish_info, to_sequence_output, to_text_request};
@@ -638,6 +558,20 @@ mod tests {
     }
 
     #[test]
+    fn grpc_rejects_empty_grammar_before_engine() {
+        use super::pb::decoding_parameters::StructuredOutput;
+        let req = pb::GenerateRequest {
+            decoding: Some(pb::DecodingParameters {
+                structured_output: Some(StructuredOutput::Grammar("  ".to_string())),
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        let err = to_text_request(req, false, &["test-model".to_string()]).unwrap_err();
+        assert!(err.message().contains("grammar cannot be an empty string"));
+    }
+
+    #[test]
     fn absent_seed_is_none() {
         let req = pb::GenerateRequest {
             sampling: Some(pb::RandomSampling {
@@ -661,6 +595,69 @@ mod tests {
         };
         let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
         assert_eq!(text.sampling_params.seed, Some(0));
+    }
+
+    #[test]
+    fn output_logprob_selectors_survive_request_lowering() {
+        use pb::candidate_tokens::Select;
+
+        let selected_ids: Vec<u32> = (100..121).collect();
+        let cases = [
+            (
+                Some(Select::TokenIds(pb::TokenIds {
+                    ids: selected_ids.clone(),
+                })),
+                None,
+                Some(selected_ids),
+            ),
+            (
+                Some(Select::TokenIds(pb::TokenIds {
+                    ids: vec![198, 198],
+                })),
+                None,
+                Some(vec![198, 198]),
+            ),
+            (
+                Some(Select::TokenIds(pb::TokenIds { ids: vec![] })),
+                Some(0),
+                None,
+            ),
+            (None, Some(0), None),
+            (Some(Select::TopN(0)), Some(0), None),
+            (Some(Select::TopN(2)), Some(2), None),
+        ];
+        for (select, expected_count, expected_ids) in cases {
+            let req = pb::GenerateRequest {
+                response: Some(pb::ResponseOptions {
+                    output_logprobs: true,
+                    output_candidates: select.map(|select| pb::CandidateTokens {
+                        select: Some(select),
+                    }),
+                    ..Default::default()
+                }),
+                ..base_request()
+            };
+            let text =
+                to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+            let params = lower_sampling_params(
+                text.sampling_params,
+                SamplingHints::default(),
+                SamplingLimits {
+                    max_model_len: 32,
+                    max_logprobs: 20,
+                    model_vocab_size: 512,
+                    tokenizer_vocab_size: 512,
+                },
+                1,
+                &TestTokenizer::new(),
+            )
+            .expect("logprob selector should lower to an engine request");
+
+            assert_eq!(
+                (params.logprobs, params.logprob_token_ids),
+                (expected_count, expected_ids)
+            );
+        }
     }
 
     #[test]
