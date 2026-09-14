@@ -61,6 +61,21 @@ def _build_indptr_from_lengths(lengths: torch.Tensor) -> torch.Tensor:
     return indptr
 
 
+def weight_already_preshuffled(linear: torch.nn.Module) -> bool:
+    """True when the linear's kernel already B-preshuffled ``weight``.
+
+    The hand-shuffles below (fused_wqa_wkv, wo_b, gate_up_proj) must be skipped
+    for those, since shuffle_weight is a permutation rather than an involution.
+    """
+    return any(
+        getattr(getattr(method, "fp8_linear", None), "preshuffles_weight", False)
+        for method in (
+            getattr(linear, "quant_method", None),
+            getattr(linear, "scheme", None),
+        )
+    )
+
+
 def apply_pre_quantized_block_scaled_mm(
     linear: torch.nn.Module,
     x_fp8: torch.Tensor,
@@ -106,13 +121,18 @@ def _combine_topk_swa_indices_kernel(
     query_start_loc_ptr,
     seq_lens_ptr,
     gather_lens_ptr,
+    left_visible_ptr,
+    right_visible_ptr,
     M,
     N,
     TOP_K: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
     WINDOW_SIZE: tl.constexpr,
+    SWA_WIDTH: tl.constexpr,
     TOPK_WIDTH: tl.constexpr,
     PADDED_TOP_K: tl.constexpr,
+    PADDED_SWA_WIDTH: tl.constexpr,
+    HAS_IMAGE: tl.constexpr,
 ):
     batch_idx = tl.program_id(0)
     worker_id = tl.program_id(1)
@@ -131,7 +151,20 @@ def _combine_topk_swa_indices_kernel(
         token_idx_in_query = token_idx - query_start
         pos = start_pos + token_idx_in_query
         topk_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K)
-        swa_len = tl.minimum(pos + 1, WINDOW_SIZE)
+        if HAS_IMAGE:
+            left = tl.load(left_visible_ptr + token_idx)
+            right = tl.load(right_visible_ptr + token_idx)
+        else:
+            left = 0
+            right = 0
+        left_add = tl.maximum(left - (WINDOW_SIZE - 1), 0)
+        # Prefix caching can resume inside an image span. Do not generate
+        # indices outside the SWA rows present in the gathered workspace.
+        swa_start = tl.maximum(
+            tl.maximum(pos - (WINDOW_SIZE - 1) - left_add, 0), gather_start
+        )
+        swa_end = tl.minimum(pos + right + 1, seq_len)
+        swa_len = tl.maximum(swa_end - swa_start, 0)
 
         topk_offset = tl.arange(0, PADDED_TOP_K)
         topk_mask = topk_offset < topk_len
@@ -149,14 +182,14 @@ def _combine_topk_swa_indices_kernel(
             mask=topk_mask,
         )
 
-        swa_offset = tl.arange(0, WINDOW_SIZE)
+        swa_offset = tl.arange(0, PADDED_SWA_WIDTH)
         tl.store(
             combined_indices_ptr
             + token_idx * combined_indices_stride
             + topk_len
             + swa_offset,
-            M * batch_idx + N + swa_offset + pos - swa_len + 1 - gather_start,
-            mask=swa_offset < swa_len,
+            M * batch_idx + N + swa_offset + swa_start - gather_start,
+            mask=(swa_offset < swa_len) & (swa_offset < SWA_WIDTH),
         )
 
         tl.store(combined_lens_ptr + token_idx, topk_len + swa_len)
@@ -172,12 +205,21 @@ def combine_topk_swa_indices(
     topk: int,
     M: int,
     N: int,
+    max_image_tokens: int = 0,
+    left_visible: torch.Tensor | None = None,
+    right_visible: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if (left_visible is None) != (right_visible is None):
+        raise ValueError("left_visible and right_visible must be provided together")
     topk_indices = topk_indices.reshape(topk_indices.shape[0], -1).contiguous()
     num_tokens = topk_indices.shape[0]
     num_reqs = seq_lens.shape[0]
+    has_image = left_visible is not None
+    # Keep the row shape fixed for a vision model even when a particular batch
+    # has no image.
+    swa_width = window_size + max_image_tokens
     combined_topk = (
-        (topk + window_size + _SPARSE_PREFILL_TOPK_ALIGNMENT - 1)
+        (topk + swa_width + _SPARSE_PREFILL_TOPK_ALIGNMENT - 1)
         // _SPARSE_PREFILL_TOPK_ALIGNMENT
         * _SPARSE_PREFILL_TOPK_ALIGNMENT
     )
@@ -201,13 +243,18 @@ def combine_topk_swa_indices(
         query_start_loc,
         seq_lens,
         gather_lens,
+        left_visible if left_visible is not None else topk_indices,
+        right_visible if right_visible is not None else topk_indices,
         M,
         N,
         TOP_K=topk,
         COMPRESS_RATIO=compress_ratio,
         WINDOW_SIZE=window_size,
+        SWA_WIDTH=swa_width,
         TOPK_WIDTH=topk_indices.shape[-1],
         PADDED_TOP_K=triton.next_power_of_2(topk_indices.shape[-1]),
+        PADDED_SWA_WIDTH=triton.next_power_of_2(swa_width),
+        HAS_IMAGE=has_image,
     )
     return combined_indices, combined_lens
 
@@ -551,12 +598,13 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 return None
             if ws.dtype == torch.float8_e8m0fnu:
                 ws = _upcast_e8m0_to_fp32(ws).contiguous()
-            # Shuffle the weight in place (single weight, no unshuffled copy).
-            replace_parameter(
-                linear,
-                "weight",
-                rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
-            )
+            # Skip if the linear's kernel already shuffled it.
+            if not weight_already_preshuffled(linear):
+                replace_parameter(
+                    linear,
+                    "weight",
+                    rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
+                )
             return ws
 
         self._wqa_wkv_scale = _prep(self.fused_wqa_wkv)
@@ -654,16 +702,26 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         return qr_kv, kv_score, indexer_kv_score, indexer_weights
 
     @functools.cached_property
-    def _wq_b_uses_aiter_block_scaled(self) -> bool:
-        """True when both wq_b GEMMs run the aiter block-scaled fp8 kernel.
+    def _wq_b_act_scale_transpose(self) -> bool | None:
+        """Activation-scale byte order every wq_b consumer agrees on, else None.
+
+        None means "do not take the fused norm+quant path". Otherwise the value
+        is the ``transpose_scale`` the producer must pass so that the scale it
+        writes matches what the selected GEMM reads.
 
         Cached: the linear kernels and the aiter env gates are fixed once
         the model is built, so this is evaluated at the first forward
         only.
 
-        The fused norm+quant path is only valid if the quant and GEMM it
-        replaces are exactly the aiter ones; otherwise fall back to the
-        shared path.
+        Two conditions, both necessary:
+
+        * The fused norm+quant path is only valid if the quant and GEMM it
+          replaces are exactly the aiter ones; otherwise fall back to the
+          shared path.
+        * One qr_scale feeds both self.wq_b and self.indexer.wq_b, which have
+          different (N, K) and so can resolve to kernels wanting opposite byte
+          orders. A single producer cannot serve both, so refuse the fast path
+          when they disagree rather than guessing.
         """
         from vllm._aiter_ops import rocm_aiter_ops
         from vllm.model_executor.kernels.linear.scaled_mm import (
@@ -671,16 +729,31 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         )
 
         if not rocm_aiter_ops.is_linear_fp8_enabled():
-            return False
+            return None
 
         linears = [self.wq_b]
         if self.indexer is not None:
             linears.append(self.indexer.wq_b)
+        layouts: set[bool] = set()
         for linear in linears:
             kernel = getattr(getattr(linear, "quant_method", None), "fp8_linear", None)
             if not isinstance(kernel, Fp8BlockScaledMMLinearKernel):
-                return False
-        return True
+                return None
+            layouts.add(bool(getattr(kernel, "wants_transposed_act_scale", False)))
+        if len(layouts) != 1:
+            logger.warning_once(
+                "DeepSeek-V4 wq_b consumers disagree on activation-scale layout; "
+                "disabling the fused q/kv norm+quant path.",
+                scope="global",
+            )
+            return None
+        transpose_scale = layouts.pop()
+        logger.debug_once(
+            "DeepSeek-V4 wq_b: emitting %s-major activation scales",
+            "column" if transpose_scale else "row",
+            scope="global",
+        )
+        return transpose_scale
 
     def _split_qkv_and_norm(
         self, qr_kv: torch.Tensor
@@ -697,11 +770,12 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         when the aiter linear path is not active.
         """
         qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
+        transpose_scale = self._wq_b_act_scale_transpose
         if not (
             qr.dim() == 2
             and qr.shape[0] > 0
             and self.q_lora_rank % 128 == 0
-            and self._wq_b_uses_aiter_block_scaled
+            and transpose_scale is not None
         ):
             return super()._split_qkv_and_norm(qr_kv)
 
@@ -715,7 +789,8 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             kv_weight=self.kv_norm.weight.data,
             kv_epsilon=self.eps,
             group_size=128,
-            transpose_scale=False,
+            # Emit the byte order the wq_b GEMMs read.
+            transpose_scale=transpose_scale,
         )
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
@@ -910,6 +985,12 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         assert query_start_loc_cpu is not None
         assert query_start_loc is not None
         prefill_token_base = query_start_loc_cpu[num_decodes]
+        left_visible = swa_metadata.prefill_left_visible
+        right_visible = swa_metadata.prefill_right_visible
+        if left_visible is not None:
+            left_visible = left_visible[num_decode_tokens:]
+            assert right_visible is not None
+            right_visible = right_visible[num_decode_tokens:]
 
         if not swa_only:
             if self.compress_ratio == 4:
@@ -988,6 +1069,17 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 top_k,
                 M,
                 N,
+                max_image_tokens=self.max_image_tokens,
+                left_visible=(
+                    left_visible[query_start:query_end]
+                    if left_visible is not None
+                    else None
+                ),
+                right_visible=(
+                    right_visible[query_start:query_end]
+                    if right_visible is not None
+                    else None
+                ),
             )
             rocm_sparse_attn_prefill(
                 q=q[query_start:query_end],
