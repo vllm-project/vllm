@@ -198,11 +198,12 @@ class DeepseekV4CPUIndexer(DeepseekV4Indexer):
         self,
         hidden_states: torch.Tensor,
         qr: torch.Tensor,
-        compressed_kv_score: torch.Tensor,
+        compressed_kv_score: torch.Tensor | None,
         indexer_weights: torch.Tensor,
         positions: torch.Tensor,
         rotary_emb: nn.Module,
         qr_scale: torch.Tensor | None = None,
+        skip_compressor: bool = False,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         """CPU override: no aux streams, so wq_b_and_q_quant and the
         compressor run straight-line instead of through
