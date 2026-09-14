@@ -110,6 +110,8 @@ class MemoryStore:
         obj = self.objects.get(key)
         if obj is None:
             return [[[-704]]]
+        if src + size > len(obj):
+            return [[[-600]]]
         payload = obj[src : src + size]
         ctypes.memmove(ptr + dst, payload, len(payload))
         return [[[len(payload)]]]
@@ -190,6 +192,7 @@ def make_worker(backend):
         "hit",
         "partial",
         "get-failure",
+        "short-data",
         "lease-expired",
         "registration-failure",
     ],
@@ -206,18 +209,25 @@ def test_reuse_pipeline(backend, mode):
     from vllm.v1.worker.gpu.model_states.interface import ModelState
 
     native = backend.store_client.store
+    values = {"a": 1.0, "b": 2.0, "c": 3.0}
     if mode == "legacy":
         old_namespace = KEY.replace("@protocol:v3", "@protocol:v2")
         for key in "abc":
             native.objects[make_embedding_key(old_namespace, key)] = b"old format"
     if mode == "partial":
         hits = {"a", "c"}
-    elif mode in ("hit", "get-failure", "lease-expired", "registration-failure"):
+    elif mode not in ("miss", "legacy"):
         hits = set("abc")
     else:
         hits = set()
     for key in hits:
-        backend.store_client.put_tensor(make_embedding_key(KEY, key), torch.ones(2, 2))
+        backend.store_client.put_tensor(
+            make_embedding_key(KEY, key), torch.full((2, 2), values[key])
+        )
+    if mode == "short-data":
+        key = make_embedding_key(KEY, "b")
+        native.objects[key] = native.objects[key][:-1]
+        hits.remove("b")
     if mode in ("get-failure", "lease-expired"):
         read = native.get_into_ranges
 
@@ -272,7 +282,7 @@ def test_reuse_pipeline(backend, mode):
     runner.enable_timing = False
     missing = [k for k in "abc" if k not in hits]
     runner.execute_mm_encoder = MagicMock(
-        return_value=[torch.full((2, 2), 7.0) for _ in missing]
+        return_value=[torch.full((2, 2), values[k] + 10) for k in missing]
     )
     state = SimpleNamespace(encoder_runner=runner, encoder_cache=cache)
     with patch(
@@ -288,7 +298,8 @@ def test_reuse_pipeline(backend, mode):
     assert output.ec_connector_worker_meta.pending_saves is False
     assert all(
         torch.equal(
-            cache.encoder_outputs[k], torch.full((2, 2), 1.0 if k in hits else 7.0)
+            cache.encoder_outputs[k],
+            torch.full((2, 2), values[k] + (0 if k in hits else 10)),
         )
         for k in "abc"
     )
@@ -336,6 +347,13 @@ def test_incompatible_output_is_a_miss(backend, mismatch):
     outputs: dict[str, torch.Tensor] = {}
     assert not backend.resolve_inputs({"a": expected}, outputs, "cpu")
     assert not outputs and not backend.store_client.store.registered
+    tensor = torch.ones(2, 2)
+    backend.store_client.put_tensor(
+        make_embedding_key(backend.namespace, "valid"), tensor
+    )
+    assert backend.resolve_inputs({"valid": SPEC}, outputs, "cpu") == {"valid"}
+    assert torch.equal(outputs["valid"], tensor)
+    assert not backend.store_client.store.registered
 
 
 def test_partial_registration_rejection_releases_publication(backend):

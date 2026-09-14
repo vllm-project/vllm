@@ -37,6 +37,7 @@ _UNSAFE_CLIENTS: list[Any] = []
 # Python exposes integer returns, not this enum.
 class _MooncakeErrorCode(IntEnum):
     NO_AVAILABLE_HANDLE = -200
+    INVALID_PARAMS = -600
     REPLICA_IS_NOT_READY = -703
     OBJECT_NOT_FOUND = -704
     OBJECT_ALREADY_EXISTS = -705
@@ -59,9 +60,12 @@ _SAFE_IO_REJECTIONS = frozenset(
         _MooncakeErrorCode.RPC_TIMEOUT,
     }
 )
-# Ranged GET checks the lease after transfer completion; PUT rejects tenant
-# quotas before allocating replicas or submitting transfers.
-_SAFE_GET_REJECTIONS = _SAFE_IO_REJECTIONS | {_MooncakeErrorCode.LEASE_EXPIRED}
+# Ranged GET rejects invalid parameters before I/O and checks leases afterwards.
+# PUT rejects tenant quotas before allocating replicas or submitting transfers.
+_SAFE_GET_REJECTIONS = _SAFE_IO_REJECTIONS | {
+    _MooncakeErrorCode.INVALID_PARAMS,
+    _MooncakeErrorCode.LEASE_EXPIRED,
+}
 _SAFE_PUT_REJECTIONS = _SAFE_IO_REJECTIONS | {_MooncakeErrorCode.TENANT_QUOTA_EXCEEDED}
 
 

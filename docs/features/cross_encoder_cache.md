@@ -93,6 +93,8 @@ must consistently identify the same input; see [cached inputs](multimodal_inputs
 - Cache misses and recoverable read errors fall back to encoding. Recoverable
   publication errors skip the write. Unexpected native errors or unconfirmed
   I/O completion or buffer release can fail the worker.
+- Incompatible objects are rejected without replacement; they can trigger
+  repeated fallback until evicted.
 - An independent Store can retain embeddings across Encoder restarts. Capacity,
   eviction and resilience to Store failures depend on the Store deployment.
 - The `protocol:v3` namespace isolates the compact embedding format from older
