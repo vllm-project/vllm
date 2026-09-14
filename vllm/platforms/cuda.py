@@ -9,7 +9,6 @@ from __future__ import annotations
 import contextlib
 import os
 import platform
-import shutil
 from collections.abc import Callable
 from datetime import timedelta
 from functools import cache, lru_cache, wraps
@@ -301,20 +300,7 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def log_warnings(cls):
-        cls._log_missing_infiniband_diags()
-
-    @classmethod
-    def _log_missing_infiniband_diags(cls):
-        try:
-            has_ib_devices = bool(os.listdir("/sys/class/infiniband"))
-        except OSError:
-            return
-        if has_ib_devices and shutil.which("ibstat") is None:
-            logger.info(
-                "InfiniBand devices found but `ibstat` is not installed. "
-                "Install `infiniband-diags` (e.g. `apt-get install "
-                "infiniband-diags`) to enable IB diagnostics."
-            )
+        pass
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:
@@ -1024,7 +1010,6 @@ class NvmlCudaPlatform(CudaPlatformBase):
     @classmethod
     @with_nvml_context
     def log_warnings(cls):
-        cls._log_missing_infiniband_diags()
         device_ids: int = pynvml.nvmlDeviceGetCount()
         if device_ids > 1:
             device_names = [cls._get_physical_device_name(i) for i in range(device_ids)]
