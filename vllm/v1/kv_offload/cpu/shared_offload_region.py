@@ -116,6 +116,7 @@ class SharedOffloadRegion:
         self._is_unlink_owner = unlink_owner
         self.fd: int | None = None
         self.mmap_obj: mmap.mmap | None = None
+        self._mmap_view: memoryview | None = None
         self._base: torch.Tensor | None = None
         self._views: list[torch.Tensor] = []
         self._canonical_offset = 0
@@ -217,7 +218,8 @@ class SharedOffloadRegion:
                     logger.info("Unlinked mmap file %s", self.mmap_path)
                 self._is_unlink_owner = False
 
-            self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
+            self._mmap_view = memoryview(self.mmap_obj)
+            self._base = torch.frombuffer(self._mmap_view, dtype=torch.int8)
             self._views = []
             self._canonical_offset = 0
             self.is_pinned = False
@@ -388,6 +390,9 @@ class SharedOffloadRegion:
         if self._views is not None:
             self._views.clear()
         self._base = None
+        if self._mmap_view is not None:
+            self._mmap_view.release()
+            self._mmap_view = None
         if self.mmap_obj:
             try:
                 self.mmap_obj.close()
