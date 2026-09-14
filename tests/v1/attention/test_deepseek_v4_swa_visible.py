@@ -374,7 +374,7 @@ COMBINE_CASES = [
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_v41_combine_topk_swa_clears_reused_workspace_padding():
-    from vllm.models.deepseek_v4_1.common.ops.cache_utils import (
+    from vllm.models.deepseek_v41.common.ops.cache_utils import (
         combine_topk_swa_indices as combine_v41,
     )
 

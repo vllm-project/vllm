@@ -8,7 +8,7 @@ import torch
 from torch import nn
 
 from vllm.config import VllmConfig
-from vllm.models.deepseek_v4_1.attention import (
+from vllm.models.deepseek_v41.attention import (
     DeepseekV4Attention,
     make_pipeline_cache_replica,
 )

@@ -3,8 +3,8 @@
 import pytest
 import torch
 
-from vllm.models.deepseek_v4_1.common.pipeline import SharingDependency
-from vllm.models.deepseek_v4_1.common.pipeline_transfer import (
+from vllm.models.deepseek_v41.common.pipeline import SharingDependency
+from vllm.models.deepseek_v41.common.pipeline_transfer import (
     get_sharing_routes,
     restore_cache_blocks,
     snapshot_cache_blocks,
