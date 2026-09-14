@@ -253,6 +253,12 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor[Qwen2AudioProcessing
         hf_processor_mm_kwargs = dict(
             **hf_processor_mm_kwargs,
             sampling_rate=feature_extractor.sampling_rate,
+            # call_hf_processor() defaults truncation=False so the dummy
+            # placeholder text isn't cut short, but Qwen2AudioProcessor
+            # forwards the same kwarg to the feature extractor, which then
+            # skips truncating audio to the model's fixed 30s/3000-frame
+            # window. Force it back on for the (correct) audio behavior.
+            truncation=True,
         )
 
         return mm_data, hf_processor_mm_kwargs
