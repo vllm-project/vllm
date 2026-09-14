@@ -13,11 +13,13 @@ request models whose before-validators were missing the same guard.
 import pytest
 from pydantic import ValidationError
 
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.pooling.classify.protocol import ClassificationChatRequest
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingChatRequest
 from vllm.entrypoints.pooling.pooling.protocol import PoolingChatRequest
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateRequest
 from vllm.entrypoints.serve.tokenize.protocol import TokenizeChatRequest
 from vllm.entrypoints.speech_to_text.transcription.protocol import TranscriptionRequest
 from vllm.entrypoints.speech_to_text.translation.protocol import TranslationRequest
@@ -69,3 +71,33 @@ def test_tokenize_chat_request_still_validates_dict_bodies():
                 "add_generation_prompt": True,
             }
         )
+
+
+CACHE_SALT_MODELS = [
+    (CompletionRequest, {"prompt": "hello"}),
+    (ChatCompletionRequest, {"messages": [{"role": "user", "content": "hello"}]}),
+    (ResponsesRequest, {"input": "hello"}),
+    (GenerateRequest, {"token_ids": [1], "sampling_params": {}}),
+]
+
+
+@pytest.mark.parametrize(
+    ("request_model", "payload"),
+    CACHE_SALT_MODELS,
+    ids=[m.__name__ for m, _ in CACHE_SALT_MODELS],
+)
+def test_request_models_reject_forbidden_cache_salt(request_model, payload):
+    with pytest.raises(VLLMValidationError, match="cache_salt"):
+        request_model.model_validate({**payload, "cache_salt": "/"})
+
+
+def test_request_models_reject_overlong_cache_salt():
+    with pytest.raises(VLLMValidationError, match="cache_salt"):
+        CompletionRequest.model_validate({"prompt": "hello", "cache_salt": "a" * 129})
+
+
+def test_request_models_accept_safe_cache_salt():
+    request = CompletionRequest.model_validate(
+        {"prompt": "hello", "cache_salt": "safe-cache_salt-123"}
+    )
+    assert request.cache_salt == "safe-cache_salt-123"

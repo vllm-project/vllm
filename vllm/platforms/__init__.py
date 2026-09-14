@@ -10,7 +10,7 @@ from vllm import envs
 from vllm.plugins import PLATFORM_PLUGINS_GROUP, load_plugins_by_group
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
-from .interface import CpuArchEnum, Platform, PlatformEnum
+from .interface import CpuArchEnum, Platform, PlatformEnum, in_wsl
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +125,20 @@ def rocm_platform_plugin() -> str | None:
     except Exception as e:
         logger.debug("ROCm platform is not available because: %s", str(e))
 
+    if not is_rocm and in_wsl():
+        try:
+            import torch
+
+            if (
+                not vllm_version_matches_substr("cpu")
+                and getattr(torch.version, "hip", None)
+                and torch.accelerator.is_available()
+            ):
+                is_rocm = True
+                logger.debug("Confirmed ROCm platform is available in WSL via PyTorch.")
+        except Exception as e:
+            logger.debug("WSL ROCm fallback detection failed because: %s", str(e))
+
     return "vllm.platforms.rocm.RocmPlatform" if is_rocm else None
 
 
@@ -237,7 +251,11 @@ def resolve_current_platform_cls_qualname() -> str:
             if platform_cls_qualname is not None:
                 activated_plugins.append(name)
         except Exception:
-            pass
+            logger.debug(
+                "Platform plugin %s failed during detection.",
+                name,
+                exc_info=True,
+            )
 
     activated_builtin_plugins = list(
         set(activated_plugins) & set(builtin_platform_plugins.keys())
