@@ -220,6 +220,59 @@ impl SchedulerLogStatsAccumulator {
     }
 }
 
+/// Where a LoRA adapter is resident, encoded as the `level` label value.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LoraLoadedLevel {
+    /// Active in a GPU slot.
+    Gpu,
+    /// Only resident in the host cache.
+    Cpu,
+}
+
+impl EncodeLabelValue for LoraLoadedLevel {
+    fn encode(&self, encoder: &mut LabelValueEncoder) -> Result<(), std::fmt::Error> {
+        EncodeLabelValue::encode(
+            &match self {
+                Self::Gpu => "gpu",
+                Self::Cpu => "cpu",
+            },
+            encoder,
+        )
+    }
+}
+
+/// Labels for `vllm:lora_adapter_load_seconds`.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct LoraLoadTransitionLabels {
+    pub model_name: String,
+    pub engine: u32,
+    /// `load` (disk into the CPU cache) or `activate` (CPU cache into a GPU slot).
+    pub transition: String,
+}
+
+pub type LoraLoadTransitionHistogramFamily =
+    Family<LoraLoadTransitionLabels, Histogram, fn() -> Histogram>;
+
+const LORA_LOAD_SECONDS_BUCKETS: [f64; 10] =
+    [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0];
+
+fn lora_load_seconds_histogram() -> Histogram {
+    Histogram::new(LORA_LOAD_SECONDS_BUCKETS.iter().copied())
+}
+
+/// Labels for `vllm:lora_adapter_loaded`, one series per resident adapter.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, EncodeLabelSet)]
+pub struct LoraLoadedLabels {
+    pub model_name: String,
+    pub engine: u32,
+    pub adapter_name: String,
+    pub level: LoraLoadedLevel,
+    /// Whether the adapter is pinned in the caches.
+    pub pinned: bool,
+    /// The adapter's LoRA rank (0 when the worker did not report one).
+    pub rank: u32,
+}
+
 /// Scheduler/batch-scoped Prometheus families exported from `SchedulerStats`.
 pub struct SchedulerMetrics {
     // Scheduler state gauges.
@@ -231,6 +284,14 @@ pub struct SchedulerMetrics {
     /// `vllm:lora_requests_info`. Value is the emit-time unix timestamp in
     /// seconds.
     pub lora_info: Family<LoraInfoLabels, F64Gauge>,
+
+    // Worker-side LoRA adapter cache residency, driven by
+    // `EngineNotification::LoraLoadEvent` events.
+    pub lora_gpu_adapters: Family<EngineLabels, U64Gauge>,
+    pub lora_cpu_adapters: Family<EngineLabels, U64Gauge>,
+    pub lora_gpu_slots: Family<EngineLabels, U64Gauge>,
+    pub lora_adapter_loaded: Family<LoraLoadedLabels, U64Gauge>,
+    pub lora_load_seconds: LoraLoadTransitionHistogramFamily,
 
     // Prefix-cache counters, including the connector-backed external cache path.
     pub prefix_cache_queries: Family<EngineLabels, U64Counter>,
@@ -313,8 +374,43 @@ impl SchedulerMetrics {
         let lora_info = Family::default();
         registry.register(
             "vllm:lora_requests_info",
-            "Running stats on lora requests.",
+            "Running stats on lora requests. DEPRECATED: encodes adapter names into comma-separated label values; superseded by vllm:lora_adapter_loaded, vllm:num_gpu_loaded_lora_adapters and vllm:num_cpu_loaded_lora_adapters.",
             lora_info.clone(),
+        );
+
+        let lora_gpu_adapters = Family::default();
+        registry.register(
+            "vllm:num_gpu_loaded_lora_adapters",
+            "Number of LoRA adapters currently loaded into GPU slots.",
+            lora_gpu_adapters.clone(),
+        );
+
+        let lora_cpu_adapters = Family::default();
+        registry.register(
+            "vllm:num_cpu_loaded_lora_adapters",
+            "Number of LoRA adapters currently resident in the worker's CPU cache (superset of the GPU-loaded set).",
+            lora_cpu_adapters.clone(),
+        );
+
+        let lora_gpu_slots = Family::default();
+        registry.register(
+            "vllm:max_gpu_lora_adapters",
+            "Number of GPU LoRA slots (max_loras).",
+            lora_gpu_slots.clone(),
+        );
+
+        let lora_adapter_loaded = Family::default();
+        registry.register(
+            "vllm:lora_adapter_loaded",
+            "Residency of individual LoRA adapters in the worker's adapter caches. The series exists (value 1) while the adapter is resident; 'level' is 'gpu' when the adapter is active in a GPU slot and 'cpu' when it is only in the host cache.",
+            lora_adapter_loaded.clone(),
+        );
+        let lora_load_seconds =
+            Family::new_with_constructor(lora_load_seconds_histogram as fn() -> Histogram);
+        registry.register(
+            "vllm:lora_adapter_load_seconds",
+            "Histogram of LoRA adapter transition time in seconds. 'transition' is 'load' for a read from disk into the CPU cache and 'activate' for a move from the CPU cache into a GPU slot.",
+            lora_load_seconds.clone(),
         );
 
         // Prefix-cache counters, including the connector-backed external cache path.
@@ -525,6 +621,11 @@ impl SchedulerMetrics {
             scheduler_waiting_by_reason,
             kv_cache_usage,
             lora_info,
+            lora_gpu_adapters,
+            lora_cpu_adapters,
+            lora_gpu_slots,
+            lora_adapter_loaded,
+            lora_load_seconds,
             prefix_cache_queries,
             prefix_cache_hits,
             external_prefix_cache_queries,
