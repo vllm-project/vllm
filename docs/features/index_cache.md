@@ -42,6 +42,21 @@ vllm serve deepseek-ai/DeepSeek-V3.2 \
     --hf-overrides '{"use_index_cache": true, "index_topk_pattern": "FFSFSSSFSSFFFSSSFFFSFSSSSSSFFSFFSFFSSFFFFFFSFFFFFSFFSSSSSSFSF"}'
 ```
 
+### DeepSeek-V4
+
+In DeepSeek-V4 only C4A layers (`compress_ratio == 4`) run an indexer, so
+`index_topk_freq` and `index_topk_pattern` are applied over those layers rather
+than over all layers. DeepSeek-V4-Flash has 21 C4A layers (even layers 2-42), so
+its pattern is 21 characters long and must start with `F`:
+
+```bash
+vllm serve deepseek-ai/DeepSeek-V4-Flash \
+    --hf-overrides '{"use_index_cache": true, "index_topk_freq": 2}' ...
+```
+
+`index_topk_freq: 2` runs 11 of the 21 indexers. Skipped layers keep their
+indexer KV cache allocated; only the top-k computation is skipped.
+
 ## How It Works
 
 1. When IndexCache is enabled, layers marked with `"F"` (Full) calculate and store top-k indices
