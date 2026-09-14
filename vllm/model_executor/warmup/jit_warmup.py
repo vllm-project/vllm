@@ -963,14 +963,18 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
         """Compile one warmup key."""
         raise NotImplementedError
 
+    def compile_many(self, compile_keys: Iterable[CompileKeyT]) -> None:
+        """Compile a batch of warmup keys, allowing backend-specific scheduling."""
+        for compile_key in compile_keys:
+            self.compile(compile_key)
+
     def register_warmup(self, *args: Any, **kwargs: Any) -> None:
         """Register this kernel with the active runner's warmup registry."""
         JitWarmupRegistry.register(self, *args, **kwargs)
 
     def warmup(self, *args: Any, **kwargs: Any) -> None:
         """Compile this kernel's warmup keys."""
-        for compile_key in self.get_warmup_keys(*args, **kwargs):
-            self.compile(compile_key)
+        self.compile_many(self.get_warmup_keys(*args, **kwargs))
 
 
 def _same_value(left: Any, right: Any) -> bool:
@@ -1111,5 +1115,4 @@ class JitWarmupRegistry:
                     f"{kernel.__class__.__name__} ({len(compile_keys)} keys)",
                     refresh=False,
                 )
-                for compile_key in compile_keys:
-                    kernel.compile(compile_key)
+                kernel.compile_many(compile_keys)
