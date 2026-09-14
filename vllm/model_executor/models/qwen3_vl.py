@@ -1892,7 +1892,10 @@ class Qwen3VLForConditionalGeneration(
 
         with self._mark_language_model(vllm_config):
             self.language_model = Qwen3LLMForCausalLM(
-                vllm_config=vllm_config.with_hf_config(config.text_config),
+                vllm_config=vllm_config.with_hf_config(
+                    config.text_config,
+                    architectures=["Qwen3ForCausalLM"],
+                ),
                 prefix=maybe_prefix(prefix, "language_model"),
             )
 
@@ -3074,24 +3077,18 @@ class Qwen3VLForConditionalGeneration(
             tower_model="visual.",
         )
 
-    def get_num_mm_encoder_tokens(
+    def get_mm_lora_token_counts(
         self,
-        num_image_tokens: int,
-    ) -> int:
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
         hf_config = self.config
         vision_config = hf_config.vision_config
         merge_size = vision_config.spatial_merge_size
-
-        return num_image_tokens * merge_size**2
-
-    def get_num_mm_connector_tokens(
-        self,
-        num_vision_tokens: int,
-    ) -> int:
-        hf_config = self.config
-        vision_config = hf_config.vision_config
-        merge_size = vision_config.spatial_merge_size
-        return num_vision_tokens // merge_size**2
+        return num_mm_embeds * merge_size**2, num_mm_embeds
 
 
 @lru_cache
