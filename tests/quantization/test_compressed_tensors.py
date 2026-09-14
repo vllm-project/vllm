@@ -54,6 +54,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
     ScaleDesc,
+    kMxfp4Dynamic,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
@@ -919,6 +920,79 @@ def test_scheme_selection(
         f"input_act={input_act} + output_act={output_act} + "
         f"format={format}, got {type(scheme).__name__}"
     )
+
+
+_MXFP4_WEIGHT_ARGS = {
+    "dynamic": False,
+    "group_size": 32,
+    "num_bits": 4,
+    "strategy": "group",
+    "symmetric": True,
+    "type": "float",
+}
+
+_MXFP4_DYNAMIC_ACT_ARGS = {
+    **_MXFP4_WEIGHT_ARGS,
+    "dynamic": True,
+}
+
+
+def _mxfp4_ct_config(input_activations):
+    return {
+        "format": "mxfp4-pack-quantized",
+        "quant_method": "compressed-tensors",
+        "config_groups": {
+            "group_0": {
+                "format": "mxfp4-pack-quantized",
+                "input_activations": input_activations,
+                "output_activations": None,
+                "targets": ["Linear"],
+                "weights": _MXFP4_WEIGHT_ARGS,
+            }
+        },
+        "ignore": ["lm_head"],
+    }
+
+
+@pytest.mark.parametrize(
+    "input_activations,expected_use_a16,expected_act_key",
+    [
+        (None, True, None),
+        (_MXFP4_DYNAMIC_ACT_ARGS, False, kMxfp4Dynamic),
+    ],
+    ids=["weight_only_w4a16", "w4a4"],
+)
+def test_mxfp4_scheme_selection_respects_input_quant(
+    input_activations, expected_use_a16, expected_act_key, monkeypatch
+):
+    """Weight-only MXFP4 (input_activations null) must stay on W4A16.
+
+    Regression for #56770: the selector used to ignore input_quant and
+    always construct W4A4 MXFP4, which dispatches FlashInfer W4A4 on SM100+.
+    """
+    captured: dict[str, object] = {}
+
+    def fake_init_mxfp4_linear_kernel(activation_quant_key=None):
+        captured["activation_quant_key"] = activation_quant_key
+        return Mock()
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.compressed_tensors."
+        "schemes.compressed_tensors_w4a4_mxfp4.init_mxfp4_linear_kernel",
+        fake_init_mxfp4_linear_kernel,
+    )
+
+    config = CompressedTensorsConfig.from_config(_mxfp4_ct_config(input_activations))
+    scheme_dict = config.target_scheme_map["Linear"]
+    scheme = config._get_scheme_from_parts(
+        weight_quant=scheme_dict["weights"],
+        input_quant=scheme_dict["input_activations"],
+        format=scheme_dict.get("format"),
+    )
+
+    assert isinstance(scheme, CompressedTensorsW4A4Mxfp4)
+    assert scheme.use_a16 is expected_use_a16
+    assert captured["activation_quant_key"] is expected_act_key
 
 
 @pytest.mark.skipif(

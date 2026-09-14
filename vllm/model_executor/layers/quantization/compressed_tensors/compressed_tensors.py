@@ -755,6 +755,14 @@ class CompressedTensorsConfig(QuantizationConfig):
             return CompressedTensorsW4A4Fp4()
 
         if self._is_mxfp4(weight_quant):
+            if input_quant is None:
+                return CompressedTensorsW4A4Mxfp4(use_a16=True)
+
+            if not self._is_mxfp4(input_quant):
+                raise ValueError(
+                    "For MXFP4 weights, input quantization must also be MXFP4 "
+                    "format, None for MXFP4A16"
+                )
             return CompressedTensorsW4A4Mxfp4()
 
         if self._is_mxfp8(weight_quant):
