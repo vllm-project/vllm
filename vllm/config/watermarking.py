@@ -66,7 +66,7 @@ class WatermarkConfig:
     sbw_scheme: SBWScheme = "selfhash"
     """SBW seeding scheme: 'selfhash' (anchored minhash PRF, default) or
     'lefthash' (additive PRF, faster)."""
-    sbw_gamma: float = Field(default=0.25, gt=0.0, lt=1.0)
+    sbw_gamma: float = Field(default=0.5, gt=0.0, lt=1.0)
     """SBW green-list fraction in (0, 1)."""
     sbw_delta: float = Field(default=2.0, ge=0.0)
     """SBW logit bias added to green tokens. Set to 0 to disable."""
