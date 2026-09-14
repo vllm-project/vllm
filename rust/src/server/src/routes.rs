@@ -20,6 +20,8 @@ mod version;
 mod weight_transfer;
 mod world_size;
 
+pub(crate) use inference::generate::GenerateSamplingParams;
+
 use std::sync::Arc;
 
 use axum::Router;

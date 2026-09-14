@@ -53,6 +53,11 @@ message GenerateRequest {
 
   // Loaded LoRA name; empty selects the base model.
   string lora_name = 15;
+
+  // Exact JSON object from native /inference/v1/generate sampling_params.
+  // When non-empty, this is the sampling source for supported fields; structured
+  // fields above remain the compatibility path for generic gRPC clients.
+  bytes native_sampling_params_json = 16;
 }
 
 message RandomSampling {
