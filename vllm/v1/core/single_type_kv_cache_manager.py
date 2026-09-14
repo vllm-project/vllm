@@ -2040,7 +2040,7 @@ class MambaManager(SingleTypeKVCacheManager):
         self,
         request: Request,
         num_tokens: int,
-        retention_interval: int | None = None,
+        retention_interval: int | None,
     ) -> BlockHashWithGroupId | None:
         hash_block_size = self.block_pool.hash_block_size
         # Re-key the reserved block at its exported checkpoint boundary.
@@ -2055,7 +2055,11 @@ class MambaManager(SingleTypeKVCacheManager):
                 and num_tokens < request.num_prompt_tokens
                 and checkpoint_position != request.shared_prefix_boundary
             ):
-                self.block_pool.evict_blocks({checkpoint_block.block_id})
+                # Latest-only retention keeps this transient checkpoint
+                # request-local. The slot may carry a hash from this step's
+                # full-block pass; that must go too, since the checkpoint
+                # state is about to overwrite the block.
+                self.block_pool._maybe_evict_cached_block(checkpoint_block)
                 return None
             if checkpoint_block.block_hash_num_tokens == checkpoint_position:
                 return None
