@@ -21,6 +21,7 @@ from vllm.model_executor.kernels.linear import (
     Int8ScaledMMLinearLayerConfig,
     ScaledMMLinearKernel,
     _get_linear_backend,
+    _resolve_backend_kernels,
     init_fp8_linear_kernel,
     init_int8_linear_kernel,
     register_linear_kernel,
@@ -33,12 +34,29 @@ from vllm.platforms import PlatformEnum
 pytestmark = pytest.mark.cpu_test
 
 
-def test_linear_backend_default_is_unchanged():
-    config = VllmConfig(kernel_config=KernelConfig(linear_backend="cutlass"))
+def test_auto_linear_backend_is_unchanged_without_overrides():
+    kernels = [object]
+    quantizations = (
+        "fp8_block_w8a8",
+        "fp8_w8a8",
+        "int8_w8a8",
+        "mixed_precision",
+        "mxfp8",
+        "mxfp4",
+        "mxfp6",
+        "w8a16_fp8",
+        "nvfp4_w4a4",
+        "nvfp4_w4a16",
+    )
+    config = VllmConfig(kernel_config=KernelConfig(linear_backend="auto"))
 
     with set_current_vllm_config(config):
-        assert _get_linear_backend() == "cutlass"
-        assert _get_linear_backend(quantization="fp8_w8a8") == "cutlass"
+        for quantization in quantizations:
+            assert _get_linear_backend(quantization=quantization) == "auto"
+            assert (
+                _resolve_backend_kernels(kernels, "test", quantization=quantization)
+                is kernels
+            )
 
 
 def test_linear_backend_override_is_quantization_specific():

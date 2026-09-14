@@ -235,18 +235,14 @@ from vllm.platforms import PlatformEnum, current_platform
 logger = init_logger(__name__)
 
 
-def _get_linear_backend(*, quantization: str | None = None) -> str:
+def _get_linear_backend(*, quantization: str) -> str:
     """Get the linear_backend setting from the current vllm config."""
     from vllm.config import get_current_vllm_config_or_none
 
     if (config := get_current_vllm_config_or_none()) is None:
         return "auto"
     overrides = config.kernel_config.linear_backend_per_quant
-    if (
-        quantization is not None
-        and overrides is not None
-        and (override := overrides.get(quantization))
-    ):
+    if overrides is not None and (override := overrides.get(quantization)):
         logger.info_once(
             "Applied linear backend override for %r: %r", quantization, override
         )
@@ -380,7 +376,7 @@ def _resolve_backend_kernels(
     kernels: list[type],
     layer_desc: str,
     *,
-    quantization: str | None = None,
+    quantization: str,
 ) -> list[type]:
     """Apply --linear-backend filtering to one layer type's kernel list.
 
@@ -637,7 +633,7 @@ def choose_scaled_mm_linear_kernel(
     compute_capability: int | None = None,
     force_kernel: type[_KernelT] | None = None,
     *,
-    quantization: str | None = None,
+    quantization: str,
 ) -> type[_KernelT]:
     """
     Choose a _KernelT that can implement the given config for the
