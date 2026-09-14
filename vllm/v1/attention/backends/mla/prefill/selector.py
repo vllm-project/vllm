@@ -69,7 +69,7 @@ def _get_mla_prefill_backend_priorities(
 
     if current_platform.is_rocm():
         return [
-            MLAPrefillBackendEnum.AITER_ASM,
+            MLAPrefillBackendEnum.ROCM_AITER_ASM,
             MLAPrefillBackendEnum.ROCM_AITER_FA,
             MLAPrefillBackendEnum.FLASH_ATTN,
         ]

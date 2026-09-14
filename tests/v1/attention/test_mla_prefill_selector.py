@@ -38,26 +38,26 @@ else:
 
 requires_gfx950 = pytest.mark.skipif(
     not ON_GFX950,
-    reason="AITER_ASM MLA prefill backend requires ROCm gfx950",
+    reason="ROCM_AITER_ASM MLA prefill backend requires ROCm gfx950",
 )
 
-# DeepSeek-R1 MLA head dimensions, which AITER_ASM supports.
+# DeepSeek-R1 MLA head dimensions, which ROCM_AITER_ASM supports.
 _R1_DIMS = MLADimensions(qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128)
 _NON_R1_DIMS = MLADimensions(qk_nope_head_dim=192, qk_rope_head_dim=64, v_head_dim=128)
 
 
-def _aiter_asm_class():
+def _rocm_aiter_asm_class():
     try:
-        return MLAPrefillBackendEnum.AITER_ASM.get_class()
+        return MLAPrefillBackendEnum.ROCM_AITER_ASM.get_class()
     except ImportError:
         return None
 
 
 @pytest.fixture
-def aiter_asm_cls():
-    cls = _aiter_asm_class()
+def rocm_aiter_asm_cls():
+    cls = _rocm_aiter_asm_class()
     if cls is None:
-        pytest.skip("AITER_ASM backend not importable")
+        pytest.skip("ROCM_AITER_ASM backend not importable")
     return cls
 
 
@@ -418,7 +418,7 @@ class TestROCmAiterFAPrefillSelection:
 
         assert AiterFlashAttnPrefillBackend.supports_dtype(torch.bfloat16)
         assert AiterFlashAttnPrefillBackend.supports_dtype(torch.float16)
-        # FP8 is served by the separate AITER ASM backend, not this one.
+        # FP8 is served by the separate ROCM_AITER_ASM backend, not this one.
         assert not AiterFlashAttnPrefillBackend.supports_dtype(torch.float8_e4m3fn)
 
     def test_supports_compute_capability_on_rocm(self):
@@ -547,8 +547,8 @@ class TestMLAPrefillBackendConfig:
 
 
 @requires_gfx950
-class TestAiterAsmValidation:
-    """AITER_ASM-specific validate_configuration contract (gfx950 FP8 only)."""
+class TestROCmAiterASMValidation:
+    """ROCM_AITER_ASM-specific validate_configuration contract (gfx950 FP8 only)."""
 
     @pytest.mark.parametrize(
         (
@@ -577,7 +577,7 @@ class TestAiterAsmValidation:
     )
     def test_validate_configuration(
         self,
-        aiter_asm_cls,
+        rocm_aiter_asm_cls,
         capability,
         cache_dtype,
         dtype,
@@ -586,7 +586,7 @@ class TestAiterAsmValidation:
         expect_valid,
         reason,
     ):
-        cls = aiter_asm_cls
+        cls = rocm_aiter_asm_cls
         with patch.object(cls, "is_available", return_value=True):
             reasons = cls.validate_configuration(
                 capability,
@@ -608,8 +608,8 @@ class TestAiterAsmValidation:
     reason="Imports vllm.platforms.rocm, whose module init requires a CUDA or "
     "ROCm torch build; not importable on XPU/CPU/TPU.",
 )
-class TestAiterAsmAvailabilityGating:
-    """AITER_ASM needs gfx950 (compute capability) and an installed AITER.
+class TestROCmAiterASMAvailabilityGating:
+    """ROCM_AITER_ASM needs gfx950 (compute capability) and an installed AITER.
 
     The two halves are gated separately: arch by supports_compute_capability,
     library presence by is_available. The chunked-prefill final_lse fix
@@ -617,27 +617,27 @@ class TestAiterAsmAvailabilityGating:
     """
 
     @pytest.mark.parametrize("found", [True, False])
-    def test_is_available_tracks_aiter_installation(self, aiter_asm_cls, found):
+    def test_is_available_tracks_aiter_installation(self, rocm_aiter_asm_cls, found):
         with patch("vllm._aiter_ops.is_aiter_found_and_supported", return_value=found):
-            assert aiter_asm_cls.is_available() is found
+            assert rocm_aiter_asm_cls.is_available() is found
 
     @pytest.mark.parametrize("on_gfx950", [True, False])
-    def test_compute_capability_tracks_gfx950(self, aiter_asm_cls, on_gfx950):
+    def test_compute_capability_tracks_gfx950(self, rocm_aiter_asm_cls, on_gfx950):
         with (
             patch("vllm.platforms.current_platform") as mock_platform,
             patch("vllm.platforms.rocm.on_gfx950", return_value=on_gfx950),
         ):
             mock_platform.is_rocm.return_value = True
-            assert aiter_asm_cls.supports_compute_capability(GFX950) is on_gfx950
+            assert rocm_aiter_asm_cls.supports_compute_capability(GFX950) is on_gfx950
 
-    def test_compute_capability_false_off_rocm(self, aiter_asm_cls):
+    def test_compute_capability_false_off_rocm(self, rocm_aiter_asm_cls):
         with patch("vllm.platforms.current_platform") as mock_platform:
             mock_platform.is_rocm.return_value = False
-            assert not aiter_asm_cls.supports_compute_capability(GFX950)
+            assert not rocm_aiter_asm_cls.supports_compute_capability(GFX950)
 
-    def test_unavailable_aiter_is_reported_as_invalid(self, aiter_asm_cls):
-        with patch.object(aiter_asm_cls, "is_available", return_value=False):
-            reasons = aiter_asm_cls.validate_configuration(
+    def test_unavailable_aiter_is_reported_as_invalid(self, rocm_aiter_asm_cls):
+        with patch.object(rocm_aiter_asm_cls, "is_available", return_value=False):
+            reasons = rocm_aiter_asm_cls.validate_configuration(
                 GFX950,
                 MLAPrefillSelectorConfig(
                     dtype=torch.bfloat16,
@@ -650,11 +650,11 @@ class TestAiterAsmAvailabilityGating:
 
 
 @requires_gfx950
-class TestAiterAsmSelectorPriority:
-    """On gfx950, AITER_ASM should win over FLASH_ATTN when FP8 KV is on."""
+class TestROCmAiterASMSelectorPriority:
+    """On gfx950, ROCM_AITER_ASM should win over FLASH_ATTN when FP8 KV is on."""
 
-    def test_aiter_asm_wins_on_gfx950_fp8(self, aiter_asm_cls):
-        cls = aiter_asm_cls
+    def test_rocm_aiter_asm_wins_on_gfx950_fp8(self, rocm_aiter_asm_cls):
+        cls = rocm_aiter_asm_cls
         cfg = MLAPrefillSelectorConfig(
             dtype=torch.bfloat16,
             mla_dimensions=_R1_DIMS,
@@ -662,10 +662,10 @@ class TestAiterAsmSelectorPriority:
         )
         with patch.object(cls, "is_available", return_value=True):
             selected = _auto_select_mla_prefill_backend(GFX950, cfg)
-            assert selected.get_name() == "AITER_ASM"
+            assert selected.get_name() == "ROCM_AITER_ASM"
 
-    def test_falls_through_to_flash_attn_when_not_fp8(self, aiter_asm_cls):
-        cls = aiter_asm_cls
+    def test_falls_through_to_flash_attn_when_not_fp8(self, rocm_aiter_asm_cls):
+        cls = rocm_aiter_asm_cls
         try:
             fa_cls = MLAPrefillBackendEnum.FLASH_ATTN.get_class()
         except ImportError:

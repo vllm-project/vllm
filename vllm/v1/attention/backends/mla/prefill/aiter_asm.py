@@ -78,7 +78,7 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "AITER_ASM"
+        return "ROCM_AITER_ASM"
 
     @classmethod
     def supports_compute_capability(cls, device_capability: "DeviceCapability") -> bool:
@@ -108,17 +108,17 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         if selector_config.cache_dtype not in ("fp8", "fp8_e4m3"):
             invalid_reasons.append(
                 f"cache_dtype {selector_config.cache_dtype!r} is unsupported "
-                "(AITER_ASM requires plain per-tensor E4M3: fp8 or fp8_e4m3)."
+                "(ROCM_AITER_ASM requires plain per-tensor E4M3: fp8 or fp8_e4m3)."
             )
         if selector_config.dcp_world_size > 1:
             invalid_reasons.append(
                 "decode context parallelism (DCP) is not supported with the "
-                "FP8 KV cache required by AITER_ASM"
+                "FP8 KV cache required by ROCM_AITER_ASM"
             )
         num_heads = selector_config.num_heads
         if num_heads and not cls._supports_num_heads(num_heads):
             invalid_reasons.append(
-                f"num_heads {num_heads} is unsupported (AITER_ASM pads "
+                f"num_heads {num_heads} is unsupported (ROCM_AITER_ASM pads "
                 "unaligned head counts up to the next multiple of 16, which "
                 "AITER bounds at 128)"
             )
@@ -151,7 +151,7 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         )
 
         assert self._supports_num_heads(num_heads), (
-            f"AITER_ASM MLA prefill does not support {num_heads} heads"
+            f"ROCM_AITER_ASM MLA prefill does not support {num_heads} heads"
         )
         # PS ASM prefill requires 16-aligned heads
         self._kernel_num_heads = _aligned_num_heads(num_heads)

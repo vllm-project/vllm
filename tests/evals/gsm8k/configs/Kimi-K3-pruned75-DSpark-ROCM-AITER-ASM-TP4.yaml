@@ -14,7 +14,7 @@ server_args: >-
   --max-num-seqs 128
   --kv-cache-dtype fp8
   --moe-backend aiter
-  --attention-config '{"backend":"ROCM_AITER_MLA","mla_prefill_backend":"AITER_ASM"}'
+  --attention-config '{"backend":"ROCM_AITER_MLA","mla_prefill_backend":"ROCM_AITER_ASM"}'
   --enable-prefix-caching
   --enable-auto-tool-choice
   --tool-call-parser kimi_k3

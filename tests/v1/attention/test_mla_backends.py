@@ -356,7 +356,7 @@ if current_platform.is_cuda():
     )
 elif current_platform.is_rocm():
     PREFILL_BACKENDS_TO_TEST.extend(
-        [MLAPrefillBackendEnum.ROCM_AITER_FA, MLAPrefillBackendEnum.AITER_ASM]
+        [MLAPrefillBackendEnum.ROCM_AITER_FA, MLAPrefillBackendEnum.ROCM_AITER_ASM]
     )
 
 MLA_DIMENSIONS_TO_TEST = [
@@ -370,10 +370,10 @@ def _prefill_backend_dimension_params():
     params = []
     for prefill_backend in PREFILL_BACKENDS_TO_TEST:
         for dimensions_id, qk_nope_head_dim, v_head_dim in MLA_DIMENSIONS_TO_TEST:
-            # AITER_ASM validity depends on the runtime kv_cache_dtype (it
+            # ROCM_AITER_ASM validity depends on the runtime kv_cache_dtype (it
             # requires an FP8 KV cache), which isn't known at collection time.
             # Defer its skip decision to _run_backend_correctness.
-            if prefill_backend == MLAPrefillBackendEnum.AITER_ASM:
+            if prefill_backend == MLAPrefillBackendEnum.ROCM_AITER_ASM:
                 invalid_reasons = []
             elif device_capability is None:
                 invalid_reasons = ["device capability unavailable"]
@@ -1476,10 +1476,10 @@ def _run_backend_correctness(
     if not backends_to_test:
         pytest.skip(f"No backends support kv_cache_dtype={kv_cache_dtype}")
 
-    # AITER_ASM validity depends on the runtime kv_cache_dtype (it requires an
+    # ROCM_AITER_ASM validity depends on the runtime kv_cache_dtype (it requires an
     # FP8 KV cache), which is not known at collection time, so its skip decision
     # is deferred here rather than baked into the parametrization marks.
-    if prefill_backend == MLAPrefillBackendEnum.AITER_ASM:
+    if prefill_backend == MLAPrefillBackendEnum.ROCM_AITER_ASM:
         try:
             prefill_invalid_reasons = (
                 prefill_backend.get_class().validate_configuration(
@@ -1503,11 +1503,11 @@ def _run_backend_correctness(
                 f"{prefill_invalid_reasons}"
             )
 
-        # AITER_ASM MLA prefill backend currently hardcodes q/k/v dequant
+        # ROCM_AITER_ASM MLA prefill backend currently hardcodes q/k/v dequant
         # scales to 1.0.
         if q_scale != 1.0 or k_scale != 1.0:
             pytest.skip(
-                "AITER_ASM MLA prefill backend only supports q_scale==k_scale==1.0"
+                "ROCM_AITER_ASM MLA prefill backend only supports q_scale==k_scale==1.0"
             )
 
     batch_spec = BATCH_SPECS[batch_spec_name]
