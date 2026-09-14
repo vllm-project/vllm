@@ -31,8 +31,11 @@ they cannot be attributed to the job's partition. When the environment identifie
 an assigned MIG UUID, the collector queries that instance's used/total memory
 through vLLM's bundled NVML binding in a bounded subprocess. Numeric
 `CUDA_VISIBLE_DEVICES` indices are resolved against explicit MIG UUIDs in
-`NVIDIA_VISIBLE_DEVICES`. Missing assignments or permission failures remain
-unknown; sibling instances are never enumerated. MIG utilization stays absent.
+`NVIDIA_VISIBLE_DEVICES`. For CDI assignments without an explicit UUID, a bounded
+helper initializes the CUDA driver and reads only CUDA-visible device UUIDs,
+without creating CUDA contexts or importing Torch. NVML verifies each MIG handle.
+Discovery or permission failures remain unknown; NVML sibling instances are never
+enumerated. MIG utilization stays absent.
 CPU jobs and AMD mirrors do not collect GPU samples.
 
 Run the helper tests without loading vLLM or requiring a GPU:

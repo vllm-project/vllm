@@ -1002,3 +1002,90 @@ def test_gpu_sampler_stops_with_command_and_preserves_failure_status(
             command["start_ns"] <= event["time_ns"] <= command["end_ns"]
             for event in batches[0]["events"]
         )
+
+
+@pytest.mark.parametrize("is_mig", [True, False])
+def test_cdi_discovery_uses_only_cuda_visible_uuids(monkeypatch, is_mig):
+    identifiers = []
+
+    def get_count(output):
+        output._obj.value = 1
+        return 0
+
+    def get_device(output, index):
+        assert index == 0
+        output._obj.value = 7
+        return 0
+
+    def get_uuid(output, device):
+        assert device.value == 7
+        output._obj[:] = bytes(range(16))
+        return 0
+
+    driver = SimpleNamespace(
+        cuInit=lambda flags: 0,
+        cuDeviceGetCount=get_count,
+        cuDeviceGet=get_device,
+        cuDeviceGetUuid_v2=get_uuid,
+    )
+    monkeypatch.setattr(ci_gpu.ctypes, "CDLL", lambda _: driver)
+    nvml = SimpleNamespace(
+        nvmlInit=lambda: None,
+        nvmlShutdown=lambda: None,
+        nvmlDeviceGetHandleByUUID=lambda value: identifiers.append(value) or "handle",
+        nvmlDeviceIsMigDeviceHandle=lambda handle: is_mig,
+        NVMLError=RuntimeError,
+    )
+    monkeypatch.setitem(sys.modules, "vllm.third_party", SimpleNamespace(pynvml=nvml))
+    expected = "MIG-00010203-0405-0607-0809-0a0b0c0d0e0f"
+    assert ci_gpu.cuda_visible_mig_devices() == ([expected] if is_mig else [])
+    assert identifiers == [expected]
+
+
+@pytest.mark.parametrize("discovery_fails", [False, True])
+def test_cdi_sampling_switches_to_slice_or_keeps_unknown(monkeypatch, discovery_fails):
+    monkeypatch.setenv("CI_INFRA_TRACE_ID", "01" * 16)
+    monkeypatch.setenv("CI_INFRA_COMMAND_SPAN_ID", "02" * 8)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setenv("NVIDIA_VISIBLE_DEVICES", "void")
+    monkeypatch.setattr(ci_gpu, "INTERVAL_SECONDS", 0)
+    stop = threading.Event()
+    commands = []
+    records = []
+
+    def query(command, **kwargs):
+        assert kwargs["timeout"] == ci_gpu.QUERY_TIMEOUT_SECONDS
+        commands.append(command)
+        if "--discover-mig" in command:
+            if discovery_fails:
+                raise subprocess.TimeoutExpired(command, 2)
+            return SimpleNamespace(stdout='["MIG-assigned"]')
+        if len(commands) == 4:
+            stop.set()
+        if "--query-mig" in command:
+            assert command[-1] == "MIG-assigned"
+            return SimpleNamespace(
+                stdout=json.dumps(
+                    [
+                        {
+                            "time_ns": 2,
+                            "name": "ci.gpu.sample",
+                            "attributes": {
+                                "gpu.uuid": "MIG-assigned",
+                                "gpu.memory.used": 123,
+                            },
+                        }
+                    ]
+                )
+            )
+        return SimpleNamespace(stdout="0, GPU-parent, H200, 99, 100, 200, Enabled")
+
+    monkeypatch.setattr(ci_gpu.subprocess, "run", query)
+    monkeypatch.setattr(ci_gpu, "record_spans", lambda spans: records.extend(spans))
+    ci_gpu.collect(os.getppid(), stop)
+    assert sum("--discover-mig" in command for command in commands) == 1
+    attributes = [event["attributes"] for span in records for event in span.events]
+    if discovery_fails:
+        assert all("gpu.memory.used" not in event for event in attributes)
+    else:
+        assert any(event.get("gpu.memory.used") == 123 for event in attributes)

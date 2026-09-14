@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import csv
+import ctypes
 import io
 import json
 import math
@@ -16,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid as uuid_module
 
 from ci_otel import Span, export_spans, record_spans
 
@@ -86,6 +88,37 @@ def visible_mig_devices() -> list[str]:
     return list(dict.fromkeys(devices))[:MAX_DEVICES]
 
 
+def cuda_visible_mig_devices() -> list[str]:
+    """Discover CDI assignments in a subprocess without creating CUDA contexts."""
+    from vllm.third_party import pynvml
+
+    driver = ctypes.CDLL("libcuda.so.1")
+    count = ctypes.c_int()
+    if driver.cuInit(0) or driver.cuDeviceGetCount(ctypes.byref(count)):
+        return []
+    devices = []
+    pynvml.nvmlInit()
+    try:
+        for index in range(min(count.value, MAX_DEVICES)):
+            device = ctypes.c_int()
+            identifier = (ctypes.c_ubyte * 16)()
+            if driver.cuDeviceGet(ctypes.byref(device), index):
+                continue
+            # The v2 entry point returns the compute instance UUID under MIG.
+            if driver.cuDeviceGetUuid_v2(ctypes.byref(identifier), device):
+                continue
+            uuid = "MIG-" + str(uuid_module.UUID(bytes=bytes(identifier)))
+            try:
+                handle = pynvml.nvmlDeviceGetHandleByUUID(uuid)
+                if pynvml.nvmlDeviceIsMigDeviceHandle(handle):
+                    devices.append(uuid)
+            except pynvml.NVMLError:
+                continue
+    finally:
+        pynvml.nvmlShutdown()
+    return devices
+
+
 def query_mig_samples(devices: list[str], timestamp_ns: int) -> list[dict]:
     # Use the binding already shipped with vLLM; never initialize CUDA/Torch.
     from vllm.third_party import pynvml
@@ -153,6 +186,7 @@ def collect(parent_pid: int, stop: threading.Event) -> None:
     events: list[dict] = []
     batch_started = time.monotonic()
     failures = 0
+    discovery_attempted = False
     mig_devices = visible_mig_devices()
     query = (
         [sys.executable, __file__, "--query-mig", *mig_devices]
@@ -181,6 +215,30 @@ def collect(parent_pid: int, stop: threading.Event) -> None:
                     if mig_devices
                     else parse_samples(result.stdout, time.time_ns())
                 )
+                if (
+                    not mig_devices
+                    and not discovery_attempted
+                    and any(
+                        sample["attributes"].get("gpu.status") == "unsupported_mig"
+                        for sample in samples
+                    )
+                ):
+                    discovery_attempted = True
+                    # CDI can assign a MIG device without exporting its UUID.
+                    # Only CUDA-visible devices are inspected, never NVML siblings.
+                    try:
+                        discovered = subprocess.run(
+                            [sys.executable, __file__, "--discover-mig"],
+                            capture_output=True,
+                            text=True,
+                            timeout=QUERY_TIMEOUT_SECONDS,
+                            check=True,
+                        )
+                        mig_devices = json.loads(discovered.stdout)
+                    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+                        mig_devices = []
+                    if mig_devices:
+                        query = [sys.executable, __file__, "--query-mig", *mig_devices]
                 if not samples:
                     break
                 events.extend(samples)
@@ -217,7 +275,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--query-mig":
+    if len(sys.argv) > 1 and sys.argv[1] == "--discover-mig":
+        print(json.dumps(cuda_visible_mig_devices()))
+    elif len(sys.argv) > 1 and sys.argv[1] == "--query-mig":
         print(json.dumps(query_mig_samples(sys.argv[2:], time.time_ns())))
     else:
         main()
