@@ -49,6 +49,8 @@ PRUNED_METADATA_FIELDS = {
     "prefill_state_indices",
     "prefill_has_initial_state",
     "spec_sequence_masks",
+    "flashinfer_prefill_query_start_loc",
+    "flashinfer_prefill_seq_order",
 }
 
 
@@ -59,10 +61,10 @@ def _assert_matches_shared_gdn(
     assert actual.recoverssm_context is None
     for field in fields(GDNAttentionMetadata):
         actual_value = getattr(actual, field.name)
-        expected_value = getattr(reference, field.name)
         if field.name in PRUNED_METADATA_FIELDS:
             assert actual_value is None
             continue
+        expected_value = getattr(reference, field.name)
         if (
             field.name in {"spec_token_indx", "non_spec_token_indx"}
             and actual.num_spec_decodes > 0
@@ -157,6 +159,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         ),
         cache_config=SimpleNamespace(
             mamba_cache_dtype="auto",
+            mamba_ssm_cache_dtype="auto",
             use_kda_recoverssm=True,
         ),
         parallel_config=SimpleNamespace(tensor_parallel_size=1),
@@ -509,6 +512,8 @@ def test_mixed_regular_and_spec_decode_uses_packed_decode_metadata():
     assert actual.non_spec_query_start_loc is None
     torch.testing.assert_close(actual.non_spec_token_indx, torch.tensor([0, 1]))
     torch.testing.assert_close(actual.spec_token_indx, torch.tensor([2, 3, 4]))
+    assert actual.non_spec_token_start == 0
+    assert actual.spec_token_start == 2
     torch.testing.assert_close(
         actual.spec_query_start_loc,
         torch.tensor([0, 3], dtype=torch.int32),
@@ -536,6 +541,8 @@ def test_mixed_regular_and_spec_decode_excludes_request_padding():
     assert actual.non_spec_state_indices_tensor.shape == (1,)
     torch.testing.assert_close(actual.non_spec_token_indx, torch.tensor([0]))
     torch.testing.assert_close(actual.spec_token_indx, torch.tensor([1, 2, 3]))
+    assert actual.non_spec_token_start == 0
+    assert actual.spec_token_start == 1
 
 
 @pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])

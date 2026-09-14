@@ -26,7 +26,8 @@ if [ -z "${CI_INFRA_OTEL_RUNTIME_DIR}" ] ||
   [ -z "${_CI_INFRA_OTEL_PYTHON}" ] ||
   [ ! -f "${CI_INFRA_OTEL_DIR}/ci_otel.py" ] ||
   ! mkdir -p "${CI_INFRA_OTEL_SPOOL_DIR}" ||
-  ! PYTHONPATH="${CI_INFRA_OTEL_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
+  ! PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH="${CI_INFRA_OTEL_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
     "${_CI_INFRA_OTEL_PYTHON}" -c "import ci_otel" >/dev/null 2>&1; then
   echo "vLLM CI OTel: tracing unavailable; test command will run normally" >&2 || :
   if [ "${_CI_INFRA_OTEL_OWNS_RUNTIME}" = "1" ]; then
@@ -58,9 +59,9 @@ fi
 
 _ci_otel_python() {
   if command -v timeout >/dev/null 2>&1; then
-    timeout 2s "${_CI_INFRA_OTEL_PYTHON}" "$@"
+    PYTHONDONTWRITEBYTECODE=1 timeout 2s "${_CI_INFRA_OTEL_PYTHON}" "$@"
   else
-    "${_CI_INFRA_OTEL_PYTHON}" "$@"
+    PYTHONDONTWRITEBYTECODE=1 "${_CI_INFRA_OTEL_PYTHON}" "$@"
   fi
 }
 
@@ -82,6 +83,14 @@ ci_otel_start() {
   CI_INFRA_COMMAND_SPAN_ID="${_CI_INFRA_OTEL_COMMAND_SPAN_ID}"
   export CI_INFRA_TRACE_ID CI_INFRA_COMMAND_SPAN_ID
   _CI_INFRA_OTEL_ACTIVE=1
+  _CI_INFRA_GPU_PID=""
+  if [ "${CI_INFRA_GPU_SAMPLING:-1}" != "0" ] &&
+    [ -f "${CI_INFRA_OTEL_DIR}/ci_gpu.py" ] &&
+    command -v nvidia-smi >/dev/null 2>&1; then
+    PYTHONDONTWRITEBYTECODE=1 \
+      "${_CI_INFRA_OTEL_PYTHON}" "${CI_INFRA_OTEL_DIR}/ci_gpu.py" "$$" </dev/null &
+    _CI_INFRA_GPU_PID=$!
+  fi
 }
 
 ci_otel_finish() {
@@ -93,6 +102,18 @@ ci_otel_finish() {
     "${_CI_INFRA_OTEL_PARENT_SPAN_ID}" "${_CI_INFRA_OTEL_START_NS}" \
     "${_CI_INFRA_OTEL_COMMAND_INDEX}" "${_CI_INFRA_OTEL_COMMAND_STATUS}" \
     "${_CI_INFRA_OTEL_COMMAND_LABEL}" || :
+  if [ -n "${_CI_INFRA_GPU_PID:-}" ]; then
+    kill -TERM "${_CI_INFRA_GPU_PID}" 2>/dev/null || :
+    _CI_INFRA_GPU_WAIT=0
+    while kill -0 "${_CI_INFRA_GPU_PID}" 2>/dev/null &&
+      [ "${_CI_INFRA_GPU_WAIT}" -lt 30 ]; do
+      sleep 0.1
+      _CI_INFRA_GPU_WAIT=$((_CI_INFRA_GPU_WAIT + 1))
+    done
+    kill -KILL "${_CI_INFRA_GPU_PID}" 2>/dev/null || :
+    wait "${_CI_INFRA_GPU_PID}" 2>/dev/null || :
+    _CI_INFRA_GPU_PID=""
+  fi
   CI_INFRA_TRACE_ID=""
   CI_INFRA_COMMAND_SPAN_ID=""
   export CI_INFRA_TRACE_ID CI_INFRA_COMMAND_SPAN_ID
@@ -118,9 +139,11 @@ _ci_otel_on_exit() {
   trap - 0
   ci_otel_finish "${_CI_INFRA_OTEL_EXIT_STATUS}" || :
   if command -v timeout >/dev/null 2>&1; then
-    timeout 4s "${_CI_INFRA_OTEL_PYTHON}" "${CI_INFRA_OTEL_DIR}/ci_otel.py" flush || :
+    PYTHONDONTWRITEBYTECODE=1 timeout 4s \
+      "${_CI_INFRA_OTEL_PYTHON}" "${CI_INFRA_OTEL_DIR}/ci_otel.py" flush || :
   else
-    "${_CI_INFRA_OTEL_PYTHON}" "${CI_INFRA_OTEL_DIR}/ci_otel.py" flush || :
+    PYTHONDONTWRITEBYTECODE=1 \
+      "${_CI_INFRA_OTEL_PYTHON}" "${CI_INFRA_OTEL_DIR}/ci_otel.py" flush || :
   fi
   if [ "${_CI_INFRA_OTEL_OWNS_RUNTIME}" = "1" ]; then
     rm -rf -- "${CI_INFRA_OTEL_RUNTIME_DIR}" || :

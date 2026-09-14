@@ -11,13 +11,18 @@ embed and norms are replicated, so the residual stream is full-width on
 every rank.
 """
 
+import itertools
 from functools import lru_cache
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
+)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
     MMEncoderAttention,
@@ -29,7 +34,10 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.models.vision import is_vit_use_data_parallel
+from vllm.model_executor.models.vision import (
+    get_load_balance_assignment,
+    is_vit_use_data_parallel,
+)
 
 
 @lru_cache(8)
@@ -206,6 +214,7 @@ class DeepseekV4Aligner(nn.Module):
         super().__init__()
         use_data_parallel = is_vit_use_data_parallel(config.vision_n_heads)
         self.downsample_ratio = config.vision_downsample_ratio
+        self.out_dim = config.hidden_size
         in_dim = config.vision_dim * self.downsample_ratio**2
         self.w1 = ColumnParallelLinear(
             in_dim,
@@ -230,3 +239,85 @@ class DeepseekV4Aligner(nn.Module):
         hidden, _ = self.w1(x)
         out, _ = self.w2(F.gelu(hidden))
         return out
+
+
+def run_dp_sharded_vision_tower(
+    vision_model: DeepseekV4ViT,
+    aligner: DeepseekV4Aligner,
+    patches: torch.Tensor,
+    vit_grid: list[list[int]],
+) -> list[torch.Tensor]:
+    """Run the ViT + aligner with images sharded across TP ranks.
+
+    Every rank holds the full tower weights (``--mm-encoder-tp-mode data``)
+    and receives the full ``patches`` batch. Images are assigned to ranks by
+    patch count (greedy load balancing), each rank encodes only its share,
+    and per-image embeddings are exchanged with one padded all-gather and
+    returned in the original image order.
+
+    Args:
+        vision_model: The (weight-replicated) ViT tower.
+        aligner: The (weight-replicated) spatial-merge projector.
+        patches: ``(sum(n_vit_h * n_vit_w), 3, p, p)`` patches of all images.
+        vit_grid: ``[n_vit_h, n_vit_w]`` per image.
+
+    Returns:
+        One ``(n_aligner_rows, hidden_size)`` embedding tensor per image.
+    """
+    tp_size = get_tensor_model_parallel_world_size()
+    tp_rank = get_tensor_model_parallel_rank()
+
+    sizes = [h * w for h, w in vit_grid]
+    cum_patches = [0, *itertools.accumulate(sizes)]
+    image_to_tp_rank, gpu_sample_counts, _ = get_load_balance_assignment(sizes, tp_size)
+    cum_sample_counts = [0, *itertools.accumulate(gpu_sample_counts)]
+
+    # Rows the aligner emits per image: each grid dim is padded up to a
+    # multiple of the merge ratio before r x r patches fold into one row.
+    r = aligner.downsample_ratio
+    rows_per_image = [-(-h // r) * -(-w // r) for h, w in vit_grid]
+
+    def rank_image_idxs(g: int) -> list[int]:
+        return image_to_tp_rank[cum_sample_counts[g] : cum_sample_counts[g + 1]]
+
+    # All-gather needs one shape on every rank; pad each rank's packed
+    # output to the largest per-rank row count (computable locally).
+    max_rows = max(
+        sum(rows_per_image[i] for i in rank_image_idxs(g)) for g in range(tp_size)
+    )
+
+    local_embeds = [
+        aligner(
+            vision_model(
+                patches[cum_patches[i] : cum_patches[i + 1]],
+                vit_grid[i][0],
+                vit_grid[i][1],
+            ),
+            vit_grid[i][0],
+            vit_grid[i][1],
+        )
+        for i in rank_image_idxs(tp_rank)
+    ]
+    if local_embeds:
+        embeds_local = torch.cat(local_embeds, dim=0)
+    else:
+        embeds_local = patches.new_zeros((0, aligner.out_dim))
+    if embeds_local.shape[0] < max_rows:
+        embeds_local = torch.cat(
+            [
+                embeds_local,
+                embeds_local.new_zeros(
+                    (max_rows - embeds_local.shape[0], embeds_local.shape[1])
+                ),
+            ],
+            dim=0,
+        )
+    gathered = tensor_model_parallel_all_gather(embeds_local.contiguous(), dim=0)
+
+    out: list[torch.Tensor] = [None] * len(vit_grid)  # type: ignore[list-item]
+    for g in range(tp_size):
+        offset = g * max_rows
+        for i in rank_image_idxs(g):
+            out[i] = gathered[offset : offset + rows_per_image[i]]
+            offset += rows_per_image[i]
+    return out
