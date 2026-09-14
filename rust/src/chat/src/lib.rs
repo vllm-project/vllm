@@ -112,10 +112,10 @@ impl ChatRequestProcessor {
         request: &ChatRequest,
         rendered: RenderedPrompt,
     ) -> Result<(Prompt, Option<MmFeatures>)> {
-        let media_is_empty = rendered.media_order.as_ref().map_or_else(
-            || !request.has_multimodal(),
-            |media_order| media_order.is_empty(),
-        );
+        let media_is_empty = match &rendered.media_order {
+            Some(media_order) => media_order.is_empty(),
+            None => !request.has_multimodal(),
+        };
         match self.model_dtype {
             Some(model_dtype) => {
                 multimodal::finalize_rendered_prompt(
