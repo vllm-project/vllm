@@ -10,7 +10,11 @@ import asyncio
 import importlib.util
 from pathlib import Path
 
+import httpx
+import msgspec
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 
 PROXY_REL = "examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py"
 
@@ -29,8 +33,8 @@ class _Response:
     def __init__(self, params):
         self._params = params
 
-    async def json(self):
-        return {"kv_transfer_params": self._params}
+    async def read(self):
+        return msgspec.json.encode({"kv_transfer_params": self._params})
 
 
 def test_maybe_prefill_leaves_the_caller_body_untouched(proxy, monkeypatch):
@@ -62,8 +66,8 @@ class _EncoderResponse:
         self.status = 200
         self._params = params
 
-    async def json(self):
-        return {"ec_transfer_params": self._params}
+    async def read(self):
+        return msgspec.json.encode({"ec_transfer_params": self._params})
 
     async def text(self):
         return ""
@@ -75,7 +79,7 @@ class _EncoderSession:
     def __init__(self, replies):
         self._replies = list(replies)
 
-    async def post(self, url, json=None, headers=None):
+    async def post(self, url, data=None, headers=None):
         return _EncoderResponse(self._replies.pop(0))
 
 
@@ -145,6 +149,125 @@ def test_raw_media_keeps_encoder_transfer_identity(proxy, monkeypatch):
     assert params["encoded-hash"] == handle
     assert params["ec_items"][0]["mm_hash"] == "encoded-hash"
     assert params["ec_items"][0]["transfer_id"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("prefill", [False, True])
+async def test_http_roundtrip_preserves_payload_and_response_bytes(
+    proxy, monkeypatch, stream, prefill
+):
+    """Exercise real HTTP hops, rewrite and a decode retry without model servers."""
+    seen: dict[str, list[dict]] = {"encode": [], "prefill": [], "decode": []}
+    prefix = b'data: {"content":"'
+    # Split a multibyte character at the old 1024-byte forwarding boundary.
+    expected = (
+        prefix + b"x" * (1023 - len(prefix)) + '图片🌍"}\n\ndata: [DONE]\n\n'.encode()
+        if stream
+        else '{ "choices": [{"message": {"content": "图片🌍"}}] }\n'.encode()
+    )
+
+    async def backend(request):
+        stage = request.match_info["stage"]
+        assert request.content_type == "application/json"
+        body = await request.json()
+        seen[stage].append(body)
+        if stage == "encode":
+            item = body["messages"][0]["content"][0]
+            return web.json_response(
+                {
+                    "ec_transfer_params": {
+                        item["uuid"]: {
+                            "metadata": {"image_grid_thw": [[1, 2, 2]]},
+                            "peer_port": len(seen[stage]),
+                        }
+                    }
+                }
+            )
+        if stage == "prefill":
+            assert body["max_tokens"] == 1 and body["stream"] is False
+            return web.json_response(
+                {"kv_transfer_params": {"remote_block_ids": [len(seen[stage])]}}
+            )
+        if len(seen[stage]) == 1:
+            return web.Response(status=500, text="retry")
+        return web.Response(
+            body=expected,
+            content_type="text/event-stream" if stream else "application/json",
+        )
+
+    backend_app = web.Application()
+    backend_app.router.add_post("/{stage}/v1/chat/completions", backend)
+    async with TestServer(backend_app) as server:
+        for stage, field in [
+            ("encode", "e_urls"),
+            ("prefill", "p_urls"),
+            ("decode", "d_urls"),
+        ]:
+            urls = [str(server.make_url(f"/{stage}"))]
+            if stage == "prefill" and not prefill:
+                urls = []
+            monkeypatch.setattr(proxy.app.state, field, urls, raising=False)
+        monkeypatch.setattr(proxy.app.state, "d_ec_urls", [], raising=False)
+        monkeypatch.setattr(proxy.app.state, "ec_consumer_dp_size", 1, raising=False)
+        monkeypatch.setattr(proxy, "DECODE_RETRIES", 1)
+        monkeypatch.setattr(proxy, "NO_REWRITE", False)
+        item = {"type": "image_url", "image_url": {"url": "data:image/png;base64,YWJj"}}
+        body = {
+            "model": "test",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "描述图片🌍"},
+                        item,
+                        item,
+                    ],
+                }
+            ],
+            "stream": stream,
+            "temperature": 0.01,
+            "max_tokens": 32,
+            "seed": 42,
+            "structured_outputs": {"choice": ["A", "B"]},
+        }
+        await proxy.on_startup()
+        try:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=proxy.app), base_url="http://proxy"
+            ) as client:
+                response = await client.post("/v1/chat/completions", json=body)
+            assert response.status_code == 200
+            assert response.content == expected
+            assert response.headers["content-type"].startswith(
+                "text/event-stream" if stream else "application/json"
+            )
+        finally:
+            await proxy.on_shutdown()
+
+    assert len(seen["encode"]) == 4
+    assert len(seen["decode"]) == 2
+    final = seen["decode"][-1]
+    for key in [
+        "model",
+        "stream",
+        "temperature",
+        "max_tokens",
+        "seed",
+        "structured_outputs",
+    ]:
+        assert final[key] == body[key]
+    content = final["messages"][0]["content"]
+    assert content[0] == body["messages"][0]["content"][0]
+    for reference in content[1:]:
+        assert reference == {
+            "type": "image_embeds",
+            "image_embeds": {"image_grid_thw": [1, 2, 2]},
+            "uuid": proxy.content_uuid(item),
+        }
+    assert final["ec_transfer_params"][proxy.content_uuid(item)]["peer_port"] in (3, 4)
+    if prefill:
+        assert final["kv_transfer_params"] == {"remote_block_ids": [2]}
 
 
 @pytest.mark.parametrize("server_keep_alive", ["0.1", "1", "5", "2", "30"])
