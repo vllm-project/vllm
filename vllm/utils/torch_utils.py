@@ -45,11 +45,13 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8_per_token_head": torch.uint8,
     "fp8_inc": torch.float8_e4m3fn,
     "fp8_ds_mla": torch.uint8,
+    "nvfp4_ds_mla": torch.uint8,
     "turboquant_k8v4": torch.uint8,
     "turboquant_4bit_nc": torch.uint8,
     "turboquant_k3v4_nc": torch.uint8,
     "turboquant_3bit_nc": torch.uint8,
     "nvfp4": torch.uint8,
+    "nvfp4_4over6": torch.uint8,
 }
 
 TORCH_DTYPE_TO_NUMPY_DTYPE = {
@@ -77,13 +79,20 @@ def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
     return (
         kv_cache_dtype.startswith("fp8")
         or kv_cache_dtype.endswith("per_token_head")
-        or kv_cache_dtype == "nvfp4"
+        or kv_cache_dtype.startswith("nvfp4")
     )
 
 
 def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
     """Return True if *kv_cache_dtype* needs per-token-head scales."""
     return kv_cache_dtype.endswith("per_token_head")
+
+
+def is_meta_module(module: torch.nn.Module) -> bool:
+    """Return True if module contains any meta parameters or buffers."""
+    return any(p.is_meta for p in module.parameters()) or any(
+        b.is_meta for b in module.buffers()
+    )
 
 
 def is_strictly_contiguous(t: torch.Tensor) -> bool:
@@ -113,6 +122,21 @@ def is_strictly_contiguous(t: torch.Tensor) -> bool:
         if strides[i] != expected_stride:
             return False
         expected_stride *= shape[i]
+    return True
+
+
+def is_non_overlapping_and_dense(t: torch.Tensor) -> bool:
+    """Check if the tensor's elements cover one gapless, non-overlapping byte
+    range, in any dimension order (i.e. a permuted view of a contiguous
+    tensor); ``is_contiguous()`` additionally requires row-major order.
+    """
+    expected_stride = 1
+    for size, stride in sorted(zip(t.shape, t.stride()), key=lambda p: p[1]):
+        if size == 1:
+            continue
+        if stride != expected_stride:
+            return False
+        expected_stride *= size
     return True
 
 
@@ -147,8 +171,10 @@ def set_default_torch_dtype(dtype: torch.dtype):
     """Sets the default torch dtype to the given dtype."""
     old_dtype = torch.get_default_dtype()
     torch.set_default_dtype(dtype)
-    yield
-    torch.set_default_dtype(old_dtype)
+    try:
+        yield
+    finally:
+        torch.set_default_dtype(old_dtype)
 
 
 def _cgroup_cpu_limit() -> float | None:
@@ -478,15 +504,6 @@ def get_kv_cache_quant_algo_string(quant_cfg: dict[str, Any]) -> str | None:
     return None
 
 
-def get_kv_cache_quant_algo_dtype(quant_cfg: dict[str, Any]) -> torch.dtype | None:
-    """Get the KV cache quantization algorithm dtype from the quantization config."""
-    kv_algo_str = get_kv_cache_quant_algo_string(quant_cfg)
-    if kv_algo_str is not None and kv_algo_str != "auto":
-        # Only convert if we have a valid dtype string (not "auto" fallback)
-        return STR_DTYPE_TO_TORCH_DTYPE[kv_algo_str]
-    return None
-
-
 def resolve_kv_cache_dtype_string(
     kv_cache_dtype: str, model_config: ModelConfig
 ) -> str:
@@ -608,7 +625,7 @@ def create_kv_caches_with_random_flash(
     value_caches: list[torch.Tensor] = []
 
     for _ in range(num_layers):
-        if cache_dtype == "nvfp4":
+        if isinstance(cache_dtype, str) and cache_dtype.startswith("nvfp4"):
             # Full page dim: fp4 data + fp8 block scales per head.
             # Per page layout: [K_data | K_scale | V_data | V_scale]
             # Returns [:, 0] and [:, 1] like all other dtypes.
@@ -886,7 +903,15 @@ def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tens
     from vllm.platforms import current_platform
 
     if current_platform.is_xpu():
-        assert cpu_tensor.is_pinned(), "CPU tensor must be pinned"
+        # Remove once the vllm-xpu-kernels fix for empty and non-pinned inputs
+        # (vllm-project/vllm-xpu-kernels#513) is in a released package.
+        if cpu_tensor.numel() == 0:
+            return torch.empty(cpu_tensor.shape, dtype=cpu_tensor.dtype, device="xpu")
+        if not cpu_tensor.is_pinned():
+            contiguous_cpu = cpu_tensor.contiguous()
+            pinned = torch.empty_like(contiguous_cpu, pin_memory=True)
+            pinned.copy_(contiguous_cpu)
+            cpu_tensor = pinned
         return torch.ops._C.get_xpu_view_from_cpu_tensor(cpu_tensor)
     elif current_platform.is_cuda_alike():
         return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)

@@ -116,6 +116,7 @@ impl ChatRenderer for HarmonyChatRenderer {
     fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
         Ok(RenderedPrompt {
             prompt: Prompt::TokenIds(self.render_token_ids(request)?),
+            media_order: None,
             effective_template_kwargs: request_template_kwargs(request),
         })
     }
@@ -216,7 +217,7 @@ fn preamble_tool_descriptions(
 ) -> Vec<ToolDescription> {
     let mut tools = Vec::new();
     if request.tool_parsing_enabled() {
-        tools.extend(to_tool_descriptions(&request.tools));
+        tools.extend(to_tool_descriptions(request.initial_tools()));
     }
     if let Some(leading_developer_tools) = leading_developer_tools {
         tools.extend(to_tool_descriptions(leading_developer_tools));

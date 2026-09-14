@@ -139,27 +139,32 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
         self, vllm_config: VllmConfig, prefix: str = ""
     ) -> BertModel | BertWithRope:
         hf_config = vllm_config.model_config.hf_config
-        kwargs = dict(vllm_config=vllm_config, prefix=prefix)
         if getattr(hf_config, "position_embedding_type", "absolute") == "absolute":
-            return BertModel(**kwargs, embedding_class=RobertaEmbedding)
+            return BertModel(
+                vllm_config=vllm_config,
+                prefix=prefix,
+                embedding_class=RobertaEmbedding,
+            )
         else:
-            return JinaRobertaModel(**kwargs)
+            return JinaRobertaModel(vllm_config=vllm_config, prefix=prefix)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         weights_list = list(weights)
+        orig_to_new_prefix: dict[str, str | None] = {"lm_head.": None}
         has_roberta_prefix = any(
             name.startswith("roberta.") for name, _ in weights_list
         )
         if has_roberta_prefix:
             # For models with the `roberta.` prefix e.g.
             # `FacebookAI/roberta-base`
-            mapper = WeightsMapper(orig_to_new_prefix={"roberta.": "model."})
+            orig_to_new_prefix["roberta."] = "model."
         else:
             # For models without the `roberta.` prefix e.g.
             # `sentence-transformers/stsb-roberta-base-v2`
-            mapper = WeightsMapper(orig_to_new_prefix={"": "model."})
+            orig_to_new_prefix[""] = "model."
+        mapper = WeightsMapper(orig_to_new_prefix=orig_to_new_prefix)
 
-        loader = AutoWeightsLoader(self, skip_prefixes=["lm_head."])
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights_list, mapper=mapper)
 
 

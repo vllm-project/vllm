@@ -61,7 +61,7 @@ th:not(:first-child) {
 See [Configuration Notes](#configuration-notes) below for what must match and
 what may differ.
 
-<sup>2</sup> Requires `FLASH_ATTN` or `FLASHINFER` backend **and** `HND` KV cache layout. Enable via `--kv-transfer-config '{"kv_connector_extra_config": {"enable_cross_layers_blocks": "True"}}'`.
+<sup>2</sup> Cross-layer contiguity is achieved by using a `BLHNC` layout (set via `VLLM_KV_CACHE_LAYOUT=BLHNC`).
 
 <sup>3</sup> Supported only when HMA is **not** required (i.e., non-hybrid models). Block IDs are remapped automatically. Only P block size < D block size is supported.
 
@@ -82,6 +82,8 @@ By default, a **compatibility hash** is checked during handshake. P and D instan
 - Attention backend
 - KV cache dtype (`cache_dtype`)
 - EAGLE/MTP-style speculative method and draft-model configuration
+- NIXL transfer mode (push vs pull) — a push (WRITE) connector and a pull (READ)
+  connector use incompatible transfer protocols and must never be paired
 
 !!! warning
     Disable the hash check with `--kv-transfer-config '{"kv_connector_extra_config": {"enforce_handshake_compat": false}}'` at your own risk.
@@ -98,9 +100,9 @@ By default, a **compatibility hash** is checked during handshake. P and D instan
 
 ### KV cache layout
 
-- NixlConnector defaults to **`HND`** layout for optimal transfer performance (non-MLA models).
-- `NHD` layout is supported but does **not** allow heterogeneous TP head splitting.
-- Experimental `HND` ↔ `NHD` permute: enable via `--kv-transfer-config '{"enable_permute_local_kv": true}'`. Not supported with HMA.
+- NixlConnector defaults to **`LBHNC`** (head-major, formerly `HND`) layout for optimal transfer performance (non-MLA models).
+- `LBNHC` (token-major, formerly `NHD`) layout is supported but does **not** allow heterogeneous TP head splitting.
+- Experimental `LBHNC` ↔ `LBNHC` permute: enable via `--kv-transfer-config '{"enable_permute_local_kv": true}'`. Not supported with HMA.
 
 ### Quantized KV cache
 

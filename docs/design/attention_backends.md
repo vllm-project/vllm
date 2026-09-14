@@ -56,6 +56,55 @@ llm = LLM(
 
 ## Backend Selection Behavior
 
+### Triton/FlashAttention Composite
+
+On Hopper, `TRITON_FLASH_ATTN` is preferred for compatible multimodal-prefix
+configurations. It uses Triton when the current queries need bidirectional
+image attention and FlashAttention for causal text prefills and decode, with a
+shared KV cache. The causal child must resolve to FA4. This happens
+automatically for FA4-only shapes such as head size 512 and models whose
+version policy promotes all layers to FA4, including Gemma 4. A standalone
+head-size-256 configuration whose version policy selects FA3 falls back to
+Triton for the whole layer.
+
+No attention override is needed for supported multimodal models:
+
+```bash
+vllm serve google/gemma-4-31B-it
+```
+
+### Triton/FlashInfer Composite
+
+On Blackwell, `TRITON_FLASHINFER` is preferred for compatible
+multimodal-prefix configurations, including Gemma 4 with BF16 or FP8 KV cache. It uses
+Triton when a batch's current queries require bidirectional image attention,
+and FlashInfer for causal text prefills and decode. Historical image tokens
+alone do not select Triton.
+
+This instantiates `create_composite_attention_backend` from
+`vllm/v1/attention/backends/composite.py` with Triton,
+FlashInfer, and `MMPrefixAttentionRouting`. The reusable factory owns child
+implementations, metadata dispatch, compatible cache requirements, and workspace
+sharing. The routing policy selects the child and defines graph-capture safety.
+Other combinations can reuse the same machinery.
+
+The backend supports head dimensions 256/512, FP16/BF16 and FP8 KV cache,
+and 64-token kernel pages with a head-major cache layout. TRTLLM handles causal
+attention at both head dimensions; its hdim512 kernels do not support 128-token
+pages.
+For Gemma 4, full CUDA graphs cover single-token batches; multi-token batches
+use the non-full-graph execution path. Models whose image masks extend beyond
+the sliding window cannot use full attention graphs with this composite.
+Context parallelism, R-SWA, attention sinks,
+and adaptive verification are not supported by this composite.
+
+It can also be selected explicitly:
+
+```bash
+vllm serve google/gemma-4-31B-it \
+    --attention-backend TRITON_FLASHINFER
+```
+
 ### Manual Selection
 
 When you explicitly set a backend via `--attention-backend` or `AttentionConfig`:
@@ -127,6 +176,24 @@ Priority is **1 = highest** (tried first).
 > **†** FlashInfer Native is the regular FlashInfer path. XQA is the SM90 decode path exposed through FlashInfer's TRTLLM decode API. trtllm-gen is used on SM100 and supports sinks. Disable XQA/trtllm-gen via `--attention-config.use_trtllm_attention=0`.
 >
 > **\*** Specify the FlashAttention version via `--attention-config.flash_attn_version=2`, `3`, or `4`. Default is FA4 on SM100+ (Blackwell), FA3 on SM90 (Hopper), FA2 otherwise.
+>
+> On Blackwell, when the FlashAttention backend is selected, `head_size=256` is served
+> by a dedicated FA4 kernel that requires a KV cache block size of 128 (advertised
+> automatically, so it is picked as long as `--block-size` is not pinned) and does not
+> support logit soft capping, attention sinks, mm_prefix/R-SWA masking, DCP, or windowed
+> encoder attention. Those configurations transparently fall back to FA2. A pinned
+> `--block-size` that is not a multiple of 128 instead makes FlashAttention ineligible
+> for such models, which is an error if the backend was requested explicitly.
+
+### b12x
+
+The optional [b12x](https://pypi.org/project/b12x/) backend supports causal
+decoder attention on NVIDIA SM120 and SM121 GPUs. Install and select it with:
+
+```bash
+uv pip install "vllm[b12x]"
+vllm serve <model> --attention-backend b12x
+```
 
 ## MiniMax M3 Sparse Attention Backends
 
