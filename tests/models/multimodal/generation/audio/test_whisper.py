@@ -11,10 +11,10 @@ from vllm.assets.audio import AudioAsset
 from vllm.multimodal.audio import AudioResampler
 from vllm.platforms import current_platform
 
-from ....conftest import HfRunner, PromptAudioInput, VllmRunner
-from ....utils import create_new_process_for_each_test, multi_gpu_test
-from ...registry import HF_EXAMPLE_MODELS
-from ...utils import check_logprobs_close
+from .....conftest import HfRunner, PromptAudioInput, VllmRunner
+from .....utils import create_new_process_for_each_test, multi_gpu_test
+from ....registry import HF_EXAMPLE_MODELS
+from ....utils import check_logprobs_close
 
 VLLM_PROMPT = "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>"
 HF_PROMPT = ""

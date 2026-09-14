@@ -11,7 +11,7 @@ from vllm.assets.image import ImageAsset
 from vllm.logprobs import Logprob, SampleLogprobs
 from vllm.tokenizers import TokenizerLike
 
-from ....conftest import HfRunner, PromptImageInput, VllmRunner
+from .....conftest import HfRunner, PromptImageInput, VllmRunner
 
 IMAGE = ImageAsset("paper-11").pil_image_ext(ext="png").convert("RGB")
 PROMPT = (
