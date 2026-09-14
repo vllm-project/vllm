@@ -50,7 +50,7 @@ from .test_fused_indexer_q_rope_quant import quantize_to_mxfp4
 @pytest.mark.parametrize("use_graph", [False, True])
 def test_dspark_context_kv_matches_query_insert(cache_dtype, num_tokens, use_graph):
     """KV-only insertion must preserve every cache byte, including graph replay."""
-    from vllm.models.deepseek_v4_1.nvidia.dspark import _insert_context_kv
+    from vllm.models.deepseek_v41.nvidia.dspark import _insert_context_kv
 
     torch.manual_seed(42)
     block_size = 256
