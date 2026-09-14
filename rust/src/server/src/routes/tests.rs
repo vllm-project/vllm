@@ -6113,6 +6113,13 @@ async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
         ("POST", "/reset_prefix_cache"),
         ("POST", "/reset_mm_cache"),
         ("POST", "/reset_encoder_cache"),
+        ("POST", "/init_weight_transfer_engine"),
+        ("POST", "/start_weight_update"),
+        ("POST", "/start_draft_weight_update"),
+        ("POST", "/update_weights"),
+        ("POST", "/finish_weight_update"),
+        ("POST", "/update_weight_version"),
+        ("GET", "/weight_info"),
     ] {
         let response = app
             .clone()
@@ -6130,6 +6137,248 @@ async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
     }
 
     engine_task.abort_and_join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn weight_transfer_routes_support_the_http_training_lifecycle() {
+    let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let mut calls = Vec::new();
+            for _ in 0..10 {
+                let utility = recv_engine_message(dealer).await;
+                assert_eq!(utility[0].as_ref(), &[0x03]);
+                let payload = decode_value(&utility[1]).expect("decode utility");
+                let array = payload.as_array().expect("utility array");
+                let call_id = array[1].as_u64().expect("call id");
+                let args: serde_json::Value =
+                    rmpv::ext::from_value(array[3].clone()).expect("decode args");
+                calls.push(format!("{} {args}", array[2].as_str().expect("method")));
+                let result = if array[2] == Value::from("get_weight_version") {
+                    utility_result_value("step-2")
+                } else if array[2] == Value::from("collective_rpc") {
+                    utility_result_value(vec![(), ()])
+                } else {
+                    utility_none_result()
+                };
+                send_outputs(push, utility_outputs(call_id, result)).await;
+            }
+            expect_test::expect![[r#"
+                [
+                    "collective_rpc [\"init_weight_transfer_engine\",null,[],{\"init_info\":{\"master_address\":\"127.0.0.1\",\"master_port\":29500,\"rank_offset\":1,\"world_size\":3}}]",
+                    "collective_rpc [\"start_weight_update\",null,[],{}]",
+                    "collective_rpc [\"update_weights\",null,[],{\"update_info\":{\"names\":[\"model.embed_tokens.weight\"],\"dtype_names\":[\"bfloat16\"],\"shapes\":[[32,16]],\"is_checkpoint_format\":true}}]",
+                    "collective_rpc [\"update_weights\",null,[],{\"update_info\":[{\"rank\":0,\"ipc_handles_pickled\":\"opaque-handle-0\"},{\"rank\":1,\"ipc_handles_pickled\":\"opaque-handle-1\"}]}]",
+                    "collective_rpc [\"finish_weight_update\",null,[],{}]",
+                    "set_weight_version [\"step-1\"]",
+                    "collective_rpc [\"start_draft_weight_update\",null,[],{}]",
+                    "collective_rpc [\"finish_weight_update\",null,[],{}]",
+                    "set_weight_version [\"step-2\"]",
+                    "get_weight_version []",
+                ]
+            "#]].assert_debug_eq(&calls);
+        })
+    })
+    .await;
+
+    let mut responses = Vec::new();
+    for (method, path, body) in [
+        (
+            "POST",
+            "/init_weight_transfer_engine",
+            Some(json!({
+                "init_info": {"master_address": "127.0.0.1", "master_port": 29500,
+                    "rank_offset": 1, "world_size": 3}
+            })),
+        ),
+        ("POST", "/start_weight_update", None),
+        (
+            "POST",
+            "/update_weights",
+            Some(json!({
+                "update_info": {"names": ["model.embed_tokens.weight"],
+                    "dtype_names": ["bfloat16"], "shapes": [[32, 16]],
+                    "is_checkpoint_format": true}
+            })),
+        ),
+        (
+            "POST",
+            "/update_weights",
+            Some(json!({
+                "update_info": [{"rank": 0, "ipc_handles_pickled": "opaque-handle-0"},
+                    {"rank": 1, "ipc_handles_pickled": "opaque-handle-1"}]
+            })),
+        ),
+        (
+            "POST",
+            "/finish_weight_update",
+            Some(json!({"weight_version": "step-1"})),
+        ),
+        ("POST", "/start_draft_weight_update", None),
+        ("POST", "/finish_weight_update", None),
+        (
+            "POST",
+            "/update_weight_version",
+            Some(json!({"new_version": "step-2"})),
+        ),
+        ("GET", "/weight_info", None),
+    ] {
+        let mut request = Request::builder().method(method).uri(path);
+        let body = match body {
+            Some(body) => {
+                request = request.header("content-type", "application/json");
+                Body::from(body.to_string())
+            }
+            None => Body::empty(),
+        };
+        let response =
+            app.call(request.body(body).expect("build request")).await.expect("call app");
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        responses.push(
+            serde_json::from_slice::<serde_json::Value>(&body)
+                .expect("decode json")
+                .to_string(),
+        );
+    }
+    engine_task.await.expect("mock engine task");
+    expect_test::expect![[r#"
+        [
+            "{\"message\":\"Weight transfer initialized\"}",
+            "{\"message\":\"Weight update started\"}",
+            "{\"message\":\"Weights updated\"}",
+            "{\"message\":\"Weights updated\"}",
+            "{\"message\":\"Weight update finished\"}",
+            "{\"message\":\"Draft weight update started\"}",
+            "{\"message\":\"Weight update finished\"}",
+            "{\"success\":true,\"new_version\":\"step-2\"}",
+            "{\"weight_version\":\"step-2\"}",
+        ]
+    "#]]
+    .assert_debug_eq(&responses);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn weight_transfer_routes_reject_invalid_payloads_before_engine_calls() {
+    let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, _push| {
+        boxed_test_future(async move {
+            let message = recv_engine_message(dealer).await;
+            panic!("invalid payload reached engine: {message:?}");
+        })
+    })
+    .await;
+
+    for (path, body) in [
+        ("/init_weight_transfer_engine", "{"),
+        ("/init_weight_transfer_engine", "{}"),
+        ("/init_weight_transfer_engine", r#"{"init_info":null}"#),
+        ("/init_weight_transfer_engine", r#"{"init_info":[]}"#),
+        ("/update_weights", "{"),
+        ("/update_weights", "{}"),
+        ("/update_weights", r#"{"update_info":null}"#),
+        ("/update_weights", r#"{"update_info":1}"#),
+        ("/update_weights", r#"{"update_info":[{},null]}"#),
+        ("/finish_weight_update", "{"),
+        ("/finish_weight_update", r#"{"weight_version":1}"#),
+        ("/update_weight_version", "{}"),
+        ("/update_weight_version", r#"{"new_version":null}"#),
+    ] {
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}: {body}");
+    }
+    engine_task.abort_and_join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn weight_transfer_routes_do_not_commit_version_when_finish_fails() {
+    let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            let payload = decode_value(&utility[1]).expect("decode utility");
+            let array = payload.as_array().expect("utility array");
+            assert_eq!(array[2], Value::from("collective_rpc"));
+            assert_eq!(
+                array[3].as_array().expect("args")[0],
+                Value::from("finish_weight_update")
+            );
+            send_outputs(
+                push,
+                UtilityCallOutput {
+                    output: UtilityOutput {
+                        call_id: array[1].as_u64().expect("call id").into(),
+                        failure_message: Some("weight reload failed".to_string()),
+                        result: None,
+                    },
+                    ..Default::default()
+                }
+                .into(),
+            )
+            .await;
+            let utility = recv_engine_message(dealer).await;
+            let payload = decode_value(&utility[1]).expect("decode utility");
+            let array = payload.as_array().expect("utility array");
+            assert_eq!(array[2], Value::from("get_weight_version"));
+            send_outputs(
+                push,
+                utility_outputs(
+                    array[1].as_u64().expect("call id"),
+                    utility_result_value("step-0"),
+                ),
+            )
+            .await;
+        })
+    })
+    .await;
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/finish_weight_update")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"weight_version":"step-1"}"#))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let error: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .expect("error message")
+            .contains("weight reload failed")
+    );
+
+    let response = app
+        .call(
+            Request::builder()
+                .uri("/weight_info")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).expect("decode json"),
+        json!({"weight_version": "step-0"})
+    );
+    engine_task.await.expect("mock engine task");
 }
 
 // ========================= Stop string tests =========================

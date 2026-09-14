@@ -33,8 +33,8 @@ pub use parser::tool::{ToolParser, ToolParserError, ToolParserFactory};
 pub use parser::{ParserSelection, validate_parser_overrides};
 pub use renderer::hf::ChatTemplateContentFormatOption;
 pub use renderer::{
-    ChatRenderer, DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer,
-    HarmonyChatRenderer, InklingChatRenderer, KimiK3ChatRenderer, RenderedPrompt,
+    ChatRenderer, DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DeepSeekV41ChatRenderer,
+    DynChatRenderer, HarmonyChatRenderer, InklingChatRenderer, KimiK3ChatRenderer, RenderedPrompt,
     RendererSelection,
 };
 pub use request::{
@@ -130,7 +130,7 @@ impl ChatRequestProcessor {
     /// Prepare media for an already-tokenized request.
     async fn prepare_media(
         &self,
-        media: Vec<MediaContentPart>,
+        media: multimodal::MultimodalInput,
         token_ids: &mut Vec<u32>,
     ) -> Result<Option<MmFeatures>> {
         if media.is_empty() {
@@ -140,8 +140,15 @@ impl ChatRequestProcessor {
             .backend
             .multimodal_model_info()
             .ok_or(Error::UnsupportedMultimodalRenderer)?;
-        let model_dtype = self.model_dtype.ok_or(Error::UnsupportedMultimodalRenderer)?;
-        let features = info.prepare_multimodal(media, token_ids, model_dtype).await?;
+        let features = match media {
+            multimodal::MultimodalInput::Raw(parts) => {
+                let model_dtype = self.model_dtype.ok_or(Error::UnsupportedMultimodalRenderer)?;
+                info.prepare_multimodal(parts, token_ids, model_dtype).await?
+            }
+            multimodal::MultimodalInput::Preprocessed(features) => {
+                info.prepare_preprocessed(features, token_ids.len())?
+            }
+        };
         Ok(Some(features))
     }
 
@@ -286,12 +293,14 @@ impl ChatLlm {
     }
 
     /// Prepare media for an already-tokenized request.
+    /// Raw content is preprocessed; inline features are checked against model
+    /// capabilities, modality limits, and the final prompt positions.
     pub async fn prepare_media(
         &self,
-        media: Vec<MediaContentPart>,
+        media: impl Into<multimodal::MultimodalInput>,
         token_ids: &mut Vec<u32>,
     ) -> Result<Option<MmFeatures>> {
-        self.processor.prepare_media(media, token_ids).await
+        self.processor.prepare_media(media.into(), token_ids).await
     }
 
     /// Effective tool-call parser name for this model, if parsing is enabled.
@@ -363,7 +372,7 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["tool parser `definitely_missing_tool_parser` is not registered (choose from: deepseek_v3, deepseek_v31, deepseek_v32, deepseek_v4, gemma4, glm45, glm47, granite4, hermes, hy_v3, hy_v4, inkling, internlm, kimi_k2, kimi_k3, llama3_json, llama4_json, minimax_m2, minimax_m3, mistral, phi4_mini_json, qwen3_coder, qwen3_xml, seed_oss)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["tool parser `definitely_missing_tool_parser` is not registered (choose from: deepseek_v3, deepseek_v31, deepseek_v32, deepseek_v4, deepseek_v41, gemma4, glm45, glm47, granite4, hermes, hy_v3, hy_v4, inkling, internlm, kimi_k2, kimi_k3, llama3_json, llama4_json, minimax_m2, minimax_m3, mistral, phi4_mini_json, qwen3_coder, qwen3_xml, seed_oss)"].assert_eq(&error.to_report_string());
     }
 
     #[test]
@@ -374,6 +383,6 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: cohere_cmd, deepseek_r1, deepseek_v3, deepseek_v4, gemma4, glm45, glm47, hy_v3, hy_v4, inkling, kimi, kimi_k2, kimi_k3, minimax_m2, minimax_m3, nemotron_v3, qwen3, seed_oss, step3, step3p5)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: cohere_cmd, deepseek_r1, deepseek_v3, deepseek_v4, deepseek_v41, gemma4, glm45, glm47, hy_v3, hy_v4, inkling, kimi, kimi_k2, kimi_k3, minimax_m2, minimax_m3, nemotron_v3, qwen3, seed_oss, step3, step3p5)"].assert_eq(&error.to_report_string());
     }
 }

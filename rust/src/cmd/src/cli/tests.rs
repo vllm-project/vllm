@@ -36,6 +36,8 @@ fn render_args_build_config_without_tls() {
         "vllm-rs",
         "render",
         "Qwen/Qwen2.5-0.5B-Instruct",
+        "--revision",
+        "release",
         "--port",
         "8080",
         "--max-model-len",
@@ -55,6 +57,7 @@ fn render_args_build_config_without_tls() {
     let config = args.into_config();
 
     assert_eq!(config.model, "Qwen/Qwen2.5-0.5B-Instruct");
+    assert_eq!(config.revision.as_deref(), Some("release"));
     assert_eq!(config.host, "127.0.0.1");
     assert_eq!(config.port, 8080);
     assert_eq!(config.max_model_len, Some(32768));
@@ -173,6 +176,7 @@ fn serve_args_forward_python_flags_with_separator() {
                     uds: None,
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
+                        revision: None,
                         generation_config: Auto,
                         engine_ready_timeout_secs: 600,
                         tool_call_parser: Auto,
@@ -903,7 +907,7 @@ fn serve_args_reject_unknown_renderer_value() {
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value 'definitely_missing' for '--tokenizer-mode <RENDERER>': unknown renderer `definitely_missing` (expected one of: auto, hf, deepseek_v32, deepseek_v4, harmony, inkling, kimi_k3)
+        error: invalid value 'definitely_missing' for '--tokenizer-mode <RENDERER>': unknown renderer `definitely_missing` (expected one of: auto, hf, deepseek_v32, deepseek_v4, deepseek_v41, harmony, inkling, kimi_k3)
 
         For more information, try '--help'.
     "#]]
@@ -1007,6 +1011,7 @@ fn frontend_args_accept_json() {
                     data_parallel_size: None,
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
+                        revision: None,
                         generation_config: Auto,
                         engine_ready_timeout_secs: 600,
                         tool_call_parser: None,
@@ -1125,7 +1130,7 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
         "--output-address",
         "ipc:///tmp/output.sock",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","generation_config":"vllm","engine_ready_timeout_secs":42,"tool_call_parser":"hermes","reasoning_parser":"qwen3_thinking","tokenizer_mode":"deepseek_v32","language_model_only":true,"max_logprobs":-1,"shutdown_timeout":3}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","generation_config":"vllm","revision":"release","engine_ready_timeout_secs":42,"tool_call_parser":"hermes","reasoning_parser":"qwen3_thinking","tokenizer_mode":"deepseek_v32","language_model_only":true,"max_logprobs":-1,"shutdown_timeout":3}"#,
     ])
     .unwrap();
 
@@ -1133,6 +1138,7 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
         panic!("expected frontend args");
     };
     assert_eq!(args.runtime.engine_ready_timeout_secs, 42);
+    assert_eq!(args.runtime.revision.as_deref(), Some("release"));
     assert_eq!(args.runtime.generation_config, GenerationConfigMode::Vllm);
     assert_eq!(
         args.runtime.tool_call_parser,
@@ -1604,6 +1610,7 @@ fn serve_args_accept_handshake_aliases() {
                     uds: None,
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
+                        revision: None,
                         generation_config: Auto,
                         engine_ready_timeout_secs: 600,
                         tool_call_parser: Auto,
@@ -1752,6 +1759,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             },
             coordinator_mode: MaybeInProc,
             model: "Qwen/Qwen3-0.6B",
+            revision: None,
             generation_config: Auto,
             served_model_name: [],
             listener_mode: BindTcp {
@@ -1839,6 +1847,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             },
             coordinator_mode: MaybeInProc,
             model: "Qwen/Qwen3-0.6B",
+            revision: None,
             generation_config: Auto,
             served_model_name: [],
             listener_mode: BindTcp {
@@ -1948,6 +1957,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 address: "tcp://127.0.0.1:7000",
             },
             model: "Qwen/Qwen3-0.6B",
+            revision: None,
             generation_config: Auto,
             served_model_name: [],
             listener_mode: InheritedFd {
@@ -2086,4 +2096,19 @@ fn frontend_args_json_disables_profiling_when_profiler_type_is_null() {
     assert_eq!(args.runtime.profiler(), None);
     let config = args.into_config();
     assert_eq!(config.profiler, None);
+}
+
+#[test]
+fn serve_revision_reaches_frontend_and_managed_engine() {
+    let cli =
+        Cli::try_parse_from(["vllm-rs", "serve", "test/model", "--revision", "release"]).unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(
+        args.to_frontend_config("tcp://localhost:1234".into()).revision.as_deref(),
+        Some("release")
+    );
+    let engine = args.to_managed_engine_config(1234);
+    assert!(engine.python_args.windows(2).any(|args| args == ["--revision", "release"]));
 }
