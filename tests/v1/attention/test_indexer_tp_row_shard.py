@@ -11,6 +11,7 @@ group exchanges ``index_topk`` int32s per row instead of the logits.
 import importlib
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
@@ -746,11 +747,14 @@ def test_runner_v2_builds_shards_from_scheduled_rows(
         seq_lens=lengths,
         seq_lens_cpu_upper_bound=lengths,
         dcp_local_seq_lens=None,
+        dcp_local_seq_lens_cpu_upper_bound=None,
+        idx_mapping_np=np.arange(2 + decode_rows, dtype=np.intp),
         positions=torch.zeros(num_tokens + 13, dtype=torch.int64),
         is_prefilling_np=torch.tensor(
             [False] * decode_rows + [True, True] + [False] * (2 - decode_rows)
         ).numpy(),
         prompt_lens=None,
+        fast_prefill=None,
     )
     group = SimpleNamespace(
         layer_names=[INDEXER_LAYER], get_metadata_builder=lambda _: builder
