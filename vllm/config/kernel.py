@@ -34,6 +34,9 @@ class IrOpPriorityConfig:
     fused_add_rms_norm: list[str] = Field(default_factory=list)
     """Priority list for vllm.ir.ops.fused_add_rms_norm"""
 
+    gelu_and_mul_sparse: list[str] = Field(default_factory=list)
+    """Priority list for vllm.ir.ops.gelu_and_mul_sparse"""
+
     def compute_hash(self) -> str:
         """
         Produces a hash unique to the pass configuration.
@@ -323,6 +326,13 @@ class KernelConfig:
     - "xpu_woq": Use XPU kernels for weight-only quantization (e.g. W8A16)
     """
 
+    linear_backend_per_quant: dict[str, LinearBackend] | None = Field(
+        default=None, min_length=1
+    )
+    """Backend overrides keyed by linear quantization scheme. Overrides take
+    precedence over ``linear_backend``; for example,
+    ``{"nvfp4_w4a16": "humming"}``."""
+
     @field_validator("moe_backend", mode="before")
     @classmethod
     def _normalize_moe_backend(cls, value: Any) -> Any:
@@ -356,6 +366,8 @@ class KernelConfig:
             "enable_flashinfer_autotune",
             "ir_op_priority",  # handled separately below
         }
+        if self.linear_backend_per_quant is None:
+            ignored_factors.add("linear_backend_per_quant")
         factors = get_hash_factors(self, ignored_factors)
         factors["ir_op_priority"] = self.ir_op_priority.compute_hash()
         return hash_factors(factors)
