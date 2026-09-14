@@ -71,6 +71,18 @@ from vllm.v1.kv_cache_interface import (
 
 logger = init_logger(__name__)
 
+_dsv41_low_latency_gemm: Any = None
+
+
+def _dsv41_gemm() -> Any:
+    """Lazy NVIDIA low-latency GEMM dispatch (keeps ROCm imports clean)."""
+    global _dsv41_low_latency_gemm
+    if _dsv41_low_latency_gemm is None:
+        from vllm.models.deepseek_v4_1.nvidia import low_latency_gemm
+
+        _dsv41_low_latency_gemm = low_latency_gemm
+    return _dsv41_low_latency_gemm
+
 
 def _replace_layer_index(prefix: str, layer_id: int) -> str:
     """Swap the layer index inside a ``...layers.<idx>...`` prefix."""
@@ -736,6 +748,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     def _fused_wqa_wkv_gemm(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # Override point: the ROCm layer preshuffles this weight in place, so
         # it cannot go through fused_wqa_wkv directly.
+        skinny = _dsv41_gemm().try_fused_wqa_wkv_gemm(self.fused_wqa_wkv, hidden_states)
+        if skinny is not None:
+            return skinny
         # MergedColumnParallelLinear returns (output, bias); bias is None.
         qr_kv, _ = self.fused_wqa_wkv(hidden_states)
         return qr_kv
@@ -772,9 +787,15 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             compressor = self.compressor
 
             def compressor_kv_score() -> torch.Tensor:
+                weight = compressor.fused_wkv_wgate.weight
+                skinny = _dsv41_gemm().try_compressor_kv_score_gemm(
+                    hidden_states, weight
+                )
+                if skinny is not None:
+                    return skinny
                 return torch.mm(
                     hidden_states,
-                    compressor.fused_wkv_wgate.weight.T,
+                    weight.T,
                     out_dtype=torch.float32,
                 )
 

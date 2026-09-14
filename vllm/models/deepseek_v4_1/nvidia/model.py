@@ -78,6 +78,10 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 from ..common.engram import EngramLayout, NgramHashState
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
 from .engram import Engram, gather_engram_hashes
+from .low_latency_gemm import (
+    enable_dsv41_low_latency_gemm,
+    prepare_dsv41_wo_a_scales,
+)
 
 if typing.TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
@@ -1039,6 +1043,7 @@ class DeepseekV41LLMForCausalLM(
         )
 
         self.set_moe_parameters()
+        enable_dsv41_low_latency_gemm(self, vllm_config)
 
     def set_moe_parameters(self) -> None:
         self.num_expert_groups = getattr(self.config, "n_group", 1)
@@ -1120,6 +1125,7 @@ class DeepseekV41LLMForCausalLM(
     def process_weights_after_loading(self) -> None:
         self.model.finalize_mega_moe_weights()
         self.model.finalize_mhc_broadcast_weights()
+        prepare_dsv41_wo_a_scales(self)
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
