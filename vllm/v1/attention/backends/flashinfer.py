@@ -47,6 +47,7 @@ from vllm.utils.flashinfer import (
     pin_host_range_buf,
     supports_trtllm_attention,
     use_trtllm_attention,
+    warn_flashinfer_jit_cache_sm75,
 )
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
@@ -1809,6 +1810,7 @@ class FlashInferImpl(AttentionImpl):
         kv_sharing_target_layer_name: int | None = None,
         sinks: torch.Tensor | None = None,
     ) -> None:
+        warn_flashinfer_jit_cache_sm75()
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
