@@ -406,6 +406,18 @@ class Glm5NextMoE(nn.Module):
         hidden_states: torch.Tensor,
         already_sequence_parallel: bool = False,
     ) -> torch.Tensor:
+        # Rank-agnostic: model runners may feed bucketed rank-3
+        # [1, T, hidden] rather than the rank-2 [tokens, hidden] assumed here.
+        # Flatten on the way in and restore the leading dims on the way out;
+        # both paths need tokens on dim 0 (fused_topk_bias unpacks a rank-2
+        # size, and sequence_parallel_chunk, the all_gather and the
+        # [:num_tokens] slice all work on dim 0). No-op for rank-2 input.
+        orig_leading_shape = hidden_states.shape[:-1]
+        hidden_dim = hidden_states.shape[-1]
+        if hidden_states.dim() != 2:
+            hidden_states = hidden_states.reshape(-1, hidden_dim)
+        num_tokens = hidden_states.shape[0]
+
         if self.use_mega_moe:
             router_logits, _ = self.gate(hidden_states)
             bias = self.gate.e_score_correction_bias
@@ -419,9 +431,8 @@ class Glm5NextMoE(nn.Module):
                 indices_type=torch.int64,
                 routed_scaling_factor=self.routed_scaling_factor,
             )
-            return self.experts(hidden_states, topk_weights, topk_ids)
-
-        num_tokens, hidden_dim = hidden_states.shape
+            final_hidden_states = self.experts(hidden_states, topk_weights, topk_ids)
+            return final_hidden_states.view(*orig_leading_shape, hidden_dim)
 
         # Chunk the hidden states so they aren't replicated across TP ranks.
         # This avoids duplicate computation in self.experts.
@@ -441,7 +452,7 @@ class Glm5NextMoE(nn.Module):
             )
             final_hidden_states = final_hidden_states[:num_tokens]
 
-        return final_hidden_states.view(num_tokens, hidden_dim)
+        return final_hidden_states.view(*orig_leading_shape, hidden_dim)
 
 
 class Glm5NextDecoderLayer(nn.Module):
