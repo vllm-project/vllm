@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from datetime import timedelta
 from typing import TYPE_CHECKING, cast
 
 import torch
@@ -17,10 +16,8 @@ from vllm.distributed import (
 )
 from vllm.distributed.utils import (
     allocate_group_ports,
-    enter_steady_state,
     fetch_group_ports,
     get_cached_tcp_store_client,
-    set_gloo_backend_timeout,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
@@ -91,19 +88,6 @@ class WorkerSentinel:
         """Dispatch an FT command by instruction name."""
         with set_current_vllm_config(self.worker.vllm_config):
             return run_method(self, ft_request.instruction, (ft_request,), {})
-
-    def activate_steady_state_cpu_timeout(self, ft_request: FaultToleranceRequest):
-        """Set init-time gloo cpu groups to the configured steady-state timeout."""
-        enter_steady_state()
-        parallel_config = self.worker.parallel_config
-        timeout_seconds = parallel_config.cpu_distributed_timeout_seconds
-        if timeout_seconds is None:
-            return
-        timeout = timedelta(seconds=timeout_seconds)
-        if parallel_config.data_parallel_size > 1:
-            set_gloo_backend_timeout(get_dp_group().cpu_group, timeout)
-        if parallel_config.tensor_parallel_size > 1:
-            set_gloo_backend_timeout(get_tp_group().cpu_group, timeout)
 
     def retry(self, ft_request: FaultToleranceRequest):
         torch.accelerator.synchronize()
