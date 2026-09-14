@@ -278,7 +278,6 @@ async def fanout_encoder_primer(
         item_transfer_ids[idx] = transfer_id
 
         encoder_req = {
-            # You *may* need to keep additional fields
             "model": orig_request.get("model"),
             "messages": [
                 {
@@ -292,6 +291,14 @@ async def fanout_encoder_primer(
             # once the prompt is encoded and its embeddings are published.
             "stream": False,
         }
+        for key in (
+            "mm_processor_kwargs",
+            "media_io_kwargs",
+            "priority",
+            "session_id",
+        ):
+            if key in orig_request:
+                encoder_req[key] = orig_request[key]
         if consumer_zmq is not None:
             # No mm_hash here on purpose. The encoder's own
             # `mm_features[i].identifier` is derived from the uuid *and* the

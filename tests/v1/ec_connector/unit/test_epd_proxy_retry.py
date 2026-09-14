@@ -154,10 +154,22 @@ def test_raw_media_keeps_encoder_transfer_identity(proxy, monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("prefill", [False, True])
+@pytest.mark.parametrize(
+    "request_options",
+    [
+        {},
+        {
+            "mm_processor_kwargs": {"max_pixels": 262144},
+            "media_io_kwargs": {"image": {"image_mode": "RGB"}},
+            "priority": -3,
+            "session_id": "session-123",
+        },
+    ],
+)
 async def test_http_roundtrip_preserves_payload_and_response_bytes(
-    proxy, monkeypatch, stream, prefill
+    proxy, monkeypatch, stream, prefill, request_options
 ):
-    """Exercise real HTTP hops, rewrite and a decode retry without model servers."""
+    """Preserve media and scheduling context across HTTP hops and retries."""
     seen: dict[str, list[dict]] = {"encode": [], "prefill": [], "decode": []}
     prefix = b'data: {"content":"'
     # Split a multibyte character at the old 1024-byte forwarding boundary.
@@ -230,6 +242,7 @@ async def test_http_roundtrip_preserves_payload_and_response_bytes(
             "max_tokens": 32,
             "seed": 42,
             "structured_outputs": {"choice": ["A", "B"]},
+            **request_options,
         }
         await proxy.on_startup()
         try:
@@ -247,6 +260,15 @@ async def test_http_roundtrip_preserves_payload_and_response_bytes(
 
     assert len(seen["encode"]) == 4
     assert len(seen["decode"]) == 2
+    for requests in seen.values():
+        for forwarded in requests:
+            for key in (
+                "mm_processor_kwargs",
+                "media_io_kwargs",
+                "priority",
+                "session_id",
+            ):
+                assert forwarded.get(key) == body.get(key)
     final = seen["decode"][-1]
     for key in [
         "model",
