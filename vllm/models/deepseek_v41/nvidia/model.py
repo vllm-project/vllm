@@ -63,12 +63,12 @@ from vllm.models.deepseek_v4.nvidia.model import (
 from vllm.models.deepseek_v4.nvidia.model import (
     make_deepseek_v4_expert_params_mapping,
 )
-from vllm.models.deepseek_v4_1.attention import DeepseekV4Attention
-from vllm.models.deepseek_v4_1.nvidia.flashinfer_sparse import (
+from vllm.models.deepseek_v41.attention import DeepseekV4Attention
+from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
     DeepseekV4FlashInferMLAAttention,
     DeepseekV4FlashInferSM120Attention,
 )
-from vllm.models.deepseek_v4_1.nvidia.flashmla import DeepseekV4FlashMLAAttention
+from vllm.models.deepseek_v41.nvidia.flashmla import DeepseekV4FlashMLAAttention
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv

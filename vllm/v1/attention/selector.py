@@ -36,6 +36,7 @@ class AttentionSelectorConfig(NamedTuple):
     use_pcp: bool = False
     use_adaptive_verification: bool = False
     use_dcp: bool = False
+    use_rswa: bool = False
 
     def __repr__(self):
         return (
@@ -55,7 +56,8 @@ class AttentionSelectorConfig(NamedTuple):
             f"use_kv_connector={self.use_kv_connector}, "
             f"use_adaptive_verification={self.use_adaptive_verification}, "
             f"use_pcp={self.use_pcp}, "
-            f"use_dcp={self.use_dcp})"
+            f"use_dcp={self.use_dcp}, "
+            f"use_rswa={self.use_rswa})"
         )
 
 
@@ -168,6 +170,10 @@ def get_attn_backend(
         use_pcp=vllm_config.parallel_config.prefill_context_parallel_size > 1,
         use_adaptive_verification=use_adaptive_verification,
         use_dcp=vllm_config.parallel_config.decode_context_parallel_size > 1,
+        use_rswa=(
+            vllm_config.model_config is not None
+            and vllm_config.model_config.rswa_window is not None
+        ),
     )
 
     # A per-KV-group override (keyed by KVCacheSpecKind) takes precedence over
