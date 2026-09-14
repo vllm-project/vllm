@@ -77,6 +77,12 @@ class AttentionConfig:
     """MLA prefill backend to use. If None, will be selected automatically.
     Valid options: FLASH_ATTN (FA3/FA4), FLASHINFER, TRTLLM_RAGGED."""
 
+    flashinfer_mla_decode_backend: Literal["auto", "cute-dsl"] = "auto"
+    """Decode kernel for FLASHINFER_MLA. "auto" preserves automatic selection;
+    "cute-dsl" explicitly selects FlashInfer's CuTe DSL kernel. Hardware and
+    tensor-shape support are validated by FlashInfer. Native decode context
+    parallelism always uses CuTe DSL, regardless of this setting."""
+
     use_prefill_query_quantization: bool = False
     """If set, quantize query for attention in prefill."""
 
