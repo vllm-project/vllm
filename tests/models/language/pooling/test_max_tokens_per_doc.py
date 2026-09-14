@@ -80,10 +80,10 @@ RERANK_CONFIGS = [
         ],
         # This model has produced both prompt-token totals in CI/local cache;
         # keep truncation checks exact while tolerating the boundary delta.
-        without_truncated_prompt_tokens=(285, 286),
-        with_max_tokens_per_query_prompt_tokens=(155, 156),
-        with_max_tokens_per_doc_prompt_tokens=155,
-        with_max_tokens_per_query_and_doc_prompt_tokens=25,
+        without_truncated_prompt_tokens=(284, 285),
+        with_max_tokens_per_query_prompt_tokens=(154, 155),
+        with_max_tokens_per_doc_prompt_tokens=154,
+        with_max_tokens_per_query_and_doc_prompt_tokens=24,
     ),
     # 4. late-interaction
     TestConfig(
@@ -94,10 +94,10 @@ RERANK_CONFIGS = [
             "512",
             "--trust-remote-code",
         ],
-        without_truncated_prompt_tokens=285,
-        with_max_tokens_per_query_prompt_tokens=155,
-        with_max_tokens_per_doc_prompt_tokens=155,
-        with_max_tokens_per_query_and_doc_prompt_tokens=25,
+        without_truncated_prompt_tokens=284,
+        with_max_tokens_per_query_prompt_tokens=154,
+        with_max_tokens_per_doc_prompt_tokens=154,
+        with_max_tokens_per_query_and_doc_prompt_tokens=24,
     ),
     # 5. jinaai/jina-reranker-v3
     TestConfig(
