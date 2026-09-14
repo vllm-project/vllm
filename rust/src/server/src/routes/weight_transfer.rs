@@ -4,14 +4,12 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::body::Bytes;
 use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use thiserror_ext::AsReport as _;
 
-use crate::error::{ApiError, invalid_request, json_parse_error};
+use crate::error::{ApiError, invalid_request};
 use crate::state::AppState;
 use crate::utils::utility_call_error;
 
@@ -26,7 +24,7 @@ pub(crate) struct UpdateWeightsRequest {
 }
 
 #[derive(Default, Deserialize)]
-struct FinishWeightUpdateRequest {
+pub(crate) struct FinishWeightUpdateRequest {
     weight_version: Option<String>,
 }
 
@@ -56,7 +54,7 @@ pub async fn init_weight_transfer_engine(
     State(state): State<Arc<AppState>>,
     body: Result<Json<InitWeightTransferRequest>, JsonRejection>,
 ) -> Result<Json<MessageResponse>, ApiError> {
-    let Json(body) = body.map_err(|error| ApiError::json_parse_error(error.body_text()))?;
+    let Json(body) = body?;
     let init_info = body.init_info.filter(JsonValue::is_object).ok_or_else(|| {
         invalid_request!(
             param = Some("init_info"),
@@ -110,7 +108,7 @@ pub async fn update_weights(
     State(state): State<Arc<AppState>>,
     body: Result<Json<UpdateWeightsRequest>, JsonRejection>,
 ) -> Result<Json<MessageResponse>, ApiError> {
-    let Json(body) = body.map_err(|error| ApiError::json_parse_error(error.body_text()))?;
+    let Json(body) = body?;
     let update_info = body
         .update_info
         .filter(|info| {
@@ -138,16 +136,10 @@ pub async fn update_weights(
 /// Finish a weight update transaction and optionally set the weight version.
 pub async fn finish_weight_update(
     State(state): State<Arc<AppState>>,
-    body: Bytes,
+    body: Result<Option<Json<FinishWeightUpdateRequest>>, JsonRejection>,
 ) -> Result<Json<MessageResponse>, ApiError> {
     // HTTPVLLMWeightSyncClient omits the body when no version is supplied.
-    let request = if body.is_empty() {
-        FinishWeightUpdateRequest::default()
-    } else {
-        serde_json::from_slice::<Option<FinishWeightUpdateRequest>>(&body)
-            .map_err(|error| json_parse_error!("{}", error.as_report()))?
-            .unwrap_or_default()
-    };
+    let request = body?.map(|Json(request)| request).unwrap_or_default();
 
     let client = state.engine_core_client();
     client
@@ -171,7 +163,7 @@ pub async fn update_weight_version(
     State(state): State<Arc<AppState>>,
     body: Result<Json<UpdateWeightVersionRequest>, JsonRejection>,
 ) -> Result<Json<UpdateWeightVersionResponse>, ApiError> {
-    let Json(body) = body.map_err(|error| ApiError::json_parse_error(error.body_text()))?;
+    let Json(body) = body?;
     state
         .engine_core_client()
         .set_weight_version(&body.new_version)
