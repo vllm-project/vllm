@@ -705,7 +705,7 @@ def test_rest_dry_fields_default_to_off():
 
 # ---------------------------------------------------------------------------
 # Added 2026-09-13 after an adversarial review. Each of these pins a defect
-# that review found, so that a later change cannot quietly reintroduce it.
+# that review found, so that a later change cannot reintroduce it unnoticed.
 # ---------------------------------------------------------------------------
 
 
