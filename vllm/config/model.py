@@ -2449,12 +2449,11 @@ def _get_and_verify_max_len(
         max_len_key = "sliding_window"
         derived_max_model_len = sliding_window
 
-    # Consider model_max_length in tokenizer_config
-    if tokenizer_config:
-        tokenizer_model_max_length = tokenizer_config.get(
+    # A tokenizer limit can supply the fallback for an unknown architecture.
+    if tokenizer_config and derived_max_model_len == float("inf"):
+        derived_max_model_len = tokenizer_config.get(
             "model_max_length", derived_max_model_len
         )
-        derived_max_model_len = min(derived_max_model_len, tokenizer_model_max_length)
 
     # If none of the keys were found in the config, use a default and
     # log a warning.
@@ -2525,6 +2524,13 @@ def _get_and_verify_max_len(
         # Do this outside loop since all layer types should have the same scaling
         derived_max_model_len *= scaling_factor
 
+    # The tokenizer's processing limit is not extended by RoPE scaling.
+    if tokenizer_config:
+        derived_max_model_len = min(
+            derived_max_model_len,
+            tokenizer_config.get("model_max_length", derived_max_model_len),
+        )
+
     if encoder_config and "max_seq_length" in encoder_config:
         derived_max_model_len = encoder_config["max_seq_length"]
 
@@ -2537,11 +2543,10 @@ def _get_and_verify_max_len(
         if rope_parameters is not None and any(
             rp["rope_type"] == "longrope" for rp in rope_parameters.values()
         ):
-            max_model_len = int(
-                getattr(
-                    hf_config, "original_max_position_embeddings", derived_max_model_len
-                )
+            original_max_model_len = getattr(
+                hf_config, "original_max_position_embeddings", derived_max_model_len
             )
+            max_model_len = int(min(derived_max_model_len, original_max_model_len))
         else:
             max_model_len = int(derived_max_model_len)
         max_model_len = current_platform.check_max_model_len(max_model_len)

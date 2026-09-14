@@ -16,11 +16,13 @@ import torch.nn as nn
 from transformers import AutoConfig, AutoModel, PretrainedConfig
 
 from vllm.config import ModelConfig, VllmConfig
+from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention import Attention, EncoderOnlyAttention
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.transformers.base import Base
 from vllm.model_executor.models.transformers.fusers import AttentionFuser
 from vllm.model_executor.models.transformers.fusers.attention import VLLM_ATTN_IMPL
+from vllm.model_executor.models.transformers.legacy import LegacyMixin
 from vllm.model_executor.models.transformers.multimodal import MultiModalMixin
 from vllm.model_executor.models.utils import StageMissingLayer
 
@@ -90,6 +92,141 @@ def test_attention_class_selection(
     backend.model.is_causal = module_is_causal
 
     assert Base._get_attn_cls(backend) is expected
+
+
+@pytest.mark.parametrize("use_inputs_embeds", [False, True])
+@pytest.mark.parametrize("padding", [0, 3])
+@pytest.mark.parametrize("with_token_type_ids", [False, True])
+def test_legacy_forward_preserves_pair_segments(
+    monkeypatch, use_inputs_embeds: bool, padding: int, with_token_type_ids: bool
+) -> None:
+    class LegacyBackend(LegacyMixin, Base):
+        pass
+
+    captured = {}
+
+    def capture_forward(self, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(Base, "forward", capture_forward)
+    model = LegacyBackend.__new__(LegacyBackend)
+    nn.Module.__init__(model)
+    model.is_roberta = False
+    model._token_type_ids = torch.ones(8, dtype=torch.int32)
+
+    positions = torch.arange(5 + padding)
+    input_ids = None if use_inputs_embeds else positions.clone()
+    inputs_embeds = torch.zeros(5 + padding, 4) if use_inputs_embeds else None
+    token_type_ids = torch.tensor([0, 0, 0, 1, 1]) if with_token_type_ids else None
+    model.forward(
+        input_ids,
+        positions,
+        inputs_embeds=inputs_embeds,
+        token_type_ids=token_type_ids,
+    )
+
+    assert captured["input_ids"] is input_ids
+    assert captured["inputs_embeds"] is inputs_embeds
+    expected = torch.zeros(1, 5 + padding, dtype=torch.int32)
+    if with_token_type_ids:
+        assert token_type_ids is not None
+        expected[0, :5] = token_type_ids
+    torch.testing.assert_close(captured["token_type_ids"], expected)
+    assert captured["token_type_ids"].data_ptr() == model._token_type_ids.data_ptr()
+
+    model._token_type_ids = None
+    captured.clear()
+    model.forward(input_ids, positions, inputs_embeds=inputs_embeds)
+    assert "token_type_ids" not in captured
+
+
+def test_legacy_model_without_segment_vocabulary_preserves_omitted_ids(monkeypatch):
+    from transformers import GPT2Config, GPT2Model
+
+    config = GPT2Config(n_embd=16, n_head=2, n_layer=1, n_positions=8, vocab_size=32)
+    torch.manual_seed(0)
+    backbone = GPT2Model(config).eval()
+
+    def init_base(self, *, vllm_config, prefix=""):
+        nn.Module.__init__(self)
+        self.model = backbone
+        self.text_config = config
+        self.device_config = SimpleNamespace(device=torch.device("cpu"))
+        self.pp_group = SimpleNamespace(is_first_rank=True, is_last_rank=True)
+        self._output_aux_hidden_states_kwargs = {}
+        self.hf_to_vllm_mapper = SimpleNamespace(
+            orig_to_new_prefix={}, orig_to_new_substr={}
+        )
+
+    monkeypatch.setattr(Base, "__init__", init_base)
+
+    class LegacyBackend(LegacyMixin, Base):
+        pass
+
+    model = LegacyBackend(
+        vllm_config=SimpleNamespace(
+            scheduler_config=SimpleNamespace(max_num_batched_tokens=8)
+        )
+    )
+    input_ids = torch.tensor([1, 2, 3, 4])
+    positions = torch.arange(4)
+    with torch.no_grad():
+        expected = backbone(input_ids[None], position_ids=positions[None])[0][0]
+        with_zero_ids = backbone(
+            input_ids[None],
+            position_ids=positions[None],
+            token_type_ids=torch.zeros_like(input_ids[None]),
+        )[0][0]
+        actual = model(input_ids, positions)
+
+    assert model._token_type_ids is None
+    assert not torch.allclose(expected, with_zero_ids)
+    torch.testing.assert_close(actual, expected)
+    with pytest.raises(ValueError, match="dedicated token type vocabulary"):
+        model(input_ids, positions, token_type_ids=torch.zeros_like(input_ids))
+
+
+@pytest.mark.parametrize(
+    ("type_vocab_size", "score_type", "graph_mode", "reject"),
+    [
+        (2, "cross-encoder", CUDAGraphMode.PIECEWISE, True),
+        (2, "cross-encoder", CUDAGraphMode.NONE, False),
+        (0, "cross-encoder", CUDAGraphMode.PIECEWISE, False),
+        (2, "bi-encoder", CUDAGraphMode.PIECEWISE, False),
+    ],
+)
+def test_legacy_segment_cross_encoder_rejects_breakable_graphs(
+    monkeypatch, type_vocab_size, score_type, graph_mode, reject
+):
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
+
+    def init_base(self, *, vllm_config, prefix=""):
+        nn.Module.__init__(self)
+        self.model = nn.Module()
+        self.model.forward = lambda token_type_ids=None: None
+        self.text_config = SimpleNamespace(
+            model_type="bert", pad_token_id=0, type_vocab_size=type_vocab_size
+        )
+        self.device_config = SimpleNamespace(device=torch.device("cpu"))
+        self.hf_to_vllm_mapper = SimpleNamespace(
+            orig_to_new_prefix={}, orig_to_new_substr={}
+        )
+
+    monkeypatch.setattr(Base, "__init__", init_base)
+
+    class LegacyBackend(LegacyMixin, Base):
+        pass
+
+    LegacyBackend.score_type = score_type
+    vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
+        compilation_config=SimpleNamespace(cudagraph_mode=graph_mode),
+    )
+    if reject:
+        with pytest.raises(ValueError, match="VLLM_USE_BREAKABLE_CUDAGRAPH=0"):
+            LegacyBackend(vllm_config=vllm_config)
+    else:
+        LegacyBackend(vllm_config=vllm_config)
 
 
 def check_implementation(

@@ -9,11 +9,11 @@ only get the `eos_token_id` from the tokenizer as defined by
 import json
 import math
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
-from transformers import BertConfig, PretrainedConfig
+from transformers import BertConfig, LlamaConfig, PretrainedConfig
 
 from vllm.config.model import ModelConfig
 from vllm.tokenizers import get_tokenizer
@@ -431,6 +431,85 @@ def test_current_sentence_transformers_cross_encoder_config(tmp_path):
 
     model_cls = get_model_cls(model_config)
     assert get_score_type(model_cls) == "cross-encoder"
+
+
+def _write_rotary_cross_encoder(path, rope_type):
+    _write_sentence_transformers_cross_encoder(path)
+    rope_parameters: dict[str, Any] = {"rope_type": rope_type, "factor": 2.0}
+    if rope_type == "longrope":
+        rope_parameters.update(short_factor=[1.0, 1.0], long_factor=[2.0, 2.0])
+    LlamaConfig(
+        architectures=["LlamaModel"],
+        hidden_size=8,
+        intermediate_size=16,
+        max_position_embeddings=64,
+        original_max_position_embeddings=32,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        num_hidden_layers=1,
+        rope_parameters=rope_parameters,
+        vocab_size=32,
+    ).save_pretrained(path)
+
+
+@pytest.mark.parametrize("rope_type", ["linear", "longrope"])
+@pytest.mark.parametrize("max_model_len", [None, -1, 8, 24])
+def test_cross_encoder_tokenizer_limit_is_not_rope_scaled(
+    tmp_path, rope_type, max_model_len
+):
+    _write_rotary_cross_encoder(tmp_path, rope_type)
+
+    if max_model_len == 24:
+        with pytest.raises(ValueError, match="greater.*derived max_model_len"):
+            ModelConfig(str(tmp_path), dtype="float32", max_model_len=max_model_len)
+    else:
+        config = ModelConfig(
+            str(tmp_path), dtype="float32", max_model_len=max_model_len
+        )
+        assert config.max_model_len == (8 if max_model_len == 8 else 16)
+
+
+@pytest.mark.parametrize("rope_type", ["linear", "longrope"])
+@pytest.mark.parametrize("max_model_len", [None, 64])
+def test_generation_ignores_cross_encoder_tokenizer_limit(
+    tmp_path, rope_type, max_model_len
+):
+    _write_rotary_cross_encoder(tmp_path, rope_type)
+
+    generation_config = ModelConfig(
+        str(tmp_path),
+        dtype="float32",
+        runner="generate",
+        convert="none",
+        max_model_len=max_model_len,
+        hf_overrides={"architectures": ["LlamaForCausalLM"]},
+    )
+    expected_max_len = max_model_len or (128 if rope_type == "linear" else 32)
+    assert generation_config.max_model_len == expected_max_len
+
+
+def test_absolute_position_pooling_preserves_tokenizer_limit(tmp_path):
+    BertConfig(
+        architectures=["BertModel"], position_embedding_type="absolute"
+    ).save_pretrained(tmp_path)
+    (tmp_path / "tokenizer_config.json").write_text(
+        json.dumps({"model_max_length": 16}), encoding="utf-8"
+    )
+
+    config = ModelConfig(str(tmp_path), dtype="float32")
+
+    assert config.max_model_len == 16
+
+
+def test_tokenizer_limit_supplies_unknown_architecture_max_length(tmp_path):
+    _write_sentence_transformers_cross_encoder(tmp_path)
+    (tmp_path / "tokenizer_config.json").write_text(
+        json.dumps({"model_max_length": 4096}), encoding="utf-8"
+    )
+    config = ModelConfig(str(tmp_path), dtype="float32")
+    config.model_arch_config.derived_max_model_len_and_key = (float("inf"), None)
+
+    assert config.get_and_verify_max_len(-1) == 4096
 
 
 @pytest.mark.parametrize(
