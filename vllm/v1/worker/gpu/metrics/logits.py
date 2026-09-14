@@ -40,3 +40,20 @@ def get_num_nans(logits: torch.Tensor) -> torch.Tensor:
         BLOCK_SIZE=BLOCK_SIZE,
     )
     return num_nans
+
+
+def aggregate_num_nans_per_request(
+    num_nans: torch.Tensor,
+    cumulative_row_ends: torch.Tensor,
+) -> torch.Tensor:
+    """Aggregate per-logit-row counts for speculative requests on device."""
+    prefix_sum = torch.empty(
+        num_nans.shape[0] + 1, dtype=num_nans.dtype, device=num_nans.device
+    )
+    prefix_sum[0] = 0
+    torch.cumsum(num_nans, dim=0, out=prefix_sum[1:])
+
+    row_starts = torch.empty_like(cumulative_row_ends)
+    row_starts[0] = 0
+    row_starts[1:] = cumulative_row_ends[:-1]
+    return prefix_sum[cumulative_row_ends] - prefix_sum[row_starts]
