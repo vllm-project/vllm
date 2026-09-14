@@ -13,6 +13,7 @@ from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
+from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import (
     flashinfer_bf16_mm,
     is_flashinfer_cutedsl_bf16_gemm_supported,
@@ -21,6 +22,56 @@ from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
+
+
+# One workgroup holds _TINY_DOT_MAX_WARPS warps of 32 lanes, each keeping
+# _TINY_DOT_ELEMS_PER_LANE elements in registers; their product is the largest
+# K the kernel takes before it spills and loses to the eager chain.
+_TINY_DOT_ELEMS_PER_LANE = 128
+_TINY_DOT_MAX_WARPS = 32
+_TINY_DOT_MAX_K = _TINY_DOT_MAX_WARPS * 32 * _TINY_DOT_ELEMS_PER_LANE
+
+
+@triton.jit
+def _tiny_dot_kernel(x_ptr, w_ptr, out_ptr, K, BLOCK: tl.constexpr):
+    offsets = tl.arange(0, BLOCK)
+    mask = offsets < K
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+    w = tl.load(w_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+    tl.store(out_ptr, tl.sum(x * w, axis=0))
+
+
+def _tiny_dot_triton(x_flat: torch.Tensor, w_flat: torch.Tensor) -> torch.Tensor:
+    K = x_flat.numel()
+    BLOCK = triton.next_power_of_2(K)
+    # Grow the workgroup with BLOCK so every lane keeps the same small number
+    # of elements live, rather than letting register pressure grow with K.
+    num_warps = min(
+        _TINY_DOT_MAX_WARPS, max(4, BLOCK // (32 * _TINY_DOT_ELEMS_PER_LANE))
+    )
+    out_f32 = torch.empty((), dtype=torch.float32, device=x_flat.device)
+    _tiny_dot_kernel[(1,)](
+        x_flat, w_flat, out_f32, K=K, BLOCK=BLOCK, num_warps=num_warps
+    )
+    return out_f32.to(x_flat.dtype)
+
+
+def _tiny_dot(
+    x_flat: torch.Tensor,
+    w_flat: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Dot product of two flattened vectors, reduced to a scalar.
+
+    Takes the single-launch Triton kernel when K fits one workgroup and there
+    is no bias to fold in, and the eager chain, still ahead of BLAS, otherwise.
+    """
+    if bias is None and x_flat.numel() <= _TINY_DOT_MAX_K:
+        return _tiny_dot_triton(x_flat.contiguous(), w_flat.contiguous())
+    out = (x_flat * w_flat).sum(dtype=x_flat.dtype)
+    if bias is not None:
+        out = out + bias.reshape(-1)[0]
+    return out
 
 
 def get_token_bin_counts_and_mask(
@@ -315,11 +366,7 @@ def rocm_unquantized_gemm_impl(
         and n == 1
         and x.dtype in [torch.float16, torch.bfloat16]
     ):
-        x_flat = x.reshape(-1)
-        w_flat = weight.reshape(-1)
-        out = (x_flat * w_flat).sum(dtype=x.dtype)
-        if bias is not None:
-            out = out + bias.reshape(-1)[0]
+        out = _tiny_dot(x.reshape(-1), weight.reshape(-1), bias)
         return out.reshape(*x.shape[:-1], 1)
 
     use_skinny = (
