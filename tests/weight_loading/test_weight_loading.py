@@ -16,6 +16,9 @@ MODEL_NAME = os.environ.get(
 REVISION = os.environ.get("REVISION", "main")
 QUANTIZATION = os.environ.get("QUANTIZATION", "gptq_marlin")
 MIN_CAPABILITY = os.environ.get("MIN_CAPABILITY", "80")
+SAFETENSORS_LOAD_STRATEGY = os.environ.get(
+    "WEIGHT_LOADING_TEST_SAFETENSORS_LOAD_STRATEGY"
+)
 
 
 @pytest.mark.skipif(
@@ -31,10 +34,7 @@ def test_weight_loading(vllm_runner):
     """
 
     # MoE models need fp16.
-    NEEDS_FP16 = (
-        QUANTIZATION == "gptq"
-        or MODEL_NAME == "nm-testing/test-w4a16-mixtral-actorder-group"
-    )
+    NEEDS_FP16 = QUANTIZATION == "gptq"
     with vllm_runner(
         model_name=MODEL_NAME,
         revision=REVISION,
@@ -42,6 +42,7 @@ def test_weight_loading(vllm_runner):
         quantization=None if QUANTIZATION == "None" else QUANTIZATION,
         max_model_len=MAX_MODEL_LEN,
         tensor_parallel_size=2,
+        safetensors_load_strategy=SAFETENSORS_LOAD_STRATEGY,
         # Generating 20 tokens needs a tiny KV cache, while sizing and
         # allocating a full-size one dominates this test on large devices.
         kv_cache_memory_bytes=2 * GiB_bytes,

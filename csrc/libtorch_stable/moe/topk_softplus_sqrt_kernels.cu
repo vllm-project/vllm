@@ -81,19 +81,92 @@ __launch_bounds__(128) __global__
                                   int num_experts, float routed_scaling_factor,
                                   const HashIndType* input_ids,
                                   const HashIndType* tid2eid,
-                                  const bool* is_padding) {
+                                  const bool* is_padding, const float* bias_vl,
+                                  int64_t image_sentinel_lo) {
   const int warp = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
   const int lane = threadIdx.x % 32;
   if (warp >= num_rows) return;
   const int64_t token_id = load_index_as_int64(input_ids, warp);
   const bool is_pad_row = is_padding != nullptr && is_padding[warp];
+  // Image tokens carry five consecutive in-vocab sentinel ids starting at
+  // image_sentinel_lo (0 = disabled); they skip the tid2eid lookup and
+  // select experts by score + bias_vl instead. Ids above the sentinel block
+  // are regular special tokens and must not match.
+  const bool is_image = bias_vl != nullptr && image_sentinel_lo > 0 &&
+                        token_id >= image_sentinel_lo &&
+                        token_id < image_sentinel_lo + 5;
 
   #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   cudaGridDependencySynchronize();
   #endif
   int expert = 0;
   float weight = 0.f;
-  if (lane < 6 && !is_pad_row) {
+  if (is_image && !is_pad_row) {
+    // Top-6 by (sqrtsoftplus(x) + bias_vl) over the full row; the routing
+    // weights are the raw sqrtsoftplus scores of the selected experts.
+    constexpr int MAX_PER_LANE = 12;  // supports num_experts <= 384
+    const int per_lane = num_experts / 32;
+    float vals[MAX_PER_LANE];
+    float sels[MAX_PER_LANE];
+  #pragma unroll
+    for (int i = 0; i < MAX_PER_LANE; ++i) {
+      if (i < per_lane) {
+        const int e = lane + 32 * i;
+        const float x = input[warp * num_experts + e];
+        float v = sqrtf(fmaxf(x, 0.f) + __logf(1.f + __expf(-fabsf(x))));
+        if (isnan(v)) {
+          v = 0.f;
+        }
+        vals[i] = v;
+        sels[i] = v + bias_vl[e];
+      } else {
+        vals[i] = 0.f;
+        sels[i] = -INFINITY;
+      }
+    }
+    int slot_expert[6];
+    float slot_weight[6];
+  #pragma unroll
+    for (int j = 0; j < 6; ++j) {
+      float best = -INFINITY;
+      int best_e = num_experts;
+  #pragma unroll
+      for (int i = 0; i < MAX_PER_LANE; ++i) {
+        if (sels[i] > best) {
+          best = sels[i];
+          best_e = lane + 32 * i;
+        }
+      }
+      // Warp argmax reduce; ties go to the lower expert id.
+  #pragma unroll
+      for (int mask = 16; mask > 0; mask >>= 1) {
+        const float other_best = VLLM_SHFL_XOR_SYNC(best, mask);
+        const int other_e = VLLM_SHFL_XOR_SYNC(best_e, mask);
+        if (other_best > best || (other_best == best && other_e < best_e)) {
+          best = other_best;
+          best_e = other_e;
+        }
+      }
+      float w = 0.f;
+  #pragma unroll
+      for (int i = 0; i < MAX_PER_LANE; ++i) {
+        if (lane + 32 * i == best_e) {
+          w = vals[i];
+          sels[i] = -INFINITY;
+        }
+      }
+  #pragma unroll
+      for (int mask = 16; mask > 0; mask >>= 1) {
+        w += VLLM_SHFL_XOR_SYNC(w, mask);
+      }
+      slot_expert[j] = best_e;
+      slot_weight[j] = w;
+    }
+    if (lane < 6) {
+      expert = slot_expert[lane];
+      weight = slot_weight[lane];
+    }
+  } else if (lane < 6 && !is_pad_row) {
     // only load and calculate for 6 experts
     expert = static_cast<int>(tid2eid[token_id * 6 + lane]);
     const float x = input[warp * num_experts + expert];
@@ -127,7 +200,8 @@ void launchDsv4HashTopk(const float* input, float* output, OutIndType* indices,
                         double routed_scaling_factor,
                         const HashIndType* input_ids,
                         const HashIndType* tid2eid, cudaStream_t stream,
-                        const bool* is_padding) {
+                        const bool* is_padding, const float* bias_vl,
+                        int64_t image_sentinel_lo) {
   if (num_rows == 0) return;
   auto* kernel = &dsv4HashTopkSoftplusSqrt<OutIndType, HashIndType>;
   cudaLaunchConfig_t config = {};
@@ -141,7 +215,8 @@ void launchDsv4HashTopk(const float* input, float* output, OutIndType* indices,
   config.numAttrs = 1;
   const float scale = static_cast<float>(routed_scaling_factor);
   cudaLaunchKernelEx(&config, kernel, input, output, indices, num_rows,
-                     num_experts, scale, input_ids, tid2eid, is_padding);
+                     num_experts, scale, input_ids, tid2eid, is_padding,
+                     bias_vl, image_sentinel_lo);
 }
 #endif
 
@@ -174,7 +249,8 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
         const int start_expert, const int end_expert, const bool renormalize,
         double routed_scaling_factor, const float* correction_bias,
         const HashIndType* input_ids, const HashIndType* tid2eid,
-        const bool* is_padding) {
+        const bool* is_padding, const float* bias_vl,
+        int64_t image_sentinel_lo) {
   static_assert(std::is_same_v<InputType, float> ||
                     std::is_same_v<InputType, __nv_bfloat16> ||
                     std::is_same_v<InputType, __half>,
@@ -240,6 +316,19 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
   }
   const bool row_is_active = finished ? !finished[thread_row] : true;
   const bool is_pad_row = is_padding != nullptr && is_padding[thread_row];
+
+  // Image tokens carry five consecutive in-vocab sentinel ids starting at
+  // image_sentinel_lo (0 = disabled); they select experts with bias_vl
+  // instead of correction_bias / the tid2eid hash table. Ids above the
+  // sentinel block are regular special tokens and must not match.
+  int64_t token_id = 0;
+  if (input_ids != nullptr) {
+    token_id = load_index_as_int64(input_ids, thread_row);
+  }
+  const bool use_vl_bias = bias_vl != nullptr && image_sentinel_lo > 0 &&
+                           token_id >= image_sentinel_lo &&
+                           token_id < image_sentinel_lo + 5;
+  const float* row_bias = use_vl_bias ? bias_vl : correction_bias;
 
   // We finally start setting up the read pointers for each thread. First, each
   // thread jumps to the start of the row it will read.
@@ -323,9 +412,10 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
   constexpr float threshold = 20.0f;
   constexpr float beta = 1.0f;
 
-  // Hash MoE path: indices are predetermined from lookup table
-  if constexpr (USE_HASH) {
-    const int64_t token_id = load_index_as_int64(input_ids, thread_row);
+  // Hash MoE path: indices are predetermined from lookup table. Image rows
+  // (sentinel ids) fall through to the score-based top-k path with bias_vl.
+  const bool hash_row = USE_HASH && !use_vl_bias;
+  if (hash_row) {
     const int64_t token_expert_offset = token_id * static_cast<int64_t>(k);
     if (!is_pad_row) {
 #pragma unroll
@@ -417,13 +507,13 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
         if (isnan(val)) {
           val = 0.f;
         }
-        if (correction_bias) {
+        if (row_bias) {
           const int group_id = ii / ELTS_PER_LDG;
           const int local_id = ii % ELTS_PER_LDG;
           const int expert_idx = first_elt_read_by_thread +
                                  group_id * THREADS_PER_ROW * ELTS_PER_LDG +
                                  local_id;
-          val = val + correction_bias[expert_idx];
+          val = val + row_bias[expert_idx];
         }
         row_chunk[ii] = val;
       }
@@ -488,8 +578,8 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
         // to global memory. (This will be a single) thread per row of the
         // input/output matrices.
         const int idx = k * thread_row + k_idx;
-        if (correction_bias != nullptr && should_process_row) {
-          max_val -= correction_bias[expert];
+        if (row_bias != nullptr && should_process_row) {
+          max_val -= row_bias[expert];
         }
         output[idx] = max_val;
         indices[idx] =
@@ -576,7 +666,8 @@ void topkGatingSoftplusSqrtLauncherHelper(
     const int start_expert, const int end_expert, const bool renormalize,
     double routed_scaling_factor, const float* correction_bias,
     const bool use_hash, const HashIndType* input_ids,
-    const HashIndType* tid2eid, cudaStream_t stream, const bool* is_padding) {
+    const HashIndType* tid2eid, cudaStream_t stream, const bool* is_padding,
+    const float* bias_vl, int64_t image_sentinel_lo) {
   static constexpr int BYTES_PER_LDG =
       MIN(MAX_BYTES_PER_LDG, sizeof(InputType) * EXPERTS);
   using Constants =
@@ -605,12 +696,13 @@ void topkGatingSoftplusSqrtLauncherHelper(
     cudaLaunchKernelEx(&config, kernel, input, finished, output, num_rows,
                        indices, source_row, k, start_expert, end_expert,
                        renormalize, routed_scaling_factor, correction_bias,
-                       input_ids, tid2eid, is_padding);
+                       input_ids, tid2eid, is_padding, bias_vl,
+                       image_sentinel_lo);
 #else
     kernel<<<num_blocks, block_dim, 0, stream>>>(
         input, finished, output, num_rows, indices, source_row, k, start_expert,
         end_expert, renormalize, routed_scaling_factor, correction_bias,
-        input_ids, tid2eid, is_padding);
+        input_ids, tid2eid, is_padding, bias_vl, image_sentinel_lo);
 #endif
   })
 }
@@ -624,7 +716,7 @@ void topkGatingSoftplusSqrtLauncherHelper(
         gating_output, nullptr, topk_weights, topk_indices,                    \
         token_expert_indices, num_tokens, topk, 0, num_experts, renormalize,   \
         routed_scaling_factor, correction_bias, use_hash, input_ids, tid2eid,  \
-        stream, is_padding);
+        stream, is_padding, bias_vl, image_sentinel_lo);
 #else
   #define LAUNCH_SOFTPLUS_SQRT(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)           \
     if (WARP_SIZE == 64) {                                                     \
@@ -633,14 +725,14 @@ void topkGatingSoftplusSqrtLauncherHelper(
           gating_output, nullptr, topk_weights, topk_indices,                  \
           token_expert_indices, num_tokens, topk, 0, num_experts, renormalize, \
           routed_scaling_factor, correction_bias, use_hash, input_ids,         \
-          tid2eid, stream, is_padding);                                        \
+          tid2eid, stream, is_padding, bias_vl, image_sentinel_lo);            \
     } else if (WARP_SIZE == 32) {                                              \
       topkGatingSoftplusSqrtLauncherHelper<NUM_EXPERTS, WARPS_PER_TB, 32,      \
                                            MAX_BYTES>(                         \
           gating_output, nullptr, topk_weights, topk_indices,                  \
           token_expert_indices, num_tokens, topk, 0, num_experts, renormalize, \
           routed_scaling_factor, correction_bias, use_hash, input_ids,         \
-          tid2eid, stream, is_padding);                                        \
+          tid2eid, stream, is_padding, bias_vl, image_sentinel_lo);            \
     } else {                                                                   \
       assert(false &&                                                          \
              "Unsupported warp size. Only 32 and 64 are supported for ROCm");  \
@@ -654,14 +746,16 @@ void topkGatingSoftplusSqrtKernelLauncher(
     const int topk, const bool renormalize, double routed_scaling_factor,
     const float* correction_bias, const bool use_hash,
     const HashIndType* input_ids, const HashIndType* tid2eid,
-    cudaStream_t stream, const bool* is_padding) {
+    cudaStream_t stream, const bool* is_padding, const float* bias_vl,
+    int64_t image_sentinel_lo) {
 #ifndef USE_ROCM
   if constexpr (std::is_same_v<InputType, float>) {
     if (use_hash && topk == 6 && renormalize &&
         (num_experts == 256 || num_experts == 384)) {
       launchDsv4HashTopk<IndType, HashIndType>(
           gating_output, topk_weights, topk_indices, num_tokens, num_experts,
-          routed_scaling_factor, input_ids, tid2eid, stream, is_padding);
+          routed_scaling_factor, input_ids, tid2eid, stream, is_padding,
+          bias_vl, image_sentinel_lo);
       return;
     }
   }
@@ -761,10 +855,28 @@ void dispatch_topk_softplus_sqrt_launch(
     const std::optional<torch::stable::Tensor>& correction_bias,
     const std::optional<torch::stable::Tensor>& input_ids,
     const std::optional<torch::stable::Tensor>& tid2eid, cudaStream_t stream,
-    const std::optional<torch::stable::Tensor>& is_padding) {
+    const std::optional<torch::stable::Tensor>& is_padding,
+    const std::optional<torch::stable::Tensor>& bias_vl,
+    int64_t image_sentinel_lo) {
   const float* bias_ptr = nullptr;
   if (correction_bias.has_value()) {
     bias_ptr = correction_bias.value().const_data_ptr<float>();
+  }
+
+  const float* bias_vl_ptr = nullptr;
+  if (bias_vl.has_value()) {
+    const torch::stable::Tensor& bias_vl_tensor = bias_vl.value();
+    STD_TORCH_CHECK(input_ids.has_value(),
+                    "input_ids is required when bias_vl is set");
+    STD_TORCH_CHECK(
+        bias_vl_tensor.scalar_type() == torch::headeronly::ScalarType::Float,
+        "bias_vl tensor must be float32");
+    STD_TORCH_CHECK(bias_vl_tensor.dim() == 1, "bias_vl tensor must be 1D");
+    STD_TORCH_CHECK(bias_vl_tensor.size(0) == num_experts,
+                    "bias_vl size mismatch, expected: ", num_experts);
+    STD_TORCH_CHECK(bias_vl_tensor.is_contiguous(),
+                    "bias_vl tensor must be contiguous");
+    bias_vl_ptr = bias_vl_tensor.const_data_ptr<float>();
   }
 
   auto launch = [&](auto* topk_indices_ptr) {
@@ -800,7 +912,8 @@ void dispatch_topk_softplus_sqrt_launch(
             topk_indices_ptr, token_expert_indices.mutable_data_ptr<int>(),
             num_tokens, num_experts, topk, renormalize, routed_scaling_factor,
             bias_ptr, true, input_ids.value().const_data_ptr<int64_t>(),
-            tid2eid.value().const_data_ptr<int64_t>(), stream, is_padding_ptr);
+            tid2eid.value().const_data_ptr<int64_t>(), stream, is_padding_ptr,
+            bias_vl_ptr, image_sentinel_lo);
       } else {
         STD_TORCH_CHECK(tid2eid.value().scalar_type() ==
                         torch::headeronly::ScalarType::Int);
@@ -810,7 +923,35 @@ void dispatch_topk_softplus_sqrt_launch(
             topk_indices_ptr, token_expert_indices.mutable_data_ptr<int>(),
             num_tokens, num_experts, topk, renormalize, routed_scaling_factor,
             bias_ptr, true, input_ids.value().const_data_ptr<int>(),
-            tid2eid.value().const_data_ptr<int>(), stream, is_padding_ptr);
+            tid2eid.value().const_data_ptr<int>(), stream, is_padding_ptr,
+            bias_vl_ptr, image_sentinel_lo);
+      }
+    } else if (bias_vl_ptr != nullptr) {
+      // Non-hash rows with bias_vl: image tokens (five sentinel ids starting
+      // at image_sentinel_lo) select experts by score + bias_vl. input_ids
+      // drives the per-row branch, so
+      // dispatch the hash-index type on its dtype.
+      if (input_ids.value().scalar_type() ==
+          torch::headeronly::ScalarType::Long) {
+        vllm::moe::topkGatingSoftplusSqrtKernelLauncher<OutIndType, ComputeType,
+                                                        int64_t>(
+            gating_output, topk_weights.mutable_data_ptr<float>(),
+            topk_indices_ptr, token_expert_indices.mutable_data_ptr<int>(),
+            num_tokens, num_experts, topk, renormalize, routed_scaling_factor,
+            bias_ptr, false, input_ids.value().const_data_ptr<int64_t>(),
+            static_cast<const int64_t*>(nullptr), stream, is_padding_ptr,
+            bias_vl_ptr, image_sentinel_lo);
+      } else {
+        STD_TORCH_CHECK(input_ids.value().scalar_type() ==
+                        torch::headeronly::ScalarType::Int);
+        vllm::moe::topkGatingSoftplusSqrtKernelLauncher<OutIndType, ComputeType,
+                                                        int>(
+            gating_output, topk_weights.mutable_data_ptr<float>(),
+            topk_indices_ptr, token_expert_indices.mutable_data_ptr<int>(),
+            num_tokens, num_experts, topk, renormalize, routed_scaling_factor,
+            bias_ptr, false, input_ids.value().const_data_ptr<int>(),
+            static_cast<const int*>(nullptr), stream, is_padding_ptr,
+            bias_vl_ptr, image_sentinel_lo);
       }
     } else {
       vllm::moe::topkGatingSoftplusSqrtKernelLauncher<OutIndType, ComputeType>(
@@ -818,7 +959,8 @@ void dispatch_topk_softplus_sqrt_launch(
           topk_indices_ptr, token_expert_indices.mutable_data_ptr<int>(),
           num_tokens, num_experts, topk, renormalize, routed_scaling_factor,
           bias_ptr, false, static_cast<const OutIndType*>(nullptr),
-          static_cast<const OutIndType*>(nullptr), stream, is_padding_ptr);
+          static_cast<const OutIndType*>(nullptr), stream, is_padding_ptr,
+          nullptr, 0);
     }
   };
 
@@ -843,7 +985,9 @@ void topk_softplus_sqrt(
     const std::optional<torch::stable::Tensor>& correction_bias,
     const std::optional<torch::stable::Tensor>& input_ids,
     const std::optional<torch::stable::Tensor>& tid2eid,
-    const std::optional<torch::stable::Tensor>& is_padding) {
+    const std::optional<torch::stable::Tensor>& is_padding,
+    const std::optional<torch::stable::Tensor>& bias_vl,
+    int64_t image_sentinel_lo) {
   const int num_experts = gating_output.size(-1);
   const auto num_tokens = gating_output.numel() / num_experts;
   const int topk = topk_weights.size(-1);
@@ -857,21 +1001,21 @@ void topk_softplus_sqrt(
         gating_output.const_data_ptr<float>(), topk_weights, topk_indices,
         token_expert_indices, num_tokens, num_experts, topk, renormalize,
         routed_scaling_factor, correction_bias, input_ids, tid2eid, stream,
-        is_padding);
+        is_padding, bias_vl, image_sentinel_lo);
   } else if (gating_output.scalar_type() ==
              torch::headeronly::ScalarType::Half) {
     dispatch_topk_softplus_sqrt_launch<__half>(
         reinterpret_cast<const __half*>(gating_output.const_data_ptr()),
         topk_weights, topk_indices, token_expert_indices, num_tokens,
         num_experts, topk, renormalize, routed_scaling_factor, correction_bias,
-        input_ids, tid2eid, stream, is_padding);
+        input_ids, tid2eid, stream, is_padding, bias_vl, image_sentinel_lo);
   } else if (gating_output.scalar_type() ==
              torch::headeronly::ScalarType::BFloat16) {
     dispatch_topk_softplus_sqrt_launch<__nv_bfloat16>(
         reinterpret_cast<const __nv_bfloat16*>(gating_output.const_data_ptr()),
         topk_weights, topk_indices, token_expert_indices, num_tokens,
         num_experts, topk, renormalize, routed_scaling_factor, correction_bias,
-        input_ids, tid2eid, stream, is_padding);
+        input_ids, tid2eid, stream, is_padding, bias_vl, image_sentinel_lo);
   } else {
     STD_TORCH_CHECK(false, "Unsupported gating_output data type: ",
                     gating_output.scalar_type());
