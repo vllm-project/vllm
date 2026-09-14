@@ -7,8 +7,8 @@ from vllm.assets.audio import AudioAsset
 from vllm.model_executor.models.moss_audio import MOSS_AUDIO_PLACEHOLDER
 from vllm.platforms import current_platform
 
-from ...registry import HF_EXAMPLE_MODELS
-from ...utils import check_logprobs_close
+from ....registry import HF_EXAMPLE_MODELS
+from ....utils import check_logprobs_close
 
 CORE_MODEL = pytest.param(
     "OpenMOSS-Team/MOSS-Audio-4B-Instruct",

@@ -7,8 +7,8 @@ import pytest
 from tests.models.registry import HF_EXAMPLE_MODELS
 from vllm.platforms import current_platform
 
-from ....conftest import IMAGE_ASSETS, ImageTestAssets
-from ....utils import large_gpu_mark, multi_gpu_test
+from .....conftest import IMAGE_ASSETS, ImageTestAssets
+from .....utils import large_gpu_mark, multi_gpu_test
 
 MOONDREAM3_MODEL_ID = "moondream/moondream3-preview"
 MOONDREAM3_TOKENIZER = "moondream/starmie-v1"

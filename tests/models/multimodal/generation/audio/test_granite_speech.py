@@ -10,9 +10,9 @@ from vllm.logprobs import SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
 
-from ....conftest import AudioTestAssets, HfRunner, PromptAudioInput, VllmRunner
-from ...registry import HF_EXAMPLE_MODELS
-from ...utils import check_logprobs_close
+from .....conftest import AudioTestAssets, HfRunner, PromptAudioInput, VllmRunner
+from ....registry import HF_EXAMPLE_MODELS
+from ....utils import check_logprobs_close
 
 HF_AUDIO_PROMPT = "<|start_of_role|>system<|end_of_role|>Knowledge Cutoff Date: April 2024.\nToday's Date: December 19, 2024.\nYou are Granite, developed by IBM. You are a helpful AI assistant<|end_of_text|>\n<|start_of_role|>user<|end_of_role|><|audio|>can you transcribe the speech into a written format?<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>"  # noqa: E501
 
