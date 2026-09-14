@@ -361,19 +361,99 @@ def test_restore_allocation_fallback_is_rank_consistent(monkeypatch, failed_phas
     monkeypatch.setattr(symm_mem, "empty", torch.empty)
     monkeypatch.setattr(symm_mem, "rendezvous", rendezvous)
     config = NS(
-        parallel_config=NS(prefill_context_parallel_size=4),
+        parallel_config=NS(
+            prefill_context_parallel_size=4, enable_batch_sharded_sampling=False
+        ),
+        speculative_config=None,
         scheduler_config=NS(max_num_seqs=4),
         model_config=NS(dtype=torch.bfloat16, get_hidden_size=lambda: 16),
     )
-    assert (
-        pcp_manager_module.allocate_pcp_restore_buffers(
-            config, torch.device("cpu"), False
-        )
-        is None
-    )
+    manager = PCPManager(4, 0, torch.device("cpu"), vllm_config=config)
+    assert manager._restore_buffers is None
     assert calls == (
         ["agree"] if failed_phase == 1 else ["agree", "rendezvous", "agree"]
     )
+
+
+@pytest.mark.parametrize("consumer", ["speculation", "batch_sharding"])
+def test_dense_only_configuration_does_not_allocate_restore_workspace(consumer):
+    config = NS(
+        speculative_config=NS() if consumer == "speculation" else None,
+        parallel_config=NS(enable_batch_sharded_sampling=consumer == "batch_sharding"),
+    )
+    # No model configuration or process group is needed on this path.
+    manager = PCPManager(4, 0, torch.device("cpu"), vllm_config=config)
+    assert manager._restore_buffers is None
+
+
+def test_manager_owns_workspace_across_kv_reinitialization(monkeypatch):
+    calls = []
+    buffers = (torch.empty(2, 8), torch.empty(8, 8), torch.empty(2, 2, 8))
+    monkeypatch.setattr(PCPManager, "validate_config", lambda *args: None)
+
+    def allocate(self, config):
+        calls.append("allocate")
+        return buffers
+
+    monkeypatch.setattr(PCPManager, "_allocate_restore_buffers", allocate)
+    monkeypatch.setattr(
+        pcp_manager_module,
+        "get_pcp_group",
+        lambda: NS(rank_in_group=0, cpu_group=NS(group_name="pcp")),
+    )
+    config = NS(
+        parallel_config=NS(
+            prefill_context_parallel_size=4,
+            decode_context_parallel_size=1,
+            cp_kv_cache_interleave_size=1,
+        ),
+        scheduler_config=NS(max_num_seqs=2, max_num_batched_tokens=32),
+    )
+    manager = pcp_manager_module.maybe_build_pcp_manager(
+        config, torch.device("cpu"), False
+    )
+    assert manager is not None and manager._restore_buffers is buffers
+    assert (
+        manager._block_tables is None
+    )  # Workspace exists before KV profiling/binding.
+    inputs = manager.input_buffers
+    for count in (1, 2):
+        manager._global_batch = manager._local_batch = manager.draft_prefill_batch = (
+            NS()
+        )
+        manager._sample_restore_idx = torch.zeros(1, dtype=torch.int64)
+        tables = NS(
+            num_kv_cache_groups=count,
+            input_block_tables=tuple(torch.zeros(2, 8) for _ in range(count)),
+        )
+        manager.initialize_kv_cache(tables, cp_interleave=128)
+        assert manager._restore_buffers is buffers and manager.input_buffers is inputs
+        assert (
+            manager._global_batch
+            is manager._local_batch
+            is manager.draft_prefill_batch
+            is None
+        )
+        assert manager._sample_restore_idx is None and manager.cp_interleave == 128
+        assert manager._global_batch_slot_mappings.shape == (count, 32)
+
+    def fail_allocation(*args):
+        raise RuntimeError("KV metadata allocation failed")
+
+    broken = NS(
+        num_kv_cache_groups=1,
+        input_block_tables=(NS(shape=(2, 8), new_zeros=fail_allocation),),
+    )
+    with pytest.raises(RuntimeError, match="KV metadata allocation failed"):
+        manager.initialize_kv_cache(broken, cp_interleave=128)
+    assert manager._restore_buffers is buffers
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: calls.append("sync"))
+    monkeypatch.setattr(
+        pcp_manager_module.dist, "barrier", lambda **kwargs: calls.append("barrier")
+    )
+    manager.shutdown()
+    manager.shutdown()
+    assert calls == ["allocate", "sync", "barrier"] and manager._restore_buffers is None
 
 
 def _multicast_restore_worker(rank, port):
@@ -387,17 +467,15 @@ def _multicast_restore_worker(rank, port):
     PCPManager.validate_config = staticmethod(lambda *args: None)
     for dtype in (torch.bfloat16, torch.float16):
         config = NS(
-            parallel_config=NS(prefill_context_parallel_size=4),
+            parallel_config=NS(
+                prefill_context_parallel_size=4, enable_batch_sharded_sampling=False
+            ),
+            speculative_config=None,
             scheduler_config=NS(max_num_seqs=64),
             model_config=NS(dtype=dtype, get_hidden_size=lambda: 32),
         )
-        buffers = pcp_manager_module.allocate_pcp_restore_buffers(
-            config, torch.device("cuda", rank), False
-        )
-        assert buffers is not None
-        manager = PCPManager(
-            4, rank, torch.device("cuda", rank), restore_buffers=buffers
-        )
+        manager = PCPManager(4, rank, torch.device("cuda", rank), vllm_config=config)
+        assert manager._restore_buffers is not None
         manager._global_batch = NS(has_prefill=True)
         for rows, skew in ((1, False), (7, False), (64, True)):
             n = rows if skew else (rows + 3) // 4
@@ -423,8 +501,8 @@ def _multicast_restore_worker(rank, port):
                         previous, expected_previous, rtol=0, atol=0
                     )
                 previous, expected_previous = output, expected.clone()
-        manager.release_restore_buffers()
-        manager.release_restore_buffers()
+        manager.shutdown()
+        manager.shutdown()
     dist.destroy_process_group()
 
 

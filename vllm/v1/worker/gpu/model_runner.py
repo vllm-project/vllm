@@ -290,9 +290,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
 
-        self.pcp_manager: pcp.PCPManager | None = None
-        self.pcp_restore_buffers = pcp.allocate_pcp_restore_buffers(
-            self.vllm_config, self.device, self.supports_mm_inputs
+        self.pcp_manager = pcp.maybe_build_pcp_manager(
+            self.vllm_config,
+            self.device,
+            self.supports_mm_inputs,
+            cls=self.pcp_manager_cls,
         )
 
         # Pooling models.
@@ -657,14 +659,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
         )
-        self.pcp_manager = pcp.maybe_build_pcp_manager(
-            self.vllm_config,
-            self.device,
-            self.supports_mm_inputs,
-            self.block_tables,
-            cls=self.pcp_manager_cls,
-            restore_buffers=self.pcp_restore_buffers,
-        )
+        if self.pcp_manager is not None:
+            self.pcp_manager.initialize_kv_cache(
+                self.block_tables, cp_interleave=self.cp_interleave
+            )
         self.ubatch_runner = maybe_build_ubatch_runner(
             self.vllm_config,
             self.device,
@@ -2176,10 +2174,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
         torch.accelerator.synchronize()
-        if getattr(self, "pcp_restore_buffers", None) is not None:
-            if self.pcp_manager is not None:
-                self.pcp_manager.release_restore_buffers()
-            self.pcp_restore_buffers = None
+        if manager := getattr(self, "pcp_manager", None):
+            manager.shutdown()
+            self.pcp_manager = None
         self.cudagraph_manager = None
         self.fast_prefill = None
         if hasattr(self, "kv_caches"):

@@ -56,7 +56,7 @@ class PCPManager:
         dcp_world_size: int = 1,
         dcp_rank: int = 0,
         cp_interleave: int = 1,
-        restore_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+        vllm_config: VllmConfig | None = None,
     ) -> None:
         self.pcp_world_size = pcp_world_size
         self.pcp_rank = pcp_rank
@@ -70,10 +70,16 @@ class PCPManager:
         self._local_gather_idx: torch.Tensor | None = None
         self.draft_prefill_batch: InputBatch | None = None
         self._block_tables = block_tables
-        self._restore_buffers = restore_buffers
+        self._restore_buffers = (
+            self._allocate_restore_buffers(vllm_config)
+            if vllm_config is not None
+            else None
+        )
         self._restore_output_index = 0
         self._restore_group_name = (
-            get_pcp_group().cpu_group.group_name if restore_buffers is not None else ""
+            get_pcp_group().cpu_group.group_name
+            if self._restore_buffers is not None
+            else ""
         )
         self._hidden_restore_idx_cpu: np.ndarray | None = None
         self._sample_local_row_idx: torch.Tensor | None = None
@@ -89,17 +95,32 @@ class PCPManager:
             if max_num_local_reqs is not None and max_num_tokens is not None
             else None
         )
+        self._max_num_local_reqs = max_num_local_reqs
+        self._max_num_tokens = max_num_tokens
+        self.initialize_kv_cache(block_tables, cp_interleave=cp_interleave)
+
+    def initialize_kv_cache(
+        self, block_tables: BlockTables | None, *, cp_interleave: int
+    ) -> None:
+        """Bind KV-dependent metadata without reallocating the restore workspace."""
+        self._block_tables = block_tables
+        self.cp_interleave = cp_interleave
+        self._global_batch = self._local_batch = self.draft_prefill_batch = None
+        self._local_gather_idx = self._hidden_restore_idx = None
+        self._hidden_restore_idx_cpu = None
+        self._sample_local_row_idx = self._sample_restore_idx = None
+        self._padded_gather_idx = self._gathered_kv_write_mask = None
         self._local_block_tables: tuple[torch.Tensor, ...] | None
         self._local_block_table_ptrs: torch.Tensor | None
-        if block_tables is not None and max_num_local_reqs is not None:
+        if block_tables is not None and self._max_num_local_reqs is not None:
             self._local_block_tables = tuple(
-                table.new_zeros((max_num_local_reqs, table.shape[1]))
+                table.new_zeros((self._max_num_local_reqs, table.shape[1]))
                 for table in block_tables.input_block_tables
             )
             self._local_block_table_ptrs = torch.tensor(
                 [table.data_ptr() for table in self._local_block_tables],
                 dtype=torch.uint64,
-                device=device,
+                device=self.device,
             )
         else:
             self._local_block_tables = None
@@ -110,23 +131,70 @@ class PCPManager:
         self._global_batch_slot_mappings = (
             torch.empty(
                 num_kv_cache_groups,
-                max_num_tokens,
+                self._max_num_tokens,
                 dtype=torch.int64,
-                device=device,
+                device=self.device,
             )
-            if max_num_tokens is not None and num_kv_cache_groups > 0
+            if self._max_num_tokens is not None and num_kv_cache_groups > 0
             else None
         )
         self._gathered_kv_slot_mappings = (
             torch.empty(
                 num_kv_cache_groups,
-                max_num_tokens * pcp_world_size,
+                self._max_num_tokens * self.pcp_world_size,
                 dtype=torch.int64,
-                device=device,
+                device=self.device,
             )
-            if max_num_tokens is not None and num_kv_cache_groups > 0
+            if self._max_num_tokens is not None and num_kv_cache_groups > 0
             else None
         )
+
+    def _allocate_restore_buffers(
+        self, config: VllmConfig
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+        """Create manager-owned storage before KV memory profiling."""
+        if (
+            config.speculative_config is not None
+            or config.parallel_config.enable_batch_sharded_sampling
+        ):
+            return None
+        device = self.device
+        dtype = config.model_config.dtype
+        if dtype not in (torch.bfloat16, torch.float16):
+            return None
+        try:
+            import torch.distributed._symmetric_memory as symm_mem
+        except ImportError:
+            return None
+        group = get_pcp_group().cpu_group
+        rows = config.scheduler_config.max_num_seqs
+        width = config.model_config.get_hidden_size()
+        buffers = None
+        for phase in ("allocation", "rendezvous"):
+            error = None
+            try:
+                if phase == "allocation":
+                    gathered = symm_mem.empty(
+                        (rows * group.size(), width), dtype=dtype, device=device
+                    )
+                    packed = torch.empty((rows, width), dtype=dtype, device=device)
+                    outputs = torch.empty((2, rows, width), dtype=dtype, device=device)
+                    buffers = packed, gathered, outputs
+                elif symm_mem.rendezvous(gathered, group).multicast_ptr == 0:
+                    raise RuntimeError("CUDA multicast is unsupported")
+            except RuntimeError as exc:
+                error = exc
+            ready = torch.tensor([error is None], dtype=torch.int32, device="cpu")
+            dist.all_reduce(ready, op=dist.ReduceOp.MIN, group=group)
+            if not ready.item():
+                logger.warning_once(
+                    "PCP multicast %s failed on at least one rank; "
+                    "using compact AllGather: %s",
+                    phase,
+                    error,
+                )
+                return None
+        return buffers
 
     @staticmethod
     def validate_config(
@@ -685,7 +753,7 @@ class PCPManager:
             return output
         return get_pcp_group().all_gather(hidden_states[local_rows], dim=0)[restore]
 
-    def release_restore_buffers(self) -> None:
+    def shutdown(self) -> None:
         if self._restore_buffers is not None:
             torch.accelerator.synchronize()
             dist.barrier(group=get_pcp_group().cpu_group)
@@ -804,60 +872,11 @@ def maybe_restore_pcp_for_sampling(
     )
 
 
-def allocate_pcp_restore_buffers(
-    config: VllmConfig,
-    device: torch.device,
-    supports_mm_inputs: bool,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
-    """Allocate compact multicast storage before KV memory profiling."""
-    if config.parallel_config.prefill_context_parallel_size <= 1:
-        return None
-    PCPManager.validate_config(config, supports_mm_inputs)
-    dtype = config.model_config.dtype
-    if dtype not in (torch.bfloat16, torch.float16):
-        return None
-    try:
-        import torch.distributed._symmetric_memory as symm_mem
-    except ImportError:
-        return None
-    group = get_pcp_group().cpu_group
-    rows = config.scheduler_config.max_num_seqs
-    width = config.model_config.get_hidden_size()
-    buffers = None
-    for phase in ("allocation", "rendezvous"):
-        error = None
-        try:
-            if phase == "allocation":
-                gathered = symm_mem.empty(
-                    (rows * group.size(), width), dtype=dtype, device=device
-                )
-                packed = torch.empty((rows, width), dtype=dtype, device=device)
-                outputs = torch.empty((2, rows, width), dtype=dtype, device=device)
-                buffers = packed, gathered, outputs
-            elif symm_mem.rendezvous(gathered, group).multicast_ptr == 0:
-                raise RuntimeError("CUDA multicast is unsupported")
-        except RuntimeError as exc:
-            error = exc
-        ready = torch.tensor([error is None], dtype=torch.int32, device="cpu")
-        dist.all_reduce(ready, op=dist.ReduceOp.MIN, group=group)
-        if not ready.item():
-            logger.warning_once(
-                "PCP multicast %s failed on at least one rank; "
-                "using compact AllGather: %s",
-                phase,
-                error,
-            )
-            return None
-    return buffers
-
-
 def maybe_build_pcp_manager(
     vllm_config: VllmConfig,
     device: torch.device,
     supports_mm_inputs: bool,
-    block_tables: BlockTables,
     cls: type[PCPManager] = PCPManager,
-    restore_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> PCPManager | None:
     parallel_config = vllm_config.parallel_config
     pcp_size = parallel_config.prefill_context_parallel_size
@@ -876,9 +895,8 @@ def maybe_build_pcp_manager(
         device=device,
         max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
         max_num_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
-        block_tables=block_tables,
         dcp_world_size=dcp_size,
         dcp_rank=dcp_rank,
         cp_interleave=parallel_config.cp_kv_cache_interleave_size,
-        restore_buffers=restore_buffers,
+        vllm_config=vllm_config,
     )
