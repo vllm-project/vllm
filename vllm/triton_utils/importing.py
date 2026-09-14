@@ -101,6 +101,18 @@ if not HAS_TRITON:
     )
 
 
+def has_active_triton_cpu_backend() -> bool:
+    """Return whether Triton's selected runtime target is CPU."""
+    if not HAS_TRITON:
+        return False
+    try:
+        from triton.runtime import driver
+
+        return driver.active.get_current_target().backend == "cpu"
+    except Exception:
+        return False
+
+
 class TritonPlaceholder(types.ModuleType):
     def __init__(self):
         super().__init__("triton")

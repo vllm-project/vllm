@@ -563,10 +563,28 @@ def _build_qsa_metadata_torch(
     return token_to_req, logical_positions, visible_blocks, slot_mapping
 
 
-# Resolve the fallback outside the per-step metadata hot path.
-build_qsa_metadata = (
-    build_qsa_metadata_triton if HAS_TRITON else _build_qsa_metadata_torch
-)
+def build_qsa_metadata(
+    common_attn_metadata: CommonAttentionMetadata,
+    token_to_req_buffer: torch.Tensor,
+    logical_positions_buffer: torch.Tensor,
+    visible_blocks_buffer: torch.Tensor,
+    slot_mapping_buffer: torch.Tensor,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Use the Triton metadata path only for accelerator tensors."""
+    builder = (
+        build_qsa_metadata_triton
+        if HAS_TRITON and token_to_req_buffer.is_cuda
+        else _build_qsa_metadata_torch
+    )
+    return builder(
+        common_attn_metadata,
+        token_to_req_buffer,
+        logical_positions_buffer,
+        visible_blocks_buffer,
+        slot_mapping_buffer,
+        **kwargs,
+    )
 
 
 @dataclass

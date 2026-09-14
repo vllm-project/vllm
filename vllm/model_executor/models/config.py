@@ -882,7 +882,52 @@ class Qwen4ExpForConditionalGenerationConfig(Qwen3_5ForConditionalGenerationConf
                 "because non-first pipeline ranks do not receive the raw input_ids "
                 "it needs. Please run with PP=1."
             )
+        from vllm.platforms import current_platform
+
+        if current_platform.is_cpu():
+            from vllm.platforms.interface import CpuArchEnum
+            from vllm.triton_utils import has_active_triton_cpu_backend
+
+            if current_platform.get_cpu_architecture() != CpuArchEnum.X86:
+                raise NotImplementedError(
+                    "Qwen4Exp CPU support currently requires x86-64."
+                )
+            if getattr(parallel_config, "tensor_parallel_size", 1) != 1:
+                raise NotImplementedError(
+                    "Qwen4Exp CPU support currently requires tensor_parallel_size=1."
+                )
+            if vllm_config.speculative_config is not None:
+                raise NotImplementedError(
+                    "Qwen4Exp CPU support does not yet support speculative decoding."
+                )
+            if getattr(vllm_config, "lora_config", None) is not None:
+                raise NotImplementedError(
+                    "Qwen4Exp CPU support does not yet support LoRA."
+                )
+            if not vllm_config.use_v2_model_runner:
+                raise ValueError(
+                    "Qwen4Exp on CPU requires Model Runner V2; remove "
+                    "VLLM_USE_V2_MODEL_RUNNER=0."
+                )
+            if vllm_config.model_config.enforce_eager:
+                raise ValueError(
+                    "Qwen4Exp on CPU requires compiled model execution; remove "
+                    "--enforce-eager."
+                )
+            if not has_active_triton_cpu_backend():
+                raise ValueError(
+                    "Qwen4Exp on CPU requires Triton with an active CPU backend. "
+                    "Use the official x86 CPU build or image containing Triton-CPU."
+                )
         multimodal_config = vllm_config.model_config.multimodal_config
+        if (
+            current_platform.is_cpu()
+            and multimodal_config is not None
+            and not multimodal_config.language_model_only
+        ):
+            raise NotImplementedError(
+                "Qwen4Exp CPU support is text-only; pass --language-model-only."
+            )
         if multimodal_config is not None and multimodal_config.language_model_only:
             _strip_qwen4_exp_mrope(vllm_config.model_config)
         spec_config = vllm_config.speculative_config
