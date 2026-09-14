@@ -8,6 +8,10 @@ batch_size == 1, so it cannot serve a decode batch. Every fp8 shape therefore
 has to land on the asm kernels, which ship real fp8 variants for gqa=16. These
 tests pin that down at the predicates, since the failure it prevents is either a
 batch assertion or -- worse -- a silently wrong result.
+
+Gluon is still the route for supported non-DCP decode shapes. DCP multi-token
+verification uses segmented MLA instead, so it depends on neither Gluon's
+query-head nor its long-context pipeline limits.
 """
 
 import pytest
@@ -41,8 +45,8 @@ def gluon_available(monkeypatch):
 @pytest.mark.parametrize("kv_cache_dtype", FP8_DTYPES)
 @pytest.mark.parametrize("num_heads", [1, 2, 4, 5, 6, 8, 12, 16, 32, 128])
 @pytest.mark.parametrize("max_qo_len", [1, 2, 4, 5, 8, 15])
-def test_fp8_never_routes_to_gluon(kv_cache_dtype, num_heads, max_qo_len):
-    """No fp8 shape reaches either Gluon entry point.
+def test_non_dcp_fp8_never_routes_to_gluon(kv_cache_dtype, num_heads, max_qo_len):
+    """No non-DCP fp8 shape reaches either Gluon entry point.
 
     The head count is deliberately swept across divisors of 16 as well as
     non-divisors: the divisor case (e.g. 8 heads at TP8) is the one that stays
@@ -58,7 +62,7 @@ def test_fp8_never_routes_to_gluon(kv_cache_dtype, num_heads, max_qo_len):
 def test_fp8_never_routes_to_gluon_under_any_mode(
     monkeypatch, kv_cache_dtype, num_heads, mode
 ):
-    """VLLM_ROCM_AITER_MLA_ASM_PADDING cannot force an fp8 cache onto Gluon.
+    """VLLM_ROCM_AITER_MLA_ASM_PADDING cannot force a non-DCP fp8 cache onto Gluon.
 
     The dtype guard deliberately precedes the mode knob: honouring an explicit
     "gluon" request under fp8 would hand Gluon the batch it asserts against, so
@@ -78,6 +82,26 @@ def test_large_head_counts_never_use_gluon(kv_cache_dtype, num_heads, max_qo_len
     """>= 16 heads has always been asm-only; the dtype guard must not change it."""
     assert not AiterMLAHelper.use_gluon_decode(num_heads, max_qo_len, kv_cache_dtype)
     assert not AiterMLAHelper.use_gluon_verify(num_heads, max_qo_len, kv_cache_dtype)
+
+
+@pytest.mark.parametrize("kv_cache_dtype", FP8_DTYPES + UNQUANTIZED_DTYPES)
+@pytest.mark.parametrize("num_heads", [8, 16, 32, 96])
+@pytest.mark.parametrize("max_qo_len", [2, 3, 8])
+def test_dcp_multitoken_verify_never_uses_gluon(
+    gluon_available, kv_cache_dtype, num_heads, max_qo_len
+):
+    assert not AiterMLAHelper.use_gluon_verify(
+        num_heads, max_qo_len, kv_cache_dtype, dcp_world_size=8
+    )
+
+
+def test_segmented_dcp_verify_does_not_depend_on_gluon(monkeypatch):
+    monkeypatch.setattr(rocm_aiter_mla, "_gluon_mla_decode_supported", lambda: False)
+    monkeypatch.setattr(rocm_aiter_mla, "_segmented_mla_decode_supported", lambda: True)
+
+    assert rocm_aiter_mla._segmented_dcp_verify_supported(8, 1)
+    # Round-robin interleaving other than 1 is not served by this route.
+    assert not rocm_aiter_mla._segmented_dcp_verify_supported(8, 4)
 
 
 @pytest.mark.parametrize("kv_cache_dtype", UNQUANTIZED_DTYPES)
