@@ -622,7 +622,7 @@ def test_internal_checkpoint_uses_partial_hash_lifecycle():
 def test_internal_checkpoint_publication_respects_retention(
     retention_interval, transient_published
 ):
-    """Under latest-only retention (0), a mid-prompt internal checkpoint is
+    """With retention_interval=0, a mid-prompt internal checkpoint is
     request-local and must not enter the prefix cache; the prompt-end
     checkpoint keeps the existing publication behavior. Dense retention
     (None) is unchanged.
@@ -656,7 +656,7 @@ def test_internal_checkpoint_publication_respects_retention(
 
 
 def test_transient_checkpoint_evicts_retained_boundary_hash():
-    """Under latest-only retention the checkpoint slot can coincide with a
+    """With retention_interval=0, the checkpoint slot can coincide with a
     reachable boundary block that this step's full-block pass just hashed.
     The checkpoint state overwrites the slot, so the stale boundary hash
     must be evicted rather than left pointing at the wrong state.

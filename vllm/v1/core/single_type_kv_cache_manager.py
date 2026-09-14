@@ -2055,7 +2055,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 and num_tokens < request.num_prompt_tokens
                 and checkpoint_position != request.shared_prefix_boundary
             ):
-                # Latest-only retention keeps this transient checkpoint
+                # retention_interval == 0 keeps this transient checkpoint
                 # request-local. The slot may carry a hash from this step's
                 # full-block pass; that must go too, since the checkpoint
                 # state is about to overwrite the block.
