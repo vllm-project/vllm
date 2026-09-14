@@ -832,6 +832,7 @@ def test_models_fse_init(
         runner_type="generate",
         is_moe=True,
         logits_processors=None,
+        rswa_window=None,
     )
     vllm_config.parallel_config.enable_expert_parallel = False
     if model_type == "deepseek_v4":
