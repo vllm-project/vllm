@@ -88,6 +88,15 @@ def minicpmv_chat_template(content: str) -> str:
     return f"<|im_start|>user\n{content}<|im_end|>\n<|im_start|>assistant\n"
 
 
+def ling_vl_chat_template(content: str) -> str:
+    """Bailing V3 template with thinking disabled."""
+    return (
+        "<role>SYSTEM</role>detailed thinking off<|role_end|>"
+        f"<role>HUMAN</role>{content}<|role_end|>"
+        "<role>ASSISTANT</role>\n<think></think>"
+    )
+
+
 MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
     "gemma3": VitCudagraphTestConfig(
         model="google/gemma-3-4b-it",
@@ -379,6 +388,31 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
             "encoder_cudagraph_max_frames_per_batch": 4,
         },
         vllm_runner_kwargs={"trust_remote_code": True},
+        marks=[pytest.mark.core_model],
+    ),
+    "bailing_moe_v3_vl": VitCudagraphTestConfig(
+        model="inclusionAI/Ling-3.0-flash-VL",
+        modalities=["image"],
+        image_prompt=ling_vl_chat_template(
+            "<|vision_start|><|image_pad|><|vision_end|>What is in this image?"
+        ),
+        max_model_len=4096,
+        max_tokens=32,
+        vllm_runner_kwargs={
+            "trust_remote_code": True,
+            "load_format": "dummy",
+            "hf_overrides": partial(
+                dummy_hf_overrides,
+                model_arch="BailingMoeV3VLForConditionalGeneration",
+                exist_overrides={
+                    "text_config": {
+                        "num_hidden_layers": 6,
+                        "layer_types": ["linear_attention"] * 5 + ["full_attention"],
+                    }
+                },
+                use_original_num_layers=True,
+            ),
+        },
         marks=[pytest.mark.core_model],
     ),
 }
