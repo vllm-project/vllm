@@ -24,6 +24,7 @@ from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.determinism.batch_invariant import (
     linear_batch_invariant,
 )
+from vllm.model_executor.layers.quantization import resolve_quant_method
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
@@ -163,6 +164,8 @@ class LinearMethodBase(QuantizeMethodBase):
 class UnquantizedLinearMethod(LinearMethodBase):
     """Linear method without quantization."""
 
+    supports_pre_processed_weights = True
+
     def __init__(self) -> None:
         config = get_current_vllm_config_or_none()
         linear_backend = (
@@ -201,9 +204,9 @@ class UnquantizedLinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if current_platform.is_cpu():
-            # MLA's kv_b_proj (see `_cpu_skip_gemm_dispatch`): not
-            # perf-critical, so skip packing and use a plain fallback.
-            if getattr(layer, "_cpu_skip_gemm_dispatch", False):
+            # MLA's kv_b_proj (see `skip_weight_relayout`): not perf-critical,
+            # so skip packing and use a plain fallback.
+            if getattr(layer, "skip_weight_relayout", False):
                 layer.cpu_linear = torch.nn.functional.linear
                 return
 
@@ -280,7 +283,7 @@ class LinearBase(PluggableLayer):
         self.quant_method: QuantizeMethodBase
         if quant_config is None:
             self.quant_method = UnquantizedLinearMethod()
-        elif quant_method := quant_config.get_quant_method(self, prefix=prefix):
+        elif quant_method := resolve_quant_method(quant_config, self, prefix=prefix):
             self.quant_method = quant_method
         else:
             raise ValueError("All linear layers should support quant method.")
@@ -377,7 +380,8 @@ class ReplicatedLinear(LinearBase):
 
         if bias:
             self.bias = Parameter(
-                torch.empty(self.output_size, dtype=self.params_dtype)
+                torch.empty(self.output_size, dtype=self.params_dtype),
+                requires_grad=False,
             )
             set_weight_attrs(
                 self.bias,
@@ -522,7 +526,8 @@ class ColumnParallelLinear(LinearBase):
 
         if bias:
             self.bias = Parameter(
-                torch.empty(self.output_size_per_partition, dtype=params_dtype)
+                torch.empty(self.output_size_per_partition, dtype=params_dtype),
+                requires_grad=False,
             )
             set_weight_attrs(
                 self.bias,
@@ -1705,7 +1710,10 @@ class RowParallelLinear(LinearBase):
             )
 
         if bias:
-            self.bias = Parameter(torch.empty(self.output_size, dtype=params_dtype))
+            self.bias = Parameter(
+                torch.empty(self.output_size, dtype=params_dtype),
+                requires_grad=False,
+            )
             set_weight_attrs(
                 self.bias,
                 {

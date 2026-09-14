@@ -26,10 +26,12 @@ class InMemoryLookupManager(AsyncLookupManager):
         super().__init__(tier_type="test")
         self._existing = existing_keys or set()
         self._results_ready = threading.Event()
+        self.batch_lookup_calls = 0
 
     def batch_lookup(
         self, keys: list[OffloadKey], req_context: ReqContext
     ) -> Iterable[bool]:
+        self.batch_lookup_calls += 1
         results = [k in self._existing for k in keys]
         self._results_ready.set()
         return results
@@ -131,6 +133,15 @@ class TestAsyncLookupManager:
         mgr.flush()
         assert mgr._lookup_queue.empty()
         mgr.shutdown()
+
+    def test_flush_skips_lookup_cleaned_up_before_submit(self):
+        mgr = InMemoryLookupManager()
+        mgr.lookup(_key(1), _ctx("req_a"))
+        mgr.cleanup("req_a")
+        mgr.flush()
+        mgr.shutdown()
+
+        assert mgr.batch_lookup_calls == 0
 
     def test_repeated_lookup_same_key_no_duplicate_batch(self):
         mgr = InMemoryLookupManager(existing_keys={_key(1)})

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Kimi-K3 decode GEMM selection for unquantized BF16 on SM90/SM100/SM103.
+"""Kimi-K3 decode GEMM selection for unquantized BF16 on SM90/SM100/SM103/SM107.
 
 Dispatch is purely by local ``(N, K)`` shape and token count ``M`` — the module
 name plays no role. Each measured shape maps to a :class:`ProjectionSpec`
@@ -12,7 +12,10 @@ The supported capabilities carry separate measured tables:
 :data:`KIMI_K3_PROJECTIONS` was tuned on B300 (SM103),
 :data:`KIMI_K3_PROJECTIONS_SM100` on B200 (SM100), and
 :data:`KIMI_K3_PROJECTIONS_SM90` on H200 (SM90). The per-(shape, M) winners
-genuinely differ between the parts, so the tables must not be merged.
+genuinely differ between the parts, so the tables must not be merged. SM107
+(Rubin) reuses the SM103 table: the plan was validated end-to-end on SM107
+hardware, but the per-M crossovers have not been re-measured there and may
+deserve their own table once retuned.
 """
 
 from __future__ import annotations
@@ -60,6 +63,20 @@ _KDA_QKVG_SIZE = 4 * 1536
 _KDA_FAB_SIZE = 128 + 12
 _KDA_PACKED_SIZE = 6288
 _KDA_TP_SIZE = 8
+
+
+def _kda_qkvg_flashinfer_backend() -> Literal["cute-dsl"] | None:
+    """Return the tested FlashInfer backend for the low-M QKVG branch.
+
+    FlashInfer's ``cute-dsl`` BF16 GEMM supports SM100 and SM103, but rejects
+    SM90 during backend validation. Other capabilities use ``torch.mm`` for
+    QKVG while retaining the concurrent F_A/beta and F_B branch.
+    """
+    if current_platform.is_device_capability(
+        (10, 0)
+    ) or current_platform.is_device_capability((10, 3)):
+        return "cute-dsl"
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -646,9 +663,14 @@ def _is_sm103() -> bool:
     return current_platform.is_device_capability((10, 3))
 
 
+def _is_sm107() -> bool:
+    return current_platform.is_device_capability((10, 7))
+
+
 def _low_latency_table() -> dict[tuple[int, int], ProjectionSpec] | None:
     """Measured dispatch table for the current device, or None if unsupported."""
-    if _is_sm103():
+    if _is_sm103() or _is_sm107():
+        # SM107 reuses the SM103 table; see the module docstring.
         return KIMI_K3_PROJECTIONS
     if current_platform.is_device_capability((10, 0)):
         return KIMI_K3_PROJECTIONS_SM100
@@ -703,6 +725,8 @@ def _run_plan(
         return shape_dynamic_skinny_gemm(x, weight, config, None)
     if not hasattr(torch.ops._C, "dsv3_fused_a_gemm"):
         return None
+    if x.shape[0] != 1 and not _is_packed_row_major(x):
+        return None
     output = torch.empty((x.shape[0], weight.shape[0]), dtype=x.dtype, device=x.device)
     ops.dsv3_fused_a_gemm(output, x, weight.t(), enable_pdl=True)
     return output
@@ -739,14 +763,16 @@ def run_kda_projection_overlap(
                 config,
                 None,
             )
-        if num_tokens <= KDA_PROJECTION_OVERLAP_MAX_TOKENS:
+        if num_tokens <= KDA_PROJECTION_OVERLAP_MAX_TOKENS and (
+            backend := _kda_qkvg_flashinfer_backend()
+        ):
             from flashinfer.gemm import mm_bf16
 
             return mm_bf16(
                 hidden_states,
                 qkvg_weight.t(),
                 pdl=True,
-                backend="cute-dsl",
+                backend=backend,
             )
         return torch.mm(hidden_states, qkvg_weight.t())
 
@@ -797,11 +823,10 @@ def run_kda_projection_overlap(
 
 
 def autotune_kda_qkvg(model: nn.Module) -> None:
-    """Autotune the FlashInfer QKVG GEMM before CUDA graph capture."""
-    from flashinfer.gemm import mm_bf16
-
+    """Autotune the supported QKVG GEMM before CUDA graph capture."""
     from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
 
+    backend = _kda_qkvg_flashinfer_backend()
     children: list[KimiK3DeltaAttention] = []
     weights_by_shape: dict[
         tuple[int, int, int, torch.dtype, torch.device], torch.Tensor
@@ -812,29 +837,33 @@ def autotune_kda_qkvg(model: nn.Module) -> None:
         if child._projection_overlap_max_tokens <= 0:
             continue
         children.append(child)
-        qkvg_weight = child.in_proj_qkvgfab.weight[:_KDA_QKVG_SIZE]
-        shape = (
-            KDA_PROJECTION_OVERLAP_MAX_TOKENS,
-            qkvg_weight.shape[0],
-            qkvg_weight.shape[1],
-            qkvg_weight.dtype,
-            qkvg_weight.device,
-        )
-        weights_by_shape.setdefault(shape, qkvg_weight)
+        if backend is not None:
+            qkvg_weight = child.in_proj_qkvgfab.weight[:_KDA_QKVG_SIZE]
+            shape = (
+                KDA_PROJECTION_OVERLAP_MAX_TOKENS,
+                qkvg_weight.shape[0],
+                qkvg_weight.shape[1],
+                qkvg_weight.dtype,
+                qkvg_weight.device,
+            )
+            weights_by_shape.setdefault(shape, qkvg_weight)
 
-    for shape, qkvg_weight in weights_by_shape.items():
-        num_tokens = shape[0]
-        hidden_states = torch.empty(
-            (num_tokens, qkvg_weight.shape[1]),
-            dtype=qkvg_weight.dtype,
-            device=qkvg_weight.device,
-        )
-        mm_bf16(
-            hidden_states,
-            qkvg_weight.t(),
-            pdl=True,
-            backend="cute-dsl",
-        )
+    if backend is not None:
+        from flashinfer.gemm import mm_bf16
+
+        for shape, qkvg_weight in weights_by_shape.items():
+            num_tokens = shape[0]
+            hidden_states = torch.empty(
+                (num_tokens, qkvg_weight.shape[1]),
+                dtype=qkvg_weight.dtype,
+                device=qkvg_weight.device,
+            )
+            mm_bf16(
+                hidden_states,
+                qkvg_weight.t(),
+                pdl=True,
+                backend=backend,
+            )
     for child in children:
         child._projection_overlap_max_tokens = KDA_PROJECTION_OVERLAP_MAX_TOKENS
 

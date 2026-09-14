@@ -4,20 +4,25 @@
 # https://github.com/QwenLM/Qwen3-ASR
 
 """
-Online forced alignment example using Qwen3-ForcedAligner-0.6B.
+Online forced alignment example using Qwen3-ForcedAligner-0.6B-hf.
 
 Forced alignment takes audio and reference text as input and produces
 word-level timestamps. The model predicts a time bin at each <timestamp>
 token position; multiplying by ``timestamp_segment_time`` gives milliseconds.
 
+This example uses STEP pooling to return logits only for <timestamp> tokens.
+The ``step_tag_id`` value 151705 is this checkpoint's ``timestamp_token_id``
+from its config.json.
+
 Start the server with:
 
-    vllm serve Qwen/Qwen3-ForcedAligner-0.6B \\
-        --runner pooling \\
-        --enforce-eager \\
-        --trust-request-chat-template \\
-        --hf-overrides \\
-        '{"architectures": ["Qwen3ASRForcedAlignerForTokenClassification"]}'
+    vllm serve Qwen/Qwen3-ForcedAligner-0.6B-hf \
+        --runner pooling \
+        --convert classify \
+        --pooler-config \
+        '{"tok_pooling_type":"STEP","step_tag_id":151705,"use_activation":false}' \
+        --enforce-eager \
+        --trust-request-chat-template
 
 Then run:
 
@@ -108,7 +113,7 @@ def parse_response(response: requests.Response) -> dict[str, Any]:
     return result
 
 
-def load_timestamp_config(model: str) -> tuple[int, float]:
+def load_timestamp_segment_time(model: str) -> float:
     model_path = Path(model)
     config_path = (
         model_path / "config.json"
@@ -119,7 +124,7 @@ def load_timestamp_config(model: str) -> tuple[int, float]:
     with config_path.open() as f:
         config = json.load(f)
 
-    return config["timestamp_token_id"], config["timestamp_segment_time"]
+    return config["timestamp_segment_time"]
 
 
 def parse_args():
@@ -129,7 +134,7 @@ def parse_args():
     parser.add_argument(
         "--model",
         type=str,
-        default="Qwen/Qwen3-ForcedAligner-0.6B",
+        default="Qwen/Qwen3-ForcedAligner-0.6B-hf",
     )
     parser.add_argument(
         "--audio-path",
@@ -147,8 +152,6 @@ def parse_args():
 
 
 def main(args):
-    from transformers import AutoTokenizer
-
     api_url = f"http://{args.host}:{args.port}/pooling"
     prompt = build_prompt(args.words)
     audio_uri = (
@@ -161,46 +164,22 @@ def main(args):
     pooling_response = post_http_request(payload=payload, api_url=api_url)
     result = parse_response(pooling_response)
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
-    timestamp_token_id, timestamp_segment_time = load_timestamp_config(args.model)
-
+    timestamp_segment_time = load_timestamp_segment_time(args.model)
     output = result["data"][0]
     logits = torch.tensor(output["data"])
     predictions = logits.argmax(dim=-1)
-    token_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
-    audio_pad_token_id = tokenizer.convert_tokens_to_ids("<|audio_pad|>")
 
-    usage = result.get("usage") or {}
-    prompt_tokens = usage.get("prompt_tokens")
-    if prompt_tokens is not None and prompt_tokens != len(predictions):
+    expected_timestamps = len(args.words) * 2
+    if len(predictions) != expected_timestamps:
         raise RuntimeError(
-            "The response length does not match the reported prompt token count."
+            f"Expected {expected_timestamps} timestamp predictions, "
+            f"but received {len(predictions)}. Check that the server was started "
+            "with STEP pooling."
         )
 
-    try:
-        audio_pad_index = token_ids.index(audio_pad_token_id)
-    except ValueError as exc:
-        raise RuntimeError("The prompt does not contain the audio pad token.") from exc
-
-    audio_token_shift = len(predictions) - len(token_ids)
-    if audio_token_shift < 0:
-        raise RuntimeError(
-            "The response is shorter than the locally tokenized prompt. "
-            "Check that the server was started with --trust-request-chat-template."
-        )
-
-    ts_predictions = []
-    for i, token_id in enumerate(token_ids):
-        if token_id != timestamp_token_id:
-            continue
-
-        prediction_index = i + audio_token_shift if i > audio_pad_index else i
-        ts_predictions.append(
-            predictions[prediction_index].item() * timestamp_segment_time
-        )
-
-    if len(ts_predictions) < len(args.words) * 2:
-        raise RuntimeError("The model did not return enough timestamp predictions.")
+    ts_predictions = [
+        prediction.item() * timestamp_segment_time for prediction in predictions
+    ]
 
     for i, word in enumerate(args.words):
         start_ms = ts_predictions[i * 2]
