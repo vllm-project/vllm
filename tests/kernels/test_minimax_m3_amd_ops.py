@@ -473,9 +473,12 @@ def test_mxfp8_rocm_native_unaligned_k_dequantizes_at_load(shape):
     )
     calls = []
     real = rocm_native._mxfp8_dot_scaled_linear
-    rocm_native._mxfp8_dot_scaled_linear = lambda *a, **k: (
-        calls.append(1) or real(*a, **k)
-    )
+
+    def _spy(*a, **k):
+        calls.append(1)
+        return real(*a, **k)
+
+    rocm_native._mxfp8_dot_scaled_linear = _spy
     try:
         out = kernel.apply_weights(unprocessed, x)
     finally:
