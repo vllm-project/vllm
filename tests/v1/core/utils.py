@@ -8,6 +8,7 @@ from tests.v1.kv_connector.unit.utils import MockKVConfig
 from vllm.config import (
     CacheConfig,
     ECTransferConfig,
+    FaultToleranceConfig,
     KVTransferConfig,
     ModelConfig,
     MultiModalConfig,
@@ -76,6 +77,7 @@ def create_scheduler(
     kv_cache_spec: KVCacheSpec | None = None,
     per_request_spec_decode_metrics: str = "none",
     scheduling_policy: SchedulerPolicy = "fcfs",
+    enable_nan_fault_tolerance: bool = False,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -182,12 +184,16 @@ def create_scheduler(
         parallel_config=ParallelConfig(
             pipeline_parallel_size=pipeline_parallel_size,
             data_parallel_size=data_parallel_size,
+            fault_tolerance_config=FaultToleranceConfig(
+                enable_nan_fault_tolerance=enable_nan_fault_tolerance
+            ),
         ),
         kv_transfer_config=kv_transfer_config,
         speculative_config=speculative_config,
         ec_transfer_config=ec_transfer_config,
         observability_config=ObservabilityConfig(
             per_request_spec_decode_metrics=per_request_spec_decode_metrics,
+            enable_detect_nans_in_logits=enable_nan_fault_tolerance,
         ),
     )
     if kv_cache_spec is None:

@@ -16,7 +16,10 @@ from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     get_num_sampled_and_rejected,
 )
-from vllm.v1.worker.gpu.metrics.logits import get_num_nans
+from vllm.v1.worker.gpu.metrics.logits import (
+    aggregate_num_nans_per_request,
+    get_num_nans,
+)
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.sampler import Sampler
@@ -292,7 +295,11 @@ class RejectionSampler:
     ) -> SamplerOutput:
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
-        num_nans = get_num_nans(logits) if self.sampler.compute_nans else None
+        num_nans = None
+        if self.sampler.compute_nans:
+            num_nans = aggregate_num_nans_per_request(
+                get_num_nans(logits), input_batch.cu_num_logits[1:]
+            )
 
         draft_sampled = input_batch.input_ids[input_batch.logits_indices]
         pos = input_batch.positions[input_batch.logits_indices]

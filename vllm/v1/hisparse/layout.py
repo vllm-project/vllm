@@ -355,4 +355,7 @@ def get_hisparse_kv_cache_config(
         prefix_cache_retention_interval=(
             vllm_config.cache_config.prefix_cache_retention_interval
         ),
+        force_zeroing=(
+            vllm_config.parallel_config.fault_tolerance_config.enable_nan_fault_tolerance
+        ),
     )

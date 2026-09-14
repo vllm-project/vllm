@@ -828,7 +828,13 @@ class EngineArgs:
             self.fault_tolerance_config = FaultToleranceConfig(
                 **self.fault_tolerance_config
             )
-        if self.enable_nan_fault_tolerance:
+        # The nested config is the source of truth after normalization. In
+        # particular, ``fault_tolerance_config={...}`` must enable logits NaN
+        # detection just like the top-level flag does.
+        if (
+            self.enable_nan_fault_tolerance
+            or self.fault_tolerance_config.enable_nan_fault_tolerance
+        ):
             self.fault_tolerance_config.enable_nan_fault_tolerance = True
             self.enable_detect_nans_in_logits = True
         if isinstance(self.ir_op_priority, dict):
