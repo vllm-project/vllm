@@ -366,7 +366,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             (kMxfp8Static, kMxfp8Dynamic),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A or (
-            activation_key in (None, kFp8DynamicTokenSym)
+            activation_key in (None, kFp8DynamicTokenSym, kInt8DynamicTokenSym)
             and _is_supported_wna16_weight_key(weight_key)
         )
 

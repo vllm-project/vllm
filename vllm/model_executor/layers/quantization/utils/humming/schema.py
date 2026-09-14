@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Map Humming schemas and handle shared checkpoint quantization settings."""
 
+import dataclasses
 from typing import TYPE_CHECKING, Any
 
 import regex as re
@@ -27,8 +28,28 @@ if TYPE_CHECKING:
         BaseInputSchema,
         BaseWeightSchema,
         HummingInputSchema,
+        HummingWeightSchema,
     )
     from vllm.utils.humming import dtypes as humming_dtypes
+
+
+def humming_update_schema_hadamard_block_size(
+    weight_schema: "HummingWeightSchema",
+    input_schema: "HummingInputSchema",
+    shape_k: int,
+) -> "HummingWeightSchema":
+    assert shape_k > 0
+    block_size = 256
+    for group_size in (
+        weight_schema.weight_scale_group_size,
+        input_schema.input_scale_group_size,
+    ):
+        if group_size is not None and group_size > 0:
+            block_size = min(block_size, group_size)
+    block_size = 1 << (block_size.bit_length() - 1)
+    while shape_k % block_size:
+        block_size //= 2
+    return dataclasses.replace(weight_schema, hadamard_block_size=block_size)
 
 
 if has_humming():

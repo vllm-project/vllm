@@ -22,6 +22,7 @@ from vllm.model_executor.layers.quantization.utils.humming.moe import (
 from vllm.model_executor.layers.quantization.utils.humming.schema import (
     check_and_fallback_input_schema,
     humming_is_layer_skipped,
+    humming_update_schema_hadamard_block_size,
     input_schema_to_quant_key,
     quant_key_to_input_schema,
     resolve_humming_layer_config,
@@ -34,6 +35,7 @@ __all__ = [
     "HummingMoEQuantConfig",
     "get_humming_moe_quant_config",
     "humming_is_layer_skipped",
+    "humming_update_schema_hadamard_block_size",
     "make_humming_moe_quant_config",
     "apply_humming_linear",
     "convert_linear_layer_to_humming_standard",

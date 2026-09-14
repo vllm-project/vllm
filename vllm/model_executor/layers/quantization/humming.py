@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
+from math import gcd
 from typing import TYPE_CHECKING, Any
 
 import regex as re
@@ -33,6 +34,7 @@ from vllm.model_executor.layers.quantization.utils.humming import (
     convert_to_humming_moe_kernel_format,
     get_humming_linear_compute_config,
     get_humming_moe_quant_config,
+    humming_update_schema_hadamard_block_size,
     input_schema_to_quant_key,
     make_humming_moe_kernel,
     resolve_humming_layer_config,
@@ -467,6 +469,18 @@ class HummingLinearMethod(LinearMethodBase):
         layer.output_partition_sizes = output_partition_sizes
         layer.extra_weight_attrs = extra_weight_attrs.copy()
 
+        input_schema = self.force_input_schema or self.input_schema
+        input_schema = input_schema.to_humming_schema(params_dtype)
+        for name in ("weight_schema", "force_weight_schema"):
+            schema = getattr(self, name)
+            if getattr(schema, "hadamard_block_size", None) == -1:
+                schema = humming_update_schema_hadamard_block_size(
+                    weight_schema=schema,
+                    input_schema=input_schema,
+                    shape_k=input_size_per_partition,
+                )
+                setattr(self, name, schema)
+
         weight_loader = extra_weight_attrs.get("weight_loader", default_weight_loader)
         new_weight_loader = self.prepare_weight_loader(layer, weight_loader)
         extra_weight_attrs["weight_loader"] = new_weight_loader
@@ -719,6 +733,18 @@ class HummingMoEMethod(FusedMoEMethodBase):
         layer.num_experts = num_experts
         layer.param_dtype = params_dtype
         layer.intermediate_size = intermediate_size_per_partition
+        input_schema = self.force_input_schema or self.input_schema
+        input_schema = input_schema.to_humming_schema(params_dtype)
+        shape_k = gcd(hidden_size, intermediate_size_per_partition)
+        for name in ("weight_schema", "force_weight_schema"):
+            schema = getattr(self, name)
+            if getattr(schema, "hadamard_block_size", None) == -1:
+                schema = humming_update_schema_hadamard_block_size(
+                    weight_schema=schema,
+                    input_schema=input_schema,
+                    shape_k=shape_k,
+                )
+                setattr(self, name, schema)
         weight_loader = extra_weight_attrs.get("weight_loader", default_weight_loader)
         weight_loader = self.prepare_weight_loader(layer, weight_loader)
         extra_weight_attrs["weight_loader"] = weight_loader
