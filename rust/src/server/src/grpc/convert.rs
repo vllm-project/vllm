@@ -750,8 +750,10 @@ mod tests {
         let expected = vec![1, 2, 3, 4];
         fin.routed_experts = Some(OpaqueData::new(expected.clone()));
 
-        let terminal = to_sequence_output("", &[10], None, Some(&fin), &ResponseOpts::default());
-        let intermediate = to_sequence_output("", &[9], None, None, &ResponseOpts::default());
+        let terminal = to_sequence_output("", &[10], None, Some(&fin), &ResponseOpts::default())
+            .expect("terminal output");
+        let intermediate = to_sequence_output("", &[9], None, None, &ResponseOpts::default())
+            .expect("intermediate output");
 
         assert_eq!(
             terminal.routed_experts,
@@ -766,8 +768,10 @@ mod tests {
         fin.sampling_mask = Some(vec![vec![1, 10], vec![2, 20]]);
 
         let terminal =
-            to_sequence_output("", &[10, 20], None, Some(&fin), &ResponseOpts::default());
-        let intermediate = to_sequence_output("", &[9], None, None, &ResponseOpts::default());
+            to_sequence_output("", &[10, 20], None, Some(&fin), &ResponseOpts::default())
+                .expect("terminal output");
+        let intermediate = to_sequence_output("", &[9], None, None, &ResponseOpts::default())
+            .expect("intermediate output");
 
         assert_eq!(
             terminal.sampling_mask,
