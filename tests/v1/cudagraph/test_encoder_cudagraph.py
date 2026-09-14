@@ -578,7 +578,7 @@ class TestEncoderCudaGraphCaptureReplay:
 
 
 # ---------------------------------------------------------------------------
-# SimpleMockViTVideoModel — extends SimpleMockViTModel with video support
+# E-only capture and output lifecycle
 # ---------------------------------------------------------------------------
 
 
@@ -668,6 +668,11 @@ def test_eonly_without_encoder_graph_skips_capture():
     runner = object.__new__(MMEncoderModelRunner)
     runner.model_state = SimpleNamespace(encoder_runner=encoder)
     assert runner.capture_model() == 0
+
+
+# ---------------------------------------------------------------------------
+# SimpleMockViTVideoModel — extends SimpleMockViTModel with video support
+# ---------------------------------------------------------------------------
 
 
 class SimpleMockViTVideoModel(SimpleMockViTModel):
