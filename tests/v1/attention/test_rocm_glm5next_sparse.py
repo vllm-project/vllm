@@ -170,13 +170,23 @@ def test_dsv4_sparse_attention_keeps_layout_constraint():
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")
-def test_sparse_prefill_kv_row_offset_does_not_overflow_int32():
-    # GLM's 640-token pages cross the signed-int32 address boundary at block
-    # 6554 for a 512-element KV row. The production kernel must promote the
-    # slot before multiplying by the row stride.
-    slot = torch.tensor([6554 * 640], dtype=torch.int32, device="cuda")
+@pytest.mark.parametrize(
+    ("block_size", "first_overflow_block"),
+    [
+        (640, 6554),  # native hybrid page: INT32_MAX/(640*512)=6553.6
+        (1280, 3277),  # ROCm-aligned 1152->1280: INT32_MAX/(1280*512)=3276.8
+    ],
+)
+def test_sparse_prefill_kv_row_offset_does_not_overflow_int32(
+    block_size: int, first_overflow_block: int
+):
+    # A 512-element KV row times a global token slot overflows int32 once
+    # physical block ids pass INT32_MAX/(block_size*512). Prefill must promote
+    # the slot before multiplying by kv_stride_n.
+    slot_id = first_overflow_block * block_size
+    slot = torch.tensor([slot_id], dtype=torch.int32, device="cuda")
     output = torch.empty(1, dtype=torch.int64, device="cuda")
 
     _store_sparse_kv_row_offset_kernel[(1,)](slot, output, stride=512)
 
-    assert output.item() == 6554 * 640 * 512
+    assert output.item() == slot_id * 512
