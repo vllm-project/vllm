@@ -13,7 +13,6 @@ from typing import Protocol, runtime_checkable
 
 import numpy as np
 import torch
-from typing_extensions import Buffer
 
 from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_tp_group
@@ -26,15 +25,6 @@ logger = logging.getLogger(__name__)
 
 MAX_ROUTED_EXPERTS_PAYLOAD_BYTES = 63 * 1024 * 1024
 MAX_ROUTED_EXPERTS_ARRAY_BYTES = MAX_ROUTED_EXPERTS_PAYLOAD_BYTES - 1024
-
-
-class _BoundedBytesIO(BytesIO):
-    def write(self, data: Buffer, /) -> int:
-        if self.tell() + memoryview(data).nbytes > MAX_ROUTED_EXPERTS_PAYLOAD_BYTES:
-            raise ValueError(
-                "Routed-experts payload exceeds the 63 MiB transport limit."
-            )
-        return super().write(data)
 
 
 @runtime_checkable
@@ -404,13 +394,18 @@ class RoutedExpertsManager:
     @staticmethod
     def serialize(routed_experts: np.ndarray) -> bytes:
         """Serialize a complete routed-experts result for opaque transport."""
-        if routed_experts.nbytes > MAX_ROUTED_EXPERTS_PAYLOAD_BYTES:
+        if routed_experts.nbytes > MAX_ROUTED_EXPERTS_ARRAY_BYTES:
+            raise ValueError(
+                "Routed-experts array exceeds the in-memory transport limit."
+            )
+        with BytesIO() as buffer:
+            np.save(buffer, routed_experts, allow_pickle=False)
+            payload = buffer.getvalue()
+        if len(payload) > MAX_ROUTED_EXPERTS_PAYLOAD_BYTES:
             raise ValueError(
                 "Routed-experts payload exceeds the 63 MiB transport limit."
             )
-        with _BoundedBytesIO() as buffer:
-            np.save(buffer, routed_experts, allow_pickle=False)
-            return buffer.getvalue()
+        return payload
 
     def serialize_terminal(
         self,

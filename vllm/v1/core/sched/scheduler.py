@@ -2158,12 +2158,24 @@ class Scheduler(SchedulerInterface):
                         if request.sampling_params is not None
                         else 0
                     )
-                    routed_experts_payload = self.routed_experts_mgr.serialize_terminal(
-                        block_ids,
-                        max(0, request.num_tokens - 1),
-                        prompt_start,
-                        current_step_captured=routing_data is not None,
-                    )
+                    try:
+                        routed_experts_payload = (
+                            self.routed_experts_mgr.serialize_terminal(
+                                block_ids,
+                                max(0, request.num_tokens - 1),
+                                prompt_start,
+                                current_step_captured=routing_data is not None,
+                            )
+                        )
+                    except ValueError:
+                        logger.exception(
+                            "Failed to serialize routed experts for request %s; "
+                            "terminating the request.",
+                            req_id,
+                        )
+                        request.status = RequestStatus.FINISHED_ERROR
+                        request.resumable = False
+                        finish_reason = request.get_finished_reason()
                 finished = self._handle_stopped_request(request)
                 if finished:
                     kv_transfer_params, ec_transfer_params = self._free_request(request)

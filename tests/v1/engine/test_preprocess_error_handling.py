@@ -61,3 +61,22 @@ def test_preprocess_error_handling(monkeypatch: pytest.MonkeyPatch):
     assert len(outputs) == 1
     assert len(outputs[0].outputs[0].token_ids) > 0
     assert outputs[0].outputs[0].finish_reason in ("stop", "length")
+
+
+def test_preprocess_rejects_routed_experts_prompt_start_past_prompt():
+    engine_core = object.__new__(EngineCore)
+    engine_core.mm_receiver_cache = None
+    request = EngineCoreRequest(
+        request_id="invalid-prompt-start",
+        prompt_token_ids=[1, 2],
+        mm_features=None,
+        sampling_params=SamplingParams(routed_experts_prompt_start=3),
+        pooling_params=None,
+        arrival_time=0.0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+    )
+
+    with pytest.raises(ValueError, match="routed_experts_prompt_start.*prompt length"):
+        engine_core.preprocess_add_request(request)

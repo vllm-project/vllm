@@ -80,6 +80,41 @@ def test_take_routed_experts_block_ids_preserves_in_flight_fifo():
     assert snapshots == {}
 
 
+def test_oversized_terminal_routed_experts_fails_only_request():
+    scheduler = create_scheduler()
+    request = create_requests(
+        num_requests=1, max_tokens=1, req_ids=["oversized-routing"]
+    )[0]
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    scheduler.enable_return_routed_experts = True
+    scheduler.routed_experts_mgr = Mock()
+    scheduler.routed_experts_mgr.serialize_terminal.side_effect = ValueError(
+        "payload too large"
+    )
+
+    outputs = scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[123]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    assert request.status == RequestStatus.FINISHED_ERROR
+    assert outputs[0].outputs[0].finish_reason == FinishReason.ERROR
+    assert outputs[0].outputs[0].routed_experts_payload is None
+
+    scheduler.enable_return_routed_experts = False
+    healthy_request = create_requests(num_requests=1, req_ids=["healthy-request"])[0]
+    scheduler.add_request(healthy_request)
+    assert scheduler.schedule().scheduled_new_reqs[0].req_id == "healthy-request"
+
+
 def test_make_scheduled_encoder_input_stats_output_embeddings():
     scheduler = create_scheduler()
     mm_features = [
