@@ -32,7 +32,7 @@ from vllm.models.deepseek_v4.nvidia.model import (
     DeepseekV4DecoderLayer,
     DeepseekV4Model,
 )
-from vllm.models.deepseek_v4_1.nvidia.model import (
+from vllm.models.deepseek_v41.nvidia.model import (
     DeepseekV4DecoderLayer as DeepseekV41DecoderLayer,
 )
 from vllm.platforms import current_platform
@@ -104,7 +104,7 @@ def test_hc_collapse_custom_op_supports_compile():
 @pytest.mark.parametrize("num_tokens", [1, 7])
 def test_v41_dspark_head_collapses_with_last_ffn_mix(num_tokens, monkeypatch):
     """Match reference DSparkBlock.forward_head's hc_pre before its RMSNorm."""
-    from vllm.models.deepseek_v4_1.nvidia import dspark
+    from vllm.models.deepseek_v41.nvidia import dspark
 
     set_random_seed(0)
     hidden_size, hc_mult = 5120, 4
@@ -296,7 +296,7 @@ def test_deepseek_v41_decoder_mixes_match_torch(
         return post, res, decoder.attn_norm(collapsed), pre
 
     monkeypatch.setattr(
-        "vllm.models.deepseek_v4_1.nvidia.model.mhc_pre_delayed_tilelang",
+        "vllm.models.deepseek_v41.nvidia.model.mhc_pre_delayed_tilelang",
         reference,
     )
     expected = decoder(x, positions, None, **kwargs)

@@ -377,7 +377,7 @@ _MULTIMODAL_MODELS = {
         "DeepseekV4ForConditionalGeneration",
     ),
     "DeepseekV41ForCausalLM": (
-        "vllm.models.deepseek_v4_1",
+        "vllm.models.deepseek_v41",
         "DeepseekV41ForCausalLM",
     ),
     "Dots3NoteForCausalLM": (
@@ -645,7 +645,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "DFlashMuseGlimmerAssistantModel": ("qwen3_dflash", "DFlashQwen3ForCausalLM"),
     "DSparkDraftModel": ("vllm.models.deepseek_v4", "DSparkDeepseekV4ForCausalLM"),
     "DSparkV41DraftModel": (
-        "vllm.models.deepseek_v4_1",
+        "vllm.models.deepseek_v41",
         "DSparkDeepseekV4ForCausalLM",
     ),
     "Qwen3DSparkModel": ("qwen3_dspark", "Qwen3DSparkForCausalLM"),

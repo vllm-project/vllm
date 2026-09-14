@@ -12,7 +12,7 @@ class DeepseekV41Config(PretrainedConfig):
     tower under ``vision_config``. The vLLM model code (ported from
     ``deepseek_v4``) reads flat attributes, so both sub-configs are flattened
     onto the top level here: text fields are exposed as-is, vision fields
-    with the ``vision_*`` naming used by ``deepseek_v4_1.common.vision``.
+    with the ``vision_*`` naming used by ``deepseek_v41.common.vision``.
     """
 
     model_type = "deepseek_v41"

@@ -7,15 +7,15 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.models.deepseek_v4_1.common import engram as engram_ops
-from vllm.models.deepseek_v4_1.common.engram import (
+from vllm.models.deepseek_v41.common import engram as engram_ops
+from vllm.models.deepseek_v41.common.engram import (
     Engram as CommonEngram,
 )
-from vllm.models.deepseek_v4_1.common.engram import (
+from vllm.models.deepseek_v41.common.engram import (
     NgramHashState,
 )
-from vllm.models.deepseek_v4_1.nvidia import engram as nvidia_engram_ops
-from vllm.models.deepseek_v4_1.nvidia.engram import Engram, ParallelEngramEmbedding
+from vllm.models.deepseek_v41.nvidia import engram as nvidia_engram_ops
+from vllm.models.deepseek_v41.nvidia.engram import Engram, ParallelEngramEmbedding
 from vllm.platforms import current_platform
 
 
@@ -503,7 +503,7 @@ def test_lookback_window_reproduces_single_instance(runner, capture):
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 def test_v2_model_state_gathers_lookback_window():
     """The window is gathered on device from the runner's token history."""
-    from vllm.models.deepseek_v4_1.nvidia.model_state import DeepseekV41ModelState
+    from vllm.models.deepseek_v41.nvidia.model_state import DeepseekV41ModelState
 
     depth, max_num_reqs, max_model_len = 3, 4, 16
     state = DeepseekV41ModelState.__new__(DeepseekV41ModelState)

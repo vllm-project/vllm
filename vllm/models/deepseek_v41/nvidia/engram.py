@@ -23,16 +23,16 @@ from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.models.deepseek_v4_1.common.engram import (
+from vllm.models.deepseek_v41.common.engram import (
     DEAD_ID,
     EngramLayout,
     _engram_head_shard_weight_loader,
     _engram_select_rows,
 )
-from vllm.models.deepseek_v4_1.common.engram import (
+from vllm.models.deepseek_v41.common.engram import (
     Engram as BaseEngram,
 )
-from vllm.models.deepseek_v4_1.common.engram import (
+from vllm.models.deepseek_v41.common.engram import (
     ParallelEngramEmbedding as BaseParallelEngramEmbedding,
 )
 from vllm.utils.platform_utils import is_uva_available

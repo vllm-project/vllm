@@ -208,7 +208,7 @@ steps:
   - tests/distributed/test_utils
   - tests/distributed/test_engram_dp_shard.py
   - vllm/config/engram.py
-  - vllm/models/deepseek_v4_1/
+  - vllm/models/deepseek_v41/
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
