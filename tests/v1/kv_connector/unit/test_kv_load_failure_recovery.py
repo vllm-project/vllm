@@ -209,10 +209,20 @@ def test_sync_load_failure(
     assert scheduler.connector.request_finished.call_count == 2
 
 
-def test_sync_load_failure_discards_multitoken_async_frames():
+@pytest.mark.parametrize(
+    "mamba_enabled,failed_group_idx", [(False, 0), (True, 0), (True, 1)]
+)
+def test_sync_load_failure_discards_multitoken_async_frames(
+    mamba_enabled: bool, failed_group_idx: int
+):
     vllm_config = create_vllm_config(kv_load_failure_policy="recompute")
     vllm_config.scheduler_config.async_scheduling = True
-    scheduler = create_scheduler(vllm_config)
+    kv_cache_config = make_kv_cache_config(
+        block_size=vllm_config.cache_config.block_size,
+        mamba_enabled=mamba_enabled,
+        num_blocks=10000,
+    )
+    scheduler = create_scheduler(vllm_config, kv_cache_config=kv_cache_config)
     # CPU-only unit tests cannot enable MRV2 without Triton. Worker-side
     # consumption of the rewind marker is covered separately.
     scheduler.use_v2_model_runner = True
@@ -240,9 +250,11 @@ def test_sync_load_failure_discards_multitoken_async_frames():
     assert request.num_output_placeholders == 5
     assert len(stale_output.scheduled_spec_decode_tokens[request.request_id]) == 3
 
-    block_ids = failed_output.scheduled_new_reqs[0].block_ids[0]
+    block_ids = failed_output.scheduled_new_reqs[0].block_ids[failed_group_idx]
+    null_block_id = scheduler.kv_cache_manager.block_pool.null_block.block_id
+    failed_block_id = next(b for b in block_ids if b != null_block_id)
     model_runner_output = create_model_runner_output(
-        [request], invalid_block_ids={block_ids[0]}, token_id=101
+        [request], invalid_block_ids={failed_block_id}, token_id=101
     )
     scheduler.update_from_output(failed_output, model_runner_output)
 
@@ -991,10 +1003,14 @@ def test_async_progressive_load_failure(
         assert scheduler.connector.get_num_new_matched_tokens.call_count == 1
 
 
-def _schedule_hybrid_async_load(
-    scheduler: Scheduler, num_prompt_blocks: int, num_external_computed_blocks: int
+def _prepare_hybrid_load(
+    scheduler: Scheduler,
+    num_prompt_blocks: int,
+    num_external_computed_blocks: int,
+    *,
+    async_load: bool = True,
 ) -> Request:
-    """Put one request into an async external load on a hybrid model."""
+    """Prepare one external load on a hybrid model."""
     request = create_request(num_tokens=num_prompt_blocks * scheduler.block_size)
     scheduler.add_request(request=request)
 
@@ -1002,7 +1018,7 @@ def _schedule_hybrid_async_load(
     scheduler.connector.get_num_new_matched_tokens.side_effect = (
         _make_get_num_new_matched_tokens(
             {request.request_id: num_external_computed_blocks * scheduler.block_size},
-            async_load=True,
+            async_load=async_load,
         )
     )
     scheduler.connector.take_events.return_value = ()
@@ -1015,10 +1031,13 @@ def _report_invalid_blocks(
     scheduler.update_from_output(
         scheduler_output,
         create_model_runner_output(
-            reqs=[],
+            reqs=[
+                scheduler.requests[req_id]
+                for req_id in scheduler_output.num_scheduled_tokens
+            ],
             finished_recving=set(),
             invalid_block_ids=invalid_block_ids,
-            use_eos=True,
+            use_eos=False,
         ),
     )
 
@@ -1033,7 +1052,7 @@ def test_hybrid_load_failure_recomputes_whole_request(
     point; the request restarts from scratch instead.
     """
     num_prompt_blocks, num_external_computed_blocks = 10, 9
-    request = _schedule_hybrid_async_load(
+    request = _prepare_hybrid_load(
         hybrid_scheduler, num_prompt_blocks, num_external_computed_blocks
     )
     scheduler_output = hybrid_scheduler.schedule()
@@ -1058,12 +1077,18 @@ def test_hybrid_load_failure_recomputes_whole_request(
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
 
 
-def test_hybrid_load_failure_ignores_null_block(hybrid_scheduler: Scheduler):
+@pytest.mark.parametrize("async_load", [True, False])
+def test_hybrid_load_failure_ignores_null_block(
+    hybrid_scheduler: Scheduler, async_load: bool
+):
     """The null block is shared by every request and holds no KV, so reporting
     it must not restart anyone."""
     num_prompt_blocks, num_external_computed_blocks = 10, 9
-    request = _schedule_hybrid_async_load(
-        hybrid_scheduler, num_prompt_blocks, num_external_computed_blocks
+    request = _prepare_hybrid_load(
+        hybrid_scheduler,
+        num_prompt_blocks,
+        num_external_computed_blocks,
+        async_load=async_load,
     )
     scheduler_output = hybrid_scheduler.schedule()
 

@@ -3255,6 +3255,17 @@ class Scheduler(SchedulerInterface):
             assert req_id in self.requests
             self._free_blocks(self.requests[req_id])
 
+    def _rewind_request_after_kv_load_failure(self, request: Request) -> None:
+        request.spec_token_ids = []
+        self._mark_inflight_output_stale(request, drop_stale_output=True)
+        request.is_prefill_chunk = request.num_computed_tokens < request.num_tokens
+        if request.is_prefill_chunk:
+            self._inflight_prefills.add(request)
+        else:
+            self._inflight_prefills.discard(request)
+        if self.use_v2_model_runner and request.status == RequestStatus.RUNNING:
+            self.rewound_req_ids.add(request.request_id)
+
     def _register_sync_kv_recovery(
         self,
         requests: Iterable[Request],
@@ -3358,16 +3369,7 @@ class Scheduler(SchedulerInterface):
                         required_end,
                     )
 
-            request.spec_token_ids = []
-            self._mark_inflight_output_stale(request, drop_stale_output=True)
-            request.is_prefill_chunk = request.num_computed_tokens < request.num_tokens
-            if request.is_prefill_chunk:
-                self._inflight_prefills.add(request)
-            else:
-                self._inflight_prefills.discard(request)
-            if self.use_v2_model_runner and request.status == RequestStatus.RUNNING:
-                self.rewound_req_ids.add(req_id)
-
+            self._rewind_request_after_kv_load_failure(request)
             affected_req_ids.add(req_id)
 
         return affected_req_ids, total_affected_tokens, blocks_to_evict
@@ -3408,7 +3410,11 @@ class Scheduler(SchedulerInterface):
                 - blocks_to_evict (set[int]): Block IDs to evict from cache,
                 including invalid blocks and downstream dependent blocks.
         """
-        if evict_blocks and self.recompute_kv_load_failures:
+        if (
+            evict_blocks
+            and self.recompute_kv_load_failures
+            and len(self.kv_cache_config.kv_cache_groups) == 1
+        ):
             return self._register_sync_kv_recovery(requests, invalid_block_ids)
 
         affected_req_ids: set[str] = set()
@@ -3466,6 +3472,8 @@ class Scheduler(SchedulerInterface):
                                 for block_id in req_block_ids
                                 if block_id != null_block_id
                             )
+                    if evict_blocks and self.recompute_kv_load_failures:
+                        self._rewind_request_after_kv_load_failure(request)
                     affected_req_ids.add(req_id)
                 continue
 
@@ -3521,20 +3529,7 @@ class Scheduler(SchedulerInterface):
                     request.num_computed_tokens = req_num_computed_tokens
 
                 if self.recompute_kv_load_failures:
-                    request.spec_token_ids = []
-                    self._mark_inflight_output_stale(request, drop_stale_output=True)
-                    request.is_prefill_chunk = (
-                        request.num_computed_tokens < request.num_tokens
-                    )
-                    if request.is_prefill_chunk:
-                        self._inflight_prefills.add(request)
-                    else:
-                        self._inflight_prefills.discard(request)
-                    if (
-                        self.use_v2_model_runner
-                        and request.status == RequestStatus.RUNNING
-                    ):
-                        self.rewound_req_ids.add(req_id)
+                    self._rewind_request_after_kv_load_failure(request)
 
                 affected_req_ids.add(request.request_id)
 
