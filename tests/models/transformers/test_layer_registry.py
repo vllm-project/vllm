@@ -10,6 +10,7 @@ logging that reports which source was used.
 """
 
 import importlib
+import inspect
 import logging
 import sys
 import types
@@ -361,6 +362,36 @@ def test_layer_names_scope_leaves_unported_layers_alone(monkeypatch):
             assert _vllm_layer(*key) is cls
 
 
+def test_layer_names_scope_rebinds_classes_only(monkeypatch):
+    """A mirrored *function* name keeps its in-tree implementation.
+
+    Both `activation` modules define `get_act_and_mul_fn`, but they are not
+    interchangeable: the in-tree one takes a `compile_native` keyword and raises
+    `ValueError` for an unsupported activation, the hw-agnostic one takes neither
+    and raises `KeyError`. Nothing subclasses a function and `register_oot` cannot
+    key on one, so rebinding it buys nothing and only breaks callers that run while
+    plugins load -- and `validate_registered_overrides` inspects classes, so it
+    would not catch the swap either.
+    """
+    from vllm.model_executor.hw_agnostic.layers._layer_names import (
+        hw_agnostic_layer_names,
+    )
+
+    monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", "1")
+    vllm_fn = _vllm_layer("activation", "get_act_and_mul_fn")
+    assert vllm_fn is not _hw_layer("activation", "get_act_and_mul_fn")
+
+    with hw_agnostic_layer_names():
+        # The class next to it in the same module is rebound, so this is the
+        # class/function distinction and not the scope failing to open.
+        assert _vllm_layer("activation", "SiluAndMul") is _hw_layer(
+            "activation", "SiluAndMul"
+        )
+        assert _vllm_layer("activation", "get_act_and_mul_fn") is vllm_fn
+        # The in-tree signature, still callable as in-tree callers expect.
+        inspect.signature(vllm_fn).bind("silu", compile_native=False)
+
+
 @pytest.mark.parametrize("hw_agnostic", ["0", "1"])
 def test_general_plugins_open_the_scope_only_when_enabled(monkeypatch, hw_agnostic):
     """`load_general_plugins` guards the scope on `VLLM_USE_HW_AGNOSTIC`.
@@ -419,16 +450,16 @@ def test_registration_follows_the_imported_class(
 
     with hw_agnostic_layer_names():
         imported = _vllm_layer(module, name)  # what the plugin's import yields
-
-        @imported.register_oot(name=name)
-        class Override(imported):
-            pass
+        # Built with `type()` and decorated by hand because the base class is a
+        # variable, which mypy rejects in a `class` header; same idiom as
+        # `test_plugin_import_pattern_reaches_the_entry_point` below.
+        override = imported.register_oot(name=name)(type("Override", (imported,), {}))
 
     if hw_agnostic == "1":
-        assert hw_agnostic_registry[name] is Override
+        assert hw_agnostic_registry[name] is override
         assert name not in hw_specific_registry
     else:
-        assert hw_specific_registry[name] is Override
+        assert hw_specific_registry[name] is override
         assert name not in hw_agnostic_registry
 
 

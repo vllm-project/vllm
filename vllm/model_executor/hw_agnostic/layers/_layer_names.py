@@ -38,13 +38,25 @@ _MIRRORED_MODULES: dict[str, str] = {
 }
 
 
-def _own_definitions(module: ModuleType) -> dict[str, object]:
-    """Public names `module` defines itself; a re-export is not an implementation."""
+def _own_classes(module: ModuleType) -> dict[str, type]:
+    """Public classes `module` defines itself; a re-export is not an implementation.
+
+    Classes only. A layer name denotes a class on both paths, and a class is what a
+    plugin subclasses and what `register_oot` keys on, so a class is the only thing
+    rebinding a name can usefully redirect. A module-level *function* under a
+    mirrored name is a different implementation of a different signature -- the two
+    `get_act_and_mul_fn`s disagree on both the keyword arguments they take and the
+    exception they raise for an unsupported activation -- and no override can reach
+    it, so swapping it would only break callers that run while plugins load. Sharing
+    this filter with `validate_registered_overrides` is also what keeps the
+    rebinding no wider than the backstop that checks it.
+    """
     return {
         name: obj
         for name, obj in vars(module).items()
         if not name.startswith("_")
-        and getattr(obj, "__module__", None) == module.__name__
+        and isinstance(obj, type)
+        and obj.__module__ == module.__name__
     }
 
 
@@ -52,10 +64,7 @@ def _published_classes(hw_modules: dict[str, str]) -> dict[str, type]:
     """Hw-agnostic classes, by the name an override would register under."""
     published: dict[str, type] = {}
     for hw_name in hw_modules.values():
-        hw_module = importlib.import_module(hw_name)
-        for name, obj in _own_definitions(hw_module).items():
-            if isinstance(obj, type):
-                published[name] = obj
+        published.update(_own_classes(importlib.import_module(hw_name)))
     return published
 
 
@@ -128,7 +137,7 @@ class _LayerNameScope:
                 hw_module = importlib.import_module(hw_name)
 
                 rebound = []
-                for name, hw_obj in _own_definitions(hw_module).items():
+                for name, hw_obj in _own_classes(hw_module).items():
                     if not hasattr(vllm_module, name):
                         continue  # hw-agnostic-only helper
                     self._saved.append((vllm_module, name, getattr(vllm_module, name)))
