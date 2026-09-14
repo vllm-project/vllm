@@ -251,26 +251,23 @@ def test_fused_norm_rope(
 
 
 @pytest.mark.parametrize("cfg", MODEL_CONFIGS, ids=MODEL_IDS)
-def test_fused_norm_rope_normalizes_query_without_local_cache_slots(
-    cfg: ModelConfig,
-):
-def test_fused_norm_rope_packed_indexer_block_stride():
+def test_fused_norm_rope_packed_indexer_block_stride(cfg: ModelConfig):
     """Indexer writes use their HMA block stride and independent slot map."""
     torch.manual_seed(7)
     dev = "cuda"
     num_tokens = block_size = 2
     pos = torch.arange(num_tokens, device=dev, dtype=torch.int64)
-    q_c = torch.randn(num_tokens, Q_LORA, device=dev, dtype=torch.bfloat16)
-    kv_c = torch.randn(num_tokens, KV_LORA, device=dev, dtype=torch.bfloat16)
-    k_pe = torch.randn(num_tokens, ROPE_DIM, device=dev, dtype=torch.bfloat16)
-    qw = torch.randn(Q_LORA, device=dev, dtype=torch.bfloat16)
-    kvw = torch.randn(KV_LORA, device=dev, dtype=torch.bfloat16)
-    ik = torch.randn(num_tokens, INDEX_HEAD_DIM, device=dev, dtype=torch.bfloat16)
-    ikw = torch.randn(INDEX_HEAD_DIM, device=dev, dtype=torch.float32)
-    ikb = torch.randn(INDEX_HEAD_DIM, device=dev, dtype=torch.float32)
-    cos_sin = make_cos_sin(32, ROPE_DIM, dev)
+    q_c = torch.randn(num_tokens, cfg.q_lora, device=dev, dtype=torch.bfloat16)
+    kv_c = torch.randn(num_tokens, cfg.kv_lora, device=dev, dtype=torch.bfloat16)
+    k_pe = torch.randn(num_tokens, cfg.rope_dim, device=dev, dtype=torch.bfloat16)
+    qw = torch.randn(cfg.q_lora, device=dev, dtype=torch.bfloat16)
+    kvw = torch.randn(cfg.kv_lora, device=dev, dtype=torch.bfloat16)
+    ik = torch.randn(num_tokens, cfg.index_head_dim, device=dev, dtype=torch.bfloat16)
+    ikw = torch.randn(cfg.index_head_dim, device=dev, dtype=torch.float32)
+    ikb = torch.randn(cfg.index_head_dim, device=dev, dtype=torch.float32)
+    cos_sin = make_cos_sin(32, cfg.rope_dim, dev)
 
-    idx_row = INDEX_HEAD_DIM + INDEX_HEAD_DIM // 128 * 4
+    idx_row = cfg.index_head_dim + cfg.index_head_dim // 128 * 4
     packed_block_stride = block_size * idx_row + 64
     backing = torch.zeros(2 * packed_block_stride, device=dev, dtype=torch.uint8)
     idx_cache = torch.as_strided(
@@ -281,7 +278,7 @@ def test_fused_norm_rope_packed_indexer_block_stride():
     mla_cache = torch.zeros(
         1,
         block_size,
-        KV_LORA + ROPE_DIM,
+        cfg.kv_lora + cfg.rope_dim,
         device=dev,
         dtype=torch.bfloat16,
     )
@@ -316,15 +313,20 @@ def test_fused_norm_rope_packed_indexer_block_stride():
     q_ref, s_ref = ue8m0_quant(ik_ref)
     packed = idx_cache[1].reshape(-1)
     values = (
-        packed[: block_size * INDEX_HEAD_DIM].view(FP8).view(block_size, INDEX_HEAD_DIM)
+        packed[: block_size * cfg.index_head_dim]
+        .view(FP8)
+        .view(block_size, cfg.index_head_dim)
     )
-    scales = packed[block_size * INDEX_HEAD_DIM :].view(torch.float32)
+    scales = packed[block_size * cfg.index_head_dim :].view(torch.float32)
     assert_fp8(values, q_ref, "packed indexer-K fp8")
     torch.testing.assert_close(scales, s_ref, rtol=0, atol=0)
     assert (backing[block_size * idx_row : packed_block_stride] == 0).all()
 
 
-def test_fused_norm_rope_materializes_qk_without_local_cache_slots():
+@pytest.mark.parametrize("cfg", MODEL_CONFIGS, ids=MODEL_IDS)
+def test_fused_norm_rope_materializes_qk_without_local_cache_slots(
+    cfg: ModelConfig,
+):
     """DCP non-owner ranks still need valid query shards for query AllGather."""
     torch.manual_seed(7)
     dev = "cuda"
@@ -337,9 +339,7 @@ def test_fused_norm_rope_materializes_qk_without_local_cache_slots():
     k_pe = torch.randn(num_tokens, cfg.rope_dim, device=dev, dtype=torch.bfloat16)
     qw = torch.randn(cfg.q_lora, device=dev, dtype=torch.bfloat16)
     kvw = torch.randn(cfg.kv_lora, device=dev, dtype=torch.bfloat16)
-    ik = torch.randn(
-        num_tokens, cfg.index_head_dim, device=dev, dtype=torch.bfloat16
-    )
+    ik = torch.randn(num_tokens, cfg.index_head_dim, device=dev, dtype=torch.bfloat16)
     ikw = torch.randn(cfg.index_head_dim, device=dev, dtype=torch.float32)
     ikb = torch.randn(cfg.index_head_dim, device=dev, dtype=torch.float32)
     cos_sin = make_cos_sin(max_pos, cfg.rope_dim, dev)
