@@ -22,6 +22,7 @@ from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadataBuilder,
 )
 from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.worker.gpu.attn_utils import compute_common_gdn_attn_metadata
 
 BLOCK_SIZE = 16
 DEVICE = torch.device("cpu")
@@ -160,12 +161,51 @@ def _build(
     common = create_common_attn_metadata(batch_spec, BLOCK_SIZE, DEVICE)
     kwargs: dict = {}
     if num_decode_draft_tokens is not None:
-        kwargs["num_decode_draft_tokens_cpu"] = torch.tensor(
+        num_decode_draft_tokens_cpu = torch.tensor(
             num_decode_draft_tokens, dtype=torch.int32
         )
-        kwargs["num_accepted_tokens"] = torch.ones(
+        num_accepted_tokens = torch.ones(
             batch_spec.batch_size, dtype=torch.int32, device=DEVICE
         )
+        (
+            num_prefills,
+            num_prefill_tokens,
+            num_decodes,
+            num_decode_tokens,
+            num_spec_decodes,
+            num_spec_decode_tokens,
+            spec_query_start_loc,
+            non_spec_query_start_loc,
+            non_spec_query_start_loc_cpu,
+            spec_sequence_masks_cpu,
+            spec_sequence_masks,
+            non_spec_sequence_masks_cpu,
+            spec_token_indx,
+            non_spec_token_indx,
+            num_accepted_tokens,
+        ) = compute_common_gdn_attn_metadata(
+            num_decode_draft_tokens_cpu,
+            num_accepted_tokens,
+            common.query_start_loc,
+            common.query_start_loc_cpu,
+            builder.num_spec,
+        )
+        kwargs["num_decode_draft_tokens_cpu"] = num_decode_draft_tokens_cpu
+        kwargs["num_accepted_tokens"] = num_accepted_tokens
+        kwargs["num_prefills"] = num_prefills
+        kwargs["num_prefill_tokens"] = num_prefill_tokens
+        kwargs["num_decodes"] = num_decodes
+        kwargs["num_decode_tokens"] = num_decode_tokens
+        kwargs["num_spec_decodes"] = num_spec_decodes
+        kwargs["num_spec_decode_tokens"] = num_spec_decode_tokens
+        kwargs["spec_query_start_loc"] = spec_query_start_loc
+        kwargs["non_spec_query_start_loc"] = non_spec_query_start_loc
+        kwargs["non_spec_query_start_loc_cpu"] = non_spec_query_start_loc_cpu
+        kwargs["spec_sequence_masks_cpu"] = spec_sequence_masks_cpu
+        kwargs["spec_sequence_masks"] = spec_sequence_masks
+        kwargs["non_spec_sequence_masks_cpu"] = non_spec_sequence_masks_cpu
+        kwargs["spec_token_indx"] = spec_token_indx
+        kwargs["non_spec_token_indx"] = non_spec_token_indx
     return builder.build(common_prefix_len=0, common_attn_metadata=common, **kwargs)
 
 
