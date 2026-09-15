@@ -233,6 +233,20 @@ def build_offloading_config(
             and parallel_config.world_size == tp_size
         )
 
+    if canonical_layout and is_parallelism_agnostic:
+        replicated_layout = (
+            all(
+                type(spec) is MLAAttentionSpec
+                for _, group in selected_groups
+                for spec in iter_layer_specs(group.kv_cache_spec)
+            )
+            and parallel_config.nnodes_within_dp == 1
+            and (
+                parallel_config.world_size == 1
+                or parallel_config.distributed_executor_backend == "mp"
+            )
+        )
+
     kv_events_config = vllm_config.kv_events_config
     cache_dtype = (
         vllm_config.model_config.dtype
