@@ -56,6 +56,7 @@ from .qwen3_vl import (
     Qwen3VLProcessingInfo,
 )
 from .utils import StageMissingLayer, maybe_prefix
+from .vision import FusedInputNorm
 
 logger = init_logger(__name__)
 
@@ -250,6 +251,7 @@ class Qwen3VLMoeForConditionalGeneration(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=quant_config,
+                input_norm=FusedInputNorm.from_model_config(self.model_config),
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
