@@ -27,25 +27,81 @@ METRIC_SOURCE_FILES = [
 ]
 
 
+def is_metric_name(value: str) -> bool:
+    return value.startswith("vllm:") and value.removeprefix("vllm:").isidentifier()
+
+
+def collect_string_bindings(func: ast.AST) -> dict[str, list[str]]:
+    """Map local names in `func` to the string values they can hold.
+
+    Covers `name = "vllm:..."` and `for name, doc in rows` where `rows` is
+    assigned literal lists of string tuples, so that `name=name` resolves.
+    """
+    strings: dict[str, list[str]] = {}
+    rows: dict[str, list[tuple[str, ...]]] = {}
+    for node in ast.walk(func):
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
+            continue
+        target, value = node.targets[0], node.value
+        if not isinstance(target, ast.Name):
+            continue
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            strings.setdefault(target.id, []).append(value.value)
+        elif isinstance(value, ast.List | ast.Tuple):
+            try:
+                table = ast.literal_eval(value)
+            except ValueError:
+                continue
+            rows.setdefault(target.id, []).extend(
+                row
+                for row in table
+                if isinstance(row, tuple) and all(isinstance(v, str) for v in row)
+            )
+
+    for node in ast.walk(func):
+        if not isinstance(node, ast.For | ast.comprehension):
+            continue
+        target, source = node.target, node.iter
+        if not (isinstance(target, ast.Tuple) and isinstance(source, ast.Name)):
+            continue
+        for i, elt in enumerate(target.elts):
+            if isinstance(elt, ast.Name):
+                strings.setdefault(elt.id, []).extend(
+                    row[i] for row in rows.get(source.id, []) if i < len(row)
+                )
+    return strings
+
+
 class MetricExtractor(ast.NodeVisitor):
     """AST visitor to extract metric definitions."""
 
     def __init__(self):
         self.metrics: list[dict[str, str]] = []
+        self._bindings: dict[str, list[str]] = {}
+
+    def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        outer = self._bindings
+        self._bindings = collect_string_bindings(node)
+        self.generic_visit(node)
+        self._bindings = outer
+
+    visit_AsyncFunctionDef = visit_FunctionDef
 
     def visit_Call(self, node: ast.Call) -> None:
         """Visit function calls to find metric class instantiations."""
         metric_type = self._get_metric_type(node)
         if metric_type:
-            name = self._extract_kwarg(node, "name")
-            documentation = self._extract_kwarg(node, "documentation")
+            names = self._extract_kwarg(node, "name")
+            docs = self._extract_kwarg(node, "documentation")
+            if len(docs) != len(names):
+                docs = [docs[0] if len(docs) == 1 else ""] * len(names)
 
-            if name:
+            for name, documentation in zip(names, docs):
                 self.metrics.append(
                     {
                         "name": name,
                         "type": metric_type,
-                        "documentation": documentation or "",
+                        "documentation": documentation,
                     }
                 )
 
@@ -62,12 +118,15 @@ class MetricExtractor(ast.NodeVisitor):
             return metric_type_map.get(node.func.attr)
         return None
 
-    def _extract_kwarg(self, node: ast.Call, key: str) -> str | None:
-        """Extract a keyword argument value from a function call."""
+    def _extract_kwarg(self, node: ast.Call, key: str) -> list[str]:
+        """Extract the possible values of a keyword argument of a call."""
         for keyword in node.keywords:
             if keyword.arg == key:
-                return self._get_string_value(keyword.value)
-        return None
+                if isinstance(keyword.value, ast.Name):
+                    return self._bindings.get(keyword.value.id, [])
+                value = self._get_string_value(keyword.value)
+                return [value] if value is not None else []
+        return []
 
     def _get_string_value(self, node: ast.AST) -> str | None:
         """Extract string value from an AST node."""
@@ -125,6 +184,20 @@ for source_config in METRIC_SOURCE_FILES:
     logger.debug("Extracting metrics from: %s", source_path)
     metrics = extract_metrics_from_file(filepath)
     logger.debug("Found %d metrics in %s", len(metrics), source_path)
+
+    tree = ast.parse(filepath.read_text(encoding="utf-8"))
+    literal_names = {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and is_metric_name(node.value)
+    }
+    if missed := literal_names - {m["name"] for m in metrics}:
+        raise ValueError(
+            f"{source_path}: MetricExtractor missed {sorted(missed)}; "
+            "teach it how these metrics are defined so they appear in the docs"
+        )
 
     blocks[source_config["key"]] = generate_markdown_table(metrics).strip()
     total_metrics += len(metrics)
