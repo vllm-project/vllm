@@ -465,3 +465,10 @@ Refer to these example scripts in the vLLM repository:
 - [run_accuracy_test.sh](../../tests/v1/kv_connector/nixl_integration/run_accuracy_test.sh)
 - [toy_proxy_server.py](../../tests/v1/kv_connector/nixl_integration/toy_proxy_server.py)
 - [test_accuracy.py](../../tests/v1/kv_connector/nixl_integration/test_accuracy.py)
+
+## Related Documentation
+
+- [NIXL Connector Metrics Aggregation](nixl_connector_metrics.md)
+- [NIXL KV Cache Lease Renewal](nixl_kv_cache_lease.md)
+- [NIXL Connector Compatibility](nixl_connector_compatibility.md)
+- [Disaggregated Prefill Architecture](disagg_prefill.md)
