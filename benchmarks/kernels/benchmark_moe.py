@@ -334,6 +334,8 @@ def benchmark_config(
 
 
 def get_rocm_tuning_space(use_fp16):
+    from vllm.platforms.rocm import on_cdna
+
     block_mn_range = [16, 32, 64, 128, 256]
     block_k_range = [16, 32, 64, 128, 256]
     if not use_fp16:
@@ -342,8 +344,14 @@ def get_rocm_tuning_space(use_fp16):
     group_m_range = [1, 4, 8, 16, 32]
     num_stage_range = [2]
     waves_per_eu_range = [0, 1, 2, 4]
-    matrix_instr_nonkdim_range = [16, 32] if use_fp16 else []
-    kpack_range = [1, 2] if use_fp16 else []
+
+    # matrix_instr_nonkdim and kpack select MFMA instruction shapes, which exist
+    # only on CDNA. RDNA (gfx11xx/gfx12xx) uses WMMA and has no MFMA, so varying
+    # them there multiplies the search space (4x for fp16) without producing
+    # distinguishable configurations.
+    has_mfma = on_cdna()
+    matrix_instr_nonkdim_range = [16, 32] if (use_fp16 and has_mfma) else []
+    kpack_range = [1, 2] if (use_fp16 and has_mfma) else []
 
     param_ranges = {
         "BLOCK_SIZE_M": block_mn_range,
@@ -354,7 +362,7 @@ def get_rocm_tuning_space(use_fp16):
         "num_stages": num_stage_range,
         "waves_per_eu": waves_per_eu_range,
     }
-    if use_fp16:
+    if use_fp16 and has_mfma:
         param_ranges["matrix_instr_nonkdim"] = matrix_instr_nonkdim_range
         param_ranges["kpack"] = kpack_range
 
@@ -443,8 +451,10 @@ def prune_rocm_configs(M, N, K, configs, is_fp16=True):
         BLOCK_SIZE_K = config.get("BLOCK_SIZE_K")
         num_warps = config.get("num_warps")
 
-        if is_fp16:
-            matrix_instr_nonkdim = config.get("matrix_instr_nonkdim")
+        # matrix_instr_nonkdim is absent on RDNA (see get_rocm_tuning_space), so
+        # checks that depend on it must be skipped rather than compared to None.
+        matrix_instr_nonkdim = config.get("matrix_instr_nonkdim")
+        if is_fp16 and matrix_instr_nonkdim is not None:
             if matrix_instr_nonkdim > mfma:
                 continue
         if mfma == 4 and BLOCK_SIZE_K < 64:
@@ -455,7 +465,7 @@ def prune_rocm_configs(M, N, K, configs, is_fp16=True):
             continue
         SPLIT_K = config.get("SPLIT_K", 1)
         GROUP_M = config.get("GROUP_SIZE_M")
-        if is_fp16:
+        if is_fp16 and matrix_instr_nonkdim is not None:
             if (
                 matrix_instr_nonkdim > BLOCK_SIZE_M
                 or matrix_instr_nonkdim > BLOCK_SIZE_N
