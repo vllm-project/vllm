@@ -90,9 +90,8 @@ class RemoteAllocInfo:
     writes_expected: int | None = None
     decode_dp_rank: int = 0
     completion_request_id: str | None = None
-    completion_remote_notify_port: int | None = None
+    completion_notify_port: int | None = None
     completion_remote_ip: str | None = None
-    completion_remote_dp_size_local: int = 0
     completion_notified: bool = False
     transfer_statuses: list[Any] = field(default_factory=list)
     transfer_offsets: dict[
