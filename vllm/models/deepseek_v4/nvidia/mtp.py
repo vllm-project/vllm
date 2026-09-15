@@ -142,8 +142,18 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         )
 
         if vllm_config.kernel_config.enable_jit_warmup:
+            from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+                _HC_HEAD_FUSED_TILELANG_KERNEL,
+            )
+
             _FUSED_MTP_INPUT_RMSNORM_KERNEL.register_warmup()
             _MTP_SHARED_HEAD_RMSNORM_KERNEL.register_warmup()
+            _HC_HEAD_FUSED_TILELANG_KERNEL.register_warmup(
+                hidden_size=config.hidden_size,
+                hc_mult=self.hc_mult,
+                rms_eps=self.rms_norm_eps,
+                hc_eps=self.hc_eps,
+            )
 
     def forward(
         self,
