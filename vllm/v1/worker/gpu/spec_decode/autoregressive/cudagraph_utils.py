@@ -59,6 +59,12 @@ class SpeculatorCudaGraphManager(CudaGraphManager):
                 full_cudagraph=desc.cg_mode == CUDAGraphMode.FULL,
             )
 
+            forward_kwargs = {}
+            if self.decode_query_len == 1:
+                forward_kwargs["num_speculative_steps"] = (
+                    desc.num_speculative_tokens
+                    or self.vllm_config.num_speculative_tokens
+                )
             return lambda cg_mode: forward_fn(
                 num_reqs,
                 num_tokens,
@@ -66,6 +72,7 @@ class SpeculatorCudaGraphManager(CudaGraphManager):
                 slot_mappings,
                 num_tokens_across_dp,
                 cg_mode,
+                **forward_kwargs,
             )
 
         super().capture(create_forward_fn, progress_bar_desc)
