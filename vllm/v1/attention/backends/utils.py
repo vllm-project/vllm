@@ -304,17 +304,11 @@ def resolve_kv_cache_layout(
                 f"none is in every supported set: {supported_layouts}."
             )
 
-    if (
-        len(
-            {
-                spec.dcp_sharded
-                for spec in kv_cache_specs
-                if isinstance(spec, AttentionSpec)
-            }
-        )
-        > 1
-        and len({spec.page_size_bytes for spec in kv_cache_specs}) > 1
-    ):
+    dcp_sharding = {
+        spec.dcp_sharded for spec in kv_cache_specs if isinstance(spec, AttentionSpec)
+    }
+    page_sizes = {spec.page_size_bytes for spec in kv_cache_specs}
+    if len(dcp_sharding) > 1 and len(page_sizes) > 1:
         # Sharded target and replicated draft caches need independent groups.
         # Block-outer layouts can pack those groups without equalizing pages.
         candidates = [layout for layout in candidates if layout.is_block_outermost]
