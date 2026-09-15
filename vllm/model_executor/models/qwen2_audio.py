@@ -59,6 +59,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
+from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -235,27 +236,23 @@ class Qwen2AudioDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2AudioProcessingIn
 
 
 class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor[Qwen2AudioProcessingInfo]):
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
-    def _preprocess_hf_mm_data(
+    def _get_hf_mm_inputs(
         self,
-        mm_data: Mapping[str, object],
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
-        feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
 
-        mm_data = dict(mm_data)
-        audios = mm_data.pop("audios", [])
-        if audios:
-            mm_data["audio"] = audios
-
-        hf_processor_mm_kwargs = dict(
-            **hf_processor_mm_kwargs,
-            sampling_rate=feature_extractor.sampling_rate,
+        feature_extractor = self.info.get_feature_extractor(**hf_kwargs)
+        return hf_inputs._replace(
+            hf_kwargs=dict(
+                hf_inputs.hf_kwargs,
+                sampling_rate=feature_extractor.sampling_rate,
+            )
         )
-
-        return mm_data, hf_processor_mm_kwargs
 
     def _get_mm_fields_config(
         self,

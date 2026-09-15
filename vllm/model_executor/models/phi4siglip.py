@@ -143,39 +143,8 @@ class Phi4SiglipDummyInputsBuilder(
 class Phi4SiglipMultiModalProcessor(
     BaseMultiModalProcessor[Phi4SiglipProcessingInfo],
 ):
-    def _apply_hf_processor_main(
-        self,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
-        )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
-
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
-
-        processed = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            dict(text=prompt_text, **mm_data),
-            hf_processor_mm_kwargs,
-        )
-
-        # The HF processor's tokenizer_image_token() replaces the "<image>"
-        # string with IMAGE_TOKEN_INDEX (-200) in input_ids.  This breaks
-        # vLLM's prompt-replacement pipeline which needs to find "<image>"
-        # as normal sub-tokens.  Re-tokenize with the plain tokenizer so
-        # that "<image>" stays as sub-tokens and can be located by
-        # PromptReplacement.
-        # NOTE: tokenizer.__call__() (not .encode()) must be used so that
-        # added/special tokens like <|user|>, <|end|> are kept as single IDs.
-        tokenizer = self.info.get_tokenizer()
-        new_ids = tokenizer(prompt_text).input_ids
-        processed["input_ids"] = torch.tensor([new_ids])
-
-        processed_data = processed
-        processed_data.update(passthrough_data)
-        return processed_data
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _get_mm_fields_config(
         self,
