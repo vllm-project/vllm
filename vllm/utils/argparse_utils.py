@@ -9,6 +9,7 @@ import textwrap
 from argparse import (
     Action,
     ArgumentDefaultsHelpFormatter,
+    ArgumentError,
     ArgumentParser,
     ArgumentTypeError,
     Namespace,
@@ -412,6 +413,10 @@ class FlexibleArgumentParser(ArgumentParser):
                         # False positive, '.' was only in the value
                         continue
                 else:
+                    if i + 1 >= len(processed_args):
+                        raise ArgumentError(
+                            None, f"expected value after {processed_arg}"
+                        )
                     value_str = processed_args[i + 1]
                     delete.add(i + 1)
 
