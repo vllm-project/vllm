@@ -19,8 +19,8 @@ each position it
     stays register friendly),
   * adds the scaled correction to the candidates' base logits,
   * picks the winner inside the candidate set only -- plain argmax at temperature
-    0, Gumbel-max otherwise, keyed by the *token id* exactly like the dense
-    sampler so the drafter and the verifier draw the same noise,
+    0, Gumbel-max otherwise, keyed by the *token id* with ``IS_DRAFTING=True``
+    so the draft noise stream is disjoint from the target/residual one,
   * stores the resulting real (target-vocab) token id and chains it into the next
     position as the new ``prev``.
 
@@ -215,7 +215,8 @@ def _markov_walk_kernel(
 
         # sample_pos is the predicted token's position Q; verification keys the
         # Gumbel noise by the predecessor (Q - 1), and the noise itself is keyed
-        # by the candidate token id, so this reproduces the dense draw exactly.
+        # by the candidate token id, with IS_DRAFTING=True to keep the draft
+        # noise stream disjoint from the target/residual one.
         position = tl.load(sample_pos_ptr + flat, mask=valid, other=1) - 1
         _, index = gumbel_noised_argmax(
             scores,
@@ -224,6 +225,7 @@ def _markov_walk_kernel(
             seed,
             position,
             temperature if PROBABILISTIC else 0.0,
+            IS_DRAFTING=True,
             USE_FP64=USE_FP64,
         )
 
