@@ -33,6 +33,12 @@ O_DIRECT = getattr(os, "O_DIRECT", 0)
 _ALIGNMENT = 4096
 
 
+class _DiskIOError(OSError):
+    """A failed disk syscall, as opposed to a CUDA or coordinator failure."""
+
+    failed_gpu_blocks: list[int] | None = None
+
+
 def _alloc_aligned(num_slots: int, bpb: int) -> torch.Tensor:
     """Allocate a staging buffer whose base address is O_DIRECT aligned.
 
@@ -68,6 +74,10 @@ class DiskBackend:
         self._store_thread: threading.Thread | None = None
         self._load_thread: threading.Thread | None = None
         self._shutdown: bool = False
+        self._error: tuple[str, Exception] | None = None
+        self._error_lock = threading.Lock()
+        self._failed_load_events: dict[int, list[int]] = {}
+        self._failed_store_events: dict[int, list[int]] = {}
         self._fd: int = -1
         self._disk_path: str = ""
         self._total_block_bytes: int = 0
@@ -174,13 +184,13 @@ class DiskBackend:
         )
 
         self._store_thread = threading.Thread(
-            target=self._store_loop,
-            args=(device, store_stream),
+            target=self._io_loop,
+            args=(True, device, store_stream),
             daemon=True,
         )
         self._load_thread = threading.Thread(
-            target=self._load_loop,
-            args=(device, load_stream),
+            target=self._io_loop,
+            args=(False, device, load_stream),
             daemon=True,
         )
         self._store_thread.start()
@@ -195,8 +205,96 @@ class DiskBackend:
         events_list: list[tuple[int, torch.Event]],
         wait_event: torch.Event | None = None,
     ) -> None:
+        self.check_error()
         q = self._store_queue if is_store else self._load_queue
         q.put((src_blocks, dst_blocks, event_idx, events_list, wait_event))
+
+    def check_error(self) -> None:
+        """Surface a failed I/O thread without reporting its transfers complete."""
+        with self._error_lock:
+            error = self._error
+        if error is not None:
+            message, cause = error
+            raise RuntimeError(message) from cause
+
+    def pop_failed_events(self, is_store: bool, hwm: int) -> dict[int, list[int]]:
+        """Return failures only after their completion events have been consumed."""
+        with self._error_lock:
+            failures = (
+                self._failed_store_events if is_store else self._failed_load_events
+            )
+            return {idx: failures.pop(idx) for idx in list(failures) if idx <= hwm}
+
+    def synchronize(self) -> None:
+        """Drain queued work as well as DMA before preempted blocks are reused."""
+        barriers = []
+        for q in (self._store_queue, self._load_queue):
+            barrier = threading.Event()
+            q.put(barrier)
+            barriers.append(barrier)
+        for barrier in barriers:
+            while not barrier.wait(timeout=0.1):
+                self.check_error()
+        self.check_error()
+
+    def _io_loop(
+        self, is_store: bool, device: torch.device, stream: torch.cuda.Stream
+    ) -> None:
+        q = self._store_queue if is_store else self._load_queue
+        transfer = self._do_store if is_store else self._do_load
+        event_idx: int | None = None
+        try:
+            current_platform.set_device(device)
+            while True:
+                item = q.get()
+                if item is None:
+                    return
+                if isinstance(item, threading.Event):
+                    stream.synchronize()
+                    item.set()
+                    continue
+                (src_blocks, dst_blocks, event_idx, events_list, wait_event) = item
+                self.check_error()
+                if wait_event is not None:
+                    stream.wait_event(wait_event)
+                try:
+                    transfer(src_blocks, dst_blocks, stream)
+                except _DiskIOError as error:
+                    # A partial transfer may still have DMA using its staging
+                    # buffers and GPU blocks. Drain it before reporting failure
+                    # or reusing the buffers for the next queued transfer.
+                    stream.synchronize()
+                    with self._error_lock:
+                        failures = (
+                            self._failed_store_events
+                            if is_store
+                            else self._failed_load_events
+                        )
+                        failed_blocks = src_blocks if is_store else dst_blocks
+                        if not is_store and error.failed_gpu_blocks is not None:
+                            failed_blocks = error.failed_gpu_blocks
+                        failures[event_idx] = failed_blocks
+                    logger.warning(
+                        "Disk KV offload %s failed during event %d (path=%r): %s",
+                        "store" if is_store else "load",
+                        event_idx,
+                        self._disk_path,
+                        error,
+                    )
+                event = torch.Event()
+                event.record(stream)
+                events_list.append((event_idx, event))
+        except Exception as error:
+            operation = "store" if is_store else "load"
+            context = "initialization" if event_idx is None else f"event {event_idx}"
+            message = (
+                f"Disk KV offload {operation} failed during {context} "
+                f"(path={self._disk_path!r}): {error}"
+            )
+            # Both threads can fail; preserve the first failure and its context.
+            with self._error_lock:
+                if self._error is None:
+                    self._error = (message, error)
 
     def shutdown(self) -> None:
         if self._shutdown:
@@ -233,57 +331,31 @@ class DiskBackend:
         os.close(self._fd)
         self._fd = -1
 
-    def _store_loop(
-        self,
-        device: torch.device,
-        stream: torch.cuda.Stream,
-    ) -> None:
-        current_platform.set_device(device)
-        while True:
-            item = self._store_queue.get()
-            if item is None:
-                return
-            (src_blocks, dst_blocks, event_idx, events_list, wait_event) = item
-            if wait_event is not None:
-                stream.wait_event(wait_event)
-            self._do_store(src_blocks, dst_blocks, stream)
-            event = torch.Event()
-            event.record(stream)
-            events_list.append((event_idx, event))
-
     def _writev_slot(self, buf_slot: int, file_offset: int) -> None:
-        written = os.pwritev(self._fd, self._store_slot_views[buf_slot], file_offset)
+        try:
+            written = os.pwritev(
+                self._fd, self._store_slot_views[buf_slot], file_offset
+            )
+        except OSError as error:
+            raise _DiskIOError(str(error)) from error
         if written < self._total_block_bytes:
-            raise OSError(
+            raise _DiskIOError(
                 f"Short write: expected {self._total_block_bytes} bytes, "
                 f"wrote {written}"
             )
 
     def _readv_slot(self, buf_slot: int, file_offset: int) -> None:
-        bytes_read = os.preadv(self._fd, self._load_slot_views[buf_slot], file_offset)
+        try:
+            bytes_read = os.preadv(
+                self._fd, self._load_slot_views[buf_slot], file_offset
+            )
+        except OSError as error:
+            raise _DiskIOError(str(error)) from error
         if bytes_read < self._total_block_bytes:
-            raise OSError(
+            raise _DiskIOError(
                 f"Short read: expected {self._total_block_bytes} bytes, "
                 f"read {bytes_read}"
             )
-
-    def _load_loop(
-        self,
-        device: torch.device,
-        stream: torch.cuda.Stream,
-    ) -> None:
-        current_platform.set_device(device)
-        while True:
-            item = self._load_queue.get()
-            if item is None:
-                return
-            (src_blocks, dst_blocks, event_idx, events_list, wait_event) = item
-            if wait_event is not None:
-                stream.wait_event(wait_event)
-            self._do_load(src_blocks, dst_blocks, stream)
-            event = torch.Event()
-            event.record(stream)
-            events_list.append((event_idx, event))
 
     def _do_store(
         self,
@@ -324,6 +396,8 @@ class DiskBackend:
         assert self._load_params is not None
         n = self._num_buffer_slots
         prev_dma_events: list[torch.Event | None] = [None] * n
+        failed_gpu_blocks: list[int] = []
+        first_error: _DiskIOError | None = None
 
         for i, (disk_slot, gpu_blk) in enumerate(zip(disk_slots, gpu_blocks)):
             buf_slot = i % n
@@ -331,7 +405,15 @@ class DiskBackend:
             if prev is not None:
                 prev.synchronize()
 
-            self._readv_slot(buf_slot, disk_slot * self._total_block_bytes)
+            try:
+                self._readv_slot(buf_slot, disk_slot * self._total_block_bytes)
+            except _DiskIOError as error:
+                # Other requests share this batch. Skip DMA for the failed
+                # read, but still attempt their blocks.
+                failed_gpu_blocks.append(gpu_blk)
+                if first_error is None:
+                    first_error = error
+                continue
 
             copy_blocks([buf_slot], [gpu_blk], self._load_params)
             ev = torch.Event()
@@ -341,3 +423,7 @@ class DiskBackend:
         for ev in prev_dma_events:
             if ev is not None:
                 ev.synchronize()
+
+        if first_error is not None:
+            first_error.failed_gpu_blocks = failed_gpu_blocks
+            raise first_error
