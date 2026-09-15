@@ -789,6 +789,8 @@ def get_model_params(config):
         hidden_size = config.hidden_size
     elif architecture in (
         "Qwen3VLMoeForConditionalGeneration",
+        "Qwen4ExpForConditionalGeneration",
+        "Qwen4ExpForCausalLM",
         "Qwen3_5MoeForConditionalGeneration",
         "Qwen3_5MoeTextConfig",
     ):
