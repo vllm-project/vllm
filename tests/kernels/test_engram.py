@@ -766,7 +766,7 @@ def test_engram_constructor_honors_offload(
     with torch.device("cuda"):
         cls = Engram if backend == "nvidia" else CommonEngram
         if offloaded and stream is None:
-            with pytest.raises(AssertionError, match="caller-provided prefetch stream"):
+            with pytest.raises(ValueError, match="caller-provided prefetch stream"):
                 cls(config, None, layout, 0, False, "engram", **kwargs)
             return
         module = cls(config, None, layout, 0, False, "engram", **kwargs)
@@ -865,6 +865,60 @@ def test_engram_shared_prefetch_stream_replays_both_layers(capture):
                 layer.vocab_end_idx,
             )
             torch.testing.assert_close(outputs[index], expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+def test_engram_shared_prefetch_stream_does_not_serialize_consumers():
+    """The first layer consumes its rows while a later lookup is still running.
+
+    Waiting on the whole shared stream instead of the layer's own event would
+    stall this consumer behind the second lookup, which is the regression the
+    per-layer completion event exists to prevent.
+    """
+    modules = []
+    stream = torch.cuda.Stream()
+    for _ in range(2):
+        module = Engram.__new__(Engram)
+        torch.nn.Module.__init__(module)
+        module._prefetch_stream = stream
+        module.embed_tokens = _make_embedding(cpu_offload=True)
+        module.use_sequence_parallel = False
+        with torch.device("cuda"):
+            module._init_staging(8, module.embed_tokens.dim)
+        modules.append(module)
+
+    slow_layer = modules[1].embed_tokens
+    real_lookup = slow_layer.lookup
+
+    def slow_lookup(indices, out, background=False):
+        # ~50 ms at 2 GHz: long enough that a stream-wide wait is unmistakable.
+        torch.cuda._sleep(100_000_000)
+        real_lookup(indices, out, background=background)
+
+    slow_layer.lookup = slow_lookup
+
+    hashes = torch.randint(1024, 3072, (8, 2, 24), device="cuda", dtype=torch.int32)
+    for index, module in enumerate(modules):
+        module.prepare_embeddings(hashes[:, index])
+    first = modules[0].embed(hashes[:, 0]).clone()
+    consumed = torch.cuda.Event()
+    consumed.record()
+
+    consumed.synchronize()
+    assert not modules[1]._prefetch_done.query(), (
+        "consuming the first layer waited for the second layer's lookup"
+    )
+
+    torch.accelerator.synchronize()
+    layer = modules[0].embed_tokens
+    expected = _reference_lookup(
+        layer.weight.cuda(),
+        layer.weight_scale_inv.cuda(),
+        hashes[:, 0],
+        layer.vocab_start_idx,
+        layer.vocab_end_idx,
+    )
+    torch.testing.assert_close(first, expected, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")

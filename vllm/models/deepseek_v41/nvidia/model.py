@@ -520,6 +520,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             self.embed_tokens = PPMissingLayer()
 
         self.engram_layout = EngramLayout.from_config(config)
+        # One stream for every Engram layer, so the offloaded lookups take
+        # turns instead of jointly starving decoder compute of SMs.
         self.engram_prefetch_stream = (
             torch.cuda.Stream()
             if self.engram_layout is not None

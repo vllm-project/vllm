@@ -391,9 +391,10 @@ class Engram(BaseEngram):
     def _init_staging(self, max_tokens: int, head_dim: int) -> None:
         super()._init_staging(max_tokens * self.embed_tokens.dp_size, head_dim)
         if self.embed_tokens.cpu_offload:
-            assert self._prefetch_stream is not None, (
-                "CPU-offloaded Engram requires a caller-provided prefetch stream"
-            )
+            if self._prefetch_stream is None:
+                raise ValueError(
+                    "CPU-offloaded Engram requires a caller-provided prefetch stream"
+                )
             self._prefetch_done = torch.cuda.Event()
         else:
             self._prefetch_stream = None
