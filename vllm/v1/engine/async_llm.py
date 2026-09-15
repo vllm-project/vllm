@@ -1252,3 +1252,12 @@ class AsyncLLM(EngineClient):
     async def get_weight_version(self) -> str:
         """Return the latest committed weight version."""
         return await self.engine_core.get_weight_version_async()
+
+    def get_kv_event_sources(self) -> list[dict[str, Any]]:
+        """Return the resolved KV-event publisher endpoint per DP rank.
+
+        Endpoints are reported by each EngineCore in its ready response;
+        with ephemeral (port 0) allocation the reported port is the one
+        actually bound at startup.
+        """
+        return self.engine_core.get_kv_event_sources()

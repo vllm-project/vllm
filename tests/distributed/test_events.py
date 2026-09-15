@@ -336,3 +336,112 @@ def test_event_publisher_factory(random_port):
     publisher = EventPublisherFactory.create(config, DP_RANK)
     assert isinstance(publisher, ZmqEventPublisher)
     publisher.shutdown()
+
+
+def test_ephemeral_port_readback():
+    """With port 0 each DP rank binds an OS-assigned ephemeral port.
+
+    The offset arithmetic must not apply (port 0 + rank would bind
+    privileged ports), and get_publisher_config() must report the
+    actually bound endpoint, not the pre-bind wildcard.
+    """
+    from vllm.config.kv_events import KVEventsConfig
+    from vllm.distributed.kv_events import ZmqEventPublisher
+
+    config = KVEventsConfig(
+        enable_kv_cache_events=True,
+        publisher="zmq",
+        endpoint="tcp://*:0",
+    )
+    pubs = [EventPublisherFactory.create(config, rank) for rank in (0, 1)]
+    try:
+        endpoints = []
+        for pub in pubs:
+            resolved = pub.get_publisher_config().endpoint
+            assert resolved is not None
+            host, port = resolved.rsplit(":", 1)
+            # The wildcard must be resolved to a concrete bind address.
+            assert "*" not in host
+            # Port 0 must have been replaced by the real assigned port.
+            assert port.isdigit() and int(port) > 0
+            endpoints.append(int(port))
+
+        # Independent ephemeral binds must not collide.
+        assert endpoints[0] != endpoints[1]
+    finally:
+        for pub in pubs:
+            pub.shutdown()
+
+    # The original config must stay untouched.
+    assert config.endpoint == "tcp://*:0"
+
+
+def test_ephemeral_replay_port_readback():
+    """Replay endpoint with port 0 gets the same bind-time treatment."""
+    from vllm.config.kv_events import KVEventsConfig
+
+    config = KVEventsConfig(
+        enable_kv_cache_events=True,
+        publisher="zmq",
+        endpoint="tcp://*:0",
+        replay_endpoint="tcp://*:0",
+    )
+    pub = EventPublisherFactory.create(config, 0)
+    try:
+        resolved = pub.get_publisher_config()
+        assert resolved.replay_endpoint is not None
+        port = resolved.replay_endpoint.rsplit(":", 1)[1]
+        assert port.isdigit() and int(port) > 0
+    finally:
+        pub.shutdown()
+
+
+def test_explicit_port_offset_unchanged(random_port):
+    """Explicit non-zero ports keep the base+rank offset (backward compat)."""
+    from vllm.config.kv_events import KVEventsConfig
+    from vllm.distributed.kv_events import ZmqEventPublisher
+
+    config = KVEventsConfig(
+        enable_kv_cache_events=True,
+        publisher="zmq",
+        endpoint=f"tcp://*:{random_port}",
+    )
+    pub = EventPublisherFactory.create(config, DP_RANK + 1)
+    try:
+        # Offset still applied pre-bind...
+        assert config.endpoint == f"tcp://*:{random_port}"
+        # ...and since the port is concrete, the bound endpoint equals it.
+        resolved = pub.get_publisher_config().endpoint
+        assert resolved == f"tcp://*:{random_port + 1}"
+    finally:
+        pub.shutdown()
+
+
+def test_ephemeral_end_to_end_delivery():
+    """A subscriber connecting to the read-back endpoint receives events."""
+    from vllm.config.kv_events import KVEventsConfig
+    from .conftest import MockSubscriber
+
+    config = KVEventsConfig(
+        enable_kv_cache_events=True,
+        publisher="zmq",
+        endpoint="tcp://*:0",
+        topic="test",
+    )
+    pub = EventPublisherFactory.create(config, 0)
+    try:
+        endpoint = pub.get_publisher_config().endpoint
+        assert endpoint is not None
+        sub = MockSubscriber(endpoint, None, "test")
+        try:
+            time.sleep(0.2)  # Let the publisher thread start
+            pub.publish(create_test_events(3))
+            result = sub.receive_one(timeout=2000)
+            assert result is not None, "No message received on ephemeral port"
+            seq, received = result
+            assert seq == 0
+            assert len(received.events) == 3
+        finally:
+            sub.close()
+    finally:
+        pub.shutdown()
