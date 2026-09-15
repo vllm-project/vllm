@@ -1331,3 +1331,40 @@ def test_processor_inputs_hashes_ignore_unrelated_kwargs():
     )
 
     assert inputs.get_mm_hashes("test-model", "blake3") == {"image": ["image-uuid"]}
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        # Shifting the key/value boundary: both flatten to the dotted key
+        # "mm_processor_kwargs.abc" followed by no value bytes.
+        ({"ab": "c"}, {"a": "bc"}),
+        # A nested mapping and a caller-supplied dotted key flatten alike.
+        ({"size": {"shortest_edge": 224}}, {"size.shortest_edge": 224}),
+        # A sequence and a mapping keyed by stringified indices flatten alike.
+        ({"fps": [2, 4]}, {"fps": {"0": 2, "1": 4}}),
+        # None contributes the key alone, which a zero-byte value also does.
+        ({"video_pruning_rate": None}, {"video_pruning_rate": ""}),
+        # An empty container contributes nothing, as does omitting the key.
+        ({"size": {}}, {}),
+    ],
+)
+def test_processor_inputs_hashes_distinguish_kwargs_shapes(left, right):
+    """Distinct processor kwargs must not share a multi-modal hash.
+
+    ``hf_processor_mm_kwargs`` is per-request input, so both the keys and the
+    values here are caller-controlled. The hash is the identity of the
+    processor cache entry and is mixed into the prefix-cache block key, so two
+    requests sharing one is a cross-request cache hit.
+    """
+    image = random_image(np.random.RandomState(0), min_wh=8, max_wh=9)
+    mm_data_items = MultiModalDataParser().parse_mm_data({"image": [image]})
+
+    def hash_with(hf_processor_mm_kwargs):
+        return ProcessorInputs(
+            prompt=[],
+            mm_data_items=mm_data_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+        ).get_mm_hashes("test-model", "blake3")["image"][0]
+
+    assert hash_with(left) != hash_with(right)
