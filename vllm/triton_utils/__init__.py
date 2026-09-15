@@ -6,7 +6,6 @@ from vllm.triton_utils.importing import (
     HAS_TRITON,
     TritonLanguagePlaceholder,
     TritonPlaceholder,
-    has_active_triton_cpu_backend,
 )
 
 if TYPE_CHECKING or HAS_TRITON:
@@ -31,7 +30,6 @@ LOGE2 = 0.6931471805599453
 
 __all__ = [
     "HAS_TRITON",
-    "has_active_triton_cpu_backend",
     "triton",
     "tl",
     "tldevice",
