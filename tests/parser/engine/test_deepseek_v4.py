@@ -30,6 +30,7 @@ from vllm.parser.deepseek_v4 import (
     DSML_THINK_START,
     DSML_TOOL_END,
     DSML_TOOL_START,
+    DSML_TOOL_START_VARIANTS,
     DeepSeekV4Parser,
     _dsml_arg_converter,
     _unwrap_wrapper_args,
@@ -1229,3 +1230,164 @@ class TestDelegatingParserLargeDelta:
         assert eos_text not in output.reasoning
         assert output.content == ""
         assert output.tool_calls == []
+
+
+# ── Malformed DSML markup must not leak into content (#51914) ─────────
+
+_WRAPPER_VARIANTS = list(DSML_TOOL_START_VARIANTS)
+
+
+class TestMalformedDsmlNoise:
+    """DeepSeek-V4-Flash intermittently misspells the tool-call opener, e.g.
+    ``<｜DSML｜toolcalls>``. Known corrupted openers open a tool block like
+    the real wrapper so the markup never surfaces as assistant content.
+    """
+
+    _INNER = (
+        f"{DSML_INVOKE_PREFIX}get_weather{DSML_INVOKE_NAME_END}\n"
+        f"{_param('city', 'true', 'Seoul')}\n"
+        f"{DSML_INVOKE_END}\n"
+        f"{DSML_TOOL_END}"
+    )
+
+    @staticmethod
+    def _parser(mock_tokenizer, thinking: bool = False):
+        return DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": thinking}
+        )
+
+    @pytest.mark.parametrize("wrapper", _WRAPPER_VARIANTS)
+    @pytest.mark.parametrize("preamble", ["", "Let me check.\n"])
+    def test_corrupted_wrapper_behaves_like_real_one(
+        self, mock_tokenizer, mock_request, wrapper, preamble
+    ):
+        text = f"{preamble}{wrapper}\n{self._INNER}"
+        reference = f"{preamble}{DSML_TOOL_START}\n{self._INNER}"
+
+        result = self._parser(mock_tokenizer).extract_tool_calls(text, mock_request)
+        expected = self._parser(mock_tokenizer).extract_tool_calls(
+            reference, mock_request
+        )
+        assert [tc.function.name for tc in result.tool_calls] == ["get_weather"]
+        assert json.loads(result.tool_calls[0].function.arguments) == {"city": "Seoul"}
+        assert result.content == expected.content
+        assert "DSML" not in (result.content or "")
+
+        results = simulate_tool_streaming(
+            self._parser(mock_tokenizer), mock_request, list(text)
+        )
+        assert collect_function_name(results) == "get_weather"
+        assert json.loads(collect_tool_arguments(results)) == {"city": "Seoul"}
+        assert collect_content(results) == (expected.content or "")
+
+    @pytest.mark.parametrize("wrapper", _WRAPPER_VARIANTS)
+    def test_corrupted_wrapper_ends_reasoning(
+        self, mock_tokenizer, mock_request, wrapper
+    ):
+        """Like the real wrapper, a corrupted one inside ``<think>`` closes
+        the reasoning block and starts the tool call."""
+        text = f"thinking{wrapper}\n{self._INNER}"
+        parser = self._parser(mock_tokenizer, thinking=True)
+        reasoning, content = parser.extract_reasoning(text, mock_request)
+        assert reasoning == "thinking"
+        assert "DSML" not in (content or "")
+
+        result = self._parser(mock_tokenizer, thinking=True).extract_tool_calls(
+            text, mock_request
+        )
+        assert [tc.function.name for tc in result.tool_calls] == ["get_weather"]
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # Fullwidth bars, DSML namespace, but not a registered spelling.
+            "see <｜DSML｜foo> and <｜DSML｜tool_call> here",
+            # Unclosed prefix.
+            "see <｜DSML｜ here\nnext line",
+            # ASCII pipes are not the DSML sigil.
+            "see <|DSML|tool> and <|DSML|toolcalls> there",
+        ],
+    )
+    def test_unregistered_markup_is_ordinary_content(
+        self, mock_tokenizer, mock_request, text
+    ):
+        """Only the registered spellings are treated as wrappers."""
+        result = self._parser(mock_tokenizer).extract_tool_calls(text, mock_request)
+        assert result.tools_called is False
+        assert result.content == text
+
+        results = simulate_tool_streaming(
+            self._parser(mock_tokenizer), mock_request, list(text)
+        )
+        assert collect_content(results) == text
+
+    @pytest.mark.parametrize("wrapper", _WRAPPER_VARIANTS)
+    def test_prose_mention_matches_canonical_wrapper(
+        self, mock_tokenizer, mock_request, wrapper
+    ):
+        """A registered spelling mentioned in prose behaves exactly like a
+        prose mention of the real wrapper: the opener starts a tool block and
+        the rest of the message is dropped. That is pre-existing behavior of
+        ``<｜DSML｜tool_calls>``; the variants must not differ from it either
+        way."""
+        template = "The opener looks like {} and then params follow. Done."
+        text = template.format(wrapper)
+        reference = template.format(DSML_TOOL_START)
+
+        result = self._parser(mock_tokenizer).extract_tool_calls(text, mock_request)
+        expected = self._parser(mock_tokenizer).extract_tool_calls(
+            reference, mock_request
+        )
+        assert result.tools_called == expected.tools_called
+        assert result.content == expected.content
+
+        results = simulate_tool_streaming(
+            self._parser(mock_tokenizer), mock_request, list(text)
+        )
+        expected_results = simulate_tool_streaming(
+            self._parser(mock_tokenizer), mock_request, list(reference)
+        )
+        assert collect_content(results) == collect_content(expected_results)
+
+    @pytest.mark.parametrize("wrapper", _WRAPPER_VARIANTS)
+    @pytest.mark.parametrize("chunk_size", [1, 3, None], ids=lambda c: f"chunk={c}")
+    def test_delegating_parser_corrupted_wrapper(self, wrapper, chunk_size):
+        """The serving-layer shape: reasoning and tool adapters on separate
+        engines, with the corrupted opener arriving as plain text."""
+        tokens = _dsv4_tokens(
+            reasoning="Checking the weather.",
+            tool_name="get_weather",
+            params=[("city", "true", "Seoul")],
+        )
+        start_id = _DSV4_FULL_VOCAB[DSML_TOOL_START]
+        tokens = [
+            (900, wrapper) if tid == start_id else (tid, text) for tid, text in tokens
+        ]
+        # Only the think markers are single tokens in the real
+        # DeepSeek-V4-Flash vocab; the DSML wrappers are ordinary text and
+        # must be matched by the lexer. Mirror that here.
+        vocab = {
+            DSML_THINK_START: _DSV4_FULL_VOCAB[DSML_THINK_START],
+            DSML_THINK_END: _DSV4_FULL_VOCAB[DSML_THINK_END],
+        }
+        tokenizer = MockTokenizer(vocab=vocab, tokens=tokens)
+        parser = _DeepSeekV4Delegating(
+            tokenizer, chat_template_kwargs={"thinking": True}
+        )
+
+        deltas = replay_streaming(
+            parser,
+            tokens,
+            chunk_size=chunk_size,
+            finished_on_last=True,
+            tools=DUMMY_TOOLS,
+        )
+        output = collect_output(deltas)
+
+        assert "Checking" in output.reasoning
+        assert len(output.tool_calls) == 1, (
+            f"reasoning={output.reasoning!r}, content={output.content!r}"
+        )
+        assert output.tool_calls[0]["name"] == "get_weather"
+        assert json.loads(output.tool_calls[0]["arguments"]) == {"city": "Seoul"}
+        assert "DSML" not in (output.content or "")
