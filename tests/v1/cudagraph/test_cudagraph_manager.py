@@ -208,6 +208,7 @@ def _make_spec_decode_manager(
     dynamic_spec_schedule: list[tuple[int, int, int]] | None = None,
     max_num_seqs: int = 8,
     use_kda_recoverssm: bool = False,
+    specialize_spec_tokens: bool = False,
 ) -> gpu_cudagraph_utils.CudaGraphManager:
     monkeypatch.setattr(
         gpu_cudagraph_utils,
@@ -230,6 +231,7 @@ def _make_spec_decode_manager(
         device=torch.device("cpu"),
         cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
         decode_query_len=decode_query_len,
+        specialize_spec_tokens=specialize_spec_tokens,
     )
     manager._graphs_captured = True
     return manager
