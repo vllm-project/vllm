@@ -472,12 +472,17 @@ class VocabParallelEmbedding(PluggableLayer):
 
         # Parameters without an output dimension are copied onto all GPUs.
         if output_dim is None:
+            # AutoQuantize-quantized lm_head emits FP4 scalar scales
+            # (input_scale, weight_scale_2). Their on-disk shape is () while
+            # PerTensorScaleParameter materializes them as (1,) -- same numel,
+            # different rank. Reshape rather than asserting. The broader
+            # numel-match check subsumes the earlier ndim==0-only handling.
             if (
-                loaded_weight.ndim == 0
-                and param.data.ndim == 1
-                and param.data.numel() == 1
+                param.data.shape != loaded_weight.shape
+                and param.data.numel() == loaded_weight.numel()
             ):
-                loaded_weight = loaded_weight.reshape(1)
+                param.data.copy_(loaded_weight.reshape(param.data.shape))
+                return
             assert param.data.shape == loaded_weight.shape
             param.data.copy_(loaded_weight)
             return
