@@ -462,13 +462,8 @@ def test_deepseek_v4_image_blocks_match_reference_spacing():
         thinking=False,
     )
 
-    assert prompt == (
-        "<｜begin▁of▁sentence｜>You are a helpful vision assistant."
-        "<｜User｜>请按“第一张、第二张”的顺序回答：第一张图\n\n"
-        "<｜deepseek_image｜>\n\n和第二张图\n\n"
-        "<｜deepseek_image｜>\n\n中分别是什么食材？"
-        "它们通常食用的部位分别是什么？<｜Assistant｜></think>"
-    )
+    expected = (FIXTURES_DIR / "test_output_5.txt").read_text().removesuffix("\n")
+    assert prompt == expected
 
 
 def test_deepseek_v4_image_sentinel_ids_match_tokenizer():
