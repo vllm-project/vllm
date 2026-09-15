@@ -34,7 +34,7 @@ steps:
   agent_tags:
     label: production
     gpu: 4+
-    mem: 96+
+    mem: 24+
   no_plugin: true
   working_dir: "."
   env:
