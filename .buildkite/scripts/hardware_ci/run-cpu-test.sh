@@ -89,10 +89,17 @@ rm -f "$build_log"
 # (transformers_utils/config.py), and default_loader.py raises its own
 # RuntimeError when a snapshot dir has a config but no weight files. Match
 # those messages too or the fallback never triggers for those cache misses.
+#
+# Also mount ~/.cache/vllm: multimodal test fixtures (e.g. VideoAsset, via
+# vllm/assets/video.py) download into VLLM_ASSETS_CACHE (~/.cache/vllm/assets
+# by default), a directory distinct from the HF hub cache above. Without a
+# persistent mount there, those assets never survive past one container's
+# lifetime, so every run re-fetches them from the network on the "offline"
+# attempt and unconditionally falls back to the online retry.
 OFFLINE_RETRY_PATTERN='huggingface_hub\.errors\.(LocalEntryNotFoundError|OfflineModeIsEnabled)|Invalid repository ID or local directory specified|Cannot find any model weights with'
 run_test() {
     local hf_offline=$1
-    docker run --rm --cpuset-cpus="$CORE_RANGE" --cpuset-mems="$NUMA_NODE" -v ~/.cache/huggingface:/root/.cache/huggingface --privileged=true -e HF_TOKEN -e VLLM_CPU_KVCACHE_SPACE=16 -e VLLM_CPU_CI_ENV=1 -e VLLM_CPU_SIM_MULTI_NUMA=1 -e VLLM_CPU_ATTN_SPLIT_KV=0 -e HF_HUB_OFFLINE="$hf_offline" -e HF_DATASETS_OFFLINE="$hf_offline" --shm-size=4g "$IMAGE_NAME" \
+    docker run --rm --cpuset-cpus="$CORE_RANGE" --cpuset-mems="$NUMA_NODE" -v ~/.cache/huggingface:/root/.cache/huggingface -v ~/.cache/vllm:/root/.cache/vllm --privileged=true -e HF_TOKEN -e VLLM_CPU_KVCACHE_SPACE=16 -e VLLM_CPU_CI_ENV=1 -e VLLM_CPU_SIM_MULTI_NUMA=1 -e VLLM_CPU_ATTN_SPLIT_KV=0 -e HF_HUB_OFFLINE="$hf_offline" -e HF_DATASETS_OFFLINE="$hf_offline" --shm-size=4g "$IMAGE_NAME" \
         timeout "$TIMEOUT_VAL" bash -c "set -euox pipefail; echo \"--- Print packages\"; pip list; echo \"--- Running tests\"; ${TEST_COMMAND}"
 }
 
