@@ -91,6 +91,17 @@ Bytes, structured as:
     The first `ue8m0` is the scale for the first 64 `float8_e4m3` values,
     the second for the next 64, and so on.
 
+For DeepSeek V4.1, each token's KV cache is 528 Bytes, structured as:
+-   **First 512 bytes:** all 512 dims as `float8_e4m3`. Unlike V4 the 64 RoPE
+    dims are quantized too, so there is no `bfloat16` part.
+-   **Last 16 bytes:** Scale factors, containing 16 `ue8m0` values, one per 32
+    consecutive `float8_e4m3` values (i.e. MXFP8).
+
+The V4 and V4.1 records are not laid out token-by-token within a page: a page
+holds all its data rows first and all its scale rows after, so a page is
+`block_size * bytes_per_token` bytes rounded up to the decode kernel's TMA
+stride (576 B for V4, 512 B for V4.1).
+
 In the "nvfp4_ds_mla" format (SM100 only, DeepSeek V3.2 geometry), each
 token's KV cache is 352 Bytes, structured as:
 -   **First 256 bytes:** 512 `e2m1` NoPE values packed 2/byte (low nibble =
