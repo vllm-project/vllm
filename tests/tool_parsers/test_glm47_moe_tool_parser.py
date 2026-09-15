@@ -17,6 +17,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.openai.responses.utils import build_response_output_items
+from vllm.parser.glm47_moe import _glm47_arg_converter
 from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 
@@ -266,3 +267,96 @@ class TestGlm47Streaming:
         ]
         args = json.loads("".join(arguments))
         assert args["city"] == "Beijing"
+
+    def test_stray_arg_key_tag(self, glm47_tool_parser, mock_request):
+        """A duplicated `</arg_key>` in the stream must not reach the key.
+
+        This is the end-to-end path: the engine accumulates the stray tag into
+        `slot.args`, so only a streaming test proves the converter sees it.
+        """
+        _reset(glm47_tool_parser)
+        chunks = [
+            "<tool_call>",
+            "get_weather\n",
+            "<arg_key>city</arg_key>",
+            "</arg_key>",
+            "<arg_value>",
+            "Beijing",
+            "</arg_value>",
+            "</tool_call>",
+        ]
+        current_text = ""
+        deltas = []
+        for chunk in chunks:
+            current_text += chunk
+            delta = glm47_tool_parser.extract_tool_calls_streaming(
+                previous_text="",
+                current_text=current_text,
+                delta_text=chunk,
+                previous_token_ids=[],
+                current_token_ids=[],
+                delta_token_ids=[],
+                request=mock_request,
+            )
+            if delta:
+                deltas.append(delta)
+        arguments = [
+            tool_call.function.arguments
+            for delta in deltas
+            for tool_call in (delta.tool_calls or [])
+            if tool_call.function and tool_call.function.arguments
+        ]
+        joined = "".join(arguments)
+        # Checked before json.loads: a partial fix truncates the stream, and
+        # the JSONDecodeError would hide which half regressed.
+        assert "</arg_key>" not in joined
+        assert json.loads(joined) == {"city": "Beijing"}
+
+
+@pytest.mark.parametrize(
+    "raw_args",
+    [
+        pytest.param(
+            "<arg_key>path</arg_key></arg_key><arg_value>/tmp/x</arg_value>",
+            id="repeated-closing-tag",
+        ),
+        pytest.param(
+            "<arg_key><arg_key>path</arg_key><arg_value>/tmp/x</arg_value>",
+            id="repeated-opening-tag",
+        ),
+        pytest.param(
+            "<arg_key>path</arg_key><arg_value>/tmp/x</arg_value>",
+            id="well-formed",
+        ),
+    ],
+)
+def test_arg_converter_ignores_stray_arg_tags(raw_args: str):
+    """Stray `arg_key` tags must not leak into the argument key."""
+    assert json.loads(_glm47_arg_converter(raw_args, False)) == {"path": "/tmp/x"}
+
+
+@pytest.mark.parametrize(
+    "raw_args",
+    [
+        pytest.param(
+            "<arg_key>path</arg_key></arg_key><arg_value>/tmp/x",
+            id="repeated-closing-tag",
+        ),
+        pytest.param(
+            "<arg_key><arg_key>path</arg_key><arg_value>/tmp/x",
+            id="repeated-opening-tag",
+        ),
+        pytest.param(
+            "<arg_key>path</arg_key><arg_value>/tmp/x",
+            id="well-formed",
+        ),
+    ],
+)
+def test_partial_arg_converter_ignores_stray_arg_tags(raw_args: str):
+    """The streaming path uses a separate pattern; it needs the same guarantee.
+
+    These inputs have no closing `</arg_value>`, which is what an in-flight
+    stream actually feeds, so they reach `_PARTIAL_ARG_RE` rather than
+    `_ARG_RE`.
+    """
+    assert json.loads(_glm47_arg_converter(raw_args, True)) == {"path": "/tmp/x"}
