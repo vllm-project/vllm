@@ -523,6 +523,11 @@ def has_nixl_ep() -> bool:
     return _has_module("nixl_ep")
 
 
+def has_nccl_ep() -> bool:
+    """Whether the optional `nccl.ep` package is available."""
+    return _has_module("nccl.ep")
+
+
 def is_numba_available() -> bool:
     """Whether the optional `numba` package is available."""
     return _has_module("numba")

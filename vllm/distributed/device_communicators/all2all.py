@@ -20,7 +20,12 @@ from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_two_sided,
 )
 from vllm.utils.func_utils import supports_kw
-from vllm.utils.import_utils import has_deep_ep, has_deep_ep_v2, has_mori
+from vllm.utils.import_utils import (
+    has_deep_ep,
+    has_deep_ep_v2,
+    has_mori,
+    has_nccl_ep,
+)
 
 from .base_device_communicator import All2AllManagerBase, Cache
 
@@ -609,6 +614,127 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         state.buffer.clean_mask_buffer()
         torch.accelerator.synchronize()
         NixlEPAll2AllManager._last_mask = None
+
+
+@dataclass
+class NcclEPGroupState:
+    group: Any
+    algorithm: Any
+    num_local_experts: int
+    max_tokens_per_rank: int
+    max_recv_tokens_per_rank: int
+    handle: Any = None
+
+
+class NcclEPAll2AllManager(All2AllManagerBase):
+    """All2All communication based on NCCL EP kernels."""
+
+    def __init__(self, cpu_group, all2all_backend: str):
+        assert has_nccl_ep(), (
+            "NCCL EP is not installed. Install nccl-extensions with the matching "
+            "CUDA extra, for example `uv pip install 'nccl-extensions[cu13]'`."
+        )
+        assert all2all_backend in (
+            "nccl_ep_low_latency",
+            "nccl_ep_high_throughput",
+        )
+        super().__init__(cpu_group)
+        self.all2all_backend = all2all_backend
+        self._nccl_comm: Any = None
+        self._groups: dict[tuple[Any, ...], NcclEPGroupState] = {}
+
+    def get_handle(self, kwargs):
+        import nccl.ep as nccl_ep  # type: ignore[import-not-found]
+        from nccl.ep.interop.torch import (  # type: ignore[import-not-found]
+            get_nccl_comm_from_group,
+        )
+
+        max_tokens = kwargs["max_num_tokens_per_dp_rank"]
+        hidden_size = kwargs["token_hidden_size"]
+        num_experts = kwargs["num_global_experts"]
+        token_dtype = kwargs["token_dtype"]
+        num_topk = kwargs["num_topk"]
+        assert kwargs["num_ep_ranks"] == self.world_size
+        assert num_experts % self.world_size == 0
+        lib_version = nccl_ep.get_lib_version()
+        if (lib_version.major, lib_version.minor) < (0, 2):
+            raise RuntimeError(
+                f"NCCL EP 0.2 or newer is required, but found {lib_version}."
+            )
+        algorithm = (
+            nccl_ep.Algorithm.LOW_LATENCY
+            if self.all2all_backend == "nccl_ep_low_latency"
+            else nccl_ep.Algorithm.HIGH_THROUGHPUT
+        )
+        max_recv_tokens = 0
+        key = (
+            algorithm,
+            max_tokens,
+            hidden_size,
+            num_experts,
+            token_dtype,
+            num_topk,
+        )
+        state = self._groups.get(key)
+        if state is not None:
+            return state
+
+        if self._nccl_comm is None:
+            self._nccl_comm = get_nccl_comm_from_group(self.cpu_group)
+
+        config = nccl_ep.GroupConfig(
+            algorithm=algorithm,
+            num_experts=num_experts,
+            max_dispatch_tokens_per_rank=max_tokens,
+            max_recv_tokens_per_rank=max_recv_tokens,
+            max_token_bytes=(
+                hidden_size * torch.empty((), dtype=token_dtype).element_size()
+            ),
+            num_topk=num_topk,
+        )
+        logger.debug("NCCL EP group args %s", config)
+        try:
+            group = nccl_ep.Group.create(self._nccl_comm, config)
+        except Exception as exc:
+            raise RuntimeError(
+                "NCCL EP group creation failed. Verify that the runtime NCCL "
+                "library is at least as new as the library used to build "
+                "the installed NCCL EP extension."
+            ) from exc
+        state = NcclEPGroupState(
+            group=group,
+            algorithm=algorithm,
+            num_local_experts=num_experts // self.world_size,
+            max_tokens_per_rank=max_tokens,
+            max_recv_tokens_per_rank=max_recv_tokens,
+        )
+        self._groups[key] = state
+        return state
+
+    def dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        is_sequence_parallel: bool = False,
+        extra_tensors: list[torch.Tensor] | None = None,
+    ):
+        raise NotImplementedError
+
+    def combine(
+        self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
+    ) -> torch.Tensor:
+        raise NotImplementedError
+
+    def destroy(self):
+        for state in self._groups.values():
+            if state.handle is not None:
+                state.handle.destroy()
+            state.group.destroy()
+        self._groups.clear()
+        if self._nccl_comm is not None:
+            self._nccl_comm.destroy()
+            self._nccl_comm = None
 
 
 class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):

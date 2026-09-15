@@ -1147,6 +1147,16 @@ class CompilationConfig:
     def set_splitting_ops_for_v1(
         self, all2all_backend: str, data_parallel_size: int = 1
     ):
+        if (
+            all2all_backend in ("nccl_ep_low_latency", "nccl_ep_high_throughput")
+            and self.cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            logger.info(
+                "NCCL EP: Disabling CUDA Graphs because handle creation and "
+                "routing updates are not graph-capture safe."
+            )
+            self.cudagraph_mode = CUDAGraphMode.NONE
+
         # To compatible with OOT hardware plugin platform (for example vllm-ascend)
         # which currently only supports sequence parallelism in eager mode.
         if self.mode != CompilationMode.VLLM_COMPILE:
