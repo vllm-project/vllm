@@ -359,7 +359,6 @@ def test_gpu_sampler_respects_mixed_request_watermarking(
         lambda *args, **kwargs: torch.tensor([3, 4]),
     )
     logits = torch.zeros(2, 8)
-    logits[1, 3] = 1.0  # unwatermarked row will pick token 3
 
     sampled, output_logits = sampler._sample_random(
         logits,
@@ -391,6 +390,7 @@ def test_gpu_sampler_filters_top_k_top_p_before_watermarking(
 
     class CapturingWatermarker:
         context_width = 1
+        supports_greedy = False
         captured_logits = None
 
         def sample(self, logits, contexts, random_sampler=None, skip_mask=None):
