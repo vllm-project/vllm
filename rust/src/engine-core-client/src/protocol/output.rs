@@ -9,7 +9,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_default::DefaultFromSerde;
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
+use serde_with::serde_as;
 
+use super::array_like::AllowTrailingFields;
 use super::utility::UtilityOutput;
 use crate::error::{Error, Result, ext_value_decode};
 use crate::protocol::logprobs::MaybeWireLogprobs;
@@ -156,11 +158,14 @@ impl EngineCoreOutput {
 ///
 /// Original Python definition:
 /// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/engine/__init__.py#L186-L214>
+#[serde_as]
 #[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple, DefaultFromSerde)]
 struct WireEngineCoreOutputs {
     #[serde(default)]
     engine_index: u32,
     /// Outputs grouped for this client in the current engine tick.
+    // Match msgspec's append-only schema evolution, including Omni extensions.
+    #[serde_as(deserialize_as = "Vec<AllowTrailingFields>")]
     #[serde(default)]
     outputs: Vec<EngineCoreOutput>,
     #[serde(default)]
@@ -401,6 +406,61 @@ mod tests {
         assert_eq!(
             decoded.finished_requests,
             Some(BTreeSet::from(["req-1".to_string()]))
+        );
+    }
+
+    #[test]
+    fn engine_core_outputs_ignore_appended_fields() {
+        let output = EngineCoreOutput {
+            request_id: "req-1".into(),
+            new_token_ids: vec![42],
+            finish_reason: Some(EngineCoreFinishReason::Length),
+            ..Default::default()
+        };
+        let mut fields = crate::protocol::decode_value(&encode_msgpack(&output).unwrap())
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .clone();
+        // Omni appends multimodal_output, is_segment_finished, and
+        // new_prompt_len_snapshot. Unknown payloads may contain nested values.
+        fields.extend([
+            OpaqueValue::Map(vec![(
+                "audio".into(),
+                OpaqueValue::Array(vec![OpaqueValue::Ext(1, vec![0, 1])]),
+            )]),
+            false.into(),
+            OpaqueValue::Nil,
+        ]);
+        let wire = (0, vec![OpaqueValue::Array(fields); 2]);
+        let frames = [Bytes::from(encode_msgpack(&wire).unwrap())];
+        let decoded = decode_engine_core_outputs(&frames).unwrap();
+        // A second output also checks that the first output's tail was consumed.
+        assert_eq!(decoded.as_request_batch().unwrap().outputs, vec![output; 2]);
+    }
+
+    #[test]
+    fn engine_core_output_requires_valid_known_fields() {
+        for fields in [
+            vec![],
+            vec!["req-1".into()],
+            vec!["req-1".into(), OpaqueValue::Nil],
+            vec!["req-1".into(), OpaqueValue::Array(vec![]), false.into()],
+        ] {
+            let wire = (0, vec![OpaqueValue::Array(fields)]);
+            let frames = [Bytes::from(encode_msgpack(&wire).unwrap())];
+            assert!(decode_engine_core_outputs(&frames).is_err());
+        }
+        let wire = (0, vec![("req-1", vec![42_u32])]);
+        let frames = [Bytes::from(encode_msgpack(&wire).unwrap())];
+        let decoded = decode_engine_core_outputs(&frames).unwrap();
+        assert_eq!(
+            decoded.as_request_batch().unwrap().outputs,
+            vec![EngineCoreOutput {
+                request_id: "req-1".into(),
+                new_token_ids: vec![42],
+                ..Default::default()
+            }]
         );
     }
 
