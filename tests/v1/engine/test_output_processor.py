@@ -23,6 +23,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine import (
     EngineCoreEvent,
     EngineCoreEventType,
+    EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreRequest,
     FinishReason,
@@ -1077,6 +1078,85 @@ def test_iteration_stats(dummy_test_vectors):
 
     assert iteration_stats.num_prompt_tokens == 0
     assert iteration_stats.num_generation_tokens == num_active
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("log_stats", [True, False])
+@pytest.mark.parametrize(
+    "end_of_input", ["non_streaming", "before_output", "after_output"]
+)
+def test_finished_requests_release_lora_tracking(end_of_input: str, log_stats: bool):
+    """Closing a stream after its last output must release only that request's load."""
+    processor = OutputProcessor(tokenizer=None, log_stats=log_stats)
+    lora = LoRARequest("adapter", 1, "/path/to/adapter")
+    requests = [
+        EngineCoreRequest(
+            request_id=f"request-{idx}",
+            external_req_id=f"external-{idx}",
+            prompt_token_ids=[1],
+            mm_features=None,
+            sampling_params=SamplingParams(detokenize=False),
+            pooling_params=None,
+            arrival_time=0,
+            lora_request=lora,
+            cache_salt=None,
+            data_parallel_rank=None,
+            resumable=end_of_input != "non_streaming",
+        )
+        for idx in range(2)
+    ]
+    for request in requests:
+        processor.add_request(request, None)
+    processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=request.request_id,
+                new_token_ids=[2],
+                events=[EngineCoreEvent.new_event(EngineCoreEventType.SCHEDULED, 1.0)],
+            )
+            for request in requests
+        ],
+        engine_core_timestamp=1.0,
+        iteration_stats=IterationStats() if log_stats else None,
+    )
+    stats = SchedulerStats()
+    processor.update_scheduler_stats(stats)
+    assert stats.running_lora_adapters == ({"adapter": 2} if log_stats else {})
+
+    for idx, request in enumerate(requests):
+        if end_of_input == "before_output":
+            request.resumable = False
+            processor.add_request(request, None)
+
+        processor.process_outputs(
+            [
+                EngineCoreOutput(
+                    request_id=request.request_id,
+                    new_token_ids=[3],
+                    finish_reason=FinishReason.LENGTH,
+                )
+            ],
+            engine_core_timestamp=2.0,
+            iteration_stats=IterationStats() if log_stats else None,
+        )
+        if end_of_input == "after_output":
+            assert processor.has_request(request.request_id)
+            stats = SchedulerStats()
+            processor.update_scheduler_stats(stats)
+            assert stats.running_lora_adapters == (
+                {"adapter": len(requests) - idx} if log_stats else {}
+            )
+            request.resumable = False
+            processor.add_request(request, None)
+
+        remaining = len(requests) - idx - 1
+        assert processor.get_num_unfinished_requests() == remaining
+        stats = SchedulerStats()
+        processor.update_scheduler_stats(stats)
+        assert stats.running_lora_adapters == (
+            {"adapter": remaining} if log_stats and remaining else {}
+        )
+    assert not processor.lora_states.requests
 
 
 @pytest.mark.parametrize("log_stats", [True, False])
