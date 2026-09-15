@@ -64,6 +64,7 @@ pub fn lower_text_request(
         lora_request: request.lora_request.clone(),
         arrival_time: request.arrival_time,
         trace_headers: None,
+        resumable: false,
     };
 
     Ok(PreparedTextRequest {

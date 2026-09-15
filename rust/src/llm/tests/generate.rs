@@ -168,6 +168,7 @@ fn sample_generate_request(request_id: &str, max_tokens: u32) -> GenerateRequest
         session_id: None,
         reasoning_parser_kwargs: None,
         lora_request: None,
+        resumable: false,
     }
 }
 
@@ -375,6 +376,162 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
         collected.kv_transfer_params,
         Some(serde_json::json!({"connector": "x"}))
     );
+}
+
+/// `GenerateRequest.resumable` must reach the wire, not just the Rust struct:
+/// the assertion is on the frame the engine decoded, because the point of the
+/// M3 change is that `prepare()` actually threads it through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resumable_flag_on_wire() {
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-resumable".to_vec();
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        |dealer, push| {
+            Box::pin(async move {
+                let add = recv_engine_message(dealer).await;
+                let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+                assert!(request.resumable, "resumable did not reach the wire");
+
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        outputs: vec![request_output(
+                            &request.request_id,
+                            vec![7],
+                            // Abort closes a resumable session; Stop only ends the
+                            // segment and leaves the output stream open.
+                            Some(EngineCoreFinishReason::Abort),
+                        )],
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+            })
+        },
+    );
+
+    let llm = connect_async_llm_with_ipc(handshake_address, 0, "test-model", &ipc).await;
+    let mut stream = llm
+        .generate(GenerateRequest {
+            resumable: true,
+            ..sample_generate_request("req-resumable", 1)
+        })
+        .await
+        .unwrap();
+    while stream.next().await.is_some() {}
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    llm.shutdown().await.unwrap();
+}
+
+/// The default stays `false`, so nothing that does not ask for a resumable
+/// session accidentally gets one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oneshot_requests_are_not_resumable_on_wire() {
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-oneshot".to_vec();
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        |dealer, push| {
+            Box::pin(async move {
+                let add = recv_engine_message(dealer).await;
+                let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+                assert!(!request.resumable);
+
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        outputs: vec![request_output(
+                            &request.request_id,
+                            vec![7],
+                            Some(EngineCoreFinishReason::Stop),
+                        )],
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+            })
+        },
+    );
+
+    let llm = connect_async_llm_with_ipc(handshake_address, 0, "test-model", &ipc).await;
+    let mut stream = llm.generate(sample_generate_request("req-oneshot", 1)).await.unwrap();
+    while stream.next().await.is_some() {}
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    llm.shutdown().await.unwrap();
+}
+
+/// A segment with `resumable: false` reads as the closing ADD on the wire, so
+/// pushing one would end the session and discard its prompt. The guard has to
+/// hold in release builds, where a `debug_assert!` is compiled out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn push_rejects_a_segment_that_would_close_the_session() {
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-sink-guard".to_vec();
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        |dealer, push| {
+            Box::pin(async move {
+                let add = recv_engine_message(dealer).await;
+                let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+                assert!(request.resumable, "the opening ADD opens a session");
+
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        outputs: vec![request_output(
+                            &request.request_id,
+                            vec![7],
+                            Some(EngineCoreFinishReason::Abort),
+                        )],
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+            })
+        },
+    );
+
+    let llm = connect_async_llm_with_ipc(handshake_address, 0, "test-model", &ipc).await;
+    let (sink, mut stream) = llm
+        .generate_streaming(GenerateRequest {
+            resumable: true,
+            ..sample_generate_request("req-sink-guard", 1)
+        })
+        .await
+        .unwrap();
+
+    let error = sink
+        .push(GenerateRequest {
+            resumable: false,
+            ..sample_generate_request("ignored-by-the-sink", 1)
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::NotResumable { .. }), "{error:?}");
+
+    while stream.next().await.is_some() {}
+    drop(sink);
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    llm.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
