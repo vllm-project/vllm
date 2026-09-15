@@ -326,6 +326,27 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
 
 class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
     @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        model_config = vllm_config.model_config
+        additional = vllm_config.additional_config
+        if (
+            model_config is None
+            or getattr(model_config.hf_config, "model_type", None) != "deepseek_v41"
+            or not isinstance(additional, dict)
+            or not additional.get("deepseek_v41_pp_sp", False)
+        ):
+            return
+        parallel = vllm_config.parallel_config
+        if not parallel.enable_expert_parallel or parallel.tensor_parallel_size < 2:
+            raise ValueError("DeepSeek V4.1 PP+SP requires EP and TP >= 2")
+        if parallel.data_parallel_size == 1:
+            if parallel.all2all_backend != "allgather_reducescatter":
+                raise ValueError(
+                    "DeepSeek V4.1 PP+SP with DP=1 requires allgather_reducescatter"
+                )
+            parallel.enable_sequence_parallel_moe = True
+
+    @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         quant_config = getattr(model_config.hf_config, "quantization_config", None)
         if quant_config is not None and quant_config.get("quant_method") == "fp8":
