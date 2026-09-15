@@ -1033,6 +1033,7 @@ def test_warmup_kernels_runs_two_full_verifications(
         decode_query_len=k + 1,
         max_model_len=4096,
         adaptive_verification=None,
+        rejection_sampler=None,
         is_pooling_model=False,
         is_encoder_decoder=False,
         is_last_pp_rank=True,
@@ -1122,6 +1123,7 @@ def test_uno_startup_reaches_sampler_plan_when_decoder_capture_will_not_run(
     runner.device = torch.device("cpu")
     adaptive = object()
     runner.adaptive_verification = adaptive
+    runner.rejection_sampler = None
     runner._dummy_run = Mock(return_value=(None, None))
     enumerate_launches = Mock(return_value=UnoServedLaunches((1,), ()))
 
@@ -1243,6 +1245,7 @@ def test_uno_warmup_executes_native_verification_s4(
     sampler.penalties_state.apply_staged_writes = lambda: None
     rejection = object.__new__(rejection_module.RejectionSampler)
     rejection.sampler = sampler
+    rejection.watermark_key = None
     rejection.num_speculative_steps = 8
     rejection.enable_adaptive_verification = False
     rejection.synthetic_conditional_rates = None
@@ -1272,13 +1275,21 @@ def test_uno_warmup_executes_native_verification_s4(
 
             return launch
 
-    for name in (
-        "_topk_topp_kernel",
-        "_topp_sb_stats_kernel",
-        "_topp_sb_step_kernel",
-        "_topp_sb_mask_kernel",
+    # The sampler's Triton kernels are reached through warmup dispatchers that
+    # bind their kernel at import, so replacing the module attribute no longer
+    # intercepts the launch; replace the kernel the dispatcher holds instead.
+    # The dispatcher binds every launch argument by name, so recorded launches
+    # carry their parameters in kwargs rather than positionally.
+    for wrapper_name, kernel_name in (
+        ("_topk_topp", "_topk_topp_kernel"),
+        ("_topp_split_stats", "_topp_sb_stats_kernel"),
+        ("_topp_split_step", "_topp_sb_step_kernel"),
+        ("_topp_split_mask", "_topp_sb_mask_kernel"),
     ):
-        monkeypatch.setattr(topk_topp_triton, name, LaunchRecorder(name))
+        wrapper = getattr(topk_topp_triton, wrapper_name)
+        recorder = LaunchRecorder(kernel_name)
+        recorder.arg_names = tuple(wrapper.kernel.arg_names)
+        monkeypatch.setattr(wrapper, "kernel", recorder)
     monkeypatch.setattr(topk_topp_sampler, "HAS_TRITON", True)
     monkeypatch.setattr(topk_topp_triton, "num_compute_units", lambda _: 82)
     for name in ("_TRITON_SPLIT_CACHE", "_TRITON_BUFFER_CACHE", "_TRITON_TABLE_CACHE"):
@@ -1315,7 +1326,7 @@ def test_uno_warmup_executes_native_verification_s4(
             for _, _, kw in split_launches
         )
         assert [
-            args[6] for name, args, _ in split_launches if "_step_" in name
+            kw["ROUND"] for name, _, kw in split_launches if "_step_" in name
         ] == list(range(5))
     verification_launches = [
         (name, args, kw) for name, args, kw in launches if "HAS_DRAFT_LOGITS" in kw
@@ -2074,6 +2085,7 @@ def test_uno_startup_suspends_adaptive_verification_for_helper_and_restores_it(
     runner = SimpleNamespace(
         speculator=object.__new__(UnoSpeculator),
         adaptive_verification=adaptive,
+        rejection_sampler=None,
         max_num_tokens=2048,
         decode_query_len=9,
         device=torch.device("cpu"),
@@ -2115,6 +2127,7 @@ def test_uno_startup_restores_adaptive_verification_after_callback_error(
     runner = SimpleNamespace(
         speculator=object.__new__(UnoSpeculator),
         adaptive_verification=adaptive,
+        rejection_sampler=None,
         max_num_tokens=2048,
         decode_query_len=9,
         device=torch.device("cpu"),

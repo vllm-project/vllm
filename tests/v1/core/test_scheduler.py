@@ -19,7 +19,12 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
+    HiSparseConnector,
+    HiSparseConnectorScheduler,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalKwargsItem,
@@ -34,6 +39,7 @@ from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.engine import FinishReason
+from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -146,6 +152,30 @@ def test_get_num_unfinished_requests():
     for i, request in enumerate(requests):
         scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_STOPPED)
         assert scheduler.get_num_unfinished_requests() == len(requests) - i - 1
+
+
+def _bind_hisparse_connector(scheduler):
+    connector = object.__new__(HiSparseConnector)
+    connector.connector_scheduler = HiSparseConnectorScheduler(async_speculative=False)
+    from tests.v1.core.test_prefix_caching import make_hisparse_kv_cache_manager
+
+    coordinator = get_hisparse_coordinator(make_hisparse_kv_cache_manager(16, 16))
+    connector.connector_scheduler.bind_coordinator(coordinator)
+    composite = object.__new__(MultiConnector)
+    composite._connectors = (connector,)
+    scheduler.connector = composite
+    return coordinator
+
+
+def test_pending_hisparse_spill_keeps_scheduler_alive():
+    """A final host spill must complete after the last request finishes."""
+    scheduler = create_scheduler()
+    coordinator = _bind_hisparse_connector(scheduler)
+    pending = coordinator.pending_spills
+    pending[0] = Mock()
+    assert scheduler.has_requests()
+    pending.clear()
+    assert not scheduler.has_requests()
 
 
 @pytest.mark.parametrize(
@@ -1179,6 +1209,45 @@ def test_preempt_during_execution():
     # sampled token id.
     assert len(requests[1].output_token_ids) == 1
     assert requests[1].output_token_ids[0] == 42
+
+
+def test_pending_hisparse_reclamation_defers_preemption(monkeypatch):
+    """Pending reclamation must stall rather than preempt its owning request."""
+    scheduler = create_scheduler(enable_prefix_caching=False)
+    request = create_requests(num_requests=1, num_tokens=16, block_size=16)[0]
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    monkeypatch.setattr(
+        scheduler.kv_cache_manager, "allocate_slots", Mock(return_value=None)
+    )
+    coordinator = _bind_hisparse_connector(scheduler)
+    monkeypatch.setattr(
+        scheduler.connector, "build_connector_meta", Mock(return_value=None)
+    )
+    monkeypatch.setattr(
+        coordinator,
+        "has_pending_reclamation",
+        Mock(return_value=True),
+    )
+
+    deferred_output = scheduler.schedule()
+
+    assert not deferred_output.num_scheduled_tokens
+    assert scheduler.running == [request]
+    assert request.status == RequestStatus.RUNNING
+    assert request.num_preemptions == 0
 
 
 def test_prefix_cache_query_not_inflated_by_connector_defer():
