@@ -19,7 +19,7 @@ logger = init_logger(__name__)
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 
 _LORA_A_PTR_DICT: dict[tuple[int, ...], tuple[torch.tensor, ...]] = {}
-_LORA_B_PTR_DICT: dict[tuple[int, ...], tuple[torch.tensor, ...]] = {}
+_LORA_B_PTR_DICT: dict[tuple[tuple[int, ...], int], tuple[torch.tensor, ...]] = {}
 
 
 def _get_lora_a_ptr(lora_a_weights: list[torch.Tensor], device: torch.device):
@@ -83,7 +83,8 @@ def _get_lora_b_ptr(
 
     """
 
-    key = tuple(lora_weight.data_ptr() for lora_weight in lora_weights)
+    weight_ptrs = tuple(lora_weight.data_ptr() for lora_weight in lora_weights)
+    key = (weight_ptrs, offset_start)
     if values := _LORA_B_PTR_DICT.get(key):
         return values
     slice_offset_lst = []
