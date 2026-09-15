@@ -170,10 +170,12 @@ class PPHandler:
         with torch.cuda.stream(self.broadcast_stream):
             self.broadcast_stream.wait_stream(self.main_stream)
             send = draft_tokens[input_batch.idx_mapping].contiguous()
+            # Must record the idx_mapping tensor since it was allocated
+            # on the main stream.
+            input_batch.idx_mapping.record_stream(self.broadcast_stream)
             torch.distributed.broadcast(
                 send, src=self.last_rank, group=self.broadcast_group
             )
-            send.record_stream(self.broadcast_stream)
 
     def receive(self, input_batch: InputBatch) -> bool:
         """Returns True iff sampled tokens need to be gathered from *all*
