@@ -77,6 +77,13 @@ def mask_dcp_empty_shards_(
         return
     assert seq_lens is not None and query_start_loc is not None
 
+    # A DCP rank can receive no local sequences during CUDA graph warmup even
+    # though the padded LSE buffer still has rows. In that case every row is an
+    # empty shard; avoid indexing the empty seq_lens tensor below.
+    if seq_lens.shape[0] == 0:
+        lse.fill_(float("-inf"))
+        return
+
     row_indices = torch.arange(
         lse.shape[0], device=lse.device, dtype=query_start_loc.dtype
     )
