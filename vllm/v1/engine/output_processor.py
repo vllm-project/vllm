@@ -5,7 +5,7 @@ import asyncio
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 import numpy as np
 import torch
@@ -29,6 +29,7 @@ from vllm.tracing import (
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
+from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import (
@@ -40,6 +41,22 @@ from vllm.v1.metrics.stats import (
 
 # shared empty CPU tensor used as a placeholder pooling output
 EMPTY_CPU_TENSOR = torch.empty(0, device="cpu")
+
+
+def _raise_collected_exception(output: Exception) -> NoReturn:
+    """Raise an exception collected for this request to its consumer task.
+
+    When the engine dies, OutputProcessor.propagate_error() hands the same
+    EngineDeadError instance to every in-flight request. Re-raising that
+    shared instance would prepend each consumer's frames onto its
+    __traceback__, so every request would log an ever-growing traceback
+    (O(N^2) log volume for N in-flight requests). Raise a fresh instance
+    instead: the root cause is already logged once by
+    AsyncLLM.output_handler.
+    """
+    if isinstance(output, EngineDeadError):
+        raise EngineDeadError() from None
+    raise output
 
 
 class RequestOutputCollector:
@@ -82,7 +99,7 @@ class RequestOutputCollector:
         self.output = None
         self.ready.clear()
         if isinstance(output, Exception):
-            raise output
+            _raise_collected_exception(output)
         return output
 
     def get_nowait(self) -> RequestOutput | PoolingRequestOutput | None:
@@ -92,7 +109,7 @@ class RequestOutputCollector:
             self.output = None
             self.ready.clear()
         if isinstance(output, Exception):
-            raise output
+            _raise_collected_exception(output)
         return output
 
     def close(self):
