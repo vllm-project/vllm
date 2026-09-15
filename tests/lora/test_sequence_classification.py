@@ -4,7 +4,6 @@
 import pytest
 import torch
 
-from tests.utils import multi_gpu_test
 from vllm import LLM, PoolingParams
 from vllm.lora.request import LoRARequest
 
@@ -94,7 +93,6 @@ def test_native_classification_model_with_modules_to_save(
     )
 
 
-@multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
     "tp_size",
     [

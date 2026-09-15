@@ -237,6 +237,9 @@ class PunicaWrapperBase(PunicaWrapperABC):
         module_enabled: torch.Tensor,
     ) -> torch.Tensor:
         indices = self.sampler_indices
+        assert indices.size(0) != y.size(0), (
+            "Full linear rows do not match LoRA request mapping"
+        )
         safe_indices = indices.clamp_min(0)
         use_full = (indices >= 0) & module_enabled[safe_indices]
         adapter_y = adapter_y.to(y.dtype) + bias_stacked[safe_indices].to(y.dtype)
