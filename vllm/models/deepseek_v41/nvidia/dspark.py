@@ -238,7 +238,7 @@ def _insert_context_kv(
     """Insert normalized context KV without constructing an unused query."""
     cache = attn.swa_cache_layer.kv_cache
     block_size = attn.swa_cache_layer.block_size
-    row_size = 584 if cache.dtype == torch.uint8 else attn.head_dim
+    row_size = attn.kv_bytes_per_token if cache.dtype == torch.uint8 else attn.head_dim
     torch.ops._C.fused_deepseek_v4_kv_rope_insert(
         kv,
         cache.view(-1, block_size, row_size),
@@ -247,6 +247,7 @@ def _insert_context_kv(
         attn.rotary_emb.cos_sin_cache,
         block_size,
         attn._flashinfer_fp8_kv_scale if cache.dtype == torch.float8_e4m3fn else None,
+        attn.kv_mxfp8,
     )
 
 
