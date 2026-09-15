@@ -14,6 +14,8 @@ disabled (score-only indexer), single shared index head. The selected block ids
 feed the block-sparse attention kernels in ``sparse_attn``.
 """
 
+import functools
+
 import torch
 
 from vllm.platforms import current_platform
@@ -22,6 +24,38 @@ from vllm.utils.math_utils import round_up
 
 # One sparse block == one KV page.
 SPARSE_BLOCK_SIZE = 128
+
+
+@functools.cache
+def _min_dot_n() -> int:
+    """Minimum N (``rhs.shape[-1]``) the active Triton backend accepts in
+    ``tl.dot``, for a bf16 x bf16 MMA.
+
+    Backends exposing a ``min_dot_size`` codegen hook make ``semantic.dot()``
+    assert on tiles narrower than the hardware MMA shape (Intel DPAS reports
+    N >= 16). Returns 1 when the backend imposes no bound, as CUDA does.
+    """
+    try:
+        from triton.backends import backends
+        from triton.runtime.driver import driver
+
+        target = driver.active.get_current_target()
+        for backend in backends.values():
+            if not hasattr(backend.compiler, "min_dot_size"):
+                continue
+            try:
+                if not backend.driver.is_active():
+                    continue
+            except Exception:
+                continue
+            # Only the N bound is restrictive for the index score kernel, where
+            # M == BLOCK_SIZE_K == 128 and K == head_dim == 128.
+            min_dot_size = backend.compiler.min_dot_size(target.arch)
+            _, n, _ = min_dot_size(tl.bfloat16, tl.bfloat16)
+            return int(n)
+    except Exception:
+        pass
+    return 1
 
 
 # ---------------------------------------------------------------------------
@@ -317,14 +351,18 @@ def _decode_index_score_kernel(
     BLOCK_SIZE_Q: tl.constexpr,
     num_kv_chunks,
     USE_PDL: tl.constexpr,
+    # Width of the (head x query) tile fed to tl.dot as its N dim, padded up to
+    # the backend's minimum MMA width. Lanes past HQ_WIDTH are masked to -inf
+    # and so never win the per-block max.
+    BLOCK_SIZE_HQ: tl.constexpr,
 ):
-    BLOCK_SIZE_HQ: tl.constexpr = num_idx_heads * BLOCK_SIZE_Q
+    HQ_WIDTH: tl.constexpr = num_idx_heads * BLOCK_SIZE_Q
     pid_r = tl.program_id(0)
     pid_c = tl.program_id(1)
     hq_offsets = tl.arange(0, BLOCK_SIZE_HQ)
     h_offsets = hq_offsets // BLOCK_SIZE_Q
     q_offsets = hq_offsets % BLOCK_SIZE_Q
-    q_mask = q_offsets < decode_query_len
+    q_mask = (q_offsets < decode_query_len) & (hq_offsets < HQ_WIDTH)
     q_ids = pid_r * decode_query_len + q_offsets
 
     if USE_PDL:
@@ -817,6 +855,13 @@ def minimax_m3_index_decode_score(
     # Use the configured max decode length to avoid Triton recompiles when
     # switching between qlen=1 and spec-decode verification batches.
     BLOCK_SIZE_Q = triton.next_power_of_2(max_decode_query_len)
+    # A narrow (head x query) tile is rejected at compile time by backends that
+    # declare a minimum MMA N, and is easy to hit here: at TP >= num_kv_heads
+    # there is one index head per rank, so without spec decode the tile is a
+    # single column.
+    BLOCK_SIZE_HQ = triton.next_power_of_2(
+        max(num_idx_heads * BLOCK_SIZE_Q, _min_dot_n())
+    )
     score_ctas_per_chunk = seq_lens.shape[0]
     target = max(
         1,
@@ -849,6 +894,7 @@ def minimax_m3_index_decode_score(
         BLOCK_SIZE_Q=BLOCK_SIZE_Q,
         num_kv_chunks=num_kv_chunks,
         USE_PDL=use_pdl,
+        BLOCK_SIZE_HQ=BLOCK_SIZE_HQ,
         **score_kwargs,
     )
     return score
