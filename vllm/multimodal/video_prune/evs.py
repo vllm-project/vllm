@@ -235,6 +235,13 @@ def recompute_mrope_positions(
         0
     ]
 
+    # Index of the first token this call has not written positions for yet.
+    cursor = num_computed_tokens
+    # Only the first block of a call can continue a media item that an earlier
+    # chunk left half-written.  Media token counts keep accumulating across
+    # items, so they cannot express that on their own.
+    is_first_block = True
+
     for mm_pos in multimodal_positions:
         # Each mm_pos can be a complete embedding for single media
         # or it can be a part of a single media (due to chunked prefill)
@@ -243,9 +250,13 @@ def recompute_mrope_positions(
         # - Current prefill chunk has no vision start indexes at all
         # - Vision start token appeared in previous prefill round
         # - Regular case
+        if mm_pos.shape[1] == 0:
+            # Qwen3 VL emits empty position tensors for fully pruned frames.
+            continue
+
         has_video_tokens = False
         num_timestamp_tokens = 0
-        if mm_pos.shape[0] == 5 and mm_pos.shape[1] > 0:
+        if mm_pos.shape[0] == 5:
             # mm_pos[4, :] indicates which positions are for video embeddings.
             # If there are no video embeddings, skip timestamp adjustment.
             has_video_tokens = torch.any(mm_pos[4, :]).item()
@@ -258,11 +269,11 @@ def recompute_mrope_positions(
                 first_vs = (mm_pos[3, :] == 1).nonzero(as_tuple=True)[0]
                 num_timestamp_tokens = first_vs[0].item() if len(first_vs) > 0 else 0
 
-        seen_vision_start_indices = vision_start_indices[
-            vision_start_indices < num_computed_tokens
-        ]
+        seen_mm_tokens = torch.count_nonzero(media_mask[:cursor])
+        seen_vision_start_indices = vision_start_indices[vision_start_indices < cursor]
 
-        if len(seen_vision_start_indices):
+        in_the_middle_of_media = False
+        if is_first_block and len(seen_vision_start_indices):
             # If we have encountered some vision start indexes,
             # then we should check the condition:
             # | --- prefill 1 ------| ---- prefill 2 ----- |
@@ -271,45 +282,50 @@ def recompute_mrope_positions(
             seem_mm_tokens_before_last_vision_start = torch.count_nonzero(
                 media_mask[:last_vision_start_token]
             )
-            in_the_middle_of_media = (
-                seen_mm_tokens > seem_mm_tokens_before_last_vision_start
-            )
-            # For Qwen3 VL, we can be inside a media segment even before any
-            # video tokens appear (timestamp tokens are text). If we've passed
-            # the last vision_start token but haven't reached the first video
-            # embedding, treat this as "in the middle of media".
-            if (
-                not in_the_middle_of_media
-                and has_video_tokens
-                and num_computed_tokens > last_vision_start_token
-                and num_computed_tokens
-                <= last_vision_start_token + num_timestamp_tokens + 1
-            ):
-                in_the_middle_of_media = True
-
-            if in_the_middle_of_media:
-                mm_embeddings_seen = (
-                    seen_mm_tokens - seem_mm_tokens_before_last_vision_start
+            if has_video_tokens:
+                # A video mm_pos also covers timestamp and vision marker
+                # entries, so the cursor may legitimately sit on a text token
+                # while still being inside the block.  The media token count
+                # stays the only usable signal here.
+                in_the_middle_of_media = (
+                    seen_mm_tokens > seem_mm_tokens_before_last_vision_start
                 )
-                global_mm_start = last_vision_start_token
+                # For Qwen3 VL, we can be inside a media segment even before any
+                # video tokens appear (timestamp tokens are text). If we've passed
+                # the last vision_start token but haven't reached the first video
+                # embedding, treat this as "in the middle of media".
+                if (
+                    not in_the_middle_of_media
+                    and cursor > last_vision_start_token
+                    and cursor <= last_vision_start_token + num_timestamp_tokens + 1
+                ):
+                    in_the_middle_of_media = True
             else:
-                # We have completed previous mm_embedding part and
-                # ready to start a new one
-                next_vision_start_token = vision_start_indices[
-                    vision_start_indices >= num_computed_tokens
-                ][0]
-                mm_embeddings_seen = 0
-                global_mm_start = next_vision_start_token
+                # A media-only mm_pos covers media tokens exclusively, so the
+                # token type at the cursor answers this exactly.  The count
+                # cannot: at a VISION_START | media boundary no media token has
+                # been counted yet, which reads as "previous media finished"
+                # and sends the search forward onto a later media item.
+                in_the_middle_of_media = bool(cursor < N and media_mask[cursor].item())
 
+        if in_the_middle_of_media:
+            mm_embeddings_seen = (
+                seen_mm_tokens - seem_mm_tokens_before_last_vision_start
+            )
+            global_mm_start = last_vision_start_token
         else:
-            # If there were no vision start indexes so far,
-            # let's find first vision start index
-            next_vision_start_token = vision_start_indices[
-                vision_start_indices >= num_computed_tokens
-            ][0]
-
+            # We have completed any previous mm_embedding part and
+            # are ready to start a new one
+            next_vision_start_tokens = vision_start_indices[
+                vision_start_indices >= cursor
+            ]
+            if not len(next_vision_start_tokens):
+                raise ValueError(
+                    "No vision start token at or after the cursor "
+                    "for a fresh media block."
+                )
             mm_embeddings_seen = 0
-            global_mm_start = next_vision_start_token
+            global_mm_start = next_vision_start_tokens[0]
 
         # For Qwen3 VL, mm_pos includes timestamp tokens before vision_start
         # when starting a new media. Adjust global_mm_start to point to where
@@ -349,8 +365,10 @@ def recompute_mrope_positions(
 
         positions[:, local_end:N] = text_pos_sum + offset - 1
 
-        # Include distance to the next vision start token
-        num_computed_tokens += mm_pos.shape[1]
+        # Advance past what was just written.  Adding only the number of
+        # entries written would leave the cursor inside the previous media.
+        cursor = int(local_end)
+        is_first_block = False
 
     mrope_positions_delta = (positions.max() + 1 - N).item()
     return positions, mrope_positions_delta
