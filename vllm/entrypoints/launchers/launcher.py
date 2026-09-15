@@ -42,9 +42,19 @@ class NoSignalServer(uvicorn.Server):
     shutdown; uvicorn's would race with and override them (see #49668).
     """
 
+    def __init__(self, config: uvicorn.Config):
+        super().__init__(config)
+        self.shutdown_requested = False
+        self.fatal_engine_error: BaseException | None = None
+
     @contextlib.contextmanager
     def capture_signals(self) -> Generator[None, None, None]:
         yield
+
+
+def _fatal_engine_error(server: NoSignalServer) -> BaseException | None:
+    """Return the error that caused EngineCore to terminate the HTTP server."""
+    return server.fatal_engine_error
 
 
 async def serve_http(
@@ -127,10 +137,20 @@ async def serve_http(
         if shutdown_event.is_set():
             return
         logger.info_once("[shutdown] API server: shutdown triggered")
+        # Record signal precedence synchronously before the watchdog can observe
+        # the engine stopping as part of intentional teardown.
+        server.shutdown_requested = True
         shutdown_event.set()
 
     async def dummy_shutdown() -> None:
         pass
+
+    async def failed_shutdown(
+        error: BaseException, *, shutdown_server: bool = False
+    ) -> None:
+        if shutdown_server:
+            await server.shutdown()
+        raise error
 
     loop.add_signal_handler(signal.SIGINT, signal_handler)
     loop.add_signal_handler(signal.SIGTERM, signal_handler)
@@ -165,6 +185,12 @@ async def serve_http(
 
     try:
         await server_task
+        fatal_error = _fatal_engine_error(server)
+        if fatal_error is not None:
+            logger.error(
+                "[shutdown] API server: EngineCore died unexpectedly; exiting non-zero"
+            )
+            return failed_shutdown(fatal_error)
         return dummy_shutdown()
     except asyncio.CancelledError:
         port = uvicorn_kwargs["port"]
@@ -177,6 +203,12 @@ async def serve_http(
                 " ".join(process.cmdline()),
             )
         logger.info_once("[shutdown] API server: shutting down FastAPI HTTP server")
+        fatal_error = _fatal_engine_error(server)
+        if fatal_error is not None:
+            logger.error(
+                "[shutdown] API server: EngineCore died unexpectedly; exiting non-zero"
+            )
+            return failed_shutdown(fatal_error, shutdown_server=True)
         return server.shutdown()
     finally:
         shutdown_task.cancel()
@@ -184,7 +216,7 @@ async def serve_http(
             watchdog_task.cancel()
 
 
-async def watchdog_loop(server: uvicorn.Server, engine: EngineClient):
+async def watchdog_loop(server: NoSignalServer, engine: EngineClient):
     """
     # Watchdog task that runs in the background, checking
     # for error state in the engine. Needed to trigger shutdown
@@ -196,7 +228,7 @@ async def watchdog_loop(server: uvicorn.Server, engine: EngineClient):
         terminate_if_errored(server, engine)
 
 
-def terminate_if_errored(server: uvicorn.Server, engine: EngineClient):
+def terminate_if_errored(server: NoSignalServer, engine: EngineClient):
     """
     See discussions here on shutting down a uvicorn server
     https://github.com/encode/uvicorn/discussions/1103
@@ -205,8 +237,18 @@ def terminate_if_errored(server: uvicorn.Server, engine: EngineClient):
     for this request.
     """
     engine_errored = engine.errored and not engine.is_running
-    if not envs.VLLM_KEEP_ALIVE_ON_ENGINE_DEATH and engine_errored:
-        server.should_exit = True
+    if (
+        envs.VLLM_KEEP_ALIVE_ON_ENGINE_DEATH
+        or server.shutdown_requested
+        or not engine_errored
+    ):
+        return
+
+    if server.fatal_engine_error is None:
+        server.fatal_engine_error = engine.dead_error or RuntimeError(
+            "EngineCore died unexpectedly without a recorded error"
+        )
+    server.should_exit = True
 
 
 def create_server_socket(
