@@ -298,3 +298,23 @@ def test_capture_model_profile_only_skips_lock(monkeypatch):
     runner.capture_model(profile_only=True)
 
     assert lock_calls == []
+
+
+@pytest.mark.parametrize("target_buffer", ["absent", "none", "tensor"])
+def test_get_drafter_hidden_states_tolerates_missing_target_buffer(target_buffer):
+    """Targets allocate the MTP hidden buffer only for hidden-state drafters."""
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    hidden_states = torch.zeros(4, 8)
+    buffer = torch.arange(16 * 8, dtype=torch.float32).view(16, 8)
+    if target_buffer == "absent":
+        runner.model = SimpleNamespace()
+    else:
+        returned = buffer if target_buffer == "tensor" else None
+        runner.model = SimpleNamespace(get_mtp_target_hidden_states=lambda: returned)
+
+    out = runner._get_drafter_hidden_states(hidden_states)
+
+    if target_buffer == "tensor":
+        assert torch.equal(out, buffer[:4])
+    else:
+        assert out is hidden_states

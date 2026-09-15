@@ -28,15 +28,19 @@ def test_iter_request_chunks_preserves_request_boundaries():
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 @pytest.mark.parametrize("logprobs_mode", get_args(LogprobsMode))
-def test_chunked_scores_match_full_batch(logprobs_mode: str):
+@pytest.mark.parametrize("trim_drafts", [False, True])
+def test_chunked_scores_match_full_batch(logprobs_mode: str, trim_drafts: bool):
     device = torch.device("cuda")
     cu_num_logits_np = np.array([0, 3, 4, 8, 10], dtype=np.int32)
-    num_logits_per_req = np.diff(cu_num_logits_np)
+    expected_offsets = cu_num_logits_np.copy()
+    if trim_drafts:
+        expected_offsets[1:] = [1, 2, 5, 6]
+    num_logits_per_req = np.diff(expected_offsets)
     idx_mapping_np = np.array([7, 2, 9, 1], dtype=np.int32)
     input_batch = SimpleNamespace(
         num_reqs=4,
         cu_num_logits_np=cu_num_logits_np,
-        cu_num_logits=torch.from_numpy(cu_num_logits_np).to(device),
+        cu_num_logits=torch.from_numpy(expected_offsets).to(device),
         idx_mapping_np=idx_mapping_np,
         idx_mapping=torch.from_numpy(idx_mapping_np).to(device),
         expanded_idx_mapping=torch.from_numpy(
@@ -78,7 +82,7 @@ def test_chunked_scores_match_full_batch(logprobs_mode: str):
         draft_logits=None,
         draft_sampled=torch.arange(10, device=device),
         pos=torch.arange(10, device=device),
-        max_chunk_logits=5,
+        max_chunk_logits=10 if trim_drafts else 5,
         max_num_logprobs=2,
     )
     score_logits = logits + 1 if logprobs_mode in PROCESSED_LOGPROBS_MODES else logits
@@ -87,7 +91,7 @@ def test_chunked_scores_match_full_batch(logprobs_mode: str):
         num_sampled,
         score_logits,
         input_batch.cu_num_logits,
-        input_batch.cu_num_logits_np,
+        expected_offsets,
         max_num_logprobs=2,
     )
 
@@ -105,6 +109,7 @@ def test_chunked_scores_match_full_batch(logprobs_mode: str):
         full_logprobs.selected_token_ranks,
     )
     assert (
-        chunked_logprobs.cu_num_generated_tokens
-        == full_logprobs.cu_num_generated_tokens
+        chunked_logprobs.tolists().cu_num_generated_tokens
+        == full_logprobs.tolists().cu_num_generated_tokens
+        == expected_offsets.tolist()
     )

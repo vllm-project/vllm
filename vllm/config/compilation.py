@@ -1390,6 +1390,7 @@ class CompilationConfig:
         max_num_reqs: int | None = None,
         is_profiling: bool = False,
         piecewise_capture_available: bool = True,
+        varlen_decode: bool = False,
     ) -> CUDAGraphMode:
         from vllm.v1.attention.backend import AttentionCGSupport
 
@@ -1397,6 +1398,23 @@ class CompilationConfig:
         if cudagraph_mode is None or cudagraph_mode == CUDAGraphMode.NONE:
             self.cudagraph_mode = CUDAGraphMode.NONE
             return CUDAGraphMode.NONE
+
+        # Decode batches whose per-request query lengths are decided on device
+        # (adaptive verification, variable-length drafters) are captured as
+        # varlen decode graphs, which requires a separate decode routine.
+        # Modes without one would replay such a batch on a mixed graph.
+        if (
+            varlen_decode
+            and cudagraph_mode.has_full_cudagraphs()
+            and not cudagraph_mode.separate_routine()
+        ):
+            logger.warning(
+                "CUDAGraphMode.%s cannot capture decode batches with varying "
+                "per-request query lengths; setting "
+                "cudagraph_mode=FULL_AND_PIECEWISE",
+                cudagraph_mode.name,
+            )
+            cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
 
         # Check cudagraph for mixed batch is supported
         if (

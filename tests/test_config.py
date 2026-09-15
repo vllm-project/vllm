@@ -538,12 +538,13 @@ def test_dsa_models_select_matching_mtp(model_type, expected_architecture):
     assert hf_config.architectures == [expected_architecture]
 
 
-def test_v2_model_runner_supports_extract_hidden_states():
+@pytest.mark.parametrize("method", ["extract_hidden_states", "ngram", "ngram_gpu"])
+def test_v2_model_runner_supports_speculative_method(method):
     config = VllmConfig()
     config.speculative_config = cast(
         SpeculativeConfig,
         SimpleNamespace(
-            method="extract_hidden_states",
+            method=method,
             parallel_drafting=False,
             enable_adaptive_verification=False,
         ),
