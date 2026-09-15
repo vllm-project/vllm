@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 # The GLM-5.3-Flash indexer head dimension is fixed at 128.
@@ -65,6 +66,7 @@ def _fwht_quant_kernel(
     sout_ptr,
     n_rows,
     BLOCK_R: tl.constexpr,
+    FP8_MAX: tl.constexpr,
 ):
     """Fused Hadamard-128 rotation + per-row absmax FP8 (ue8m0) quant.
 
@@ -98,8 +100,8 @@ def _fwht_quant_kernel(
     x = tl.reshape(x, (BLOCK_R, 128))
 
     absmax = tl.maximum(tl.max(tl.abs(x), axis=1), 1e-4)
-    scale = tl.exp2(tl.ceil(tl.log2(absmax * (1.0 / 448.0))))
-    y = tl.minimum(tl.maximum(x / scale[:, None], -448.0), 448.0)
+    scale = tl.exp2(tl.ceil(tl.log2(absmax * (1.0 / FP8_MAX))))
+    y = tl.minimum(tl.maximum(x / scale[:, None], -FP8_MAX), FP8_MAX)
 
     tl.store(qout_ptr + rows[:, None] * 128 + offs[None, :], y, mask=rmask[:, None])
     tl.store(sout_ptr + rows, scale, mask=rmask)
@@ -115,19 +117,24 @@ def fwht128_quant_fp8(q: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         q: ``[rows, 128]`` bf16 — one head vector per row.
 
     Returns:
-        (q_fp8 ``[rows, 128]`` float8_e4m3fn, scale ``[rows, 1]`` float32).
+        (q_fp8 ``[rows, 128]`` platform fp8 dtype (e4m3fn on CUDA,
+        e4m3fnuz on ROCm), scale ``[rows, 1]`` float32).
     """
     assert q.ndim == 2 and q.shape[1] == 128, q.shape
     assert q.dtype == torch.bfloat16
     assert q.is_contiguous()
     n_rows = q.shape[0]
-    q_fp8 = torch.empty((n_rows, 128), dtype=torch.float8_e4m3fn, device=q.device)
+    fp8_dtype = current_platform.fp8_dtype()
+    q_fp8 = torch.empty((n_rows, 128), dtype=fp8_dtype, device=q.device)
     q_scale = torch.empty((n_rows, 1), dtype=torch.float32, device=q.device)
     if n_rows == 0:
         return q_fp8, q_scale
     BLOCK_R = 32
     grid = (triton.cdiv(n_rows, BLOCK_R),)
-    _fwht_quant_kernel[grid](q, q_fp8, q_scale, n_rows, BLOCK_R=BLOCK_R, num_warps=2)
+    fp8_max = torch.finfo(fp8_dtype).max
+    _fwht_quant_kernel[grid](
+        q, q_fp8, q_scale, n_rows, BLOCK_R=BLOCK_R, FP8_MAX=fp8_max, num_warps=2
+    )
     return q_fp8, q_scale
 
 
