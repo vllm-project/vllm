@@ -1116,6 +1116,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             for request_slice, query_slice in chunk_specs
         ]
 
+    def _prefill_split_seq_lens(self, seq_lens_cpu: torch.Tensor) -> torch.Tensor:
+        """Per-request KV lengths the prefill chunker budgets logits with;
+        subclasses whose logits rows are wider than the context override."""
+        return seq_lens_cpu
+
     @staticmethod
     def _split_indexer_prefill_chunks(
         compressed_seq_lens_cpu: torch.Tensor,
@@ -1278,7 +1283,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 )
             else:
                 chunk_specs = self._split_indexer_prefill_chunks(
-                    compressed_seq_lens_cpu[num_decodes:],
+                    self._prefill_split_seq_lens(compressed_seq_lens_cpu[num_decodes:]),
                     prefill_query_lens_cpu,
                     self.max_prefill_buffer_size,
                     max_logits_bytes,
