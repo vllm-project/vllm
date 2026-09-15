@@ -28,7 +28,7 @@ from kvcr.types import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
-from vllm.v1.kv_hints import KvHintAction, KvHintsEnvelope
+from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.kv_offload.base import (
     LookupResult,
     Medium,
@@ -273,21 +273,7 @@ def test_kvcr_tier_adapts_request_and_load(monkeypatch):
     """Check hint forwarding, key conversion, load descriptors, and cleanup."""
     kvcr = RecordingKVCR()
     tier = _make_tier(monkeypatch, kvcr)
-    kv_hint = KvHintsEnvelope(
-        protocol_version="0.1",
-        message_id="msg",
-        actions=[
-            KvHintAction(
-                action_id="action",
-                action_type="kv.fetch",
-                action_version="1.0",
-                payload={
-                    "source_control_endpoint": "tcp://source:1",
-                    "block_hashes": [123],
-                },
-            )
-        ],
-    )
+    kv_hint = KvHintsEnvelope(protocol_version="0.1", message_id="msg", actions=[])
     ctx = ReqContext(
         req_id="req",
         kv_hints=kv_hint,
