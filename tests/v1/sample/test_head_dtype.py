@@ -241,3 +241,65 @@ def test_fp32_head_e2e_no_nan():
                 assert math.isfinite(position[token_id].logprob)
                 # No returned logprob is NaN.
                 assert not any(math.isnan(lp.logprob) for lp in position.values())
+
+
+def _real_bf16_lm_head(vocab_size: int, hidden_size: int, weight: torch.Tensor):
+    from unittest import mock
+
+    world_size_getter = (
+        "vllm.model_executor.layers.vocab_parallel_embedding."
+        "get_tensor_model_parallel_world_size"
+    )
+    with mock.patch(world_size_getter, return_value=2):
+        lm_head = ParallelLMHead(
+            vocab_size,
+            hidden_size,
+            params_dtype=torch.bfloat16,
+            disable_tp=True,
+        )
+    lm_head.weight_loader(lm_head.weight, weight)
+    return lm_head
+
+
+def test_fp32_head_accepts_excluded_unquantized_linear_head(default_vllm_config):
+    # An lm_head *excluded* from quantization (e.g. a ModelOpt exclude_modules
+    # config) carries UnquantizedLinearMethod rather than
+    # UnquantizedEmbeddingMethod. Both hold plain weights; the cast path must
+    # accept the excluded head. Exercises the real layer with post-load
+    # processing, which on some CPU builds frees the weight — in that case the
+    # guard must refuse cleanly (see test below) rather than crash in a kernel.
+    from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+
+    vocab_size, hidden_size = 64, 16
+    lp = _build_processor(vocab_size)
+    lp.head_dtype = torch.float32
+
+    weight = torch.randn(vocab_size, hidden_size, dtype=torch.bfloat16)
+    lm_head = _real_bf16_lm_head(vocab_size, hidden_size, weight)
+    lm_head.quant_method = UnquantizedLinearMethod()
+    lm_head.quant_method.process_weights_after_loading(lm_head)
+
+    hidden_states = torch.randn(4, hidden_size, dtype=torch.bfloat16)
+    weight_after = getattr(lm_head, "weight", None)
+    if weight_after is not None and weight_after.ndim == 2:
+        logits = lp._get_logits(hidden_states, lm_head, None)
+        assert logits.dtype == torch.float32
+        expected = torch.nn.functional.linear(hidden_states.float(), weight.float())
+        torch.testing.assert_close(logits, expected)
+    else:
+        # CPU fused-GEMM dispatch freed the weight; the guard must name the
+        # condition instead of crashing on an empty tensor.
+        with pytest.raises(ValueError, match="materialized"):
+            lp._get_logits(hidden_states, lm_head, None)
+
+
+def test_fp32_head_rejects_dematerialized_weight(default_vllm_config):
+    # dispatch_cpu_unquantized_gemm(remove_weight=True) replaces lm_head.weight
+    # with an empty tensor after fusing the GEMM; the cast path reads .weight
+    # directly and must refuse cleanly rather than crash in the kernel.
+    lp = _build_processor(64)
+    lp.head_dtype = torch.float32
+    lm_head = _FakeLmHead(torch.empty(0))
+
+    with pytest.raises(ValueError, match="materialized"):
+        lp._get_logits(torch.randn(4, 16, dtype=torch.bfloat16), lm_head, None)
