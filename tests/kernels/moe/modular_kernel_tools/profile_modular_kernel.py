@@ -159,7 +159,7 @@ def run(config: Config):
     weights: WeightTensors = WeightTensors.make(config)
     vllm_config, env_dict = config.make_env_data()
     parallel_launch_with_config(
-        config.world_size, rank_worker, vllm_config, env_dict, config, weights
+        config.world_size, rank_worker, vllm_config, env_dict, None, config, weights
     )
 
 
