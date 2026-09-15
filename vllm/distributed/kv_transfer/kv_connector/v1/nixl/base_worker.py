@@ -548,9 +548,15 @@ class NixlBaseConnectorWorker:
         self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
 
-        # DCP support is scoped to MLA, with dcp_size in (1, tp_size): either fully
-        # replicated or fully sharded. A DCP rank is always derivable this way.
-        self.dcp_rank = self.tp_rank % self.dcp_size
+        # TP1 PCP+DCP owns distinct KV shards; replicated PCP uses rank zero.
+        self.pcp_dcp_sharded = self.pcp_size > 1 and self.dcp_size > 1
+        self.transfer_tp_size = (
+            self.pcp_size if self.pcp_dcp_sharded else self.world_size
+        )
+        self.transfer_tp_rank = self.pcp_rank if self.pcp_dcp_sharded else self.tp_rank
+
+        # MLA is either fully replicated or fully sharded across transfer ranks.
+        self.dcp_rank = self.transfer_tp_rank % self.dcp_size
 
         self.num_blocks = kv_cache_config.num_blocks
         self.enable_permute_local_kv = False
@@ -686,7 +692,7 @@ class NixlBaseConnectorWorker:
         # Uses Queue for thread-safe cross-thread coordination with the
         # background handshake thread, matching the _ready_requests pattern.
         self._failed_recv_reqs: queue.Queue[ReqId] = queue.Queue()
-        self._failed_inflight_recvs: set[ReqId] = set()
+        self._recv_failures: set[ReqId] = set()
         self._pending_recv_notifs: dict[ReqId, list[tuple[str, bytes]]] = {}
 
         # Handshake metadata of this worker for NIXL transfers.
@@ -781,12 +787,16 @@ class NixlBaseConnectorWorker:
         local_dcp_size = self.dcp_size
         remote_pcp_size = agent_metadata.pcp_size
         remote_dcp_size = agent_metadata.dcp_size
-        if (local_pcp_size > 1 and remote_dcp_size > 1) or (
-            remote_pcp_size > 1 and local_dcp_size > 1
+        if remote_pcp_size > 1 and remote_dcp_size not in (1, remote_pcp_size):
+            raise NotImplementedError(
+                "Remote NixlConnector PCP+DCP does not span the full PCP group. "
+                f"Remote PCP/DCP={remote_pcp_size}/{remote_dcp_size}."
+            )
+        if (local_pcp_size > 1 and local_dcp_size == 1 and remote_dcp_size > 1) or (
+            remote_pcp_size > 1 and remote_dcp_size == 1 and local_dcp_size > 1
         ):
             raise NotImplementedError(
-                "NixlConnector PCP requires decode_context_parallel_size=1 "
-                "on both instances. "
+                "Replicated PCP cannot be paired with a DCP-sharded NIXL peer. "
                 f"Local PCP/DCP={local_pcp_size}/{local_dcp_size}; "
                 f"remote PCP/DCP={remote_pcp_size}/{remote_dcp_size}."
             )
@@ -1202,7 +1212,7 @@ class NixlBaseConnectorWorker:
                     error=e,
                     meta=meta,
                 )
-                self._handle_failed_transfer(req_id, None)
+                self._failed_recv_reqs.put(req_id)
 
         fut.add_done_callback(request_ready)
 
@@ -1210,8 +1220,8 @@ class NixlBaseConnectorWorker:
         """Register the KV Cache data in nixl."""
 
         self.transfer_topo = TransferTopology(
-            tp_rank=self.tp_rank,
-            tp_size=self.world_size,
+            tp_rank=self.transfer_tp_rank,
+            tp_size=self.transfer_tp_size,
             block_size=self.block_size,
             engine_id=self.engine_id,
             is_mla=self.use_mla,
@@ -2608,22 +2618,32 @@ class NixlBaseConnectorWorker:
         """
         assert self.transfer_topo is not None
         done_sending = self._get_new_notifs()
-        done_recving = self._pop_done_transfers(self._recving_transfers)
+        done_recving, newly_failed = self._pop_done_transfers(self._recving_transfers)
+        if newly_failed:
+            self._recv_failures.update(newly_failed)
 
         done_sending.update(self._replicated_pcp_done_sending)
         self._replicated_pcp_done_sending.clear()
 
-        # Drain queue of requests where handshake or transfer setup failed.
-        failed_recv_reqs = set[ReqId]()
+        # Process receive failures reported by background threads.
         while not self._failed_recv_reqs.empty():
             try:
-                failed_recv_reqs.add(self._failed_recv_reqs.get_nowait())
+                req_id = self._failed_recv_reqs.get_nowait()
             except queue.Empty:
                 break
+            self._handle_failed_transfer(req_id, None, self._recv_failures)
 
-        # Add failed requests to done_recving for scheduler tracking
-        # (blocks are already marked invalid, scheduler will handle recompute)
-        done_recving.update(failed_recv_reqs)
+        failed_recv_reqs: set[ReqId] = set()
+        if self._recv_failures:
+            # Keep failure bookkeeping independent of healthy request count.
+            for req_id in tuple(self._recv_failures):
+                if req_id not in self._recving_metadata:
+                    self._recv_failures.remove(req_id)
+                elif req_id not in self._recving_transfers:
+                    self._recv_failures.remove(req_id)
+                    failed_recv_reqs.add(req_id)
+            done_recving.update(failed_recv_reqs)
+
         if len(done_sending) > 0 or len(done_recving) > 0:
             logger.debug(
                 "Rank %s, get_finished: %s requests done sending "
@@ -2644,12 +2664,17 @@ class NixlBaseConnectorWorker:
 
             # Skip KV sync and post-processing for failed requests
             if req_id in failed_recv_reqs:
+                self._pending_recv_notifs.pop(req_id, None)
+                # TODO (NickLucche) handle failed transfer for HMA.
+                if not self._is_hma_required:
+                    self._invalid_block_ids.put(set(meta.local_block_ids[0]))
                 logger.warning(
                     "Skipping KV post-processing for failed request %s",
                     req_id,
                 )
                 continue
 
+            self._send_pending_recv_notifs(req_id)
             assert meta.remote is not None
             if self.use_host_buffer:
                 self.sync_recved_kv_to_device(req_id, meta)
@@ -2773,22 +2798,26 @@ class NixlBaseConnectorWorker:
                     new_expiry,
                 )
 
-    def _pop_done_transfers(self, transfers: dict[str, list[int]]) -> set[str]:
-        """
-        Pop completed xfers by checking for DONE state.
+    def _pop_done_transfers(
+        self, transfers: dict[str, list[int]]
+    ) -> tuple[set[str], set[str]]:
+        """Poll transfers, retaining handles until they can be released.
+
         Args:
-            transfers: dict of req_id -> list[running_xfer]
+            transfers: Outstanding handles by request, updated in place.
+
         Returns:
-            set of req_ids that have all done xfers
+            Requests with no outstanding handles and requests with observed
+            failures. Failed requests may still have outstanding handles.
         """
         done_req_ids: set[str] = set()
+        failed_req_ids: set[str] = set()
         for req_id, handles in list(transfers.items()):
             in_progress = []
             for handle in handles:
                 try:
                     xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                     if xfer_state == "DONE":
-                        # Get telemetry from NIXL
                         res = self.nixl_wrapper.get_xfer_telemetry(handle)
                         self.xfer_stats.record_transfer(res)
                         self.nixl_wrapper.release_xfer_handle(handle)
@@ -2797,58 +2826,52 @@ class NixlBaseConnectorWorker:
                     else:
                         self._log_failure(
                             failure_type="transfer_failed",
-                            msg="Deferring request completion until its last "
-                            "xfer is terminal",
                             req_id=req_id,
                             xfer_state=xfer_state,
                         )
-                        self._handle_failed_transfer(req_id, handle)
+                        if not self._handle_failed_transfer(
+                            req_id, handle, failed_req_ids
+                        ):
+                            in_progress.append(handle)
                 except Exception as e:
                     self._log_failure(
                         failure_type="transfer_exception",
-                        msg="Handle is unpollable; treating it as terminal",
                         req_id=req_id,
                         error=e,
                     )
-                    self._handle_failed_transfer(req_id, handle)
+                    if not self._handle_failed_transfer(req_id, handle, failed_req_ids):
+                        in_progress.append(handle)
 
             if not in_progress:
-                del transfers[req_id]
                 done_req_ids.add(req_id)
-                if req_id in self._failed_inflight_recvs:
-                    self._failed_inflight_recvs.remove(req_id)
-                    self._report_failed_recv(req_id)
-                else:
-                    self._send_pending_recv_notifs(req_id)
+                del transfers[req_id]
             else:
                 transfers[req_id] = in_progress
-        return done_req_ids
+        return done_req_ids, failed_req_ids
 
-    def _handle_failed_transfer(self, req_id: str, handle: int | None):
-        """
-        Handle a failed transfer by marking all (logical) blocks as invalid and
-        recording the failure.
-
-        Args:
-            req_id: The request ID.
-            handle: The transfer handle.
-        """
-        # A sibling READ may still be writing these blocks. Retain metadata
-        # and defer invalidation until every handle is terminal.
-        self._pending_recv_notifs.pop(req_id, None)
-        if req_id in self._recving_transfers:
-            self._failed_inflight_recvs.add(req_id)
-        else:
-            self._report_failed_recv(req_id)
-        if handle is not None:
+    def _try_release_xfer_handle(self, req_id: str, handle: int) -> bool:
+        """Release a handle, returning False if the caller must retain it."""
+        try:
             self.nixl_wrapper.release_xfer_handle(handle)
-        self.xfer_stats.record_failed_transfer()
+        except Exception as e:
+            # A status error does not guarantee that the backend stopped DMA.
+            self._log_failure(
+                failure_type="transfer_release_failed",
+                msg="Retaining handle and blocks until release succeeds",
+                req_id=req_id,
+                error=e,
+            )
+            return False
+        return True
 
-    def _report_failed_recv(self, req_id: str) -> None:
-        if (meta := self._recving_metadata.get(req_id)) is not None:
-            if not self._is_hma_required:
-                self._invalid_block_ids.put(set(meta.local_block_ids[0]))
-            self._failed_recv_reqs.put(req_id)
+    def _handle_failed_transfer(
+        self, req_id: str, handle: int | None, failed_req_ids: set[str] | None = None
+    ) -> bool:
+        """Record a failure and release its handle, returning False to retain it."""
+        self.xfer_stats.record_failed_transfer()
+        if failed_req_ids is not None:
+            failed_req_ids.add(req_id)
+        return handle is None or self._try_release_xfer_handle(req_id, handle)
 
     def _send_pending_recv_notifs(self, req_id: str) -> None:
         """Send notifications deferred by split DRAM/VRAM reads."""
@@ -3254,7 +3277,10 @@ class NixlBaseConnectorWorker:
         # Notif-only engines (push-mode D side) have no descriptor state.
         for handle in self.dst_xfer_side_handles.pop(engine_id, {}).values():
             self.nixl_wrapper.release_dlist_handle(handle)
-        for agent_name in self._remote_agents.pop(engine_id).values():
+        # Pop under the handshake lock; NIXL teardown stays outside it.
+        with self._handshake_lock:
+            agents = self._remote_agents.pop(engine_id)
+        for agent_name in agents.values():
             self.nixl_wrapper.remove_remote_agent(agent_name)
 
         self.kv_caches_base_addr.pop(engine_id, None)
