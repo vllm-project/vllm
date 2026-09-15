@@ -453,8 +453,8 @@ def plot(
     )
 
     with DummyExecutor() if len(fig_groups) <= 1 else ProcessPoolExecutor() as executor:
-        # Resolve the iterable to ensure that the workers are run
-        all(
+        # Consume every result so all figures complete and worker errors are raised.
+        list(
             executor.map(
                 partial(
                     _plot_fig,
