@@ -1964,15 +1964,29 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def topk_gating_available(cls) -> bool:
-        """Whether AITER topk_gating supports selected-mass softmax renorm."""
+        """Whether ``aiter.ops.topk.topk_gating`` exists with softmax args.
+
+        Softmax ``need_renorm`` was silently ignored until AITER #4460
+        (v0.1.20). Builds older than that should set
+        ``VLLM_ROCM_USE_AITER_TOPK_GATING=0``.
+        """
         if cls._TOPK_GATING_AVAILABLE is None:
             try:
-                from aiter.ops import topk
+                import inspect
 
-                cls._TOPK_GATING_AVAILABLE = bool(
-                    getattr(topk, "TOPK_GATING_SUPPORTS_SOFTMAX_RENORM", False)
+                from aiter.ops.topk import topk_gating
+
+                params = inspect.signature(topk_gating).parameters
+                cls._TOPK_GATING_AVAILABLE = (
+                    "need_renorm" in params and "score_func" in params
                 )
-            except ImportError:
+            except (
+                ImportError,
+                ModuleNotFoundError,
+                AttributeError,
+                ValueError,
+                TypeError,
+            ):
                 cls._TOPK_GATING_AVAILABLE = False
         return cls._TOPK_GATING_AVAILABLE
 
