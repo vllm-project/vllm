@@ -42,6 +42,7 @@ from vllm.config import (
     DiffusionConfig,
     ECTransferConfig,
     EncoderCacheManagerConfig,
+    EngramConfig,
     EPLBConfig,
     FaultToleranceConfig,
     KernelConfig,
@@ -75,7 +76,12 @@ from vllm.config.cache import (
     PrefixCachingHashAlgo,
 )
 from vllm.config.device import Device
-from vllm.config.kernel import IrOpPriorityConfig, LinearBackend, MoEBackend
+from vllm.config.kernel import (
+    IrOpPriorityConfig,
+    LinearBackend,
+    MoEBackend,
+    SparseIndexerTopkBackend,
+)
 from vllm.config.load import SafetensorsLoadStrategy
 from vllm.config.lora import MaxLoRARanks
 from vllm.config.mamba import MambaBackendEnum, MambaSSUAlgorithm
@@ -105,6 +111,7 @@ from vllm.config.parallel import (
 from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
 from vllm.config.vllm import OptimizationLevel, PerformanceMode
+from vllm.config.watermarking import WatermarkConfig
 from vllm.logger import init_logger, suppress_logging
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
@@ -488,7 +495,7 @@ class EngineArgs:
     dcp_comm_backend: DCPCommBackend | None = ParallelConfig.dcp_comm_backend
     dcp_q_replicate: bool | None = ParallelConfig.dcp_q_replicate
     dcp_kv_cache_interleave_size: int = ParallelConfig.dcp_kv_cache_interleave_size
-    cp_kv_cache_interleave_size: int = ParallelConfig.cp_kv_cache_interleave_size
+    cp_kv_cache_interleave_size: int | None = None
     data_parallel_size: int = ParallelConfig.data_parallel_size
     data_parallel_rank: int | None = None
     data_parallel_start_rank: int | None = None
@@ -506,8 +513,12 @@ class EngineArgs:
     enable_ep_weight_filter: bool = ParallelConfig.enable_ep_weight_filter
     moe_backend: MoEBackend = KernelConfig.moe_backend
     linear_backend: LinearBackend = KernelConfig.linear_backend
+    sparse_indexer_topk_backend: SparseIndexerTopkBackend = (
+        KernelConfig.sparse_indexer_topk_backend
+    )
     all2all_backend: All2AllBackend = ParallelConfig.all2all_backend
     enable_elastic_ep: bool = ParallelConfig.enable_elastic_ep
+    elastic_ep_max_dp_size: int = ParallelConfig.elastic_ep_max_dp_size
     enable_dbo: bool = ParallelConfig.enable_dbo
     ubatch_size: int = ParallelConfig.ubatch_size
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
@@ -658,6 +669,7 @@ class EngineArgs:
     spec_method: str | None = None
     spec_model: str | None = None
     spec_tokens: int | None = None
+    watermark_config: dict[str, Any] | None = None
     diffusion_config: dict[str, Any] | None = None
 
     show_hidden_metrics_for_version: str | None = (
@@ -691,12 +703,12 @@ class EngineArgs:
     pooler_config: PoolerConfig | None = ModelConfig.pooler_config
     compilation_config: CompilationConfig = get_field(VllmConfig, "compilation_config")
     attention_config: AttentionConfig = get_field(VllmConfig, "attention_config")
+    engram_config: EngramConfig | None = VllmConfig.engram_config
     mamba_config: MambaConfig = get_field(VllmConfig, "mamba_config")
     kernel_config: KernelConfig = get_field(VllmConfig, "kernel_config")
     enable_flashinfer_autotune: bool = get_field(
         KernelConfig, "enable_flashinfer_autotune"
     )
-    enable_bf16x3_router_gemm: bool | None = None
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
@@ -778,9 +790,9 @@ class EngineArgs:
 
     fail_on_environ_validation: bool = False
     gdn_prefill_backend: Literal["flashinfer", "triton", "cutedsl"] | None = None
-    kda_prefill_backend: Literal["auto", "triton", "flashkda", "flashinfer"] | None = (
-        None
-    )
+    kda_prefill_backend: (
+        Literal["auto", "triton", "flashkda", "flashinfer", "fused"] | None
+    ) = None
     kda_decode_backend: Literal["auto", "native", "flashinfer", "triton"] | None = None
 
     def __post_init__(self):
@@ -791,6 +803,8 @@ class EngineArgs:
             self.compilation_config = CompilationConfig(**self.compilation_config)
         if isinstance(self.attention_config, dict):
             self.attention_config = AttentionConfig(**self.attention_config)
+        if isinstance(self.engram_config, dict):
+            self.engram_config = EngramConfig(**self.engram_config)
         if isinstance(self.mamba_config, dict):
             self.mamba_config = MambaConfig(**self.mamba_config)
         if isinstance(self.kernel_config, dict):
@@ -1106,7 +1120,10 @@ class EngineArgs:
         )
         parallel_group.add_argument(
             "--cp-kv-cache-interleave-size",
-            **parallel_kwargs["cp_kv_cache_interleave_size"],
+            **{
+                **parallel_kwargs["cp_kv_cache_interleave_size"],
+                "default": None,
+            },
         )
         parallel_group.add_argument(
             "--prefill-context-parallel-size",
@@ -1199,6 +1216,10 @@ class EngineArgs:
         )
         parallel_group.add_argument(
             "--enable-elastic-ep", **parallel_kwargs["enable_elastic_ep"]
+        )
+        parallel_group.add_argument(
+            "--elastic-ep-max-dp-size",
+            **parallel_kwargs["elastic_ep_max_dp_size"],
         )
         parallel_group.add_argument(
             "--dbo-decode-token-threshold",
@@ -1658,16 +1679,17 @@ class EngineArgs:
             "--enable-flashinfer-autotune",
             **kernel_kwargs["enable_flashinfer_autotune"],
         )
-        kernel_group.add_argument(
-            "--enable-bf16x3-router-gemm",
-            **kernel_kwargs["enable_bf16x3_router_gemm"],
-        )
         moe_backend_kwargs = kernel_kwargs["moe_backend"]
         moe_backend_kwargs["type"] = lambda s: s.lower().replace("-", "_")
         kernel_group.add_argument("--moe-backend", **moe_backend_kwargs)
         linear_backend_kwargs = kernel_kwargs["linear_backend"]
         linear_backend_kwargs["type"] = lambda s: s.lower().replace("-", "_")
         kernel_group.add_argument("--linear-backend", **linear_backend_kwargs)
+        sparse_indexer_topk_kwargs = kernel_kwargs["sparse_indexer_topk_backend"]
+        sparse_indexer_topk_kwargs["type"] = lambda s: s.lower().replace("-", "_")
+        kernel_group.add_argument(
+            "--sparse-indexer-topk-backend", **sparse_indexer_topk_kwargs
+        )
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
@@ -1688,6 +1710,8 @@ class EngineArgs:
         vllm_group.add_argument(
             "--spec-tokens", **speculative_kwargs["num_speculative_tokens"]
         )
+        vllm_kwargs["watermark_config"]["type"] = optional_type(json.loads)
+        vllm_group.add_argument("--watermark-config", **vllm_kwargs["watermark_config"])
         vllm_kwargs["diffusion_config"]["type"] = optional_type(json.loads)
         vllm_group.add_argument(
             "--diffusion-config", "-dc", **vllm_kwargs["diffusion_config"]
@@ -1708,6 +1732,7 @@ class EngineArgs:
         vllm_group.add_argument(
             "--attention-config", "-ac", **vllm_kwargs["attention_config"]
         )
+        vllm_group.add_argument("--engram-config", **vllm_kwargs["engram_config"])
         vllm_group.add_argument("--reasoning-config", **vllm_kwargs["reasoning_config"])
         vllm_group.add_argument("--kernel-config", **vllm_kwargs["kernel_config"])
         vllm_group.add_argument(
@@ -1764,9 +1789,10 @@ class EngineArgs:
         parser.add_argument(
             "--kda-prefill-backend",
             dest="kda_prefill_backend",
-            choices=["auto", "triton", "flashkda", "flashinfer"],
+            choices=["auto", "triton", "flashkda", "flashinfer", "fused"],
             default=None,
-            help="Select KDA prefill backend.",
+            help="Select KDA prefill backend. 'flashkda' is CUDA-only and "
+            "'fused' is ROCm-only; 'auto' picks a supported backend.",
         )
         parser.add_argument(
             "--kda-decode-backend",
@@ -1993,6 +2019,14 @@ class EngineArgs:
         if isinstance(cfg, str):
             cfg = json.loads(cfg)
         return DiffusionConfig(**cfg)
+
+    def create_watermark_config(self) -> WatermarkConfig | None:
+        if self.watermark_config is None:
+            return None
+        cfg = self.watermark_config
+        if isinstance(cfg, str):
+            cfg = json.loads(cfg)
+        return WatermarkConfig(**cfg)
 
     def create_observability_config(self) -> ObservabilityConfig:
         return ObservabilityConfig(
@@ -2337,6 +2371,7 @@ class EngineArgs:
             enable_ep_weight_filter=self.enable_ep_weight_filter,
             all2all_backend=self.all2all_backend,
             enable_elastic_ep=self.enable_elastic_ep,
+            elastic_ep_max_dp_size=self.elastic_ep_max_dp_size,
             enable_dbo=self.enable_dbo,
             ubatch_size=self.ubatch_size,
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,
@@ -2358,7 +2393,14 @@ class EngineArgs:
             dcp_comm_backend=self.dcp_comm_backend,
             dcp_q_replicate=self.dcp_q_replicate,
             dcp_kv_cache_interleave_size=self.dcp_kv_cache_interleave_size,
-            cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
+            cp_kv_cache_interleave_size=(
+                self.cp_kv_cache_interleave_size
+                if self.cp_kv_cache_interleave_size is not None
+                else ParallelConfig.cp_kv_cache_interleave_size
+            ),
+            _allow_auto_resolve_cp_interleave_size=(
+                self.cp_kv_cache_interleave_size is None
+            ),
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
             assigned_physical_gpu_ids=self._resolve_device_ids(),
@@ -2374,6 +2416,7 @@ class EngineArgs:
             target_parallel_config=parallel_config,
         )
         diffusion_config = self.create_diffusion_config()
+        watermark_config = self.create_watermark_config()
 
         self._set_default_max_num_seqs_and_batched_tokens_args(
             usage_context,
@@ -2522,12 +2565,12 @@ class EngineArgs:
                     "are mutually exclusive"
                 )
             kernel_config.enable_flashinfer_autotune = self.enable_flashinfer_autotune
-        if self.enable_bf16x3_router_gemm is not None:
-            kernel_config.enable_bf16x3_router_gemm = self.enable_bf16x3_router_gemm
         if self.moe_backend != "auto":
             kernel_config.moe_backend = self.moe_backend
         if self.linear_backend != "auto":
             kernel_config.linear_backend = self.linear_backend
+        if self.sparse_indexer_topk_backend != "auto":
+            kernel_config.sparse_indexer_topk_backend = self.sparse_indexer_topk_backend
 
         # Transfer top-level ir_op_priority into KernelConfig.ir_op_priority
         for op_name, op_priority in asdict(self.ir_op_priority).items():
@@ -2594,6 +2637,17 @@ class EngineArgs:
         if self.gdn_prefill_backend is not None:
             self.additional_config["gdn_prefill_backend"] = self.gdn_prefill_backend
         if self.kda_prefill_backend is not None:
+            if (
+                self.kda_prefill_backend == "flashkda"
+                and not current_platform.is_cuda()
+            ):
+                raise ValueError(
+                    "--kda-prefill-backend=flashkda is only available on CUDA."
+                )
+            if self.kda_prefill_backend == "fused" and not current_platform.is_rocm():
+                raise ValueError(
+                    "--kda-prefill-backend=fused is only available on ROCm."
+                )
             self.additional_config["kda_prefill_backend"] = self.kda_prefill_backend
         if self.kda_decode_backend is not None:
             self.additional_config["kda_decode_backend"] = self.kda_decode_backend
@@ -2607,10 +2661,12 @@ class EngineArgs:
             load_config=load_config,
             offload_config=offload_config,
             attention_config=attention_config,
+            engram_config=self.engram_config,
             mamba_config=mamba_config,
             kernel_config=kernel_config,
             lora_config=lora_config,
             speculative_config=speculative_config,
+            watermark_config=watermark_config,
             diffusion_config=diffusion_config,
             structured_outputs_config=self.structured_outputs_config,
             observability_config=observability_config,

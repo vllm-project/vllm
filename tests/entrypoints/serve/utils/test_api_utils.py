@@ -4,6 +4,7 @@
 from argparse import Namespace
 
 import pytest
+from fastapi import FastAPI, HTTPException, Request
 
 from vllm.entrypoints.generate.base.protocol import StreamOptions
 from vllm.entrypoints.serve.utils import api_utils
@@ -12,6 +13,51 @@ from vllm.entrypoints.serve.utils.api_utils import (
     redact_sensitive_args,
     should_include_usage,
 )
+
+
+@pytest.mark.parametrize("omit", [False, True])
+@pytest.mark.parametrize("session_id", [None, "session-1"])
+def test_apply_routed_expert_session_requires_identity_only_when_enabled(
+    omit, session_id
+):
+    app = FastAPI()
+    app.state.vllm_config = Namespace(
+        model_config=Namespace(enable_omit_prefix_routed_experts=omit)
+    )
+    headers = [] if session_id is None else [(b"x-session-id", session_id.encode())]
+    raw = Request({"type": "http", "app": app, "headers": headers})
+    request = Namespace(cache_salt="original")
+    if omit and session_id is None:
+        with pytest.raises(HTTPException) as exc:
+            api_utils.apply_routed_expert_session(request, raw)
+        assert exc.value.status_code == 400
+        assert request.cache_salt == "original"
+    else:
+        api_utils.apply_routed_expert_session(request, raw)
+        assert (request.cache_salt != "original") is omit
+
+
+def test_apply_routed_expert_session_render_generate_roundtrip():
+    app = FastAPI()
+    app.state.vllm_config = Namespace(
+        model_config=Namespace(enable_omit_prefix_routed_experts=True)
+    )
+    raw = Request(
+        {"type": "http", "app": app, "headers": [(b"x-session-id", b"session-1")]}
+    )
+    request = Namespace(cache_salt="original")
+    api_utils.apply_routed_expert_session(request, raw)
+    rendered_salt = request.cache_salt
+    raw = Request({"type": "http", "app": app, "headers": []})
+    api_utils.apply_routed_expert_session(request, raw, allow_encoded_session=True)
+    assert request.cache_salt == rendered_salt
+    raw = Request(
+        {"type": "http", "app": app, "headers": [(b"x-session-id", b"session-2")]}
+    )
+    with pytest.raises(HTTPException) as exc:
+        api_utils.apply_routed_expert_session(request, raw, allow_encoded_session=True)
+    assert exc.value.status_code == 400
+    assert request.cache_salt == rendered_salt
 
 
 @pytest.mark.parametrize(
@@ -120,17 +166,24 @@ class TestRedactSensitiveArgs:
     API_KEY = "sk-test-secret-12345"
 
     def test_redact_replaces_sensitive_values_only(self):
-        args = {"api_key": self.API_KEY, "hf_token": "hf_secret", "other": "visible"}
+        args = {
+            "api_key": self.API_KEY,
+            "hf_token": "hf_secret",
+            "watermark_config": {"algorithm": "gumbel", "key": 42},
+            "other": "visible",
+        }
         redacted = redact_sensitive_args(args)
         assert redacted == {
             "api_key": "***",
             "hf_token": "***",
+            "watermark_config": "***",
             "other": "visible",
         }
         # original dict must not be mutated
         assert args == {
             "api_key": self.API_KEY,
             "hf_token": "hf_secret",
+            "watermark_config": {"algorithm": "gumbel", "key": 42},
             "other": "visible",
         }
 
