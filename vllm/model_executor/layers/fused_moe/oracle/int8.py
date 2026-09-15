@@ -191,7 +191,7 @@ def make_int8_moe_quant_config(
 
     if int8_backend == Int8MoeBackend.HUMMING:
         from vllm.model_executor.layers.fused_moe import RoutedExperts
-        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+        from vllm.model_executor.layers.quantization.utils.humming import (
             get_humming_moe_quant_config,
         )
 
@@ -252,7 +252,7 @@ def convert_to_int8_moe_kernel_format(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Convert INT8 MoE weights to backend-specific kernel format."""
     if int8_backend == Int8MoeBackend.HUMMING:
-        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+        from vllm.model_executor.layers.quantization.utils.humming import (
             convert_to_humming_moe_kernel_format,
         )
 

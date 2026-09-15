@@ -388,7 +388,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
         self, layer: RoutedExperts
     ) -> FusedMoEQuantConfig | None:
         if self.wna16_backend == WNA16MoEBackend.HUMMING:
-            from vllm.model_executor.layers.quantization.utils.humming_utils import (
+            from vllm.model_executor.layers.quantization.utils.humming import (
                 get_humming_moe_quant_config,
             )
 

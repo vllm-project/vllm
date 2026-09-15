@@ -102,6 +102,37 @@ class MoEPermuteScratch:
         return topk_ids_int32
 
 
+def moe_prepare_scatter(
+    topk_ids: torch.Tensor,
+    expert_map: torch.Tensor | None,
+    scratch: MoEPermuteScratch,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Generate expert offsets and shared scatter/unpermute destination indices."""
+    assert topk_ids.device == scratch.device
+    assert topk_ids.size(0) <= scratch.max_num_tokens
+    assert topk_ids.size(1) == scratch.topk
+    n_token, topk = topk_ids.shape
+    expanded_rows = topk_ids.numel()
+    inverse = scratch.inv_permuted_idx[:expanded_rows].view(n_token, topk)
+    if expanded_rows == 0:
+        scratch.expert_first_token_offset.zero_()
+        return scratch.expert_first_token_offset, inverse
+    torch.ops._moe_C.moe_prepare_scatter(
+        scratch.prepare_topk_ids(topk_ids),
+        scratch.token_expert_indices_view(n_token),
+        expert_map,
+        scratch.num_experts,
+        scratch.num_local_experts,
+        scratch.expert_first_token_offset,
+        inverse,
+        scratch.sort_workspace,
+        scratch.permuted_experts_id[:expanded_rows].view(n_token, topk),
+        scratch.sorted_row_idx[:expanded_rows].view(n_token, topk),
+        scratch.topk_ids_for_sort[:expanded_rows].view(n_token, topk),
+    )
+    return scratch.expert_first_token_offset, inverse
+
+
 def moe_permute(
     hidden_states: torch.Tensor,
     a1q_scale: torch.Tensor | None,
