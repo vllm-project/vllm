@@ -22,6 +22,7 @@ from vllm.distributed import (
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.deepseek_v41.common.engram import (
     DEAD_ID,
@@ -351,6 +352,28 @@ class Engram(BaseEngram):
     """NVIDIA Engram with asynchronous offload and node-local DP lookup."""
 
     _prefetch_stream: torch.cuda.Stream | None = None
+    _prefetch_done: torch.cuda.Event | None = None
+
+    def __init__(
+        self,
+        config,
+        quant_config: QuantizationConfig | None,
+        layout: EngramLayout,
+        layer_hash_index: int,
+        use_sequence_parallel: bool,
+        prefix: str,
+        *,
+        prefetch_stream: torch.cuda.Stream | None = None,
+    ) -> None:
+        self._prefetch_stream = prefetch_stream
+        super().__init__(
+            config,
+            quant_config,
+            layout,
+            layer_hash_index,
+            use_sequence_parallel,
+            prefix,
+        )
 
     def _create_embedding(
         self, layout: EngramLayout, layer_hash_index: int
@@ -368,7 +391,13 @@ class Engram(BaseEngram):
     def _init_staging(self, max_tokens: int, head_dim: int) -> None:
         super()._init_staging(max_tokens * self.embed_tokens.dp_size, head_dim)
         if self.embed_tokens.cpu_offload:
-            self._prefetch_stream = torch.cuda.Stream(device=self.staged_rows.device)
+            if self._prefetch_stream is None:
+                self._prefetch_stream = torch.cuda.Stream(
+                    device=self.staged_rows.device
+                )
+            self._prefetch_done = torch.cuda.Event()
+        else:
+            self._prefetch_stream = None
 
     def prepare_embeddings(self, hash_ids: torch.Tensor) -> None:
         """Prefetch local shared rows or the DP group's gathered hash IDs."""
@@ -388,14 +417,17 @@ class Engram(BaseEngram):
         hash_ids.record_stream(stream)
         with torch.cuda.stream(stream):
             self.embed_tokens.lookup(hash_ids, rows, background=True)
+            assert self._prefetch_done is not None
+            self._prefetch_done.record(stream)
 
     @eager_break_during_capture
-    def _finish_prefetch(self, stream: torch.cuda.Stream) -> None:
-        torch.cuda.current_stream().wait_stream(stream)
+    def _finish_prefetch(self, event: torch.cuda.Event) -> None:
+        torch.cuda.current_stream().wait_event(event)
 
     def _ready_rows(self, num_tokens: int) -> torch.Tensor:
         if self._prefetch_stream is not None:
-            self._finish_prefetch(self._prefetch_stream)
+            assert self._prefetch_done is not None
+            self._finish_prefetch(self._prefetch_done)
         if self.embed_tokens.dp_size > 1:
             slot = engram_gathered_num_tokens()
             staged = self.staged_rows[: slot * self.embed_tokens.dp_size]
