@@ -33,7 +33,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.quantization.utils.fp8_utils import is_fp8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
     kFp8Dynamic128Sym,
     kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
@@ -167,31 +169,34 @@ class Config:
 
         return vllm_config, env_dict
 
+    def fp8_quant_key_pair(self) -> tuple[QuantKey, QuantKey]:
+        """Derive the (weight_quant_key, activation_quant_key) pair an FP8
+        quant config of this shape corresponds to (either OCP or FNUZ FP8,
+        see ``current_platform.fp8_dtype()``)."""
+        if self.quant_block_shape is not None:
+            return kFp8Static128BlockSym, kFp8Dynamic128Sym
+        if self.is_per_out_ch_quant:
+            return (
+                kFp8StaticChannelSym,
+                kFp8DynamicTokenSym
+                if self.is_per_act_token_quant
+                else kFp8StaticTensorSym,
+            )
+        return (
+            kFp8StaticTensorSym,
+            kFp8DynamicTensorSym
+            if self.is_per_act_token_quant
+            else kFp8StaticTensorSym,
+        )
+
     def fe_supports_quant_scheme(self) -> bool:
         """Check if the fused experts class supports this quant config.
         See https://github.com/ROCm/aiter/issues/2419 for AITER gaps."""
         if self.quant_config is None or self.quant_dtype is None:
             return True
-        if self.quant_dtype != torch.float8_e4m3fn:
+        if not is_fp8(self.quant_dtype):
             return True
-        # Derive QuantKeys from test config
-        if self.quant_block_shape is not None:
-            w_key = kFp8Static128BlockSym
-            a_key = kFp8Dynamic128Sym
-        elif self.is_per_out_ch_quant:
-            w_key = kFp8StaticChannelSym
-            a_key = (
-                kFp8DynamicTokenSym
-                if self.is_per_act_token_quant
-                else kFp8StaticTensorSym
-            )
-        else:
-            w_key = kFp8StaticTensorSym
-            a_key = (
-                kFp8DynamicTensorSym
-                if self.is_per_act_token_quant
-                else kFp8StaticTensorSym
-            )
+        w_key, a_key = self.fp8_quant_key_pair()
         fe_cls = self.fused_experts_type
         if hasattr(fe_cls, "_supports_quant_scheme"):
             try:
@@ -201,10 +206,7 @@ class Config:
         return True
 
     def is_fp8_block_quantized(self):
-        return (
-            self.quant_dtype == torch.float8_e4m3fn
-            and self.quant_block_shape is not None
-        )
+        return is_fp8(self.quant_dtype) and self.quant_block_shape is not None
 
     def is_batched_prepare_finalize(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
@@ -372,7 +374,7 @@ class WeightTensors:
     def is_quantized(self) -> bool:
         # or w1_scale is not None?
         return (
-            self.w1.dtype == torch.float8_e4m3fn
+            is_fp8(self.w1.dtype)
             or self.w1.dtype == torch.uint8
             or self.w1.dtype == torch.int8
         )
