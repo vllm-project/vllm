@@ -6,11 +6,91 @@
 
 set -euo pipefail
 
+ZEN_CPU_DEPENDENCIES=(
+    ".buildkite/image_build/image_build.yaml"
+    ".buildkite/image_build/image_build_zen_cpu.sh"
+    ".buildkite/scripts/rocm/build-test-image.sh"
+    "docker/Dockerfile.zen"
+    "docker/Dockerfile.cpu"
+    "requirements/cpu.txt"
+    "requirements/build/cpu.txt"
+    "requirements/build/rust.txt"
+    "requirements/test/cpu.txt"
+    "requirements/test/cuda.in"
+    "requirements/lint.txt"
+    "rust/"
+    "rust-toolchain.toml"
+    "build_rust.sh"
+    "tools/build_rust.py"
+    "use_existing_torch.py"
+    "csrc/cpu/"
+    "cmake/cpu_extension.cmake"
+)
+
 metadata_get() {
     local key="$1"
     if command -v buildkite-agent >/dev/null 2>&1; then
         buildkite-agent meta-data get "${key}" 2>/dev/null || true
     fi
+}
+
+get_changed_files() {
+    local merge_base=""
+
+    if [[ "${BUILDKITE_BRANCH:-}" == "main" ]]; then
+        git diff --name-only --diff-filter=ACMDR HEAD~1 HEAD 2>/dev/null || return 1
+        return 0
+    fi
+
+    merge_base="$(git merge-base origin/main HEAD 2>/dev/null || true)"
+    if [[ -z "${merge_base}" ]]; then
+        return 1
+    fi
+
+    git diff --name-only --diff-filter=ACMDR "${merge_base}" HEAD 2>/dev/null
+}
+
+should_build_zen_cpu_image() {
+    local mode="${VLLM_ZEN_CPU_BUILD:-auto}"
+    local changed_files=()
+    local file=""
+    local dependency=""
+
+    if [[ "${mode}" == "0" ]]; then
+        echo "Skipping Zen CPU validation because VLLM_ZEN_CPU_BUILD=0"
+        return 1
+    fi
+
+    if [[ "${mode}" == "1" ]]; then
+        echo "Running Zen CPU validation because VLLM_ZEN_CPU_BUILD=1"
+        return 0
+    fi
+
+    if ! mapfile -t changed_files < <(get_changed_files); then
+        echo "Could not determine changed files; running Zen CPU validation defensively"
+        return 0
+    fi
+
+    for file in "${changed_files[@]}"; do
+        for dependency in "${ZEN_CPU_DEPENDENCIES[@]}"; do
+            if [[ "${file}" == "${dependency}" || "${file}" == "${dependency}"* ]]; then
+                echo "Detected Zen CPU build input change: ${file}"
+                return 0
+            fi
+        done
+    done
+
+    echo "No Zen CPU build inputs changed; skipping Zen CPU validation"
+    return 1
+}
+
+maybe_build_zen_cpu_image() {
+    if ! should_build_zen_cpu_image; then
+        return 0
+    fi
+
+    echo "--- :docker: Building Zen CPU validation image on amd-cpu"
+    .buildkite/image_build/image_build_zen_cpu.sh "${BUILDKITE_COMMIT}"
 }
 
 load_digest_handoff() {
@@ -68,10 +148,12 @@ main() {
     if [[ "${ROCM_CI_ARTIFACT_ONLY:-0}" == "1" && "${base_refreshed}" != "1" ]]; then
         echo "ROCM_CI_ARTIFACT_ONLY=1; building ROCm wheel artifact only"
         IMAGE_TAG="" bash .buildkite/scripts/ci-bake-rocm.sh test-rocm-ci-with-artifacts
+        maybe_build_zen_cpu_image
         return
     fi
 
     bash .buildkite/scripts/ci-bake-rocm.sh test-rocm-ci-with-wheel
+    maybe_build_zen_cpu_image
 }
 
 main "$@"
