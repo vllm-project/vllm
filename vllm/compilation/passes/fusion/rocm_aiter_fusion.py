@@ -11,6 +11,7 @@ from torch._inductor.pattern_matcher import PatternMatcherPass
 
 import vllm.ir.ops
 import vllm.model_executor.layers.quantization.utils.fp8_utils  # noqa: F401
+import vllm.model_executor.layers.quantization.utils.mxfp8_utils  # noqa: F401
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
@@ -543,6 +544,104 @@ class AiterRMSNormGatedFp8GroupQuantPattern(AiterRMSNormQuantPattern):
         )
 
 
+class AiterRMSNormMxfp8QuantPattern:
+    """Fuse ``rms_norm`` + MXFP8 activation quant into one AITER kernel.
+
+    The MXFP8 linear path quantizes its activation in a separate launch right
+    before the ``tl.dot_scaled`` GEMM (``_mxfp8_dot_scaled_linear``), and the
+    trace shows that pair adjacent every time it appears. AITER's fused norm
+    can emit the same (FP8 E4M3, per-32 E8M0 scale) pair directly, so the
+    standalone quant launch is removable rather than merely cheap.
+
+    Unlike the FP8 siblings above there is no ``MatcherQuantFP8`` to reuse:
+    MXFP8 quant is a single custom op, so the pattern calls it directly.
+    """
+
+    FUSED_OP = rocm_aiter_ops.get_rmsnorm_mxfp8_quant_op()
+    QUANT_OP = torch.ops.vllm.mxfp8_quantize.default
+
+    def __init__(self, epsilon: float) -> None:
+        self.epsilon = epsilon
+        self.device = torch.device("cuda")
+
+    def empty(self, *args: Any, **kwargs: Any) -> torch.Tensor:
+        return torch.empty(*args, dtype=torch.bfloat16, device=self.device, **kwargs)
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            result_rms = torch.ops.vllm_ir.rms_norm(input, weight, self.epsilon)
+            result, scale = self.QUANT_OP(result_rms, False, 0)
+            return result, scale
+
+        def replacement(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            at = self.FUSED_OP(
+                x=input,
+                weight=weight,
+                variance_epsilon=self.epsilon,
+            )
+            return at[0], at[1]
+
+        pm.register_replacement(
+            pattern,
+            replacement,
+            # hidden dim must be a multiple of the 32-element MX block
+            [self.empty(5, 64), self.empty(64)],
+            pm.fwd_only,
+            pm_pass,
+        )
+
+
+class AiterFusedAddRMSNormMxfp8QuantPattern(AiterRMSNormMxfp8QuantPattern):
+    """Residual-add sibling of :class:`AiterRMSNormMxfp8QuantPattern`.
+
+    This is the shape that actually dominates the DeepSeek-V4.1 decode step:
+    ``aiter::add_rmsnorm_quant_kernel`` immediately precedes the MXFP8 quant
+    for the majority of its occurrences.
+    """
+
+    FUSED_OP = rocm_aiter_ops.get_rmsnorm_with_add_mxfp8_quant_op()
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            residual: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            result_rms, residual_out = torch.ops.vllm_ir.fused_add_rms_norm(
+                input, residual, weight, self.epsilon
+            )
+            result, scale = self.QUANT_OP(result_rms, False, 0)
+            return result, residual_out, scale
+
+        def replacement(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            residual: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            at = self.FUSED_OP(
+                x=input,
+                residual=residual,
+                weight=weight,
+                variance_epsilon=self.epsilon,
+            )
+            # result, residual, scale
+            return at[0], at[1], at[2]
+
+        pm.register_replacement(
+            pattern,
+            replacement,
+            [self.empty(5, 64), self.empty(64), self.empty(5, 64)],
+            pm.fwd_only,
+            pm_pass,
+        )
+
+
 class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
     """
     This pass fuses aiter rms_norm & vllm/aiter quant custom ops
@@ -613,6 +712,14 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
                 epsilon, FP8_DTYPE, GroupShape(1, 128), match_aiter_quant_op
             ).register(self.patterns)
 
+            # Fuse (fused_add_)rms_norm + MXFP8 activation quant, so the MX
+            # GEMM consumes the norm's block scales instead of re-quantizing.
+            # Register the fused-add variant before the plain one, for the
+            # same reason as the FP8 patterns above.
+            if rocm_aiter_ops.is_mxfp8_norm_fusion_enabled():
+                AiterFusedAddRMSNormMxfp8QuantPattern(epsilon).register(self.patterns)
+                AiterRMSNormMxfp8QuantPattern(epsilon).register(self.patterns)
+
             # When quant_fp8 custom ops are disabled, both AITER and native
             # quant matchers trace through QuantFP8's native implementation.
             # Registering both variants would create duplicate Inductor
@@ -676,6 +783,8 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
             DoubleAiterRMSFp8GroupQuantPattern,
             DoubleAiterRMSFp8GroupQuantViewPattern,
             AiterRMSNormGatedFp8GroupQuantPattern,
+            AiterRMSNormMxfp8QuantPattern,
+            AiterFusedAddRMSNormMxfp8QuantPattern,
         ]
         return self.hash_source(self, *fusion_patterns)
 
