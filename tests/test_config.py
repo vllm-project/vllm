@@ -252,6 +252,47 @@ def test_kv_offloading_does_not_skip_dcp_interleave_validation():
         VllmConfig.validate_block_size(config)
 
 
+def test_connector_can_preserve_dcp_interleave_size(caplog):
+    class PerSlotConnector:
+        @classmethod
+        def preserves_dcp_kv_cache_interleave_size(cls, extra_config):
+            del extra_config
+            return True
+
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=2,
+            dcp_kv_cache_interleave_size=1,
+            cp_kv_cache_interleave_size=1,
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="NixlConnector",
+            kv_role="kv_both",
+        ),
+    )
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=5760))
+        ]
+    )
+
+    with (
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.factory."
+            "KVConnectorFactory.get_connector_class",
+            return_value=PerSlotConnector,
+        ),
+        caplog.at_level(logging.INFO),
+    ):
+        VllmConfig.adjust_dcp_kv_cache_interleave_size(config, kv_cache_config)
+
+    assert config.parallel_config.cp_kv_cache_interleave_size == 1
+    assert (
+        "KV connector PerSlotConnector preserves cp_kv_cache_interleave_size=1 for DCP"
+        in caplog.text
+    )
+
+
 def test_compile_config_repr_succeeds():
     # setup: VllmBackend mutates the config object
     config = VllmConfig()
