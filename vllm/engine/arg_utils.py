@@ -1784,8 +1784,11 @@ class EngineArgs:
             dest="kda_prefill_backend",
             choices=["auto", "triton", "flashkda", "flashinfer", "fused"],
             default=None,
-            help="Select KDA prefill backend. 'flashkda' is CUDA-only and "
-            "'fused' is ROCm-only; 'auto' picks a supported backend.",
+            help=(
+                "Select KDA prefill backend. On ROCm, 'flashkda' uses AITER "
+                "and 'fused' uses the native fused kernels; 'auto' picks a "
+                "supported backend."
+            ),
         )
         parser.add_argument(
             "--kda-decode-backend",
@@ -2629,12 +2632,11 @@ class EngineArgs:
         if self.gdn_prefill_backend is not None:
             self.additional_config["gdn_prefill_backend"] = self.gdn_prefill_backend
         if self.kda_prefill_backend is not None:
-            if (
-                self.kda_prefill_backend == "flashkda"
-                and not current_platform.is_cuda()
+            if self.kda_prefill_backend == "flashkda" and not (
+                current_platform.is_cuda() or current_platform.is_rocm()
             ):
                 raise ValueError(
-                    "--kda-prefill-backend=flashkda is only available on CUDA."
+                    "--kda-prefill-backend=flashkda is only available on CUDA or ROCm."
                 )
             if self.kda_prefill_backend == "fused" and not current_platform.is_rocm():
                 raise ValueError(
