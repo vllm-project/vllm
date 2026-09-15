@@ -205,6 +205,12 @@ class TieringMetricsTracker:
             self._stats.increase_counter(
                 time_metric, completed_job.transfer_time, labelvalues
             )
+            if transfer_job.is_promotion:
+                self._stats.observe_histogram(
+                    TieringOffloadingMetrics.PROMOTION_LATENCY,
+                    completed_job.transfer_time,
+                    labelvalues,
+                )
 
     def _observe_active_transfer_stats(self, stats: OffloadingConnectorStats) -> None:
         for tier_idx, state in enumerate(self._tier_states):
