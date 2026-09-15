@@ -861,6 +861,12 @@ class GPUModelRunner(
         self.num_accepted_tokens = self._make_buffer(
             self.max_num_reqs, dtype=torch.int32
         )
+        # The count includes the bonus token, so one is the minimum, and the
+        # recurrent kernels pick their state slot as `accepted - 1`. Dummy runs
+        # skip `_prepare_inputs`, so the zeros from the allocation would reach
+        # those kernels as index -1 and fault on the out-of-bounds read.
+        self.num_accepted_tokens.np.fill(1)
+        self.num_accepted_tokens.copy_to_gpu()
 
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -2241,7 +2247,7 @@ class GPUModelRunner(
             )
             self.mrope_positions.gpu[:, :total_num_scheduled_tokens] += drift
 
-        use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
+        use_spec_decode = self.speculative_config is not None
         if not use_spec_decode:
             # NOTE(woosuk): Due to chunked prefills, the batch may contain
             # partial requests. While we should not sample any token
@@ -2268,6 +2274,18 @@ class GPUModelRunner(
                 num_draft_tokens[req_idx] = draft_len
                 if num_scheduled_tokens[req_idx] == draft_len + 1:
                     num_decode_draft_tokens[req_idx] = draft_len
+            # Some recurrent backends may read the previous step's state at an
+            # offset that only the speculative path applies. So a decode step
+            # that got no drafts must still count as a speculative row with
+            # zero drafts, not as a plain decode. Prompt chunks are left out:
+            # their tokens are prompt tokens and carry no such offset.
+            zero_draft_decode_mask = (
+                self.input_batch.num_computed_tokens_cpu[:num_reqs]
+                >= self.input_batch.num_prompt_tokens[:num_reqs]
+            ) & (num_scheduled_tokens[:num_reqs] == 1)
+            num_decode_draft_tokens[
+                (num_decode_draft_tokens < 0) & zero_draft_decode_mask
+            ] = 0
             spec_decode_metadata = self._calc_spec_decode_metadata(
                 num_draft_tokens, cu_num_tokens
             )
@@ -4381,7 +4399,7 @@ class GPUModelRunner(
                         self.mamba_state_idx,
                     )
 
-            use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
+            use_spec_decode = self.speculative_config is not None
             ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
 
             slot_mappings_by_group, slot_mappings = self._get_slot_mappings(
