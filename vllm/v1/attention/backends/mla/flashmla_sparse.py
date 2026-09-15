@@ -20,7 +20,11 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.platform_utils import num_compute_units
-from vllm.utils.torch_utils import current_stream, is_quantized_kv_cache
+from vllm.utils.torch_utils import (
+    async_tensor_h2d,
+    current_stream,
+    is_quantized_kv_cache,
+)
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -48,7 +52,6 @@ from vllm.v1.attention.ops.flashmla import (
     get_mla_metadata,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -519,7 +522,7 @@ class FlashMLASparseMetadataBuilder(
                 )
                 workspace_rows = torch.from_numpy(rows_per_rank.astype(np.int32))
                 max_prefill_buffer_size //= self.dcp_world_size
-                entry_rows = async_copy_to_gpu(row_bounds[:-1], device=self.device)
+                entry_rows = async_tensor_h2d(row_bounds[:-1], device=self.device)
                 prefill_block_table = prefill_block_table.index_select(0, entry_rows)
                 prefill_seq_lens = prefill_seq_lens.index_select(0, entry_rows)
             num_entries = len(workspace_rows)
