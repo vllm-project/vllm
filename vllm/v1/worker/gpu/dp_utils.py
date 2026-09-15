@@ -126,12 +126,12 @@ def sync_cudagraph_and_dp_padding(
             parallel_config,
             # Thresholds only grow with the token count, so holding the smallest
             # rank to them holds every rank to them.
-            int(num_tokens_across_dp.min()),
+            int(synchronized_token_counts.min()),
             uniform_decode=uniform_decode_across_dp,
         ):
             # Expert all-to-all requires every rank to split and pad equally.
             # Empty microbatches run as dummy batches.
-            ubatch_num_tokens = int(num_tokens_across_dp.max())
+            ubatch_num_tokens = int(synchronized_token_counts.max())
             num_ubatches = get_num_ubatches(parallel_config)
             ubatch_desc = None
             if cudagraph_manager is not None:
@@ -144,7 +144,7 @@ def sync_cudagraph_and_dp_padding(
                     num_active_loras=num_active_loras,
                     num_ubatches=num_ubatches,
                 )
-                if 2 * int(num_tokens_across_dp.min()) < ubatch_desc.num_tokens:
+                if 2 * int(synchronized_token_counts.min()) < ubatch_desc.num_tokens:
                     # If one rank has an empty second microbatch, run without
                     # CUDA graphs.
                     ubatch_desc = None
@@ -164,6 +164,11 @@ def sync_cudagraph_and_dp_padding(
             return ubatch_desc, DPSyncState(
                 num_tokens_across_dp=torch.full_like(
                     num_tokens_across_dp, ubatch_num_tokens
+                ),
+                moe_non_sp_token_counts=(
+                    torch.full_like(moe_non_sp_token_counts, ubatch_num_tokens)
+                    if moe_non_sp_token_counts is not None
+                    else None
                 ),
                 uniform_token_count=synced_uniform_token_count,
                 eager=ubatch_desc.cg_mode == CUDAGraphMode.NONE,

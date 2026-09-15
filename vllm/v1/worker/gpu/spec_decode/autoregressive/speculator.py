@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -168,7 +169,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
         self.on_prefill_begin(self.max_num_reqs)
         self.prefill_cudagraph_manager.capture(
-            self._prefill,
+            self._with_capture_dp_sync(self._prefill),
             self.model_state,
             self.target_input_buffers,
             self.block_tables,
@@ -190,7 +191,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             else self._generate_draft
         )
         self.decode_cudagraph_manager.capture(
-            decode_fn,
+            self._with_capture_dp_sync(decode_fn),
             self.model_state,
             self.input_buffers,
             self.block_tables,
@@ -199,6 +200,53 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             progress_bar_desc="Capturing decode CUDA graphs",
         )
         self.on_multi_step_decode_end(self.max_num_reqs)
+
+    def _with_capture_dp_sync(
+        self, forward_fn: Callable[..., None]
+    ) -> Callable[..., None]:
+        """Adapt a draft forward to `SpeculatorCudaGraphManager.capture`.
+
+        The manager passes the capture's uniform DP token counts as a tensor,
+        while the draft forwards take a `DPSyncState` so they can also carry
+        the MoE non-SP token counts that DP x PCP expert parallelism needs.
+        """
+        parallel_config = self.vllm_config.parallel_config
+        pcp_size = parallel_config.prefill_context_parallel_size
+        needs_moe_non_sp_counts = (
+            parallel_config.enable_expert_parallel and pcp_size > 1
+        )
+
+        def capture_forward_fn(
+            num_reqs: int,
+            num_tokens: int,
+            attn_metadata: dict[str, Any] | None,
+            slot_mappings: dict[str, torch.Tensor] | None,
+            num_tokens_across_dp: torch.Tensor | None,
+            cudagraph_runtime_mode: CUDAGraphMode,
+        ) -> None:
+            dp_sync = None
+            if num_tokens_across_dp is not None:
+                dp_sync = DPSyncState(
+                    num_tokens_across_dp=num_tokens_across_dp,
+                    moe_non_sp_token_counts=(
+                        num_tokens_across_dp.repeat(pcp_size)
+                        if needs_moe_non_sp_counts
+                        else None
+                    ),
+                    uniform_token_count=None,
+                    eager=False,
+                    num_reqs=num_reqs,
+                )
+            forward_fn(
+                num_reqs,
+                num_tokens,
+                attn_metadata,
+                slot_mappings,
+                dp_sync,
+                cudagraph_runtime_mode,
+            )
+
+        return capture_forward_fn
 
     @torch.inference_mode()
     def propose(
