@@ -682,12 +682,7 @@ def hash_block_tokens(
 
 def resolve_dcp_kv_block_size(spec: KVCacheSpec, dcp_world_size: int) -> int:
     """Return the token span of a cache block under DCP."""
-    layer_specs = iter_layer_specs(spec)
-    if len(layer_specs) > 0 and all(
-        isinstance(layer_spec, AttentionSpec) for layer_spec in layer_specs
-    ):
-        return spec.block_size * dcp_world_size
-    return spec.block_size
+    return spec.block_size * (dcp_world_size if spec.dcp_sharded else 1)
 
 
 def resolve_dcp_kv_cache_spec(spec: KVCacheSpec, dcp_world_size: int) -> KVCacheSpec:
@@ -705,28 +700,6 @@ def resolve_dcp_kv_cache_spec(spec: KVCacheSpec, dcp_world_size: int) -> KVCache
             },
         )
     return replace(spec, block_size=block_size)
-
-
-def dcp_world_size_for_kv_cache_spec(spec: KVCacheSpec, dcp_world_size: int) -> int:
-    """Return the DCP size that owns this group's block geometry.
-
-    Full-attention KV (including MLA) is sharded across DCP ranks, so prefix
-    hashing and manager ``block_size`` use the process DCP size. Other specs
-    keep replicated per-rank state (Mamba, sliding window, chunked-local) and
-    must keep ``dcp_world_size=1`` even when the process runs with DCP > 1.
-
-    Draft MLA groups on the sharded DSpark path are ``FullAttentionSpec`` /
-    ``MLAAttentionSpec`` and therefore keep the process DCP size. A replicated
-    draft group would need a different spec, not this helper.
-    """
-    if dcp_world_size <= 1:
-        return 1
-    inner = spec
-    if isinstance(spec, UniformTypeKVCacheSpecs):
-        inner = next(iter(spec.kv_cache_specs.values()))
-    if isinstance(inner, FullAttentionSpec):
-        return dcp_world_size
-    return 1
 
 
 def resolve_kv_cache_block_sizes(
@@ -752,6 +725,8 @@ def resolve_kv_cache_block_sizes(
     groups = kv_cache_config.kv_cache_groups
 
     if len(groups) <= 1:
+        if groups and not groups[0].kv_cache_spec.dcp_sharded:
+            dcp = 1
         bs = cache_config.block_size * dcp
         return bs, bs
 
@@ -1935,6 +1910,22 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
         kv_cache_spec: The kv cache spec of each attention layer in the model
 
     """
+
+    replicated_specs: dict[str, KVCacheSpec] = {
+        name: spec for name, spec in kv_cache_spec.items() if not spec.dcp_sharded
+    }
+    if replicated_specs and len(replicated_specs) < len(kv_cache_spec):
+        target_specs = {
+            name: spec
+            for name, spec in kv_cache_spec.items()
+            if name not in replicated_specs
+        }
+        unify_hybrid_kv_cache_specs(target_specs)
+        unify_hybrid_kv_cache_specs(replicated_specs)
+        kv_cache_spec.update(target_specs)
+        kv_cache_spec.update(replicated_specs)
+        return
+
     if is_kv_cache_spec_uniform(
         kv_cache_spec
     ) or UniformTypeKVCacheSpecs.is_uniform_type(kv_cache_spec):
@@ -2276,10 +2267,15 @@ def _ensure_min_page_size(
     scaled: list[KVCacheGroupSpec] = []
     for g in groups:
         s = g.kv_cache_spec
-        kw: dict[str, int] = {"block_size": s.block_size * scale}
         if isinstance(s, (AttentionSpec, MambaSpec)) and s.page_size_padded is not None:
-            kw["page_size_padded"] = s.page_size_padded * scale
-        scaled.append(KVCacheGroupSpec(g.layer_names, replace(s, **kw)))
+            s = replace(
+                s,
+                block_size=s.block_size * scale,
+                page_size_padded=s.page_size_padded * scale,
+            )
+        else:
+            s = replace(s, block_size=s.block_size * scale)
+        scaled.append(KVCacheGroupSpec(g.layer_names, s))
     return scaled, common_page
 
 
