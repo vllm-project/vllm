@@ -57,7 +57,7 @@ if [[ -z "${BK_TOKEN}" ]]; then
         # the container -- it fails before the flag is read. That ordering was
         # only fixed in v3.107.0. Skipping redaction would also stop the token
         # being registered with the log redactor, for no gain here.
-        if BK_TOKEN="$(buildkite-agent secret get "${TOKEN_SECRET_KEY}" 2>"${secret_err}")"; then
+        if BK_TOKEN="$(buildkite-agent secret get --skip-redaction "${TOKEN_SECRET_KEY}" 2>"${secret_err}")"; then
             if [[ -z "${BK_TOKEN}" ]]; then
                 echo "secret '${TOKEN_SECRET_KEY}' resolved but is empty"
             fi
