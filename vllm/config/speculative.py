@@ -682,8 +682,8 @@ class SpeculativeConfig:
         if hf_config.model_type in ("deepseek_v4", "deepseek_v41"):
             # V4.1 has no classic-MTP draft: its checkpoints ship DSpark stages
             # under ``mtp.*``, so only V4 gets an MTP architecture here. The
-            # DSpark path rewrites ``architectures`` itself and needs only
-            # ``n_predict``; ``method="mtp"`` on V4.1 is rejected below.
+            # DSpark path rewrites ``architectures`` itself;
+            # ``method="mtp"`` on V4.1 is rejected below.
             is_v41 = hf_config.model_type == "deepseek_v41"
             hf_config.model_type = "deepseek_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
@@ -1428,14 +1428,6 @@ class SpeculativeConfig:
                     draft_hf_config.architectures = [
                         "DSparkV41DraftModel" if is_v41 else "DSparkDraftModel"
                     ]
-                    if is_v41:
-                        # hf_config_override set n_predict to the number of
-                        # MTP stages (3), but one DSpark round drafts
-                        # dspark_block_size tokens; num_speculative_tokens
-                        # divisibility is checked against n_predict below.
-                        draft_hf_config.n_predict = getattr(
-                            draft_hf_config, "dspark_block_size", None
-                        ) or getattr(draft_hf_config, "n_predict", None)
                     self.draft_model_config.quantization = (
                         self.target_model_config.quantization
                     )
@@ -1452,11 +1444,6 @@ class SpeculativeConfig:
                         and getattr(hf, "target_layer_ids", None) is not None
                     ):
                         hf.dspark_target_layer_ids = hf.target_layer_ids
-                    if (
-                        getattr(hf, "n_predict", None) is None
-                        and getattr(hf, "block_size", None) is not None
-                    ):
-                        hf.n_predict = hf.block_size
 
                 if self.method in ("dflash", "dspark"):
                     self.parallel_drafting = True
@@ -1471,7 +1458,15 @@ class SpeculativeConfig:
                 n_predict = getattr(
                     self.draft_model_config.hf_config, "n_predict", None
                 )
-                if n_predict is not None:
+                if self.use_dspark():
+                    if self.num_speculative_tokens is None:
+                        # DSpark's parallel width is independent of MTP stages.
+                        hf_config = self.draft_model_config.hf_config
+                        block_size = getattr(hf_config, "block_size", None)
+                        if block_size is None:
+                            block_size = getattr(hf_config, "dspark_block_size", None)
+                        self.num_speculative_tokens = block_size
+                elif n_predict is not None:
                     if self.num_speculative_tokens is None:
                         # Default to max value defined in draft model config.
                         self.num_speculative_tokens = n_predict
