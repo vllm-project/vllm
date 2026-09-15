@@ -9,8 +9,9 @@ use serde_json::Value;
 use super::DeepSeekV4ChatRenderer;
 use crate::ChatRenderer;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
+use crate::renderer::deepseek_v41::DeepSeekV41ChatRenderer;
 use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
-use crate::request::{ChatMessage, ChatRequest, GenerationPromptMode, ReasoningEffort};
+use crate::request::{ChatMessage, ChatRequest, ChatTool, GenerationPromptMode, ReasoningEffort};
 
 fn render_request(request: &ChatRequest) -> String {
     DeepSeekV4ChatRenderer::new()
@@ -19,6 +20,19 @@ fn render_request(request: &ChatRequest) -> String {
         .prompt
         .into_text()
         .expect("deepseek v4 renderer should return text prompt")
+}
+
+fn thinking_request(messages: Vec<ChatMessage>) -> ChatRequest {
+    let mut request = ChatRequest {
+        messages,
+        ..ChatRequest::for_test()
+    };
+    request
+        .chat_options
+        .template_kwargs
+        .insert("thinking".to_string(), Value::Bool(true));
+    request.chat_options.reasoning_effort = Some(ReasoningEffort::Low);
+    request
 }
 
 fn fixture_request(input_name: &str) -> ChatRequest {
@@ -69,6 +83,114 @@ fn renders_developer_tools_like_hf_python() {
         "test_input_developer_tools.json",
         expect_file!["fixtures/test_output_developer_tools.txt"],
     );
+}
+
+#[test]
+fn drop_thinking_removes_developer_before_last_user() {
+    let request = thinking_request(vec![
+        ChatMessage::developer("old instruction", None),
+        ChatMessage::assistant_blocks(vec![
+            AssistantContentBlock::Reasoning {
+                text: "old reasoning".to_string(),
+            },
+            AssistantContentBlock::Text {
+                text: "old answer".to_string(),
+            },
+        ]),
+        ChatMessage::user("next question"),
+    ]);
+
+    let rendered = render_request(&request);
+
+    expect![
+        "<｜begin▁of▁sentence｜>old answer<｜end▁of▁sentence｜><｜User｜>next question<｜Assistant｜><think>"
+    ]
+    .assert_eq(&rendered);
+}
+
+#[test]
+fn dropped_developer_does_not_hide_following_assistant() {
+    let request = thinking_request(vec![
+        ChatMessage::user("old question"),
+        ChatMessage::developer("old instruction", None),
+        ChatMessage::assistant_text("old answer"),
+        ChatMessage::user("next question"),
+    ]);
+
+    let rendered = render_request(&request);
+
+    expect![
+        "<｜begin▁of▁sentence｜><｜User｜>old question<｜Assistant｜></think>old answer<｜end▁of▁sentence｜><｜User｜>next question<｜Assistant｜><think>"
+    ]
+    .assert_eq(&rendered);
+}
+
+#[test]
+fn drop_thinking_keeps_last_developer() {
+    let request = thinking_request(vec![
+        ChatMessage::user("old question"),
+        ChatMessage::assistant_text("old answer"),
+        ChatMessage::developer("latest instruction", None),
+    ]);
+
+    let rendered = render_request(&request);
+
+    expect![
+        "<｜begin▁of▁sentence｜><｜User｜>old question<｜Assistant｜></think>old answer<｜end▁of▁sentence｜><｜User｜>latest instruction<｜Assistant｜><think>"
+    ]
+    .assert_eq(&rendered);
+}
+
+#[test]
+fn drop_thinking_false_keeps_historical_developer() {
+    let mut request = thinking_request(vec![
+        ChatMessage::developer("old instruction", None),
+        ChatMessage::assistant_text("old answer"),
+        ChatMessage::user("next question"),
+    ]);
+    request
+        .chat_options
+        .template_kwargs
+        .insert("drop_thinking".to_string(), Value::Bool(false));
+
+    let rendered = render_request(&request);
+
+    assert!(rendered.contains("<｜User｜>old instruction"));
+}
+
+#[test]
+fn drop_thinking_removes_developer_before_tool_response() {
+    let request = thinking_request(vec![
+        ChatMessage::developer("old instruction", None),
+        ChatMessage::assistant_text("old answer"),
+        ChatMessage::tool_response("result", "call-1"),
+    ]);
+
+    let rendered = render_request(&request);
+
+    expect![
+        "<｜begin▁of▁sentence｜>old answer<｜end▁of▁sentence｜><｜User｜><tool_result>result</tool_result><｜Assistant｜><think>"
+    ]
+    .assert_eq(&rendered);
+}
+
+#[test]
+fn tools_keep_historical_developer() {
+    let tool = ChatTool {
+        name: "lookup".to_string(),
+        description: None,
+        parameters: Value::Object(Default::default()),
+        strict: None,
+    };
+    let request = thinking_request(vec![
+        ChatMessage::developer("old instruction", Some(vec![tool])),
+        ChatMessage::assistant_text("old answer"),
+        ChatMessage::user("next question"),
+    ]);
+
+    let rendered = render_request(&request);
+
+    assert!(rendered.contains("<｜User｜>old instruction"));
 }
 
 #[test]
@@ -279,6 +401,51 @@ fn reasoning_effort_template_kwarg_is_ignored() {
 }
 
 #[test]
+fn tool_call_arguments_preserve_non_objects_like_recipe() {
+    let renderers: [(&dyn ChatRenderer, &str); 2] = [
+        (&DeepSeekV4ChatRenderer::new(), "parameter"),
+        (&DeepSeekV41ChatRenderer::new(), " parameter"),
+    ];
+    for arguments in [
+        "not json",
+        "[1, 2]",
+        "null",
+        "42",
+        "true",
+        "",
+        r#""text""#,
+        r#""{\"query\":\"double\"}""#,
+    ] {
+        let request = ChatRequest {
+            messages: vec![
+                ChatMessage::assistant_blocks(vec![AssistantContentBlock::ToolCall(
+                    AssistantToolCall {
+                        id: "call".to_string(),
+                        name: "search".to_string(),
+                        arguments: arguments.to_string(),
+                    },
+                )]),
+                ChatMessage::tool_response("result", "call"),
+            ],
+            ..ChatRequest::for_test()
+        };
+
+        for (renderer, tag) in renderers {
+            let prompt = renderer.render(&request).unwrap().prompt.into_text().unwrap();
+            let parameters: Vec<_> =
+                prompt.lines().filter(|line| line.contains("parameter name=")).collect();
+            assert_eq!(
+                parameters,
+                [format!(
+                    "<｜DSML｜{tag} name=\"arguments\" string=\"true\">{arguments}</｜DSML｜{tag}>"
+                )],
+                "arguments: {arguments:?}, tag: {tag:?}",
+            );
+        }
+    }
+}
+
+#[test]
 fn tool_results_are_sorted_by_previous_assistant_tool_call_order() {
     let mut request = ChatRequest {
         messages: vec![
@@ -465,4 +632,95 @@ fn continue_final_assistant_omits_final_eos() {
 
     expect!["<｜begin▁of▁sentence｜><｜User｜>write<｜Assistant｜></think>partial answer"]
         .assert_eq(&rendered);
+}
+
+#[test]
+fn last_user_turn_appends_generation_prompt_by_default() {
+    let request = thinking_request(vec![ChatMessage::user("Hello")]);
+
+    let rendered = render_request(&request);
+
+    assert!(rendered.ends_with("<｜User｜>Hello<｜Assistant｜><think>"));
+}
+
+#[test]
+fn last_user_turn_omits_generation_prompt_when_disabled() {
+    let mut request = thinking_request(vec![ChatMessage::user("Hello")]);
+    request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
+
+    let rendered = render_request(&request);
+
+    assert!(rendered.ends_with("<｜User｜>Hello"));
+    assert!(!rendered.contains("<｜Assistant｜>"));
+    assert!(!rendered.contains("<think>"));
+}
+
+#[test]
+fn user_then_assistant_still_writes_suffix_without_generation_prompt() {
+    let mut request = ChatRequest {
+        messages: vec![
+            ChatMessage::user("Hello"),
+            ChatMessage::assistant_text("Hi there."),
+        ],
+        ..ChatRequest::for_test()
+    };
+    request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
+    request
+        .chat_options
+        .template_kwargs
+        .insert("thinking".to_string(), Value::Bool(false));
+
+    let rendered = render_request(&request);
+
+    expect![
+        "<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜></think>Hi there.<｜end▁of▁sentence｜>"
+    ]
+    .assert_eq(&rendered);
+}
+
+#[test]
+fn trailing_system_omits_generation_prompt_when_disabled() {
+    let mut request = ChatRequest {
+        messages: vec![
+            ChatMessage::system("rules"),
+            ChatMessage::user("question"),
+            ChatMessage::system("final rules"),
+        ],
+        ..ChatRequest::for_test()
+    };
+    request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
+    request
+        .chat_options
+        .template_kwargs
+        .insert("enable_thinking".to_string(), Value::Bool(false));
+    request.chat_options.reasoning_effort = Some(ReasoningEffort::Low);
+
+    let rendered = render_request(&request);
+
+    expect!["<｜begin▁of▁sentence｜>rules<｜User｜>questionfinal rules"].assert_eq(&rendered);
+}
+
+#[test]
+fn last_merged_tool_result_omits_generation_prompt_when_disabled() {
+    let mut request = thinking_request(vec![
+        ChatMessage::user("question"),
+        ChatMessage::tool_response("result", "call-1"),
+    ]);
+    request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
+
+    let rendered = render_request(&request);
+
+    expect!["<｜begin▁of▁sentence｜><｜User｜>question\n\n<tool_result>result</tool_result>"]
+        .assert_eq(&rendered);
+    assert!(!rendered.contains("<｜Assistant｜>"));
+}
+
+#[test]
+fn last_developer_omits_generation_prompt_when_disabled() {
+    let mut request = thinking_request(vec![ChatMessage::developer("latest instruction", None)]);
+    request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
+
+    let rendered = render_request(&request);
+
+    expect!["<｜begin▁of▁sentence｜><｜User｜>latest instruction"].assert_eq(&rendered);
 }

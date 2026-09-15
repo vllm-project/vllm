@@ -27,15 +27,10 @@ def vision_server():
         "1",
         "--limit-mm-per-prompt.video",
         "0",
+        "--enable-scale-out",
     ]
 
-    env_overrides: dict[str, str] = {}
-
-    with RemoteOpenAIServer(
-        VISION_MODEL_NAME,
-        args,
-        env_dict=env_overrides,
-    ) as remote_server:
+    with RemoteOpenAIServer(VISION_MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
