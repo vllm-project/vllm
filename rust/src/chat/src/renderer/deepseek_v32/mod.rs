@@ -26,6 +26,7 @@ impl ChatRenderer for DeepSeekV32ChatRenderer {
 
         Ok(RenderedPrompt {
             prompt: Prompt::Text(encoding::render_request(request)?),
+            media_order: None,
             effective_template_kwargs: request_template_kwargs(request),
         })
     }

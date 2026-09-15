@@ -468,6 +468,7 @@ class CPUExpertsFp8(mk.FusedMoEExpertsModular):
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,
             RoutingMethodType.DeepseekV4,
+            RoutingMethodType.DeepSeekV3,
         ]
 
     @staticmethod
