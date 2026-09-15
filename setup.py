@@ -1008,6 +1008,10 @@ class precompiled_wheel_utils:
                     exact_members.update(
                         {
                             "vllm/_C.abi3.so",
+                            # x86 CPU wheels ship per-ISA variants of _C;
+                            # CpuPlatform.import_kernels() selects one at runtime.
+                            "vllm/_C_AVX512.abi3.so",
+                            "vllm/_C_AVX2.abi3.so",
                             "vllm/_C_stable_libtorch.abi3.so",
                             "vllm/_moe_C_stable_libtorch.abi3.so",
                             "vllm/_qutlass_C.abi3.so",
