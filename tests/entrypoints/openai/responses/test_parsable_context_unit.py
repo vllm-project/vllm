@@ -220,6 +220,18 @@ def test_process_text_with_parser():
     assert msg.content[0].text == "Hello!"
 
 
+def test_process_passes_prompt_token_ids_to_parser():
+    parser = MagicMock()
+    parser.parse_with_prompt.return_value = (None, "Hello!", None)
+    ctx = _make_context(None, response_parser=parser)
+    output = _make_request_output(text="Hello!")
+    output.prompt_token_ids = [7, 8]
+
+    ctx.append_output(output)
+
+    assert parser.parse_with_prompt.call_args.kwargs["prompt_token_ids"] == [7, 8]
+
+
 def test_process_text_without_parser():
     """parser_cls=None falls back to plain text wrapping."""
     ctx = _make_context(None)

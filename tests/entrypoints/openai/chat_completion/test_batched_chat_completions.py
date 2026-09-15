@@ -3,6 +3,7 @@
 
 import json
 from collections.abc import AsyncGenerator
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
@@ -322,3 +323,30 @@ async def test_batched_echo_prepends_matching_assistant_prefix() -> None:
     )
 
     assert response.choices[0].message.content == "PREFIX ASSISTANT ANSWER"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_batched_parser_receives_prompt_token_ids() -> None:
+    serving = OpenAIServingChatBatch.__new__(OpenAIServingChatBatch)
+    serving.response_role = "assistant"
+    serving.system_fingerprint = None
+    parser = MagicMock()
+    parser.parse_with_prompt.return_value = (None, "ASSISTANT ANSWER", None)
+    request = BatchChatCompletionRequest(
+        model="test-model",
+        messages=[[{"role": "user", "content": "USER PROMPT"}]],
+    )
+
+    await serving.chat_completion_full_generator_batch(
+        request=request,
+        generators=[_generator(0, "ASSISTANT ANSWER")],
+        request_id="req-parser-prompt",
+        model_name="test-model",
+        all_conversations=[[{"role": "user", "content": "USER PROMPT"}]],
+        tokenizer=None,
+        request_metadata=RequestResponseMetadata(request_id="req-parser-prompt"),
+        parser=parser,
+    )
+
+    assert parser.parse_with_prompt.call_args.kwargs["prompt_token_ids"] == [1, 2, 3]
