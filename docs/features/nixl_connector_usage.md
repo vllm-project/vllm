@@ -108,6 +108,49 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
   --decoder-ports 8200
 ```
 
+### Running in Separate Docker Containers
+
+This example runs the prefiller and decoder in separate containers on the same host, sharing a PID namespace and exposing both participating GPUs to each worker.
+
+!!! note
+    Separate PID namespaces can cause CUDA IPC failures. While requests may still succeed, KV transfers can fall back to TCP and become significantly slower.
+
+First, create a container to hold the shared PID namespace:
+
+```bash
+docker run -d --name pd-namespace \
+  --entrypoint sleep \
+  vllm/vllm-openai:latest infinity
+```
+
+Start the prefiller on GPU 0:
+
+```bash
+docker run -d --name nixl-prefiller \
+  --gpus all --network host \
+  --pid=container:pd-namespace \
+  -e CUDA_VISIBLE_DEVICES=0,1 \
+  -e VLLM_NIXL_SIDE_CHANNEL_PORT=5600 \
+  vllm/vllm-openai:latest \
+  Qwen/Qwen3-0.6B --port 8100 --enforce-eager \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}'
+```
+
+Start the decoder on GPU 1:
+
+```bash
+docker run -d --name nixl-decoder \
+  --gpus all --network host \
+  --pid=container:pd-namespace \
+  -e CUDA_VISIBLE_DEVICES=1,0 \
+  -e VLLM_NIXL_SIDE_CHANNEL_PORT=5601 \
+  vllm/vllm-openai:latest \
+  Qwen/Qwen3-0.6B --port 8200 --enforce-eager \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}'
+```
+
+Once both servers are ready, start the proxy on the host by following [proxy server](#proxy-server). Keep `pd-namespace` running until both workers stop.
+
 ## Environment Variables
 
 - `VLLM_NIXL_SIDE_CHANNEL_PORT`: Port for NIXL handshake communication
