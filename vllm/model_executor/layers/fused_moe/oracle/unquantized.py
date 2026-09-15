@@ -19,12 +19,12 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.oracle.base import MoEKernelOracle
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+from vllm.model_executor.layers.fused_moe.flashinfer import (
     align_moe_weights_for_fi,
     convert_moe_weights_to_flashinfer_trtllm_block_layout,
     swap_w13_to_w31,
 )
+from vllm.model_executor.layers.fused_moe.oracle.base import MoEKernelOracle
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:

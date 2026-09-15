@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""FlashInfer helpers for fused MoE weight preparation and activation mapping."""
+
 from typing import TYPE_CHECKING
 
 import torch
