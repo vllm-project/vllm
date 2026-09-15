@@ -482,6 +482,11 @@ class ProtonProfilerWrapper(WorkerProfiler):
     def has_cuda_graph_session(self) -> bool:
         return self._graph_session
 
+    @property
+    def has_retained_session(self) -> bool:
+        """Whether the worker must retain this wrapper for replay or recovery."""
+        return self._session_id is not None
+
     def set_output_name(self, worker_name: str) -> None:
         """Set the next run's output name after startup graph capture."""
         if self._active:

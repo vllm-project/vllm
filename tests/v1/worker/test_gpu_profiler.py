@@ -872,11 +872,11 @@ class TestProtonProfilerWrapper:
 
     @pytest.mark.parametrize("capture", [False, True])
     @pytest.mark.parametrize("recover_at_shutdown", [False, True])
-    @pytest.mark.parametrize("failure", ["flush", "advance"])
+    @pytest.mark.parametrize("failure", ["flush", "advance", "write"])
     def test_failed_periodic_stop_retains_phases_until_recovery(
-        self, tmp_path, capture, recover_at_shutdown, failure
+        self, tmp_path, monkeypatch, capture, recover_at_shutdown, failure
     ):
-        """A failed flush must not lose the old run or finalize its session."""
+        """Worker stop must retain failed sessions for the next run or shutdown."""
         wrapper, proton = make_proton_wrapper(
             tmp_path,
             proton_mode="periodic_flushing",
@@ -886,33 +886,56 @@ class TestProtonProfilerWrapper:
         if capture:
             with wrapper.capture_cuda_graphs():
                 pass
+        worker = SimpleNamespace(
+            rank=0,
+            profiler=wrapper,
+            profiler_config=SimpleNamespace(profiler="proton"),
+            elastic_ep_executor=Mock(),
+        )
+        monkeypatch.setattr(
+            "vllm.distributed.utils.get_worker_rank_suffix", lambda **kwargs: "rank0"
+        )
+        monkeypatch.setattr("vllm.v1.worker.gpu_worker.gc.unfreeze", lambda: None)
+        monkeypatch.setattr(
+            "vllm.v1.worker.gpu_worker.ensure_kv_transfer_shutdown", None
+        )
+        monkeypatch.setattr(
+            "vllm.v1.worker.gpu_worker.ensure_ec_transfer_shutdown", None
+        )
+        monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: False)
         proton.data.clear.reset_mock()
         proton.data.is_phase_complete.return_value = False
-        wrapper.start()
-        wrapper.step()
-        wrapper.step()
-        failing_call = (
-            proton.deactivate if failure == "flush" else proton.data.advance_phase
-        )
+        Worker.profile(worker, profile_prefix="first")
+        parts = 1 if failure == "write" else 2
+        for _ in range(parts):
+            worker.profiler.step()
+        failing_call = {
+            "flush": proton.deactivate,
+            "advance": proton.data.advance_phase,
+            "write": proton.data.get,
+        }[failure]
         original_effect = failing_call.side_effect
         failing_call.side_effect = RuntimeError(f"{failure} failed")
-        wrapper.stop()
-        proton.data.get.assert_not_called()
+        Worker.profile(worker, is_start=False)
+        assert worker.profiler is wrapper
+        if failure != "write":
+            proton.data.get.assert_not_called()
         proton.data.clear.assert_not_called()
         proton.finalize.assert_not_called()
         failing_call.side_effect = original_effect
         if not recover_at_shutdown:
-            wrapper.start()
-            wrapper.step()
-            wrapper.stop()
-        wrapper.shutdown()
+            Worker.profile(worker, profile_prefix="second")
+            worker.profiler.step()
+            Worker.profile(worker, is_start=False)
+            assert (worker.profiler is wrapper) == capture
+        Worker.shutdown(worker)
         first_phase = 1 if capture else 0
-        expected = range(first_phase, first_phase + (2 if recover_at_shutdown else 3))
+        expected = range(first_phase, first_phase + parts + (not recover_at_shutdown))
         assert proton.data.clear.call_args_list == [
             call(7, phase) for phase in expected
         ]
-        assert len(list(tmp_path.glob("*_run0.part_*.hatchet"))) == 2
-        assert len(list(tmp_path.glob("*_run1.part_*.hatchet"))) == (
+        assert len(list(tmp_path.glob("proton_first_*_run0.part_*.hatchet"))) == parts
+        assert len(list(tmp_path.glob("proton_second_*_run1.part_*.hatchet"))) == (
             0 if recover_at_shutdown else 1
         )
         proton.start.assert_called_once()
@@ -1119,7 +1142,7 @@ def test_gpu_worker_recreates_proton_profiler_for_each_run():
         ),
         patch("vllm.v1.worker.gpu_worker.ProtonProfilerWrapper") as wrapper,
     ):
-        wrapper.return_value.has_cuda_graph_session = False
+        wrapper.return_value.has_retained_session = False
         Worker.profile(worker, profile_prefix="first")
         Worker.profile(worker, is_start=False)
         Worker.profile(worker, profile_prefix="second")
@@ -1137,6 +1160,7 @@ def test_gpu_worker_reuses_cuda_graph_proton_session():
     worker.rank = 1
     worker.profiler = MagicMock(spec=ProtonProfilerWrapper)
     worker.profiler.has_cuda_graph_session = True
+    worker.profiler.has_retained_session = True
     worker.profiler_config.profiler = "proton"
 
     with patch(

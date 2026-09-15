@@ -1308,10 +1308,9 @@ class Worker(WorkerBase):
                 self.profiler.stop()
             finally:
                 if self.profiler_config.profiler == "proton" and not (
-                    self.profiler.has_cuda_graph_session
+                    self.profiler.has_retained_session
                 ):
-                    # Proton output names are fixed when the wrapper is constructed.
-                    # Recreate it so the next profile_prefix is honored.
+                    # Keep graph metadata and failed exports until finalized.
                     self.profiler = None
 
     def execute_dummy_batch(self) -> None:
