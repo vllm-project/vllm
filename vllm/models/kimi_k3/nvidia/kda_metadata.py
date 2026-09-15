@@ -308,6 +308,9 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        # GDN base does not retain layer_names; RecoverSSM's commit context needs
+        # it to resolve the per-layer forward context. Inert when RecoverSSM is off.
+        self.layer_names = layer_names
         self.use_recoverssm = vllm_config.cache_config.use_kda_recoverssm
         self.spec_state_slots = 1 if self.use_recoverssm else self.num_spec + 1
         self.recoverssm_num_accepted_tokens: torch.Tensor | None = None
@@ -382,6 +385,17 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 query_start_loc_cpu.diff() > 0
             )
             spec_sequence_masks_cpu |= active_decode_mask_cpu
+            if self.use_recoverssm:
+                # RecoverSSM's verify buffers hold exactly num_spec+1 activations
+                # per request. Real verify rows are always <= num_spec+1, but
+                # adaptive's cost-table profiler probes token counts past the
+                # cudagraph limit by even-splitting them over the capped request
+                # slots, yielding eager dummy decode rows longer than num_spec+1.
+                # Route those out of the RecoverSSM path rather than failing
+                # startup; captured/real decode rows are unaffected (all <= k+1).
+                spec_sequence_masks_cpu &= (
+                    query_start_loc_cpu.diff() <= self.num_spec + 1
+                )
             num_spec_decodes = int(spec_sequence_masks_cpu.sum().item())
             if num_spec_decodes == 0:
                 spec_sequence_masks_cpu = None
@@ -405,16 +419,6 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             assert spec_sequence_masks_cpu is not None
             assert num_accepted_tokens is not None
             query_lens_cpu = query_start_loc_cpu.diff()
-            if (
-                self.use_recoverssm
-                and torch.any(
-                    query_lens_cpu[spec_sequence_masks_cpu] > self.num_spec + 1
-                ).item()
-            ):
-                raise ValueError(
-                    "KDA RecoverSSM speculative decode query length exceeds "
-                    f"its activation capacity ({self.num_spec + 1})"
-                )
             num_query_tokens = query_start_loc_cpu[-1].item()
 
             # Exclude zero-length cudagraph padding from request-indexed
