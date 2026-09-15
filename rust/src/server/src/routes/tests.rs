@@ -54,8 +54,7 @@ use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
 use super::{
     build_router, build_router_with_dev_mode, build_router_with_dev_mode_and_lora,
-    build_router_with_scale_out_endpoints, parse_scale_out_endpoints_flag,
-    render::build_router as build_render_router,
+    build_router_with_scale_out_endpoints, render::build_router as build_render_router,
 };
 use crate::config::{ApiServerOptions, CorsConfig, LoraModulePath};
 use crate::lora::LoadLoraError;
@@ -541,6 +540,7 @@ impl ChatRenderer for FakeChatBackend {
         }
         Ok(vllm_chat::RenderedPrompt {
             prompt: Prompt::Text(prompt),
+            media_order: None,
             effective_template_kwargs: Default::default(),
         })
     }
@@ -731,23 +731,36 @@ async fn test_app_with_dev_mode(dev_mode_enabled: bool) -> axum::Router {
     )
 }
 
-#[test]
-fn scale_out_flag_accepts_unset_empty_zero_one_and_whitespace() {
-    assert_eq!(parse_scale_out_endpoints_flag(None), Ok(false));
-    assert_eq!(parse_scale_out_endpoints_flag(Some("")), Ok(false));
-    assert_eq!(parse_scale_out_endpoints_flag(Some("0")), Ok(false));
-    assert_eq!(parse_scale_out_endpoints_flag(Some("1")), Ok(true));
-    assert_eq!(parse_scale_out_endpoints_flag(Some(" 1 ")), Ok(true));
-}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn scale_out_generate_route_follows_api_server_options() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-scale-out-api-server-options",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let state = Arc::new(
+        AppState::new(vec!["model".to_string()], chat).with_api_server_options(ApiServerOptions {
+            enable_scale_out: true,
+            ..Default::default()
+        }),
+    );
+    let mut app = build_router(state);
 
-#[test]
-fn scale_out_flag_rejects_values_other_than_zero_or_one() {
-    for value in ["-1", "2", "01", "+1", "invalid", " "] {
-        assert_eq!(
-            parse_scale_out_endpoints_flag(Some(value)),
-            Err("VLLM_ENABLE_SCALE_OUT_ENDPOINTS must be 0 or 1".to_string())
-        );
-    }
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/inference/v1/generate")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_ne!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2721,6 +2734,49 @@ async fn non_stream_chat_returns_json_response() {
     }
     // ...except `tool_calls`, which Python pops from the payload when empty.
     assert!(!message.contains_key("tool_calls"), "{json}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn openai_watermarking_defaults_and_opt_out_reach_engine_core() {
+    for endpoint in ["/v1/chat/completions", "/v1/completions"] {
+        for stream in [false, true] {
+            for watermarking in [None, Some(true), Some(false)] {
+                let (mut app, engine_task) = test_app_with_backend_and_engine_request_check(
+                    Arc::new(FakeChatBackend::new()),
+                    move |request| {
+                        let params = request.sampling_params.as_ref().expect("sampling params");
+                        assert_eq!(params.watermarking, watermarking.unwrap_or(true));
+                    },
+                )
+                .await;
+
+                let mut body = json!({"stream": stream, "max_tokens": 2});
+                if endpoint == "/v1/chat/completions" {
+                    body["messages"] = json!([{"role": "user", "content": "hi"}]);
+                } else {
+                    body["prompt"] = json!("hi");
+                }
+                if let Some(watermarking) = watermarking {
+                    body["watermarking"] = json!(watermarking);
+                }
+                let response = app
+                    .call(
+                        Request::builder()
+                            .method("POST")
+                            .uri(endpoint)
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.to_string()))
+                            .expect("build request"),
+                    )
+                    .await
+                    .expect("call app");
+                assert_eq!(response.status(), StatusCode::OK);
+                to_bytes(response.into_body(), usize::MAX).await.expect("drain response");
+                engine_task.await.expect("mock engine task");
+            }
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
