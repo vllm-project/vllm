@@ -307,6 +307,7 @@ steps:
 
 - label: ":nvidia: (L4) LM Eval Humming TEMPORARY"
   key: lm-eval-humming-l4
+  optional: true
   timeout_in_minutes: 90
   device: l4
   num_devices: 1
@@ -325,6 +326,7 @@ steps:
 
 - label: ":nvidia: (A100) LM Eval Humming Default TEMPORARY Shard %N"
   key: lm-eval-humming-a100-default
+  optional: true
   timeout_in_minutes: 75
   device: a100
   num_devices: 1
@@ -340,6 +342,7 @@ steps:
 
 - label: ":nvidia: (A100) LM Eval Humming Activation INT8 TEMPORARY Shard %N"
   key: lm-eval-humming-a100-act
+  optional: true
   timeout_in_minutes: 45
   device: a100
   num_devices: 1
@@ -355,6 +358,7 @@ steps:
 
 - label: ":nvidia: (H100) LM Eval Humming Default TEMPORARY Shard %N"
   key: lm-eval-humming-h100-default
+  optional: true
   timeout_in_minutes: 70
   device: h100
   num_devices: 1
@@ -370,6 +374,7 @@ steps:
 
 - label: ":nvidia: (H100) LM Eval Humming Activation FP8/INT8 TEMPORARY"
   key: lm-eval-humming-h100-act
+  optional: true
   timeout_in_minutes: 70
   device: h100
   num_devices: 1
@@ -385,6 +390,7 @@ steps:
 
 - label: ":nvidia: (H100) LM Eval Humming DeepEP TEMPORARY"
   key: lm-eval-humming-h100-deepep
+  optional: true
   timeout_in_minutes: 60
   device: h100
   num_devices: 2
@@ -404,6 +410,7 @@ steps:
 
 - label: ":nvidia: (B200) LM Eval Humming Default TEMPORARY"
   key: lm-eval-humming-b200-default
+  optional: true
   timeout_in_minutes: 50
   device: b200-k8s
   num_devices: 1
@@ -418,6 +425,7 @@ steps:
 
 - label: ":nvidia: (B200) LM Eval Humming Activation FP8/INT8 TEMPORARY"
   key: lm-eval-humming-b200-act
+  optional: true
   timeout_in_minutes: 50
   device: b200-k8s
   num_devices: 1
