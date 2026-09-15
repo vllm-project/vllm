@@ -5,7 +5,6 @@ import fnmatch
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 import torch
-from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -76,10 +75,6 @@ __all__ = ["QuarkLinearMethod"]
 
 logger = init_logger(__name__)
 
-# model_type values that use dynamic MXFP4 re-quantization for
-# OCP MX fp4 Quark checkpoints
-_DEEPSEEK_V3_FAMILY_MODEL_TYPES = frozenset({"deepseek_v3", "deepseek_v32"})
-
 
 class QuantKeyMatch(NamedTuple):
     matches: bool
@@ -113,38 +108,6 @@ class QuarkConfig(QuantizationConfig):
         self.kv_cache_group = kv_cache_group
         self.kv_cache_config = kv_cache_config
         self.pack_method = pack_method
-        # Note : this flag is kept disabled because the overhead of
-        # dynamic mxfp4 quantization negates the performance gains
-        # that come from shifting to mxfp4. It is left here in case
-        # we want to re-enable it in the future.
-        self.dynamic_mxfp4_quant = False
-
-    def maybe_update_config(
-        self,
-        model_name: str,
-        hf_config: PretrainedConfig | None = None,
-        revision: str | None = None,
-    ):
-        """Enable dynamic MXFP4 only for DeepSeek-V3-family fp4 checkpoints."""
-
-        if hf_config is None:
-            return
-
-        if (
-            getattr(hf_config, "model_type", None)
-            not in _DEEPSEEK_V3_FAMILY_MODEL_TYPES
-        ):
-            return
-
-        quant_config = getattr(hf_config, "quantization_config", None)
-        if isinstance(quant_config, dict):
-            quant_dtype = (
-                quant_config.get("global_quant_config", {})
-                .get("weight", {})
-                .get("dtype")
-            )
-            if quant_dtype == "fp4":
-                self.dynamic_mxfp4_quant = True
 
     def get_linear_method(self) -> "QuarkLinearMethod":
         return QuarkLinearMethod(self)
@@ -194,17 +157,6 @@ class QuarkConfig(QuantizationConfig):
             self.get_quant_method_target(prefix, type(layer))
         )
 
-        exclude_layers = cast(list[str], self.quant_config.get("exclude"))
-        is_ignored = should_ignore_layer(
-            prefix,
-            ignore=exclude_layers,
-            fused_mapping=self.packed_modules_mapping,
-            check_children=isinstance(layer, RoutedExperts),
-        )
-        dynamic_mxfp4_quant = (
-            is_ignored and "self_attn" in prefix and self.dynamic_mxfp4_quant
-        )
-
         if method_cls is UnquantizedFusedMoEMethod:
             return UnquantizedFusedMoEMethod(layer.moe_config)
         if method_cls is UnquantizedLinearMethod:
@@ -215,7 +167,6 @@ class QuarkConfig(QuantizationConfig):
                 scheme_cls,
                 weight_quant_key=weight_quant_key,
                 activation_quant_key=activation_quant_key,
-                dynamic_mxfp4_quant=dynamic_mxfp4_quant,
             )
             layer.scheme = scheme
             return QuarkLinearMethod(self)
@@ -263,11 +214,6 @@ class QuarkConfig(QuantizationConfig):
             if is_routed_experts:
                 return None, None, UnquantizedFusedMoEMethod
             if issubclass(layer_type, LinearBase):
-                if "self_attn" in prefix and self.dynamic_mxfp4_quant:
-                    weight_quant_key, activation_key, _ = self.get_scheme_cls(
-                        layer_type, prefix
-                    )
-                    return weight_quant_key, activation_key, QuarkLinearMethod
                 return None, None, UnquantizedLinearMethod
             return None, None, None
         if issubclass(layer_type, LinearBase):
@@ -920,7 +866,6 @@ class QuarkConfig(QuantizationConfig):
         scheme_cls: type["QuarkScheme"],
         weight_quant_key: QuantKey | None,
         activation_quant_key: QuantKey | None,
-        dynamic_mxfp4_quant: bool = False,
     ) -> "QuarkScheme":
         """Construct a Quark scheme selected by get_scheme_cls."""
         if scheme_cls not in (
@@ -943,9 +888,6 @@ class QuarkConfig(QuantizationConfig):
             QuarkOCP_MX,
         ):
             kwargs["weight_quant_key"] = weight_quant_key
-
-        if scheme_cls is QuarkOCP_MX:
-            kwargs["dynamic_mxfp4_quant"] = dynamic_mxfp4_quant
 
         scheme = scheme_cls(**kwargs)
 
