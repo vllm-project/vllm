@@ -464,6 +464,7 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
                     layer.head_size,
                 )
                 continue
+            layer.impl.set_interleaved_v_cache()
             for epsilon in [1e-5, 1e-6]:
                 for neox in [True, False]:
                     for quant_q in [False, True]:
