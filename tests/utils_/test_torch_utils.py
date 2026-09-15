@@ -9,12 +9,69 @@ from vllm.utils.torch_utils import (
     common_broadcastable_dtype,
     current_stream,
     get_kv_cache_torch_dtype,
+    get_torch_allocator_settings,
     is_lossless_cast,
     is_quantized_kv_cache,
     set_default_torch_dtype,
     set_torch_threads_for_runtime,
     startup_omp_num_threads,
+    torch_allocator_uses_expandable_segments,
 )
+
+
+@pytest.mark.parametrize(
+    ("settings", "expected"),
+    [
+        ("", False),
+        ("expandable_segments:True", True),
+        ("expandable_segments:False", False),
+        (" expandable_segments : True ", True),
+        ("max_split_size_mb:64,expandable_segments:True", True),
+        ("expandable_segments:False,expandable_segments:True", True),
+        ("expandable_segments:True,expandable_segments:False", False),
+        (
+            "roundup_power2_divisions:[256:1,512:2],expandable_segments:True",
+            True,
+        ),
+    ],
+)
+def test_torch_allocator_uses_expandable_segments(settings, expected):
+    assert torch_allocator_uses_expandable_segments(settings) is expected
+
+
+def test_get_torch_allocator_settings_uses_runtime_getter(monkeypatch):
+    monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:False")
+    monkeypatch.setattr(
+        torch._C,
+        "_accelerator_getAllocatorSettings",
+        lambda: "expandable_segments:True",
+        raising=False,
+    )
+
+    assert get_torch_allocator_settings() == "expandable_segments:True"
+
+
+def test_get_torch_allocator_settings_env_fallback(monkeypatch):
+    monkeypatch.setattr(
+        torch._C, "_accelerator_getAllocatorSettings", None, raising=False
+    )
+    for env_var in (
+        "PYTORCH_CUDA_ALLOC_CONF",
+        "PYTORCH_HIP_ALLOC_CONF",
+        "PYTORCH_ALLOC_CONF",
+    ):
+        monkeypatch.delenv(env_var, raising=False)
+
+    assert get_torch_allocator_settings() == ""
+
+    monkeypatch.setenv("PYTORCH_ALLOC_CONF", "unified")
+    assert get_torch_allocator_settings() == "unified"
+
+    monkeypatch.setenv("PYTORCH_HIP_ALLOC_CONF", "hip")
+    assert get_torch_allocator_settings() == "hip"
+
+    monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "")
+    assert get_torch_allocator_settings() == ""
 
 
 def test_nvfp4_4over6_cache_dtype() -> None:
