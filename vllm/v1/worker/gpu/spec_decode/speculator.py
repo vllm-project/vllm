@@ -16,6 +16,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models import supports_multimodal_embeddings
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.v1.attention.backend import AttentionType
+from vllm.v1.attention.selector import get_attn_spec_kind
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.watermarking.spec_decode import (
@@ -55,6 +57,40 @@ def _target_feeds_hc_residual(vllm_config: VllmConfig) -> bool:
 
     target_cls = get_model_cls(vllm_config.model_config)
     return hasattr(target_cls, "get_mtp_target_hidden_states")
+
+
+def _draft_attention_backend_supports_pcp(vllm_config: VllmConfig) -> bool:
+    """Whether the configured draft backend can consume a PCP-sharded batch.
+
+    An automatic backend selection remains sharded: the selector receives
+    ``use_pcp=True`` and will prefer only PCP-capable candidates. An explicitly
+    configured backend can be classified before the draft model is built, so
+    unsupported backends can instead build a replicated drafter from the
+    outset.
+    """
+    speculative_config = vllm_config.speculative_config
+    assert speculative_config is not None
+    draft_model_config = speculative_config.draft_model_config
+
+    backend = speculative_config.attention_backend
+    attention_config = vllm_config.attention_config
+    if backend is None:
+        backend = attention_config.backend
+
+    # Per-kind selection takes precedence over the global backend in the
+    # attention selector, including over the draft-specific global override.
+    get_sliding_window = getattr(draft_model_config, "get_sliding_window", None)
+    kind = get_attn_spec_kind(
+        use_mla=getattr(draft_model_config, "use_mla", False),
+        has_sliding_window=(
+            get_sliding_window is not None and get_sliding_window() is not None
+        ),
+        attn_type=AttentionType.DECODER,
+    )
+    backend = attention_config.backend_per_kind.get(kind.value, backend)
+    if backend is None:
+        return True
+    return backend.get_class().supports_pcp()
 
 
 class BaseSpeculator(ABC):
@@ -99,6 +135,30 @@ class BaseSpeculator(ABC):
 
 class DraftModelSpeculator(BaseSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        target_parallel_config = vllm_config.parallel_config
+        self.target_pcp_size = getattr(
+            target_parallel_config, "prefill_context_parallel_size", 1
+        )
+        self.uses_pcp_draft_sharding = (
+            self.target_pcp_size > 1
+            and vllm_config.speculative_config is not None
+            and vllm_config.speculative_config.method == "mtp"
+            and _draft_attention_backend_supports_pcp(vllm_config)
+        )
+        if self.target_pcp_size > 1 and not self.uses_pcp_draft_sharding:
+            # The target remains PCP-sharded. Only the drafter's model,
+            # attention builders, and graph managers see PCP=1.
+            vllm_config = replace(
+                vllm_config,
+                parallel_config=replace(
+                    target_parallel_config,
+                    prefill_context_parallel_size=1,
+                ),
+            )
+            logger.info(
+                "Draft attention does not support PCP sharding; using a "
+                "replicated drafter while the target remains PCP-sharded."
+            )
         self.vllm_config = vllm_config
         self.device = device
 
