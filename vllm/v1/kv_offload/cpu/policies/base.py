@@ -2,9 +2,24 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ctypes
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
+
+
+def order_request_keys(
+    key_groups: Sequence[Sequence[OffloadKey]], req_context: ReqContext
+) -> list[OffloadKey]:
+    """Return one head-to-tail order across all KV cache groups."""
+    keys = [key for group in key_groups for key in group]
+    positions = {
+        key: position
+        for key in keys
+        if (position := req_context.get_offload_key_position(key)) is not None
+    }
+    if len(positions) == len(keys):
+        keys.sort(key=positions.__getitem__)
+    return keys
 
 
 class ChunkStatus(ctypes.Structure):
@@ -65,6 +80,30 @@ class CachePolicy(ABC):
             keys: Chunks to mark as recently used.
             req_context: Per-request context for the request touching these chunks.
         """
+
+    def on_request_finished(
+        self,
+        key_groups: Sequence[Sequence[OffloadKey]],
+        insertion_only_keys: set[OffloadKey],
+        reused_keys: set[OffloadKey],
+        req_context: ReqContext,
+    ) -> None:
+        """Apply one request-scoped cache access in prefix order.
+
+        ``key_groups`` contains keys observed for each KV cache group in
+        head-to-tail order. ``insertion_only_keys`` and ``reused_keys``
+        distinguish chunks only created by this request from ready chunks it
+        actually reused, which matters for policies such as ARC where reuse
+        changes frequency but insertion and pending observations do not.
+
+        The default forwards one touch per group, preserving compatibility
+        for experimental out-of-tree policies while moving those touches to
+        request finalization. Policies that distinguish insertion from reuse
+        can override this hook and inspect the access classifications.
+        """
+        del insertion_only_keys, reused_keys
+        for keys in key_groups:
+            self.touch(keys, req_context)
 
     @abstractmethod
     def evict(
