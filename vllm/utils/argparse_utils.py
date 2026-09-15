@@ -442,7 +442,19 @@ class FlexibleArgumentParser(ArgumentParser):
 
         # Add the dict args back as if they were originally passed as JSON
         for dict_arg, dict_value in dict_args.items():
-            processed_args.append(dict_arg)
+            # Resolve dict_arg to the actual registered option string if needed.
+            # e.g., "--cc" is not registered, but "-cc" is for --compilation-config.
+            resolved_arg = dict_arg
+            if dict_arg not in self._option_string_actions:
+                dict_arg_stripped = dict_arg.lstrip("-")
+                for action in self._actions:
+                    for opt in action.option_strings:
+                        if opt.lstrip("-") == dict_arg_stripped:
+                            resolved_arg = opt
+                            break
+                    if resolved_arg != dict_arg:
+                        break
+            processed_args.append(resolved_arg)
             processed_args.append(json.dumps(dict_value))
 
         return super().parse_args(processed_args, namespace)
