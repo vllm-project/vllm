@@ -5,8 +5,9 @@ import pytest
 import torch
 
 from tests.kernels.utils import opcheck
-from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
+from vllm.model_executor.layers.fused_qk_norm_rope import fused_qk_rmsnorm_rope_gate
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
+from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -146,3 +147,75 @@ def test_fused_qk_norm_rope_matches_reference(
         atol=ATOL,
         rtol=RTOL,
     )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="fused gate kernel requires cuda or rocm platform",
+)
+@pytest.mark.parametrize("num_tokens", [1, 8, 64, 512])
+@torch.inference_mode()
+def test_fused_qk_norm_rope_gate_matches_eager(
+    default_vllm_config,
+    num_tokens: int,
+):
+    """Gated Triton kernel vs. ``Qwen3NextAttention._project_qkv_gate``'s eager
+    branch -- the parity guarantee behind enabling the kernel on ROCm."""
+    device = "cuda:0"
+    dtype = torch.bfloat16
+    torch.set_default_device(device)
+    set_random_seed(13)
+
+    num_q_heads, num_kv_heads, head_dim = 24, 4, 256
+    partial_rotary_factor = 0.25  # rotary_dim = 64
+    eps = 1e-6
+
+    q_norm = GemmaRMSNorm(head_dim, eps=eps).to(device=device, dtype=dtype)
+    k_norm = GemmaRMSNorm(head_dim, eps=eps).to(device=device, dtype=dtype)
+    # GemmaRMSNorm applies x * (1 + weight), so weight is centered on 0.
+    q_norm.weight.data.normal_(mean=0.0, std=0.1)
+    k_norm.weight.data.normal_(mean=0.0, std=0.1)
+    rotary_emb = get_rope(
+        head_size=head_dim,
+        max_position=8192,
+        rope_parameters={
+            "rope_theta": 10000.0,
+            "partial_rotary_factor": partial_rotary_factor,
+        },
+    ).to(device)
+
+    q_size = num_q_heads * head_dim
+    kv_size = num_kv_heads * head_dim
+    q_gate = torch.randn(num_tokens, q_size * 2, dtype=dtype, device=device)
+    k_in = torch.randn(num_tokens, kv_size, dtype=dtype, device=device)
+    positions = torch.arange(num_tokens, dtype=torch.long, device=device)
+
+    # Fused path (mirrors _project_qkv_gate fused branch).
+    q_f, k_f, gate_f = fused_qk_rmsnorm_rope_gate(
+        q_gate.clone(),
+        k_in.clone(),
+        q_norm.weight.float() + 1.0,
+        k_norm.weight.float() + 1.0,
+        rotary_emb.cos_sin_cache,
+        positions,
+        q_norm.variance_epsilon,
+        num_q_heads,
+        num_kv_heads,
+        head_dim,
+        rotary_emb.rotary_dim,
+    )
+
+    # Eager path (mirrors _project_qkv_gate eager branch exactly).
+    qg = q_gate.view(num_tokens, num_q_heads, -1)
+    q_e, gate_e = torch.chunk(qg, 2, dim=-1)
+    q_e = q_e.reshape(num_tokens, -1)
+    gate_e = gate_e.reshape(num_tokens, -1)
+    q_e = q_norm(q_e.view(-1, num_q_heads, head_dim)).view(-1, q_size)
+    k_e = k_norm(k_in.view(-1, num_kv_heads, head_dim)).view(-1, kv_size)
+    q_e, k_e = rotary_emb(positions, q_e.clone(), k_e.clone())
+
+    # bf16 rope materializes ~1-2 ULP off the fused kernel's round-trip; the
+    # non-rotary head region is bit-identical. 5e-2 covers the rotary ULP.
+    torch.testing.assert_close(q_f, q_e, atol=5e-2, rtol=1e-2)
+    torch.testing.assert_close(k_f, k_e, atol=5e-2, rtol=1e-2)
+    torch.testing.assert_close(gate_f, gate_e, atol=0, rtol=0)
