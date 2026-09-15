@@ -299,22 +299,25 @@ class ActivationQuantFusionPass(VllmFusionPatternMatcherPass):
             self.register(SiluMulNvfp4QuantPattern())
 
         if current_platform.is_cuda():
+            # NOTE: is_e8m0 (scale_ue8m0=True) variants are intentionally not
+            # registered: silu_and_mul_per_block_quant has no ue8m0 parameter
+            # and always emits raw float32 group scales, so the replacement
+            # would silently drop the power-of-two scale contract of the
+            # DeepGEMM path. See the matching note in rms_quant_fusion.py.
             for (
                 quant_key,
                 is_scale_transposed,
-                is_e8m0,
                 is_tma_aligned,
             ) in itertools.product(
                 [kFp8Dynamic128Sym, kFp8Dynamic64Sym],
                 [False, True],
-                [True, False],
                 [False, True],
             ):
                 self.register(
                     SiluMulBlockQuantPattern(
                         quant_key,
                         is_scale_transposed=is_scale_transposed,
-                        is_e8m0=is_e8m0,
+                        is_e8m0=False,
                         is_tma_aligned=is_tma_aligned,
                     )
                 )
