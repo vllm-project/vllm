@@ -282,6 +282,13 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         ):
             return True
 
+        # xgrammar enforces `allOf` only when it has a single branch. For
+        # multiple branches it silently compiles to an "accept anything" rule,
+        # dropping every constraint without surfacing an error.
+        allof = obj.get("allOf")
+        if isinstance(allof, list) and len(allof) > 1:
+            return True
+
         # Recursively check all nested objects and arrays
         for value in obj.values():
             if isinstance(value, dict):
@@ -295,6 +302,200 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         return False
 
     return check_object(schema)
+
+
+_ANNOTATION_KEYS = frozenset(
+    {
+        "title",
+        "description",
+        "default",
+        "examples",
+        "deprecated",
+        "readOnly",
+        "writeOnly",
+        "$comment",
+    }
+)
+
+
+class _UnmergeableAllOf(Exception):
+    """Raised when a multi-branch allOf cannot be flattened losslessly."""
+
+
+def _lookup_local_ref(root: dict[str, Any], ref: str) -> dict[str, Any]:
+    if not isinstance(ref, str) or not ref.startswith("#/"):
+        raise _UnmergeableAllOf
+    node: Any = root
+    for raw_token in ref[2:].split("/"):
+        token = raw_token.replace("~1", "/").replace("~0", "~")
+        if not isinstance(node, dict) or token not in node:
+            raise _UnmergeableAllOf
+        node = node[token]
+    if not isinstance(node, dict):
+        raise _UnmergeableAllOf
+    return node
+
+
+def _is_object_schema(schema: dict[str, Any]) -> bool:
+    return schema.get("type", "object") == "object"
+
+
+def _merge_property_schemas(
+    current: Any,
+    incoming: Any,
+    root: dict[str, Any],
+    active_refs: frozenset[str],
+) -> Any:
+    if current == incoming:
+        return current
+    if not isinstance(current, dict) or not isinstance(incoming, dict):
+        raise _UnmergeableAllOf
+    if not _is_object_schema(current) or not _is_object_schema(incoming):
+        raise _UnmergeableAllOf
+    return _merge_object_schemas([current, incoming], root, active_refs)
+
+
+def _merge_defs_map(dest: dict[str, Any], incoming: Any) -> None:
+    if not isinstance(incoming, dict):
+        raise _UnmergeableAllOf
+    for name, defn in incoming.items():
+        if name not in dest:
+            dest[name] = defn
+        elif dest[name] != defn:
+            raise _UnmergeableAllOf
+
+
+def _merge_object_schemas(
+    schemas: list[dict[str, Any]],
+    root: dict[str, Any],
+    active_refs: frozenset[str],
+) -> dict[str, Any]:
+    properties: dict[str, Any] = {}
+    required: list[Any] = []
+    seen_required: set[Any] = set()
+    defs: dict[str, Any] = {}
+    definitions: dict[str, Any] = {}
+    annotations: dict[str, Any] = {}
+
+    for schema in schemas:
+        if not isinstance(schema, dict):
+            raise _UnmergeableAllOf
+        for key, value in schema.items():
+            if key == "type":
+                if value != "object":
+                    raise _UnmergeableAllOf
+            elif key == "properties":
+                if not isinstance(value, dict):
+                    raise _UnmergeableAllOf
+                for name, prop in value.items():
+                    if name in properties:
+                        properties[name] = _merge_property_schemas(
+                            properties[name], prop, root, active_refs
+                        )
+                    else:
+                        properties[name] = prop
+            elif key == "required":
+                if not isinstance(value, list):
+                    raise _UnmergeableAllOf
+                for item in value:
+                    if item not in seen_required:
+                        seen_required.add(item)
+                        required.append(item)
+            elif key == "$defs":
+                _merge_defs_map(defs, value)
+            elif key == "definitions":
+                _merge_defs_map(definitions, value)
+            elif key in _ANNOTATION_KEYS:
+                if key not in annotations:
+                    annotations[key] = value
+            else:
+                raise _UnmergeableAllOf
+
+    result: dict[str, Any] = {"type": "object"}
+    if properties:
+        result["properties"] = {
+            name: _flatten_node(prop, root, active_refs)
+            for name, prop in properties.items()
+        }
+    if required:
+        result["required"] = required
+    if defs:
+        result["$defs"] = defs
+    if definitions:
+        result["definitions"] = definitions
+    result.update(annotations)
+    return result
+
+
+def _resolve_branch(
+    root: dict[str, Any], branch: Any, active_refs: frozenset[str]
+) -> tuple[dict[str, Any], frozenset[str]]:
+    if not isinstance(branch, dict):
+        raise _UnmergeableAllOf
+    ref = branch.get("$ref")
+    if ref is None:
+        return branch, frozenset()
+    if not isinstance(ref, str) or ref in active_refs:
+        raise _UnmergeableAllOf
+    target = _lookup_local_ref(root, ref)
+    resolved, nested_refs = _resolve_branch(root, target, active_refs | {ref})
+    inlined = nested_refs | {ref}
+    siblings = {key: value for key, value in branch.items() if key != "$ref"}
+    if not siblings:
+        return resolved, inlined
+    merged = _merge_object_schemas([resolved, siblings], root, active_refs | inlined)
+    return merged, inlined
+
+
+def _flatten_node(node: Any, root: dict[str, Any], active_refs: frozenset[str]) -> Any:
+    if isinstance(node, dict):
+        allof = node.get("allOf")
+        if isinstance(allof, list) and len(allof) > 1:
+            remaining = {key: value for key, value in node.items() if key != "allOf"}
+            branches: list[dict[str, Any]] = []
+            refs_inlined: frozenset[str] = frozenset()
+            for branch in allof:
+                resolved, refs = _resolve_branch(root, branch, active_refs)
+                branches.append(resolved)
+                refs_inlined |= refs
+            if remaining:
+                branches.append(remaining)
+            child_refs = active_refs | refs_inlined
+            node = _merge_object_schemas(branches, root, child_refs)
+            return {
+                key: _flatten_node(value, root, child_refs)
+                for key, value in node.items()
+            }
+        return {
+            key: _flatten_node(value, root, active_refs) for key, value in node.items()
+        }
+    if isinstance(node, list):
+        return [_flatten_node(item, root, active_refs) for item in node]
+    return node
+
+
+def flatten_allof_branches(schema: dict[str, Any]) -> dict[str, Any] | None:
+    """Flatten multi-branch ``allOf`` combinators into a single object schema.
+
+    Every object node with more than one ``allOf`` branch is merged into one
+    object schema. Single-branch ``allOf`` is left as-is. ``$ref`` values are
+    resolved only when they appear as an ``allOf`` branch; a bare ``$ref``
+    node is not inlined. ``schema`` is not mutated.
+
+    Args:
+        schema: JSON schema to rewrite.
+
+    Returns:
+        A rewritten copy of ``schema``, or ``None`` if a multi-branch
+        ``allOf`` cannot be merged losslessly.
+    """
+    try:
+        flattened = _flatten_node(schema, schema, frozenset())
+    except _UnmergeableAllOf:
+        return None
+    if not isinstance(flattened, dict):
+        return None
+    return flattened
 
 
 def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
@@ -346,6 +547,14 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
                 raise VLLMValidationError("Invalid JSON grammar specification.") from e
         else:
             schema = so_params.json
+
+        flattened = flatten_allof_branches(schema)
+        if flattened is not None:
+            schema = flattened
+            if isinstance(so_params.json, str):
+                so_params.json = json.dumps(flattened)
+            else:
+                so_params.json = flattened
 
         if has_xgrammar_unsupported_json_features(schema):
             raise VLLMValidationError(
