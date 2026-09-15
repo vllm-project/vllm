@@ -791,6 +791,11 @@ _AUTOMATIC_CONVERTED_MODELS = {
 
 _MULTIMODAL_EXAMPLE_MODELS = {
     # [Decoder-only]
+    "AgnesForConditionalGeneration": _HfExamplesInfo(
+        "Agnes-AI/Agnes-3.0-Flash",
+        trust_remote_code=True,
+        max_model_len=2048,
+    ),
     "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
     "AudioFlamingo3ForConditionalGeneration": _HfExamplesInfo(
         "nvidia/audio-flamingo-3-hf",

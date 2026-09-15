@@ -594,6 +594,7 @@ _MULTIMODAL_MODELS = {
         "qwen3_vl_moe",
         "Qwen3VLMoeForConditionalGeneration",
     ),
+    "AgnesForConditionalGeneration": ("agnes", "AgnesForConditionalGeneration"),
     "Qwen3_5ForConditionalGeneration": ("qwen3_5", "Qwen3_5ForConditionalGeneration"),
     "Qwen3_5MoeForConditionalGeneration": (
         "qwen3_5",
@@ -696,6 +697,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "Qwen3NextMTP": ("qwen3_next_mtp", "Qwen3NextMTP"),
     "Qwen4ExpMTP": ("vllm.models.qwen4_exp", "Qwen4ExpMTP"),
     "Step3p5MTP": ("step3p5_mtp", "Step3p5MTP"),
+    "AgnesMTP": ("agnes", "AgnesMTP"),
     "Qwen3_5MTP": ("qwen3_5_mtp", "Qwen3_5MTP"),
     "Qwen3_5MoeMTP": ("qwen3_5_mtp", "Qwen3_5MoeMTP"),
     "InternS2MobiusMTP": ("interns2_mobius", "InternS2MobiusMTP"),

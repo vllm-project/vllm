@@ -902,6 +902,7 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["Exaone4_5_MTP"]}
             )
         if hf_config.model_type in (
+            "agnes",
             "qwen3_5",
             "qwen3_5_moe",
             "qwen3_5_text",
@@ -911,6 +912,8 @@ class SpeculativeConfig:
             # `qwen3_5_text` / `qwen3_5_moe_text` model types and carry the
             # same `mtp_num_hidden_layers` field as the multimodal ones.
             is_moe = hf_config.model_type in ("qwen3_5_moe", "qwen3_5_moe_text")
+            # Agnes reuses the Qwen3.5 MTP block under its own tensor names.
+            is_agnes = hf_config.model_type == "agnes"
             hf_config.model_type = "qwen3_5_mtp"
             n_predict = getattr(hf_config, "mtp_num_hidden_layers", None)
             if n_predict is None:
@@ -919,7 +922,11 @@ class SpeculativeConfig:
             hf_config.update(
                 {
                     "n_predict": n_predict,
-                    "architectures": ["Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP"],
+                    "architectures": [
+                        "AgnesMTP"
+                        if is_agnes
+                        else ("Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP")
+                    ],
                 }
             )
         if hf_config.model_type in ("intern_s2_preview", "interns2_mobius"):
