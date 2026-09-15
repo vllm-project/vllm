@@ -165,6 +165,14 @@ class SimpleCPUOffloadScheduler:
             kv_cache_config, offload_capacity
         )
         self.num_cpu_blocks = self.cpu_kv_cache_config.num_blocks
+        # Groups that opt out of prefix caching (GLM-5.3-Flash kpool tail,
+        # Qwen3.8-Flash-Next QSA ring: per-request scratch blocks whose
+        # block_size need not divide hash_block_size) hold no hashed blocks and
+        # are never stored or loaded; skip them wherever blocks are mapped to
+        # token ranges.
+        self.prefix_cacheable_group_ids = frozenset(
+            self.cpu_kv_cache_config.prefix_cacheable_group_ids
+        )
         self.kv_event_medium = MEDIUM_STORAGE if disk_capacity_bytes > 0 else MEDIUM_CPU
         # Find the full attention kv group for prefix cache matching.
         self.fa_gidx = -1
@@ -299,6 +307,8 @@ class SimpleCPUOffloadScheduler:
         target = 0
         for g in kv_cache_config.kv_cache_groups:
             spec = g.kv_cache_spec
+            if not spec.prefix_cacheable:
+                continue
             # Only full attention is sharded across DCP ranks; replicated specs
             # (mamba, sliding window, chunked-local) keep their own block size.
             block_size = spec.block_size * dcp_world_size_for_kv_cache_spec(
@@ -443,6 +453,9 @@ class SimpleCPUOffloadScheduler:
         # the rest will be released along with the temp pin below.
         cpu_hit_blocks: list[list[KVCacheBlock]] = []
         for g in range(num_groups):
+            if g not in self.prefix_cacheable_group_ids:
+                cpu_hit_blocks.append([])
+                continue
             g_block_size = self.group_block_sizes[g]
             n_take_g = cdiv(num_external_tokens, g_block_size)
             cpu_hit_blocks.append(cpu_hit_blocks_full[g][:n_take_g])
@@ -829,6 +842,8 @@ class SimpleCPUOffloadScheduler:
         num_free = self.cpu_block_pool.get_num_free_blocks()
 
         for g, group_gpu_ids in enumerate(block_ids_by_group):
+            if g not in self.prefix_cacheable_group_ids:
+                continue
             if len(gpu_block_ids) >= num_free:
                 break
             group_manager = self.cpu_coordinator.single_type_managers[g]
