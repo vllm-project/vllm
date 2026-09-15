@@ -67,6 +67,23 @@ class SchedulerConfig:
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
 
+    prefill_admission_slots: int = Field(default=0, ge=0)
+    """Maximum number of sequence slots used for a prefill admission wave.
+
+    When positive, a full resident decode batch is kept decode-only. After
+    decode residency drops below ``max_num_seqs``, up to this many waiting
+    prefills are admitted together. Decodes deferred by the wave retain their
+    KV cache, and slots without a waiting prefill remain available to decode.
+    0 disables prefill admission waves."""
+
+    @property
+    def max_num_resident_seqs(self) -> int:
+        """Maximum requests retained by the scheduler and model runner."""
+        return self.max_num_seqs + min(
+            self.prefill_admission_slots,
+            self.max_num_seqs,
+        )
+
     long_prefill_token_threshold: int = Field(default=0, ge=0)
     """For chunked prefill, a request is considered long if the prompt is
     longer than this number of tokens. 0 disables the cap (default)."""
@@ -258,8 +275,9 @@ class SchedulerConfig:
         factors.append(self.max_num_batched_tokens)
 
         # PLE and other model components allocate static per-request buffers.
-        # Their shapes are captured in compiled graphs.
-        factors.append(self.max_num_seqs)
+        # Their shapes are captured in compiled graphs. Prefill admission can
+        # retain more requests than a single execution step can schedule.
+        factors.append(self.max_num_resident_seqs)
 
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
@@ -271,6 +289,11 @@ class SchedulerConfig:
         return None if value is None else handler(value)
 
     def __post_init__(self, max_model_len: int, is_encoder_decoder: bool) -> None:
+        if self.prefill_admission_slots > 0 and self.runner_type != "generate":
+            raise ValueError(
+                "prefill_admission_slots is only supported for generation models."
+            )
+
         if is_encoder_decoder:
             # Chunked prefill should be disabled for encoder-decoder models.
             self.disable_chunked_mm_input = True
