@@ -8,7 +8,8 @@ import pytest
 
 from vllm.config.cache import CacheConfig
 from vllm.config.scheduler import SchedulerConfig
-from vllm.config.utils import get_hash_factors, hash_factors, normalize_value
+from vllm.config.utils import get_hash_factors, hash_factors, normalize_value, replace
+from vllm.v1.kv_cache_layout import KVCacheLayout
 
 # Helpers
 
@@ -215,6 +216,17 @@ def test_cache_config_hash_ignores_kv_cache_sizing_knobs():
     base_hash = CacheConfig().compute_hash()
     assert CacheConfig(kv_cache_memory_bytes=1 << 30).compute_hash() == base_hash
     assert CacheConfig(gpu_memory_utilization=0.5).compute_hash() == base_hash
+
+
+def test_cache_config_replace_shares_resolved_kv_cache_layout():
+    target = CacheConfig(cache_dtype="auto")
+    draft = replace(target, cache_dtype="fp8")
+
+    target.kv_cache_layout = "LBHNC"
+
+    assert target.get_resolved_kv_cache_layout() is KVCacheLayout.LBHNC
+    assert draft.get_resolved_kv_cache_layout() is KVCacheLayout.LBHNC
+    assert target.metrics_info()["kv_cache_layout"] == "LBHNC"
 
 
 def test_scheduler_config_hash_includes_max_num_seqs():
