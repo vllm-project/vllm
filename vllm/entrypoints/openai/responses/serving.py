@@ -110,6 +110,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
+        enable_store: bool = False,
         default_chat_template_kwargs: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
@@ -150,12 +151,11 @@ class OpenAIServingResponses(GenerateBaseServing):
         # NOTE(woosuk): This may not be intuitive for users, as the default
         # behavior in OpenAI's Responses API is to store the response, but
         # vLLM's default behavior is not.
-        self.enable_store = envs.VLLM_ENABLE_RESPONSES_API_STORE
+        self.enable_store = enable_store
         if self.enable_store:
             logger.warning_once(
-                "`VLLM_ENABLE_RESPONSES_API_STORE` is enabled. This may "
-                "cause a memory leak since we never remove responses from "
-                "the store."
+                "`--enable-responses-store` is set. This may cause a memory "
+                "leak since we never remove responses from the store."
             )
 
         self.use_harmony = self.model_config.hf_config.model_type == "gpt_oss"
@@ -253,9 +253,8 @@ class OpenAIServingResponses(GenerateBaseServing):
                 message=(
                     "This vLLM engine does not support `store=True` and "
                     "therefore does not support the background mode. To "
-                    "enable these features, set the environment variable "
-                    "`VLLM_ENABLE_RESPONSES_API_STORE=1` when launching "
-                    "the vLLM server."
+                    "enable these features, pass `--enable-responses-store` "
+                    "when launching the vLLM server."
                 ),
                 status_code=HTTPStatus.BAD_REQUEST,
                 param="background",
