@@ -66,10 +66,11 @@ def v41_moe_config(dist_init):
     )
 
 
+@pytest.mark.parametrize("padding", [False, True], ids=["unpadded", "nan_padding"])
 @pytest.mark.parametrize("vision", [False, True])
 @pytest.mark.parametrize("layer_id,num_experts,top_k", [(0, 8, 2), (2, 4, 3)])
 def test_deepseek_v41_moe_routes_without_hash_table(
-    v41_moe_config, monkeypatch, vision, layer_id, num_experts, top_k
+    v41_moe_config, monkeypatch, vision, layer_id, num_experts, top_k, padding
 ):
     """Main and draft layers select experts by score and preserve image routing."""
     if not current_platform.is_device_capability_family(100):
@@ -115,9 +116,34 @@ def test_deepseek_v41_moe_routes_without_hash_table(
         dim=-1, keepdim=True
     )
 
+    num_valid_tokens = 3 if padding else 4
+    expected_output = 3 * hidden_states[:num_valid_tokens]
+    if padding:
+        hidden_states[-1] = float("nan")
+        padding_mask = torch.tensor([False, False, False, True], device="cuda")
+        monkeypatch.setenv("VLLM_MOE_SKIP_PADDING", "1")
+        monkeypatch.setattr(
+            "vllm.models.deepseek_v4.nvidia.model.is_forward_context_available",
+            lambda: True,
+        )
+        monkeypatch.setattr(
+            "vllm.models.deepseek_v4.nvidia.model.get_forward_context",
+            lambda: SimpleNamespace(is_padding=padding_mask),
+        )
+
     def check_routing(x, weights, ids, *, activation_clamp):
-        torch.testing.assert_close(ids, expected_ids)
-        torch.testing.assert_close(weights, expected_weights, rtol=1e-3, atol=1e-4)
+        assert torch.isfinite(weights).all()
+        if padding:
+            assert torch.count_nonzero(x[num_valid_tokens:]) == 0
+        torch.testing.assert_close(
+            ids[:num_valid_tokens], expected_ids[:num_valid_tokens]
+        )
+        torch.testing.assert_close(
+            weights[:num_valid_tokens],
+            expected_weights[:num_valid_tokens],
+            rtol=1e-3,
+            atol=1e-4,
+        )
         assert activation_clamp == config.swiglu_limit
         return x.clone()
 
@@ -134,7 +160,8 @@ def test_deepseek_v41_moe_routes_without_hash_table(
         image_sentinel_base_id=IMAGE_SENTINEL_BASE_ID if vision else None,
     )
     torch.testing.assert_close(
-        moe(hidden_states, input_ids, metadata), 3 * hidden_states
+        moe(hidden_states, input_ids, metadata)[:num_valid_tokens],
+        expected_output,
     )
 
 
