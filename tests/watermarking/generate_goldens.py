@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Regenerate every deterministic watermarking golden.
+"""Regenerate tests/watermarking/watermarking_goldens.json.
 
-Run with ``python tests/watermarking/generate_goldens.py`` from the repository root.
+Run with ``python -m tests.watermarking.generate_goldens`` from the repository root.
 """
 
 import json
