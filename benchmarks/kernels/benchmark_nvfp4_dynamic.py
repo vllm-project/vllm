@@ -13,6 +13,7 @@ import importlib.metadata
 import json
 import os
 import statistics
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,8 +21,8 @@ import flashinfer
 import torch
 import torch.nn.functional as F
 from flashinfer.autotuner import AutoTuner, autotune
-from flashinfer.experimental.native_bf16_fp4.runner import get_runner
-from flashinfer.experimental.native_bf16_fp4.tiled_silu import run as native_silu
+from flashinfer.gemm.kernels.native_bf16_fp4.runner import get_runner
+from flashinfer.gemm.kernels.native_bf16_fp4.tiled_silu import run as native_silu
 from flashinfer.quantization.fp4_quantization import silu_and_mul_nvfp4_quantize
 from flashinfer.testing import bench_gpu_time_with_cupti
 
@@ -126,7 +127,19 @@ def verify_sources(manifest_path):
 
 
 def make_variants(
-    x, packed, sf, wg, ai, alpha, fused, stock_layer, marlin_layer, stock_kernel, n, k
+    x,
+    packed,
+    sf,
+    wg,
+    ai,
+    alpha,
+    fused,
+    stock_layer,
+    marlin_layer,
+    stock_kernel,
+    n,
+    k,
+    prepared_a16,
 ):
     def stock_a4():
         if not fused:
@@ -154,12 +167,21 @@ def make_variants(
             size_k=k,
         )
 
-    return [
+    def flashinfer_a16():
+        activation = stock_silu(x) if fused else x
+        return flashinfer.mm_bf16_fp4(
+            activation, *prepared_a16, backend="cute-dsl", out_dtype=torch.bfloat16
+        )
+
+    variants = [
         ("stock_a4", stock_a4),
         ("cute_a4", cute_a4),
-        ("native_a16", native_a16),
+        ("flashinfer_a16", flashinfer_a16),
         ("marlin", marlin),
     ]
+    if x.shape[0] <= 16:
+        variants.insert(2, ("native_a16", native_a16))
+    return variants
 
 
 @torch.inference_mode()
@@ -185,7 +207,7 @@ def main():
         assert str(props.uuid).removeprefix("GPU-") == args.expected_uuid.removeprefix(
             "GPU-"
         )
-    assert all(1 <= m <= 16 for m in args.m)
+    assert all(m >= 1 for m in args.m)
     if args.clock_admission is not None:
         admission = json.loads(args.clock_admission.read_text())
         assert admission["passed"]
@@ -230,6 +252,8 @@ def main():
         "timing": "CUPTI full operation span, CUDA graph, cold L2, balanced order",
         "stock_down": "Stock vLLM fused SiLU+NVFP4 quantization and stock CUTLASS GEMM",
         "marlin_down": "Stock vLLM SiLU+multiply and stock NVFP4 Marlin",
+        "flashinfer_a16_down": "Stock SiLU+multiply and prepared CuTe W4A16",
+        "native_support": "M=1..16; omitted above 16, never relabeled W4A4",
         "correctness": {
             "atol": 0.03,
             "rtol": 0.01,
@@ -280,6 +304,38 @@ def main():
             wg.clone(), requires_grad=False
         )
         prepare_fp4_layer_for_marlin(marlin_layer)
+        torch.accelerator.synchronize()
+        prep_start = time.perf_counter()
+        prepared_a16 = flashinfer.prepare_bf16_fp4_weights(
+            packed, sf, wg, backend="cute-dsl"
+        )
+        torch.accelerator.synchronize()
+        canonical_ptrs = {
+            tensor.untyped_storage().data_ptr() for tensor in (packed, sf, wg)
+        }
+        extra_storages = {
+            tensor.untyped_storage().data_ptr(): tensor.untyped_storage().nbytes()
+            for tensor in prepared_a16
+            if tensor is not None
+            and tensor.untyped_storage().data_ptr() not in canonical_ptrs
+        }
+        (args.output / f"preparation-{name}.json").write_text(
+            json.dumps(
+                {
+                    "backend": "cute-dsl",
+                    "first_call_wall_seconds": time.perf_counter() - prep_start,
+                    "additional_storage_bytes": sum(extra_storages.values()),
+                    "excluded_from_operation_timing": True,
+                    "tensors": [
+                        {"shape": list(t.shape), "dtype": str(t.dtype)}
+                        for t in prepared_a16
+                        if t is not None
+                    ],
+                },
+                indent=2,
+            )
+            + "\n"
+        )
         for m in args.m:
             x = torch.randn(
                 (m, k * (2 if fused else 1)),
@@ -301,6 +357,7 @@ def main():
                 stock_kernel,
                 n,
                 k,
+                prepared_a16,
             )
             print(f"PREPARE shape={name} m={m}", flush=True)
             if args.qualify_only:
@@ -326,10 +383,13 @@ def main():
                 for label in ("stock_a4", "cute_a4", "native_a16")
             }
             checks = {
-                label: check(fn(), refs["native_a16" if label == "marlin" else label])
+                label: check(
+                    fn(),
+                    refs[label if label in ("stock_a4", "cute_a4") else "native_a16"],
+                )
                 for label, fn in variants
             }
-            if args.all_a16_tactics:
+            if args.all_a16_tactics and m <= 16:
                 activation = (
                     native_silu(x, block=256, vector=1, enable_pdl=True) if fused else x
                 )
@@ -396,7 +456,7 @@ def main():
         (args.output / f"weights-preserved-{name}.json").write_text(
             json.dumps(before) + "\n"
         )
-        del stock_layer, marlin_layer, packed, logical_sf, sf
+        del stock_layer, marlin_layer, packed, logical_sf, sf, prepared_a16
     if args.source_manifest is not None:
         verify_sources(args.source_manifest)
     (args.output / "complete.json").write_text(

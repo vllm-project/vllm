@@ -32,7 +32,7 @@ def cutedsl_dynamic_nvfp4(
     x = x.contiguous()
     if 0 < x.shape[0] <= max_a16_tokens:
         if fuse_silu:
-            from flashinfer.experimental.native_bf16_fp4.tiled_silu import run
+            from flashinfer.gemm.kernels.native_bf16_fp4.tiled_silu import run
 
             x = run(x, block=256, vector=1, enable_pdl=True)
         return flashinfer.mm_bf16_fp4(
