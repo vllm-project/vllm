@@ -19,11 +19,12 @@ llm = LLM(
         "rejection_sample_method": "fly",
         "fly_window_size": 6,
         "fly_entropy_threshold": 0.3,
+        "fly_entropy_top_k": 3,
     },
 )
 ```
 
-FLy requires at least two speculative tokens. `fly_window_size` is the number of subsequent native acceptance decisions checked; it must be smaller than `num_speculative_tokens` and defaults to `min(6, num_speculative_tokens - 1)`. The entropy gate uses the three largest processed target probabilities by default. Set `VLLM_FLY_ENTROPY_TOP_K` to change that number.
+FLy requires at least two speculative tokens. `fly_window_size` is the number of subsequent native acceptance decisions checked; it must be smaller than `num_speculative_tokens` and defaults to `min(6, num_speculative_tokens - 1)`. The entropy gate uses the three largest processed target probabilities by default. Set `fly_entropy_top_k` in `speculative_config` to change that number; it must be positive and is capped at the vocabulary size.
 
 FLy supports greedy draft sampling with target-only acceptance and probabilistic draft sampling with standard p/q acceptance. Token-Level Intersection can be used for cross-vocabulary draft models with greedy draft sampling, but is incompatible with `use_local_argmax_reduction`.
 

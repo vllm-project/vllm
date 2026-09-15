@@ -93,6 +93,7 @@ class RejectionSampler:
         self.use_block_verification: bool = False
         self.fly_window_size = 0
         self.fly_entropy_threshold = spec_config.fly_entropy_threshold
+        self.fly_entropy_top_k = spec_config.fly_entropy_top_k
         self.synthetic_conditional_rates: torch.Tensor | None = None
         if rejection_sample_method == "synthetic":
             assert spec_config.synthetic_acceptance_rates is not None
@@ -208,6 +209,7 @@ class RejectionSampler:
             use_block_verification=self.use_block_verification,
             fly_window_size=self.fly_window_size,
             fly_entropy_threshold=self.fly_entropy_threshold,
+            fly_entropy_top_k=self.fly_entropy_top_k,
             **self._watermarking_kwargs(
                 draft_sampled, expanded_idx_mapping, expanded_local_pos
             ),

@@ -1096,7 +1096,7 @@ def test_sample_recovered_tokens_vocab_boundary(vocab_size: int, no_draft_probs:
 
 
 def _make_fly_sampler(
-    window_size: int = 2, entropy_threshold: float = 0.0
+    window_size: int = 2, entropy_threshold: float = 0.0, entropy_top_k: int = 3
 ) -> RejectionSampler:
     mock_sampler = Mock(spec=Sampler)
     mock_sampler.logprobs_mode = "raw_logprobs"
@@ -1104,6 +1104,7 @@ def _make_fly_sampler(
         rejection_sample_method="fly",
         fly_window_size=window_size,
         fly_entropy_threshold=entropy_threshold,
+        fly_entropy_top_k=entropy_top_k,
     )
     return RejectionSampler(mock_sampler, spec_config)
 
@@ -1145,7 +1146,8 @@ def test_fly_greedy_rescues_mismatch_after_native_acceptance_window(
     )
 
 
-def test_fly_requires_full_lookahead_and_passes_entropy_gate():
+@pytest.mark.parametrize("top_k", [1, 3])
+def test_fly_requires_full_lookahead_and_passes_entropy_gate(top_k: int):
     spec_tokens = [[1, 2, 3, 4, 5]]
     target_tokens = [[9, 2, 3, 8, 5, 6]]
     logits = create_logits_tensor(target_tokens, vocab_size=10)
@@ -1153,7 +1155,9 @@ def test_fly_requires_full_lookahead_and_passes_entropy_gate():
     spec_metadata = create_spec_decode_metadata(spec_tokens, logits)
     bonus = torch.tensor([6], device=logits.device)
 
-    fly_sampler = _make_fly_sampler(window_size=2, entropy_threshold=0.3)
+    fly_sampler = _make_fly_sampler(
+        window_size=2, entropy_threshold=0.5, entropy_top_k=top_k
+    )
     mock_sampler_output(fly_sampler, bonus)
     low_entropy_output = fly_sampler(spec_metadata, None, logits, metadata)
     assert low_entropy_output.sampled_token_ids[0, 0].item() == 9
@@ -1163,9 +1167,11 @@ def test_fly_requires_full_lookahead_and_passes_entropy_gate():
     logits[0, 1] = 0.9
     logits[0, 0] = 0.8
     high_entropy_output = fly_sampler(spec_metadata, None, logits, metadata)
-    assert high_entropy_output.sampled_token_ids[0, 0].item() == 1
-
-    assert high_entropy_output.sampled_token_ids[0, 3].item() == 8
+    assert high_entropy_output.sampled_token_ids[0, 0].item() == (
+        1 if top_k == 3 else 9
+    )
+    if top_k == 3:
+        assert high_entropy_output.sampled_token_ids[0, 3].item() == 8
 
 
 def test_fly_does_not_override_target_constraint():

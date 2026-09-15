@@ -1066,6 +1066,7 @@ def rejection_sample(
     watermark_key: int | None = None,
     fly_window_size: int = 0,
     fly_entropy_threshold: float = 0.3,
+    fly_entropy_top_k: int = 3,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
     assert draft_logits is None or (
@@ -1110,7 +1111,7 @@ def rejection_sample(
     if fly_window_size > 0:
         assert synthetic_conditional_rates is None and not use_block_verification
         fly_entropy = compute_fly_entropy(
-            target_logits[:, :vocab_size], from_logits=True
+            target_logits[:, :vocab_size], fly_entropy_top_k, from_logits=True
         )
 
     # Compute the per-vocab-block logits stats, such as target argmax

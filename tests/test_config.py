@@ -3314,6 +3314,7 @@ def test_fly_defaults_window_size():
         )
 
     assert config.fly_window_size == 1
+    assert config.fly_entropy_top_k == 3
 
 
 @pytest.mark.parametrize(
@@ -3322,6 +3323,14 @@ def test_fly_defaults_window_size():
         (
             {"method": "draft_model", "num_speculative_tokens": 1},
             "at least 2",
+        ),
+        (
+            {
+                "method": "draft_model",
+                "num_speculative_tokens": 8,
+                "fly_entropy_top_k": 0,
+            },
+            "fly_entropy_top_k",
         ),
         (
             {

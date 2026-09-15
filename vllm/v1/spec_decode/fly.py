@@ -10,12 +10,11 @@ inside its rejection kernel.
 
 import torch
 
-import vllm.envs as envs
 from vllm.triton_utils import tl, triton
 
 
 def compute_fly_entropy(
-    values: torch.Tensor, *, from_logits: bool = False
+    values: torch.Tensor, entropy_top_k: int, *, from_logits: bool = False
 ) -> torch.Tensor:
     """Compute FLy's top-k entropy from processed target probabilities or logits."""
 
@@ -24,9 +23,8 @@ def compute_fly_entropy(
     if values.shape[-1] == 0:
         raise ValueError("FLy requires a non-empty target vocabulary")
 
-    entropy_top_k = envs.VLLM_FLY_ENTROPY_TOP_K
     if entropy_top_k <= 0:
-        raise ValueError("VLLM_FLY_ENTROPY_TOP_K must be greater than zero")
+        raise ValueError("fly_entropy_top_k must be greater than zero")
     top_k = min(entropy_top_k, values.shape[-1])
     values = values.to(torch.float32)
     top_values = torch.topk(values, k=top_k, dim=-1).values
