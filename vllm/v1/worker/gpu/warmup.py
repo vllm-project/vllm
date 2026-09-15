@@ -447,7 +447,7 @@ def _warmup_kernels(
 
     # The deferred PP post-update path only runs on real steps, so the steps
     # above never JIT-compile its kernel on non-last ranks.
-    if model_runner.pp_handler is not None and not model_runner.is_last_pp_rank:
+    if not model_runner.is_last_pp_rank and model_runner.pp_handler is not None:
         model_runner.warmup_pp_decode_update()
 
     # Clean up - process finish_req_ids.
