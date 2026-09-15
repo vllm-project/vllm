@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from functools import cached_property
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 from packaging.version import parse
 from pydantic import Field, field_validator, model_validator
@@ -151,15 +151,20 @@ class ObservabilityConfig:
                 )
         return value
 
-    @field_validator("collect_detailed_traces")
+    @field_validator("collect_detailed_traces", mode="before")
     @classmethod
-    def _validate_collect_detailed_traces(
-        cls, value: list[DetailedTraceModules] | None
-    ) -> list[DetailedTraceModules] | None:
+    def _validate_collect_detailed_traces(cls, value: Any) -> Any:
         """Handle the legacy case where users might provide a comma-separated
         string instead of a list of strings."""
-        if value is not None and len(value) == 1 and "," in value[0]:
-            value = cast(list[DetailedTraceModules], value[0].split(","))
+        if isinstance(value, str):
+            value = [value]
+        if (
+            isinstance(value, list)
+            and len(value) == 1
+            and isinstance(value[0], str)
+            and "," in value[0]
+        ):
+            value = value[0].split(",")
         return value
 
     @model_validator(mode="after")
