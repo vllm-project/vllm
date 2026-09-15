@@ -12,6 +12,7 @@ import subprocess
 import sys
 from collections.abc import Callable
 from typing import Protocol
+from unittest.mock import Mock
 
 import pytest
 from pydantic import ValidationError
@@ -27,8 +28,37 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import BeamSearchParams
 from vllm.tokenizers import deepseek_v4_encoding, deepseek_v32_encoding
+from vllm.v1.engine.input_processor import InputProcessor
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
+
+
+@pytest.mark.parametrize("offset", [-1, 0, 2, 3, 4, 2**127])
+def test_routed_experts_offset_validated_before_engine_submission(offset):
+    """Reject invalid offsets even when routed-expert output is disabled."""
+    processor = Mock(spec=InputProcessor)
+    processor.tokenizer = None
+    processor.generation_config_fields = {}
+    processor.renderer = Mock()
+    processor.renderer.get_eos_token_id.return_value = None
+    processor.vllm_config = Mock()
+    params = SamplingParams(routed_experts_prompt_start=offset)
+    prompt = {"type": "token", "prompt_token_ids": [1, 2, 3]}
+
+    if not 0 <= offset <= 3:
+        with pytest.raises(VLLMValidationError, match="routed_experts_prompt_start"):
+            InputProcessor.process_inputs(
+                processor, "invalid", prompt, params, ("generate",)
+            )
+        params.routed_experts_prompt_start = 0
+
+    request = InputProcessor.process_inputs(
+        processor, "valid", prompt, params, ("generate",)
+    )
+    assert (
+        request.sampling_params.routed_experts_prompt_start
+        == params.routed_experts_prompt_start
+    )
 
 
 # --- Stop strings: public requests cap the number of stop strings ---------
