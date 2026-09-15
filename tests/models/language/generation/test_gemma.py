@@ -63,8 +63,10 @@ def test_checkpoint_lm_head_can_override_tied_config(monkeypatch) -> None:
 @pytest.mark.cpu_test
 def test_gemma4_attention_mapper() -> None:
     """Layers with a qkv_proj pack q/k/v; `attention_k_eq_v` full-attention
-    layers also load K as the V shard; KV-shared layers keep q_proj and drop
-    the K/V tensors original checkpoints still ship for them."""
+    layers also load K as the V shard, and leave any v_proj such a checkpoint
+    ships unmapped so it fails the load rather than silently overwriting V;
+    KV-shared layers keep q_proj and drop the K/V tensors original checkpoints
+    still ship for them."""
     config = SimpleNamespace(
         num_hidden_layers=3,
         num_kv_shared_layers=1,
@@ -75,7 +77,10 @@ def test_gemma4_attention_mapper() -> None:
         (f"model.layers.{i}.self_attn.{tensor}.weight", torch.full((2, 2), i + 1.0))
         for i in range(3)
         for tensor in ("q_proj", "k_proj", "k_norm")
-    ] + [("model.layers.0.mlp.up_proj.weight", torch.empty(0))]
+    ] + [
+        ("model.layers.0.mlp.up_proj.weight", torch.empty(0)),
+        ("model.layers.1.self_attn.v_proj.weight", torch.empty(0)),
+    ]
 
     mapper = Gemma4Model.hf_to_vllm_mapper | _gemma4_layer_weights_mapper(config)
     mapped = list(mapper.apply(weights))
@@ -90,6 +95,7 @@ def test_gemma4_attention_mapper() -> None:
         ("model.layers.1.self_attn.k_norm.weight", None),
         ("model.layers.2.self_attn.q_proj.weight", None),
         ("model.layers.0.mlp.gate_up_proj.weight", 1),
+        ("model.layers.1.self_attn.v_proj.weight", None),
     ]
     k_weight, v_weight = weights[4][1], mapped[5][1]
     assert torch.equal(v_weight, k_weight) and v_weight is not k_weight

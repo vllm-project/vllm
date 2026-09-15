@@ -69,6 +69,7 @@ from .interfaces import (
 )
 from .utils import (
     AutoWeightsLoader,
+    ShardIds,
     WeightsMapper,
     extract_layer_index,
     make_layers,
@@ -83,35 +84,42 @@ def _gemma4_layer_weights_mapper(config) -> WeightsMapper:
 
     gate/up pack into `mlp.gate_up_proj`. Layers with a qkv_proj pack q/k/v
     into it; `attention_k_eq_v` full-attention layers ship k_proj only, so K
-    is also loaded as V. KV-shared layers only have q_proj; the K/V tensors
-    original checkpoints still ship for them are dropped.
+    is loaded into both the K and V shards and no v_proj is expected. KV-shared
+    layers only have q_proj; the K/V tensors original checkpoints still ship
+    for them are dropped.
     """
     num_layers = config.num_hidden_layers
     first_kv_shared = num_layers - getattr(config, "num_kv_shared_layers", 0)
-    k_eq_v = getattr(config, "attention_k_eq_v", False)
+    k_eq_v_layers = (
+        {
+            i
+            for i, layer_type in enumerate(config.layer_types[:first_kv_shared])
+            if layer_type == "full_attention"
+        }
+        if getattr(config, "attention_k_eq_v", False)
+        else set()
+    )
+    qkv_shards: tuple[tuple[str, ShardIds], ...] = (("q", "q"), ("k", "k"), ("v", "v"))
+    k_eq_v_shards: tuple[tuple[str, ShardIds], ...] = (("q", "q"), ("k", ["k", "v"]))
+    stacked: dict[str, tuple[str, ShardIds]] = {
+        ".mlp.gate_proj.": (".mlp.gate_up_proj.", 0),
+        ".mlp.up_proj.": (".mlp.gate_up_proj.", 1),
+    }
+    stacked |= {
+        f"layers.{i}.self_attn.{shard}_proj.": (
+            f"layers.{i}.self_attn.qkv_proj.",
+            shard_id,
+        )
+        for i in range(first_kv_shared)
+        for shard, shard_id in (k_eq_v_shards if i in k_eq_v_layers else qkv_shards)
+    }
     return WeightsMapper(
         orig_to_new_substr={
             f"layers.{i}.self_attn.{name}.": None
             for i in range(first_kv_shared, num_layers)
             for name in ("k_proj", "v_proj", "k_norm")
         },
-        orig_to_new_stacked={
-            ".mlp.gate_proj.": (".mlp.gate_up_proj.", 0),
-            ".mlp.up_proj.": (".mlp.gate_up_proj.", 1),
-        }
-        | {
-            f"layers.{i}.self_attn.{shard}_proj.": (
-                f"layers.{i}.self_attn.qkv_proj.",
-                shard,
-            )
-            for i in range(first_kv_shared)
-            for shard in ("q", "k", "v")
-        },
-        src_to_dst_copy={
-            f"layers.{i}.self_attn.k_proj.": f"layers.{i}.self_attn.v_proj."
-            for i, layer_type in enumerate(config.layer_types[:first_kv_shared])
-            if k_eq_v and layer_type == "full_attention"
-        },
+        orig_to_new_stacked=stacked,
     )
 
 
