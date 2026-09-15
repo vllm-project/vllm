@@ -35,7 +35,7 @@ from transformers.conversion_mapping import (
     get_model_conversion_mapping,
 )
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.compilation.decorators import DynamicArgDims, support_torch_compile
 from vllm.config.utils import getattr_iter
 from vllm.distributed import get_pp_group, get_tp_group
 from vllm.distributed.utils import get_pp_indices
@@ -258,7 +258,7 @@ class Base(
     def _decorate_cls_for_torch_compile(
         self,
         cls: type["PreTrainedModel"],
-        dynamic_arg_dims: dict[str, int | list[int] | dict[int, str]] | None,
+        dynamic_arg_dims: DynamicArgDims | None,
         enable_if: Callable[["VllmConfig"], bool],
         is_encoder: bool,
     ):
@@ -294,7 +294,7 @@ class Base(
         self._decorate_cls_for_torch_compile(
             cls=self._pre_trained_model_classes.decoder,
             # Applied to a PreTrainedModel so the batch dimension will exist
-            dynamic_arg_dims=dict[str, int | list[int] | dict[int, str]](
+            dynamic_arg_dims=DynamicArgDims(
                 input_ids=1,  # shape: [1, seq_len]
                 inputs_embeds=1,  # shape: [1, seq_len, hidden_size]
                 position_ids=-1,  # shape: [1, seq_len] or [3, 1, seq_len] for mrope
