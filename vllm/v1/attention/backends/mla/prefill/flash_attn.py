@@ -448,6 +448,10 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         lse = None
         if isinstance(attn_out, tuple):
             attn_out, lse = attn_out[0], attn_out[1]
+            if not self._is_vllm_fa:
+                # Upstream flash_attn returns (q_len, num_heads); MLA expects
+                # (num_heads, q_len), as the FlashInfer backend also converts.
+                lse = lse.transpose(0, 1)
 
         # Remain consistent with old `flash_attn_varlen_func` where there
         # is only one output tensor if `return_softmax_lse` is False.
