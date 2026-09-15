@@ -201,6 +201,11 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         else:
             param.data.copy_(loaded_weight.view(param.shape))
 
+    def _set_padded_weight_loader(self, param: torch.Tensor) -> None:
+        if hasattr(param, "weight_loader"):
+            delattr(param, "weight_loader")
+        set_weight_attrs(param, {"weight_loader": self.padded_weight_loader})
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight_name, weight_scale_name, _, _ = self.layer_param_names
         weight = getattr(layer, weight_name)
@@ -219,12 +224,7 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             (0, pad_k, 0, pad_n),
         ).t()
         replace_parameter(layer, weight_name, padded_weight.data)
-        set_weight_attrs(
-            getattr(layer, weight_name),
-            {
-                "weight_loader": self.padded_weight_loader,
-            },
-        )
+        self._set_padded_weight_loader(getattr(layer, weight_name))
 
         weight_scale = getattr(layer, weight_scale_name, None)
         if weight_scale is not None and pad_n > 0 and weight_scale.numel() > 1:
@@ -233,12 +233,7 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
                 flat_scale, dim=0, alignment=16, value=1.0
             ).view(-1, *weight_scale.shape[1:])
             replace_parameter(layer, weight_scale_name, padded_scale.data)
-            set_weight_attrs(
-                getattr(layer, weight_name),
-                {
-                    "weight_loader": self.padded_weight_loader,
-                },
-            )
+            self._set_padded_weight_loader(getattr(layer, weight_scale_name))
 
     def apply_scaled_mm(
         self,
