@@ -314,6 +314,22 @@ class RemoteVLLMServer:
         )
         self._request_shutdown_timeout = float(args.shutdown_timeout)
 
+        # Devices this server will occupy, as *visible* ordinals. Used to scope
+        # GPU memory measurements to the server's own devices so a busy neighbor
+        # on unrelated GPUs of a shared node does not keep the teardown
+        # memory-release wait from ever succeeding. ``device_ids`` may pin the
+        # server to specific, possibly non-contiguous devices; otherwise this is
+        # the contiguous range ``[0, world_size)``.
+        self._num_gpu_devices = (
+            int(getattr(args, "tensor_parallel_size", 1) or 1)
+            * int(getattr(args, "pipeline_parallel_size", 1) or 1)
+            * int(getattr(args, "prefill_context_parallel_size", 1) or 1)
+            * int(getattr(args, "data_parallel_size", 1) or 1)
+        )
+        self._engine_device_ids = resolve_engine_devices(
+            getattr(args, "device_ids", None), self._num_gpu_devices
+        )
+
         with _temporarily_sanitized_pythonpath_env():
             self._pre_download_model(model, args)
         self._shutdown_complete = False
@@ -595,14 +611,21 @@ class RemoteVLLMServer:
         return members
 
     def _get_gpu_memory_used(self) -> float | None:
-        """Get total GPU memory used across all visible devices in bytes."""
+        """Get GPU memory used across this server's devices in bytes.
+
+        Only the devices this server occupies are counted (``self.
+        _engine_device_ids``, i.e. the pinned ``device_ids`` or the contiguous
+        ``[0, world_size)`` fallback). On a shared node this avoids attributing
+        a neighbor's memory on unrelated GPUs to this server, which would
+        otherwise stall the teardown memory-release wait.
+        """
         try:
+            device_count = current_platform.device_count()
+            visible = [d for d in self._engine_device_ids if 0 <= d < device_count]
             if current_platform.is_rocm():
                 with _nvml():
                     handles = amdsmi_get_processor_handles()
-                    devices = get_physical_device_indices(
-                        list(range(current_platform.device_count()))
-                    )
+                    devices = get_physical_device_indices(visible)
                     total_used_mib = 0
                     for device in devices:
                         handle = handles[device]
@@ -619,16 +642,15 @@ class RemoteVLLMServer:
             elif current_platform.is_cuda():
                 with _nvml():
                     total_used = 0
-                    device_count = current_platform.device_count()
-                    for i in range(device_count):
+                    # NVML indexes by physical id, so map visible -> physical.
+                    for i in get_physical_device_indices(visible):
                         handle = nvmlDeviceGetHandleByIndex(i)
                         mem_info = nvmlDeviceGetMemoryInfo(handle)
                         total_used += mem_info.used
                     return total_used
             elif current_platform.is_xpu():
                 total_used = 0
-                device_count = current_platform.device_count()
-                for i in range(device_count):
+                for i in visible:
                     free, total = torch.xpu.mem_get_info(i)
                     total_used += total - free
                 return total_used
@@ -1595,6 +1617,34 @@ def get_physical_device_indices(devices: list[int]):
     return [index_mapping[i] for i in devices if i in index_mapping]
 
 
+def resolve_engine_devices(
+    device_ids: Sequence[Any] | None,
+    num_devices: int,
+) -> list[int]:
+    """Resolve the visible-set device indices an engine occupies.
+
+    The result scopes GPU memory-settle waits to just these devices. The
+    memory-query path indexes devices by their *visible* ordinal -- the index
+    into ``CUDA_VISIBLE_DEVICES`` / ``ZE_AFFINITY_MASK`` (or all GPUs when
+    unset) -- on both CUDA and XPU. Integer ``device_ids`` are exactly those
+    visible ordinals, so they are returned as-is (this handles non-contiguous
+    pins such as ``[2, 3, 5, 7]``). When there is no explicit integer mapping
+    (``device_ids`` unset or given as UUID strings), fall back to the
+    contiguous range ``[0, num_devices)``.
+
+    Args:
+        device_ids: The ``device_ids`` passed to the engine, or ``None``.
+        num_devices: Number of devices the engine occupies, used for the
+            contiguous fallback.
+
+    Returns:
+        The visible-set device indices the engine occupies.
+    """
+    if device_ids and all(isinstance(d, int) for d in device_ids):
+        return [int(d) for d in device_ids]
+    return list(range(num_devices))
+
+
 def get_nvml_device_handle(device: int):
     visible_devices = os.environ.get("NVIDIA_VISIBLE_DEVICES")
     if visible_devices is not None:
@@ -1770,6 +1820,7 @@ def wait_for_memory_to_settle(
     *,
     threshold_ratio: float | dict[int, float] | None = 0.1,
     timeout_s: float = 240,
+    devices: list[int] | None = None,
 ) -> None:
     """Block until ROCm or XPU device VRAM usage drops below ``threshold_ratio``.
 
@@ -1777,6 +1828,15 @@ def wait_for_memory_to_settle(
     loads in a single test process can OOM the *next* engine/model startup
     even after ``cleanup_dist_env_and_memory``. This gives the driver time to
     actually release VRAM before the next allocation. No-op off ROCm.
+
+    Args:
+        threshold_ratio: Per-device (or shared) used-memory ratio to wait for.
+        timeout_s: Give up after this many seconds.
+        devices: Logical device indices to wait on. Defaults to every visible
+            device. Pass the indices the current engine actually used so the
+            wait does not block on GPUs owned by other processes sharing the
+            node (e.g. under an ``ZE_AFFINITY_MASK``/``CUDA_VISIBLE_DEVICES``
+            that still exposes several devices).
     """
     if not current_platform.is_rocm() and not current_platform.is_xpu():
         return
@@ -1784,11 +1844,17 @@ def wait_for_memory_to_settle(
     num_gpus = current_platform.device_count()
     if num_gpus == 0:
         return
+    if devices is None:
+        devices = list(range(num_gpus))
+    else:
+        devices = [device for device in devices if 0 <= device < num_gpus]
+    if not devices:
+        return
     if threshold_ratio is None:
         threshold_ratio = 0.1
 
     wait_for_gpu_memory_to_clear(
-        devices=list(range(num_gpus)),
+        devices=devices,
         threshold_ratio=threshold_ratio,
         timeout_s=timeout_s,
         stable_duration_s=2.0,
