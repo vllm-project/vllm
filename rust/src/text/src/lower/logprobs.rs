@@ -6,8 +6,8 @@
 //! `-1` is expanded only for bounds checks. The original request values are
 //! passed through to engine-core.
 
-use itertools::Itertools as _;
 use thiserror::Error;
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
 
 use crate::backend::SamplingLimits;
 
@@ -36,10 +36,21 @@ pub enum LogprobsError {
          len(logprob_token_ids). Got logprobs={logprobs}, len(logprob_token_ids)={num_token_ids}."
     )]
     TokenIdsMismatch { logprobs: i32, num_token_ids: usize },
-    #[error("prompt_logprob_token_ids must not be empty.")]
-    EmptyPromptLogprobTokenIds,
-    #[error("prompt_logprob_token_ids must not contain duplicates.")]
-    DuplicatePromptLogprobTokenIds,
+    #[error(
+        "prompt_logprob_token_ids must be a non-empty integer array of shape \
+         [num_rows, num_ids]."
+    )]
+    InvalidPromptLogprobTokenIds,
+    #[error(
+        "prompt_logprob_token_ids contain out-of-vocab token ids (-1 pads a row). \
+         Vocabulary size: {vocab_size}"
+    )]
+    PromptLogprobTokenIdsOutOfVocab { vocab_size: usize },
+    #[error(
+        "prompt_logprob_token_ids has {rows} rows, but the prompt has {expected} scored \
+         rows (prompt_len - 1 - prompt_logprob_start)."
+    )]
+    PromptLogprobRowsMismatch { rows: usize, expected: usize },
     #[error("prompt_logprob_start requires prompt_logprob_token_ids.")]
     PromptLogprobStartWithoutTokenIds,
 }
@@ -49,8 +60,6 @@ pub(super) fn validate_logprobs(
     logprobs: Option<i32>,
     prompt_logprobs: Option<i32>,
     logprob_token_ids: Option<&[u32]>,
-    prompt_logprob_token_ids: Option<&[u32]>,
-    prompt_logprob_start: Option<u32>,
     sampling_limits: SamplingLimits,
 ) -> Result<(), LogprobsError> {
     let vocab_size = sampling_limits.model_vocab_size;
@@ -59,26 +68,54 @@ pub(super) fn validate_logprobs(
 
     validate_logprobs_count(logprobs, max_logprobs, vocab_size, "logprobs")?;
     validate_logprobs_count(prompt_logprobs, max_logprobs, vocab_size, "prompt_logprobs")?;
-    validate_logprobs_count(
-        prompt_logprob_token_ids.map(|ids| ids.len() as i32),
-        max_logprobs,
-        vocab_size,
-        "prompt_logprob_token_ids",
-    )?;
-    validate_prompt_logprob_token_ids(prompt_logprob_token_ids, prompt_logprob_start)?;
     validate_logprob_token_ids(logprobs, logprob_token_ids)
 }
 
-fn validate_prompt_logprob_token_ids(
-    token_ids: Option<&[u32]>,
+/// Validate per-row candidates as Python `SamplingParams` and `InputProcessor`
+/// do, and pad them with `-1` into the engine's `[num_rows, num_ids]` array.
+pub(super) fn lower_prompt_logprob_token_ids(
+    rows: Option<Vec<Vec<i64>>>,
     start: Option<u32>,
-) -> Result<(), LogprobsError> {
-    match token_ids {
-        Some([]) => Err(LogprobsError::EmptyPromptLogprobTokenIds),
-        Some(ids) if !ids.iter().all_unique() => Err(LogprobsError::DuplicatePromptLogprobTokenIds),
-        None if start.is_some() => Err(LogprobsError::PromptLogprobStartWithoutTokenIds),
-        _ => Ok(()),
+    prompt_len: u32,
+    sampling_limits: SamplingLimits,
+) -> Result<Option<WireNdArray>, LogprobsError> {
+    let Some(rows) = rows else {
+        return match start {
+            Some(_) => Err(LogprobsError::PromptLogprobStartWithoutTokenIds),
+            None => Ok(None),
+        };
+    };
+    let width = rows.iter().map(Vec::len).max().unwrap_or(0);
+    if width == 0 {
+        return Err(LogprobsError::InvalidPromptLogprobTokenIds);
     }
+    let vocab_size = sampling_limits.model_vocab_size;
+    let max_logprobs =
+        normalize_logprobs_count(sampling_limits.max_logprobs, vocab_size, "max_logprobs")?;
+    if width > max_logprobs {
+        return Err(LogprobsError::TooManyCount {
+            parameter: "prompt_logprob_token_ids",
+            requested: width,
+            max_allowed: max_logprobs,
+        });
+    }
+    if rows.iter().flatten().any(|&id| id < -1 || id >= vocab_size as i64) {
+        return Err(LogprobsError::PromptLogprobTokenIdsOutOfVocab { vocab_size });
+    }
+    let expected = (prompt_len as usize).saturating_sub(1 + start.unwrap_or(0) as usize);
+    if rows.len() != expected {
+        return Err(LogprobsError::PromptLogprobRowsMismatch {
+            rows: rows.len(),
+            expected,
+        });
+    }
+    let data = rows
+        .iter()
+        .flat_map(|row| row.iter().copied().chain(std::iter::repeat_n(-1, width - row.len())))
+        .collect();
+    Ok(Some(
+        WireNdArray::from_i64(vec![rows.len(), width], data).expect("padded rows are rectangular"),
+    ))
 }
 
 fn validate_logprobs_count(

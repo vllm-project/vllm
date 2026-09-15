@@ -317,11 +317,11 @@ async def test_generate_logprobs(client, logprobs_value):
 @pytest.mark.asyncio
 async def test_generate_prompt_token_id_logprobs(client):
     token_ids = [11, 22, 33, 44, 55]
-    candidates = [22, 33, 44, 55]
+    rows = [[33], [44, 100], [55]]
     sampling_params = {
         "max_tokens": 1,
         "prompt_logprobs": 0,
-        "prompt_logprob_token_ids": candidates,
+        "prompt_logprob_token_ids": rows,
         "prompt_logprob_start": 1,
     }
     payload = {
@@ -334,14 +334,13 @@ async def test_generate_prompt_token_id_logprobs(client):
     data = resp.json()
 
     scores = np.load(io.BytesIO(base64.b64decode(data["prompt_token_id_logprobs"])))
-    assert scores.shape == (len(token_ids) - 2, len(candidates))
+    assert scores.shape == (3, 2)
     for row, target in enumerate(token_ids[2:]):
         expected = data["prompt_logprobs"][row + 2][str(target)]["logprob"]
-        assert scores[row, candidates.index(target)] == pytest.approx(
-            expected, abs=1e-3
-        )
+        assert scores[row, 0] == pytest.approx(expected, abs=1e-3)
+    assert np.isneginf(scores[[0, 2], 1]).all()
 
-    stream_only_ids = {"prompt_logprob_token_ids": candidates}
+    stream_only_ids = {"prompt_logprob_token_ids": rows}
     resp = await client.post(
         GEN_ENDPOINT,
         json={**payload, "sampling_params": stream_only_ids, "stream": True},
@@ -349,15 +348,12 @@ async def test_generate_prompt_token_id_logprobs(client):
     assert resp.status_code == 400
     assert "prompt_logprob_token_ids" in resp.text
 
-    past_end = {**sampling_params, "prompt_logprob_start": len(token_ids)}
+    too_few_rows = {**sampling_params, "prompt_logprob_token_ids": rows[:2]}
     resp = await client.post(
-        GEN_ENDPOINT, json={**payload, "sampling_params": past_end}
+        GEN_ENDPOINT, json={**payload, "sampling_params": too_few_rows}
     )
-    resp.raise_for_status()
-    empty = np.load(
-        io.BytesIO(base64.b64decode(resp.json()["prompt_token_id_logprobs"]))
-    )
-    assert empty.shape == (0, len(candidates))
+    assert resp.status_code == 400
+    assert "scored rows" in resp.text
 
 
 @pytest.mark.asyncio
