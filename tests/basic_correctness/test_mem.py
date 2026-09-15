@@ -111,6 +111,36 @@ def test_basic_cumem():
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+def test_release_kv_cache_memory_then_sleep():
+    kv_cache_memory_bytes = 256 * 1024 * 1024
+    llm = LLM(
+        "Qwen/Qwen3-0.6B",
+        enable_sleep_mode=True,
+        enforce_eager=True,
+        kv_cache_memory_bytes=kv_cache_memory_bytes,
+        max_model_len=1024,
+        max_num_seqs=4,
+    )
+    prompt = "How are you?"
+    sampling_params = SamplingParams(temperature=0, max_tokens=10)
+    expected = llm.generate(prompt, sampling_params)[0].outputs[0].text
+
+    free_bytes = current_platform.mem_get_info()[0]
+    llm.sleep(level=0)
+    llm.release_kv_cache_memory()
+    free_bytes_after_release = current_platform.mem_get_info()[0]
+    assert free_bytes_after_release - free_bytes >= kv_cache_memory_bytes * 0.99
+    assert llm.llm_engine.is_sleeping()
+
+    llm.sleep(level=1)
+    assert current_platform.mem_get_info()[0] > free_bytes_after_release
+    llm.wake_up()
+    assert not llm.llm_engine.is_sleeping()
+    actual = llm.generate(prompt, sampling_params)[0].outputs[0].text
+    assert actual == expected
+
+
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 def test_discard_tags():
     """Test that discard(tags) selectively frees GPU memory for specific
     tags while keeping other tags mapped and usable."""

@@ -198,6 +198,9 @@ class CPUWorker(Worker):
         logger.warning("sleep mode is not supported on CPU, ignore it.")
         pass
 
+    def discard(self, tags: tuple[str, ...]) -> None:
+        raise RuntimeError("Selective discard is not supported on CPU.")
+
     def _should_warm_up_model(self) -> bool:
         # VLLM_CPU_CI_ENV always skips warmup to save CI time.
         if envs.VLLM_CPU_CI_ENV:

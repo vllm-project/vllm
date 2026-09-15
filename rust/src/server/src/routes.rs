@@ -142,6 +142,10 @@ fn build_router_with_options(
             .route("/weight_info", get(weight_transfer::weight_info))
             .route("/abort_requests", post(abort_requests::abort_requests))
             .route("/sleep", post(sleep::sleep))
+            .route(
+                "/release_kv_cache_memory",
+                post(sleep::release_kv_cache_memory),
+            )
             .route("/wake_up", post(sleep::wake_up))
             .route("/is_sleeping", get(sleep::is_sleeping))
             .route("/pause", post(pause::pause))
