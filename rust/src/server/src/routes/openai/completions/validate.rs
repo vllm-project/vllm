@@ -52,7 +52,7 @@ pub(super) fn validate_request_compat(
     }
 
     if let Some(prompt_logprobs) = request.prompt_logprobs {
-        if request.stream && (prompt_logprobs > 0 || prompt_logprobs == -1) {
+        if request.stream {
             bail_invalid_request!(
                 param = "prompt_logprobs",
                 "`prompt_logprobs` are not available when `stream=true`."
@@ -177,6 +177,20 @@ mod tests {
     fn validate_request_compat_rejects_streaming_prompt_logprobs() {
         let request = CompletionRequest {
             prompt_logprobs: Some(1),
+            ..base_request()
+        };
+        assert!(
+            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err()
+        );
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_streaming_prompt_logprobs_zero() {
+        // prompt_logprobs=0 is a meaningful, explicit request (not "unset"),
+        // so it must be rejected under stream=true just like any other
+        // prompt_logprobs value.
+        let request = CompletionRequest {
+            prompt_logprobs: Some(0),
             ..base_request()
         };
         assert!(
