@@ -987,6 +987,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """Estimate the GPU memory required to capture CUDA graphs."""
         return _profile_cudagraph_memory(self)
 
+    def needs_cudagraph_capture(self) -> bool:
+        """Whether capture_model() has any CUDA graphs left to capture."""
+        return (
+            self.model_state.supports_mm_inputs
+            and self.model_state.encoder_runner.has_cudagraph()
+        ) or (
+            self.cudagraph_manager is not None
+            and self.cudagraph_manager.needs_capture()
+        )
+
     @torch.inference_mode()
     def capture_model(self, *, profile_only: bool = False) -> int:
         assert self.cudagraph_manager is not None
@@ -1458,7 +1468,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         input_batch = pcp.maybe_partition_pcp_batch(
             self.pcp_manager,
             input_batch,
-            padded_num_tokens=batch_desc.num_tokens,
+            batch_desc,
         )
         return input_batch
 
@@ -1486,7 +1496,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def prepare_dummy_attn(
         self, input_batch: InputBatch, valid_state_slots: bool = False
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
-        block_tables = self.block_tables.get_dummy_block_tables(input_batch.num_reqs)
+        block_table_provider = self.pcp_manager or self.block_tables
+        block_tables = block_table_provider.get_dummy_block_tables(input_batch.num_reqs)
         if valid_state_slots:
             state_slots = torch.arange(
                 1,
@@ -1735,25 +1746,29 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.input_buffers,
                 max_query_len=batch_desc.max_query_len,
             )
-            if not skip_attn_for_dummy_run:
-                block_tables, slot_mappings = self.prepare_dummy_attn(
-                    input_batch, valid_dummy_state_slots
-                )
-                if context_len:
-                    set_dummy_context(
-                        input_batch,
-                        self.block_tables,
-                        context_len,
-                        self.kv_cache_config.num_blocks,
-                        self.max_model_len,
-                    )
-            else:
+            if self.pcp_manager is not None:
+                input_batch = self.pcp_manager.prepare_inputs_to_capture(input_batch)
+            if skip_attn_for_dummy_run:
                 assert batch_desc.cg_mode != CUDAGraphMode.FULL, (
                     "Attention metadata must be prepared for dummy runs when using "
                     "FULL cudagraph mode."
                 )
                 block_tables = None
                 slot_mappings = None
+            else:
+                block_tables, slot_mappings = self.prepare_dummy_attn(
+                    input_batch, valid_dummy_state_slots
+                )
+            if not skip_attn_for_dummy_run and context_len:
+                assert block_tables is not None
+                set_dummy_context(
+                    input_batch,
+                    self.block_tables,
+                    context_len,
+                    self.kv_cache_config.num_blocks,
+                    self.max_model_len,
+                    input_block_tables=block_tables,
+                )
 
         attn_metadata = None
         slot_mappings_by_layer = None
@@ -2110,6 +2125,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if self.speculator is not None:
             assert self.sampler is not None
+            if isinstance(self.speculator, DraftModelSpeculator):
+                self.speculator.observe_verification(
+                    input_batch.idx_mapping, num_sampled, num_rejected
+                )
             # Let the target override the hidden state fed to the drafter
             # (e.g. DeepSeek V4 MTP needs the pre-hc_head residual). The
             # target returns a persistent buffer sized at max_num_batched_tokens;
