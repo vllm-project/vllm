@@ -515,6 +515,9 @@ def _make_fused_conv1d_weight_loader(dims, tp_size, tp_rank):
     sharded_dims = [d // tp_size for d in dims]
 
     def weight_loader(param, loaded_weight, loaded_shard_id=None):
+        if loaded_shard_id is None:
+            loaded_shard_id = getattr(loaded_weight, "shard_id", None)
+        assert loaded_shard_id is not None
         if loaded_weight.dim() == 2:
             loaded_weight = loaded_weight.unsqueeze(1)
         dim = dims[loaded_shard_id]
