@@ -11,7 +11,7 @@ from vllm.v1.watermarking.watermarker import (
     SupportsSpeculativeDecoding,
     Watermarker,
 )
-from vllm.v1.worker.gpu.sample.watermark import repeated_context_mask
+from vllm.v1.worker.gpu.sample.watermark import draft_watermarking_mask
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import rejection_sample
 
 
@@ -88,33 +88,18 @@ class DraftWatermarker:
             assert self.all_token_ids is not None
             assert self.prompt_lens is not None
             assert self.total_lens is not None
-            repeated = repeated_context_mask(
+            enabled = draft_watermarking_mask(
                 self.all_token_ids,
                 idx_mapping,
                 self.prompt_lens,
                 self.total_lens,
+                self.prior_contexts,
                 contexts,
+                steps,
+                enabled,
                 self.deduplicate_contexts_max_history,
                 include_prompt=self.deduplicate_contexts == "all",
-                history_offsets=steps,
             )
-            if self.deduplicate_contexts == "all":
-                repeated |= (contexts < 0).any(dim=-1)
-            prior_steps = torch.arange(
-                self.num_speculative_steps, device=logits.device
-            ).unsqueeze(0)
-            in_history = prior_steps < steps.unsqueeze(1)
-            if self.deduplicate_contexts_max_history is not None:
-                in_history &= prior_steps >= (
-                    steps.unsqueeze(1) - self.deduplicate_contexts_max_history
-                )
-            repeated |= (
-                (self.prior_contexts[:num_rows] == contexts.unsqueeze(1)).all(dim=-1)
-                & in_history
-            ).any(dim=-1)
-            enabled &= ~repeated
-            row_indices = torch.arange(num_rows, device=logits.device)
-            self.prior_contexts.index_put_((row_indices, steps), contexts)
         sampled = torch.where(enabled, watermarked, ordinary_sampled)
         contexts.copy_(torch.cat((contexts[:, 1:], sampled.unsqueeze(-1)), dim=-1))
         return sampled

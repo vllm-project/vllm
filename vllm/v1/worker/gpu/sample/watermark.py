@@ -54,11 +54,21 @@ def _repeated_context_mask_kernel(
     history_offsets_ptr,
     contexts_ptr,
     context_stride,
+    local_positions_ptr,
+    prior_contexts_ptr,
+    prior_contexts_stride_0,
+    prior_contexts_stride_1,
+    steps_ptr,
+    steps_stride,
+    enabled_ptr,
     CONTEXT_WIDTH: tl.constexpr,
+    NUM_SPECULATIVE_STEPS: tl.constexpr,
     MAX_HISTORY: tl.constexpr,
     INCLUDE_PROMPT: tl.constexpr,
     SKIP_PARTIAL_CONTEXT: tl.constexpr,
     HAS_HISTORY_OFFSETS: tl.constexpr,
+    SPECULATIVE_CONTEXTS: tl.constexpr,
+    DRAFT_CONTEXTS: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
@@ -102,6 +112,93 @@ def _repeated_context_mask_kernel(
             )
             matches &= historical_token == context_token
         repeated |= tl.max(matches.to(tl.int32), axis=0)
+
+    if SPECULATIVE_CONTEXTS:
+        local_pos = tl.load(local_positions_ptr + row)
+        if INCLUDE_PROMPT:
+            partial_context = tl.full((), 0, tl.int32)
+            for context_offset in range(CONTEXT_WIDTH):
+                context_token = tl.load(
+                    contexts_ptr + row * context_stride + context_offset
+                )
+                partial_context |= context_token < 0
+            repeated |= partial_context
+        for offset in range(1, NUM_SPECULATIVE_STEPS + 1):
+            prior_row = row - offset
+            in_history = (prior_row >= 0) & (local_pos >= offset)
+            if MAX_HISTORY > 0:
+                in_history &= offset <= MAX_HISTORY
+            prior_req_idx = tl.load(
+                req_indices_ptr + tl.maximum(prior_row, 0),
+                mask=in_history,
+                other=-1,
+            )
+            prior_local_pos = tl.load(
+                local_positions_ptr + tl.maximum(prior_row, 0),
+                mask=in_history,
+                other=-1,
+            )
+            matches = (
+                in_history
+                & (req_idx == prior_req_idx)
+                & (local_pos == prior_local_pos + offset)
+            )
+            for context_offset in range(CONTEXT_WIDTH):
+                context_token = tl.load(
+                    contexts_ptr + row * context_stride + context_offset
+                )
+                prior_token = tl.load(
+                    contexts_ptr
+                    + tl.maximum(prior_row, 0) * context_stride
+                    + context_offset,
+                    mask=in_history,
+                    other=-2,
+                )
+                matches &= context_token == prior_token
+            repeated |= matches
+
+    if DRAFT_CONTEXTS:
+        step = tl.load(steps_ptr + row * steps_stride).to(tl.int64)
+        partial_context = tl.full((), 0, tl.int32)
+        for context_offset in range(CONTEXT_WIDTH):
+            context_token = tl.load(
+                contexts_ptr + row * context_stride + context_offset
+            )
+            partial_context |= context_token < 0
+        if INCLUDE_PROMPT:
+            repeated |= partial_context
+
+        for prior_step in range(NUM_SPECULATIVE_STEPS):
+            in_history = prior_step < step
+            if MAX_HISTORY > 0:
+                in_history &= prior_step >= step - MAX_HISTORY
+            matches = in_history
+            for context_offset in range(CONTEXT_WIDTH):
+                context_token = tl.load(
+                    contexts_ptr + row * context_stride + context_offset
+                )
+                prior_token = tl.load(
+                    prior_contexts_ptr
+                    + row * prior_contexts_stride_0
+                    + prior_step * prior_contexts_stride_1
+                    + context_offset
+                )
+                matches &= context_token == prior_token
+            repeated |= matches
+
+        for context_offset in range(CONTEXT_WIDTH):
+            context_token = tl.load(
+                contexts_ptr + row * context_stride + context_offset
+            )
+            tl.store(
+                prior_contexts_ptr
+                + row * prior_contexts_stride_0
+                + step * prior_contexts_stride_1
+                + context_offset,
+                context_token,
+            )
+        enabled = tl.load(enabled_ptr + row)
+        repeated = enabled & (repeated == 0)
     tl.store(output_ptr + row, repeated)
 
 
@@ -157,6 +254,8 @@ def repeated_context_mask(
     include_prompt: bool = False,
     skip_partial_context: bool = False,
     history_offsets: torch.Tensor | None = None,
+    local_positions: torch.Tensor | None = None,
+    num_speculative_steps: int = 0,
 ) -> torch.Tensor:
     """Return, per row, whether the row's context already occurred in its history.
 
@@ -176,11 +275,19 @@ def repeated_context_mask(
             ordinary sampling.
         history_offsets: Number of newer, non-committed positions preceding each
             context. These positions count toward `max_history`.
+        local_positions: Position within each request's speculative block. When
+            provided, compare each context with earlier contexts in that block.
+        num_speculative_steps: Maximum number of draft tokens in the block.
     """
     if max_history is not None and max_history < 1:
         raise ValueError("max_history must be positive or None")
+    if (local_positions is None) != (num_speculative_steps == 0):
+        raise ValueError(
+            "local_positions and positive num_speculative_steps must be "
+            "provided together"
+        )
     if all_token_ids.device.type == "cpu":
-        return _repeated_context_mask_cpu(
+        repeated = _repeated_context_mask_cpu(
             all_token_ids,
             req_indices,
             prompt_lens,
@@ -191,6 +298,30 @@ def repeated_context_mask(
             skip_partial_context,
             history_offsets,
         )
+        if local_positions is not None:
+            max_offset = num_speculative_steps + 1
+            if max_history is not None:
+                max_offset = min(max_offset, max_history + 1)
+            for offset in range(1, max_offset):
+                prior_contexts = torch.cat(
+                    (contexts[:offset], contexts[:-offset]), dim=0
+                )
+                prior_requests = torch.cat(
+                    (req_indices[:offset], req_indices[:-offset]), dim=0
+                )
+                prior_local_pos = torch.cat(
+                    (local_positions[:offset], local_positions[:-offset]), dim=0
+                )
+                repeated |= (
+                    (req_indices >= 0)
+                    & (local_positions >= offset)
+                    & (req_indices == prior_requests)
+                    & (local_positions == prior_local_pos + offset)
+                    & (contexts == prior_contexts).all(dim=-1)
+                )
+            if include_prompt:
+                repeated |= (contexts < 0).any(dim=-1)
+        return repeated
 
     if contexts.stride(-1) != 1:
         contexts = contexts.contiguous()
@@ -205,14 +336,92 @@ def repeated_context_mask(
         history_offsets,
         contexts,
         contexts.stride(0),
+        local_positions,
+        None,
+        0,
+        0,
+        None,
+        0,
+        None,
         CONTEXT_WIDTH=contexts.shape[-1],
+        NUM_SPECULATIVE_STEPS=num_speculative_steps,
         MAX_HISTORY=0 if max_history is None else max_history,
         INCLUDE_PROMPT=include_prompt,
         SKIP_PARTIAL_CONTEXT=skip_partial_context,
         HAS_HISTORY_OFFSETS=history_offsets is not None,
+        SPECULATIVE_CONTEXTS=local_positions is not None,
+        DRAFT_CONTEXTS=False,
         BLOCK=512,
     )
     return repeated
+
+
+def draft_watermarking_mask(
+    all_token_ids: torch.Tensor,
+    req_indices: torch.Tensor,
+    prompt_lens: torch.Tensor,
+    total_lens: torch.Tensor,
+    prior_contexts: torch.Tensor,
+    contexts: torch.Tensor,
+    steps: torch.Tensor,
+    enabled: torch.Tensor,
+    max_history: int | None,
+    include_prompt: bool,
+) -> torch.Tensor:
+    if contexts.device.type == "cpu":
+        repeated = repeated_context_mask(
+            all_token_ids,
+            req_indices,
+            prompt_lens,
+            total_lens,
+            contexts,
+            max_history,
+            include_prompt=include_prompt,
+            history_offsets=steps,
+        )
+        prior_steps = torch.arange(prior_contexts.shape[1]).unsqueeze(0)
+        in_history = prior_steps < steps.unsqueeze(1)
+        if max_history is not None:
+            in_history &= prior_steps >= steps.unsqueeze(1) - max_history
+        repeated |= (
+            (prior_contexts[: len(contexts)] == contexts.unsqueeze(1)).all(dim=-1)
+            & in_history
+        ).any(dim=-1)
+        if include_prompt:
+            repeated |= (contexts < 0).any(dim=-1)
+        row_indices = torch.arange(len(contexts))
+        prior_contexts.index_put_((row_indices, steps), contexts)
+        return enabled & ~repeated
+
+    active = torch.empty(len(contexts), dtype=torch.bool, device=contexts.device)
+    _repeated_context_mask_kernel[(len(contexts),)](
+        active,
+        all_token_ids,
+        all_token_ids.stride(0),
+        req_indices,
+        prompt_lens,
+        total_lens,
+        steps,
+        contexts,
+        contexts.stride(0),
+        None,
+        prior_contexts,
+        prior_contexts.stride(0),
+        prior_contexts.stride(1),
+        steps,
+        steps.stride(0),
+        enabled,
+        NUM_SPECULATIVE_STEPS=prior_contexts.shape[1],
+        CONTEXT_WIDTH=contexts.shape[1],
+        MAX_HISTORY=0 if max_history is None else max_history,
+        INCLUDE_PROMPT=include_prompt,
+        SKIP_PARTIAL_CONTEXT=False,
+        HAS_HISTORY_OFFSETS=True,
+        SPECULATIVE_CONTEXTS=False,
+        DRAFT_CONTEXTS=True,
+        BLOCK=512,
+    )
+    return active
 
 
 @triton.jit

@@ -28,6 +28,7 @@ from vllm.v1.watermarking.spec_decode import (
 from vllm.v1.watermarking.watermarker import Watermarker, WatermarkSample
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.watermark import (
+    draft_watermarking_mask,
     philox_gumbel_sample,
     repeated_context_mask,
 )
@@ -909,22 +910,25 @@ def test_gpu_sampler_deduplicates_contexts_within_speculative_block():
         prompt_len=SimpleNamespace(gpu=torch.tensor([1])),
         total_len=SimpleNamespace(gpu=torch.tensor([3])),
     )
-    request_indices = torch.tensor([0, 0, 0, 0])
-    local_positions = torch.tensor([0, 1, 2, 3])
+    request_indices = torch.tensor([0, 0, 0, 0, 0])
+    local_positions = torch.tensor([0, 1, 2, 3, 4])
     contexts = sampler._get_contexts(
         request_indices,
         local_positions,
-        torch.tensor([2, 3, 1, 2]),
+        torch.tensor([0, 3, 4, 1, 2]),
     )
 
     repeated = sampler._get_repeated_contexts(
         request_indices, contexts, local_positions
     )
 
-    assert torch.equal(contexts, torch.tensor([[1, 2], [2, 3], [3, 1], [1, 2]]))
-    assert torch.equal(repeated, torch.tensor([False, False, False, True]))
+    assert torch.equal(
+        contexts,
+        torch.tensor([[1, 2], [2, 3], [3, 4], [4, 1], [1, 2]]),
+    )
+    assert torch.equal(repeated, torch.tensor([False, False, False, False, True]))
 
-    sampler.deduplicate_contexts_max_history = 2
+    sampler.deduplicate_contexts_max_history = 3
     repeated = sampler._get_repeated_contexts(
         request_indices, contexts, local_positions
     )
@@ -956,6 +960,96 @@ def test_gpu_sampler_all_scope_skips_only_partial_speculative_contexts():
 
     assert torch.equal(contexts, torch.tensor([[-1, 10], [10, 20], [20, 30]]))
     assert torch.equal(repeated, torch.tensor([True, False, False]))
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+)
+@pytest.mark.parametrize("max_history,expected_last", [(None, True), (3, False)])
+def test_speculative_context_repetition_accelerator_parity(
+    max_history: int | None, expected_last: bool
+):
+    all_token_ids = torch.tensor([[10, 11]])
+    req_indices = torch.tensor([0, 0, 0, 0, 0])
+    prompt_lens = torch.tensor([0])
+    total_lens = torch.tensor([2])
+    local_positions = torch.tensor([0, 1, 2, 3, 4])
+    contexts = torch.tensor([[1, 2], [2, 3], [3, 4], [4, 1], [1, 2]])
+
+    expected = repeated_context_mask(
+        all_token_ids,
+        req_indices,
+        prompt_lens,
+        total_lens,
+        contexts,
+        history_offsets=local_positions,
+        local_positions=local_positions,
+        num_speculative_steps=4,
+        max_history=max_history,
+    )
+    actual = repeated_context_mask(
+        all_token_ids.cuda(),
+        req_indices.cuda(),
+        prompt_lens.cuda(),
+        total_lens.cuda(),
+        contexts.cuda(),
+        history_offsets=local_positions.cuda(),
+        local_positions=local_positions.cuda(),
+        num_speculative_steps=4,
+        max_history=max_history,
+    ).cpu()
+
+    assert torch.equal(
+        expected, torch.tensor([False, False, False, False, expected_last])
+    )
+    assert torch.equal(actual, expected)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+)
+def test_draft_context_deduplication_accelerator_parity():
+    all_token_ids = torch.tensor([[10, 11, 20], [30, 31, 40]])
+    req_indices = torch.tensor([0, 1])
+    prompt_lens = torch.tensor([0, 0])
+    total_lens = torch.tensor([3, 3])
+    prior_contexts = torch.tensor(
+        [[[10, 11], [20, 21], [0, 0]], [[30, 31], [0, 0], [0, 0]]]
+    )
+    contexts = torch.tensor([[10, 11], [40, 41]])
+    steps = torch.tensor([2, 1])
+    enabled = torch.tensor([True, True])
+
+    expected_prior = prior_contexts.clone()
+    expected = draft_watermarking_mask(
+        all_token_ids,
+        req_indices,
+        prompt_lens,
+        total_lens,
+        expected_prior,
+        contexts,
+        steps,
+        enabled,
+        max_history=2,
+        include_prompt=False,
+    )
+    actual_prior = prior_contexts.cuda()
+    actual = draft_watermarking_mask(
+        all_token_ids.cuda(),
+        req_indices.cuda(),
+        prompt_lens.cuda(),
+        total_lens.cuda(),
+        actual_prior,
+        contexts.cuda(),
+        steps.cuda(),
+        enabled.cuda(),
+        max_history=2,
+        include_prompt=False,
+    ).cpu()
+
+    assert torch.equal(expected, torch.tensor([False, True]))
+    assert torch.equal(actual, expected)
+    assert torch.equal(actual_prior.cpu(), expected_prior)
 
 
 def test_gpu_sampler_builds_chunked_multi_request_speculative_contexts():
