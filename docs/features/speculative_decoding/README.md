@@ -94,6 +94,7 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 | `synthetic_acceptance_length` | `float` | `None` | Target mean acceptance length for `synthetic`; in `[1, num_speculative_tokens + 1]`. Mutually exclusive with `synthetic_acceptance_rates`. |
 | `fly_window_size` | `integer >= 1` | `min(6, num_speculative_tokens - 1)` | Number of subsequent native acceptance decisions checked by FLy. FLy requires at least two speculative tokens, and the window must be smaller than `num_speculative_tokens`. |
 | `fly_entropy_threshold` | `float >= 0` | `0.3` | Minimum target top-k entropy required for FLy to defer a native rejection. |
+| `fly_entropy_top_k` | `integer >= 1` | `3` | Number of largest processed target probabilities used by FLy's entropy gate, capped at the vocabulary size. |
 | `use_heterogeneous_vocab` | `boolean` | `false` | Allow draft and target models with different vocabularies. Builds a token-level intersection at initialisation and constrains draft logits to shared tokens only. Only compatible with `method=draft_model`. Probabilistic draft sampling (`draft_sample_method='probabilistic'`) and `use_local_argmax_reduction` are not supported when this option is enabled. |
 
 !!! note

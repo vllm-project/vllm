@@ -89,8 +89,9 @@ def _build_rejection_sample_inputs(
 
 @pytest.mark.parametrize("temperature", [0.0, 1.0])
 @pytest.mark.parametrize("has_draft_logits", [False, True])
+@pytest.mark.parametrize("top_k", [1, 3])
 def test_fly_requires_entropy_and_native_lookahead(
-    temperature: float, has_draft_logits: bool
+    temperature: float, has_draft_logits: bool, top_k: int
 ):
     """Defer only supported rejections with a full, natively accepted window."""
     device = "cuda"
@@ -133,10 +134,17 @@ def test_fly_requires_entropy_and_native_lookahead(
     )
 
     sampled, num_sampled = rejection_sample(
-        **inputs, num_speculative_steps=4, fly_window_size=2
+        **inputs,
+        num_speculative_steps=4,
+        fly_window_size=2,
+        fly_entropy_threshold=0.5,
+        fly_entropy_top_k=top_k,
     )
-    assert num_sampled.tolist() == [5, 1, 1, 1, 1, 1, 1]
-    assert sampled[0].tolist() == [7, 2, 3, 4, 8]
+    assert num_sampled.tolist() == [5 if top_k == 3 else 1, 1, 1, 1, 1, 1, 1]
+    if top_k == 3:
+        assert sampled[0].tolist() == [7, 2, 3, 4, 8]
+    else:
+        assert sampled[0, 0].item() >= 8
     assert sampled[1:6, 0].min().item() >= 8
 
 
@@ -199,21 +207,21 @@ def test_fly_pending_window_preserves_recovery_position(
 @pytest.mark.parametrize("top_k", [1, 3, 100])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_fly_entropy_from_logits_matches_probabilities(
-    monkeypatch: pytest.MonkeyPatch,
     top_k: int,
     dtype: torch.dtype,
 ):
     """Logits match probability-based entropy with masking and top-k clipping."""
-    monkeypatch.setenv("VLLM_FLY_ENTROPY_TOP_K", str(top_k))
     torch.manual_seed(7)
     logits = torch.randn(2, 20, dtype=dtype, device="cuda")[:, :17]
     logits[0, 0] = -30
     logits[0, 3] = -float("inf")
     logits[1] = -float("inf")
     logits[1, 1] = 0
-    reference_entropy = compute_fly_entropy(logits.softmax(-1, dtype=torch.float32))
+    reference_entropy = compute_fly_entropy(
+        logits.softmax(-1, dtype=torch.float32), top_k
+    )
     torch.testing.assert_close(
-        compute_fly_entropy(logits, from_logits=True),
+        compute_fly_entropy(logits, top_k, from_logits=True),
         reference_entropy,
         atol=1e-5,
         rtol=1e-5,

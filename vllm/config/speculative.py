@@ -618,6 +618,9 @@ class SpeculativeConfig:
     fly_entropy_threshold: float = Field(default=0.3, ge=0)
     """Target top-k entropy lower bound for FLy loose acceptance."""
 
+    fly_entropy_top_k: int = Field(default=3, ge=1)
+    """Number of largest target probabilities used by FLy's entropy gate."""
+
     def compute_hash(self) -> str:
         """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
