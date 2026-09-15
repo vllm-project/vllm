@@ -274,24 +274,26 @@ class HiSparseCoordinator:
         for host_idx in range(state.copies_recorded_blocks, num_host_blocks):
             if host_idx in state.pending_pages:
                 continue
-            host_block = host_blocks[host_idx]
-            if host_block.is_null or host_block.block_hash is None:
-                continue
-            blocks: list[KVCacheBlock] = []
-            for manager in self.resident_managers:
-                block = manager.get_resident_page(request_id, host_idx)
-                if block is None:
-                    break
-                blocks.append(block)
-            if len(blocks) != len(self.resident_managers):
-                continue
-            self._drop_copy(host_block.block_hash)
-            self.copies[host_block.block_hash] = tuple(blocks)
-            for block in blocks:
-                self._copy_by_block[block.block_id] = host_block.block_hash
+            self._record_copy(request_id, host_idx, host_blocks[host_idx])
         state.copies_recorded_blocks = max(
             state.copies_recorded_blocks, num_host_blocks
         )
+
+    def _record_copy(
+        self, request_id: str, page_idx: int, host_block: KVCacheBlock
+    ) -> None:
+        if host_block.is_null or host_block.block_hash is None:
+            return
+        blocks: list[KVCacheBlock] = []
+        for manager in self.resident_managers:
+            block = manager.get_resident_page(request_id, page_idx)
+            if block is None:
+                return
+            blocks.append(block)
+        self._drop_copy(host_block.block_hash)
+        self.copies[host_block.block_hash] = tuple(blocks)
+        for block in blocks:
+            self._copy_by_block[block.block_id] = host_block.block_hash
 
     def _drop_copy(self, host_hash: BlockHashWithGroupId) -> None:
         blocks = self.copies.pop(host_hash, None)
@@ -716,6 +718,8 @@ class HiSparseCoordinator:
                     pending.request_state.valid_pages.add(page_idx)
                 if page_idx in pending.request_state.valid_pages:
                     self._page_became_clean(request_id, pending.request_state, page_idx)
+                    if pending.restore:
+                        self._record_copy(request_id, page_idx, pending.host_block)
                 completed_request_ids.add(request_id)
             assert self.host_manager is not None
             self.host_manager.block_pool.free_blocks([pending.host_block])
