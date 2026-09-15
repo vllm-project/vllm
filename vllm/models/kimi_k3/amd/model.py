@@ -244,6 +244,9 @@ class KimiK3ForConditionalGeneration(
     def get_mamba_state_copy_func(cls):
         return KimiLinearForCausalLM.get_mamba_state_copy_func()
 
+    def process_weights_after_loading(self) -> None:
+        self.language_model.process_weights_after_loading()
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
