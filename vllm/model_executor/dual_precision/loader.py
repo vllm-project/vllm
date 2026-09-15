@@ -316,10 +316,11 @@ def make_int4_vllm_config(vllm_config: VllmConfig, int4_model: str) -> VllmConfi
         hf_config_path=int4_model,
         quantization=None,
     )
-    validate_shadow_quantization(
+    shadow_format = validate_shadow_quantization(
         int4_model_config.model_arch_config.quantization_config,
         int4_model_config.quantization,
     )
+    logger.info("Dual precision shadow checkpoint format: %s.", shadow_format)
     int4_compilation_config = clone_init_dataclass(vllm_config.compilation_config)
     int4_load_config = make_shadow_load_config(vllm_config.load_config)
     return clone_init_dataclass(
@@ -529,9 +530,9 @@ def attach_shadow_layers(
     register_shadow_store(model, store)
 
     logger.info(
-        "Loaded %d GPTQ shadow linear layers; attached %d quantized INT4 "
-        "layers, kept %d quantized layers in BF16 by policy, and left %d "
-        "layers in BF16 because no INT4 shadow was available.",
+        "Loaded %d quantized shadow linear layers; attached %d of them, "
+        "kept %d quantized layers in BF16 by policy, and left %d layers in "
+        "BF16 because no shadow was available.",
         state.num_shadow_linears,
         attached,
         policy_bf16,

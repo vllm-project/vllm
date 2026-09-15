@@ -128,7 +128,9 @@ def _load_fixture(name: str) -> tuple[list[str], set[str]]:
     ("fixture", "num_layers", "bf16_layers", "module_policy", "expected"),
     [
         # Qwen3.5-9B BF16 + Intel AutoRound INT4 shadow, every headline run:
-        # "Loaded 286 GPTQ shadow linear layers; attached 152 ... left 134".
+        # Archived log wording: "Loaded 286 GPTQ shadow linear layers;
+        # attached 152 ... left 134". The same counts hold for the NVFP4
+        # shadow, so the live line no longer says GPTQ.
         ("qwen3_5_9b_autoround", 32, "none", "all", (152, 0, 134)),
         # Nemotron-Nano-9B-v2 + RedHatAI w4a16 (stage0 weight audit):
         # "Loaded 139 ...; attached 112 ... left 27" (27 = mamba conv1d).
