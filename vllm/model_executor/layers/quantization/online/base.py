@@ -65,6 +65,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kInt4Static32,
     kInt8StaticChannelSym,
     kMxfp4Static,
     kMxfp8Dynamic,
@@ -229,6 +230,11 @@ class OnlineQuantizationConfig(QuantizationConfig):
             quantization.
         """
         if spec is None or spec.weight is None:
+            return None
+        # int4_per_group_32 is a load-time MXFP4 requantization for gfx942
+        # Kimi-K3, not an online conversion of unquantized weights. Leave it
+        # to Mxfp4MoEMethod instead of failing the online MoE table lookup.
+        if spec.weight == kInt4Static32:
             return None
         cls = table.get(spec.weight)
         if cls is None:
