@@ -27,6 +27,10 @@ from vllm.model_executor.layers.quantization.modelopt import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     create_fp8_scale_parameter,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    _e2m1_inline,
+    dequantize_to_dtype,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
 )
@@ -43,7 +47,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
-from ..common.ple import PLEVocabParallelEmbedding
+from ..common.ple import PLEVocabParallelEmbedding, compute_ple_shard_overlap
 from .ops.ple import ple_ngram_ids
 
 logger = init_logger(__name__)
@@ -171,6 +175,8 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
         embedding_dtype: str | None = None,
     ) -> "Qwen4ExpPLEEmbeddingMethod":
         """Select the concrete PLE embedding format for a layer."""
+        if embedding_dtype == "nvfp4":
+            return Qwen4ExpPLENvFp4EmbeddingMethod()
         if embedding_dtype == "float8_e4m3fn":
             return Qwen4ExpPLEFp8EmbeddingMethod()
         if quant_config is None:
@@ -217,6 +223,25 @@ class Qwen4ExpPLEEmbeddingMethod(QuantizeMethodBase):
 
     def embedding(self, layer: nn.Module, input_: torch.Tensor) -> torch.Tensor:
         return F.embedding(input_, layer.weight)
+
+    def lookup_dtype(self, layer: nn.Module) -> torch.dtype:
+        return layer.weight.dtype
+
+    def lookup_from_pinned(
+        self,
+        layer: "Qwen4ExpPLEPinnedHostEmbedding",
+        ids: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        _lookup_ple_embedding_from_pinned_kernel[(ids.numel(),)](
+            layer._uva_weight,
+            ids,
+            output,
+            layer.embedding_dim,
+            layer.shard_indices.org_vocab_start_index,
+            layer.shard_indices.org_vocab_end_index,
+            BLOCK_D=layer._block_d,
+        )
 
     @abstractmethod
     def dequantize(
@@ -322,6 +347,194 @@ class Qwen4ExpPLEFp8EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
         return embeddings.to(output_dtype) * weight_scale.to(output_dtype)
 
 
+class Qwen4ExpPLENvFp4EmbeddingMethod(Qwen4ExpPLEEmbeddingMethod):
+    """Packed E2M1 rows, E4M3 scales per 16 values, and one global scale."""
+
+    def create_weights(
+        self,
+        layer: Qwen4ExpPLEEmbedding,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ) -> None:
+        del input_size, output_size
+        if input_size_per_partition % 16:
+            raise ValueError("NVFP4 PLE embedding dimension must be divisible by 16")
+        self._loaded_ranges: dict[str, set[tuple[int, int]]] = {
+            "weight": set(),
+            "weight_scale": set(),
+        }
+        weight_loader = extra_weight_attrs.get("weight_loader")
+        for name, width, dtype in (
+            ("weight", input_size_per_partition // 2, torch.uint8),
+            ("weight_scale", input_size_per_partition // 16, torch.float8_e4m3fn),
+        ):
+            layer.register_parameter(
+                name,
+                ModelWeightParameter(
+                    data=layer.allocate_embedding_weight(
+                        sum(output_partition_sizes), width, dtype
+                    ),
+                    input_dim=1,
+                    output_dim=0,
+                    weight_loader=weight_loader,
+                ),
+            )
+        layer.register_parameter(
+            "weight_scale_2",
+            create_fp8_scale_parameter(
+                PerTensorScaleParameter,
+                output_partition_sizes,
+                input_size_per_partition,
+                None,
+                weight_loader,
+                scale_dtype=torch.float32,
+            ),
+        )
+        if layer.weight_scale.is_pinned():
+            layer._uva_weight_scale = get_accelerator_view_from_cpu_tensor(
+                layer.weight_scale
+            )
+
+    def process_weights_after_loading(self, layer: nn.Module) -> None:
+        scale = layer.weight_scale_2
+        if not torch.all(torch.isfinite(scale) & (scale > 0)):
+            raise ValueError(
+                "NVFP4 PLE checkpoint requires a finite positive global scale"
+            )
+        expected_rows = (
+            layer.shard_indices.org_vocab_end_index
+            - layer.shard_indices.org_vocab_start_index
+        )
+        for name, ranges in self._loaded_ranges.items():
+            loaded_end = 0
+            for start, end in sorted(ranges):
+                if start > loaded_end:
+                    break
+                loaded_end = max(loaded_end, end)
+            if loaded_end != expected_rows:
+                raise ValueError(
+                    f"NVFP4 PLE checkpoint is missing {name} rows "
+                    f"starting at local row {loaded_end}"
+                )
+
+    def record_loaded_rows(
+        self,
+        layer: Qwen4ExpPLEEmbedding,
+        name: str,
+        checkpoint_start: int,
+        checkpoint_rows: int,
+    ) -> None:
+        overlap = compute_ple_shard_overlap(
+            checkpoint_start=checkpoint_start,
+            checkpoint_rows=checkpoint_rows,
+            tp_start=layer.shard_indices.org_vocab_start_index,
+            tp_end=layer.shard_indices.org_vocab_end_index,
+        )
+        if overlap is not None:
+            start = overlap.destination_start
+            self._loaded_ranges[name].add((start, start + overlap.row_count))
+
+    def lookup_dtype(self, layer: nn.Module) -> torch.dtype:
+        return layer.params_dtype
+
+    def embedding(self, layer: nn.Module, input_: torch.Tensor) -> torch.Tensor:
+        ids = input_.reshape(-1)
+        if not input_.is_cuda:
+            rows = dequantize_to_dtype(
+                F.embedding(ids, layer.weight),
+                F.embedding(ids, layer.weight_scale),
+                layer.weight_scale_2,
+                layer.params_dtype,
+                swizzle=False,
+            )
+            return rows.reshape(*input_.shape, layer.embedding_dim)
+        output = torch.empty(
+            (*input_.shape, layer.embedding_dim),
+            dtype=layer.params_dtype,
+            device=input_.device,
+        )
+        if ids.numel():
+            _lookup_nvfp4_ple_embedding_kernel[(ids.numel(),)](
+                layer.weight,
+                layer.weight_scale,
+                layer.weight_scale_2,
+                ids,
+                output,
+                layer.embedding_dim,
+                0,
+                layer.weight.shape[0],
+                BLOCK_D=triton.next_power_of_2(layer.embedding_dim),
+            )
+        return output
+
+    def lookup_from_pinned(
+        self,
+        layer: "Qwen4ExpPLEPinnedHostEmbedding",
+        ids: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        _lookup_nvfp4_ple_embedding_kernel[(ids.numel(),)](
+            layer._uva_weight,
+            layer._uva_weight_scale,
+            layer.weight_scale_2,
+            ids,
+            output,
+            layer.embedding_dim,
+            layer.shard_indices.org_vocab_start_index,
+            layer.shard_indices.org_vocab_end_index,
+            BLOCK_D=layer._block_d,
+        )
+
+    def dequantize(
+        self,
+        layer: nn.Module,
+        embeddings: torch.Tensor,
+        output_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        # NVFP4 rows are dequantized during lookup, before the ETP reduction.
+        return embeddings.to(output_dtype)
+
+
+@triton.jit
+def _lookup_nvfp4_ple_embedding_kernel(
+    weight_ptr,
+    scale_ptr,
+    global_scale_ptr,
+    ids_ptr,
+    output_ptr,
+    embedding_dim,
+    vocab_start,
+    vocab_end,
+    BLOCK_D: tl.constexpr,
+):
+    row = tl.program_id(0)
+    idx = tl.load(ids_ptr + row).to(tl.int64)
+    owned = (idx >= vocab_start) & (idx < vocab_end)
+    local_idx = tl.where(owned, idx - vocab_start, 0)
+    offsets = tl.arange(0, BLOCK_D)
+    mask = owned & (offsets < embedding_dim)
+    packed = tl.load(
+        weight_ptr + local_idx * (embedding_dim // 2) + offsets // 2,
+        mask=mask,
+        other=0,
+    )
+    codes = (packed >> ((offsets % 2) * 4)) & 0xF
+    scales = tl.load(
+        scale_ptr + local_idx * (embedding_dim // 16) + offsets // 16,
+        mask=mask,
+        other=0.0,
+    ).to(tl.float32)
+    global_scale = tl.load(global_scale_ptr).to(tl.float32)
+    values = _e2m1_inline(codes) * scales * global_scale
+    tl.store(
+        output_ptr + row * embedding_dim + offsets, values, offsets < embedding_dim
+    )
+
+
 class Qwen4ExpPLEDeviceEmbedding(Qwen4ExpPLEEmbedding):
     """PLE table allocated on the active model device."""
 
@@ -422,7 +635,7 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
             max_total_tokens * self.etp_data_parallel_size,
             num_ngram_heads,
             self.embedding_dim,
-            dtype=self.weight.dtype,
+            dtype=self.embedding_method.lookup_dtype(self),
             device=self._uva_weight.device,
         )
         self._output_dim = num_ngram_heads * self.embedding_dim
@@ -447,35 +660,28 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         input_ids: torch.Tensor,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Look up local ETP rows while preserving the weight storage dtype."""
+        """Look up local ETP rows in the embedding method's output format."""
         expected_shape = (*input_ids.shape, self.embedding_dim)
+        output_dtype = self.embedding_method.lookup_dtype(self)
         if output is None:
             output = torch.empty(
                 expected_shape,
-                dtype=self.weight.dtype,
+                dtype=output_dtype,
                 device=input_ids.device,
             )
         elif (
             tuple(output.shape) != expected_shape
-            or output.dtype != self.weight.dtype
+            or output.dtype != output_dtype
             or output.device != input_ids.device
         ):
             raise ValueError(
-                "PLE prefetch output must match the input shape, weight dtype, "
+                "PLE prefetch output must match the input shape, lookup dtype, "
                 "and input device"
             )
 
         flat_ids = input_ids.reshape(-1).long()
         if flat_ids.numel():
-            _lookup_ple_embedding_from_pinned_kernel[(flat_ids.numel(),)](
-                self._uva_weight,
-                flat_ids,
-                output,
-                self.embedding_dim,
-                self.shard_indices.org_vocab_start_index,
-                self.shard_indices.org_vocab_end_index,
-                BLOCK_D=self._block_d,
-            )
+            self.embedding_method.lookup_from_pinned(self, flat_ids, output)
         return output
 
     def _reduce_etp_embeddings(self, embeddings: torch.Tensor) -> torch.Tensor:
@@ -878,6 +1084,15 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         loaded: set[str] = set()
         regular_weights: list[tuple[str, torch.Tensor]] = []
         shard_prefix = "ngram_embedding.shard_"
+        embedding = self.ngram_embedding
+        method = getattr(embedding, "embedding_method", None)
+        nvfp4_method = (
+            method if isinstance(method, Qwen4ExpPLENvFp4EmbeddingMethod) else None
+        )
+        shard_parameters = ("weight", "weight_scale") if nvfp4_method else ("weight",)
+        shard_size = (
+            embedding.org_vocab_size + self.split_ngram_parts - 1
+        ) // self.split_ngram_parts
 
         for name, loaded_weight in weights:
             leaf_name = name.rsplit(".", 1)[-1]
@@ -893,9 +1108,9 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                 buffer.copy_(loaded_weight.to(device=buffer.device, dtype=buffer.dtype))
                 loaded.add(name)
                 continue
-            if name.startswith(shard_prefix) and name.endswith(".weight"):
-                shard_text = name[len(shard_prefix) : -len(".weight")]
-                if not shard_text.isdigit():
+            if name.startswith(shard_prefix):
+                shard_text, _, suffix = name[len(shard_prefix) :].partition(".")
+                if not shard_text.isdigit() or suffix not in shard_parameters:
                     regular_weights.append((name, loaded_weight))
                     continue
                 shard_index = int(shard_text)
@@ -904,28 +1119,35 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                         f"PLE embedding shard index {shard_index} exceeds "
                         f"split_ngram_parts={self.split_ngram_parts}"
                     )
-                embedding = self.ngram_embedding
-                shard_size = (
-                    embedding.org_vocab_size + self.split_ngram_parts - 1
-                ) // self.split_ngram_parts
                 checkpoint_start = shard_index * shard_size
                 expected_rows = max(
                     0,
                     min(shard_size, embedding.org_vocab_size - checkpoint_start),
                 )
-                expected_shape = (expected_rows, embedding.embedding_dim)
+                parameter = getattr(embedding, suffix)
+                expected_shape = (expected_rows, parameter.shape[1])
                 if tuple(loaded_weight.shape) != expected_shape:
                     raise ValueError(
-                        f"Shape mismatch for PLE embedding shard {shard_index}: "
+                        f"Shape mismatch for PLE embedding shard {shard_index} "
+                        f"{suffix}: "
                         f"expected {expected_shape}, got "
                         f"{tuple(loaded_weight.shape)}"
                     )
-                embedding.weight.weight_loader(
-                    embedding.weight,
+                if nvfp4_method and loaded_weight.dtype != parameter.dtype:
+                    raise ValueError(
+                        f"NVFP4 PLE shard {shard_index} {suffix} requires "
+                        f"{parameter.dtype}, got {loaded_weight.dtype}"
+                    )
+                parameter.weight_loader(
+                    parameter,
                     loaded_weight,
                     checkpoint_start=checkpoint_start,
                 )
-                loaded.add("ngram_embedding.weight")
+                if nvfp4_method:
+                    nvfp4_method.record_loaded_rows(
+                        embedding, suffix, checkpoint_start, expected_rows
+                    )
+                loaded.add(f"ngram_embedding.{suffix}")
                 continue
             regular_weights.append((name, loaded_weight))
 

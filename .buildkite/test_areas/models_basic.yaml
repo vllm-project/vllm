@@ -115,6 +115,7 @@ steps:
   - tests/models/qwen4_exp/
   commands:
     - pytest -v -s models/qwen4_exp/test_hc_ops.py models/qwen4_exp/test_qsa_pre_indexer.py models/qwen4_exp/test_qsa_reference.py
+    - pytest -v -s models/qwen4_exp/test_ple.py -k nvfp4
   mirror:
     amd:
       label: ":amd: (MI300) Qwen4 Exp"
