@@ -1466,3 +1466,37 @@ def test_mhc_fused_post_pre_delayed_falls_back_for_large_batches():
 
     assert not rocm_aiter_ops.mhc_fused_post_pre_delayed_prefers_unfused(1)
     assert rocm_aiter_ops.mhc_fused_post_pre_delayed_prefers_unfused(1 << 20)
+
+
+@pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
+@pytest.mark.parametrize("num_tokens", [1, 7, 128])
+def test_mhc_pre_broadcast_tilelang_deepgemm_fallback(num_tokens, monkeypatch):
+    """Verify mhc_pre_broadcast_tilelang works with TileLang fallback."""
+    from vllm.model_executor.kernels.mhc.tilelang import (
+        mhc_pre_broadcast_tilelang,
+    )
+
+    set_random_seed(0)
+    hc_mult, hidden_size = 4, 5120
+    residual = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device=DEVICE)
+    fn = (
+        torch.randn(24, hc_mult * hidden_size, dtype=torch.float32, device=DEVICE)
+        * 0.02
+    )
+    fn_broadcast = (
+        torch.randn(24, hidden_size, dtype=torch.float32, device=DEVICE) * 0.02
+    )
+    scale = torch.tensor([0.5, 0.25, 1.0], device=DEVICE)
+    base = torch.randn(24, device=DEVICE)
+    norm_weight = torch.ones(hidden_size, dtype=torch.bfloat16, device=DEVICE)
+
+    args = (residual, fn, scale, base, 1e-6, 1e-6, 1e-6, 2.0, 20)
+    kwargs = dict(norm_weight=norm_weight, norm_eps=1e-6, fn_broadcast=fn_broadcast)
+
+    monkeypatch.setattr("vllm.utils.deep_gemm.is_deep_gemm_supported", lambda: False)
+    out_fallback = mhc_pre_broadcast_tilelang(*args, **kwargs)
+
+    assert out_fallback[0].shape == (num_tokens, hc_mult, hidden_size)
+    assert out_fallback[1].shape == (num_tokens, hc_mult, 1)
+    assert out_fallback[2].shape == (num_tokens, hc_mult, hc_mult)
+    assert out_fallback[3].shape == (num_tokens, hidden_size)
