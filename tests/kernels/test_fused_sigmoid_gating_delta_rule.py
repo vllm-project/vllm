@@ -197,3 +197,53 @@ def test_fused_sigmoid_gating_delta_rule_update_spec(
     torch.testing.assert_close(
         last_recurrent_state, last_recurrent_state_ref, atol=1e-2, rtol=1e-2
     )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires a CUDA/ROCm GPU"
+)
+def test_fused_sigmoid_gating_readout_finite_under_large_fp32_state():
+    """Readout must stay finite when the fp32 SSM state is large.
+
+    The gated-delta-net recurrent state is an *unnormalized* accumulator that
+    grows over long, low-decay context (it is normalized only at the readout by
+    RMSNormGated). With an fp32 SSM state cache (``mamba_ssm_cache_dtype=float32``)
+    the readout ``o = state @ q`` can exceed fp16's ~65504 range. If the output
+    is materialized in the fp16 activation dtype it overflows to +/-inf and, after
+    normalization, becomes NaN -> the model degenerates to a single repeated
+    token. Regression for that overflow: fails when the output is downcast to
+    fp16, passes when it honors the fp32 state precision.
+    """
+    set_random_seed(0)
+    B, T, H, HV, K, V = 1, 1, 4, 4, 64, 128
+    dt = torch.float16
+    q = torch.randn(B, T, H, K, device=DEVICE, dtype=dt)
+    k = torch.randn(B, T, H, K, device=DEVICE, dtype=dt)
+    v = torch.randn(B, T, HV, V, device=DEVICE, dtype=dt)
+    a = torch.randn(B, T, HV, device=DEVICE, dtype=dt)
+    b = torch.randn(B, T, HV, device=DEVICE, dtype=dt)
+    A_log = torch.randn(HV, device=DEVICE, dtype=torch.float32)
+    dt_bias = torch.randn(HV, device=DEVICE, dtype=torch.float32)
+    # fp32 state at a magnitude reachable over long context; 1e6 > fp16 max.
+    state = torch.randn(B, HV, V, K, device=DEVICE, dtype=torch.float32) * 1e6
+
+    o, _ = fused_sigmoid_gating_delta_rule_update(
+        A_log=A_log,
+        a=a,
+        b=b,
+        dt_bias=dt_bias,
+        q=q,
+        k=k,
+        v=v,
+        initial_state=state.clone(),
+        inplace_final_state=False,
+        use_qk_l2norm_in_kernel=True,
+    )
+
+    n_bad = int((~torch.isfinite(o)).sum())
+    assert n_bad == 0, (
+        f"readout has {n_bad} non-finite (inf/NaN) entries under a large fp32 "
+        f"state -- fp16 overflow; max|o|={o.float().abs().max().item():.3e}"
+    )
+    # Carries the true large magnitude, not a saturated/clamped value.
+    assert o.float().abs().max().item() > 1e4
