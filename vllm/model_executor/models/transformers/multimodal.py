@@ -584,20 +584,31 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
             # work for Transformers. The vision path has logic tied to
             # `mm_tokens_per_modality` in _apply_vision()
             hf_processor_mm_kwargs = {
-                **hf_processor_mm_kwargs,
+                # vLLM needs the untruncated sequence to keep placeholder
+                # tokens aligned. Note that the text inputs are just dummy
+                # text, not the original prompt. The original prompt is
+                # already tokenized by the renderer.
+                "truncation": False,
                 # HF processors only accept text, and the decoded string already
                 # contains any special tokens, so don't let them be added again
                 # (the HF processor call disables `add_special_tokens`).
                 "add_special_tokens": False,
+                **hf_processor_mm_kwargs,
             }
 
             processor_data, _, passthrough_data = self._get_hf_mm_inputs(
                 mm_items, hf_processor_mm_kwargs
             )
 
+            # The real prompt is fed to the processor below and the placeholder
+            # ranges are read back out of its output, so the dummy text meant for
+            # media-only callers is discarded here.
+            processor_data.pop("text", None)
+            has_mm_data = any(processor_data.values())
+
             # Ask which modality owns each token of the expanded prompt, which
             # is the only marking of the tokens an expansion adds around an item
-            if any(processor_data.values()):
+            if has_mm_data:
                 processor_data = {**processor_data, "return_mm_token_type_ids": True}
 
             try:
@@ -607,7 +618,7 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
                     hf_processor_mm_kwargs,
                 )
             except ValueError:
-                if any(processor_data.values()):
+                if has_mm_data:
                     raise
                 # Some processors reject a prompt holding placeholders with
                 # no data to go with them, so tokenize it without them

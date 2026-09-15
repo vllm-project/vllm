@@ -1626,6 +1626,9 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             and isinstance(videos := hf_data["videos"], list)
             and len(videos) > 0
         ):
+            # Videos are processed item-wise below; remove them from hf_data so
+            # the combined call at the end does not re-sample the raw frames.
+            del hf_data["videos"]
             video_grid_thw_lst = []
             pixel_values_videos_lst = []
             frame_embed_token_id = self.info._get_video_frame_embed_token_id(processor)

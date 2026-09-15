@@ -746,6 +746,9 @@ class WhisperDummyInputsBuilder(BaseDummyInputsBuilder[WhisperProcessingInfo]):
 
 
 class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo]):
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
     def create_encoder_prompt(
         self,
         prompt: list[int],
