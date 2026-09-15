@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import math
 from enum import Enum
 from typing import Any
 
@@ -266,6 +267,39 @@ def map_fp8_backend(runner_backend: MoEBackend) -> Fp8MoeBackend:
         f"moe_backend='{runner_backend}' is not supported for FP8 MoE. "
         f"Expected one of {list(mapping.keys())}."
     )
+
+
+def refine_fp8_moe_block_shape(
+    config: FusedMoEConfig,
+    weight_block_size: list[int],
+) -> list[int] | None:
+    """
+    Compute a refined block shape for block-quantized FP8 MoE weights whose
+    checkpoint blocks cannot be sharded exactly across TP ranks.
+
+    TP shards the intermediate dim of the expert weights, so a per-shard size
+    that is not a multiple of the checkpoint's block size makes the
+    checkpoint's block scales impossible to shard exactly. When a finer block
+    size (>= 32) divides both the checkpoint blocks and all involved dims,
+    the weight scales can be refined to that granularity at load time (a
+    lossless upsampling, since the refined block divides the checkpoint
+    block). Only Triton-based kernels can consume the refined block shape:
+    they take it as a runtime argument, while the other backends require the
+    native 128x128 blocks. The refined shape is encoded in the QuantKey used
+    for backend selection, so backends that only support 128x128 blocks are
+    rejected by the oracle automatically.
+
+    Returns the refined [block_n, block_k] shape, or None if no refinement
+    is needed or possible.
+    """
+    block_n, block_k = weight_block_size
+    ispp = config.intermediate_size_per_partition
+    if ispp % block_n == 0 and (config.tp_size == 1 or ispp % block_k == 0):
+        return None
+    refine = math.gcd(block_n, block_k, ispp, config.hidden_dim)
+    if refine < 32:
+        return None
+    return [refine, refine]
 
 
 def select_fp8_moe_backend(

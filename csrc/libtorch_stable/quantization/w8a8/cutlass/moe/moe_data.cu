@@ -62,6 +62,7 @@ __global__ void compute_expert_offsets(
     tot_offset += swap_ab ? problem_sizes1[i * 3 + 1] : problem_sizes1[i * 3];
     expert_offsets[i + 1] = tot_offset;
   }
+  atomic_buffer[num_experts] = tot_offset;
 }
 
 __global__ void compute_expert_blockscale_offsets(
@@ -81,28 +82,28 @@ __global__ void compute_expert_blockscale_offsets(
     tot_offset_round += (cur_offset + (128 - 1)) / 128 * 128;
     blockscale_offsets[i + 1] = tot_offset_round;
   }
+  atomic_buffer[num_experts] = tot_offset;
 }
 
 __global__ void compute_arg_sorts(const int32_t* __restrict__ topk_ids,
-                                  const int32_t* __restrict__ expert_offsets,
                                   int32_t* input_permutation,
                                   int32_t* output_permutation,
                                   int32_t* atomic_buffer, const int topk_length,
                                   const int topk) {
   int const blk_expert_id = blockIdx.x;
   int const num_experts = gridDim.x;
-  int32_t const num_tokens = expert_offsets[num_experts];
 
   for (int i = threadIdx.x; i < topk_length; i += THREADS_PER_EXPERT) {
     int const expert_id = topk_ids[i];
-    if (expert_id == -1 && blockIdx.x == 0) {
+    if ((expert_id < 0 || expert_id >= num_experts) && blockIdx.x == 0) {
+      int const start = atomicAdd(&atomic_buffer[num_experts], 1);
+      input_permutation[start] = -1;
       // output_permutation is used to re-order the moe outputs. It is
       // used as c2 = c2[c_map], where c2 is a torch.tensor that is the
-      // output of the cutlass kernels and c_map is the output_permutation.
-      // c2 is initialized to zeros, therefore by setting the output_permutation
-      // to num_tokens, we are guaranteed to fill the moe outputs to zero
-      // for "invalid" topk_ids.
-      output_permutation[i] = num_tokens;
+      // output of the cutlass kernels and c_map is the output_permutation. Use
+      // out-of-range sentinels for invalid routes; shuffle_rows converts them
+      // to zero rows.
+      output_permutation[i] = topk_length;
     } else if (expert_id == blk_expert_id) {
       int start = atomicAdd(&atomic_buffer[expert_id], 1);
       input_permutation[start] = i / topk;
@@ -246,7 +247,7 @@ void get_cutlass_moe_mm_data_caller(
   const torch::stable::accelerator::DeviceGuard device_guard(device.index());
   auto stream = get_current_cuda_stream(device.index());
   torch::stable::Tensor atomic_buffer = torch::stable::new_zeros(
-      topk_ids, {num_experts}, torch::headeronly::ScalarType::Int);
+      topk_ids, {num_experts + 1}, torch::headeronly::ScalarType::Int);
 
   int num_threads = min(THREADS_PER_EXPERT, topk_ids.numel());
 
@@ -275,7 +276,6 @@ void get_cutlass_moe_mm_data_caller(
   }
   compute_arg_sorts<<<num_experts, num_threads, 0, stream>>>(
       static_cast<const int32_t*>(topk_ids.data_ptr()),
-      static_cast<const int32_t*>(expert_offsets.data_ptr()),
       static_cast<int32_t*>(input_permutation.data_ptr()),
       static_cast<int32_t*>(output_permutation.data_ptr()),
       static_cast<int32_t*>(atomic_buffer.data_ptr()), topk_ids.numel(),
