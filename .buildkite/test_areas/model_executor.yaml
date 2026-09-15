@@ -28,10 +28,9 @@ steps:
     # build timeout. The `thread` method also handles hangs inside C/CUDA
     # calls that the signal method cannot interrupt.
     # Every branch runs whole directories, so the area needs no -m filter and
-    # every test file is provably claimed by exactly one shard. p90 per branch
-    # from build 88881; sleep_mode/ is unmeasured (its slow_test cases have
-    # never run) and sits on the lightest branch, which still has the most
-    # headroom under the slowest one.
+    # every test file is provably claimed by exactly one shard. Trailing
+    # comments are pytest minutes measured in validation build 89006, which
+    # ran the slow_test cases (reload/ and sleep_mode/) for the first time.
     - |
       case "$$BUILDKITE_PARALLEL_JOB" in
         0)
@@ -42,10 +41,10 @@ steps:
           pytest -v -s model_executor/model_loader/sharded_state model_executor/model_loader/weights model_executor/model_loader/registry --timeout=900 --timeout-method=thread  # 12.7m
           ;;
         2)
-          pytest -v -s model_executor/model_loader/reload model_executor/model_loader/params model_executor/model_loader/fastsafetensors_loader model_executor/model_loader/instanttensor_loader model_executor/model_loader/runai_streamer_loader --timeout=900 --timeout-method=thread  # 11.1m
+          pytest -v -s model_executor/model_loader/reload --timeout=900 --timeout-method=thread  # 18.6m
           ;;
         3)
-          pytest -v -s model_executor/layers model_executor/mrope model_executor/kernels model_executor/utils model_executor/models model_executor/custom_ops model_executor/warmup model_executor/quantization model_executor/moe model_executor/offloader model_executor/sleep_mode --timeout=900 --timeout-method=thread  # 9.1m + sleep_mode
+          pytest -v -s model_executor/layers model_executor/mrope model_executor/kernels model_executor/utils model_executor/models model_executor/custom_ops model_executor/warmup model_executor/quantization model_executor/moe model_executor/offloader model_executor/sleep_mode model_executor/model_loader/params model_executor/model_loader/fastsafetensors_loader model_executor/model_loader/instanttensor_loader model_executor/model_loader/runai_streamer_loader --timeout=900 --timeout-method=thread  # 17.0m
           ;;
         *) exit 2 ;;
       esac
