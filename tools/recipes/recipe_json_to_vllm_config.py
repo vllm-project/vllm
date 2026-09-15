@@ -192,7 +192,7 @@ def parse_args() -> argparse.Namespace:
 
     sweep = p.add_argument_group(
         "optional performance sweep",
-        ("Generate benchmark files after creating one initial runtime suggestion."),
+        ("Generate benchmark files alongside the directly deployable runtime config."),
     )
     sweep.add_argument(
         "--generate-sweep",
@@ -894,6 +894,7 @@ def main() -> int:
         )
 
         tuning = None
+        sweep_config = None
         workload = None
         sweep_writer = None
         hardware = None
@@ -969,6 +970,8 @@ def main() -> int:
                 policies=policies,
             )
             config.update(tuning.overrides)
+            sweep_config = dict(config)
+            sweep_config.update(tuning.sweep_overrides)
 
         write_config(args.config_out, source, recipe, config)
         write_env(
@@ -1023,11 +1026,12 @@ def main() -> int:
         elif args.generate_sweep or args.generate_scheduler_sweep:
             assert workload is not None
             assert sweep_writer is not None
+            assert sweep_config is not None
             sweep_files = sweep_writer(
                 args.sweep_out_dir,
                 config_path=args.config_out,
                 env_path=args.env_out,
-                config=config,
+                config=sweep_config,
                 workload=workload,
             )
 
@@ -1035,6 +1039,10 @@ def main() -> int:
             if tuning.overrides:
                 print("Initial runtime suggestion:")
                 for key, value in tuning.overrides.items():
+                    print(f"  {key}: {value}")
+            if tuning.sweep_overrides and selected_sweep_modes:
+                print("Explicit scheduler sweep seed:")
+                for key, value in tuning.sweep_overrides.items():
                     print(f"  {key}: {value}")
             for note in tuning.notes:
                 print(f"  tuning: {note}")
