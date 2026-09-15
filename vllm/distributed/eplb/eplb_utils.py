@@ -42,8 +42,12 @@ class CpuGpuEvent:
         Should only be called by the Async Eplb thread.
         """
         self._recorded.wait()
-        self._event.wait(stream)
-        self._recorded.clear()
+        try:
+            self._event.wait(stream)
+        finally:
+            # Clear even if the CUDA wait raises, so a faulted cycle does
+            # not leave the event armed for the next iteration.
+            self._recorded.clear()
 
     def record(self, stream: torch.cuda.Stream | None = None):
         """
