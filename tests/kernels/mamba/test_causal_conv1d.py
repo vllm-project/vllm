@@ -392,3 +392,81 @@ def test_causal_conv1d_varlen(
     )
     unpadded_out = out[:, : out_ref_tensor.shape[-1]]
     assert torch.allclose(unpadded_out, out_ref_tensor, rtol=rtol, atol=atol)
+
+
+@pytest.mark.parametrize("itype", [torch.bfloat16])
+@pytest.mark.parametrize("silu_activation", [True])
+@pytest.mark.parametrize("has_bias", [True])
+@pytest.mark.parametrize("width", [4])
+@pytest.mark.parametrize("dim", [64, 2048])
+@pytest.mark.parametrize("q_lens_cfg", [[3, 1, 0, 4, 2], [1, 5, 5, 1], [2, 0, 0, 3]])
+def test_causal_conv1d_update_ragged_varlen(
+    q_lens_cfg, dim, width, has_bias, silu_activation, itype
+):
+    device = DEVICE
+    rtol, atol = 1e-2, 5e-2
+    set_random_seed(0)
+
+    batch_size = len(q_lens_cfg)
+    max_query_len = 5
+    assert max(q_lens_cfg) <= max_query_len
+    state_len = width - 1 + max_query_len
+    total_entries = 10 * batch_size
+
+    q_lens = torch.tensor(q_lens_cfg, dtype=torch.int32, device=device)
+    query_start_loc = torch.cat(
+        [
+            torch.zeros(1, dtype=torch.int32, device=device),
+            torch.cumsum(q_lens, dim=0, dtype=torch.int32),
+        ]
+    )
+    total_tokens = int(q_lens.sum())
+
+    x = torch.randn(total_tokens, dim, device=device, dtype=itype)
+    conv_state = torch.randn(
+        total_entries, state_len, dim, device=device, dtype=itype
+    ).transpose(1, 2)
+    weight = torch.randn(dim, width, device=device, dtype=itype)
+    bias = torch.randn(dim, device=device, dtype=itype) if has_bias else None
+    activation = None if not silu_activation else "silu"
+
+    conv_state_indices = (
+        torch.randperm(total_entries - 1, device=device)[:batch_size] + 1
+    ).to(torch.int32)
+    num_accepted_tokens = torch.randint(
+        1, max_query_len + 1, (batch_size,), dtype=torch.int32, device=device
+    )
+    conv_state_ref = conv_state.detach().clone()
+
+    out = causal_conv1d_update(
+        x.clone(),
+        conv_state,
+        weight,
+        bias,
+        activation=activation,
+        conv_state_indices=conv_state_indices,
+        num_accepted_tokens=num_accepted_tokens,
+        query_start_loc=query_start_loc,
+        max_query_len=max_query_len,
+    )
+
+    for seq_idx in range(batch_size):
+        start = int(query_start_loc[seq_idx])
+        end = int(query_start_loc[seq_idx + 1])
+        entry = conv_state_indices[seq_idx : seq_idx + 1]
+        if start == end:
+            assert torch.equal(conv_state[entry], conv_state_ref[entry])
+            continue
+        out_ref = causal_conv1d_update(
+            x[start:end].clone(),
+            conv_state_ref,
+            weight,
+            bias,
+            activation=activation,
+            conv_state_indices=entry,
+            num_accepted_tokens=num_accepted_tokens[seq_idx : seq_idx + 1],
+            query_start_loc=query_start_loc.new_tensor([0, end - start]),
+            max_query_len=max_query_len,
+        )
+        assert torch.equal(conv_state[entry], conv_state_ref[entry])
+        assert torch.allclose(out[start:end], out_ref, rtol=rtol, atol=atol)
