@@ -197,6 +197,8 @@ class Parser:
         Used by structured engines like `xgrammar` to check if the
         reasoning content ends in the model output.
 
+        Must be a pure function of the input_ids.
+
         Args:
             input_ids: The token IDs of the model output.
 
@@ -209,6 +211,8 @@ class Parser:
     ) -> bool:
         """
         Check if the reasoning content ends during a decode step.
+
+        Must be a pure function of the input_ids and delta_ids.
 
         Args:
             input_ids: The entire model output token IDs.
@@ -228,8 +232,8 @@ class Parser:
 
         Returns:
             The offset within ``token_ids`` of the last reasoning token, or
-            ``None`` when reasoning does not end in this window. Parsers that
-            cannot answer from a window alone always return ``None``; callers
+            ``len(token_ids)`` when reasoning does not end in this window. Parsers
+            that cannot answer from a window alone always return ``None``; callers
             fall back to :meth:`is_reasoning_end_streaming`.
         """
         return None

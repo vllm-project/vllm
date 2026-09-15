@@ -30,6 +30,22 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
 
+- label: ":nvidia: (H200 MIG 35GB) LM Eval Watermarking"
+  device: h200_35gb
+  key: lm-eval-watermarking
+  # Recorded runs took 80–140 seconds
+  timeout_in_minutes: 10
+  source_file_dependencies:
+  - .buildkite/test_areas/lm_eval.yaml
+  - tests/evals/gsm8k/
+  - vllm/config/watermarking.py
+  - vllm/sampling_params.py
+  - vllm/v1/watermarking/
+  - vllm/v1/worker/gpu/
+  autorun_on_main: true
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-watermark.txt
+
 # - label: LM Eval Large Models (4xA100)
 #   key: lm-eval-large-models-4xa100
 #   device: a100

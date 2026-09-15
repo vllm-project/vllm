@@ -11,6 +11,7 @@ server_args: >-
   --moe-backend flashinfer_cutlass
   --prefill-context-parallel-size 4
   --decode-context-parallel-size 4
+  --dcp-comm-backend ag_rs
   --enable-expert-parallel
   --kv-cache-dtype fp8
 env:
