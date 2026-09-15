@@ -3,8 +3,8 @@
 """MSA (SM100/Blackwell) block-sparse attention for MiniMax M3.
 
 Prefill attends with ``fmha_sm100`` (``build_k2q_csr`` + ``sparse_atten_func``).
-Decode uses Triton split-K by default, with an opt-in CUTLASS ``fmha_sm100``
-path for regular decode and speculative verification.
+Decode uses Triton split-K by default, with opt-in CUTLASS ``fmha_sm100`` or
+FlashInfer MSA paths for regular decode and speculative verification.
 """
 
 from dataclasses import dataclass
@@ -34,6 +34,10 @@ from vllm.models.minimax_m3.nvidia.msa_cutlass_sparse_decode import (
     should_prepare_decode_metadata,
     supports_cutlass_sparse_decode,
 )
+from vllm.models.minimax_m3.nvidia.msa_flashinfer_sparse_decode import (
+    msa_flashinfer_sparse_decode,
+    supports_flashinfer_sparse_decode,
+)
 from vllm.v1.attention.backend import (
     AttentionLayer,
     CommonAttentionMetadata,
@@ -57,6 +61,14 @@ class MiniMaxM3SparseCutlassBackend(MiniMaxM3SparseMSABackend):
     @staticmethod
     def get_name() -> str:
         return "CUTLASS_MSA"
+
+
+class MiniMaxM3SparseFlashInferBackend(MiniMaxM3SparseMSABackend):
+    """Attention-backend alias selecting FlashInfer MSA sparse decode."""
+
+    @staticmethod
+    def get_name() -> str:
+        return "FLASHINFER_MSA"
 
 
 class MiniMaxM3SparseTritonBackend(MiniMaxM3SparseMSABackend):
@@ -174,13 +186,30 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
             page_size=self.block_size,
             topk_blocks=self.topk_blocks,
         )
+        self.use_flashinfer_decode = supports_flashinfer_sparse_decode(
+            decode_backend=msa_decode_backend,
+            num_q_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            kv_cache_dtype=self.kv_cache_dtype,
+            page_size=self.block_size,
+            topk_blocks=self.topk_blocks,
+        )
+        selected_backend = (
+            "FlashInfer"
+            if self.use_flashinfer_decode
+            else "CUTLASS"
+            if self.use_cutlass_decode
+            else "Triton"
+        )
         logger.info_once(
             "MiniMax M3 MSA sparse decode selected %s",
-            "CUTLASS" if self.use_cutlass_decode else "Triton",
+            selected_backend,
         )
 
     def should_use_msa_decode(self, layer_name: str) -> bool:
-        if not self.use_cutlass_decode:
+        use_cutlass_decode = getattr(self, "use_cutlass_decode", False)
+        use_flashinfer_decode = getattr(self, "use_flashinfer_decode", False)
+        if not (use_cutlass_decode or use_flashinfer_decode):
             return False
         attn_metadata = get_forward_context().attn_metadata
         if not isinstance(attn_metadata, dict):
@@ -189,6 +218,8 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
         if not isinstance(main_md, MiniMaxM3SparseMetadata):
             return False
         decode = main_md.decode
+        if use_flashinfer_decode:
+            return isinstance(decode, MiniMaxM3SparseMSADecodeMetadata)
         return (
             isinstance(decode, MiniMaxM3SparseMSADecodeMetadata)
             and decode.msa_cutlass is not None
@@ -233,7 +264,27 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
                 if isinstance(d, MiniMaxM3SparseMSADecodeMetadata)
                 else None
             )
-            if self.use_cutlass_decode and msa_metadata is not None:
+            if getattr(self, "use_flashinfer_decode", False):
+                assert query_fp8 is not None
+                flashinfer_lse = torch.empty(
+                    (nd, self.num_heads), dtype=torch.float32, device=query.device
+                )
+                flashinfer_output, _ = msa_flashinfer_sparse_decode(
+                    query_fp8[:nd].view(-1, self.num_heads, hd),
+                    kv_cache,
+                    topk[:nd].transpose(0, 1),
+                    d.block_table,
+                    d.seq_lens,
+                    d.decode_query_len,
+                    scale=self.scale,
+                    q_scale_float=getattr(layer, "_q_scale_float", 1.0),
+                    k_scale_float=getattr(layer, "_k_scale_float", 1.0),
+                    v_scale_float=getattr(layer, "_v_scale_float", 1.0),
+                    out=out[:nd],
+                    lse_out=flashinfer_lse,
+                )
+                assert flashinfer_output.data_ptr() == out[:nd].data_ptr()
+            elif self.use_cutlass_decode and msa_metadata is not None:
                 assert query_fp8 is not None
                 msa_cutlass_sparse_decode(
                     query_fp8[:nd].view(-1, self.num_heads, hd),
