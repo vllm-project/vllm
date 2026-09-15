@@ -1103,7 +1103,8 @@ class NemotronH_Nano_VL_V2(
     def _parse_and_validate_image_input(
         self, **kwargs: object
     ) -> NanoNemotronVLImageInputs | None:
-        if image_embeds := kwargs.pop("image_embeds", None):
+        image_embeds = kwargs.pop("image_embeds", None)
+        if image_embeds is not None:
             return NanoNemotronVLImageEmbeddingInputs(
                 type="image_embeds",
                 data=image_embeds,
@@ -1341,7 +1342,7 @@ class NemotronH_Nano_VL_V2(
 
     def _parse_and_validate_video_input(
         self, **kwargs: object
-    ) -> NanoNemotronVLVideoPixelInputs | None:
+    ) -> NanoNemotronVLVideoInputs | None:
         pixel_values_flat_video = kwargs.pop("pixel_values_flat_video", None)
         video_num_patches = kwargs.pop("video_num_patches", None)
         video_embeds = kwargs.pop("video_embeds", None)
@@ -1408,7 +1409,10 @@ class NemotronH_Nano_VL_V2(
                 and "images" not in modalities
             ):
                 modalities["images"] = self._parse_and_validate_image_input(**kwargs)
-            if input_key in ("pixel_values_flat_video",) and "videos" not in modalities:
+            if (
+                input_key in ("pixel_values_flat_video", "video_embeds")
+                and "videos" not in modalities
+            ):
                 modalities["videos"] = self._parse_and_validate_video_input(**kwargs)
             if (
                 input_key
@@ -1450,7 +1454,10 @@ class NemotronH_Nano_VL_V2(
                 multimodal_embeddings += tuple(image_embeddings)
             if modality == "videos":
                 video_input = modalities["videos"]
-                video_embeddings = self._process_video_input(video_input)
+                if video_input["type"] == "video_embeds":
+                    video_embeddings = video_input["data"]
+                else:
+                    video_embeddings = self._process_video_input(video_input)
                 multimodal_embeddings += tuple(video_embeddings)
             if modality == "audios":
                 audio_input = modalities["audios"]
