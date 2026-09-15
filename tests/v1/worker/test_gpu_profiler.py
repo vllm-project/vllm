@@ -19,7 +19,11 @@ from vllm.config import (
 from vllm.config.profiler import _is_uri_path
 from vllm.platforms import current_platform
 from vllm.profiler import graph_capture
-from vllm.profiler.graph_capture import graph_capture_profiler, graph_capture_step
+from vllm.profiler.graph_capture import (
+    graph_capture_profiler,
+    graph_capture_step,
+    skip_graph_capture_tracing,
+)
 from vllm.profiler.wrapper import (
     ProtonProfilerWrapper,
     WorkerProfiler,
@@ -340,21 +344,19 @@ class TestAnnotateProfile:
 
 
 def test_profiler_entered_during_capture():
-    """Profiler is used as a context manager in _warmup_and_capture,
-    confirming it is active during the actual graph capture run."""
+    """graph_capture_step enters the bound profiler during V1 capture."""
     runner = MagicMock()
     runner.compilation_config.cudagraph_num_of_warmups = 0
-    mock_profiler = MagicMock()
 
-    GPUModelRunner._warmup_and_capture(
-        runner,
-        desc=MagicMock(num_tokens=4, uniform=True),
-        cudagraph_runtime_mode=CUDAGraphMode.FULL,
-        profiler=mock_profiler,
-    )
+    with bound_graph_capture() as profiler:
+        GPUModelRunner._warmup_and_capture(
+            runner,
+            desc=MagicMock(num_tokens=4, uniform=True),
+            cudagraph_runtime_mode=CUDAGraphMode.FULL,
+        )
 
-    mock_profiler.__enter__.assert_called_once()
-    mock_profiler.__exit__.assert_called_once()
+    profiler.__enter__.assert_called_once()
+    profiler.__exit__.assert_called_once()
 
 
 @contextmanager
@@ -515,6 +517,28 @@ class TestGraphCaptureProfiler:
             profiler = graph_capture.make_graph_capture_profiler(config, None)
 
         assert isinstance(profiler, nullcontext)
+
+    def test_nested_bind_keeps_outer_prefix(self, annotation):
+        with (
+            bound_graph_capture("draft") as profiler,
+            graph_capture_profiler(MagicMock(), label_prefix="ignored"),
+            graph_capture_step(32, "FULL"),
+        ):
+            pass
+
+        annotation.assert_called_once_with("capture_32_draft_FULL")
+        profiler.__enter__.assert_called_once()
+
+    def test_skip_tracing_is_noop_even_if_capture_binds(self, annotation):
+        with (
+            skip_graph_capture_tracing(),
+            graph_capture_profiler(MagicMock(), label_prefix="encoder"),
+            graph_capture_step(32, "FULL"),
+        ):
+            pass
+
+        annotation.assert_not_called()
+        assert graph_capture._active_binding.get() is None
 
 
 def make_proton(session_id: int | None = 7):

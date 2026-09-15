@@ -22,7 +22,7 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.model_executor.models.utils import scatter_output_slices
 from vllm.model_executor.models.vision import get_load_balance_assignment
-from vllm.profiler.graph_capture import graph_capture_step
+from vllm.profiler.graph_capture import graph_capture_profiler, graph_capture_step
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.worker.encoder_cudagraph_defs import (
@@ -245,6 +245,12 @@ class EncoderCudaGraphManager:
 
     def capture(self, graph_pool: Any):
         """Capture CUDA graphs for every configured path and token budget."""
+        with graph_capture_profiler(
+            self.vllm_config, subsystem="encoder", label_prefix="encoder"
+        ):
+            self._capture_all_budget_graphs(graph_pool)
+
+    def _capture_all_budget_graphs(self, graph_pool: Any) -> None:
         self.graph_pool = graph_pool
 
         num_graphs = self.get_num_graphs_to_capture()

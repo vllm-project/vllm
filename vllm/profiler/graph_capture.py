@@ -41,6 +41,19 @@ class _CaptureBinding:
 _active_binding: contextvars.ContextVar[_CaptureBinding | None] = (
     contextvars.ContextVar("vllm_graph_capture_binding", default=None)
 )
+_skip_capture_tracing: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "vllm_skip_graph_capture_tracing", default=False
+)
+
+
+@contextmanager
+def skip_graph_capture_tracing() -> Iterator[None]:
+    """Disable capture tracing for the throwaway memory-estimate capture."""
+    token = _skip_capture_tracing.set(True)
+    try:
+        yield
+    finally:
+        _skip_capture_tracing.reset(token)
 
 
 def make_graph_capture_profiler(
@@ -93,6 +106,10 @@ def graph_capture_profiler(
             ``capture_32_draft_FULL`` rather than reusing the decoder's
             ``capture_32_FULL``.
     """
+    if _skip_capture_tracing.get() or _active_binding.get() is not None:
+        yield
+        return
+
     binding = _CaptureBinding(
         profiler=make_graph_capture_profiler(vllm_config, subsystem),
         label_prefix=label_prefix,
