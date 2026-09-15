@@ -917,9 +917,7 @@ def test_online_quantization_targets_ignore_collision() -> None:
         )
     )
     with pytest.raises(ValueError, match="matches both quantization_config.ignore"):
-        config.resolve_quant_method_cls(
-            Mock(spec=LinearBase), "model.layers.0.self_attn.o_proj"
-        )
+        config.resolve_quant_method_cls(LinearBase, "model.layers.0.self_attn.o_proj")
 
 
 def test_online_quantization_targets_reject_unsupported_layer() -> None:
