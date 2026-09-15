@@ -1094,7 +1094,7 @@ def compute_causal_conv1d_metadata(
 def get_dcp_local_seq_lens(
     seq_lens: torch.Tensor,
     dcp_size: int = 1,
-    dcp_rank: int | None = None,
+    dcp_rank: int | torch.Tensor | None = None,
     cp_kv_cache_interleave_size: int = 1,
 ) -> torch.Tensor:
     """While using dcp, kv_cache size stored on each rank may be different,
@@ -1112,6 +1112,12 @@ def get_dcp_local_seq_lens(
             dcp_size,
         )
         seq_lens_tiled = seq_lens_i32.unsqueeze(-1)
+    elif isinstance(dcp_rank, torch.Tensor):
+        assert dcp_rank.dtype == torch.int32
+        assert dcp_rank.device == seq_lens.device
+        assert dcp_rank.numel() == 1
+        rank_offsets = dcp_rank
+        seq_lens_tiled = seq_lens_i32
     else:
         rank_offsets = torch.tensor(dcp_rank, dtype=torch.int32, device=seq_lens.device)
         seq_lens_tiled = seq_lens_i32

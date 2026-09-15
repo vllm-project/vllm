@@ -108,10 +108,10 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     # layer). Separate names from DSV4 so a V4.1 model never resolves the
     # V4.0 backend classes through this enum.
     FLASHMLA_SPARSE_DSV41 = (
-        "vllm.models.deepseek_v4_1.sparse_mla.DeepseekV4FlashMLABackend"
+        "vllm.models.deepseek_v41.sparse_mla.DeepseekV4FlashMLABackend"
     )
     FLASHINFER_MLA_SPARSE_DSV41 = (
-        "vllm.models.deepseek_v4_1.nvidia.flashinfer_sparse."
+        "vllm.models.deepseek_v41.nvidia.flashinfer_sparse."
         "DeepseekV4FlashInferMLASparseBackend"
     )
     B12X = "vllm.v1.attention.backends.b12x.B12xPagedAttentionBackend"

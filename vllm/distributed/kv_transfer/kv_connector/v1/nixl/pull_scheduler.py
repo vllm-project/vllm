@@ -172,6 +172,9 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                         request,
                         local_block_ids,
                         local_num_computed_blocks,
+                        # Parked in WAITING_FOR_REMOTE_KVS only when there is
+                        # something to pull; a full local hit stays RUNNING.
+                        num_external_tokens > 0,
                     )
 
                 else:
@@ -224,7 +227,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             # To avoid stranding the prefill blocks in the prefill instance,
             # we must add empty block_ids to _reqs_need_recv so that our
             # worker side will notify and free blocks in the prefill instance.
-            self._reqs_need_recv[request.request_id] = (request, [], ())
+            self._reqs_need_recv[request.request_id] = (request, [], (), False)
             params["do_remote_prefill"] = False
             return False, None
 
@@ -282,7 +285,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             remote_request_id=request.request_id,
             remote_host=self.side_channel_host,
             remote_port=self.side_channel_port,
-            tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
+            tp_size=self.transfer_tp_size,
             dcp_size=self.vllm_config.parallel_config.decode_context_parallel_size,
             pp_size=self.vllm_config.parallel_config.pipeline_parallel_size,
             remote_num_tokens=remote_num_tokens,

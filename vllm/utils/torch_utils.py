@@ -705,17 +705,30 @@ def create_kv_caches_with_random(
 
 def async_tensor_h2d(
     data: list | np.ndarray | torch.Tensor,
-    device: str | torch.device,
+    device: str | torch.device | None = None,
     dtype: torch.dtype | None = None,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Copy list/numpy array/tensor async from host to device."""
+    if dtype is None and out is not None:
+        dtype = out.dtype
     if isinstance(data, np.ndarray):
         data = torch.from_numpy(data)
     if isinstance(data, torch.Tensor):
-        t = data.pin_memory() if PIN_MEMORY else data
+        t = data
+        if PIN_MEMORY and not t.is_pinned():
+            # Stage in pinned, contiguous buffer to ensure fully async copy.
+            t = torch.empty(
+                t.shape, dtype=dtype or t.dtype, device="cpu", pin_memory=True
+            ).copy_(t)
     else:
         t = torch.tensor(data, dtype=dtype, pin_memory=PIN_MEMORY, device="cpu")
     assert t.is_cpu
+
+    if out is not None:
+        assert out.dtype == dtype
+        return out.copy_(t, non_blocking=True)
+    assert device is not None, "must provide destination tensor or device"
     return t.to(device=device, dtype=dtype, non_blocking=True)
 
 
@@ -816,8 +829,11 @@ def current_stream() -> torch.cuda.Stream:
         # https://github.com/pytorch/pytorch/blob/42ad9edfb754743fdae3276ade43de000beb4f60/aten/src/ATen/cuda/CUDAGraph.cpp#L77
         # for more details. Therefore, we create a dedicated stream per process.
         if current_platform.is_rocm() or current_platform.is_cuda():
+            # Ensure new stream is ordered w.r.t. replaced stream's work.
+            new_stream = torch.cuda.Stream()
+            new_stream.wait_stream(torch.cuda.current_stream())
             # torch.cuda.set_stream here is the alias of _pathed_set_stream
-            torch.cuda.set_stream(torch.cuda.Stream())
+            torch.cuda.set_stream(new_stream)
         elif current_platform.is_cpu():
             _current_stream_tls.value = _StreamPlaceholder()
         else:

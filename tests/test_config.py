@@ -337,6 +337,108 @@ def test_hisparse_rejects_non_cuda(monkeypatch):
         VllmConfig(attention_config=AttentionConfig(hisparse_config=HiSparseConfig()))
 
 
+@pytest.mark.parametrize(
+    "kv_transfer_config",
+    [
+        KVTransferConfig(
+            kv_connector="HiSparseConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"host_pool_gib": 128},
+        ),
+        KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "connectors": [
+                    {
+                        "kv_connector": "OffloadingConnector",
+                        "kv_role": "kv_both",
+                        "kv_connector_extra_config": {"cpu_bytes_to_use": 1 << 30},
+                    },
+                    {
+                        "kv_connector": "HiSparseConnector",
+                        "kv_role": "kv_both",
+                        "kv_connector_extra_config": {"host_pool_gib": 128},
+                    },
+                ]
+            },
+        ),
+        KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role="kv_consumer",
+            kv_connector_extra_config={
+                "connectors": [
+                    {"kv_connector": "NixlConnector", "kv_role": "kv_consumer"},
+                    {
+                        "kv_connector": "HiSparseConnector",
+                        "kv_role": "kv_both",
+                        "kv_connector_extra_config": {"host_pool_gib": 128},
+                    },
+                ]
+            },
+        ),
+    ],
+    ids=["standalone", "multi-connector", "pd-decode"],
+)
+def test_hisparse_connector_implies_attention_config(monkeypatch, kv_transfer_config):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
+    config = VllmConfig(
+        kv_transfer_config=kv_transfer_config,
+        # Skip the HMA auto-detect block: it imports the connector class,
+        # which pulls the platform's compiled attention extensions.
+        scheduler_config=SchedulerConfig(
+            max_model_len=2048,
+            is_encoder_decoder=False,
+            disable_hybrid_kv_cache_manager=False,
+        ),
+    )
+    assert isinstance(config.attention_config.hisparse_config, HiSparseConfig)
+
+
+def test_hisparse_connector_preserves_explicit_attention_config(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
+    config = VllmConfig(
+        attention_config=AttentionConfig(
+            hisparse_config=HiSparseConfig(device_buffer_size=512)
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="HiSparseConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"host_pool_gib": 128},
+        ),
+        scheduler_config=SchedulerConfig(
+            max_model_len=2048,
+            is_encoder_decoder=False,
+            disable_hybrid_kv_cache_manager=False,
+        ),
+    )
+    assert config.attention_config.hisparse_config.device_buffer_size == 512
+
+
+def test_hisparse_connector_without_cuda_still_rejected(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: False)
+    with pytest.raises(ValueError, match="requires NVIDIA CUDA"):
+        VllmConfig(
+            kv_transfer_config=KVTransferConfig(
+                kv_connector="HiSparseConnector",
+                kv_role="kv_both",
+                kv_connector_extra_config={"host_pool_gib": 128},
+            )
+        )
+
+
+def test_no_hisparse_connector_keeps_attention_config_unset(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    config = VllmConfig(
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="OffloadingConnector", kv_role="kv_both"
+        )
+    )
+    assert config.attention_config.hisparse_config is None
+
+
 def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
     """ROCm keeps the DSA models (DeepSeek V3.2/V4, GLM-5.2) on their compiled
     MRV1 paths and off breakable cudagraphs by default."""
@@ -3320,6 +3422,22 @@ def test_ir_op_priority_default():
     )
     assert priority_config.rms_norm == ["oink", "native"]
     assert priority_config.fused_add_rms_norm == ["native"]
+
+
+@pytest.mark.parametrize("mode", [CompilationMode.NONE, CompilationMode.VLLM_COMPILE])
+@pytest.mark.parametrize("backend", ["inductor", "eager"])
+def test_ir_op_platform_defaults_support_sparse_gelu(mode, backend):
+    """Worker initialization must not select an unregistered sparse GELU provider."""
+    from vllm import ir
+
+    config = SimpleNamespace(
+        compilation_config=CompilationConfig(mode=mode, backend=backend)
+    )
+    priority = current_platform.get_default_ir_op_priority(config)
+    expected = ["triton", "native"] if current_platform.is_cuda() else ["native"]
+
+    with priority.set_priority():
+        assert ir.ops.gelu_and_mul_sparse.get_priority() == expected
 
 
 def test_ir_op_priority_str():
