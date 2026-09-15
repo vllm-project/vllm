@@ -39,6 +39,22 @@ _UNPARSEABLE_EMBED_ERRORS: Final = (
 )
 
 
+def _truncated_reason(exc: Exception) -> str:
+    """`exc`'s message, capped, saying how much was left out when it is capped.
+
+    Without the count a capped reason reads like the whole one, so a caller
+    debugging a large payload cannot tell that torch said more than this.
+    """
+    reason: Final = str(exc).strip() or type(exc).__name__
+    omitted: Final = len(reason) - _MAX_EMBED_ERROR_REASON_CHARS
+    if omitted <= 0:
+        return reason
+    return (
+        f"{reason[:_MAX_EMBED_ERROR_REASON_CHARS]}"
+        f"... ({omitted} more characters truncated)"
+    )
+
+
 def safe_load_prompt_embeds(
     model_config: "ModelConfig",
     embed: bytes,
@@ -62,10 +78,9 @@ def safe_load_prompt_embeds(
             # torch's reason is worth keeping -- for a malformed sparse tensor
             # it names the offending index -- but it is built from the caller's
             # own bytes, so it is truncated rather than echoed whole.
-            reason = str(exc).strip() or type(exc).__name__
             raise VLLMValidationError(
                 "`prompt_embeds` could not be deserialized as a torch tensor: "
-                f"{reason[:_MAX_EMBED_ERROR_REASON_CHARS]}",
+                f"{_truncated_reason(exc)}",
                 parameter="prompt_embeds",
             ) from exc
         tensor = safe_to_dense(tensor, parameter="prompt_embeds")

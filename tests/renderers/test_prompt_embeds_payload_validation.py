@@ -18,6 +18,7 @@ exception class alone.
 import io
 import pickle
 import zipfile
+from unittest.mock import patch
 
 import pybase64 as base64
 import pytest
@@ -27,7 +28,10 @@ from vllm.entrypoints.serve.exception_handling.error_response import (
     create_error_response,
 )
 from vllm.exceptions import VLLMValidationError
-from vllm.renderers.embed_utils import safe_load_prompt_embeds
+from vllm.renderers.embed_utils import (
+    _MAX_EMBED_ERROR_REASON_CHARS,
+    safe_load_prompt_embeds,
+)
 
 
 @pytest.fixture
@@ -94,6 +98,49 @@ def test_the_error_body_stays_bounded(model_config, payload):
         safe_load_prompt_embeds(model_config, _encode(payload + padding))
 
     assert len(str(excinfo.value)) < 500
+
+
+def test_a_long_reason_is_truncated_and_says_how_much_was_left_out(model_config):
+    """The cap is pinned against a reason of known length, not a real payload.
+
+    Which of torch's messages happen to exceed the cap is torch's business and
+    changes between releases, so the reason is injected here: that keeps the
+    assertion about *this* code's truncation rule rather than about whichever
+    error text the installed torch produces.
+    """
+    reason = "E" * (_MAX_EMBED_ERROR_REASON_CHARS + 37)
+
+    with (
+        patch(
+            "vllm.renderers.embed_utils.torch.load", side_effect=RuntimeError(reason)
+        ),
+        pytest.raises(VLLMValidationError) as excinfo,
+    ):
+        safe_load_prompt_embeds(model_config, _encode(b"ignored"))
+
+    message = str(excinfo.value)
+    assert "E" * _MAX_EMBED_ERROR_REASON_CHARS in message
+    assert "E" * (_MAX_EMBED_ERROR_REASON_CHARS + 1) not in message
+    assert "... (37 more characters truncated)" in message
+
+
+def test_a_short_reason_is_passed_through_whole(model_config):
+    """A reason that fits is not annotated -- the count only appears when it is
+    telling the reader something."""
+    reason = "invalid magic number; corrupt file?"
+    assert len(reason) <= _MAX_EMBED_ERROR_REASON_CHARS
+
+    with (
+        patch(
+            "vllm.renderers.embed_utils.torch.load", side_effect=RuntimeError(reason)
+        ),
+        pytest.raises(VLLMValidationError) as excinfo,
+    ):
+        safe_load_prompt_embeds(model_config, _encode(b"ignored"))
+
+    message = str(excinfo.value)
+    assert reason in message
+    assert "truncated" not in message
 
 
 def test_a_well_formed_payload_still_loads(model_config):
