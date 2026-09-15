@@ -17,6 +17,7 @@ from vllm.compilation.passes.fusion.act_quant_fusion import (
     SILU_MUL_OP,
     ActivationQuantFusionPass,
 )
+from vllm.compilation.passes.fusion.matcher_utils import GELU_TANH_MUL_OP
 from vllm.compilation.passes.fusion.rms_quant_fusion import QUANT_OPS
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
@@ -34,7 +35,7 @@ from vllm.model_executor.kernels.linear import (
     PerTensorTorchFP8ScaledMMLinearKernel,
     ROCmFP8ScaledMMLinearKernel,
 )
-from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.activation import GeluAndMul, SiluAndMul
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -168,6 +169,42 @@ class TestSiluMulGroupFp8QuantModel(torch.nn.Module):
     def ops_in_model_before(self):
         return [
             SILU_MUL_OP if self.enable_silu_mul_custom_op else torch.ops.aten.mul,
+            rocm_aiter_ops.get_group_quant_op(),
+        ]
+
+    def ops_in_model_after(self):
+        return [torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant]
+
+
+class TestGeluMulGroupFp8QuantModel(torch.nn.Module):
+    """GeGLU (gelu_tanh) sibling of TestSiluMulGroupFp8QuantModel."""
+
+    act_quant_key = kFp8Dynamic128Sym
+
+    def __init__(self, hidden_size: int, dtype: torch.dtype, **kwargs):
+        super().__init__()
+        self.gelu_and_mul = GeluAndMul(approximate="tanh")
+        self.weight_quant_key = create_fp8_quant_key(
+            static=True, group_shape=GroupShape(hidden_size, hidden_size)
+        )
+
+        self.w8a8_block_fp8_linear = TestFP8Layer(
+            weight_shape=(hidden_size, hidden_size),
+            weight_quant_key=self.weight_quant_key,
+            activation_quant_key=self.act_quant_key,
+            input_dtype=dtype,
+        )
+
+        self.enable_gelu_mul_custom_op = self.gelu_and_mul.enabled()
+
+    def forward(self, x):
+        y = self.gelu_and_mul(x)
+        x2 = self.w8a8_block_fp8_linear(y)
+        return x2
+
+    def ops_in_model_before(self):
+        return [
+            GELU_TANH_MUL_OP if self.enable_gelu_mul_custom_op else torch.ops.aten.mul,
             rocm_aiter_ops.get_group_quant_op(),
         ]
 
@@ -367,4 +404,72 @@ def test_fusion_silu_and_mul_quant(
         backend.check_before_ops(model.ops_in_model_before())
 
         # In post-nodes, fused kernels should be present and quant op should not
+        backend.check_after_ops(model.ops_in_model_after())
+
+
+@pytest.mark.parametrize("num_tokens", [32, 64])
+@pytest.mark.parametrize("hidden_size", [128, 256])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("enable_gelu_mul_custom_op", [True, False])
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm+AITER only")
+def test_fusion_gelu_and_mul_group_quant(
+    num_tokens: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    enable_gelu_mul_custom_op: bool,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """GeGLU + aiter group FP8 quant fuses into rocm_aiter_act_mul_and_fp8_group_quant.
+
+    Mirrors the ROCm group-FP8 branch of test_fusion_silu_and_mul_quant for a
+    gelu_tanh MLP (Gemma). The fused replacement applies gelu_tanh; the eager
+    reference goes through GeluAndMul, whose difference from tanh is dominated
+    by fp8 group-quant error (5e-2 tolerance).
+    """
+    if not IS_AITER_FOUND:
+        pytest.skip("AITER is not supported on this GPU.")
+
+    from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
+        RocmAiterSiluMulFp8GroupQuantFusionPass,
+    )
+
+    torch.set_default_device("cuda")
+    torch.set_default_dtype(dtype)
+
+    x = torch.rand(num_tokens, hidden_size * 2)
+
+    # Group-FP8 quant fusion requires the quant_fp8 custom op enabled.
+    custom_ops = ["none", "+quant_fp8"]
+    if enable_gelu_mul_custom_op:
+        custom_ops.append("+gelu_and_mul")
+    config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            custom_ops=custom_ops,
+            backend="eager",
+            pass_config=PassConfig(fuse_act_quant=True, eliminate_noops=True),
+        ),
+    )
+
+    with set_current_vllm_config(config), monkeypatch.context() as m:
+        m.setenv("VLLM_ROCM_USE_AITER", "1")
+        rocm_aiter_ops.refresh_env_variables()
+        fusion_passes = [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
+        passes = [NoOpEliminationPass(config), *fusion_passes, PostCleanupPass(config)]
+        backend = TestBackend(*passes)
+        model = TestGeluMulGroupFp8QuantModel(hidden_size=hidden_size, dtype=dtype)
+
+        torch._dynamo.mark_dynamic(x, 0)
+
+        result = model(x)
+        model2 = torch.compile(model, backend=backend)
+        result2 = model2(x)
+
+        atol, rtol = 5e-2, 5e-2
+        torch.testing.assert_close(
+            result[0].to(dtype=dtype), result2[0].to(dtype=dtype), atol=atol, rtol=rtol
+        )
+
+        assert sum([p.matched_count for p in fusion_passes]) == 1
+        backend.check_before_ops(model.ops_in_model_before())
         backend.check_after_ops(model.ops_in_model_after())
