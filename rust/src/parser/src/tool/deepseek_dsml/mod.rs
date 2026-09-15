@@ -70,7 +70,6 @@ enum DsmlMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ParamMode {
     String,
-    Raw,
     Buffered,
 }
 
@@ -250,7 +249,7 @@ impl DeepSeekDsmlToolParser {
         }
 
         if self.buffer.starts_with(self.tokens.tool_calls_end) {
-            self.buffer.drain(..self.tokens.tool_calls_end.len());
+            self.buffer.clear();
             self.mode = DsmlMode::Done;
             return Ok(true);
         }
@@ -286,10 +285,6 @@ impl DeepSeekDsmlToolParser {
                     self.push_call(output, index, None, arguments);
                     self.active_param = None;
                 }
-                ParamMode::Raw => {
-                    self.push_call(output, index, None, raw);
-                    self.active_param = None;
-                }
                 ParamMode::Buffered => {
                     let mut param = self.active_param.take().expect("active parameter exists");
                     param.buffered.push_str(&raw);
@@ -311,7 +306,6 @@ impl DeepSeekDsmlToolParser {
             ParamMode::String => {
                 self.push_call(output, index, None, Self::escape_string_fragment(&raw)?);
             }
-            ParamMode::Raw => self.push_call(output, index, None, raw),
             ParamMode::Buffered => {
                 if let Some(param) = self.active_param.as_mut() {
                     param.buffered.push_str(&raw);
@@ -351,13 +345,9 @@ impl DeepSeekDsmlToolParser {
         self.buffer.drain(..consumed);
 
         let index = self.active_tool_index.expect("active tool exists");
-        let tool_name = self.active_tool_name.clone().unwrap_or_default();
         let mode = if is_string {
             self.push_param_prefix(output, index, &name, true)?;
             ParamMode::String
-        } else if self.tool_parameters.can_stream_raw_param(&tool_name, &name) {
-            self.push_param_prefix(output, index, &name, false)?;
-            ParamMode::Raw
         } else {
             ParamMode::Buffered
         };
@@ -383,6 +373,9 @@ impl DeepSeekDsmlToolParser {
         // Extract tool calls from streaming model output. DSML framing is
         // buffered, while stable function metadata and argument fragments are
         // emitted as soon as they can no longer change.
+        if self.mode == DsmlMode::Done {
+            return Ok(());
+        }
         self.buffer.push_str(chunk);
 
         loop {
