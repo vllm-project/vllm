@@ -287,10 +287,17 @@ class CustomAllreduce:
         )
         self.max_size = max_size
         self.max_all_gather_size = max_all_gather_size
+        env_rs_mib = envs.VLLM_MNNVL_REDUCE_SCATTER_MAX_SIZE_BYTES_MB
+        if env_rs_mib is not None:
+            max_mnnvl_reduce_scatter_size = env_rs_mib * 1024 * 1024
+        env_ag_mib = envs.VLLM_MNNVL_ALL_GATHER_MAX_SIZE_BYTES_MB
         if max_mnnvl_all_gather_size is None:
-            max_mnnvl_all_gather_size = self._DEFAULT_MNNVL_ALL_GATHER_MAX_SIZES[
-                world_size
-            ]
+            if env_ag_mib is not None:
+                max_mnnvl_all_gather_size = env_ag_mib * 1024 * 1024
+            else:
+                max_mnnvl_all_gather_size = self._DEFAULT_MNNVL_ALL_GATHER_MAX_SIZES[
+                    world_size
+                ]
         self.max_mnnvl_all_gather_size = max_mnnvl_all_gather_size
         self.max_reduce_scatter_size = max_reduce_scatter_size
         self.max_mnnvl_reduce_scatter_size = max_mnnvl_reduce_scatter_size
