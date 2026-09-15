@@ -296,3 +296,8 @@ class EngineClient(ABC):
     async def get_weight_version(self) -> str:
         """Return the latest committed weight version."""
         raise NotImplementedError
+
+    async def get_kv_event_sources(self) -> list[dict[str, Any]]:
+        """Discovery info for enabled ZMQ KV-cache event publishers, one
+        entry per data_parallel_rank, ordered deterministically by rank."""
+        raise NotImplementedError
