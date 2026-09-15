@@ -430,7 +430,6 @@ def test_lookup_cap_stops_at_authoritative_prefix_boundary():
     assert scheduler._req_status["req"].partial_tail_boundary == 20
 
 
-@pytest.mark.skip_global_cleanup
 def test_max_load_tokens_zero_skips_partial_tail_lookup():
     scheduler = _make_partial_tail_scheduler()
     request = _make_partial_tail_request(
@@ -445,7 +444,6 @@ def test_max_load_tokens_zero_skips_partial_tail_lookup():
     )
 
 
-@pytest.mark.skip_global_cleanup
 def test_max_load_tokens_caps_tokens_beyond_gpu_prefix():
     scheduler = _make_partial_tail_scheduler()
     request = _make_partial_tail_request(
@@ -457,7 +455,6 @@ def test_max_load_tokens_caps_tokens_beyond_gpu_prefix():
     assert scheduler._req_status["req"].partial_tail_boundary == 24
 
 
-@pytest.mark.skip_global_cleanup
 def test_max_load_tokens_rounds_down_without_partial_tail():
     scheduler = _make_partial_tail_scheduler()
     scheduler.config = scheduler.config._replace(supports_partial_tail=False)
@@ -469,7 +466,6 @@ def test_max_load_tokens_rounds_down_without_partial_tail():
     assert scheduler.get_num_new_matched_tokens(request, 0) == (16, True)
 
 
-@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("value", ["8", 8.5, -1, True])
 def test_invalid_max_load_tokens_is_ignored(value):
     scheduler = _make_partial_tail_scheduler()
@@ -3019,7 +3015,6 @@ def test_skip_reading_prefix_cache(request_runner, async_scheduling: bool):
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
-@pytest.mark.skip_global_cleanup
 def test_max_load_tokens_limits_external_load(request_runner, async_scheduling: bool):
     """The load cap limits external reads without changing the store path."""
     block_size = 4
