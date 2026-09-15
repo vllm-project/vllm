@@ -196,6 +196,7 @@ def fi_chunk_gated_delta_rule(
     output_final_state: bool,
     cu_seqlens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = True,
+    output: torch.Tensor | None = None,
 ):
     from flashinfer.gdn_prefill import (
         chunk_gated_delta_rule as chunk_gated_delta_rule_fi,
@@ -226,6 +227,7 @@ def fi_chunk_gated_delta_rule(
         initial_state=fi_state,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
+        output=output,
     )
     # FlashInfer returns (output, state) when output_final_state=True,
     # or just output when output_final_state=False.
@@ -285,11 +287,8 @@ class ChunkGatedDeltaRule(CustomOp):
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+            output=core_attn_out,
         )
-        if core_attn_out is not None:
-            o_flat = o.squeeze(0).reshape(-1)
-            co_flat = core_attn_out.reshape(-1)
-            co_flat[: o_flat.numel()].copy_(o_flat)
         return o, final_state
 
     def forward_native(
@@ -1525,6 +1524,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             assert prefill_has_initial_state is not None
             initial_state = ssm_state[prefill_state_indices]
             initial_state[~prefill_has_initial_state, ...] = 0
+            # FlashInfer can write prefill rows into core_attn_out directly.
+            prefill_out = None
+            if (
+                spec_sequence_masks is None
+                and self.chunk_gated_delta_rule.gdn_prefill_backend == "flashinfer"
+                and core_attn_out.dim() == 3
+            ):
+                prefill_start = num_decode_tokens if split_non_spec else 0
+                prefill_out = core_attn_out[prefill_start:num_actual_tokens]
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
@@ -1540,11 +1548,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 chunk_indices=attn_metadata.chunk_indices,
                 chunk_offsets=attn_metadata.chunk_offsets,
                 use_qk_l2norm_in_kernel=False,
+                core_attn_out=prefill_out,
             )
             # Init cache
             ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
 
-            if split_non_spec:
+            if prefill_out is not None:
+                core_attn_out_non_spec = None
+                if split_non_spec:
+                    core_attn_out[:num_decode_tokens] = core_attn_out_decode.squeeze(0)
+            elif split_non_spec:
                 # Stitch the peeled decode outputs in front of the prefill
                 # outputs (decode-first order).
                 core_attn_out_non_spec = torch.cat(
@@ -1585,7 +1598,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
         elif spec_sequence_masks is not None:
             core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
-        else:
+        elif core_attn_out_non_spec is not None:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
 
     def _forward_core_decode_aiter(
@@ -1839,6 +1852,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp")
         )
 
+    def _grouped_norm_weight(self, num_heads: int) -> torch.Tensor:
+        """Per-head norm weight tiled to one row, cached."""
+        weight = self.norm.weight
+        key = (num_heads, weight.data_ptr(), weight._version)
+        cached = getattr(self, "_grouped_norm_weight_cache", None)
+        if cached is None or cached[0] != key:
+            cached = (key, weight.detach().repeat(num_heads).contiguous())
+            self._grouped_norm_weight_cache = cached
+        return cached[1]
+
     def _rms_norm_gated_cuda(
         self,
         x: torch.Tensor,
@@ -1852,22 +1875,41 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         x_shape = x.shape
         assert output_gate.shape == x_shape
         assert out.shape == x_shape
-        x_2d = x.reshape(-1, x_shape[-1])
-        output_gate_2d = output_gate.reshape(-1, x_shape[-1])
-        out_2d = out.reshape(-1, x_shape[-1])
+        group_size = (
+            x_shape[-1] if self.norm.group_size is None else self.norm.group_size
+        )
+        weight = self.norm.weight
+        if (
+            x.dim() == 3
+            and self.norm.bias is None
+            and self.norm.group_size is None
+            and x.is_contiguous()
+            and out.is_contiguous()
+            and output_gate.stride(-1) == 1
+            and output_gate.stride(-2) == x_shape[-1]
+        ):
+            # [n, HV*V] rows keep a strided gate a view; group_size=V norms per head.
+            num_rows = x_shape[0]
+            x_2d = x.view(num_rows, -1)
+            output_gate_2d = output_gate.view(num_rows, -1)
+            out_2d = out.view(num_rows, -1)
+            weight = self._grouped_norm_weight(x_shape[1])
+        else:
+            x_2d = x.reshape(-1, x_shape[-1])
+            output_gate_2d = output_gate.reshape(-1, x_shape[-1])
+            out_2d = out.reshape(-1, x_shape[-1])
+            weight = weight.contiguous()
         assert x_2d.stride(-1) == 1
         assert output_gate_2d.stride(-1) == 1
         assert out_2d.stride(-1) == 1
         layer_norm_fwd(
             x_2d,
-            self.norm.weight.contiguous(),
+            weight,
             self.norm.bias,
             self.norm.eps,
             z=output_gate_2d,
             out=out_2d,
-            group_size=(
-                x_shape[-1] if self.norm.group_size is None else self.norm.group_size
-            ),
+            group_size=group_size,
             norm_before_gate=self.norm.norm_before_gate,
             is_rms_norm=True,
             activation=self.norm.activation,
