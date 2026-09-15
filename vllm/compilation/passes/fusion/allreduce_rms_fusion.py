@@ -622,12 +622,14 @@ class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
         dtype: torch.dtype,
         device: str | None,
         allreduce_params: FlashInferFusedAllReduceParams,
+        gemma: bool = False,
     ) -> None:
         super().__init__(dtype, device)
         self.epsilon = epsilon
         self.allreduce_params = allreduce_params
         self.quant_dtype = torch.float8_e4m3fn
         self.quant_matcher = MatcherQuantFP8(kFp8StaticTensorSym)
+        self.gemma = gemma
 
     def get_inputs(self) -> list[torch.Tensor]:
         _, scale = self.quant_matcher.inputs()
@@ -642,7 +644,8 @@ class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
             scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             all_reduce = tensor_model_parallel_all_reduce(input)
-            rms = vllm.ir.ops.rms_norm(all_reduce, weight, self.epsilon)
+            gamma = weight.float() + 1.0 if self.gemma else weight
+            rms = vllm.ir.ops.rms_norm(all_reduce, gamma, self.epsilon)
             quant, _ = self.quant_matcher(rms, scale)
             return quant, all_reduce
 
@@ -667,6 +670,7 @@ class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
                     flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormFP8Quant
                 ),
                 scale_factor=scale,
+                weight_bias=1.0 if self.gemma else 0.0,
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
             )
 
@@ -679,7 +683,9 @@ class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
             self.get_inputs(),
             pm.fwd_only,
             pm_pass,
-            extra_check=_rms_input_weight_dtype_match,
+            extra_check=(lambda match: True)
+            if self.gemma
+            else _rms_input_weight_dtype_match,
         )
 
 
@@ -697,6 +703,7 @@ class AllReduceFusedAddRMSNormStaticQuantFP8Pattern(BasePattern):
         dtype: torch.dtype,
         device: str | None,
         allreduce_params: FlashInferFusedAllReduceParams,
+        gemma: bool = False,
     ) -> None:
         super().__init__(dtype, device)
         self.epsilon = epsilon
@@ -704,6 +711,7 @@ class AllReduceFusedAddRMSNormStaticQuantFP8Pattern(BasePattern):
         self.quant_dtype = torch.float8_e4m3fn
 
         self.quant_matcher = MatcherQuantFP8(kFp8StaticTensorSym)
+        self.gemma = gemma
 
     def get_inputs(self) -> list[torch.Tensor]:
         input = self.empty(5, 16)
@@ -722,8 +730,9 @@ class AllReduceFusedAddRMSNormStaticQuantFP8Pattern(BasePattern):
             scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             allreduce_output = tensor_model_parallel_all_reduce(input)
+            gamma = weight.float() + 1.0 if self.gemma else weight
             rms, res = vllm.ir.ops.fused_add_rms_norm(
-                allreduce_output, residual, weight, self.epsilon
+                allreduce_output, residual, gamma, self.epsilon
             )
             quant, _ = self.quant_matcher(rms, scale)
 
@@ -751,6 +760,7 @@ class AllReduceFusedAddRMSNormStaticQuantFP8Pattern(BasePattern):
                     flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormFP8Quant
                 ),
                 scale_factor=scale,
+                weight_bias=1.0 if self.gemma else 0.0,
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
             )
             # quant_out, rms_norm_residual
@@ -762,7 +772,9 @@ class AllReduceFusedAddRMSNormStaticQuantFP8Pattern(BasePattern):
             self.get_inputs(),
             pm.fwd_only,
             pm_pass,
-            extra_check=_norm_input_weight_dtype_match,
+            extra_check=(lambda match: True)
+            if self.gemma
+            else _norm_input_weight_dtype_match,
         )
 
 
@@ -1075,18 +1087,21 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
     def register_patterns(self) -> None:
         for epsilon in [1e-5, 1e-6]:
             if self.supports_quant_fusion:
-                AllReduceFusedRMSNormStaticQuantFP8Pattern(
-                    epsilon,
-                    self.model_dtype,
-                    self.device,
-                    self.allreduce_params,
-                ).register(self.patterns)
-                AllReduceFusedAddRMSNormStaticQuantFP8Pattern(
-                    epsilon,
-                    self.model_dtype,
-                    self.device,
-                    self.allreduce_params,
-                ).register(self.patterns)
+                for gemma in (False, True):
+                    AllReduceFusedRMSNormStaticQuantFP8Pattern(
+                        epsilon,
+                        self.model_dtype,
+                        self.device,
+                        self.allreduce_params,
+                        gemma=gemma,
+                    ).register(self.patterns)
+                    AllReduceFusedAddRMSNormStaticQuantFP8Pattern(
+                        epsilon,
+                        self.model_dtype,
+                        self.device,
+                        self.allreduce_params,
+                        gemma=gemma,
+                    ).register(self.patterns)
                 if current_platform.has_device_capability(100):
                     AllReduceFusedRMSNormStaticQuantNVFP4Pattern(
                         epsilon,
