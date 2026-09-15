@@ -564,6 +564,7 @@ def test_mhc_pre_delayed_custom_op_supports_compile(carried):
     )
 
 
+@pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),
     reason="DeepGEMM Mega mHC requires SM100-family CUDA",
