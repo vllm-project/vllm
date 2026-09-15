@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+
 import pytest
 
 from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
+from tests.tool_parsers.utils import DummyTokenizer, run_tool_extraction_streaming
+from vllm.tool_parsers.granite_20b_fc_tool_parser import Granite20bFCToolParser
 
 
 class TestGranite20bFcToolParser(ToolParserTests):
@@ -74,3 +78,22 @@ class TestGranite20bFcToolParser(ToolParserTests):
             },
             xfail_nonstreaming={},
         )
+
+
+def test_streaming_parallel_calls_single_delta():
+    parser = Granite20bFCToolParser(DummyTokenizer())
+    model_output = (
+        '<function_call> {"name": "get_weather", "arguments": {"x": 42}}'
+        '<function_call> {"name": "b", "arguments": {"y": 7}}'
+    )
+
+    reconstructor = run_tool_extraction_streaming(
+        parser, [model_output], assert_one_tool_per_delta=False
+    )
+
+    assert [tc.function.name for tc in reconstructor.tool_calls] == [
+        "get_weather",
+        "b",
+    ]
+    assert json.loads(reconstructor.tool_calls[0].function.arguments) == {"x": 42}
+    assert json.loads(reconstructor.tool_calls[1].function.arguments) == {"y": 7}
