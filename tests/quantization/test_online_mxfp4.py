@@ -10,6 +10,7 @@ against the pure-torch reference in `reference_mxfp4.py`.
 import pytest
 import torch
 
+from vllm.config.kernel import MoEBackend
 from vllm.config.model import ModelConfig
 from vllm.model_executor.kernels.linear import _POSSIBLE_MXFP4_KERNELS
 from vllm.model_executor.kernels.linear.mxfp4.aiter import (
@@ -283,7 +284,7 @@ def test_online_mxfp4_tp_weight_quant_matches_unsharded(tp_size: int):
     ],
 )
 def test_online_mxfp4_moe_matches_quark(
-    moe_backend: str,
+    moe_backend: MoEBackend,
     unpadded_hidden_size: int,
     unpadded_intermediate_size: int,
     default_vllm_config,

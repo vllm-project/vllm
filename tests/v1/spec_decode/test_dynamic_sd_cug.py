@@ -25,7 +25,7 @@ def _create_vllm_config_for_dsd(
     max_num_seqs: int,
     max_spec_tokens: int,
     *,
-    cudagraph_mode: str = "FULL_AND_PIECEWISE",
+    cudagraph_mode: CUDAGraphMode = CUDAGraphMode.FULL_AND_PIECEWISE,
     use_dynamic_sd: bool = True,
     num_spec_per_batch_size: list[tuple[int, int, int]] | None = None,
 ) -> MagicMock:
@@ -202,7 +202,7 @@ def test_dynamic_sd_non_uniform_batch_falls_back_to_piecewise(monkeypatch):
     vllm_config = _create_vllm_config_for_dsd(
         max_num_seqs=512,
         max_spec_tokens=max_spec_tokens,
-        cudagraph_mode="FULL_AND_PIECEWISE",
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
         use_dynamic_sd=True,
     )
     manager = gpu_cudagraph_utils.CudaGraphManager(
@@ -321,7 +321,7 @@ def test_basic_sd_does_not_capture_shorter_full_decode_shapes(monkeypatch):
     vllm_config = _create_vllm_config_for_dsd(
         max_num_seqs=max_num_seqs,
         max_spec_tokens=max_spec_tokens,
-        cudagraph_mode="FULL_AND_PIECEWISE",
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
         use_dynamic_sd=False,
     )
     manager = gpu_cudagraph_utils.CudaGraphManager(
@@ -388,7 +388,7 @@ def test_dynamic_sd_only_captures_scheduled_query_lengths(monkeypatch):
     vllm_config = _create_vllm_config_for_dsd(
         max_num_seqs=max_num_seqs,
         max_spec_tokens=max_spec_tokens,
-        cudagraph_mode="FULL_AND_PIECEWISE",
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
         use_dynamic_sd=True,
         num_spec_per_batch_size=num_spec_per_batch_size,
     )

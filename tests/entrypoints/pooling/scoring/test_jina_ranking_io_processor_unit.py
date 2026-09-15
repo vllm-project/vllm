@@ -3,6 +3,7 @@
 """Unit tests for JinaRankingIOProcessor request building."""
 
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -10,12 +11,13 @@ from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast
 
 from vllm import PoolingParams
+from vllm.config import ModelConfig
 from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
 from vllm.entrypoints.pooling.scoring.io_processor import JinaRankingIOProcessor
 from vllm.entrypoints.pooling.scoring.protocol import RerankRequest
 from vllm.entrypoints.pooling.scoring.typing import ScoringData
 from vllm.entrypoints.pooling.typing import OfflineScoringInputsContext
-from vllm.renderers import TokenizeParams
+from vllm.renderers import BaseRenderer, TokenizeParams
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -30,12 +32,18 @@ def test_online_forwards_truncate_prompt_tokens_to_proxy(monkeypatch):
     silently disables truncate_prompt_tokens for Jina rerank/score.
     """
     proc = JinaRankingIOProcessor.__new__(JinaRankingIOProcessor)
-    proc.valid_inputs_online = MagicMock(
-        return_value=ScoringData(data_1=["query"], data_2=["doc"])
+    monkeypatch.setattr(
+        proc,
+        "valid_inputs_online",
+        MagicMock(return_value=ScoringData(data_1=["query"], data_2=["doc"])),
     )
-    proc._get_token_limits = MagicMock(return_value=(0, 0))
-    proc.ensure_str = MagicMock(side_effect=lambda data: list(data))
-    proc.format_docs_prompts_func = MagicMock(return_value="formatted prompt")
+    monkeypatch.setattr(proc, "_get_token_limits", MagicMock(return_value=(0, 0)))
+    monkeypatch.setattr(
+        proc, "ensure_str", MagicMock(side_effect=lambda data: list(data))
+    )
+    monkeypatch.setattr(
+        proc, "format_docs_prompts_func", MagicMock(return_value="formatted prompt")
+    )
 
     captured: dict[str, object] = {}
 
@@ -71,9 +79,12 @@ def offline_processor_and_context():
     backend.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
     proc = JinaRankingIOProcessor.__new__(JinaRankingIOProcessor)
     proc.tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend)
-    proc.model_config = SimpleNamespace(max_model_len=1024, is_encoder_decoder=False)
-    proc.renderer = SimpleNamespace(
-        default_cmpl_tok_params=TokenizeParams(max_total_tokens=1024)
+    proc.model_config = cast(
+        ModelConfig, SimpleNamespace(max_model_len=1024, is_encoder_decoder=False)
+    )
+    proc.renderer = cast(
+        BaseRenderer,
+        SimpleNamespace(default_cmpl_tok_params=TokenizeParams(max_total_tokens=1024)),
     )
     ctx = OfflineScoringInputsContext(
         pooling_task="token_embed",

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Literal
 from unittest import mock
 
 import numpy as np
@@ -31,6 +32,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.spec_decode.dflash import DFlashProposer
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
+from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
@@ -46,13 +48,13 @@ DEVICE_TYPE = current_platform.device_type
 
 
 def _create_proposer(
-    method: str,
+    method: Literal["eagle", "eagle3", "draft_model", "dflash"],
     num_speculative_tokens: int,
     attention_backend: str | None = None,
     parallel_drafting: bool = False,
-    rejection_sample_method: str = "standard",
-    draft_sample_method: str = "greedy",
-) -> EagleProposer:
+    rejection_sample_method: Literal["standard", "synthetic", "block"] = "standard",
+    draft_sample_method: Literal["greedy", "probabilistic"] = "greedy",
+) -> SpecDecodeBaseProposer:
     # Method-dependent setup
     if method == "eagle":
         target_model_dir = model_dir
@@ -102,9 +104,14 @@ def _create_proposer(
             max_model_len=model_config.max_model_len,
             is_encoder_decoder=model_config.is_encoder_decoder,
         ),
-        attention_config=AttentionConfig(backend=attention_backend),
+        attention_config=AttentionConfig(
+            backend=AttentionBackendEnum[attention_backend]
+            if attention_backend
+            else None
+        ),
     )
 
+    proposer: SpecDecodeBaseProposer
     if method == "dflash":
         proposer = DFlashProposer(vllm_config=vllm_config, device=device)
     elif "eagle" in method:
@@ -136,7 +143,7 @@ def test_prepare_next_token_ids():
     )
 
     mock_num_scheduled_tokens = {req_id: 0 for req_id in req_ids}
-    mock_requests = {}
+    mock_requests: dict[str, CachedRequestState] = {}
     for req_id in req_ids:
         mock_request = mock.MagicMock(spec=CachedRequestState)
         # Each request will have a backup next token id of 10, 20, 30, 40
@@ -955,13 +962,12 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
 
     attn_metadata_builder = attn_metadata_builder_cls(
         kv_cache_spec=create_standard_kv_cache_spec(proposer.vllm_config),
-        layer_names=proposer._draft_attn_layer_names,
+        layer_names=sorted(proposer._draft_attn_layer_names),
         vllm_config=proposer.vllm_config,
         device=device,
     )
 
-    # Mock runner and draft_attn_groups for attention metadata building
-    proposer.runner = mock.MagicMock()
+    # Mock draft_attn_groups for attention metadata building.
     mock_attn_group = mock.MagicMock()
     mock_attn_group.get_metadata_builder.return_value = attn_metadata_builder
     mock_attn_group.layer_names = list(proposer._draft_attn_layer_names)
@@ -1061,11 +1067,10 @@ def test_propose_stores_probabilistic_draft_probs(attn_backend, monkeypatch):
     )
     attn_metadata_builder = attn_metadata_builder_cls(
         kv_cache_spec=create_standard_kv_cache_spec(proposer.vllm_config),
-        layer_names=proposer._draft_attn_layer_names,
+        layer_names=sorted(proposer._draft_attn_layer_names),
         vllm_config=proposer.vllm_config,
         device=device,
     )
-    proposer.runner = mock.MagicMock()
     mock_attn_group = mock.MagicMock()
     mock_attn_group.get_metadata_builder.return_value = attn_metadata_builder
     mock_attn_group.layer_names = list(proposer._draft_attn_layer_names)
@@ -1141,6 +1146,7 @@ def test_set_inputs_first_pass_dflash():
 
     num_speculative_tokens = 3
     proposer = _create_proposer("dflash", num_speculative_tokens)
+    assert isinstance(proposer, DFlashProposer)
     mask_token_id = proposer.parallel_drafting_token_id
 
     # Setup batch with 3 requests

@@ -9,6 +9,7 @@ These tests run on real hardware — no mocks. Skipped on non-GFX950 platforms.
 import pytest
 import torch
 
+from vllm.config.kernel import MoEBackend
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -54,7 +55,7 @@ def disable_rocm_aiter(monkeypatch: pytest.MonkeyPatch):
     set_rocm_aiter(monkeypatch, False)
 
 
-def _make_w4a4_moe_config(moe_backend: str = "auto") -> FusedMoEConfig:
+def _make_w4a4_moe_config(moe_backend: MoEBackend = "auto") -> FusedMoEConfig:
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
     return FusedMoEConfig(

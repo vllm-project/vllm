@@ -129,6 +129,7 @@ def test_hash_collision_video_num_frames():
         }
         video = MediaWithBytes((frames, metadata), source)
         items = MultiModalDataParser()._parse_video_data([video])
+        assert items is not None
         return items.get_all_items_for_hash()[0]
 
     hasher = MultiModalHasher
@@ -153,6 +154,7 @@ def test_hash_video_tensor_frames():
         }
         video = MediaWithBytes((frames, metadata), source)
         items = MultiModalDataParser()._parse_video_data([video])
+        assert items is not None
         return items.get_all_items_for_hash()[0]
 
     np_frames = np.zeros((2, 8, 8, 3), dtype=np.uint8)

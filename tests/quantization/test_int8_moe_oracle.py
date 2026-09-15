@@ -11,6 +11,7 @@ they run on any platform where the Triton INT8 MoE kernel is available — CUDA
 import pytest
 import torch
 
+from vllm.config.kernel import MoEBackend
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -40,7 +41,7 @@ requires_int8_moe = pytest.mark.skipif(
 )
 
 
-def _make_int8_moe_config(moe_backend: str = "auto") -> FusedMoEConfig:
+def _make_int8_moe_config(moe_backend: MoEBackend = "auto") -> FusedMoEConfig:
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
     return FusedMoEConfig(

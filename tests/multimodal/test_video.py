@@ -7,6 +7,7 @@ import sys
 import threading
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -83,24 +84,28 @@ def _fresh_decoder_pool():
 @VIDEO_LOADER_REGISTRY.register("test_video_loader_1")
 class TestVideoLoader1(VideoLoader):
     @classmethod
-    def load_bytes(cls, data: bytes, num_frames: int = -1) -> npt.NDArray:
-        return FAKE_OUTPUT_1
+    def load_bytes(
+        cls, data: bytes, num_frames: int = -1, **kwargs
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        return FAKE_OUTPUT_1, {}
 
 
 @VIDEO_LOADER_REGISTRY.register("test_video_loader_2")
 class TestVideoLoader2(VideoLoader):
     @classmethod
-    def load_bytes(cls, data: bytes, num_frames: int = -1) -> npt.NDArray:
-        return FAKE_OUTPUT_2
+    def load_bytes(
+        cls, data: bytes, num_frames: int = -1, **kwargs
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        return FAKE_OUTPUT_2, {}
 
 
 def test_video_loader_registry():
     custom_loader_1 = VIDEO_LOADER_REGISTRY.load("test_video_loader_1")
-    output_1 = custom_loader_1.load_bytes(b"test")
+    output_1, _ = custom_loader_1.load_bytes(b"test")
     np.testing.assert_array_equal(output_1, FAKE_OUTPUT_1)
 
     custom_loader_2 = VIDEO_LOADER_REGISTRY.load("test_video_loader_2")
-    output_2 = custom_loader_2.load_bytes(b"test")
+    output_2, _ = custom_loader_2.load_bytes(b"test")
     np.testing.assert_array_equal(output_2, FAKE_OUTPUT_2)
 
 
@@ -488,7 +493,7 @@ def test_pynvvideocodec_failed_rebuild_invalidates_decoder_slot():
 
     old_decoder = FakeDecoder()
     slot = PyNvVideoCodecDecoderSlot(FakeStream())
-    slot.decoder = old_decoder
+    slot.decoder = old_decoder  # type: ignore[assignment]  # Fake retained GPU decoder.
     slot.source_path = "valid.mp4"
 
     class FakeNvc:
@@ -596,7 +601,9 @@ def test_pynvvideocodec_h200_recovers_after_unsupported_8k():
         _pynv_decoder_pool.max_slots = old_max
 
 
-def test_pynvvideocodec_cross_subclass_shares_single_pool():
+def test_pynvvideocodec_cross_subclass_shares_single_pool(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """Regression test for GHSA-j682-9xp5-rrf3.
 
     Multiple subclasses of PyNvVideoCodecVideoBackendMixin must share the
@@ -623,11 +630,12 @@ def test_pynvvideocodec_cross_subclass_shares_single_pool():
     with _fresh_decoder_pool() as pool:
         pool.max_slots = 2
 
-        orig_create = PyNvVideoCodecVideoBackendMixin._create_decoder_slot
-        PyNvVideoCodecVideoBackendMixin._create_decoder_slot = classmethod(
-            fake_create_slot
-        )
-        try:
+        with monkeypatch.context() as m:
+            m.setattr(
+                PyNvVideoCodecVideoBackendMixin,
+                "_create_decoder_slot",
+                classmethod(fake_create_slot),
+            )
             with ExitStack() as stack:
                 stack.enter_context(MixinSubclassA._borrow_decoder_slot())
                 stack.enter_context(MixinSubclassB._borrow_decoder_slot())
@@ -652,8 +660,6 @@ def test_pynvvideocodec_cross_subclass_shares_single_pool():
 
             assert create_count == 2
             assert len(pool.slots) == 2
-        finally:
-            PyNvVideoCodecVideoBackendMixin._create_decoder_slot = orig_create
 
 
 @pytest.mark.parametrize("hw_decoders", [0, -1, 1.5, True, "2"])
@@ -662,7 +668,7 @@ def test_pynvvideocodec_rejects_invalid_hw_decoders(hw_decoders: object):
         VideoBackend.load_bytes(
             b"fake video",
             backend=PYNVVIDEOCODEC_VIDEO_BACKEND,
-            hw_decoders=hw_decoders,  # type: ignore[arg-type]
+            hw_decoders=hw_decoders,
         )
 
 
@@ -799,6 +805,7 @@ def test_video_processor_from_model_repo(
     )
 
     backend = get_video_loader_backend_for_processor(video_processor)
+    assert backend is not None
     loader = VIDEO_LOADER_REGISTRY.load(backend)
     assert isinstance(loader, expected_loader_cls), (
         f"{model_repo!r}: backend={backend!r} loaded "
@@ -1698,7 +1705,9 @@ def test_glm5next_backend_codec_parity(tmp_path, backend):
     path = _write_gray_video(tmp_path, total_frames, fps)
     # Dense default sampling (gap 5) and a sparse max_frames cap (gap 20).
     for max_frames in (None, 6):
-        kwargs = {} if max_frames is None else {"max_frames": max_frames}
+        kwargs: dict[str, Any] = (
+            {} if max_frames is None else {"max_frames": max_frames}
+        )
         expected = glm_sample_frame_indices(
             total_frames, float(fps), 12.0, max_frame_count=max_frames
         )

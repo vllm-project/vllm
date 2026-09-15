@@ -21,6 +21,7 @@ from vllm.entrypoints.pooling.typing import (
     PoolingEngineInput,
     PoolingServeContext,
 )
+from vllm.inputs import tokens_input
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 
 
@@ -28,7 +29,7 @@ class TestEmbeddingRequestParsing:
     """Unit tests for OpenAI embedding request parsing."""
 
     def test_input_messages_parses_as_chat_request(self):
-        request = TypeAdapter(EmbeddingRequest).validate_python(
+        request: EmbeddingRequest = TypeAdapter(EmbeddingRequest).validate_python(
             {
                 "model": "test",
                 "input": [{"role": "user", "content": "hello"}],
@@ -42,7 +43,7 @@ class TestEmbeddingRequestParsing:
         assert request.chat_template_kwargs == {"instruction": "Represent the query: "}
 
     def test_batched_input_messages_parses_as_batch_chat_input_request(self):
-        request = TypeAdapter(EmbeddingRequest).validate_python(
+        request: EmbeddingRequest = TypeAdapter(EmbeddingRequest).validate_python(
             {
                 "model": "test",
                 "input": [
@@ -65,7 +66,7 @@ class TestEmbeddingRequestParsing:
         assert request.chat_template_kwargs == {"instruction": "Represent the query: "}
 
     def test_token_ids_still_parse_as_completion_request(self):
-        request = TypeAdapter(EmbeddingRequest).validate_python(
+        request: EmbeddingRequest = TypeAdapter(EmbeddingRequest).validate_python(
             {
                 "model": "test",
                 "input": [[1, 2, 3], [4, 5]],
@@ -76,7 +77,7 @@ class TestEmbeddingRequestParsing:
         assert request.input == [[1, 2, 3], [4, 5]]
 
     def test_messages_still_parses_as_chat_request(self):
-        request = TypeAdapter(EmbeddingRequest).validate_python(
+        request: EmbeddingRequest = TypeAdapter(EmbeddingRequest).validate_python(
             {
                 "model": "test",
                 "messages": [{"role": "user", "content": "hello"}],
@@ -89,7 +90,7 @@ class TestEmbeddingRequestParsing:
         assert request.chat_template_kwargs == {"instruction": "Represent the query: "}
 
     def test_batched_messages_parses_as_batch_chat_request(self):
-        request = TypeAdapter(EmbeddingRequest).validate_python(
+        request: EmbeddingRequest = TypeAdapter(EmbeddingRequest).validate_python(
             {
                 "model": "test",
                 "messages": [
@@ -410,13 +411,13 @@ class TestChunkedEmbeddingProcessing:
     @classmethod
     def _make_handler(cls):
         handler = object.__new__(EmbedIOProcessor)
-        handler.model_config = cls._FakeModelConfig()
+        handler.model_config = cls._FakeModelConfig()  # type: ignore[assignment]
         handler.enable_chunked_processing = True
         return handler
 
     @staticmethod
     def _make_context() -> PoolingServeContext[EmbeddingCompletionRequest]:
-        request = TypeAdapter(EmbeddingRequest).validate_python(
+        request: EmbeddingRequest = TypeAdapter(EmbeddingRequest).validate_python(
             {
                 "model": "test",
                 "input": [[0, 1, 2, 3, 4], [10, 11]],
@@ -431,13 +432,13 @@ class TestChunkedEmbeddingProcessing:
             request_id="embd-client-prompt-999-chunk-888",
             engine_inputs=[
                 PoolingEngineInput(
-                    prompts={"prompt_token_ids": [0, 1, 2, 3, 4]},
+                    prompts=tokens_input(prompt_token_ids=[0, 1, 2, 3, 4]),
                     params=pooling_params,
                     lora_requests=None,
                     priorities=0,
                 ),
                 PoolingEngineInput(
-                    prompts={"prompt_token_ids": [10, 11]},
+                    prompts=tokens_input(prompt_token_ids=[10, 11]),
                     params=pooling_params,
                     lora_requests=None,
                     priorities=0,

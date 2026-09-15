@@ -80,7 +80,7 @@ class TestConfigSet:
         config_set = ConfigSet("test_kernel")
 
         with pytest.raises(KeyError, match="platform 'h100' not found"):
-            config_set.get_config("h100", "nonexistent")
+            config_set.get_config("h100", CaseKey({"batch": 32}))
 
         config_data = {"num_warps": 8, "num_stages": 4}
         data = {
