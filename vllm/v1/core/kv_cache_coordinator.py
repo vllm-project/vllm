@@ -916,8 +916,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                         and group_block_size > self.hash_block_size
                         else group_block_size
                     )
+                    # The peek is discarded before reuse. Bound it by the
+                    # available hashes, not the final recomputation boundary.
                     _max_length = min(
-                        curr_hit_length + eagle_margin, max_cache_hit_length
+                        curr_hit_length + eagle_margin,
+                        len(block_hashes) * self.hash_block_size,
                     )
                 hit_blocks, _new_hit_length = manager_cls.find_longest_cache_hit(
                     block_hashes=block_hashes,
@@ -980,6 +983,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
+        *,
+        peek_past_max_length: bool = False,
     ) -> tuple[tuple[list[KVCacheBlock], ...], tuple[int, ...]]:
         """Like find_longest_cache_hit but evaluates each group independently.
 
@@ -993,9 +998,22 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
         for spec, group_ids, manager_cls, use_eagle in self.attention_groups:
             manager = self.single_type_managers[group_ids[0]]
+            lookup_length = max_cache_hit_length
+            if peek_past_max_length and use_eagle and not isinstance(spec, MambaSpec):
+                margin = (
+                    self.hash_block_size
+                    if self.enable_partial_hash_hits
+                    and manager_cls.supports_fine_grained_hash_lookup
+                    and manager.block_size > self.hash_block_size
+                    else manager.block_size
+                )
+                lookup_length = min(
+                    lookup_length + margin,
+                    len(block_hashes) * self.hash_block_size,
+                )
             blocks, group_hit = manager_cls.find_longest_cache_hit(
                 block_hashes=block_hashes,
-                max_length=max_cache_hit_length,
+                max_length=lookup_length,
                 kv_cache_group_ids=group_ids,
                 block_pool=manager.block_pool,
                 kv_cache_spec=spec,
