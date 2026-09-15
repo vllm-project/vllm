@@ -283,7 +283,7 @@ class Glm4vVisionAttention(nn.Module):
     ) -> None:
         super().__init__()
         # Per attention head and per partition values.
-        use_data_parallel = is_vit_use_data_parallel()
+        use_data_parallel = is_vit_use_data_parallel(num_heads)
         self.tp_size = (
             1 if use_data_parallel else get_tensor_model_parallel_world_size()
         )
@@ -628,7 +628,7 @@ class Glm4vVisionTransformer(nn.Module):
     ) -> None:
         super().__init__()
 
-        use_data_parallel = is_vit_use_data_parallel()
+        use_data_parallel = is_vit_use_data_parallel(vision_config.num_heads)
         self.tp_size = (
             1 if use_data_parallel else get_tensor_model_parallel_world_size()
         )
