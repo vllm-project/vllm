@@ -1613,9 +1613,7 @@ class GPUModelRunner(
                 bufs=self._get_mamba_bufs(),
                 num_reqs=num_reqs,
                 num_accepted_tokens_gpu=self.num_accepted_tokens.gpu,
-                num_accepted_tokens_cpu_tensor=(
-                    self.input_batch.num_accepted_tokens_cpu_tensor
-                ),
+                num_accepted_tokens_cpu_tensor=self.num_accepted_tokens.cpu,
                 input_batch=self.input_batch,
                 kv_cache_config=self.kv_cache_config,
                 forward_context=self.compilation_config.static_forward_context,
@@ -1625,7 +1623,7 @@ class GPUModelRunner(
             assert self.num_accepted_tokens_event is not None
             self.num_accepted_tokens_event.record()
         else:
-            self.input_batch.num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
+            self.num_accepted_tokens.cpu[:num_reqs].copy_(
                 self.num_accepted_tokens.gpu[:num_reqs], non_blocking=True
             )
             assert self.num_accepted_tokens_event is not None
@@ -1968,6 +1966,37 @@ class GPUModelRunner(
 
         return encoder_seq_lens, encoder_seq_lens_cpu
 
+    def _sync_num_accepted_tokens(
+        self, num_reqs: int, prev_req_id_to_index: dict[str, int] | None
+    ) -> None:
+        """Synchronize and remap accepted token counts into input_batch.
+
+        In async scheduling mode, remaps counts from runner.num_accepted_tokens.np
+        through prev_positions to account for row shifts from InputBatch.condense().
+        In sync mode, performs a direct write-back to input_batch.
+        """
+        if self.use_async_scheduling:
+            if prev_req_id_to_index:
+                # Remap the previous-iteration runner snapshot through prev_positions.
+                prev_idx = self.prev_positions.np[:num_reqs]
+                new_mask = prev_idx < 0
+                self.num_accepted_tokens.np[:num_reqs] = self.num_accepted_tokens.np[
+                    np.where(new_mask, 0, prev_idx)
+                ]
+                self.num_accepted_tokens.np[:num_reqs][new_mask] = 1
+                self.input_batch.num_accepted_tokens_cpu[:num_reqs] = (
+                    self.num_accepted_tokens.np[:num_reqs]
+                )
+            else:
+                # Initial step or all-chunked-prefill step
+                self.num_accepted_tokens.np[:num_reqs].fill(1)
+                self.input_batch.num_accepted_tokens_cpu[:num_reqs].fill(1)
+        else:
+            # Non-async mode: write back 1:1 to input_batch
+            self.input_batch.num_accepted_tokens_cpu[:num_reqs] = (
+                self.num_accepted_tokens.np[:num_reqs]
+            )
+
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
@@ -2121,24 +2150,7 @@ class GPUModelRunner(
         if needs_cpu_accepted_counts:
             assert self.num_accepted_tokens_event is not None
             self.num_accepted_tokens_event.synchronize()
-            # Async mode: condense() reordered indices, use prev_positions mapping
-            if self.use_async_scheduling and prev_req_id_to_index:
-                prev_idx = self.prev_positions.np[:num_reqs]
-                new_mask = prev_idx < 0
-                self.num_accepted_tokens.np[:num_reqs] = (
-                    self.input_batch.num_accepted_tokens_cpu[
-                        np.where(new_mask, 0, prev_idx)
-                    ]
-                )
-                self.num_accepted_tokens.np[:num_reqs][new_mask] = 1
-                self.input_batch.num_accepted_tokens_cpu[:num_reqs] = (
-                    self.num_accepted_tokens.np[:num_reqs]
-                )
-            else:
-                # Non-async mode: use values directly
-                self.num_accepted_tokens.np[:num_reqs] = (
-                    self.input_batch.num_accepted_tokens_cpu[:num_reqs]
-                )
+            self._sync_num_accepted_tokens(num_reqs, prev_req_id_to_index)
             self.num_accepted_tokens.np[num_reqs:].fill(1)
             self.num_accepted_tokens.copy_to_gpu()
         else:
