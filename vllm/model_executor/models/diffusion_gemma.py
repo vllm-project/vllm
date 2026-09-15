@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -65,6 +65,9 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsQuant,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.mm.lora import MMEncoderLoraActivation
 
 logger = init_logger(__name__)
 
@@ -879,6 +882,7 @@ class DiffusionGemmaModelState(ModelState):
         scheduled_encoder_inputs: dict[str, list[int]],
         input_batch: InputBatch,
         req_states: RequestState,
+        mm_lora_activation: MMEncoderLoraActivation | None = None,
     ) -> torch.Tensor | None:
         if not self.supports_mm_inputs:
             return None
@@ -887,7 +891,9 @@ class DiffusionGemmaModelState(ModelState):
             scheduled_encoder_inputs
         )
         if mm_kwargs:
-            encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
+            encoder_outputs = self.encoder_runner.execute_mm_encoder(
+                mm_kwargs, mm_lora_activation=mm_lora_activation
+            )
             self.encoder_cache.encoder_outputs.update(zip(mm_hashes, encoder_outputs))
 
         mm_embeds, is_mm_embed = self.gather_mm_embeddings(input_batch)

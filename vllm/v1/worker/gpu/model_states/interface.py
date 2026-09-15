@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from typing import Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import torch
 import torch.nn as nn
@@ -22,6 +22,9 @@ from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.mm.lora import MMEncoderLoraActivation
 
 
 class ModelSpecificAttnMetadata:
@@ -161,6 +164,7 @@ class ModelState(ABC):
         scheduled_encoder_inputs: dict[str, list[int]],
         input_batch: InputBatch,
         req_states: RequestState,
+        mm_lora_activation: "MMEncoderLoraActivation | None" = None,
     ) -> torch.Tensor | None:
         """Prepare the ``inputs_embeds`` tensor for the current forward pass."""
         raise NotImplementedError
@@ -170,7 +174,9 @@ class ModelState(ABC):
         return None
 
     def execute_mm_encoder(
-        self, scheduled_encoder_inputs: dict[str, list[int]]
+        self,
+        scheduled_encoder_inputs: dict[str, list[int]],
+        mm_lora_activation: "MMEncoderLoraActivation | None" = None,
     ) -> None:
         """Run the multi-modal encoder and cache its outputs by `mm_hash`.
 
@@ -184,7 +190,9 @@ class ModelState(ABC):
             with self.encoder_runner.timed_encoder_operation(
                 scheduled_encoder_inputs.keys()
             ):
-                encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
+                encoder_outputs = self.encoder_runner.execute_mm_encoder(
+                    mm_kwargs, mm_lora_activation=mm_lora_activation
+                )
             self.encoder_cache.encoder_outputs.update(zip(mm_hashes, encoder_outputs))
 
     def gather_mm_embeddings(
