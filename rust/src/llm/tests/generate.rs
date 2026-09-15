@@ -177,6 +177,7 @@ fn sample_generate_request(request_id: &str, max_tokens: u32) -> GenerateRequest
         reasoning_parser_kwargs: None,
         reasoning_ended: None,
         lora_request: None,
+        resumable: false,
     }
 }
 
@@ -435,6 +436,203 @@ async fn collect_output_rejects_partial_sampling_mask() {
             ..
         }
     ));
+}
+
+/// `GenerateRequest.resumable` must reach the wire through `generate_streaming`,
+/// and plain `generate` must refuse it: with no sink to close the session, its
+/// stream would never end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resumable_flag_on_wire() {
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-resumable".to_vec();
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        |dealer, push| {
+            Box::pin(async move {
+                let add = recv_engine_message(dealer).await;
+                let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+                assert!(request.resumable, "resumable did not reach the wire");
+
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        outputs: vec![request_output(
+                            &request.request_id,
+                            vec![7],
+                            // Abort closes a resumable session; Stop only ends the
+                            // segment and leaves the output stream open.
+                            Some(EngineCoreFinishReason::Abort),
+                        )],
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+            })
+        },
+    );
+
+    let llm = connect_async_llm_with_ipc(handshake_address, 0, "test-model", &ipc).await;
+    let Err(error) = llm
+        .generate(GenerateRequest {
+            resumable: true,
+            ..sample_generate_request("req-resumable", 1)
+        })
+        .await
+    else {
+        panic!("generate must reject a resumable request");
+    };
+    assert!(
+        matches!(error, Error::ResumableRequiresStreaming { .. }),
+        "{error:?}"
+    );
+
+    let (_sink, mut stream) = llm
+        .generate_streaming(GenerateRequest {
+            resumable: true,
+            ..sample_generate_request("req-resumable", 1)
+        })
+        .await
+        .unwrap();
+    while stream.next().await.is_some() {}
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    llm.shutdown().await.unwrap();
+}
+
+/// A segment stop parks the session. It must not look finished, and closing
+/// the session ends the stream without inventing another output.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn segment_stop_is_not_terminal_until_the_session_finishes() {
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-segment-stop".to_vec();
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        |dealer, push| {
+            Box::pin(async move {
+                let add = recv_engine_message(dealer).await;
+                let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+                assert!(request.resumable, "the opening ADD opens a session");
+
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        outputs: vec![request_output(
+                            &request.request_id,
+                            vec![7],
+                            Some(EngineCoreFinishReason::Stop),
+                        )],
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+
+                let closing = recv_engine_message(dealer).await;
+                let closing: EngineCoreRequest = rmp_serde::from_slice(&closing[1]).unwrap();
+                assert!(!closing.resumable, "finish sends the closing ADD");
+                assert_eq!(closing.request_id, request.request_id);
+            })
+        },
+    );
+
+    let llm = connect_async_llm_with_ipc(handshake_address, 0, "test-model", &ipc).await;
+    let (sink, mut stream) = llm
+        .generate_streaming(GenerateRequest {
+            resumable: true,
+            ..sample_generate_request("req-segment-stop", 1)
+        })
+        .await
+        .unwrap();
+
+    let segment = timeout(Duration::from_secs(10), stream.next())
+        .await
+        .expect("segment timeout")
+        .expect("segment output")
+        .expect("segment output is not an error");
+    assert_eq!(segment.token_ids, vec![7]);
+    assert!(
+        !segment.finished(),
+        "a segment stop must not end the session"
+    );
+
+    sink.finish().await.expect("close session");
+
+    let end = timeout(Duration::from_secs(10), stream.next())
+        .await
+        .expect("session end timeout");
+    assert!(end.is_none(), "session end must not invent another output");
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    llm.shutdown().await.unwrap();
+}
+
+/// A segment with `resumable: false` reads as the closing ADD on the wire, so
+/// pushing one would end the session and discard its prompt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn push_rejects_a_segment_that_would_close_the_session() {
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-sink-guard".to_vec();
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        |dealer, push| {
+            Box::pin(async move {
+                let add = recv_engine_message(dealer).await;
+                let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+                assert!(request.resumable, "the opening ADD opens a session");
+
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        outputs: vec![request_output(
+                            &request.request_id,
+                            vec![7],
+                            Some(EngineCoreFinishReason::Abort),
+                        )],
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+            })
+        },
+    );
+
+    let llm = connect_async_llm_with_ipc(handshake_address, 0, "test-model", &ipc).await;
+    let (sink, mut stream) = llm
+        .generate_streaming(GenerateRequest {
+            resumable: true,
+            ..sample_generate_request("req-sink-guard", 1)
+        })
+        .await
+        .unwrap();
+
+    let error = sink
+        .push(GenerateRequest {
+            resumable: false,
+            ..sample_generate_request("ignored-by-the-sink", 1)
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::NotResumable { .. }), "{error:?}");
+
+    while stream.next().await.is_some() {}
+    drop(sink);
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    llm.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
