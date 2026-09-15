@@ -139,6 +139,7 @@ def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int 
 
 
 if TYPE_CHECKING:
+    from vllm.device_allocator.cuda_checkpoint import CudaCheckpoint
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -220,6 +221,13 @@ class Worker(WorkerBase):
         self.profiler_config = vllm_config.profiler_config
 
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
+        self._cuda_checkpoint: CudaCheckpoint | None = None
+        if envs.VLLM_SLEEP_OFFLOAD_CUDA_CONTEXT:
+            from vllm.device_allocator.cuda_checkpoint import (
+                CudaCheckpoint as CheckpointController,
+            )
+
+            self._cuda_checkpoint = CheckpointController()
 
         # Device handles of the previous step's PP intermediate-tensor send.
         self._pp_send_work: list[Handle] = []
@@ -240,6 +248,11 @@ class Worker(WorkerBase):
         return self._sleep_mode_backend
 
     def sleep(self, level: int = 1) -> None:
+        if self._cuda_checkpoint is not None and level != 1:
+            raise ValueError("CUDA context offload supports sleep level 1 only")
+        if self._cuda_checkpoint is not None and self._cuda_checkpoint.suspended:
+            self._cuda_checkpoint.suspend()
+            return
         torch.accelerator.synchronize()
         free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
 
@@ -275,8 +288,12 @@ class Worker(WorkerBase):
             format_gib(freed_bytes),
             format_gib(used_bytes),
         )
+        if self._cuda_checkpoint is not None:
+            self._cuda_checkpoint.suspend()
 
     def wake_up(self, tags: list[str] | None = None) -> None:
+        if self._cuda_checkpoint is not None:
+            self._cuda_checkpoint.resume()
         self.sleep_mode_backend.resume(tags)
         if self.vllm_config.model_config.enable_nccl_comm_suspend:
             resume_device_comms()
@@ -1445,6 +1462,11 @@ class Worker(WorkerBase):
             self.model_runner.reset_lora_state()
 
     def shutdown(self) -> None:
+        checkpoint = getattr(self, "_cuda_checkpoint", None)
+        if checkpoint is not None and checkpoint.suspended:
+            raise RuntimeError(
+                "Shut down the dedicated engine process while CUDA is offloaded"
+            )
         gc.unfreeze()
 
         # has_kv_transfer_group can be None during interpreter shutdown.

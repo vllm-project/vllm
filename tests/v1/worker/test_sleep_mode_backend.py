@@ -39,8 +39,11 @@ def test_new_backend_starts_in_running_state():
 
 
 @pytest.mark.parametrize("enable_nccl_comm_suspend", [True, False])
-def test_worker_drives_communicator_suspension(monkeypatch, enable_nccl_comm_suspend):
-    """Comm walkers run around sleep/wake only when explicitly enabled."""
+@pytest.mark.parametrize("checkpoint", ["disabled", "enabled", "failure"])
+def test_worker_drives_communicator_suspension(
+    monkeypatch, enable_nccl_comm_suspend, checkpoint
+):
+    """Restore the CUDA context before touching allocator or communicator state."""
     from types import SimpleNamespace
 
     from vllm.v1.worker.gpu_worker import Worker
@@ -55,6 +58,19 @@ def test_worker_drives_communicator_suspension(monkeypatch, enable_nccl_comm_sus
             calls.append(("backend.resume", tuple(tags) if tags else None))
 
     worker = object.__new__(Worker)
+
+    class Checkpoint:
+        suspended = False
+
+        def suspend(self):
+            calls.append(("checkpoint.suspend", None))
+            if checkpoint == "failure":
+                raise RuntimeError("checkpoint failed")
+
+        def resume(self):
+            calls.append(("checkpoint.resume", None))
+
+    worker._cuda_checkpoint = None if checkpoint == "disabled" else Checkpoint()
     worker._sleep_mode_backend = Backend()
     worker._sleep_saved_buffers = {}
     worker._sleep_saved_draft_buffers = {}
@@ -73,23 +89,130 @@ def test_worker_drives_communicator_suspension(monkeypatch, enable_nccl_comm_sus
         lambda: calls.append(("comms.resume", None)),
     )
 
-    worker.sleep(level=1)
-    worker.wake_up(tags=["weights"])
+    if checkpoint == "failure":
+        with pytest.raises(RuntimeError, match="checkpoint failed"):
+            worker.sleep(level=1)
+        # Recovery is requested by the executor; failed sleep must stay paused.
+        worker.wake_up()
+    else:
+        worker.sleep(level=1)
+        worker.wake_up(tags=["weights"])
 
     expected = [
         ("backend.suspend", 1),
         ("comms.suspend", None),
-        ("backend.resume", ("weights",)),
+        ("checkpoint.suspend", None),
+        ("checkpoint.resume", None),
+        ("backend.resume", None if checkpoint == "failure" else ("weights",)),
         ("comms.resume", None),
     ]
     if not enable_nccl_comm_suspend:
         expected = [c for c in expected if not c[0].startswith("comms.")]
+    if checkpoint == "disabled":
+        expected = [c for c in expected if not c[0].startswith("checkpoint.")]
     assert calls == expected
 
 
 def test_unknown_backend_raises():
     with pytest.raises(ValueError, match="Unsupported sleep-mode backend"):
         SleepModeBackendFactory.get_backend_class("does-not-exist")
+
+
+@pytest.mark.parametrize(
+    "initial,operation,calls_expected",
+    [
+        ("RUNNING", "suspend", ["lock", "checkpoint"]),
+        ("LOCKED", "suspend", ["checkpoint"]),
+        ("CHECKPOINTED", "suspend", []),
+        ("RUNNING", "resume", []),
+        ("LOCKED", "resume", ["unlock"]),
+        ("CHECKPOINTED", "resume", ["restore", "unlock"]),
+        ("FAILED", "resume", None),
+        ("FAILED", "suspend", None),
+    ],
+)
+def test_checkpoint_driver_state_recovery(
+    monkeypatch, initial, operation, calls_expected
+):
+    """Retries use the driver state left by an interrupted helper."""
+    from types import SimpleNamespace
+
+    from cuda.bindings import driver
+
+    from vllm.device_allocator.cuda_checkpoint import _main
+
+    states = driver.CUprocessState
+    state = getattr(states, f"CU_PROCESS_STATE_{initial}")
+    calls = []
+    success = driver.CUresult.CUDA_SUCCESS
+
+    def transition(name, target):
+        def call(*args):
+            nonlocal state
+            calls.append(name)
+            state = getattr(states, f"CU_PROCESS_STATE_{target}")
+            return (success,)
+
+        return call
+
+    monkeypatch.setattr(driver, "cuInit", lambda _: (success,))
+    monkeypatch.setattr(driver, "cuDriverGetVersion", lambda: (success, 13020))
+    monkeypatch.setattr(
+        driver, "cuCheckpointProcessGetState", lambda _: (success, state)
+    )
+    monkeypatch.setattr(driver, "CUcheckpointLockArgs", SimpleNamespace)
+    for action, target in (
+        ("Lock", "LOCKED"),
+        ("Checkpoint", "CHECKPOINTED"),
+        ("Restore", "LOCKED"),
+        ("Unlock", "RUNNING"),
+    ):
+        monkeypatch.setattr(
+            driver, f"cuCheckpointProcess{action}", transition(action.lower(), target)
+        )
+    if calls_expected is None:
+        with pytest.raises(RuntimeError, match="Cannot|not running"):
+            _main(operation, 123)
+        assert calls == []
+    else:
+        _main(operation, 123)
+        assert calls == calls_expected
+        expected = "CHECKPOINTED" if operation == "suspend" else "RUNNING"
+        assert state == getattr(states, f"CU_PROCESS_STATE_{expected}")
+
+
+def test_checkpoint_timeout_keeps_recovery_serialized(monkeypatch):
+    """An unkillable helper must neither hang the caller nor race a retry."""
+    import subprocess
+    from unittest.mock import MagicMock
+
+    from vllm.device_allocator.cuda_checkpoint import CudaCheckpoint
+
+    checkpoint = object.__new__(CudaCheckpoint)
+    checkpoint.suspended = False
+    checkpoint._helper = None
+    helper = MagicMock()
+    helper.wait.side_effect = subprocess.TimeoutExpired("checkpoint", 60)
+    helper.poll.return_value = None
+    spawn = MagicMock(return_value=helper)
+    monkeypatch.setattr(subprocess, "Popen", spawn)
+
+    with pytest.raises(RuntimeError, match="timed out"):
+        checkpoint.suspend()
+    assert checkpoint.suspended
+    assert [call.kwargs["timeout"] for call in helper.wait.call_args_list] == [60, 5]
+    helper.kill.assert_called_once()
+    with pytest.raises(RuntimeError, match="has not exited"):
+        checkpoint.resume()
+    assert checkpoint.suspended
+    assert spawn.call_count == 1
+
+    helper.poll.return_value = -9
+    recovered = MagicMock(returncode=0)
+    spawn.return_value = recovered
+    checkpoint.resume()
+    assert not checkpoint.suspended
+    assert spawn.call_count == 2
 
 
 def test_duplicate_registration_raises():

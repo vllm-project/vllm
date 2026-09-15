@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     VLLM_NCCL_SO_PATH: str | None = None
     LD_LIBRARY_PATH: str | None = None
     VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE: int = 256
+    VLLM_SLEEP_OFFLOAD_CUDA_CONTEXT: bool = False
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: str | None = None
     VLLM_ENGINE_ITERATION_TIMEOUT_S: int = 60
@@ -752,6 +753,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # flag to control the chunk size (in MB) for sleeping memory allocations under ROCm
     "VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE": lambda: int(
         os.environ.get("VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE", "256")
+    ),
+    # Offload the CUDA context, including live GraphExecs, after level 1 sleep.
+    # Any wake, including a partial wake, restores the full CUDA context.
+    "VLLM_SLEEP_OFFLOAD_CUDA_CONTEXT": lambda: bool(
+        int(os.environ.get("VLLM_SLEEP_OFFLOAD_CUDA_CONTEXT", "0"))
     ),
     # Feature flag to enable/disable Inductor standalone compile.
     # In torch <= 2.7 we ignore this flag; in torch >= 2.9 this is
