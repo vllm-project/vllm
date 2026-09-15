@@ -167,12 +167,17 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             self.prefill_cudagraph_manager.init_breakable_cg_runner(self.model)
 
         self.on_prefill_begin(self.max_num_reqs)
+        capture_input_buffers = self.target_input_buffers
+        capture_attn_groups = self.target_attn_groups
+        if self.target_pcp_size > 1 and not self.uses_pcp_draft_sharding:
+            capture_input_buffers = self.input_buffers
+            capture_attn_groups = self.attn_groups
         self.prefill_cudagraph_manager.capture(
             self._prefill,
             self.model_state,
-            self.target_input_buffers,
+            capture_input_buffers,
             self.block_tables,
-            self.target_attn_groups,
+            capture_attn_groups,
             self.kv_cache_config,
             progress_bar_desc="Capturing prefill CUDA graphs",
         )
@@ -199,6 +204,37 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             progress_bar_desc="Capturing decode CUDA graphs",
         )
         self.on_multi_step_decode_end(self.max_num_reqs)
+
+    @torch.inference_mode()
+    def _prepare_replicated_pcp_prefill_attn(
+        self,
+        input_batch: InputBatch,
+        batch_desc: BatchExecutionDescriptor,
+    ) -> tuple[dict[str, Any] | None, dict[str, torch.Tensor]]:
+        """Build global draft metadata when the target metadata is sharded."""
+        num_reqs = input_batch.num_reqs
+        num_reqs_padded = batch_desc.num_reqs or num_reqs
+        self.block_tables.gather_block_tables(
+            input_batch.idx_mapping,
+            num_reqs_padded=num_reqs_padded,
+        )
+        slot_mappings = self.block_tables.compute_slot_mappings(
+            input_batch.idx_mapping,
+            input_batch.query_start_loc,
+            input_batch.positions,
+            batch_desc.num_tokens,
+        )
+        slot_mappings_by_layer = build_slot_mappings_by_layer(
+            slot_mappings, self.kv_cache_config
+        )
+        attn_metadata = self._build_attn_metadata(
+            num_reqs=num_reqs,
+            batch_desc=batch_desc,
+            query_start_loc_np=input_batch.query_start_loc_np,
+            seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
+            step=0,
+        )
+        return attn_metadata, slot_mappings_by_layer
 
     @torch.inference_mode()
     def propose(
@@ -270,7 +306,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             self.max_num_reqs,
         )
 
-        if self.pcp_manager is not None:
+        if self.pcp_manager is not None and self.uses_pcp_draft_sharding:
             self.pcp_manager.prepare_draft_prefill(
                 input_batch,
                 self.input_buffers.input_ids[:num_tokens_padded],
@@ -279,7 +315,13 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             if prefill is not None:
                 num_tokens = prefill.num_tokens
                 num_tokens_padded = prefill.num_tokens_after_padding
-        self.hidden_states[:num_tokens_padded].copy_(hidden_states)
+        self.hidden_states[:num_tokens].copy_(hidden_states[:num_tokens])
+        if num_tokens_padded > num_tokens:
+            self.hidden_states[num_tokens:num_tokens_padded].zero_()
+        if self.target_pcp_size > 1 and not self.uses_pcp_draft_sharding:
+            self.input_buffers.is_padding[:num_tokens_padded].copy_(
+                input_batch.is_padding[:num_tokens_padded]
+            )
 
         # When all requests are decoding (no true prefills), each has
         # num_speculative_steps + 1 tokens, enabling FULL graph replay.
@@ -307,6 +349,18 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             else None
         )
 
+        prefill_attn_metadata: dict[str, Any] | None = attn_metadata
+        prefill_slot_mappings: dict[str, torch.Tensor] | None = slot_mappings
+        if self.target_pcp_size > 1 and not self.uses_pcp_draft_sharding:
+            if dummy_run and skip_attn_for_dummy_run:
+                prefill_attn_metadata, prefill_slot_mappings = None, None
+            else:
+                prefill_attn_metadata, prefill_slot_mappings = (
+                    self._prepare_replicated_pcp_prefill_attn(
+                        input_batch, prefill_batch_desc
+                    )
+                )
+
         self._prepare_eplb_forward(num_tokens)
 
         self.on_prefill_begin(num_reqs)
@@ -321,8 +375,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             self._prefill(
                 num_reqs,
                 prefill_batch_desc.num_tokens,
-                attn_metadata,
-                slot_mappings,
+                prefill_attn_metadata,
+                prefill_slot_mappings,
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=prefill_batch_desc.cg_mode,
                 mm_inputs=mm_inputs,
@@ -403,8 +457,9 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         input_buffers: InputBatch | InputBuffers = self.input_buffers
         is_padding = None
-        if self.pcp_manager is not None:
+        if self.pcp_manager is not None and self.uses_pcp_draft_sharding:
             input_buffers = self.pcp_manager.get_draft_input_buffers(self.input_buffers)
+        if self.target_pcp_size > 1:
             is_padding = input_buffers.is_padding[:num_tokens]
         batch_descriptor = BatchDescriptor(num_tokens=num_tokens)
         with set_forward_context(
@@ -483,7 +538,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             cudagraph_runtime_mode=cudagraph_runtime_mode,
             mm_inputs=mm_inputs,
         )
-        if self.pcp_manager is not None:
+        if self.pcp_manager is not None and self.uses_pcp_draft_sharding:
             last_hidden_states, hidden_states = self.pcp_manager.restore_draft_prefill(
                 last_hidden_states, hidden_states
             )

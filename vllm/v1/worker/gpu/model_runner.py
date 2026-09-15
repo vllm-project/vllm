@@ -876,6 +876,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     ),
                 )
 
+            draft_hidden_states = hidden_states
+            assert draft_hidden_states is not None
+            draft_uses_pcp_sharding = (
+                isinstance(self.speculator, DraftModelSpeculator)
+                and self.speculator.uses_pcp_draft_sharding
+            )
+            if self.pcp_manager is not None and not draft_uses_pcp_sharding:
+                hidden_states, input_batch = self.pcp_manager.restore_for_sampling(
+                    hidden_states
+                )
+                if aux_hidden_states is not None:
+                    aux_hidden_states = [
+                        self.pcp_manager.restore_hidden_states(states)
+                        for states in aux_hidden_states
+                    ]
+
             # Let the target override the hidden state fed to the drafter
             # (e.g. DeepSeek V4 MTP needs the pre-hc_head residual). The
             # target returns a persistent buffer sized at max_num_batched_tokens;
@@ -883,7 +899,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_hidden_states = hidden_states
             if hasattr(self.model, "get_mtp_target_hidden_states"):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
-                spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
+                spec_hidden_states = pre_hc_hidden_states[
+                    : draft_hidden_states.shape[0]
+                ]
+                if self.pcp_manager is not None and not draft_uses_pcp_sharding:
+                    spec_hidden_states = self.pcp_manager.restore_hidden_states(
+                        spec_hidden_states
+                    )
             if isinstance(self.sampler, GPUWatermarkSampler):
                 self.speculator.prepare_watermarking(
                     self.sampler._get_contexts(input_batch.idx_mapping),
@@ -2128,10 +2150,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # (e.g. DeepSeek V4 MTP needs the pre-hc_head residual). The
             # target returns a persistent buffer sized at max_num_batched_tokens;
             # slice to the active token count that propose() expects.
-            spec_hidden_states = draft_hidden_states
+            draft_uses_pcp_sharding = (
+                isinstance(self.speculator, DraftModelSpeculator)
+                and self.speculator.uses_pcp_draft_sharding
+            )
+            spec_hidden_states = (
+                draft_hidden_states if draft_uses_pcp_sharding else hidden_states
+            )
             if hasattr(self.model, "get_mtp_target_hidden_states"):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
                 spec_hidden_states = pre_hc_hidden_states[: draft_hidden_states.size(0)]
+                if self.pcp_manager is not None and not draft_uses_pcp_sharding:
+                    spec_hidden_states = self.pcp_manager.restore_hidden_states(
+                        spec_hidden_states
+                    )
             if isinstance(self.sampler, GPUWatermarkSampler):
                 self.speculator.prepare_watermarking(
                     self.sampler._get_contexts(input_batch.idx_mapping),

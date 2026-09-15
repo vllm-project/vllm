@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import nullcontext
+from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -28,7 +29,10 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
 from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
     MultiModuleMTPSpeculator,
 )
-from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+from vllm.v1.worker.gpu.spec_decode.speculator import (
+    DraftModelSpeculator,
+    _draft_attention_backend_supports_pcp,
+)
 
 
 class _TestSpeculator(AutoRegressiveSpeculator):
@@ -95,6 +99,8 @@ def _make_speculator(
     speculator = object.__new__(_TestSpeculator)
     speculator.supports_mm_inputs = False
     speculator.pcp_manager = None
+    speculator.target_pcp_size = 1
+    speculator.uses_pcp_draft_sharding = False
     speculator.vllm_config = None
     speculator.input_buffers = SimpleNamespace(
         input_ids=torch.arange(4),
@@ -103,6 +109,173 @@ def _make_speculator(
     speculator.hidden_states = torch.zeros(4, 3)
     speculator.model = _DraftModel(output)
     return speculator
+
+
+def _draft_backend_config(
+    draft_backend=None,
+    target_backend=None,
+    backend_per_kind=None,
+):
+    draft_model_config = SimpleNamespace(
+        use_mla=False,
+        get_sliding_window=lambda: None,
+    )
+    return SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            attention_backend=draft_backend,
+            draft_model_config=draft_model_config,
+        ),
+        attention_config=SimpleNamespace(
+            backend=target_backend,
+            backend_per_kind=backend_per_kind or {},
+        ),
+    )
+
+
+def _backend_with_pcp_support(supports_pcp: bool):
+    backend_cls = SimpleNamespace(supports_pcp=lambda: supports_pcp)
+    return SimpleNamespace(get_class=lambda: backend_cls)
+
+
+@dataclass
+class _ParallelConfig:
+    prefill_context_parallel_size: int = 4
+    data_parallel_size: int = 1
+    data_parallel_rank: int = 0
+
+
+@dataclass
+class _SpeculatorVllmConfig:
+    speculative_config: object
+    attention_config: object
+    parallel_config: _ParallelConfig
+    scheduler_config: object
+    model_config: object
+
+
+def test_auto_draft_backend_prefers_pcp_sharding():
+    assert _draft_attention_backend_supports_pcp(_draft_backend_config())
+
+
+@pytest.mark.parametrize("supports_pcp", [False, True])
+def test_explicit_draft_backend_controls_pcp_sharding(supports_pcp):
+    backend = _backend_with_pcp_support(supports_pcp)
+    config = _draft_backend_config(draft_backend=backend)
+
+    assert _draft_attention_backend_supports_pcp(config) is supports_pcp
+
+
+def test_draft_backend_per_kind_takes_precedence_for_pcp_sharding():
+    supported = _backend_with_pcp_support(True)
+    unsupported = _backend_with_pcp_support(False)
+    config = _draft_backend_config(
+        draft_backend=supported,
+        backend_per_kind={"full_attention": unsupported},
+    )
+
+    assert not _draft_attention_backend_supports_pcp(config)
+
+
+@pytest.mark.parametrize(
+    ("supports_pcp", "expected_draft_pcp_size"),
+    [(True, 4), (False, 1)],
+)
+def test_draft_config_prefers_sharding_and_falls_back_to_replication(
+    monkeypatch, supports_pcp, expected_draft_pcp_size
+):
+    monkeypatch.setattr(base_spec_module, "_target_feeds_hc_residual", lambda _: False)
+    draft_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(),
+        use_mla=False,
+        get_sliding_window=lambda: None,
+        get_hidden_size=lambda: 16,
+        get_vocab_size=lambda: 32,
+    )
+    speculative_config = SimpleNamespace(
+        method="mtp",
+        num_speculative_tokens=3,
+        draft_model_config=draft_model_config,
+        attention_backend=_backend_with_pcp_support(supports_pcp),
+        use_local_argmax_reduction=False,
+        draft_sample_method="greedy",
+        enable_adaptive_verification=False,
+    )
+    config = _SpeculatorVllmConfig(
+        speculative_config=speculative_config,
+        attention_config=SimpleNamespace(backend=None, backend_per_kind={}),
+        parallel_config=_ParallelConfig(),
+        scheduler_config=SimpleNamespace(
+            max_num_seqs=2,
+            max_num_batched_tokens=8,
+        ),
+        model_config=SimpleNamespace(
+            max_model_len=32,
+            dtype=torch.float32,
+            use_fp64_gumbel=False,
+        ),
+    )
+
+    speculator = _TestSpeculator(config, torch.device("cpu"))
+
+    assert speculator.target_pcp_size == 4
+    assert speculator.uses_pcp_draft_sharding is supports_pcp
+    assert (
+        speculator.vllm_config.parallel_config.prefill_context_parallel_size
+        == expected_draft_pcp_size
+    )
+    assert config.parallel_config.prefill_context_parallel_size == 4
+
+
+def test_replicated_pcp_prefill_builds_global_draft_metadata(monkeypatch):
+    speculator = object.__new__(_TestSpeculator)
+    slot_mappings = torch.tensor([[7, 8, 9]])
+    speculator.block_tables = SimpleNamespace(
+        gather_block_tables=Mock(),
+        compute_slot_mappings=Mock(return_value=slot_mappings),
+    )
+    speculator.kv_cache_config = object()
+    speculator._build_attn_metadata = Mock(return_value={"draft": "metadata"})
+    monkeypatch.setattr(
+        spec_module,
+        "build_slot_mappings_by_layer",
+        lambda mappings, kv_config: {"draft.layer": mappings},
+    )
+    input_batch = SimpleNamespace(
+        num_reqs=2,
+        idx_mapping=torch.tensor([3, 1]),
+        query_start_loc=torch.tensor([0, 2, 3]),
+        query_start_loc_np=torch.tensor([0, 2, 3]).numpy(),
+        positions=torch.tensor([5, 6, 9]),
+        seq_lens_cpu_upper_bound=torch.tensor([7, 10]),
+    )
+    batch_desc = BatchExecutionDescriptor(
+        cg_mode=CUDAGraphMode.PIECEWISE,
+        num_tokens=4,
+        num_reqs=4,
+    )
+
+    metadata, mappings_by_layer = speculator._prepare_replicated_pcp_prefill_attn(
+        input_batch, batch_desc
+    )
+
+    speculator.block_tables.gather_block_tables.assert_called_once_with(
+        input_batch.idx_mapping, num_reqs_padded=4
+    )
+    speculator.block_tables.compute_slot_mappings.assert_called_once_with(
+        input_batch.idx_mapping,
+        input_batch.query_start_loc,
+        input_batch.positions,
+        4,
+    )
+    speculator._build_attn_metadata.assert_called_once_with(
+        num_reqs=2,
+        batch_desc=batch_desc,
+        query_start_loc_np=input_batch.query_start_loc_np,
+        seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
+        step=0,
+    )
+    assert metadata == {"draft": "metadata"}
+    assert torch.equal(mappings_by_layer["draft.layer"], slot_mappings)
 
 
 @pytest.mark.parametrize(("hc_mult", "expected"), [(None, 64), (4, 256)])
