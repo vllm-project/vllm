@@ -62,6 +62,7 @@ MambaDType = Literal["auto", "float32", "float16", "bfloat16"]
 MambaCacheMode = Literal["all", "align", "none"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
 KVOffloadingBackend = Literal["native", "lmcache"]
+KVCompressionAlgorithm = Literal["full_replacement", "filtering"]
 
 
 @config
@@ -245,6 +246,31 @@ class CacheConfig:
     'native' (vLLM native CPU offloading), 'lmcache'.
     KV offloading is only activated when kv_offloading_size is set."""
 
+    kv_compression_algorithm: KVCompressionAlgorithm | None = None
+    """Opt-in KV cache compression with KeyDiff scoring. If `None` (default),
+    compression is disabled and behavior is unchanged.\n
+    - "full_replacement": compact each request's KV cache once, right after
+    its prefill completes, keeping the top-scoring tokens per KV head.\n
+    - "filtering": online per-token keep/skip decisions during decode; tokens
+    scored as redundant are dropped from the cache (append-only filtering).\n
+    Requires the FLASH_ATTN attention backend, a single full-attention KV
+    cache group, and a non-quantized KV cache; disables prefix caching and
+    is incompatible with speculative decoding."""
+
+    kv_compression_ratio: float = 0.0
+    """Target fraction of KV cache entries to discard (0.0-1.0, exclusive)
+    when `kv_compression_algorithm` is set. E.g. 0.5 keeps ~50% of tokens.
+    Must be 0.0 (the default) when compression is disabled."""
+
+    kv_compression_interval: int = 512
+    """Number of tokens between retroactive compactions (mirrors kvpress
+    DecodingPress.compression_interval, default 512). Applies to
+    "full_replacement" during prefill chunks and decode, and to "filtering"
+    during prefill chunks only (decode filtering always runs every step).
+    An unconditional compaction also runs when prefill completes,
+    regardless of this interval. Lower values compress more eagerly at
+    higher gather/scatter cost."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -281,6 +307,10 @@ class CacheConfig:
             "kv_cache_max_concurrency",
             # WIP feature toggle not impacting compiled graph shape
             "kv_sharing_fast_prefill",
+            # Eager post-forward cache rewrite; no compiled graph impact
+            "kv_compression_algorithm",
+            "kv_compression_ratio",
+            "kv_compression_interval",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors
@@ -302,6 +332,31 @@ class CacheConfig:
         if value is None:
             return value
         return handler(value)
+
+    @model_validator(mode="after")
+    def _verify_kv_compression(self) -> "CacheConfig":
+        if self.kv_compression_interval < 1:
+            raise ValueError(
+                "kv_compression_interval must be >= 1, got "
+                f"{self.kv_compression_interval}."
+            )
+        if self.kv_compression_algorithm is not None:
+            if not 0.0 < self.kv_compression_ratio < 1.0:
+                raise ValueError(
+                    "kv_compression_ratio must be in (0.0, 1.0) when "
+                    "kv_compression_algorithm is set, got "
+                    f"{self.kv_compression_ratio}."
+                )
+            if self.cache_dtype.startswith("fp8"):
+                raise ValueError(
+                    "KV compression does not support quantized KV cache "
+                    f"(kv_cache_dtype={self.cache_dtype})."
+                )
+        elif self.kv_compression_ratio != 0.0:
+            raise ValueError(
+                "kv_compression_ratio requires kv_compression_algorithm to be set."
+            )
+        return self
 
     @model_validator(mode="after")
     def _apply_block_size_default(self) -> "CacheConfig":

@@ -359,6 +359,11 @@ class ModelRunnerOutput:
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
+    # req_id -> number of KV cache entries discarded by KV compression
+    # (KeyDiff) in this step. Consumed by the scheduler to adjust block
+    # allocation for compressed requests. None when compression is disabled.
+    kv_compression_discarded: dict[str, int] | None = None
+
     # Per-step routed experts data captured by the worker.
     # ``routing_data`` shape: (num_scheduled_tokens, num_layers,
     #                         num_experts_per_tok); expert IDs as uint8/uint16.
