@@ -1280,6 +1280,7 @@ class SpeculativeConfig:
                     allowed_media_domains=self.target_model_config.allowed_media_domains,
                     dtype=self.target_model_config.dtype,
                     seed=self.target_model_config.seed,
+                    hf_token=self.target_model_config.hf_token,
                     revision=self.revision,
                     code_revision=self.code_revision,
                     tokenizer_revision=self.target_model_config.tokenizer_revision,
