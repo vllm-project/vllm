@@ -15,6 +15,7 @@ import importlib.util
 import json
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
 import numpy as np
@@ -26,11 +27,36 @@ from vllm.benchmarks.lib.endpoint_request_func import (
     async_request_openai_audio,
     async_request_openai_chat_completions,
     async_request_openai_completions,
+    async_request_profile,
 )
 
 pytestmark = pytest.mark.skip_global_cleanup
 
 AUDIO_SAMPLE_RATE = 16_000
+
+
+@pytest.mark.parametrize("action", ["start_profile", "stop_profile"])
+@pytest.mark.parametrize("status", [200, 400, 500])
+def test_profile_control_uses_http_status_without_reading_sse(
+    monkeypatch, action, status
+):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    response = MagicMock(status=status)
+    response.text = AsyncMock(return_value="profiling unavailable")
+    session = MagicMock()
+    session.post.return_value.__aenter__ = AsyncMock(return_value=response)
+    api_url = f"http://localhost/{action}"
+    output = asyncio.run(
+        async_request_profile(api_url, session, extra_headers={"X-Test": "value"})
+    )
+    assert output.success == (status == 200)
+    if status != 200:
+        assert output.error == f"HTTP {status}: profiling unavailable"
+    response.content.iter_any.assert_not_called()
+    session.post.assert_called_once_with(
+        url=api_url,
+        headers={"Authorization": "Bearer test-key", "X-Test": "value"},
+    )
 
 
 class _ScriptedClock:

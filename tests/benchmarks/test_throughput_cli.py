@@ -8,15 +8,20 @@ LoRA-assignment and MMVU cases below cover the pieces that are throughput-only
 serve-side dataset coverage.
 """
 
+import asyncio
 import subprocess
+from contextlib import nullcontext
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from vllm.benchmarks.datasets import SampleRequest
 from vllm.benchmarks.throughput import (
+    _run_vllm_async_requests,
     _run_vllm_chat_requests,
+    _run_vllm_requests,
     _to_serve_args,
     add_cli_args,
     assign_loras,
@@ -25,6 +30,72 @@ from vllm.benchmarks.throughput import (
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    "chat,prequeue", [(False, False), (True, False), (False, True), (True, True)]
+)
+@pytest.mark.parametrize("fails", [False, True])
+def test_profile_stops_after_requests_even_on_error(chat, prequeue, fails):
+    llm = Mock()
+    method = "wait_for_completion" if prequeue else "chat" if chat else "generate"
+    getattr(llm, method).return_value = []
+    run = _run_vllm_chat_requests if chat else _run_vllm_requests
+    kwargs = {} if chat else {"enable_lora": False}
+    requests = [SampleRequest(prompt="test", prompt_len=1, expected_output_len=1)]
+
+    # Warmup must never activate the profiler.
+    run(llm, requests, 1, False, False, prequeue, **kwargs)
+    llm.start_profile.assert_not_called()
+    llm.reset_mock()
+    if fails:
+        getattr(llm, method).side_effect = RuntimeError("generation failed")
+    with (
+        pytest.raises(RuntimeError, match="generation failed")
+        if fails
+        else nullcontext()
+    ):
+        run(llm, requests, 1, False, True, prequeue, **kwargs)
+    names = [c[0] for c in llm.mock_calls]
+    assert (
+        names.index("start_profile") < names.index(method) < names.index("stop_profile")
+    )
+    llm.stop_profile.assert_called_once()
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("fails", [False, True])
+def test_async_profile_stops_after_stream_even_on_error(fails):
+    events = []
+
+    async def generate(*args, **kwargs):
+        events.append("generate")
+        if fails:
+            raise RuntimeError("generation failed")
+        yield None
+
+    llm = SimpleNamespace(
+        generate=generate,
+        start_profile=AsyncMock(side_effect=lambda: events.append("start")),
+        stop_profile=AsyncMock(side_effect=lambda: events.append("stop")),
+    )
+    with (
+        pytest.raises(RuntimeError, match="generation failed")
+        if fails
+        else nullcontext()
+    ):
+        asyncio.run(
+            _run_vllm_async_requests(
+                llm,
+                [SampleRequest(prompt="test", prompt_len=1, expected_output_len=1)],
+                1,
+                False,
+                True,
+                "test",
+            )
+        )
+    assert events == ["start", "generate", "stop"]
 
 
 @pytest.mark.benchmark
