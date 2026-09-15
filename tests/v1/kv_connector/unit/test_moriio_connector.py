@@ -912,6 +912,7 @@ def test_worker_layer_to_group_routing(mock_parallel_groups):
     vllm_config = create_vllm_config(role="kv_consumer", read_mode=True)
     # Building the worker directly bypasses MoRIIOConnector._set_port_defaults,
     # so provide the ports manually.
+    assert vllm_config.kv_transfer_config is not None
     vllm_config.kv_transfer_config.kv_connector_extra_config.update(
         {
             "http_port": 12346,

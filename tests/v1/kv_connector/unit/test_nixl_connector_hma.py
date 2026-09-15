@@ -176,7 +176,7 @@ def test_full_local_hit_is_not_awaited_by_the_scheduler():
         NixlPullConnectorScheduler,
     )
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-    from vllm.v1.core.kv_cache_utils import KVCacheBlock
+    from vllm.v1.core.kv_cache_utils import BlockHashWithGroupId, KVCacheBlock
 
     scheduler = object.__new__(NixlPullConnectorScheduler)
     scheduler._reqs_in_batch = set()
@@ -189,7 +189,9 @@ def test_full_local_hit_is_not_awaited_by_the_scheduler():
         select_transfer_block_ids=lambda block_ids: block_ids
     )
 
-    blocks = KVCacheBlocks(blocks=([KVCacheBlock(block_id=0, _block_hash=object())],))
+    blocks = KVCacheBlocks(
+        blocks=([KVCacheBlock(block_id=0, _block_hash=BlockHashWithGroupId(b"0"))],)
+    )
     request = create_request(do_remote_prefill=True)
 
     scheduler.update_state_after_alloc(request, blocks, num_external_tokens=0)
