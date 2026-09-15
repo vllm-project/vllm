@@ -18,6 +18,7 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_upd
 from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
     gather_initial_states,
 )
+from vllm.models.common.kda import store_cache_checkpoints_kernel
 from vllm.models.kimi_k3.amd.ops.third_party.kda import (
     fused_recurrent_kda_packed_decode as fused_recurrent_kda_packed_decode_amd,
 )
@@ -25,7 +26,6 @@ from vllm.models.kimi_k3.nvidia import kda as nvidia_kda
 from vllm.models.kimi_k3.nvidia.kda import (
     _flashinfer_kda_prefill,
     _flashkda_prefill,
-    _store_cache_checkpoints_kernel,
     is_flashinfer_fused_kda_decode_supported,
     is_flashinfer_recurrent_kda_prefill_supported,
     is_flashkda_supported,
@@ -1502,7 +1502,7 @@ def test_flashkda_checkpoint_correctness(state_dtype: torch.dtype, tolerance: fl
     width = H * D
     recurrent_row_size = checkpoint_state[0].numel()
     block_size = 256
-    _store_cache_checkpoints_kernel[
+    store_cache_checkpoints_kernel[
         (
             checkpoint_state_indices.numel(),
             (max(width * state_len, recurrent_row_size) + block_size - 1) // block_size,
