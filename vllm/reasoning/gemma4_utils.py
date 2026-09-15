@@ -40,6 +40,10 @@ _THINKING_END_TAG = "<channel|>"
 
 # Sentinel tokens that may appear in decoded output.
 _TURN_END_TAG = "<turn|>"
+_EOS_TAG = "<eos>"
+
+# Sentinels that may trail the answer, in any order and possibly repeated.
+_TRAILING_SENTINELS = (_TURN_END_TAG, _EOS_TAG)
 
 
 def parse_thinking_output(text: str) -> dict[str, str | None]:
@@ -119,12 +123,18 @@ def _clean_answer(text: str) -> str:
 
     Strips ``<turn|>``, ``<eos>``, and surrounding whitespace that the
     model appends at the end of its response.
+
+    The sentinels are stripped repeatedly rather than once each, because a
+    single pass in a fixed order only cleans one arrangement: checking
+    ``<turn|>`` before ``<eos>`` leaves the turn marker behind for
+    ``...<turn|><eos>``, since at that point the text ends with ``<eos>``.
     """
     text = text.strip()
-    # Strip trailing <turn|> (Gemma4 turn-end marker)
-    if text.endswith(_TURN_END_TAG):
-        text = text[: -len(_TURN_END_TAG)].rstrip()
-    # Strip trailing <eos> if present
-    if text.endswith("<eos>"):
-        text = text[:-5].rstrip()
+    changed = True
+    while changed:
+        changed = False
+        for tag in _TRAILING_SENTINELS:
+            if text.endswith(tag):
+                text = text[: -len(tag)].rstrip()
+                changed = True
     return text
