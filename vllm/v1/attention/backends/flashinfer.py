@@ -1929,6 +1929,12 @@ class FlashInferImpl(AttentionImpl):
         else:
             self.sinks.copy_(source_sinks)
 
+    @staticmethod
+    def get_query_scale(layer: torch.nn.Module, q_data_type: torch.dtype) -> float:
+        if q_data_type in (torch.float8_e4m3fn, torch.float8_e5m2):
+            return layer._q_scale_float
+        return 1.0
+
     def get_xqa_bmm1_scale(self, layer: torch.nn.Module, q_data_type: torch.dtype):
         bmm1_scale = self.scale
         if is_quantized_kv_cache(self.kv_cache_dtype):
@@ -2224,7 +2230,9 @@ class FlashInferImpl(AttentionImpl):
                             prefill_query,
                             kv_cache_for_fi,
                             self.sinks,
-                            self.scale * layer._q_scale_float * layer._k_scale_float,
+                            self.scale
+                            * self.get_query_scale(layer, prefill_query.dtype)
+                            * layer._k_scale_float,
                             v_scale=layer._v_scale_float,
                             out=out_prefill,
                         )
@@ -2232,7 +2240,7 @@ class FlashInferImpl(AttentionImpl):
                         prefill_wrapper.run(
                             prefill_query,
                             kv_cache_for_fi,
-                            q_scale=layer._q_scale_float,
+                            q_scale=self.get_query_scale(layer, prefill_query.dtype),
                             k_scale=layer._k_scale_float,
                             v_scale=layer._v_scale_float,
                             out=out_prefill,
@@ -2403,7 +2411,7 @@ class FlashInferImpl(AttentionImpl):
                     decode_wrapper.run(
                         decode_query,
                         kv_cache_for_fi,
-                        q_scale=layer._q_scale_float,
+                        q_scale=self.get_query_scale(layer, decode_query.dtype),
                         k_scale=layer._k_scale_float,
                         v_scale=layer._v_scale_float,
                         out=output_tmp,
@@ -2421,7 +2429,7 @@ class FlashInferImpl(AttentionImpl):
                     decode_wrapper.run(
                         decode_query,
                         kv_cache_for_fi,
-                        q_scale=layer._q_scale_float,
+                        q_scale=self.get_query_scale(layer, decode_query.dtype),
                         k_scale=layer._k_scale_float,
                         v_scale=layer._v_scale_float,
                         out=out_decode,
