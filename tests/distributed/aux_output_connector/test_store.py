@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import threading
-from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -30,14 +28,8 @@ from vllm.distributed.aux_output_connector.store import (
     BlockObjectStore,
     BlockObjectStoreError,
 )
-from vllm.distributed.aux_output_connector.worker import (
-    AuxOutputWorkerConnector,
-    PendingAuxOutput,
-)
+from vllm.distributed.aux_output_connector.worker import AuxOutputWorkerConnector
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
-from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.worker.gpu import async_utils
-from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
 pytestmark = pytest.mark.cpu_test
 
@@ -233,99 +225,27 @@ def test_worker_skips_aux_outputs_for_internal_warmup_step():
     worker.close()
 
 
-def _pending_output(worker, callback):
-    pending = PendingAuxOutput(
-        worker, np.array([]), np.array([]), torch.empty(0), callback
-    )
-    worker._pending_output = pending
-    return pending
-
-
-def test_worker_completes_previous_output_without_an_output_thread(monkeypatch):
-    """UniProc starts its next step before consuming the previous lazy Future."""
-    event = Mock()
-    monkeypatch.setattr(torch.cuda, "Event", lambda **kwargs: event)
-    monkeypatch.setattr(async_utils, "stream", lambda *args: nullcontext())
-    monkeypatch.setattr(
-        async_utils, "async_copy_to_np", lambda tensor: tensor.numpy().copy()
-    )
+def test_worker_waits_for_previous_aux_output_before_next_step():
     worker = _make_worker(1)
-    worker.begin_step(
-        _metadata(0, [_request_metadata("request", 0, 1, 0, [])], {}).metadata
-    )
-    rows = torch.ones((1, *_SHAPE), dtype=torch.uint8)
-    pending = PendingAuxOutput(worker, np.array([0]), np.array([0, 1]), rows)
-    worker._pending_output = pending
-    process_output = Mock(wraps=worker.process_output)
-    monkeypatch.setattr(worker, "process_output", process_output)
-    output = async_utils.AsyncOutput(
-        ModelRunnerOutput(["request"], {"request": 0}),
-        SamplerOutput(
-            torch.tensor([[7]]), None, None, None, num_rejected=torch.tensor([0])
-        ),
-        torch.tensor([1]),
-        Mock(),
-        Mock(),
-        pending_aux_output=pending,
-    )
-    assert pending.finish_callback is not None
-    event.record.assert_called_once()
-    process_output.assert_not_called()
-
-    worker.begin_step(_metadata(0, [], {}).metadata)
-    result = output.get_output()
-
-    assert result.sampled_token_ids == [[7]]
-    np.testing.assert_array_equal(
-        result.aux_output_connector_output["request"].rows, rows.numpy()
-    )
-    process_output.assert_called_once()
-    assert worker._pending_output is None
-    worker.close()
-
-
-def test_worker_and_output_thread_commit_previous_output_once():
-    worker = _make_worker(1)
+    finished = threading.Event()
+    worker._pending_output = SimpleNamespace(finished=finished)
     entered = threading.Event()
-    release = threading.Event()
+    returned = threading.Event()
 
-    def finish():
+    def begin_step():
         entered.set()
-        assert release.wait(5)
-        return {}
+        worker.begin_step(_metadata(0, [], {}).metadata)
+        returned.set()
 
-    callback = Mock(side_effect=finish)
-    pending = _pending_output(worker, callback)
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        output = executor.submit(pending.finish_once)
-        try:
-            assert entered.wait(5)
-            next_step = executor.submit(
-                worker.begin_step, _metadata(0, [], {}).metadata
-            )
-            with pytest.raises(TimeoutError):
-                next_step.result(timeout=0.1)
-        finally:
-            release.set()
-        assert output.result(timeout=5) == {}
-        next_step.result(timeout=5)
-
-    callback.assert_called_once_with()
+    thread = threading.Thread(target=begin_step)
+    thread.start()
+    assert entered.wait(1)
+    assert not returned.wait(0.05)
+    worker._pending_output = None
+    finished.set()
+    assert returned.wait(1)
+    thread.join()
     assert worker._pending_output is None
-    worker.close()
-
-
-def test_failed_aux_output_is_not_retried_or_hidden_by_next_step():
-    worker = _make_worker(1)
-    error = RuntimeError("publish failed")
-    callback = Mock(side_effect=error)
-    pending = _pending_output(worker, callback)
-
-    for consume in (pending.finish_once, lambda: worker.begin_step(None)):
-        with pytest.raises(RuntimeError, match="publish failed") as caught:
-            consume()
-        assert caught.value is error
-    callback.assert_called_once_with()
     worker.close()
 
 
@@ -381,15 +301,17 @@ def _process_output(
         query_start_loc,
     )
     assert pending is not None
-    pending.finish_callback = lambda: worker.process_output(
-        request_ids,
-        pending.token_starts,
-        pending.query_start_loc,
-        pending.routed_experts.cpu().numpy(),
-        num_sampled,
-        num_rejected,
-    )
-    return pending.finish_once()
+    try:
+        return worker.process_output(
+            request_ids,
+            pending.token_starts,
+            pending.query_start_loc,
+            pending.routed_experts.cpu().numpy(),
+            num_sampled,
+            num_rejected,
+        )
+    finally:
+        pending.complete()
 
 
 def test_worker_ignores_cudagraph_query_padding():

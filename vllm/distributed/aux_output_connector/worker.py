@@ -4,10 +4,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from concurrent.futures import Future
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from threading import Lock
+from threading import Event
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -56,23 +55,11 @@ class PendingAuxOutput:
     token_starts: np.ndarray
     query_start_loc: np.ndarray
     routed_experts: torch.Tensor
-    finish_callback: Callable[[], dict[str, AuxOutputRequestOutput]] | None = None
-    _result: Future[dict[str, AuxOutputRequestOutput]] = field(default_factory=Future)
-    _lock: Lock = field(default_factory=Lock)
+    finished: Event = field(default_factory=Event)
 
-    def finish_once(self) -> dict[str, AuxOutputRequestOutput]:
-        with self._lock:
-            if not self._result.done():
-                assert self.finish_callback is not None
-                try:
-                    self._result.set_result(self.finish_callback())
-                except Exception as error:
-                    self._result.set_exception(error)
-                else:
-                    self.connector._pending_output = None
-                finally:
-                    self.finish_callback = None
-            return self._result.result()
+    def complete(self) -> None:
+        self.connector._pending_output = None
+        self.finished.set()
 
 
 class AuxOutputWorkerConnector:
@@ -293,7 +280,7 @@ class AuxOutputWorkerConnector:
     def begin_step(self, metadata: AuxOutputConnectorMetadata | None) -> None:
         """Apply one scheduler step's request and block-hash updates."""
         if pending_output := self._pending_output:
-            pending_output.finish_once()
+            pending_output.finished.wait()
         self._step_metadata = metadata
         if self._buffer is None or metadata is None:
             return
