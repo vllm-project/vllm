@@ -55,6 +55,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import (
     BatchDescriptor,
+    get_forward_context,
     set_forward_context,
 )
 from vllm.logger import init_logger
@@ -2354,6 +2355,22 @@ class GPUModelRunner(
             blk_table_tensor[num_reqs:num_reqs_padded].fill_(NULL_BLOCK_ID)
             return blk_table_tensor
 
+        def _get_block_table_cpu(kv_cache_gid: int):
+            additional_config = self.vllm_config.additional_config
+            if not isinstance(additional_config, dict) or not additional_config.get(
+                "deepseek_v41_pp_sharing"
+            ):
+                return None
+            assert num_reqs_padded is not None
+            if isinstance(
+                kv_cache_groups[kv_cache_gid].kv_cache_spec, EncoderOnlyAttentionSpec
+            ):
+                return torch.zeros((num_reqs_padded, 1), dtype=torch.int32)
+            table = self.input_batch.block_table[kv_cache_gid].get_cpu_tensor()
+            snapshot = table[:num_reqs_padded].clone()
+            snapshot[num_reqs:num_reqs_padded].fill_(NULL_BLOCK_ID)
+            return snapshot
+
         assert slot_mappings is not None
         block_table_gid_0 = _get_block_table(0)
         slot_mapping_gid_0 = slot_mappings[0]
@@ -2588,6 +2605,7 @@ class GPUModelRunner(
         spec_decode_common_attn_metadata = None
         for kv_cache_gid, kv_cache_group in enumerate(kv_cache_groups):
             cm = copy(cm_base)  # shallow copy
+            cm.block_table_cpu = _get_block_table_cpu(kv_cache_gid)
 
             # Basically only the encoder seq_lens, block_table and slot_mapping change
             # for each kv_cache_group.
@@ -3373,6 +3391,10 @@ class GPUModelRunner(
 
         return tuple(tasks)
 
+    @property
+    def pipeline_payload_keys(self) -> frozenset[str]:
+        return getattr(self.get_model(), "pipeline_payload_keys", frozenset())
+
     def sync_and_gather_intermediate_tensors(
         self,
         num_tokens: int,
@@ -3383,6 +3405,8 @@ class GPUModelRunner(
 
         tp = self.vllm_config.parallel_config.tensor_parallel_size
         is_rs = is_residual_scattered_for_sp(self.vllm_config, num_tokens)
+        payload_keys = self.pipeline_payload_keys
+        payloads = {}
 
         # When sequence parallelism is enabled, the "residual" tensor is
         # sharded across TP ranks. All-gather it here because downstream
@@ -3390,6 +3414,10 @@ class GPUModelRunner(
         if sync_self:
             assert intermediate_tensors is not None
             for k, v in intermediate_tensors.items():
+                if k in payload_keys:
+                    # Eager model-owned state may have a block axis, not tokens.
+                    payloads[k] = v
+                    continue
                 is_scattered = k == "residual" and is_rs
                 if is_scattered:
                     local_len = num_tokens // tp
@@ -3400,7 +3428,7 @@ class GPUModelRunner(
                 )
 
         return IntermediateTensors(
-            {k: v[:num_tokens] for k, v in self.intermediate_tensors.items()}
+            {k: v[:num_tokens] for k, v in self.intermediate_tensors.items()} | payloads
         )
 
     def eplb_step(self, is_dummy: bool = False, is_profile: bool = False) -> None:
@@ -6171,6 +6199,7 @@ class GPUModelRunner(
                     slot_mapping=slot_mappings,
                 ),
             ):
+                get_forward_context().additional_kwargs["is_dummy_run"] = True
                 outputs = self.model(
                     input_ids=input_ids,
                     positions=positions,
