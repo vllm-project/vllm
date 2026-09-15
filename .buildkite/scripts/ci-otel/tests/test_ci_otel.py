@@ -6,11 +6,13 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -393,6 +395,35 @@ def test_shell_wrapper_preserves_failure_status(tmp_path):
     )
 
     assert result.returncode == 1
+
+
+def test_shell_wrapper_does_not_write_bytecode_to_helper_tree(tmp_path):
+    helper_dir = tmp_path / "ci-otel"
+    shutil.copytree(
+        SCRIPTS_DIR,
+        helper_dir,
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
+    shell = (
+        f'. "{helper_dir / "ci_otel.sh"}"; '
+        f"ci_otel_start 1 {_quoted('true')}; ci_otel_finish 0"
+    )
+
+    result = subprocess.run(
+        ["/bin/sh", "-c", shell],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "CI_INFRA_OTEL_DIR": str(helper_dir),
+            "CI_INFRA_GPU_SAMPLING": "0",
+            "CI_INFRA_OTEL_SPOOL_DIR": str(tmp_path / "spans"),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert list(helper_dir.rglob("*.pyc")) == []
 
 
 def test_ci_otel_run_records_command_and_preserves_status(tmp_path):
@@ -814,6 +845,85 @@ def test_gpu_samples_preserve_zero_and_omit_unsupported_metrics():
     assert "gpu.memory.total" not in events[2]["attributes"]
 
 
+@pytest.mark.parametrize(
+    "cuda,nvidia,expected",
+    [
+        ("MIG-a", "GPU-parent", ["MIG-a"]),
+        ("0", "MIG-a", ["MIG-a"]),
+        ("1,0", "MIG-a,MIG-b", ["MIG-b", "MIG-a"]),
+        (None, "MIG-a", ["MIG-a"]),
+        ("", "MIG-a", []),
+        ("-1", "MIG-a", []),
+        ("2", "MIG-a", []),
+        ("GPU-parent", "MIG-a", []),
+        ("0", "all", []),
+    ],
+)
+def test_mig_assignment_obeys_cuda_visibility(monkeypatch, cuda, nvidia, expected):
+    monkeypatch.setenv("NVIDIA_VISIBLE_DEVICES", nvidia)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    if cuda is not None:
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", cuda)
+    assert ci_gpu.visible_mig_devices() == expected
+
+
+@pytest.mark.parametrize("used", [0, 3 * 1024**3])
+def test_mig_memory_uses_assigned_handle_without_parent_metrics(monkeypatch, used):
+    handles = []
+    closed = []
+
+    def get_handle(uuid):
+        handles.append(uuid)
+        return "slice-handle"
+
+    def get_memory(handle):
+        assert handle == "slice-handle"
+        return SimpleNamespace(used=used, total=16 * 1024**3)
+
+    nvml = SimpleNamespace(
+        nvmlInit=lambda: None,
+        nvmlShutdown=lambda: closed.append(True),
+        nvmlDeviceGetHandleByUUID=get_handle,
+        nvmlDeviceIsMigDeviceHandle=lambda handle: handle == "slice-handle",
+        nvmlDeviceGetMemoryInfo=get_memory,
+        NVMLError=RuntimeError,
+    )
+    monkeypatch.setattr(ci_gpu, "load_nvml", lambda: nvml)
+    samples = ci_gpu.query_mig_samples(["MIG-a"], 1234)
+    assert handles == ["MIG-a"]
+    assert closed == [True]
+    assert samples[0]["time_ns"] == 1234
+    attributes = samples[0]["attributes"]
+    assert attributes["gpu.uuid"] == "MIG-a"
+    assert attributes["gpu.memory.used"] == used
+    assert attributes["gpu.memory.total"] == 16 * 1024**3
+    assert "gpu.utilization" not in attributes
+
+
+@pytest.mark.parametrize("is_mig", [True, False])
+def test_mig_memory_never_substitutes_parent_or_permission_failure(monkeypatch, is_mig):
+    def unavailable(handle):
+        if not is_mig:
+            pytest.fail("queried parent memory")
+        raise RuntimeError("Insufficient Permissions")
+
+    nvml = SimpleNamespace(
+        nvmlInit=lambda: None,
+        nvmlShutdown=lambda: None,
+        nvmlDeviceGetHandleByUUID=lambda uuid: "handle",
+        nvmlDeviceIsMigDeviceHandle=lambda handle: is_mig,
+        nvmlDeviceGetMemoryInfo=unavailable,
+        NVMLError=RuntimeError,
+    )
+    monkeypatch.setattr(ci_gpu, "load_nvml", lambda: nvml)
+    samples = ci_gpu.query_mig_samples(["MIG-a"], 1234)
+    if is_mig:
+        assert samples[0]["attributes"]["gpu.status"] == "unavailable_mig_memory"
+        assert "gpu.memory.used" not in samples[0]["attributes"]
+    else:
+        assert samples == []
+
+
 def test_gpu_batches_keep_command_identity_and_survive_spool_roundtrip(
     monkeypatch, tmp_path
 ):
@@ -830,7 +940,11 @@ def test_gpu_batches_keep_command_identity_and_survive_spool_roundtrip(
     assert b"ci.gpu.sample" in ci_otel.encode_request([span])
 
 
-def test_gpu_query_failures_are_bounded_and_never_synthesize_idle_samples(monkeypatch):
+@pytest.mark.parametrize("mig", [False, True])
+def test_gpu_query_failures_are_bounded_and_never_synthesize_idle_samples(
+    monkeypatch, mig
+):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "MIG-a" if mig else "0")
     calls = []
 
     def query(*args, **kwargs):
@@ -918,3 +1032,112 @@ def test_gpu_sampler_stops_with_command_and_preserves_failure_status(
             command["start_ns"] <= event["time_ns"] <= command["end_ns"]
             for event in batches[0]["events"]
         )
+
+
+@pytest.mark.parametrize("is_mig", [True, False])
+def test_cdi_discovery_uses_only_cuda_visible_uuids(monkeypatch, is_mig):
+    identifiers = []
+
+    def get_count(output):
+        output._obj.value = 1
+        return 0
+
+    def get_device(output, index):
+        assert index == 0
+        output._obj.value = 7
+        return 0
+
+    def get_uuid(output, device):
+        assert device.value == 7
+        output._obj[:] = bytes(range(16))
+        return 0
+
+    driver = SimpleNamespace(
+        cuInit=lambda flags: 0,
+        cuDeviceGetCount=get_count,
+        cuDeviceGet=get_device,
+        cuDeviceGetUuid_v2=get_uuid,
+    )
+    monkeypatch.setattr(ci_gpu.ctypes, "CDLL", lambda _: driver)
+    nvml = SimpleNamespace(
+        nvmlInit=lambda: None,
+        nvmlShutdown=lambda: None,
+        nvmlDeviceGetHandleByUUID=lambda value: identifiers.append(value) or "handle",
+        nvmlDeviceIsMigDeviceHandle=lambda handle: is_mig,
+        NVMLError=RuntimeError,
+    )
+    monkeypatch.setattr(ci_gpu, "load_nvml", lambda: nvml)
+    expected = "MIG-00010203-0405-0607-0809-0a0b0c0d0e0f"
+    assert ci_gpu.cuda_visible_mig_devices() == ([expected] if is_mig else [])
+    assert identifiers == [expected]
+
+
+@pytest.mark.parametrize("discovery_fails", [False, True])
+def test_cdi_sampling_switches_to_slice_or_keeps_unknown(monkeypatch, discovery_fails):
+    monkeypatch.setenv("CI_INFRA_TRACE_ID", "01" * 16)
+    monkeypatch.setenv("CI_INFRA_COMMAND_SPAN_ID", "02" * 8)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setenv("NVIDIA_VISIBLE_DEVICES", "void")
+    monkeypatch.setattr(ci_gpu, "INTERVAL_SECONDS", 0)
+    stop = threading.Event()
+    commands = []
+    records = []
+
+    def query(command, **kwargs):
+        assert kwargs["timeout"] == ci_gpu.QUERY_TIMEOUT_SECONDS
+        commands.append(command)
+        if "--discover-mig" in command:
+            if discovery_fails:
+                raise subprocess.TimeoutExpired(command, 2)
+            return SimpleNamespace(stdout='["MIG-assigned"]')
+        if len(commands) == 4:
+            stop.set()
+        if "--query-mig" in command:
+            assert command[-1] == "MIG-assigned"
+            return SimpleNamespace(
+                stdout=json.dumps(
+                    [
+                        {
+                            "time_ns": 2,
+                            "name": "ci.gpu.sample",
+                            "attributes": {
+                                "gpu.uuid": "MIG-assigned",
+                                "gpu.memory.used": 123,
+                            },
+                        }
+                    ]
+                )
+            )
+        return SimpleNamespace(stdout="0, GPU-parent, H200, 99, 100, 200, Enabled")
+
+    monkeypatch.setattr(ci_gpu.subprocess, "run", query)
+    monkeypatch.setattr(ci_gpu, "record_spans", lambda spans: records.extend(spans))
+    ci_gpu.collect(os.getppid(), stop)
+    assert sum("--discover-mig" in command for command in commands) == 1
+    attributes = [event["attributes"] for span in records for event in span.events]
+    if discovery_fails:
+        assert all("gpu.memory.used" not in event for event in attributes)
+    else:
+        assert any(event.get("gpu.memory.used") == 123 for event in attributes)
+        assert all(event["gpu.uuid"] == "MIG-assigned" for event in attributes)
+
+
+def test_bundled_nvml_load_does_not_import_vllm_or_torch(tmp_path):
+    # Match test images: the collector is outside the installed vLLM package.
+    helper = tmp_path / "ci_gpu_relocated.py"
+    helper.write_text((SCRIPTS_DIR / "ci_gpu.py").read_text())
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; import ci_gpu_relocated as ci_gpu; "
+            "binding = ci_gpu.load_nvml(); "
+            "assert callable(binding.nvmlDeviceGetMemoryInfo); "
+            "assert 'vllm' not in sys.modules; assert 'torch' not in sys.modules",
+        ],
+        env={**os.environ, "PYTHONPATH": f"{tmp_path}{os.pathsep}{SCRIPTS_DIR}"},
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
