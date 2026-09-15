@@ -1167,6 +1167,25 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       "Building Kimi K3 AttnRes for archs: ${KIMI_K3_ATTN_RES_ARCHS}")
   endif()
 
+  if(VLLM_GPU_LANG STREQUAL "CUDA" AND
+     DEFINED CMAKE_CUDA_COMPILER_VERSION AND
+     CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(LOW_SM_AR_ARCHS
+      "10.0f;10.3f" "${CUDA_ARCHS}")
+  endif()
+  if(LOW_SM_AR_ARCHS)
+    set(LOW_SM_AR_SRC
+      "csrc/libtorch_stable/low_sm_all_reduce.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${LOW_SM_AR_SRC}"
+      CUDA_ARCHS "${LOW_SM_AR_ARCHS}")
+    set_property(SOURCE ${LOW_SM_AR_SRC} APPEND PROPERTY
+      COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:-O3>")
+    list(APPEND VLLM_STABLE_EXT_SRC "${LOW_SM_AR_SRC}")
+    message(STATUS
+      "Building low-SM all-reduce for archs: ${LOW_SM_AR_ARCHS}")
+  endif()
+
   # Hadacore kernels
   cuda_archs_loose_intersection(HADACORE_ARCHS "8.0+PTX;9.0+PTX" "${CUDA_ARCHS}")
   if(HADACORE_ARCHS)
