@@ -955,8 +955,15 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # to the decode kernel's TMA stride; plain bf16 / per-tensor fp8 rows
         # use natural element-size pages.
         uses_fp8_ds_mla_layout = self.kv_cache_dtype == "fp8_ds_mla"
+        # DeepSeek-V4.1 sparse-MLA pages are compressed states. Ratio-1 and
+        # ratio-2 layers use 64 and 128 tokens respectively to carry at least
+        # 64 kernel states, while preserving any larger configured page width.
+        block_size = max(
+            vllm_config.cache_config.block_size,
+            64 * self.compress_ratio,
+        )
         return MLAAttentionSpec(
-            block_size=vllm_config.cache_config.block_size,
+            block_size=block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=torch.uint8 if uses_fp8_ds_mla_layout else self.kv_cache_torch_dtype,
