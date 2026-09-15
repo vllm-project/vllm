@@ -84,7 +84,9 @@ def _make_gate(
     )
 
 
-@pytest.mark.parametrize("input_size,output_size", [(3072, 256), (6144, 128)])
+@pytest.mark.parametrize(
+    "input_size,output_size,sm120_enabled", [(3072, 256, False), (6144, 128, True)]
+)
 @pytest.mark.parametrize(
     "device_capability,enabled",
     [
@@ -97,7 +99,7 @@ def _make_gate(
     ],
 )
 def test_cuda_fp32_router_architecture_gate(
-    monkeypatch, input_size, output_size, device_capability, enabled
+    monkeypatch, input_size, output_size, device_capability, enabled, sm120_enabled
 ):
     """Admit exact SM120 without extending admission to the whole family."""
     gate = _make_gate(
@@ -109,7 +111,8 @@ def test_cuda_fp32_router_architecture_gate(
         output_size=output_size,
         device_capability=device_capability,
     )
-    assert gate.allow_fp32_router_gemm == enabled
+    expected = sm120_enabled if device_capability == (12, 0) else enabled
+    assert gate.allow_fp32_router_gemm == expected
     if device_capability == (12, 0):
         assert not gate.allow_specialized_router_gemm
         assert not gate.allow_ll_bf16_gemm
@@ -139,6 +142,50 @@ def test_sm120_fp32_router_rejects_unsupported_configs(monkeypatch, overrides):
     )
     gate = _make_gate(monkeypatch, **(kwargs | overrides))
     assert not gate.allow_fp32_router_gemm
+
+
+@pytest.mark.parametrize(
+    "overrides,input_dtype",
+    [
+        ({"bias": True}, torch.bfloat16),
+        ({"input_size": 4096}, torch.bfloat16),
+        ({"input_size": 3072, "output_size": 256}, torch.bfloat16),
+        ({"params_dtype": torch.bfloat16}, torch.float32),
+        ({"params_dtype": torch.float16}, torch.float32),
+        ({"device_capability": (12, 1)}, torch.bfloat16),
+        ({"device_capability": (8, 6)}, torch.bfloat16),
+        ({}, torch.float16),
+    ],
+)
+@torch.inference_mode()
+def test_sm120_exclusions_use_linear_without_dropping_bias(
+    monkeypatch, overrides, input_dtype
+):
+    kwargs = dict(
+        is_rocm=False,
+        is_cuda=True,
+        params_dtype=torch.float32,
+        input_size=6144,
+        output_size=128,
+        device_capability=(12, 0),
+    )
+    gate = _make_gate(monkeypatch, **(kwargs | overrides))
+    gate.weight.zero_()
+    if gate.bias is not None:
+        gate.bias.fill_(2)
+
+    def reject_native(*args):
+        pytest.fail("Excluded configuration reached FP32 router dispatch")
+
+    monkeypatch.setattr(torch.ops.vllm, "fp32_router_gemm_dispatch", reject_native)
+    x = torch.ones(2, gate.weight.shape[1], dtype=input_dtype)
+    output, output_bias = gate(x)
+    assert output_bias is None
+    assert output.dtype == torch.float32
+    expected = torch.full(
+        (2, gate.weight.shape[0]), 2.0 if gate.bias is not None else 0.0
+    )
+    torch.testing.assert_close(output, expected)
 
 
 def test_sm120_force_fp32_compute_preserves_fp32_weights(monkeypatch):
@@ -229,107 +276,77 @@ def test_fp32_router_runtime_batch_limit(
     torch.testing.assert_close(output, torch.zeros(num_tokens, 128))
 
 
-def test_rocm_no_bias_bf16_fp32_enables_fused_gemm(monkeypatch):
-    gate = _make_gate(monkeypatch, is_rocm=True, bias=False)
-    assert not gate.allow_specialized_router_gemm
-    assert gate.allow_cublas_router_gemm
-
-
-def test_rocm_bias_disables_fused_gemm(monkeypatch):
-    # torch.mm cannot add a bias, so a biased gate must not take the fused path.
-    gate = _make_gate(monkeypatch, is_rocm=True, bias=True)
-    assert not gate.allow_cublas_router_gemm
-
-
-def test_rocm_fp32_weight_disables_fused_gemm(monkeypatch):
-    gate = _make_gate(monkeypatch, is_rocm=True, params_dtype=torch.float32)
-    assert not gate.allow_cublas_router_gemm
-
-
-def test_rocm_non_fp32_out_dtype_disables_fused_gemm(monkeypatch):
-    gate = _make_gate(monkeypatch, is_rocm=True, out_dtype=torch.bfloat16)
-    assert not gate.allow_cublas_router_gemm
-
-
-def test_non_rocm_non_cuda_disables_fused_gemm(monkeypatch):
-    # Neither the CUDA specialized path nor the ROCm branch applies.
-    gate = _make_gate(monkeypatch, is_rocm=False, is_cuda=False)
-    assert not gate.allow_cublas_router_gemm
-
-
-def test_rocm_set_out_dtype_enables_fused_gemm(monkeypatch):
-    gate = _make_gate(monkeypatch, is_rocm=True, bias=False, out_dtype=None)
-    assert not gate.allow_cublas_router_gemm
-    gate.set_out_dtype(torch.float32)
-    assert gate.allow_cublas_router_gemm
-
-
-def test_rocm_set_out_dtype_respects_bias_guard(monkeypatch):
-    gate = _make_gate(monkeypatch, is_rocm=True, bias=True, out_dtype=None)
-    gate.set_out_dtype(torch.float32)
-    assert not gate.allow_cublas_router_gemm
-
-
-@pytest.mark.parametrize(
-    ("input_size", "output_size"),
-    [(3072, 256), (4096, 8), (4096, 192), (6144, 128), (6144, 256)],
-)
-def test_rocm_gfx950_enables_fp32_router_gemm(
-    monkeypatch, input_size: int, output_size: int
-) -> None:
+@pytest.mark.parametrize("device_capability", [(9, 0), (10, 0), None])
+@pytest.mark.parametrize("num_tokens", [1, 33])
+@pytest.mark.parametrize("deferred", [False, True])
+@torch.inference_mode()
+def test_existing_fp32_router_routes_keep_fp32_output(
+    monkeypatch, device_capability, num_tokens, deferred
+):
+    """SM120 output casts must not change the pre-existing CUDA/gfx950 tier."""
+    is_rocm = device_capability is None
     gate = _make_gate(
         monkeypatch,
-        is_rocm=True,
+        is_rocm=is_rocm,
+        is_cuda=not is_rocm,
         params_dtype=torch.float32,
-        input_size=input_size,
-        output_size=output_size,
-        on_gfx950=True,
+        out_dtype=None if deferred else torch.bfloat16,
+        input_size=6144,
+        output_size=128,
+        device_capability=device_capability,
+        on_gfx950=is_rocm,
     )
-    assert gate.allow_fp32_router_gemm
-    assert not gate.allow_cublas_router_gemm
+    if deferred:
+        gate.set_out_dtype(torch.bfloat16)
+    monkeypatch.setattr(
+        gate_linear_mod.ops, "fp32_router_gemm", torch.nn.functional.linear
+    )
+    monkeypatch.setattr(
+        torch.ops.vllm,
+        "fp32_router_gemm_dispatch",
+        gate_linear_mod.fp32_router_gemm_dispatch_impl,
+    )
+    gate.weight.fill_(1.0 / 6144)
+    output, bias = gate(torch.ones(num_tokens, 6144))
+    assert bias is None
+    assert output.dtype == torch.float32
+    torch.testing.assert_close(output, torch.ones(num_tokens, 128))
 
 
-@pytest.mark.parametrize("ep_size", [2, 4, 8])
-def test_rocm_fp32_router_gemm_is_replicated_across_ep_sizes(
-    monkeypatch, ep_size: int
-) -> None:
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("strided_operand", ["input", "weight"])
+@torch.inference_mode()
+def test_sm120_fp32_router_preserves_strided_linear_inputs(
+    monkeypatch, dtype, strided_operand
+):
+    """Unsupported native layouts must retain the linear fallback contract."""
     gate = _make_gate(
         monkeypatch,
-        is_rocm=True,
+        is_rocm=False,
+        is_cuda=True,
         params_dtype=torch.float32,
         input_size=6144,
         output_size=128,
-        on_gfx950=True,
-        parallel_world_size=ep_size,
+        device_capability=(12, 0),
     )
-    assert gate.weight.shape == (128, 6144)
-    assert gate.allow_fp32_router_gemm
+    x = torch.ones(2, 6144, dtype=dtype)
+    if strided_operand == "input":
+        x = torch.ones(2, 12288, dtype=dtype)[:, ::2]
+    else:
+        gate.weight.data = torch.empty(128, 12288)[:, ::2]
+    gate.weight.fill_(1.0 / 6144)
+    assert not x.is_contiguous() or not gate.weight.is_contiguous()
 
+    def reject_native(*args):
+        pytest.fail("Strided input reached the contiguous-only CUDA router")
 
-@pytest.mark.parametrize(
-    ("input_size", "output_size", "params_dtype", "bias", "on_gfx950"),
-    [
-        pytest.param(6144, 128, torch.float32, False, False, id="gfx942"),
-        pytest.param(2048, 64, torch.float32, False, True, id="shape"),
-        pytest.param(6144, 128, torch.bfloat16, False, True, id="bf16-weight"),
-        pytest.param(6144, 128, torch.float32, True, True, id="bias"),
-    ],
-)
-def test_rocm_fp32_router_gemm_rejects_unsupported_configs(
-    monkeypatch,
-    input_size: int,
-    output_size: int,
-    params_dtype: torch.dtype,
-    bias: bool,
-    on_gfx950: bool,
-) -> None:
-    gate = _make_gate(
-        monkeypatch,
-        is_rocm=True,
-        params_dtype=params_dtype,
-        bias=bias,
-        input_size=input_size,
-        output_size=output_size,
-        on_gfx950=on_gfx950,
+    monkeypatch.setattr(gate_linear_mod.ops, "fp32_router_gemm", reject_native)
+    monkeypatch.setattr(
+        torch.ops.vllm,
+        "fp32_router_gemm_dispatch",
+        gate_linear_mod.fp32_router_gemm_dispatch_impl,
     )
-    assert not gate.allow_fp32_router_gemm
+    output, bias = gate(x)
+    assert bias is None
+    assert output.dtype == torch.float32
+    torch.testing.assert_close(output, torch.ones(2, 128))

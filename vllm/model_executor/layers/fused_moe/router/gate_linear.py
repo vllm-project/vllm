@@ -44,7 +44,9 @@ class GateLinear(ReplicatedLinear):
     ):
         is_hopper = current_platform.is_device_capability((9, 0))
         is_blackwell = current_platform.is_device_capability_family(100)
-        is_sm120 = current_platform.is_device_capability((12, 0))
+        is_sm120 = current_platform.is_cuda() and current_platform.is_device_capability(
+            (12, 0)
+        )
         is_gfx950 = False
         if current_platform.is_rocm():
             from vllm.platforms.rocm import on_gfx950
@@ -78,6 +80,7 @@ class GateLinear(ReplicatedLinear):
             prefix=prefix,
         )
         self.out_dtype = out_dtype
+        self._is_sm120 = is_sm120
 
         self.allow_specialized_router_gemm = can_use_specialized_kernels
 
@@ -89,6 +92,7 @@ class GateLinear(ReplicatedLinear):
                 (
                     current_platform.is_cuda()
                     and (is_hopper or is_blackwell or is_sm120)
+                    and (not is_sm120 or (input_size, output_size) == (6144, 128))
                     and (input_size, output_size) in self.FP32_SUPPORTED_SHAPES
                 )
                 or (is_gfx950 and is_rocm_fp32_shape)
@@ -185,7 +189,11 @@ class GateLinear(ReplicatedLinear):
             output = torch.ops.vllm.fp32_router_gemm_dispatch(
                 x, self.weight, self.allow_bf16x3_router_gemm
             )
-            if self.out_dtype is not None and output.dtype != self.out_dtype:
+            if (
+                self._is_sm120
+                and self.out_dtype is not None
+                and output.dtype != self.out_dtype
+            ):
                 output = output.to(self.out_dtype)
             return output, None
 
@@ -227,13 +235,12 @@ def fp32_router_gemm_dispatch_impl(
     does not support runtime dispatching on num_tokens.
     """
     max_tokens = _FP32_ROUTER_GEMM_MAX_TOKENS
-    if (
-        x.dtype == torch.float32
-        and current_platform.is_cuda()
-        and current_platform.is_device_capability((12, 0))
-    ):
-        # Larger FP32 activation batches favor F.linear on SM120.
-        max_tokens = 16
+    if current_platform.is_cuda() and current_platform.is_device_capability((12, 0)):
+        if not x.is_contiguous() or not weight.is_contiguous():
+            return torch.nn.functional.linear(x.float(), weight)
+        if x.dtype == torch.float32:
+            # Larger FP32 activation batches favor F.linear on SM120.
+            max_tokens = 16
     if x.shape[0] <= max_tokens:
         if current_platform.is_rocm():
             from vllm.model_executor.layers.fused_moe.router.rocm_fp32_router_gemm import (  # noqa: E501
