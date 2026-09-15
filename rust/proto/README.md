@@ -2,6 +2,9 @@
 
 This directory is the canonical source for vLLM's gRPC schema.
 
+See [context parallel deployment](../../docs/serving/context_parallel_deployment.md)
+for effective attention block-size metadata in Python and `Control.GetServerInfo`.
+
 The schema is published to `buf.build/vllm-project/vllm`:
 
 - A daily workflow publishes the latest Git `main` schema to the `nightly` label.
