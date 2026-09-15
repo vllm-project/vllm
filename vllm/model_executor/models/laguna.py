@@ -110,10 +110,11 @@ class LagunaMLP(nn.Module):
 
 
 class LagunaMoE(nn.Module):
-    """Sparse MoE block for Laguna with optional shared expert and sigmoid routing.
+    """Sparse MoE block for Laguna with an optional shared expert.
 
     Key differences from other MoE implementations:
-    - Uses SIGMOID routing activation (not softmax)
+    - Router scoring is config-driven via ``moe_router_score_func``: "sigmoid"
+      (default) or "sqrtsoftplus"
     - Shared expert runs in parallel with routed experts (when enabled)
     - Matches HF reference: modular_laguna.py LagunaSparseMoeBlock
     """
@@ -192,14 +193,11 @@ class LagunaMoE(nn.Module):
             torch.zeros(config.num_experts, dtype=torch.float32),
             requires_grad=False,
         )
-        # MoERunner with SIGMOID routing. Passing `shared_experts=` lets the
-        # layer overlap the shared-expert compute with the all2all dispatch.
-        # `apply_routed_scale_to_output=True` makes MoERunner handle the
-        # FusedMoEFactory with SIGMOID routing. Passing `shared_experts=` lets the
-        # layer overlap the shared-expert compute with the all2all dispatch.
-        # `apply_routed_scale_to_output=True` makes FusedMoEFactory handle the
-        # routed_scaling_factor, shared+routed combine, and TP all-reduce
-        # internally, so forward() just returns the final hidden states.
+        # FusedMoEFactory with config-driven scoring. Passing `shared_experts=`
+        # lets the layer overlap the shared-expert compute with the all2all
+        # dispatch. `apply_routed_scale_to_output=True` makes FusedMoEFactory
+        # handle the routed_scaling_factor, shared+routed combine, and TP
+        # all-reduce internally, so forward() just returns the final hidden states.
         self.experts = FusedMoEFactory(
             shared_experts=self.shared_expert,
             num_experts=config.num_experts,
@@ -209,7 +207,7 @@ class LagunaMoE(nn.Module):
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
-            scoring_func="sigmoid",
+            scoring_func=getattr(config, "moe_router_score_func", "sigmoid"),
             use_grouped_topk=False,
             apply_router_weight_on_input=bool(config.moe_apply_router_weight_on_input),
             e_score_correction_bias=e_score_correction_bias,
