@@ -13,14 +13,14 @@ from vllm.config import ModelConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 
-from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
-from ....utils import large_gpu_test
-from ...utils import check_embeddings_close
+from .....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
+from .....utils import large_gpu_test
+from ....utils import check_embeddings_close
 
 # BC for method that was deleted in Transformers v5.
 # Only needed for generating the HF reference.
-transformers.utils.is_flash_attn_greater_or_equal_2_10 = (
-    lambda: transformers.utils.is_flash_attn_greater_or_equal("2.1.0")
+transformers.utils.is_flash_attn_greater_or_equal_2_10 = lambda: (
+    transformers.utils.is_flash_attn_greater_or_equal("2.1.0")
 )
 
 HF_TEXT_PROMPTS = [
