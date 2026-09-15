@@ -650,7 +650,7 @@ steps:
   - tests/compile
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s compile/fullgraph/test_full_graph.py
+  - pytest -v -s compile/fullgraph/full_graph
 
 - label: ":amd: (MI300) PyTorch Nightly Dependency Override Check" # TBD
   timeout_in_minutes: 25
@@ -718,13 +718,16 @@ steps:
   - vllm/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
-  - tests/compile/fullgraph/test_basic_correctness.py
+  - tests/compile/fullgraph/_basic_correctness.py
+  - tests/compile/fullgraph/granite/
+  - tests/compile/fullgraph/bge_multilingual_gemma2/
   - tests/compile/test_wrapper.py
   - tests/entrypoints/llm/test_collective_rpc.py
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s entrypoints/llm/test_collective_rpc.py
-  - pytest -v -s ./compile/fullgraph/test_basic_correctness.py
+  - pytest -v -s compile/fullgraph/granite
+  - pytest -v -s compile/fullgraph/bge_multilingual_gemma2
   - pytest -v -s ./compile/test_wrapper.py
 
 #-----------------------------------------------------------  mi300 · cuda  ------------------------------------------------------------#
@@ -979,12 +982,15 @@ steps:
   - vllm/distributed/
   - tests/distributed/test_pynccl
   - tests/distributed/test_events
-  - tests/compile/fullgraph/test_basic_correctness.py
+  - tests/compile/fullgraph/_basic_correctness.py
+  - tests/compile/fullgraph/granite/
+  - tests/compile/fullgraph/bge_multilingual_gemma2/
   - tests/distributed/test_symm_mem_allreduce.py
   - tests/distributed/test_multiproc_executor.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s compile/fullgraph/test_basic_correctness.py
+  - pytest -v -s compile/fullgraph/granite
+  - pytest -v -s compile/fullgraph/bge_multilingual_gemma2
   - pytest -v -s distributed/test_pynccl.py
   - pytest -v -s distributed/test_events.py
   - pytest -v -s distributed/test_symm_mem_allreduce.py

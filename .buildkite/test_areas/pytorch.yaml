@@ -123,10 +123,11 @@ steps:
   commands:
   - pytest -s -v compile/passes --ignore compile/passes/distributed
 
-- label: ":nvidia: (H200 MIG 35GB) PyTorch Fullgraph"
+- label: ":nvidia: (H200 MIG 35GB) PyTorch Fullgraph Shard %N"
   device: h200_35gb
   key: pytorch-fullgraph-test
-  timeout_in_minutes: 90
+  timeout_in_minutes: 45
+  parallelism: 4
   source_file_dependencies:
   - vllm/__init__.py
   - vllm/_aiter_ops.py
@@ -157,15 +158,34 @@ steps:
   commands:
   # Run smoke tests under fullgraph directory, except test_full_cudagraph.py
   # as it is a heavy test that is covered in other steps.
-  # Use `find` to launch multiple instances of pytest so that
-  # they do not suffer from https://github.com/vllm-project/vllm/issues/28965
-  - "find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_cudagraph.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
+  # Run each directory in a separate pytest process to avoid
+  # https://github.com/vllm-project/vllm/issues/28965.
+  - |
+    set -eu
+    case "$$BUILDKITE_PARALLEL_JOB" in
+      0)
+        pytest -s -v compile/fullgraph/granite                                      # 16m
+        ;;
+      1)
+        pytest -s -v compile/fullgraph/full_graph                                   # 16m
+        ;;
+      2)
+        pytest -s -v compile/fullgraph/bge_multilingual_gemma2                      # 18m
+        ;;
+      3)
+        pytest -s -v compile/fullgraph/multimodal_compile                           # 8m combined
+        pytest -s -v compile/fullgraph/multiple_graphs
+        pytest -s -v compile/fullgraph/simple
+        pytest -s -v compile/fullgraph/toy_llama
+        ;;
+      *) exit 2 ;;
+    esac
   mirror:
     amd:
-      label: ":amd: (MI355) PyTorch Fullgraph"
+      label: ":amd: (MI355) PyTorch Fullgraph Shard %N"
       dind: false
       device: mi355_1
-      timeout_in_minutes: 90
+      timeout_in_minutes: 60
       depends_on:
       - image-build-amd
 
@@ -205,7 +225,7 @@ steps:
   - vllm/v1/
   - tests/compile
   commands:
-  - pytest -s -v compile/fullgraph/test_full_cudagraph.py
+  - pytest -s -v compile/fullgraph/full_cudagraph
 
 - label: ":nvidia: (H200 MIG 18GB) PyTorch Nightly Dependency Override Check"
   key: pytorch-nightly-dependency-override-check

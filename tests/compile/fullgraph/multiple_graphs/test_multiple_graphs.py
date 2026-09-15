@@ -22,10 +22,10 @@ from vllm.config import (
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
-from ...utils import create_new_process_for_each_test
+from ....utils import create_new_process_for_each_test
 
 # This import automatically registers `torch.ops.silly.attention`
-from .. import silly_attention  # noqa: F401
+from ... import silly_attention  # noqa: F401
 
 BATCH_SIZE = 32
 MLP_SIZE = 128
