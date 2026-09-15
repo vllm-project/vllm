@@ -7,7 +7,7 @@ import time
 import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
-from typing import Any, Optional
+from typing import Any
 
 import vllm.envs as envs
 from vllm import TokensPrompt
@@ -44,6 +44,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
 from vllm.v1.engine import EngineCoreRequest, PauseMode
+from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.engine.input_processor import InputProcessor
@@ -91,7 +92,7 @@ class AsyncLLM(EngineClient):
         client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
-        profiler: Optional[TorchProfilerWrapper] = None,  # type: ignore # noqa
+        profiler: TorchProfilerWrapper | None = None,
     ) -> None:
         """
         Create an AsyncLLM.
@@ -144,15 +145,27 @@ class AsyncLLM(EngineClient):
         # Convert EngineInput --> EngineCoreRequest.
         self.input_processor = InputProcessor(self.vllm_config, renderer)
 
+        self.admission_stats = (
+            SharedAdmissionStats(client_addresses, client_count, client_index)
+            if client_addresses is not None
+            and "mp_admission_counters" in client_addresses
+            else None
+        )
+
         # Converts EngineCoreOutputs --> RequestOutput.
         self.output_processor = OutputProcessor(
             renderer.tokenizer,
             log_stats=self.log_stats,
             stream_interval=self.vllm_config.scheduler_config.stream_interval,
             tracing_enabled=tracing_endpoint is not None,
+            admission_stats=self.admission_stats,
         )
 
         # EngineCore (starts the engine in background process).
+        # Hand the renderer to the client so it can start the frontend MM
+        # warmup only after engine-core fork (the why is in
+        # BaseRenderer.start_mm_warmup_in_background). The warmup is joined
+        # by reset_mm_cache / warmup / shutdown.
         self.engine_core = EngineCoreClient.make_async_mp_client(
             vllm_config=vllm_config,
             executor_class=executor_class,
@@ -160,6 +173,7 @@ class AsyncLLM(EngineClient):
             client_addresses=client_addresses,
             client_count=client_count,
             client_index=client_index,
+            renderer=renderer,
         )
 
         # Loggers.
@@ -185,6 +199,7 @@ class AsyncLLM(EngineClient):
         except RuntimeError:
             pass
 
+        self.profiler = profiler
         if (
             vllm_config.profiler_config.profiler == "torch"
             and not vllm_config.profiler_config.ignore_frontend
@@ -285,8 +300,9 @@ class AsyncLLM(EngineClient):
         Both limits return HTTP 503 (Service Unavailable) so that load
         balancers and client SDKs retry on a different instance.
 
-        - ``max_num_queued_reqs``: hard cap on the number of unfinished requests
-          (waiting + running).  A request with ``n > 1`` counts as ``n`` slots.
+        - ``max_num_queued_reqs``: approximate global cap on the number of
+          unfinished requests (waiting + running). A request with ``n > 1``
+          counts as ``n`` slots.
         - ``max_num_queued_tokens``: TTFT QoS — cap on the total prompt
           tokens of requests still in prefill.
 
@@ -306,13 +322,17 @@ class AsyncLLM(EngineClient):
         """
         max_num_reqs = self.scheduler_config.max_num_queued_reqs
         if max_num_reqs is not None:
-            current = self.get_num_unfinished_requests()
-            if current + n > max_num_reqs:
+            current_requests = (
+                self.admission_stats.get_num_requests()
+                if self.admission_stats is not None
+                else self.get_num_unfinished_requests()
+            )
+            if current_requests + n > max_num_reqs:
                 logger.info(
                     "Request queue full - rejecting request %s "
                     "(current=%d, n=%d, max=%d).",
                     request_id,
-                    current,
+                    current_requests,
                     n,
                     max_num_reqs,
                 )
@@ -647,6 +667,17 @@ class AsyncLLM(EngineClient):
 
         The caller of generate() iterates the returned AsyncGenerator,
         returning the RequestOutput back to the caller.
+
+        Note:
+            Passing a raw prompt string directly to this method is deprecated.
+            Advanced power-users can manually bypass the raw-prompt fallback
+            path using the Engine's underlying Renderer pipeline:
+
+            >>> from vllm.inputs import parse_model_prompt
+            >>> parsed = parse_model_prompt(self.model_config, "Prompt text")
+            >>> params = self.renderer.default_cmpl_tok_params
+            >>> (engine_input,) = self.renderer.render_cmpl([parsed], params)
+            >>> gen = self.generate(engine_input, sampling_params, request_id)
         """
 
         q: RequestOutputCollector | None = None
@@ -1023,6 +1054,9 @@ class AsyncLLM(EngineClient):
         await asyncio.gather(*coros)
 
     async def reset_mm_cache(self) -> None:
+        # Join the background MM warmup first: the mm_processor_cache is not
+        # safe for concurrent access with its apply/clear.
+        self.renderer._join_mm_warmup()
         await self.renderer.clear_mm_cache_async()
         await self.engine_core.reset_mm_cache_async()
 

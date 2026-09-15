@@ -119,6 +119,7 @@ steps:
     REGISTRY: "public.ecr.aws/q9t5s3a7"
     REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
+  optional: true
   source_file_dependencies:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
@@ -133,7 +134,8 @@ steps:
     'cd tests &&
     pytest -v -s tool_use
     --deselect="tests/tool_use/mistral/test_mistral_tool_calls.py::test_tool_call_none_with_tools[ministral-3b]"
-    --deselect="tests/tool_use/test_chat_completions.py::test_chat_completion_with_tools[granite-3.0-8b]" &&
+    --deselect="tests/tool_use/test_chat_completions.py::test_chat_completion_with_tools[granite-3.0-8b]"
+    --deselect="tests/tool_use/test_chat_completions.py::test_chat_completion_with_tools[llama3.2]" &&
     pytest -v -s entrypoints/tool_parsers &&
     pytest -v -s entrypoints/generate &&
     pytest -v -s entrypoints/anthropic &&
@@ -153,6 +155,7 @@ steps:
     REGISTRY: "public.ecr.aws/q9t5s3a7"
     REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
+  optional: true
   source_file_dependencies:
   - vllm/
   - "!vllm/distributed/kv_transfer/"

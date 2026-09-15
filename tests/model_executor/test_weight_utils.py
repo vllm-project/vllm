@@ -160,6 +160,17 @@ class TestMaybeRemapKvScaleName:
         assert result is None
 
 
+def test_checkpoint_weight_mapper_discards_serialized_g_idx():
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizationConfig,
+    )
+
+    mapper = QuantizationConfig.get_checkpoint_weight_mapper()
+
+    assert mapper._map_name("model.layers.0.g_idx") is None
+    assert mapper._map_name("model.layers.0.qweight") == "model.layers.0.qweight"
+
+
 class TestKvCacheScaleMapper:
     """The `WeightsMapper` returned by `get_cache_scale_mapper` replaces the
     per-model `maybe_remap_kv_scale_name` calls. It must remap the same set of
