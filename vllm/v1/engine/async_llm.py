@@ -145,10 +145,11 @@ class AsyncLLM(EngineClient):
         # Convert EngineInput --> EngineCoreRequest.
         self.input_processor = InputProcessor(self.vllm_config, renderer)
 
-        self.admission_stats = SharedAdmissionStats(
-            client_addresses,
-            client_count,
-            client_index,
+        self.admission_stats = (
+            SharedAdmissionStats(client_addresses, client_count, client_index)
+            if client_addresses is not None
+            and "mp_admission_counters" in client_addresses
+            else None
         )
 
         # Converts EngineCoreOutputs --> RequestOutput.
@@ -319,17 +320,23 @@ class AsyncLLM(EngineClient):
             QueueOverflowError: If ``max_num_queued_reqs`` would be exceeded.
             MaxQueuedTokensError: If ``max_num_queued_tokens`` would be exceeded.
         """
-        current_requests = self.admission_stats.get_num_requests()
         max_num_reqs = self.scheduler_config.max_num_queued_reqs
-        if max_num_reqs is not None and current_requests + n > max_num_reqs:
-            logger.info(
-                "Request queue full - rejecting request %s (current=%d, n=%d, max=%d).",
-                request_id,
-                current_requests,
-                n,
-                max_num_reqs,
+        if max_num_reqs is not None:
+            current_requests = (
+                self.admission_stats.get_num_requests()
+                if self.admission_stats is not None
+                else self.get_num_unfinished_requests()
             )
-            raise QueueOverflowError()
+            if current_requests + n > max_num_reqs:
+                logger.info(
+                    "Request queue full - rejecting request %s "
+                    "(current=%d, n=%d, max=%d).",
+                    request_id,
+                    current_requests,
+                    n,
+                    max_num_reqs,
+                )
+                raise QueueOverflowError()
 
         max_queued_tokens = self.scheduler_config.max_num_queued_tokens
         if max_queued_tokens is not None:

@@ -68,8 +68,7 @@ def _make_async_llm(
     llm.output_processor = MagicMock()
     llm.output_processor.get_num_unfinished_requests.return_value = num_unfinished
     llm.output_processor.get_num_queued_tokens.return_value = num_queued_tokens
-    llm.admission_stats = SharedAdmissionStats(None, 1, 0)
-    llm.admission_stats.set_num_requests(num_unfinished)
+    llm.admission_stats = None
     return llm
 
 
@@ -312,7 +311,6 @@ async def test_concurrent_single_request_admission_respects_limit():
         request_states[request.request_id] = _make_req_state(
             len(request.prompt_token_ids)
         )
-        llm.admission_stats.set_num_requests(len(request_states))
 
     llm.output_processor.add_request.side_effect = add_request
 
