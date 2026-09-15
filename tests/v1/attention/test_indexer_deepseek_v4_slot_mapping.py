@@ -216,6 +216,13 @@ def test_indexer_warmup_includes_pcp_normalized_dcp_key(monkeypatch):
     # Triton's compile key normalizes generic i32 values to 2 and divisible
     # i32 values (including zero) to 16.
     assert {(key.dcp_rank, key.dcp_world) for key in keys} == {(2, 2), (16, 1)}
+    assert {
+        (
+            key.input_variant.is_aligned("uncompressed_seq_lens"),
+            key.input_variant.is_aligned("cu_compressed_seq_lens"),
+        )
+        for key in keys
+    } == {(False, False), (False, True), (True, False), (True, True)}
 
 
 def test_compressed_slot_mapping_warmup_includes_index_kpool():

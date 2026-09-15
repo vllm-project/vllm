@@ -521,9 +521,26 @@ class BuildPrefillChunkMetadataKernel(
             DCP_INTERLEAVE=dcp_interleave,
             BLOCK_SIZE=self.BLOCK_SIZE,
             COMPRESS_RATIO=list(compress_ratios),
+            # PCP's global cumulative lengths are the second row of one packed
+            # allocation, so their pointer is not always 16-byte aligned.
+            # Prefill chunking can independently unalign uncompressed lengths.
             input_variant=(
-                TritonPointerInputVariant.from_alignment(uncompressed_seq_lens=True),
-                TritonPointerInputVariant.from_alignment(uncompressed_seq_lens=False),
+                TritonPointerInputVariant.from_alignment(
+                    uncompressed_seq_lens=True,
+                    cu_compressed_seq_lens=True,
+                ),
+                TritonPointerInputVariant.from_alignment(
+                    uncompressed_seq_lens=True,
+                    cu_compressed_seq_lens=False,
+                ),
+                TritonPointerInputVariant.from_alignment(
+                    uncompressed_seq_lens=False,
+                    cu_compressed_seq_lens=True,
+                ),
+                TritonPointerInputVariant.from_alignment(
+                    uncompressed_seq_lens=False,
+                    cu_compressed_seq_lens=False,
+                ),
             ),
         )
 
@@ -534,7 +551,9 @@ class BuildPrefillChunkMetadataKernel(
             uncompressed_seq_lens=compile_key.input_variant.pointer(
                 "uncompressed_seq_lens", torch.int32
             ),
-            cu_compressed_seq_lens=int32_ptr,
+            cu_compressed_seq_lens=compile_key.input_variant.pointer(
+                "cu_compressed_seq_lens", torch.int32
+            ),
             row_start_cu_compressed_seq_lens=int32_ptr,
             token_to_seq=int32_ptr,
             cu_compressed_seq_len_ks=int32_ptr,
