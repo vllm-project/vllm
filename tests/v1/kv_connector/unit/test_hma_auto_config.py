@@ -8,10 +8,17 @@ import pytest
 from vllm.config import DeviceConfig, KVTransferConfig, SchedulerConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
+    MultiConnector,
+)
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
 pytestmark = pytest.mark.cpu_test
+
+
+class MockMultiConnector(MultiConnector):
+    pass
 
 
 @pytest.fixture(autouse=True)
@@ -72,8 +79,55 @@ def mock_hybrid_kv_cache_supported(monkeypatch):
             ),
             True,
         ),
+        (  # MultiConnector subclass: all HMA children → HMA stays enabled
+            KVTransferConfig(
+                kv_connector="MockMultiConnector",
+                kv_connector_module_path=__name__,
+                kv_role="kv_both",
+                kv_connector_extra_config={
+                    "connectors": [
+                        {
+                            "kv_connector": "SimpleCPUOffloadConnector",
+                            "kv_role": "kv_both",
+                            "kv_connector_extra_config": {"cpu_bytes_to_use": 1 << 30},
+                        },
+                        {
+                            "kv_connector": "OffloadingConnector",
+                            "kv_role": "kv_both",
+                            "kv_connector_extra_config": {"cpu_bytes_to_use": 1 << 30},
+                        },
+                    ]
+                },
+            ),
+            False,
+        ),
+        (  # MultiConnector subclass: mixed children → HMA is auto-disabled
+            KVTransferConfig(
+                kv_connector="MockMultiConnector",
+                kv_connector_module_path=__name__,
+                kv_role="kv_both",
+                kv_connector_extra_config={
+                    "connectors": [
+                        {
+                            "kv_connector": "SimpleCPUOffloadConnector",
+                            "kv_role": "kv_both",
+                            "kv_connector_extra_config": {"cpu_bytes_to_use": 1 << 30},
+                        },
+                        {"kv_connector": "ExampleConnector", "kv_role": "kv_both"},
+                    ]
+                },
+            ),
+            True,
+        ),
     ],
-    ids=["hma_connector", "non_hma_connector", "multi_all_hma", "multi_mixed"],
+    ids=[
+        "hma_connector",
+        "non_hma_connector",
+        "multi_all_hma",
+        "multi_mixed",
+        "multi_subclass_all_hma",
+        "multi_subclass_mixed",
+    ],
 )
 def test_hma_auto_config(kv_transfer_config, expect_disabled):
     vllm_config = VllmConfig(
