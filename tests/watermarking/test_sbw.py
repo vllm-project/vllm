@@ -6,6 +6,9 @@ Test structure mirrors tests/watermarking/test_gumbel.py and
 tests/watermarking/test_watermarking.py.
 """
 
+from types import SimpleNamespace
+
+import numpy as np
 import pytest
 import torch
 
@@ -13,6 +16,8 @@ from vllm.config.watermarking import WatermarkConfig
 from vllm.platforms import current_platform
 from vllm.v1.watermarking import SBWWatermarkDetector, SBWWatermarker
 from vllm.v1.watermarking.factory import create_watermarker
+from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
+from vllm.v1.worker.gpu.sample.sampler import Sampler
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -319,3 +324,164 @@ class TestSBWDetector:
         tokens = list(range(50))
         detection = detector.detect(tokens)
         assert 0.0 <= detection.p_value <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# GPUWatermarkSampler -- SBW bias path
+# ---------------------------------------------------------------------------
+# These tests verify that GPUWatermarkSampler.sample() applies the SBW bias
+# on raw logits (before apply_sampling_params) and that per-row delta=0.0
+# correctly leaves non-watermarked rows untouched.
+# ---------------------------------------------------------------------------
+
+
+def _make_sbw_gpu_sampler(
+    watermarked: list[bool],
+    temperatures: list[float] | None = None,
+) -> GPUWatermarkSampler:
+    """Build a minimal GPUWatermarkSampler stub for SBW path tests."""
+    B = len(watermarked)
+    if temperatures is None:
+        temperatures = [1.0] * B
+    wm = _make_watermarker(delta=2.0, gamma=0.5)
+    sampler = object.__new__(GPUWatermarkSampler)
+    sampler.watermarker = wm
+    sampler.watermarking = SimpleNamespace(
+        np=np.array(watermarked),
+        gpu=torch.tensor(watermarked),
+    )
+    sampler.sampling_states = SimpleNamespace(
+        temperature=SimpleNamespace(
+            np=np.array(temperatures), gpu=torch.tensor(temperatures)
+        ),
+        seeds=SimpleNamespace(gpu=torch.zeros(B, dtype=torch.int64)),
+    )
+    sampler._get_contexts = lambda idx_mapping: torch.zeros(
+        len(idx_mapping), wm.context_width, dtype=torch.int64
+    )
+    return sampler
+
+
+def test_sbw_gpu_sampler_biases_raw_logits_before_super(monkeypatch):
+    """sample() must pass biased logits to super().sample(), not raw ones.
+
+    We intercept super().sample() and verify that the logits it receives
+    are different from the raw logits passed in (i.e. bias was applied).
+    """
+    sampler = _make_sbw_gpu_sampler(watermarked=[True])
+    received: list[torch.Tensor] = []
+
+    def fake_super_sample(self, logits, *args, **kwargs):
+        received.append(logits.clone())
+        return torch.tensor([0]), logits
+
+    monkeypatch.setattr(Sampler, "sample", fake_super_sample)
+
+    raw_logits = torch.zeros(1, 100)
+    sampler.sample(
+        raw_logits,
+        torch.tensor([0]),
+        torch.tensor([0]),
+        np.array([0]),
+        torch.zeros(1, dtype=torch.int64),
+        torch.zeros(1, dtype=torch.int64),
+        torch.zeros(1, dtype=torch.int64),
+    )
+
+    assert len(received) == 1
+    # At least some tokens must have been biased
+    assert not torch.equal(received[0], raw_logits), (
+        "super().sample() received unchanged logits -- bias was not applied"
+    )
+
+
+def test_sbw_gpu_sampler_does_not_bias_when_no_watermarked_rows(monkeypatch):
+    """If no rows are watermarked, raw logits must reach super() unchanged."""
+    sampler = _make_sbw_gpu_sampler(watermarked=[False, False])
+    received: list[torch.Tensor] = []
+
+    def fake_super_sample(self, logits, *args, **kwargs):
+        received.append(logits.clone())
+        return torch.tensor([0, 0]), logits
+
+    monkeypatch.setattr(Sampler, "sample", fake_super_sample)
+
+    raw_logits = torch.zeros(2, 100)
+    sampler.sample(
+        raw_logits,
+        torch.tensor([0, 1]),
+        torch.tensor([0, 1]),
+        np.array([0, 1]),
+        torch.zeros(2, dtype=torch.int64),
+        torch.zeros(2, dtype=torch.int64),
+        torch.zeros(2, dtype=torch.int64),
+    )
+
+    assert len(received) == 1
+    assert torch.equal(received[0], raw_logits), (
+        "super().sample() received modified logits despite no watermarked rows"
+    )
+
+
+def test_sbw_gpu_sampler_mixed_batch_non_watermarked_rows_unchanged(monkeypatch):
+    """Non-watermarked rows must receive delta=0 bias (i.e. unchanged logits)."""
+    sampler = _make_sbw_gpu_sampler(watermarked=[True, False, True, False])
+    received: list[torch.Tensor] = []
+
+    def fake_super_sample(self, logits, *args, **kwargs):
+        received.append(logits.clone())
+        return torch.zeros(4, dtype=torch.int64), logits
+
+    monkeypatch.setattr(Sampler, "sample", fake_super_sample)
+
+    raw_logits = torch.zeros(4, 100)
+    sampler.sample(
+        raw_logits,
+        torch.tensor([0, 1, 2, 3]),
+        torch.tensor([0, 1, 2, 3]),
+        np.array([0, 1, 2, 3]),
+        torch.zeros(4, dtype=torch.int64),
+        torch.zeros(4, dtype=torch.int64),
+        torch.zeros(4, dtype=torch.int64),
+    )
+
+    assert len(received) == 1
+    biased = received[0]
+    # Non-watermarked rows (1, 3) must be identical to raw
+    assert torch.equal(biased[1], raw_logits[1]), "row 1 (unwatermarked) was modified"
+    assert torch.equal(biased[3], raw_logits[3]), "row 3 (unwatermarked) was modified"
+    # Watermarked rows (0, 2) must differ
+    assert not torch.equal(biased[0], raw_logits[0]), (
+        "row 0 (watermarked) was not biased"
+    )
+    assert not torch.equal(biased[2], raw_logits[2]), (
+        "row 2 (watermarked) was not biased"
+    )
+
+
+def test_sbw_gpu_sampler_biases_greedy_requests(monkeypatch):
+    """SBW must bias greedy (temperature=0) requests unlike Gumbel."""
+    sampler = _make_sbw_gpu_sampler(watermarked=[True], temperatures=[0.0])
+    received: list[torch.Tensor] = []
+
+    def fake_super_sample(self, logits, *args, **kwargs):
+        received.append(logits.clone())
+        return torch.tensor([0]), logits
+
+    monkeypatch.setattr(Sampler, "sample", fake_super_sample)
+
+    raw_logits = torch.zeros(1, 100)
+    sampler.sample(
+        raw_logits,
+        torch.tensor([0]),
+        torch.tensor([0]),
+        np.array([0]),
+        torch.zeros(1, dtype=torch.int64),
+        torch.zeros(1, dtype=torch.int64),
+        torch.zeros(1, dtype=torch.int64),
+    )
+
+    assert len(received) == 1
+    assert not torch.equal(received[0], raw_logits), (
+        "SBW bias was not applied to greedy request"
+    )

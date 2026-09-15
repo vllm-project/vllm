@@ -55,6 +55,59 @@ class GPUWatermarkSampler(Sampler):
         super().apply_staged_writes()
         self.watermarking.copy_to_uva()
 
+    def sample(
+        self,
+        logits: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+        pos: torch.Tensor,
+        input_ids: torch.Tensor,
+        expanded_local_pos: torch.Tensor,
+        return_logprobs: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Apply SBW bias on raw logits before sampling-param processing.
+
+        Bias-based watermarkers (supports_greedy=True) must see raw logits so
+        that the green-list bias is applied before top-k/top-p filtering.  A
+        green token just outside top-k can therefore be promoted into the
+        candidate set by +delta, matching the semantics of the standalone
+        vllm_sbw LogitsProcessor reference implementation.
+
+        Noise-based watermarkers (Gumbel) are unaffected: their watermark is
+        applied inside _sample_random after top-k/top-p, as before.
+        """
+        if self.watermarker.supports_greedy:
+            watermarking = self.watermarking.np[idx_mapping_np]
+            if np.any(watermarking):
+                contexts = self._get_contexts(expanded_idx_mapping)
+                # Per-row delta: 0.0 for non-watermarked rows so they are
+                # unaffected; self.watermarker.delta for watermarked rows.
+                enabled_gpu = self.watermarking.gpu[expanded_idx_mapping]
+                delta_vec = torch.where(
+                    enabled_gpu,
+                    torch.full(
+                        (1,),
+                        self.watermarker.delta,  # type: ignore[attr-defined]
+                        dtype=logits.dtype,
+                        device=logits.device,
+                    ),
+                    torch.zeros(1, dtype=logits.dtype, device=logits.device),
+                )
+                logits = self.watermarker.bias(  # type: ignore[attr-defined]
+                    logits, contexts, delta_vec
+                )
+        return super().sample(
+            logits,
+            expanded_idx_mapping,
+            idx_mapping,
+            idx_mapping_np,
+            pos,
+            input_ids,
+            expanded_local_pos,
+            return_logprobs,
+        )
+
     def _sample_random(
         self,
         processed_logits: torch.Tensor,
@@ -65,21 +118,27 @@ class GPUWatermarkSampler(Sampler):
         top_p: torch.Tensor | None,
         use_flashinfer: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        watermarking = self.watermarking.np[idx_mapping_np]
         if self.watermarker.supports_greedy:
-            # Bias-based watermarkers (e.g. SBW) can watermark greedy requests:
-            # +delta shifts the argmax toward green tokens. gumbel_sample
-            # already handles temperature=0 as a plain argmax, so no special
-            # casing is needed.
-            enabled = watermarking
-        else:
-            # Noise-based watermarkers (e.g. Gumbel) must skip greedy requests:
-            # Gumbel noise would corrupt the argmax.
-            enabled = watermarking & (
-                self.sampling_states.temperature.np[idx_mapping_np] != 0
+            # Bias-based watermarkers (e.g. SBW): bias was already applied on
+            # raw logits in sample() before apply_sampling_params ran.
+            # top-k/top-p filtering and sampling are handled by the base class.
+            return super()._sample_random(
+                processed_logits,
+                expanded_idx_mapping,
+                idx_mapping_np,
+                pos,
+                top_k,
+                top_p,
+                use_flashinfer,
             )
+
+        # Noise-based watermarkers (e.g. Gumbel): filter first, then the
+        # watermarker adds noise and samples.
+        watermarking = self.watermarking.np[idx_mapping_np]
+        enabled = watermarking & (
+            self.sampling_states.temperature.np[idx_mapping_np] != 0
+        )
         if not np.any(enabled):
-            # No watermarked requests: delegate entirely to normal sampler.
             return super()._sample_random(
                 processed_logits,
                 expanded_idx_mapping,

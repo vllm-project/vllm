@@ -118,7 +118,7 @@ def _sbw_selfhash_inner(
     context: torch.Tensor,  # (B, context_width) int64
     logits: torch.Tensor,  # (B, V) float, mutated in-place
     gamma_int: torch.Tensor,  # () int64 scalar
-    delta: float,
+    delta: torch.Tensor,  # (B,) float, per-row bias (0.0 for non-watermarked)
     hash_key: torch.Tensor,  # () int64 scalar
 ) -> torch.Tensor:
     """Selfhash: anchored minhash PRF + Philox + green-list bias (in-place).
@@ -162,7 +162,9 @@ def _sbw_selfhash_inner(
         r0,
         torch.where(word_idx == 1, r1, torch.where(word_idx == 2, r2, r3)),
     )
-    logits = logits + ((sel & _INT31_MAX) < gamma_int).to(logits.dtype) * delta
+    logits = logits + (
+        ((sel & _INT31_MAX) < gamma_int).to(logits.dtype) * delta.unsqueeze(-1)
+    )
     return logits
 
 
@@ -180,7 +182,7 @@ def _sbw_lefthash_inner(
     context: torch.Tensor,
     logits: torch.Tensor,
     gamma_int: torch.Tensor,
-    delta: float,
+    delta: torch.Tensor,  # (B,) float, per-row bias (0.0 for non-watermarked)
     hash_key: torch.Tensor,
 ) -> torch.Tensor:
     """Lefthash: additive PRF (one seed per row) + Philox + green-list bias."""
@@ -206,7 +208,9 @@ def _sbw_lefthash_inner(
         r0,
         torch.where(word_idx == 1, r1, torch.where(word_idx == 2, r2, r3)),
     )
-    logits = logits + ((sel & _INT31_MAX) < gamma_int).to(logits.dtype) * delta
+    logits = logits + (
+        ((sel & _INT31_MAX) < gamma_int).to(logits.dtype) * delta.unsqueeze(-1)
+    )
     return logits
 
 
@@ -289,6 +293,46 @@ class SBWWatermarker(Watermarker):
             f"gamma={self.gamma}, delta={self.delta})"
         )
 
+    def _ensure_key_tensors(self, device: torch.device) -> None:
+        """Lazily create cached scalar tensors on the target device."""
+        if self._hash_key_t is None or self._hash_key_t.device != device:
+            self._hash_key_t = torch.tensor(self._key, dtype=torch.int64, device=device)
+            self._gamma_int_t = torch.tensor(
+                self._gamma_int, dtype=torch.int64, device=device
+            )
+
+    def bias(
+        self,
+        logits: torch.Tensor,
+        contexts: torch.Tensor,
+        delta_vec: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply per-row SBW green-list bias to logits and return the result.
+
+        Args:
+            logits: (B, V) logit tensor. May be fp16/bf16; bias is applied
+                in the tensor's native dtype.
+            contexts: (B, context_width) int64 context tensor.
+            delta_vec: (B,) float tensor of per-row bias values. Pass
+                self.delta for watermarked rows and 0.0 for non-watermarked
+                rows so that non-watermarked requests are unaffected.
+
+        Returns:
+            Biased logits tensor (same shape and dtype as input).
+        """
+        self._ensure_key_tensors(logits.device)
+        assert self._gamma_int_t is not None
+        assert self._hash_key_t is not None
+        delta_vec = delta_vec.to(logits.dtype)
+        if self.scheme == "selfhash":
+            return _sbw_selfhash_compiled(
+                contexts, logits, self._gamma_int_t, delta_vec, self._hash_key_t
+            )
+        else:
+            return _sbw_lefthash_compiled(
+                contexts, logits, self._gamma_int_t, delta_vec, self._hash_key_t
+            )
+
     def sample(
         self,
         logits: torch.Tensor,
@@ -298,59 +342,38 @@ class SBWWatermarker(Watermarker):
     ) -> WatermarkSample:
         """Bias logits toward the green list then delegate to random_sampler.
 
-        SBW applies its bias before any top-k/top-p filtering, letting the
-        normal sampler (FlashInfer or gumbel) handle filtering on the biased
-        logits. random_sampler is required for SBW; if None, falls back to
-        argmax (useful for CPU-only tests).
+        In the GPU serving path, bias is applied upstream (before top-k/top-p)
+        via bias(). This method is retained for the spec-decode draft path and
+        CPU-only unit tests where top-k/top-p is not applied.
         """
+        B = logits.shape[0]
         device = logits.device
-        # Create scalar tensors once and cache them. torch.tensor() with a
-        # CUDA device blocks until the GPU is idle, which adds ~14ms per step
-        # when called on the hot path during an ongoing forward pass.
-        if self._hash_key_t is None or self._hash_key_t.device != device:
-            self._hash_key_t = torch.tensor(self._key, dtype=torch.int64, device=device)
-            self._gamma_int_t = torch.tensor(
-                self._gamma_int, dtype=torch.int64, device=device
-            )
-        hash_key = self._hash_key_t
-        assert self._gamma_int_t is not None
-        gamma_int = self._gamma_int_t
-
-        if self.scheme == "selfhash":
-            biased = _sbw_selfhash_compiled(
-                contexts, logits, gamma_int, self.delta, hash_key
-            )
-        else:
-            biased = _sbw_lefthash_compiled(
-                contexts, logits, gamma_int, self.delta, hash_key
-            )
-
-        # Delegate to the normal (FlashInfer) sampler on the biased logits.
-        if random_sampler is not None:
-            wm_ids = random_sampler(biased)
-        else:
-            wm_ids = biased.argmax(dim=-1)
-
         if skip_mask is not None:
-            if random_sampler is not None:
-                unwm_ids = random_sampler(logits)
-            else:
-                unwm_ids = logits.argmax(dim=-1)
-            token_ids = torch.where(skip_mask, unwm_ids, wm_ids)
-            out_logits = torch.where(skip_mask.unsqueeze(-1), logits, biased)
+            # Per-row delta: 0.0 for rows that should not be watermarked.
+            delta_vec = torch.where(
+                skip_mask,
+                torch.zeros(1, dtype=logits.dtype, device=device),
+                torch.full((1,), self.delta, dtype=logits.dtype, device=device),
+            )
         else:
-            token_ids = wm_ids
-            out_logits = biased
+            delta_vec = torch.full((B,), self.delta, dtype=logits.dtype, device=device)
 
-        return WatermarkSample(token_ids=token_ids, logits=out_logits)
+        biased = self.bias(logits, contexts, delta_vec)
+
+        if random_sampler is not None:
+            token_ids = random_sampler(biased)
+        else:
+            token_ids = biased.argmax(dim=-1)
+
+        return WatermarkSample(token_ids=token_ids, logits=biased)
 
     def _sample_watermarked(
         self,
         logits: torch.Tensor,
         contexts: torch.Tensor,
     ) -> WatermarkSample:
-        # SBW overrides sample() directly; this path is only reached when
-        # no random_sampler is available (e.g. CPU-only unit tests).
+        # SBW overrides sample() directly so this path is never reached via
+        # the base class. Implemented only to satisfy the ABC.
         return self.sample(logits, contexts, random_sampler=None, skip_mask=None)
 
 
