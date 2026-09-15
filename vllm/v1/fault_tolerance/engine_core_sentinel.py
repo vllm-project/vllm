@@ -17,7 +17,9 @@ from vllm.config import set_current_vllm_config
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.distributed.utils import (
     create_tcp_store,
+    enter_steady_state,
     init_gloo_process_group,
+    set_gloo_backend_timeout,
 )
 from vllm.logger import init_logger
 from vllm.v1.engine import (
@@ -68,6 +70,26 @@ class EngineCoreSentinel:
         after a scale_down the engine never idle-pauses and keeps stepping
         dummy batches instead."""
         return bool(self._dead_dp_ranks)
+
+    def activate_cpu_group_timeouts(self) -> None:
+        """Give startup-created gloo groups the configured cpu timeout."""
+        enter_steady_state()
+        timeout_seconds = self.parallel_config.cpu_distributed_timeout_seconds
+        if timeout_seconds is None:
+            return
+        if self._initial_dp_size > 1:
+            set_gloo_backend_timeout(
+                cast("DPEngineCoreProc", self.engine).dp_group,
+                timedelta(seconds=timeout_seconds),
+            )
+        self.engine.model_executor.collective_rpc(
+            "handle_ft_command",
+            args=(
+                FaultToleranceRequest(
+                    instruction="activate_cpu_group_timeouts", params={}
+                ),
+            ),
+        )
 
     def handle_command(self, client_idx: int, call_id: int, ft_args: dict):
         """Dispatch an FT command by instruction name."""
@@ -412,6 +434,8 @@ def fault_tolerant_wrapper(busy_loop_func: Callable):
     """Wrap the busy loop to catch faults and delegate recovery."""
 
     def run_with_fault_tolerance(self: "EngineCoreProc"):
+        if self.enable_fault_tolerance:
+            self.ft_sentinel.activate_cpu_group_timeouts()
         while True:
             try:
                 busy_loop_func(self)
