@@ -767,6 +767,7 @@ def get_model_params(config):
         "DeepseekV3ForCausalLM",
         "DeepseekV32ForCausalLM",
         "DeepseekV4ForCausalLM",
+        "DeepseekForCausalLM",
         "GlmMoeDsaForCausalLM",
         "Glm4MoeForCausalLM",
         "Glm4MoeLiteForCausalLM",
