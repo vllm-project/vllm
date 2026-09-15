@@ -333,7 +333,15 @@ def _selective_scan_update_kernel(
     if HAS_STATE_BATCH_INDICES:
         if IS_SPEC_DECODING:
             num_accepted = tl.load(num_accepted_tokens_ptr + pid_b).to(tl.int64)
+            # Preserve the existing zero-count clamp while bounding the
+            # accepted-token-derived state lookup to this request's row.
+            # The bound is the ROW stride (elements per batch row), matching
+            # fused_recurrent.py's i_t < stride_indices_seq: for a contiguous
+            # [batch, T] tensor stride(0) == T. stride(1) would be 1 there,
+            # which rejects every accepted count > 1 (and a padded row keeps
+            # any overshoot inside this request's allocated slack).
             init_token_idx = tl.maximum(num_accepted - 1, 0)
+            valid_initial_token = init_token_idx < stride_state_indices_batch
         else:
             init_token_idx = 0
 
@@ -347,9 +355,17 @@ def _selective_scan_update_kernel(
                 dst_state_batch_idx * stride_state_batch + pid_h * stride_state_head
             )
 
-        state_batch_indices_ptr += (
-            pid_b * stride_state_indices_batch + init_token_idx * stride_state_indices_T
-        )
+        state_batch_indices_ptr += pid_b * stride_state_indices_batch
+        if IS_SPEC_DECODING and not valid_initial_token:
+            offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+            zero = tl.zeros([BLOCK_SIZE_M], dtype=tl.float32)
+            out_ptr += bos * stride_out_batch + pid_h * stride_out_head
+            for _ in range(seq_len):
+                tl.store(out_ptr + offs_m * stride_out_dim, zero, mask=offs_m < dim)
+                out_ptr += stride_out_batch
+            return
+
+        state_batch_indices_ptr += init_token_idx * stride_state_indices_T
         state_batch_idx = tl.load(state_batch_indices_ptr).to(tl.int64)
         state_ptr += state_batch_idx * stride_state_batch + pid_h * stride_state_head
     else:

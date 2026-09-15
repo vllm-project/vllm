@@ -1152,3 +1152,129 @@ def test_selective_state_update_varlen_with_num_accepted(
             state_ref = state_ref_intermediate[(seq_idx, token_idx)].squeeze(0)
 
             assert torch.allclose(state[dst_slot], state_ref, rtol=rtol, atol=atol)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@torch.inference_mode()
+def test_selective_state_update_rejects_accepted_count_past_state_row():
+    """An invalid accepted count must not select an adjacent state row."""
+    dim, dstate, seq_len = 64, 16, 3
+    total_state_slots = 12
+    set_random_seed(2026)
+
+    state = torch.randn(
+        total_state_slots, dim, dstate, dtype=torch.float32, device=DEVICE
+    )
+    state_before = state.clone()
+
+    state_indices_storage = torch.full(
+        (3, seq_len), NULL_BLOCK_ID, dtype=torch.int32, device=DEVICE
+    )
+    state_indices_storage[1, 0] = 1
+    # Keep the old out-of-row access inside allocated storage so this is a
+    # deterministic semantic regression rather than an illegal-address probe.
+    state_indices_storage[2, 0] = 2
+    state_batch_indices = state_indices_storage[1:2]
+    dst_state_batch_indices = torch.tensor(
+        [[3, 4, 5]], dtype=torch.int32, device=DEVICE
+    )
+
+    x = torch.randn(seq_len, dim, device=DEVICE)
+    dt = torch.randn_like(x)
+    A = -torch.rand(dim, dstate, device=DEVICE) - 1.0
+    B = torch.randn(seq_len, dstate, device=DEVICE)
+    C = torch.randn_like(B)
+    D = torch.randn(dim, device=DEVICE)
+    dt_bias = torch.rand(dim, device=DEVICE) - 4.0
+    out = torch.full_like(x, torch.nan)
+
+    selective_state_update(
+        state,
+        x,
+        dt,
+        A,
+        B,
+        C,
+        D=D,
+        dt_bias=dt_bias,
+        dt_softplus=True,
+        state_batch_indices=state_batch_indices,
+        dst_state_batch_indices=dst_state_batch_indices,
+        out=out,
+        num_accepted_tokens=torch.tensor(
+            [seq_len + 1], dtype=torch.int32, device=DEVICE
+        ),
+        cu_seqlens=torch.tensor([0, seq_len], dtype=torch.int32, device=DEVICE),
+    )
+
+    torch.testing.assert_close(out, torch.zeros_like(out))
+    torch.testing.assert_close(state, state_before)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@torch.inference_mode()
+def test_selective_state_update_accepts_valid_accepted_count_within_row():
+    """A VALID accepted count > 1 must still compute, not fail closed.
+
+    Discriminating half of the bounds regression above: the first version of
+    the bound compared against stride(1) (== 1 when contiguous), which
+    rejected every accepted count > 1 and zeroed legitimate speculative
+    decode output while leaving state untouched. Guarding only the invalid
+    side cannot catch that (an oversized count fails closed under both the
+    right and the wrong bound), so this test pins the valid side: real
+    output, state mutation.
+    """
+    dim, dstate, seq_len = 64, 16, 3
+    total_state_slots = 12
+    set_random_seed(2026)
+
+    state = torch.randn(
+        total_state_slots, dim, dstate, dtype=torch.float32, device=DEVICE
+    )
+    state_before = state.clone()
+
+    state_indices_storage = torch.full(
+        (3, seq_len), NULL_BLOCK_ID, dtype=torch.int32, device=DEVICE
+    )
+    # Column 1 (init_token_idx for num_accepted == 2) selects state row 1.
+    state_indices_storage[1, 0] = 6
+    state_indices_storage[1, 1] = 1
+    state_indices_storage[1, 2] = 7
+    state_batch_indices = state_indices_storage[1:2]
+    dst_state_batch_indices = torch.tensor(
+        [[3, 4, 5]], dtype=torch.int32, device=DEVICE
+    )
+
+    x = torch.randn(seq_len, dim, device=DEVICE)
+    dt = torch.randn_like(x)
+    A = -torch.rand(dim, dstate, device=DEVICE) - 1.0
+    B = torch.randn(seq_len, dstate, device=DEVICE)
+    C = torch.randn_like(B)
+    D = torch.randn(dim, device=DEVICE)
+    dt_bias = torch.rand(dim, device=DEVICE) - 4.0
+    out = torch.full_like(x, torch.nan)
+
+    selective_state_update(
+        state,
+        x,
+        dt,
+        A,
+        B,
+        C,
+        D=D,
+        dt_bias=dt_bias,
+        dt_softplus=True,
+        state_batch_indices=state_batch_indices,
+        dst_state_batch_indices=dst_state_batch_indices,
+        out=out,
+        num_accepted_tokens=torch.tensor([2], dtype=torch.int32, device=DEVICE),
+        cu_seqlens=torch.tensor([0, seq_len], dtype=torch.int32, device=DEVICE),
+    )
+
+    assert not torch.isnan(out).any(), "output was never written"
+    assert not torch.equal(out, torch.zeros_like(out)), (
+        "valid accepted count was wrongly failed closed to zero output"
+    )
+    assert not torch.equal(state, state_before), (
+        "valid accepted count wrongly skipped the state update"
+    )
