@@ -13,6 +13,7 @@ from tests.watermarking.golden_candidates import (
     WATERMARKING_CANDIDATES,
     GoldenCandidatePayload,
     GoldenFormatError,
+    GoldenGuardError,
     GoldenPayload,
     compare_entries,
     compare_golden,
@@ -20,6 +21,7 @@ from tests.watermarking.golden_candidates import (
     frozen_entry,
     golden_payload,
     read_goldens,
+    validate_golden_guards,
 )
 
 GOLDENS_PATH = Path(__file__).with_name("watermarking_goldens.json")
@@ -77,7 +79,8 @@ def main(argv: list[str] | None = None) -> int:
 def _check() -> int:
     try:
         stored = read_goldens(GOLDENS_PATH)
-    except (OSError, GoldenFormatError) as error:
+        validate_golden_guards(stored)
+    except (OSError, GoldenFormatError, GoldenGuardError) as error:
         print(error)
         return 1
 
@@ -136,6 +139,7 @@ def _write(
     payload: GoldenPayload,
     previous: dict[str, GoldenCandidatePayload] | None = None,
 ) -> int:
+    validate_golden_guards(payload["candidates"])
     if previous is None:
         try:
             previous = read_goldens(GOLDENS_PATH)

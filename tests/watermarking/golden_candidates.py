@@ -7,7 +7,7 @@ import json
 import math
 import platform
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TypedDict, TypeVar, cast, get_args
 
@@ -41,6 +41,9 @@ GOLDEN_FLOAT_RTOL = 1e-9
 GOLDEN_FLOAT_ATOL = 1e-300
 
 P_VALUE_RATIO_MIN_DISTANCE = 1e-6
+REPETITIVE_MIN_KEY_PERTURBATION_TOKENS = 8
+REPETITIVE_MAX_P_VALUE_RATIO = 0.5
+ROUTING_BOUNDARY_MIN_DISTANCE = 1e-6
 
 # round(((i + 1) * (5**0.5 - 1) / 2) % 1.0, 4) for i in range(64)
 ROUTING_UNIFORMS: tuple[float, ...] = (
@@ -529,6 +532,15 @@ WATERMARKING_CANDIDATES = (
         fixture=MIDDLE_FIXTURE,
     ),
     _candidate(
+        "gumbel-philox-key42-cw4-mid-no-dedup",
+        "gumbel",
+        42,
+        generation_deduplicate_contexts="none",
+        generation_deduplicate_contexts_max_history=None,
+        detection_deduplicate_contexts=False,
+        fixture=MIDDLE_FIXTURE,
+    ),
+    _candidate(
         "gumbel-philox-key42-cw4-mid-all",
         "gumbel",
         42,
@@ -637,6 +649,12 @@ SKIP_PARTIAL_TWINS = (
         "gumbel-philox-key42-cw4-mid-all",
     ),
 )
+DEDUPLICATION_TWINS = (
+    (
+        "gumbel-philox-key42-cw4-mid-history-none",
+        "gumbel-philox-key42-cw4-mid-no-dedup",
+    ),
+)
 
 
 def environment_block() -> dict[str, str]:
@@ -650,16 +668,106 @@ def environment_block() -> dict[str, str]:
 
 
 def frozen_entry(candidate: WatermarkingCandidate) -> GoldenCandidatePayload:
-    """Build the entry to freeze for one candidate, refusing unstable rows."""
-    entry = candidate.golden_entry()
-    ratio = entry["detection"]["p_value_ratio"]
-    if abs(ratio - 1.0) < P_VALUE_RATIO_MIN_DISTANCE:
-        raise GoldenGuardError(
-            f"{candidate.id}: p_value is within "
-            f"{P_VALUE_RATIO_MIN_DISTANCE:g} of p_value_threshold "
-            f"(ratio {ratio!r}), so is_watermarked is not reproducible"
+    """Build the entry to freeze for one candidate."""
+    return candidate.golden_entry()
+
+
+def validate_golden_guards(
+    entries: Mapping[str, GoldenCandidatePayload],
+) -> None:
+    candidates_by_id = {
+        candidate.id: candidate for candidate in WATERMARKING_CANDIDATES
+    }
+    missing = sorted(set(candidates_by_id) - set(entries))
+    if missing:
+        raise GoldenGuardError(f"golden entries are missing candidates: {missing}")
+
+    for candidate in WATERMARKING_CANDIDATES:
+        entry = entries[candidate.id]
+        ratio = entry["detection"]["p_value_ratio"]
+        if abs(ratio - 1.0) < P_VALUE_RATIO_MIN_DISTANCE:
+            raise GoldenGuardError(
+                f"{candidate.id}: p_value is within "
+                f"{P_VALUE_RATIO_MIN_DISTANCE:g} of p_value_threshold "
+                f"(ratio {ratio!r}), so is_watermarked is not reproducible"
+            )
+
+        if candidate.fixture == REPETITIVE_FIXTURE:
+            alternate_tokens = replace(candidate, key=candidate.key ^ 1).generate()
+            changed_tokens = sum(
+                actual != alternate
+                for actual, alternate in zip(
+                    entry["generation"], alternate_tokens, strict=True
+                )
+            )
+            if changed_tokens < REPETITIVE_MIN_KEY_PERTURBATION_TOKENS:
+                raise GoldenGuardError(
+                    f"{candidate.id}: key ^ 1 changes only {changed_tokens} tokens; "
+                    f"expected at least {REPETITIVE_MIN_KEY_PERTURBATION_TOKENS}"
+                )
+            full_context_skips = (
+                entry["trace"]["dedup_skips"] - entry["trace"]["partial_context_skips"]
+            )
+            if full_context_skips < 1:
+                raise GoldenGuardError(
+                    f"{candidate.id}: repetitive fixture has no full-context "
+                    "deduplication skip"
+                )
+            if ratio > REPETITIVE_MAX_P_VALUE_RATIO:
+                raise GoldenGuardError(
+                    f"{candidate.id}: p_value_ratio {ratio!r} exceeds "
+                    f"{REPETITIVE_MAX_P_VALUE_RATIO}"
+                )
+
+        alpha = candidate.scheme_config.generation_alpha
+        if candidate.scheme == "dual_key_gumbel" and 0 < alpha < 1:
+            boundary = routing_boundary(alpha)
+            distance = min(
+                abs(uniform - boundary)
+                for uniform in candidate.fixture.routing_uniforms
+            )
+            if distance < ROUTING_BOUNDARY_MIN_DISTANCE:
+                raise GoldenGuardError(
+                    f"{candidate.id}: routing uniform is only {distance!r} from "
+                    f"the realised boundary; expected at least "
+                    f"{ROUTING_BOUNDARY_MIN_DISTANCE:g}"
+                )
+
+    for enabled_id, disabled_id in DEDUPLICATION_TWINS:
+        enabled = candidates_by_id[enabled_id]
+        disabled = candidates_by_id[disabled_id]
+        expected_disabled = replace(
+            enabled,
+            id=disabled_id,
+            scheme_config=replace(
+                enabled.scheme_config,
+                generation_deduplicate_contexts="none",
+                detection_deduplicate_contexts=False,
+            ),
         )
-    return entry
+        if disabled != expected_disabled:
+            raise GoldenGuardError(
+                f"{enabled_id} and {disabled_id} must differ only in generation "
+                "and detection deduplication"
+            )
+
+        enabled_entry = entries[enabled_id]
+        disabled_entry = entries[disabled_id]
+        if enabled_entry["trace"]["dedup_skips"] < 1:
+            raise GoldenGuardError(f"{enabled_id}: expected at least one dedup skip")
+        if disabled_entry["trace"]["dedup_skips"] != 0:
+            raise GoldenGuardError(f"{disabled_id}: expected zero dedup skips")
+        if enabled_entry["generation"] == disabled_entry["generation"]:
+            raise GoldenGuardError(
+                f"{enabled_id} and {disabled_id}: generations must differ"
+            )
+        enabled_scored = enabled_entry["detection"]["num_scored_tokens"]
+        disabled_scored = disabled_entry["detection"]["num_scored_tokens"]
+        if enabled_scored == disabled_scored:
+            raise GoldenGuardError(
+                f"{enabled_id} and {disabled_id}: detector scored-token counts "
+                "must differ"
+            )
 
 
 def golden_payload() -> GoldenPayload:
