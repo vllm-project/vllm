@@ -5,7 +5,7 @@ import asyncio
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
@@ -40,6 +40,9 @@ from vllm.v1.metrics.stats import (
     SchedulerStats,
 )
 from vllm.v1.outputs import SamplingMaskLists
+
+if TYPE_CHECKING:
+    from vllm.v1.engine.admission_control import SharedAdmissionStats
 
 # shared empty CPU tensor used as a placeholder pooling output
 EMPTY_CPU_TENSOR = torch.empty(0, device="cpu")
@@ -455,6 +458,7 @@ class OutputProcessor:
         log_stats: bool,
         stream_interval: int = 1,
         tracing_enabled: bool = False,
+        admission_stats: "SharedAdmissionStats | None" = None,
     ):
         self.log_stats = log_stats
         self.tokenizer = tokenizer
@@ -464,6 +468,7 @@ class OutputProcessor:
         self.external_req_ids: defaultdict[str, list[str]] = defaultdict(list)
         self.lora_states = LoRARequestStates(log_stats)
         self.tracing_enabled = tracing_enabled
+        self.admission_stats = admission_stats
 
     def get_num_unfinished_requests(self):
         return len(self.request_states)
@@ -553,6 +558,7 @@ class OutputProcessor:
                     child_reqs = self.abort_requests(child_reqs, internal=True)
                     request_ids_to_abort.extend(child_reqs)
                 self.parent_requests.pop(request_id, None)
+        self._update_admission_stats()
         return request_ids_to_abort
 
     def add_request(
@@ -585,6 +591,7 @@ class OutputProcessor:
 
         # Track the external_req_id -> [internal_req_id, ...] mapping
         self.external_req_ids[req_state.external_req_id].append(request_id)
+        self._update_admission_stats()
 
     def _update_streaming_request_state(
         self, req_state: RequestState, request: EngineCoreRequest, prompt: str | None
@@ -763,6 +770,11 @@ class OutputProcessor:
         parent_req = req_state.parent_req
         if parent_req and not parent_req.child_requests:
             self.parent_requests.pop(parent_req.request_id, None)
+        self._update_admission_stats()
+
+    def _update_admission_stats(self) -> None:
+        if self.admission_stats is not None:
+            self.admission_stats.set_num_requests(self.get_num_unfinished_requests())
 
     def update_scheduler_stats(self, scheduler_stats: SchedulerStats | None):
         self.lora_states.update_scheduler_stats(scheduler_stats)
