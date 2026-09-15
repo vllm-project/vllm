@@ -2609,6 +2609,25 @@ class NixlBaseConnectorWorker:
                 indices=indices,
             )
 
+    def _zero_untransferred_region_blocks(self, block_ids: BlockIds) -> None:
+        """Clear clipped physical pages in their owning region only."""
+        if not any(block_ids):
+            return
+        bases = self.kv_caches_base_addr[self.engine_id][self.tp_rank]
+        for region, blocks in enumerate(block_ids):
+            if not blocks:
+                continue
+            cache = self.device_kv_caches[self.region_names[region]]
+            storage = cache.untyped_storage()
+            pages = torch.empty(0, dtype=torch.uint8, device=cache.device).set_(
+                storage,
+                bases[region] - storage.data_ptr(),
+                (self.region_num_blocks[region], self.block_len_per_layer[region]),
+                (self.block_stride_per_layer[region], 1),
+            )
+            for block in blocks:
+                pages[block].zero_()
+
     def get_transfer_results(self) -> KVConnectorTransferResults:
         """
         Get transfers that completed on this specific worker.
@@ -2680,6 +2699,14 @@ class NixlBaseConnectorWorker:
                 self.sync_recved_kv_to_device(req_id, meta)
 
             direct_device_recving.add(req_id)
+
+            if meta.local_untransferred_region_blocks is not None:
+                # P/D group positions differ. Use the actual region read plan,
+                # including any local allocation padding the read did not cover.
+                self._zero_untransferred_region_blocks(
+                    meta.local_untransferred_region_blocks
+                )
+                continue
 
             # Post processing for heteroblocksize/layout, and for blocks the
             # transfer clipped. The latter happens either at remote-block
@@ -3078,12 +3105,32 @@ class NixlBaseConnectorWorker:
 
     @staticmethod
     def _apply_prefix_caching_by_region(
-        decode_block_ids: BlockIds, prefill_block_ids: BlockIds
+        decode_block_ids: BlockIds,
+        prefill_block_ids: BlockIds,
+        *,
+        num_computed_blocks: list[int] | None = None,
+        num_remote_blocks: int | None = None,
     ) -> tuple[BlockIds, BlockIds]:
         """Pair an uncached decode suffix with the same prefill regions."""
         assert len(decode_block_ids) == len(prefill_block_ids)
         if not any(decode_block_ids):
-            return [], prefill_block_ids
+            empty_regions: list[list[int]] = [[] for _ in decode_block_ids]
+            return empty_regions, empty_regions.copy()
+
+        if num_computed_blocks is not None:
+            assert num_remote_blocks is not None
+            matched_decode, matched_prefill = [], []
+            for decode_region, prefill_region, start in zip(
+                decode_block_ids, prefill_block_ids, num_computed_blocks, strict=True
+            ):
+                count = min(len(decode_region), max(num_remote_blocks - start, 0))
+                if start + count > len(prefill_region):
+                    raise ValueError("Remote KV pages do not cover the requested range")
+                # An extra producer page can be allocation padding, not a
+                # cached prefix. Select by token position instead of list length.
+                matched_decode.append(list(decode_region[:count]))
+                matched_prefill.append(list(prefill_region[start : start + count]))
+            return matched_decode, matched_prefill
 
         trimmed_prefill: list[list[int]] = []
         for decode_region, prefill_region in zip(
