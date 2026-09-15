@@ -8,6 +8,8 @@ support for torch.compile tracing and ``mutates_args=["o"]`` in-place output
 aliasing.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -31,6 +33,45 @@ def _require_aiter():
 
     if not is_aiter_found_and_supported():
         pytest.skip("aiter is required on supported ROCm hardware for this test")
+
+
+@pytest.mark.parametrize("candidate_blocks", [False, True])
+def test_sparse_indexer_forward_hip_schema(monkeypatch, candidate_blocks):
+    """The ROCm caller must match the registered op and reject CUDA-only features."""
+    _require_aiter()
+    from torch._subclasses.fake_tensor import FakeTensorMode
+
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
+
+    monkeypatch.setattr(rocm_aiter_ops, "is_enabled", lambda: True)
+    with FakeTensorMode():
+        tensor = torch.empty(1, device="cuda")
+        indices = torch.empty((1, 1), dtype=torch.int32, device="cuda")
+        indexer = SimpleNamespace(
+            use_fp4_cache=False,
+            candidate_blocks=indices if candidate_blocks else None,
+            candidate_block_size=128 if candidate_blocks else 0,
+            candidate_write=False,
+            k_cache=SimpleNamespace(prefix="model.layers.0.indexer", kv_cache=tensor),
+            quant_block_size=128,
+            scale_fmt="ue8m0",
+            topk_tokens=1,
+            head_dim=128,
+            max_model_len=128,
+            max_total_seq_len=128,
+            topk_indices_buffer=indices,
+            skip_k_cache_insert=False,
+            compress_ratio=1,
+        )
+        if candidate_blocks:
+            with pytest.raises(NotImplementedError, match="candidate blocks"):
+                SparseAttnIndexer.forward_hip(indexer, tensor, tensor, None, tensor)
+        else:
+            output = SparseAttnIndexer.forward_hip(
+                indexer, tensor, tensor, None, tensor
+            )
+            assert output is indices
 
 
 @torch.inference_mode()
