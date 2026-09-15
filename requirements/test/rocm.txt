@@ -1086,7 +1086,7 @@ scipy==1.17.1
     #   vocos
 segmentation-models-pytorch==0.5.0
     # via -r requirements/test/rocm.in
-sentence-transformers==5.3.0
+sentence-transformers==5.7.0
     # via
     #   -r requirements/test/rocm.in
     #   mteb
@@ -1212,6 +1212,7 @@ tokenizers==0.23.1
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
     #   cohere
+    #   sentence-transformers
     #   transformers
 torch-c-dlpack-ext==0.1.5
     # via tilelang

@@ -606,6 +606,7 @@ numpy==2.2.6
     #   scikit-learn
     #   scipy
     #   segmentation-models-pytorch
+    #   sentence-transformers
     #   soxr
     #   statsmodels
     #   tensorizer
@@ -1107,7 +1108,7 @@ scipy==1.13.1
     #   vocos
 segmentation-models-pytorch==0.5.0
     # via -r requirements/test/cuda.in
-sentence-transformers==5.2.0
+sentence-transformers==5.7.0
     # via
     #   -r requirements/test/cuda.in
     #   mteb
@@ -1224,6 +1225,7 @@ tokenizers==0.23.1
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
     #   cohere
+    #   sentence-transformers
     #   transformers
 torch==2.13.0+cu130
     # via
