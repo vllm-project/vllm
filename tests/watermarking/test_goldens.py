@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+"""Check the watermarking goldens still reproduce."""
+
 import json
 from pathlib import Path
 
@@ -8,8 +10,11 @@ import pytest
 
 from tests.watermarking.golden_candidates import (
     DETECTOR_FACTORIES,
+    GOLDEN_FLOAT_RTOL,
+    REGENERATE_COMMAND,
     WATERMARKING_CANDIDATES,
     GoldenCandidatePayload,
+    compare_golden,
     configured_algorithms,
     configured_prfs,
     load_goldens,
@@ -29,9 +34,7 @@ def test_goldens_cover_every_candidate(
     candidate_ids = {candidate.id for candidate in WATERMARKING_CANDIDATES}
 
     assert len(candidate_ids) == len(WATERMARKING_CANDIDATES)
-    assert set(goldens) == candidate_ids, (
-        "Run `python tests/watermarking/generate_goldens.py`"
-    )
+    assert set(goldens) == candidate_ids, f"Run `{REGENERATE_COMMAND}`"
     assert {candidate.scheme for candidate in WATERMARKING_CANDIDATES} == (
         configured_algorithms()
     )
@@ -48,15 +51,13 @@ def test_watermarking_candidate_golden(
     candidate,
     goldens: dict[str, GoldenCandidatePayload],
 ):
-    golden = goldens[candidate.id]
+    differences = compare_golden(candidate, goldens[candidate.id])
 
-    assert candidate.configuration() == golden["configuration"]
-    generated = candidate.generate()
-    assert generated == golden["generation"]
-
-    detection = candidate.detect(golden["generation"])
-    expected = golden["detection"]
-    assert detection.score.hex() == expected["score"]
-    assert detection.p_value.hex() == expected["p_value"]
-    assert detection.num_scored_tokens == expected["num_scored_tokens"]
-    assert detection.is_watermarked == expected["is_watermarked"]
+    assert not differences, "\n".join(
+        [
+            f"{candidate.id}: golden drift "
+            f"(tolerance {GOLDEN_FLOAT_RTOL:g} on score and p_value)",
+            *differences,
+            f"Regenerate with `{REGENERATE_COMMAND}`",
+        ]
+    )

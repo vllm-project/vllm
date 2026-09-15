@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from dataclasses import dataclass
 from typing import TypedDict, get_args
 
@@ -21,6 +22,24 @@ from vllm.v1.watermarking import (
     create_watermarker,
 )
 from vllm.v1.worker.gpu.sample.watermark import repeated_context_mask
+
+REGENERATE_COMMAND = "python -m tests.watermarking.generate_goldens"
+
+# Relative tolerance for score and p_value. The hex payload round-trips
+# exactly, but libm differs by an ULP across builds, so the reproduced value is
+# compared with GOLDEN_FLOAT_RTOL; the absolute floor only matters when the
+# golden value is exactly zero.
+GOLDEN_FLOAT_RTOL = 1e-9
+GOLDEN_FLOAT_ATOL = 1e-300
+
+
+def floats_match(actual: float, expected: float) -> bool:
+    return math.isclose(
+        actual,
+        expected,
+        rel_tol=GOLDEN_FLOAT_RTOL,
+        abs_tol=GOLDEN_FLOAT_ATOL,
+    )
 
 
 class GoldenDetectionPayload(TypedDict):
@@ -349,6 +368,118 @@ WATERMARKING_CANDIDATES = (
         fixture=REPETITIVE_FIXTURE,
     ),
 )
+
+
+def _relative_difference(actual: float, expected: float) -> float:
+    if expected == 0.0:
+        return 0.0 if actual == 0.0 else math.inf
+    return abs(actual - expected) / abs(expected)
+
+
+def _compare_hex_float(
+    field: str,
+    actual: float,
+    expected_hex: object,
+    differences: list[str],
+) -> None:
+    if not isinstance(expected_hex, str):
+        differences.append(f"{field}: golden value {expected_hex!r} is not a string")
+        return
+    try:
+        expected = float.fromhex(expected_hex)
+    except ValueError:
+        differences.append(
+            f"{field}: golden value {expected_hex!r} is not a hexadecimal float"
+        )
+        return
+    if not floats_match(actual, expected):
+        differences.append(
+            f"{field}: expected {expected_hex} ({expected!r}), "
+            f"got {actual.hex()} ({actual!r}), relative difference "
+            f"{_relative_difference(actual, expected):.3e}"
+        )
+
+
+def _compare_exact(
+    field: str,
+    actual: object,
+    expected: object,
+    differences: list[str],
+) -> None:
+    if actual != expected:
+        differences.append(f"{field}: expected {expected!r}, got {actual!r}")
+
+
+def compare_golden(
+    candidate: WatermarkingCandidate,
+    golden: GoldenCandidatePayload,
+) -> list[str]:
+    """Return one line per field that drifted, empty when the golden reproduces.
+
+    Configuration, tokens, num_scored_tokens and is_watermarked are compared
+    exactly; score and p_value are compared with GOLDEN_FLOAT_RTOL.
+    """
+    differences: list[str] = []
+
+    configuration = candidate.configuration()
+    expected_configuration = golden["configuration"]
+    for key in sorted(set(configuration) | set(expected_configuration)):
+        _compare_exact(
+            f"configuration.{key}",
+            configuration.get(key),
+            expected_configuration.get(key),
+            differences,
+        )
+
+    generated = candidate.generate()
+    expected_generation = golden["generation"]
+    if generated != expected_generation:
+        first_difference = next(
+            (
+                index
+                for index, (actual, expected) in enumerate(
+                    zip(generated, expected_generation)
+                )
+                if actual != expected
+            ),
+            min(len(generated), len(expected_generation)),
+        )
+        differences.append(
+            f"generation: first differs at index {first_difference} "
+            f"({len(generated)} tokens generated, "
+            f"{len(expected_generation)} in the golden): "
+            f"expected {expected_generation}, got {generated}"
+        )
+
+    # Detection runs on the golden tokens so a token drift and a detection
+    # drift are reported independently.
+    detection = candidate.detect(expected_generation)
+    expected_detection = golden["detection"]
+    _compare_hex_float(
+        "detection.score",
+        detection.score,
+        expected_detection["score"],
+        differences,
+    )
+    _compare_hex_float(
+        "detection.p_value",
+        detection.p_value,
+        expected_detection["p_value"],
+        differences,
+    )
+    _compare_exact(
+        "detection.num_scored_tokens",
+        detection.num_scored_tokens,
+        expected_detection["num_scored_tokens"],
+        differences,
+    )
+    _compare_exact(
+        "detection.is_watermarked",
+        detection.is_watermarked,
+        expected_detection["is_watermarked"],
+        differences,
+    )
+    return differences
 
 
 def golden_payload() -> GoldenPayload:
