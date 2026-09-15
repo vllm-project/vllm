@@ -3,6 +3,7 @@
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
 from vllm.v1.engine import EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.stats import (
+    FinishedRequestStats,
     IterationStats,
     PrefillStats,
     PromptTokenStats,
@@ -288,3 +289,70 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     assert stats.external_kv_transfer == 999
     assert stats.cached_tokens == 999
     assert stats.total == 1000
+
+
+def _finish(finish_reason=FinishReason.ABORT, **ts) -> FinishedRequestStats:
+    """Finish a request whose timestamps are set by ``ts`` and return its stats."""
+    req_stats = RequestStateStats(arrival_time=1000.0)
+    for field, value in ts.items():
+        setattr(req_stats, field, value)
+
+    iteration_stats = IterationStats()
+    iteration_stats.update_from_finished_request(
+        finish_reason=finish_reason,
+        request_id="test-req",
+        num_prompt_tokens=10,
+        max_tokens_param=None,
+        req_stats=req_stats,
+    )
+    return iteration_stats.finished_requests[0]
+
+
+# A plausible engine-core monotonic timestamp: these are host-uptime values,
+# so subtracting one from an unset (0.0) field yields a nonsense magnitude.
+UPTIME_TS = 500_000.0
+
+
+def test_intervals_are_zero_when_aborted_before_scheduling():
+    """A request aborted while waiting was never scheduled.
+
+    Its QUEUED/SCHEDULED events are never flushed to the frontend, so both
+    timestamps stay unset, while the abort output still stamps the token
+    timestamps -- making prefill/inference span the whole host uptime.
+    """
+    finished_req = _finish(first_token_ts=UPTIME_TS, last_token_ts=UPTIME_TS)
+
+    assert finished_req.queued_time == 0.0
+    assert finished_req.prefill_time == 0.0
+    assert finished_req.inference_time == 0.0
+    assert finished_req.decode_time == 0.0
+
+
+def test_intervals_are_zero_when_scheduled_but_no_first_token():
+    """Scheduled, then finished before any token was emitted."""
+    finished_req = _finish(
+        queued_ts=UPTIME_TS,
+        scheduled_ts=UPTIME_TS + 0.5,
+        last_token_ts=UPTIME_TS + 1.0,
+    )
+
+    assert finished_req.queued_time == 0.5
+    assert finished_req.prefill_time == 0.0
+    assert finished_req.decode_time == 0.0
+    assert finished_req.inference_time == 0.5
+
+
+def test_intervals_unchanged_for_completed_request():
+    """The normal path keeps its exact durations."""
+    finished_req = _finish(
+        finish_reason=FinishReason.STOP,
+        queued_ts=UPTIME_TS,
+        scheduled_ts=UPTIME_TS + 0.5,
+        first_token_ts=UPTIME_TS + 1.0,
+        last_token_ts=UPTIME_TS + 3.0,
+    )
+
+    assert finished_req.queued_time == 0.5
+    assert finished_req.prefill_time == 0.5
+    assert finished_req.decode_time == 2.0
+    assert finished_req.inference_time == 2.5
