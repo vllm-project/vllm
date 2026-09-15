@@ -210,6 +210,7 @@ if TYPE_CHECKING:
     VLLM_MOE_SKIP_PADDING: bool = True
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
+    VLLM_KIMI_K3_DEFER_ATTN_RES_MLP: bool = False
     VLLM_KIMI_K3_GEMM_AR: bool = True
     VLLM_KIMI_K3_GEMM_RS: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
@@ -1595,6 +1596,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # speculator sees, so it is off by default while the effect is measured.
     "VLLM_KIMI_K3_AUX_ATTN_RES_STREAM": lambda: bool(
         int(os.getenv("VLLM_KIMI_K3_AUX_ATTN_RES_STREAM", "0"))
+    ),
+    # Kimi-K3 ROCm AttnRes only. Carry each layer's MLP output into the next
+    # AttnRes call as its delta instead of materializing a standalone prefix
+    # add. The AttnRes kernel performs the same dtype-rounded add before any
+    # block write, scoring, or normalization. Keep opt-in until the supported
+    # ROCm kernel set has been benchmarked end to end.
+    "VLLM_KIMI_K3_DEFER_ATTN_RES_MLP": lambda: bool(
+        int(os.getenv("VLLM_KIMI_K3_DEFER_ATTN_RES_MLP", "0"))
     ),
     # Use the SM100 BF16 GEMM-AR kernel for eligible Kimi-K3 row-parallel
     # attention projections. All TP ranks must belong to one NVLink domain.

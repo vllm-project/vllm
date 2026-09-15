@@ -7,6 +7,7 @@ from typing import Any
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -623,13 +624,37 @@ class KimiDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         block_residual: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        prefix_sum = hidden_states
+        prefix_sum, pending_mlp_out, block_residual = (
+            self.forward_attn_residual_deferred(
+                positions,
+                hidden_states,
+                block_residual,
+            )
+        )
+        return prefix_sum + pending_mlp_out, block_residual
+
+    def forward_attn_residual_deferred(
+        self,
+        positions: torch.Tensor,
+        prefix_sum: torch.Tensor,
+        block_residual: torch.Tensor,
+        pending_mlp_out: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Run one AttnRes layer without materializing its final MLP add.
+
+        ``pending_mlp_out`` is the preceding layer's MLP output. AttnRes adds
+        it to ``prefix_sum`` in the input dtype before block writes, scoring,
+        and normalization, exactly where the eager path materializes
+        ``prefix_sum + pending_mlp_out``. The returned MLP output can therefore
+        be consumed as the next layer's delta.
+        """
         hidden_states = _apply_attn_res(
             prefix_sum,
             block_residual,
             self.self_attention_res_proj,
             self.self_attention_res_norm,
             self.prev_valid_blocks,
+            delta=pending_mlp_out,
             output_norm=self.input_layernorm,
             block_write_idx=(self.block_write_idx if self.is_block_write_layer else -1),
         )
@@ -658,9 +683,8 @@ class KimiDecoderLayer(nn.Module):
             output_norm=self.post_attention_layernorm,
         )
 
-        hidden_states = self.mlp(hidden_states)
-        prefix_sum = prefix_sum + hidden_states
-        return prefix_sum, block_residual
+        pending_mlp_out = self.mlp(hidden_states)
+        return prefix_sum, pending_mlp_out, block_residual
 
 
 class KimiLinearModel(nn.Module, EagleModelMixin):
@@ -816,23 +840,42 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             block_residual[:, : residual.size(1), :].copy_(residual)
         residual = block_residual
 
+        pending_mlp_out = None
         for layer_idx, layer in enumerate(
             self.layers[self.start_layer : self.end_layer],
             start=self.start_layer,
         ):
-            hidden_states, residual = layer(
-                positions=positions,
-                hidden_states=hidden_states,
-                residual=residual,
-            )
+            if envs.VLLM_KIMI_K3_DEFER_ATTN_RES_MLP:
+                hidden_states, pending_mlp_out, residual = (
+                    layer.forward_attn_residual_deferred(
+                        positions=positions,
+                        prefix_sum=hidden_states,
+                        block_residual=residual,
+                        pending_mlp_out=pending_mlp_out,
+                    )
+                )
+            else:
+                hidden_states, residual = layer(
+                    positions=positions,
+                    hidden_states=hidden_states,
+                    residual=residual,
+                )
             if (layer_idx + 1) in self.aux_hidden_state_layers:
-                # AMD attn-res layer already returns prefix_sum + MLP delta as
-                # hidden_states; the override drops the block bank in residual.
+                # DSpark consumes the exact post-MLP target state at every
+                # configured depth, so only these tapped boundaries are
+                # materialized while the live layer stream stays deferred.
+                aux_hidden_state = (
+                    hidden_states
+                    if pending_mlp_out is None
+                    else hidden_states + pending_mlp_out
+                )
                 self._maybe_add_hidden_state(
-                    aux_hidden_states, layer_idx + 1, hidden_states, residual
+                    aux_hidden_states, layer_idx + 1, aux_hidden_state, residual
                 )
 
         if not get_pp_group().is_last_rank:
+            if pending_mlp_out is not None:
+                hidden_states = hidden_states + pending_mlp_out
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
@@ -843,6 +886,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             self.output_attn_res_proj,
             self.output_attn_res_norm,
             attn_res_block_num,
+            delta=pending_mlp_out,
         )
         # NOTE: the final norm is applied in compute_logits instead of here, so
         # the MTP draft model receives the pre-norm hidden states.
