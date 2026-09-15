@@ -505,6 +505,120 @@ class TestRenderPrompt:
         assert renderer.tokenizer._captured_text_len <= 100
 
 
+class TestMaxTokensNotReservation:
+    """Regression tests for GitHub issue #42474.
+
+    ``max_tokens`` must be treated as an upper bound on generation length, not
+    as a hard reservation that is subtracted from the available input space.
+    """
+
+    def test_large_max_tokens_does_not_eat_prompt_budget(self):
+        """Prompt fits in context even when max_tokens is large."""
+        renderer = _build_renderer(MockModelConfig())
+
+        # 50-token prompt with a 100-token context window and max_tokens=60.
+        # Before the fix: max_input_tokens = 100 - 60 = 40 → 50 > 40 → error.
+        # After the fix:  max_input_tokens = 100            → 50 ≤ 100 → OK.
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, "x" * 50)
+        )
+        results = renderer.tokenize_prompts(
+            prompts,
+            TokenizeParams(max_total_tokens=100, max_output_tokens=60),
+        )
+        assert len(results) == 1
+        assert len(results[0]["prompt_token_ids"]) == 50
+
+    def test_max_tokens_zero_still_rejects_oversized_prompt(self):
+        """Genuine prompt overflow is still caught regardless of max_tokens."""
+        renderer = _build_renderer(MockModelConfig())
+
+        # 150-token prompt with 100-token context → should still fail.
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, "x" * 150)
+        )
+        with pytest.raises(VLLMValidationError, match="maximum context length"):
+            renderer.tokenize_prompts(
+                prompts,
+                TokenizeParams(max_total_tokens=100, max_output_tokens=0),
+            )
+
+    def test_negative_truncation_uses_max_total(self):
+        """truncate_prompt_tokens=-1 pads to max_total_tokens, not max_input."""
+        renderer = _build_renderer(MockModelConfig())
+
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, "x" * 200)
+        )
+        results = renderer.tokenize_prompts(
+            prompts,
+            TokenizeParams(
+                max_total_tokens=100,
+                max_output_tokens=40,
+                truncate_prompt_tokens=-1,
+            ),
+        )
+        # -1 should map to max_total_tokens (100), not max_total - max_output (60).
+        assert len(results[0]["prompt_token_ids"]) == 100
+
+    def test_negative_pad_uses_max_total(self):
+        """pad_prompt_tokens=-1 pads to max_total_tokens, not max_input."""
+        renderer = _build_renderer(MockModelConfig())
+        pad_id = renderer.tokenizer.pad_token_id
+
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, "x" * 30)
+        )
+        results = renderer.tokenize_prompts(
+            prompts,
+            TokenizeParams(
+                max_total_tokens=100,
+                max_output_tokens=40,
+                pad_prompt_tokens=-1,
+            ),
+        )
+        # -1 should map to max_total_tokens (100), not max_total - max_output (60).
+        assert results[0]["prompt_token_ids"] == list(range(30)) + [pad_id] * 70
+
+    def test_max_tokens_exceeds_context_is_still_clamped_by_api(self):
+        """Renderer allows the prompt; API layer clamps max_tokens later."""
+        renderer = _build_renderer(MockModelConfig())
+
+        # Simulates the reported scenario: max_tokens > context - prompt_length.
+        # Renderer should accept the 40-token prompt; get_max_tokens() clamps
+        # sampling max_tokens to 60 at the entrypoint layer.
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, "x" * 40)
+        )
+        results = renderer.tokenize_prompts(
+            prompts,
+            TokenizeParams(max_total_tokens=100, max_output_tokens=80),
+        )
+        assert len(results) == 1
+        assert len(results[0]["prompt_token_ids"]) == 40
+
+    def test_with_kwargs_preserves_output_budget(self):
+        """with_kwargs without an explicit max_length keeps the output budget.
+
+        Under the old semantics `with_kwargs()` recomputed
+        `max_output_tokens = max_total - max_input`, which (after this fix)
+        would have silently reset a real output budget to zero.
+        """
+        tok_params = TokenizeParams(max_total_tokens=100, max_output_tokens=60)
+        chained = tok_params.with_kwargs(truncation_side="left")
+
+        assert chained.max_output_tokens == 60
+        assert chained.max_input_tokens == 100
+
+    def test_with_kwargs_explicit_max_length_sets_budget(self):
+        """An explicit max_length still re-derives the output budget."""
+        tok_params = TokenizeParams(max_total_tokens=100, max_output_tokens=60)
+        chained = tok_params.with_kwargs(max_length=80)
+
+        assert chained.max_output_tokens == 20
+        assert chained.max_input_tokens == 100
+
+
 class TestRenderEmbedPrompt:
     def _create_test_embed_bytes(self, tensor: torch.Tensor) -> bytes:
         """Helper to create base64-encoded tensor bytes."""

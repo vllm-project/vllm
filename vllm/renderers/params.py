@@ -207,11 +207,17 @@ class TokenizeParams:
 
     @property
     def max_input_tokens(self) -> int | None:
-        """Maximum allowed number of input tokens."""
+        """Maximum allowed number of input tokens.
+
+        ``max_output_tokens`` is *not* subtracted here: the value represents the
+        actual model context length, not a reservation of output space.
+        Downstream clamping of the sampling ``max_tokens`` is handled by
+        ``get_max_tokens()`` in the entrypoint layer.
+        """
         if self.max_total_tokens is None:
             return None
 
-        return self.max_total_tokens - self.max_output_tokens
+        return self.max_total_tokens
 
     def __post_init__(self) -> None:
         max_total_tokens = self.max_total_tokens
@@ -247,14 +253,15 @@ class TokenizeParams:
         ):
             raise VLLMValidationError(
                 f"{self.truncate_prompt_tokens_param}={truncate_prompt_tokens} "
-                f"cannot be greater than {self.max_total_tokens_param} - "
-                f"{self.max_output_tokens_param} = {max_input_tokens}. "
+                f"cannot be greater than {self.max_total_tokens_param} "
+                f"= {max_input_tokens}. "
                 f"Please request a smaller truncation size.",
                 parameter=self.truncate_prompt_tokens_param,
                 value=truncate_prompt_tokens,
             )
 
     def with_kwargs(self, **tokenization_kwargs: Any):
+        has_max_length = "max_length" in tokenization_kwargs
         max_length = tokenization_kwargs.pop("max_length", self.max_input_tokens)
         pad_prompt_tokens = tokenization_kwargs.pop(
             "pad_prompt_tokens", self.pad_prompt_tokens
@@ -301,13 +308,17 @@ class TokenizeParams:
 
         max_total_tokens = self.max_total_tokens
 
+        if has_max_length and max_total_tokens is not None and max_length is not None:
+            max_output_tokens = max_total_tokens - max_length
+        else:
+            # No explicit ``max_length`` override: preserve the original output
+            # budget instead of recomputing it from ``max_input_tokens`` (which
+            # is now the full context length).
+            max_output_tokens = self.max_output_tokens
+
         return TokenizeParams(
             max_total_tokens=max_total_tokens,
-            max_output_tokens=(
-                0
-                if max_total_tokens is None or max_length is None
-                else max_total_tokens - max_length
-            ),
+            max_output_tokens=max_output_tokens,
             pad_prompt_tokens=pad_prompt_tokens,
             truncate_prompt_tokens=truncate_prompt_tokens,
             truncation_side=truncation_side,
@@ -355,13 +366,11 @@ class TokenizeParams:
             if len(text) > max_input_chars:
                 raise VLLMValidationError(
                     f"This model's maximum context length is "
-                    f"{self.max_total_tokens} tokens. However, you requested "
-                    f"{self.max_output_tokens} output tokens and your prompt "
+                    f"{self.max_total_tokens} tokens. However, your prompt "
                     f"contains {len(text)} characters (more than "
                     f"{max_input_chars} characters, which is the upper bound "
                     f"for {max_input_tokens} input tokens). "
-                    f"Please reduce the length of the input prompt or the "
-                    f"number of requested output tokens.",
+                    f"Please reduce the length of the input prompt.",
                     parameter="input_text",
                     value=len(text),
                 )
@@ -494,15 +503,12 @@ class TokenizeParams:
             # max_input_tokens + 1 (see get_encode_kwargs), so the
             # actual prompt length could be larger.
             qualifier = "at least " if token_count == max_input_tokens + 1 else ""
-            total = token_count + self.max_output_tokens
             raise VLLMValidationError(
                 f"This model's maximum context length is "
-                f"{self.max_total_tokens} tokens. However, you requested "
-                f"{self.max_output_tokens} output tokens and your prompt "
-                f"contains {qualifier}{token_count} input tokens, "
-                f"for a total of {qualifier}{total} tokens. "
-                f"Please reduce the length of the input prompt or the "
-                f"number of requested output tokens.",
+                f"{self.max_total_tokens} tokens. However, your prompt "
+                f"contains {qualifier}{token_count} input tokens, which "
+                f"exceeds this limit even without any output tokens. "
+                f"Please reduce the length of the input prompt.",
                 parameter="input_tokens",
                 value=token_count,
             )
