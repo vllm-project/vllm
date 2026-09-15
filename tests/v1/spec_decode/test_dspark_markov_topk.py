@@ -272,6 +272,7 @@ def _dense_gumbel_tokens(
             case.seeds,
             pos[:, step],
             apply_temperature=True,
+            is_drafting=True,
         )
     return tokens
 
