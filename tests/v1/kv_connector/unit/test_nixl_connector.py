@@ -1635,6 +1635,9 @@ def test_kv_connector_stats_aggregation():
     assert cli_stats["Avg xfer time (ms)"] == 1500.0
     assert cli_stats["Avg post time (ms)"] == 1500.0
     assert cli_stats["Avg number of descriptors"] == 1.5
+    # Reduced values must be plain Python scalars so CLI logging renders
+    # them without numpy reprs (eg np.float64(...)).
+    assert all(not isinstance(v, np.generic) for v in cli_stats.values())
 
 
 def test_multi_kv_connector_stats_aggregation():
