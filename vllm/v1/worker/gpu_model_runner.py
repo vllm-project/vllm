@@ -275,7 +275,9 @@ def count_nans_per_row(logits: torch.Tensor) -> torch.Tensor:
 
 def _stage_dummy_request_metadata(
     *,
+    seq_lens_cpu: torch.Tensor,
     seq_lens: torch.Tensor,
+    num_scheduled_tokens_cpu: torch.Tensor,
     num_scheduled_tokens: torch.Tensor,
     req_indices: torch.Tensor,
     query_pos: torch.Tensor,
@@ -289,6 +291,14 @@ def _stage_dummy_request_metadata(
 
     Positions are absolute: computed context length plus per-request query offset.
     """
+    # A profiling override may be shorter than the scheduled query. Keep both
+    # sequence-length mirrors consistent without creating negative positions.
+    torch.maximum(
+        seq_lens_cpu[:num_reqs_padded],
+        num_scheduled_tokens_cpu[:num_reqs_padded],
+        out=seq_lens_cpu[:num_reqs_padded],
+    )
+    seq_lens.copy_(seq_lens_cpu, non_blocking=True)
     num_computed_tokens[:num_reqs_padded] = (
         seq_lens[:num_reqs_padded] - num_scheduled_tokens[:num_reqs_padded]
     )
@@ -6082,7 +6092,6 @@ class GPUModelRunner(
                     seq_lens = max_query_len  # type: ignore[assignment]
                 self.optimistic_seq_lens_cpu[:num_reqs] = seq_lens
                 self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
-                self.seq_lens.copy_(self.optimistic_seq_lens_cpu, non_blocking=True)
 
                 cum_num_tokens = self._get_cumsum_and_arange(
                     num_scheduled_tokens, self.query_pos.np
@@ -6096,7 +6105,9 @@ class GPUModelRunner(
                 self.num_scheduled_tokens.np[num_reqs:num_reqs_padded].fill(0)
                 self.num_scheduled_tokens.copy_to_gpu(num_reqs_padded)
                 _stage_dummy_request_metadata(
+                    seq_lens_cpu=self.optimistic_seq_lens_cpu,
                     seq_lens=self.seq_lens,
+                    num_scheduled_tokens_cpu=self.num_scheduled_tokens.cpu,
                     num_scheduled_tokens=self.num_scheduled_tokens.gpu,
                     req_indices=self.req_indices.gpu,
                     query_pos=self.query_pos.gpu,
