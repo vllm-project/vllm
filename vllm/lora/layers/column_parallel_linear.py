@@ -326,6 +326,21 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     ):
         self.reset_lora(index)
 
+        # A fused source (e.g. Megatron, which stores QKV as one linear) hands
+        # over a single lora_a shared by every slice and a single lora_b
+        # covering all of them. Split b by output_sizes and replicate a -- the
+        # same normalization MergedColumnParallelLinearVariableSliceWithLoRA
+        # already applies. Normalize b first so the a count below matches.
+        if isinstance(lora_b, torch.Tensor):
+            split_b, start = [], 0
+            for size in self.output_sizes:
+                split_b.append(lora_b[start : start + size])
+                start += size
+            lora_b = split_b
+        if isinstance(lora_a, torch.Tensor):
+            n = len(lora_b) if isinstance(lora_b, list) else self.n_slices
+            lora_a = [lora_a] * n
+
         # Expand packed adapter groups when they don't match n_slices.
         # E.g. in_proj_qkv (covers Q+K+V) + in_proj_z as 2 groups for a
         # 4-slice layer: split b_qkv by output_sizes and replicate a_qkv.
