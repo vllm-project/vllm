@@ -6,6 +6,7 @@ import gc
 import json
 import os
 import time
+from collections.abc import Callable
 from contextlib import nullcontext
 from datetime import datetime
 from itertools import product
@@ -44,37 +45,51 @@ _CACHE_CLEAR_INTERVAL_ENV = "VLLM_MOE_TUNE_CACHE_CLEAR_INTERVAL"
 TRITON_CACHE_CLEAR_INTERVAL = int(os.environ.get(_CACHE_CLEAR_INTERVAL_ENV, "50"))
 
 
+def _clear_triton_jit_cache():
+    """Clear in-memory compiled kernels across supported Triton versions."""
+    runtime_cache = getattr(getattr(triton, "runtime", None), "cache", None)
+    clear_runtime_cache = getattr(runtime_cache, "clear", None)
+    if callable(clear_runtime_cache):
+        clear_runtime_cache()
+        return
+
+    runtime_jit = getattr(getattr(triton, "runtime", None), "jit", None)
+    jit_registry = getattr(runtime_jit, "_triton_jit_function_registry", {})
+    for jit_function in jit_registry.values():
+        device_caches = getattr(jit_function, "device_caches", None)
+        if device_caches is not None:
+            device_caches.clear()
+
+
 def clear_triton_cache():
     """Clear Triton JIT compilation cache and Python/CUDA memory.
 
     This helps prevent OOM during tuning with large models (many experts).
     """
-    # Force Python garbage collection
-    gc.collect()
-
-    # Clear CUDA memory cache
-    if torch.cuda.is_available():
-        torch.accelerator.empty_cache()
-
-    # Try to clear Triton's runtime cache
+    # Clear Triton's in-memory kernel cache before releasing CUDA allocations.
     try:
-        if (
-            hasattr(triton, "runtime")
-            and hasattr(triton.runtime, "cache")
-            and hasattr(triton.runtime.cache, "clear")
-        ):
-            triton.runtime.cache.clear()
-    except ImportError:
-        # Triton not installed, skip cache clearing
-        pass
-    except AttributeError:
-        # Triton version doesn't have expected cache API
-        pass
+        _clear_triton_jit_cache()
     except Exception as e:
         print(f"Warning: Failed to clear Triton cache: {e}")
 
-    # Additional garbage collection after clearing caches
+    # Release objects that were only reachable from the JIT cache.
     gc.collect()
+
+    if torch.cuda.is_available():
+        torch.accelerator.empty_cache()
+
+
+def _run_with_oom_recovery(run_config: Callable[[], float]) -> float:
+    """Clear accumulated tuning state and retry one OOM once."""
+    try:
+        return run_config()
+    except torch.OutOfMemoryError:
+        # Leave the exception scope before clearing so its traceback no longer
+        # keeps the failed attempt's CUDA tensors alive.
+        pass
+
+    clear_triton_cache()
+    return run_config()
 
 
 def ensure_divisibility(numerator, denominator, text):
@@ -632,20 +647,22 @@ class BenchmarkWorker:
         ):
             for idx, config in enumerate(tqdm(search_space)):
                 try:
-                    kernel_time = benchmark_config(
-                        config,
-                        num_tokens,
-                        num_experts,
-                        shard_intermediate_size,
-                        hidden_size,
-                        topk,
-                        dtype,
-                        use_fp8_w8a8,
-                        use_int8_w8a16,
-                        use_int4_w4a16,
-                        num_iters=20,
-                        block_quant_shape=block_quant_shape,
-                        use_deep_gemm=use_deep_gemm,
+                    kernel_time = _run_with_oom_recovery(
+                        lambda config=config: benchmark_config(
+                            config,
+                            num_tokens,
+                            num_experts,
+                            shard_intermediate_size,
+                            hidden_size,
+                            topk,
+                            dtype,
+                            use_fp8_w8a8,
+                            use_int8_w8a16,
+                            use_int4_w4a16,
+                            num_iters=20,
+                            block_quant_shape=block_quant_shape,
+                            use_deep_gemm=use_deep_gemm,
+                        )
                     )
                 except triton.runtime.autotuner.OutOfResources:
                     # Some configurations may be invalid and fail to compile.
