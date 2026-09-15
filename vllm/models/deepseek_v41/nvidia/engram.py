@@ -36,6 +36,10 @@ from vllm.models.deepseek_v41.common.engram import (
 from vllm.models.deepseek_v41.common.engram import (
     ParallelEngramEmbedding as BaseParallelEngramEmbedding,
 )
+from vllm.models.deepseek_v41.common.ops.engram_quant import (
+    can_quantize_engram_gather,
+    quantize_gathered_engram_rows,
+)
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
@@ -405,39 +409,19 @@ class Engram(BaseEngram):
 
     @cached_property
     def _can_quantize_gather(self) -> bool:
-        from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
-            FlashInferCutedslMxfp8LinearKernel,
-            FlashInferCutlassMxfp8LinearKernel,
-        )
-        from vllm.model_executor.layers.fusion.quant_activation import (
-            get_input_quant_key,
-        )
-        from vllm.model_executor.layers.quantization.utils.quant_utils import (
-            kMxfp8Dynamic,
-        )
-
-        return (
-            self.embed_tokens.tp_size > 1
-            and not self.use_sequence_parallel
-            and self.embed_tokens.n_hash_cols * self.embed_tokens.dim % 32 == 0
-            and get_input_quant_key(self.wkv) == kMxfp8Dynamic
-            # QuantKey does not encode the F8_128x4 scale layout.
-            and type(getattr(self.wkv.quant_method, "kernel", None))
-            in (FlashInferCutedslMxfp8LinearKernel, FlashInferCutlassMxfp8LinearKernel)
-        )
+        return can_quantize_engram_gather(self.embed_tokens, self.wkv)
 
     def _project_embeddings(self, hash_ids: torch.Tensor) -> torch.Tensor:
         if not self._can_quantize_gather:
             return super()._project_embeddings(hash_ids)
-        from vllm.models.deepseek_v41.common.ops.engram_quant import (
-            quantize_gathered_engram_rows,
-        )
-
-        rows = self._ready_rows(hash_ids.shape[0])
-        gathered = tensor_model_parallel_all_gather(rows, dim=0)
+        num_tokens = hash_ids.shape[0]
+        gathered = tensor_model_parallel_all_gather(self._ready_rows(num_tokens), dim=0)
+        width = self.embed_tokens.n_hash_cols * self.embed_tokens.dim
+        if not self.use_sequence_parallel:
+            return self.wkv(quantize_gathered_engram_rows(gathered, num_tokens, width))
+        tp_size = self.embed_tokens.tp_size
+        chunk = (num_tokens + tp_size - 1) // tp_size
         quantized = quantize_gathered_engram_rows(
-            gathered,
-            rows.shape[0],
-            self.embed_tokens.n_hash_cols * self.embed_tokens.dim,
+            gathered, num_tokens, width, get_tensor_model_parallel_rank() * chunk, chunk
         )
         return self.wkv(quantized)

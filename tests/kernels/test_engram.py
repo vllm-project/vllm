@@ -1019,8 +1019,9 @@ def test_engram_head_collectives_survive_graph_breaks():
 @pytest.mark.parametrize(
     "tp_size,n_heads,dim", [(2, 24, 256), (4, 23, 256), (8, 15, 32)]
 )
-def test_engram_gather_quant_bitwise(num_tokens, tp_size, n_heads, dim):
-    """Reorder heads and drop padding without changing quantized bytes."""
+@pytest.mark.parametrize("token_window", ["all", "sp_first", "sp_last"])
+def test_engram_gather_quant_bitwise(num_tokens, tp_size, n_heads, dim, token_window):
+    """Reorder heads, drop padding, and select an SP token window bitwise."""
     from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
         mxfp8_e4m3_quantize,
     )
@@ -1047,10 +1048,21 @@ def test_engram_gather_quant_bitwise(num_tokens, tp_size, n_heads, dim):
         num_tokens, tp_size * local_heads, dim
     )
     expected_input = expected_input[:, :n_heads].flatten(-2)
-    actual = quantize_gathered_engram_rows(source, num_tokens, width)
-    assert actual.orig_shape == torch.Size((num_tokens, width))
+    if token_window == "all":
+        token_start, out_tokens = 0, num_tokens
+    else:
+        out_tokens = (num_tokens + tp_size - 1) // tp_size
+        token_start = (tp_size - 1 if token_window == "sp_last" else 0) * out_tokens
+    window = expected_input[token_start : token_start + out_tokens]
+    # The last SP shard quantizes rows past num_tokens as zeros.
+    expected_input = torch.nn.functional.pad(
+        window, (0, 0, 0, out_tokens - window.shape[0])
+    )
+    args = (source, num_tokens, width, token_start, out_tokens)
+    actual = quantize_gathered_engram_rows(*args)
+    assert actual.orig_shape == torch.Size((out_tokens, width))
     assert actual.orig_dtype == gathered.dtype
-    if num_tokens == 0:
+    if out_tokens == 0:
         assert actual.data.numel() == actual.scale.numel() == 0
         return
     expected, scales = mxfp8_e4m3_quantize(expected_input, is_sf_swizzled_layout=True)
@@ -1058,7 +1070,7 @@ def test_engram_gather_quant_bitwise(num_tokens, tp_size, n_heads, dim):
         if replay:
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
-                actual = quantize_gathered_engram_rows(source, num_tokens, width)
+                actual = quantize_gathered_engram_rows(*args)
             graph.replay()
         assert torch.equal(actual.data.view(torch.uint8), expected.view(torch.uint8))
         assert torch.equal(actual.scale, scales)
@@ -1103,8 +1115,9 @@ def test_engram_gather_quant_bf16_rounding_bitwise():
 )
 @pytest.mark.parametrize("backend", ["cute-dsl", "cutlass"])
 @pytest.mark.parametrize("num_tokens,n_heads", [(1, 24), (17, 23), (256, 24)])
+@pytest.mark.parametrize("sp_rank", [None, 1, 3])
 def test_engram_quantized_gather_preserves_wkv(
-    backend, num_tokens, n_heads, monkeypatch
+    backend, num_tokens, n_heads, sp_rank, monkeypatch
 ):
     """The real MXFP8 projection skips requantization and stays bitwise equal."""
     from vllm.config import VllmConfig, set_current_vllm_config
@@ -1119,6 +1132,9 @@ def test_engram_quantized_gather_preserves_wkv(
     from vllm.model_executor.layers.linear import ReplicatedLinear
     from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
         mxfp8_e4m3_quantize,
+    )
+    from vllm.models.deepseek_v41.common.ops.engram_quant import (
+        can_quantize_engram_gather,
     )
     from vllm.models.deepseek_v41.quant_config import DeepseekV4FP8Config
 
@@ -1162,7 +1178,9 @@ def test_engram_quantized_gather_preserves_wkv(
         module = Engram.__new__(Engram)
         torch.nn.Module.__init__(module)
         module.wkv = linear
-        module.use_sequence_parallel = False
+        module.use_sequence_parallel = sp_rank is not None
+        for ops in (engram_ops, nvidia_engram_ops):
+            monkeypatch.setattr(ops, "get_tensor_model_parallel_rank", lambda: sp_rank)
         module.embed_tokens = torch.nn.Identity()
         module.embed_tokens.tp_size = tp
         module.embed_tokens.dp_size = 1
@@ -1199,7 +1217,7 @@ def test_engram_quantized_gather_preserves_wkv(
             "vllm.model_executor.kernels.linear.mxfp8.flashinfer.mxfp8_e4m3_quantize",
             reject_requantization,
         )
-        assert module._can_quantize_gather
+        assert can_quantize_engram_gather(module.embed_tokens, linear)
         for run in (
             module._project_embeddings,
             torch.compile(
@@ -1216,6 +1234,37 @@ def test_engram_quantized_gather_preserves_wkv(
             actual = module._project_embeddings(ids)
         graph.replay()
         assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
+
+        # Breakable capture: the prefetch wait becomes a real eager break and
+        # the fused segment after it must replay against refreshed rows.
+        import vllm.envs as envs
+        from vllm.compilation.breakable_cudagraph import (
+            BreakableCUDAGraphCapture,
+            eager_break_during_capture,
+        )
+
+        module._prefetch_stream = torch.cuda.Stream()
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(envs, "VLLM_USE_BREAKABLE_CUDAGRAPH", True)
+            finish = eager_break_during_capture(inspect.unwrap(Engram._finish_prefetch))
+            module._finish_prefetch = finish.__get__(module, Engram)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            capture = BreakableCUDAGraphCapture()
+            with capture:
+                actual = module._project_embeddings(ids)
+            assert capture.num_eager_breaks == 1
+            rows.copy_(torch.randn_like(rows))
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(
+                    "vllm.model_executor.kernels.linear.mxfp8.flashinfer"
+                    ".mxfp8_e4m3_quantize",
+                    mxfp8_e4m3_quantize,
+                )
+                expected = CommonEngram._project_embeddings(module, ids)
+            capture.replay()
+        torch.cuda.current_stream().wait_stream(stream)
+        assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
         linear.requires_unquantized_input = True
-        del module._can_quantize_gather
-        assert not module._can_quantize_gather
+        assert not can_quantize_engram_gather(module.embed_tokens, linear)
