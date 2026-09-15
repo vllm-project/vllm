@@ -15,9 +15,23 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
+from vllm.v1.attention.ops.fp8e4nv import (
+    FP8E4NV_EXTERN_LIBS,
+    convert_to_fp8e4m3,
+)
 
 # MXFP4: 32 elements per block, packed 2 nibbles per byte, ue8m0 block scale.
 MXFP4_BLOCK_SIZE = 32
+
+
+def _can_use_cutedsl() -> bool:
+    capability = current_platform.get_device_capability()
+    return (
+        current_platform.is_cuda()
+        and has_cutedsl()
+        and capability is not None
+        and capability.major >= 9
+    )
 
 
 @triton.jit
@@ -87,6 +101,7 @@ class FusedIndexerQRopeQuantTritonKernel(
         index_q_head_dim: int
         fp8_max: float
         use_fnuz: bool
+        fp8_software_conv: bool
         use_explicit_fma: bool
 
     @staticmethod
@@ -114,6 +129,7 @@ class FusedIndexerQRopeQuantTritonKernel(
         index_weights_out_stride,
         FP8_MAX: tl.constexpr = 448.0,
         USE_FNUZ: tl.constexpr = False,
+        FP8_SOFTWARE_CONV: tl.constexpr = False,
         USE_EXPLICIT_FMA: tl.constexpr = False,
     ):
         # Layout matches the unfused reference (DeepseekV4ScalingRotaryEmbedding
@@ -165,26 +181,31 @@ class FusedIndexerQRopeQuantTritonKernel(
 
         # Store quantized values to index_q_fp8. FNUZ (e4m3fnuz) on gfx942, OCP
         # (e4m3fn) elsewhere -- matches the K cache.
-        fp8_dtype = tl.float8e4b8 if USE_FNUZ else tl.float8e4nv
         fp8_base_ptr = (
             index_q_fp8_ptr
             + tok_idx * index_q_fp8_stride0
             + head_idx * index_q_fp8_stride1
         )
+        if USE_FNUZ:
+            q_even = tl.div_rn(r_even, index_q_scale).to(tl.float8e4b8)
+            q_odd = tl.div_rn(r_odd, index_q_scale).to(tl.float8e4b8)
+        elif FP8_SOFTWARE_CONV:
+            q_even = convert_to_fp8e4m3(tl.div_rn(r_even, index_q_scale))
+            q_odd = convert_to_fp8e4m3(tl.div_rn(r_odd, index_q_scale))
+        else:
+            q_even = tl.div_rn(r_even, index_q_scale).to(tl.float8e4nv)
+            q_odd = tl.div_rn(r_odd, index_q_scale).to(tl.float8e4nv)
         if INDEX_Q_NOPE_DIM > 0:
-            tl.store(
-                fp8_base_ptr + nope_offset,
-                tl.div_rn(x_nope, index_q_scale).to(fp8_dtype),
-            )
+            if USE_FNUZ:
+                q_nope = tl.div_rn(x_nope, index_q_scale).to(tl.float8e4b8)
+            elif FP8_SOFTWARE_CONV:
+                q_nope = convert_to_fp8e4m3(tl.div_rn(x_nope, index_q_scale))
+            else:
+                q_nope = tl.div_rn(x_nope, index_q_scale).to(tl.float8e4nv)
+            tl.store(fp8_base_ptr + nope_offset, q_nope)
         fp8_rot_base = fp8_base_ptr + INDEX_Q_NOPE_DIM
-        tl.store(
-            fp8_rot_base + half_offset * 2,
-            tl.div_rn(r_even, index_q_scale).to(fp8_dtype),
-        )
-        tl.store(
-            fp8_rot_base + half_offset * 2 + 1,
-            tl.div_rn(r_odd, index_q_scale).to(fp8_dtype),
-        )
+        tl.store(fp8_rot_base + half_offset * 2, q_even)
+        tl.store(fp8_rot_base + half_offset * 2 + 1, q_odd)
 
         # FP8 weight-fold contract:
         #   index_weights_out = index_weights * q_scale * softmax_scale * head_scale
@@ -215,6 +236,11 @@ class FusedIndexerQRopeQuantTritonKernel(
         rope_dim: int,
         use_fnuz: bool,
     ) -> CompileKey:
+        fp8_software_conv = (
+            current_platform.is_cuda()
+            and current_platform.has_device_capability(75)
+            and not current_platform.has_device_capability(89)
+        )
         return self.CompileKey(
             dtype=dtype,
             num_heads=num_heads,
@@ -222,6 +248,7 @@ class FusedIndexerQRopeQuantTritonKernel(
             index_q_head_dim=head_dim,
             fp8_max=224.0 if use_fnuz else 448.0,
             use_fnuz=use_fnuz,
+            fp8_software_conv=fp8_software_conv,
             use_explicit_fma=current_platform.is_rocm(),
         )
 
@@ -261,7 +288,11 @@ class FusedIndexerQRopeQuantTritonKernel(
             index_weights_softmax_scale=1.0,
             index_weights_head_scale=1.0,
             index_q_fp8=TritonWarmupTensor(
-                current_platform.fp8_dtype(),
+                (
+                    torch.uint8
+                    if compile_key.fp8_software_conv
+                    else current_platform.fp8_dtype()
+                ),
                 shape=(1, compile_key.num_heads, compile_key.index_q_head_dim),
                 strides=(q_stride0, compile_key.index_q_head_dim, 1),
             ),
@@ -290,6 +321,16 @@ class FusedIndexerQRopeQuantTritonKernel(
     ) -> LaunchSpec:
         num_tokens = positions.shape[0]
         num_index_q_heads = index_q.shape[1]
+        fp8_software_conv = (
+            current_platform.is_cuda()
+            and current_platform.has_device_capability(75)
+            and not current_platform.has_device_capability(89)
+        )
+        index_q_out = (
+            index_q_fp8.view(torch.uint8)
+            if fp8_software_conv and isinstance(index_q_fp8, torch.Tensor)
+            else index_q_fp8
+        )
         return (num_tokens, num_index_q_heads), dict(
             pos_ptr=positions,
             index_q_stride0=index_q.stride(0),
@@ -297,15 +338,18 @@ class FusedIndexerQRopeQuantTritonKernel(
             index_q_cos_sin_ptr=index_q_cos_sin_cache,
             index_q_cos_sin_stride=index_q_cos_sin_cache.stride(0),
             INDEX_Q_HALF_ROT_DIM=index_q_cos_sin_cache.shape[-1] // 2,
-            index_q_fp8_stride0=index_q_fp8.stride(0),
-            index_q_fp8_stride1=index_q_fp8.stride(1),
+            index_q_fp8_ptr=index_q_out,
+            index_q_fp8_stride0=index_q_out.stride(0),
+            index_q_fp8_stride1=index_q_out.stride(1),
             INDEX_Q_HEAD_DIM=index_q.shape[2],
             index_weights_stride=index_weights.stride(0),
             index_weights_out_stride=index_weights_out.stride(0),
             FP8_MAX=fp8_max,
             USE_FNUZ=use_fnuz,
+            FP8_SOFTWARE_CONV=fp8_software_conv,
             USE_EXPLICIT_FMA=current_platform.is_rocm(),
             num_warps=1,
+            **({"extern_libs": FP8E4NV_EXTERN_LIBS} if fp8_software_conv else {}),
         )
 
 
@@ -595,7 +639,7 @@ def fused_indexer_q_rope_quant(
             dtype=torch.uint8,
             device=index_q.device,
         )
-        if has_cutedsl():
+        if _can_use_cutedsl():
             # lazily import, otherwise some tests fail due to CUDA driver init failure.
             from vllm.models.deepseek_v4.nvidia.ops.fused_indexer_q_cutedsl import (
                 _INDEXER_Q_MXFP4_KERNEL,
@@ -651,7 +695,7 @@ def fused_indexer_q_rope_quant(
     use_fnuz = fp8_dtype == torch.float8_e4m3fnuz
     fp8_max = 224.0 if use_fnuz else 448.0
     index_q_fp8 = torch.empty_like(index_q, dtype=fp8_dtype)
-    if has_cutedsl():
+    if _can_use_cutedsl():
         # lazily import, otherwise some tests fail due to CUDA driver init failure.
         from vllm.models.deepseek_v4.nvidia.ops.fused_indexer_q_cutedsl import (
             _INDEXER_Q_FP8_KERNEL,
