@@ -83,8 +83,11 @@ rm -f "$build_log"
 
 # Run the image, setting --shm-size=4g for tensor parallel. Default to
 # HF_HUB_OFFLINE so a warm ~/.cache/huggingface doesn't hit the network;
-# retry once online if the cache is missing something.
-OFFLINE_RETRY_PATTERN='huggingface_hub\.errors\.(LocalEntryNotFoundError|OfflineModeIsEnabled)'
+# retry once online if the cache is missing something. vllm's get_config()
+# wraps the raw huggingface_hub offline-mode errors in a generic ValueError
+# (see transformers_utils/config.py), so match that message too or the
+# fallback never triggers for a config-lookup cache miss.
+OFFLINE_RETRY_PATTERN='huggingface_hub\.errors\.(LocalEntryNotFoundError|OfflineModeIsEnabled)|Invalid repository ID or local directory specified'
 run_test() {
     local hf_offline=$1
     docker run --rm --cpuset-cpus="$CORE_RANGE" --cpuset-mems="$NUMA_NODE" -v ~/.cache/huggingface:/root/.cache/huggingface --privileged=true -e HF_TOKEN -e VLLM_CPU_KVCACHE_SPACE=16 -e VLLM_CPU_CI_ENV=1 -e VLLM_CPU_SIM_MULTI_NUMA=1 -e VLLM_CPU_ATTN_SPLIT_KV=0 -e HF_HUB_OFFLINE="$hf_offline" -e HF_DATASETS_OFFLINE="$hf_offline" --shm-size=4g "$IMAGE_NAME" \
