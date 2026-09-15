@@ -25,6 +25,21 @@ steps:
       depends_on:
       - image-build-amd
 
+- label: ":nvidia: RL weight transfer (NCCL trainer + inference)"
+  key: rl-weight-transfer-nccl
+  device: h100
+  num_devices: 2
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/entrypoints/
+  - vllm/v1/
+  - vllm/distributed/weight_transfer/
+  - vllm/model_executor/layers/fused_moe/
+  - tests/entrypoints/serve/dev/rlhf/
+  commands:
+  - pytest -v -s entrypoints/serve/dev/rlhf/state_transitions/test_weight_update.py -m distributed
+
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (LLM)"
   device: h200_35gb
   key: entrypoints-integration-llm
@@ -61,7 +76,7 @@ steps:
   - tests/entrypoints/scale_out
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  - pytest -v -s entrypoints/serve -m "not distributed" --ignore=entrypoints/serve/dev/rpc --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   - if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc; fi
   - pytest -v -s entrypoints/scale_out --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   mirror:
