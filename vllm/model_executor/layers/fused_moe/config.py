@@ -1088,6 +1088,13 @@ class FusedMoEParallelConfig:
         )
 
     @property
+    def use_fi_cft_counted_write_kernels(self):
+        return (
+            self.use_all2all_kernels
+            and self.all2all_backend == "flashinfer_cft_counted_write"
+        )
+
+    @property
     def use_batched_activation_format(self):
         return self.use_deepep_ll_kernels or self.use_nixl_ep_kernels
 
@@ -1489,6 +1496,10 @@ class FusedMoEConfig:
     @property
     def use_fi_nvl_one_sided_kernels(self):
         return self.moe_parallel_config.use_fi_nvl_one_sided_kernels
+
+    @property
+    def use_fi_cft_counted_write_kernels(self):
+        return self.moe_parallel_config.use_fi_cft_counted_write_kernels
 
     @property
     def use_ag_rs_all2all_kernels(self):
