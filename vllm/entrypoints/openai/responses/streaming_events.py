@@ -1099,7 +1099,9 @@ def emit_simple_tool_call_done(
         ),
     )
     state.output_index += 1
+    state.tool_call_name = None
     state.tool_call_namespace = None
+    state.tool_call_index = None
     state.current_state = _StateType.NONE
     return events
 
@@ -1117,7 +1119,15 @@ def split_delta(delta: DeltaMessage) -> list[DeltaMessage]:
 
     The Responses API emits typed SSE events (one type per event), so a
     compound DeltaMessage must be split before entering the state machine.
-    Order: reasoning -> content -> tool_calls (grouped by index).
+
+    Ordering:
+    - Tool call groups are classified per index:
+      * Continuation/tail groups (where the group's first DeltaToolCall has
+        function.name as None) belong to an ongoing tool call that preceded any
+        subsequent reasoning or content. They are emitted first.
+      * Reasoning and content deltas are emitted in the middle.
+      * Newly starting tool call groups (where function.name is provided) follow
+        reasoning and content as usual.
     """
     has_reasoning = delta.reasoning is not None
     has_content = delta.content is not None
@@ -1130,17 +1140,28 @@ def split_delta(delta: DeltaMessage) -> list[DeltaMessage]:
     ):
         return [delta]
 
-    deltas: list[DeltaMessage] = []
-    if has_reasoning:
-        deltas.append(DeltaMessage(reasoning=delta.reasoning))
-    if has_content:
-        deltas.append(DeltaMessage(content=delta.content))
+    continuation_deltas: list[DeltaMessage] = []
+    new_call_deltas: list[DeltaMessage] = []
     if has_tools:
         groups: dict[int | None, list[DeltaToolCall]] = {}
         for tc in delta.tool_calls:
             groups.setdefault(tc.index, []).append(tc)
         for tcs in groups.values():
-            deltas.append(DeltaMessage(tool_calls=tcs))
+            if tcs and tcs[0].function is not None and tcs[0].function.name is None:
+                continuation_deltas.append(DeltaMessage(tool_calls=tcs))
+            else:
+                new_call_deltas.append(DeltaMessage(tool_calls=tcs))
+
+    deltas: list[DeltaMessage] = []
+    deltas.extend(continuation_deltas)
+
+    if has_reasoning:
+        deltas.append(DeltaMessage(reasoning=delta.reasoning))
+    if has_content:
+        deltas.append(DeltaMessage(content=delta.content))
+
+    deltas.extend(new_call_deltas)
+
     return deltas or [delta]
 
 
@@ -1244,9 +1265,10 @@ class SimpleStreamingEventProcessor:
                 tool_call.function.name,
                 tool_call_name_map=self.tool_call_name_map,
             )
+            tool_name = call_name.name or self.state.tool_call_name or "unknown"
             return handlers.open_fn(
                 self.state,
-                call_name.name,
+                tool_name,
                 tool_call.index,
                 call_name.namespace,
             )
