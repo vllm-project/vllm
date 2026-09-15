@@ -195,9 +195,17 @@ def _create_nvfp4_hnd_kv_cache(
     return nvfp4_cache
 
 
-def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL):
+def _run_trtllm_integration(
+    batch_spec, kv_cache_dtype="auto", model_name=MODEL, kv_magnitude=1.0
+):
     """Run TRTLLM attention through the full FlashInfer pipeline
-    and compare against an SDPA reference."""
+    and compare against an SDPA reference.
+
+    Args:
+        kv_magnitude: Scales K and V while dividing the softmax scale by the
+            same factor, leaving the attention weights untouched. The returned
+            output is then exactly proportional to it.
+    """
     set_random_seed(42)
     device = torch.device(f"{DEVICE_TYPE}:0")
 
@@ -218,7 +226,9 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
     )
     head_size = vllm_config.model_config.get_head_size()
     dtype = vllm_config.model_config.dtype
-    scale = 1.0 / (head_size**0.5)
+    # Dividing by kv_magnitude keeps the QK logits, and therefore the softmax
+    # weights, identical across magnitudes.
+    scale = 1.0 / (head_size**0.5) / kv_magnitude
 
     # 1. Generate data and compute SDPA reference
     all_q, all_k, all_v = [], [], []
@@ -231,8 +241,12 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
         ctx_len = s_len - q_len
 
         q = torch.randn(q_len, num_q_heads, head_size, dtype=dtype, device=device)
-        k_full = torch.randn(s_len, num_kv_heads, head_size, dtype=dtype, device=device)
-        v_full = torch.randn(s_len, num_kv_heads, head_size, dtype=dtype, device=device)
+        k_full = torch.randn(
+            s_len, num_kv_heads, head_size, dtype=dtype, device=device
+        ).mul_(kv_magnitude)
+        v_full = torch.randn(
+            s_len, num_kv_heads, head_size, dtype=dtype, device=device
+        ).mul_(kv_magnitude)
 
         # SDPA reference (N=1, H, L, D)
         q_sdpa = q.unsqueeze(0).transpose(1, 2)
@@ -415,6 +429,7 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
     else:
         atol, rtol = 1e-2, 1e-2
     torch.testing.assert_close(output, sdpa_output, atol=atol, rtol=rtol)
+    return output
 
 
 @pytest.mark.parametrize(
@@ -441,4 +456,31 @@ def test_trtllm_gen_nvfp4_kv_integration(batch_spec_name: str):
         BATCH_SPECS[batch_spec_name],
         kv_cache_dtype="nvfp4",
         model_name=MODEL_NVFP4,
+    )
+
+
+@torch.inference_mode()
+def test_trtllm_gen_nvfp4_kv_output_is_magnitude_equivariant():
+    """NVFP4 KV attention must stay proportional as the KV magnitude shrinks.
+
+    The trtllm-gen NVFP4 kernel can only write FP8 E4M3, so a BF16 output is
+    round-tripped through an FP8 scratch buffer. If that round-trip does not
+    carry an output scale, small attention outputs fall under E4M3's smallest
+    normal (2**-6) and are flushed towards zero, which breaks the proportion
+    that holds everywhere else in the pipeline.
+    """
+    shrink = 1.0 / 64.0
+    reference = _run_trtllm_integration(
+        BATCH_SPECS["decode_only"],
+        kv_cache_dtype="nvfp4",
+        model_name=MODEL_NVFP4,
+    )
+    shrunk = _run_trtllm_integration(
+        BATCH_SPECS["decode_only"],
+        kv_cache_dtype="nvfp4",
+        model_name=MODEL_NVFP4,
+        kv_magnitude=shrink,
+    )
+    torch.testing.assert_close(
+        shrunk.float() / shrink, reference.float(), atol=5e-2, rtol=5e-2
     )
