@@ -79,6 +79,8 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
         cache_config: CacheConfig,
         backend_cls: "type[AttentionBackend] | None" = None,
         block_size: int = 64,
+        packed_bytes_per_token: int = 584,
+        packed_page_alignment: int = 576,
     ):
         super().__init__()
         self.backend_cls = backend_cls or DeepseekSparseSWABackend
@@ -88,6 +90,8 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
         self.prefix = prefix
         self.cache_config = cache_config
         self.dtype = dtype
+        self.packed_bytes_per_token = packed_bytes_per_token
+        self.packed_page_alignment = packed_page_alignment
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -105,8 +109,9 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
         self.kv_cache = kv_cache.squeeze(1)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        # fp8_ds_mla's UE8M0 paged layout needs 576B alignment; contiguous
-        # bf16/fp8 cache uses the natural element-size page.
+        # fp8_ds_mla's UE8M0 paged layout rounds its page up to the decode
+        # kernel's TMA stride; contiguous bf16/fp8 cache uses the natural
+        # element-size page.
         uses_fp8_ds_mla_layout = self.cache_config.cache_dtype == "fp8_ds_mla"
         return SlidingWindowMLASpec(
             block_size=self.block_size,
@@ -115,10 +120,11 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
             dtype=self.dtype,
             sliding_window=self.window_size,
             cache_dtype_str=self.cache_config.cache_dtype,
-            # DeepseekV4 fp8_ds_mla: 584B per token (448B NoPE + 128B RoPE + 8B scales)
-            state_content_bytes=584 if uses_fp8_ds_mla_layout else None,
-            # 576B for FlashMLA packing; 512B for FlashInfer sparse (#44577).
-            alignment=576 if uses_fp8_ds_mla_layout else 512,
+            state_content_bytes=(
+                self.packed_bytes_per_token if uses_fp8_ds_mla_layout else None
+            ),
+            # FlashMLA packing stride; 512B for FlashInfer sparse (#44577).
+            alignment=self.packed_page_alignment if uses_fp8_ds_mla_layout else 512,
             model_version="deepseek_v4",
             kv_quant_mode=get_kv_quant_mode(self.cache_config.cache_dtype),
         )

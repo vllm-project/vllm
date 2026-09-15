@@ -215,6 +215,136 @@ def test_v41_fused_save_compress_and_insert(
         torch.testing.assert_close(cache_backing, expected_cache, rtol=0, atol=0)
 
 
+def _mxfp8_record_reference(
+    latent_row: torch.Tensor, cos_sin_row: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reference V4.1 record for one token: 512 fp8 bytes + 16 UE8M0 scales.
+
+    Mirrors FlashMLA's ``KVCacheLayout.V41_FP8Sparse`` quantizer: rotate the
+    RoPE tail first, then scale every 32-dim tile, RoPE tiles included.
+    """
+    row = latent_row.float()
+    c, s = cos_sin_row.chunk(2)
+    rotated = row.clone()
+    even, odd = row[448::2], row[449::2]
+    rotated[448::2] = even * c - odd * s
+    rotated[449::2] = odd * c + even * s
+    quantized, scales = _ue8m0_reference(rotated, 32, 448.0)
+    return quantized.view(torch.uint8), (scales.log2() + 127).to(torch.uint8)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.parametrize("compress_ratio", [1, 2])
+def test_v41_rope_insert_mxfp8_record(compress_ratio: int):
+    """The 528-byte V4.1 record quantizes the RoPE dims instead of keeping them
+    in bf16, so a page is [block_size x 512 fp8][block_size x 16 UE8M0].
+
+    Byte-exact against the reference quantizer, including the rows and page
+    padding the kernel must leave alone.
+    """
+    from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
+        rope_quant_insert,
+    )
+
+    torch.manual_seed(7)
+    device = "cuda"
+    cache_block = 64
+    cache_stride = math.ceil(cache_block * 528 / 512) * 512
+    num_tokens = 12
+
+    positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    latent = torch.randn(num_tokens, 512, dtype=torch.bfloat16, device=device)
+    angles = torch.randn(64, 32, device=device)
+    cos_sin = torch.cat((angles.cos(), angles.sin()), dim=-1)
+
+    cache_backing = torch.full((2, cache_stride), 165, dtype=torch.uint8, device=device)
+    cache = cache_backing.as_strided((2, cache_block, 528), (cache_stride, 528, 1))
+    # Leave one token unmapped so the kernel's negative-slot skip is covered.
+    slots = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    slots[3] = -1
+
+    rope_quant_insert(latent, positions, cos_sin, cache, slots, compress_ratio)
+
+    expected = torch.full_like(cache_backing, 165)
+    for t in range(num_tokens):
+        slot = slots[t].item()
+        pos = positions[t].item()
+        if slot < 0 or (pos + 1) % compress_ratio:
+            continue
+        page, row = divmod(slot, cache_block)
+        values, scales = _mxfp8_record_reference(
+            latent[t], cos_sin[pos // compress_ratio * compress_ratio]
+        )
+        expected[page, row * 512 : (row + 1) * 512] = values
+        scale_offset = cache_block * 512 + row * 16
+        expected[page, scale_offset : scale_offset + 16] = scales
+
+    torch.testing.assert_close(cache_backing, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+def test_v41_mxfp8_cache_round_trip():
+    """quantize_and_insert -> dequantize_and_gather recovers the V4.1 record.
+
+    The RoPE dims now go through fp8, so they carry quantization error too --
+    the check is that every dim survives within one MXFP8 tile step, and that
+    the bytes on the way match the reference quantizer.
+    """
+    from vllm.models.deepseek_v41.common.ops import (
+        dequantize_and_gather_k_cache,
+        quantize_and_insert_k_cache,
+    )
+
+    torch.manual_seed(11)
+    device = "cuda"
+    block_size = 64
+    num_tokens = 70
+    num_blocks = 4
+    page_bytes = math.ceil(block_size * 528 / 512) * 512
+
+    k = torch.randn(num_tokens, 512, dtype=torch.bfloat16, device=device)
+    cache = torch.zeros(num_blocks, page_bytes, dtype=torch.uint8, device=device)
+    slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    quantize_and_insert_k_cache(
+        k, cache, slot_mapping, block_size=block_size, bytes_per_token=528
+    )
+
+    for t in (0, 1, block_size, num_tokens - 1):
+        values, scales = _ue8m0_reference(k[t].float(), 32, 448.0)
+        page, row = divmod(t, block_size)
+        torch.testing.assert_close(
+            cache[page, row * 512 : (row + 1) * 512],
+            values.view(torch.uint8),
+            rtol=0,
+            atol=0,
+        )
+        scale_offset = block_size * 512 + row * 16
+        torch.testing.assert_close(
+            cache[page, scale_offset : scale_offset + 16],
+            (scales.log2() + 127).to(torch.uint8),
+            rtol=0,
+            atol=0,
+        )
+
+    out = torch.zeros(1, num_tokens, 512, dtype=torch.bfloat16, device=device)
+    dequantize_and_gather_k_cache(
+        out,
+        cache.view(num_blocks, block_size, 528),
+        seq_lens=torch.tensor([num_tokens], dtype=torch.int32, device=device),
+        gather_lens=None,
+        block_table=torch.arange(num_blocks, dtype=torch.int32, device=device).view(
+            1, -1
+        ),
+        block_size=block_size,
+        offset=0,
+    )
+    # Half an e4m3 ULP at the top of the range (16 units) bounds the error.
+    tile_amax = k.float().abs().view(num_tokens, 16, 32).amax(-1).clamp(min=1e-4)
+    tolerance = 16.0 * (tile_amax / 448.0).log2().ceil().exp2()
+    error = (out[0].float() - k.float()).abs()
+    assert (error <= tolerance.repeat_interleave(32, dim=-1)).all()
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
 @pytest.mark.parametrize("compress_ratio", [1, 2])
 @pytest.mark.parametrize("store_fp8", [False, True])

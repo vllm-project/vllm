@@ -259,6 +259,8 @@ def _insert_context_kv(
             attn.padded_heads,
             attn.eps,
             block_size,
+            True,  # apply_q_norm (unused: the query is a discarded dummy)
+            attn.kv_mxfp8,
         )
     elif cache_dtype == torch.bfloat16:
         swa_3d = swa_cache.view(-1, block_size, attn.head_dim)

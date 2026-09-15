@@ -232,10 +232,13 @@ def rope_quant_insert(
 
     The BF16 latent supplies both NoPE quantization and RoPE input. It is read
     only for valid slots at group boundaries. The cache dtype selects the
-    layout: ``uint8`` is the fp8_ds_mla paged layout (576 value bytes and eight
-    segregated UE8M0 scale bytes per token, including one zero padding scale);
-    ``bfloat16`` and ``float8_e4m3fn`` are the plain [448 NoPE | 64 RoPE] rows
-    read by FlashInfer, the latter scaled by the per-tensor ``fp8_scale``.
+    layout: ``uint8`` is the fp8_ds_mla paged layout, whose record the
+    per-token byte width names -- 584 B for V4 (576 value bytes and eight
+    segregated UE8M0 scale bytes, including one zero padding scale) or 528 B
+    for V4.1 (512 MXFP8 value bytes covering the RoPE dims too, then 16 UE8M0
+    scales of 32 dims each). ``bfloat16`` and ``float8_e4m3fn`` are the plain
+    [448 NoPE | 64 RoPE] rows read by FlashInfer, the latter scaled by the
+    per-tensor ``fp8_scale``.
     """
     assert compress_ratio in (1, 2)
     assert latent.shape[1] == 512 and latent.dtype == torch.bfloat16
@@ -246,8 +249,15 @@ def rope_quant_insert(
         return
     launch_kwargs = {"launch_pdl": False} if current_platform.is_cuda() else {}
     if kv_cache.dtype == torch.uint8:
-        assert kv_cache.shape[-1] == 584
-        _rope_quant_insert_kernel[(num_tokens,)](
+        assert kv_cache.shape[-1] in (584, 528), (
+            f"unsupported paged KV record width {kv_cache.shape[-1]}"
+        )
+        kernel = (
+            _rope_quant_insert_mxfp8_kernel
+            if kv_cache.shape[-1] == 528
+            else _rope_quant_insert_kernel
+        )
+        kernel[(num_tokens,)](
             latent,
             positions,
             cos_sin_cache,
@@ -336,6 +346,60 @@ def _rope_quant_insert_kernel(
         rotated = tl.where(rotated == rotated, rotated, 0.0)
     rope_dst = (values + 448).to(tl.pointer_type(tl.bfloat16))
     tl.store(rope_dst + d - 448, rotated.to(tl.bfloat16), d >= 448)
+
+
+@triton.jit
+def _rope_quant_insert_mxfp8_kernel(
+    latent,
+    positions,
+    cos_sin,
+    cache,
+    cache_slots,
+    COS_STRIDE: tl.constexpr,
+    CACHE_STRIDE: tl.constexpr,
+    CACHE_BLOCK: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    SANITIZE_CACHE_NANS: tl.constexpr,
+):
+    """V4.1 record: RoPE first, then MXFP8-quantize all 512 dims.
+
+    The RoPE dims are quantized here too, so unlike the V4 kernel the rotation
+    has to happen before the scales are picked.
+    """
+    t = tl.program_id(0)
+    slot = tl.load(cache_slots + t)
+    if slot < 0:
+        return
+    position = tl.load(positions + t)
+    if (position + 1) % COMPRESS_RATIO != 0:
+        return
+    d = tl.arange(0, 512)
+    normed = tl.load(latent + t.to(tl.int64) * 512 + d).to(tl.float32)
+
+    # NoPE pairs load (cos, sin) = (1, 0), so the rotation is the identity there.
+    even, odd = tl.split(tl.reshape(normed, (256, 2)))
+    pair = tl.arange(0, 256) - 224
+    cs = cos_sin + (position // COMPRESS_RATIO * COMPRESS_RATIO) * COS_STRIDE
+    c = tl.load(cs + tl.maximum(pair, 0), pair >= 0, other=1.0).to(tl.float32)
+    s = tl.load(cs + 32 + tl.maximum(pair, 0), pair >= 0, other=0.0).to(tl.float32)
+    rotated = tl.interleave(even * c - odd * s, odd * c + even * s)
+    if SANITIZE_CACHE_NANS:
+        rotated = tl.where(rotated == rotated, rotated, 0.0)
+
+    page = cache + (slot // CACHE_BLOCK).to(tl.int64) * CACHE_STRIDE
+    values = page + (slot % CACHE_BLOCK) * 512
+    scales = page + CACHE_BLOCK * 512 + (slot % CACHE_BLOCK) * 16
+
+    quant = tl.reshape(rotated, (16, 32))
+    amax = tl.maximum(tl.max(tl.abs(quant), 1), 1e-4)
+    exponent = tl.ceil(tl.log2(amax * (1.0 / 448.0)))
+    scaled = quant * tl.reshape(tl.exp2(-exponent), (16, 1))
+    fp8 = tl.clamp(scaled, -448.0, 448.0).to(tl.float8e4nv)
+    tl.store(values + d, tl.reshape(fp8.to(tl.uint8, bitcast=True), (512,)))
+
+    max_encoded: tl.constexpr = 254.0 if SANITIZE_CACHE_NANS else 255.0
+    encoded = tl.minimum(tl.maximum(exponent + 127.0, 0.0), max_encoded)
+    tl.store(scales + tl.arange(0, 16), encoded.to(tl.uint8))
 
 
 @triton.jit

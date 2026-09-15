@@ -424,6 +424,104 @@ def test_kv_path_matches_reference(num_tokens: int, block_size: int):
     )
 
 
+# ── Test 2c: DeepSeek V4.1 MXFP8 record (kv_mxfp8=True) ──────────────────────
+
+V41_HEAD_BYTES = HEAD_DIM + HEAD_DIM // 32  # 512 fp8 + 16 UE8M0 scales = 528
+
+
+@pytest.mark.parametrize("num_tokens", [1, 17, 64])
+@pytest.mark.parametrize("block_size", [32, 64])
+def test_kv_path_mxfp8_record_matches_reference(num_tokens: int, block_size: int):
+    """``kv_mxfp8=True`` writes DeepSeek's V4.1 record: all 512 dims as fp8 e4m3
+    with one UE8M0 scale per 32 dims, no bf16 RoPE tail.
+
+    Both sides quantize the same bf16-rounded rotated row, so the bytes must
+    match the Triton encoder exactly apart from the documented 1-ULP bf16
+    rounding split on the rotation itself.
+    """
+    from vllm.models.deepseek_v41.common.ops import (
+        dequantize_and_gather_k_cache as v41_dequantize_and_gather_k_cache,
+    )
+    from vllm.models.deepseek_v41.common.ops import (
+        quantize_and_insert_k_cache as v41_quantize_and_insert_k_cache,
+    )
+
+    torch.manual_seed(3)
+    device = "cuda"
+    dtype = torch.bfloat16
+    max_pos = 4096
+
+    kv = torch.randn(num_tokens, HEAD_DIM, dtype=dtype, device=device)
+    positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    cos_sin_cache = make_cos_sin_cache(max_pos, ROPE_DIM, torch.float32, device)
+
+    num_blocks = (num_tokens + block_size - 1) // block_size + 1
+    slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
+
+    k_cache_ref = torch.zeros(
+        num_blocks, block_size * V41_HEAD_BYTES, dtype=torch.uint8, device=device
+    )
+    v41_quantize_and_insert_k_cache(
+        apply_rope_gptj_last_k(kv, positions, cos_sin_cache),
+        k_cache_ref,
+        slot_mapping,
+        block_size=block_size,
+        use_fnuz=USE_FNUZ,
+        bytes_per_token=V41_HEAD_BYTES,
+    )
+
+    k_cache_fused = torch.zeros_like(k_cache_ref)
+    q_dummy = torch.zeros(num_tokens, 1, HEAD_DIM, dtype=dtype, device=device)
+    torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+        q_dummy,
+        kv,
+        k_cache_fused,
+        slot_mapping,
+        positions,
+        cos_sin_cache,
+        64,
+        1e-6,
+        block_size,
+        True,
+        True,  # kv_mxfp8
+    )
+
+    # A pre-quantization bf16 tie can land the two encoders on adjacent e4m3
+    # codes, so compare after dequantizing and allow one step at the tile scale.
+    def _dequant(cache_2d):
+        out = torch.zeros(1, num_tokens, HEAD_DIM, dtype=dtype, device=device)
+        v41_dequantize_and_gather_k_cache(
+            out,
+            cache_2d.view(num_blocks, block_size, V41_HEAD_BYTES),
+            torch.tensor([num_tokens], dtype=torch.int32, device=device),
+            None,
+            torch.arange(num_blocks, dtype=torch.int32, device=device).unsqueeze(0),
+            block_size,
+            offset=0,
+            use_fnuz=USE_FNUZ,
+        )
+        return out[0]
+
+    rec_ref = _dequant(k_cache_ref).float()
+    rec_fused = _dequant(k_cache_fused).float()
+    tile_scale = (
+        (rec_ref.abs().view(num_tokens, 16, 32).amax(-1).clamp(min=1e-4) / FP8_MAX)
+        .log2()
+        .ceil()
+        .exp2()
+    )
+    # One e4m3 ULP at the top of the range is 32 quantized units.
+    step = 32.0 * tile_scale.repeat_interleave(32, dim=-1)
+    assert ((rec_fused - rec_ref).abs() <= step).all()
+    # The NoPE dims see no rotation at all, so they must be byte-identical.
+    nope_bytes = slice(0, block_size * HEAD_DIM)
+    ref_rows = k_cache_ref[:, nope_bytes].view(num_blocks, block_size, HEAD_DIM)
+    fused_rows = k_cache_fused[:, nope_bytes].view(num_blocks, block_size, HEAD_DIM)
+    torch.testing.assert_close(
+        fused_rows[..., :NOPE_DIM], ref_rows[..., :NOPE_DIM], rtol=0, atol=0
+    )
+
+
 # ── Test 2b: DP padding (slot_mapping shorter than q/kv) ─────────────────────
 
 
