@@ -13,20 +13,21 @@ import contextlib
 import inspect
 import operator
 import textwrap
-from collections.abc import Callable, Sized
+from collections.abc import Callable
 from itertools import chain
-from typing import TypeGuard
+from typing import Any
 from unittest import mock
 
 import torch
 from torch import fx, nn
 from torch.nn import functional as F
+from typing_extensions import TypeIs
 
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-_UNKNOWN = object()
+_UNKNOWN: Any = object()
 """Sentinel meta value for proxies whose concrete value could not be inferred.
 Distinct from `None`, which is a valid concrete value (e.g. `attn_weights`)."""
 
@@ -35,7 +36,7 @@ _MODULE_CALL = nn.Module.__call__
 `call_module` nodes; meta execution must call modules for real."""
 
 
-def is_leaf_call(node: object) -> bool:
+def is_leaf_call(node: object) -> TypeIs[fx.Node]:
     """Is node a call recorded by `_as_leaf_call` (e.g. an attention interface)."""
     return isinstance(node, fx.Node) and node.meta.get("leaf_call", False)
 
@@ -61,11 +62,10 @@ class _MetaProxy(fx.Proxy):
     executing each op on the meta values, so PyTorch's meta kernels are the
     single source of shape inference — no per-op rules."""
 
-    meta: object = _UNKNOWN
+    meta: Any = _UNKNOWN
 
     def __len__(self) -> int:
         if self.meta is not _UNKNOWN:
-            assert isinstance(self.meta, Sized)
             return len(self.meta)
         return super().__len__()  # type: ignore[misc]
 
@@ -191,7 +191,6 @@ class _AllLeafTracer(fx.Tracer):
         meta = getattr(obj, "meta", _UNKNOWN)
         if meta is _UNKNOWN:
             return super().iter(obj)
-        assert isinstance(meta, Sized)
         return iter([obj[i] for i in range(len(meta))])
 
 
@@ -650,7 +649,7 @@ def aliasing_names(
     """
     names = set(seed)
     assigns = [
-        node
+        (node, node.value)
         for node in ast.walk(funcdef)
         if isinstance(node, (ast.Assign, ast.AnnAssign))
         and node.value is not None
@@ -659,9 +658,7 @@ def aliasing_names(
     changed = True
     while changed:
         changed = False
-        for node in assigns:
-            value = node.value
-            assert value is not None
+        for node, value in assigns:
             if not _aliasing_reads(value) & names:
                 continue
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
@@ -776,7 +773,7 @@ def peel(node: object) -> object:
     return node
 
 
-def is_fn(node: object, target: object) -> bool:
+def is_fn(node: object, target: object) -> TypeIs[fx.Node]:
     """Is node `<target>()`."""
     return (
         isinstance(node, fx.Node)
@@ -785,14 +782,14 @@ def is_fn(node: object, target: object) -> bool:
     )
 
 
-def is_method(node: object, name: str) -> bool:
+def is_method(node: object, name: str) -> TypeIs[fx.Node]:
     """Is node `.<name>()`."""
     return (
         isinstance(node, fx.Node) and node.op == "call_method" and node.target == name
     )
 
 
-def is_op(node: object, name: str) -> TypeGuard[fx.Node]:
+def is_op(node: object, name: str) -> TypeIs[fx.Node]:
     """
     Is node `torch.<name>()`, `F.<name>()`, `operator.<name>()`, or `Tensor.<name>()`.
     """

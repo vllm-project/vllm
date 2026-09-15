@@ -16,9 +16,8 @@
 # limitations under the License.
 """Transformers modeling backend utilities."""
 
-from collections.abc import Callable, Hashable, Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from functools import lru_cache
 from itertools import chain
 from operator import attrgetter
 from pathlib import Path
@@ -71,7 +70,7 @@ def init_on_device_without_buffers(device: torch.device):
                 module._parameters[name].to(device), **kwargs
             )
 
-    tensor_constructors_to_patch: dict[str, Callable[..., torch.Tensor]] = {}
+    tensor_constructors_to_patch: dict[str, Callable] = {}
 
     def patch_tensor_constructor(fn):
         def wrapper(*args, **kwargs):
@@ -210,7 +209,9 @@ class _VocabParallelEmbeddingBase(VocabParallelEmbedding, _UninitializedEmbeddin
     `super().forward(...)` in an `nn.Embedding` subclass reaches vLLM's embedding."""
 
 
-@lru_cache
+_rebased_embedding_classes: dict[type[nn.Embedding], type[VocabParallelEmbedding]] = {}
+
+
 def _rebase_on_vocab_parallel(cls: type[nn.Embedding]) -> type[VocabParallelEmbedding]:
     """Subclass `cls` so that `VocabParallelEmbedding` supersedes its `nn.Embedding`.
 
@@ -220,7 +221,10 @@ def _rebase_on_vocab_parallel(cls: type[nn.Embedding]) -> type[VocabParallelEmbe
     Returns:
         The new class, to assign to `__class__` of an instance of `cls`.
     """
-    return type(cls.__name__, (cls, _VocabParallelEmbeddingBase), {})
+    if cls not in _rebased_embedding_classes:
+        rebased_cls = type(cls.__name__, (cls, _VocabParallelEmbeddingBase), {})
+        _rebased_embedding_classes[cls] = rebased_cls
+    return _rebased_embedding_classes[cls]
 
 
 def replace_embedding_class(
@@ -254,9 +258,7 @@ def replace_embedding_class(
         return VocabParallelEmbedding(**kwargs)
 
     # Otherwise `embedding` inherits `nn.Embedding`, rebase it in place
-    embedding_cls = type(embedding)
-    assert isinstance(embedding_cls, Hashable)
-    embedding.__class__ = _rebase_on_vocab_parallel(embedding_cls)
+    embedding.__class__ = _rebase_on_vocab_parallel(type(embedding))
     VocabParallelEmbedding.__init__(embedding, **kwargs)
     return embedding
 
@@ -274,10 +276,9 @@ def recursive_replace_linear(
             qual_name = maybe_prefix(prefix, child_name)
             # Replace modules as needed
             if isinstance(child_module, nn.Linear):
-                style: Style = "replicate"
                 new_module = replace_linear_class(
                     child_module,
-                    style,
+                    "replicate",
                     quant_config,
                     prefix=qual_name,
                 )
