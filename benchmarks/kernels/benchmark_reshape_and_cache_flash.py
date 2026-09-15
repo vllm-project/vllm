@@ -46,8 +46,6 @@ def run_benchmark(
             f"Unsupported implementation: {implementation}. "
             "Only 'cuda' and 'triton' are supported."
         )
-    if implementation == "triton" and kv_cache_layout == "HND":
-        return float("nan")  # Triton does not support HND layout yet.
 
     set_random_seed(42)
     torch.set_default_device(device)
