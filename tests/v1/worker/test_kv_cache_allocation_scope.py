@@ -11,7 +11,80 @@ import torch
 import vllm.v1.hisparse.binding as hisparse_binding
 import vllm.v1.worker.gpu.attn_utils as attn_utils
 import vllm.v1.worker.gpu_model_runner as gpu_model_runner
+from vllm.v1.hisparse.layout import _build_hisparse_kv_cache_tensors
+from vllm.v1.hisparse.runtime import HiSparseCacheHandle, HiSparseRuntime
+from vllm.v1.kv_cache_interface import (
+    HiSparseHotSpec,
+    HiSparseResidentSpec,
+    KVCacheGroupSpec,
+)
+from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.worker.gpu_worker import Worker
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.uint8])
+def test_hisparse_layer_cache_writes_are_independent(dtype):
+    """Layers packed into one allocation must retain distinct resident/hot KV."""
+    num_blocks, block_size, row_width = 3, 2, 8
+    names = ["layer.0", "layer.1"]
+    resident_names = [name + ".hisparse_resident" for name in names]
+    hot_names = [name + ".hisparse_hot" for name in names]
+    page_size = block_size * row_width * dtype.itemsize
+    groups = [
+        KVCacheGroupSpec(
+            resident_names,
+            HiSparseResidentSpec(block_size=block_size, page_size=page_size),
+        ),
+        KVCacheGroupSpec(
+            hot_names,
+            HiSparseHotSpec(
+                block_size=block_size, page_size=page_size, blocks_per_request=1
+            ),
+        ),
+    ]
+    # Reserve a leading page to exercise both the tensor and layer offsets.
+    block_stride = 3 * page_size
+    raw = torch.zeros(num_blocks * block_stride, dtype=torch.int8)
+    tensors = _build_hisparse_kv_cache_tensors(
+        groups, num_blocks, raw.numel(), KVCacheLayout.BLNHC, block_stride
+    )
+    for tensor in tensors:
+        tensor.offset = page_size
+    host = torch.zeros(2, num_blocks, block_size, row_width, dtype=dtype)
+    handles = []
+    for _ in names:
+        # Binding requires no CUDA replacement state.
+        runtime = object.__new__(HiSparseRuntime)
+        runtime.kv_dtype, runtime.row_width = dtype, row_width
+        handles.append(HiSparseCacheHandle(runtime))
+    kv_caches = dict(zip(names, host))
+    kv_caches.update((name, raw) for name in resident_names + hot_names)
+    hisparse_binding.bind_hisparse_kv_caches(
+        forward_context={
+            name: SimpleNamespace(hisparse_cache=handle)
+            for name, handle in zip(names, handles)
+        },
+        kv_cache_config=SimpleNamespace(
+            kv_cache_tensors=tensors,
+            kv_cache_groups=groups,
+            num_blocks=num_blocks,
+            host_group_ids=[0],
+        ),
+        kv_caches=kv_caches,
+        block_tables=SimpleNamespace(
+            input_block_tables=[torch.zeros(1, 1, dtype=torch.int32)] * 2,
+            slot_mappings=[torch.zeros(1, dtype=torch.int64)] * 2,
+        ),
+        host_pool=SimpleNamespace(registered=host, shared_region=None),
+    )
+    for i, handle in enumerate(handles):
+        handle.view.cache[1].fill_(i + 1)
+        handle.runtime.hot.cache[2].fill_(i + 3)
+    for i, handle in enumerate(handles):
+        assert torch.all(handle.view.cache[1] == i + 1)
+        assert torch.all(handle.runtime.hot.cache[2] == i + 3)
+    assert not raw.view(num_blocks, block_stride)[:, :page_size].count_nonzero()
 
 
 class _AllocationScope(AbstractContextManager):
