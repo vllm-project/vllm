@@ -361,15 +361,7 @@ class Step3p5MTPProposer(EagleProposer):
         )
         draft_probs_list = None if draft_probs is None else [draft_probs]
 
-        if self.allowed_attn_types is not None:
-            for group_md in per_group_attn_metadata:
-                if not isinstance(group_md, self.allowed_attn_types):
-                    raise ValueError(
-                        f"Unsupported attention metadata type for speculative "
-                        "decoding with num_speculative_tokens > 1: "
-                        f"{type(group_md)}. Supported types are: "
-                        f"{self.allowed_attn_types}"
-                    )
+        self._raise_if_unsupported_multi_step_drafting()
 
         draft_token_ids_list = [draft_token_ids]
 
