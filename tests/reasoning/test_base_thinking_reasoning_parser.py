@@ -367,6 +367,34 @@ class TestBaseThinkingReasoningParserStreaming:
         assert reasoning == "Reasoning content"
         assert content == "Final"
 
+    def test_streaming_start_token_grouped_with_text(self, test_tokenizer):
+        """Regression test for #55195: when the start marker and the first
+        reasoning token arrive in the same delta, the marker must be stripped,
+        matching what non-streaming extraction returns."""
+        parser = TestThinkingReasoningParser(test_tokenizer)
+
+        deltas = [
+            "<test:think>Some reasoning",
+            "</test:think>",
+            "Answer",
+        ]
+
+        reasoning, content = run_reasoning_extraction(parser, deltas, streaming=True)
+
+        assert reasoning == "Some reasoning"
+        assert content == "Answer"
+
+    def test_streaming_start_token_grouped_without_end(self, test_tokenizer):
+        """Start marker grouped with text and no end marker in the stream."""
+        parser = TestThinkingReasoningParser(test_tokenizer)
+
+        deltas = ["<test:think>Some reasoning"]
+
+        reasoning, content = run_reasoning_extraction(parser, deltas, streaming=True)
+
+        assert reasoning == "Some reasoning"
+        assert content is None
+
 
 class TestBaseThinkingReasoningParserMultipleImplementations:
     """
