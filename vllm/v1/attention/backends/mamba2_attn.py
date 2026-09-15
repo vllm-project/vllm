@@ -160,7 +160,7 @@ class Mamba2AttentionMetadataBuilder(
                 )
                 prep_initial_states = bool((num_computed_tokens_p_cpu > 0).any())
 
-            cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p = (
+            cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p, _ = (
                 self._build_chunk_metadata_tensors(
                     self.chunk_size,
                     common,
