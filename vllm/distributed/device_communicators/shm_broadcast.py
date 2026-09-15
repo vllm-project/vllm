@@ -346,7 +346,9 @@ class ShmRingBuffer:
                 except FileNotFoundError:
                     # we might deserialize the object in a different node
                     # in this case, this object is not used,
-                    # and we should suppress the error
+                    # and we should suppress the error. Callers that require
+                    # a working local attach (e.g. create_from_handle) must
+                    # check for this and fail clearly themselves.
                     pass
 
     def handle(self):
@@ -567,6 +569,14 @@ class MessageQueue:
         if rank in handle.local_reader_ranks:
             assert handle.buffer_handle is not None
             self.buffer = ShmRingBuffer(*handle.buffer_handle)
+            if not hasattr(self.buffer, "shared_memory"):
+                name = handle.buffer_handle[3]
+                raise RuntimeError(
+                    f"Rank {rank} is a local reader but could not attach to "
+                    f"shared memory ring buffer {name!r}. The segment may "
+                    "have been unlinked, the handle may be stale, or the "
+                    "processes may not share a /dev/shm namespace."
+                )
             self.current_idx = 0
             self.local_reader_rank = handle.local_reader_ranks.index(rank)
             self._is_local_reader = True
