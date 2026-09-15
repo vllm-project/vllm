@@ -209,7 +209,7 @@ class DSparkDeepseekV4Model(nn.Module):
 
         residual = post_mix = res_mix = None
         for layer in self.layers:
-            hidden_states, residual, post_mix, res_mix = layer(
+            hidden_states, residual, post_mix, res_mix, _ = layer(
                 hidden_states,
                 positions,
                 input_ids,
