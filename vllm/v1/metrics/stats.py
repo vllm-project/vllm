@@ -3,11 +3,13 @@
 
 import time
 from collections import defaultdict, deque
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
+from vllm.v1.cache_hit_source import CacheHitSource
 from vllm.v1.metrics.perf import PerfStats
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
@@ -267,6 +269,8 @@ class PrefillStats:
         num_cached_tokens: Tokens to be prefilled without actual compute work.
         num_local_cached_tokens: Tokens to be prefilled from local prefix cache.
         num_external_cached_tokens: Tokens to be prefilled from external KV transfer.
+        external_cached_token_sources: Ordered external token counts by the
+            cache tier that supplied them, using canonical CacheHitSource values.
         num_cache_creation_tokens: Tokens computed and written to the prefix cache.
     """
 
@@ -275,6 +279,7 @@ class PrefillStats:
     num_cached_tokens: int = 0
     num_local_cached_tokens: int = 0
     num_external_cached_tokens: int = 0
+    external_cached_token_sources: list[tuple[str, int]] = field(default_factory=list)
     num_cache_creation_tokens: int = 0
 
     def set(
@@ -282,15 +287,65 @@ class PrefillStats:
         num_prompt_tokens: int,
         num_local_cached_tokens: int,
         num_external_cached_tokens: int,
+        external_cached_token_sources: Sequence[tuple[str | CacheHitSource, int]]
+        | None = None,
     ):
         num_cached_tokens = num_local_cached_tokens + num_external_cached_tokens
         assert num_cached_tokens <= num_prompt_tokens
+
+        sources: list[tuple[str, int]]
+        if external_cached_token_sources is None:
+            sources = (
+                [("external", num_external_cached_tokens)]
+                if num_external_cached_tokens
+                else []
+            )
+        else:
+            sources = []
+            for source, num_tokens in external_cached_token_sources:
+                assert source
+                assert num_tokens >= 0
+                canonical_source = CacheHitSource(source).value
+                if num_tokens == 0:
+                    continue
+                if sources and sources[-1][0] == canonical_source:
+                    previous_source, previous_tokens = sources[-1]
+                    sources[-1] = (
+                        previous_source,
+                        previous_tokens + num_tokens,
+                    )
+                else:
+                    sources.append((canonical_source, num_tokens))
+        assert sum(num_tokens for _, num_tokens in sources) == (
+            num_external_cached_tokens
+        )
 
         self.num_prompt_tokens = num_prompt_tokens
         self.num_computed_tokens = num_prompt_tokens - num_cached_tokens
         self.num_cached_tokens = num_cached_tokens
         self.num_local_cached_tokens = num_local_cached_tokens
         self.num_external_cached_tokens = num_external_cached_tokens
+        self.external_cached_token_sources = sources
+
+    def truncate_external_cached_tokens(self, num_external_cached_tokens: int) -> None:
+        """Keep only the successfully restored prefix of external tokens."""
+        assert 0 <= num_external_cached_tokens <= self.num_external_cached_tokens
+        remaining = num_external_cached_tokens
+        sources: list[tuple[str, int]] = []
+        for source, num_tokens in self.external_cached_token_sources:
+            if remaining == 0:
+                break
+            kept_tokens = min(num_tokens, remaining)
+            sources.append((source, kept_tokens))
+            remaining -= kept_tokens
+        assert remaining == 0
+
+        self.num_external_cached_tokens = num_external_cached_tokens
+        self.external_cached_token_sources = sources
+        self.num_cached_tokens = (
+            self.num_local_cached_tokens + num_external_cached_tokens
+        )
+        self.num_computed_tokens = self.num_prompt_tokens - self.num_cached_tokens
 
     def finalize(self, num_cached_tokens: int) -> None:
         assert num_cached_tokens >= 0
@@ -384,11 +439,13 @@ class PromptTokenStats:
         local_cache_hit: Tokens from local prefix cache.
         external_kv_transfer: Tokens from external KV transfer.
         cached_tokens: Tokens skipped during prefill (from scheduler).
+        cached_tokens_by_source: Cached tokens by physical cache tier.
         total: Total prompt tokens.
 
     Invariants:
         computed + local_cache_hit + external_kv_transfer = total
         local_cache_hit + external_kv_transfer = cached_tokens
+        sum(cached_tokens_by_source.values()) = cached_tokens
     """
 
     ALL_SOURCES: tuple[str, ...] = (
@@ -396,11 +453,15 @@ class PromptTokenStats:
         "local_cache_hit",
         "external_kv_transfer",
     )
+    BUILTIN_CACHED_SOURCES: tuple[str, ...] = tuple(
+        source.value for source in CacheHitSource
+    )
 
     computed: int = 0
     local_cache_hit: int = 0
     external_kv_transfer: int = 0
     cached_tokens: int = 0
+    cached_tokens_by_source: dict[str, int] = field(default_factory=dict)
     total: int = 0
 
     def update_from_output(self, prefill_stats: PrefillStats) -> None:
@@ -411,6 +472,15 @@ class PromptTokenStats:
 
         self.local_cache_hit += prefill_stats.num_local_cached_tokens
         self.external_kv_transfer += prefill_stats.num_external_cached_tokens
+        if prefill_stats.num_local_cached_tokens:
+            self.cached_tokens_by_source["device"] = (
+                self.cached_tokens_by_source.get("device", 0)
+                + prefill_stats.num_local_cached_tokens
+            )
+        for source, num_tokens in prefill_stats.external_cached_token_sources:
+            self.cached_tokens_by_source[source] = (
+                self.cached_tokens_by_source.get(source, 0) + num_tokens
+            )
 
     def get_by_source(self, source: str) -> int:
         """Get token count by source label."""
