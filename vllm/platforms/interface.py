@@ -1072,6 +1072,16 @@ class Platform:
         return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
 
     @classmethod
+    def supports_eplb(cls) -> bool:
+        """Whether this platform can run expert parallel load balancing."""
+        return cls.is_cuda_alike()
+
+    @classmethod
+    def get_default_eplb_communicator(cls) -> str | None:
+        """Override EPLB communicator auto-selection, if needed."""
+        return None
+
+    @classmethod
     def is_integrated_gpu(cls, device_id: int = 0) -> bool:
         """
         Returns whether the GPU is an integrated (UMA) device that shares

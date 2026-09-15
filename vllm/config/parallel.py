@@ -4,7 +4,7 @@
 import os
 import socket
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Literal, overload
+from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 import regex as re
 import torch
@@ -525,10 +525,12 @@ class ParallelConfig:
             )
 
         if self.enable_eplb:
-            if not current_platform.is_cuda_alike():
+            if not (
+                current_platform.supports_eplb() or current_platform.is_cuda_alike()
+            ):
                 raise ValueError(
-                    "Expert parallelism load balancing is only supported on "
-                    "CUDA devices or ROCm devices now."
+                    "Expert parallelism load balancing is not supported "
+                    "on this platform."
                 )
             if not self.enable_expert_parallel:
                 raise ValueError("enable_expert_parallel must be True to use EPLB.")
@@ -1026,6 +1028,27 @@ class ParallelConfig:
             )
 
         if self.enable_eplb and self.eplb_config.communicator is None:
+            platform_backend = current_platform.get_default_eplb_communicator()
+            if platform_backend is not None:
+                if platform_backend not in (
+                    "torch_nccl",
+                    "torch_gloo",
+                    "nixl",
+                    "pynccl",
+                ):
+                    raise ValueError(f"Unknown EPLB communicator: {platform_backend}")
+                if self.eplb_config.use_async and platform_backend in (
+                    "torch_nccl",
+                    "pynccl",
+                ):
+                    raise ValueError(
+                        f"{platform_backend} communicator is incompatible with "
+                        "async EPLB."
+                    )
+                self.eplb_config.communicator = cast(
+                    EPLBCommunicatorBackend, platform_backend
+                )
+                return
             # Prefer NIXL when available: zero-copy RDMA reads, compatible
             # with both async EPLB and elastic EP.
             # Fallbacks: pynccl for elastic EP (stateless groups need it),
