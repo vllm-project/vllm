@@ -6,6 +6,7 @@ These tests verify that ParsableContext correctly delegates to the unified
 Parser (via parse) and properly builds response output items.
 """
 
+import asyncio
 from collections.abc import Sequence
 from unittest.mock import MagicMock
 
@@ -361,3 +362,15 @@ def test_num_init_messages_offset():
     items = ctx.make_response_output_items()
     assert len(items) == 1
     assert items[0].type == "message"
+
+
+def test_call_python_tool_missing_code_raises_value_error():
+    """code_interpreter args that omit 'code' must raise a controlled
+    ValueError, not an uncaught KeyError -> HTTP 500 (issue #49954)."""
+    ctx = _make_context(None)
+    # Valid JSON, but no required "code" field.
+    last_msg = FunctionCall(
+        id="call_1", name="code_interpreter", arguments='{"language": "python"}'
+    )
+    with pytest.raises(ValueError, match="code"):
+        asyncio.run(ctx.call_python_tool(MagicMock(), last_msg))
