@@ -28,6 +28,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEExpertsModular,
     FusedMoEPrepareAndFinalizeModular,
 )
+from vllm.model_executor.layers.fused_moe.oracle import register_fp8_moe_backend
 from vllm.model_executor.layers.fused_moe.routed_experts import (
     FusedMoeWeightScaleSupported,
     RoutedExperts,
@@ -85,6 +86,7 @@ __all__ = [
     "activation_without_mul",
     "apply_moe_activation",
     "fused_moe_make_expert_params_mapping",
+    "register_fp8_moe_backend",
     "override_config",
     "get_config",
 ]
