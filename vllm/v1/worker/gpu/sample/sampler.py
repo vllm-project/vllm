@@ -136,6 +136,9 @@ class Sampler:
         expanded_local_pos = input_batch.expanded_local_pos
         pos = input_batch.positions[input_batch.logits_indices]
         input_ids = input_batch.input_ids[input_batch.logits_indices]
+        # CPU-side sequence lengths, already materialized by the model runner, so DRY
+        # can size its window without a device read. See apply_dry.
+        seq_lens_np = input_batch.seq_lens_cpu_upper_bound.numpy()
 
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
@@ -152,6 +155,7 @@ class Sampler:
             input_ids,
             expanded_local_pos,
             return_logprobs=logprobs_dims is not None,
+            seq_lens_np=seq_lens_np,
         )
 
         if self.trace_replay_state is not None:
@@ -221,6 +225,7 @@ class Sampler:
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
         skip_top_k_top_p: bool = False,
+        seq_lens_np: np.ndarray | None = None,
     ) -> torch.Tensor:
         if not np.any(self.needs_logits_processing[idx_mapping_np]):
             return logits
@@ -247,7 +252,7 @@ class Sampler:
         self.dry_state.apply_dry(
             logits,
             idx_mapping_np,
-            pos,
+            seq_lens_np,
             expanded_logits=logits.shape[0] != idx_mapping_np.shape[0],
         )
 
@@ -297,6 +302,7 @@ class Sampler:
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
         return_logprobs: bool = False,
+        seq_lens_np: np.ndarray | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         processed_logits = self.apply_sampling_params(
             logits,
@@ -307,6 +313,7 @@ class Sampler:
             input_ids,
             expanded_local_pos,
             skip_top_k_top_p=True,
+            seq_lens_np=seq_lens_np,
         )
         top_k, top_p = self.sampling_states.get_top_k_top_p(
             expanded_idx_mapping, idx_mapping_np
