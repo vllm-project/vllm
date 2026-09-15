@@ -872,6 +872,32 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
         )
 
 
+def iter_layer_specs(kv_cache_spec: KVCacheSpec) -> Collection[KVCacheSpec]:
+    """The per-layer specs a KV cache group spec covers.
+
+    ``UniformTypeKVCacheSpecs`` groups keep one spec per layer; every other
+    spec describes its group on its own. Returns the layer specs either way so
+    callers do not have to special-case the wrapper.
+    """
+    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+        return kv_cache_spec.kv_cache_specs.values()
+    return (kv_cache_spec,)
+
+
+def is_full_attention_spec(kv_cache_spec: KVCacheSpec) -> bool:
+    """Whether a KV cache group spec is (or wraps) full attention.
+
+    ``UniformTypeKVCacheSpecs`` is not itself a ``FullAttentionSpec``, so a bare
+    isinstance check misses groups that carry the wrapper. Every layer must be
+    full attention: a group holding a recycling sliding-window layer has no
+    stable slot layout, so callers that key data by slot cannot use it.
+    """
+    layer_specs = iter_layer_specs(kv_cache_spec)
+    return len(layer_specs) > 0 and all(
+        isinstance(spec, FullAttentionSpec) for spec in layer_specs
+    )
+
+
 def get_kv_cache_spec_kind(kv_cache_spec: KVCacheSpec) -> KVCacheSpecKind:
     if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
         inner_kinds = {

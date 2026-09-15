@@ -60,6 +60,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
     get_kv_cache_spec_kind,
     get_kv_cache_spec_sliding_window,
+    is_full_attention_spec,
 )
 from vllm.v1.metrics.stats import CachingMetrics, PrefixCacheStats
 from vllm.v1.request import Request
@@ -2192,6 +2193,7 @@ def new_indexer_mla_spec(block_size=16):
 
 def _grouping_config():
     return SimpleNamespace(
+        model_config=SimpleNamespace(enable_return_routed_experts=False),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         speculative_config=None,
     )
@@ -2764,6 +2766,52 @@ def test_unify_kv_cache_page_size_padding_requires_backend_support():
 
     with pytest.raises(NotImplementedError):
         kv_cache_utils.unify_kv_cache_spec_page_size(specs)
+
+
+def test_routed_expert_export_promotes_uniform_sliding_mla_cache():
+    original = new_swa_mla_spec()
+    default_specs = {"layer": original}
+    get_kv_cache_groups(
+        SimpleNamespace(
+            model_config=SimpleNamespace(enable_return_routed_experts=False),
+            scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        ),
+        default_specs,
+    )
+    unchanged = kv_cache_utils._promote_local_kv_cache_specs({"layer": original})
+    promoted_specs = {"layer": original}
+    groups = get_kv_cache_groups(
+        SimpleNamespace(
+            model_config=SimpleNamespace(enable_return_routed_experts=True)
+        ),
+        promoted_specs,
+    )
+
+    assert isinstance(default_specs["layer"], SlidingWindowMLASpec)
+    assert unchanged["layer"] is original
+    assert isinstance(promoted_specs["layer"], MLAAttentionSpec)
+    assert promoted_specs["layer"].sliding_window == original.sliding_window
+    assert promoted_specs["layer"].cache_dtype_str == original.cache_dtype_str
+    assert len(groups) == 1
+    assert isinstance(groups[0].kv_cache_spec, MLAAttentionSpec)
+
+
+def test_is_full_attention_spec_unwraps_uniform_type_specs():
+    common = dict(num_kv_heads=1, head_size=1, dtype=torch.float32)
+    full = FullAttentionSpec(block_size=4, **common)
+    mla = MLAAttentionSpec(block_size=4, **common)
+    swa = SlidingWindowMLASpec(block_size=4, sliding_window=8, **common)
+
+    def wrap(**specs):
+        return UniformTypeKVCacheSpecs(block_size=4, kv_cache_specs=specs)
+
+    assert is_full_attention_spec(full)
+    assert is_full_attention_spec(mla)
+    assert not is_full_attention_spec(swa)
+    assert is_full_attention_spec(wrap(a=mla, b=mla))
+    assert not is_full_attention_spec(wrap(a=swa, b=swa))
+    assert not is_full_attention_spec(wrap(a=mla, b=swa))
+    assert not is_full_attention_spec(wrap())
 
 
 def test_unpadded_page_size_includes_per_token_head_scales():

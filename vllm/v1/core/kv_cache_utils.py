@@ -1411,6 +1411,7 @@ def get_kv_cache_config_from_groups(
 
 def _promote_local_kv_cache_specs(
     kv_cache_spec: dict[str, KVCacheSpec],
+    force_full_allocation: bool = False,
 ) -> dict[str, KVCacheSpec]:
     """Use full-attention allocation for local-attention cache specs.
 
@@ -1419,9 +1420,10 @@ def _promote_local_kv_cache_specs(
     """
     promoted_specs = kv_cache_spec.copy()
 
-    if is_kv_cache_spec_uniform(
-        promoted_specs
-    ) or UniformTypeKVCacheSpecs.is_uniform_type(promoted_specs):
+    if not force_full_allocation and (
+        is_kv_cache_spec_uniform(promoted_specs)
+        or UniformTypeKVCacheSpecs.is_uniform_type(promoted_specs)
+    ):
         return promoted_specs
 
     has_full_attention = any(
@@ -1456,7 +1458,9 @@ def _promote_local_kv_cache_specs(
         ChunkedLocalAttentionSpec: FullAttentionSpec,
     }
 
-    if has_full_attention and (has_sliding_window or has_chunked_local_attention):
+    if (has_full_attention or force_full_allocation) and (
+        has_sliding_window or has_chunked_local_attention
+    ):
         for layer_name, spec in kv_cache_spec.items():
             target_cls = next(
                 (promotions[c] for c in type(spec).__mro__ if c in promotions), None
@@ -1751,7 +1755,17 @@ def get_kv_cache_groups(
     Returns:
         The generated KVCacheGroups
     """
-    if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
+    if vllm_config.model_config.enable_return_routed_experts:
+        promoted_specs = _promote_local_kv_cache_specs(
+            kv_cache_spec, force_full_allocation=True
+        )
+        if promoted_specs != kv_cache_spec:
+            logger.warning(
+                "Routed-expert export requires stable KV-cache slots; "
+                "using full KV-cache allocation for local attention."
+            )
+            kv_cache_spec.update(promoted_specs)
+    elif vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
         unify_hybrid_kv_cache_specs(kv_cache_spec)
 
     if is_kv_cache_type_attention_free(kv_cache_spec):
