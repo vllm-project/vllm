@@ -178,11 +178,7 @@ def normalize_audio(
 # Audio Resampling
 # ============================================================
 
-# torchaudio.transforms.Resample builds a sinc kernel of about
-# (orig_sr / gcd) * (target_sr / gcd) float32 values. Coprime rates
-# (e.g. 16001 → 16000) therefore allocate gigabytes. 64 MiB keeps every
-# common capture rate exact.
-_MAX_TORCHAUDIO_KERNEL_ELEMS = 16_777_216
+_MAX_TORCHAUDIO_KERNEL_ELEMS = 1 << 24
 
 
 def _polyphase_kernel_elems(orig_sr: int, target_sr: int) -> int:
@@ -196,33 +192,19 @@ def _bounded_resample_rates(
     *,
     max_kernel_elems: int = _MAX_TORCHAUDIO_KERNEL_ELEMS,
 ) -> tuple[int, int]:
-    """Return rates whose reduced product fits ``max_kernel_elems``.
-
-    Unchanged when the exact pair already fits. Otherwise the closest
-    fraction with a bounded denominator, so common capture rates stay
-    bit-identical and coprime header rates cannot inflate the kernel.
-    """
+    """Return rates whose reduced product fits ``max_kernel_elems``."""
     if orig_sr < 1 or target_sr < 1:
         raise ValueError(
             f"Sample rates must be positive integers, got orig_sr={orig_sr}, "
             f"target_sr={target_sr}."
         )
-    if orig_sr == target_sr:
-        return orig_sr, target_sr
     if _polyphase_kernel_elems(orig_sr, target_sr) <= max_kernel_elems:
         return orig_sr, target_sr
-
     gcd = math.gcd(orig_sr, target_sr)
-    orig_p = orig_sr // gcd
-    target_p = target_sr // gcd
-    ratio = orig_p / target_p
-    max_den = max(1, int(math.sqrt(max_kernel_elems / max(ratio, 1e-12))))
-    while max_den >= 1:
-        approx = Fraction(orig_p, target_p).limit_denominator(max_den)
-        if approx.numerator * approx.denominator <= max_kernel_elems:
-            return approx.numerator, approx.denominator
-        max_den = approx.denominator - 1
-    return 1, 1
+    orig_p, target_p = orig_sr // gcd, target_sr // gcd
+    den_cap = max(1, int(math.sqrt(max_kernel_elems * target_p / orig_p)))
+    approx = Fraction(orig_p, target_p).limit_denominator(den_cap)
+    return approx.numerator, approx.denominator
 
 
 def resample_audio_pyav(
@@ -334,8 +316,7 @@ def _get_torchaudio_resampler(
 ) -> "torchaudio.transforms.Resample":
     # `torchaudio.transforms.Resample` precomputes its kernel for a fixed
     # (orig_sr, target_sr) pair; cache instances so repeated requests at a
-    # common input rate skip the kernel rebuild. Rates are bounded so a
-    # coprime header rate cannot pin a multi-GiB kernel in this cache.
+    # common input rate skip the kernel rebuild.
     orig_sr, target_sr = _bounded_resample_rates(orig_sr, target_sr)
     return torchaudio.transforms.Resample(orig_sr, target_sr)
 
