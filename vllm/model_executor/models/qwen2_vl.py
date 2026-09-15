@@ -1383,7 +1383,7 @@ class Qwen2VLForConditionalGeneration(
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
                     self.visual,
-                    pixel_values.type(self.visual.dtype),
+                    pixel_values,
                     grid_thw.tolist(),
                     rope_type="rope_3d",
                 )
@@ -1408,7 +1408,7 @@ class Qwen2VLForConditionalGeneration(
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
                     self.visual,
-                    pixel_values_videos.type(self.visual.dtype),
+                    pixel_values_videos,
                     grid_thw.tolist(),
                     rope_type="rope_3d",
                 )
