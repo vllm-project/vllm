@@ -486,7 +486,7 @@ def run_dp_sharded_mrope_vision_model(
     # to work
     max_len_per_rank = max(grouped_pixel_values_len) // embed_dim_reduction_factor
     local_grid_thw_list = [grid_thw_list[i] for i in image_idxs_local]
-    embed_dtype = getattr(vision_model, "dtype", pixel_values.dtype)
+    embed_dtype = next(vision_model.parameters()).dtype
 
     # Run the vision model on the local pixel_values_local
     if rope_type == "rope_2d":
