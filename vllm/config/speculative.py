@@ -1564,8 +1564,16 @@ class SpeculativeConfig:
                 self.index_share_for_mtp_iteration
             )
 
-        if self.method != "dspark" and self.enable_adaptive_verification:
-            raise ValueError("Adaptive verification only supported with DSpark")
+        if (
+            self.method != "dspark"
+            and self.enable_adaptive_verification
+            and self.use_local_argmax_reduction
+        ):
+            raise ValueError(
+                "Adaptive verification estimates per-position acceptance from "
+                "the draft logits, which use_local_argmax_reduction never "
+                "materializes. Disable one of them."
+            )
 
         if self.is_dspark_prefill_only():
             # is_dspark_prefill_only() implies target_kv_transfer_config is set.
@@ -1760,6 +1768,7 @@ class SpeculativeConfig:
         draft_parallel_config = ParallelConfig(
             pipeline_parallel_size=1,
             tensor_parallel_size=speculative_draft_tensor_parallel_size,
+            enable_expert_parallel=target_parallel_config.enable_expert_parallel,
             distributed_executor_backend=target_parallel_config.distributed_executor_backend,
             max_parallel_loading_workers=target_parallel_config.max_parallel_loading_workers,
             disable_custom_all_reduce=target_parallel_config.disable_custom_all_reduce,

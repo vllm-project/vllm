@@ -102,6 +102,8 @@ class DSparkSpeculator(DFlashSpeculator):
                 fixed_graph_num_reqs * self.num_query_per_req,
             )
 
+        self.use_confidence_head: bool = False
+
     def _get_graph_dispatch_shape(
         self, num_reqs: int, num_query_tokens: int
     ) -> tuple[int, int]:
@@ -140,13 +142,14 @@ class DSparkSpeculator(DFlashSpeculator):
                 dtype=self.draft_logits.dtype,
                 device=self.device,
             )
-        if self.enable_adaptive_verification and model.model.confidence_head is None:
-            raise ValueError(
-                "Adaptive verification needs a DSpark checkpoint with a confidence "
-                "head, and this one has none. Pass "
-                "enable_adaptive_verification=false in the speculative config to verify"
-                " a fixed number of drafts instead."
-            )
+        self.use_confidence_head = (
+            self.enable_adaptive_verification
+            and model.model.confidence_head is not None
+        )
+        if self.use_confidence_head:
+            # The acceptance estimator is not needed when a trained confidence head
+            # is available.
+            self.use_acceptance_estimator = False
         return model
 
     def _sample_logits(
@@ -156,8 +159,10 @@ class DSparkSpeculator(DFlashSpeculator):
         sample_pos: torch.Tensor,
         step: int,
     ) -> torch.Tensor:
+        self._maybe_predict_acceptance(logits, idx_map, self._step_cols[step])
         if self.draft_logits is None:
-            return self.model.map_draft_to_target(logits.argmax(dim=-1))
+            draft_ids = logits.argmax(dim=-1)
+            return self.model.map_draft_to_target(draft_ids)
 
         # Probabilistic sampling and rejection operate in target-vocabulary
         # space. A reduced draft vocabulary is scattered into its target rows.
@@ -216,7 +221,7 @@ class DSparkSpeculator(DFlashSpeculator):
         for i in range(n_spec):
             # Sequential stage: Markov bias from the previously sampled token.
             markov_embed = self.model.markov_embed(prev)
-            if self.enable_adaptive_verification:
+            if self.use_confidence_head:
                 confidence_markov_embeds.append(markov_embed)
             bias = self.model.markov_bias(markov_embed)
             logits_i = base_logits[:, i] + bias
@@ -226,7 +231,7 @@ class DSparkSpeculator(DFlashSpeculator):
             self.draft_tokens[:num_reqs, i] = draft_sampled_i
             prev = draft_sampled_i
 
-        if self.enable_adaptive_verification:
+        if self.use_confidence_head:
             confidence = self.model.compute_confidence(
                 sample_hidden,
                 torch.stack(confidence_markov_embeds, dim=1).flatten(0, 1),
@@ -261,7 +266,7 @@ class DSparkSpeculator(DFlashSpeculator):
 
         for i in range(n_spec):
             markov_embed = self.model.markov_embed(prev)
-            if self.enable_adaptive_verification:
+            if self.use_confidence_head:
                 confidence_markov_embeds.append(markov_embed)
             logits_i = self.model.apply_markov_bias_gathered(
                 markov_embed,
@@ -275,7 +280,7 @@ class DSparkSpeculator(DFlashSpeculator):
             self.draft_tokens[:num_reqs, i] = draft_sampled_i
             prev = draft_sampled_i
 
-        if self.enable_adaptive_verification:
+        if self.use_confidence_head:
             confidence = self.model.compute_confidence(
                 sample_hidden,
                 torch.stack(confidence_markov_embeds, dim=1).flatten(0, 1),
