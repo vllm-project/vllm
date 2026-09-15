@@ -4,8 +4,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from typing import cast
+
+import torch
 
 from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
     decode_mm_kwargs_item,
@@ -24,6 +26,7 @@ from vllm.inputs import (
 from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     MultiModalKwargsOptionalItems,
+    PlaceholderRange,
 )
 
 
@@ -117,6 +120,31 @@ def mm_kwargs_from_features(
     return mm_kwargs
 
 
+def rebuild_mm_placeholders(
+    mm_placeholders: Mapping[str, list[PlaceholderRangeInfo]],
+) -> dict[str, list[PlaceholderRange]]:
+    """Convert rendered `PlaceholderRangeInfo` back into `PlaceholderRange`.
+
+    `is_embed` has to survive the round trip: the model runner branches on it
+    to decide how much of the encoder output a span consumes and which
+    positions to overwrite, and it cannot be recomputed from offset and
+    length alone.
+    """
+    return {
+        modality: [
+            PlaceholderRange(
+                offset=p.offset,
+                length=p.length,
+                is_embed=None
+                if p.is_embed is None
+                else torch.tensor(p.is_embed, dtype=torch.bool),
+            )
+            for p in ranges
+        ]
+        for modality, ranges in mm_placeholders.items()
+    }
+
+
 def extract_mm_features(
     engine_input: EngineInput,
     *,
@@ -138,7 +166,12 @@ def extract_mm_features(
 
     mm_placeholders = {
         modality: [
-            PlaceholderRangeInfo(offset=p.offset, length=p.length) for p in ranges
+            PlaceholderRangeInfo(
+                offset=p.offset,
+                length=p.length,
+                is_embed=None if p.is_embed is None else p.is_embed.tolist(),
+            )
+            for p in ranges
         ]
         for modality, ranges in raw_placeholders.items()
     }
