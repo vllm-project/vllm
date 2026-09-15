@@ -155,6 +155,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI250) Language Models (PPL)"
+      dind: false
       device: mi250_1
       timeout_in_minutes: 65
       depends_on:
@@ -217,6 +218,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI250) Language Models (MTEB)"
+      dind: false
       device: mi250_1
       timeout_in_minutes: 60
       depends_on:
