@@ -583,10 +583,11 @@ def _rocm_aiter_mla_decode_fwd_impl(
     reduce_indptr: torch.Tensor | None = None,
     reduce_final_map: torch.Tensor | None = None,
     reduce_partial_map: torch.Tensor | None = None,
+    causal: bool = True,
 ) -> None:
     from aiter.mla import mla_decode_fwd
 
-    kwargs: dict[str, float | torch.Tensor | None] = {
+    kwargs: dict[str, float | torch.Tensor | None | bool] = {
         "sm_scale": sm_scale,
         "logit_cap": logit_cap,
     }
@@ -595,6 +596,8 @@ def _rocm_aiter_mla_decode_fwd_impl(
     if _check_aiter_mla_fp8_support():
         kwargs["q_scale"] = q_scale
         kwargs["kv_scale"] = kv_scale
+
+    kwargs["causal"] = causal
 
     if work_meta_data is not None:
         assert work_indptr is not None, (
@@ -1676,6 +1679,75 @@ def _rocm_aiter_fp8_attn_fake(
     )
 
 
+def _mhc_delayed_pre_tail(
+    gemm_out: torch.Tensor,
+    sqrsum: torch.Tensor,
+    residual: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    pre_mix: torch.Tensor | None,
+    rms_eps: float,
+    hc_pre_eps: float,
+    hc_sinkhorn_eps: float,
+    hc_post_mult_value: float,
+    sinkhorn_repeat: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Finish a delayed mHC pre once AITER has produced the projection.
+
+    Shared by the plain and the post-fused entry points, which differ only in
+    which kernel computes ``gemm_out`` / ``sqrsum`` and the residual they
+    project. ``mhc_pre_big_fuse`` also writes a collapse against its own
+    pre-mix, which the delayed formulation cannot use and so discards.
+    Returns ``(post_mix, comb_mix, layer_input, next_pre_mix)``.
+    """
+    from aiter.ops.mhc import mhc_pre_big_fuse
+
+    num_tokens, hc_mult, hidden_size = residual.shape
+    device = residual.device
+    with torch.device(device):
+        post_mix = torch.empty(
+            num_tokens, hc_mult, 1, dtype=torch.float32, device=device
+        )
+        comb_mix = torch.empty(
+            num_tokens, hc_mult, hc_mult, dtype=torch.float32, device=device
+        )
+        unused_collapse = torch.empty(
+            num_tokens, hidden_size, dtype=torch.bfloat16, device=device
+        )
+        mhc_pre_big_fuse(
+            post_mix,
+            comb_mix,
+            unused_collapse,
+            gemm_out,
+            sqrsum,
+            hc_scale,
+            hc_base,
+            residual,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_mult_value,
+            sinkhorn_repeat,
+        )
+
+    next_pre_mix = torch.ops.vllm.mhc_pre_mix_triton(
+        gemm_out,
+        sqrsum,
+        hc_scale,
+        hc_base,
+        hc_mult,
+        hc_mult * hidden_size,
+        rms_eps,
+        hc_pre_eps,
+    )
+    if pre_mix is None:
+        # Model entry selects residual stream zero.
+        layer_input = residual[:, 0]
+    else:
+        layer_input = torch.ops.vllm.hc_collapse_triton(residual, pre_mix)
+    return post_mix, comb_mix, layer_input, next_pre_mix
+
+
 # Global flag to ensure ops are registered only once
 _OPS_REGISTERED = False
 
@@ -1966,6 +2038,26 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_mla_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._MLA_ENABLED
+
+    @classmethod
+    @if_aiter_supported
+    def mla_decode_supports_non_causal(cls) -> bool:
+        """Whether installed aiter.mla.mla_decode_fwd accepts `causal`.
+
+        Added in aiter v0.1.20. A missing argument is a hard error rather
+        than a boolean the caller can use to pick another MLA backend.
+        """
+        import inspect
+
+        from aiter.mla import mla_decode_fwd
+
+        if "causal" not in inspect.signature(mla_decode_fwd).parameters:
+            raise RuntimeError(
+                "ROCM_AITER_MLA requires aiter.mla.mla_decode_fwd(..., causal=). "
+                "The installed aiter is causal-only; upgrade aiter rather than "
+                "falling back to another MLA backend."
+            )
+        return True
 
     @classmethod
     @if_aiter_supported
@@ -2789,6 +2881,7 @@ class rocm_aiter_ops:
         reduce_indptr: torch.Tensor | None = None,
         reduce_final_map: torch.Tensor | None = None,
         reduce_partial_map: torch.Tensor | None = None,
+        causal: bool = True,
     ):
         torch.ops.vllm.rocm_aiter_mla_decode_fwd(
             q,
@@ -2809,6 +2902,7 @@ class rocm_aiter_ops:
             reduce_indptr=reduce_indptr,
             reduce_final_map=reduce_final_map,
             reduce_partial_map=reduce_partial_map,
+            causal=causal,
         )
 
     @staticmethod
@@ -3598,6 +3692,169 @@ class rocm_aiter_ops:
             comb_mix.view(*outer_shape, hc_mult, hc_mult),
             layer_input.view(*outer_shape, hidden_size),
         )
+
+    @staticmethod
+    def mhc_pre_delayed(
+        residual: torch.Tensor,
+        fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        rms_eps: float,
+        hc_pre_eps: float,
+        hc_sinkhorn_eps: float,
+        hc_post_mult_value: float,
+        sinkhorn_repeat: int,
+        pre_mix: torch.Tensor | None = None,
+        sublayer_out: torch.Tensor | None = None,
+        post_layer_mix: torch.Tensor | None = None,
+        comb_res_mix: torch.Tensor | None = None,
+        residual_out: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """mHC pre using the pre-mix carried from the previous sublayer.
+
+        Same gates as :meth:`mhc_pre`, but the stream collapse applies the
+        caller's ``pre_mix`` instead of the one computed here, and the one
+        computed here is returned for the next sublayer seam. AITER has no
+        single kernel for that shape, so drive its two stages directly:
+        ``mhc_pre_big_fuse`` still produces the post and comb gates (including
+        every sinkhorn iteration), while the pre gate is recovered from the
+        same split-k GEMM output and the collapse is done by the Triton
+        kernel. ``mhc_pre_big_fuse`` also writes a collapse we do not use;
+        that redundant store is the price of not having a native delayed
+        kernel, and is small next to the ~140 launches it replaces.
+
+        Passing ``sublayer_out`` / ``post_layer_mix`` / ``comb_res_mix``
+        also applies the preceding post block. AITER then projects the new
+        residual in the same kernel that computes it
+        (``mhc_fused_post_pre_gemm_sqrsum``), which saves one launch; every
+        later stage is identical either way. That new residual is written to
+        ``residual_out``, which the caller must supply in that case; it is an
+        output buffer rather than a return value so the op never has to hand
+        back one of its own inputs on the unfused path.
+
+        Returns:
+            post_mix: shape (..., hc_mult, 1), dtype torch.float32
+            comb_mix: shape (..., hc_mult, hc_mult), dtype torch.float32
+            layer_input: shape (..., hidden_size), dtype torch.bfloat16
+            next_pre_mix: shape (..., hc_mult), dtype torch.float32
+        """
+        from aiter.ops.mhc import (
+            get_mhc_fused_post_pre_config,
+            get_mhc_pre_splitk,
+            mhc_fused_post_pre_gemm_sqrsum,
+            mhc_pre_gemm_sqrsum,
+        )
+
+        assert residual.dtype == torch.bfloat16
+        assert fn.dtype == torch.float32
+        assert hc_scale.dtype == torch.float32
+        assert hc_base.dtype == torch.float32
+
+        hc_mult = residual.shape[-2]
+        hidden_size = residual.shape[-1]
+        hc_mult3 = hc_mult * 2 + hc_mult * hc_mult
+        hc_hidden_size = hc_mult * hidden_size
+
+        assert fn.shape == (hc_mult3, hc_hidden_size)
+        assert hc_scale.shape == (3,)
+        assert hc_base.shape == (hc_mult3,)
+
+        outer_shape = residual.shape[:-2]
+        residual_flat = residual.view(-1, hc_mult, hidden_size)
+        num_tokens = residual_flat.shape[0]
+        device = residual_flat.device
+
+        if num_tokens == 0:
+            return (
+                torch.empty(0, hc_mult, 1, dtype=torch.float32, device=device),
+                torch.empty(0, hc_mult, hc_mult, dtype=torch.float32, device=device),
+                torch.empty(0, hidden_size, dtype=torch.bfloat16, device=device),
+                torch.empty(0, hc_mult, dtype=torch.float32, device=device),
+            )
+
+        pre_mix_flat = None if pre_mix is None else pre_mix.view(-1, hc_mult)
+
+        fuse_post = sublayer_out is not None
+        # AITER's Python wrappers allocate without explicit device arguments.
+        with torch.device(device):
+            if fuse_post:
+                # Keyed on the per-stream K, i.e. hidden_size, not hc_mult * it.
+                splitk, tile_m, tile_n, tile_k = get_mhc_fused_post_pre_config(
+                    num_tokens, hidden_size
+                )
+            else:
+                splitk, tile_k = get_mhc_pre_splitk(num_tokens, hc_hidden_size)
+            # AITER pads the GEMM output to a multiple of 32 columns.
+            gemm_pad = torch.empty(
+                splitk,
+                num_tokens,
+                (hc_mult3 + 31) // 32 * 32,
+                dtype=torch.float32,
+                device=device,
+            )
+            gemm_out = gemm_pad[:, :, :hc_mult3]
+            sqrsum = torch.empty(splitk, num_tokens, dtype=torch.float32, device=device)
+            if fuse_post:
+                # Restated for the type checker, which cannot narrow the
+                # optional arguments through the fuse_post flag.
+                assert sublayer_out is not None
+                assert post_layer_mix is not None and comb_res_mix is not None
+                assert residual_out is not None
+                projected = residual_out.view(-1, hc_mult, hidden_size)
+                mhc_fused_post_pre_gemm_sqrsum(
+                    gemm_out,
+                    sqrsum,
+                    projected,
+                    sublayer_out.view(-1, hidden_size),
+                    residual_flat,
+                    # The kernel wants the post mix squeezed to (tokens, hc_mult).
+                    post_layer_mix.view(-1, hc_mult, 1).squeeze(-1),
+                    comb_res_mix.view(-1, hc_mult, hc_mult),
+                    fn,
+                    tile_m,
+                    tile_n,
+                    tile_k,
+                    0,
+                )
+            else:
+                projected = residual_flat
+                mhc_pre_gemm_sqrsum(gemm_out, sqrsum, projected, fn, tile_k, 0)
+
+        post_mix, comb_mix, layer_input, next_pre_mix = _mhc_delayed_pre_tail(
+            gemm_out,
+            sqrsum,
+            projected,
+            hc_scale,
+            hc_base,
+            pre_mix_flat,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_mult_value,
+            sinkhorn_repeat,
+        )
+
+        return (
+            post_mix.view(*outer_shape, hc_mult, 1),
+            comb_mix.view(*outer_shape, hc_mult, hc_mult),
+            layer_input.view(*outer_shape, hidden_size),
+            next_pre_mix.view(*outer_shape, hc_mult),
+        )
+
+    @staticmethod
+    def mhc_fused_post_pre_delayed_prefers_unfused(num_tokens: int) -> bool:
+        """True when AITER's own heuristic favours separate post and pre.
+
+        Mirrors the ``fused_m_upper_bound`` table in ``aiter.ops.mhc``: the
+        fused GEMM wins for decode-sized batches and loses for large ones.
+        """
+        from aiter.jit.utils.chip_info import get_gfx_runtime
+
+        return num_tokens >= {
+            "gfx950": 1024,
+            "gfx942": 128,
+            "gfx1250": 1024,
+        }.get(get_gfx_runtime(), 1024)
 
     @staticmethod
     def hc_head(

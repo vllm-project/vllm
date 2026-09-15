@@ -13,7 +13,7 @@ from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputGrammar
 from vllm.v1.utils import ConstantList
 
-from .utils import create_requests, create_scheduler
+from .utils import create_requests, create_scheduler, mock_kv
 
 pytestmark = pytest.mark.cpu_test
 
@@ -143,6 +143,32 @@ def test_abort():
     for i, req in enumerate(requests):
         assert req.status == RequestStatus.FINISHED_ABORTED
         assert req.num_output_tokens == abort_order_copy.index(i)
+
+
+def test_connector_metadata_precedes_async_placeholder_advance(monkeypatch):
+    """Mirroring must see earlier unresolved outputs, excluding the current step."""
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
+    )
+    (request,) = create_requests(num_requests=1, num_tokens=4, max_tokens=4)
+    scheduler.add_request(request)
+
+    assert scheduler.connector is not None
+    build_connector_meta = scheduler.connector.build_connector_meta
+    observed_placeholders = []
+
+    def record_placeholders(scheduler_output):
+        observed_placeholders.append(request.num_output_placeholders)
+        return build_connector_meta(scheduler_output)
+
+    monkeypatch.setattr(
+        scheduler.connector, "build_connector_meta", record_placeholders
+    )
+    scheduler.schedule()
+    scheduler.schedule()
+
+    assert observed_placeholders == [0, 1]
 
 
 def test_preempt():
@@ -308,7 +334,6 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     request = create_requests(num_requests=1, num_tokens=1)[0]
     request.structured_output_request = Mock()
     request.structured_output_request.grammar = Mock(spec=StructuredOutputGrammar)
-    request.structured_output_request.grammar.accept_tokens.return_value = False
     request.status = RequestStatus.RUNNING
     request.num_computed_tokens = request.num_tokens
     request.num_output_placeholders = 1
@@ -317,10 +342,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.connector = None
     scheduler.ec_connector = None
     scheduler.structured_output_manager = Mock()
-    scheduler.structured_output_manager.should_advance.return_value = True
-    scheduler.structured_output_manager.trim_reasoning_for_advance.side_effect = (
-        lambda request, new_token_ids: new_token_ids
-    )
+    scheduler.structured_output_manager.accept_tokens.return_value = False
     scheduler.requests = {request.request_id: request}
     scheduler.running = [request]
     scheduler.waiting = Mock()
