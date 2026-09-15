@@ -183,6 +183,20 @@ class MooncakeStoreConfig:
     def from_file(file_path: str) -> "MooncakeStoreConfig":
         with open(file_path) as file:
             config = json.load(file)
+        unsupported_ssd_fields = [
+            name
+            for name in ("enable_ssd_offload", "ssd_offload_path")
+            if config.get(name)
+        ]
+        if unsupported_ssd_fields:
+            raise ValueError(
+                "MooncakeStoreConnector does not support "
+                f"{', '.join(unsupported_ssd_fields)} in its JSON config. "
+                "These settings do not enable local SSD offload in vLLM workers. "
+                "For SSD offload, use mode='standalone-store' with "
+                "enable_offload=true and configure SSD storage on an external "
+                "mooncake_client."
+            )
         return MooncakeStoreConfig(
             metadata_server=config.get("metadata_server", ""),
             master_server_address=config.get("master_server_address", ""),
