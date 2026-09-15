@@ -558,7 +558,7 @@ def test_fused_norm_rope_ds_mla(num_tokens: int):
     kpe_ref = rope(k_pe.float(), pos, mla_cos_sin, interleave=True)  # [N, 64]
     tiles = kv_ref.view(num_tokens, 4, 128)
     ref_scale = torch.clamp(tiles.abs().amax(dim=-1) / FP8_MAX, min=1.1754944e-38)
-    uses_e8m0_scale = torch.cuda.get_device_capability()[0] >= 10
+    uses_e8m0_scale = current_platform.is_device_capability_family(100)
     if uses_e8m0_scale:
         ref_scale = torch.exp2(torch.ceil(torch.log2(ref_scale)))
     ref_nope = (tiles / ref_scale[..., None]).reshape(num_tokens, KV_LORA).to(FP8)

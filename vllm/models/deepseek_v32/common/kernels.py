@@ -548,7 +548,9 @@ def fused_norm_rope(
     # --- MLA KV cache setup ---
     mla_cache_nvfp4 = mla_kv_cache_dtype == "nvfp4_ds_mla"
     mla_cache_ds_mla = mla_kv_cache_dtype == "fp8_ds_mla" or mla_cache_nvfp4
-    mla_cache_e8m0_scale = torch.cuda.get_device_capability(device)[0] >= 10
+    mla_cache_e8m0_scale = current_platform.is_device_capability_family(
+        100, device_id=device.index or 0
+    )
     mla_cache_fp8 = is_quantized_kv_cache(mla_kv_cache_dtype) and not mla_cache_ds_mla
     mla_num_tiles = 1
     mla_ds_scale_view = torch.empty(0, dtype=torch.float32, device=device)

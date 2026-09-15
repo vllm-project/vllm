@@ -943,7 +943,9 @@ def test_concat_and_cache_ds_mla(
 
     ref_cache = torch.zeros_like(kv_cache, dtype=kv_cache.dtype)
     tile_data = torch.zeros(128, dtype=dtype, device=device)
-    uses_e8m0_scale = torch.cuda.get_device_capability(device)[0] >= 10
+    uses_e8m0_scale = current_platform.is_device_capability_family(
+        100, device_id=torch.device(device).index or 0
+    )
 
     for i in range(num_tokens):
         slot = slot_mapping[i].item()
