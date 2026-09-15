@@ -133,6 +133,48 @@ class HarmonyParser(DelegatingParser):
         self._num_processed_messages += 1
         return msg
 
+    def _recover_unparsable_message(self, remaining: Sequence[int]) -> list[Segment]:
+        """Decode a message Harmony refused to parse as raw final-channel text.
+
+        `remaining` is the unconsumed tail of the chunk, starting with the
+        token that tripped the parser; it is folded into the recovered text so
+        nothing the model generated is silently dropped. Parser state is reset
+        so the next message starts clean.
+
+        Mirrors the flush() recovery shape: a delta-only segment for streaming
+        consumers plus a completed message for consumers that only read
+        completed messages (parse(), the Responses message loop).
+        """
+        logger.warning(
+            "Harmony parser rejected a malformed message; returning the "
+            "recovered raw output."
+        )
+        self._current_message_tokens.extend(remaining)
+        text = self.model_tokenizer.decode(self._current_message_tokens)
+
+        self._parser = None
+        self._num_processed_messages = 0
+        self._current_message_tokens.clear()
+
+        final_channel = "final"
+        msg = Message.from_role_and_content(Role.ASSISTANT, text).with_channel(
+            final_channel
+        )
+        return [
+            Segment(
+                channel=final_channel,
+                recipient=None,
+                delta=text,
+                completed_message=None,
+            ),
+            Segment(
+                channel=final_channel,
+                recipient=None,
+                delta="",
+                completed_message=msg,
+            ),
+        ]
+
     def flush(self) -> list[Segment]:
         segments: list[Segment] = []
         try:
@@ -334,8 +376,17 @@ class HarmonyParser(DelegatingParser):
 
         segments: list[Segment] = []
         reasoning_token_count = 0
-        for token_id in token_ids:
-            self._harmony_parser.process(token_id)
+        for position, token_id in enumerate(token_ids):
+            try:
+                self._harmony_parser.process(token_id)
+            except HarmonyError:
+                # A malformed header (e.g. a duplicated `to=` clause) makes
+                # Harmony reject the message it has buffered so far. Recover
+                # the way flush() does rather than letting the error reach the
+                # API server as a 500: surface what was generated as plain
+                # final-channel text and reset for the next message.
+                segments.extend(self._recover_unparsable_message(token_ids[position:]))
+                break
             channel = self._harmony_parser.current_channel
             recipient = self._normalize_recipient(
                 self._harmony_parser.current_recipient
