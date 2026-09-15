@@ -258,10 +258,29 @@ class FlashInferMLASparseMetadataBuilder(
             supports_dcp_with_varlen=True,
         )
 
+
+class FlashInferMLASparseTRTLLMMetadataBuilder(FlashInferMLASparseMetadataBuilder):
+    """Metadata builder for the SM100 TRT-LLM sparse MLA kernel."""
+
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+    hisparse_supports_multi_token_decode: ClassVar[bool] = True
+
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ) -> None:
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+
         # Under DCP the workspace must hold the trtllm-gen softmax-stats slab.
         # The buffer address is baked into CUDA graphs, so it has to reach its
         # final size here, before the first forward/capture (no lazy regrow).
         if self.dcp_world_size > 1:
+            num_q_heads = vllm_config.model_config.get_num_attention_heads(
+                vllm_config.parallel_config
+            )
             _get_workspace_buffer(
                 device,
                 _required_workspace_bytes(
@@ -270,13 +289,6 @@ class FlashInferMLASparseMetadataBuilder(
                     vllm_config.scheduler_config.max_num_batched_tokens,
                 ),
             )
-
-
-class FlashInferMLASparseTRTLLMMetadataBuilder(FlashInferMLASparseMetadataBuilder):
-    """Metadata builder for the SM100 TRT-LLM sparse MLA kernel."""
-
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
-    hisparse_supports_multi_token_decode: ClassVar[bool] = True
 
     def _build_req_id_per_token(
         self,
