@@ -215,3 +215,70 @@ def test_custom_allreduce(
     if world_size > torch.accelerator.device_count():
         pytest.skip("Not enough GPUs to run the test.")
     multi_process_parallel(monkeypatch, tp_size, pipeline_parallel_size, test_target)
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({}, False),
+        ({"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}, True),
+        ({"PYTORCH_ALLOC_CONF": "expandable_segments:True"}, True),
+        (
+            {"PYTORCH_ALLOC_CONF": "max_split_size_mb:512,expandable_segments:True"},
+            True,
+        ),
+        ({"PYTORCH_ALLOC_CONF": "expandable_segments:False"}, False),
+        ({"PYTORCH_ALLOC_CONF": ""}, False),
+    ],
+)
+def test_expandable_segments_enabled(monkeypatch, env, expected):
+    for var in ("PYTORCH_ALLOC_CONF", "PYTORCH_CUDA_ALLOC_CONF"):
+        monkeypatch.delenv(var, raising=False)
+    for var, value in env.items():
+        monkeypatch.setenv(var, value)
+
+    assert car._expandable_segments_enabled() is expected
+
+
+class _ReachedP2PProbe(Exception):
+    """Sentinel proving __init__ ran past the expandable-segments guard."""
+
+
+@pytest.mark.parametrize("expandable_segments", [True, False])
+def test_custom_allreduce_disabled_with_expandable_segments(
+    monkeypatch,
+    expandable_segments,
+):
+    """expandable_segments must disable custom allreduce rather than abort.
+
+    The CUDA VMM allocations it produces cannot be shared via
+    cudaIpcGetMemHandle, which the C++ side calls behind CUDACHECK in
+    get_graph_buffer_ipc_meta -- so the worker used to die with a bare
+    "Failed: Cuda error custom_all_reduce.cuh:164 'invalid argument'".
+    See #42609, #49101, #56180.
+    """
+    monkeypatch.setattr(car, "custom_ar", True)
+    monkeypatch.setattr(car.dist, "get_backend", lambda _group: "gloo")
+    monkeypatch.setattr(car, "in_the_same_node_as", lambda *_a, **_kw: [True, True])
+    monkeypatch.setattr(car.dist, "get_rank", lambda group=None: 0)
+    monkeypatch.setattr(car.dist, "get_world_size", lambda group=None: 2)
+    monkeypatch.setattr(
+        car, "_expandable_segments_enabled", lambda: expandable_segments
+    )
+
+    def get_device_capability(*_args, **_kwargs):
+        raise _ReachedP2PProbe
+
+    monkeypatch.setattr(
+        car.current_platform, "get_device_capability", get_device_capability
+    )
+
+    communicator = car.CustomAllreduce.__new__(car.CustomAllreduce)
+    if expandable_segments:
+        communicator.__init__(group=object(), device=0)
+        assert communicator.disabled is True
+    else:
+        # Without the env var the guard is inert and init walks on into the
+        # regular capability/P2P probing.
+        with pytest.raises(_ReachedP2PProbe):
+            communicator.__init__(group=object(), device=0)
