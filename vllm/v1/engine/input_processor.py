@@ -100,6 +100,7 @@ class InputProcessor:
                 self.structured_outputs_config,
                 self.tokenizer,
             )
+            self.vllm_config._check_supports_watermarking(params)
 
             if self.model_config.return_sampling_mask:
                 if params.temperature <= 0:

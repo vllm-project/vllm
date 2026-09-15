@@ -1313,6 +1313,7 @@ class BeamSearchParams(
     length_penalty: float = 1.0
     include_stop_str_in_output: bool = False
     structured_outputs: StructuredOutputsParams | None = None
+    watermarking: bool = True
     skip_special_tokens: bool = True
 
     def __post_init__(self) -> None:

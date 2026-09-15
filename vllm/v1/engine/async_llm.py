@@ -419,6 +419,9 @@ class AsyncLLM(EngineClient):
                     "does not match the EngineCoreRequest.request_id attribute. The "
                     "latter will be used, and the former will be ignored."
                 )
+            request_params = request.params
+            if isinstance(request_params, SamplingParams):
+                self.vllm_config._check_supports_watermarking(request_params)
         else:
             if isinstance(prompt, dict) and "type" in prompt:
                 # Rendered EngineInput; no blocking preprocessing needed.
