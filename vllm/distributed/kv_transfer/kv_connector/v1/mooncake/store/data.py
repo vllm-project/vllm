@@ -6,12 +6,11 @@
 """Data classes for MooncakeStoreConnector."""
 
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import cast
 
 import numpy as np
 import torch
-
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorWorkerMetadata,
@@ -115,6 +114,19 @@ class KeyMetadata:
     # Complete namespace for an opt-in Store payload format. Empty keeps
     # historical keys byte-identical.
     store_namespace: str = ""
+    # Optional semantic identity for one transport field. Semantic data uses
+    # endpoint-neutral PP/group ranks; legacy keys leave this empty.
+    region_id: str = ""
+
+
+def endpoint_neutral_region_metadata(
+    metadata: KeyMetadata,
+    region_id: str,
+) -> KeyMetadata:
+    """Return metadata for a field whose identity is independent of HMA layout."""
+    if not region_id:
+        raise ValueError("Semantic region ID must not be empty")
+    return replace(metadata, pp_rank=-1, group_id=-1, region_id=region_id)
 
 
 @dataclass(order=True)
@@ -135,6 +147,7 @@ class PoolKey:
                 self.key_metadata.dcp_rank,
                 self.key_metadata.pp_rank,
                 self.key_metadata.group_id,
+                self.key_metadata.region_id,
                 self.chunk_hash,
             )
         )
@@ -147,10 +160,12 @@ class PoolKey:
         pcp_rank: int | None = None,
         dcp_rank: int | None = None,
         pp_rank: int | None = None,
+        group_id: int | None = None,
+        region_id: str | None = None,
     ) -> str:
         """Return the stable prefix for a Mooncake pool key."""
         prefix = f"{key_metadata.cache_prefix}@" if key_metadata.cache_prefix else ""
-        return (
+        key_prefix = (
             f"{prefix}"
             f"{key_metadata.model_name}"
             f"{key_metadata.store_namespace}"
@@ -158,8 +173,12 @@ class PoolKey:
             f"@pcp{key_metadata.pcp_rank if pcp_rank is None else pcp_rank}"
             f"@dcp{key_metadata.dcp_rank if dcp_rank is None else dcp_rank}"
             f"@pp_rank:{key_metadata.pp_rank if pp_rank is None else pp_rank}"
-            f"@group:{key_metadata.group_id}"
+            f"@group:{key_metadata.group_id if group_id is None else group_id}"
         )
+        resolved_region_id = key_metadata.region_id if region_id is None else region_id
+        if resolved_region_id:
+            key_prefix += f"@region:{resolved_region_id}"
+        return key_prefix
 
     @staticmethod
     def build_key_string(key_prefix: str, chunk_hash: str) -> str:
@@ -235,6 +254,7 @@ class RankLocalStoreLayout(StoreLayout):
         self._key_prefix = PoolKey.build_prefix(metadata)
         self.kv_caches_base_addr: list[int] = []
         self.block_len: list[int] = []
+        self.block_stride: list[int] = []
 
     @property
     def local_shard_ids(self) -> tuple[StoreShardId, ...]:
@@ -264,6 +284,25 @@ class RankLocalStoreLayout(StoreLayout):
 
     def set_block_len(self, block_lens: list[int]) -> None:
         self.block_len = block_lens
+        # Historical layouts store complete dense pages, so content length and
+        # physical stride are identical unless a semantic descriptor overrides it.
+        self.block_stride = list(block_lens)
+
+    def set_block_stride(self, block_strides: list[int]) -> None:
+        if len(block_strides) != len(self.block_len):
+            raise ValueError("Block stride and content length counts must match")
+        if any(
+            content_len <= 0
+            or block_stride < 0
+            or (block_stride != 0 and block_stride < content_len)
+            for content_len, block_stride in zip(
+                self.block_len, block_strides, strict=True
+            )
+        ):
+            raise ValueError(
+                "Block stride must be zero or cover a positive content length"
+            )
+        self.block_stride = block_strides
 
     def register_kv_caches(
         self,
@@ -302,6 +341,7 @@ class RankLocalStoreLayout(StoreLayout):
                 block_lens.append(cache.stride(0) * cache.element_size())
         self.kv_caches_base_addr = base_addrs
         self.block_len = block_lens
+        self.block_stride = list(block_lens)
 
     def prepare_values(
         self,
@@ -329,7 +369,11 @@ class RankLocalStoreLayout(StoreLayout):
             dtype=np.int64,
             count=n,
         )
-        addrs = base[None, :] + bids[:, None] * blen[None, :]
+        stride = np.asarray(
+            [self.block_stride[i % length] for i in range(base.shape[0])],
+            dtype=np.int64,
+        )
+        addrs = base[None, :] + bids[:, None] * stride[None, :]
         block_counts = (spans + self.block_size - 1) // self.block_size
         sizes = blen[None, :] * block_counts[:, None]
         return addrs.tolist(), sizes.tolist(), bids.tolist()
@@ -338,7 +382,7 @@ class RankLocalStoreLayout(StoreLayout):
         length = len(self.block_len)
         return (
             [
-                base_addr + block_id * self.block_len[index % length]
+                base_addr + block_id * self.block_stride[index % length]
                 for index, base_addr in enumerate(self.kv_caches_base_addr)
             ],
             [
@@ -576,6 +620,33 @@ class ChunkedTokenDatabase:
             metadata, block_size, self.hash_block_size
         )
 
+    @classmethod
+    def from_semantic_region(
+        cls,
+        database: "ChunkedTokenDatabase",
+        *,
+        region_id: str,
+        base_addr: int,
+        block_stride: int,
+        content_len: int,
+    ) -> "ChunkedTokenDatabase":
+        """Build a one-field database with endpoint-neutral object keys."""
+        metadata = endpoint_neutral_region_metadata(database.metadata, region_id)
+        layout = RankLocalStoreLayout(
+            metadata,
+            database.block_size,
+            database.hash_block_size,
+        )
+        layout.set_kv_caches_base_addr([base_addr])
+        layout.set_block_len([content_len])
+        layout.set_block_stride([block_stride])
+        return cls(
+            metadata,
+            database.block_size,
+            hash_block_size=database.hash_block_size,
+            store_layout=layout,
+        )
+
     @property
     def kv_caches_base_addr(self) -> list[int]:
         return self._rank_local_layout().kv_caches_base_addr
@@ -583,6 +654,10 @@ class ChunkedTokenDatabase:
     @property
     def block_len(self) -> list[int]:
         return self._rank_local_layout().block_len
+
+    @property
+    def block_stride(self) -> list[int]:
+        return self._rank_local_layout().block_stride
 
     def _rank_local_layout(self) -> RankLocalStoreLayout:
         if not isinstance(self.store_layout, RankLocalStoreLayout):
