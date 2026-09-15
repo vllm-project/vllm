@@ -8,6 +8,7 @@ import math
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from functools import cached_property
+from math import gcd
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import regex as re
@@ -124,6 +125,28 @@ def _fill_short_context_topk_indices(
 # plus 7 UE8M0 scales of 64 dims and a pad byte (584 B, 576 B pages).
 def _use_v41_mxfp8_kv_record() -> bool:
     return current_platform.is_device_capability_family(100)
+
+
+# A packed page is rounded up to the record's TMA stride (the spec's
+# ``alignment``), so a state count whose raw page is not already a multiple of
+# that stride pads every page, and the loss surfaces nowhere. The V4.1 records
+# are exact on the right count -- 528 B on multiples of 32, 288 B on multiples
+# of 16 -- and this keeps a later change to a record width or a block size
+# from starting to pad silently. V4's 584 B record would need a multiple of 72
+# and never gets one under the multiple-of-32 SWA rule, so it is exempt.
+def _check_exact_packed_page(
+    what: str, states_per_page: int, bytes_per_state: int, alignment: int
+) -> None:
+    if bytes_per_state == 584:
+        return
+    raw = states_per_page * bytes_per_state
+    if raw % alignment:
+        raise ValueError(
+            f"{what}: {states_per_page} states x {bytes_per_state} B pads every "
+            f"page from {raw} B up to the {alignment} B stride; this record "
+            f"needs a multiple of {alignment // gcd(bytes_per_state, alignment)} "
+            "states per page."
+        )
 
 
 def _resolve_dsv4_kv_cache_dtype(
@@ -521,6 +544,14 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 "decodes only on SM100."
             )
 
+        swa_block_size = 32
+        if self.kv_cache_dtype.endswith("_ds_mla"):
+            _check_exact_packed_page(
+                f"{prefix}.swa_cache",
+                swa_block_size,
+                self.swa_bytes_per_token,
+                self.kv_page_alignment,
+            )
         self.swa_cache_layer = DeepseekV4SWACache(
             head_dim=self.head_dim,
             window_size=self.window_size,
@@ -528,7 +559,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             prefix=f"{prefix}.swa_cache",
             cache_config=cache_config,
             backend_cls=self.swa_backend_cls,
-            block_size=32,
+            block_size=swa_block_size,
             packed_bytes_per_token=self.swa_bytes_per_token,
             packed_page_alignment=self.kv_page_alignment,
         )
@@ -1046,8 +1077,18 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # to the decode kernel's TMA stride; plain bf16 / per-tensor fp8 rows
         # use natural element-size pages.
         uses_fp8_ds_mla_layout = self.kv_cache_dtype in ("fp8_ds_mla", "nvfp4_ds_mla")
+        block_size = vllm_config.cache_config.block_size
+        if uses_fp8_ds_mla_layout:
+            # One state per compress_ratio tokens, so that is what multiplies
+            # the record width in the page.
+            _check_exact_packed_page(
+                f"{self.prefix}.compressed_cache",
+                block_size // self.compress_ratio,
+                self.compressed_bytes_per_token,
+                self.kv_page_alignment,
+            )
         return MLAAttentionSpec(
-            block_size=vllm_config.cache_config.block_size,
+            block_size=block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=torch.uint8 if uses_fp8_ds_mla_layout else self.kv_cache_torch_dtype,
