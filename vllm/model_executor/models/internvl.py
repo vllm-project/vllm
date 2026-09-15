@@ -19,6 +19,10 @@ from transformers import BatchFeature, PretrainedConfig
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.inputs import MultiModalDataDict
+from vllm.model_executor.layers.internvl_shuffle_layer_norm import (
+    can_use_internvl_shuffle_layer_norm,
+    internvl_shuffle_layer_norm,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.models.intern_vit import (
@@ -710,9 +714,31 @@ class InternVLChatModel(
 
         h = w = int(vit_embeds.shape[1] ** 0.5)
         vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)
-        vit_embeds = self.pixel_shuffle(vit_embeds, scale_factor=self.downsample_ratio)
+        norm = self.mlp1[0]
+        assert isinstance(norm, nn.LayerNorm)
+        if can_use_internvl_shuffle_layer_norm(
+            vit_embeds,
+            norm.weight,
+            norm.bias,
+            self.ps_version,
+            self.downsample_ratio,
+        ):
+            assert norm.bias is not None
+            vit_embeds = internvl_shuffle_layer_norm(
+                vit_embeds,
+                norm.weight,
+                norm.bias,
+                norm.eps,
+            )
+        else:
+            vit_embeds = self.pixel_shuffle(
+                vit_embeds, scale_factor=self.downsample_ratio
+            )
+            vit_embeds = norm(vit_embeds)
         vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], -1, vit_embeds.shape[-1])
-        vit_embeds = self.mlp1(vit_embeds)
+        vit_embeds = self.mlp1[1](vit_embeds)
+        vit_embeds = self.mlp1[2](vit_embeds)
+        vit_embeds = self.mlp1[3](vit_embeds)
         return vit_embeds
 
     def _parse_and_validate_image_input(
