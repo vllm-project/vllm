@@ -170,7 +170,21 @@ def _score_edges(
     anchor_token_ids: torch.Tensor,
     top_k: int,
 ) -> torch.Tensor:
-    successors = successor_table[candidate_ids]
+    # Clamp the gather indices into the codebooks' valid row range. candidate_ids
+    # (from the target LM head TopK) and anchor_token_ids (real prompt tokens) are
+    # always in [0, vocab) on the serving path, so clamp is an identity there. But
+    # during spec warmup / cudagraph capture the drafter's input_ids buffer carries
+    # uninitialized / -1 sentinel ids (never filled with valid tokens for the dummy
+    # step), and those reach anchor_token_ids -> predecessor_ids. These raw codebook
+    # gathers run INSIDE CandidateSelector's @support_torch_compile region, so an
+    # out-of-range id trips an inductor-lowered bounds assert
+    # (`index out of bounds: 0 <= tmp < vocab`) — the same -1-sentinel class as the
+    # VPE tp==1 / drafter-embed fixes, but on a distinct compiled gather that neither
+    # of those touches. Clamping keeps the index provably in-range so the compiled
+    # kernel is safe; warmup rows are discarded downstream by rejection sampling.
+    # See DESIGN-NOTES §18.
+    vocab_size = successor_table.shape[0]
+    successors = successor_table[candidate_ids.clamp(0, vocab_size - 1)]
     predecessor_ids = torch.cat(
         (
             anchor_token_ids[:, None, None].expand(-1, 1, top_k),
@@ -178,7 +192,7 @@ def _score_edges(
         ),
         dim=1,
     )
-    predecessors = predecessor_table[predecessor_ids]
+    predecessors = predecessor_table[predecessor_ids.clamp(0, vocab_size - 1)]
     return unary_logits[:, :, None] + torch.einsum(
         "blpr,blcr->blpc", predecessors * hidden[:, :, None], successors
     )
