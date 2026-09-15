@@ -13,9 +13,11 @@ from vllm import _custom_ops as ops
 from vllm import envs
 from vllm.config import (
     VllmConfig,
+    get_current_vllm_config,
     get_layers_from_vllm_config,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear.zentorch_utils import has_zentorch_op
 from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.torch_utils import is_quantized_kv_cache
@@ -30,6 +32,10 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import (
     get_num_attention_heads_from_layers,
+)
+from vllm.v1.attention.backends.zentorch_sdpa import (
+    should_use_zentorch_sdpa,
+    zentorch_sdpa_attn,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -334,6 +340,21 @@ class CPUAttentionBackendImpl(AttentionImpl):
                 "heads in the layer"
             )
 
+        vllm_config = get_current_vllm_config()
+        self.isa = _get_attn_isa(
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.block_size,
+            self.head_size,
+            self.kv_cache_dtype,
+        )
+
+        self.use_zentorch_sdpa = should_use_zentorch_sdpa(
+            attn_type,
+            self.alibi_slopes,
+            self.sliding_window,
+            vllm_config.model_config.dtype,
+        )
+
     def forward(
         self,
         layer: AttentionLayer,
@@ -375,6 +396,21 @@ class CPUAttentionBackendImpl(AttentionImpl):
             AttentionType.ENCODER,
         )
         if is_encoder_attention:
+            if self.use_zentorch_sdpa and has_zentorch_op(["zentorch_sdpa_attn"]):
+                # Encoder attention never reads the KV cache back, so the
+                # zentorch path attends the packed QKV directly instead of
+                # staging it through the scratch encoder cache.
+                zentorch_sdpa_attn(
+                    query[:num_actual_tokens],
+                    key[:num_actual_tokens],
+                    value[:num_actual_tokens],
+                    output[:num_actual_tokens],
+                    attn_metadata,
+                    self.scale,
+                    self.sliding_window,
+                    self.alibi_slopes,
+                )
+                return output
             # For encoder attention,
             kv_cache = attn_metadata.encoder_cache
 

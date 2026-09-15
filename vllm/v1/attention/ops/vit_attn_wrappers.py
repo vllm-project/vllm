@@ -243,9 +243,19 @@ def apply_sdpa(
     (batch_size x seq_len x num_heads x head_size)
     """
     q, k, v = (einops.rearrange(x, "b s h d -> b h s d") for x in [q, k, v])
-    output = F.scaled_dot_product_attention(
-        q, k, v, dropout_p=0.0, scale=scale, enable_gqa=enable_gqa
-    )
+    if current_platform.is_zen_cpu() and hasattr(
+        torch.ops.zentorch, "zentorch_sdpa"
+    ):
+        # Schema: (query, key, value, dropout_p=0., is_causal=False, *,
+        # attn_mask=None, scale=None) -> (attention, logsumexp).
+        # No enable_gqa: GQA is inferred from key.size(1) vs query.size(1).
+        output, _ = torch.ops.zentorch.zentorch_sdpa(
+            q, k, v, dropout_p=0.0, is_causal=False, scale=scale
+        )
+    else:
+        output = F.scaled_dot_product_attention(
+            q, k, v, dropout_p=0.0, scale=scale, enable_gqa=enable_gqa
+        )
     output = einops.rearrange(output, "b h s d -> b s h d ")
     return output
 
