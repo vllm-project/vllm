@@ -4,6 +4,7 @@
 from unittest.mock import patch
 
 import pytest
+from openai.types.responses.response_compaction_item import ResponseCompactionItem
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 from openai.types.responses.response_function_tool_call_output_item import (
     ResponseFunctionToolCallOutputItem,
@@ -20,6 +21,8 @@ from vllm.entrypoints.openai.responses.utils import (
     _construct_message_from_response_item,
     construct_chat_messages_with_tool_call,
     construct_input_messages,
+    decode_compaction_summary,
+    encode_compaction_summary,
     should_continue_final_message,
 )
 from vllm.exceptions import VLLMValidationError
@@ -117,6 +120,37 @@ def make_function_call_output(
 
 class TestResponsesUtils:
     """Tests for Responses API utils."""
+
+    def test_compaction_item_becomes_conversation_context(self):
+        item = ResponseCompactionItem(
+            id="cmp_1",
+            encrypted_content=encode_compaction_summary("The user chose SQLite."),
+            type="compaction",
+        )
+
+        messages = construct_chat_messages_with_tool_call([item])
+
+        assert messages == [
+            {
+                "role": "assistant",
+                "content": (
+                    "Compacted conversation context:\n\nThe user chose SQLite."
+                ),
+            }
+        ]
+        assert decode_compaction_summary(item.encrypted_content) == (
+            "The user chose SQLite."
+        )
+
+    def test_foreign_compaction_item_is_rejected(self):
+        item = ResponseCompactionItem(
+            id="cmp_1",
+            encrypted_content="not-created-by-vllm",
+            type="compaction",
+        )
+
+        with pytest.raises(VLLMValidationError, match="created by vLLM"):
+            construct_chat_messages_with_tool_call([item])
 
     def test_construct_chat_messages_with_tool_call(self):
         """Test construction of chat messages with tool calls."""

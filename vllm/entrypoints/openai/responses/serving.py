@@ -11,6 +11,7 @@ from typing import Any, Final, cast
 
 from fastapi import Request
 from openai.types.responses import (
+    ResponseCompactionItem,
     ResponseOutputItem,
     ResponseOutputMessage,
     ResponseOutputText,
@@ -41,6 +42,10 @@ from vllm.entrypoints.openai.responses.context import (
 )
 from vllm.entrypoints.openai.responses.harmony import harmony_to_response_output
 from vllm.entrypoints.openai.responses.protocol import (
+    CompactedResponse,
+    CompactInputTokensDetails,
+    CompactOutputTokensDetails,
+    CompactResponseUsage,
     InputTokensDetails,
     OutputTokensDetails,
     ResponseCompletedEvent,
@@ -48,6 +53,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseInProgressEvent,
     ResponseInputOutputItem,
     ResponseInputOutputMessage,
+    ResponsesCompactRequest,
     ResponsesRequest,
     ResponsesResponse,
     ResponseUsage,
@@ -64,6 +70,7 @@ from vllm.entrypoints.openai.responses.streaming_events import (
 )
 from vllm.entrypoints.openai.responses.utils import (
     build_response_output_items,
+    encode_compaction_summary,
     extract_function_tool_names,
     extract_tool_types,
 )
@@ -90,6 +97,11 @@ from vllm.utils import random_uuid
 from vllm.utils.collection_utils import as_list
 
 logger = init_logger(__name__)
+
+_COMPACTION_INSTRUCTIONS = """Create a concise checkpoint of the conversation.
+Preserve the user's goals, requirements, decisions, important facts, unresolved
+questions, and any state needed to continue the work. Do not continue the task or
+address the user directly. Return only the checkpoint."""
 
 
 class OpenAIServingResponses(GenerateBaseServing):
@@ -308,6 +320,87 @@ class OpenAIServingResponses(GenerateBaseServing):
     ):
         return await self._with_kv_transfer_rejection_cleanup(
             self._create_responses(request, raw_request), request, raw_request
+        )
+
+    async def compact_responses(
+        self,
+        request: ResponsesCompactRequest,
+        raw_request: Request | None = None,
+    ) -> CompactedResponse | ErrorResponse:
+        instructions = _COMPACTION_INSTRUCTIONS
+        if request.instructions:
+            instructions = f"{request.instructions}\n\n{instructions}"
+
+        generation_request = ResponsesRequest(
+            model=request.model,
+            input=request.input if request.input is not None else "",
+            instructions=instructions,
+            previous_response_id=request.previous_response_id,
+            prompt_cache_key=request.prompt_cache_key,
+            service_tier=(
+                "priority" if request.service_tier == "fast" else request.service_tier
+            ),
+            store=False,
+            stream=False,
+            temperature=0.0,
+            max_output_tokens=min(4096, max(1, self.model_config.max_model_len // 8)),
+            truncation="auto",
+        )
+        generated = await self.create_responses(generation_request, raw_request)
+        if isinstance(generated, ErrorResponse):
+            return generated
+        if not isinstance(generated, ResponsesResponse):
+            return self.create_error_response(
+                err_type="server_error",
+                message="Compaction unexpectedly returned a streaming response.",
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+        summary_parts = [
+            content.text
+            for item in generated.output
+            if isinstance(item, ResponseOutputMessage)
+            for content in item.content
+            if isinstance(content, ResponseOutputText)
+        ]
+        if not summary_parts:
+            return self.create_error_response(
+                err_type="server_error",
+                message="The model did not produce a compaction summary.",
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+        usage = generated.usage
+        if usage is None:
+            return self.create_error_response(
+                err_type="server_error",
+                message="The compaction response did not include token usage.",
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+        compact_usage = CompactResponseUsage(
+            input_tokens=usage.input_tokens,
+            input_tokens_details=CompactInputTokensDetails(
+                cached_tokens=usage.input_tokens_details.cached_tokens,
+            ),
+            output_tokens=usage.output_tokens,
+            output_tokens_details=CompactOutputTokensDetails(
+                reasoning_tokens=usage.output_tokens_details.reasoning_tokens,
+            ),
+            total_tokens=usage.total_tokens,
+        )
+        return CompactedResponse(
+            id=generated.id,
+            created_at=generated.created_at,
+            output=[
+                ResponseCompactionItem(
+                    id=f"cmp_{random_uuid()}",
+                    encrypted_content=encode_compaction_summary(
+                        "\n\n".join(summary_parts)
+                    ),
+                    type="compaction",
+                )
+            ],
+            usage=compact_usage,
         )
 
     async def _create_responses(
