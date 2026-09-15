@@ -522,7 +522,7 @@ def test_kv_path_mxfp8_record_matches_reference(num_tokens: int, block_size: int
     )
 
 
-# ── Test 2d: mega-attention Q layout (q_fused_layout=True) ───────────────────
+# ── Test 2d: mega-attention Q layout (is_q_interleaved) ──────────────────────
 
 Q_CHUNK = 16
 NUM_Q_CHUNKS = HEAD_DIM // Q_CHUNK  # 32
@@ -530,10 +530,10 @@ NUM_Q_CHUNKS = HEAD_DIM // Q_CHUNK  # 32
 
 @pytest.mark.parametrize("num_tokens", [1, 17, 2048])
 @pytest.mark.parametrize("n_heads,q_head_padded", [(16, 64), (64, 128), (64, 0)])
-def test_q_fused_layout_pads_without_rope(
+def test_q_interleaved_pads_without_rope(
     num_tokens: int, n_heads: int, q_head_padded: int
 ):
-    """``q_fused_layout=True`` only zero-pads Q, in the chunk-interleaved layout.
+    """``is_q_interleaved`` with no norm or RoPE only zero-pads Q.
 
     The mega-attention kernel norms and rotates Q itself, so every live
     element must survive bit-exact while the padding heads -- which interleave
@@ -568,7 +568,8 @@ def test_q_fused_layout_pads_without_rope(
         block_size,
         False,  # apply_q_norm
         True,  # kv_mxfp8
-        True,  # q_fused_layout
+        False,  # apply_q_rope
+        True,  # is_q_interleaved
     )
 
     # The KV half is unaffected by the Q mode: it must still be inserted.
@@ -585,7 +586,7 @@ def test_q_fused_layout_pads_without_rope(
 
 
 @pytest.mark.parametrize("n_heads", [8, 16, 32])
-def test_q_fused_layout_survives_graph_replay(n_heads: int):
+def test_q_interleaved_survives_graph_replay(n_heads: int):
     """A captured fused insert refills its padded Q buffer on every replay.
 
     The op allocates ``q_out`` itself, so the tensor a capture hands back has
@@ -621,7 +622,8 @@ def test_q_fused_layout_survives_graph_replay(n_heads: int):
             block_size,
             False,  # apply_q_norm
             True,  # kv_mxfp8
-            True,  # q_fused_layout
+            False,  # apply_q_rope
+            True,  # is_q_interleaved
         )
 
     # Capture takes its warmup on a side stream.
@@ -643,6 +645,64 @@ def test_q_fused_layout_survives_graph_replay(n_heads: int):
         want = q.view(num_tokens, NUM_Q_CHUNKS, n_heads, Q_CHUNK)
         torch.testing.assert_close(got[:, :, :n_heads], want, rtol=0, atol=0)
         assert (got[:, :, n_heads:] == 0).all()
+
+
+@pytest.mark.parametrize("n_heads", [16, 64])
+@pytest.mark.parametrize("apply_q_norm", [False, True])
+@pytest.mark.parametrize("apply_q_rope", [False, True])
+def test_q_interleaved_is_orthogonal_to_norm_and_rope(
+    n_heads: int, apply_q_norm: bool, apply_q_rope: bool
+):
+    """The Q layout composes with whatever norm and RoPE it is given.
+
+    A lane owns the same 512-dim slice of its head in either layout -- only
+    the address differs -- so the head-major result permuted into the
+    interleaved layout must equal running the interleaved path on a permuted
+    input, bit for bit, for every norm/RoPE combination.
+    """
+    from vllm.models.deepseek_v41.common.ops.fused_layout import permute_q_to_fused
+
+    torch.manual_seed(7)
+    device = "cuda"
+    dtype = torch.bfloat16
+    block_size, num_tokens, q_head_padded = 64, 5, 64
+
+    q = torch.randn(num_tokens, n_heads, HEAD_DIM, dtype=dtype, device=device)
+    kv = torch.randn(num_tokens, HEAD_DIM, dtype=dtype, device=device)
+    positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    cos_sin_cache = make_cos_sin_cache(4096, ROPE_DIM, torch.float32, device)
+    num_blocks = (num_tokens + block_size - 1) // block_size + 1
+    slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
+
+    def run(q_in, is_q_interleaved):
+        cache = torch.zeros(
+            num_blocks, block_size * V41_HEAD_BYTES, dtype=torch.uint8, device=device
+        )
+        out = torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+            q_in,
+            kv,
+            cache,
+            slot_mapping,
+            positions,
+            cos_sin_cache,
+            q_head_padded,
+            1e-6,
+            block_size,
+            apply_q_norm,
+            True,  # kv_mxfp8
+            apply_q_rope,
+            is_q_interleaved,
+        )
+        return out, cache
+
+    head_major, cache_major = run(q, False)
+    interleaved, cache_inter = run(permute_q_to_fused(q), True)
+
+    torch.testing.assert_close(
+        interleaved, permute_q_to_fused(head_major), rtol=0, atol=0
+    )
+    # The Q layout must not leak into the KV half.
+    torch.testing.assert_close(cache_inter, cache_major, rtol=0, atol=0)
 
 
 # ── Test 2b: DP padding (slot_mapping shorter than q/kv) ─────────────────────
