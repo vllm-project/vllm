@@ -368,6 +368,7 @@ class DraftModelSpeculator(BaseSpeculator):
             causal=causal,
             seq_lens_cpu_upper_bound=draft_seq_lens_cpu_upper_bound,
             is_prefilling=self.draft_is_prefilling[:num_reqs],
+            replay_start=self.input_buffers.replay_start[:num_reqs_padded],
         )
         return attn_metadata
 
