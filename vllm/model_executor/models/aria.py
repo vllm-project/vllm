@@ -384,6 +384,8 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
     model to perform tasks that involve both image and text inputs.
     """
 
+    supports_encoder_tp_data = True
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # mapping for new names in checkpoint saved after transformers v4.52

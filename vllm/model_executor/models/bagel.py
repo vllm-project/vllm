@@ -329,6 +329,8 @@ class BagelForConditionalGeneration(
     The image generation part is not supported in vLLM.
     """
 
+    supports_encoder_tp_data = True
+
     # pos_embed is handled by the PositionEmbedding module
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"vit_pos_embed.pos_embed": None}

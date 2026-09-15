@@ -224,22 +224,22 @@ do not configure CPU worker affinity.
 
 ### Batch-level DP for Multi-Modal Encoders
 
-By default, TP is used to shard the weights of multi-modal encoders just like for language decoders,
-in order to reduce the memory and compute load on each GPU.
+By default, the batched input data of multi-modal encoders is sharded across TP ranks
+(`mm_encoder_tp_mode="data"`), essentially performing batch-level DP, while the full
+encoder weights are hosted on each TP rank.
 
-However, since the size of multi-modal encoders is very small compared to language decoders,
-there is relatively little gain from TP. On the other hand, TP incurs significant communication
-overhead because of all-reduce being performed after every layer.
-
-Given this, it may be advantageous to instead shard the batched input data using TP, essentially
-performing batch-level DP. This has been shown to improve the throughput and TTFT by around 10% for
+This is because the size of multi-modal encoders is very small compared to language decoders,
+so there is relatively little gain from sharding their weights with TP. On the other hand, TP
+incurs significant communication overhead because of all-reduce being performed after every layer.
+Batch-level DP has been shown to improve the throughput and TTFT by around 10% for
 `tensor_parallel_size=8`. For vision encoders that use hardware-unoptimized Conv3D operations,
 batch-level DP can provide another 40% improvement compared to regular TP.
 
 Nevertheless, since the weights of the multi-modal encoder are replicated across each TP rank,
 there will be a minor increase in memory consumption and may cause OOM if you can barely fit the model already.
 
-You can enable batch-level DP by setting `mm_encoder_tp_mode="data"`, for example:
+You can revert to sharding the encoder weights with TP by setting `mm_encoder_tp_mode="weights"`,
+for example:
 
 ```python
 from vllm import LLM
@@ -247,11 +247,12 @@ from vllm import LLM
 llm = LLM(
     model="Qwen/Qwen2.5-VL-72B-Instruct",
     tensor_parallel_size=4,
-    # When mm_encoder_tp_mode="data",
-    # the vision encoder uses TP=4 (not DP=1) to shard the input data,
+    # The default mm_encoder_tp_mode="data" makes the vision encoder use
+    # TP=4 (not DP=1) to shard the input data,
     # so the TP size becomes the effective DP size.
     # Note that this is independent of the DP size for language decoder which is used in expert parallel setting.
-    mm_encoder_tp_mode="data",
+    # Setting mm_encoder_tp_mode="weights" shards the encoder weights instead.
+    mm_encoder_tp_mode="weights",
     # The language decoder uses TP=4 to shard the weights regardless
     # of the setting of mm_encoder_tp_mode
 )
@@ -263,7 +264,8 @@ llm = LLM(
 
 Batch-level DP needs to be implemented on a per-model basis,
 and enabled by setting `supports_encoder_tp_data = True` in the model class.
-Regardless, you need to set `mm_encoder_tp_mode="data"` in engine arguments to use this feature.
+Models whose encoder does not support batch-level DP automatically fall back to
+`mm_encoder_tp_mode="weights"` with a warning.
 
 Known supported models (with corresponding benchmarks):
 

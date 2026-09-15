@@ -437,6 +437,8 @@ class Granite4VisionForConditionalGeneration(
     Both modes expect a LM-only adapter (no modules_to_save).
     """
 
+    supports_encoder_tp_data = True
+
     # LoRA class attributes (matches GraniteForCausalLM)
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],

@@ -262,6 +262,7 @@ class PaliGemmaForConditionalGeneration(
         }
     )
 
+    supports_encoder_tp_data = True
     supports_tower_connector_lora = True
 
     @classmethod
