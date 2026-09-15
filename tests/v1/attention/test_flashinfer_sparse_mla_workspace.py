@@ -1,11 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU-only tests for the FlashInfer sparse MLA workspace sizing (#50781)."""
+"""CPU-only tests for FlashInfer sparse MLA backend constraints."""
 
+from types import SimpleNamespace
 from unittest.mock import patch
+
+import pytest
+import torch
 
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     _DEFAULT_WORKSPACE_BUFFER_SIZE,
+    FlashInferMLASparseTRTLLMBackend,
     _required_workspace_bytes,
     compute_trtllm_sparse_mla_workspace_bytes,
 )
@@ -55,6 +60,58 @@ def test_non_dcp_size_is_unchanged():
         max_num_batched_tokens=65536,
     )
     assert computed == _DEFAULT_WORKSPACE_BUFFER_SIZE
+
+
+def test_combined_pcp_dcp_rejects_flashinfer_sparse():
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=4,
+            decode_context_parallel_size=4,
+        ),
+        model_config=None,
+    )
+    with patch("vllm.config.get_current_vllm_config", return_value=config):
+        reason = FlashInferMLASparseTRTLLMBackend.supports_combination(
+            head_size=576,
+            dtype=torch.bfloat16,
+            kv_cache_dtype="fp8",
+            block_size=64,
+            use_mla=True,
+            has_sink=False,
+            use_sparse=True,
+            use_mm_prefix=False,
+            device_capability=SimpleNamespace(major=10),
+        )
+
+    assert reason is not None
+    assert "use FLASHMLA_SPARSE" in reason
+
+
+@pytest.mark.parametrize("pcp_size,dcp_size", [(4, 1), (1, 4)])
+def test_single_context_parallel_mode_allows_flashinfer_sparse(
+    pcp_size: int, dcp_size: int
+):
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=pcp_size,
+            decode_context_parallel_size=dcp_size,
+        ),
+        model_config=None,
+    )
+    with patch("vllm.config.get_current_vllm_config", return_value=config):
+        reason = FlashInferMLASparseTRTLLMBackend.supports_combination(
+            head_size=576,
+            dtype=torch.bfloat16,
+            kv_cache_dtype="fp8",
+            block_size=64,
+            use_mla=True,
+            has_sink=False,
+            use_sparse=True,
+            use_mm_prefix=False,
+            device_capability=SimpleNamespace(major=10),
+        )
+
+    assert reason is None
 
 
 def test_default_constant_matches_envs_default(monkeypatch):

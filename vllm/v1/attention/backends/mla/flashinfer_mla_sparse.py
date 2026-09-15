@@ -113,6 +113,16 @@ class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
         from vllm.config import get_current_vllm_config
 
         vllm_config = get_current_vllm_config()
+        parallel_config = vllm_config.parallel_config
+        if (
+            parallel_config.prefill_context_parallel_size > 1
+            and parallel_config.decode_context_parallel_size > 1
+        ):
+            return (
+                "FLASHINFER_MLA_SPARSE does not support combined PCP+DCP; "
+                "use FLASHMLA_SPARSE, which gathers each DCP KV shard before "
+                "running the rank-local PCP prefill queries"
+            )
         if kv_cache_dtype == "fp8_ds_mla":
             return (
                 "FLASHINFER_MLA_SPARSE SM10 does not support fp8_ds_mla kv-cache dtype"
