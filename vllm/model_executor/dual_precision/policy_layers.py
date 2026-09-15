@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Pure name-matching and layer/module policies for the INT4 shadow store.
+"""Pure name-matching and layer/module policies for the low-precision shadow store.
 
 Nothing in this module touches torch state; every function is a pure
 function of module names and policy strings so it can be unit-tested on CPU
@@ -23,6 +23,24 @@ QUANTIZED_WEIGHT_NAMES: tuple[str, ...] = (
 )
 """Parameter names that mark a ``LinearBase`` as GPTQ-packed."""
 
+NVFP4_WEIGHT_NAMES: tuple[str, ...] = (
+    "weight_global_scale",
+    "weight_scale_2",
+    "w13_weight_global_scale",
+    "w2_weight_global_scale",
+)
+"""Parameter names that mark a ``LinearBase`` as ModelOpt NVFP4.
+
+NVFP4 keeps its packed weight under the plain name ``weight`` (uint8, two FP4
+values per byte), which a BF16 linear also has, so the marker must be one of the
+scales instead.  ``weight_scale_2`` is the name the checkpoint loads under and
+``weight_global_scale`` the name ``process_weights_after_loading`` renames it to,
+so a layer is recognised both before and after that pass.
+"""
+
+SHADOW_WEIGHT_NAMES: tuple[str, ...] = QUANTIZED_WEIGHT_NAMES + NVFP4_WEIGHT_NAMES
+"""Every marker that makes a ``LinearBase`` usable as a low-precision shadow."""
+
 MODULE_POLICY_ALL = "all"
 MODULE_POLICY_MLP_ONLY = "mlp_only"
 _MLP_ONLY_SUFFIXES = (
@@ -35,8 +53,12 @@ _TRANSFORMER_LAYER_PATTERN = re.compile(r"(?:^|\.)layers\.(\d+)(?:\.|$)")
 
 
 def is_quantized_shadow_layer(layer: nn.Module) -> bool:
-    """Whether ``layer`` carries a packed (quantized) weight."""
-    return any(hasattr(layer, name) for name in QUANTIZED_WEIGHT_NAMES)
+    """Whether ``layer`` carries a packed (quantized) weight.
+
+    True for the GPTQ packings and for ModelOpt NVFP4; a plain BF16 linear, whose
+    only weight tensor is ``weight``, is false.
+    """
+    return any(hasattr(layer, name) for name in SHADOW_WEIGHT_NAMES)
 
 
 def transformer_layer_index(module_name: str) -> int | None:

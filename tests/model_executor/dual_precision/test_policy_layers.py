@@ -32,6 +32,19 @@ def test_recognize_quantized_shadow_weight_formats(weight_name: str):
     assert is_quantized_shadow_layer(layer)
 
 
+@pytest.mark.parametrize(
+    "weight_name",
+    ["weight_global_scale", "weight_scale_2", "w13_weight_global_scale"],
+)
+def test_nvfp4_scale_names_mark_a_quantized_shadow(weight_name):
+    layer = nn.Module()
+    # NVFP4 packs into the plain ``weight`` name, so only a scale can mark it.
+    layer.weight = object()
+    setattr(layer, weight_name, object())
+
+    assert is_quantized_shadow_layer(layer)
+
+
 def test_plain_weight_is_not_a_quantized_shadow():
     layer = nn.Module()
     layer.weight = object()

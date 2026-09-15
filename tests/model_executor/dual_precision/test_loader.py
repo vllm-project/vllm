@@ -16,7 +16,9 @@ from vllm.model_executor.dual_precision.loader import (
     validate_shadow_quantization,
 )
 
-HF_HUB = "/data/huggingface/hub"
+# The measurement host kept its cache at /data/huggingface/hub; other hosts set
+# DUAL_PRECISION_HF_HUB. Tests skip on whatever is missing, so either works.
+HF_HUB = os.environ.get("DUAL_PRECISION_HF_HUB", "/data/huggingface/hub")
 QWEN35_9B_BF16 = (
     f"{HF_HUB}/models--Qwen--Qwen3.5-9B/snapshots/"
     "c202236235762e1c871ad0ccb60c8ee5ba337b9a"
@@ -24,6 +26,10 @@ QWEN35_9B_BF16 = (
 QWEN35_9B_AUTOROUND = (
     f"{HF_HUB}/models--Intel--Qwen3.5-9B-int4-AutoRound/snapshots/"
     "29688b8959bebb6d019ddd8f174a5b4bfd670456"
+)
+QWEN35_9B_NVFP4 = (
+    f"{HF_HUB}/models--AxionML--Qwen3.5-9B-NVFP4/snapshots/"
+    "97aef92393f126bf649f310cd40861be8dad3279"
 )
 
 AUTOROUND_GPTQ = {
@@ -38,6 +44,25 @@ CT_PACK_QUANTIZED = {
     "format": "pack-quantized",
     "config_groups": {"group_0": {"format": "pack-quantized", "targets": ["Linear"]}},
 }
+MODELOPT_NVFP4 = {
+    "quant_method": "modelopt",
+    "config_groups": {
+        "group_0": {
+            "targets": ["Linear"],
+            "weights": {"num_bits": 4, "type": "float", "group_size": 16},
+            "input_activations": {"num_bits": 4, "type": "float", "dynamic": False},
+        }
+    },
+}
+MODELOPT_FP8 = {
+    "quant_method": "modelopt",
+    "config_groups": {
+        "group_0": {
+            "targets": ["Linear"],
+            "weights": {"num_bits": 8, "type": "float"},
+        }
+    },
+}
 
 
 @pytest.mark.parametrize(
@@ -51,6 +76,25 @@ CT_PACK_QUANTIZED = {
 )
 def test_accepts_gptq_packings(hf_quant_config, resolved, label):
     assert validate_shadow_quantization(hf_quant_config, resolved) == label
+
+
+@pytest.mark.parametrize(
+    ("hf_quant_config", "resolved"),
+    [
+        (MODELOPT_NVFP4, "modelopt_fp4"),
+        # Older exports name the format only in the weight spec or quant_algo.
+        (MODELOPT_NVFP4, None),
+        ({"quant_method": "modelopt", "quant_algo": "NVFP4"}, None),
+        ({"quant_method": "modelopt_fp4"}, "modelopt_fp4"),
+    ],
+)
+def test_accepts_modelopt_nvfp4_shadow(hf_quant_config, resolved):
+    assert validate_shadow_quantization(hf_quant_config, resolved) == "modelopt:nvfp4"
+
+
+def test_rejects_modelopt_fp8_shadow():
+    with pytest.raises(ValueError, match="NVFP4"):
+        validate_shadow_quantization(MODELOPT_FP8, "modelopt")
 
 
 @pytest.mark.parametrize(
@@ -208,3 +252,33 @@ def test_make_int4_vllm_config_clone_fields():
 
     with pytest.raises(ValueError, match="VLLM_DUAL_PRECISION_INT4_MODEL"):
         make_int4_vllm_config(vllm_config, "")
+
+
+def test_make_int4_vllm_config_accepts_an_nvfp4_shadow():
+    """The gate passes an NVFP4 checkpoint and vLLM resolves it to modelopt_fp4.
+
+    Config-level only: no weights are loaded and no GPU is touched.
+    """
+    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config.load import LoadConfig
+    from vllm.config.lora import LoRAConfig
+
+    bf16 = _require(QWEN35_9B_BF16)
+    nvfp4 = _require(QWEN35_9B_NVFP4)
+
+    model_config = ModelConfig(
+        model=bf16, tokenizer=bf16, dtype="bfloat16", max_model_len=512, seed=0
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        lora_config=LoRAConfig(max_lora_rank=16),
+        load_config=LoadConfig(load_format="dummy"),
+    )
+
+    shadow_config = make_int4_vllm_config(vllm_config, nvfp4)
+
+    assert shadow_config.model_config.model == nvfp4
+    assert shadow_config.model_config.quantization == "modelopt_fp4"
+    # The shadow never inherits a dummy loader, whatever the engine does.
+    assert str(shadow_config.load_config.load_format).lower() == "auto"
+    assert vllm_config.model_config.quantization is None

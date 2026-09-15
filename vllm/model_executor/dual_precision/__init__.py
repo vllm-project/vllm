@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Dual-precision residency: a BF16 model plus an INT4 (GPTQ) shadow store,
-with every LoRA wrapper bound to one of them per forward.
+"""Dual-precision residency: a BF16 model plus a low-precision shadow store
+(GPTQ-packed INT4 or ModelOpt NVFP4), with every LoRA wrapper bound to one of
+them per forward.
 
 Public surface consumed by the model runner, the CUDA-graph dispatcher and
 the scheduler-side switch:
