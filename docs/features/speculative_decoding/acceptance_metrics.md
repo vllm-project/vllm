@@ -50,6 +50,7 @@ A `summary` response's `metrics` looks like:
       "acceptance_histogram": [39, 1, 0, 3],
       "num_spec_steps": 43,
       "num_accepted_draft_tokens": 10,
+      "num_committed_tokens": 53,
       "num_draft_tokens": 129,
       "num_spec_tokens": 3
     }
@@ -59,11 +60,12 @@ A `summary` response's `metrics` looks like:
 
 | Field | Description |
 | --- | --- |
-| `mean_acceptance_length` | Mean tokens emitted per verification step, including the bonus token: `1 + num_accepted_draft_tokens / num_spec_steps`. Ranges from `1.0` (nothing accepted) to `num_spec_tokens + 1`. |
+| `mean_acceptance_length` | Mean tokens actually committed per verification step after EOS/stop handling. Ordinary steps include the bonus token; terminal steps count only tokens emitted before stopping. |
 | `draft_acceptance_rate` | Fraction of proposed draft tokens accepted: `num_accepted_draft_tokens / num_draft_tokens`. |
 | `acceptance_histogram` | Dense list of length `num_spec_tokens + 1`; index `j` is the number of steps that accepted exactly `j` draft tokens. Excludes the always-accepted bonus token. |
 | `num_spec_steps` | Number of verification steps for this request (the sum of the histogram). |
 | `num_accepted_draft_tokens` | Total accepted draft tokens, excluding bonus tokens. |
+| `num_committed_tokens` | Total tokens actually committed after EOS/stop truncation. |
 | `num_draft_tokens` | Total proposed draft tokens, after subtracting drafts invalidated by structured-output constraints. |
 | `num_spec_tokens` | Configured `num_speculative_tokens` (`k`), i.e. the maximum draft length per step. |
 
@@ -98,3 +100,4 @@ all-`n == 1` workloads):
 | `num_spec_steps` | `vllm:spec_decode_num_drafts_total` |
 | `num_draft_tokens` | `vllm:spec_decode_num_draft_tokens_total` |
 | `num_accepted_draft_tokens` | `vllm:spec_decode_num_accepted_tokens_total` |
+| `num_committed_tokens` | Not currently exposed as a Prometheus counter |
