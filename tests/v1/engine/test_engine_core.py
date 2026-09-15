@@ -675,11 +675,29 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
     return core
 
 
+def test_checkpoint_requires_full_wake_before_scheduler_resume(monkeypatch):
+    """The resume endpoint cannot schedule work on partially sleeping memory."""
+    monkeypatch.setattr("vllm.envs.VLLM_SLEEP_OFFLOAD_CUDA_CONTEXT", True)
+    core = _pausable_engine_core_proc()
+    core.model_executor.is_sleeping = True
+    with pytest.raises(RuntimeError, match="Wake all sleeping memory"):
+        core.resume_scheduler()
+    core.scheduler.set_pause_state.assert_not_called()
+    core.model_executor.is_sleeping = False
+    core.resume_scheduler()
+    core.scheduler.set_pause_state.assert_called_once()
+
+
 @pytest.mark.parametrize("deferred", [False, True])
-def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
+@pytest.mark.parametrize("checkpointed", [False, True])
+def test_pause_synchronizes_device_before_cache_reset(
+    deferred: bool, checkpointed: bool, monkeypatch
+):
     """A resolved pause promises an idle device: the barrier must run before
     caches are cleared and before the caller is unblocked."""
     core = _pausable_engine_core_proc()
+    monkeypatch.setattr("vllm.envs.VLLM_SLEEP_OFFLOAD_CUDA_CONTEXT", checkpointed)
+    core.model_executor.is_sleeping = checkpointed
     core.engines_running = deferred
     order: list[str] = []
     core.model_executor.collective_rpc.side_effect = lambda method: order.append(method)
@@ -694,4 +712,4 @@ def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
         assert result.result(timeout=0) is None
     else:
         assert result is None
-    assert order == ["synchronize_device", "reset_caches"]
+    assert order == ([] if checkpointed else ["synchronize_device", "reset_caches"])

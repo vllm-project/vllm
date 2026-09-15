@@ -24,7 +24,97 @@ from vllm.v1.executor.uniproc_executor import (
 )
 
 
+def test_failed_checkpoint_keeps_wake_available(monkeypatch):
+    """A failed sleep or restore must not advertise resident memory."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr("vllm.envs.VLLM_SLEEP_OFFLOAD_CUDA_CONTEXT", True)
+    executor = SimpleNamespace(is_sleeping=False, sleeping_tags=set())
+
+    def fail(method, **kwargs):
+        raise RuntimeError("driver failure")
+
+    executor.collective_rpc = fail
+    with pytest.raises(RuntimeError, match="driver failure"):
+        Executor.sleep(executor)
+    assert executor.is_sleeping
+    assert executor.sleeping_tags == {"weights", "kv_cache"}
+    with pytest.raises(RuntimeError, match="driver failure"):
+        Executor.wake_up(executor)
+    assert executor.is_sleeping
+    executor.collective_rpc = lambda *args, **kwargs: None
+    Executor.wake_up(executor)
+    assert not executor.is_sleeping
+    assert executor.sleeping_tags == set()
+
+
+@pytest.mark.parametrize(
+    "cuda, dp_backend, worker_cls",
+    [(False, "mp", "auto"), (True, "ray", "auto"), (True, "mp", "custom.Worker")],
+)
+def test_checkpoint_rejects_unsupported_engine_process(
+    monkeypatch, cuda, dp_backend, worker_cls
+):
+    """Reject unsupported platforms and actor launchers before worker startup."""
+    from types import SimpleNamespace
+
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr("vllm.envs.VLLM_SLEEP_OFFLOAD_CUDA_CONTEXT", True)
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: cuda)
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            data_parallel_backend=dp_backend, worker_cls=worker_cls
+        )
+    )
+    with pytest.raises(ValueError, match="CUDA and a local engine"):
+        Executor.__init__(SimpleNamespace(), config)
+
+
 class Mock: ...
+
+
+@pytest.mark.parametrize(
+    "section,field,value",
+    [
+        ("parallel_config", "world_size", 2),
+        ("parallel_config", "data_parallel_size", 2),
+        ("parallel_config", "distributed_executor_backend", "external_launcher"),
+        ("model_config", "enable_sleep_mode", False),
+        ("model_config", "sleep_mode_backend", "custom"),
+        (None, "use_v2_model_runner", False),
+        (None, "multiprocessing", False),
+    ],
+)
+def test_checkpoint_requires_isolated_v2_cumem_worker(
+    monkeypatch, section, field, value
+):
+    from types import SimpleNamespace
+
+    from vllm.platforms import current_platform
+
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            world_size=1,
+            data_parallel_size=1,
+            data_parallel_backend="mp",
+            worker_cls="vllm.v1.worker.gpu_worker.Worker",
+            distributed_executor_backend="uni",
+        ),
+        model_config=SimpleNamespace(
+            enable_sleep_mode=True, sleep_mode_backend="cumem"
+        ),
+        use_v2_model_runner=True,
+    )
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr("vllm.envs.VLLM_SLEEP_OFFLOAD_CUDA_CONTEXT", True)
+    monkeypatch.setattr(
+        "vllm.envs.VLLM_ENABLE_V1_MULTIPROCESSING", field != "multiprocessing"
+    )
+    if field != "multiprocessing":
+        setattr(getattr(config, section) if section else config, field, value)
+    with pytest.raises(ValueError, match="cuMem sleep mode"):
+        Executor.__init__(SimpleNamespace(), config)
 
 
 def test_supports_async_scheduling_base_executor():

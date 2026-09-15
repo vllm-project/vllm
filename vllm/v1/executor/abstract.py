@@ -97,12 +97,33 @@ class Executor(ABC):
         self,
         vllm_config: VllmConfig,
     ) -> None:
+        parallel_config = vllm_config.parallel_config
+        if envs.VLLM_SLEEP_OFFLOAD_CUDA_CONTEXT:
+            from vllm.platforms import current_platform
+
+            if (
+                not current_platform.is_cuda()
+                or parallel_config.data_parallel_backend == "ray"
+                or parallel_config.worker_cls != "vllm.v1.worker.gpu_worker.Worker"
+                or parallel_config.distributed_executor_backend != "uni"
+                or parallel_config.world_size != 1
+                or parallel_config.data_parallel_size != 1
+                or not envs.VLLM_ENABLE_V1_MULTIPROCESSING
+                or not vllm_config.use_v2_model_runner
+                or not vllm_config.model_config.enable_sleep_mode
+                or vllm_config.model_config.sleep_mode_backend != "cumem"
+            ):
+                raise ValueError(
+                    "CUDA context offload requires CUDA and a local engine process "
+                    "with the standard V2 worker, uni executor, one GPU, "
+                    "and cuMem sleep mode"
+                )
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
         self.load_config = vllm_config.load_config
-        self.parallel_config = vllm_config.parallel_config
+        self.parallel_config = parallel_config
         self.scheduler_config = vllm_config.scheduler_config
         self.device_config = vllm_config.device_config
         self.speculative_config = vllm_config.speculative_config
@@ -335,10 +356,15 @@ class Executor(ABC):
         self.collective_rpc("reset_encoder_cache")
 
     def sleep(self, level: int = 1):
-        if self.is_sleeping:
+        if self.is_sleeping and not envs.VLLM_SLEEP_OFFLOAD_CUDA_CONTEXT:
             logger.warning("Executor is already sleeping.")
             return
         time_before_sleep = time.perf_counter()
+        if envs.VLLM_SLEEP_OFFLOAD_CUDA_CONTEXT:
+            # A failed checkpoint may leave CUDA locked and allocations asleep.
+            # Keep wake_up available and scheduling paused until recovery succeeds.
+            self.sleeping_tags = {"weights", "kv_cache"}
+            self.is_sleeping = True
         self.collective_rpc("sleep", kwargs=dict(level=level))
         time_after_sleep = time.perf_counter()
         self.sleeping_tags = {"weights", "kv_cache"}
