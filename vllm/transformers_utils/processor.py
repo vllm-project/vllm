@@ -79,6 +79,15 @@ _I = TypeVar("_I", bound=BaseImageProcessor, default=BaseImageProcessor)
 _V = TypeVar("_V", bound=BaseVideoProcessor, default=BaseVideoProcessor)
 
 
+def _make_hashable(value: Any) -> Any:
+    """Recursively wrap native dicts/lists so nested values hash for lru_cache."""
+    if isinstance(value, dict):
+        return HashableDict(value)
+    if isinstance(value, list):
+        return HashableList(value)
+    return value
+
+
 class HashableDict(dict):
     """
     A dictionary that can be hashed by lru_cache.
@@ -87,7 +96,7 @@ class HashableDict(dict):
     # NOTE: pythonic dict is not hashable,
     # we override on it directly for simplicity
     def __hash__(self) -> int:  # type: ignore[override]
-        return hash(frozenset(self.items()))
+        return hash(frozenset((k, _make_hashable(v)) for k, v in self.items()))
 
 
 class HashableList(list):
@@ -96,7 +105,7 @@ class HashableList(list):
     """
 
     def __hash__(self) -> int:  # type: ignore[override]
-        return hash(tuple(self))
+        return hash(tuple(_make_hashable(v) for v in self))
 
 
 def _get_processor_factory_fn(processor_cls: type | tuple[type, ...]):
