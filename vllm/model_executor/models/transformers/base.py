@@ -489,6 +489,10 @@ class Base(
 
         vocab_embeddings = self._vocab_embeddings()
 
+        # OlmoForCausalLM regresses on XPU (-3.1% throughput); others gain, exclude it.
+        arch = self.config.architectures[0].lower()
+        swap_layernorm = "olmoforcausallm" not in arch
+
         def register_fusion(fuser: BaseFuser, prefix: str, module: nn.Module):
             """Register a fused layer's mappings just before it is built."""
             self.fusers.setdefault(prefix, []).append(fuser)
@@ -555,7 +559,7 @@ class Base(
                     new_module = replace_embedding_class(
                         child_module, self.quant_config, prefix=qual_name
                     )
-                elif isinstance(child_module, nn.LayerNorm):
+                elif isinstance(child_module, nn.LayerNorm) and swap_layernorm:
                     new_module = replace_layernorm_class(child_module)
                 elif child_module_fusers := fusers[child_module]:
                     for fuser in child_module_fusers:
