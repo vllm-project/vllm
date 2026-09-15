@@ -157,6 +157,8 @@ class EngineCoreRequest(
 
     session_id: str | None = None
 
+    mamba_checkpoint_position: int | None = None
+
     @property
     def params(self) -> SamplingParams | PoolingParams:
         """Return the processed params (sampling or pooling)."""
