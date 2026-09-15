@@ -627,6 +627,60 @@ class CpuPlatform(Platform):
                 logger.warning_once("Failed to import from vllm._C: %r", e)
 
     @classmethod
+    def register_triton_kernel_overrides(cls) -> None:
+        """Fallback C++ implementations for core Triton kernels.
+
+        Used when the Triton-CPU backend is unavailable. When Triton-CPU is
+        present, the Triton kernels can run natively and the overrides
+        would only shadow them, so registration is skipped.
+        """
+        from vllm.triton_utils import HAS_TRITON
+
+        if HAS_TRITON:
+            return
+
+        from vllm.model_executor.triton_dispatcher import register_kernels
+        from vllm.utils import cpu_triton_utils as cpu_tl
+
+        register_kernels(
+            {
+                "vllm.v1.worker.block_table.ComputeSlotMappingKernel.kernel": (
+                    cpu_tl._compute_slot_mapping_kernel_impl
+                ),
+                "vllm.v1.spec_decode.utils.eagle_step_slot_mapping_metadata_kernel": (
+                    cpu_tl._eagle_step_slot_mapping_metadata_kernel_impl
+                ),
+                "vllm.v1.spec_decode.utils.eagle_prepare_inputs_padded_kernel": (
+                    cpu_tl._eagle_prepare_inputs_padded_kernel_impl
+                ),
+                "vllm.v1.spec_decode.utils.eagle_prepare_next_token_padded_kernel": (
+                    cpu_tl._eagle_prepare_next_token_padded_kernel_impl
+                ),
+                "vllm.v1.spec_decode.utils.copy_and_expand_eagle_inputs_kernel": (
+                    cpu_tl._copy_and_expand_eagle_inputs_kernel_impl
+                ),
+                "vllm.v1.spec_decode.utils.copy_and_expand_dflash_inputs_kernel": (
+                    cpu_tl._copy_and_expand_dflash_inputs_kernel_impl
+                ),
+                "vllm.v1.sample.rejection_sampler.rejection_greedy_sample_kernel": (
+                    cpu_tl._rejection_greedy_sample_kernel_impl
+                ),
+                "vllm.v1.sample.rejection_sampler.rejection_random_sample_kernel": (
+                    cpu_tl._rejection_random_sample_kernel_impl
+                ),
+                "vllm.v1.sample.rejection_sampler.expand_kernel": (
+                    cpu_tl._expand_kernel_impl
+                ),
+                "vllm.v1.sample.rejection_sampler.sample_recovered_tokens_kernel": (
+                    cpu_tl._sample_recovered_tokens_kernel_impl
+                ),
+                "vllm.v1.worker.mamba_utils.batch_memcpy_kernel": (
+                    cpu_tl._batch_memcpy_impl
+                ),
+            }
+        )
+
+    @classmethod
     def pack_kv_cache(
         cls,
         kv_cache: torch.Tensor,
