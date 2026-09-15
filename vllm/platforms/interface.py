@@ -365,7 +365,7 @@ class Platform:
         try:
             import vllm._C  # noqa: F401
         except ImportError as e:
-            logger.warning_once("Failed to import from vllm._C: %r", e)
+            logger.warning_once("Failed to import from vllm._C: %s", repr(e))
         with contextlib.suppress(ImportError):
             import vllm._moe_C_stable_libtorch  # noqa: F401
 
