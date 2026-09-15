@@ -19,7 +19,12 @@ from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.mem_utils import MemorySnapshot, format_gib
+from vllm.utils.mem_utils import (
+    MemorySnapshot,
+    cap_unified_memory_budget,
+    format_gib,
+    unified_memory_host_reserve_bytes,
+)
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -539,6 +544,30 @@ def request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) -> 
     requested_memory = math.ceil(
         init_snapshot.total_memory * cache_config.gpu_memory_utilization
     )
+
+    # On integrated (unified-memory) GPUs the CPU/OS and GPU share one pool, so
+    # `util * total` can claim memory the OS needs. Cap the budget so a host
+    # reserve stays free (no-op on discrete GPUs). See issue #46307.
+    requested_memory = cap_unified_memory_budget(
+        init_snapshot.device_,
+        requested_memory,
+        init_snapshot.free_memory,
+        init_snapshot.total_memory,
+    )
+
+    # A non-positive budget means the host is already at or below its reserve.
+    # Reject it here, before the caller loads weights: the free-memory check
+    # below cannot catch it (free_memory is never < 0), and the allocator cap
+    # that would otherwise stop the run is not installed until profiling.
+    if requested_memory <= 0:
+        raise ValueError(
+            f"No memory budget left on device {init_snapshot.device_}: "
+            f"{format_gib(init_snapshot.free_memory)} GiB available of "
+            f"{format_gib(init_snapshot.total_memory)} GiB is at or below the "
+            f"{format_gib(unified_memory_host_reserve_bytes(init_snapshot.total_memory))}"
+            " GiB host reserve kept free for the OS on integrated GPUs. Free "
+            "memory on the host, or lower VLLM_UNIFIED_MEMORY_HOST_RESERVE_GB."
+        )
 
     if init_snapshot.free_memory < requested_memory:
         raise ValueError(
