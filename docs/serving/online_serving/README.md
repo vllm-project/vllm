@@ -25,7 +25,8 @@ We currently support the following OpenAI APIs:
 
 ## Anthropic APIs
 
-- Anthropic messages API (`/v1/messages`, `/v1/messages/count_tokens`)
+- [Anthropic Messages API](./anthropic_compatible_server.md) (`/v1/messages`,
+  `/v1/messages/count_tokens`)
 
 ## Cohere APIs
 
