@@ -46,7 +46,11 @@ from vllm.model_executor.models.gemma4_mm import (
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.transformers.utils import recursive_replace_linear
-from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    maybe_prefix,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -160,13 +164,11 @@ class DiffusionGemmaForConditionalGeneration(
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
+            "model.decoder.self_conditioning.": "self_conditioning.",
             "model.decoder.": "model.",
             "model.encoder.language_model.": "model.",
             "model.encoder.vision_tower.": "vision_tower.",
             "model.encoder.embed_vision.": "embed_vision.",
-        },
-        orig_to_new_substr={
-            ".experts.": ".moe.experts.",
         },
     )
 
@@ -336,114 +338,12 @@ class DiffusionGemmaForConditionalGeneration(
             logits = _softcap_logits(logits, self.final_logit_softcapping)
         return logits
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        """Load weights from checkpoint.
-
-        Checkpoint layout (HF DiffusionGemma):
-          model.encoder.vision_tower.*            → vision tower
-          model.encoder.embed_vision.*            → vision embedder
-          model.encoder.language_model.layers.*   → backbone
-          model.decoder.layers.*                  → backbone (tied)
-          model.decoder.embed_tokens.*            → embeddings
-          model.decoder.self_conditioning.*       → self-conditioning MLP
-          lm_head.*                               → LM head (tied)
-
-        We load encoder weights into our single ``Gemma4Model`` backbone,
-        skip duplicate decoder backbone weights, handle vision tower and
-        self-conditioning separately.
-        """
-
-        sc_params = dict(
-            (n, p)
-            for n, p in self.named_parameters()
-            if n.startswith("self_conditioning.")
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # Some checkpoints carry a vestigial Gemma3n-style embedding table.
+        loader = AutoWeightsLoader(
+            self, ignore_unexpected_prefixes=["embed_vision.embedding."]
         )
-
-        # Collect vision tower + embedder parameters AND buffers for manual
-        # loading.  The HF vision tower registers std_bias / std_scale as
-        # buffers (not parameters) when config.standardize is True, so we
-        # must include named_buffers() to avoid "not found in model" warnings.
-        vision_params: dict[str, torch.Tensor] = {}
-        for n, p in self.named_parameters():
-            if n.startswith(("vision_tower.", "embed_vision.")):
-                vision_params[n] = p
-        for n, b in self.named_buffers():
-            if n.startswith(("vision_tower.", "embed_vision.")):
-                vision_params[n] = b
-
-        def _remap_weights():
-            # Use full weight names (including suffixes like .weight_scale,
-            # .weight_packed) for dedup instead of just the base layer name. Critical
-            # for quantized checkpoints where each weight has multiple tensors;
-            # tracking only base names skips scales as duplicates.
-            seen_weights: set[str] = set()
-            for name, weight in weights:
-                # Self-conditioning lives under model.decoder.self_conditioning.*
-                # in the checkpoint but at self_conditioning.* in our model.
-                if "self_conditioning" in name:
-                    sc_name = name.split("self_conditioning.", 1)[1]
-                    sc_name = "self_conditioning." + sc_name
-                    if sc_name in sc_params:
-                        sc_params[sc_name].data.copy_(weight)
-                    continue
-
-                # Vision tower: model.encoder.vision_tower.* → vision_tower.*
-                # In HF, the vision tower is a sibling of language_model
-                # under the encoder module.
-                if name.startswith("model.encoder.vision_tower."):
-                    vt_name = name[len("model.encoder.") :]
-                    if vt_name in vision_params:
-                        vision_params[vt_name].data.copy_(weight)
-                    else:
-                        logger.warning(
-                            "Vision tower weight %s (mapped to %s) not found in model",
-                            name,
-                            vt_name,
-                        )
-                    continue
-
-                # Vision embedder: model.encoder.embed_vision.* → embed_vision.*
-                if name.startswith("model.encoder.embed_vision."):
-                    ev_name = name[len("model.encoder.") :]
-                    if ev_name in vision_params:
-                        vision_params[ev_name].data.copy_(weight)
-                    else:
-                        logger.warning(
-                            "Embed vision weight %s (mapped to %s) not found in model",
-                            name,
-                            ev_name,
-                        )
-                    continue
-
-                # Skip vestigial embed_vision.embedding weights.
-                if "embed_vision.embedding." in name:
-                    continue
-
-                # Encoder backbone → model.*
-                if name.startswith("model.encoder.language_model."):
-                    name = name.replace("model.encoder.language_model.", "model.")
-                # Decoder backbone → model.* (skip exact duplicates)
-                elif name.startswith("model.decoder."):
-                    name = name.replace("model.decoder.", "model.")
-
-                # Skip only if we've seen the exact same weight name (including scales)
-                if name in seen_weights:
-                    continue
-                seen_weights.add(name)
-                yield name, weight
-
-        # Delegate to Gemma4ForCausalLM.load_weights for the backbone,
-        # which handles stacked params, MoE, k_eq_v, etc.
-        # Temporarily set self.config to text_config since Gemma4's
-        # load_weights expects it (e.g. tie_word_embeddings, layer_types).
-        from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
-
-        saved_config = self.config
-        self.config = self.model.config
-        try:
-            Gemma4ForCausalLM.load_weights(self, _remap_weights())
-        finally:
-            self.config = saved_config
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
