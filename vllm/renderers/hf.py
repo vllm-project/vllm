@@ -23,6 +23,7 @@ from typing_extensions import override
 from vllm.entrypoints.chat_utils import (
     PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
     ChatTemplateResolutionError,
+    MultiModalMediaFallbacks,
     load_chat_template,
     parse_chat_messages,
     parse_chat_messages_async,
@@ -1017,10 +1018,26 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         # expose offset_mapping.
         return self.tokenizer is not None and self.tokenizer.is_fast
 
+    @override
+    def _render_messages_for_chat(
+        self,
+        messages: list[ChatCompletionMessageParam],
+        params: ChatParams,
+        *,
+        skip_mm_cache: bool,
+    ) -> tuple[list[ConversationMessage], DictPrompt]:
+        return self.render_messages(
+            messages,
+            params,
+            skip_mm_cache=skip_mm_cache,
+        )
+
     def render_messages(
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
+        *,
+        skip_mm_cache: bool = False,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         model_config = self.model_config
         tokenizer = self.get_tokenizer()
@@ -1031,6 +1048,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 _ensure_prompt_embeds_placeholder_token(tokenizer)
             )
 
+        media_fallbacks: MultiModalMediaFallbacks = {}
         conversation, mm_data, mm_uuids = parse_chat_messages(
             messages,
             model_config,
@@ -1043,6 +1061,9 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             ),
             media_io_kwargs=params.media_io_kwargs,
             mm_processor_kwargs=params.mm_processor_kwargs,
+            mm_processor_cache=self.mm_processor_cache,
+            skip_early_mm_lookup=(params.skip_early_mm_lookup or skip_mm_cache),
+            media_fallbacks=media_fallbacks,
         )
 
         # prompt_embeds tensors are carried by the tracker through mm_data,
@@ -1134,13 +1155,31 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
             prompt["multi_modal_uuids"] = mm_uuids
+        if media_fallbacks:
+            cast(dict, prompt)["_mm_media_fallbacks"] = media_fallbacks
 
         return conversation, prompt
+
+    @override
+    async def _render_messages_for_chat_async(
+        self,
+        messages: list[ChatCompletionMessageParam],
+        params: ChatParams,
+        *,
+        skip_mm_cache: bool,
+    ) -> tuple[list[ConversationMessage], DictPrompt]:
+        return await self.render_messages_async(
+            messages,
+            params,
+            skip_mm_cache=skip_mm_cache,
+        )
 
     async def render_messages_async(
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
+        *,
+        skip_mm_cache: bool = False,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         model_config = self.model_config
         tokenizer = self.get_tokenizer()
@@ -1151,6 +1190,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 _ensure_prompt_embeds_placeholder_token(tokenizer)
             )
 
+        media_fallbacks: MultiModalMediaFallbacks = {}
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
             messages,
             model_config,
@@ -1163,6 +1203,9 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             ),
             media_io_kwargs=params.media_io_kwargs,
             mm_processor_kwargs=params.mm_processor_kwargs,
+            mm_processor_cache=self.mm_processor_cache,
+            skip_early_mm_lookup=(params.skip_early_mm_lookup or skip_mm_cache),
+            media_fallbacks=media_fallbacks,
         )
 
         prompt_embeds_tensors: list[torch.Tensor] | None = None
@@ -1254,6 +1297,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
             prompt["multi_modal_uuids"] = mm_uuids
+        if media_fallbacks:
+            cast(dict, prompt)["_mm_media_fallbacks"] = media_fallbacks
 
         return conversation, prompt
 
