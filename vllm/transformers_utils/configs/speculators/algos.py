@@ -124,10 +124,9 @@ def update_dflash(config_dict: dict, pre_trained_config: dict) -> None:
         "target_layer_ids": [i - 1 for i in aux_layer_ids],
         "sample_from_anchor": config_dict.get("sample_from_anchor", False),
     }
-    # Enable causal masking in SWA for vllm-project/speculators models
-    pre_trained_config["dflash_config"]["causal"] = not config_dict.get(
-        "sliding_window_non_causal", True
-    )
+    # Causal SWA uses per-layer defaults; full attention stays non-causal.
+    if config_dict.get("sliding_window_non_causal", True):
+        pre_trained_config["dflash_config"]["causal"] = False
 
 
 @register_speculator("dflash2")
