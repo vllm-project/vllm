@@ -149,14 +149,13 @@ def enable_wo_b_gemm_rs(layers, vllm_config) -> None:
         pc.tensor_parallel_size != 4
         or pc.use_ubatching
         or vllm_config.model_config.dtype != torch.bfloat16
-        or vllm_config.speculative_config is not None
         or vllm_config.lora_config is not None
         or envs.VLLM_BATCH_INVARIANT
         or not current_platform.is_device_capability_family(100)
     ):
         logger.warning_once(
             "DSV4.1 native GEMM-RS requires TP4, SM100, BF16 activations, "
-            "and no ubatching, speculation, LoRA, or batch invariance."
+            "and no ubatching, LoRA, or batch invariance."
         )
         return
     supported = (FlashInferCutlassMxfp8LinearKernel, FlashInferCutedslMxfp8LinearKernel)
