@@ -18,6 +18,10 @@ from .mem_constants import GiB_bytes, KiB_bytes, MiB_bytes
 
 logger = init_logger(__name__)
 
+# Device-wide vs. per-process consumption differences below this are not
+# reported (CUDA runtime bookkeeping, other processes' minor fluctuations).
+_OTHER_PROCESS_DELTA_WARN_BYTES = 128 * MiB_bytes
+
 
 def format_kib(b: int) -> str:
     return f"{round(b / KiB_bytes, 2)}"
@@ -111,6 +115,9 @@ class MemorySnapshot:
     cuda_memory: int = 0
     torch_memory: int = 0
     non_torch_memory: int = 0
+    # Memory used by this process alone (per-process accounting, e.g. NVML);
+    # None when the platform cannot attribute device memory to processes.
+    process_memory: int | None = None
     timestamp: float = 0.0
 
     device: torch.types.Device = None
@@ -157,6 +164,10 @@ class MemorySnapshot:
         self.torch_memory = torch.accelerator.memory_reserved(device)
 
         self.non_torch_memory = self.cuda_memory - self.torch_memory
+        process_memory = current_platform.get_process_memory_usage(device.index or 0)
+        self.process_memory = (
+            process_memory if isinstance(process_memory, int) else None
+        )
         self.timestamp = time.time()
 
     def __sub__(self, other: "MemorySnapshot") -> "MemorySnapshot":
@@ -174,10 +185,20 @@ class MemorySnapshot:
             cuda_memory=self.cuda_memory - other.cuda_memory,
             torch_memory=self.torch_memory - other.torch_memory,
             non_torch_memory=self.non_torch_memory - other.non_torch_memory,
+            process_memory=(
+                self.process_memory - other.process_memory
+                if self.process_memory is not None and other.process_memory is not None
+                else None
+            ),
             timestamp=self.timestamp - other.timestamp,
             device=self.device_,
             auto_measure=False,
         )
+
+    def _format_process_memory(self) -> str:
+        if self.process_memory is None:
+            return "n/a"
+        return f"{format_gib(self.process_memory)}GiB"
 
     def __repr__(self) -> str:
         return (
@@ -188,6 +209,7 @@ class MemorySnapshot:
             f"{current_platform.device_name}_memory={format_gib(self.cuda_memory)}GiB, "
             f"torch_memory={format_gib(self.torch_memory)}GiB, "
             f"non_torch_memory={format_gib(self.non_torch_memory)}GiB, "
+            f"process_memory={self._format_process_memory()}, "
             f"timestamp={self.timestamp}, "
             f"auto_measure={self.auto_measure}"
         )
@@ -201,6 +223,9 @@ class MemoryProfilingResult:
     torch_peak_increase: int = 0
     non_torch_increase: int = 0
     total_consumed: int = 0
+    # True when total_consumed comes from this process's own device memory
+    # usage rather than from the device-wide free-memory delta.
+    process_scoped: bool = False
     transient_peak_headroom: int = 0
     weights_memory: int = 0
     before_create: MemorySnapshot = field(default_factory=MemorySnapshot)
@@ -309,9 +334,33 @@ def memory_profiling(
     # Measure total consumption via mem_get_info() instead of
     # memory_reserved(), which goes negative when pluggable allocators
     # (e.g. cumem) bypass PyTorch's tracking.
-    result.total_consumed = (
+    device_consumed = (
         result.before_create.free_memory - result.after_profile.free_memory
     )
+    before_process = result.before_create.process_memory
+    after_process = result.after_profile.process_memory
+    if before_process is not None and after_process is not None:
+        # Per-process accounting: memory that other processes on the same
+        # device allocate or release while this instance loads and profiles
+        # must not be charged to (or credited against) this instance.
+        result.total_consumed = after_process - before_process
+        result.process_scoped = True
+        other_processes_delta = device_consumed - result.total_consumed
+        if abs(other_processes_delta) >= _OTHER_PROCESS_DELTA_WARN_BYTES:
+            logger.warning(
+                "Other processes on %s changed their device memory usage by "
+                "%s GiB while this instance was loading and profiling. The "
+                "KV cache budget is based on this process's own usage "
+                "(%s GiB) rather than the device-wide change (%s GiB); make "
+                "sure the instances sharing this device do not request more "
+                "memory than it has in total.",
+                result.before_create.device_,
+                format_gib(other_processes_delta),
+                format_gib(result.total_consumed),
+                format_gib(device_consumed),
+            )
+    else:
+        result.total_consumed = device_consumed
 
     # total_consumed already covers persistent torch allocations; add only the
     # transient peak headroom to avoid double-counting.
