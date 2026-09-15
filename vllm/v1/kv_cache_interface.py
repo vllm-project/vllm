@@ -818,22 +818,16 @@ class SlidingWindowSpec(AttentionSpec):
     ) -> int:
         """Per-request admission cap, in blocks.
 
-        Single source of truth for both startup pool sizing
-        (`max_memory_usage_bytes`) and the runtime admission gate. Per-request
-        real-held blocks plateau at this bound because
-        `SlidingWindowManager.remove_skipped_blocks` runs from `allocate_slots`
-        before each chunk's `get_num_blocks_to_allocate`.
-
-        `max_in_flight_tokens` is the max tokens scheduled but not yet settled
-        (one batch per concurrent step); see `VllmConfig.max_in_flight_tokens`.
+        Single source of truth for startup pool sizing, the runtime admission
+        gate, and execution allocation. Logical positions outside this bound
+        are represented by null blocks in the request block table.
         """
-        # During chunked prefill, we hold KV for the last `sliding_window-1`
-        # computed tokens plus the in-flight tokens (frees happen on the
-        # processed-token basis); never more than `max_model_len`. An additional
-        # `extra_retained_tokens` trailing tokens are kept alive below the
-        # window for multi-module spec decoding, and must be accounted here too.
+        del max_in_flight_tokens
+        # Keep the last `sliding_window-1` tokens plus the trailing extension
+        # used by multi-module speculative decoding; never more than
+        # `max_model_len`.
         num_tokens = min(
-            self.sliding_window - 1 + self.extra_retained_tokens + max_in_flight_tokens,
+            self.sliding_window - 1 + self.extra_retained_tokens,
             max_model_len,
         )
         # +1 because the sliding window may not start from the beginning of
