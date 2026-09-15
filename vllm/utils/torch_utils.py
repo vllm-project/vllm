@@ -705,17 +705,30 @@ def create_kv_caches_with_random(
 
 def async_tensor_h2d(
     data: list | np.ndarray | torch.Tensor,
-    device: str | torch.device,
+    device: str | torch.device | None = None,
     dtype: torch.dtype | None = None,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Copy list/numpy array/tensor async from host to device."""
+    if dtype is None and out is not None:
+        dtype = out.dtype
     if isinstance(data, np.ndarray):
         data = torch.from_numpy(data)
     if isinstance(data, torch.Tensor):
-        t = data.pin_memory() if PIN_MEMORY else data
+        t = data
+        if PIN_MEMORY and not t.is_pinned():
+            # Stage in pinned, contiguous buffer to ensure fully async copy.
+            t = torch.empty(
+                t.shape, dtype=dtype or t.dtype, device="cpu", pin_memory=True
+            ).copy_(t)
     else:
         t = torch.tensor(data, dtype=dtype, pin_memory=PIN_MEMORY, device="cpu")
     assert t.is_cpu
+
+    if out is not None:
+        assert out.dtype == dtype
+        return out.copy_(t, non_blocking=True)
+    assert device is not None, "must provide destination tensor or device"
     return t.to(device=device, dtype=dtype, non_blocking=True)
 
 

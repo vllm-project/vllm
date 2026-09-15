@@ -27,7 +27,7 @@ from vllm.utils.deep_gemm import (
 )
 from vllm.utils.math_utils import round_down
 from vllm.utils.platform_utils import num_compute_units
-from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -47,7 +47,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
 )
-from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 
 logger = init_logger(__name__)
 
@@ -338,14 +337,14 @@ def build_pcp_global_chunk_plan(
             + local
         )
 
-    cu = async_copy_to_gpu(cu, device=device)
+    cu = async_tensor_h2d(cu, device=device)
     return PCPGlobalChunkPlan(
         row_start_cu=cu[0],
         global_cu=cu[1],
         padded_local_cu=cu[2],
         padded_local_total=padded_total,
         total=total,
-        deinterleave_idx=async_copy_to_gpu(idx, device=device),
+        deinterleave_idx=async_tensor_h2d(idx, device=device),
     )
 
 

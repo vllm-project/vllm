@@ -1264,15 +1264,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         """
         # write self.paged_kv_indptr_cpu inplace (0-index is always 0)
         np.cumsum(
-            num_blocks_np,
-            dtype=np.int32,
-            out=self.paged_kv_indptr.np[1 : num_reqs + 1],
+            num_blocks_np, dtype=np.int32, out=self.paged_kv_indptr.np[1 : num_reqs + 1]
         )
-        paged_kv_indptr = self.paged_kv_indptr.gpu[: num_reqs + 1]
-        paged_kv_indptr_cpu = self.paged_kv_indptr.cpu[: num_reqs + 1]
-        if PIN_MEMORY:
-            paged_kv_indptr_cpu = paged_kv_indptr_cpu.pin_memory()
-        paged_kv_indptr.copy_(paged_kv_indptr_cpu, non_blocking=True)
+        paged_kv_indptr = self.paged_kv_indptr.copy_to_gpu(num_reqs + 1)
 
         # write self.paged_kv_indices inplace
         num_actual_pages = self.paged_kv_indptr.np[num_reqs]
@@ -1292,12 +1286,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             page_size,
             paged_kv_last_page_len_np,
         )
-        paged_kv_last_page_len_cpu = self.paged_kv_last_page_len.cpu[:num_reqs]
-        if PIN_MEMORY:
-            paged_kv_last_page_len_cpu = paged_kv_last_page_len_cpu.pin_memory()
-        self.paged_kv_last_page_len.gpu[:num_reqs].copy_(
-            paged_kv_last_page_len_cpu, non_blocking=True
-        )
+        self.paged_kv_last_page_len.copy_to_gpu(num_reqs)
         return paged_kv_indices
 
     def build(

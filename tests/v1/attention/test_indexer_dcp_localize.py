@@ -996,7 +996,7 @@ def test_pcp_plan_deinterleave_restores_global_order(
 
     monkeypatch.setattr("vllm.v1.attention.backends.mla.indexer.PIN_MEMORY", False)
     monkeypatch.setattr(
-        "vllm.v1.attention.backends.mla.indexer.async_copy_to_gpu",
+        "vllm.v1.attention.backends.mla.indexer.async_tensor_h2d",
         lambda x, device: x.to(device),
     )
     scheduled = np.array(req_lens, dtype=np.int64)

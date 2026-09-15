@@ -64,7 +64,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, async_tensor_h2d
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -99,10 +99,7 @@ from vllm.v1.worker.gpu.attn_utils import (
     init_kv_cache,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.buffer_utils import (
-    async_copy_to_gpu,
-    set_default_max_concurrency,
-)
+from vllm.v1.worker.gpu.buffer_utils import set_default_max_concurrency
 from vllm.v1.worker.gpu.cp_utils import maybe_prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
@@ -1289,7 +1286,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         req_ids = batch_req_state.req_ids
         num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
         idx_mapping_np = batch_req_state.idx_mapping_np
-        idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
+        idx_mapping = async_tensor_h2d(idx_mapping_np, device=self.device)
         num_reqs = len(req_ids)
 
         # Get the number of draft tokens for each request.
@@ -1324,7 +1321,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cu_num_logits_np = np.empty(num_reqs + 1, dtype=np.int32)
             cu_num_logits_np[0] = 0
             np.cumsum(num_logits, out=cu_num_logits_np[1:])
-            cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
+            cu_num_logits = async_tensor_h2d(cu_num_logits_np, device=self.device)
 
         adaptive_verification = (
             self.adaptive_verification if num_draft_tokens_per_req is not None else None
@@ -1352,7 +1349,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Some attention backends like FA3 require query_start_loc to be non-decreasing.
         query_start_loc_np[num_reqs + 1 :] = num_tokens
         query_start_loc = self.input_buffers.query_start_loc
-        async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
+        async_tensor_h2d(query_start_loc_np, out=query_start_loc)
         if adaptive_verification is not None:
             cu_num_logits, query_start_loc, total_num_draft_tokens = (
                 adaptive_verification.reallocate_drafts(req_ids, idx_mapping)
