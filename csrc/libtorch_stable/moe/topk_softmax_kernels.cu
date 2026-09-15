@@ -86,7 +86,7 @@ __launch_bounds__(TPB) __global__
     __shared__ float normalizing_factor;
     __shared__ float float_max;
 
-    const int thread_row_offset = blockIdx.x * num_cols;
+    const int64_t thread_row_offset = static_cast<int64_t>(blockIdx.x) * num_cols;
 
     float threadData(-FLT_MAX);
 
@@ -98,7 +98,7 @@ __launch_bounds__(TPB) __global__
 
     for (int ii = threadIdx.x; ii < num_cols; ii += TPB)
     {
-        const int idx = thread_row_offset + ii;
+        const int64_t idx = thread_row_offset + ii;
         const float val = toFloat(input[idx]);
         threadData = max(val, threadData);
     }
@@ -114,7 +114,7 @@ __launch_bounds__(TPB) __global__
 
     for (int ii = threadIdx.x; ii < num_cols; ii += TPB)
     {
-        const int idx = thread_row_offset + ii;
+        const int64_t idx = thread_row_offset + ii;
         const float val = toFloat(input[idx]);
         threadData += expf(val - float_max);
     }
@@ -129,7 +129,7 @@ __launch_bounds__(TPB) __global__
 
     for (int ii = threadIdx.x; ii < num_cols; ii += TPB)
     {
-        const int idx = thread_row_offset + ii;
+        const int64_t idx = thread_row_offset + ii;
         const float val = toFloat(input[idx]);
         float softmax_val = expf(val - float_max) * normalizing_factor;
         // Clamp NaN/Inf to 0 to prevent duplicate expert IDs downstream.
@@ -142,7 +142,7 @@ template <int TPB, typename InputType>
 __launch_bounds__(TPB) __global__
     void moeSigmoid(const InputType* input, const bool* finished, float* output, const int num_cols)
 {
-    const int thread_row_offset = blockIdx.x * num_cols;
+    const int64_t thread_row_offset = static_cast<int64_t>(blockIdx.x) * num_cols;
 
     // Don't touch finished rows.
     if ((finished != nullptr) && finished[blockIdx.x])
@@ -152,7 +152,7 @@ __launch_bounds__(TPB) __global__
 
     for (int ii = threadIdx.x; ii < num_cols; ii += TPB)
     {
-        const int idx = thread_row_offset + ii;
+        const int64_t idx = thread_row_offset + ii;
         const float val = toFloat(input[idx]);
         float sigmoid_val = 1.0f / (1.0f + __expf(-val));
         // Clamp NaN/Inf to 0 to prevent duplicate expert IDs downstream.
@@ -189,7 +189,7 @@ __launch_bounds__(TPB) __global__ void moeTopK(
     const int block_row = blockIdx.x;
 
     const bool row_is_active = finished ? !finished[block_row] : true;
-    const int thread_read_offset = blockIdx.x * num_experts;
+    const int64_t thread_read_offset = static_cast<int64_t>(blockIdx.x) * num_experts;
     float selected_sum = 0.f;
     for (int k_idx = 0; k_idx < k; ++k_idx)
     {
@@ -199,7 +199,7 @@ __launch_bounds__(TPB) __global__ void moeTopK(
         cub_kvp inp_kvp;
         for (int expert = threadIdx.x; expert < num_experts; expert += TPB)
         {
-            const int idx = thread_read_offset + expert;
+            const int64_t idx = thread_read_offset + expert;
             inp_kvp.key = expert;
 
             // Apply correction bias if provided
