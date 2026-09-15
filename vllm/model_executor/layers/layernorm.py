@@ -195,14 +195,13 @@ class GemmaRMSNorm(CustomOp):
 
 
 @CustomOp.register("layer_norm")
-class EagerLayerNorm(CustomOp):
+class StandardLayerNorm(CustomOp):
     """Standard (mean-centered) LayerNorm.
 
     Drop-in for a bare `nn.LayerNorm` that dispatches to a fused XPU SYCL
-    kernel (vllm-xpu-kernels `layer_norm`, PR #577) in eager mode; falls back
-    to the native implementation under torch.compile (Inductor already fuses
-    the plain decomposition there), off XPU, or when the op isn't in the
-    installed vllm-xpu-kernels package.
+    kernel (vllm-xpu-kernels `layer_norm`, PR #577); falls back to the native
+    implementation off XPU or when the op isn't in the installed
+    vllm-xpu-kernels package.
     """
 
     def __init__(
@@ -231,9 +230,10 @@ class EagerLayerNorm(CustomOp):
         return self.forward_native(x)
 
     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
+        import vllm._xpu_ops  # noqa: F401 registers torch.ops.vllm.xpu_layer_norm
+
         if (
-            torch.compiler.is_compiling()
-            or self.weight is None
+            self.weight is None
             or self.bias is None
             or not hasattr(torch.ops._C, "layer_norm")
         ):
@@ -241,7 +241,7 @@ class EagerLayerNorm(CustomOp):
         # empty_like preserves x's strides, but the kernel requires a
         # contiguous out (unlike x, which it can handle non-contiguous).
         out = torch.empty(x.shape, device=x.device, dtype=x.dtype)
-        torch.ops._C.layer_norm(out, x, self.weight, self.bias, self.eps)
+        torch.ops.vllm.xpu_layer_norm(out, x, self.weight, self.bias, self.eps)
         return out
 
     def extra_repr(self) -> str:

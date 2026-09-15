@@ -32,7 +32,7 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.layernorm import EagerLayerNorm
+from vllm.model_executor.layers.layernorm import StandardLayerNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -144,7 +144,7 @@ class OPTDecoderLayer(nn.Module):
         )
         self.do_layer_norm_before = config.do_layer_norm_before
 
-        self.self_attn_layer_norm = EagerLayerNorm(
+        self.self_attn_layer_norm = StandardLayerNorm(
             self.embed_dim, elementwise_affine=config.layer_norm_elementwise_affine
         )
         self.fc1 = ColumnParallelLinear(
@@ -162,7 +162,7 @@ class OPTDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.fc2",
         )
-        self.final_layer_norm = EagerLayerNorm(
+        self.final_layer_norm = StandardLayerNorm(
             self.embed_dim, elementwise_affine=config.layer_norm_elementwise_affine
         )
 
@@ -246,7 +246,7 @@ class OPTDecoder(nn.Module):
         # before transformers v4.20.1
         # see https://github.com/facebookresearch/metaseq/pull/164
         if config.do_layer_norm_before and not config._remove_final_layer_norm:
-            self.final_layer_norm = EagerLayerNorm(
+            self.final_layer_norm = StandardLayerNorm(
                 config.hidden_size,
                 elementwise_affine=config.layer_norm_elementwise_affine,
             )

@@ -25,7 +25,7 @@ from vllm.model_executor.layers.attention import (
     MMEncoderAttention,
 )
 from vllm.model_executor.layers.conv import Conv2dLayer
-from vllm.model_executor.layers.layernorm import EagerLayerNorm
+from vllm.model_executor.layers.layernorm import StandardLayerNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -473,13 +473,13 @@ class SiglipEncoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
             attn_cls=attn_cls,
         )
-        self.layer_norm1 = EagerLayerNorm(self.embed_dim, eps=config.layer_norm_eps)
+        self.layer_norm1 = StandardLayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(
             config,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
-        self.layer_norm2 = EagerLayerNorm(self.embed_dim, eps=config.layer_norm_eps)
+        self.layer_norm2 = StandardLayerNorm(self.embed_dim, eps=config.layer_norm_eps)
 
     def forward(
         self,
@@ -579,7 +579,7 @@ class SiglipTextTransformer(nn.Module):
             attn_cls=EncoderOnlyAttention,
         )
 
-        self.final_layer_norm = EagerLayerNorm(embed_dim, eps=config.layer_norm_eps)
+        self.final_layer_norm = StandardLayerNorm(embed_dim, eps=config.layer_norm_eps)
         self.head = nn.Linear(embed_dim, config.projection_size)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -622,7 +622,9 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
         self.attention = torch.nn.MultiheadAttention(
             config.hidden_size, config.num_attention_heads, batch_first=True
         )
-        self.layernorm = EagerLayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.layernorm = StandardLayerNorm(
+            config.hidden_size, eps=config.layer_norm_eps
+        )
         self.mlp = SiglipMLP(
             config=config,
             quant_config=quant_config,
@@ -691,9 +693,11 @@ class SiglipVisionTransformer(nn.Module):
         if require_post_norm is None:
             require_post_norm = len(self.encoder.layers) == num_hidden_layers
 
-        self.post_layernorm: EagerLayerNorm | None
+        self.post_layernorm: StandardLayerNorm | None
         if require_post_norm:
-            self.post_layernorm = EagerLayerNorm(embed_dim, eps=config.layer_norm_eps)
+            self.post_layernorm = StandardLayerNorm(
+                embed_dim, eps=config.layer_norm_eps
+            )
         else:
             self.post_layernorm = None
 

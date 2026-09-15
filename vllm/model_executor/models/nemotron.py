@@ -117,21 +117,21 @@ class NemotronLayerNorm1P(CustomOp):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if torch.compiler.is_compiling() or not hasattr(
-            torch.ops._C, "nemotron_layer_norm"
-        ):
+        import vllm._xpu_ops  # noqa: F401 registers torch.ops.vllm.xpu_nemotron_layer_norm
+
+        if not hasattr(torch.ops._C, "nemotron_layer_norm"):
             return self.forward_native(x, residual)
         if residual is not None:
             if not hasattr(torch.ops._C, "fused_add_nemotron_layer_norm"):
                 return self.forward_native(x, residual)
-            torch.ops._C.fused_add_nemotron_layer_norm(
+            torch.ops.vllm.xpu_fused_add_nemotron_layer_norm(
                 x, residual, self.weight, self.bias, self.eps
             )
             return x, residual
         # empty_like preserves x's strides, but the kernel requires a
         # contiguous out (unlike x, which it can handle non-contiguous).
         out = torch.empty(x.shape, device=x.device, dtype=x.dtype)
-        torch.ops._C.nemotron_layer_norm(out, x, self.weight, self.bias, self.eps)
+        torch.ops.vllm.xpu_nemotron_layer_norm(out, x, self.weight, self.bias, self.eps)
         return out
 
 

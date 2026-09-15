@@ -465,7 +465,7 @@ class Base(
         - `nn.Conv2d` / `nn.Conv3d` with vLLM's `Conv2d` / `Conv3d`
         - Vocab `nn.Embedding`s with vLLM's `VocabParallelEmbedding`
         - RMSNorm (detected from their dataflow) with vLLM's `RMSNorm`or `GemmaRMSNorm`
-        - `nn.LayerNorm` with vLLM's `EagerLayerNorm`
+        - `nn.LayerNorm` with vLLM's `StandardLayerNorm`
         """
         tp_plan = self.model.tp_plan or {}
 
