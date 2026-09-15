@@ -46,13 +46,13 @@ Now you can send requests to the proxy server through port 8000.
     - For headless instances, must be the same as the master instance
     - Each instance needs a unique port on its host; using the same port number across different hosts is fine
 
-- `VLLM_MOONCAKE_BOOTSTRAP_REGISTER_TIMEOUT`: Per-request timeout (in seconds) for a prefiller worker registering itself with the bootstrap server. (Optional)
+- `VLLM_MOONCAKE_CONNECTOR_TIMEOUT`: Per-request timeout (in seconds) for a prefiller worker registering itself with the bootstrap server. (Optional)
     - Default: 30.0
     - Only relevant for prefiller instances
     - Global rank 0 hosts the bootstrap server in the same process that registers its Mooncake memory segment, so a large `MOONCAKE_GLOBAL_SEGMENT_SIZE` can delay responses for several seconds during startup
     - Raise this if worker registration warnings appear during startup on hosts with very large host-memory segments
 
-- `VLLM_MOONCAKE_BOOTSTRAP_REGISTER_MAX_ATTEMPTS`: Number of registration attempts before a worker treats bootstrap registration as fatal. (Optional)
+- `VLLM_MOONCAKE_CONNECTOR_MAX_ATTEMPTS`: Number of registration attempts before a worker treats bootstrap registration as fatal. (Optional)
     - Default: 10
     - Attempts use exponential backoff capped at 10 seconds, and connection errors and timeouts are both retried
     - Once the attempts are exhausted, the worker raises instead of blocking, so startup fails cleanly rather than hanging
