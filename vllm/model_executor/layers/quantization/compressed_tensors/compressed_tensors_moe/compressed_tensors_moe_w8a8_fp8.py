@@ -10,6 +10,7 @@ from compressed_tensors.quantization import (
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
+    FusedMoEParallelConfig,
     FusedMoeWeightScaleSupported,
     RoutedExperts,
     SharedExperts,
@@ -20,6 +21,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     convert_to_fp8_moe_kernel_format,
+    fp8_round_up_hidden_size_and_intermediate_size,
     make_fp8_moe_kernel,
     make_fp8_moe_quant_config,
     select_fp8_moe_backend,
@@ -110,6 +112,26 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             allow_vllm_cutlass=True,
         )
 
+    def maybe_roundup_sizes(
+        self,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        act_dtype: torch.dtype,
+        moe_parallel_config: FusedMoEParallelConfig,
+    ) -> tuple[int, int]:
+        hidden_size, intermediate_size_per_partition = super().maybe_roundup_sizes(
+            hidden_size=hidden_size,
+            intermediate_size_per_partition=intermediate_size_per_partition,
+            act_dtype=act_dtype,
+            moe_parallel_config=moe_parallel_config,
+        )
+        return fp8_round_up_hidden_size_and_intermediate_size(
+            self.fp8_backend,
+            hidden_size,
+            intermediate_size_per_partition,
+            activation=self.moe.activation,
+        )
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -139,8 +161,17 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             )
 
         # WEIGHTS
+        # Rounded-up (padded) expert weights must start zeroed: the loader only writes
+        # the checkpoint's real rows/columns, and an uninitialized tail is live weight
+        # for the kernel.
+        is_padded = (
+            hidden_size != self.moe.hidden_dim_unpadded
+            or intermediate_size_per_partition
+            != self.moe.intermediate_size_per_partition_unpadded
+        )
+        alloc = torch.zeros if is_padded else torch.empty
         w13_weight = torch.nn.Parameter(
-            torch.empty(
+            alloc(
                 num_experts,
                 w13_num_shards * intermediate_size_per_partition,
                 hidden_size,
@@ -152,7 +183,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         set_weight_attrs(w13_weight, extra_weight_attrs)
 
         w2_weight = torch.nn.Parameter(
-            torch.empty(
+            alloc(
                 num_experts,
                 hidden_size,
                 intermediate_size_per_partition,

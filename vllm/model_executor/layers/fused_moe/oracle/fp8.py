@@ -11,6 +11,7 @@ from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
@@ -36,6 +37,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
 )
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
@@ -65,6 +67,23 @@ class Fp8MoeBackend(Enum):
     TRITON_MXFP8 = "TRITON_MXFP8"
     # MXFP8 MoE via AITER (FlyDSL two-stage grouped GEMM) on gfx950.
     AITER_MXFP8 = "AITER_MXFP8"
+
+
+def fp8_round_up_hidden_size_and_intermediate_size(
+    backend: Fp8MoeBackend,
+    hidden_size: int,
+    intermediate_size: int,
+    activation: MoEActivation,
+) -> tuple[int, int]:
+    """Round up hidden_size and intermediate_size based on backend requirements."""
+    if backend == Fp8MoeBackend.AITER and activation == MoEActivation.GELU_TANH:
+        # AITER has no 1-stage fp8 MoE kernel for gelu_tanh, so it always lands on
+        # the CK 2-stage GEMM, which needs a 128-aligned intermediate size (e.g.
+        # Gemma4-26B-A4B's 704 -> 768). silu/gelu keep their size: AITER routes
+        # their non-128-aligned shapes to 1-stage kernels, so padding would only
+        # add work there.
+        intermediate_size = round_up(intermediate_size, 128)
+    return hidden_size, intermediate_size
 
 
 def _get_priority_backends(

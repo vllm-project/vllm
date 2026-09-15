@@ -220,6 +220,8 @@ def ref_moe_forward(
             act = F.silu(gate) * up
         elif activation == "gelu":
             act = F.gelu(gate) * up
+        elif activation == "gelu_tanh":
+            act = F.gelu(gate, approximate="tanh") * up
         else:
             raise ValueError(f"Unknown activation: {activation}")
         output[expert_mask] = act @ w2_f[expert_idx].T
@@ -600,6 +602,7 @@ def test_activation_method_enum_values():
 
     assert ActivationMethod.SILU == 0
     assert ActivationMethod.GELU == 1
+    assert ActivationMethod.GELU_TANH == 4
 
 
 # MXFP4 kernel tests ------------------------------------------------------
@@ -848,6 +851,360 @@ def test_aiter_fused_moe_gelu_accuracy():
         atol=0.05,
         rtol=0.0,
     )
+
+
+def test_aiter_fused_moe_gelu_tanh_accuracy():
+    """The tanh-approx GELU variant (Gemma-family MoE) should stay aligned with
+    the float32 tanh-approx reference."""
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        ActivationMethod,
+        QuantMethod,
+    )
+
+    _assert_aiter_supported()
+    case = _make_moe_case(
+        num_tokens=128,
+        hidden_dim=512,
+        intermediate_dim=1024,
+        num_experts=4,
+        topk=2,
+        seed=42,
+    )
+    ref_out = ref_moe_forward(
+        case["hidden_states"],
+        case["w1"],
+        case["w2"],
+        case["topk_weights"],
+        case["topk_ids"],
+        activation="gelu_tanh",
+    )
+    out = _run_fused_moe(
+        case["hidden_states"],
+        case["w1"],
+        case["w2"],
+        case["topk_weights"],
+        case["topk_ids"],
+        activation_method=int(ActivationMethod.GELU_TANH),
+        quant_method=int(QuantMethod.NO),
+    )
+
+    assert out.shape == case["hidden_states"].shape
+    _assert_close_budget(
+        out.float(),
+        ref_out,
+        label="gelu_tanh_accuracy",
+        atol=0.05,
+        rtol=0.0,
+    )
+    # The budget above cannot tell tanh-GELU from exact GELU: the two references
+    # differ by ~1e-4 per element while the bf16 kernel's own noise is ~1e-3. So
+    # project the kernel's deviation from the exact-GELU reference onto the
+    # (tanh - exact) direction. The least-squares coefficient is ~1 when the
+    # kernel applied tanh-GELU and ~0 when it applied exact GELU; with this many
+    # output elements its noise is well under 0.1.
+    ref_exact = ref_moe_forward(
+        case["hidden_states"],
+        case["w1"],
+        case["w2"],
+        case["topk_weights"],
+        case["topk_ids"],
+        activation="gelu",
+    )
+    direction = (ref_out - ref_exact).flatten()
+    assert direction.norm() > 0, "references identical"
+    coeff = torch.dot((out.float() - ref_exact).flatten(), direction) / torch.dot(
+        direction, direction
+    )
+    assert coeff.item() > 0.5, (
+        f"kernel does not follow tanh-GELU (coefficient {coeff.item():.2f}; "
+        "1 = tanh-GELU, 0 = exact GELU)"
+    )
+
+
+def _pad_intermediate_dim(
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    intermediate_dim_padded: int,
+    *,
+    fill: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Lay out ``w1``/``w2`` with the intermediate dim rounded up to
+    ``intermediate_dim_padded`` the way the fp8 MoE methods allocate them, with
+    the checkpoint's rows/columns in place and the tail either zeroed or filled
+    with garbage (an uninitialized allocation)."""
+    num_experts, two_intermediate, hidden_dim = w1.shape
+    intermediate_dim = two_intermediate // 2
+    assert w2.shape == (num_experts, hidden_dim, intermediate_dim)
+    assert intermediate_dim_padded >= intermediate_dim
+
+    def _alloc(*shape: int) -> torch.Tensor:
+        if fill == "zeros":
+            return torch.zeros(*shape, dtype=w1.dtype, device=w1.device)
+        assert fill == "garbage"
+        return torch.randn(*shape, dtype=torch.float32, device=w1.device).to(w1.dtype)
+
+    # w13 stacks the gate rows above the up rows, so each half is padded on its own,
+    # matching where the loader places the checkpoint in the rounded-up parameter.
+    w1_padded = _alloc(num_experts, 2 * intermediate_dim_padded, hidden_dim)
+    w1_padded[:, :intermediate_dim] = w1[:, :intermediate_dim]
+    up_rows = slice(intermediate_dim_padded, intermediate_dim_padded + intermediate_dim)
+    w1_padded[:, up_rows] = w1[:, intermediate_dim:]
+    w2_padded = _alloc(num_experts, hidden_dim, intermediate_dim_padded)
+    w2_padded[:, :, :intermediate_dim] = w2
+    return w1_padded, w2_padded
+
+
+@pytest.mark.parametrize("quant", ["bf16", "fp8_per_tensor"])
+def test_aiter_fused_moe_gelu_tanh_padded_matches_unpadded_reference(quant: str):
+    """The fp8 MoE path rounds a non-128-aligned intermediate size up (704 -> 768
+    for Gemma4-26B-A4B) and allocates the padded expert weights zeroed. With a
+    zero tail, padding + gelu_tanh must reproduce the unpadded reference; a
+    garbage tail is live weight and must not."""
+    from tests.kernels.moe.utils import make_test_weights
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        ActivationMethod,
+        QuantMethod,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+        Fp8MoeBackend,
+        fp8_round_up_hidden_size_and_intermediate_size,
+    )
+
+    _assert_aiter_supported()
+    if quant == "fp8_per_tensor" and not (on_gfx942() or on_gfx950()):
+        pytest.skip("AITER fp8 MoE is gfx942/gfx950 only")
+
+    hidden_dim, intermediate_dim = 512, 704
+    _, intermediate_dim_padded = fp8_round_up_hidden_size_and_intermediate_size(
+        Fp8MoeBackend.AITER, hidden_dim, intermediate_dim, MoEActivation.GELU_TANH
+    )
+    assert intermediate_dim_padded == 768
+    case = _make_moe_case(
+        num_tokens=32,
+        hidden_dim=hidden_dim,
+        intermediate_dim=intermediate_dim,
+        num_experts=4,
+        topk=2,
+        seed=7,
+    )
+    hidden_states = case["hidden_states"]
+    # Unpadded bf16 weights feed the reference; the kernel gets their padded
+    # (and, for fp8, quantized) layout.
+    w1_ref, w2_ref = case["w1"], case["w2"]
+    w1_kernel, w2_kernel = w1_ref, w2_ref
+    kernel_kwargs: dict[str, torch.Tensor] = {}
+    if quant == "bf16":
+        quant_method = QuantMethod.NO
+        atol, budget_kwargs = 0.05, {}
+    else:
+        hidden_states = hidden_states / 10
+        (w1_ref, w1_kernel, w1_scale, _), (w2_ref, w2_kernel, w2_scale, _) = (
+            make_test_weights(
+                case["w1"].shape[0],
+                intermediate_dim,
+                hidden_dim,
+                torch.bfloat16,
+                torch.float8_e4m3fn,
+                per_out_ch_quant=False,
+            )
+        )
+        _, a1_scale = rocm_aiter_ops.per_tensor_quant(
+            hidden_states, current_platform.fp8_dtype()
+        )
+        kernel_kwargs = dict(w1_scale=w1_scale, w2_scale=w2_scale, a1_scale=a1_scale)
+        quant_method = QuantMethod.PER_TENSOR
+        atol, budget_kwargs = 0.02, dict(pass_rate=1.0, max_violation_factor=1.5)
+
+    ref_out = ref_moe_forward(
+        hidden_states,
+        w1_ref,
+        w2_ref,
+        case["topk_weights"],
+        case["topk_ids"],
+        activation="gelu_tanh",
+    )
+
+    def _run_padded(fill: str) -> torch.Tensor:
+        w1_padded, w2_padded = _pad_intermediate_dim(
+            w1_kernel, w2_kernel, intermediate_dim_padded, fill=fill
+        )
+        w1_shuffled, w2_shuffled = _shuffle_moe_weights(w1_padded, w2_padded)
+        return torch.ops.vllm.rocm_aiter_fused_moe(
+            hidden_states,
+            w1_shuffled,
+            w2_shuffled,
+            case["topk_weights"],
+            case["topk_ids"],
+            expert_mask=None,
+            activation_method=int(ActivationMethod.GELU_TANH),
+            quant_method=int(quant_method),
+            doweight_stage1=False,
+            **kernel_kwargs,
+        ).float()
+
+    out = _run_padded("zeros")
+    assert out.shape == hidden_states.shape
+    _assert_close_budget(
+        out,
+        ref_out,
+        label=f"gelu_tanh_padded_zero_tail quant={quant}",
+        atol=atol,
+        rtol=0.0,
+        **budget_kwargs,
+    )
+
+    if quant == "bf16":
+        # The check above only means something if the tail is live weight: an
+        # uninitialized (garbage) tail must move the output well outside the budget.
+        out_garbage = _run_padded("garbage")
+        max_diff = (out_garbage - ref_out).abs().max().item()
+        assert max_diff > atol, (
+            f"garbage tail did not affect the output ({max_diff:.3e})"
+        )
+
+
+def _make_fp8_routed_experts(hidden_size: int, intermediate_size: int):
+    """A small fp8-serialized RoutedExperts layer built the way the model
+    loader builds one (quant method selection, size round-up, create_weights)."""
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEConfig,
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+    )
+    from vllm.model_executor.layers.fused_moe.expert_map_manager import (
+        ExpertMapManager,
+    )
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+
+    num_experts, topk, max_num_tokens = 4, 2, 16
+    moe_config = FusedMoEConfig(
+        num_experts=num_experts,
+        experts_per_token=topk,
+        hidden_dim=hidden_size,
+        intermediate_size=intermediate_size,
+        num_local_experts=num_experts,
+        num_logical_experts=num_experts,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        activation=MoEActivation.GELU_TANH,
+        in_dtype=torch.bfloat16,
+        device="cuda",
+        routing_method=RoutingMethodType.TopK,
+        max_num_tokens=max_num_tokens,
+    )
+    expert_map_manager = ExpertMapManager(
+        max_num_batched_tokens=max_num_tokens,
+        top_k=topk,
+        global_num_experts=num_experts,
+        num_redundant_experts=0,
+        num_expert_group=None,
+        moe_parallel_config=moe_config.moe_parallel_config,
+        placement_strategy="linear",
+        enable_eplb=False,
+    )
+    return RoutedExperts(
+        "experts",
+        torch.bfloat16,
+        moe_config,
+        quant_config=Fp8Config(
+            is_checkpoint_fp8_serialized=True, activation_scheme="dynamic"
+        ),
+        expert_map_manager=expert_map_manager,
+    )
+
+
+@pytest.mark.skipif(
+    not (on_gfx942() or on_gfx950()),
+    reason="AITER fp8 MoE is gfx942/gfx950 only",
+)
+def test_fp8_moe_create_weights_zeroes_rounded_up_experts(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """End to end through the layer: with the AITER fp8 backend, RoutedExperts
+    rounds a 704 intermediate size up to 768, Fp8MoEMethod.create_weights hands
+    the loader zeroed expert weights, and after loading a 704-wide checkpoint the
+    real rows sit where the kernel expects them while the padding is still zero."""
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
+    from vllm.model_executor.layers.quantization.fp8 import Fp8MoEMethod
+
+    _assert_aiter_supported()
+    hidden_size, intermediate_size, intermediate_size_padded = 512, 704, 768
+
+    with monkeypatch.context() as mp:
+        mp.setenv("VLLM_ROCM_USE_AITER", "1")
+        mp.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+        _reload_envs()
+        rocm_aiter_ops.refresh_env_variables()
+        # Parameters land on the default device, as when a model is built on GPU.
+        with torch.device("cuda"):
+            layer = _make_fp8_routed_experts(hidden_size, intermediate_size)
+
+    assert isinstance(layer.quant_method, Fp8MoEMethod)
+    assert layer.quant_method.fp8_backend == Fp8MoeBackend.AITER
+    moe_config = layer.moe_config
+    assert moe_config.intermediate_size_per_partition_unpadded == intermediate_size
+    assert moe_config.intermediate_size_per_partition == intermediate_size_padded
+    assert moe_config.hidden_dim == moe_config.hidden_dim_unpadded == hidden_size
+
+    num_experts = moe_config.num_local_experts
+    w13, w2 = layer.w13_weight, layer.w2_weight
+    assert w13.device.type == w2.device.type == "cuda"
+    assert w13.shape == (num_experts, 2 * intermediate_size_padded, hidden_size)
+    assert w2.shape == (num_experts, hidden_size, intermediate_size_padded)
+    # create_weights must hand the loader zeroed tensors (fp8 zero is bit pattern
+    # 0), since the loader only writes the checkpoint's rows/columns.
+    assert not w13.view(torch.uint8).any()
+    assert not w2.view(torch.uint8).any()
+
+    # Load a checkpoint with the unpadded size the way the model loader does.
+    generator = torch.Generator(device="cuda")
+    generator.manual_seed(0)
+
+    def _rand_fp8(*shape: int) -> torch.Tensor:
+        return (torch.randn(*shape, generator=generator, device="cuda") / 4).to(
+            w13.dtype
+        )
+
+    checkpoint: dict[str, torch.Tensor] = {}
+    for expert_id in range(num_experts):
+        checkpoint[f"{expert_id}.gate_proj.weight"] = _rand_fp8(
+            intermediate_size, hidden_size
+        )
+        checkpoint[f"{expert_id}.up_proj.weight"] = _rand_fp8(
+            intermediate_size, hidden_size
+        )
+        checkpoint[f"{expert_id}.down_proj.weight"] = _rand_fp8(
+            hidden_size, intermediate_size
+        )
+    loaded = set(layer.load_weights(checkpoint.items()))
+    assert {"w13_weight", "w2_weight"} <= loaded
+
+    def _bits(t: torch.Tensor) -> torch.Tensor:
+        return t.view(torch.uint8)
+
+    up_rows = slice(
+        intermediate_size_padded, intermediate_size_padded + intermediate_size
+    )
+    for expert_id in range(num_experts):
+        gate = checkpoint[f"{expert_id}.gate_proj.weight"]
+        up = checkpoint[f"{expert_id}.up_proj.weight"]
+        down = checkpoint[f"{expert_id}.down_proj.weight"]
+        # gate rows at [0, 704), up rows at [768, 768 + 704): each half of w13 is
+        # padded on its own, which is where the kernel's N/2 split expects them.
+        assert torch.equal(_bits(w13[expert_id, :intermediate_size]), _bits(gate))
+        assert torch.equal(_bits(w13[expert_id, up_rows]), _bits(up))
+        assert not _bits(
+            w13[expert_id, intermediate_size:intermediate_size_padded]
+        ).any()
+        assert not _bits(
+            w13[expert_id, intermediate_size_padded + intermediate_size :]
+        ).any()
+        assert torch.equal(_bits(w2[expert_id, :, :intermediate_size]), _bits(down))
+        assert not _bits(w2[expert_id, :, intermediate_size:]).any()
 
 
 def test_aiter_fused_moe_determinism():
