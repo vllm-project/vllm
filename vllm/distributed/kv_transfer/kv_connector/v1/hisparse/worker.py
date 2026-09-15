@@ -22,6 +22,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tp_group,
 )
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.layout import HISPARSE_HOT_SUFFIX
@@ -748,10 +749,13 @@ class HiSparseConnectorWorker:
                 # instead of tail prefill on D. Restore the prompt rows before
                 # decode appends to this page; unused rows do not extend the
                 # logical sequence.
-                destination[resident_block].copy_(
-                    source[host_start : host_start + self.kernel_block_size],
-                    non_blocking=True,
-                )
+                # cudaHostRegister pins this pool outside PyTorch's allocator,
+                # so the sync checker cannot recognize it via is_pinned().
+                with gpu_sync_allowed():
+                    destination[resident_block].copy_(
+                        source[host_start : host_start + self.kernel_block_size],
+                        non_blocking=True,
+                    )
         self._record_transfer_completion(transfers, stream=current_stream())
 
     def _submit_transfers(self, transfers: list[SparseKVPageTransfer]) -> None:
