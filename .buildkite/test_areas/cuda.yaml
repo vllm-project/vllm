@@ -17,6 +17,7 @@ steps:
     - pytest -v -s cuda/test_cuda_context.py
     - pytest -v -s cuda/test_platform_no_cuda_init.py
     - pytest -v -s cuda/test_cuda_compatibility_path.py
+    - pytest -v -s cuda/test_wsl2_pin_memory.py
   mirror:
     amd:
       label: ":amd: (MI355) CUDA Platform"
