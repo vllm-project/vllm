@@ -57,6 +57,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         self._einsum_recipe, self._tma_aligned_scales = compute_fp8_einsum_recipe(
             self._o_proj_block_size
         )
+        self.physical_selection_buffers: tuple[torch.Tensor, torch.Tensor] | None = None
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         return deep_gemm_fp8_o_proj(
@@ -198,13 +199,44 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             assert self.topk_indices_buffer is not None
             block_size = attn_metadata.block_size // self.compress_ratio
             is_valid = swa_metadata.is_valid_token[:num_decode_tokens]
-            global_indices, topk_lens = compute_global_topk_indices_and_lens(
-                self.topk_indices_buffer[:num_decode_tokens],
-                swa_metadata.token_to_req_indices,
-                attn_metadata.block_table[:num_decodes],
-                block_size,
-                is_valid,
+            buffers = self.physical_selection_buffers
+            can_reuse = (
+                buffers is not None
+                and swa_metadata.num_prefills == 0
+                and swa_metadata.max_decode_query_len == 1
+                and num_decode_tokens == num_decodes
+                and num_decode_tokens <= buffers[0].shape[0]
+                and self.index_source_layer_id is not None
             )
+            cached_selection = attn_metadata.physical_selection
+            if (
+                can_reuse
+                and attn_metadata.physical_selection_source_id
+                == self.index_source_layer_id
+                and attn_metadata.physical_selection_swa_metadata is swa_metadata
+                and cached_selection is not None
+            ):
+                global_indices, topk_lens = cached_selection
+            else:
+                output_buffers = (
+                    (buffers[0][:num_decode_tokens], buffers[1][:num_decode_tokens])
+                    if can_reuse and buffers is not None
+                    else None
+                )
+                global_indices, topk_lens = compute_global_topk_indices_and_lens(
+                    self.topk_indices_buffer[:num_decode_tokens],
+                    swa_metadata.token_to_req_indices,
+                    attn_metadata.block_table[:num_decodes],
+                    block_size,
+                    is_valid,
+                    output_buffers=output_buffers,
+                )
+                if can_reuse:
+                    attn_metadata.physical_selection_source_id = (
+                        self.index_source_layer_id
+                    )
+                    attn_metadata.physical_selection_swa_metadata = swa_metadata
+                    attn_metadata.physical_selection = (global_indices, topk_lens)
             topk_indices = global_indices.view(num_decode_tokens, 1, -1)
 
         swa_indices = swa_metadata.decode_swa_indices

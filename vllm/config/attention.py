@@ -86,6 +86,10 @@ class AttentionConfig:
     indexer). Quantized formats (fp8, mxfp4, nvfp4) require indexer kernel
     support in the backend."""
 
+    dsv41_reuse_physical_selection: bool = False
+    """Reuse DeepSeek V4.1 FlashMLA physical top-k indices across decode layers
+    sharing one index source. Unsupported serving modes use the original path."""
+
     hisparse_config: HiSparseConfig | None = None
     """HiSparse host-resident KV configuration. Setting this enables experimental
     Model Runner V2-only HiSparse sparse-MLA decode hot-buffering. It is inferred
