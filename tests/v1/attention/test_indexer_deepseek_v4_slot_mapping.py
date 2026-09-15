@@ -8,7 +8,7 @@ import torch
 
 from tests.v1.attention.utils import create_vllm_config
 from vllm.models.deepseek_v4.sparse_mla import DeepseekV4SparseMLABackend
-from vllm.models.deepseek_v4_1.sparse_mla import (
+from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4SparseMLABackend as DeepseekV41SparseMLABackend,
 )
 from vllm.v1.attention.backend import CommonAttentionMetadata
