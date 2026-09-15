@@ -19,7 +19,7 @@ from typing_extensions import runtime_checkable
 from vllm.config import CacheConfig, VllmConfig, get_layers_from_vllm_config
 from vllm.config.cache import _layout_from_name
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_down
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_tensor
 from vllm.v1.kv_cache_interface import KVCacheLayout, KVCacheSpec, MambaSpec
 
@@ -33,6 +33,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
@@ -65,6 +66,37 @@ _LN_2 = math.log(2.0)
 def log2_lse_to_ln(lse: torch.Tensor) -> torch.Tensor:
     """Convert a base-2 log-sum-exp tensor to natural-log units."""
     return lse * _LN_2
+
+
+def compute_mm_prefix_ranges(
+    mm_features_per_req: Sequence[Sequence[MultiModalFeatureSpec]],
+    sliding_window: int | None = None,
+    clamp_sliding_window: bool = False,
+    span_pad: int = 0,
+) -> dict[int, list[tuple[int, int]]]:
+    """Per-request PrefixLM bidirectional ranges for image/video tokens."""
+    req_doc_ranges: dict[int, list[tuple[int, int]]] = {}
+    for req_idx, mm_features in enumerate(mm_features_per_req):
+        image_doc_ranges = []
+        for mm_feature in mm_features:
+            if mm_feature.modality not in ("image", "video"):
+                continue
+            pos_info = mm_feature.mm_position
+            if span_pad:
+                start = round_down(pos_info.offset, span_pad) + span_pad - 1
+                feature_ranges = [(start, pos_info.offset + pos_info.length - 1)]
+            else:
+                feature_ranges = pos_info.extract_embeds_range()
+            for r in feature_ranges:
+                if (
+                    not clamp_sliding_window
+                    and sliding_window is not None
+                    and (r[1] - r[0] + 1) > sliding_window
+                ):
+                    continue
+                image_doc_ranges.append(r)
+        req_doc_ranges[req_idx] = image_doc_ranges
+    return req_doc_ranges
 
 
 def compute_mm_prefix_range_tensor(
