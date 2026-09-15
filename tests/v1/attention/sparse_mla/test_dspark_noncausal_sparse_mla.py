@@ -31,12 +31,12 @@ from types import MethodType, SimpleNamespace
 import pytest
 import torch
 
-from tests.v1.attention.test_mla_backends import (
+from tests.v1.attention._mla_backends import (
     BatchSpec,
     MockSparseMLAAttentionLayer,
     create_and_prepopulate_kv_cache,
 )
-from tests.v1.attention.test_sparse_mla_backends import (
+from tests.v1.attention.sparse_mla.test_sparse_mla_backends import (
     _quantize_dequantize_fp8_ds_mla,
 )
 from tests.v1.attention.utils import (

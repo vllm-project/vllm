@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from tests.v1.attention.test_mla_backends import (
+from tests.v1.attention._mla_backends import (
     BATCH_SPECS,
     BatchSpec,
     MockSparseMLAAttentionLayer,
