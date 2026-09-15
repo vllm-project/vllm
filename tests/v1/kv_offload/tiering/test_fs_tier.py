@@ -65,6 +65,7 @@ def _make_offloading_spec(
     if world_size is None:
         world_size = tp_size
     spec = MagicMock()
+    spec.storage_format = None
     spec.config = OffloadingConfig(
         groups=(),
         worker_kv_bytes_per_block=0,

@@ -407,6 +407,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 num_cpu_chunks=self.num_chunks,
                 mmap_region=worker_mmap,
                 canonical_layout=self.config.canonical_layout,
+                compact_group_layout=self.compact_group_layout,
             )
         except Exception:
             worker_mmap.cleanup()

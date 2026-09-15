@@ -83,6 +83,7 @@ def _make_offloading_config(
 
 
 _OFFLOADING_SPEC = SimpleNamespace(
+    storage_format=None,
     config=_make_offloading_config(enable_kv_cache_events=False),
 )
 
@@ -218,6 +219,7 @@ class MockNixlAgent:
 def _make_events_spec(enable_kv_cache_events: bool) -> SimpleNamespace:
     """Offloading spec stub with an explicit global KV events flag."""
     return SimpleNamespace(
+        storage_format=None,
         config=_make_offloading_config(enable_kv_cache_events),
         kv_events_config=OffloadingKVEventsConfig(
             enable_kv_cache_events=enable_kv_cache_events,
@@ -769,6 +771,7 @@ class TestObjStoreConfig:
 def test_obj_tier_replicated_layout_collapses_mapper_identity():
     """TP=2 and TP=4 replicated configs share the obj FileMapper namespace."""
     tp2_spec = SimpleNamespace(
+        storage_format=None,
         config=_make_offloading_config(
             False, tp_size=2, world_size=2, rank=1, replicated_layout=True
         ),
@@ -778,6 +781,7 @@ def test_obj_tier_replicated_layout_collapses_mapper_identity():
         ),
     )
     tp4_spec = SimpleNamespace(
+        storage_format=None,
         config=_make_offloading_config(
             False, tp_size=4, world_size=4, rank=3, replicated_layout=True
         ),

@@ -914,3 +914,64 @@ def test_blocks_per_chunk_must_be_positive():
 
     with pytest.raises(ValueError, match="greater than 0"):
         build_offloading_config(config, _make_kv_cache_config())
+
+
+@pytest.mark.parametrize("head_sizes", [(128,) * 8, (64, 128, 256)])
+@pytest.mark.parametrize("blocks_per_chunk", [1, 3])
+def test_cpu_capacity_reserves_one_group_per_key(head_sizes, blocks_per_chunk):
+    """A group-specific key must not reserve all other groups' pages."""
+    from vllm.utils.math_utils import round_up
+    from vllm.v1.kv_offload.base import LookupResult, ReqContext, make_offload_key
+    from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+    from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+
+    groups = [
+        KVCacheGroupSpec(
+            [f"layer{i}"],
+            FullAttentionSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=head_size,
+                dtype=torch.float16,
+            ),
+        )
+        for i, head_size in enumerate(head_sizes)
+    ]
+    pages = [g.kv_cache_spec.page_size_bytes for g in groups]
+    row_bytes = round_up(
+        max(pages) * blocks_per_chunk, SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    )
+    capacity = 2 * len(groups)
+    config = _make_vllm_config(
+        extra_config={
+            "cpu_bytes_to_use": row_bytes * capacity,
+            "blocks_per_chunk": blocks_per_chunk,
+        }
+    )
+    cache = KVCacheConfig(
+        num_blocks=16,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=sum(pages) * 16,
+                layers=[name for g in groups for name in g.layer_names],
+                layer_stride=0,
+                block_stride=sum(pages),
+            )
+        ],
+        kv_cache_groups=groups,
+    )
+    spec = CPUOffloadingSpec(build_offloading_config(config, cache))
+    assert spec.num_chunks == capacity
+    assert spec.kv_bytes_per_chunk == row_bytes
+    manager = spec.get_manager()
+    ctx = ReqContext("capacity")
+    keys = [
+        make_offload_key(i.to_bytes(8, "big"), g)
+        for g in range(len(groups))
+        for i in range(2)
+    ]
+    store = manager.prepare_store(keys, ctx)
+    assert store is not None
+    assert store.evicted_keys == []
+    manager.complete_store(keys, ctx, success=True)
+    assert all(manager.lookup(key, ctx) is LookupResult.HIT for key in keys)
