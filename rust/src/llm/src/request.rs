@@ -12,6 +12,16 @@ use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 use crate::error::{Error, Result};
 use crate::request_metrics::current_unix_timestamp_secs;
 
+/// Prepare a request ID for engine-core, randomizing it to avoid collisions if requested.
+pub(crate) fn prepare_request_id(external_request_id: &str, randomize_request_id: bool) -> String {
+    if randomize_request_id {
+        let random_suffix = Uuid::new_v4().simple().to_string();
+        format!("{external_request_id}-{}", &random_suffix[..8])
+    } else {
+        external_request_id.to_string()
+    }
+}
+
 /// Tokenized decoder-only generate request accepted by [`crate::Llm`].
 ///
 /// This is the first-stage Rust subset of the inputs that eventually flow into
@@ -83,13 +93,7 @@ impl GenerateRequest {
             lora_request,
         } = self;
 
-        let external_request_id = request_id;
-        let engine_request_id = if randomize_request_id {
-            let random_suffix = Uuid::new_v4().simple().to_string();
-            format!("{external_request_id}-{}", &random_suffix[..8])
-        } else {
-            external_request_id.clone()
-        };
+        let engine_request_id = prepare_request_id(&request_id, randomize_request_id);
         Ok(PreparedGenerateRequest {
             engine_request: EngineCoreRequest {
                 request_id: engine_request_id,
@@ -109,7 +113,7 @@ impl GenerateRequest {
                 trace_headers,
                 resumable: false,
                 session_id,
-                external_req_id: Some(external_request_id),
+                external_req_id: Some(request_id),
                 // Rust parser doesn't expose this information, leave it unset and let the
                 // reasoning logic in engine-sided structured output manager handle it.
                 reasoning_ended: None,

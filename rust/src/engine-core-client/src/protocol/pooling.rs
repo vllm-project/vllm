@@ -1,0 +1,38 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+use serde_tuple::{Deserialize_tuple, Serialize_tuple};
+
+use super::task::PoolingTask;
+
+/// API parameters for pooling models.
+///
+/// This is the supported positional prefix of Python's array-like
+/// `PoolingParams`. Python fills the omitted internal suffix with its declared
+/// defaults.
+///
+/// Original Python definition:
+/// <https://github.com/vllm-project/vllm/blob/6ec92bcbc8/vllm/pooling_params.py#L38-L73>
+///
+/// Original Python field documentation:
+/// <https://github.com/vllm-project/vllm/blob/6ec92bcbc8/vllm/config/pooler.py#L51-L115>
+#[derive(Debug, Clone, Default, PartialEq, Serialize_tuple, Deserialize_tuple)]
+pub struct EngineCorePoolingParams {
+    /// Whether to apply activation function to the pooler outputs.
+    /// `None` lets engine-core resolve the model's default.
+    pub use_activation: Option<bool>,
+    /// Reduce the dimensions of embeddings if model support matryoshka
+    /// representation.
+    /// `None` lets engine-core resolve the model's default.
+    pub dimensions: Option<u32>,
+    /// If set, only the score corresponding to the `step_tag_id` in the
+    /// generated sentence should be returned. Otherwise, the scores for all
+    /// tokens are returned.
+    pub step_tag_id: Option<u32>,
+    /// A list of indices for the vocabulary dimensions to be extracted,
+    /// such as the token IDs of `good_token` and `bad_token` in the
+    /// `math-shepherd-mistral-7b-prm` model.
+    pub returned_token_ids: Option<Vec<u32>>,
+    /// The task used for pooling.
+    pub task: PoolingTask,
+}
