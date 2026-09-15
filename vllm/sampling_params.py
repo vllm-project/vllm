@@ -601,6 +601,12 @@ class SamplingParams(
             raise VLLMValidationError(
                 f"top_k must be an integer, got {type(self.top_k).__name__}"
             )
+        if self.top_k > 2**64 - 1:
+            raise VLLMValidationError(
+                f"top_k must be at most {2**64 - 1}, got {self.top_k}.",
+                parameter="top_k",
+                value=self.top_k,
+            )
         if not 0.0 <= self.min_p <= 1.0:
             raise VLLMValidationError(f"min_p must be in [0, 1], got {self.min_p}.")
         if self.max_tokens is not None and self.max_tokens < 1:
@@ -618,12 +624,20 @@ class SamplingParams(
                 f"min_tokens must be less than or equal to "
                 f"max_tokens={self.max_tokens}, got {self.min_tokens}."
             )
-        if self.stream_interval is not None and self.stream_interval < 1:
-            raise VLLMValidationError(
-                f"stream_interval must be at least 1, got {self.stream_interval}.",
-                parameter="stream_interval",
-                value=self.stream_interval,
-            )
+        if self.stream_interval is not None:
+            if self.stream_interval < 1:
+                raise VLLMValidationError(
+                    f"stream_interval must be at least 1, got {self.stream_interval}.",
+                    parameter="stream_interval",
+                    value=self.stream_interval,
+                )
+            if self.stream_interval > 2**64 - 1:
+                raise VLLMValidationError(
+                    f"stream_interval must be at most {2**64 - 1}, "
+                    f"got {self.stream_interval}.",
+                    parameter="stream_interval",
+                    value=self.stream_interval,
+                )
         if self.logprobs is not None and self.logprobs != -1 and self.logprobs < 0:
             raise VLLMValidationError(
                 f"logprobs must be non-negative or -1, got {self.logprobs}.",

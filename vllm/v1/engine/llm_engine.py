@@ -277,28 +277,30 @@ class LLMEngine:
 
         n = params.n if isinstance(params, SamplingParams) else 1
 
-        if n == 1:
-            # Make a new RequestState and queue.
-            self.output_processor.add_request(request, prompt_text, None, 0)
-            # Add the request to EngineCore.
-            self.engine_core.add_request(request)
-            return req_id
+        try:
+            if n == 1:
+                # Make a new RequestState and queue.
+                self.output_processor.add_request(request, prompt_text, None, 0)
+                # Add the request to EngineCore.
+                self.engine_core.add_request(request)
+            else:
+                # Fan out child requests (for n>1).
+                parent_req = ParentRequest(request)
+                for idx in range(n):
+                    request_id, child_params = parent_req.get_child_info(idx)
+                    child_request = request if idx == n - 1 else copy(request)
+                    child_request.request_id = request_id
+                    child_request.sampling_params = child_params
 
-        # Fan out child requests (for n>1).
-        parent_req = ParentRequest(request)
-        for idx in range(n):
-            request_id, child_params = parent_req.get_child_info(idx)
-            child_request = request if idx == n - 1 else copy(request)
-            child_request.request_id = request_id
-            child_request.sampling_params = child_params
-
-            # Make a new RequestState and queue.
-            self.output_processor.add_request(
-                child_request, prompt_text, parent_req, idx
-            )
-            # Add the request to EngineCore.
-            self.engine_core.add_request(child_request)
-
+                    # Make a new RequestState and queue.
+                    self.output_processor.add_request(
+                        child_request, prompt_text, parent_req, idx
+                    )
+                    # Add the request to EngineCore.
+                    self.engine_core.add_request(child_request)
+        except BaseException:
+            self.abort_request([req_id], internal=True)
+            raise
         return req_id
 
     def step(self) -> list[RequestOutput | PoolingRequestOutput]:

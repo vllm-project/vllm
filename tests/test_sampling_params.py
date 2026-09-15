@@ -64,6 +64,16 @@ def test_extra_args_accepts_messagepack_integer_boundaries(value):
     assert SamplingParams(extra_args=extra_args).extra_args == extra_args
 
 
+@pytest.mark.parametrize("kwargs", [{"top_k": 2**64}, {"stream_interval": 2**64}])
+def test_sampling_params_reject_integers_beyond_messagepack(kwargs: dict):
+    with pytest.raises(VLLMValidationError, match="must be at most"):
+        SamplingParams(**kwargs)
+
+
+def test_sampling_params_accept_messagepack_integer_boundaries():
+    SamplingParams(top_k=2**64 - 1, stream_interval=2**64 - 1)
+
+
 def test_extra_args_preserves_custom_objects_and_shared_containers():
     custom = object()
     shared = [custom, (None, "value", 1.5)]
