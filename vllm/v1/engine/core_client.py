@@ -1690,10 +1690,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             engine = self.reqs_in_flight.get(request_id)
             if engine is None:
                 engine = self._finished_request_engines.get(request_id)
-            engine_idx = (
-                int.from_bytes(engine, "little") if engine is not None else None
-            )
-            by_engine[engine_idx].append(request_id)
+            eng_idx = int.from_bytes(engine, "little") if engine is not None else None
+            by_engine[eng_idx].append(request_id)
         return by_engine
 
     def acknowledge_finished_requests(self, request_ids: Iterable[str]) -> None:

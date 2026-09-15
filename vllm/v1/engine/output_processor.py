@@ -497,11 +497,9 @@ class OutputProcessor:
     ) -> list[str]:
         """Resolve external and parent IDs to live IDs without removing state."""
         resolved_ids: dict[str, None] = {}
-        for request_id in request_ids:
-            internal_ids = (
-                [request_id] if internal else self.external_req_ids.get(request_id, [])
-            )
-            for internal_id in internal_ids:
+        for req_id in request_ids:
+            req_ids = [req_id] if internal else self.external_req_ids.get(req_id, [])
+            for internal_id in req_ids:
                 if internal_id in self.request_states:
                     resolved_ids[internal_id] = None
                 elif parent := self.parent_requests.get(internal_id):

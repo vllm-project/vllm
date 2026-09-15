@@ -539,16 +539,13 @@ class IterationStats:
     ):
         e2e_latency = self._time_since(req_stats.arrival_time)
 
-        # An aborted request may not have reached scheduling or produced a token.
-        # Keep unavailable intervals out of histograms instead of deriving them
-        # from the zero-value timestamp sentinels.
+        # Omit intervals for stages an aborted request has not reached.
         queued_time = (
             req_stats.scheduled_ts - req_stats.queued_ts
             if req_stats.queued_ts != 0.0 and req_stats.scheduled_ts != 0.0
             else None
         )
         if req_stats.first_token_ts != 0.0 and req_stats.last_token_ts != 0.0:
-            # Prefill interval is from first SCHEDULED to first NEW_TOKEN.
             prefill_time = (
                 req_stats.first_token_ts - req_stats.scheduled_ts
                 if req_stats.scheduled_ts != 0.0

@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from unittest.mock import MagicMock
-
-from prometheus_client import CollectorRegistry, Counter, Histogram
+from unittest.mock import MagicMock, call
 
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
 from vllm.v1.engine import EngineCoreOutputs, FinishReason
+from vllm.v1.engine.core_client import DPLBAsyncMPClient
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.metrics.stats import (
     FinishedRequestStats,
@@ -21,17 +20,10 @@ from vllm.v1.utils import compute_iteration_details
 
 
 def test_abort_metrics_do_not_count_as_engine_iterations():
-    registry = CollectorRegistry()
-    iteration_tokens = Histogram("iteration_tokens", "", ["engine"], registry=registry)
-    aborted_requests = Counter("aborted_requests", "", ["engine"], registry=registry)
     stat_logger = MagicMock(
-        histogram_iteration_tokens={
-            idx: iteration_tokens.labels(engine=str(idx)) for idx in (0, 1)
-        },
+        histogram_iteration_tokens={idx: MagicMock() for idx in (0, 1)},
         counter_request_success={
-            FinishReason.ABORT: {
-                idx: aborted_requests.labels(engine=str(idx)) for idx in (0, 1)
-            }
+            FinishReason.ABORT: {idx: MagicMock() for idx in (0, 1)}
         },
         kv_cache_metrics_enabled=False,
         gauge_lora_info=None,
@@ -40,27 +32,32 @@ def test_abort_metrics_do_not_count_as_engine_iterations():
     abort_stats.finished_requests.append(
         FinishedRequestStats(finish_reason=FinishReason.ABORT)
     )
-
     PrometheusStatLogger.record(stat_logger, None, abort_stats, engine_idx=1)
 
-    assert registry.get_sample_value("aborted_requests_total", {"engine": "1"}) == 1
-    assert registry.get_sample_value("aborted_requests_total", {"engine": "0"}) == 0
-    assert registry.get_sample_value("iteration_tokens_count", {"engine": "1"}) == 0
-    assert registry.get_sample_value("iteration_tokens_count", {"engine": "0"}) == 0
+    for sched_stats, token_count in [(None, 3), (SchedulerStats(), 0)]:
+        step_stats = IterationStats()
+        step_stats.num_generation_tokens = token_count
+        PrometheusStatLogger.record(stat_logger, sched_stats, step_stats, engine_idx=1)
 
-    step_stats = IterationStats()
-    step_stats.num_generation_tokens = 3
-    PrometheusStatLogger.record(stat_logger, None, step_stats, engine_idx=1)
+    counters = stat_logger.counter_request_success[FinishReason.ABORT]
+    counters[1].inc.assert_called_once_with()
+    counters[0].inc.assert_not_called()
+    histograms = stat_logger.histogram_iteration_tokens
+    histograms[0].observe.assert_not_called()
+    assert histograms[1].observe.call_args_list == [call(3), call(0)]
 
-    assert registry.get_sample_value("iteration_tokens_count", {"engine": "1"}) == 1
-    assert registry.get_sample_value("iteration_tokens_sum", {"engine": "1"}) == 3
 
-    PrometheusStatLogger.record(
-        stat_logger, SchedulerStats(), IterationStats(), engine_idx=1
-    )
-
-    assert registry.get_sample_value("iteration_tokens_count", {"engine": "1"}) == 2
-    assert registry.get_sample_value("iteration_tokens_sum", {"engine": "1"}) == 3
+def test_abort_request_engine_ownership():
+    client = object.__new__(DPLBAsyncMPClient)
+    client.reqs_in_flight = {"active": (2).to_bytes(2, "little")}
+    client._finished_request_engines = {"pending": (1).to_bytes(2, "little")}
+    assert client.group_requests_by_engine(["active", "pending", "unknown"]) == {
+        2: ["active"],
+        1: ["pending"],
+        None: ["unknown"],
+    }
+    client.acknowledge_finished_requests(["pending"])
+    assert client.group_requests_by_engine(["pending"]) == {None: ["pending"]}
 
 
 def test_iteration_stats_repr():

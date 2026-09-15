@@ -221,23 +221,21 @@ class LLMEngine:
             request_ids, internal
         )
         requests_by_engine = self.engine_core.group_requests_by_engine(internal_ids)
-        for engine_idx, engine_request_ids in requests_by_engine.items():
-            iteration_stats = (
-                IterationStats() if self.log_stats and engine_idx is not None else None
-            )
+        for eng_idx, engine_request_ids in requests_by_engine.items():
+            stats = IterationStats() if self.log_stats and eng_idx is not None else None
             aborted_ids = self.output_processor.abort_requests(
-                engine_request_ids, internal=True, iteration_stats=iteration_stats
+                engine_request_ids, internal=True, iteration_stats=stats
             )
             self.engine_core.abort_requests(aborted_ids)
             if (
                 self.logger_manager is not None
-                and iteration_stats is not None
-                and iteration_stats.finished_requests
+                and stats is not None
+                and stats.finished_requests
             ):
                 self.logger_manager.record(
                     scheduler_stats=None,
-                    iteration_stats=iteration_stats,
-                    engine_idx=engine_idx,
+                    iteration_stats=stats,
+                    engine_idx=eng_idx,
                 )
 
     def add_request(
