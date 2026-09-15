@@ -121,8 +121,8 @@ class TorchDistNcclEplbCommunicator(EplbCommunicator):
                 P2POp(
                     torch.distributed.isend,
                     tensor,
-                    dst_rank,
-                    self._ep_group,
+                    group=self._ep_group,
+                    group_peer=dst_rank,
                 )
             )
 
@@ -137,8 +137,8 @@ class TorchDistNcclEplbCommunicator(EplbCommunicator):
                 P2POp(
                     torch.distributed.irecv,
                     tensor,
-                    src_rank,
-                    self._ep_group,
+                    group=self._ep_group,
+                    group_peer=src_rank,
                 )
             )
 
@@ -200,8 +200,8 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
                         P2POp(
                             torch.distributed.isend,
                             cpu_tensor,
-                            peer_rank,
-                            self._cpu_group,
+                            group=self._cpu_group,
+                            group_peer=peer_rank,
                         )
                     )
                     continue
@@ -212,8 +212,8 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
                     P2POp(
                         torch.distributed.irecv,
                         cpu_tensor,
-                        peer_rank,
-                        self._cpu_group,
+                        group=self._cpu_group,
+                        group_peer=peer_rank,
                     )
                 )
                 recv_staging.append((tensor, cpu_tensor))
