@@ -149,8 +149,49 @@ def test_update_state_after_alloc_tracks_cached_blocks_per_group():
 
     scheduler.update_state_after_alloc(request, blocks, num_external_tokens=2)
 
-    _, _, local_num_computed_blocks = scheduler._reqs_need_recv[request.request_id]
+    _, _, local_num_computed_blocks, awaiting_kvs = scheduler._reqs_need_recv[
+        request.request_id
+    ]
     assert local_num_computed_blocks == (2, 1)
+    # There are external tokens to pull, so the scheduler parks the request and
+    # is waiting to see it in finished_recving.
+    assert awaiting_kvs is True
+
+
+@pytest.mark.cpu_test
+def test_full_local_hit_is_not_awaited_by_the_scheduler():
+    """A recv with num_external_tokens == 0 must not be flagged as awaited.
+
+    The request keeps running -- there is nothing to pull, only a notification
+    owed to the producer -- so the worker must not report it in
+    finished_recving. Doing so trips `assert RequestStatus.is_finished` in
+    _update_from_kv_xfer_finished, which only tolerates a finished recv for a
+    request that is parked or already done."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler import (
+        NixlPullConnectorScheduler,
+    )
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.core.kv_cache_utils import KVCacheBlock
+
+    scheduler = object.__new__(NixlPullConnectorScheduler)
+    scheduler._reqs_in_batch = set()
+    scheduler._reqs_need_save = {}
+    scheduler._reqs_need_recv = {}
+    scheduler.use_host_buffer = False
+    scheduler.is_bidirectional_kv_xfer_enabled = False
+    scheduler._is_hma_required = False
+    scheduler.kv_cache_config = MagicMock(
+        select_transfer_block_ids=lambda block_ids: block_ids
+    )
+
+    blocks = KVCacheBlocks(blocks=([KVCacheBlock(block_id=0, _block_hash=object())],))
+    request = create_request(do_remote_prefill=True)
+
+    scheduler.update_state_after_alloc(request, blocks, num_external_tokens=0)
+
+    _, local_block_ids, _, awaiting_kvs = scheduler._reqs_need_recv[request.request_id]
+    assert not local_block_ids  # full local hit: nothing to pull
+    assert awaiting_kvs is False
 
 
 @pytest.mark.cpu_test
