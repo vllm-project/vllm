@@ -1092,12 +1092,15 @@ class TestNestedSchemaCoercion:
             parser_engine_config=qwen3_config(thinking=False),
         )
 
-    def test_nested_object_coerced(self, parser_with_tools, mock_request):
+    @pytest.mark.parametrize("raw_min_stars", ["100", '"100"'])
+    def test_nested_object_coerced(
+        self, parser_with_tools, mock_request, raw_min_stars
+    ):
         text = (
             "<tool_call>\n"
             "<function=search>\n"
             '<parameter=filters>{"language": "python",'
-            ' "min_stars": 100}</parameter>\n'
+            f' "min_stars": {raw_min_stars}}}</parameter>\n'
             "</function>\n"
             "</tool_call>"
         )
@@ -1106,11 +1109,14 @@ class TestNestedSchemaCoercion:
         assert args["filters"] == {"language": "python", "min_stars": 100}
         assert isinstance(args["filters"]["min_stars"], int)
 
-    def test_nested_array_items_coerced(self, parser_with_tools, mock_request):
+    @pytest.mark.parametrize("raw_limits", ["[10, 20, 30]", '["10", "20", "30"]'])
+    def test_nested_array_items_coerced(
+        self, parser_with_tools, mock_request, raw_limits
+    ):
         text = (
             "<tool_call>\n"
             "<function=search>\n"
-            "<parameter=limits>[10, 20, 30]</parameter>\n"
+            f"<parameter=limits>{raw_limits}</parameter>\n"
             "</function>\n"
             "</tool_call>"
         )
@@ -1132,15 +1138,55 @@ class TestNestedSchemaCoercion:
         assert args["tags"] == ["ml", "42"]
         assert all(isinstance(v, str) for v in args["tags"])
 
+    @pytest.mark.parametrize("value", [1, True, None])
+    @pytest.mark.parametrize("container_type", ["object", "array"])
+    @pytest.mark.parametrize("schema_kind", ["empty", "description", "const", "string"])
+    def test_decoded_container_preserves_native_scalars(
+        self, tools, mock_tokenizer, mock_request, value, container_type, schema_kind
+    ):
+        """Recursing into decoded JSON must preserve its native scalar values."""
+        field_schema = {
+            "empty": {},
+            "description": {"description": "A value"},
+            "const": {"const": value},
+            "string": {"type": "string"},
+        }[schema_kind]
+        payload: dict[str, object] | list[object]
+        if container_type == "object":
+            payload = {"value": value}
+            payload_schema = {"type": "object", "properties": {"value": field_schema}}
+        else:
+            payload = [value]
+            payload_schema = {"type": "array", "items": field_schema}
+        tools[0].function.parameters["properties"]["payload"] = payload_schema
+        parser = ParserEngine(
+            mock_tokenizer,
+            tools=tools,
+            parser_engine_config=qwen3_config(thinking=False),
+        )
+        text = (
+            "<tool_call><function=search>"
+            f"<parameter=payload>{json.dumps(payload)}</parameter>"
+            "</function></tool_call>"
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+        actual = json.loads(result.tool_calls[0].function.arguments)["payload"]
+        assert actual == payload
+        leaf = actual["value"] if container_type == "object" else actual[0]
+        assert type(leaf) is type(value)
+
+    @pytest.mark.parametrize(
+        "raw_bool,raw_null", [("false", "null"), ('"false"', '"null"')]
+    )
     def test_array_of_objects_with_bool_and_null_coerced(
-        self, parser_with_tools, mock_request
+        self, parser_with_tools, mock_request, raw_bool, raw_null
     ):
         text = (
             "<tool_call>\n"
             "<function=AskUserQuestion>\n"
             "<parameter=questions>"
             '[{"question": "Pick a color",'
-            ' "multiSelect": false, "answer": null}]'
+            f' "multiSelect": {raw_bool}, "answer": {raw_null}}}]'
             "</parameter>\n"
             "</function>\n"
             "</tool_call>"
@@ -1154,14 +1200,17 @@ class TestNestedSchemaCoercion:
         assert questions[0]["multiSelect"] is False
         assert questions[0]["answer"] is None
 
+    @pytest.mark.parametrize(
+        "raw_bool,raw_null", [("false", "null"), ('"false"', '"null"')]
+    )
     def test_streaming_array_of_objects_with_bool_and_null_coerced(
-        self, parser_with_tools, mock_request
+        self, parser_with_tools, mock_request, raw_bool, raw_null
     ):
         chunks = [
             "<tool_call>\n",
             "<function=AskUserQuestion>\n",
             '<parameter=questions>[{"question": "Pick a color",',
-            ' "multiSelect": false, "answer": null}]',
+            f' "multiSelect": {raw_bool}, "answer": {raw_null}}}]',
             "</parameter>\n",
             "</function>\n",
             "</tool_call>",
