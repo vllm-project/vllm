@@ -412,8 +412,17 @@ class MatcherQuantFP8(MatcherCustomOp):
 
         if self.quant_key.scale.static:
             assert scale is not None
+            # Pin group_shape=None explicitly: static per-group quantization
+            # reuses this op with group_shape=(-1, group_size), and the
+            # pattern matcher only subset-matches kwargs, so an unpinned
+            # pattern would wrongly fuse per-group quant into per-tensor
+            # fused kernels.
             _, result = auto_functionalized(
-                self.QUANT_OP, result=result, input=input, scale=scale
+                self.QUANT_OP,
+                result=result,
+                input=input,
+                scale=scale,
+                group_shape=None,
             )
             return result, scale
         else:
