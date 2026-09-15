@@ -62,11 +62,7 @@ def flash_attn_maxseqlen_wrapper(
 
     out = None
     if not is_rocm_aiter and torch.cuda.is_current_stream_capturing():
-        # Encoder CUDA-graph replay pads the batch with empty sequences whose
-        # rows the attention kernel never writes. Zero-init `out` so those
-        # rows stay finite: stale pool memory there would otherwise feed NaNs
-        # into the next block's K/V tile loads, where masking cannot remove
-        # them (0 * NaN = NaN in the PV matmul).
+        # workaround for encoder CUDA-graph replay paddings with NaNs edge case
         out = torch.zeros(
             q.shape[0], q.shape[1], v.shape[-1], dtype=q.dtype, device=q.device
         )

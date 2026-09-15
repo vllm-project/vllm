@@ -641,13 +641,6 @@ class FusedInputNorm(nn.Module):
 
     @property
     def input_dtype(self) -> torch.dtype | None:
-        """Dtype of the raw pixel inputs fed to this module.
-
-        A non-identity norm means the processor-side rescale/normalize was
-        skipped (mm_device_do_normalize), so pixels arrive as uint8. Identity
-        inputs are already normalized floats; return None to let the caller
-        fall back to the model dtype.
-        """
         return None if self.is_identity else torch.uint8
 
     @classmethod
