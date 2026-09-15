@@ -23,8 +23,9 @@ from vllm.tool_parsers.abstract_tool_parser import (
 from vllm.tool_parsers.utils import (
     UnexpectedAstError,
     compute_tool_delta,
-    handle_single_tool,
     make_valid_python,
+    salvage_calls_from_unparsable_block,
+    salvage_tool_calls,
 )
 
 logger = init_logger(__name__)
@@ -56,6 +57,13 @@ class PythonicToolParser(ToolParser):
         tools: list[Tool] | None = None,
     ):
         super().__init__(tokenizer, tools)
+        self._reported_malformed_block = False
+
+    def _report_malformed_block(self, text: str) -> None:
+        """Log an unparsable block once, however many chunks repeat it."""
+        if not self._reported_malformed_block:
+            self._reported_malformed_block = True
+            logger.warning("Skipping malformed tool call block: %s", text)
 
     # Rename for readability. This is NOT a tool id.
     @property
@@ -92,17 +100,30 @@ class PythonicToolParser(ToolParser):
             )
 
         try:
-            module = ast.parse(model_output)
+            try:
+                module = ast.parse(model_output)
+            except (SyntaxError, ValueError):
+                # The block as a whole is unparsable (e.g. a broken quote).
+                # Split into top-level segments and parse each on its own so
+                # one bad call does not drop every parseable sibling.
+                salvaged = salvage_calls_from_unparsable_block(model_output)
+                if not salvaged:
+                    raise
+                return ExtractedToolCallInformation(
+                    tools_called=True,
+                    tool_calls=salvage_tool_calls(salvaged),
+                    content=None,
+                )
             parsed = getattr(module.body[0], "value", None)
             if isinstance(parsed, ast.List) and all(
                 isinstance(e, ast.Call) for e in parsed.elts
             ):
+                tool_calls = salvage_tool_calls(parsed.elts)
+                if not tool_calls:
+                    raise UnexpectedAstError("No convertible tool call in the block")
                 return ExtractedToolCallInformation(
                     tools_called=True,
-                    tool_calls=[
-                        handle_single_tool(e)  # type: ignore
-                        for e in parsed.elts
-                    ],
+                    tool_calls=tool_calls,
                     content=None,
                 )
             else:
@@ -128,7 +149,15 @@ class PythonicToolParser(ToolParser):
             return DeltaMessage(content=delta_text)
 
         try:
-            valid_and_added_text = make_valid_python(current_text)
+            try:
+                valid_and_added_text = make_valid_python(current_text)
+            except UnexpectedAstError:
+                # Brackets the model got structurally wrong fail at the same
+                # offset on every chunk of the block. There is no terminator
+                # to wait for here, so report the first such text once for
+                # the request rather than a traceback per chunk.
+                self._report_malformed_block(current_text)
+                return None
             if valid_and_added_text is None:
                 return None
             valid_text, added_text = valid_and_added_text
@@ -139,10 +168,11 @@ class PythonicToolParser(ToolParser):
                 isinstance(e, ast.Call) for e in parsed.elts
             ):
                 raise UnexpectedAstError("Tool output must be a list of function calls")
-            tool_calls = [
-                handle_single_tool(e)  # type: ignore
-                for e in parsed.elts
-            ]
+            tool_calls = salvage_tool_calls(parsed.elts)
+            if not tool_calls:
+                # A partially arrived call routinely completes to a shape that
+                # cannot be converted yet; wait for more text.
+                return None
 
             tool_deltas = []
             for index, new_call in enumerate(tool_calls):

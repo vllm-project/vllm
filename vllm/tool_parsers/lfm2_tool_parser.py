@@ -28,17 +28,40 @@ from vllm.tool_parsers.utils import (
     contains_broken_string_literal,
     escape_ctrl_chars_in_strings,
     escape_nested_quotes_in_strings,
-    handle_single_tool,
     make_valid_python,
     normalize_leading_zero_ints,
     rename_reserved_kwargs,
     restore_reserved_kwarg_names,
+    salvage_calls_from_unparsable_block,
+    salvage_tool_calls,
 )
 
 logger = init_logger(__name__)
 
 TOOL_CALL_START = "<|tool_call_start|>"
 TOOL_CALL_END = "<|tool_call_end|>"
+
+
+def _rewrite_candidates(text: str) -> list[str]:
+    """Progressive rewrites for pythonic text that failed to parse.
+
+    Each rewrite is a no-op on already-valid text: escape raw control
+    chars / NUL bytes inside string literals, strip leading zeros from int
+    literals (month=07), close unambiguous nested quotes
+    (command='sed -n '1,9p' f.py'), and rename reserved-keyword parameters
+    (from=1; restored after decoding). The first candidate that parses wins.
+    """
+    escaped = escape_ctrl_chars_in_strings(normalize_leading_zero_ints(text))
+    candidates = [escaped]
+    requoted, requote_changed = escape_nested_quotes_in_strings(escaped)
+    if requote_changed:
+        # Requoting can move raw control chars (newlines beyond the phantom
+        # close) inside the string; escape again.
+        candidates.append(escape_ctrl_chars_in_strings(requoted))
+    renamed, kw_renamed = rename_reserved_kwargs(candidates[-1])
+    if kw_renamed:
+        candidates.append(renamed)
+    return candidates
 
 
 class Lfm2ToolParser(ToolParser):
@@ -187,36 +210,36 @@ class Lfm2ToolParser(ToolParser):
             )
 
         try:
-            kw_renamed = False
             try:
                 module = ast.parse(tool_text)
             except (SyntaxError, ValueError):
-                # Progressive rewrites, each a no-op on already-valid text:
-                # escape raw control chars / NUL bytes inside string literals,
-                # strip leading zeros from int literals (month=07), close
-                # unambiguous nested quotes (command='sed -n '1,9p' f.py'),
-                # and rename reserved-keyword parameters (from=1; restored
-                # below). The first rewrite whose result parses wins.
-                escaped = escape_ctrl_chars_in_strings(
-                    normalize_leading_zero_ints(tool_text)
-                )
-                candidates = [escaped]
-                requoted, requote_changed = escape_nested_quotes_in_strings(escaped)
-                if requote_changed:
-                    # Requoting can move raw control chars (newlines beyond
-                    # the phantom close) inside the string; escape again.
-                    candidates.append(escape_ctrl_chars_in_strings(requoted))
-                renamed, kw_renamed = rename_reserved_kwargs(candidates[-1])
-                if kw_renamed:
-                    candidates.append(renamed)
-                for candidate in candidates:
+                for candidate in _rewrite_candidates(tool_text):
                     try:
                         module = ast.parse(candidate)
                         break
                     except (SyntaxError, ValueError):
                         continue
                 else:
-                    raise
+                    # The block as a whole is unrecoverable (e.g. a genuinely
+                    # ambiguous nested quote). Split it into top-level
+                    # segments and parse each on its own so one bad call does
+                    # not drop every parseable sibling — an agent loop that
+                    # gets no tool result at all otherwise stalls silently.
+                    # Non-streaming only: a partial streaming block is
+                    # legitimately unparsable and must keep waiting.
+                    salvaged = salvage_calls_from_unparsable_block(
+                        tool_text, rewrite=_rewrite_candidates
+                    )
+                    if not salvaged:
+                        raise
+                    return ExtractedToolCallInformation(
+                        tools_called=True,
+                        tool_calls=[
+                            self._restore_reserved(tc)
+                            for tc in salvage_tool_calls(salvaged)
+                        ],
+                        content=content,
+                    )
             parsed = getattr(module.body[0], "value", None)
             # An empty block ([]) must not report tools_called=True with zero
             # calls, so require at least one element.
@@ -225,12 +248,12 @@ class Lfm2ToolParser(ToolParser):
                 and parsed.elts
                 and all(isinstance(e, ast.Call) for e in parsed.elts)
             ):
-                tool_calls = [
-                    handle_single_tool(e)  # type: ignore
-                    for e in parsed.elts
-                ]
-                if kw_renamed:
-                    tool_calls = [self._restore_reserved(tc) for tc in tool_calls]
+                # Restoring reserved-keyword names is an exact inverse and a
+                # no-op when the rename rewrite did not fire.
+                converted = salvage_tool_calls(parsed.elts)
+                if not converted:
+                    raise UnexpectedAstError("No convertible tool call in the block")
+                tool_calls = [self._restore_reserved(tc) for tc in converted]
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=tool_calls,
@@ -358,10 +381,27 @@ class Lfm2ToolParser(ToolParser):
             # partial parse an implicit-concatenation misreading whose
             # streamed prefix could never be retracted. Withhold deltas
             # until the requote recovery above has produced sane text.
+            # Text that already parses has no broken string to wait for:
+            # adjacent literals ('ab' 'cd') are valid implicit concatenation
+            # the heuristic misreads, and withholding them would stall the
+            # stream on a value that is already correct.
             if contains_broken_string_literal(tool_text):
-                return _content_only_or_none()
+                try:
+                    ast.parse(tool_text)
+                except (SyntaxError, ValueError):
+                    return _content_only_or_none()
 
-            valid_and_added_text = make_valid_python(tool_text)
+            try:
+                valid_and_added_text = make_valid_python(tool_text)
+            except UnexpectedAstError:
+                # Brackets the model got structurally wrong fail at the same
+                # offset on every chunk, so an exception with a traceback per
+                # chunk buries the one line worth reading. A partial block may
+                # still be rescued by the requote recovery once its end
+                # arrives, so wait quietly until then and report the text once.
+                if has_end_in_current:
+                    logger.warning("Skipping malformed tool call block: %s", tool_text)
+                return _content_only_or_none()
             if valid_and_added_text is None:
                 return _content_only_or_none()
             valid_text, added_text = valid_and_added_text
@@ -372,10 +412,12 @@ class Lfm2ToolParser(ToolParser):
                 isinstance(e, ast.Call) for e in parsed.elts
             ):
                 raise UnexpectedAstError("Tool output must be a list of function calls")
-            tool_calls = [
-                handle_single_tool(e)  # type: ignore
-                for e in parsed.elts
-            ]
+            tool_calls = salvage_tool_calls(parsed.elts)
+            if not tool_calls:
+                # A partially arrived call routinely completes to a shape that
+                # cannot be converted yet; wait for more text rather than
+                # logging a failure on every chunk.
+                return _content_only_or_none()
             if kw_renamed:
                 tool_calls = [self._restore_reserved(tc) for tc in tool_calls]
 
