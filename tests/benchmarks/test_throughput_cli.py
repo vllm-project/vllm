@@ -17,6 +17,7 @@ from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from vllm.benchmarks.datasets import SampleRequest
 from vllm.benchmarks.throughput import (
     _run_vllm_chat_requests,
+    _to_serve_args,
     add_cli_args,
     assign_loras,
     get_requests,
@@ -277,3 +278,91 @@ def test_get_requests_allows_multimodal_on_plain_vllm_backend(
     requests = get_requests(args, hf_tokenizer)
     assert len(requests) == 3
     assert all(isinstance(r, SampleRequest) for r in requests)
+
+
+def test_to_serve_args_supports_mm_processor_flags() -> None:
+    """The adapter must serve callers without throughput's legacy flags.
+
+    ``bench mm-processor`` exposes neither --input-len/--output-len/--prefix-len
+    nor --backend, and leaves --random-prefix-len at its default of 0. The
+    adapter must not read the legacy flags unconditionally, and must keep the
+    explicit 0 instead of coercing it to None (which later crashed
+    RandomMultiModalDataset.get_prefix on ``None <= 0``).
+    """
+    args = SimpleNamespace(
+        random_input_len=32,
+        random_output_len=1,
+        random_prefix_len=0,
+    )
+    serve_args = _to_serve_args(args)
+
+    assert serve_args.random_input_len == 32
+    assert serve_args.random_output_len == 1
+    assert serve_args.random_prefix_len == 0
+    assert serve_args.backend == "vllm-chat"
+    assert serve_args.enable_multimodal_chat
+    assert serve_args.no_oversample is False
+
+
+def test_to_serve_args_keeps_legacy_flag_fallback() -> None:
+    """Callers that only set the legacy flags still get them mapped."""
+    args = SimpleNamespace(
+        input_len=256,
+        output_len=8,
+        prefix_len=16,
+        backend="vllm",
+    )
+    serve_args = _to_serve_args(args)
+
+    assert serve_args.random_input_len == 256
+    assert serve_args.random_output_len == 8
+    assert serve_args.random_prefix_len == 16
+    assert serve_args.backend == "vllm"
+    assert not serve_args.enable_multimodal_chat
+
+
+@pytest.mark.benchmark
+def test_get_requests_random_mm_with_mm_processor_args(
+    hf_tokenizer: PreTrainedTokenizerBase,
+) -> None:
+    """Regression: bench mm-processor's random-mm sampling must not crash.
+
+    get_requests feeds mm-processor's parsed args (no legacy length/backend
+    flags) through the shared get_samples dispatch. With the default
+    --random-prefix-len 0 this previously crashed inside
+    RandomMultiModalDataset.get_prefix with a TypeError.
+    """
+    from vllm.benchmarks.mm_processor import add_cli_args as add_mm_cli_args
+
+    parser = FlexibleArgumentParser()
+    add_mm_cli_args(parser)
+    args = parser.parse_args(
+        [
+            "--dataset-name",
+            "random-mm",
+            "--num-prompts",
+            "3",
+            "--random-input-len",
+            "32",
+            "--random-output-len",
+            "1",
+            "--random-mm-base-items-per-request",
+            "1",
+            "--random-mm-num-mm-items-range-ratio",
+            "0",
+            "--random-mm-limit-mm-per-prompt",
+            '{"image": 1}',
+            "--random-mm-bucket-config",
+            "{(224, 224, 1): 1.0}",
+        ]
+    )
+
+    requests = get_requests(args, hf_tokenizer)
+    assert len(requests) == 3
+    assert all(isinstance(r, SampleRequest) for r in requests)
+    # mm-processor drives llm.chat, so prompts must be chat-formatted with
+    # multimodal content attached.
+    for req in requests:
+        assert isinstance(req.prompt, list)
+        assert req.prompt[0]["role"] == "user"
+        assert any(item.get("type") == "image_url" for item in req.prompt[0]["content"])
