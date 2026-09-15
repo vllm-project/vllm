@@ -283,6 +283,15 @@ def rocm_aiter_fused_experts(
     topk_weights = topk_weights.to(torch.float32)
     topk_ids = topk_ids.to(torch.int32)
 
+    # VLLM_MOE_SKIP_PADDING (on by default) makes the topk kernels write -1
+    # into topk_ids for cudagraph padding rows. AITER indexes the expert
+    # weights with these ids directly, so the sentinel has to be neutralized
+    # here: route padding rows to expert 0 with zero weight, contributing
+    # nothing to the output. Done branchlessly to stay cudagraph-capturable.
+    is_padding = topk_ids < 0
+    topk_ids = torch.where(is_padding, torch.zeros_like(topk_ids), topk_ids)
+    topk_weights = torch.where(is_padding, torch.zeros_like(topk_weights), topk_weights)
+
     # w8a8 per-channel quantization
     if (
         quant_config.per_act_token_quant
