@@ -62,6 +62,12 @@ INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET = 5
 _CACHED_MARKER_KEY = "_vllm_space_marker_cache"
 _NOT_CACHED = "__not_computed__"
 
+_CACHED_DECODE_KEY = "_vllm_token_decode_cache"
+# Top-k logprob tokens are highly repeated across steps and requests, so a
+# modest cache captures most hits. Cleared wholesale on overflow.
+_CACHED_DECODE_MAX_SIZE = 4096
+_DECODE_MISS = object()
+
 
 def _get_leading_space_marker(tokenizer: TokenizerLike) -> str | None:
     """Read the space marker from the tokenizer's pre_tokenizer config.
@@ -140,6 +146,26 @@ def convert_prompt_ids_to_tokens(
     return new_tokens, prefix_offset, read_offset
 
 
+def _decode_single_token(tokenizer: TokenizerLike, tid: int) -> str:
+    """Decode one token id, caching the result on the tokenizer.
+
+    decode() on a single id is a fixed point of the tokenizer, but costs a
+    Python->Rust round trip (~5-20us), which dominates logprobs detokenization
+    when the same top-k ids recur across steps.
+    """
+    cache = getattr(tokenizer, _CACHED_DECODE_KEY, None)
+    if cache is None:
+        cache = {}
+        setattr(tokenizer, _CACHED_DECODE_KEY, cache)
+    decoded = cache.get(tid, _DECODE_MISS)
+    if decoded is _DECODE_MISS:
+        decoded = tokenizer.decode([tid]) or ""
+        if len(cache) >= _CACHED_DECODE_MAX_SIZE:
+            cache.clear()
+        cache[tid] = decoded
+    return decoded
+
+
 def convert_ids_list_to_tokens(
     tokenizer: TokenizerLike,
     token_ids: list[int],
@@ -162,10 +188,10 @@ def convert_ids_list_to_tokens(
         return []
     marker = _get_leading_space_marker(tokenizer)
     if marker is None:
-        return [tokenizer.decode([tid]) or "" for tid in token_ids]
+        return [_decode_single_token(tokenizer, tid) for tid in token_ids]
     raw_tokens = tokenizer.convert_ids_to_tokens(token_ids)
     return [
-        _restore_leading_spaces(raw, tokenizer.decode([tid]) or "", marker)
+        _restore_leading_spaces(raw, _decode_single_token(tokenizer, tid), marker)
         for tid, raw in zip(token_ids, raw_tokens)
     ]
 
