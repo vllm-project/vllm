@@ -1212,8 +1212,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         qkvz/ba layout.
 
         For decode-only (no spec, no prefill) interleaved-GQA layouts,
-        dispatches directly to ``_forward_core_decode_aiter``. Otherwise unpacks
-        the packed layout and falls through to ``_forward_core``.
+        dispatches directly to ``_forward_core_decode_aiter`` unless recovery
+        from a previous speculative step is required. Otherwise unpacks the
+        packed layout and falls through to ``_forward_core`` for state recovery.
 
         Args:
             qkvz: packed [q, k, v, z] projection (num_tokens, qkvz_dim)
@@ -1241,6 +1242,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if (
             self.gqa_interleaved_layout
             and attn_metadata.spec_sequence_masks is None
+            and attn_metadata.spec_decode_src_indices is None
             and attn_metadata.num_prefills == 0
             and attn_metadata.num_decodes > 0
         ):
@@ -1325,6 +1327,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
         num_accepted_tokens = attn_metadata.num_accepted_tokens
+        spec_decode_src_indices = attn_metadata.spec_decode_src_indices
+
+        if spec_decode_src_indices is not None:
+            assert non_spec_state_indices_tensor is not None
+            num_corrected_states = spec_decode_src_indices.shape[0]
+            destination_indices = non_spec_state_indices_tensor[:num_corrected_states]
+            ssm_state[destination_indices] = ssm_state[spec_decode_src_indices]
 
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         b = b[:num_actual_tokens]
@@ -1373,6 +1382,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if attn_metadata.num_prefills > 0:
             assert mixed_qkv_non_spec is not None
             mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
+            conv_num_accepted = (
+                attn_metadata.non_spec_num_accepted
+                if attn_metadata.non_spec_num_accepted is not None
+                else num_accepted_tokens
+            )
             # - "cache_indices" updates the conv_state cache in positions
             #   pointed to by "state_indices_tensor"
             mixed_qkv_non_spec = causal_conv1d_fn(
@@ -1384,10 +1398,14 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 has_initial_state=has_initial_state,
                 cache_indices=non_spec_state_indices_tensor,
                 query_start_loc=non_spec_query_start_loc,
+                num_accepted_tokens=conv_num_accepted,
                 metadata=attn_metadata,
             ).transpose(0, 1)
         elif attn_metadata.num_decodes > 0:
             assert mixed_qkv_non_spec is not None
+            conv_num_accepted = (
+                num_accepted_tokens if spec_decode_src_indices is not None else None
+            )
             mixed_qkv_non_spec = causal_conv1d_update(
                 mixed_qkv_non_spec,
                 conv_state,
@@ -1397,6 +1415,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 conv_state_indices=non_spec_state_indices_tensor[  # type: ignore[index]
                     : attn_metadata.num_actual_tokens  # type: ignore[attr-defined]
                 ],
+                num_accepted_tokens=conv_num_accepted,
                 validate_data=True,
             )
         else:
@@ -1676,6 +1695,14 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
+        num_accepted_tokens = attn_metadata.num_accepted_tokens
+        spec_decode_src_indices = attn_metadata.spec_decode_src_indices
+
+        if spec_decode_src_indices is not None:
+            assert non_spec_state_indices_tensor is not None
+            num_corrected_states = spec_decode_src_indices.shape[0]
+            destination_indices = non_spec_state_indices_tensor[:num_corrected_states]
+            ssm_state[destination_indices] = ssm_state[spec_decode_src_indices]
 
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         b = b[:num_actual_tokens]
@@ -1691,6 +1718,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.conv1d.bias,
             self.activation,
             conv_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
+            num_accepted_tokens=num_accepted_tokens,
             validate_data=False,
         )
         out_buf = core_attn_out[:num_actual_tokens].unsqueeze(1)
