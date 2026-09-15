@@ -482,7 +482,10 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         # Core configuration
         self._vllm_config = vllm_config
         self._role = role
-        self._block_size = vllm_config.cache_config.block_size
+        self._block_size = (
+            vllm_config.cache_config.block_size
+            * vllm_config.parallel_config.decode_context_parallel_size
+        )
         self._use_mla = vllm_config.model_config.use_mla
         self._model_config = vllm_config.model_config
 
