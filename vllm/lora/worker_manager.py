@@ -17,6 +17,7 @@ from vllm.lora.model_manager import (
     create_lora_manager,
 )
 from vllm.lora.peft_helper import PEFTHelper
+from vllm.lora.punica_wrapper import PunicaWrapperBase
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -200,6 +201,9 @@ class WorkerLoRAManager:
             self._adapter_manager.supports_mm
             and self._adapter_manager.supports_tower_connector_lora
         )
+
+    def get_lora_logits_wrapper(self) -> PunicaWrapperBase | None:
+        return self._adapter_manager.get_lora_logits_wrapper()
 
     def _apply_adapters(self, adapter_requests: set[Any]) -> None:
         existing_adapters = self.list_adapters()
