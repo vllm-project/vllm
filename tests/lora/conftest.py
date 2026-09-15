@@ -295,11 +295,6 @@ def skywork_qwen3_reward_lora_files():
 
 
 @pytest.fixture(scope="session")
-def tinyllama_lora_files():
-    return hf_api().snapshot_download(repo_id="jashing/tinyllama-colorist-lora")
-
-
-@pytest.fixture(scope="session")
 def deepseekv2_lora_files():
     return hf_api().snapshot_download(repo_id="wuchen01/DeepSeek-V2-Lite-Chat-All-LoRA")
 
