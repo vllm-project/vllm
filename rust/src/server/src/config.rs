@@ -296,7 +296,7 @@ impl Config {
             );
         }
         self.transport_mode.validate()?;
-        if self.grpc_port.is_none() && self.grpc_services != GrpcServiceSelection::All {
+        if self.grpc_port.is_none() && self.grpc_services != GrpcServiceSelection::default() {
             bail!("--grpc-services requires --grpc-port");
         }
 

@@ -192,8 +192,23 @@ HEALTH_CHECK = "/grpc.health.v1.Health/Check"
 SERVING = b"\x08\x01"
 
 
-def test_default_mounts_every_service(tmp_path: Path) -> None:
+CONTROL_ALIASES = ("/vllm.Control/IsPaused", "/vllm.Control/GetKvEventSources")
+
+
+def test_default_mounts_only_configured_services(tmp_path: Path) -> None:
     with serve([], tmp_path / "vllm-rs.log") as server, channel(server) as chan:
+        assert mounted_services(chan) == [INFERENCE, CONTROL]
+        for path in ("/vllm.RlControl/IsPaused", "/vllm.KvTransfer/GetKvEventSources"):
+            assert call_error(chan, path).code() == grpc.StatusCode.UNIMPLEMENTED, path
+        for path in CONTROL_ALIASES:
+            assert call_error(chan, path).code() == grpc.StatusCode.UNIMPLEMENTED, path
+
+
+def test_all_mounts_every_service_and_the_control_aliases(tmp_path: Path) -> None:
+    with (
+        serve(["--grpc-services", "all"], tmp_path / "vllm-rs.log") as server,
+        channel(server) as chan,
+    ):
         assert mounted_services(chan) == [INFERENCE, CONTROL, KV_TRANSFER, RL_CONTROL]
         for service in SERVICE_NAMES:
             status = call(chan, HEALTH_CHECK, _health_request(service))
@@ -224,10 +239,10 @@ def test_explicit_list_unmounts_the_rest(tmp_path: Path) -> None:
         ):
             assert call_error(chan, path).code() == grpc.StatusCode.UNIMPLEMENTED, path
 
-        for path in ("/vllm.Control/IsPaused", "/vllm.Control/GetKvEventSources"):
+        for path in CONTROL_ALIASES:
             error = call_error(chan, path)
             assert error.code() == grpc.StatusCode.UNIMPLEMENTED, path
-            assert "--grpc-services" in (error.details() or ""), path
+            assert "--grpc-services all" in (error.details() or ""), path
 
         assert call(chan, HEALTH_CHECK, _health_request("vllm.Control")) == SERVING
         for service in ("vllm.KvTransfer", "vllm.RlControl"):
@@ -242,6 +257,10 @@ def test_configured_follows_engine_config(tmp_path: Path) -> None:
         call(chan, "/vllm.RlControl/IsSleeping")
         error = call_error(chan, "/vllm.KvTransfer/GetKvEventSources")
         assert error.code() == grpc.StatusCode.UNIMPLEMENTED
+
+        error = call_error(chan, "/vllm.Control/IsSleeping")
+        assert error.code() == grpc.StatusCode.UNIMPLEMENTED
+        assert "--grpc-services all" in (error.details() or "")
 
 
 def test_unconfigured_explicit_service_fails_startup(tmp_path: Path) -> None:

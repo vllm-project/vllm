@@ -66,7 +66,7 @@ use super::{
     ControlGrpcService, ControlServiceImpl, InferenceGrpcService, InferenceServiceImpl,
     KvTransferGrpcService, KvTransferServiceImpl, RlControlGrpcService, RlControlServiceImpl, pb,
 };
-use crate::grpc_services::{GrpcServiceSelection, GrpcServices};
+use crate::grpc_services::{GrpcMount, GrpcServiceSelection, GrpcServices};
 use crate::listener::{Listener, MaybeTlsListener};
 use crate::state::AppState;
 use crate::tls;
@@ -342,25 +342,25 @@ fn multimodal_backend_with_limits(
 /// them all to a test server.
 struct TestServices {
     state: AppState,
-    mounted: GrpcServices,
+    mount: GrpcMount,
 }
 
 impl TestServices {
     fn new(state: AppState) -> Self {
         Self {
             state,
-            mounted: GrpcServices::all(),
+            mount: GrpcMount::all(),
         }
     }
 
-    fn mounting(mut self, mounted: GrpcServices) -> Self {
-        self.mounted = mounted;
+    fn mounting(mut self, mount: GrpcMount) -> Self {
+        self.mount = mount;
         self
     }
 
     fn install(self, builder: &mut TonicServer) -> Router {
-        let Self { state, mounted } = self;
-        let state = Arc::new(state.with_grpc_services(mounted));
+        let Self { state, mount } = self;
+        let state = Arc::new(state.with_grpc_mount(mount));
         let mounted = state.grpc_services();
         let kv_transfer_impl = Arc::new(KvTransferServiceImpl::new(state.clone()));
         let rl_control_impl = Arc::new(RlControlServiceImpl::new(state.clone()));
@@ -504,7 +504,7 @@ async fn start_grpc_test_server(
     shutdown: tokio_util::sync::CancellationToken,
 ) -> (Channel, tokio::task::JoinHandle<()>) {
     let (health_reporter, health_service) = health_reporter();
-    let mounted = services.mounted;
+    let mounted = services.mount.services();
     super::mark_serving(&health_reporter, mounted).await;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
@@ -2002,13 +2002,16 @@ async fn control_reports_server_and_model_info() {
 async fn unmounted_services_answer_unimplemented() {
     let (services, engine_health, _engine_task) =
         setup_grpc_service(b"engine-grpc-service-set", default_stream_output_specs()).await;
-    let mounted = GrpcServiceSelection::Configured
+    let mount = GrpcServiceSelection::Configured
         .resolve(&services.state.engine_core_client().ready_responses())
         .expect("configured selection resolves");
-    assert_eq!(mounted, GrpcServices::INFERENCE | GrpcServices::CONTROL);
+    assert_eq!(
+        mount.services(),
+        GrpcServices::INFERENCE | GrpcServices::CONTROL
+    );
 
     let (channel, server_task) = start_grpc_test_server(
-        services.mounting(mounted),
+        services.mounting(mount),
         engine_health,
         tokio_util::sync::CancellationToken::new(),
     )
@@ -2070,13 +2073,13 @@ async fn deprecated_control_aliases_match_the_moved_services() {
         },
     )
     .await;
-    let mounted = GrpcServiceSelection::Configured
+    let mount = GrpcServiceSelection::All
         .resolve(&services.state.engine_core_client().ready_responses())
-        .expect("configured selection resolves");
-    assert_eq!(mounted, GrpcServices::all());
+        .expect("all resolves");
+    assert_eq!(mount, GrpcMount::all());
 
     let (channel, server_task) = start_grpc_test_server(
-        services.mounting(mounted),
+        services.mounting(mount),
         engine_health,
         tokio_util::sync::CancellationToken::new(),
     )
@@ -2116,44 +2119,78 @@ async fn deprecated_control_aliases_match_the_moved_services() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 #[allow(deprecated)]
-async fn deprecated_control_aliases_follow_the_mounted_set() {
-    let (services, engine_health, _engine_task) = setup_grpc_service(
-        b"engine-grpc-deprecated-unmounted",
-        default_stream_output_specs(),
+async fn deprecated_control_aliases_are_only_served_by_all() {
+    let mut ready = default_ready_response();
+    ready.enable_sleep_mode = true;
+    ready.kv_events_config = Some(KvEventsConfig {
+        enable_kv_cache_events: true,
+        publisher: "zmq".to_string(),
+        endpoint: "tcp://*:5559".to_string(),
+        replay_endpoint: Some("tcp://*:5560".to_string()),
+        buffer_steps: 10_000,
+        hwm: 100_000,
+        max_queue_size: 100_000,
+        topic: "kv".to_string(),
+    });
+    let (services, engine_health, engine_task) = setup_grpc_service_with_engine_script(
+        b"engine-grpc-deprecated-split".to_vec(),
+        ready,
+        Arc::new(FakeTextBackend),
+        |dealer, push| {
+            boxed_test_future(async move {
+                reply_utility_bool(dealer, push, "is_scheduler_paused", false).await;
+            })
+        },
     )
     .await;
+    let mount = GrpcServiceSelection::Explicit(GrpcServices::all())
+        .resolve(&services.state.engine_core_client().ready_responses())
+        .expect("every service is configured");
+    assert_eq!(mount, GrpcMount::split(GrpcServices::all()));
+
     let (channel, server_task) = start_grpc_test_server(
-        services.mounting(GrpcServices::CONTROL | GrpcServices::INFERENCE),
+        services.mounting(mount),
         engine_health,
         tokio_util::sync::CancellationToken::new(),
     )
     .await;
-    let mut control_client = ControlClient::new(channel);
+    let mut control_client = ControlClient::new(channel.clone());
 
     let kv_transfer = control_client
         .get_kv_event_sources(pb::GetKvEventSourcesRequest {})
         .await
-        .expect_err("KvTransfer is not mounted");
+        .expect_err("the Control alias is off although KvTransfer is mounted");
     assert_eq!(kv_transfer.code(), tonic::Code::Unimplemented);
     assert!(
         kv_transfer.message().contains("vllm.KvTransfer")
-            && kv_transfer.message().contains("--grpc-services"),
+            && kv_transfer.message().contains("--grpc-services all"),
         "unexpected message: {}",
         kv_transfer.message()
     );
+    KvTransferClient::new(channel.clone())
+        .get_kv_event_sources(pb::GetKvEventSourcesRequest {})
+        .await
+        .expect("KvTransfer serves KV event sources on its own prefix");
 
     let rl_control = control_client
         .is_paused(pb::IsPausedRequest {})
         .await
-        .expect_err("RlControl is not mounted");
+        .expect_err("the Control alias is off although RlControl is mounted");
     assert_eq!(rl_control.code(), tonic::Code::Unimplemented);
     assert!(
         rl_control.message().contains("vllm.RlControl")
-            && rl_control.message().contains("--grpc-services"),
+            && rl_control.message().contains("--grpc-services all"),
         "unexpected message: {}",
         rl_control.message()
     );
+    let paused = RlControlClient::new(channel)
+        .is_paused(pb::IsPausedRequest {})
+        .await
+        .expect("RlControl serves IsPaused on its own prefix")
+        .into_inner();
+    assert!(!paused.paused);
 
+    engine_task.await.expect("mock engine task");
     server_task.abort();
 }
 
@@ -2424,7 +2461,7 @@ async fn control_aggregates_multi_engine_capacity() {
         Arc::new(FakeTextBackend) as Arc<dyn ChatTextBackend>,
     );
     let state =
-        AppState::new(vec!["test-model".to_string()], chat).with_grpc_services(GrpcServices::all());
+        AppState::new(vec!["test-model".to_string()], chat).with_grpc_mount(GrpcMount::all());
     let state = Arc::new(state);
     let service = ControlServiceImpl::new(
         state.clone(),
@@ -2565,7 +2602,9 @@ async fn grpc_health_reports_only_mounted_services() {
     let (services, engine_health, _engine_task) =
         setup_grpc_service(b"engine-grpc-health-subset", default_stream_output_specs()).await;
     let (channel, server_task) = start_grpc_test_server(
-        services.mounting(GrpcServices::INFERENCE | GrpcServices::CONTROL),
+        services.mounting(GrpcMount::split(
+            GrpcServices::INFERENCE | GrpcServices::CONTROL,
+        )),
         engine_health,
         tokio_util::sync::CancellationToken::new(),
     )

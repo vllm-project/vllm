@@ -185,7 +185,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         language_model_only: false,
                         max_logprobs: None,
                         grpc_port: None,
-                        grpc_services: All,
+                        grpc_services: Configured,
                         shutdown_timeout: 0,
                         http_timeout_keep_alive: None,
                         chat_template: None,
@@ -580,7 +580,8 @@ fn serve_passes_grpc_services_into_config() {
         panic!("expected serve args");
     };
     let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
-    assert_eq!(config.grpc_services, GrpcServiceSelection::All);
+    assert_eq!(config.grpc_services, GrpcServiceSelection::Configured);
+    config.validate().expect("the default selection is valid without a gRPC port");
 
     let cli = Cli::try_parse_from([
         "vllm-rs",
@@ -644,7 +645,7 @@ fn serve_rejects_grpc_services_without_grpc_port() {
         "serve",
         "Qwen/Qwen3-0.6B",
         "--grpc-services",
-        "configured",
+        "all",
     ])
     .unwrap();
     let Command::Serve(args) = cli.command else {
@@ -1130,7 +1131,7 @@ fn frontend_args_accept_json() {
                         language_model_only: false,
                         max_logprobs: None,
                         grpc_port: None,
-                        grpc_services: All,
+                        grpc_services: Configured,
                         shutdown_timeout: 0,
                         http_timeout_keep_alive: None,
                         chat_template: None,
@@ -1731,7 +1732,7 @@ fn serve_args_accept_handshake_aliases() {
                         language_model_only: false,
                         max_logprobs: None,
                         grpc_port: None,
-                        grpc_services: All,
+                        grpc_services: Configured,
                         shutdown_timeout: 0,
                         http_timeout_keep_alive: None,
                         chat_template: None,
@@ -1912,7 +1913,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             api_keys: [],
             disable_log_stats: false,
             grpc_port: None,
-            grpc_services: All,
+            grpc_services: Configured,
             shutdown_timeout: 0ns,
             keep_alive_timeout: 5s,
             profiler: None,
@@ -2002,7 +2003,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             api_keys: [],
             disable_log_stats: false,
             grpc_port: None,
-            grpc_services: All,
+            grpc_services: Configured,
             shutdown_timeout: 0ns,
             keep_alive_timeout: 5s,
             profiler: None,
@@ -2113,7 +2114,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             api_keys: [],
             disable_log_stats: false,
             grpc_port: None,
-            grpc_services: All,
+            grpc_services: Configured,
             shutdown_timeout: 0ns,
             keep_alive_timeout: 5s,
             profiler: None,

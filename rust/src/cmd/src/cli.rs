@@ -248,11 +248,12 @@ pub struct SharedRuntimeArgs {
     #[arg(long)]
     #[serde(default)]
     pub grpc_port: Option<u16>,
-    /// gRPC services to mount on `--grpc-port`: `all` (the default) mounts
-    /// every service, `configured` derives them from the engine configuration,
-    /// or pass a comma-separated list of `inference`, `control`,
-    /// `kv-transfer`, `rl-control`. A list naming a service the engines are not
-    /// configured for fails startup.
+    /// gRPC services to mount on `--grpc-port`: `configured` (the default)
+    /// derives them from the engine configuration, `all` mounts every service
+    /// and serves the deprecated `Control` aliases of the RPCs that moved to
+    /// `KvTransfer` and `RlControl`, or pass a comma-separated list of
+    /// `inference`, `control`, `kv-transfer`, `rl-control`. A list naming a
+    /// service the engines are not configured for fails startup.
     #[arg(long, default_value_t)]
     #[serde(default)]
     pub grpc_services: GrpcServiceSelection,

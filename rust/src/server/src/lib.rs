@@ -32,7 +32,7 @@ pub use config::{
     ApiServerOptions, Config, CoordinatorMode, CorsConfig, DEFAULT_KEEP_ALIVE_TIMEOUT,
     HttpListenerMode, LoraModulePath, TlsConfig,
 };
-pub use grpc_services::{GrpcServiceSelection, GrpcServices, GrpcServicesParseError};
+pub use grpc_services::{GrpcMount, GrpcServiceSelection, GrpcServices, GrpcServicesParseError};
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
@@ -135,7 +135,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     .await
     .context("failed to connect to engine core")?;
 
-    let grpc_services = config
+    let grpc_mount = config
         .grpc_services
         .resolve(&client.ready_responses())
         .context("invalid --grpc-services selection")?;
@@ -155,7 +155,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
             .with_api_keys(config.api_keys.clone())
             .with_cors(config.cors.clone())
             .with_profiler(config.profiler.clone())
-            .with_grpc_services(grpc_services),
+            .with_grpc_mount(grpc_mount),
     );
 
     // Load operator-configured static LoRA adapters before serving, failing

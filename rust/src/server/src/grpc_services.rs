@@ -156,14 +156,55 @@ impl FromStr for GrpcServices {
     }
 }
 
+/// What the frontend mounts on its gRPC port once `--grpc-services` is
+/// resolved against the engines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GrpcMount {
+    services: GrpcServices,
+    control_aliases: bool,
+}
+
+impl GrpcMount {
+    /// Every service, plus the deprecated `Control` aliases of the RPCs that
+    /// moved to `KvTransfer` and `RlControl`.
+    pub fn all() -> Self {
+        Self {
+            services: GrpcServices::all(),
+            control_aliases: true,
+        }
+    }
+
+    /// Exactly these services, with the deprecated `Control` aliases answering
+    /// `Unimplemented` so each RPC is reachable only under its own service
+    /// prefix.
+    pub fn split(services: GrpcServices) -> Self {
+        Self {
+            services,
+            control_aliases: false,
+        }
+    }
+
+    /// The mounted services.
+    pub fn services(self) -> GrpcServices {
+        self.services
+    }
+
+    /// Whether the deprecated `Control` aliases delegate to `KvTransfer` and
+    /// `RlControl`.
+    pub fn control_aliases(self) -> bool {
+        self.control_aliases
+    }
+}
+
 /// What `--grpc-services` asked for, before the engines report what they
 /// support.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GrpcServiceSelection {
-    /// Mount every service, whatever the engines are configured for.
-    #[default]
+    /// Mount every service, whatever the engines are configured for, and serve
+    /// the deprecated `Control` aliases.
     All,
     /// Derive the set from the engine ready responses.
+    #[default]
     Configured,
     /// Serve exactly these services.
     Explicit(GrpcServices),
@@ -172,10 +213,10 @@ pub enum GrpcServiceSelection {
 impl GrpcServiceSelection {
     /// Resolve the selection against the engine ready responses, rejecting an
     /// explicit service the engines are not configured for.
-    pub fn resolve(self, ready: &[&EngineCoreReadyResponse]) -> Result<GrpcServices> {
+    pub fn resolve(self, ready: &[&EngineCoreReadyResponse]) -> Result<GrpcMount> {
         let services = match self {
-            Self::All => return Ok(GrpcServices::all()),
-            Self::Configured => return Ok(GrpcServices::configured(ready)),
+            Self::All => return Ok(GrpcMount::all()),
+            Self::Configured => return Ok(GrpcMount::split(GrpcServices::configured(ready))),
             Self::Explicit(services) => services,
         };
         if services.is_empty() {
@@ -193,7 +234,7 @@ impl GrpcServiceSelection {
                  transfer (--weight-transfer-config) or sleep mode (--enable-sleep-mode) configured"
             );
         }
-        Ok(services)
+        Ok(GrpcMount::split(services))
     }
 }
 
@@ -516,12 +557,12 @@ mod tests {
                 GrpcServiceSelection::Configured
                     .resolve(&ready)
                     .expect("configured never fails"),
-                expected,
+                GrpcMount::split(expected),
                 "resolved configured set for {label}"
             );
             assert_eq!(
                 GrpcServiceSelection::All.resolve(&ready).expect("all never fails"),
-                GrpcServices::all(),
+                GrpcMount::all(),
                 "all mounts everything for {label}"
             );
         }
@@ -549,12 +590,12 @@ mod tests {
         let inference = GrpcServiceSelection::Explicit(GrpcServices::INFERENCE);
         assert_eq!(
             inference.resolve(&ready).expect("inference is always available"),
-            GrpcServices::INFERENCE
+            GrpcMount::split(GrpcServices::INFERENCE)
         );
 
         assert_eq!(
             GrpcServiceSelection::All.resolve(&ready).expect("all skips validation"),
-            GrpcServices::all()
+            GrpcMount::all()
         );
     }
 
@@ -605,13 +646,47 @@ mod tests {
             GrpcServiceSelection::Explicit(GrpcServices::KV_TRANSFER)
                 .resolve(&ready)
                 .expect("kv-transfer is configured"),
-            GrpcServices::KV_TRANSFER
+            GrpcMount::split(GrpcServices::KV_TRANSFER)
         );
         assert_eq!(
             GrpcServiceSelection::Configured
                 .resolve(&ready)
                 .expect("configured never fails"),
-            GrpcServices::all()
+            GrpcMount::split(GrpcServices::all())
+        );
+    }
+
+    #[test]
+    fn only_all_serves_the_control_aliases() {
+        let configured = [EngineCoreReadyResponse {
+            kv_events_config: Some(kv_events(true)),
+            enable_sleep_mode: true,
+            ..default_ready_response()
+        }];
+        let ready: Vec<&EngineCoreReadyResponse> = configured.iter().collect();
+
+        let all = GrpcServiceSelection::All.resolve(&ready).expect("all never fails");
+        assert!(all.control_aliases());
+        assert_eq!(all.services(), GrpcServices::all());
+
+        for selection in [
+            GrpcServiceSelection::Configured,
+            GrpcServiceSelection::Explicit(GrpcServices::all()),
+        ] {
+            let mount = selection.resolve(&ready).expect("every service is configured");
+            assert_eq!(mount.services(), GrpcServices::all(), "{selection}");
+            assert!(
+                !mount.control_aliases(),
+                "{selection} must not serve the deprecated Control aliases"
+            );
+        }
+    }
+
+    #[test]
+    fn the_default_selection_is_configured() {
+        assert_eq!(
+            GrpcServiceSelection::default(),
+            GrpcServiceSelection::Configured
         );
     }
 }

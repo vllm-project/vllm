@@ -41,29 +41,27 @@ impl ControlServiceImpl {
     }
 
     /// The `KvTransfer` implementation behind the deprecated `Control` aliases,
-    /// or `Unimplemented` when `KvTransfer` is not mounted.
+    /// or `Unimplemented` unless `--grpc-services all` serves them.
     fn kv_transfer(&self) -> Result<&KvTransferServiceImpl, Status> {
-        self.require_mounted(GrpcServices::KV_TRANSFER)?;
-        Ok(&self.kv_transfer)
+        self.aliased(&self.kv_transfer, GrpcServices::KV_TRANSFER)
     }
 
     /// The `RlControl` implementation behind the deprecated `Control` aliases,
-    /// or `Unimplemented` when `RlControl` is not mounted.
+    /// or `Unimplemented` unless `--grpc-services all` serves them.
     fn rl_control(&self) -> Result<&RlControlServiceImpl, Status> {
-        self.require_mounted(GrpcServices::RL_CONTROL)?;
-        Ok(&self.rl_control)
+        self.aliased(&self.rl_control, GrpcServices::RL_CONTROL)
     }
 
-    fn require_mounted(&self, flag: GrpcServices) -> Result<(), Status> {
-        if self.state.grpc_services().contains(flag) {
-            return Ok(());
+    fn aliased<'a, T>(&self, target: &'a T, flag: GrpcServices) -> Result<&'a T, Status> {
+        if self.state.grpc_control_aliases() {
+            return Ok(target);
         }
         let entry = service_entry(flag)
             .ok_or_else(|| Status::unimplemented("the requested service is not mounted"))?;
         Err(Status::unimplemented(format!(
-            "{} is not mounted on this port, so its deprecated vllm.Control aliases are \
-             unavailable; add `{}` to --grpc-services to serve them",
-            entry.service_name, entry.token,
+            "the deprecated vllm.Control aliases for {} are only served with `--grpc-services \
+             all`; call {} directly",
+            entry.service_name, entry.service_name,
         )))
     }
 
