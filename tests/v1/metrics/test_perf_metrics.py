@@ -135,7 +135,56 @@ def test_base_config_parser():
     assert result.num_attention_heads == 16
     assert result.num_hidden_layers == 24
     assert result.weight_byte_size == 2  # float16 is 2 bytes
-    assert result.activation_byte_size == 2  # default activation size
+    assert result.activation_byte_size == 2  # float16 activations are 2 bytes
+
+
+@pytest.mark.parametrize(
+    "model_dtype,expected_byte_size",
+    [("float16", 2), ("bfloat16", 2), ("float32", 4)],
+)
+def test_base_config_parser_activation_byte_size_follows_dtype(
+    model_dtype: str, expected_byte_size: int
+):
+    """Activation traffic is sized from the model's compute dtype.
+
+    Activations are produced in the model dtype, so pinning them to 2 bytes
+    under-reported memory traffic by half for a float32 model while that same
+    model's weight traffic was sized correctly.
+    """
+    hf_config = Qwen3Config(
+        hidden_size=2048,
+        num_attention_heads=16,
+        num_hidden_layers=24,
+    )
+    vllm_config = create_mock_vllm_config(hf_config, model_dtype=model_dtype)
+
+    result = BaseConfigParser().parse(ParsedArgs(), vllm_config)
+
+    assert result.activation_byte_size == expected_byte_size
+    assert result.weight_byte_size == expected_byte_size
+
+
+def test_attention_read_bytes_scale_with_activation_dtype():
+    """A float32 model reads twice the activation bytes of a bfloat16 one."""
+    hf_config = Qwen3Config(
+        hidden_size=2048,
+        num_attention_heads=16,
+        num_key_value_heads=16,
+        num_hidden_layers=4,
+    )
+    ctx = ExecutionContext.from_single_request(
+        num_tokens=128, context_len=128, is_prefill=True
+    )
+
+    bf16 = AttentionMetrics.from_vllm_config(
+        create_mock_vllm_config(hf_config, model_dtype="bfloat16")
+    ).get_read_bytes_breakdown(ctx)
+    fp32 = AttentionMetrics.from_vllm_config(
+        create_mock_vllm_config(hf_config, model_dtype="float32")
+    ).get_read_bytes_breakdown(ctx)
+
+    # qkv_input is pure activation traffic, so it doubles exactly.
+    assert fp32["qkv_input"] == 2 * bf16["qkv_input"]
 
 
 def test_base_attention_config_parser_with_gqa():
