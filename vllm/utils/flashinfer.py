@@ -247,6 +247,9 @@ flashinfer_convert_sf_to_mma_layout = _lazy_import_wrapper(
 flashinfer_b12x_fused_moe = _lazy_import_wrapper(
     "flashinfer.fused_moe", "b12x_fused_moe"
 )
+flashinfer_get_hybrid_num_tokens_buckets = _lazy_import_wrapper(
+    "flashinfer.fused_moe.utils", "get_hybrid_num_tokens_buckets"
+)
 trtllm_fp4_block_scale_moe = _lazy_import_wrapper(
     "flashinfer", "trtllm_fp4_block_scale_moe"
 )
@@ -263,6 +266,14 @@ flashinfer_trtllm_batch_decode_sparse_mla_dsv4 = _lazy_import_wrapper(
 flashinfer_xqa_batch_decode_with_kv_cache = _lazy_import_wrapper(
     "flashinfer.decode",
     "xqa_batch_decode_with_kv_cache",
+)
+flashinfer_recurrent_kda = _lazy_import_wrapper(
+    "flashinfer.kda",
+    "recurrent_kda",
+)
+flashinfer_fused_kda_decode = _lazy_import_wrapper(
+    "flashinfer.kda_decode",
+    "fused_kda_decode",
 )
 
 
@@ -396,6 +407,28 @@ def has_flashinfer_bf16_fp4() -> bool:
     mod = _get_submodule("flashinfer.gemm")
     return mod is not None and all(
         hasattr(mod, name) for name in ("mm_bf16_fp4", "prepare_bf16_fp4_weights")
+    )
+
+
+@functools.cache
+def has_flashinfer_recurrent_kda() -> bool:
+    """Return whether FlashInfer recurrent KDA prefill is available."""
+    if not has_flashinfer():
+        return False
+    mod = _get_submodule("flashinfer.kda")
+    return mod is not None and callable(getattr(mod, "recurrent_kda", None))
+
+
+@functools.cache
+def has_flashinfer_fused_kda_decode() -> bool:
+    """Return whether FlashInfer fused KDA decode is available."""
+    if not has_flashinfer():
+        return False
+    mod = _get_submodule("flashinfer.kda_decode")
+    return (
+        mod is not None
+        and bool(getattr(mod, "_FUSED_KDA_DECODE_AVAILABLE", False))
+        and callable(getattr(mod, "fused_kda_decode", None))
     )
 
 
@@ -708,19 +741,11 @@ if has_flashinfer():
 
         concat_mla_k(k, k_nope, k_pe)
 
-    def _flashinfer_concat_mla_k_fake(
-        k: torch.Tensor,
-        k_nope: torch.Tensor,
-        k_pe: torch.Tensor,
-    ) -> None:
-        return
-
     # Register flashinfer concat_mla_k custom op
     direct_register_custom_op(
         op_name="flashinfer_concat_mla_k",
         op_func=_flashinfer_concat_mla_k,
         mutates_args=["k"],  # k tensor is modified in-place
-        fake_impl=_flashinfer_concat_mla_k_fake,
     )
 
     @torch.library.custom_op(
@@ -968,44 +993,6 @@ if has_flashinfer():
     ) -> torch.Tensor:
         # A is [m, k], B is [k, n] -> output [m, n]
         return torch.empty(A.shape[0], B.shape[1], dtype=out_dtype, device=A.device)
-
-
-def flashinfer_mm_mxfp8(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    block_scale_a: torch.Tensor,
-    block_scale_b: torch.Tensor,
-    out_dtype: torch.dtype,
-    backend: str = "cutlass",
-) -> torch.Tensor:
-    """MXFP8 MM helper - mirrors flashinfer_scaled_fp4_mm API.
-
-    Takes non-transposed weights and handles transpose internally.
-
-    CRITICAL: mm_mxfp8 CUTLASS kernel requires SWIZZLED 1D scales for optimal
-    performance and accuracy. Both input and weight scales should be in
-    swizzled format from FlashInfer's mxfp8_quantize(is_sf_swizzled_layout=True).
-    """
-    # a shape [M, K]
-    # b shape [K, N]
-    assert a.ndim == 2 and b.ndim == 2
-    assert a.shape[1] == b.shape[1]  # K dimension must match
-
-    if block_scale_b.ndim != 1:
-        raise ValueError(
-            "mm_mxfp8 expects 1D swizzled weight scales for CUTLASS; "
-            f"got shape={tuple(block_scale_b.shape)}"
-        )
-
-    # Output tensor [M, N]
-    return mm_mxfp8(
-        a,
-        b.t(),  # Transpose weight: [N, K] -> [K, N]
-        block_scale_a,
-        block_scale_b,
-        out_dtype,
-        backend=backend,
-    )
 
 
 def flashinfer_scaled_fp4_mm(
@@ -1264,11 +1251,14 @@ __all__ = [
     "nvfp4_block_scale_interleave",
     "flashinfer_cute_dsl_fused_moe_nvfp4",
     "flashinfer_b12x_fused_moe",
+    "flashinfer_get_hybrid_num_tokens_buckets",
     "flashinfer_convert_sf_to_mma_layout",
     "trtllm_fp4_block_scale_moe",
     "flashinfer_trtllm_batch_decode_with_kv_cache_mla",
     "flashinfer_trtllm_batch_decode_sparse_mla_dsv4",
     "flashinfer_xqa_batch_decode_with_kv_cache",
+    "flashinfer_recurrent_kda",
+    "flashinfer_fused_kda_decode",
     "autotune",
     "has_flashinfer_moe",
     "has_flashinfer_comm",
@@ -1276,6 +1266,8 @@ __all__ = [
     "has_flashinfer_nvlink_one_sided",
     "has_flashinfer_cutlass_fused_moe",
     "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
+    "has_flashinfer_recurrent_kda",
+    "has_flashinfer_fused_kda_decode",
     "has_flashinfer_cutedsl_moe_nvfp4",
     "has_flashinfer_bf16_fp4",
     "has_flashinfer_b12x_moe",

@@ -216,12 +216,11 @@ def strip_covered_mm_data(
     mm_features: list[MultiModalFeatureSpec],
     num_computed_tokens: int,
     uses_mrope: bool = False,
-    uses_xdrope: bool = False,
 ) -> list[MultiModalFeatureSpec]:
     """Drop the tensor data of mm items whose placeholder span is fully inside
     a prefix-cache-covered region: no encoder run can be scheduled for them,
-    so the workers never consume the payload fields. M-RoPE and XD-RoPE models
-    keep CPU-side metadata fields used to compute positions. SHM address items
+    so the workers never consume the payload fields. M-RoPE models keep
+    CPU-side metadata fields used to compute positions. SHM address items
     are also kept so workers can balance the sender's reference count. The
     scheduler-side ``Request`` keeps the full features."""
     if not mm_features or num_computed_tokens == 0:
@@ -239,7 +238,7 @@ def strip_covered_mm_data(
             return f
 
         data = None
-        if uses_mrope or uses_xdrope:
+        if uses_mrope:
             data = MultiModalKwargsItem(
                 {k: elem for k, elem in f.data.items() if elem.field.keep_on_cpu}
             )

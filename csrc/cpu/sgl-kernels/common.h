@@ -343,6 +343,36 @@ inline void parallel_2d(int m, int n, const func_t& f) {
 #endif
 }
 
+// Like parallel_2d but with explicit nth_m x nth_n decomposition.
+// Caller is responsible for choosing nth_m and nth_n.
+//
+// Cherry-picked from a newer sglang commit than this file's last full sync
+// (needed by mhc.cpp's phase-1 tiling); not part of a full common.h resync.
+template <typename func_t>
+inline void parallel_2d_tiled(int m, int n, int nth_m, int nth_n, const func_t& f) {
+  const int nth = nth_m * nth_n;
+#if defined(_OPENMP)
+#pragma omp parallel num_threads(nth)
+  {
+    int ith = omp_get_thread_num();
+    int ith_m = ith / nth_n;
+    int ith_n = ith % nth_n;
+
+    int thread_block_m = div_up(m, nth_m);
+    int thread_block_n = div_up(n, nth_n);
+
+    int begin_m = std::min(ith_m * thread_block_m, m);
+    int end_m = std::min(begin_m + thread_block_m, m);
+    int begin_n = std::min(ith_n * thread_block_n, n);
+    int end_n = std::min(begin_n + thread_block_n, n);
+
+    f(begin_m, end_m, begin_n, end_n);
+  }
+#else
+  f(0, m, 0, n);
+#endif
+}
+
 // limit max cache blocks
 // when we need to do pre-unpack for weights, e.g. fp8
 #define MAX_CACHE_BLOCK_SIZE 4

@@ -98,7 +98,7 @@ def should_load_quant_weights(quant_method: QuantizeMethodBase | None) -> bool:
 def _largest_kernel_block_within(
     attn_backend: "type[AttentionBackend]",
     per_token_bytes: int,
-    page_budget: int | None,
+    page_budget: int,
     fallback: int,
 ) -> int:
     """Largest supported kernel block size whose page fits in ``page_budget``.
@@ -106,20 +106,22 @@ def _largest_kernel_block_within(
     A padded spec (e.g. skip-quant layer) that pads its page up to a large shared page
     wastes ``page_budget - block*per_token`` bytes per block. Picking the largest kernel
     block whose natural page still fits under ``page_budget`` minimizes that waste.
-    Falls back to the smallest supported block when ``page_budget`` is None (no padding
-    — the block is handled by ``unify``'s integer scaling instead) or nothing fits.
+    ``MultipleOf`` declarations are expanded to the largest aligned block that fits.
+    Falls back to the smallest supported block when nothing fits.
     """
     from vllm.v1.attention.backend import MultipleOf
 
     sizes = attn_backend.get_supported_kernel_block_sizes()
+    max_block_size = page_budget // per_token_bytes
     candidates = [s for s in sizes if isinstance(s, int)]
-    if not candidates:
-        candidates = [s.base for s in sizes if isinstance(s, MultipleOf)]
+    candidates.extend(
+        max(s.base, max_block_size // s.base * s.base)
+        for s in sizes
+        if isinstance(s, MultipleOf)
+    )
     if not candidates:
         return fallback
     smallest = min(candidates)
-    if not page_budget or per_token_bytes <= 0:
-        return smallest
     fitting = [b for b in candidates if b * per_token_bytes <= page_budget]
     return max(fitting) if fitting else smallest
 
@@ -621,8 +623,15 @@ class Attention(nn.Module, AttentionLayerBase):
             # When this SW layer is a padded spec (skip-quant: its page is
             # padded up to ``skip_page_size_padded``), pick the largest kernel
             # block that still fits the shared page so we waste fewer padding
-            # bytes per block. Otherwise (page_size_padded is None) the smallest
-            # block is fine — ``unify`` scales it up by an integer ratio.
+            # bytes per block. Otherwise (page_size_padded is None) take the
+            # primary block size when the backend can run it unsplit: if this
+            # page does not divide the primary page, ``unify`` then pads it
+            # (padded pages cannot be split) instead of scaling a small block
+            # to a size coprime with the primary one, which inflates the
+            # scheduler LCM (e.g. a 1024 B/token SWA draft next to a 1152
+            # B/token MLA target: 1728 vs 1536 gives LCM 13824). Backends that
+            # cannot run the primary block start from their smallest block and
+            # ``unify`` scales it up by an integer ratio.
             shared_page = vllm_config.cache_config.skip_page_size_padded
             # The backend owns its packing
             sw_per_token = self.attn_backend.customize_spec(
@@ -636,8 +645,9 @@ class Attention(nn.Module, AttentionLayerBase):
                     sliding_window=self.sliding_window,
                 )
             ).real_page_size_bytes
+            page_budget = shared_page or sw_per_token * block_size
             sw_block_size = _largest_kernel_block_within(
-                self.attn_backend, sw_per_token, shared_page, block_size
+                self.attn_backend, sw_per_token, page_budget, block_size
             )
             return SlidingWindowSpec(
                 block_size=sw_block_size,
@@ -777,22 +787,8 @@ def unified_attention_with_output(
     )
 
 
-def unified_attention_with_output_fake(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: LayerNameType,
-    output_scale: torch.Tensor | None = None,
-    output_block_scale: torch.Tensor | None = None,
-    kv_cache_dummy_dep: torch.Tensor | None = None,
-) -> None:
-    return
-
-
 direct_register_custom_op(
     op_name="unified_attention_with_output",
     op_func=unified_attention_with_output,
     mutates_args=["output", "output_block_scale"],
-    fake_impl=unified_attention_with_output_fake,
 )
