@@ -6,6 +6,7 @@ import gc
 import json
 import os
 import time
+from collections.abc import Callable
 from contextlib import nullcontext
 from datetime import datetime
 from itertools import product
@@ -91,6 +92,36 @@ class BenchmarkConfig(TypedDict):
     GROUP_SIZE_M: int
     num_warps: int
     num_stages: int
+
+
+_EXPERT_LOAD_LOGIT_BIAS: dict[str, Callable[[int], torch.Tensor]] = {
+    "uniform": lambda n_experts: torch.zeros(n_experts),
+    "zipf": lambda n_experts: -torch.log(
+        torch.arange(1, n_experts + 1, dtype=torch.float32)
+    ),
+}
+EXPERT_LOAD_DISTRIBUTIONS = tuple(_EXPERT_LOAD_LOGIT_BIAS)
+
+
+def generate_gating_output(
+    num_iters: int, num_tokens: int, num_experts: int, *, distribution: str
+) -> torch.Tensor:
+    """Per-iteration gating logits fed to fused_topk. 'uniform' (this
+    script's existing default) draws iid gating logits, so every expert is
+    equally likely to land in an unbatched token's top-k. 'zipf' adds a
+    per-expert bias of -log(rank) on top of the same noise: since
+    softmax(logit) is scaled by exp(bias), this puts roughly 1/rank of the
+    selection mass on the rank'th expert, modeling the skewed expert load
+    real serving traffic produces instead of this benchmark's current
+    near-uniform-only routing.
+    """
+    if distribution not in _EXPERT_LOAD_LOGIT_BIAS:
+        raise ValueError(
+            f"unknown --expert-load-distribution {distribution!r}; "
+            f"expected one of {EXPERT_LOAD_DISTRIBUTIONS}"
+        )
+    bias = _EXPERT_LOAD_LOGIT_BIAS[distribution](num_experts)
+    return torch.randn(num_iters, num_tokens, num_experts, dtype=torch.float32) + bias
 
 
 def benchmark_config(
