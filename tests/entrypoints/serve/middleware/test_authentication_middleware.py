@@ -148,3 +148,134 @@ def test_auto_discovered_unprotected_routes_no_auth(task_routes):
         assert resp.status_code == 200, (
             f"[{task}] {test_method} {test_path} should be accessible without token"
         )
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: root_path must not bypass auth
+# ---------------------------------------------------------------------------
+
+GUARDED_ROUTES: list[tuple[str, list[str]]] = [
+    ("/v1/models", ["GET"]),
+    ("/v1/chat/completions", ["POST"]),
+    ("/v2/embed", ["POST"]),
+    ("/inference/v1/generate", ["POST"]),
+    ("/cohere/v2/chat", ["POST"]),
+    ("/health", ["GET"]),
+]
+
+
+def _create_app_with_root_path(
+    root_path: str,
+    routes: list[tuple[str, list[str]]] | None = None,
+) -> FastAPI:
+    """Create a FastAPI app with AuthenticationMiddleware and a root_path."""
+    app = FastAPI()
+    app.add_middleware(AuthenticationMiddleware, tokens=["valid-token"])
+    app.root_path = root_path
+
+    async def mock_endpoint():
+        return JSONResponse({"status": "ok"})
+
+    for path_template, methods in routes or GUARDED_ROUTES:
+        allowed_methods = list(set(methods + ["OPTIONS"]))
+        app.add_api_route(
+            path_template,
+            mock_endpoint,
+            methods=allowed_methods,
+            include_in_schema=False,
+        )
+    return app
+
+
+@pytest.mark.parametrize(
+    "root_path, request_path",
+    [
+        ("/v", "/v1/models"),
+        ("/v", "/v1/chat/completions"),
+        ("/v", "/v2/embed"),
+        ("/in", "/inference/v1/generate"),
+        ("/co", "/cohere/v2/chat"),
+        ("/", "/v1/models"),
+    ],
+    ids=[
+        "root=/v,path=/v1/models",
+        "root=/v,path=/v1/chat/completions",
+        "root=/v,path=/v2/embed",
+        "root=/in,path=/inference/v1/generate",
+        "root=/co,path=/cohere/v2/chat",
+        "root=/,path=/v1/models",
+    ],
+)
+def test_root_path_non_segment_prefix_does_not_bypass_auth(
+    root_path: str, request_path: str
+):
+    """When root_path is a non-segment prefix of a guarded route, the auth
+    check must still fire. This is a regression test for the removeprefix
+    bypass where '/v1/models'.removeprefix('/v') yielded '1/models' which
+    did not match GUARDED_PREFIX."""
+    app = _create_app_with_root_path(root_path)
+    client = TestClient(app, root_path=root_path)
+
+    resp = client.request("GET" if "models" in request_path else "POST", request_path)
+    assert resp.status_code == 401, (
+        f"root_path={root_path!r} request={request_path!r} "
+        "should be rejected without a token"
+    )
+
+    resp = client.request(
+        "GET" if "models" in request_path else "POST",
+        request_path,
+        headers={"Authorization": "Bearer valid-token"},
+    )
+    assert resp.status_code == 200, (
+        f"root_path={root_path!r} request={request_path!r} "
+        "should succeed with a valid token"
+    )
+
+
+@pytest.mark.parametrize(
+    "root_path, request_path",
+    [
+        ("/api", "/api/v1/models"),
+        ("/proxy", "/proxy/v1/chat/completions"),
+    ],
+    ids=[
+        "root=/api,path=/api/v1/models",
+        "root=/proxy,path=/proxy/v1/chat/completions",
+    ],
+)
+def test_root_path_segment_boundary_still_guards(root_path: str, request_path: str):
+    """When root_path falls on a real segment boundary, stripping it must
+    still leave a guarded path that requires auth."""
+    routes = [
+        ("/v1/models", ["GET"]),
+        ("/v1/chat/completions", ["POST"]),
+    ]
+    app = _create_app_with_root_path(root_path, routes)
+    client = TestClient(app, root_path=root_path)
+
+    resp = client.request("GET" if "models" in request_path else "POST", request_path)
+    assert resp.status_code == 401, (
+        f"root_path={root_path!r} request={request_path!r} "
+        "should be rejected without a token"
+    )
+
+    resp = client.request(
+        "GET" if "models" in request_path else "POST",
+        request_path,
+        headers={"Authorization": "Bearer valid-token"},
+    )
+    assert resp.status_code == 200, (
+        f"root_path={root_path!r} request={request_path!r} "
+        "should succeed with a valid token"
+    )
+
+
+def test_root_path_unguarded_route_still_accessible():
+    """Unguarded routes (e.g. /health) must remain accessible without a
+    token regardless of root_path."""
+    app = _create_app_with_root_path("/v")
+    client = TestClient(app, root_path="/v")
+
+    resp = client.get("/health")
+    assert resp.status_code == 200, "/health should not require auth"
