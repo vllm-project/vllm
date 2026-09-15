@@ -12,14 +12,14 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from vllm.logprobs import SampleLogprobs
 from vllm.multimodal.image import rescale_image_size
 
-from ....conftest import (
+from .....conftest import (
     IMAGE_ASSETS,
     HfRunner,
     PromptImageInput,
     VllmRunner,
 )
-from ....utils import multi_gpu_test
-from ...utils import check_logprobs_close
+from .....utils import multi_gpu_test
+from ....utils import check_logprobs_close
 
 pytestmark = pytest.mark.skipif(
     Version("5.0") <= Version(version("transformers")),

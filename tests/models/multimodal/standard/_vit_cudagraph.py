@@ -7,11 +7,10 @@ from functools import partial
 import pytest
 
 from vllm.multimodal.video import sample_frames_from_video
-from vllm.platforms import current_platform
 
 from ....conftest import IMAGE_ASSETS, VIDEO_ASSETS
 from ...utils import dummy_hf_overrides
-from .vlm_utils.builders import sample_frames_with_video_metadata
+from ..generation.vlm_utils.builders import sample_frames_with_video_metadata
 
 
 @dataclass
@@ -393,16 +392,31 @@ def get_compilation_config(config: VitCudagraphTestConfig):
     }
 
 
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("model_id", params_with_marks(MODEL_CONFIGS))
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="Skip if not cuda or rocm"
+CORE_MODEL_IDS = (
+    "llama4",
+    "qwen2_vl",
+    "qwen2_5_vl",
+    "kimi_vl",
+    "qwen3_vl",
+    "qwen3_5",
+    "internvl",
+    "idefics3",
+    "glm4_1v",
+    "deepseek_ocr",
+    "gemma4",
+    "minicpmv_25",
+    "minicpmv_26",
+    "minicpmv_40",
 )
-def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
+CORE_MODEL_CONFIGS = {model_id: MODEL_CONFIGS[model_id] for model_id in CORE_MODEL_IDS}
+EXTENDED_MODEL_CONFIGS = {
+    model_id: config
+    for model_id, config in MODEL_CONFIGS.items()
+    if model_id not in CORE_MODEL_CONFIGS
+}
+
+
+def run_vit_cudagraph_image(model_id, vllm_runner, image_assets):
     config = MODEL_CONFIGS[model_id]
 
     if config.skip:
@@ -444,11 +458,7 @@ def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
         assert isinstance(output_text, str)
 
 
-@pytest.mark.parametrize("model_id", params_with_marks(MODEL_CONFIGS))
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="Skip if not cuda or rocm"
-)
-def test_vit_cudagraph_video(model_id, vllm_runner, video_assets):
+def run_vit_cudagraph_video(model_id, vllm_runner, video_assets):
     config = MODEL_CONFIGS[model_id]
 
     if config.skip:
