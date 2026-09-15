@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, TypeAlias, TypeVar
 
@@ -8,6 +9,7 @@ from prometheus_client import Counter, Gauge, Histogram
 from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.logger import init_logger
+from vllm.v1.metrics.utils import create_metric_per_engine
 
 PromMetric: TypeAlias = Gauge | Counter | Histogram
 PromMetricT = TypeVar("PromMetricT", bound=PromMetric)
@@ -138,6 +140,131 @@ class KVConnectorPromMetrics:
         created using the create_metric_per_engine() helper method.
         """
         raise NotImplementedError
+
+
+# Bucket edges shared by the connectors that export per-transfer telemetry,
+# named after the series each one feeds. Timing runs 1ms to 5s; post time gets
+# one extra sub-millisecond edge below the copy's range. Payload sizes run 2KiB
+# to 8GiB, doubling every other power of two, and descriptor counts run 10 to
+# 50k.
+KV_TRANSFER_XFER_TIME_BUCKETS = (
+    0.005,
+    0.01,
+    0.025,
+    0.05,
+    0.075,
+    0.1,
+    0.2,
+    0.3,
+    0.5,
+    0.75,
+    1.0,
+    5.0,
+)
+KV_TRANSFER_POST_TIME_BUCKETS = (0.001, *KV_TRANSFER_XFER_TIME_BUCKETS)
+KV_TRANSFER_BYTES_BUCKETS = tuple(2 ** (10 + i) for i in range(1, 25, 2))
+KV_TRANSFER_DESCRIPTOR_BUCKETS = (
+    10,
+    20,
+    30,
+    50,
+    75,
+    100,
+    200,
+    400,
+    1000,
+    2000,
+    4000,
+    10000,
+    20000,
+    50000,
+)
+
+
+class KVTransferPromMetrics(KVConnectorPromMetrics):
+    """
+    A base class for connectors that record one row per KV transfer.
+
+    Subclasses declare their series with `declare_histogram()` and
+    `declare_counter()`, naming the key of the stats snapshot that feeds each
+    one. `observe()` then fans a snapshot out to every declared series, so a
+    connector describes what it exports rather than how it is recorded.
+    """
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ):
+        super().__init__(vllm_config, metric_types, labelnames, per_engine_labelvalues)
+        self._histograms: list[tuple[dict[int, PromMetric], str]] = []
+        self._counters: list[tuple[dict[int, PromMetric], str]] = []
+
+    def declare_histogram(
+        self,
+        *,
+        name: str,
+        documentation: str,
+        stats_key: str,
+        buckets: Sequence[float],
+    ) -> dict[int, PromMetric]:
+        """Declare a histogram observing every value stored under `stats_key`."""
+        return self._declare(
+            self._histogram_cls(
+                name=name,
+                documentation=documentation,
+                buckets=buckets,
+                labelnames=self._labelnames,
+            ),
+            stats_key,
+            declared=self._histograms,
+        )
+
+    def declare_counter(
+        self,
+        *,
+        name: str,
+        documentation: str,
+        stats_key: str,
+    ) -> dict[int, PromMetric]:
+        """Declare a counter of the events recorded under `stats_key`."""
+        return self._declare(
+            self._counter_cls(
+                name=name,
+                documentation=documentation,
+                labelnames=self._labelnames,
+            ),
+            stats_key,
+            declared=self._counters,
+        )
+
+    def _declare(
+        self,
+        metric: PromMetric,
+        stats_key: str,
+        declared: list[tuple[dict[int, PromMetric], str]],
+    ) -> dict[int, PromMetric]:
+        per_engine_metrics = create_metric_per_engine(
+            metric, self.per_engine_labelvalues
+        )
+        declared.append((per_engine_metrics, stats_key))
+        return per_engine_metrics
+
+    def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0) -> None:
+        # A snapshot always carries every declared key, so a miss here is a
+        # connector bug and should surface rather than silently drop samples.
+        for per_engine_metrics, stats_key in self._histograms:
+            for value in transfer_stats_data[stats_key]:
+                per_engine_metrics[engine_idx].observe(value)
+
+        # Each failure appends a single unit, so incrementing by the sum costs
+        # one Prometheus client call per series instead of one per event.
+        for per_engine_metrics, stats_key in self._counters:
+            num_events = sum(transfer_stats_data[stats_key])
+            if num_events:
+                per_engine_metrics[engine_idx].inc(num_events)
 
 
 class KVConnectorProm:
