@@ -49,6 +49,12 @@ class TokensInput(_InputOptions):
     Populated when ``return_assistant_tokens_mask=True`` is set on the
     render request and the chat template supports ``{% generation %}``."""
 
+    generation_prefix_len: NotRequired[int]
+    """Number of trailing tokens in ``prompt_token_ids`` that form a forced
+    generation prefix (e.g. a channel-open stub appended by the chat
+    template). These tokens are needed by the model but should not be
+    counted toward ``usage.prompt_tokens`` in the API response."""
+
 
 def tokens_input(
     prompt_token_ids: list[int],
