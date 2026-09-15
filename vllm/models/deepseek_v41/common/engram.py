@@ -992,6 +992,9 @@ class Engram(nn.Module):
         rows = tensor_model_parallel_all_gather(rows, dim=1)
         return rows[:, : self.embed_tokens.n_hash_cols]
 
+    def _project_embeddings(self, hash_ids: torch.Tensor) -> torch.Tensor:
+        return self.wkv(self.embed(hash_ids).flatten(-2))
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1001,7 +1004,7 @@ class Engram(nn.Module):
         """hidden_states: [T, hc_mult, dim]; hash_ids: [T, n_hash_cols] (all
         tokens, pre sequence-parallel shard); token_mask: [T], False shuts
         the gate so those positions pass through untouched."""
-        kv = self.wkv(self.embed(hash_ids).flatten(-2))
+        kv = self._project_embeddings(hash_ids)
         num_kv_tokens = hash_ids.shape[0]
         assert token_mask is None or token_mask.shape == (num_kv_tokens,)
         if self.use_sequence_parallel:

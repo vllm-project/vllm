@@ -6,6 +6,7 @@ import mmap
 import tempfile
 import weakref
 from contextlib import ExitStack
+from functools import cached_property
 
 import numpy as np
 import torch
@@ -401,3 +402,42 @@ class Engram(BaseEngram):
             staged = self.staged_rows[: slot * self.embed_tokens.dp_size]
             return _gather_engram_rows(staged, num_tokens)
         return super()._ready_rows(num_tokens)
+
+    @cached_property
+    def _can_quantize_gather(self) -> bool:
+        from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
+            FlashInferCutedslMxfp8LinearKernel,
+            FlashInferCutlassMxfp8LinearKernel,
+        )
+        from vllm.model_executor.layers.fusion.quant_activation import (
+            get_input_quant_key,
+        )
+        from vllm.model_executor.layers.quantization.utils.quant_utils import (
+            kMxfp8Dynamic,
+        )
+
+        return (
+            self.embed_tokens.tp_size > 1
+            and not self.use_sequence_parallel
+            and self.embed_tokens.n_hash_cols * self.embed_tokens.dim % 32 == 0
+            and get_input_quant_key(self.wkv) == kMxfp8Dynamic
+            # QuantKey does not encode the F8_128x4 scale layout.
+            and type(getattr(self.wkv.quant_method, "kernel", None))
+            in (FlashInferCutedslMxfp8LinearKernel, FlashInferCutlassMxfp8LinearKernel)
+        )
+
+    def _project_embeddings(self, hash_ids: torch.Tensor) -> torch.Tensor:
+        if not self._can_quantize_gather:
+            return super()._project_embeddings(hash_ids)
+        from vllm.models.deepseek_v41.common.ops.engram_quant import (
+            quantize_gathered_engram_rows,
+        )
+
+        rows = self._ready_rows(hash_ids.shape[0])
+        gathered = tensor_model_parallel_all_gather(rows, dim=0)
+        quantized = quantize_gathered_engram_rows(
+            gathered,
+            rows.shape[0],
+            self.embed_tokens.n_hash_cols * self.embed_tokens.dim,
+        )
+        return self.wkv(quantized)
