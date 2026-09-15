@@ -337,6 +337,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     secondary_tiers=secondary_tiers,
                 )
                 self._manager = tiering_manager
+                scheduler_mmap.unlink_backing_file()
             except Exception:
                 for tier in reversed(secondary_tiers):
                     try:
