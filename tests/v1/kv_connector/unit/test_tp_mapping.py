@@ -75,6 +75,7 @@ class TestTPMappingStructure:
 @pytest.mark.parametrize(
     "tp_rank,tp_size,remote_tp_size,dcp_size,remote_dcp_size,expected_ranks",
     [
+        (0, 1, 8, 1, 8, tuple(range(8))),
         (0, 4, 4, 1, 4, (0, 1, 2, 3)),
         (2, 4, 4, 4, 4, (2,)),
         (0, 2, 4, 2, 4, (0, 2)),

@@ -35,6 +35,7 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     output_ptr,
     softmax_scale,
     output_scale,
+    output_gate_ptr,
     stride_q_row,
     stride_q_head,
     stride_k_block,
@@ -47,6 +48,8 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     stride_table_req,
     stride_output_row,
     stride_output_head,
+    stride_output_gate_row,
+    stride_output_gate_head,
     num_rows,
     num_cache_blocks,
     num_requests,
@@ -182,6 +185,18 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     )
     output_mask = head_offsets[:, None] < GROUP_SIZE
     if NUM_SPLITS == 1:
+        # Preserve the unfused path's BF16 attention-output rounding before
+        # applying the gate in FP32.
+        normalized_output = normalized_output.to(output_ptr.dtype.element_ty)
+        output_gate = tl.load(
+            output_gate_ptr
+            + row * stride_output_gate_row
+            + (first_head + head_offsets[:, None]) * stride_output_gate_head
+            + dim_offsets[None, :],
+            mask=output_mask,
+            other=0.0,
+        ).to(tl.float32)
+        normalized_output = normalized_output.to(tl.float32) * tl.sigmoid(output_gate)
         tl.store(
             output_ptr
             + row * stride_output_row
@@ -217,8 +232,11 @@ def _qsa_merge_splitk_kernel(
     partial_output_ptr,
     partial_lse_ptr,
     output_ptr,
+    output_gate_ptr,
     stride_output_row,
     stride_output_head,
+    stride_output_gate_row,
+    stride_output_gate_head,
     num_rows,
     HEAD_DIM: tl.constexpr,
     NUM_QUERY_HEADS: tl.constexpr,
@@ -250,6 +268,16 @@ def _qsa_merge_splitk_kernel(
     )
     merged = tl.sum(partial_output * weights[:, None], axis=0)
     merged = tl.where(denominator > 0, merged / denominator, 0.0)
+    # Preserve the unfused path's BF16 attention-output rounding before
+    # applying the gate in FP32.
+    merged = merged.to(output_ptr.dtype.element_ty)
+    output_gate = tl.load(
+        output_gate_ptr
+        + row * stride_output_gate_row
+        + head * stride_output_gate_head
+        + dim_offsets
+    ).to(tl.float32)
+    merged = merged.to(tl.float32) * tl.sigmoid(output_gate)
     tl.store(
         output_ptr + row * stride_output_row + head * stride_output_head + dim_offsets,
         merged,
@@ -535,6 +563,8 @@ def qsa_sparse_paged_attention(
     out: torch.Tensor | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
+    *,
+    output_gate: torch.Tensor,
 ) -> torch.Tensor:
     """Run sparse GQA directly over paged BF16 or FP8-e4m3 K/V caches.
 
@@ -593,6 +623,8 @@ def qsa_sparse_paged_attention(
         raise ValueError("QSA sparse output must match its query")
     assert out.dtype == q.dtype and out.device == q.device
     assert out.stride(2) == 1
+    assert output_gate.is_contiguous()
+    output_gate_view = output_gate.view_as(q)
     if not q.shape[0]:
         return out
 
@@ -632,6 +664,7 @@ def qsa_sparse_paged_attention(
         out,
         softmax_scale,
         output_scale,
+        output_gate_view,
         q.stride(0),
         q.stride(1),
         k_cache.stride(0),
@@ -644,6 +677,8 @@ def qsa_sparse_paged_attention(
         block_table.stride(0),
         out.stride(0),
         out.stride(1),
+        output_gate_view.stride(0),
+        output_gate_view.stride(1),
         q.shape[0],
         k_cache.shape[0],
         block_table.shape[0],
@@ -668,8 +703,11 @@ def qsa_sparse_paged_attention(
         partial_output,
         partial_lse,
         out,
+        output_gate_view,
         out.stride(0),
         out.stride(1),
+        output_gate_view.stride(0),
+        output_gate_view.stride(1),
         q.shape[0],
         HEAD_DIM=q.shape[2],
         NUM_QUERY_HEADS=q.shape[1],
@@ -737,6 +775,10 @@ def warmup_qsa_sparse_paged_attention(
     output_ptr = TritonWarmupTensor(
         torch.bfloat16, shape=(num_rows, num_query_heads, head_dim)
     )
+    # The output gate is mandatory at runtime; warm the gated specialization.
+    output_gate_ptr = TritonWarmupTensor(
+        torch.bfloat16, shape=(num_rows, num_query_heads, head_dim)
+    )
     head_stride = head_dim
     row_stride = num_query_heads * head_dim
     num_cache_blocks = triton_scalar_specialization_rep(kv_cache.shape[0])
@@ -766,6 +808,7 @@ def warmup_qsa_sparse_paged_attention(
             output_ptr,
             1.0,
             1.0,
+            output_gate_ptr,
             row_stride,
             head_stride,
             key_cache.stride(0),
@@ -776,6 +819,8 @@ def warmup_qsa_sparse_paged_attention(
             value_cache.stride(2),
             selection_width + 1,
             block_table.stride(0),
+            row_stride,
+            head_stride,
             row_stride,
             head_stride,
             num_rows,
@@ -801,6 +846,9 @@ def warmup_qsa_sparse_paged_attention(
                 partial_output_ptr,
                 partial_lse_ptr,
                 output_ptr,
+                output_gate_ptr,
+                row_stride,
+                head_stride,
                 row_stride,
                 head_stride,
                 num_rows,

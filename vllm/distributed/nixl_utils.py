@@ -91,9 +91,26 @@ def is_nixl_available() -> bool:
     return pkg in sys.modules or importlib.util.find_spec(pkg) is not None
 
 
+def alias_nixl_for_ray() -> None:
+    """Let Ray's ``nixl._api`` import resolve to the ROCm implementation."""
+    if not current_platform.is_rocm() or "nixl._api" in sys.modules:
+        return
+
+    package_name = _get_nixl_package_name()
+    if not is_nixl_available():
+        raise ImportError(f"Ray's NIXL transport on ROCm requires {package_name}")
+
+    _maybe_set_ucx_rcache_limit()
+    package = importlib.import_module(package_name)
+    api = importlib.import_module(f"{package_name}._api")
+    sys.modules.setdefault("nixl", package)
+    sys.modules.setdefault("nixl._api", api)
+
+
 __all__ = [
     "NixlWrapper",
     "nixl_agent_config",
     "nixlXferTelemetry",
     "is_nixl_available",
+    "alias_nixl_for_ray",
 ]

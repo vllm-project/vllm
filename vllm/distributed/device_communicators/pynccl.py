@@ -3,6 +3,7 @@
 
 
 # ===================== import region =====================
+import contextlib
 import threading
 
 import torch
@@ -25,6 +26,33 @@ from vllm.logger import init_logger
 from vllm.utils.torch_utils import current_stream
 
 logger = init_logger(__name__)
+
+_warmup_tls = threading.local()
+
+
+def _warmup_deferred() -> bool:
+    return getattr(_warmup_tls, "deferred", False)
+
+
+@contextlib.contextmanager
+def defer_comm_warmup_on_rocm():
+    """Build communicators on this thread without their warm-up on ROCm, where
+    the warm-up can deadlock if built next to a live engine whose existing
+    communicators still have collectives in flight; instead the warm-up is
+    deferred to when the engine is quiet (during commit).
+    """
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_rocm():
+        yield
+        return
+    prev = _warmup_deferred()
+    _warmup_tls.deferred = True
+    try:
+        yield
+    finally:
+        _warmup_tls.deferred = prev
+
 
 _NCCL_SYMM_OPS_REGISTERED = False
 
@@ -152,6 +180,9 @@ class PyNcclCommunicator:
             self.comm: ncclComm_t = self.nccl.ncclCommInitRank(
                 self.world_size, self.unique_id, self.rank
             )
+
+            if _warmup_deferred():
+                return
 
             stream = current_stream()
             # A small all_reduce for warmup.
