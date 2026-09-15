@@ -119,3 +119,12 @@ def test_deepseek_v4_rocm_dspark_confidence_is_probability():
         torch.sigmoid(torch.tensor([0.0, -1.0])),
     )
     assert torch.all((confidence >= 0) & (confidence <= 1))
+
+
+@pytest.mark.cpu_test
+def test_deepseek_v4_rocm_dspark_confidence_requires_a_head():
+    model = _make_uninitialized_model(None)
+    empty = torch.zeros((1, 1))
+
+    with pytest.raises(RuntimeError, match="confidence_head"):
+        model.compute_confidence(empty, empty)

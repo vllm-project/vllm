@@ -369,7 +369,11 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         self, head_hidden: torch.Tensor, markov_embed: torch.Tensor
     ) -> torch.Tensor:
         """Per-position acceptance probability for each drafted token."""
-        assert self.model.confidence_head is not None
+        if self.model.confidence_head is None:
+            raise RuntimeError(
+                "compute_confidence() requires a confidence head, but the "
+                "checkpoint did not provide confidence_head weights."
+            )
         return torch.sigmoid(self.model.confidence_head(head_hidden, markov_embed))
 
     # --- Weight loading ----------------------------------------------------
