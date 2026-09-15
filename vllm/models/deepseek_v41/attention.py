@@ -1277,6 +1277,7 @@ class DeepseekV4Indexer(nn.Module):
             self.softmax_scale,
             self.n_head**-0.5,
             use_fp4=self.use_fp4_kv,
+            weights_out_dtype=self.indexer_weights_dtype,
         )
         if isinstance(q_quant, tuple):
             q, q_scale = q_quant
