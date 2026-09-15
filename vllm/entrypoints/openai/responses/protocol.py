@@ -184,6 +184,7 @@ class ResponsesRequest(OpenAIBaseModel):
     truncation: Literal["auto", "disabled"] | None = "disabled"
     user: str | None = None
     skip_special_tokens: bool = True
+    stop_token_ids: list[int] | None = []
     include_stop_str_in_output: bool = False
     presence_penalty: float | None = Field(
         default=None,
@@ -429,6 +430,16 @@ class ResponsesRequest(OpenAIBaseModel):
         if isinstance(stop, str):
             stop = [stop]
 
+        stop_token_ids = self.stop_token_ids
+        default_stop_ids = default_sampling_params.get("stop_token_ids")
+        if default_stop_ids:
+            if not stop_token_ids:
+                stop_token_ids = list(default_stop_ids)
+            else:
+                stop_token_ids = list(
+                    dict.fromkeys([*stop_token_ids, *default_stop_ids])
+                )
+
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
             extra_args["kv_transfer_params"] = self.kv_transfer_params
@@ -443,6 +454,7 @@ class ResponsesRequest(OpenAIBaseModel):
             max_tokens=max_tokens,
             logprobs=self.top_logprobs if self.is_include_output_logprobs() else None,
             stop=stop,
+            stop_token_ids=stop_token_ids,
             frequency_penalty=frequency_penalty,
             presence_penalty=presence_penalty,
             repetition_penalty=repetition_penalty,
