@@ -54,6 +54,98 @@ from vllm.v1.attention.backend import AttentionCGSupport
 DEVICE_TYPE = current_platform.device_type
 
 
+@pytest.mark.parametrize(
+    "connector,role,extra,allowed",
+    [
+        ("SimpleCPUOffloadConnector", "kv_both", {}, True),
+        ("OffloadingConnector", "kv_both", {}, True),
+        ("MooncakeStoreConnector", "kv_both", {}, True),
+        ("SimpleCPUOffloadConnector", "kv_consumer", {}, False),
+        ("OffloadingConnector", "kv_producer", {}, False),
+        ("MooncakeStoreConnector", "kv_consumer", {}, False),
+        (
+            "OffloadingConnector",
+            "kv_both",
+            {"spec_name": "TieringOffloadingSpec"},
+            False,
+        ),
+        ("OffloadingConnector", "kv_both", {"spec_module_path": "custom"}, False),
+        (
+            "OffloadingConnector",
+            "kv_both",
+            {"secondary_tiers": [{"type": "fs"}]},
+            False,
+        ),
+        ("ExampleConnector", "kv_both", {}, False),
+    ],
+)
+def test_routed_expert_offloading_connector_capability(connector, role, extra, allowed):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            enable_return_routed_experts=True, enable_omit_prefix_routed_experts=True
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector=connector, kv_role=role, kv_connector_extra_config=extra
+        ),
+        max_concurrent_batches=2,
+    )
+    if allowed:
+        VllmConfig._verify_routed_expert_offloading(config)
+    else:
+        with pytest.raises(ValueError, match="external-lookup bypass"):
+            VllmConfig._verify_routed_expert_offloading(config)
+
+
+@pytest.mark.parametrize(
+    "return_experts,omit,batches,error",
+    [
+        (False, False, 3, None),
+        (True, False, 1, "requires prefix omit"),
+        (True, True, 3, "at most two batches"),
+    ],
+)
+def test_routed_expert_offloading_guards(return_experts, omit, batches, error):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            enable_return_routed_experts=return_experts,
+            enable_omit_prefix_routed_experts=omit,
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="SimpleCPUOffloadConnector", kv_role="kv_both"
+        ),
+        max_concurrent_batches=batches,
+    )
+    if error:
+        with pytest.raises(ValueError, match=error):
+            VllmConfig._verify_routed_expert_offloading(config)
+    else:
+        VllmConfig._verify_routed_expert_offloading(config)
+
+
+@pytest.mark.parametrize("simple", [False, True])
+@pytest.mark.parametrize("omit", [False, True])
+def test_routed_expert_auto_offloading_config(monkeypatch, simple, omit):
+    monkeypatch.setenv("VLLM_USE_SIMPLE_KV_OFFLOAD", str(int(simple)))
+    kwargs = dict(
+        model_config=ModelConfig(
+            model="facebook/opt-125m",
+            skip_tokenizer_init=True,
+            enable_return_routed_experts=True,
+            enable_omit_prefix_routed_experts=omit,
+        ),
+        cache_config=CacheConfig(kv_offloading_size=1, kv_offloading_backend="native"),
+        device_config=DeviceConfig("cpu"),
+    )
+    if not omit:
+        with pytest.raises(ValueError, match="requires prefix omit"):
+            VllmConfig(**kwargs)
+    else:
+        config = VllmConfig(**kwargs)
+        assert config.kv_transfer_config.kv_connector == (
+            "SimpleCPUOffloadConnector" if simple else "OffloadingConnector"
+        )
+
+
 def _write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value), encoding="utf-8")

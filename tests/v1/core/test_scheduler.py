@@ -63,6 +63,157 @@ from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 pytestmark = pytest.mark.cpu_test
 
 
+@pytest.mark.parametrize(
+    "enabled,cached,computed,output,bypass",
+    [
+        (False, 32, 0, 0, False),
+        (True, -1, 0, 0, False),
+        (True, 32, 0, 0, True),
+        (True, 32, 16, 0, False),
+        (True, 32, 0, 1, False),
+        (True, 0, 0, 0, True),
+    ],
+)
+def test_routed_expert_recovery_lookup(enabled, cached, computed, output, bypass):
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler._routed_expert_offload = enabled
+    scheduler.connector = None
+    scheduler.kv_cache_manager = Mock()
+    scheduler.kv_cache_manager.get_computed_blocks.return_value = ("blocks", 16, 0)
+    scheduler.kv_cache_manager.get_computed_blocks_up_to.return_value = (
+        "blocks",
+        16,
+        0,
+    )
+    request = SimpleNamespace(
+        num_cached_tokens=cached,
+        num_computed_tokens=computed,
+        num_output_tokens=output,
+    )
+    assert scheduler._bypass_routed_expert_lookup(request) is bypass
+    scheduler._get_local_prefix_cache_hit(request)
+    if bypass:
+        scheduler.kv_cache_manager.get_computed_blocks_up_to.assert_called_once_with(
+            request, max_cache_hit_length=cached
+        )
+    else:
+        scheduler.kv_cache_manager.get_computed_blocks.assert_called_once_with(request)
+
+
+@pytest.mark.parametrize("enabled,output_tokens", [(False, 0), (True, 0), (True, 1)])
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_routed_expert_recovery_schedule_uses_bypass(
+    enabled, output_tokens, async_scheduling
+):
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        use_kv_connector=mock_kv(0, False),
+        async_scheduling=async_scheduling,
+    )
+    seed = create_requests(
+        num_requests=1,
+        num_tokens=64,
+        max_tokens=2,
+        same_prompt=True,
+        req_ids=["seed"],
+    )[0]
+    scheduler.add_request(seed)
+    _step_until_done(
+        scheduler,
+        scheduler.schedule(),
+        ModelRunnerOutput(
+            req_ids=["seed"],
+            req_id_to_index={"seed": 0},
+            sampled_token_ids=[[1000]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    request = create_requests(
+        num_requests=1,
+        num_tokens=80,
+        max_tokens=4,
+        same_prompt=True,
+        req_ids=["recovery"],
+    )[0]
+    request.num_cached_tokens = 16
+    request.status = RequestStatus.PREEMPTED
+    request.num_preemptions = 1
+    if output_tokens:
+        request.append_output_token_ids([1000])
+    scheduler.enable_omit_prefix_routed_experts = enabled
+    scheduler._routed_expert_offload = enabled
+    connector = scheduler.connector
+    connector.get_num_new_matched_tokens = Mock(return_value=(0, False))
+    connector.bypass_external_lookup = Mock(return_value=(0, False))
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    bypass = enabled and not output_tokens
+    expected_local = 16 if bypass else 64
+    assert output.num_scheduled_tokens[request.request_id] == (
+        request.num_tokens - expected_local
+    )
+    assert request.num_cached_tokens == 16
+    if bypass:
+        connector.bypass_external_lookup.assert_called_once_with(
+            request, expected_local
+        )
+        connector.get_num_new_matched_tokens.assert_not_called()
+    else:
+        connector.get_num_new_matched_tokens.assert_called_once_with(
+            request, expected_local
+        )
+        connector.bypass_external_lookup.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "omit,prompt_start,expected_start",
+    [
+        (False, None, 0),
+        (False, 24, 24),
+        (True, None, 16),
+        (True, 8, 16),
+        (True, 24, 24),
+    ],
+)
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_routed_expert_prompt_output_start(
+    omit, prompt_start, expected_start, async_scheduling
+):
+    scheduler = create_scheduler(async_scheduling=async_scheduling)
+    scheduler.enable_return_routed_experts = True
+    scheduler.enable_omit_prefix_routed_experts = omit
+    scheduler._re_block_ids = {}
+    routes = np.arange(32, dtype=np.uint16).reshape(32, 1, 1)
+    scheduler.routed_experts_mgr = Mock(attn_gid=0, routed_experts_by_slot=routes)
+    scheduler.routed_experts_mgr.get.side_effect = (
+        lambda blocks, length, token_start: routes[token_start:length]
+    )
+    request = create_requests(num_requests=1, num_tokens=32, max_tokens=2)[0]
+    request.num_cached_tokens = 16
+    request.sampling_params.routed_experts_prompt_start = prompt_start
+    scheduler.add_request(request)
+    scheduled = scheduler.schedule()
+    outputs = scheduler.update_from_output(
+        scheduled,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[1000]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+            routed_experts=RoutedExpertsLists(routes, np.arange(32)),
+        ),
+    )
+    assert scheduler.routed_experts_mgr.get.call_args.kwargs == {
+        "token_start": expected_start
+    }
+    result = next(iter(outputs.values())).outputs[0]
+    np.testing.assert_array_equal(result.routed_experts, routes[expected_start:])
+
+
 def test_make_scheduled_encoder_input_stats_output_embeddings():
     scheduler = create_scheduler()
     mm_features = [
@@ -1437,6 +1588,99 @@ def test_prefix_cache_stats_counted_once_for_retried_then_scheduled_request():
         retried.num_tokens,
         block_size * 2,
     )
+
+
+@pytest.mark.parametrize("omit", [False, True])
+def test_routed_expert_cached_boundary_survives_recovery(omit):
+    """Freeze the omission boundary on admission, not failed allocation or retry."""
+    block_size = 16
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        enable_chunked_prefill=False,
+        block_size=block_size,
+    )
+    scheduler.enable_omit_prefix_routed_experts = omit
+
+    # Seed the cache so the next request with the same prompt hits it.
+    seed = create_requests(
+        num_requests=1,
+        num_tokens=block_size * 2,
+        max_tokens=2,
+        same_prompt=True,
+        block_size=block_size,
+        req_ids=["seed"],
+    )[0]
+    scheduler.add_request(seed)
+    _step_until_done(
+        scheduler,
+        scheduler.schedule(),
+        ModelRunnerOutput(
+            req_ids=["seed"],
+            req_id_to_index={"seed": 0},
+            sampled_token_ids=[[1000]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    # The seeding step swapped in a fresh accumulator, so re-read it; the
+    # retried request must be the only thing recorded from here on.
+    stats = scheduler.kv_cache_manager.prefix_cache_stats
+    assert stats is not None
+    assert (stats.requests, stats.queries, stats.hits) == (0, 0, 0)
+
+    retried = create_requests(
+        num_requests=1,
+        num_tokens=block_size * 3,
+        max_tokens=2,
+        same_prompt=True,
+        block_size=block_size,
+        req_ids=["retried"],
+    )[0]
+    scheduler.add_request(retried)
+
+    # Reject the first allocation attempt, then delegate to the real one.
+    orig_allocate_slots = scheduler.kv_cache_manager.allocate_slots
+    allocate_results: list = []
+
+    def spy_allocate_slots(*args, **kwargs):
+        result = None if not allocate_results else orig_allocate_slots(*args, **kwargs)
+        allocate_results.append(result)
+        return result
+
+    scheduler.kv_cache_manager.allocate_slots = spy_allocate_slots
+
+    assert not scheduler.schedule().scheduled_new_reqs
+    assert retried.num_cached_tokens == -1
+    assert (stats.requests, stats.queries, stats.hits) == (0, 0, 0)
+
+    admitted = scheduler.schedule()
+    assert "retried" in admitted.num_scheduled_tokens
+    assert allocate_results[0] is None and allocate_results[1] is not None
+    assert (stats.requests, stats.queries, stats.hits) == (
+        1,
+        retried.num_tokens,
+        block_size * 2,
+    )
+    assert retried.num_cached_tokens == (block_size * 2 if omit else -1)
+    scheduler.running.remove(retried)
+    scheduler._preempt_request(retried, 0.0)
+    scheduler.update_from_output(
+        admitted,
+        ModelRunnerOutput(
+            req_ids=["retried"],
+            req_id_to_index={"retried": 0},
+            sampled_token_ids=[[1000]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    assert retried.num_stale_output_tokens == 0
+    assert scheduler.reset_prefix_cache()
+    assert "retried" in scheduler.schedule().num_scheduled_tokens
+    assert retried.num_cached_tokens == (block_size * 2 if omit else -1)
 
 
 def test_scheduler_reset_prefix_cache():

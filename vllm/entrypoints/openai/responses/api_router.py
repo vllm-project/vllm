@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-
 from collections.abc import AsyncGenerator
 from http import HTTPStatus
 
@@ -16,6 +14,7 @@ from vllm.entrypoints.openai.responses.protocol import (
 from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import (
+    apply_routed_expert_session,
     load_aware_call,
     validate_json_request,
     with_cancellation,
@@ -58,6 +57,7 @@ async def _convert_stream_to_sse_events(
 @with_cancellation
 @load_aware_call
 async def create_responses(request: ResponsesRequest, raw_request: Request):
+    apply_routed_expert_session(request, raw_request)
     handler = responses(raw_request)
     if handler is None:
         raise NotImplementedError("The model does not support Responses API")

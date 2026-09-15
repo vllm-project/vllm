@@ -249,6 +249,9 @@ class ModelConfig:
     equivalent to setting `-cc.mode=none -cc.cudagraph_mode=none`."""
     enable_return_routed_experts: bool = False
     """Whether to return routed experts."""
+    enable_omit_prefix_routed_experts: bool = False
+    """Omit cached-prefix routes; requires a stable session ID and caller-owned
+    route history."""
     return_sampling_mask: bool = False
     """Whether to return the post-processing token support for each sample."""
     max_logprobs: int = Field(default=20, ge=-1)

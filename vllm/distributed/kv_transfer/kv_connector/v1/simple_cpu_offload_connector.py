@@ -30,6 +30,7 @@ from vllm.v1.simple_kv_offload.worker import (
 )
 
 if TYPE_CHECKING:
+    from vllm.config import KVTransferConfig
     from vllm.forward_context import ForwardContext
     from vllm.v1.attention.backend import AttentionMetadata
     from vllm.v1.core.block_pool import BlockPool
@@ -234,6 +235,18 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         return None
 
     # --- Scheduler-side methods ---
+
+    @classmethod
+    def supports_external_lookup_bypass(cls, config: "KVTransferConfig") -> bool:
+        return config.kv_role == "kv_both"
+
+    def bypass_external_lookup(
+        self, request: "Request", num_computed_tokens: int
+    ) -> tuple[int | None, bool]:
+        assert self.scheduler_manager is not None
+        return self.scheduler_manager.bypass_external_lookup(
+            request, num_computed_tokens
+        )
 
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         if self.scheduler_manager is not None:
