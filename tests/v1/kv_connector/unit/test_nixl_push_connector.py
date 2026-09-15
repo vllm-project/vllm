@@ -351,6 +351,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         # Base worker fields touched by start_load_kv / _get_new_notifs.
         w._recving_metadata = {}
         w._pending_recv_notifs = {}
+        w._failed_recv_reqs = queue.Queue()
         w._recv_failures = set()
         w._recving_transfers = defaultdict(list)
         w._reqs_to_process = set()
@@ -455,12 +456,14 @@ class TestPushWriterRegSend:
                 list(group) for group in rd["local_block_ids"]
             ]
 
-    def test_fails_request_when_engine_not_handshaked(self):
+    def test_queues_failed_request_when_engine_not_handshaked(self):
         w, failures = self._reg_send_worker()
 
         w._do_send_reg_notif("req-1", _registration_data("req-1"))
 
-        assert failures == [("req-1", None)]
+        assert failures == []
+        assert w._failed_recv_reqs.get_nowait() == "req-1"
+        assert w._failed_recv_reqs.empty()
         w.nixl_wrapper.send_notif.assert_not_called()
 
     def test_agent_read_is_serialized_with_handshake_lock(self):
@@ -886,7 +889,6 @@ class TestPushWriterNotifs:
         w.nixl_wrapper = MagicMock()
         w.xfer_stats = MagicMock()
         w._log_failure = MagicMock()  # type: ignore[method-assign]
-        w._failed_recv_reqs = queue.Queue()
         w._invalid_block_ids = queue.Queue()
         w._pending_recv_notifs = {}
         w._replicated_pcp_done_sending = set()
