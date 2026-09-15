@@ -10,6 +10,7 @@ import torch
 
 import vllm.utils.jit_monitor as jit_monitor
 import vllm.v1.worker.gpu_worker as gpu_worker_module
+from vllm.config.compilation import CUDAGraphMode
 from vllm.config.parallel import ParallelConfig
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.attention.backend import (
@@ -531,3 +532,98 @@ def test_execute_model_waits_previous_pp_send_before_forward(
 
     assert log == ["wait:prev-tensor", "forward", "isend"]
     assert worker._pp_send_work == [tensor_handle]
+
+
+class _FakeProfilingBuilder:
+    """A builder whose dedicated workspace is owned by nothing else."""
+
+    def __init__(self) -> None:
+        self.int_workspace = torch.empty(64, dtype=torch.uint8)
+
+
+def test_profiling_lease_outlives_the_closing_memory_measurement(monkeypatch):
+    """The dedicated workspace has to survive `memory_profiling`'s exit.
+
+    The shared arena is held by the global workspace manager, but the int
+    workspace a wrapper allocates is owned by that wrapper alone. Releasing
+    the lease inside the profiling block frees it before the closing
+    measurement that `total_consumed` is derived from, so KV cache sizing
+    would go back to not knowing about it. It still has to be gone before the
+    CUDA graph profiling that follows rebuilds the minimal KV state.
+    """
+    import gc
+    import weakref
+    from contextlib import contextmanager
+
+    from vllm.v1.worker.workspace import PersistentWorkspaceLease
+
+    # The lease has to be the only owner, so the builder is handed over and
+    # this scope keeps nothing but weak references to it.
+    handover = [_FakeProfilingBuilder()]
+    builder_ref = weakref.ref(handover[0])
+    workspace_ref = weakref.ref(handover[0].int_workspace)
+    alive_at: dict[str, bool] = {}
+
+    def _alive() -> bool:
+        gc.collect()
+        return builder_ref() is not None and workspace_ref() is not None
+
+    consumed = 4 * GiB_bytes
+
+    @contextmanager
+    def fake_memory_profiling(snapshot, weights_memory=0):
+        result = _profile_result(consumed)
+        result.non_kv_cache_memory = consumed
+        yield result
+        # memory_profiling measures here, after the block it wraps returns.
+        alive_at["closing_measurement"] = _alive()
+
+    worker = object.__new__(Worker)
+    worker.vllm_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.PIECEWISE)
+    )
+    worker.cache_config = SimpleNamespace(
+        kv_cache_memory_bytes=0, gpu_memory_utilization=0.9
+    )
+    worker.model_config = SimpleNamespace(multimodal_config=None)
+    worker.parallel_config = SimpleNamespace()
+    worker.init_snapshot = SimpleNamespace(
+        free_memory=ANY_FREE_MEMORY, total_memory=ANY_FREE_MEMORY
+    )
+    worker.requested_memory = ANY_FREE_MEMORY
+
+    def profile_cudagraph_memory(*, persistent_workspace_profiled):
+        assert persistent_workspace_profiled
+        alive_at["cudagraph_profiling"] = _alive()
+        return 0
+
+    worker.model_runner = SimpleNamespace(
+        model_memory_usage=0,
+        profile_run=lambda: None,
+        prepare_profiling_workspace=lambda: PersistentWorkspaceLease([handover.pop()]),
+        profile_cudagraph_memory=profile_cudagraph_memory,
+        record_persistent_attention_workspace_profile=lambda: None,
+    )
+
+    monkeypatch.setattr(gpu_worker_module, "maybe_apply_startup_plan", lambda w: None)
+    monkeypatch.setattr(gpu_worker_module, "memory_profiling", fake_memory_profiling)
+    monkeypatch.setattr(
+        gpu_worker_module,
+        "requires_persistent_attention_workspace_profiling",
+        lambda config: True,
+    )
+    monkeypatch.setattr(
+        gpu_worker_module, "maybe_rocm_profiling_fallback", lambda result: None
+    )
+    monkeypatch.setattr(
+        gpu_worker_module,
+        "current_platform",
+        SimpleNamespace(is_cuda_alike=lambda: True),
+    )
+    monkeypatch.setattr(gpu_worker_module, "reserve_mm_ipc_gpu_memory", lambda *args: 0)
+    monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: None)
+
+    worker.determine_available_memory()
+
+    assert alive_at["closing_measurement"] is True
+    assert alive_at["cudagraph_profiling"] is False

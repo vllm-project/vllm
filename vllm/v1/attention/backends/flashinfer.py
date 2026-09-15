@@ -1101,6 +1101,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     ) -> PersistentWorkspaceProfilingSupport:
         if vllm_config.parallel_config.decode_context_parallel_size > 1:
             return PersistentWorkspaceProfilingSupport.UNSUPPORTED
+        # The reservation below owns the causal prefill wrapper only. A
+        # mm-prefix model routes part of its prefill through a wrapper this
+        # builder does not reserve, so it has to opt in together with the
+        # change that gives the reservation ownership of that wrapper.
+        if vllm_config.model_config.is_mm_prefix_lm:
+            return PersistentWorkspaceProfilingSupport.UNSUPPORTED
         kv_specs = iter_layer_specs(kv_cache_spec)
         # Non-causal execution owns a separate prefill wrapper that is not
         # covered by the causal reservation contract below.

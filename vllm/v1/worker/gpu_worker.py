@@ -584,18 +584,26 @@ class Worker(WorkerBase):
                 if profile_persistent_workspace:
                     workspace_lease = self.model_runner.prepare_profiling_workspace()
                 self.model_runner.profile_run()
-
-                # Release profiling-only owners before rebuilding the minimal KV
-                # state for CUDA graph-pool measurement; the global shared arenas
-                # stay live and are included in profile_result.total_consumed.
-                if workspace_lease is not None:
-                    workspace_lease.release()
-                    workspace_lease = None
-                    gc.collect()
-                    torch.accelerator.empty_cache()
+            # The lease has to outlive the block above. Only the shared arenas
+            # are held by the global manager; the dedicated workspace a builder
+            # allocates per wrapper is owned by that wrapper alone, so releasing
+            # it any earlier frees it before memory_profiling takes the closing
+            # measurement that total_consumed is derived from, and KV sizing
+            # goes back to not knowing about it.
         finally:
+            # Release profiling-only owners before rebuilding the minimal KV
+            # state for CUDA graph memory profiling. The shared arenas stay
+            # live and are already in profile_result.total_consumed.
+            released_workspace_lease = workspace_lease is not None
             if workspace_lease is not None:
                 workspace_lease.release()
+                workspace_lease = None
+        # Reclaiming what the lease held is only meaningful once profiling
+        # succeeded, and keeping it out of the finally above means a failure
+        # here cannot mask the error that got us there.
+        if released_workspace_lease:
+            gc.collect()
+            torch.accelerator.empty_cache()
 
         # Profile CUDA graph memory if graphs will be captured.
         # ROCm is included: #44825 moved the profiler to
