@@ -58,20 +58,22 @@ def test_dspark_parallel_config_disables_eplb_atomically():
 
 
 @pytest.mark.parametrize("pcp_size", [1, 4])
-def test_dense_draft_disables_context_parallelism_without_changing_target(
-    monkeypatch, pcp_size
+@pytest.mark.parametrize("dcp_size", [1, 4])
+@pytest.mark.parametrize("use_mla", [False, True])
+def test_draft_context_parallelism_without_changing_target(
+    monkeypatch, pcp_size, dcp_size, use_mla
 ):
     target_parallel = ParallelConfig(
         tensor_parallel_size=4,
         prefill_context_parallel_size=pcp_size,
-        decode_context_parallel_size=4,
+        decode_context_parallel_size=dcp_size,
         cp_kv_cache_interleave_size=16,
         distributed_executor_backend="mp",
     )
     target_config = SimpleNamespace(
         parallel_config=target_parallel,
         speculative_config=SimpleNamespace(
-            draft_model_config=SimpleNamespace(use_mla=False)
+            draft_model_config=SimpleNamespace(use_mla=use_mla)
         ),
     )
 
@@ -87,10 +89,10 @@ def test_dense_draft_disables_context_parallelism_without_changing_target(
     draft_parallel = captured.value.args[0].parallel_config
     assert draft_parallel.tensor_parallel_size == 4
     assert draft_parallel.prefill_context_parallel_size == 1
-    assert draft_parallel.decode_context_parallel_size == 1
+    assert draft_parallel.decode_context_parallel_size == (dcp_size if use_mla else 1)
     assert draft_parallel.cp_kv_cache_interleave_size == 16
     assert target_parallel.prefill_context_parallel_size == pcp_size
-    assert target_parallel.decode_context_parallel_size == 4
+    assert target_parallel.decode_context_parallel_size == dcp_size
     assert target_parallel.cp_kv_cache_interleave_size == 16
 
 

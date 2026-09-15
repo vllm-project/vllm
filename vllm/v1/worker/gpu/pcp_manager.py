@@ -144,12 +144,14 @@ class PCPManager:
         speculative_config = vllm_config.speculative_config
         if speculative_config is not None:
             if speculative_config.use_dspark():
+                dcp_size = parallel_config.decode_context_parallel_size
                 if (
-                    speculative_config.draft_model_config.use_mla
-                    and parallel_config.decode_context_parallel_size != 1
+                    dcp_size not in (1, pcp_size)
+                    and speculative_config.draft_model_config.use_mla
                 ):
                     raise NotImplementedError(
-                        "MRV2 PCP with an MLA DSpark draft requires DCP=1."
+                        "MRV2 PCP DSpark requires DCP=1 or DCP=PCP; got "
+                        f"DCP={dcp_size}, PCP={pcp_size}."
                     )
             elif (
                 speculative_config.method != "mtp"

@@ -1577,20 +1577,18 @@ def _get_kv_cache_bytes_per_block(
     )
     assert bytes_per_block > 0
     # Sparse MLA addresses whole rows within the shared pool's block stride.
-    row_alignment = math.lcm(
-        *(
-            spec.state_content_size_bytes
-            for group in kv_cache_groups
-            for spec in iter_layer_specs(group.kv_cache_spec)
-            if isinstance(spec, MLAAttentionSpec)
-        )
-    )
-    hot_page_sizes = [
+    alignment_sizes = [
+        spec.state_content_size_bytes
+        for group in kv_cache_groups
+        for spec in iter_layer_specs(group.kv_cache_spec)
+        if isinstance(spec, MLAAttentionSpec)
+    ]
+    alignment_sizes.extend(
         group.kv_cache_spec.page_size_bytes
         for group in kv_cache_groups
         if isinstance(group.kv_cache_spec, HiSparseHotSpec)
-    ]
-    return round_up(bytes_per_block, math.lcm(row_alignment, *hot_page_sizes))
+    )
+    return round_up(bytes_per_block, math.lcm(*alignment_sizes))
 
 
 def validate_kv_cache_layout(
@@ -1908,33 +1906,21 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
         kv_cache_spec: The kv cache spec of each attention layer in the model
     """
 
-    replicated_specs: dict[str, KVCacheSpec] = {
-        name: spec for name, spec in kv_cache_spec.items() if not spec.dcp_sharded
-    }
-    if replicated_specs and len(replicated_specs) < len(kv_cache_spec):
-        target_specs = {
-            name: spec
-            for name, spec in kv_cache_spec.items()
-            if name not in replicated_specs
-        }
-        unify_hybrid_kv_cache_specs(target_specs)
-        unify_hybrid_kv_cache_specs(replicated_specs)
-        kv_cache_spec.update(target_specs)
-        kv_cache_spec.update(replicated_specs)
-        return
-
-    if is_kv_cache_spec_uniform(
-        kv_cache_spec
-    ) or UniformTypeKVCacheSpecs.is_uniform_type(kv_cache_spec):
-        return
-
-    logger.warning(
-        "Hybrid KV cache manager is disabled for this hybrid model, "
-        "This means we do not enable any optimizations for saving KV cache "
-        "memory (e.g., dropping the KV cache outside the sliding window). "
-        "The compute of layers like sliding window is still saved."
-    )
-    kv_cache_spec.update(_promote_local_kv_cache_specs(kv_cache_spec))
+    groups: defaultdict[bool, dict[str, KVCacheSpec]] = defaultdict(dict)
+    for name, spec in kv_cache_spec.items():
+        replicated = isinstance(spec, AttentionSpec) and not spec.dcp_sharded
+        groups[replicated][name] = spec
+    for specs in groups.values():
+        promoted_specs = _promote_local_kv_cache_specs(specs)
+        if promoted_specs == specs:
+            continue
+        logger.warning(
+            "Hybrid KV cache manager is disabled for this hybrid model, "
+            "This means we do not enable any optimizations for saving KV cache "
+            "memory (e.g., dropping the KV cache outside the sliding window). "
+            "The compute of layers like sliding window is still saved."
+        )
+        kv_cache_spec.update(promoted_specs)
 
 
 def _approximate_gcd(values: Sequence[int], *, lower_bound: int | None = None) -> int:
