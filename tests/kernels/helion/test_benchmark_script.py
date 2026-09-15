@@ -12,10 +12,17 @@ if not has_helion():
 from scripts import benchmark_helion_kernels
 
 check_correctness = benchmark_helion_kernels.check_correctness
+make_mutated_arg_reset = benchmark_helion_kernels._make_mutated_arg_reset
+
+
+def _raw_kernel(output: torch.Tensor, input: torch.Tensor) -> torch.Tensor:
+    return input * 2
 
 
 class _FakeKernel:
     helion_settings = None
+    _mutates_args = ["output"]
+    raw_kernel_func = staticmethod(_raw_kernel)
 
     def __init__(self, offset: float):
         self.calls = 0
@@ -71,6 +78,20 @@ def test_check_correctness_reports_return_value_mismatch():
 
     with pytest.raises(AssertionError, match="Numerics check failed for case bad"):
         check_correctness(kernel, baseline, inputs, "bad")
+
+
+def test_make_mutated_arg_reset_restores_only_declared_tensor_arguments():
+    kernel = _FakeKernel(offset=1)
+    output = torch.zeros(4)
+    input = torch.arange(4)
+    reset_inputs = make_mutated_arg_reset(kernel, (output, input))
+
+    output.fill_(2)
+    input.fill_(3)
+    reset_inputs()
+
+    torch.testing.assert_close(output, torch.zeros(4))
+    torch.testing.assert_close(input, torch.full((4,), 3))
 
 
 def test_log_versions(monkeypatch):
