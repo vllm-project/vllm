@@ -9,6 +9,7 @@ import torch.nn.functional as F
 
 from tests.v1.sample.utils import create_allowed_token_ids
 from vllm.platforms import current_platform
+from vllm.utils import cpu_triton_utils
 from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (
@@ -996,6 +997,50 @@ def test_sample_recovered_tokens_uses_fp64_exponential_race_when_requested():
     )
 
     assert torch.equal(actual, expected)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cpu(),
+    reason="exercises the CPU fallback kernel for sample_recovered_tokens",
+)
+@pytest.mark.parametrize(
+    "inv_q_row,fp64_choice,fp32_choice",
+    [
+        # Near-tie only fp64 can resolve: both entries round to 1.0 in fp32.
+        ([1.0, 1.0 + 1e-10, 1.0], 1, 0),
+        # Lower-tail draws whose reciprocals both overflow fp32 to +inf.
+        ([1e39, 2e39, 1.0], 1, 0),
+    ],
+)
+def test_cpu_sample_recovered_tokens_preserves_fp64_inv_q(
+    inv_q_row, fp64_choice, fp32_choice
+):
+    """fp64 gumbel noise must survive the CPU kernel, as it does on Triton.
+
+    The fp32 expectations double as a guard that the fp32 path is unchanged.
+    """
+    vocab_size = 3
+    target_probs = torch.tensor([[1.0, 1.0, 0.5]], dtype=torch.float32)
+    draft_token_ids = torch.tensor([2], dtype=torch.int64)
+    cu_num_draft_tokens = torch.tensor([1], dtype=torch.int64)
+
+    def recovered_token(dtype: torch.dtype) -> int:
+        out = torch.zeros(1, dtype=torch.int64)
+        cpu_triton_utils.sample_recovered_tokens_kernel[(1, 1)](
+            out,
+            cu_num_draft_tokens,
+            draft_token_ids,
+            None,
+            target_probs,
+            torch.tensor([inv_q_row], dtype=dtype),
+            vocab_size,
+            NO_DRAFT_PROBS=True,
+            USE_FP64_GUMBEL=dtype is torch.float64,
+        )
+        return int(out.item())
+
+    assert recovered_token(torch.float64) == fp64_choice
+    assert recovered_token(torch.float32) == fp32_choice
 
 
 @pytest.mark.parametrize("no_draft_probs", [True, False])
