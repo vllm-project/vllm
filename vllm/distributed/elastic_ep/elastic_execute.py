@@ -171,6 +171,17 @@ class ElasticEPScalingExecutor:
         )
 
     @contextmanager
+    def _suppress_eplb(self) -> Iterator[None]:
+        # A rank warming up alone must not advance the EPLB step counter.
+        runner = self.worker.model_runner
+        was_suppressed = runner.eep_eplb_suppressed
+        runner.eep_eplb_suppressed = True
+        try:
+            yield
+        finally:
+            runner.eep_eplb_suppressed = was_suppressed
+
+    @contextmanager
     def _disable_flashinfer_autotune(self) -> Iterator[None]:
         kernel_config = self.worker.vllm_config.kernel_config
         enabled = kernel_config.enable_flashinfer_autotune
@@ -686,6 +697,7 @@ class ElasticEPScalingExecutor:
             skip_dp_coordination() if reuse_kernel else nullcontext(),
             all2all_manager.mask_remote_ranks() if reuse_kernel else nullcontext(),
             self._disable_flashinfer_autotune() if reuse_kernel else nullcontext(),
+            self._suppress_eplb(),
             runner.preserve_serving_state(),
         ):
             runner.warm_up_workspace()

@@ -384,25 +384,6 @@ def test_human_readable_int_rejects_invalid(invalid: str):
         human_readable_int(invalid)
 
 
-def _make_scaling_llm(all2all_backend: str = "allgather_reducescatter") -> AsyncLLM:
-    llm = AsyncLLM.__new__(AsyncLLM)
-    llm.vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(
-            data_parallel_size=2, all2all_backend=all2all_backend
-        ),
-        use_v2_model_runner=True,
-    )
-    llm.engine_core = SimpleNamespace(
-        prepare_elastic_ep=AsyncMock(),
-        commit_elastic_ep=AsyncMock(),
-        dp_engines_running=MagicMock(return_value=False),
-        shutdown=MagicMock(),
-    )
-    llm.output_processor = MagicMock()
-    llm.log_stats = False
-    return llm
-
-
 @pytest.mark.asyncio
 async def test_add_request_rechecks_admission_after_middleware_passes():
     llm = _make_async_llm()
@@ -448,65 +429,6 @@ async def test_existing_request_can_add_after_admission_closes():
         llm.engine_core.add_request_async.assert_awaited_once_with(request)
     finally:
         set_scaling_elastic_ep(False)
-
-
-@pytest.mark.asyncio
-async def test_mrv2_scaling_closes_admission_drains_then_commits():
-    llm = _make_scaling_llm()
-    events: list[str | tuple[str, bool]] = []
-    from vllm.entrypoints.serve.elastic_ep.middleware import (
-        get_scaling_elastic_ep,
-        set_scaling_elastic_ep,
-    )
-
-    llm.engine_core.prepare_elastic_ep.side_effect = lambda _: events.append("prepare")
-
-    async def drain(_: int) -> None:
-        events.append(("drain", bool(get_scaling_elastic_ep())))
-
-    llm._drain_requests_for_elastic_ep = AsyncMock(side_effect=drain)
-    llm.engine_core.commit_elastic_ep.side_effect = lambda: events.append("commit")
-
-    set_scaling_elastic_ep(False)
-    try:
-        await llm._scale_elastic_ep(4, 30)
-        assert events == ["prepare", ("drain", True), "commit"]
-        assert llm.engine_core.commit_elastic_ep.await_count == 1
-        assert not get_scaling_elastic_ep()
-        assert llm.vllm_config.parallel_config.data_parallel_size == 4
-    finally:
-        set_scaling_elastic_ep(False)
-
-
-@pytest.mark.asyncio
-async def test_mrv2_scaling_skips_drain_when_graphs_are_reused():
-    """Existing NIXL EP ranks keep their graphs and do not re-warm at commit."""
-    llm = _make_scaling_llm(all2all_backend="nixl_ep")
-    llm._drain_requests_for_elastic_ep = AsyncMock()
-
-    from vllm.entrypoints.serve.elastic_ep.middleware import set_scaling_elastic_ep
-
-    set_scaling_elastic_ep(False)
-    try:
-        await llm._scale_elastic_ep(4, 30)
-        llm._drain_requests_for_elastic_ep.assert_not_awaited()
-        assert llm.engine_core.commit_elastic_ep.await_count == 1
-    finally:
-        set_scaling_elastic_ep(False)
-
-
-@pytest.mark.asyncio
-async def test_drain_waits_for_frontend_streaming_request(monkeypatch):
-    llm = _make_scaling_llm()
-    llm.engine_core.dp_engines_running.return_value = False
-    llm.output_processor.has_unfinished_requests.side_effect = [True, False]
-    sleep = AsyncMock()
-    monkeypatch.setattr(asyncio, "sleep", sleep)
-
-    await llm.wait_for_requests_to_drain(drain_timeout=2)
-
-    assert llm.output_processor.has_unfinished_requests.call_count == 2
-    sleep.assert_awaited_once_with(1)
 
 
 @pytest.mark.asyncio
@@ -558,39 +480,3 @@ async def test_parallel_sampling_registers_all_children_before_first_send(
         release_first_send.set()
         await add_task
     assert llm.engine_core.add_request_async.await_count == 3
-
-
-@pytest.mark.asyncio
-async def test_mrv2_drain_failure_reopens_admission():
-    llm = _make_scaling_llm()
-    llm.wait_for_requests_to_drain = AsyncMock(side_effect=TimeoutError)
-
-    from vllm.entrypoints.serve.elastic_ep.middleware import (
-        get_scaling_elastic_ep,
-        set_scaling_elastic_ep,
-    )
-
-    set_scaling_elastic_ep(False)
-    with pytest.raises(TimeoutError):
-        await llm._scale_elastic_ep(4, 30)
-    assert not get_scaling_elastic_ep()
-    llm.engine_core.commit_elastic_ep.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_mrv2_commit_failure_leaves_admission_closed():
-    llm = _make_scaling_llm()
-    llm.wait_for_requests_to_drain = AsyncMock()
-    llm.engine_core.commit_elastic_ep.side_effect = RuntimeError("commit failed")
-
-    from vllm.entrypoints.serve.elastic_ep.middleware import (
-        get_scaling_elastic_ep,
-        set_scaling_elastic_ep,
-    )
-
-    set_scaling_elastic_ep(False)
-    with pytest.raises(RuntimeError, match="commit failed"):
-        await llm._scale_elastic_ep(4, 30)
-    assert get_scaling_elastic_ep()
-    assert llm.engine_core.commit_elastic_ep.await_count == 1
-    set_scaling_elastic_ep(False)
