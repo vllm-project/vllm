@@ -333,6 +333,25 @@ class TestBaseThinkingReasoningParserStreaming:
         assert reasoning == "Some reasoning"
         assert content == "Answer"
 
+    def test_streaming_multi_token_delta_strips_start_token(self, test_tokenizer):
+        """A delta containing the start token and reasoning must strip it."""
+        parser = TestThinkingReasoningParser(test_tokenizer)
+        delta_text = "<test:think>step one"
+        delta_token_ids = [parser.start_token_id, 1234]
+
+        delta_message = parser.extract_reasoning_streaming(
+            previous_text="",
+            current_text=delta_text,
+            delta_text=delta_text,
+            previous_token_ids=[],
+            current_token_ids=delta_token_ids,
+            delta_token_ids=delta_token_ids,
+        )
+
+        assert delta_message is not None
+        assert delta_message.reasoning == "step one"
+        assert delta_message.content is None
+
     def test_streaming_no_end_token(self, test_tokenizer):
         """Test streaming when no end token is encountered."""
         parser = TestThinkingReasoningParser(test_tokenizer)

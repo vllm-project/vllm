@@ -149,7 +149,13 @@ class BaseThinkingReasoningParser(ReasoningParser):
             else:
                 # start token in delta, no end token in delta,
                 # reasoning content continues
-                return DeltaMessage(reasoning=delta_text)
+                start_index = delta_text.find(self.start_token)
+                reasoning = (
+                    delta_text[start_index + len(self.start_token) :]
+                    if start_index >= 0
+                    else delta_text
+                )
+                return DeltaMessage(reasoning=reasoning)
         else:
             # not find thinking start token
             return DeltaMessage(content=delta_text)
