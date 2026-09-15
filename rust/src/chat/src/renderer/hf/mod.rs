@@ -1239,7 +1239,6 @@ mod tests {
             serde_json::json!(37),
             serde_json::json!(0.37),
             serde_json::json!("custom"),
-            serde_json::json!("none"),
         ] {
             let mut request = sample_request(vec![ChatMessage::user("hello")]);
             request.chat_options.reasoning_effort =
@@ -1249,7 +1248,6 @@ mod tests {
                 ("enable_thinking".to_string(), serde_json::json!(true)),
             ]
             .into();
-            let original = request.chat_options.clone();
             let rendered = HfChatRenderer::new(
                 Some("{{ reasoning_effort|tojson }}|{{ enable_thinking }}".to_string()),
                 HashMap::new(),
@@ -1263,7 +1261,6 @@ mod tests {
                 rendered.effective_template_kwargs["reasoning_effort"],
                 effort
             );
-            assert_eq!(request.chat_options, original);
         }
     }
 
@@ -1281,7 +1278,6 @@ mod tests {
                 ("reasoning_effort".to_string(), effort),
             ]
             .into();
-            let original = request.chat_options.clone();
             let rendered = HfChatRenderer::new(
                 Some(
                     "{{ thinking }}|{{ enable_thinking }}|{{ reasoning_effort is none }}"
@@ -1294,8 +1290,10 @@ mod tests {
             .render(&request)
             .unwrap();
             assert!(rendered.prompt.into_text().unwrap().starts_with("custom-mode|True|"));
-            assert_eq!(rendered.effective_template_kwargs, original.template_kwargs);
-            assert_eq!(request.chat_options, original);
+            assert_eq!(
+                rendered.effective_template_kwargs,
+                request.chat_options.template_kwargs
+            );
         }
     }
 

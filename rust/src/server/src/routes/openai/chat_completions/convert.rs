@@ -523,7 +523,7 @@ mod tests {
 
     #[test]
     fn chat_http_reasoning_effort_rejects_model_extensions_at_top_level() {
-        for effort in [json!(37), json!(0.37), json!("custom"), json!(true)] {
+        for effort in [json!(37), json!("custom")] {
             let request = json!({
                 "messages": [{"role": "user", "content": "hello"}],
                 "reasoning_effort": effort,

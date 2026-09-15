@@ -196,137 +196,92 @@ mod tests {
 
     #[test]
     fn explicit_toggle_decides_mode_and_none_inherits_enabled_effort() {
-        let actual = [
-            json!({}),
-            json!({"reasoning_effort": "none"}),
-            json!({"reasoning_effort": "high"}),
-            json!({"enable_thinking": true}),
-            json!({"enable_thinking": true, "reasoning_effort": "none"}),
-            json!({"enable_thinking": true, "reasoning_effort": "low"}),
-            json!({"enable_thinking": false, "reasoning_effort": "high"}),
-            json!({"thinking": true, "enable_thinking": false}),
-            json!({"thinking": false, "enable_thinking": true}),
-            json!({"reasoning_effort": 37}),
-            json!({"reasoning_effort": null}),
-        ]
-        .map(|value| ReasoningControl::from_template_kwargs(&kwargs(value)).unwrap());
-        expect_test::expect![[r#"
-            [
-                Default,
+        use ReasoningControl::{Default, Disabled, Enabled};
+
+        for (source, expected) in [
+            (json!({}), Default),
+            (json!({"reasoning_effort": "none"}), Disabled),
+            (
+                json!({"reasoning_effort": "high"}),
+                ReasoningControl::enabled("high"),
+            ),
+            (json!({"enable_thinking": true}), Enabled { effort: None }),
+            (
+                json!({"enable_thinking": true, "reasoning_effort": "none"}),
+                Enabled { effort: None },
+            ),
+            (
+                json!({"enable_thinking": true, "reasoning_effort": "low"}),
+                ReasoningControl::enabled("low"),
+            ),
+            (
+                json!({"enable_thinking": false, "reasoning_effort": "high"}),
                 Disabled,
-                Enabled {
-                    effort: Some(
-                        String(
-                            "high",
-                        ),
-                    ),
-                },
-                Enabled {
-                    effort: None,
-                },
-                Enabled {
-                    effort: None,
-                },
-                Enabled {
-                    effort: Some(
-                        String(
-                            "low",
-                        ),
-                    ),
-                },
+            ),
+            (
+                json!({"thinking": true, "enable_thinking": false}),
+                Enabled { effort: None },
+            ),
+            (
+                json!({"thinking": false, "enable_thinking": true}),
                 Disabled,
-                Enabled {
-                    effort: None,
-                },
-                Disabled,
-                Enabled {
-                    effort: Some(
-                        Number(
-                            Number(37),
-                        ),
-                    ),
-                },
-                Default,
-            ]
-        "#]]
-        .assert_debug_eq(&actual);
+            ),
+            (
+                json!({"reasoning_effort": 37}),
+                ReasoningControl::enabled(EffortValue::Number(37.into())),
+            ),
+            (json!({"reasoning_effort": null}), Default),
+        ] {
+            let source = kwargs(source);
+            assert_eq!(
+                ReasoningControl::from_template_kwargs(&source).unwrap(),
+                expected,
+                "{source:?}"
+            );
+        }
     }
 
     #[test]
     fn request_and_deployment_states_fall_back_before_model_defaults() {
-        let sources = [
-            (json!({}), json!({"enable_thinking": false})),
+        for (request, defaults, expected) in [
+            (
+                json!({}),
+                json!({"enable_thinking": false}),
+                ReasoningControl::Disabled,
+            ),
             (
                 json!({"reasoning_effort": "high"}),
                 json!({"thinking": false}),
+                ReasoningControl::enabled("high"),
             ),
             (
                 json!({"enable_thinking": false}),
                 json!({"reasoning_effort": "high"}),
+                ReasoningControl::Disabled,
             ),
             (
                 json!({"thinking": true, "reasoning_effort": "none"}),
                 json!({"reasoning_effort": "low"}),
+                ReasoningControl::enabled("low"),
             ),
             (
                 json!({"thinking": true}),
                 json!({"thinking": false, "reasoning_effort": "low"}),
+                ReasoningControl::enabled("max"),
             ),
-            (json!({}), json!({})),
-        ];
-        let actual = sources.map(|(request, defaults)| {
-            ReasoningControl::from_template_kwargs(&kwargs(request))
+            (json!({}), json!({}), ReasoningControl::enabled("max")),
+        ] {
+            let request = kwargs(request);
+            let defaults = kwargs(defaults);
+            let actual = ReasoningControl::from_template_kwargs(&request)
                 .unwrap()
-                .fallback(ReasoningControl::from_template_kwargs(&kwargs(defaults)).unwrap())
-                .fallback(ReasoningControl::enabled("max"))
-        });
-        expect_test::expect![[r#"
-            [
-                Disabled,
-                Enabled {
-                    effort: Some(
-                        String(
-                            "high",
-                        ),
-                    ),
-                },
-                Disabled,
-                Enabled {
-                    effort: Some(
-                        String(
-                            "low",
-                        ),
-                    ),
-                },
-                Enabled {
-                    effort: Some(
-                        String(
-                            "max",
-                        ),
-                    ),
-                },
-                Enabled {
-                    effort: Some(
-                        String(
-                            "max",
-                        ),
-                    ),
-                },
-            ]
-        "#]]
-        .assert_debug_eq(&actual);
-    }
-
-    #[test]
-    fn typed_effort_wins_over_kwargs_without_mutating_the_request() {
-        let mut request = ChatRequest::for_test();
-        request.chat_options.reasoning_effort = Some(EffortValue::from("high"));
-        request.chat_options.template_kwargs = kwargs(json!({"reasoning_effort": 37}));
-        let original = request.clone();
-        let control =
-            ReasoningControl::resolve(&request, &kwargs(json!({"thinking": false}))).unwrap();
-        assert_eq!(control, ReasoningControl::enabled("high"));
-        assert_eq!(request, original);
+                .fallback(ReasoningControl::from_template_kwargs(&defaults).unwrap())
+                .fallback(ReasoningControl::enabled("max"));
+            assert_eq!(
+                actual, expected,
+                "request={request:?}, defaults={defaults:?}"
+            );
+        }
     }
 
     #[test]

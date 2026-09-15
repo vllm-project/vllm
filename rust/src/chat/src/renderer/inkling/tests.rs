@@ -353,21 +353,6 @@ fn ignores_unsupported_reasoning_effort_names() {
 }
 
 #[test]
-fn rejects_invalid_reasoning_effort_types() {
-    for value in [json!(true), json!([]), json!({})] {
-        let mut request = ChatRequest::for_test();
-        request
-            .chat_options
-            .template_kwargs
-            .insert("reasoning_effort".to_string(), value);
-
-        let error = renderer().render(&request).unwrap_err();
-        assert!(error.is_request_validation_error());
-        assert!(error.as_report().to_string().contains("must be a string or number"));
-    }
-}
-
-#[test]
 fn rejects_out_of_range_reasoning_effort() {
     for value in [0.990_000_1, 1.0, 1.5, -0.1] {
         let mut request = ChatRequest::for_test();

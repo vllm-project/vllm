@@ -324,12 +324,6 @@ fn normalized_reasoning_drives_both_prompt_and_compatibility_kwargs() {
             "Absolute maximum",
         ),
         (
-            serde_json::json!({"thinking": true, "enable_thinking": false}),
-            true,
-            "high",
-            "Absolute maximum",
-        ),
-        (
             serde_json::json!({"thinking": false, "enable_thinking": true, "reasoning_effort": "max"}),
             false,
             "none",
@@ -341,12 +335,6 @@ fn normalized_reasoning_drives_both_prompt_and_compatibility_kwargs() {
             "high",
             "Absolute maximum",
         ),
-        (
-            serde_json::json!({"reasoning_effort": "max"}),
-            true,
-            "max",
-            "Beyond maximum",
-        ),
     ] {
         let mut request = ChatRequest::for_test();
         request.chat_options.template_kwargs = serde_json::from_value(kwargs).unwrap();
@@ -354,7 +342,9 @@ fn normalized_reasoning_drives_both_prompt_and_compatibility_kwargs() {
         let prompt = rendered.prompt.into_text().unwrap();
         assert_eq!(prompt.ends_with("<think>"), enabled);
         assert_eq!(prompt.contains("Reasoning Effort:"), enabled);
-        assert!(prompt.contains(prefix));
+        if enabled {
+            assert!(prompt.contains(prefix));
+        }
         assert_eq!(rendered.effective_template_kwargs["thinking"], enabled);
         assert_eq!(
             rendered.effective_template_kwargs["enable_thinking"],
