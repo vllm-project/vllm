@@ -1579,8 +1579,14 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             if split_non_spec:
                 # Stitch the peeled decode outputs in front of the prefill
                 # outputs (decode-first order).
+                # The decode kernel may emit the widened readout dtype while the
+                # chunk kernel emits the activation dtype.
                 core_attn_out_non_spec = torch.cat(
-                    [core_attn_out_decode, core_attn_out_non_spec], dim=1
+                    [
+                        core_attn_out_decode.to(core_attn_out.dtype),
+                        core_attn_out_non_spec.to(core_attn_out.dtype),
+                    ],
+                    dim=1,
                 )
         elif attn_metadata.num_decodes > 0:
             core_attn_out_non_spec, last_recurrent_state = (
@@ -1607,13 +1613,20 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 3. Merge core attention output
         if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
+            # Spec (fused decode kernel) and non-spec (chunk kernel) outputs can
+            # differ in dtype when the readout buffer is widened; index_copy_
+            # does not cast, so merge in the destination buffer's dtype.
             merged_out = torch.empty(
                 (1, num_actual_tokens, *core_attn_out_spec.shape[2:]),
-                dtype=core_attn_out_non_spec.dtype,
+                dtype=core_attn_out.dtype,
                 device=core_attn_out_non_spec.device,
             )
-            merged_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
-            merged_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
+            merged_out.index_copy_(
+                1, spec_token_indx, core_attn_out_spec.to(merged_out.dtype)
+            )
+            merged_out.index_copy_(
+                1, non_spec_token_indx, core_attn_out_non_spec.to(merged_out.dtype)
+            )
             core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
         elif spec_sequence_masks is not None:
             core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
