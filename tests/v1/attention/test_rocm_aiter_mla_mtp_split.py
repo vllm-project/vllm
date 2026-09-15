@@ -237,6 +237,7 @@ def test_mtp_decode_qlen4_keeps_uniform_rows_with_metadata(monkeypatch):
         query_start_loc_cpu=torch.tensor([0, 4, 8], dtype=torch.int32),
         query_start_loc_device=torch.tensor([0, 4, 8], dtype=torch.int32),
         num_decode_tokens=8,
+        max_query_len=4,
         dcp_tot_seq_lens_device=None,
     )
 
@@ -293,6 +294,7 @@ def test_full_cudagraph_padded_uniform_mtp_synthesizes_decode_indptr(
         query_start_loc_cpu=torch.tensor([0, mtp_qlen, mtp_qlen], dtype=torch.int32),
         query_start_loc_device=torch.tensor([0, mtp_qlen, mtp_qlen], dtype=torch.int32),
         num_decode_tokens=seq_lens.numel() * mtp_qlen,
+        max_query_len=mtp_qlen,
         dcp_tot_seq_lens_device=None,
     )
 
@@ -362,6 +364,7 @@ def test_decode_expands_kernel_block_page_indices(monkeypatch):
         query_start_loc_cpu=torch.tensor([0, 1, 2], dtype=torch.int32),
         query_start_loc_device=torch.tensor([0, 1, 2], dtype=torch.int32),
         num_decode_tokens=seq_lens.numel(),
+        max_query_len=1,
         dcp_tot_seq_lens_device=None,
     )
 
@@ -451,6 +454,7 @@ def test_persistent_metadata_gate(
         query_start_loc_cpu=query_start_loc,
         query_start_loc_device=query_start_loc,
         num_decode_tokens=num_reqs * qo_len,
+        max_query_len=qo_len,
         dcp_tot_seq_lens_device=None,
     )
 
@@ -520,6 +524,7 @@ def test_persistent_metadata_gate_without_gluon_build(
         query_start_loc_cpu=query_start_loc,
         query_start_loc_device=query_start_loc,
         num_decode_tokens=num_reqs * qo_len,
+        max_query_len=qo_len,
         dcp_tot_seq_lens_device=None,
     )
 

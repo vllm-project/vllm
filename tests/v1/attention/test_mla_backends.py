@@ -1095,6 +1095,7 @@ def test_flashmla_dcp_decode_metadata_uses_gathered_query_heads(
         query_start_loc_cpu=query_start_loc,
         query_start_loc_device=query_start_loc,
         num_decode_tokens=2,
+        max_query_len=1,
         dcp_tot_seq_lens_device=None,
     )
 

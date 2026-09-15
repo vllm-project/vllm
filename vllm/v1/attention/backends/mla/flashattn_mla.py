@@ -202,8 +202,13 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
+        max_query_len: int,
         dcp_tot_seq_lens_device: torch.Tensor | None,
     ) -> FlashAttnMLADecodeMetadata:
+        # Deliberately measured rather than taking the promised bound: this backend
+        # feeds the value to _schedule_decode, whose metadata size is asserted
+        # against a persistent buffer, so honouring the promise under varlen decode
+        # capture needs its own verification.
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         max_query_len = query_lens_cpu.max().item()
 
