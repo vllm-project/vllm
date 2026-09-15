@@ -7,7 +7,7 @@ import sys
 import uuid
 import weakref
 from abc import ABC, abstractmethod
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
@@ -35,6 +35,7 @@ from vllm.utils.network_utils import (
     get_open_zmq_inproc_path,
     make_zmq_socket,
 )
+from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.engine import (
     EEP_NOTIFICATION_CALL_ID,
     FT_STATUS_CALL_ID,
@@ -357,8 +358,14 @@ class InprocClient(EngineCoreClient):
             log_stats,
             executor_fail_callback=executor_fail_callback,
         )
+        self._pending_outputs: deque[EngineCoreOutputs] = deque()
 
     def get_output(self) -> EngineCoreOutputs:
+        if self._pending_outputs:
+            return self._pending_outputs.popleft()
+        return self._step()
+
+    def _step(self) -> EngineCoreOutputs:
         outputs, model_executed = self.engine_core.step_fn()
         self.engine_core.post_step(model_executed=model_executed)
         return outputs and outputs.get(0) or EngineCoreOutputs()
@@ -393,9 +400,28 @@ class InprocClient(EngineCoreClient):
     def reset_encoder_cache(self) -> None:
         self.engine_core.reset_encoder_cache()
 
+    def drain_requests(self, step: Callable[[], Any]) -> None:
+        """Drive running requests to completion, leaving new requests queued.
+
+        The caller supplies the step function so frontend stop conditions and
+        output delivery continue to run while the in-process engine drains.
+        """
+        core = self.engine_core
+        if core.vllm_config.parallel_config.data_parallel_size > 1:
+            raise ValueError(
+                "'wait' mode is not supported with in-process data parallelism"
+            )
+        if core.model_executor.is_sleeping:
+            raise ValueError("Wake the engine before draining requests")
+
+        core.scheduler.set_pause_state(PauseState.PAUSED_NEW)
+        while core.scheduler.has_requests() or core.batch_queue:
+            step()
+
     def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
         if mode == "wait":
-            raise ValueError("'wait' pause mode is not supported in inproc-engine mode")
+            self.drain_requests(lambda: self._pending_outputs.append(self._step()))
+            mode = "keep"
         result = self.engine_core.sleep(level, mode)
         assert result is None
 
