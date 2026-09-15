@@ -558,7 +558,7 @@ def _reduce_partitions(
 # -- Public launcher ----------------------------------------------------------
 def flydsl_turboquant_decode_attention(
     query: torch.Tensor,  # [B, Hq, D] bf16/fp16
-    kv_cache: torch.Tensor,  # [num_blocks, BS, Hk, slot_size_aligned]
+    kv_cache: torch.Tensor,  # [num_blocks, Hk, 1, page_record_size]
     block_table: torch.Tensor,  # [B, max_blocks_per_seq] int32
     seq_lens: torch.Tensor,  # [B] int32
     Pi: torch.Tensor,  # [D, D] fp32
@@ -595,7 +595,7 @@ def flydsl_turboquant_decode_attention(
     Sinks are NYI and silently ignored if set. norm_correction is honored
     implicitly via the pre-folded stored K-norm (see footer comment).
     """
-    del mid_o_buf, lse_buf, key_packed_size, value_packed_size
+    del mid_o_buf, lse_buf
     if not is_flydsl_available():
         raise RuntimeError(
             "FlyDSL decode requested but FlyDSL is not available (needs gfx950 "
@@ -608,8 +608,17 @@ def flydsl_turboquant_decode_attention(
     )
 
     B, Hq, D = query.shape
-    Hk = kv_cache.shape[2]
-    block_size = kv_cache.shape[1]
+    Hk = kv_cache.shape[1]
+    slot_size = key_packed_size + value_packed_size
+    slot_size += slot_size % 2
+    record_size = kv_cache.shape[-1]
+    if kv_cache.ndim != 4 or kv_cache.shape[2] != 1 or record_size % slot_size:
+        raise ValueError(
+            "TurboQuant cache must have shape "
+            "[num_blocks, num_kv_heads, 1, page_record_size] with a page "
+            "record divisible by the per-token payload"
+        )
+    block_size = record_size // slot_size
     QG = Hq // Hk
     assert D == _TQ_MOD.HEAD_SIZE
     assert block_size in (16, 32), (

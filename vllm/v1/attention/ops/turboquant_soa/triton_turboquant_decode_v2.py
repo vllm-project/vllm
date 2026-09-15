@@ -514,16 +514,27 @@ def triton_turboquant_decode_attention_v2(
     graph across both versions.
     """
     B, Hq, D = query.shape
-    Hk = kv_cache.shape[2]
-    block_size = kv_cache.shape[1]
-    padded_slot = kv_cache.shape[3]
+    cfg = _get_layout(D, mse_bits, value_quant_bits, key_packed_size)
+    Hk = kv_cache.shape[1]
+    per_token_bytes = key_packed_size + cfg["val_data_bytes"] + 4
+    padded_slot = per_token_bytes + per_token_bytes % 2
+    record_size = kv_cache.shape[-1]
+    if kv_cache.ndim != 4 or kv_cache.shape[2] != 1:
+        raise ValueError(
+            "TurboQuant cache must have shape "
+            "[num_blocks, num_kv_heads, 1, page_record_size]"
+        )
+    if record_size % padded_slot:
+        raise ValueError(
+            "TurboQuant page record is not divisible by its per-token payload: "
+            f"{record_size=} {padded_slot=}"
+        )
+    block_size = record_size // padded_slot
     max_num_blocks = block_table.shape[1]
     n_centroids = centroids.shape[0]
     kv_group_size = Hq // Hk
     device = query.device
     del max_seq_len  # no longer used: splits is fixed via max_num_kv_splits
-
-    cfg = _get_layout(D, mse_bits, value_quant_bits, key_packed_size)
 
     # Opt#3 SoA layout constants (match store-side computation).
     key_data_bytes = D if key_fp8 else cfg["mse_bytes"]
