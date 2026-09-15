@@ -37,6 +37,24 @@ steps:
   commands:
   - export VLLM_TEST_CLEAN_GPU_MEMORY=1
   - pytest -s -v tests/compile/passes/distributed
+  mirror:
+    amd:
+      label: ':amd: (MI300) Distributed Compile'
+      dind: false
+      device: mi300_2
+      timeout_in_minutes: 65
+      working_dir: /vllm-workspace/
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/compilation/
+      - vllm/model_executor/layers
+      - tests/compile/passes/distributed/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      commands:
+      - export VLLM_TEST_CLEAN_GPU_MEMORY=1
+      - pytest -s -v tests/compile/passes/distributed
 
 - label: ":nvidia: (B200) Fusion and Compile"
   key: fusion-and-compile-unit-tests-2xb200
@@ -241,3 +259,45 @@ steps:
     # for ar-rms-quant-fp4, also sweep llama3
     - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k "(FLASHINFER and inductor_partition and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek))) or Llama-3.1-8B-Instruct-FP4"
     - pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k "FLASHINFER and inductor_partition and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek))"
+
+- label: ':amd: (MI300) Fusion E2E TP2 AR-RMS (Inductor Partition)'
+  key: fusion-e2e-tp2-ar-rms-inductor-partition-amd
+  dind: false
+  device: mi300_2
+  num_devices: 2
+  timeout_in_minutes: 65
+  working_dir: /vllm-workspace/
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/compilation/
+  - vllm/model_executor/layers
+  - tests/compile/fusions_e2e/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - csrc/quantization/
+  - vllm/v1/attention/
+  commands:
+  - export VLLM_TEST_CLEAN_GPU_MEMORY=1
+  - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py::test_tp2_ar_rms_fusions -k "inductor_partition"
+
+- label: ':amd: (MI300) Fusion E2E TP2 AR-RMS (Dynamo Partition)'
+  key: fusion-e2e-tp2-ar-rms-dynamo-partition-amd
+  dind: false
+  device: mi300_2
+  num_devices: 2
+  timeout_in_minutes: 65
+  working_dir: /vllm-workspace/
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/compilation/
+  - vllm/model_executor/layers
+  - tests/compile/fusions_e2e/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - csrc/quantization/
+  - vllm/v1/attention/
+  commands:
+  - export VLLM_TEST_CLEAN_GPU_MEMORY=1
+  - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py::test_tp2_ar_rms_fusions -k "dynamo_partition"
