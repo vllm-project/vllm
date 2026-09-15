@@ -209,6 +209,29 @@ def test_high_volume(publisher, subscriber):
     assert sorted(seqs) == seqs, "Sequence numbers should be in order"
 
 
+def test_shutdown_cleans_up_when_event_queue_is_full():
+    """Shutdown should clean up even if the event queue is full."""
+    from queue import Queue
+    from unittest.mock import Mock
+
+    from vllm.distributed.kv_events import ZmqEventPublisher
+
+    publisher = ZmqEventPublisher.__new__(ZmqEventPublisher)
+    publisher._running = True
+    publisher._event_queue = Queue(maxsize=1)
+    publisher._event_queue.put_nowait(create_test_events(1))
+    publisher._thread = Mock(spec=threading.Thread)
+    publisher._thread.is_alive.return_value = False
+    publisher._pub = Mock()
+    publisher._replay = Mock()
+    publisher.SHUTDOWN_TIMEOUT = 0
+
+    publisher.shutdown()
+
+    publisher._pub.close.assert_called_once_with(linger=0)
+    publisher._replay.close.assert_called_once_with(linger=0)
+
+
 def test_null_publisher():
     """Test that NullEventPublisher can be used without errors"""
     publisher = NullEventPublisher(DP_RANK)
