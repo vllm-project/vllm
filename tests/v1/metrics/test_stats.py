@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
-from vllm.v1.engine import EngineCoreOutputs, FinishReason
+from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.stats import (
     IterationStats,
+    LoRARequestStates,
     PrefillStats,
     PromptTokenStats,
     RequestStateStats,
@@ -288,3 +289,81 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     assert stats.external_kv_transfer == 999
     assert stats.cached_tokens == 999
     assert stats.total == 1000
+
+
+def test_inter_token_latency_tracks_each_committed_decode_token():
+    iteration_stats = IterationStats()
+    req_stats = RequestStateStats(arrival_time=0.0)
+    lora_states = LoRARequestStates()
+
+    iteration_stats.update_from_output(
+        EngineCoreOutput(request_id="req", new_token_ids=[1]),
+        engine_core_timestamp=1.0,
+        is_prefilling=True,
+        req_stats=req_stats,
+        lora_states=lora_states,
+        lora_name=None,
+    )
+    iteration_stats.update_from_output(
+        EngineCoreOutput(request_id="req", new_token_ids=[2, 3, 4]),
+        engine_core_timestamp=4.0,
+        is_prefilling=False,
+        req_stats=req_stats,
+        lora_states=lora_states,
+        lora_name=None,
+    )
+    iteration_stats.update_from_output(
+        EngineCoreOutput(request_id="req", new_token_ids=[]),
+        engine_core_timestamp=6.0,
+        is_prefilling=False,
+        req_stats=req_stats,
+        lora_states=lora_states,
+        lora_name=None,
+    )
+    iteration_stats.update_from_output(
+        EngineCoreOutput(request_id="req", new_token_ids=[5, 6]),
+        engine_core_timestamp=8.0,
+        is_prefilling=False,
+        req_stats=req_stats,
+        lora_states=lora_states,
+        lora_name=None,
+    )
+
+    assert iteration_stats.num_generation_tokens == 6
+    assert req_stats.num_generation_tokens == 6
+    assert iteration_stats.inter_token_latencies_iter == [1.0] * 3 + [2.0] * 2
+    assert sum(iteration_stats.inter_token_latencies_iter) == 7.0
+    assert req_stats.first_token_ts == 1.0
+    assert req_stats.last_token_ts == 8.0
+
+
+def test_tokenless_first_output_still_advances_last_token_ts():
+    """Pooling and aborted/failed prefill requests emit a first output with no
+    new tokens; finished-request latencies must stay non-negative."""
+    iteration_stats = IterationStats()
+    req_stats = RequestStateStats(arrival_time=0.0)
+    req_stats.scheduled_ts = 0.5
+    lora_states = LoRARequestStates()
+
+    iteration_stats.update_from_output(
+        EngineCoreOutput(request_id="req", new_token_ids=[]),
+        engine_core_timestamp=2.0,
+        is_prefilling=True,
+        req_stats=req_stats,
+        lora_states=lora_states,
+        lora_name=None,
+    )
+
+    assert req_stats.last_token_ts == 2.0
+    assert not iteration_stats.inter_token_latencies_iter
+
+    iteration_stats.update_from_finished_request(
+        finish_reason=FinishReason.ABORT,
+        request_id="req",
+        num_prompt_tokens=10,
+        max_tokens_param=None,
+        req_stats=req_stats,
+    )
+    finished = iteration_stats.finished_requests[0]
+    assert finished.decode_time == 0.0
+    assert finished.inference_time == 1.5
