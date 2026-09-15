@@ -7,8 +7,8 @@ Automatic Prefix Caching (APC) allows the vLLM engine to reuse cached
 KV (key-value) pairs from previous prompts if a new query shares the same
 prefix. This reduces redundant computation and improves inference speed.
 
-To enable APC, set `enable_prefix_caching=True` when initializing the
-vLLM engine.
+APC is enabled by default for supported models. This example still passes
+`enable_prefix_caching=True` explicitly for clarity.
 
 This script uses a long Markdown table as the shared prompt prefix and
 compares the generation time for two queries that share the same prefix
@@ -76,7 +76,7 @@ def get_generation_time(llm, sampling_params, prompts):
 
 
 def main():
-    # set enable_prefix_caching=True to enable APC
+    # APC is on by default; True is explicit for this demo
     llm = LLM(model="lmsys/longchat-13b-16k", enable_prefix_caching=True)
 
     sampling_params = SamplingParams(temperature=0, max_tokens=100)
