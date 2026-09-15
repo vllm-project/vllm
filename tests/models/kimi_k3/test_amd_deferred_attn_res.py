@@ -112,6 +112,21 @@ def test_deferred_boundary_is_limited_to_low_token_shapes(
 
 
 @pytest.mark.cpu_test
+def test_deferred_boundary_can_cover_full_mixed_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(kimi_linear.envs, "VLLM_KIMI_K3_DEFER_ATTN_RES_MLP", True)
+    monkeypatch.setattr(
+        kimi_linear.envs,
+        "VLLM_KIMI_K3_DEFER_ATTN_RES_MLP_MAX_TOKENS",
+        16384,
+    )
+
+    assert kimi_linear._should_defer_attn_res_mlp(torch.empty(16384, 2))
+    assert not kimi_linear._should_defer_attn_res_mlp(torch.empty(16385, 2))
+
+
+@pytest.mark.cpu_test
 def test_model_preserves_tapped_state_and_folds_final_pending_delta(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

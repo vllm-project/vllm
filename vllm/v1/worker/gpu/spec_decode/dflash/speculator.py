@@ -35,6 +35,119 @@ from vllm.v1.worker.utils import AttentionGroup
 logger = init_logger(__name__)
 
 
+def _slice_context_slot_mapping(
+    context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | None,
+    start: int,
+    end: int,
+) -> torch.Tensor | list[torch.Tensor | None] | None:
+    if isinstance(context_slot_mapping, torch.Tensor):
+        return context_slot_mapping[start:end]
+    if context_slot_mapping is None:
+        return None
+    return [
+        None if slot_mapping is None else slot_mapping[start:end]
+        for slot_mapping in context_slot_mapping
+    ]
+
+
+def _store_context_kv_with_graphs(
+    model: Any,
+    context_cudagraph_manager: BoundedContextCudaGraph | None,
+    context_states: torch.Tensor,
+    context_positions: torch.Tensor,
+    context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | None,
+    input_batch: InputBatch,
+    *,
+    dummy_run: bool,
+    is_profile: bool,
+) -> None:
+    """Graph decode slices and eagerly store prefill slices in one projection."""
+    num_reqs = input_batch.num_reqs
+    num_target_tokens = context_states.shape[0]
+    exact_layout = (
+        num_target_tokens == int(input_batch.num_scheduled_tokens[:num_reqs].sum())
+        and int(input_batch.query_start_loc_np[num_reqs]) == num_target_tokens
+    )
+    decode_req_indices = {
+        req_idx
+        for req_idx in range(num_reqs)
+        if not input_batch.is_prefilling_np[req_idx]
+    }
+    if (
+        context_cudagraph_manager is None
+        or dummy_run
+        or is_profile
+        or not exact_layout
+        or not decode_req_indices
+    ):
+        model.precompute_and_store_context_kv(
+            context_states,
+            context_positions,
+            context_slot_mapping,
+        )
+        return
+
+    projected_context = model.project_context_kv(context_states)
+    segments = [
+        (
+            req_idx,
+            int(input_batch.query_start_loc_np[req_idx]),
+            int(input_batch.query_start_loc_np[req_idx + 1]),
+        )
+        for req_idx in range(num_reqs)
+    ]
+    replayable = {
+        req_idx
+        for req_idx, start, end in segments
+        if req_idx in decode_req_indices
+        and context_cudagraph_manager.can_replay(
+            projected_context[start:end],
+            context_positions[start:end],
+            _slice_context_slot_mapping(context_slot_mapping, start, end),
+            eligible=True,
+        )
+    }
+    if not replayable:
+        model.store_projected_context_kv(
+            projected_context,
+            context_positions,
+            context_slot_mapping,
+        )
+        return
+
+    replayed = 0
+    for req_idx, start, end in segments:
+        if start == end:
+            continue
+        sliced_slots = _slice_context_slot_mapping(context_slot_mapping, start, end)
+        if req_idx in replayable and context_cudagraph_manager.replay(
+            projected_context[start:end],
+            context_positions[start:end],
+            sliced_slots,
+            eligible=True,
+        ):
+            replayed += 1
+            continue
+        model.store_projected_context_kv(
+            projected_context[start:end],
+            context_positions[start:end],
+            sliced_slots,
+        )
+
+    has_prefill = getattr(input_batch, "has_prefill", None)
+    if has_prefill is None:
+        has_prefill = bool(input_batch.is_prefilling_np.any())
+    if replayed and (has_prefill or num_reqs > 1):
+        context_cudagraph_manager.segmented_batch_count += 1
+        context_cudagraph_manager.segmented_replay_count += replayed
+        if context_cudagraph_manager.segmented_batch_count == 1:
+            logger.info(
+                "Replayed %d DSpark context graph slice(s) in the first "
+                "mixed or multi-request batch",
+                replayed,
+            )
+
+
 class DFlashSpeculator(DraftModelSpeculator):
     _speculator_name = "DFlash"  # For logging, so we can share methods with subclasses
 
@@ -430,46 +543,16 @@ class DFlashSpeculator(DraftModelSpeculator):
             context_slots = self._context_slot_mappings[0][:num_target_tokens]
         context_states = self.hidden_states[:num_target_tokens]
         context_positions = self.context_positions[:num_target_tokens]
-        has_prefill = getattr(input_batch, "has_prefill", None)
-        if has_prefill is None:
-            # Compatibility with packaged V2 runners predating has_prefill.
-            has_prefill = bool(input_batch.is_prefilling_np.any())
-        fixed_single_decode = (
-            num_reqs == 1
-            and not has_prefill
-            and not dummy_run
-            and not is_profile
-            and num_target_tokens == int(input_batch.num_scheduled_tokens.sum())
+        _store_context_kv_with_graphs(
+            self.model,
+            self.context_cudagraph_manager,
+            context_states,
+            context_positions,
+            context_slots,
+            input_batch,
+            dummy_run=dummy_run,
+            is_profile=is_profile,
         )
-        projected_context = None
-        if self.context_cudagraph_manager is not None and fixed_single_decode:
-            # AITER's GEMM path is not safe to capture independently of the
-            # model graph. Project eagerly, then graph only the norm/RoPE/cache
-            # tail that consumes this stable-width tensor.
-            projected_context = self.model.project_context_kv(context_states)
-        replayed_context_graph = (
-            projected_context is not None
-            and self.context_cudagraph_manager is not None
-            and self.context_cudagraph_manager.replay(
-                projected_context,
-                context_positions,
-                context_slots,
-                eligible=fixed_single_decode,
-            )
-        )
-        if not replayed_context_graph:
-            if projected_context is None:
-                self.model.precompute_and_store_context_kv(
-                    context_states,
-                    context_positions,
-                    context_slots,
-                )
-            else:
-                self.model.store_projected_context_kv(
-                    projected_context,
-                    context_positions,
-                    context_slots,
-                )
 
         batch_sync, num_batch_tokens = (
             self._build_uniform_batch_dp_sync(dp_sync, num_reqs, self.num_query_per_req)

@@ -3,6 +3,7 @@
 
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 import torch.nn as nn
@@ -15,6 +16,9 @@ from vllm.models.kimi_k3.nvidia import dspark_mla
 from vllm.models.kimi_k3.nvidia.dspark_mla import K3DSparkForCausalLM, K3DSparkModel
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import BoundedContextCudaGraph
+from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
+    _store_context_kv_with_graphs,
+)
 
 
 def test_dspark_mla_uses_compile_free_model_entrypoint():
@@ -89,6 +93,8 @@ def test_bounded_context_cudagraph_clear_drops_pool_ownership():
     manager.graph_pools[1] = (1, 2)
     manager.replay_count = 3
     manager.fallback_count = 4
+    manager.segmented_batch_count = 2
+    manager.segmented_replay_count = 5
 
     manager.clear()
 
@@ -96,6 +102,158 @@ def test_bounded_context_cudagraph_clear_drops_pool_ownership():
     assert manager.graph_pools == {}
     assert manager.replay_count == 0
     assert manager.fallback_count == 0
+    assert manager.segmented_batch_count == 0
+    assert manager.segmented_replay_count == 0
+
+
+@pytest.mark.cpu_test
+def test_context_graph_replays_decode_slice_in_mixed_batch():
+    manager = BoundedContextCudaGraph(
+        torch.device("cpu"), torch.float32, hidden_size=2, max_num_tokens=2
+    )
+
+    class FakeGraph:
+        replay_count = 0
+
+        def replay(self):
+            self.replay_count += 1
+
+    graph = FakeGraph()
+    manager.graphs[2] = graph  # type: ignore[assignment]
+    project_calls = []
+    store_calls = []
+    model = SimpleNamespace(
+        project_context_kv=lambda states: project_calls.append(states) or states + 10,
+        store_projected_context_kv=lambda *args: store_calls.append(args),
+        precompute_and_store_context_kv=lambda *_args: pytest.fail(
+            "a replayable decode slice must share the eager projection"
+        ),
+    )
+    input_batch = SimpleNamespace(
+        num_reqs=2,
+        num_scheduled_tokens=np.array([2, 3], dtype=np.int32),
+        query_start_loc_np=np.array([0, 2, 5], dtype=np.int32),
+        is_prefilling_np=np.array([False, True]),
+        has_prefill=True,
+    )
+    states = torch.arange(10, dtype=torch.float32).view(5, 2)
+    positions = torch.arange(5, dtype=torch.int64)
+    slots = torch.arange(5, dtype=torch.int64)
+
+    _store_context_kv_with_graphs(
+        model,
+        manager,
+        states,
+        positions,
+        slots,
+        input_batch,
+        dummy_run=False,
+        is_profile=False,
+    )
+
+    assert len(project_calls) == 1
+    assert project_calls[0] is states
+    assert graph.replay_count == 1
+    assert manager.replay_count == 1
+    assert manager.segmented_batch_count == 1
+    assert manager.segmented_replay_count == 1
+    torch.testing.assert_close(manager.context_states, states[:2] + 10)
+    assert len(store_calls) == 1
+    torch.testing.assert_close(store_calls[0][0], states[2:] + 10)
+    torch.testing.assert_close(store_calls[0][1], positions[2:])
+    torch.testing.assert_close(store_calls[0][2], slots[2:])
+
+
+@pytest.mark.cpu_test
+def test_context_graph_replays_each_request_in_multi_decode_batch():
+    manager = BoundedContextCudaGraph(
+        torch.device("cpu"), torch.float32, hidden_size=2, max_num_tokens=2
+    )
+
+    class FakeGraph:
+        replay_count = 0
+
+        def replay(self):
+            self.replay_count += 1
+
+    graph = FakeGraph()
+    manager.graphs[2] = graph  # type: ignore[assignment]
+    store_calls = []
+    model = SimpleNamespace(
+        project_context_kv=lambda states: states,
+        store_projected_context_kv=lambda *args: store_calls.append(args),
+        precompute_and_store_context_kv=lambda *_args: pytest.fail(
+            "each fixed decode slice must replay"
+        ),
+    )
+    input_batch = SimpleNamespace(
+        num_reqs=2,
+        num_scheduled_tokens=np.array([2, 2], dtype=np.int32),
+        query_start_loc_np=np.array([0, 2, 4], dtype=np.int32),
+        is_prefilling_np=np.array([False, False]),
+        has_prefill=False,
+    )
+
+    _store_context_kv_with_graphs(
+        model,
+        manager,
+        torch.arange(8, dtype=torch.float32).view(4, 2),
+        torch.arange(4, dtype=torch.int64),
+        torch.arange(4, dtype=torch.int64),
+        input_batch,
+        dummy_run=False,
+        is_profile=False,
+    )
+
+    assert graph.replay_count == 2
+    assert manager.replay_count == 2
+    assert manager.segmented_batch_count == 1
+    assert manager.segmented_replay_count == 2
+    assert store_calls == []
+
+
+@pytest.mark.cpu_test
+def test_context_graph_preserves_batched_store_when_no_slice_can_replay():
+    manager = BoundedContextCudaGraph(
+        torch.device("cpu"), torch.float32, hidden_size=2, max_num_tokens=2
+    )
+    manager.graphs[2] = SimpleNamespace(replay=lambda: None)  # type: ignore[assignment]
+    store_calls = []
+    model = SimpleNamespace(
+        project_context_kv=lambda states: states + 10,
+        store_projected_context_kv=lambda *args: store_calls.append(args),
+        precompute_and_store_context_kv=lambda *_args: pytest.fail(
+            "the existing projection must be reused"
+        ),
+    )
+    input_batch = SimpleNamespace(
+        num_reqs=2,
+        num_scheduled_tokens=np.array([3, 3], dtype=np.int32),
+        query_start_loc_np=np.array([0, 3, 6], dtype=np.int32),
+        is_prefilling_np=np.array([False, False]),
+        has_prefill=False,
+    )
+    states = torch.arange(12, dtype=torch.float32).view(6, 2)
+    positions = torch.arange(6, dtype=torch.int64)
+    slots = torch.arange(6, dtype=torch.int64)
+
+    _store_context_kv_with_graphs(
+        model,
+        manager,
+        states,
+        positions,
+        slots,
+        input_batch,
+        dummy_run=False,
+        is_profile=False,
+    )
+
+    assert manager.replay_count == 0
+    assert manager.fallback_count == 0
+    assert len(store_calls) == 1
+    torch.testing.assert_close(store_calls[0][0], states + 10)
+    assert store_calls[0][1] is positions
+    assert store_calls[0][2] is slots
 
 
 @pytest.mark.cpu_test

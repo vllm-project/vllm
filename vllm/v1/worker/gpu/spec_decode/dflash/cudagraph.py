@@ -61,6 +61,8 @@ class BoundedContextCudaGraph:
         self.capture_stream: torch.cuda.Stream | None = None
         self.replay_count = 0
         self.fallback_count = 0
+        self.segmented_batch_count = 0
+        self.segmented_replay_count = 0
 
     def clear(self) -> None:
         """Release graphs captured against a temporary or superseded KV cache."""
@@ -69,6 +71,8 @@ class BoundedContextCudaGraph:
         self.capture_stream = None
         self.replay_count = 0
         self.fallback_count = 0
+        self.segmented_batch_count = 0
+        self.segmented_replay_count = 0
 
     @staticmethod
     def _shared_slot_mapping(
@@ -142,6 +146,34 @@ class BoundedContextCudaGraph:
         source_stream.wait_stream(capture_stream)
 
     @torch.inference_mode()
+    def can_replay(
+        self,
+        context_states: torch.Tensor,
+        context_positions: torch.Tensor,
+        context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | None,
+        *,
+        eligible: bool,
+    ) -> bool:
+        """Return whether a context slice satisfies the captured contract."""
+        num_tokens = context_states.shape[0]
+        shared_slot_mapping = self._shared_slot_mapping(context_slot_mapping)
+        return (
+            eligible
+            and num_tokens in self.graphs
+            and shared_slot_mapping is not None
+            and context_states.ndim == 2
+            and context_positions.shape == (num_tokens,)
+            and shared_slot_mapping.shape == (num_tokens,)
+            and context_states.shape[1:] == self.context_states.shape[1:]
+            and context_states.dtype == self.context_states.dtype
+            and context_states.device == self.device
+            and context_positions.dtype == torch.int64
+            and context_positions.device == self.device
+            and shared_slot_mapping.dtype == torch.int64
+            and shared_slot_mapping.device == self.device
+        )
+
+    @torch.inference_mode()
     def replay(
         self,
         context_states: torch.Tensor,
@@ -153,24 +185,16 @@ class BoundedContextCudaGraph:
         """Replay a captured shape when inputs satisfy the bounded contract."""
         num_tokens = context_states.shape[0]
         shared_slot_mapping = self._shared_slot_mapping(context_slot_mapping)
-        if (
-            not eligible
-            or num_tokens not in self.graphs
-            or shared_slot_mapping is None
-            or context_states.ndim != 2
-            or context_positions.shape != (num_tokens,)
-            or shared_slot_mapping.shape != (num_tokens,)
-            or context_states.shape[1:] != self.context_states.shape[1:]
-            or context_states.dtype != self.context_states.dtype
-            or context_states.device != self.device
-            or context_positions.dtype != torch.int64
-            or context_positions.device != self.device
-            or shared_slot_mapping.dtype != torch.int64
-            or shared_slot_mapping.device != self.device
+        if not self.can_replay(
+            context_states,
+            context_positions,
+            context_slot_mapping,
+            eligible=eligible,
         ):
             self.fallback_count += 1
             return False
 
+        assert shared_slot_mapping is not None
         self.context_states[:num_tokens].copy_(context_states)
         self.context_positions[:num_tokens].copy_(context_positions)
         self.context_slot_mapping[:num_tokens].copy_(shared_slot_mapping)
