@@ -6,6 +6,7 @@ from argparse import Namespace
 from fastapi import FastAPI
 
 from vllm.config import ModelConfig
+from vllm.entrypoints.openai.responses.store import ResponsesStoreConfig
 from vllm.entrypoints.serve.exception_handling.register import init_exception_handler
 from vllm.entrypoints.serve.middleware.register import init_entrypoints_middleware
 from vllm.entrypoints.serve.sagemaker.api_router import sagemaker_standards_bootstrap
@@ -40,6 +41,8 @@ def build_app(
     else:
         app = FastAPI(lifespan=lifespan)
     app.state.args = args
+    app.state.responses_store_enabled = ResponsesStoreConfig.from_cli_args(args).enabled
+    app.state.responses_store_service = None
     app.root_path = args.root_path
 
     register_api_routers(args, app, supported_tasks, model_config)

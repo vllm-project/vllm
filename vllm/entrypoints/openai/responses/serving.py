@@ -6,6 +6,7 @@ import time
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack
+from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Any, Final, cast
 
@@ -53,6 +54,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseUsage,
     StreamingResponsesResponse,
 )
+from vllm.entrypoints.openai.responses.store.base import SessionStore
 from vllm.entrypoints.openai.responses.streaming_events import (
     SimpleStreamingEventProcessor,
     StreamingState,
@@ -64,6 +66,7 @@ from vllm.entrypoints.openai.responses.streaming_events import (
 )
 from vllm.entrypoints.openai.responses.utils import (
     build_response_output_items,
+    construct_input_messages,
     extract_function_tool_names,
     extract_tool_types,
 )
@@ -90,6 +93,119 @@ from vllm.utils import random_uuid
 from vllm.utils.collection_utils import as_list
 
 logger = init_logger(__name__)
+
+
+@dataclass(slots=True)
+class _SessionTokenState:
+    """单个 Responses 请求内部维护的增量 token 状态。"""
+
+    store: SessionStore
+    session_id: str
+    should_save: bool
+
+    # SessionStore.get() 返回的历史 token 副本。
+    reused_prompt_token_ids: list[int] | None = None
+
+    # 本次请求开始前的历史长度，用于最终切出 delta。
+    history_length: int = 0
+
+    # 当前模型子请求使用的完整 prompt。
+    prompt_token_ids: list[int] | None = None
+
+    # 当前模型子请求生成的输出。
+    output_token_ids: list[int] = field(default_factory=list)
+
+    def merge_prompt(
+        self,
+        engine_input: EngineInput,
+        bos_token_id: int | None,
+    ) -> None:
+        """将当前用户输入的 token 追加到跨请求历史 token 后。"""
+
+        prompt_token_ids = engine_input.get("prompt_token_ids")
+        if prompt_token_ids is None:
+            raise ValueError("Incremental token reuse requires tokenized text input.")
+
+        reused_prompt_token_ids = self.reused_prompt_token_ids
+        if reused_prompt_token_ids is None:
+            return
+
+        # 增量片段不应再次引入 BOS。
+        start = int(
+            bos_token_id is not None
+            and bool(prompt_token_ids)
+            and prompt_token_ids[0] == bos_token_id
+        )
+
+        reused_prompt_token_ids.extend(prompt_token_ids[start:])
+        engine_input["prompt_token_ids"] = reused_prompt_token_ids
+
+    def begin_turn(self, engine_input: EngineInput) -> None:
+        """记录当前模型子请求的完整 prompt。"""
+
+        prompt_token_ids = engine_input.get("prompt_token_ids")
+        if prompt_token_ids is None:
+            raise ValueError("Session token storage requires tokenized text input.")
+
+        self.prompt_token_ids = prompt_token_ids
+        self.output_token_ids.clear()
+
+    def append_output(self, output: Any) -> None:
+        """收集当前模型子请求生成的输出 token。"""
+
+        self.output_token_ids.extend(output.outputs[0].token_ids)
+
+    def merge_tool_delta(
+        self,
+        engine_input: EngineInput,
+        bos_token_id: int | None,
+        eos_token_id: int | None,
+    ) -> None:
+        """拼接模型工具调用输出以及新工具结果。"""
+
+        tool_delta_token_ids = engine_input.get("prompt_token_ids")
+        if tool_delta_token_ids is None:
+            raise ValueError("Incremental tool tokenization requires tokenized input.")
+
+        prompt_token_ids = self.prompt_token_ids
+        if prompt_token_ids is None:
+            raise ValueError("No active prompt is available.")
+
+        # 提交刚刚由模型生成的工具调用。
+        prompt_token_ids.extend(self.output_token_ids)
+        self.output_token_ids.clear()
+
+        # 模型输出通常不包含触发停止的 EOS。
+        if eos_token_id is not None and (
+            not prompt_token_ids or prompt_token_ids[-1] != eos_token_id
+        ):
+            prompt_token_ids.append(eos_token_id)
+
+        start = int(
+            bos_token_id is not None
+            and bool(tool_delta_token_ids)
+            and tool_delta_token_ids[0] == bos_token_id
+        )
+        prompt_token_ids.extend(tool_delta_token_ids[start:])
+
+        engine_input["prompt_token_ids"] = prompt_token_ids
+        self.prompt_token_ids = prompt_token_ids
+
+    def build_delta(self, eos_token_id: int | None) -> list[int]:
+        """生成本次请求需要传给 SessionStore.save() 的 token。"""
+
+        assert self.prompt_token_ids is not None
+
+        # 切片会生成独立列表，不会修改完整 prompt。
+        delta_token_ids = self.prompt_token_ids[self.history_length :]
+        delta_token_ids.extend(self.output_token_ids)
+
+        if eos_token_id is not None and (
+            not delta_token_ids or delta_token_ids[-1] != eos_token_id
+        ):
+            delta_token_ids.append(eos_token_id)
+
+        return delta_token_ids
 
 
 class OpenAIServingResponses(GenerateBaseServing):
@@ -297,6 +413,101 @@ class OpenAIServingResponses(GenerateBaseServing):
             skip_mm_cache=skip_mm_cache,
         )
 
+    def _make_incremental_context_miss_error(
+        self,
+        session_id: str,
+    ) -> ErrorResponse:
+        return self.create_error_response(
+            err_type="incremental_context_miss",
+            message=(
+                "Incremental context is no longer available. "
+                "Resend the request with full context."
+            ),
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            param=session_id,
+        )
+
+    @staticmethod
+    def _resolve_session_store(
+        raw_request: Request | None,
+    ) -> SessionStore | None:
+        if raw_request is None:
+            return None
+
+        service = getattr(
+            raw_request.app.state,
+            "responses_store_service",
+            None,
+        )
+        return None if service is None else service.store
+
+    async def _make_session_token_state(
+        self,
+        request: ResponsesRequest,
+        raw_request: Request | None,
+    ) -> _SessionTokenState | ErrorResponse | None:
+        use_incremental_token = request.use_incremental_token
+        use_store = request.use_store
+
+        if not use_incremental_token and not use_store:
+            return None
+
+        # 本次实现没有覆盖 Harmony 的跨请求增量渲染语义。
+        if use_incremental_token and self.use_harmony:
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message=(
+                    "Incremental token reuse is not supported for Harmony models."
+                ),
+                status_code=HTTPStatus.BAD_REQUEST,
+                param="use_incremental_token",
+            )
+
+        if raw_request is None:
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message="The x-session-id header is required.",
+                status_code=HTTPStatus.BAD_REQUEST,
+                param="x-session-id",
+            )
+
+        session_id = raw_request.headers.get("x-session-id")
+        if not session_id:
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message="The x-session-id header is required.",
+                status_code=HTTPStatus.BAD_REQUEST,
+                param="x-session-id",
+            )
+
+        session_store = self._resolve_session_store(raw_request)
+        if session_store is None:
+            return self.create_error_response(
+                err_type="session_store_unavailable",
+                message="SessionStore is not configured.",
+                status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+                param=session_id,
+            )
+
+        reused_prompt_token_ids = None
+        if use_incremental_token:
+            # 每个请求仅在这里调用一次 get()。
+            reused_prompt_token_ids = await session_store.get(session_id)
+            if reused_prompt_token_ids is None:
+                return self._make_incremental_context_miss_error(session_id)
+
+        return _SessionTokenState(
+            store=session_store,
+            session_id=session_id,
+            should_save=use_store,
+            reused_prompt_token_ids=reused_prompt_token_ids,
+            history_length=(
+                len(reused_prompt_token_ids)
+                if reused_prompt_token_ids is not None
+                else 0
+            ),
+        )
+
     async def create_responses(
         self,
         request: ResponsesRequest,
@@ -349,14 +560,24 @@ class OpenAIServingResponses(GenerateBaseServing):
         lora_request = self._maybe_get_adapters(request)
         model_name = self.models.model_name(lora_request)
 
-        render_result = await self._render_resolved_response_inputs(
-            request,
-            prev_response,
-        )
-        if isinstance(render_result, ErrorResponse):
-            return render_result
-        messages = render_result.messages
-        engine_inputs = [render_result.engine_input]
+        session_token_state = await self._make_session_token_state(request, raw_request)
+        if isinstance(session_token_state, ErrorResponse):
+            return session_token_state
+
+        if request.use_incremental_token:
+            assert session_token_state is not None
+            messages, engine_inputs = await self._make_incremental_request(
+                request, session_token_state
+            )
+        else:
+            render_result = await self._render_resolved_response_inputs(
+                request,
+                prev_response,
+            )
+            if isinstance(render_result, ErrorResponse):
+                return render_result
+            messages = render_result.messages
+            engine_inputs = [render_result.engine_input]
 
         request_metadata = RequestResponseMetadata(request_id=request.request_id)
         if raw_request:
@@ -495,6 +716,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 trace_headers=trace_headers,
                 session_id=session_id,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
+                session_token_state=session_token_state,
             )
             generators.append(generator)
 
@@ -531,6 +753,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                         tokenizer,
                         request_metadata,
                         created_time,
+                        session_token_state,
                     ),
                     name=f"create_{request.request_id}",
                 )
@@ -545,6 +768,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                         tokenizer,
                         request_metadata,
                         created_time,
+                        session_token_state,
                     ),
                     name=f"create_{response.id}",
                 )
@@ -569,6 +793,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 model_name,
                 tokenizer,
                 request_metadata,
+                session_token_state=session_token_state,
             )
 
         return await self.responses_full_generator(
@@ -579,13 +804,58 @@ class OpenAIServingResponses(GenerateBaseServing):
             model_name,
             tokenizer,
             request_metadata,
+            session_token_state=session_token_state,
         )
+
+    async def _make_incremental_request(
+        self,
+        request: ResponsesRequest,
+        session_token_state: _SessionTokenState,
+    ):
+        messages = construct_input_messages(request_input=request.input)
+        chat_template_kwargs = self._effective_chat_template_kwargs(request)
+        chat_template_kwargs["use_incremental_token"] = True
+        _, engine_inputs = await self.online_renderer.preprocess_chat(
+            request,
+            messages,
+            default_template=self.chat_template,
+            default_template_content_format=self.chat_template_content_format,
+            default_template_kwargs=chat_template_kwargs,
+            tool_dicts=None,
+            parser=self.parser,
+        )
+        (engine_input,) = engine_inputs
+        session_token_state.merge_prompt(engine_input, self.renderer.get_bos_token_id())
+        return messages, engine_inputs
 
     async def _render_next_turn(
         self,
         request: ResponsesRequest,
         messages: list[ResponseInputOutputItem],
+        new_item_count: int = 0,
     ) -> list[EngineInput]:
+        if request.use_incremental_token:
+            assert new_item_count > 0
+            split_index = len(messages) - new_item_count
+            context_messages = construct_input_messages(
+                request_input=messages[:split_index],
+            )
+            new_messages = construct_input_messages(
+                request_input=messages[split_index:],
+            )
+            chat_template_kwargs = self._effective_chat_template_kwargs(request)
+            chat_template_kwargs["incremental_context"] = context_messages
+            _, engine_inputs = await self.online_renderer.preprocess_chat(
+                request,
+                new_messages,
+                default_template=self.chat_template,
+                default_template_content_format=self.chat_template_content_format,
+                default_template_kwargs=chat_template_kwargs,
+                tool_dicts=None,
+                parser=self.parser,
+            )
+            return engine_inputs
+
         render_request = request.model_copy(
             update={
                 "input": list(messages),
@@ -616,6 +886,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         trace_headers: Mapping[str, str] | None = None,
         session_id: str | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
+        session_token_state: _SessionTokenState | None = None,
     ):
         max_model_len = self.model_config.max_model_len
         cache_salt = cast(str | None, engine_input.get("cache_salt"))
@@ -633,6 +904,9 @@ class OpenAIServingResponses(GenerateBaseServing):
                 lora_request=lora_request,
             )
 
+            if session_token_state is not None:
+                session_token_state.begin_turn(engine_input)
+
             generator = self.engine_client.generate(
                 engine_input,
                 sampling_params,
@@ -645,6 +919,8 @@ class OpenAIServingResponses(GenerateBaseServing):
             )
 
             async for res in generator:
+                if session_token_state is not None:
+                    session_token_state.append_output(res)
                 context.append_output(res)
                 # NOTE(woosuk): The stop condition is handled by the engine.
                 yield context
@@ -676,7 +952,16 @@ class OpenAIServingResponses(GenerateBaseServing):
                 (engine_input,) = await self._render_next_turn(
                     context.request,
                     context.response_messages,
+                    new_item_count=len(tool_output),
                 )
+
+                if context.request.use_incremental_token:
+                    assert session_token_state is not None
+                    session_token_state.merge_tool_delta(
+                        engine_input,
+                        self.renderer.get_bos_token_id(),
+                        self.renderer.get_eos_token_id(),
+                    )
 
                 sampling_params.max_tokens = get_max_tokens(
                     max_model_len,
@@ -719,6 +1004,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
         created_time: int | None = None,
+        session_token_state: _SessionTokenState | None = None,
     ) -> ErrorResponse | ResponsesResponse:
         if created_time is None:
             created_time = int(time.time())
@@ -876,6 +1162,17 @@ class OpenAIServingResponses(GenerateBaseServing):
                 # If the response is already cancelled, don't update it.
                 if stored_response is None or stored_response.status != "cancelled":
                     self.response_store[response.id] = response
+        if session_token_state is not None and session_token_state.should_save:
+            delta_token_ids = session_token_state.build_delta(
+                self.renderer.get_eos_token_id()
+            )
+
+            # 每个完整请求只在此处调用一次 save()。
+            await session_token_state.store.save(
+                session_token_state.session_id,
+                response.id,
+                delta_token_ids,
+            )
         return response
 
     def _topk_logprobs(
@@ -1283,6 +1580,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
         created_time: int | None = None,
+        session_token_state: _SessionTokenState | None = None,
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         # TODO:
         # 1. Handle disconnect
@@ -1370,6 +1668,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 tokenizer,
                 request_metadata,
                 created_time=created_time,
+                session_token_state=session_token_state,
             )
             yield _increment_sequence_number_and_return(
                 ResponseCompletedEvent(

@@ -31,6 +31,16 @@ def responses(request: Request) -> OpenAIServingResponses | None:
     return request.app.state.openai_serving_responses
 
 
+def _response_headers(
+    request: ResponsesRequest,
+    raw_request: Request,
+) -> dict[str, str]:
+    headers = {"response_id": request.request_id}
+    if session_id := raw_request.headers.get("x-session-id"):
+        headers["x-session-id"] = session_id
+    return headers
+
+
 async def _convert_stream_to_sse_events(
     generator: AsyncGenerator[StreamingResponsesResponse, None],
 ) -> AsyncGenerator[str, None]:
@@ -53,6 +63,7 @@ async def _convert_stream_to_sse_events(
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
         HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+        HTTPStatus.SERVICE_UNAVAILABLE.value: {"model": ErrorResponse},
     },
 )
 @with_cancellation
@@ -63,17 +74,24 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
         raise NotImplementedError("The model does not support Responses API")
 
     generator = await handler.create_responses(request, raw_request)
+    response_headers = _response_headers(request, raw_request)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(
             content=generator.model_dump(mode="json", by_alias=True),
             status_code=generator.error.code,
+            headers=response_headers,
         )
     elif isinstance(generator, ResponsesResponse):
-        return JSONResponse(content=generator.model_dump(mode="json", by_alias=True))
+        return JSONResponse(
+            content=generator.model_dump(mode="json", by_alias=True),
+            headers=response_headers,
+        )
 
     return StreamingResponse(
-        content=_convert_stream_to_sse_events(generator), media_type="text/event-stream"
+        content=_convert_stream_to_sse_events(generator),
+        media_type="text/event-stream",
+        headers=response_headers,
     )
 
 

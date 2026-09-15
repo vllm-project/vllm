@@ -142,6 +142,14 @@ class ServeSubcommand(CLISubcommand):
             )
             args.api_server_count = 1
 
+        if getattr(args, "responses_store_key_file", None) is not None and (
+            is_multi_port or args.api_server_count > 1
+        ):
+            raise ValueError(
+                "Persistent Responses store key management supports exactly "
+                "one API server process"
+            )
+
         if is_multi_port:
             run_dp_supervisor(args)
         elif args.api_server_count < 1:
