@@ -3,8 +3,7 @@
 
 import importlib.util
 import threading
-from collections import OrderedDict, defaultdict
-from queue import Queue
+from collections import OrderedDict
 from types import SimpleNamespace
 from typing import Any
 
@@ -16,6 +15,8 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     MLAAttentionSpec,
 )
+
+from .utils import make_moriio_writer
 
 aiter_available = importlib.util.find_spec("aiter") is not None
 mori_available = importlib.util.find_spec("mori") is not None
@@ -82,18 +83,6 @@ def _worker(
 
 def _remote_meta(num_blocks: int = 16) -> SimpleNamespace:
     return SimpleNamespace(num_blocks=num_blocks)
-
-
-def _writer_with_fake_worker(fake_worker: Any) -> Any:
-    writer = MoRIIOWriter.__new__(MoRIIOWriter)
-    writer._worker_ref = lambda: fake_worker
-    writer._write_task_q = Queue()
-    writer._write_state_lock = threading.Lock()
-    writer._scheduled_writes = defaultdict(int)
-    writer._scheduled_layers = defaultdict(set)
-    writer._sealed_writes = {}
-    writer.ensure_worker_started = lambda: None
-    return writer
 
 
 def _wrapper_for_messages() -> Any:
@@ -400,7 +389,7 @@ def test_write_scheduler_deduplicates_layers_and_seals_expected_count():
     request_info = RemoteAllocInfo(block_ids=[4, 5])
     wrapper = _wrapper_for_messages()
     wrapper.done_remote_allocate_req_dict["xfer"] = request_info
-    writer = _writer_with_fake_worker(SimpleNamespace(moriio_wrapper=wrapper))
+    writer = make_moriio_writer(SimpleNamespace(moriio_wrapper=wrapper))
 
     assert writer.schedule_write(_write_task("dense0"))
     assert not writer.schedule_write(_write_task("dense0"))
@@ -455,9 +444,7 @@ def test_write_completion_notifies_once_after_all_sealed_writes_finish():
     request_info.completion_notify_port = 7002
     request_info.completion_remote_ip = "127.0.0.1"
     wrapper.done_remote_allocate_req_dict["xfer"] = request_info
-    writer = _writer_with_fake_worker(
-        SimpleNamespace(moriio_wrapper=wrapper, tp_rank=2)
-    )
+    writer = make_moriio_writer(SimpleNamespace(moriio_wrapper=wrapper, tp_rank=2))
     writer._scheduled_writes["xfer"] = 2
     writer._scheduled_layers["xfer"] = {"dense0", "indexer"}
     writer._sealed_writes["xfer"] = 2
@@ -505,7 +492,7 @@ def test_moriio_wrapper_waits_scoped_statuses_without_global_drain():
 def test_write_failure_marks_terminal_and_clears_scheduled_state():
     wrapper = _wrapper_for_messages()
     wrapper.done_remote_allocate_req_dict["xfer"] = RemoteAllocInfo(block_ids=[4, 5])
-    writer = _writer_with_fake_worker(SimpleNamespace(moriio_wrapper=wrapper))
+    writer = make_moriio_writer(SimpleNamespace(moriio_wrapper=wrapper))
     writer._scheduled_writes["xfer"] = 2
     writer._scheduled_layers["xfer"] = {"dense0", "indexer"}
     writer._sealed_writes["xfer"] = 2
@@ -523,7 +510,7 @@ def test_write_failure_marks_terminal_and_clears_scheduled_state():
 def test_schedule_write_rejects_terminal_transfer_without_recreating_state():
     wrapper = _wrapper_for_messages()
     wrapper.done_remote_allocate_req_dict["xfer"] = RemoteAllocInfo(block_ids=[4, 5])
-    writer = _writer_with_fake_worker(SimpleNamespace(moriio_wrapper=wrapper))
+    writer = make_moriio_writer(SimpleNamespace(moriio_wrapper=wrapper))
     writer._scheduled_writes["xfer"] = 1
     writer._scheduled_layers["xfer"] = {"dense0"}
     writer._sealed_writes["xfer"] = 1
