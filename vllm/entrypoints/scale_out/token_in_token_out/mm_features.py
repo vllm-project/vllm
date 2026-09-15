@@ -84,10 +84,17 @@ def _encode_mm_kwargs_with_metadata(
             else set()
         )
         metadata_items = _encode_metadata_items(items, declared=declared)
-        if any(item is not None for item in metadata_items):
-            metadata_by_modality[modality] = metadata_items
+        metadata_by_modality[modality] = metadata_items
 
-    mm_metadata = metadata_by_modality or None
+    mm_metadata = (
+        metadata_by_modality
+        if any(
+            item is not None
+            for items in metadata_by_modality.values()
+            for item in items
+        )
+        else None
+    )
     return kwargs_data, mm_metadata
 
 
