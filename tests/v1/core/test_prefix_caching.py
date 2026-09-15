@@ -490,6 +490,36 @@ def allocate_external_prefix(
     )
 
 
+@pytest.mark.parametrize("tail_tokens", [1, HISPARSE_BLOCK_SIZE - 1])
+def test_nixl_hisparse_admits_unaligned_prompt_with_resident_tail(tail_tokens):
+    """Import sealed host pages and reserve a GPU page for local tail prefill."""
+    from tests.v1.kv_connector.unit.utils import create_vllm_config
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler import (
+        NixlPullConnectorScheduler,
+    )
+
+    manager = make_hisparse_kv_cache_manager(32, 16)
+    config = create_vllm_config(block_size=HISPARSE_BLOCK_SIZE)
+    connector = NixlPullConnectorScheduler(config, "test", manager.kv_cache_config)
+    request = make_request(
+        "unaligned",
+        list(range(2 * HISPARSE_BLOCK_SIZE + tail_tokens)),
+        HISPARSE_BLOCK_SIZE,
+        sha256,
+    )
+    request.kv_transfer_params = {"do_remote_prefill": True}
+    count, is_async = connector.get_num_new_matched_tokens(request, 0)
+    assert count == 2 * HISPARSE_BLOCK_SIZE and is_async
+    assert allocate_external_prefix(manager, request, count) is not None
+    coordinator = get_hisparse_coordinator(manager)
+    coordinator.finish_host_import(request.request_id, failed=False)
+    request.num_computed_tokens = count
+    assert manager.allocate_slots(request, num_new_tokens=tail_tokens) is not None
+    _, _, resident, _ = manager.get_blocks(request.request_id).blocks
+    assert all(block.is_null for block in resident[:2])
+    assert not resident[2].is_null
+
+
 @pytest.mark.parametrize("enable_caching", [False, True])
 def test_hisparse_keeps_resident_pages_until_hot_buffer_is_allocated(enable_caching):
     """Later admissions must not remove a scheduled request's only readable tier."""

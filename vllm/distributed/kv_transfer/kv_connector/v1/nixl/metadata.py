@@ -249,6 +249,8 @@ class ReqMeta:
     # True only when the scheduler parked the request in WAITING_FOR_REMOTE_KVS
     # and expects it in finished_recving; notify-only recvs must not be reported.
     awaiting_kvs: bool = False
+    # Local scheduler-only cap: omit an unimported remote prompt suffix.
+    remote_token_limit: int | None = None
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):
@@ -290,6 +292,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             pp_size=kv_transfer_params.get("pp_size", 1),
             local_num_computed_blocks=local_num_computed_blocks,
             awaiting_kvs=awaiting_kvs,
+            remote_token_limit=kv_transfer_params.get("_nixl_host_import_tokens"),
         )
 
     def add_new_req_to_save(

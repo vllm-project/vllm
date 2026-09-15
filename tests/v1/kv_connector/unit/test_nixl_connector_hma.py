@@ -40,6 +40,117 @@ from .utils import (
 
 
 @pytest.mark.cpu_test
+@pytest.mark.parametrize("num_tokens", [1, 63, 64, 65, 127, 128, 129, 32019])
+@pytest.mark.parametrize("cached_tokens", [0, 64])
+def test_hisparse_import_leaves_partial_tail_for_local_prefill(
+    num_tokens, cached_tokens
+):
+    """Unsealed host rows must not be advertised as asynchronously computed."""
+    sched = make_nixl_scheduler()
+    sched._host_import_alignment = 64
+    req = create_request(num_tokens=num_tokens, do_remote_prefill=True)
+    cached_tokens = min(cached_tokens, num_tokens // 64 * 64)
+    expected = num_tokens // 64 * 64 - cached_tokens
+    assert sched.get_num_new_matched_tokens(req, cached_tokens) == (
+        expected,
+        expected > 0,
+    )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("cached", [False, True])
+def test_hisparse_import_excludes_unwritten_local_tail(cached):
+    """Allocated tail capacity is not an external-load destination."""
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.core.kv_cache_utils import KVCacheBlock
+
+    sched = make_nixl_scheduler(heartbeat=True)
+    sched._host_import_alignment = 16
+    sched.vllm_config = create_vllm_config(block_size=16)
+    req = create_request(num_tokens=35, do_remote_prefill=True)
+    count, _ = sched.get_num_new_matched_tokens(req, 16 if cached else 0)
+    blocks = KVCacheBlocks(
+        (
+            [
+                KVCacheBlock(i, _block_hash=object() if cached and i == 1 else None)
+                for i in (1, 2, 3)
+            ],
+        )
+    )
+    sched.update_state_after_alloc(req, blocks, count)
+    _, block_ids, _, awaiting_kvs = sched._reqs_need_recv[req.request_id]
+    assert block_ids == ([2] if cached else [1, 2],)
+    assert awaiting_kvs
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("empty", [False, True])
+@pytest.mark.parametrize("remote_ratio", [1, 2])
+@pytest.mark.parametrize("dcp_size", [1, 2])
+def test_hisparse_import_drops_remote_tail_before_prefix_matching(
+    empty, remote_ratio, dcp_size
+):
+    """Dropping a tail must not shift the imported prefix toward the suffix."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlConnectorMetadata,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_worker import (
+        NixlPullConnectorWorker,
+    )
+
+    worker = object.__new__(NixlPullConnectorWorker)
+    worker._engine_last_active = {}
+    worker._recving_transfers = {}
+    worker._bidirectional_kv_xfer_enabled = False
+    worker._has_mamba = False
+    worker._mixed_mem_types = False
+    worker.use_mla = True
+    worker.dcp_size = dcp_size
+    worker.region_group_ids = [0, 1]
+    worker.kv_cache_config = make_kv_cache_config(block_size=16)
+    info = MagicMock(
+        remote_block_size=16,
+        remote_dcp_size=dcp_size,
+        remote_physical_blocks_per_logical=remote_ratio,
+    )
+    worker.transfer_topo = MagicMock()
+    worker.transfer_topo.get_engine_info.return_value = info
+    worker.transfer_topo.tp_ratio.return_value = 1
+    plan = MagicMock(all_source_ranks=(0,))
+    worker.tp_mappings = {"remote": plan}
+    worker.dst_region_group_ids = {"remote": [0, 0]}
+    worker.src_xfer_handles_by_block_size = {16: 1}
+    worker.dst_xfer_side_handles = {"remote": {0: 2}}
+    worker._read_blocks = MagicMock()
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        "req",
+        [] if empty else [[91], [92]],
+        {
+            "remote_block_ids": [[10, 11, 12]],
+            "remote_host": "localhost",
+            "remote_port": 1234,
+            "remote_engine_id": "remote",
+            "remote_request_id": "prefill",
+            "_nixl_host_import_tokens": 32,
+        },
+    )
+    worker._read_blocks_for_req("req", metadata.reqs_to_recv["req"])
+    call = worker._read_blocks.call_args
+    # _read_blocks still applies local-prefix-cache suffix matching afterward.
+    local_ids = call.kwargs["read_spec"].local_block_ids
+    remote_ids = call.kwargs["read_spec"].remote_block_ids
+    if empty:
+        assert local_ids == remote_ids == []
+    else:
+        expected = [10, 11] if remote_ratio == 1 else [20, 21]
+        expected = expected[: 2 // dcp_size]
+        assert remote_ids == [expected, expected]
+        _, remote_ids = worker._apply_prefix_caching_by_region(local_ids, remote_ids)
+        assert remote_ids == [[expected[-1]], [expected[-1]]]
+
+
+@pytest.mark.cpu_test
 @pytest.mark.parametrize(
     "swa_enabled,expected_sw_sizes",
     [
