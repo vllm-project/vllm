@@ -73,6 +73,60 @@ def test_deepgemm_moe_permute_initializes_padding_scales(workspace_init):
     )
 
 
+@pytest.mark.parametrize("num_tokens", [1, 2, 4])
+@pytest.mark.parametrize("use_ue8m0", [True, False])
+@pytest.mark.skipif(not is_deep_gemm_supported(), reason="Requires deep_gemm kernels")
+def test_deepgemm_moe_permute_column_major_scale_stride(
+    num_tokens, use_ue8m0, workspace_init
+):
+    """Regression test for #53338: the non-PACK_UE8M0 scale load must
+    honor recv_x_scale_stride1 (column-major f32 scales, M >= 2)."""
+    hidden_size, num_experts, topk, group_size = 2048, 256, 8, 128
+    num_groups = hidden_size // group_size
+    x = torch.zeros(num_tokens, hidden_size, device="cuda", dtype=torch.bfloat16)
+    for t in range(num_tokens):
+        for g in range(num_groups):
+            x[t, g * group_size : (g + 1) * group_size] = 2.0 ** (g - 8 + 20 * t)
+
+    aq, aq_scale = per_token_group_quant_fp8(
+        x,
+        group_size,
+        column_major_scales=True,
+        use_ue8m0=use_ue8m0,
+    )
+    assert aq_scale.dtype == torch.float32
+    assert aq_scale.stride() == (1, num_tokens)
+    # Every (token, group) scale is unique, so wrong (t, g) addressing is
+    # bitwise-visible in the scattered rows.
+    assert torch.unique(aq_scale).numel() == num_tokens * num_groups
+
+    topk_ids = (
+        torch.arange(num_tokens * topk, device="cuda", dtype=torch.int64).reshape(
+            num_tokens, topk
+        )
+        % num_experts
+    )
+    _, aq_scale_out, _, inv_perm, _ = deepgemm_moe_permute(
+        aq=aq,
+        aq_scale=aq_scale,
+        topk_ids=topk_ids,
+        local_num_experts=num_experts,
+        expert_map=None,
+        expert_tokens_meta=None,
+        block_size=group_size,
+    )
+
+    for t in range(num_tokens):
+        for k in range(topk):
+            dest = int(inv_perm[t, k])
+            torch.testing.assert_close(
+                aq_scale_out[dest],
+                aq_scale[t],
+                rtol=0,
+                atol=0,
+            )
+
+
 def make_block_quant_fp8_weights(
     e: int,
     n: int,
