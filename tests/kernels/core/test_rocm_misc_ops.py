@@ -19,7 +19,7 @@ These tests catch ROCm-specific regressions early:
 
 Related coverage:
 - AITER kernel numerics: ``tests/kernels/core/test_rocm_aiter_ops.py``
-- Attention backend selection: ``tests/v1/attention/test_rocm_attention_backends_selection.py``
+- Attention backend selection: ``tests/v1/attention/rocm/test_rocm_attention_backends_selection.py``
 - GEMM dispatch: ``tests/model_executor/layers/test_rocm_unquantized_gemm.py``
 """  # noqa: E501
 

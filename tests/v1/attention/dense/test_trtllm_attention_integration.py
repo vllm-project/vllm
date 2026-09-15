@@ -9,7 +9,9 @@ import pytest
 import torch
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
-from tests.v1.attention.test_attention_backends import create_and_prepopulate_kv_cache
+from tests.v1.attention.dense.test_attention_backends import (
+    create_and_prepopulate_kv_cache,
+)
 from tests.v1.attention.utils import (
     BatchSpec,
     create_common_attn_metadata,
