@@ -1583,12 +1583,14 @@ steps:
   - tests/kernels/attention/test_rocm_aiter_mla_decode.py
   - tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
   - tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
+  - tests/kernels/attention/test_rocm_aiter_mla_head_padding.py
   - tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
   commands:
   - rocm-smi
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode.py
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
+  - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_head_padding.py
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
 
 - label: ":amd: (MI300) Attention Kernels Shard %N" # TBD
@@ -3561,12 +3563,14 @@ steps:
   - tests/kernels/attention/test_rocm_aiter_mla_decode.py
   - tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
   - tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
+  - tests/kernels/attention/test_rocm_aiter_mla_head_padding.py
   - tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
   commands:
   - rocm-smi
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode.py
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
+  - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_head_padding.py
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
 
 - label: ":amd: (MI355) Attention Kernels Shard %N" # TBD

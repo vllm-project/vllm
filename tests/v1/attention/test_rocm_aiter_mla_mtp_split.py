@@ -305,6 +305,7 @@ def test_single_token_dcp_decode_returns_unpadded_lse(monkeypatch):
         dcp_verify=None,
         has_persistent_metadata=False,
         attn_out_dtype=torch.bfloat16,
+        padded_num_heads=None,
     )
     attn_metadata = SimpleNamespace(decode=decode, causal=True, work_meta_data=None)
     layer = SimpleNamespace(_q_scale=torch.tensor(1.0), _k_scale=torch.tensor(1.0))
@@ -317,6 +318,20 @@ def test_single_token_dcp_decode_returns_unpadded_lse(monkeypatch):
     # gathered count the cross-rank merge expects.
     assert captured["q_heads"] == 16
     assert lse is not None
+    assert output.shape[1] == decode_heads
+    assert lse.shape == (num_tokens, decode_heads)
+
+    # The builder resolves the launch head count once and carries it on the
+    # metadata; the impl must launch at that count rather than recompute one.
+    # 48 would otherwise pass straight through (already 16-aligned), so a
+    # dropped padded_num_heads shows up here as 48 instead of 96.
+    num_heads, decode_heads = 24, 48
+    decode.padded_num_heads = 96
+    q = torch.zeros(num_tokens, decode_heads, head_dim, dtype=torch.bfloat16)
+    impl.num_heads = num_heads
+    output, lse = impl.forward_mqa(q, torch.zeros(1, 1, head_dim), attn_metadata, layer)
+
+    assert captured["q_heads"] == 96
     assert output.shape[1] == decode_heads
     assert lse.shape == (num_tokens, decode_heads)
 
