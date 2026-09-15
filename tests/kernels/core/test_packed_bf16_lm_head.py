@@ -26,9 +26,13 @@ requires_cuda = pytest.mark.skipif(
 
 def test_lm_head_backend_config_normalizes_and_validates():
     """KernelConfig accepts CLI spelling and rejects unsafe storage limits."""
-    config = KernelConfig(lm_head_backend=cast(Any, "lossless-packed"))
+    config = KernelConfig(
+        lm_head_backend=cast(Any, "lossless-packed"),
+        linear_backend_per_quant={"nvfp4_w4a16": "humming"},
+    )
 
     assert config.lm_head_backend == "lossless_packed"
+    assert config.linear_backend_per_quant == {"nvfp4_w4a16": "humming"}
     with pytest.raises(ValueError):
         KernelConfig(lm_head_max_packed_fraction=0.0)
 
