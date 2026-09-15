@@ -20,7 +20,7 @@ import regex as re
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.parser.engine.events import EventType
+from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
     ParserEngineConfig,
@@ -51,6 +51,7 @@ _PARTIAL_ARG_RE = re.compile(
     r"<arg_value>(?P<value>.*)$",
     re.DOTALL,
 )
+_ARG_KEY_END_RE = re.compile(r"\s*([^\s<][^<]*?)</arg_key>", re.DOTALL)
 
 
 def _glm47_arg_converter(raw_args: str, partial: bool) -> str:
@@ -200,11 +201,61 @@ class Glm47MoeParser(ParserEngine):
             name = name.strip()
         super()._emit_name_delta(idx, deltas, name)
 
+    def _recover_missing_arg_key_start(self, idx: int) -> None:
+        slot = self._tool_slots[idx]
+        name = slot.name.strip()
+        if not name or self._is_valid_tool_name(name):
+            slot.name = name
+            return
+
+        text = name + slot.args
+        best_name = ""
+        best_end = -1
+        for end in range(len(text), 0, -1):
+            candidate = text[:end].strip()
+            if candidate and self._is_valid_tool_name(candidate):
+                best_name = candidate
+                best_end = end
+                break
+
+        if not best_name:
+            slot.name = name
+            return
+
+        tail = text[best_end:].lstrip(" \t\r\n(")
+        if not _ARG_KEY_END_RE.match(tail):
+            slot.name = name
+            return
+
+        slot.name = best_name
+        slot._args_parts = [ARG_KEY_START + tail]
+        slot._args_joined = None
+        slot.streamed_json = ""
+        slot.string_keys = None
+
     def _handle_tool_end(self, event, deltas) -> None:
         idx = event.tool_index
         if 0 <= idx < len(self._tool_slots):
-            self._tool_slots[idx].name = self._tool_slots[idx].name.strip()
+            self._recover_missing_arg_key_start(idx)
         super()._handle_tool_end(event, deltas)
+
+    def _handle_arg_chunk(self, event, deltas) -> None:
+        idx = event.tool_index
+        if idx < 0 or idx >= len(self._tool_slots):
+            super()._handle_arg_chunk(event, deltas)
+            return
+
+        slot = self._tool_slots[idx]
+        if slot.name_sent:
+            super()._handle_arg_chunk(event, deltas)
+            return
+
+        if event.value:
+            slot.append_args(event.value)
+        self._recover_missing_arg_key_start(idx)
+        super()._handle_arg_chunk(
+            SemanticEvent(type=event.type, value="", tool_index=idx), deltas
+        )
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         if not self.thinking_enabled:
