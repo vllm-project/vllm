@@ -397,6 +397,7 @@ def test_deepseek_v4_maps_xhigh_to_high_reasoning_effort():
         (2, {"thinking": True, "reasoning_effort": "low"}),
         (3, {"thinking": True, "reasoning_effort": "low"}),
         (4, {"thinking": False}),
+        (5, {"thinking": False}),
     ],
 )
 def test_deepseek_v4_matches_reference_golden_fixtures(case_id, kwargs):
@@ -451,19 +452,6 @@ def test_deepseek_v4_image_blocks_become_placeholders():
         "<｜User｜>first:\n\n<｜deepseek_image｜>\n\n"
         "second:\n\n<｜deepseek_image｜>" in prompt
     )
-
-
-def test_deepseek_v4_image_blocks_match_reference_spacing():
-    messages, _ = _load_reference_case(5)
-
-    prompt = _tokenizer().apply_chat_template(
-        messages,
-        tokenize=False,
-        thinking=False,
-    )
-
-    expected = (FIXTURES_DIR / "test_output_5.txt").read_text().removesuffix("\n")
-    assert prompt == expected
 
 
 def test_deepseek_v4_image_sentinel_ids_match_tokenizer():
