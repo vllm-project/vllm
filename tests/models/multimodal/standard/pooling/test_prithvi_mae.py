@@ -6,7 +6,7 @@ import importlib.util
 import pytest
 import torch
 
-from ....conftest import VllmRunner
+from .....conftest import VllmRunner
 
 pytestmark = pytest.mark.skipif(
     importlib.util.find_spec("terratorch") is None,
