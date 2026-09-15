@@ -49,8 +49,9 @@ disabled, an error will occur while starting vLLM.
 ### Correlate logs with OpenTelemetry traces
 
 Set `VLLM_LOGGING_TRACE_CONTEXT=1` before starting vLLM to include
-`trace_id` (32 hexadecimal characters), `span_id` (16 hexadecimal characters),
-and `trace_sampled` in the default text logs. This is disabled by default.
+`trace_id` (32 hexadecimal characters) and `span_id` (16 hexadecimal characters)
+in the default text logs. This environment variable is disabled by default;
+it is not a `vllm serve` command-line option.
 It requires `opentelemetry-api`; it does not initialize a tracer or export logs.
 
 ```bash

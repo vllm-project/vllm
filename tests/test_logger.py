@@ -58,7 +58,7 @@ def test_trace_context_logging(monkeypatch, color, sampled):
             for line in lines[:2]:
                 assert f"trace_id={0x123:032x}" in line
                 assert f"span_id={0x456:016x}" in line
-                assert f"trace_sampled={sampled}" in line
+                assert "trace_sampled=" not in line
             assert "second line" in lines[1]
             for field in ("trace_id=", "span_id=", "trace_sampled="):
                 assert field not in lines[2]

@@ -24,8 +24,7 @@ class TraceContextFilter(logging.Filter):
         record.span_id = format(context.span_id if context.is_valid else 0, "016x")
         record.trace_sampled = bool(context.is_valid and context.trace_flags.sampled)
         record.trace_context = (
-            f"[trace_id={record.trace_id} span_id={record.span_id} "
-            f"trace_sampled={record.trace_sampled}] "
+            f"[trace_id={record.trace_id} span_id={record.span_id}] "
             if context.is_valid
             else ""
         )
