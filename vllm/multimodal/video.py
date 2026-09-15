@@ -357,6 +357,9 @@ class PyNvVideoCodecVideoBackend(VideoBackend):
     video_processor=("Qwen3VLVideoProcessor", "Cosmos3EdgeVideoProcessor"),
 )
 class Qwen3VLVideoBackend(VideoBackend):
+    _MAX_FRAMES: ClassVar[int] = 768
+    _MAX_FPS: ClassVar[int] = 30
+
     @classmethod
     def compute_frames_index_to_sample(
         cls,
@@ -366,10 +369,10 @@ class Qwen3VLVideoBackend(VideoBackend):
     ) -> list[int]:
         total_frames_num = source.total_frames_num
         original_fps = source.original_fps
-        fps = target.fps
+        fps = min(target.fps, cls._MAX_FPS)
         max_frame_idx = source.total_frames_num - 1
         min_frames = kwargs.get("min_frames", 4)
-        max_frames = kwargs.get("max_frames", 768)
+        max_frames = min(kwargs.get("max_frames", cls._MAX_FRAMES), cls._MAX_FRAMES)
 
         # Refer to:
         # https://github.com/huggingface/transformers/blob/v5.9.0/src/transformers/models/qwen3_vl/video_processing_qwen3_vl.py#L119-L125
@@ -420,6 +423,9 @@ class Qwen2VLVideoBackend(VideoBackend):
     clip); it is clamped to the last valid frame.
     """
 
+    _MAX_FRAMES: ClassVar[int] = 768
+    _MAX_FPS: ClassVar[int] = 30
+
     @classmethod
     def compute_frames_index_to_sample(
         cls,
@@ -433,7 +439,7 @@ class Qwen2VLVideoBackend(VideoBackend):
         original_fps = source.original_fps
         temporal_patch_size = kwargs.get("temporal_patch_size", 2)
         min_frames = kwargs.get("min_frames", 4)
-        max_frames = kwargs.get("max_frames", 768)
+        max_frames = min(kwargs.get("max_frames", cls._MAX_FRAMES), cls._MAX_FRAMES)
 
         # vLLM reports original_fps == 0 for clips with unknown/variable fps
         # (VFR, malformed, streaming); fail loudly instead of dividing by zero.
@@ -447,7 +453,7 @@ class Qwen2VLVideoBackend(VideoBackend):
             math.floor(min(max_frames, total_frames_num) / temporal_patch_size)
             * temporal_patch_size
         )
-        n = total_frames_num / original_fps * target.fps
+        n = total_frames_num / original_fps * min(target.fps, cls._MAX_FPS)
         n = min(max(n, min_frames), max_frames, total_frames_num)
         n = math.floor(n / temporal_patch_size) * temporal_patch_size
 
