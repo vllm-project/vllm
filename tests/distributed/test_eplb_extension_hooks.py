@@ -72,6 +72,14 @@ def test_platform_rejects_async_pynccl_fallback():
         Platform.check_and_update_eplb_config(config)
 
 
+def test_platform_rejects_unknown_communicator():
+    config = SimpleNamespace(
+        eplb_config=SimpleNamespace(communicator="unknown", use_async=False),
+    )
+    with pytest.raises(ValueError, match="Unknown EPLB communicator"):
+        Platform.check_and_update_eplb_config(config)
+
+
 def test_async_planner_uses_state_hook():
     old_map = torch.tensor([[0, 1]])
     new_map = torch.tensor([[1, 0]])
