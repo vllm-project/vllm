@@ -88,7 +88,9 @@ class AttentionConfig:
 
     hisparse_config: HiSparseConfig | None = None
     """HiSparse host-resident KV configuration. Setting this enables experimental
-    Model Runner V2-only HiSparse sparse-MLA decode hot-buffering."""
+    Model Runner V2-only HiSparse sparse-MLA decode hot-buffering. It is inferred
+    with defaults when HiSparseConnector is configured (directly or via
+    MultiConnector); set it explicitly only to tune its fields."""
 
     use_non_causal: bool = False
     """Whether to use non-causal (bidirectional) attention."""
