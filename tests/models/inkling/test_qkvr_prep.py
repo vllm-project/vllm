@@ -256,3 +256,72 @@ def test_rel_projection_schedule_crossover(
 ):
     assert not qkvr_prep.use_rel_proj_throughput(last_latency_rows, rel_extent)
     assert qkvr_prep.use_rel_proj_throughput(first_throughput_rows, rel_extent)
+
+
+FP8_DTYPE = torch.float8_e4m3fn
+
+
+@pytest.mark.skipif(
+    _cap is None,
+    reason="Inkling QKVR prep kernels require CUDA",
+)
+@pytest.mark.parametrize(
+    ("is_local", "tokens"),
+    [
+        (True, 9),  # fused small-batch path
+        (False, 9),
+        (True, 128),  # tiled path
+        (False, 640),
+    ],
+)
+@pytest.mark.parametrize(("k_scale_val", "v_scale_val"), [(1.0, 1.0), (0.5, 2.0)])
+@torch.inference_mode()
+def test_qkvr_prep_fp8_cache_write(is_local, tokens, k_scale_val, v_scale_val):
+    """fp8 quant-on-store: dequantized cache contents match the bf16 run,
+    q/rel outputs are unaffected, and the conv cache stays bf16-identical."""
+    args = list(_make_inputs(is_local=is_local, tokens=tokens, tp_size=4))
+    kv_heads = args[8]
+    head_dim = args[9]
+
+    bf16_args = list(args)
+    bf16_args[11] = args[11].clone()
+    bf16_args[12] = args[12].clone()
+    bf16_args[13] = args[13].clone()
+    q_bf16, rel_bf16 = qkvr_prep.fused_qkvr_prep(*bf16_args)
+
+    args[12] = torch.zeros_like(bf16_args[12], dtype=FP8_DTYPE)
+    args[13] = torch.zeros_like(bf16_args[13], dtype=FP8_DTYPE)
+    k_scale = torch.tensor(k_scale_val, dtype=torch.float32, device="cuda")
+    v_scale = torch.tensor(v_scale_val, dtype=torch.float32, device="cuda")
+    q_fp8, rel_fp8 = qkvr_prep.fused_qkvr_prep(*args, k_scale=k_scale, v_scale=v_scale)
+
+    # The q/rel path does not depend on the cache dtype.
+    torch.testing.assert_close(q_fp8, q_bf16, rtol=0, atol=0)
+    torch.testing.assert_close(rel_fp8, rel_bf16, rtol=0, atol=0)
+
+    # Conv state is pinned to the model dtype and must be byte-identical.
+    torch.testing.assert_close(args[11], bf16_args[11], rtol=0, atol=0)
+
+    # Dequantized fp8 contents vs the bf16 stores at the written slots.
+    # e4m3 half-ulp relative error is 2**-4; atol covers the subnormal
+    # granularity floor after descaling.
+    written = slice(0, tokens)
+    for cache_fp8, cache_bf16, scale in (
+        (args[12], bf16_args[12], k_scale_val),
+        (args[13], bf16_args[13], v_scale_val),
+    ):
+        dequant = cache_fp8.view(-1, kv_heads, head_dim)[written].float() * scale
+        expected = cache_bf16.view(-1, kv_heads, head_dim)[written].float()
+        torch.testing.assert_close(dequant, expected, rtol=0.07, atol=0.02)
+
+
+@pytest.mark.skipif(
+    _cap is None,
+    reason="Inkling QKVR prep kernels require CUDA",
+)
+def test_qkvr_prep_fp8_requires_scales():
+    args = list(_make_inputs(is_local=True, tokens=9))
+    args[12] = torch.zeros_like(args[12], dtype=FP8_DTYPE)
+    args[13] = torch.zeros_like(args[13], dtype=FP8_DTYPE)
+    with pytest.raises(AssertionError):
+        qkvr_prep.fused_qkvr_prep(*args)
