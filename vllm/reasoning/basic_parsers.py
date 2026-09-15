@@ -69,6 +69,10 @@ class BaseThinkingReasoningParser(ReasoningParser):
         self.start_token_id: int = start_token_id
         self.end_token_id: int = end_token_id
 
+        self._seen_token_ids: set[int] = set()
+        self._seen_len = 0
+        self._seen_tail: int | None = None
+
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         start_token_id = self.start_token_id
         end_token_id = self.end_token_id
@@ -95,6 +99,27 @@ class BaseThinkingReasoningParser(ReasoningParser):
         else:
             return input_ids[input_ids.index(self.end_token_id) + 1 :]
 
+    def _refresh_seen_token_ids(self, previous_token_ids: Sequence[int]) -> None:
+        """Refresh the cached set of token ids seen so far in this stream.
+
+        ``previous_token_ids`` grows by one delta per streaming call, so
+        probing it with ``in`` costs O(len) per call and O(n^2) over a
+        completion. Mirroring it into a set keeps those probes constant time.
+        Only the newly appended tail is folded in; if the caller hands over a
+        sequence that does not extend the previous one, the set is rebuilt.
+        """
+        length = len(previous_token_ids)
+        extends_previous = length >= self._seen_len and (
+            self._seen_len == 0
+            or previous_token_ids[self._seen_len - 1] == self._seen_tail
+        )
+        if extends_previous:
+            self._seen_token_ids.update(previous_token_ids[self._seen_len :])
+        else:
+            self._seen_token_ids = set(previous_token_ids)
+        self._seen_len = length
+        self._seen_tail = previous_token_ids[-1] if length else None
+
     def extract_reasoning_streaming(
         self,
         previous_text: str,
@@ -109,6 +134,8 @@ class BaseThinkingReasoningParser(ReasoningParser):
         Handles streaming output where previous + delta = current.
         Uses token IDs for faster processing.
         """
+        self._refresh_seen_token_ids(previous_token_ids)
+
         # Skip single special tokens
         if len(delta_token_ids) == 1 and (
             delta_token_ids[0] in [self.start_token_id, self.end_token_id]
@@ -117,7 +144,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
 
         # Check if start token is present in previous or delta.
         # Keep compatibility with models that don't generate start tokens.
-        if self.start_token_id in previous_token_ids:
+        if self.start_token_id in self._seen_token_ids:
             if self.end_token_id in delta_token_ids:
                 # start token in previous, end token in delta,
                 # extract reasoning content
@@ -127,7 +154,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 return DeltaMessage(
                     reasoning=reasoning, content=content if content else None
                 )
-            elif self.end_token_id in previous_token_ids:
+            elif self.end_token_id in self._seen_token_ids:
                 # start token in previous, end token in previous,
                 # reasoning content continues
                 return DeltaMessage(content=delta_text)
