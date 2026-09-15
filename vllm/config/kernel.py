@@ -170,6 +170,7 @@ SparseIndexerTopkBackend = Literal[
     "persistent",
     "per_row",
     "flashinfer",
+    "flashinfer_gvr2",
     "torch",
 ]
 
@@ -285,13 +286,17 @@ class KernelConfig:
     sparse_indexer_topk_backend: SparseIndexerTopkBackend = "auto"
     """Backend for the DSA sparse indexer decode top-k kernel. Available options:
 
-    - "auto": The pre-existing chain (cooperative -> persistent -> per_row);
-      the other backends are opt-in
+    - "auto": flashinfer_gvr2 when it is available and the logits row width
+      is at least 32K, otherwise the chain cooperative -> persistent ->
+      per_row; the other backends are opt-in
     - "deep_select": Use DeepSelect kernels (SM100a/SM103a only)
     - "cooperative": Use vLLM's cooperative_topk kernel
     - "persistent": Use vLLM's persistent_topk kernel
     - "per_row": Use vLLM's top_k_per_row_decode kernel
     - "flashinfer": Use FlashInfer's top_k_ragged_transform kernel
+    - "flashinfer_gvr2": Use FlashInfer's self-sampling GVR V2 top-k
+      (`top_k_varlen(backend="gvr_2")`, hint-free). SM100 family, fp32
+      logits, topk in {512, 1024, 2048}
     - "torch": Use a plain torch.topk implementation (debug reference)
 
     Explicit values raise RuntimeError when their constraints are not met.

@@ -1610,6 +1610,29 @@ def _has_flashinfer_topk() -> bool:
     return importlib.util.find_spec("flashinfer") is not None
 
 
+def _has_flashinfer_gvr2() -> bool:
+    """FlashInfer with the gvr_2 top_k_varlen backend (SM100 family only).
+    Probes the package tree so collection does not import flashinfer."""
+    if not _has_flashinfer_topk() or not current_platform.is_device_capability_family(
+        100
+    ):
+        return False
+    import importlib.util
+    import os
+
+    spec = importlib.util.find_spec("flashinfer")
+    assert spec is not None and spec.submodule_search_locations
+    return any(
+        os.path.exists(os.path.join(p, "topk_varlen", "kernels", "gvr2_topk_host.py"))
+        for p in spec.submodule_search_locations
+    )
+
+
+requires_flashinfer_gvr2 = pytest.mark.skipif(
+    not _has_flashinfer_gvr2(), reason="requires flashinfer gvr_2 top-k on SM100"
+)
+
+
 def _has_cooperative_topk() -> bool:
     return _has_device_capability(
         90
@@ -1643,6 +1666,7 @@ SPARSE_INDEXER_EXPLICIT_BACKENDS = [
             not _has_flashinfer_topk(), reason="requires flashinfer top-k"
         ),
     ),
+    pytest.param("flashinfer_gvr2", marks=requires_flashinfer_gvr2),
     pytest.param("deep_select", marks=requires_sm100),
 ]
 
@@ -1718,6 +1742,7 @@ def test_sparse_indexer_decode_topk_explicit_backends(
                 not _has_flashinfer_topk(), reason="requires flashinfer top-k"
             ),
         ),
+        pytest.param("flashinfer_gvr2", marks=requires_flashinfer_gvr2),
         pytest.param("deep_select", marks=requires_sm100),
     ],
 )
@@ -1774,20 +1799,42 @@ def test_sparse_indexer_topk_backend_resolution() -> None:
 
     def resolve(
         backend: str,
-        t: torch.Tensor = logits,
+        t: torch.Tensor | None = None,
         k: int = 2048,
         num_rows: int = 64,
     ) -> str:
         cfg = VllmConfig(kernel_config={"sparse_indexer_topk_backend": backend})
         with set_current_vllm_config(cfg):
-            return SparseIndexerTopk().resolve_backend(t, k, num_rows)
+            return SparseIndexerTopk().resolve_backend(
+                logits if t is None else t, k, num_rows
+            )
 
     is_sm100 = current_platform.is_device_capability_family(100)
     has_coop = _has_cooperative_topk()
     has_fi = _has_flashinfer_topk()
+    has_gvr2 = _has_flashinfer_gvr2()
 
-    # "auto" is exactly the pre-existing chain: cooperative -> persistent ->
-    # per_row. It must never select the opt-in backends by itself.
+    if has_gvr2:
+        # Wide rows (>= 32K) go to gvr_2 regardless of the row count or the
+        # DeepSelect alignment; narrow rows keep the pre-existing chain.
+        assert resolve("auto") == "flashinfer_gvr2"
+        assert resolve("auto", k=512, num_rows=128) == "flashinfer_gvr2"
+        assert resolve("auto", unaligned_logits, num_rows=128) == "flashinfer_gvr2"
+        assert resolve("auto", k=5000) == "per_row"
+        assert resolve("flashinfer_gvr2", num_rows=1) == "flashinfer_gvr2"
+        with pytest.raises(RuntimeError, match="topk_tokens must be in"):
+            resolve("flashinfer_gvr2", k=3000)
+        with pytest.raises(RuntimeError, match="fp32"):
+            resolve("flashinfer_gvr2", logits.to(torch.bfloat16))
+        logits = logits[:, :16384]
+        unaligned_logits = unaligned_logits[:, :16384]
+    else:
+        with pytest.raises(RuntimeError, match="gvr_2|SM100|CUDA"):
+            resolve("flashinfer_gvr2")
+
+    # Otherwise "auto" is exactly the pre-existing chain: cooperative ->
+    # persistent -> per_row. It must never select the opt-in backends by
+    # itself.
     if has_coop:
         assert resolve("auto") == "cooperative"
         assert resolve("auto", k=512, num_rows=8) == "cooperative"
@@ -1811,7 +1858,7 @@ def test_sparse_indexer_topk_backend_resolution() -> None:
         assert resolve("cooperative") == "cooperative"
     if has_fi:
         assert resolve("flashinfer") == "flashinfer"
-    if is_sm100:
+    if is_sm100 and hasattr(torch.ops.deep_select, "get_alignment_requirement"):
         # Explicit deep_select has no row-count requirement.
         assert resolve("deep_select", num_rows=1) == "deep_select"
         with pytest.raises(RuntimeError, match="constraints"):

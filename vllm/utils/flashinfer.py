@@ -392,6 +392,16 @@ def has_flashinfer_sparse_mla_sm120_config(num_q_heads: int, top_k: int) -> bool
 
 
 @functools.cache
+def has_flashinfer_topk_varlen_gvr2() -> bool:
+    """Return ``True`` if FlashInfer ships the ``gvr_2`` varlen top-k backend
+    (self-sampling GVR V2, ``flashinfer.top_k_varlen(backend="gvr_2")``)."""
+    if not has_flashinfer():
+        return False
+    mod = _get_submodule("flashinfer.topk_varlen.kernels.gvr2_topk_host")
+    return mod is not None and callable(getattr(mod, "run_varlen", None))
+
+
+@functools.cache
 def has_flashinfer_cutedsl() -> bool:
     """Return ``True`` if FlashInfer cutedsl module is available."""
     return (
