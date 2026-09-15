@@ -463,6 +463,8 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                     if weight_name not in name:
                         continue
                     name_mapped = name.replace(weight_name, param_name)
+                    if name_mapped not in params_dict:
+                        continue
                     param = params_dict[name_mapped]
                     success = param.weight_loader(
                         param,
