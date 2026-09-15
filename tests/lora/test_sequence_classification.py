@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import pytest
 import torch
 
 from tests.utils import multi_gpu_test
@@ -101,15 +100,7 @@ def test_native_classification_model_with_modules_to_save(
     cleanup_dist_env_and_memory()
 
 
-@pytest.mark.parametrize(
-    "tp_size",
-    [
-        1,
-        2,
-    ],
-)
-@multi_gpu_test(num_gpus=2)
-def test_batched_loras(
+def _test_batched_loras(
     qwen3_guard_star_trek_lora_files: str,
     qwen3_guard_new_zealand_lora_files: str,
     tp_size: int,
@@ -151,3 +142,26 @@ def test_batched_loras(
 
     del llm
     cleanup_dist_env_and_memory()
+
+
+def test_batched_loras(
+    qwen3_guard_star_trek_lora_files: str,
+    qwen3_guard_new_zealand_lora_files: str,
+) -> None:
+    _test_batched_loras(
+        qwen3_guard_star_trek_lora_files,
+        qwen3_guard_new_zealand_lora_files,
+        tp_size=1,
+    )
+
+
+@multi_gpu_test(num_gpus=2)
+def test_batched_loras_tp(
+    qwen3_guard_star_trek_lora_files: str,
+    qwen3_guard_new_zealand_lora_files: str,
+) -> None:
+    _test_batched_loras(
+        qwen3_guard_star_trek_lora_files,
+        qwen3_guard_new_zealand_lora_files,
+        tp_size=2,
+    )
