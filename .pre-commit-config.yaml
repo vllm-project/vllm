@@ -177,6 +177,13 @@ repos:
     files: ^\.github/mergify\.yml$
     pass_filenames: false
     additional_dependencies: [PyYAML, regex]
+  - id: check-buildkite-step-keys
+    name: Check every Buildkite step declares an explicit key
+    language: python
+    entry: python tools/pre_commit/check_buildkite_step_keys.py
+    files: ^\.buildkite/.*\.ya?ml$
+    pass_filenames: false
+    additional_dependencies: [PyYAML]
   - id: mypy-3.10 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.10
     entry: python tools/pre_commit/mypy.py "3.10"
