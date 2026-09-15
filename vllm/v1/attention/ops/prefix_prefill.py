@@ -239,15 +239,21 @@ def _fwd_kernel(
         # (handles cross-block tiles via B_Loc). Same addressing is reused for
         # the current-chunk cache read below.
         token_indices = start_n + offs_bs_n
-        # Context tokens are always followed by the current chunk, so the tile
-        # never steps past this batch's block-table row; the block-table load
-        # stays unmasked (MASK_BLOCK_TABLE=False) and offs_bs_n is an unused
-        # placeholder for token_valid.
+        context_token_valid = token_indices < cur_batch_ctx_len
+        if SLIDING_WINDOW > 0:
+            # Every query in this tile is at or after earliest_q_pos. Context
+            # older than its sliding window is invalid for the entire tile and
+            # must not be loaded: an evicted block can map to stale/NaN storage,
+            # and zero attention probability does not neutralize 0 * NaN.
+            earliest_q_pos = cur_batch_ctx_len + block_start_loc
+            context_token_valid = context_token_valid & (
+                earliest_q_pos - token_indices < SLIDING_WINDOW
+            )
         off_k, off_v = _paged_kv_cache_offsets(
             B_Loc,
             cur_batch,
             token_indices,
-            offs_bs_n,
+            context_token_valid,
             offs_d,
             cur_kv_head,
             x,
@@ -263,6 +269,7 @@ def _fwd_kernel(
             stride_v_cache_d,
             stride_v_cache_bl,
             PHYSICAL_BLOCK_SIZE,
+            MASK_BLOCK_TABLE=SLIDING_WINDOW > 0,
         )
 
         if (
@@ -271,10 +278,15 @@ def _fwd_kernel(
         ):
             k_load = tl.load(
                 K_cache + off_k,
-                mask=dim_mask[:, None]
-                & ((start_n + offs_bs_n[None, :]) < cur_batch_ctx_len),
+                mask=dim_mask[:, None] & context_token_valid[None, :],
                 other=0.0,
             )  # [D,N]
+        elif SLIDING_WINDOW > 0:
+            k_load = tl.load(
+                K_cache + off_k,
+                mask=context_token_valid[None, :],
+                other=0.0,
+            )
         else:
             k_load = tl.load(K_cache + off_k)
 
@@ -324,10 +336,15 @@ def _fwd_kernel(
         ):
             v_load = tl.load(
                 V_cache + off_v,
-                mask=dim_mask[None, :]
-                & ((start_n + offs_bs_n[:, None]) < cur_batch_ctx_len),
+                mask=dim_mask[None, :] & context_token_valid[:, None],
                 other=0.0,
             )  # [N,D]
+        elif SLIDING_WINDOW > 0:
+            v_load = tl.load(
+                V_cache + off_v,
+                mask=context_token_valid[:, None],
+                other=0.0,
+            )
         else:
             v_load = tl.load(V_cache + off_v)
 
