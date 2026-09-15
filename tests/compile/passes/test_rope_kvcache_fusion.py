@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from unittest.mock import patch
+
 import pytest
 import torch
 from torch._higher_order_ops import auto_functionalized
@@ -13,7 +15,10 @@ from tests.v1.attention.utils import (
     dense_kv_cache_views,
 )
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
-from vllm.compilation.passes.fusion import rope_kvcache_fusion
+from vllm.compilation.passes.fusion import (
+    qk_norm_rope_kvcache_fusion,
+    rope_kvcache_fusion,
+)
 from vllm.compilation.passes.fusion.matcher_utils import ROTARY_OP
 from vllm.compilation.passes.fusion.rope_kvcache_fusion import RopeKVCacheFusionPass
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
@@ -95,6 +100,45 @@ def test_rope_kvcache_fusion_default_keeps_large_ranges_unfused():
     assert fusion_pass.is_applicable_for_range(Range(1, 256))
     assert not fusion_pass.is_applicable_for_range(Range(257, 11650))
     assert not fusion_pass.is_applicable_for_range(Range(11651, 16384))
+
+
+@pytest.mark.parametrize(
+    ("pass_cls", "pass_module", "warning"),
+    [
+        (
+            RopeKVCacheFusionPass,
+            rope_kvcache_fusion,
+            "RoPE + KV cache fusion is enabled",
+        ),
+        (
+            qk_norm_rope_kvcache_fusion.QkNormRopeKvCacheFusionPass,
+            qk_norm_rope_kvcache_fusion,
+            "QK Norm + RoPE + KV cache fusion is enabled",
+        ),
+    ],
+)
+def test_rope_kvcache_pass_warns_when_no_attention_layers(
+    pass_cls, pass_module, warning
+):
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(dtype=torch.bfloat16),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            pass_config=PassConfig(
+                fuse_rope_kvcache=True,
+                fuse_qk_norm_rope_kvcache=True,
+            ),
+        ),
+    )
+
+    with (
+        patch.object(pass_module, "get_layers_from_vllm_config", return_value={}),
+        patch.object(pass_module.logger, "warning") as warning_mock,
+    ):
+        pass_cls(vllm_config)
+
+    warning_mock.assert_called_once()
+    assert warning in warning_mock.call_args.args[0]
 
 
 class QKRoPEKVCacheTestModel(torch.nn.Module):

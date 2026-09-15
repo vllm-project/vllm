@@ -434,6 +434,12 @@ class RopeKVCacheFusionPass(VllmPatternMatcherPass):
         self.max_token_num = cc.pass_config.rope_kvcache_fusion_max_token_num
 
         attn_layers = get_layers_from_vllm_config(config, Attention)
+        if not attn_layers:
+            logger.warning(
+                "RoPE + KV cache fusion is enabled, but no attention layers were "
+                "found in CompilationConfig.static_forward_context, so no fusion "
+                "patterns were registered."
+            )
         # When _USE_LAYERNAME is enabled, layer_name is a wildcard so all
         # layers produce the same pattern — register once then break.
         for _, layer in attn_layers.items():
