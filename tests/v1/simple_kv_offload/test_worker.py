@@ -9,9 +9,12 @@ read partially written / stale blocks and silently corrupt the CPU cache.
 
 from __future__ import annotations
 
+import os
 import time
 from contextlib import nullcontext
-from unittest.mock import MagicMock
+from datetime import timedelta
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -62,6 +65,164 @@ ITERS = 30
 # Keep the compute stream busy so the KV write lands late; this makes the
 # store-vs-compute race deterministic instead of timing-dependent.
 SLEEP_CYCLES = 50_000_000
+
+
+@pytest.mark.parametrize("rank", range(4))
+def test_shared_dp_discovery_visits_all_nodes(rank):
+    """Early return on one node would deadlock the remaining collective probes."""
+    from vllm.v1.simple_kv_offload.shared_offload import _discover_local_ranks
+
+    group = MagicMock(world_size=4, rank_in_group=rank)
+    with patch(
+        "vllm.v1.simple_kv_offload.shared_offload.in_the_same_node_as",
+        side_effect=[[True, True, False, False], [False, False, True, True]],
+    ) as probe:
+        assert _discover_local_ranks(group) == ([0, 1] if rank < 2 else [2, 3])
+        assert [call.args[1] for call in probe.call_args_list] == [0, 2]
+
+
+def _shared_dp_dma_process(
+    rank: int, rendezvous: str, mismatch: bool, iterations: int = 1
+) -> None:
+    """Exercise independent address spaces even on a machine with one GPU."""
+    from tests.v1.simple_kv_offload.test_scheduler import (
+        _BYTES_PER_BLOCK,
+        BLOCK_SIZE,
+        _make_kv_cache_config,
+        _make_vllm_config,
+    )
+    from vllm.distributed.parallel_state import GroupCoordinator
+    from vllm.v1.core.kv_cache_utils import BlockHashWithGroupId
+    from vllm.v1.simple_kv_offload.shared_block_pool import SharedCPUBlockPool
+
+    torch.accelerator.set_device_index(0)
+    torch.distributed.init_process_group(
+        "gloo",
+        init_method=f"file://{rendezvous}",
+        world_size=2,
+        rank=rank,
+        timeout=timedelta(seconds=60),
+    )
+    group = GroupCoordinator([[0, 1]], 0, "gloo", use_device_communicator=False)
+    config = _make_vllm_config()
+    config.parallel_config.data_parallel_rank = rank
+    config.parallel_config.data_parallel_size = 2
+    if mismatch and rank == 1:
+        config.cache_config.prefix_caching_hash_algo = "sha256_cbor"
+    worker = SimpleCPUOffloadWorker(
+        config,
+        _make_kv_cache_config(4, num_groups=2),
+        _BYTES_PER_BLOCK * 8,
+        cpu_offload_shared=True,
+    )
+    gpu_caches = {
+        f"layer_{layer}": torch.full(
+            (4, _BYTES_PER_BLOCK),
+            31 + rank + layer * 10,
+            dtype=torch.int8,
+            device="cuda",
+        )
+        for layer in range(2)
+    }
+    pool = None
+    try:
+        with patch(
+            "vllm.v1.simple_kv_offload.shared_offload.get_dp_group", return_value=group
+        ):
+            if mismatch:
+                with pytest.raises(ValueError, match="DP hash/model/KV layout"):
+                    worker.register_kv_caches(gpu_caches)
+                return
+            worker.register_kv_caches(gpu_caches)
+        assert worker.shared_region.is_pinned
+        assert not os.path.exists(worker.shared_region.mmap_path)
+        pool = SharedCPUBlockPool(worker.handshake_metadata, BLOCK_SIZE)
+        for iteration in range(iterations):
+            for layer, gpu in enumerate(gpu_caches.values()):
+                gpu[0].fill_(31 + rank + layer * 10 + iteration)
+            destination = pool.get_new_blocks(1)[0]
+            assert destination.block_id // 4 == rank
+            worker.bind_connector_metadata(
+                SimpleCPUOffloadMetadata(
+                    store_event=iteration,
+                    store_gpu_blocks=[0],
+                    store_cpu_blocks=[destination.block_id],
+                )
+            )
+            worker.wait_for_save()
+            deadline = time.monotonic() + 20
+            while worker._pending_store_event_indices:
+                worker.get_finished(set())
+                assert time.monotonic() < deadline
+                time.sleep(0.001)
+            worker.clear_connector_metadata()
+            with pool.locked():
+                pool._insert_block_hash(
+                    BlockHashWithGroupId(bytes([rank, iteration]) * 18),
+                    destination,
+                    BLOCK_SIZE,
+                )
+                pool.free_blocks([destination])
+            group.barrier()
+            with pool.locked():
+                source = pool.cached_block_hash_to_block.get_one_block(
+                    BlockHashWithGroupId(bytes([1 - rank, iteration]) * 18)
+                )
+                assert source is not None
+                pool.touch([source])
+            group.barrier()
+            # Fill the owner's remaining slots while its peer holds a read
+            # reference. Neither allocator may recycle the DMA source.
+            pressure = pool.get_new_blocks(2)
+            assert destination not in pressure
+            assert pool.get_num_free_blocks() == 0
+            worker.bind_connector_metadata(
+                SimpleCPUOffloadMetadata(
+                    load_event=iteration,
+                    load_cpu_blocks=[source.block_id],
+                    load_gpu_blocks=[1],
+                    load_event_to_reqs={iteration: ["peer-replay"]},
+                )
+            )
+            worker.start_load_kv()
+            deadline = time.monotonic() + 20
+            while worker._pending_load_event_indices:
+                worker.get_finished(set())
+                assert time.monotonic() < deadline
+                time.sleep(0.001)
+            for layer, gpu in enumerate(gpu_caches.values()):
+                assert torch.all(
+                    gpu[1] == 31 + (1 - rank) + layer * 10 + iteration
+                ).item()
+                assert torch.all(gpu[0] == 31 + rank + layer * 10 + iteration).item()
+                assert torch.all(gpu[2:] == 31 + rank + layer * 10).item()
+            pool.free_blocks([source, *pressure])
+            worker.clear_connector_metadata()
+            group.barrier()
+            assert pool.get_num_free_blocks() == 3
+    finally:
+        worker.shutdown()
+        if pool is not None:
+            pool.close()
+        group.destroy()
+        torch.distributed.destroy_process_group()
+
+
+@pytest.mark.parametrize(
+    "mismatch,iterations",
+    [(False, 1), (False, 32), (True, 1)],
+    ids=["peer_dma", "eviction_pressure", "hash_mismatch"],
+)
+def test_shared_dp_multiprocess_dma_restores_peer_bytes(
+    tmp_path: Path, mismatch: bool, iterations: int
+) -> None:
+    """Two workers copy to disjoint slots and restore each other's actual KV bytes."""
+    torch.multiprocessing.spawn(
+        _shared_dp_dma_process,
+        args=(str(tmp_path / "rendezvous"), mismatch, iterations),
+        nprocs=2,
+        join=True,
+    )
 
 
 def _make_backend() -> tuple[DmaCopyBackend, torch.Tensor, torch.Tensor]:

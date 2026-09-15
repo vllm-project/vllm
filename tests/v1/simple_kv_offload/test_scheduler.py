@@ -5,7 +5,8 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from pathlib import Path
 
 import pytest
 import torch
@@ -53,7 +54,11 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.simple_kv_offload.manager import SimpleCPUOffloadScheduler
-from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadWorkerMetadata
+from vllm.v1.simple_kv_offload.metadata import (
+    SimpleCPUOffloadHandshake,
+    SimpleCPUOffloadWorkerMetadata,
+)
+from vllm.v1.simple_kv_offload.shared_offload import shared_hash_signature
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -423,6 +428,229 @@ def _alloc_and_register(
     if confirmed:
         request.num_computed_tokens = num_blocks * BLOCK_SIZE
     return kv_blocks
+
+
+def _make_shared_schedulers(tmp_path, count=2):
+    fixtures = [make_scheduler(num_cpu_blocks=3) for _ in range(count)]
+    for rank, fix in enumerate(fixtures):
+        fix.scheduler.set_shared_pool(
+            SimpleCPUOffloadHandshake(
+                region_id=str(tmp_path),
+                local_rank=rank,
+                local_size=count,
+                blocks_per_rank=3,
+                hash_signature=shared_hash_signature(fix.vllm_config),
+            )
+        )
+    return fixtures
+
+
+@pytest.fixture
+def shared_schedulers(tmp_path):
+    fixtures = _make_shared_schedulers(tmp_path)
+    try:
+        yield fixtures
+    finally:
+        for fix in fixtures:
+            fix.scheduler.shutdown()
+
+
+def _store_shared_request(fix, request):
+    blocks = _alloc_and_register(fix, request, num_blocks=2)
+    fix.scheduler.update_state_after_alloc(request, blocks, num_external_tokens=0)
+    return fix.scheduler.build_connector_meta(
+        make_scheduler_output(
+            {request.request_id: 2 * BLOCK_SIZE},
+            new_reqs={request.request_id: blocks.get_block_ids()},
+        )
+    )
+
+
+def test_shared_dp_joiner_can_initialize_before_creator(tmp_path, monkeypatch):
+    """Joining first must initialize metadata without losing a published prefix."""
+    from vllm.v1.simple_kv_offload import shared_block_pool
+
+    creator, joiner = [make_scheduler(num_cpu_blocks=3) for _ in range(2)]
+    metadata = SimpleCPUOffloadHandshake(
+        str(tmp_path), 0, 2, 3, shared_hash_signature(creator.vllm_config)
+    )
+    region_cls = shared_block_pool.SharedOffloadRegion
+    init_region = region_cls.__init__
+    request = make_request()
+    regions = []
+
+    def delay_creator(region, *args, **kwargs):
+        init_region(region, *args, **kwargs)
+        regions.append(region)
+        monkeypatch.setattr(region_cls, "__init__", init_region)
+        joiner.scheduler.set_shared_pool(replace(metadata, local_rank=1))
+        meta = _store_shared_request(joiner, request)
+        simulate_store_completion(joiner.scheduler, meta.store_event)
+
+    monkeypatch.setattr(region_cls, "__init__", delay_creator)
+    try:
+        creator.scheduler.set_shared_pool(metadata)
+        assert creator.scheduler.get_num_new_matched_tokens(request, 0) == (
+            2 * BLOCK_SIZE,
+            True,
+        )
+        creator.scheduler.request_finished(request, [])
+        assert not Path(regions[0].mmap_path).exists()
+        assert list(tmp_path.iterdir()) == []
+    finally:
+        creator.scheduler.shutdown()
+        joiner.scheduler.shutdown()
+        for region in regions:
+            region.cleanup()
+
+
+def test_shared_dp_hit_is_published_after_store_completion(shared_schedulers):
+    """An engine with an empty GPU pool can restore a different DP's prefix."""
+    writer, reader = shared_schedulers
+    request = make_request(num_blocks=2)
+    meta = _store_shared_request(writer, request)
+    replay = Request(
+        request_id="other-dp-request",
+        prompt_token_ids=request.prompt_token_ids,
+        sampling_params=request.sampling_params,
+        pooling_params=None,
+        block_hasher=request._block_hasher,
+    )
+    assert reader.scheduler.get_num_new_matched_tokens(replay, 0) == (0, False)
+    simulate_store_completion(writer.scheduler, meta.store_event)
+    assert reader.gpu_block_pool.get_cached_block(replay.block_hashes[0], [0]) is None
+    assert reader.scheduler.get_num_new_matched_tokens(replay, 0) == (
+        2 * BLOCK_SIZE,
+        True,
+    )
+    destinations = KVCacheBlocks((reader.gpu_block_pool.get_new_blocks(2),))
+    reader.scheduler.update_state_after_alloc(replay, destinations, 2 * BLOCK_SIZE)
+    loads = reader.scheduler.build_connector_meta(make_scheduler_output({}))
+    assert loads.load_cpu_blocks == meta.store_cpu_blocks
+    assert loads.load_gpu_blocks == list(destinations.get_block_ids()[0])
+    simulate_load_completion(reader.scheduler, {replay.request_id})
+
+
+def test_shared_dp_write_partitions_do_not_overlap(shared_schedulers):
+    """Each writer uses only its static partition, including after eviction."""
+    first, second = shared_schedulers
+    first_meta = _store_shared_request(first, make_request())
+    second_meta = _store_shared_request(second, make_request())
+    assert first_meta.store_cpu_blocks == [1, 2]
+    assert second_meta.store_cpu_blocks == [4, 5]
+    simulate_store_completion(first.scheduler, first_meta.store_event)
+    next_meta = _store_shared_request(first, make_request())
+    assert next_meta.store_cpu_blocks == [1, 2]
+
+
+def test_shared_dp_preserves_secondary_hashes(shared_schedulers):
+    """Peer index refresh retains the source block's secondary prefix keys."""
+    writer, reader = shared_schedulers
+    request = make_request()
+    meta = _store_shared_request(writer, request)
+    source = writer.gpu_block_pool.blocks[meta.store_gpu_blocks[0]]
+    alias = make_request(num_blocks=1).block_hashes[0]
+    writer.gpu_block_pool._insert_block_hash(
+        make_block_hash_with_group_id(alias, 0), source, num_tokens=None
+    )
+    simulate_store_completion(writer.scheduler, meta.store_event)
+    pool = reader.scheduler.cpu_block_pool
+    with pool.locked():
+        blocks = pool.get_cached_block(alias, [0])
+        assert blocks is not None
+        assert blocks[0].block_id == meta.store_cpu_blocks[0]
+        assert blocks[0].block_hash == source.block_hash
+        assert blocks[0].block_hash_num_tokens == source.block_hash_num_tokens
+
+
+def test_shared_dp_rejects_interrupted_invalidation(shared_schedulers, monkeypatch):
+    """A writer that exits before announcing invalidation cannot leave a hit."""
+    writer, reader = shared_schedulers
+    request = make_request()
+    meta = _store_shared_request(writer, request)
+    simulate_store_completion(writer.scheduler, meta.store_event)
+    assert reader.scheduler.get_num_new_matched_tokens(request, 0)[0] == 2 * BLOCK_SIZE
+    reader.scheduler.request_finished(request, [])
+
+    def interrupted(slot):
+        raise RuntimeError("writer interrupted before revision update")
+
+    monkeypatch.setattr(writer.scheduler.cpu_block_pool, "_changed", interrupted)
+    with pytest.raises(RuntimeError, match="writer interrupted"):
+        writer.scheduler.cpu_block_pool.get_new_blocks(1)
+    assert reader.scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+
+
+def test_shared_dp_read_pin_survives_cancel_until_dma_completion(shared_schedulers):
+    """Canceled in-flight peer loads still exclude the writer from those slots."""
+    writer, reader = shared_schedulers
+    request = make_request()
+    meta = _store_shared_request(writer, request)
+    simulate_store_completion(writer.scheduler, meta.store_event)
+    assert reader.scheduler.get_num_new_matched_tokens(request, 0)[0] == 2 * BLOCK_SIZE
+    assert get_cpu_free_blocks(writer.scheduler) == 0
+    destination = KVCacheBlocks((reader.gpu_block_pool.get_new_blocks(2),))
+    reader.scheduler.update_state_after_alloc(request, destination, 2 * BLOCK_SIZE)
+    reader.scheduler.build_connector_meta(make_scheduler_output({}))
+    reader.scheduler.request_finished(request, [])
+    assert get_cpu_free_blocks(writer.scheduler) == 0
+    assert not writer.scheduler.reset()
+    simulate_load_completion(reader.scheduler, {request.request_id})
+    assert get_cpu_free_blocks(writer.scheduler) == 2
+    assert writer.scheduler.reset()
+    assert reader.scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+
+
+def test_shared_dp_pending_hit_retry_and_cancel_release_pins(shared_schedulers):
+    """A retried allocation neither leaks nor drops another request's read pin."""
+    writer, reader = shared_schedulers
+    request = make_request()
+    meta = _store_shared_request(writer, request)
+    simulate_store_completion(writer.scheduler, meta.store_event)
+    for _ in range(3):
+        assert (
+            reader.scheduler.get_num_new_matched_tokens(request, 0)[0] == 2 * BLOCK_SIZE
+        )
+    reader.scheduler.request_finished(request, [])
+    assert get_cpu_free_blocks(writer.scheduler) == 2
+    assert writer.scheduler.reset()
+
+
+def test_eight_dp_readers_release_the_writer_only_after_the_last_reader(tmp_path):
+    """A shared prefix stays protected until all seven peer engines release it."""
+    fixtures = _make_shared_schedulers(tmp_path, count=8)
+    writer, *readers = fixtures
+    try:
+        request = make_request()
+        meta = _store_shared_request(writer, request)
+        simulate_store_completion(writer.scheduler, meta.store_event)
+        for reader in readers:
+            assert reader.scheduler.get_num_new_matched_tokens(request, 0) == (
+                2 * BLOCK_SIZE,
+                True,
+            )
+        for reader in readers[:-1]:
+            reader.scheduler.request_finished(request, [])
+            assert get_cpu_free_blocks(writer.scheduler) == 0
+        readers[-1].scheduler.request_finished(request, [])
+        assert get_cpu_free_blocks(writer.scheduler) == 2
+    finally:
+        for fix in fixtures:
+            fix.scheduler.shutdown()
+
+
+def test_shared_dp_rejects_scheduler_hash_mismatch(tmp_path):
+    fix = make_scheduler(num_cpu_blocks=3)
+    with pytest.raises(ValueError, match="scheduler/worker hash mismatch"):
+        fix.scheduler.set_shared_pool(
+            SimpleCPUOffloadHandshake(
+                str(tmp_path),
+                0,
+                1,
+                3,
+                ("sha256", b"different-root", b"different-block"),
+            )
+        )
 
 
 # ---------------------------------------------------------------------------
