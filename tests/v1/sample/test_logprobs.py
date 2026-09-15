@@ -6,6 +6,7 @@ import math
 from collections.abc import Generator
 from types import SimpleNamespace
 from typing import get_args
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -23,6 +24,7 @@ from vllm.config.model import LogprobsMode
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.exceptions import VLLMValidationError
 from vllm.platforms import current_platform
+from vllm.v1.engine.input_processor import InputProcessor
 
 from ...conftest import HfRunner, VllmRunner
 
@@ -447,6 +449,29 @@ def test_prompt_logprob_token_ids_bounded_by_max_logprobs():
     # The error names the value to raise max_logprobs to.
     with pytest.raises(VLLMValidationError, match=r"max_logprobs.*at least 5"):
         verify(prompt_logprob_token_ids=[1, 2, 3, 4, 5])
+
+    # prompt_logprob_start alone is a caller mistake, not a silent no-op.
+    with pytest.raises(VLLMValidationError, match="requires prompt_logprob_token_ids"):
+        verify(prompt_logprob_start=3)
+
+
+def test_prompt_logprob_token_ids_require_v2_model_runner():
+    """Only the V2 runner scores them; the V1 runner would return None."""
+    processor = SimpleNamespace(
+        model_config=SimpleNamespace(
+            return_sampling_mask=False, enable_trace_replay=False
+        ),
+        vllm_config=SimpleNamespace(reasoning_config=None, use_v2_model_runner=False),
+        speculative_config=None,
+        structured_outputs_config=None,
+        tokenizer=None,
+    )
+    params = SamplingParams(prompt_logprob_token_ids=[1, 2])
+    with patch.object(SamplingParams, "verify"):
+        with pytest.raises(VLLMValidationError, match="V2 model runner"):
+            InputProcessor._validate_params(processor, params, ("generate",))
+        processor.vllm_config.use_v2_model_runner = True
+        InputProcessor._validate_params(processor, params, ("generate",))
 
 
 def test_none_logprobs(vllm_model, example_prompts):

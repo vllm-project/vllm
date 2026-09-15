@@ -925,6 +925,12 @@ class SamplingParams(
                     parameter="prompt_logprob_start",
                     value=self.prompt_logprob_start,
                 )
+        elif self.prompt_logprob_start is not None:
+            raise VLLMValidationError(
+                "prompt_logprob_start requires prompt_logprob_token_ids.",
+                parameter="prompt_logprob_start",
+                value=self.prompt_logprob_start,
+            )
 
     def _validate_stop_token_ids(self, model_config: ModelConfig) -> None:
         """Validate stop_token_ids are within vocabulary range."""

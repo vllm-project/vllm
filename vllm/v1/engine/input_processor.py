@@ -100,6 +100,15 @@ class InputProcessor:
                 self.structured_outputs_config,
                 self.tokenizer,
             )
+            if (
+                params.prompt_logprob_token_ids is not None
+                and not self.vllm_config.use_v2_model_runner
+            ):
+                raise VLLMValidationError(
+                    "prompt_logprob_token_ids requires the V2 model runner "
+                    "(VLLM_USE_V2_MODEL_RUNNER=1).",
+                    parameter="prompt_logprob_token_ids",
+                )
 
             if self.model_config.return_sampling_mask:
                 if params.temperature <= 0:
