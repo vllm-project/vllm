@@ -71,6 +71,7 @@ class Transfer:
     batch_src: torch.Tensor
     batch_dst: torch.Tensor
     batch_sizes: torch.Tensor
+    failed: bool = False
 
 
 def compute_sub_block_ptrs(
@@ -653,16 +654,39 @@ class SingleDirectionOffloadingHandler:
         # writing; we must keep STREAM ordering so source reads are gated
         # by the transfer stream's wait_stream(compute) barrier.
         is_src_access_order_any = not self.gpu_to_cpu
-        with current_platform.stream(stream):
-            start_event.record(stream)
-            if op_idx > 0:
-                self._swap_blocks_batch(
-                    src,
-                    dst,
-                    sizes,
-                    is_src_access_order_any=is_src_access_order_any,
-                )
+        try:
+            with current_platform.stream(stream):
+                start_event.record(stream)
+                if op_idx > 0:
+                    self._swap_blocks_batch(
+                        src,
+                        dst,
+                        sizes,
+                        is_src_access_order_any=is_src_access_order_any,
+                    )
+                end_event.record(stream)
+        except RuntimeError:
+            logger.exception(
+                "KV offload %s transfer failed for job %d",
+                "GPU->CPU" if self.gpu_to_cpu else "CPU->GPU",
+                job_id,
+            )
             end_event.record(stream)
+            self._transfer_events[job_id] = end_event
+            self._transfers.append(
+                Transfer(
+                    job_id=job_id,
+                    stream=stream,
+                    start_event=start_event,
+                    end_event=end_event,
+                    num_bytes=0,
+                    batch_src=batch_src,
+                    batch_dst=batch_dst,
+                    batch_sizes=batch_sizes,
+                    failed=True,
+                )
+            )
+            return True
 
         self._transfer_events[job_id] = end_event
         self._transfers.append(
@@ -683,33 +707,63 @@ class SingleDirectionOffloadingHandler:
 
     def get_finished(self) -> list[TransferResult]:
         results: list[TransferResult] = []
-        while self._transfers and self._transfers[0].end_event.query():
-            transfer = self._transfers.popleft()
-            transfer_time = (
-                transfer.start_event.elapsed_time(transfer.end_event) * 1e-3
-            )  # elapsed_time is in milliseconds
-            result = TransferResult(
-                job_id=transfer.job_id,
-                success=True,
-                transfer_size=transfer.num_bytes,
-                transfer_time=transfer_time,
-            )
+        while self._transfers:
+            transfer = self._transfers[0]
+            try:
+                if not transfer.end_event.query():
+                    break
+                transfer_time = (
+                    None
+                    if transfer.failed
+                    # elapsed_time is in milliseconds
+                    else transfer.start_event.elapsed_time(transfer.end_event) * 1e-3
+                )
+            except RuntimeError:
+                logger.exception(
+                    "KV offload %s transfer failed for job %d while polling "
+                    "for completion",
+                    "GPU->CPU" if self.gpu_to_cpu else "CPU->GPU",
+                    transfer.job_id,
+                )
+                self._transfers.popleft()
+                self._transfer_events.pop(transfer.job_id, None)
+                results.append(TransferResult(job_id=transfer.job_id, success=False))
+                continue
 
-            results.append(result)
+            self._transfers.popleft()
+            self._transfer_events.pop(transfer.job_id, None)
+            if transfer.failed:
+                results.append(TransferResult(job_id=transfer.job_id, success=False))
+                continue
+
+            results.append(
+                TransferResult(
+                    job_id=transfer.job_id,
+                    success=True,
+                    transfer_size=transfer.num_bytes,
+                    transfer_time=transfer_time,
+                )
+            )
             self._stream_pool.append(transfer.stream)
             self._event_pool.append(transfer.end_event)
             self._event_pool.append(transfer.start_event)
             self._buffer_pool.append(
                 (transfer.batch_src, transfer.batch_dst, transfer.batch_sizes)
             )
-            del self._transfer_events[transfer.job_id]
         return results
 
     def wait(self, job_ids: set[int]):
         for job_id in job_ids:
             event = self._transfer_events.get(job_id)
             if event is not None:
-                event.synchronize()
+                try:
+                    event.synchronize()
+                except RuntimeError:
+                    logger.exception(
+                        "KV offload transfer for job %d failed while waiting "
+                        "for it to complete",
+                        job_id,
+                    )
 
     def shutdown(self) -> None:
         """Drain this direction and release its transfer-side resources."""
