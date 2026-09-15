@@ -288,6 +288,45 @@ def test_scheduler_projects_nonprefix_groups_and_mamba_ids():
     assert scheduler._boundary_state_group_ids == frozenset({1})
 
 
+def _init_hybrid_scheduler(*, save_decode_cache: bool, retention: int):
+    vllm_config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_role="kv_both",
+            kv_connector_extra_config={"save_decode_cache": save_decode_cache},
+        ),
+        kv_events_config=None,
+        cache_config=SimpleNamespace(
+            block_size=800,
+            enable_prefix_caching=True,
+            prefix_match_unit=None,
+            prefix_cache_retention_interval=retention,
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1, world_size=1),
+    )
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "scheduler.LookupKeyClient"
+    ):
+        return MooncakeStoreScheduler(vllm_config, _make_qsa_hybrid_cache_config())
+
+
+def test_decode_saves_without_retention_warn_once(caplog_vllm):
+    """The core keeps no boundary at retention 0, so decode saves could never
+    complete an external hit and the operator would not see why."""
+    _init_hybrid_scheduler(save_decode_cache=True, retention=0)
+
+    assert "prefix_cache_retention_interval=0 retains no Mamba boundary" in (
+        caplog_vllm.text
+    )
+    assert "--prefix-cache-retention-interval=800" in caplog_vllm.text
+
+
+def test_decode_saves_with_retention_do_not_warn(caplog_vllm):
+    _init_hybrid_scheduler(save_decode_cache=True, retention=800)
+
+    assert "retains no Mamba boundary" not in caplog_vllm.text
+
+
 def test_current_save_block_ids_use_store_group_projection():
     scheduler = _make_bare_scheduler()
     scheduler.kv_cache_config = _make_qsa_hybrid_cache_config()
@@ -1141,11 +1180,16 @@ def test_finished_partial_tail_is_pre_pinned_as_store_job():
     assert scheduler._gpu_block_pool.blocks[9].ref_cnt == 0
 
 
-def test_decode_boundary_state_offload_dropped_unclaimed():
-    # A hand-off past the prefill end can never complete a joint hybrid hit
-    # (every other group stops saving there), so it is neither transferred nor
-    # claimed — leaving the core free to release the block immediately.
-    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+def _make_decode_boundary_scheduler(
+    *, save_decode_cache: bool, kv_role: str = "kv_both"
+) -> tuple[MooncakeStoreScheduler, SimpleNamespace]:
+    """A 12-token prefill in decode; boundary 16 is its first decode boundary."""
+    scheduler = _make_bare_scheduler(
+        hash_block_size=4,
+        enable_partial_hash_hits=True,
+        kv_role=kv_role,
+        save_decode_cache=save_decode_cache,
+    )
     request = SimpleNamespace(
         all_token_ids=list(range(24)),
         block_hashes=[b"h0", b"h1", b"h2", b"h3", b"h4", b"h5"],
@@ -1155,13 +1199,12 @@ def test_decode_boundary_state_offload_dropped_unclaimed():
     scheduler._unfinished_requests["req-0"] = (request, ([0],))
     scheduler._request_trackers["req-0"] = RequestTracker(
         req_id="req-0",
-        token_len=12,
+        token_len=16,
         allocated_block_ids=([0],),
         num_saved_tokens=12,
-        token_ids=list(range(12)),
+        token_ids=list(range(16)),
         prefill_end_tokens=12,
     )
-
     out = SimpleNamespace(
         finished_req_ids=set(),
         preempted_req_ids=set(),
@@ -1174,9 +1217,19 @@ def test_decode_boundary_state_offload_dropped_unclaimed():
         ),
         num_scheduled_tokens={},
         scheduled_spec_decode_tokens={},
-        # Boundary 16 is a decode boundary for a 12-token prefill.
-        kv_connector_block_state=_make_connector_block_state(offloads=[(1, 7, 16)]),
+        kv_connector_block_state=_make_connector_block_state(
+            block_ids=([0],), offloads=[(1, 7, 16)]
+        ),
     )
+    return scheduler, out
+
+
+def test_decode_boundary_state_offload_dropped_unclaimed():
+    # Without decode saves a hand-off past the prefill end can never complete
+    # a joint hybrid hit (every other group stops saving there), so it is
+    # neither transferred nor claimed — leaving the core free to release the
+    # block immediately.
+    scheduler, out = _make_decode_boundary_scheduler(save_decode_cache=False)
 
     meta = scheduler.build_connector_meta(out)
 
@@ -1184,6 +1237,134 @@ def test_decode_boundary_state_offload_dropped_unclaimed():
     assert scheduler._pinned_saves == {}
     assert scheduler._gpu_block_pool.blocks[7].ref_cnt == 0
     assert scheduler._request_trackers["req-0"].has_pending_offload is False
+
+
+@pytest.mark.parametrize("kv_role", ["kv_both", "kv_consumer"])
+def test_decode_boundary_state_offload_claimed_with_save_decode_cache(kv_role):
+    # With decode saves every group stores each block as it fills, so the
+    # mamba boundary past the prefill end is the missing half of a joint hit
+    # and must be offloaded — by a consumer too, which saves decode blocks.
+    scheduler, out = _make_decode_boundary_scheduler(
+        save_decode_cache=True, kv_role=kv_role
+    )
+
+    meta = scheduler.build_connector_meta(out)
+
+    assert len(meta.requests) == 1
+    req_meta = meta.requests[0]
+    assert req_meta.can_save is True
+    assert req_meta.token_len_chunk == 0
+    assert req_meta.boundary_state_offloads == [(1, 7, 16)]
+    assert scheduler._pinned_saves[req_meta.store_job_id][0] == [7]
+    assert scheduler._gpu_block_pool.blocks[7].ref_cnt == 1
+    assert scheduler._request_trackers["req-0"].has_pending_offload is True
+
+
+def test_consumer_decode_boundary_state_offload_dropped_by_default():
+    scheduler, out = _make_decode_boundary_scheduler(
+        save_decode_cache=False, kv_role="kv_consumer"
+    )
+
+    meta = scheduler.build_connector_meta(out)
+
+    assert meta.requests == []
+    assert scheduler._pinned_saves == {}
+
+
+def test_decode_boundary_offload_rides_same_step_decode_save():
+    # The core offers the boundary in the step whose decode token fills the
+    # block, which is also the step the attention groups save that block; the
+    # mamba entry attaches to that save meta instead of a second job.
+    scheduler, tracker = _setup_decode_request(
+        kv_role="kv_both", save_decode_cache=True, token_len=47
+    )
+    out = _make_decode_scheduler_output(num_computed_tokens=47)
+    out.kv_connector_block_state = _make_connector_block_state(
+        block_ids=([0, 1, 2],), offloads=[(1, 7, 48)]
+    )
+
+    meta = scheduler.build_connector_meta(out)
+
+    assert len(meta.requests) == 1
+    req_meta = meta.requests[0]
+    assert req_meta.can_save is True
+    assert req_meta.token_len_chunk == 48
+    assert req_meta.boundary_state_offloads == [(1, 7, 48)]
+    assert tracker.num_saved_tokens == 48
+    # Block 0 is the null block and is never referenced.
+    assert scheduler._pinned_saves[req_meta.store_job_id][0] == [7, 1, 2]
+
+
+def _make_finished_tail_scheduler(
+    *, kv_role: str, save_decode_cache: bool
+) -> tuple[MooncakeStoreScheduler, SimpleNamespace]:
+    scheduler = _make_bare_scheduler(
+        hash_block_size=4,
+        enable_partial_hash_hits=True,
+        kv_role=kv_role,
+        save_decode_cache=save_decode_cache,
+    )
+    request = SimpleNamespace(
+        request_id="req-0", block_hashes=[b"h0", b"h1", b"h2", b"h3", b"h4"]
+    )
+    scheduler._request_trackers["req-0"] = RequestTracker(
+        req_id="req-0",
+        token_len=18,
+        allocated_block_ids=([3], [9]),
+        token_ids=list(range(18)),
+        prefill_end_tokens=12,
+    )
+    return scheduler, request
+
+
+@pytest.mark.parametrize("kv_role", ["kv_both", "kv_consumer"])
+def test_finished_decode_partial_tail_claimed_with_save_decode_cache(kv_role):
+    scheduler, request = _make_finished_tail_scheduler(
+        kv_role=kv_role, save_decode_cache=True
+    )
+
+    # Boundary 18 is a decode-time sub-block tail for a 12-token prefill.
+    delay_free = scheduler.register_finished_partial_tail(
+        request, ([3], [9]), [(1, 9, 18)]
+    )
+
+    assert delay_free is False
+    assert scheduler._gpu_block_pool.blocks[9].ref_cnt == 1
+    assert "req-0" in scheduler._finished_partial_tail_metas
+
+
+@pytest.mark.parametrize(
+    ("kv_role", "boundary"),
+    [("kv_both", 18), ("kv_consumer", 10)],
+)
+def test_finished_partial_tail_dropped_without_save_decode_cache(kv_role, boundary):
+    # A past-prefill tail (18) has no attention counterpart without decode
+    # saves; a consumer saves nothing at all, so even a prefill-range tail (10)
+    # is dropped.
+    scheduler, request = _make_finished_tail_scheduler(
+        kv_role=kv_role, save_decode_cache=False
+    )
+
+    delay_free = scheduler.register_finished_partial_tail(
+        request, ([3], [9]), [(1, 9, boundary)]
+    )
+
+    assert delay_free is False
+    assert scheduler._gpu_block_pool.blocks[9].ref_cnt == 0
+    assert scheduler._finished_partial_tail_metas == {}
+
+
+def test_consumer_prefill_tail_claimed_with_save_decode_cache():
+    # A decode-saving consumer backfills the prompt on its first decode save,
+    # so its prefill-range tail completes a joint hit too.
+    scheduler, request = _make_finished_tail_scheduler(
+        kv_role="kv_consumer", save_decode_cache=True
+    )
+
+    scheduler.register_finished_partial_tail(request, ([3], [9]), [(1, 9, 10)])
+
+    assert scheduler._gpu_block_pool.blocks[9].ref_cnt == 1
+    assert "req-0" in scheduler._finished_partial_tail_metas
 
 
 def _register_offload_request(scheduler, *, prefill_end_tokens, num_prompt_tokens):

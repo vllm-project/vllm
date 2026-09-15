@@ -115,6 +115,9 @@ class KeyMetadata:
     # Complete namespace for an opt-in Store payload format. Empty keeps
     # historical keys byte-identical.
     store_namespace: str = ""
+    # Digest of the settings that decide a block's bytes and shape; instances
+    # that differ in any of them never share keys.
+    config_fingerprint: str = ""
 
 
 @dataclass(order=True)
@@ -130,6 +133,7 @@ class PoolKey:
                 self.key_metadata.cache_prefix,
                 self.key_metadata.model_name,
                 self.key_metadata.store_namespace,
+                self.key_metadata.config_fingerprint,
                 self.key_metadata.tp_rank,
                 self.key_metadata.pcp_rank,
                 self.key_metadata.dcp_rank,
@@ -150,10 +154,16 @@ class PoolKey:
     ) -> str:
         """Return the stable prefix for a Mooncake pool key."""
         prefix = f"{key_metadata.cache_prefix}@" if key_metadata.cache_prefix else ""
+        fingerprint = (
+            f"@cfg:{key_metadata.config_fingerprint}"
+            if key_metadata.config_fingerprint
+            else ""
+        )
         return (
             f"{prefix}"
             f"{key_metadata.model_name}"
             f"{key_metadata.store_namespace}"
+            f"{fingerprint}"
             f"@tp_rank:{key_metadata.tp_rank if tp_rank is None else tp_rank}"
             f"@pcp{key_metadata.pcp_rank if pcp_rank is None else pcp_rank}"
             f"@dcp{key_metadata.dcp_rank if dcp_rank is None else dcp_rank}"
