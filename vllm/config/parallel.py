@@ -724,8 +724,15 @@ class ParallelConfig:
         from torch.distributed import DistNetworkError
 
         from vllm.distributed.utils import (
+            steady_state_entered,
             stateless_init_torch_distributed_process_group,
         )
+
+        # Under FT, startup-created groups get no configured timeout: uneven
+        # rank startup would trip it. The sentinel applies it after startup.
+        timeout = self.cpu_distributed_timeout
+        if self.enable_fault_tolerance and not steady_state_entered():
+            timeout = None
 
         max_retries = 5
         last_exc: Exception | None = None
@@ -741,7 +748,7 @@ class ParallelConfig:
                     backend="gloo",
                     return_store=return_store,
                     listen_socket=listen_socket,
-                    timeout=self.cpu_distributed_timeout,
+                    timeout=timeout,
                 )
             except DistNetworkError as e:
                 # We only want to retry when the root cause is EADDRINUSE.
