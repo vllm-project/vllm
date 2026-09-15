@@ -157,8 +157,12 @@ def _get_backend_priorities(
         # So prefer FlashAttention when non-causal on SM100f.
         if device_capability.major == 10 and not use_non_causal:
             return [
-                *([AttentionBackendEnum.TRITON_FLASHINFER] if use_mm_prefix else []),
                 AttentionBackendEnum.FLASHINFER,
+                # The composite reaches mm-prefix by routing the bidirectional
+                # spans to Triton. FlashInfer serves them in one kernel when its
+                # own combination validates, so it is offered first and the
+                # composite stays the fallback for the cases it rejects.
+                *([AttentionBackendEnum.TRITON_FLASHINFER] if use_mm_prefix else []),
                 AttentionBackendEnum.FLASH_ATTN,
                 AttentionBackendEnum.TRITON_ATTN,
                 AttentionBackendEnum.FLEX_ATTENTION,

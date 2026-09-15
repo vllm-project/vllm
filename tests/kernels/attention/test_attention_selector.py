@@ -819,7 +819,9 @@ def blackwell_selection():
             return_value=DeviceCapability(10, 0),
         ),
         patch(
-            "vllm.v1.attention.backends.fa_utils.is_fa_version_supported",
+            # get_flash_attn_version() imports this inside the call, so the
+            # patch has to land on the defining module, not on fa_utils.
+            "vllm.vllm_flash_attn.flash_attn_interface.is_fa_version_supported",
             return_value=True,
         ),
     ):
@@ -835,7 +837,9 @@ def hopper_selection():
             return_value=DeviceCapability(9, 0),
         ),
         patch(
-            "vllm.v1.attention.backends.fa_utils.is_fa_version_supported",
+            # get_flash_attn_version() imports this inside the call, so the
+            # patch has to land on the defining module, not on fa_utils.
+            "vllm.vllm_flash_attn.flash_attn_interface.is_fa_version_supported",
             return_value=True,
         ),
     ):
@@ -845,10 +849,17 @@ def hopper_selection():
 @blackwell_only
 @pytest.mark.parametrize("use_mm_prefix", [False, True])
 @pytest.mark.parametrize("flash_attn_version", [None, 3, 4])
+@pytest.mark.parametrize("native_mm_prefix", [False, True])
 def test_hopper_mm_prefix_selects_triton_flash_attn(
-    use_mm_prefix, flash_attn_version, hopper_selection
+    use_mm_prefix, flash_attn_version, native_mm_prefix, hopper_selection
 ):
-    """Hopper selects the composite only when its causal route resolves FA4."""
+    """Hopper selects the composite only when its causal route resolves FA4.
+
+    Below the composite the order is FLASH_ATTN, FLASHINFER, TRITON_ATTN, so
+    once FlashInfer can serve an mm-prefix batch itself it answers before the
+    Triton fallback. Without FA4 and without that FlashInfer support, the
+    fallback is what is left.
+    """
     from vllm.engine.arg_utils import EngineArgs
 
     config = EngineArgs(
@@ -856,35 +867,62 @@ def test_hopper_mm_prefix_selects_triton_flash_attn(
         dtype="bfloat16",
         attention_config=AttentionConfig(flash_attn_version=flash_attn_version),
     ).create_engine_config()
-    with set_current_vllm_config(config):
+    with (
+        patch(
+            "vllm.v1.attention.backends.flashinfer._mm_prefix_jit_available",
+            return_value=native_mm_prefix,
+        ),
+        set_current_vllm_config(config),
+    ):
         backend = get_attn_backend(
             256, torch.bfloat16, None, use_mm_prefix=use_mm_prefix
         )
     fa4_resolved = config.attention_config.flash_attn_version == 4
-    if use_mm_prefix:
-        expected = "TRITON_FLASH_ATTN" if fa4_resolved else "TRITON_ATTN"
-    else:
+    if not use_mm_prefix:
         expected = "FLASH_ATTN"
+    elif fa4_resolved:
+        expected = "TRITON_FLASH_ATTN"
+    elif native_mm_prefix:
+        expected = "FLASHINFER"
+    else:
+        expected = "TRITON_ATTN"
     assert backend.get_name() == expected
 
 
 @blackwell_only
 @pytest.mark.parametrize("use_mm_prefix", [False, True])
 @pytest.mark.parametrize("kv_cache_dtype", [None, "fp8_e4m3"])
-def test_mm_prefix_selects_composite_without_changing_causal_default(
-    use_mm_prefix, kv_cache_dtype, blackwell_selection
+@pytest.mark.parametrize("native_mm_prefix", [False, True])
+def test_mm_prefix_priority_without_changing_causal_default(
+    use_mm_prefix, kv_cache_dtype, native_mm_prefix, blackwell_selection
 ):
-    """The image-mask requirement must reach CUDA's automatic backend priority."""
+    """The image-mask requirement must reach CUDA's automatic backend priority.
+
+    FlashInfer serves an mm-prefix batch in one kernel when its own combination
+    validates, so it is offered before the composite; the composite is what the
+    priority falls back to otherwise. An fp8 cache is one such case: the
+    mm-prefix path rejects it whatever the JIT probe reports.
+    """
     from vllm.engine.arg_utils import EngineArgs
 
     config = EngineArgs(
         model="google/gemma-4-31B-it", dtype="bfloat16"
     ).create_engine_config()
-    with set_current_vllm_config(config):
+    with (
+        patch(
+            "vllm.v1.attention.backends.flashinfer._mm_prefix_jit_available",
+            return_value=native_mm_prefix,
+        ),
+        set_current_vllm_config(config),
+    ):
         backend = get_attn_backend(
             256, torch.bfloat16, kv_cache_dtype, use_mm_prefix=use_mm_prefix
         )
-    expected = "TRITON_FLASHINFER" if use_mm_prefix else "FLASHINFER"
+    native_serves_it = native_mm_prefix and kv_cache_dtype is None
+    if not use_mm_prefix or native_serves_it:
+        expected = "FLASHINFER"
+    else:
+        expected = "TRITON_FLASHINFER"
     assert backend.get_name() == expected
 
 
