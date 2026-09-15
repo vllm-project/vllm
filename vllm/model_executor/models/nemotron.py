@@ -33,6 +33,7 @@ from torch import nn
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (
@@ -77,23 +78,22 @@ def _cast_if_autocast_enabled(device_type: str, *args):
     )
 
 
-class NemotronLayerNorm1P(nn.LayerNorm):
-    def __init__(
-        self,
-        normalized_shape: int | list[int] | torch.Size,
-        eps: float = 1e-5,
-        elementwise_affine: bool = True,
-        bias: bool = True,
-        device=None,
-        dtype=None,
-    ):
-        super().__init__(normalized_shape, eps, elementwise_affine, bias, device, dtype)
+@CustomOp.register("nemotron_layer_norm")
+class NemotronLayerNorm1P(CustomOp):
+    """LayerNorm variant used by Nemotron: `x * (1 + w)` instead of `x * w`."""
 
-    def forward(
+    def __init__(self, hidden_size: int, eps: float = 1e-5) -> None:
+        super().__init__()
+        self.normalized_shape = (hidden_size,)
+        self.eps = eps
+        self.weight = nn.Parameter(torch.zeros(hidden_size))
+        self.bias = nn.Parameter(torch.zeros(hidden_size))
+
+    def forward_native(
         self,
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if residual is not None:
             x = x + residual
             residual = x
@@ -104,6 +104,33 @@ class NemotronLayerNorm1P(nn.LayerNorm):
         with torch.amp.autocast(device_type, enabled=False):
             x = torch.nn.functional.layer_norm(*args)
             return x if residual is None else (x, residual)
+
+    def forward_cuda(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        return self.forward_native(x, residual)
+
+    def forward_xpu(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if torch.compiler.is_compiling() or not hasattr(
+            torch.ops._C, "nemotron_layer_norm"
+        ):
+            return self.forward_native(x, residual)
+        if residual is not None:
+            if not hasattr(torch.ops._C, "fused_add_nemotron_layer_norm"):
+                return self.forward_native(x, residual)
+            torch.ops._C.fused_add_nemotron_layer_norm(
+                x, residual, self.weight, self.bias, self.eps
+            )
+            return x, residual
+        out = torch.empty_like(x)
+        torch.ops._C.nemotron_layer_norm(out, x, self.weight, self.bias, self.eps)
+        return out
 
 
 class NemotronMLP(nn.Module):
