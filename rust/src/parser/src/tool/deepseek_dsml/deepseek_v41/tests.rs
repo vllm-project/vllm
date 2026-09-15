@@ -31,6 +31,21 @@ fn tools() -> Vec<Tool> {
     }]
 }
 
+fn build_tag(
+    function: FunctionDefinition,
+    choice: ToolChoice,
+) -> xgrammar_structural_tag::format::StructuralTag {
+    let parser = DeepSeekV41ToolParser::create(&tools()).unwrap();
+    let builder = parser.structural_tag_builder().unwrap();
+    build_structural_tag(
+        builder,
+        &[ToolParam::Function(FunctionToolParam::new(function))],
+        choice,
+        StructuralTagOptions::default().with_reasoning(false),
+    )
+    .unwrap()
+}
+
 #[test]
 fn spaced_dsml_streaming_preserves_shared_schema_coercion() {
     let wire = concat!(
@@ -80,34 +95,118 @@ fn v4_tags_remain_text_in_v41_dialect() {
 }
 
 #[test]
-fn structural_tag_ignores_parameter_schemas_and_strict() {
-    let parser = DeepSeekV41ToolParser::create(&tools()).unwrap();
-    let builder = parser.structural_tag_builder().unwrap();
-    let options = StructuralTagOptions::default().with_reasoning(false);
+fn structural_tag_constrains_parameters_by_schema() {
+    let function = FunctionDefinition::new("lookup").with_parameters(json!({
+        "$defs": {
+            "window": {
+                "type": "object",
+                "properties": {"start": {"type": "integer"}},
+                "required": ["start"]
+            }
+        },
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "limit": {"type": "integer"},
+            "unit": {"type": "string", "enum": ["ids", "titles"]},
+            "window": {"$ref": "#/$defs/window"},
+            "note": true
+        },
+        "required": ["query", "limit"],
+        "additionalProperties": false
+    }));
+
+    let tag = build_tag(function, ToolChoice::required());
+
+    expect![[r##"{"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"const_string","value":"\n\n<｜DSML｜ calls>\n"},{"type":"tags_with_separator","tags":[{"begin":"<｜DSML｜ invoke name=\"lookup\">\n","content":{"type":"sequence","elements":[{"type":"tag","begin":"<｜DSML｜ parameter name=\"query","content":{"type":"sequence","elements":[{"type":"const_string","value":"\" string=\""},{"type":"or","elements":[{"type":"const_string","value":"true"},{"type":"const_string","value":"false"}]},{"type":"const_string","value":"\">"},{"type":"any_text","excludes":["</｜DSML｜ parameter>","</｜DSML｜ invoke>","</｜DSML｜ calls>"]}]},"end":"</｜DSML｜ parameter>\n"},{"type":"tag","begin":"<｜DSML｜ parameter name=\"limit","content":{"type":"sequence","elements":[{"type":"const_string","value":"\" string=\""},{"type":"or","elements":[{"type":"const_string","value":"true"},{"type":"const_string","value":"false"}]},{"type":"const_string","value":"\">"},{"type":"json_schema","json_schema":{"type":"integer","$defs":{"window":{"type":"object","properties":{"start":{"type":"integer"}},"required":["start"]}}},"style":"json","any_order":false,"max_whitespace_cnt":null}]},"end":"</｜DSML｜ parameter>\n"},{"type":"optional","content":{"type":"tag","begin":"<｜DSML｜ parameter name=\"unit","content":{"type":"sequence","elements":[{"type":"const_string","value":"\" string=\""},{"type":"or","elements":[{"type":"const_string","value":"true"},{"type":"const_string","value":"false"}]},{"type":"const_string","value":"\">"},{"type":"or","elements":[{"type":"const_string","value":"ids"},{"type":"const_string","value":"titles"}]}]},"end":"</｜DSML｜ parameter>\n"}},{"type":"optional","content":{"type":"tag","begin":"<｜DSML｜ parameter name=\"window","content":{"type":"sequence","elements":[{"type":"const_string","value":"\" string=\""},{"type":"or","elements":[{"type":"const_string","value":"true"},{"type":"const_string","value":"false"}]},{"type":"const_string","value":"\">"},{"type":"json_schema","json_schema":{"$ref":"#/$defs/window","$defs":{"window":{"type":"object","properties":{"start":{"type":"integer"}},"required":["start"]}}},"style":"json","any_order":false,"max_whitespace_cnt":null}]},"end":"</｜DSML｜ parameter>\n"}},{"type":"optional","content":{"type":"tag","begin":"<｜DSML｜ parameter name=\"note","content":{"type":"or","elements":[{"type":"sequence","elements":[{"type":"const_string","value":"\" string=\"true\">"},{"type":"any_text","excludes":["</｜DSML｜ parameter>","</｜DSML｜ invoke>","</｜DSML｜ calls>"]}]},{"type":"sequence","elements":[{"type":"const_string","value":"\" string=\"false\">"},{"type":"json_schema","json_schema":true,"style":"json","any_order":false,"max_whitespace_cnt":null}]}]},"end":"</｜DSML｜ parameter>\n"}}]},"end":"</｜DSML｜ invoke>\n"}],"separator":"","at_least_one":true,"stop_after_first":false},{"type":"const_string","value":"</｜DSML｜ calls>"}]}}"##]].assert_eq(&tag.to_json_string().unwrap());
+}
+
+#[test]
+fn structural_tag_strict_false_matches_unconstrained_parameters() {
+    let parameters = json!({
+        "type": "object",
+        "properties": {"query": {"const": "fixed"}},
+        "required": ["query"],
+        "additionalProperties": false
+    });
     for choice in [
         ToolChoice::auto(),
         ToolChoice::required(),
         ToolChoice::function("lookup"),
     ] {
-        let build = |function| {
-            build_structural_tag(
-                builder,
-                &[ToolParam::Function(FunctionToolParam::new(function))],
-                choice.clone(),
-                options,
-            )
-            .unwrap()
-        };
-        let expected = build(FunctionDefinition::new("lookup"));
-        for strict in [None, Some(false), Some(true)] {
-            for parameters in [
-                json!(false),
-                json!({"type":"object", "properties":{"query":{"const":"fixed"}}, "required":["query"]}),
-            ] {
-                let mut function = FunctionDefinition::new("lookup").with_parameters(parameters);
-                function.strict = strict;
-                assert_eq!(build(function), expected);
-            }
-        }
+        let strict_off = build_tag(
+            FunctionDefinition::new("lookup")
+                .with_parameters(parameters.clone())
+                .with_strict(false),
+            choice.clone(),
+        );
+        let unconstrained = build_tag(
+            FunctionDefinition::new("lookup").with_parameters(json!(true)),
+            choice,
+        );
+        assert_eq!(strict_off, unconstrained);
     }
+}
+
+#[test]
+fn structural_tag_without_parameters_stays_permissive() {
+    let tag = build_tag(FunctionDefinition::new("lookup"), ToolChoice::required());
+    let value = serde_json::to_value(tag).unwrap();
+    let invoke_content = &value["format"]["elements"][1]["tags"][0]["content"];
+    assert_eq!(invoke_content["type"], "star");
+}
+
+#[test]
+fn structural_tag_auto_without_tools_allows_any_text() {
+    let parser = DeepSeekV41ToolParser::create(&tools()).unwrap();
+    let builder = parser.structural_tag_builder().unwrap();
+
+    let tag = build_structural_tag(
+        builder,
+        &[],
+        ToolChoice::auto(),
+        StructuralTagOptions::default().with_reasoning(false),
+    )
+    .unwrap();
+    let value = serde_json::to_value(tag).unwrap();
+
+    assert_eq!(value["format"]["type"], "any_text");
+    assert_eq!(value["format"]["excludes"], json!(["<think>", "</think>"]));
+}
+
+#[test]
+fn structural_tag_named_choice_keeps_only_named_tool() {
+    let parser = DeepSeekV41ToolParser::create(&tools()).unwrap();
+    let builder = parser.structural_tag_builder().unwrap();
+    let tools = vec![
+        ToolParam::Function(FunctionToolParam::new(
+            FunctionDefinition::new("search").with_parameters(json!({
+                "type": "object",
+                "properties": {"q": {"type": "string"}},
+                "required": ["q"]
+            })),
+        )),
+        ToolParam::Function(FunctionToolParam::new(
+            FunctionDefinition::new("lookup").with_parameters(json!({
+                "type": "object",
+                "properties": {"id": {"type": "integer"}},
+                "required": ["id"]
+            })),
+        )),
+    ];
+
+    let tag = build_structural_tag(
+        builder,
+        &tools,
+        ToolChoice::function("lookup"),
+        StructuralTagOptions::default().with_reasoning(false),
+    )
+    .unwrap()
+    .to_json_string()
+    .unwrap();
+
+    assert!(tag.contains("lookup"));
+    assert!(!tag.contains("search"));
+    // The named tool's parameter schema is still enforced.
+    assert!(tag.contains(r#"<｜DSML｜ parameter name=\"id"#), "{tag}");
 }
