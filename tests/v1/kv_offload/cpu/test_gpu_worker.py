@@ -17,6 +17,8 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
     CanonicalKVCaches,
     CanonicalKVCacheTensor,
+    CanonicalPageMapping,
+    CopyRun,
     GPULoadStoreSpec,
     TransferResult,
 )
@@ -680,5 +682,112 @@ def test_load_waits_for_pending_compute_stream_writes(default_vllm_config) -> No
             torch.accelerator.synchronize()
             for block_id in loaded_blocks:
                 torch.testing.assert_close(gpu_tensor[block_id].cpu(), expected)
+    finally:
+        worker.shutdown()
+
+
+@pytest.mark.parametrize("layout", ["private", "shared", "canonical"])
+@torch.inference_mode()
+def test_compact_groups_roundtrip_after_slot_reuse(default_vllm_config, layout):
+    """Aliased, unequal groups share slots without losing sparse chunk tails."""
+    packed = torch.randint(1, 100, (18, 1536), dtype=torch.int8, device=DEVICES[0])
+    original = packed.clone()
+    # The first alias exposes less of the backing page than group 1 needs.
+    pages = [packed[:, :512], packed[:, 1024:]]
+    groups = [[(0, 512), (1, 512)], [(0, 1024)], [(1, 256), (0, 256)]]
+    canonical = layout == "canonical"
+    refs = []
+    for group in groups:
+        group_refs = []
+        for index, size in group:
+            # Simulate one TP shard's two fragments in a twice-as-large page.
+            mapping = (
+                CanonicalPageMapping(
+                    size * 2,
+                    size,
+                    (CopyRun(0, size // 2, size // 2, 2, size // 2, size),),
+                    1,
+                    0,
+                    True,
+                )
+                if canonical
+                else None
+            )
+            group_refs.append(CanonicalKVCacheRef(index, size, mapping))
+        refs.append(group_refs)
+    region = None
+    if layout != "private":
+        region = SharedOffloadRegion(
+            engine_id=str(uuid.uuid4()),
+            num_chunks=2,
+            rank=None if canonical else 1,
+            kv_bytes_per_chunk=8192,
+            cpu_page_size=3072,
+        )
+    worker = CPUOffloadingWorker(
+        kv_caches=CanonicalKVCaches(
+            [CanonicalKVCacheTensor(page, page.shape[1]) for page in pages], refs
+        ),
+        blocks_per_chunk=3,
+        num_cpu_chunks=2,
+        mmap_region=region,
+        canonical_layout=canonical,
+        compact_group_layout=True,
+    )
+
+    def transfer(job, gpu, cpu, store):
+        if store:
+            assert worker.submit_store(job, gpu, cpu)
+        else:
+            assert worker.submit_load(job, cpu, gpu)
+        deadline = time.monotonic() + 10
+        finished: list[TransferResult] = []
+        while not finished and time.monotonic() < deadline:
+            finished = worker.get_finished()
+        assert len(finished) == 1 and finished[0].success
+        assert finished[0].job_id == job
+
+    try:
+        # Fill both slots; group 2 has only the middle sub-block of its chunk.
+        transfer(
+            1,
+            GPULoadStoreSpec([0, 1, 2, 4], [3, 0, 1], [0, 0, 1]),
+            CPULoadStoreSpec([0, 1]),
+            True,
+        )
+        packed.zero_()
+        transfer(
+            2,
+            GPULoadStoreSpec([9, 10, 11, 13], [3, 0, 1], [0, 0, 1]),
+            CPULoadStoreSpec([0, 1]),
+            False,
+        )
+        expected = torch.zeros_like(packed)
+        expected[9:12, :512] = original[:3, :512]
+        expected[9:12, 1024:] = original[:3, 1024:]
+        expected[13, :256] = original[4, :256]
+        expected[13, 1024:1280] = original[4, 1024:1280]
+        torch.testing.assert_close(packed, expected, rtol=0, atol=0)
+
+        # Evict group 0's key and reuse its slot for the differently sized group 1.
+        packed[6:9] = original[6:9]
+        transfer(
+            3,
+            GPULoadStoreSpec([6, 7, 8], [0, 3, 0], [0, 0, 0]),
+            CPULoadStoreSpec([0]),
+            True,
+        )
+        packed.zero_()
+        transfer(
+            4,
+            GPULoadStoreSpec([15, 16, 17, 13], [0, 3, 1], [0, 0, 1]),
+            CPULoadStoreSpec([0, 1]),
+            False,
+        )
+        expected.zero_()
+        expected[15:18, :1024] = original[6:9, :1024]
+        expected[13, :256] = original[4, :256]
+        expected[13, 1024:1280] = original[4, 1024:1280]
+        torch.testing.assert_close(packed, expected, rtol=0, atol=0)
     finally:
         worker.shutdown()

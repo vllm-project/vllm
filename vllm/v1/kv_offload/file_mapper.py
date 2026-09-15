@@ -40,6 +40,7 @@ class FileMapper:
         parallel_agnostic: bool = False,
         replicated_layout: bool = False,
         canonical_format: str | None = None,
+        storage_format: str | None = None,
     ):
         """
         Initialize the file mapper. Each worker constructs its own, but
@@ -74,6 +75,8 @@ class FileMapper:
         # identity participates in the storage namespace.
         if canonical_format is not None:
             self.fields["canonical_format"] = canonical_format
+        if storage_format is not None:
+            self.fields["storage_format"] = storage_format
         self.base_path: str = self._compute_base_path(root_dir, self.fields)
 
     @classmethod
@@ -116,6 +119,7 @@ class FileMapper:
             ),
             replicated_layout=(parallel_agnostic and config.replicated_layout),
             canonical_format=canonical_format,
+            storage_format=offloading_spec.storage_format,
         )
 
     def get_file_name(self, key: OffloadKey) -> str:

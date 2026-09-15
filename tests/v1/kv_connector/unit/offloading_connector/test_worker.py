@@ -107,6 +107,7 @@ def _make_worker(
 
     spec = MagicMock(spec=OffloadingSpec)
     spec.replicated_layout = replicated_layout
+    spec.compact_group_layout = False
     spec.config = MagicMock()
     spec.config.parallel.rank = rank
     spec.get_worker.return_value = MagicMock()
@@ -636,3 +637,44 @@ def test_register_kv_caches_uniform_type(backend):
     # opaque mapping rather than a certified, parallelism-agnostic one
     assert group_refs[0].mapping.parallelism_agnostic
     assert not group_refs[1].mapping.parallelism_agnostic
+
+
+@pytest.mark.parametrize("compact", [False, True])
+def test_packed_groups_keep_separate_transfer_regions(monkeypatch, compact):
+    """A group key must not copy unrelated layers from a packed GPU block."""
+    spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16
+    )
+    page = spec.page_size_bytes
+    packed = torch.arange(4 * 2 * page, dtype=torch.int64).to(torch.int8)
+    packed = packed.view(4, 2 * page)
+    caches = {"layer0": packed[:, :page], "layer1": packed[:, page:]}
+    config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=packed.numel(),
+                layers=list(caches),
+                layer_stride=page,
+                block_stride=2 * page,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec([name], spec) for name in caches],
+    )
+    monkeypatch.setattr(
+        "vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker."
+        "derive_canonical_mappings",
+        lambda *args: {},
+    )
+    worker, offloading_spec = _make_worker(config)
+    offloading_spec.compact_group_layout = compact
+    worker.register_kv_caches(caches)
+    registered = offloading_spec.get_worker.call_args.args[0]
+    for index, refs in enumerate(registered.group_data_refs):
+        assert len(refs) == 1
+        ref = refs[0]
+        tensor = registered.tensors[ref.tensor_idx].tensor
+        assert ref.page_size_bytes == (page if compact else 2 * page)
+        torch.testing.assert_close(
+            tensor, caches[f"layer{index}"] if compact else packed
+        )
