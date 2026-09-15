@@ -253,9 +253,14 @@ class NgramProposerGPU:
         self.max_num_seqs = vllm_config.scheduler_config.max_num_seqs
         self.device = device
 
-        self.kernel = NgramGPUKernel(
-            vllm_config=self.vllm_config, prefix="ngram_gpu_kernel", device=device
-        )
+        from vllm.compilation.backends import set_model_tag
+
+        with set_model_tag("ngram_gpu_kernel"):
+            self.kernel = NgramGPUKernel(
+                vllm_config=self.vllm_config,
+                prefix="ngram_gpu_kernel",
+                device=device,
+            )
         self.kernel.to(device)
         self.kernel.eval()
 
