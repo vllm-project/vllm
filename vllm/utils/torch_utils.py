@@ -816,8 +816,11 @@ def current_stream() -> torch.cuda.Stream:
         # https://github.com/pytorch/pytorch/blob/42ad9edfb754743fdae3276ade43de000beb4f60/aten/src/ATen/cuda/CUDAGraph.cpp#L77
         # for more details. Therefore, we create a dedicated stream per process.
         if current_platform.is_rocm() or current_platform.is_cuda():
+            # Ensure new stream is ordered w.r.t. replaced stream's work.
+            new_stream = torch.cuda.Stream()
+            new_stream.wait_stream(torch.cuda.current_stream())
             # torch.cuda.set_stream here is the alias of _pathed_set_stream
-            torch.cuda.set_stream(torch.cuda.Stream())
+            torch.cuda.set_stream(new_stream)
         elif current_platform.is_cpu():
             _current_stream_tls.value = _StreamPlaceholder()
         else:
