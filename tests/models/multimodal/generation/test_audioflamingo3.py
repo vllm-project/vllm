@@ -93,11 +93,13 @@ def assert_output_matches(output, expected_text, expected_token_ids):
     )
 
 
-@pytest.fixture(scope="module")
-def llm():
+@pytest.fixture
+def llm(monkeypatch: pytest.MonkeyPatch):
     model_info = HF_EXAMPLE_MODELS.get_hf_info("AudioFlamingo3ForConditionalGeneration")
     model_info.check_transformers_version(on_fail="skip")
 
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     try:
         return LLM(
             model=MODEL_NAME,

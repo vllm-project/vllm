@@ -254,7 +254,7 @@ def _compare_sp_settings(
     model_id: str,
     settings: list[tuple[list[str], list[str]]],
     *,
-    method: Literal["generate", "encode"],
+    method: Literal["generate", "generate_close", "encode"],
 ) -> None:
     if not settings:
         pytest.skip("No supported sequence-parallel configurations")
@@ -325,7 +325,10 @@ def test_tp_sp_generation(
             if comparison is not None:
                 comparisons.append(comparison)
 
-    _compare_sp_settings(model_id, comparisons, method="generate")
+    # SP rewrites all-reduce into reduce-scatter+all-gather, changing
+    # accumulation order vs the baseline, so compare logprobs closeness
+    # rather than requiring exact output equality.
+    _compare_sp_settings(model_id, comparisons, method="generate_close")
 
 
 # Focused regression test for the SP + prompt_embeds graph-rewrite path.
@@ -370,7 +373,7 @@ def test_tp_sp_generation_prompt_embeds(
             if comparison is not None:
                 comparisons.append(comparison)
 
-    _compare_sp_settings(model_id, comparisons, method="generate")
+    _compare_sp_settings(model_id, comparisons, method="generate_close")
 
 
 @create_new_process_for_each_test()
@@ -403,8 +406,9 @@ def test_tp_sp_nvfp4_generation(num_gpus_available: int):
         enable_prompt_embeds=False,
         is_multimodal=False,
     )
+
     _compare_sp_settings(
         NVFP4_MODEL_ID,
         [] if comparison is None else [comparison],
-        method="generate",
+        method="generate_close",
     )
