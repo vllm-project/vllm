@@ -2,16 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-import prometheus_client
+from collections.abc import Iterable
+from typing import TYPE_CHECKING
+
 import regex as re
-from fastapi import FastAPI, Response
-from prometheus_client import make_asgi_app
+from fastapi import FastAPI
+from prometheus_client import CollectorRegistry, make_asgi_app
+from prometheus_client.core import GaugeMetricFamily
 from prometheus_fastapi_instrumentator import Instrumentator
 from prometheus_fastapi_instrumentator import routing as _pfi_routing
 from starlette.routing import Match, Mount
-from starlette.types import Scope
+from starlette.types import Receive, Scope, Send
 
 from vllm.v1.metrics.prometheus import get_prometheus_registry
+
+if TYPE_CHECKING:
+    from vllm.engine.protocol import EngineClient
 
 
 def _patch_instrumentator_route_walk() -> None:
@@ -49,8 +55,21 @@ def _patch_instrumentator_route_walk() -> None:
 _patch_instrumentator_route_walk()
 
 
-class PrometheusResponse(Response):
-    media_type = prometheus_client.CONTENT_TYPE_LATEST
+class _EngineHealthCollector:
+    def __init__(self, engines: list[dict], errored: bool):
+        self.engines = engines
+        self.errored = errored
+
+    def collect(self) -> Iterable[GaugeMetricFamily]:
+        metric = GaugeMetricFamily(
+            "vllm:engine_healthy",
+            "Whether the engine reports healthy under fault tolerance.",
+            labels=["engine"],
+        )
+        for engine in self.engines:
+            healthy = engine["status"] == "healthy" and not self.errored
+            metric.add_metric([str(engine["id"])], int(healthy))
+        yield metric
 
 
 def attach_router(app: FastAPI):
@@ -58,10 +77,6 @@ def attach_router(app: FastAPI):
 
     registry = get_prometheus_registry()
 
-    # `response_class=PrometheusResponse` is needed to return an HTTP response
-    # with header "Content-Type: text/plain; version=0.0.4; charset=utf-8"
-    # instead of the default "application/json" which is incorrect.
-    # See https://github.com/trallnag/prometheus-fastapi-instrumentator/issues/163#issue-1296092364
     Instrumentator(
         excluded_handlers=[
             "/metrics",
@@ -72,10 +87,23 @@ def attach_router(app: FastAPI):
             "/server_info",
         ],
         registry=registry,
-    ).add().instrument(app).expose(app, response_class=PrometheusResponse)
+    ).add().instrument(app)
+
+    async def metrics(scope: Scope, receive: Receive, send: Send):
+        scrape_registry = registry
+        client: EngineClient | None = getattr(app.state, "engine_client", None)
+        if client and client.vllm_config.parallel_config.enable_fault_tolerance:
+            status = await client.get_status()
+            # Keep rank health local to this scrape, outside shared metric files.
+            scrape_registry = CollectorRegistry(auto_describe=True)
+            scrape_registry.register(registry)
+            scrape_registry.register(
+                _EngineHealthCollector(status["engines"], client.errored)
+            )
+        await make_asgi_app(registry=scrape_registry)(scope, receive, send)
 
     # Add prometheus asgi middleware to route /metrics requests
-    metrics_route = Mount("/metrics", make_asgi_app(registry=registry))
+    metrics_route = Mount("/metrics", metrics)
 
     # Workaround for 307 Redirect for /metrics
     metrics_route.path_regex = re.compile("^/metrics(?P<path>.*)$")
