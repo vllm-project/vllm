@@ -57,15 +57,17 @@ def test_inkling_mtp_chain_norm_is_disabled_by_default():
 
 
 def test_inkling_supports_piecewise_cudagraphs():
+    # ALWAYS (varlen decode batches, needed by adaptive verification) must not
+    # downgrade a piecewise request.
     support = InklingSconvMetadataBuilder.get_cudagraph_support
-    assert support(None, None) == AttentionCGSupport.UNIFORM_BATCH
+    assert support(None, None) == AttentionCGSupport.ALWAYS
 
     compilation_config = CompilationConfig(
         cudagraph_mode=CUDAGraphMode.PIECEWISE,
         splitting_ops=[],
     )
     resolved_mode = compilation_config.resolve_cudagraph_mode_and_sizes(
-        AttentionCGSupport.UNIFORM_BATCH,
+        support(None, None),
         "InklingSconvBackend",
     )
 
