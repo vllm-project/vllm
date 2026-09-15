@@ -2174,10 +2174,10 @@ steps:
   - |
     set -eu
     case "$$BUILDKITE_PARALLEL_JOB" in
-      0) pytest -v -s models/multimodal/standard/vit_cudagraph --num-shards=3 --shard-id=0 ;;  # 6.1m H200 p90
-      1) pytest -v -s models/multimodal/standard/vit_cudagraph --num-shards=3 --shard-id=1 ;;  # 17.2m H200 p90
-      2) pytest -v -s models/multimodal/standard/vit_cudagraph --num-shards=3 --shard-id=2 ;;  # 14.8m H200 p90
-      3)  # 16.8m H200 p90
+      0) pytest -v -s models/multimodal/standard/vit_cudagraph --num-shards=3 --shard-id=0 ;;
+      1) pytest -v -s models/multimodal/standard/vit_cudagraph --num-shards=3 --shard-id=1 ;;
+      2) pytest -v -s models/multimodal/standard/vit_cudagraph --num-shards=3 --shard-id=2 ;;
+      3)
         pytest -v -s models/multimodal/standard/audio models/multimodal/standard/interleaved models/multimodal/standard/mapping models/multimodal/standard/pooling
         pytest -v -s models/multimodal/standard/memory_leak
         cd ..
@@ -3864,10 +3864,10 @@ steps:
   - |
     set -eu
     case "$$BUILDKITE_PARALLEL_JOB" in
-      0) pytest -v -s models/multimodal/standard/vit_cudagraph --num-shards=3 --shard-id=0 ;;  # 6.1m H200 p90
-      1) pytest -v -s models/multimodal/standard/vit_cudagraph --num-shards=3 --shard-id=1 ;;  # 17.2m H200 p90
-      2) pytest -v -s models/multimodal/standard/vit_cudagraph --num-shards=3 --shard-id=2 ;;  # 14.8m H200 p90
-      3)  # 16.8m H200 p90
+      0) pytest -v -s models/multimodal/standard/vit_cudagraph --num-shards=3 --shard-id=0 ;;
+      1) pytest -v -s models/multimodal/standard/vit_cudagraph --num-shards=3 --shard-id=1 ;;
+      2) pytest -v -s models/multimodal/standard/vit_cudagraph --num-shards=3 --shard-id=2 ;;
+      3)
         pytest -v -s models/multimodal/standard/audio models/multimodal/standard/interleaved models/multimodal/standard/mapping models/multimodal/standard/pooling
         pytest -v -s models/multimodal/standard/memory_leak
         cd ..
