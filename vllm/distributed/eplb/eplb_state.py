@@ -28,7 +28,7 @@ physical experts.
 
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 import torch
@@ -57,6 +57,7 @@ from .eplb_utils import CpuGpuEvent
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
 from .rebalance_execute import (
     AsyncEplbLayerResult,
+    TransferMetadata,
     move_from_buffer,
     rearrange_expert_weights_inplace,
 )
@@ -230,6 +231,8 @@ class EplbModelState:
     pointers remain stable across CUDA-graph replays.  The router kernel
     indexes this list with ``dbo_current_ubatch_id()``.
     """
+    transfer_layer_fn: Callable[..., TransferMetadata] | None = None
+    """Optional device-specific transfer for an asynchronous layer."""
 
 
 class EplbState:
@@ -355,6 +358,39 @@ class EplbState:
                         new_model.num_expert_groups,
                     )
                 )
+
+    def create_model_communicator(
+        self,
+        model: MixtureOfExperts,
+        expert_buffer: list[torch.Tensor],
+        group_coordinator: GroupCoordinator,
+    ) -> EplbCommunicator:
+        """Create the communicator used by a model's EPLB transfers."""
+        backend = self.parallel_config.eplb_config.communicator
+        assert backend is not None
+        return create_eplb_communicator(
+            group_coordinator, backend, model.expert_weights, expert_buffer
+        )
+
+    def plan_rebalance(
+        self,
+        model_state: EplbModelState,
+        physical_to_logical_map_cpu: torch.Tensor,
+        cuda_stream: torch.cuda.Stream,
+    ) -> torch.Tensor:
+        """Calculate a new layout on CPU; subclasses may choose another policy."""
+        assert model_state.eplb_stats is not None
+        stats = model_state.eplb_stats
+        with torch.cuda.stream(cuda_stream):
+            load_window_cpu = stats.global_expert_load_window.cpu()
+        return self.policy.rebalance_experts(
+            load_window_cpu,
+            stats.num_replicas,
+            stats.num_groups,
+            stats.num_nodes,
+            stats.num_gpus,
+            physical_to_logical_map_cpu,
+        )
 
     def add_model(
         self,
@@ -489,14 +525,8 @@ class EplbState:
         self._propagate_shared_tensors(model, num_unpadded_tokens_tensors)
         expert_buffer = [torch.empty_like(w) for w in model.expert_weights[0]]
 
-        assert self.parallel_config.eplb_config.communicator is not None, (
-            "EPLB communicator backend must be set by ParallelConfig"
-        )
-        communicator = create_eplb_communicator(
-            group_coordinator=get_eplb_group(),
-            backend=self.parallel_config.eplb_config.communicator,
-            expert_weights=model.expert_weights,
-            expert_buffer=expert_buffer,
+        communicator = self.create_model_communicator(
+            model, expert_buffer, get_eplb_group()
         )
 
         model_state = EplbModelState(
@@ -669,6 +699,7 @@ class EplbState:
                     _move_to_workspace(
                         model_state=eplb_model_state,
                         ep_rank=ep_group.rank(),
+                        on_committed=self.on_layer_committed,
                     )
 
         if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:
@@ -685,6 +716,9 @@ class EplbState:
             self.rearrange()
 
         self._update_layer_should_record(log_stats=log_stats)
+
+    def on_layer_committed(self, model_state: EplbModelState, layer_idx: int) -> None:
+        """Run device-specific work after the maps and weights are committed."""
 
     def _should_record_current_step(self, log_stats: bool = False) -> bool:
         """Return whether expert-load recording should be enabled this step.
@@ -1156,13 +1190,8 @@ class EplbState:
         self, model_config: ModelConfig, group_coordinator: GroupCoordinator
     ) -> EplbCommunicator:
         model_state = self.model_states[model_config.compute_hash()]
-        backend = self.parallel_config.eplb_config.communicator
-        assert backend is not None
-        return create_eplb_communicator(
-            group_coordinator,
-            backend,
-            model_state.model.expert_weights,
-            model_state.expert_buffer,
+        return self.create_model_communicator(
+            model_state.model, model_state.expert_buffer, group_coordinator
         )
 
     def update_communicator(
@@ -1196,6 +1225,8 @@ class EplbLayerState:
     Reference to the parent :class:`EplbModelState`'s tensor list so the
     router can read the correct per-[u]batch unpadded token count.
     """
+    map_and_record: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None
+    """Optional device-specific logical-to-physical mapping and load recording."""
 
     def set_layer_state(
         self,
@@ -1415,6 +1446,7 @@ def _commit_eplb_maps(
 def _move_to_workspace(
     model_state: EplbModelState,
     ep_rank: int,
+    on_committed: Callable[[EplbModelState, int], None] | None = None,
 ) -> None:
     result = model_state.pending_result
     assert result is not None
@@ -1431,6 +1463,9 @@ def _move_to_workspace(
         new_physical_to_logical_map=result.new_physical_to_logical_map,
         layer=result.layer_idx,
     )
+
+    if on_committed is not None:
+        on_committed(model_state, result.layer_idx)
 
     if result.layer_idx == model_state.model.num_moe_layers - 1:
         model_state.rebalanced = False
