@@ -238,7 +238,9 @@ class EagerLayerNorm(CustomOp):
             or not hasattr(torch.ops._C, "layer_norm")
         ):
             return self.forward_native(x)
-        out = torch.empty_like(x)
+        # empty_like preserves x's strides, but the kernel requires a
+        # contiguous out (unlike x, which it can handle non-contiguous).
+        out = torch.empty(x.shape, device=x.device, dtype=x.dtype)
         torch.ops._C.layer_norm(out, x, self.weight, self.bias, self.eps)
         return out
 
