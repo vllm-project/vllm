@@ -1217,10 +1217,8 @@ def _get_kv_cache_groups_glm5_next(
         for name, spec in attn_specs.items()
         if type(spec) is not MLAAttentionSpec
     }
-    mla_specs = cast(
-        dict[str, MLAAttentionSpec],
-        {k: v for k, v in attn_specs.items() if k not in foreign_specs},
-    )
+    target_attn_specs = {k: v for k, v in attn_specs.items() if k not in foreign_specs}
+    mla_specs = cast(dict[str, MLAAttentionSpec], target_attn_specs)
     foreign_group: KVCacheGroupSpec | None = None
     if foreign_specs:
         # Plain attention layers from an attached draft model keep their own
@@ -1245,7 +1243,7 @@ def _get_kv_cache_groups_glm5_next(
     mla_pages = {mla_specs[name].page_size_bytes for name in mla_names}
     assert len(mla_pages) == 1
     mla_page = mla_pages.pop()
-    uniform_spec = UniformTypeKVCacheSpecs.from_specs(mla_specs)
+    uniform_spec = UniformTypeKVCacheSpecs.from_specs(target_attn_specs)
     assert uniform_spec is not None
 
     tail_group: KVCacheGroupSpec | None = None
