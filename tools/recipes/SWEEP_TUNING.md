@@ -1,8 +1,11 @@
 # Sweep Tuning
 
 Sweep tuning is optional. The converter always creates an initial `config.yml`
-that can be deployed directly. For benchmark-backed tuning, the recommended
-workflow is **Tune All**, which measures the serving stack in dependency order:
+that can be deployed directly. Workload-derived scheduler values are kept out
+of this file and used only as explicit benchmark seeds; recipe-provided
+scheduler settings remain unchanged. For benchmark-backed tuning, the
+recommended workflow is **Tune All**, which measures the serving stack in
+dependency order:
 
 ```text
 TP/DP -> concurrency -> scheduler
@@ -112,6 +115,11 @@ The initial configuration remains directly deployable:
 source /output/env.sh
 vllm serve --config /output/config.yml
 ```
+
+Before measurements, `config.yml` retains the recipe/vLLM scheduler defaults.
+The sweep package separately carries explicit workload-derived values for
+`max-num-seqs` and `max-num-batched-tokens`, so the benchmark can compare both
+policies without making the workload heuristic the deployment default.
 
 Stop a manually started server before running the sweep because the generated
 sweep scripts start and stop their own vLLM servers.

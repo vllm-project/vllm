@@ -46,7 +46,10 @@ class WorkloadHints:
 
 @dataclass
 class TuningResult:
+    """Runtime overrides and benchmark-only seeds produced by tuning policies."""
+
     overrides: dict[str, Any] = field(default_factory=dict)
+    sweep_overrides: dict[str, Any] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
 
@@ -64,6 +67,17 @@ def _record_override(
 ) -> None:
     result.overrides[key] = value
     result.notes.append(f"{key}={value!r}: {reason}")
+
+
+def _record_sweep_override(
+    result: TuningResult,
+    key: str,
+    value: Any,
+    reason: str,
+) -> None:
+    """Record an explicit benchmark seed without changing deployment config."""
+    result.sweep_overrides[key] = value
+    result.notes.append(f"sweep {key}={value!r}: {reason}")
 
 
 def _get_active_sequence_count(
@@ -202,13 +216,14 @@ def _resolve_max_num_seqs(
     data_parallel_size = _get_data_parallel_size(config)
     per_replica_concurrency = ceil(workload.concurrency / data_parallel_size)
 
-    _record_override(
+    _record_sweep_override(
         result,
         "max-num-seqs",
         per_replica_concurrency,
         (
-            "derived from the optional global target concurrency "
-            f"and data_parallel_size={data_parallel_size}"
+            "benchmark seed derived from the optional global target concurrency "
+            f"and data_parallel_size={data_parallel_size}; config.yml keeps the "
+            "recipe/vLLM scheduler default"
         ),
     )
 
@@ -256,17 +271,18 @@ def _resolve_max_num_batched_tokens(
         ):
             candidate = max(candidate, max_model_len)
 
-    _record_override(
+    _record_sweep_override(
         result,
         "max-num-batched-tokens",
         candidate,
         (
-            "workload-derived scheduler budget "
+            "workload-derived benchmark seed "
             f"(per_replica_active_sequences={active_sequences}, "
             f"data_parallel_size={data_parallel_size}, "
             f"prefills_per_step={prefills_per_step:.2f}, "
             f"decode_budget={decode_budget}, "
-            f"prefill_budget={prefill_budget})"
+            f"prefill_budget={prefill_budget}); config.yml keeps the "
+            "recipe/vLLM scheduler default"
         ),
     )
 
@@ -330,7 +346,7 @@ def finetune_runtime_config(
     workload: WorkloadHints | None = None,
     policies: tuple[Policy, ...] = DEFAULT_POLICIES,
 ) -> TuningResult:
-    """Return overrides; never mutate the recipe-derived config in place."""
+    """Return deployment overrides and sweep seeds without mutating config."""
     hints = workload or WorkloadHints()
     hints.validate()
 

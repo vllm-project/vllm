@@ -57,7 +57,7 @@ python3 tools/recipes/recipe_json_to_vllm_config.py \
 python3 tools/recipes/recipe_json_to_vllm_config.py recipe.json
 ```
 
-### Test New or Modified Recipes from a Preview
+### 1.1 Test New or Modified Recipes from a Preview page
 
 A Recipes pull request can expose the same JSON API through its Vercel preview.
 Use that preview as the recipe source with `--api-base` to validate new or
@@ -98,9 +98,10 @@ requested. See [RUNTIME_TUNING.md](RUNTIME_TUNING.md#hardware-information).
 
 ## 3. Workload Information (Optional)
 
-Workload hints can refine scheduler settings for one initial deployment
-suggestion. Inputs include token lengths, concurrency, and optional latency or
-capacity objectives.
+Workload hints calculate explicit scheduler seeds for optional benchmark
+tuning. The directly deployable `config.yml` keeps recipe-provided scheduler
+settings or lets vLLM resolve its defaults. Inputs include token lengths,
+concurrency, and optional latency or capacity objectives.
 
 ```bash
 python3 tools/recipes/recipe_json_to_vllm_config.py \
@@ -120,8 +121,9 @@ inputs and how runtime parameters are calculated.
 
 ## 4. Sweep Tuning (Optional)
 
-Use `--generate-sweep` when the initial scheduler suggestion should be validated
-with `vllm bench sweep serve`. The sweep benchmarks nearby scheduler values and
+Use `--generate-sweep` to compare the workload-derived scheduler seed with
+vLLM's resolved defaults using `vllm bench sweep serve`. The sweep benchmarks
+nearby scheduler values and
 `recommend.py` produces one measured `recommended-config.yml` plus the
 selection evidence in `recommendation.json`.
 
