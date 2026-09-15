@@ -28,6 +28,7 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 import vllm.version
 from vllm.config import ModelConfig
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.weight_utils import (
     filter_duplicate_safetensors_files,
@@ -35,13 +36,19 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.hashing import safe_hash
 
+logger = init_logger(__name__)
+
 SOCKET_NAME_TEMPLATE = "vllm_weight_cache_{gpu_uuid}.sock"
 SOCKET_DIR_TEMPLATE = "vllm_weight_cache_{uid}"
 
 _LEN_STRUCT = struct.Struct("!Q")
-# Sanity bound for a single message. IPC handles are tiny; only small
-# non-CUDA tensors are ever shipped by value.
+# Sanity bound for a single pickled message. IPC handles are tiny; tensor
+# data itself is streamed separately via send_tensor/recv_tensor_into.
 MAX_MSG_SIZE = 1 << 34
+# Sanity bound for a single streamed tensor payload (send_tensor/
+# recv_tensor_into). Individual weights can be multi-GB (e.g. embedding
+# tables), so this is much larger than MAX_MSG_SIZE.
+MAX_TENSOR_SIZE = 1 << 40
 
 
 def _current_uid() -> int:
@@ -66,21 +73,22 @@ class UnsupportedPlatformForIPCError(Exception):
 
 
 def check_ipc_platform_support() -> None:
-    """Hard-error unless the current platform can share CUDA IPC handles.
+    """Hard-error unless the current platform can use the weight cache.
 
-    Only CUDA/ROCm tensors get a real IPC handle from ``TensorEntry``; other
-    platforms (e.g. XPU) would silently ship every tensor by value instead.
+    CUDA/ROCm tensors get a real IPC handle from ``TensorEntry``; XPU has no
+    such handle yet and ships tensors by value instead. Other platforms are
+    rejected outright.
 
     Raises:
         UnsupportedPlatformForIPCError: If the current platform is not
-            CUDA/ROCm.
+            CUDA, ROCm, or XPU.
     """
-    if current_platform.is_cuda_alike():
+    if current_platform.is_cuda_alike() or current_platform.is_xpu():
         return
     raise UnsupportedPlatformForIPCError(
-        f"platform {current_platform.device_name!r} does not support CUDA IPC "
-        "weight sharing; only CUDA and ROCm are supported. Use the default "
-        "--load-format for this platform."
+        f"platform {current_platform.device_name!r} does not support the "
+        "weight cache; only CUDA, ROCm and XPU are supported. Use the "
+        "default --load-format for this platform."
     )
 
 
@@ -310,31 +318,80 @@ class WeightCacheKey:
         ]
 
 
+def _try_export_ipc(tensor: torch.Tensor) -> tuple | None:
+    """Best-effort export of a real device IPC handle for ``tensor``.
+
+    CUDA/ROCm always get one via ``reduce_tensor``; a failure there is a real
+    bug and propagates. Other accelerators have no such handle yet, so
+    ``reduce_tensor`` silently falls back to a non-IPC rebuild function
+    instead -- both that and an outright exception mean "no IPC support",
+    returning ``None`` so the caller ships the tensor by value.
+    """
+    if tensor.device.type == "cpu":
+        return None
+    if tensor.is_cuda:
+        _, args = reduce_tensor(tensor)
+        return args
+    try:
+        rebuild_func, args = reduce_tensor(tensor)
+    except Exception:
+        logger.debug(
+            "Device IPC export not supported for %s tensors; shipping by value instead",
+            tensor.device.type,
+        )
+        return None
+    if rebuild_func is not rebuild_cuda_tensor:
+        return None
+    return args
+
+
 @dataclass
 class TensorEntry:
     """A single cached tensor.
 
-    CUDA tensors are exported as `torch.multiprocessing` reduction args
-    (CUDA IPC handles); non-CUDA tensors are shipped by value.
+    Tensors with a real device IPC handle (CUDA/ROCm today) are exported as
+    `torch.multiprocessing` reduction args. Everything else is shipped by
+    value instead: metadata is sent inline via
+    ``stream_shape``/``stream_dtype``, and the raw bytes follow separately
+    via ``send_tensor``/``recv_tensor_into``.
     """
 
     kind: str
     """Either "param" or "buffer"."""
     ipc_args: tuple | None = None
     cpu_tensor: torch.Tensor | None = None
+    stream_shape: torch.Size | None = None
+    stream_dtype: torch.dtype | None = None
 
     @classmethod
-    def from_tensor(cls, tensor: torch.Tensor, kind: str) -> "TensorEntry":
+    def from_tensor(
+        cls, tensor: torch.Tensor, kind: str
+    ) -> tuple["TensorEntry", torch.Tensor | None]:
+        """Build the entry for ``tensor``.
+
+        Returns the entry, plus the raw CPU tensor to stream with
+        ``send_tensor`` right after it when there's no IPC handle for
+        ``tensor`` (``None`` otherwise).
+        """
         tensor = tensor.detach()
-        if tensor.is_cuda:
-            _, ipc_args = reduce_tensor(tensor)
-            return cls(kind=kind, ipc_args=ipc_args)
-        return cls(kind=kind, cpu_tensor=tensor.cpu())
+        ipc_args = _try_export_ipc(tensor)
+        if ipc_args is not None:
+            return cls(kind=kind, ipc_args=ipc_args), None
+        cpu_tensor = tensor.cpu()
+        entry = cls(
+            kind=kind, stream_shape=cpu_tensor.shape, stream_dtype=cpu_tensor.dtype
+        )
+        return entry, cpu_tensor
 
     def rebuild(self, device_index: int) -> torch.Tensor:
         if self.ipc_args is None:
             assert self.cpu_tensor is not None
-            return self.cpu_tensor
+            device = torch.device(current_platform.device_type, device_index)
+            if device.type == "cpu":
+                return self.cpu_tensor
+            # No IPC handle: copy in via a pinned staging buffer for faster
+            # H2D bandwidth. A no-op since cpu_tensor is already pinned.
+            return self.cpu_tensor.pin_memory().to(device, non_blocking=True)
         args = list(self.ipc_args)
         # Index 6 of the args from reduce_tensor is the device index. It must
         # be retargeted to the local index since the daemon and the engine may
@@ -354,6 +411,45 @@ def recv_msg(sock: socket.socket) -> Any:
     if length > MAX_MSG_SIZE:
         raise ValueError(f"Message size {length} exceeds limit {MAX_MSG_SIZE}")
     return pickle.loads(_recv_exact(sock, length))
+
+
+def send_tensor(sock: socket.socket, tensor: torch.Tensor) -> None:
+    """Send a CPU tensor's raw bytes, with no pickling of the data.
+
+    Pairs with a ``recv_tensor_into`` call for a tensor of the same
+    shape/dtype on the other end, right after the message that describes it.
+    """
+    view = tensor.contiguous().reshape(-1).view(torch.uint8).numpy()
+    sock.sendall(_LEN_STRUCT.pack(view.nbytes))
+    sock.sendall(memoryview(view))
+
+
+def recv_tensor_into(sock: socket.socket, buffer: torch.Tensor) -> None:
+    """Receive raw tensor bytes sent by ``send_tensor`` straight into ``buffer``.
+
+    ``buffer`` must be contiguous and already sized to match what was sent
+    (e.g. a pinned staging tensor allocated from the sender's advertised
+    shape/dtype); reading directly into it combines the receive with the
+    host-memory pinning into a single step.
+    """
+    (length,) = _LEN_STRUCT.unpack(_recv_exact(sock, _LEN_STRUCT.size))
+    if length > MAX_TENSOR_SIZE:
+        raise ValueError(
+            f"Tensor payload size {length} exceeds limit {MAX_TENSOR_SIZE}"
+        )
+    view = buffer.reshape(-1).view(torch.uint8).numpy()
+    if length != view.nbytes:
+        raise ValueError(
+            f"Tensor payload size {length} does not match expected buffer "
+            f"size {view.nbytes}"
+        )
+    mv = memoryview(view)
+    total = 0
+    while total < length:
+        n = sock.recv_into(mv[total:], length - total)
+        if n == 0:
+            raise ConnectionError("Socket closed while receiving tensor payload")
+        total += n
 
 
 def _recv_exact(sock: socket.socket, num_bytes: int) -> bytes:
