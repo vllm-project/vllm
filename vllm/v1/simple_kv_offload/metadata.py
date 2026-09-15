@@ -5,11 +5,23 @@
 from dataclasses import dataclass, field
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorWorkerMetadata,
 )
 
 INVALID_JOB_ID = -1
+
+
+@dataclass
+class SimpleCPUOffloadHandshake(KVConnectorHandshakeMetadata):
+    """Worker-verified, node-local shared pool configuration."""
+
+    region_id: str
+    local_rank: int
+    local_size: int
+    blocks_per_rank: int
+    hash_signature: tuple[str, bytes, bytes]
 
 
 @dataclass
