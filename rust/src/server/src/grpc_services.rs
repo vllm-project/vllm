@@ -16,8 +16,8 @@ use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
 
 use crate::grpc::pb;
 use crate::grpc::{
-    ControlGrpcService, InferenceGrpcService, KvTransferGrpcService, RlControlGrpcService,
-    kv_event_source,
+    ControlGrpcService, InferenceGrpcService, KvTransferGrpcService, LoraGrpcService,
+    RlControlGrpcService, kv_event_source,
 };
 
 bitflags! {
@@ -29,6 +29,7 @@ bitflags! {
         const CONTROL = 1 << 1;
         const KV_TRANSFER = 1 << 2;
         const RL_CONTROL = 1 << 3;
+        const LORA = 1 << 4;
     }
 }
 
@@ -44,7 +45,7 @@ pub(crate) struct GrpcServiceEntry {
 }
 
 /// Every service, in the order [`GrpcServices`] displays and reports them.
-pub(crate) const GRPC_SERVICE_TABLE: [GrpcServiceEntry; 4] = [
+pub(crate) const GRPC_SERVICE_TABLE: [GrpcServiceEntry; 5] = [
     GrpcServiceEntry {
         flag: GrpcServices::INFERENCE,
         token: "inference",
@@ -73,6 +74,13 @@ pub(crate) const GRPC_SERVICE_TABLE: [GrpcServiceEntry; 4] = [
         service_name: <RlControlGrpcService as NamedService>::NAME,
         proto: pb::GrpcService::RlControl,
     },
+    GrpcServiceEntry {
+        flag: GrpcServices::LORA,
+        token: "lora",
+        aliases: &[],
+        service_name: <LoraGrpcService as NamedService>::NAME,
+        proto: pb::GrpcService::Lora,
+    },
 ];
 
 /// The entry for a single service flag.
@@ -95,7 +103,7 @@ const CONFIGURED_TOKEN: &str = "configured";
 pub enum GrpcServicesParseError {
     #[error(
         "unknown gRPC service `{0}`; expected `all`, `configured`, or a comma-separated list of \
-         inference, control, kv-transfer, rl-control"
+         inference, control, kv-transfer, rl-control, lora"
     )]
     UnknownService(String),
     #[error(
@@ -114,6 +122,7 @@ impl GrpcServices {
         let mut services = Self::INFERENCE | Self::CONTROL;
         services.set(Self::KV_TRANSFER, kv_transfer_configured(ready));
         services.set(Self::RL_CONTROL, rl_configured(ready));
+        services.set(Self::LORA, lora_configured(ready));
         services
     }
 }
@@ -234,6 +243,12 @@ impl GrpcServiceSelection {
                  transfer (--weight-transfer-config) or sleep mode (--enable-sleep-mode) configured"
             );
         }
+        if services.contains(GrpcServices::LORA) && !lora_configured(ready) {
+            bail!(
+                "--grpc-services requested lora, but the engines do not all have LoRA \
+                 (--enable-lora) configured"
+            );
+        }
         Ok(GrpcMount::split(services))
     }
 }
@@ -287,6 +302,11 @@ fn kv_transfer_configured(ready: &[&EngineCoreReadyResponse]) -> bool {
 /// True when every engine can serve the RL RPCs, which drive them all at once.
 fn rl_configured(ready: &[&EngineCoreReadyResponse]) -> bool {
     weight_transfer_backend(ready).is_some() || sleep_mode_enabled(ready)
+}
+
+/// True when every engine can load LoRA adapters.
+fn lora_configured(ready: &[&EngineCoreReadyResponse]) -> bool {
+    !ready.is_empty() && ready.iter().all(|ready| ready.supports_lora)
 }
 
 /// The weight transfer backend every engine reports, or `None` when they
@@ -359,7 +379,7 @@ mod tests {
         assert_eq!(GrpcServiceSelection::Configured.to_string(), "configured");
         assert_eq!(
             GrpcServiceSelection::Explicit(GrpcServices::all()).to_string(),
-            "inference,control,kv-transfer,rl-control"
+            "inference,control,kv-transfer,rl-control,lora"
         );
         assert_eq!(
             GrpcServiceSelection::Explicit(GrpcServices::KV_TRANSFER).to_string(),
@@ -399,7 +419,8 @@ mod tests {
                 "vllm.Inference",
                 "vllm.Control",
                 "vllm.KvTransfer",
-                "vllm.RlControl"
+                "vllm.RlControl",
+                "vllm.Lora"
             ]
         );
         for entry in &GRPC_SERVICE_TABLE {
@@ -466,8 +487,27 @@ mod tests {
     #[test]
     fn configured_derives_services_from_ready_responses() {
         let base = GrpcServices::INFERENCE | GrpcServices::CONTROL;
-        let cases: [(&str, Vec<EngineCoreReadyResponse>, GrpcServices); 9] = [
+        let cases: [(&str, Vec<EngineCoreReadyResponse>, GrpcServices); 11] = [
             ("plain engine", vec![default_ready_response()], base),
+            (
+                "lora enabled",
+                vec![EngineCoreReadyResponse {
+                    supports_lora: true,
+                    ..default_ready_response()
+                }],
+                base | GrpcServices::LORA,
+            ),
+            (
+                "one engine of two enables lora",
+                vec![
+                    EngineCoreReadyResponse {
+                        supports_lora: true,
+                        ..default_ready_response()
+                    },
+                    default_ready_response(),
+                ],
+                base,
+            ),
             (
                 "kv events enabled",
                 vec![EngineCoreReadyResponse {
@@ -587,6 +627,13 @@ mod tests {
             "unexpected error: {error}"
         );
 
+        let lora = GrpcServiceSelection::Explicit(GrpcServices::LORA);
+        let error = lora.resolve(&ready).expect_err("lora is unsupported");
+        assert!(
+            error.to_string().contains("requested lora"),
+            "unexpected error: {error}"
+        );
+
         let inference = GrpcServiceSelection::Explicit(GrpcServices::INFERENCE);
         assert_eq!(
             inference.resolve(&ready).expect("inference is always available"),
@@ -638,6 +685,7 @@ mod tests {
         let configured = [EngineCoreReadyResponse {
             kv_events_config: Some(kv_events(true)),
             enable_sleep_mode: true,
+            supports_lora: true,
             ..default_ready_response()
         }];
         let ready: Vec<&EngineCoreReadyResponse> = configured.iter().collect();
@@ -661,6 +709,7 @@ mod tests {
         let configured = [EngineCoreReadyResponse {
             kv_events_config: Some(kv_events(true)),
             enable_sleep_mode: true,
+            supports_lora: true,
             ..default_ready_response()
         }];
         let ready: Vec<&EngineCoreReadyResponse> = configured.iter().collect();

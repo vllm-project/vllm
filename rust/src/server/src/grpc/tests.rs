@@ -61,10 +61,12 @@ use super::kv_transfer::kv_event_source;
 use super::pb::control_client::ControlClient;
 use super::pb::inference_client::InferenceClient;
 use super::pb::kv_transfer_client::KvTransferClient;
+use super::pb::lora_client::LoraClient;
 use super::pb::rl_control_client::RlControlClient;
 use super::{
     ControlGrpcService, ControlServiceImpl, InferenceGrpcService, InferenceServiceImpl,
-    KvTransferGrpcService, KvTransferServiceImpl, RlControlGrpcService, RlControlServiceImpl, pb,
+    KvTransferGrpcService, KvTransferServiceImpl, LoraGrpcService, LoraServiceImpl,
+    RlControlGrpcService, RlControlServiceImpl, pb,
 };
 use crate::grpc_services::{GrpcMount, GrpcServiceSelection, GrpcServices};
 use crate::listener::{Listener, MaybeTlsListener};
@@ -364,11 +366,13 @@ impl TestServices {
         let mounted = state.grpc_services();
         let kv_transfer_impl = Arc::new(KvTransferServiceImpl::new(state.clone()));
         let rl_control_impl = Arc::new(RlControlServiceImpl::new(state.clone()));
+        let lora_impl = Arc::new(LoraServiceImpl::new(state.clone()));
         let control = mounted.contains(GrpcServices::CONTROL).then(|| {
             ControlGrpcService::new(ControlServiceImpl::new(
                 state.clone(),
                 kv_transfer_impl.clone(),
                 rl_control_impl.clone(),
+                lora_impl.clone(),
             ))
         });
         let kv_transfer = mounted
@@ -377,6 +381,9 @@ impl TestServices {
         let rl_control = mounted
             .contains(GrpcServices::RL_CONTROL)
             .then(|| RlControlGrpcService::from_arc(rl_control_impl));
+        let lora = mounted
+            .contains(GrpcServices::LORA)
+            .then(|| LoraGrpcService::from_arc(lora_impl));
         let inference = mounted.contains(GrpcServices::INFERENCE).then(|| {
             InferenceGrpcService::new(InferenceServiceImpl::new(state))
                 .max_decoding_message_size(crate::DEFAULT_REQUEST_BODY_LIMIT_BYTES)
@@ -385,6 +392,7 @@ impl TestServices {
             .add_optional_service(control)
             .add_optional_service(kv_transfer)
             .add_optional_service(rl_control)
+            .add_optional_service(lora)
             .add_optional_service(inference)
     }
 }
@@ -2122,6 +2130,8 @@ async fn deprecated_control_aliases_match_the_moved_services() {
 async fn deprecated_control_aliases_are_only_served_by_all() {
     let mut ready = default_ready_response();
     ready.enable_sleep_mode = true;
+    ready.supports_lora = true;
+    ready.max_loras = 4;
     ready.kv_events_config = Some(KvEventsConfig {
         enable_kv_cache_events: true,
         publisher: "zmq".to_string(),
@@ -2183,12 +2193,44 @@ async fn deprecated_control_aliases_are_only_served_by_all() {
         "unexpected message: {}",
         rl_control.message()
     );
-    let paused = RlControlClient::new(channel)
+    let paused = RlControlClient::new(channel.clone())
         .is_paused(pb::IsPausedRequest {})
         .await
         .expect("RlControl serves IsPaused on its own prefix")
         .into_inner();
     assert!(!paused.paused);
+
+    let load = control_client
+        .load_lora(pb::LoadLoraRequest {
+            lora_name: "adapter".to_string(),
+            source_path: "adapter".to_string(),
+        })
+        .await
+        .expect_err("the Control alias is off although Lora is mounted");
+    assert_eq!(load.code(), tonic::Code::Unimplemented);
+    assert!(
+        load.message().contains("vllm.Lora") && load.message().contains("--grpc-services all"),
+        "unexpected message: {}",
+        load.message()
+    );
+    let unload = control_client
+        .unload_lora(pb::UnloadLoraRequest {
+            lora_name: "adapter".to_string(),
+        })
+        .await
+        .expect_err("the Control alias is off although Lora is mounted");
+    assert_eq!(unload.code(), tonic::Code::Unimplemented);
+    let via_control = control_client
+        .list_loras(pb::ListLorasRequest {})
+        .await
+        .expect("Control.ListLoras is not deprecated and stays served")
+        .into_inner();
+    let via_lora = LoraClient::new(channel)
+        .list_loras(pb::ListLorasRequest {})
+        .await
+        .expect("Lora serves ListLoras on its own prefix")
+        .into_inner();
+    assert_eq!(via_control, via_lora);
 
     engine_task.await.expect("mock engine task");
     server_task.abort();
@@ -2235,12 +2277,13 @@ async fn control_lora_lifecycle_selects_adapter_for_generation() {
         tokio_util::sync::CancellationToken::new(),
     )
     .await;
+    let mut lora_client = LoraClient::new(channel.clone());
     let mut control_client = ControlClient::new(channel.clone());
     let mut inference_client = InferenceClient::new(channel);
 
     let denied_source_path =
         std::env::temp_dir().join(format!("vllm-grpc-lora-denied-{}", std::process::id()));
-    let denied = control_client
+    let denied = lora_client
         .load_lora(pb::LoadLoraRequest {
             lora_name: "denied-adapter".to_string(),
             source_path: denied_source_path.to_string_lossy().into_owned(),
@@ -2249,7 +2292,7 @@ async fn control_lora_lifecycle_selects_adapter_for_generation() {
         .expect_err("local LoRA path should be validated before engine load");
     assert_eq!(denied.code(), tonic::Code::InvalidArgument);
 
-    let loaded = control_client
+    let loaded = lora_client
         .load_lora(pb::LoadLoraRequest {
             lora_name: "adapter".to_string(),
             source_path: "adapter".to_string(),
@@ -2262,7 +2305,7 @@ async fn control_lora_lifecycle_selects_adapter_for_generation() {
         Some(1)
     );
 
-    let duplicate = control_client
+    let duplicate = lora_client
         .load_lora(pb::LoadLoraRequest {
             lora_name: "adapter".to_string(),
             source_path: "adapter".to_string(),
@@ -2271,13 +2314,19 @@ async fn control_lora_lifecycle_selects_adapter_for_generation() {
         .expect_err("duplicate LoRA name should be rejected");
     assert_eq!(duplicate.code(), tonic::Code::AlreadyExists);
 
-    let listed = control_client
+    let listed = lora_client
         .list_loras(pb::ListLorasRequest {})
         .await
         .expect("list LoRAs")
         .into_inner();
     assert_eq!(listed.adapters.len(), 1);
     assert_eq!(listed.adapters[0].lora_name, "adapter");
+    let listed_via_control = control_client
+        .list_loras(pb::ListLorasRequest {})
+        .await
+        .expect("list LoRAs through Control")
+        .into_inner();
+    assert_eq!(listed_via_control, listed);
 
     inference_client
         .generate(pb::GenerateRequest {
@@ -2294,7 +2343,7 @@ async fn control_lora_lifecycle_selects_adapter_for_generation() {
         .await
         .expect("generate with LoRA");
 
-    let unloaded = control_client
+    let unloaded = lora_client
         .unload_lora(pb::UnloadLoraRequest {
             lora_name: "adapter".to_string(),
         })
@@ -2306,7 +2355,7 @@ async fn control_lora_lifecycle_selects_adapter_for_generation() {
         Some(1)
     );
     assert!(
-        control_client
+        lora_client
             .list_loras(pb::ListLorasRequest {})
             .await
             .expect("list LoRAs after unload")
@@ -2466,7 +2515,8 @@ async fn control_aggregates_multi_engine_capacity() {
     let service = ControlServiceImpl::new(
         state.clone(),
         Arc::new(KvTransferServiceImpl::new(state.clone())),
-        Arc::new(RlControlServiceImpl::new(state)),
+        Arc::new(RlControlServiceImpl::new(state.clone())),
+        Arc::new(LoraServiceImpl::new(state)),
     );
 
     let server = pb::control_server::Control::get_server_info(

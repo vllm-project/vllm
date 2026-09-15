@@ -254,11 +254,13 @@ where
         grpc::mark_serving(&health_reporter, services).await;
         let kv_transfer_impl = Arc::new(grpc::KvTransferServiceImpl::new(state.clone()));
         let rl_control_impl = Arc::new(grpc::RlControlServiceImpl::new(state.clone()));
+        let lora_impl = Arc::new(grpc::LoraServiceImpl::new(state.clone()));
         let control_service = services.contains(GrpcServices::CONTROL).then(|| {
             grpc::ControlGrpcService::new(grpc::ControlServiceImpl::new(
                 state.clone(),
                 kv_transfer_impl.clone(),
                 rl_control_impl.clone(),
+                lora_impl.clone(),
             ))
             .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES)
         });
@@ -268,6 +270,10 @@ where
         });
         let rl_control_service = services.contains(GrpcServices::RL_CONTROL).then(|| {
             grpc::RlControlGrpcService::from_arc(rl_control_impl)
+                .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES)
+        });
+        let lora_service = services.contains(GrpcServices::LORA).then(|| {
+            grpc::LoraGrpcService::from_arc(lora_impl)
                 .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES)
         });
         let inference_service = services.contains(GrpcServices::INFERENCE).then(|| {
@@ -282,6 +288,7 @@ where
             .add_optional_service(control_service)
             .add_optional_service(kv_transfer_service)
             .add_optional_service(rl_control_service)
+            .add_optional_service(lora_service)
             .add_optional_service(inference_service);
         Some((
             addr,

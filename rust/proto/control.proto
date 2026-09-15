@@ -12,14 +12,18 @@ service Control {
   // Request lifecycle.
   rpc Abort (AbortRequest) returns (AbortResponse) {}
 
-  // LoRA lifecycle.
-  rpc LoadLora (LoadLoraRequest) returns (LoadLoraResponse) {}
-  rpc UnloadLora (UnloadLoraRequest) returns (UnloadLoraResponse) {}
+  // LoRA discovery. Also served by `Lora.ListLoras`; this alias stays so a
+  // caller admitted only to `Control` can see which adapters are loaded.
   rpc ListLoras (ListLorasRequest) returns (ListLorasResponse) {}
 
-  // The RPCs below moved to `KvTransfer` and `RlControl`. They stay on
+  // The RPCs below moved to `Lora`, `KvTransfer` and `RlControl`. They stay on
   // `Control` for one release so existing clients keep working, and are served
   // only under `--grpc-services all`; otherwise they answer `Unimplemented`.
+
+  // Deprecated: use Lora.LoadLora.
+  rpc LoadLora (LoadLoraRequest) returns (LoadLoraResponse) { option deprecated = true; }
+  // Deprecated: use Lora.UnloadLora.
+  rpc UnloadLora (UnloadLoraRequest) returns (UnloadLoraResponse) { option deprecated = true; }
 
   // Deprecated: use KvTransfer.GetKvEventSources.
   rpc GetKvEventSources (GetKvEventSourcesRequest) returns (GetKvEventSourcesResponse) { option deprecated = true; }
@@ -50,6 +54,13 @@ service Control {
   rpc UpdateWeightVersion (UpdateWeightVersionRequest) returns (UpdateWeightVersionResponse) { option deprecated = true; }
   // Deprecated: use RlControl.GetWeightVersion.
   rpc GetWeightVersion (GetWeightVersionRequest) returns (GetWeightVersionResponse) { option deprecated = true; }
+}
+
+service Lora {
+  // LoRA lifecycle.
+  rpc LoadLora (LoadLoraRequest) returns (LoadLoraResponse) {}
+  rpc UnloadLora (UnloadLoraRequest) returns (UnloadLoraResponse) {}
+  rpc ListLoras (ListLorasRequest) returns (ListLorasResponse) {}
 }
 
 service KvTransfer {
@@ -85,6 +96,7 @@ enum GrpcService {
   GRPC_SERVICE_CONTROL = 2;
   GRPC_SERVICE_KV_TRANSFER = 3;
   GRPC_SERVICE_RL_CONTROL = 4;
+  GRPC_SERVICE_LORA = 5;
 }
 
 message ServerInfo {

@@ -32,8 +32,15 @@ INFERENCE = 1
 CONTROL = 2
 KV_TRANSFER = 3
 RL_CONTROL = 4
+LORA = 5
 
-SERVICE_NAMES = ("vllm.Inference", "vllm.Control", "vllm.KvTransfer", "vllm.RlControl")
+SERVICE_NAMES = (
+    "vllm.Inference",
+    "vllm.Control",
+    "vllm.KvTransfer",
+    "vllm.RlControl",
+    "vllm.Lora",
+)
 
 
 def _vllm_rs() -> str:
@@ -192,16 +199,26 @@ HEALTH_CHECK = "/grpc.health.v1.Health/Check"
 SERVING = b"\x08\x01"
 
 
-CONTROL_ALIASES = ("/vllm.Control/IsPaused", "/vllm.Control/GetKvEventSources")
+CONTROL_ALIASES = (
+    "/vllm.Control/IsPaused",
+    "/vllm.Control/GetKvEventSources",
+    "/vllm.Control/LoadLora",
+)
 
 
 def test_default_mounts_only_configured_services(tmp_path: Path) -> None:
     with serve([], tmp_path / "vllm-rs.log") as server, channel(server) as chan:
         assert mounted_services(chan) == [INFERENCE, CONTROL]
-        for path in ("/vllm.RlControl/IsPaused", "/vllm.KvTransfer/GetKvEventSources"):
+        for path in (
+            "/vllm.RlControl/IsPaused",
+            "/vllm.KvTransfer/GetKvEventSources",
+            "/vllm.Lora/ListLoras",
+        ):
             assert call_error(chan, path).code() == grpc.StatusCode.UNIMPLEMENTED, path
         for path in CONTROL_ALIASES:
             assert call_error(chan, path).code() == grpc.StatusCode.UNIMPLEMENTED, path
+        error = call_error(chan, "/vllm.Control/ListLoras")
+        assert error.code() == grpc.StatusCode.FAILED_PRECONDITION
 
 
 def test_all_mounts_every_service_and_the_control_aliases(tmp_path: Path) -> None:
@@ -209,7 +226,13 @@ def test_all_mounts_every_service_and_the_control_aliases(tmp_path: Path) -> Non
         serve(["--grpc-services", "all"], tmp_path / "vllm-rs.log") as server,
         channel(server) as chan,
     ):
-        assert mounted_services(chan) == [INFERENCE, CONTROL, KV_TRANSFER, RL_CONTROL]
+        assert mounted_services(chan) == [
+            INFERENCE,
+            CONTROL,
+            KV_TRANSFER,
+            RL_CONTROL,
+            LORA,
+        ]
         for service in SERVICE_NAMES:
             status = call(chan, HEALTH_CHECK, _health_request(service))
             assert status == SERVING, service
@@ -251,14 +274,21 @@ def test_explicit_list_unmounts_the_rest(tmp_path: Path) -> None:
 
 
 def test_configured_follows_engine_config(tmp_path: Path) -> None:
-    args = ["--grpc-services", "configured", "--enable-sleep-mode"]
+    args = ["--grpc-services", "configured", "--enable-sleep-mode", "--enable-lora"]
     with serve(args, tmp_path / "vllm-rs.log") as server, channel(server) as chan:
-        assert mounted_services(chan) == [INFERENCE, CONTROL, RL_CONTROL]
+        assert mounted_services(chan) == [INFERENCE, CONTROL, RL_CONTROL, LORA]
         call(chan, "/vllm.RlControl/IsSleeping")
         error = call_error(chan, "/vllm.KvTransfer/GetKvEventSources")
         assert error.code() == grpc.StatusCode.UNIMPLEMENTED
 
         error = call_error(chan, "/vllm.Control/IsSleeping")
+        assert error.code() == grpc.StatusCode.UNIMPLEMENTED
+        assert "--grpc-services all" in (error.details() or "")
+
+        assert call(chan, "/vllm.Lora/ListLoras") == call(
+            chan, "/vllm.Control/ListLoras"
+        )
+        error = call_error(chan, "/vllm.Control/LoadLora")
         assert error.code() == grpc.StatusCode.UNIMPLEMENTED
         assert "--grpc-services all" in (error.details() or "")
 
