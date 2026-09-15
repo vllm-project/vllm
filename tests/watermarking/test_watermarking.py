@@ -1097,22 +1097,31 @@ def test_draft_sampler_uses_draft_key_and_advances_context(monkeypatch):
             return torch.zeros(hidden_states.shape[0], 8)
 
     class StubWatermarker:
+        context_width = 2
+
         @staticmethod
-        def sample(logits, contexts, random_sampler=None):
-            assert random_sampler is None
-            return WatermarkSample(torch.tensor([7, 7]), logits)
+        def sample(logits, contexts, random_sampler=None, skip_mask=None):
+            assert random_sampler is not None
+            return WatermarkSample(
+                torch.where(skip_mask, random_sampler(logits), 7), logits
+            )
 
     speculator = object.__new__(StubSpeculator)
     speculator.model = StubModel()
     speculator.use_fp64_gumbel = False
-    draft_watermarker = object.__new__(DraftWatermarker)
-    draft_watermarker.watermarker = StubWatermarker()
-    draft_watermarker.deduplicate_contexts = "none"
-    draft_watermarker.contexts = torch.tensor([[1, 2], [3, 4]])
+    draft_watermarker = DraftWatermarker(
+        StubWatermarker(),
+        max_num_reqs=2,
+        device=torch.device("cpu"),
+        num_speculative_steps=1,
+        deduplicate_contexts="none",
+        deduplicate_contexts_max_history=None,
+    )
+    draft_watermarker.contexts.copy_(torch.tensor([[1, 2], [3, 4]]))
     draft_watermarker.enabled = torch.tensor([True, False])
     speculator.draft_watermarker = draft_watermarker
     monkeypatch.setattr(
-        "vllm.v1.worker.gpu.spec_decode.speculator.gumbel_sample",
+        "vllm.v1.watermarking.watermarker.gumbel_sample",
         lambda *args, **kwargs: torch.tensor([3, 4]),
     )
 
@@ -1219,15 +1228,20 @@ def test_dspark_reduced_vocab_draft_sampler_applies_watermarking(monkeypatch):
     speculator.use_fp64_gumbel = False
     watermark_logits: list[torch.Tensor] = []
 
-    def sample(logits, sampled, idx_map, temperature, draft_step):
+    def sample_draft(
+        logits,
+        idx_mapping,
+        temperature,
+        seeds,
+        positions,
+        draft_step,
+        draft_logits,
+        use_fp64,
+    ):
         watermark_logits.append(logits.clone())
-        return sampled + 1
+        return torch.tensor([4, 5])
 
-    speculator.draft_watermarker = SimpleNamespace(sample=sample)
-    monkeypatch.setattr(
-        "vllm.v1.worker.gpu.spec_decode.dspark.speculator.gumbel_sample",
-        lambda *args, **kwargs: torch.tensor([3, 4]),
-    )
+    speculator.draft_watermarker = SimpleNamespace(sample_draft=sample_draft)
 
     sampled = speculator._sample_logits(
         torch.tensor([[10.0, 20.0], [30.0, 40.0]]),
