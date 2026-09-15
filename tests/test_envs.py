@@ -55,6 +55,30 @@ def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch)
     assert envs.VLLM_P2P_SIDE_CHANNEL_PORT == 5799
 
 
+def test_output_proc_chunk_size_defaults_and_override(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    getter = environment_variables["VLLM_V1_OUTPUT_PROC_CHUNK_SIZE"]
+    monkeypatch.delenv("VLLM_V1_OUTPUT_PROC_CHUNK_SIZE", raising=False)
+    assert getter() == 128
+
+    monkeypatch.setenv("VLLM_V1_OUTPUT_PROC_CHUNK_SIZE", "1")
+    assert getter() == 1
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_output_proc_chunk_size_rejects_non_positive_values(
+    monkeypatch: pytest.MonkeyPatch, value: str
+):
+    monkeypatch.setenv("VLLM_V1_OUTPUT_PROC_CHUNK_SIZE", value)
+
+    with pytest.raises(
+        ValueError,
+        match=r"VLLM_V1_OUTPUT_PROC_CHUNK_SIZE must be greater than 0",
+    ):
+        environment_variables["VLLM_V1_OUTPUT_PROC_CHUNK_SIZE"]()
+
+
 def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_HOST_IP", "1.1.1.1")
     monkeypatch.setenv("VLLM_PORT", "1234")
