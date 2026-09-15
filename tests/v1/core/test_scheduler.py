@@ -3575,6 +3575,92 @@ def test_priority_scheduling_heap_property():
     assert scheduled_priorities == expected_priorities
 
 
+def test_priority_scheduling_preempted_request_readmission_priority():
+    """Test that in PriorityRequestQueue, a preempted request is re-admitted
+    before an unstarted request with the same priority, even if the unstarted
+    request arrived earlier.
+    """
+    scheduler = create_scheduler_with_priority(
+        max_num_seqs=1,  # Only 1 request can run at a time
+    )
+
+    # req_unstarted arrived early (arrival=0.0), never ran (preemptions=0)
+    # req_preempted arrived later (arrival=1.0), but was preempted (preemptions=1)
+    requests = create_requests_with_priority(
+        num_requests=2,
+        priorities=[0, 0],
+        arrival_times=[0.0, 1.0],
+        req_ids=["unstarted", "preempted"],
+    )
+    req_unstarted, req_preempted = requests[0], requests[1]
+    req_preempted.num_preemptions = 1
+
+    # Add unstarted request and prepend preempted request
+    scheduler.waiting.add_request(req_unstarted)
+    scheduler.waiting.prepend_request(req_preempted)
+
+    # Preempted request must be popped and scheduled first
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 1
+    assert output.scheduled_new_reqs[0].req_id == "preempted"
+
+
+def test_priority_scheduling_preemption_victim_anti_thrashing():
+    """Test that when choosing a preemption victim among running requests of equal
+    priority, the scheduler prefers the request with FEWER preemptions,
+    preventing repeated preemption of the same request (anti-thrashing).
+    """
+    block_size = 16
+    num_blocks = 6  # 1 null block -> 5 usable blocks
+    num_tokens = block_size * 2  # 32 tokens = 2 blocks each
+
+    scheduler = create_scheduler_with_priority(
+        max_num_seqs=3,
+        max_num_batched_tokens=200,
+        num_blocks=num_blocks,
+        block_size=block_size,
+    )
+
+    # Two requests with equal priority:
+    # req_preempted_once has arrival=2.0, num_preemptions=1
+    # req_never_preempted has arrival=1.0, num_preemptions=0
+    requests = create_requests_with_priority(
+        num_requests=2,
+        priorities=[5, 5],
+        arrival_times=[2.0, 1.0],
+        num_tokens=num_tokens,
+        req_ids=["req_preempted_once", "req_never_preempted"],
+    )
+    r1, r2 = requests[0], requests[1]
+    r1.num_preemptions = 1
+
+    scheduler.add_request(r1)
+    scheduler.add_request(r2)
+
+    # Schedule both into running (uses 4 blocks, 1 free block remains)
+    output = scheduler.schedule()
+    assert len(scheduler.running) == 2
+
+    # Simulate 1 decode step: both requests now need a 3rd block (6 blocks needed, only 5 free)
+    model_output = ModelRunnerOutput(
+        req_ids=["req_preempted_once", "req_never_preempted"],
+        req_id_to_index={"req_preempted_once": 0, "req_never_preempted": 1},
+        sampled_token_ids=[[100], [101]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_output)
+
+    # Next schedule triggers preemption
+    # Anti-thrashing check: req_never_preempted (0 preemptions) should be preempted first,
+    # leaving req_preempted_once (1 preemption) running!
+    output = scheduler.schedule()
+
+    assert scheduler.requests["req_never_preempted"].status == RequestStatus.PREEMPTED
+    assert any(req.request_id == "req_preempted_once" for req in scheduler.running)
+
+
 def test_schedule_skip_tokenizer_init():
     scheduler = create_scheduler(skip_tokenizer_init=True)
     requests = create_requests(num_requests=5)
