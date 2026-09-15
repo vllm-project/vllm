@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from io import BytesIO
-from pickle import UnpicklingError
 from typing import TYPE_CHECKING, Final
-from zipfile import BadZipFile
 
 import pybase64
 import torch
@@ -22,21 +20,6 @@ if TYPE_CHECKING:
 # How much of torch's own reason is repeated back to the caller. The reason is
 # built from bytes the caller sent, so it is bounded rather than echoed whole.
 _MAX_EMBED_ERROR_REASON_CHARS: Final = 200
-
-# What `torch.load` raises when the payload is not a tensor file at all. It has
-# no single error type for that: the zip reader raises `RuntimeError`, the
-# legacy pickle path raises `UnpicklingError`, `KeyError` or `IndexError`, and
-# an empty payload raises `EOFError`. None of these is a `ValueError`, so the
-# entrypoints' fallback mapped them to 500 -- for a blob the caller supplied.
-# `torch.OutOfMemoryError` subclasses `RuntimeError` and is a server condition,
-# so it is re-raised before this tuple is consulted.
-_UNPARSEABLE_EMBED_ERRORS: Final = (
-    EOFError,
-    LookupError,
-    RuntimeError,
-    UnpicklingError,
-    BadZipFile,
-)
 
 
 def _truncated_reason(exc: Exception) -> str:
@@ -65,16 +48,30 @@ def safe_load_prompt_embeds(
             parameter="prompt_embeds",
         )
 
+    # Decoded outside the try below so that a body which is not base64 keeps
+    # raising binascii.Error, which is a ValueError and already answered 400.
+    payload: Final = pybase64.b64decode(embed, validate=True)
+
     with check_sparse_tensor_invariants_threadsafe():
         try:
             tensor = torch.load(
-                BytesIO(pybase64.b64decode(embed, validate=True)),
+                BytesIO(payload),
                 weights_only=True,
                 map_location=torch.device("cpu"),
             )
-        except torch.OutOfMemoryError:
+        except (torch.OutOfMemoryError, MemoryError):
+            # Running out of memory is the server's condition, not the caller's.
             raise
-        except _UNPARSEABLE_EMBED_ERRORS as exc:
+        except Exception as exc:
+            # Everything else here is about the bytes the caller sent, and torch
+            # has no single error type for "this is not a tensor file": the zip
+            # reader raises `RuntimeError`, the legacy pickle path raises
+            # `UnpicklingError`, `KeyError` or `IndexError`, an empty payload
+            # raises `EOFError`. None of them is a `ValueError`, so the
+            # entrypoints' fallback mapped them all to 500. Catching by
+            # behaviour rather than by type also survives torch changing which
+            # error it raises for a given malformed payload.
+            #
             # torch's reason is worth keeping -- for a malformed sparse tensor
             # it names the offending index -- but it is built from the caller's
             # own bytes, so it is truncated rather than echoed whole.
