@@ -141,7 +141,7 @@ class PoolingBaseServing(ABC, BaseServing):
     async def _prepare_generators(
         self,
         ctx: PoolingServeContext,
-    ):
+    ) -> list[AsyncGenerator[PoolingRequestOutput, None]]:
         if ctx.engine_inputs is None:
             raise ValueError("Engine inputs not available")
 
@@ -183,6 +183,7 @@ class PoolingBaseServing(ABC, BaseServing):
             generators.append(generator)
 
         ctx.result_generator = merge_async_iterators(*generators)
+        return generators
 
     async def _collect_batch(
         self,
