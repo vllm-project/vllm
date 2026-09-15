@@ -64,7 +64,7 @@ def make_request() -> EngineCoreRequest:
     )
 
 
-class ThreadedUniProcExecutor(UniProcExecutor):
+class DummyExecutor(UniProcExecutor):
     def initialize_from_config(self, kv_cache_configs: list[KVCacheConfig]) -> None:
         super().initialize_from_config(kv_cache_configs)
         self.thread_pool = ThreadPoolExecutor(max_workers=1)
@@ -319,7 +319,7 @@ def test_engine_core_concurrent_batches():
         engine_core = EngineCore(
             vllm_config=vllm_config,
             log_stats=False,
-            executor_class=ThreadedUniProcExecutor,
+            executor_class=DummyExecutor,
         )
     assert engine_core.batch_queue is not None
 
@@ -403,7 +403,7 @@ def test_batch_queue_propagates_model_runner_execution_error() -> None:
     ).create_engine_config()
     engine_core = EngineCore(
         vllm_config=vllm_config,
-        executor_class=ThreadedUniProcExecutor,
+        executor_class=DummyExecutor,
         log_stats=False,
     )
 
