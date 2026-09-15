@@ -623,6 +623,7 @@ def rocm_fp8_paged_mqa_logits(
     block_tables: torch.Tensor,
     schedule_metadata: torch.Tensor,
     max_model_len: int,
+    use_workspace: bool = True,
 ) -> torch.Tensor:
     """Compute FP8 MQA logits using paged KV-cache.
 
@@ -661,9 +662,18 @@ def rocm_fp8_paged_mqa_logits(
                 aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits
             )
             batch_size, next_n, heads, _ = q_fp8.shape
-            (out_logits,) = current_workspace_manager().get_simultaneous(
-                ((batch_size * next_n, max_model_len), torch.float32),
-            )
+            if use_workspace:
+                (out_logits,) = current_workspace_manager().get_simultaneous(
+                    ((batch_size * next_n, max_model_len), torch.float32),
+                )
+            else:
+                # Workspace offset 0 would alias fused q_fp8.
+                out_logits = torch.full(
+                    (batch_size * next_n, max_model_len),
+                    float("-inf"),
+                    device=q_fp8.device,
+                    dtype=torch.float32,
+                )
             deepgemm_fp8_paged_mqa_logits(
                 q_fp8,
                 kv_cache_fp8,
@@ -682,10 +692,18 @@ def rocm_fp8_paged_mqa_logits(
             aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits_stage1
         )
         batch_size, next_n, heads, _ = q_fp8.shape
-        (out_qk,) = current_workspace_manager().get_simultaneous(
-            ((heads, batch_size * next_n, max_model_len), torch.float32),
-        )
-        out_qk.fill_(float("-inf"))
+        if use_workspace:
+            (out_qk,) = current_workspace_manager().get_simultaneous(
+                ((heads, batch_size * next_n, max_model_len), torch.float32),
+            )
+            out_qk.fill_(float("-inf"))
+        else:
+            out_qk = torch.full(
+                (heads, batch_size * next_n, max_model_len),
+                float("-inf"),
+                device=q_fp8.device,
+                dtype=torch.float32,
+            )
         deepgemm_fp8_paged_mqa_logits_stage1(
             q_fp8,
             kv_cache_fp8,
@@ -981,6 +999,15 @@ def rocm_aiter_sparse_attn_indexer_fake(
     candidate_blocks: torch.Tensor | None = None,
     candidate_block_size: int = 0,
     candidate_write: bool = False,
+    k_norm_weight: torch.Tensor | None = None,
+    k_norm_bias: torch.Tensor | None = None,
+    k_norm_eps: float = 1e-6,
+    positions: torch.Tensor | None = None,
+    cos_cache: torch.Tensor | None = None,
+    sin_cache: torch.Tensor | None = None,
+    weights_scale: float = 1.0,
+    is_neox_style: bool = True,
+    use_qk_rope_cache_fusion: bool = False,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -1005,6 +1032,15 @@ def rocm_aiter_sparse_attn_indexer(
     candidate_blocks: torch.Tensor | None = None,
     candidate_block_size: int = 0,
     candidate_write: bool = False,
+    k_norm_weight: torch.Tensor | None = None,
+    k_norm_bias: torch.Tensor | None = None,
+    k_norm_eps: float = 1e-6,
+    positions: torch.Tensor | None = None,
+    cos_cache: torch.Tensor | None = None,
+    sin_cache: torch.Tensor | None = None,
+    weights_scale: float = 1.0,
+    is_neox_style: bool = True,
+    use_qk_rope_cache_fusion: bool = False,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     forward_context = get_forward_context()
@@ -1022,26 +1058,49 @@ def rocm_aiter_sparse_attn_indexer(
         # would corrupt PyTorch's dispatch state.
         workspace_manager = current_workspace_manager()
 
-        # Prefill k_fp8 and k_scale buffers, used by
-        # rocm_aiter_sparse_attn_indexer's prefill path
-        workspace_manager.get_simultaneous(
-            ((total_seq_lens, head_dim), fp8_dtype),
-            ((total_seq_lens, 4), torch.uint8),
-        )
-
-        # Decode logits buffer, used by rocm_fp8_paged_mqa_logits.
-        decode_rows = _max_decode_logits_rows(hidden_states.shape[0])
-        if _ON_GFX942 or _ON_GFX950:
+        if use_qk_rope_cache_fusion:
+            num_tok_prof, n_head_prof, head_dim_q_prof = q_fp8.shape
+            # One get_simultaneous: separate calls alias at offset 0.
             workspace_manager.get_simultaneous(
-                ((decode_rows, max_model_len), torch.float32),
+                ((num_tok_prof, n_head_prof, head_dim_q_prof), fp8_dtype),
+                ((num_tok_prof, n_head_prof), torch.float32),
+                ((total_seq_lens, head_dim), fp8_dtype),
+                ((total_seq_lens, 4), torch.uint8),
             )
-        else:
-            workspace_manager.get_simultaneous(
-                (
+            decode_rows = _max_decode_logits_rows(hidden_states.shape[0])
+            if _ON_GFX942 or _ON_GFX950:
+                _ = torch.empty(
+                    (decode_rows, max_model_len),
+                    dtype=torch.float32,
+                    device=hidden_states.device,
+                )
+            else:
+                _ = torch.empty(
                     (q_fp8.shape[1], decode_rows, max_model_len),
-                    torch.float32,
-                ),
+                    dtype=torch.float32,
+                    device=hidden_states.device,
+                )
+        else:
+            # Prefill k_fp8 and k_scale buffers, used by
+            # rocm_aiter_sparse_attn_indexer's prefill path
+            workspace_manager.get_simultaneous(
+                ((total_seq_lens, head_dim), fp8_dtype),
+                ((total_seq_lens, 4), torch.uint8),
             )
+
+            # Decode logits buffer, used by rocm_fp8_paged_mqa_logits.
+            decode_rows = _max_decode_logits_rows(hidden_states.shape[0])
+            if _ON_GFX942 or _ON_GFX950:
+                workspace_manager.get_simultaneous(
+                    ((decode_rows, max_model_len), torch.float32),
+                )
+            else:
+                workspace_manager.get_simultaneous(
+                    (
+                        (q_fp8.shape[1], decode_rows, max_model_len),
+                        torch.float32,
+                    ),
+                )
         # Transient logits tensor peak memory, produced by
         # rocm_fp8_mqa_logits (prefill) and rocm_fp8_paged_mqa_logits
         # (decode). Prefill logits are bounded by
@@ -1071,6 +1130,15 @@ def rocm_aiter_sparse_attn_indexer(
             candidate_blocks,
             candidate_block_size,
             candidate_write,
+            k_norm_weight,
+            k_norm_bias,
+            k_norm_eps,
+            positions,
+            cos_cache,
+            sin_cache,
+            weights_scale,
+            is_neox_style,
+            use_qk_rope_cache_fusion,
         )
     layer_attn_metadata = attn_metadata[k_cache_prefix]
     assert isinstance(layer_attn_metadata, DeepseekV32IndexerMetadata)
@@ -1087,10 +1155,82 @@ def rocm_aiter_sparse_attn_indexer(
     num_tokens = slot_mapping.shape[0]
     if k is not None:
         k = k[:num_tokens]
-    elif not skip_k_cache_insert:
-        raise ValueError("k must be provided when skip_k_cache_insert is False")
+    elif not skip_k_cache_insert and not use_qk_rope_cache_fusion:
+        raise ValueError(
+            "k must be provided when skip_k_cache_insert and "
+            "use_qk_rope_cache_fusion are both False"
+        )
 
-    if not skip_k_cache_insert:
+    _k_fp8_prefill = _k_scale_prefill = None
+    if use_qk_rope_cache_fusion:
+        if (
+            k_norm_weight is None
+            or k_norm_bias is None
+            or positions is None
+            or cos_cache is None
+            or sin_cache is None
+            or k is None
+        ):
+            raise ValueError(
+                "use_qk_rope_cache_fusion=True requires k, k_norm_weight/"
+                "k_norm_bias/positions/cos_cache/sin_cache"
+            )
+        import aiter
+
+        # .contiguous() is a no-op for 1-token views.
+        if k.stride(-1) != 1 or k.stride(0) != k.size(-1):
+            if k.size(0) == 1:
+                k = k.as_strided(k.size(), (k.size(-1), 1))
+            else:
+                out = torch.empty(k.shape, dtype=k.dtype, device=k.device)
+                out.copy_(k)
+                k = out
+
+        q_bf16 = q_fp8
+
+        assert k.dim() == 2 and k.stride(1) == 1 and k.stride(0) == k.size(1), (
+            f"fused indexer k not contiguous [num_tokens, head_dim]: "
+            f"shape={tuple(k.shape)} stride={tuple(k.stride())}"
+        )
+
+        num_tokens_q, n_head, head_dim_q = q_bf16.shape
+        if has_prefill:
+            q_fp8, weights_out, _k_fp8_prefill, _k_scale_prefill = (
+                current_workspace_manager().get_simultaneous(
+                    ((num_tokens_q, n_head, head_dim_q), fp8_dtype),
+                    ((num_tokens_q, n_head), torch.float32),
+                    ((total_seq_lens, head_dim), fp8_dtype),
+                    ((total_seq_lens, 4), torch.uint8),
+                )
+            )
+        else:
+            q_fp8, weights_out = current_workspace_manager().get_simultaneous(
+                ((num_tokens_q, n_head, head_dim_q), fp8_dtype),
+                ((num_tokens_q, n_head), torch.float32),
+            )
+        aiter.indexer_qk_rope_quant_and_cache(
+            q_bf16,
+            q_fp8,
+            weights,
+            weights_out,
+            k,
+            kv_cache,
+            slot_mapping,
+            k_norm_weight,
+            k_norm_bias,
+            positions,
+            cos_cache,
+            sin_cache,
+            k_norm_eps,
+            quant_block_size,
+            scale_fmt,
+            weights_scale,
+            # Match unfused K-cache layout for paged_mqa.
+            preshuffle=True,
+            is_neox=is_neox_style,
+        )
+        weights = weights_out
+    elif not skip_k_cache_insert:
         indexer_k_quant_and_cache_triton(
             k,
             kv_cache,
@@ -1103,11 +1243,15 @@ def rocm_aiter_sparse_attn_indexer(
         prefill_metadata = layer_attn_metadata.prefill
         assert prefill_metadata is not None
 
-        workspace_manager = current_workspace_manager()
-        k_fp8_full, k_scale_full = workspace_manager.get_simultaneous(
-            ((total_seq_lens, head_dim), fp8_dtype),
-            ((total_seq_lens, 4), torch.uint8),
-        )
+        if _k_fp8_prefill is not None:
+            k_fp8_full = _k_fp8_prefill
+            k_scale_full = _k_scale_prefill
+        else:
+            workspace_manager = current_workspace_manager()
+            k_fp8_full, k_scale_full = workspace_manager.get_simultaneous(
+                ((total_seq_lens, head_dim), fp8_dtype),
+                ((total_seq_lens, 4), torch.uint8),
+            )
         for chunk in prefill_metadata.chunks:
             k_fp8 = k_fp8_full[: chunk.total_seq_lens]
             k_scale = k_scale_full[: chunk.total_seq_lens]
@@ -1215,6 +1359,7 @@ def rocm_aiter_sparse_attn_indexer(
             decode_metadata.block_table,
             decode_metadata.schedule_metadata,
             max_model_len=max_model_len,
+            use_workspace=not use_qk_rope_cache_fusion,
         )
 
         if candidate_blocks is not None:

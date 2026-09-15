@@ -1844,6 +1844,7 @@ class rocm_aiter_ops:
     # Lazily probed: whether aiter.topk_softmax supports the
     # num_shared_experts / shared_expert_scoring_func args (7-arg form).
     _TOPK_SOFTMAX_FUSED_SIGMOID: bool | None = None
+    _DSV32_INDEXER_QK_FUSION_KERNEL_PRESENT: bool | None = None
 
     @classmethod
     def refresh_env_variables(cls):
@@ -2099,6 +2100,22 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
+    def is_dsv32_indexer_qk_fusion_enabled(cls) -> bool:
+        if not cls._AITER_ENABLED:
+            return False
+        if cls._DSV32_INDEXER_QK_FUSION_KERNEL_PRESENT is None:
+            try:
+                import aiter
+
+                cls._DSV32_INDEXER_QK_FUSION_KERNEL_PRESENT = hasattr(
+                    aiter, "indexer_qk_rope_quant_and_cache"
+                )
+            except ImportError:
+                cls._DSV32_INDEXER_QK_FUSION_KERNEL_PRESENT = False
+        return cls._DSV32_INDEXER_QK_FUSION_KERNEL_PRESENT
+
+    @classmethod
+    @if_aiter_supported
     def is_tgemm_enabled(cls) -> bool:
         from vllm.platforms.rocm import on_gfx950
 
@@ -2220,7 +2237,11 @@ class rocm_aiter_ops:
                 direct_register_custom_op(
                     op_name="rocm_aiter_sparse_attn_indexer",
                     op_func=rocm_aiter_sparse_attn_indexer,
-                    mutates_args=["topk_indices_buffer", "candidate_blocks"],
+                    mutates_args=[
+                        "topk_indices_buffer",
+                        "candidate_blocks",
+                        "kv_cache",
+                    ],
                     fake_impl=rocm_aiter_sparse_attn_indexer_fake,
                     dispatch_key=current_platform.dispatch_key,
                 )
@@ -2398,7 +2419,11 @@ class rocm_aiter_ops:
             direct_register_custom_op(
                 op_name="rocm_aiter_sparse_attn_indexer",
                 op_func=rocm_aiter_sparse_attn_indexer,
-                mutates_args=["topk_indices_buffer", "candidate_blocks"],
+                mutates_args=[
+                    "topk_indices_buffer",
+                    "candidate_blocks",
+                    "kv_cache",
+                ],
                 fake_impl=rocm_aiter_sparse_attn_indexer_fake,
                 dispatch_key=current_platform.dispatch_key,
             )

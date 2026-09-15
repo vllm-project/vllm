@@ -809,6 +809,10 @@ class ROCMAiterMLASparseImpl(
             (q_concat_shape, vllm_config.model_config.dtype),
         )
 
+    def record_logical_topk_ready(self) -> None:
+        # Needed for torch.compile of MLAModules.forward.
+        return
+
     def _forward_mla(
         self,
         layer: AttentionLayer,
