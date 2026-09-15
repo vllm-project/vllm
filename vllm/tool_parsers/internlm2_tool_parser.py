@@ -177,6 +177,18 @@ class Internlm2ToolParser(ToolParser):
                         cur_args_json, prev_args_json
                     )
 
+                    # extract_intermediate_diff reports the characters inserted
+                    # between the two parses, which is not the same as the text the
+                    # client still needs: partial_json_parser closes the object
+                    # optimistically, so a quote or brace it produced in an earlier
+                    # parse counts as already sent even though it never was, and the
+                    # arguments arrive truncated. Once the JSON is complete, reconcile
+                    # the delta against what has actually been streamed.
+                    if is_complete_json(parsable_arr):
+                        streamed = self.streamed_args_for_tool[self.current_tool_id]
+                        if cur_args_json.startswith(streamed + argument_diff):
+                            argument_diff = cur_args_json[len(streamed) :]
+
                     delta = DeltaMessage(
                         tool_calls=[
                             DeltaToolCall(
