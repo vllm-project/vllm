@@ -82,11 +82,13 @@ class RejectionSampler(nn.Module):
         )
         self.fly_window_size: int | None = None
         self.fly_entropy_threshold: float | None = None
+        self.fly_entropy_top_k = 3
         if self.use_fly:
             assert spec_config is not None
             assert spec_config.fly_window_size is not None
             self.fly_window_size = spec_config.fly_window_size
             self.fly_entropy_threshold = spec_config.fly_entropy_threshold
+            self.fly_entropy_top_k = spec_config.fly_entropy_top_k
             if device is not None and device.type == "cpu":
                 raise NotImplementedError("FLy verification is not supported on CPU.")
         self.use_fp64_gumbel = getattr(sampler, "use_fp64_gumbel", False)
@@ -216,6 +218,7 @@ class RejectionSampler(nn.Module):
             use_fp64_gumbel=self.use_fp64_gumbel,
             fly_window_size=self.fly_window_size,
             fly_entropy_threshold=self.fly_entropy_threshold,
+            fly_entropy_top_k=self.fly_entropy_top_k,
         )
 
         logprobs_tensors = None
@@ -446,6 +449,7 @@ def rejection_sample(
     use_fp64_gumbel: bool = False,
     fly_window_size: int | None = None,
     fly_entropy_threshold: float | None = None,
+    fly_entropy_top_k: int = 3,
 ) -> torch.Tensor:
     assert draft_token_ids.ndim == 1
     assert draft_probs is None or draft_probs.ndim == 2
@@ -500,7 +504,7 @@ def rejection_sample(
     fly_entropy: torch.Tensor | None = None
     if fly_enabled:
         assert target_probs is not None
-        fly_entropy = compute_fly_entropy(target_probs)
+        fly_entropy = compute_fly_entropy(target_probs, fly_entropy_top_k)
 
     if not sampling_metadata.all_random:
         # Rejection sampling for greedy sampling requests.

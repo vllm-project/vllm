@@ -10,23 +10,20 @@ inside its rejection kernel.
 
 import torch
 
-import vllm.envs as envs
 from vllm.triton_utils import tl, triton
 
 
 def compute_fly_entropy(
-    values: torch.Tensor, *, from_logits: bool = False
+    values: torch.Tensor, entropy_top_k: int, *, from_logits: bool = False
 ) -> torch.Tensor:
     """Compute FLy's top-k entropy from processed target probabilities or logits."""
-
     if values.ndim != 2:
         raise ValueError("FLy expects 2-D target probabilities or logits")
     if values.shape[-1] == 0:
         raise ValueError("FLy requires a non-empty target vocabulary")
 
-    entropy_top_k = envs.VLLM_FLY_ENTROPY_TOP_K
     if entropy_top_k <= 0:
-        raise ValueError("VLLM_FLY_ENTROPY_TOP_K must be greater than zero")
+        raise ValueError("fly_entropy_top_k must be greater than zero")
     top_k = min(entropy_top_k, values.shape[-1])
     values = values.to(torch.float32)
     top_values = torch.topk(values, k=top_k, dim=-1).values
@@ -67,8 +64,8 @@ def apply_fly_greedy_acceptance_kernel(
         tl.zeros([], dtype=cu_num_draft_tokens_ptr.dtype.element_ty)
         if req_idx == 0
         else tl.load(cu_num_draft_tokens_ptr + req_idx - 1)
-    )
-    end_idx = tl.load(cu_num_draft_tokens_ptr + req_idx)
+    ).to(tl.int64)
+    end_idx = tl.load(cu_num_draft_tokens_ptr + req_idx).to(tl.int64)
     num_draft_tokens = end_idx - start_idx
 
     for pos in range(num_draft_tokens):
@@ -124,8 +121,8 @@ def apply_fly_random_acceptance_kernel(
         tl.zeros([], dtype=cu_num_draft_tokens_ptr.dtype.element_ty)
         if req_idx == 0
         else tl.load(cu_num_draft_tokens_ptr + req_idx - 1)
-    )
-    end_idx = tl.load(cu_num_draft_tokens_ptr + req_idx)
+    ).to(tl.int64)
+    end_idx = tl.load(cu_num_draft_tokens_ptr + req_idx).to(tl.int64)
     num_draft_tokens = end_idx - start_idx
 
     for pos in range(num_draft_tokens):
