@@ -55,10 +55,8 @@ _CLASS_TO_MODULE: dict[str, str] = {
     # tiiuae/falcon-7b(-instruct) models. Newer Falcon models will use the
     # `FalconConfig` class from the official HuggingFace transformers library.
     "RWConfig": "vllm.transformers_utils.configs.falcon",
-    "LagunaConfig": "vllm.transformers_utils.configs.laguna",
     "Lfm2MoeConfig": "vllm.transformers_utils.configs.lfm2_moe",
     "MedusaConfig": "vllm.transformers_utils.configs.medusa",
-    "MellumConfig": "vllm.transformers_utils.configs.mellum",
     "MiDashengLMConfig": "vllm.transformers_utils.configs.midashenglm",
     "MiniMaxM3Config": "vllm.transformers_utils.configs.minimax_m3",
     "MiniMaxM3MTPConfig": "vllm.transformers_utils.configs.minimax_m3",
@@ -151,10 +149,8 @@ __all__ = [
     "HyperCLOVAXConfig",
     "IsaacConfig",
     "RWConfig",
-    "LagunaConfig",
     "Lfm2MoeConfig",
     "MedusaConfig",
-    "MellumConfig",
     "MiDashengLMConfig",
     "MiniMaxM3Config",
     "MiniMaxM3MTPConfig",
