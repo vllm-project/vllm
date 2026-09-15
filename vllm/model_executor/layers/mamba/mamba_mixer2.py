@@ -760,6 +760,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
             query_start_loc_d = attn_metadata.query_start_loc_d
             num_decodes = attn_metadata.num_decodes
             num_decode_tokens = attn_metadata.num_decode_tokens
+            checkpoint_chunk_idx = attn_metadata.checkpoint_chunk_idx
+            checkpoint_block_idx = attn_metadata.checkpoint_block_idx
 
         if attn_metadata is None:
             # V1 profile run -- warm up SSD kernels so that autotuning
@@ -852,6 +854,19 @@ class MambaMixer2(MambaBase, PluggableLayer):
             x = hidden_states_B_C_p.transpose(
                 0, 1
             )  # this is the form that causal-conv see
+
+            if checkpoint_chunk_idx is not None:
+                # Raw pre-conv window ending at the checkpoint, written before
+                # the conv so the running-block write wins on any aliasing.
+                # The checkpoint is >= one hash block into the query, so the
+                # window cannot underflow.
+                assert cu_chunk_seqlen_p is not None
+                ends = cu_chunk_seqlen_p[checkpoint_chunk_idx + 1]
+                window = torch.arange(1 - self.conv_kernel_size, 0, device=x.device)
+                conv_state[checkpoint_block_idx] = x[
+                    :, ends.unsqueeze(1) + window
+                ].permute(1, 0, 2)
+
             hidden_states_B_C_p = causal_conv1d_fn(
                 x,
                 self.conv_weights,
@@ -890,6 +905,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
             # NOTE: final output is an in-place update of out tensor
             assert preallocated_ssm_out_p is not None
+            keep_all_states = is_mamba_cache_all or checkpoint_chunk_idx is not None
             varlen_states = mamba_chunk_scan_combined_varlen(
                 hidden_states_p.view(
                     num_prefill_tokens, self.num_heads // self.tp_size, self.head_dim
@@ -907,7 +923,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 cu_chunk_seqlens=cu_chunk_seqlen_p,
                 last_chunk_indices=last_chunk_indices_p,
                 initial_states=initial_states,
-                return_intermediate_states=is_mamba_cache_all,
+                return_intermediate_states=keep_all_states,
                 dt_softplus=True,
                 dt_limit=(0.0, float("inf")),
                 out=preallocated_ssm_out_p.view(num_prefill_tokens, -1, self.head_dim),
@@ -1002,7 +1018,16 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 # - varlen state is a (num_prefills, nheads, headdim, dstate)
                 #   tensor
                 assert state_indices_tensor_p is not None
-                ssm_state[state_indices_tensor_p] = varlen_states
+                final_states = (
+                    varlen_states[last_chunk_indices_p]
+                    if keep_all_states
+                    else varlen_states
+                )
+                if checkpoint_chunk_idx is not None:
+                    ssm_state[checkpoint_block_idx] = varlen_states[
+                        checkpoint_chunk_idx
+                    ]
+                ssm_state[state_indices_tensor_p] = final_states
                 if ring_start is not None and self._updates_replayssm_trackers:
                     assert prev_num_accepted is not None
                     reset_replayssm_ring_trackers(

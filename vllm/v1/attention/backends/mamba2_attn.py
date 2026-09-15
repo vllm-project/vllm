@@ -112,9 +112,8 @@ class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
     # Chunk-related metadata (only for prefill)
     seq_idx_p: torch.Tensor | None = None
 
-    # Internal prefill checkpoints, compacted to the checkpointing rows and
-    # sharing row order. Both None when no row checkpoints this step. The
-    # checkpoint's token offset is cu_chunk_seqlen_p[checkpoint_chunk_idx + 1].
+    # Internal prefill checkpoints, compacted to the checkpointing rows. The
+    # token offset is cu_chunk_seqlen_p[checkpoint_chunk_idx + 1].
     checkpoint_chunk_idx: torch.Tensor | None = None
     checkpoint_block_idx: torch.Tensor | None = None
 
@@ -137,53 +136,6 @@ class Mamba2AttentionMetadataBuilder(
             "chunk_size needs to be set in the model config for Mamba2 models"
         )
         self.chunk_size: int = chunk_size
-
-    def _build_checkpoint_metadata(
-        self,
-        common: Mamba2AttentionMetadata,
-        common_attn_metadata: CommonAttentionMetadata,
-    ) -> tuple[list[int] | None, torch.Tensor | None]:
-        """Per-row internal prefill checkpoint offsets and destinations.
-
-        Returns:
-            ``(offsets, block_idx)``: offsets feed ``_compute_chunk_metadata``
-            (0 = no checkpoint); ``block_idx`` is compacted to the
-            checkpointing rows. Both None when no row checkpoints.
-        """
-        cache_config = self.vllm_config.cache_config
-        if (
-            cache_config.mamba_cache_mode != "align"
-            or self.kv_cache_spec.num_prefill_checkpoint_blocks == 0
-        ):
-            return None, None
-
-        first = common.num_reqs - common.num_prefills
-        block_size = self.kv_cache_spec.block_size
-        spec_config = self.vllm_config.speculative_config
-        seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
-        assert seq_lens_cpu is not None
-        _, qsl_cpu = self._prefill_cpu_metadata(common, common_attn_metadata)
-
-        offsets, cols = compute_mamba_prefill_checkpoints(
-            seq_lens_cpu[first : first + common.num_prefills].tolist(),
-            (qsl_cpu[1:] - qsl_cpu[:-1]).tolist(),
-            hash_block_size=cache_config.prefix_match_unit or block_size,
-            mamba_block_size=block_size,
-            checkpoint_alignment=self.kv_cache_spec.prefill_checkpoint_alignment,
-            drop_eagle_block=(
-                spec_config is not None and spec_config.use_eagle_block_drop()
-            ),
-        )
-        rows = [i for i, offset in enumerate(offsets) if offset]
-        if not rows:
-            return None, None
-
-        dev = common_attn_metadata.query_start_loc.device
-        block_idx = common_attn_metadata.block_table_tensor[
-            async_tensor_h2d([first + i for i in rows], dev),
-            async_tensor_h2d([cols[i] for i in rows], dev),
-        ]
-        return offsets, block_idx
 
     def build(
         self,
@@ -218,9 +170,40 @@ class Mamba2AttentionMetadataBuilder(
                 )
                 prep_initial_states = bool((num_computed_tokens_p_cpu > 0).any())
 
-            checkpoint_offsets_p, checkpoint_block_idx = (
-                self._build_checkpoint_metadata(common, common_attn_metadata)
-            )
+            checkpoint_offsets_p = None
+            cache_config = self.vllm_config.cache_config
+            if (
+                cache_config.mamba_cache_mode == "align"
+                and self.kv_cache_spec.num_prefill_checkpoint_blocks
+            ):
+                # Offsets feed the chunk split below so a chunk ends on the
+                # checkpoint; block_idx is compacted to the rows that take one.
+                spec_config = self.vllm_config.speculative_config
+                block_size = self.kv_cache_spec.block_size
+                first = common.num_reqs - common.num_prefills
+                seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+                assert seq_lens_cpu is not None
+                _, qsl = self._prefill_cpu_metadata(common, common_attn_metadata)
+                offsets, cols = compute_mamba_prefill_checkpoints(
+                    seq_lens_cpu[first : first + common.num_prefills].tolist(),
+                    (qsl[1:] - qsl[:-1]).tolist(),
+                    hash_block_size=cache_config.prefix_match_unit or block_size,
+                    mamba_block_size=block_size,
+                    checkpoint_alignment=(
+                        self.kv_cache_spec.prefill_checkpoint_alignment
+                    ),
+                    drop_eagle_block=(
+                        spec_config is not None and spec_config.use_eagle_block_drop()
+                    ),
+                )
+                rows = [i for i, offset in enumerate(offsets) if offset]
+                if rows:
+                    checkpoint_offsets_p = offsets
+                    dev = common_attn_metadata.query_start_loc.device
+                    checkpoint_block_idx = common_attn_metadata.block_table_tensor[
+                        async_tensor_h2d([first + i for i in rows], dev),
+                        async_tensor_h2d([cols[i] for i in rows], dev),
+                    ]
 
             (
                 cu_chunk_seqlen_p,
