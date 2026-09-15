@@ -113,6 +113,12 @@ class QuantizationConfig(ABC):
     after remapping, so should be in vLLM format (e.g. .q_scale, not .q.scale)."""
     online_quantization_config: "OnlineQuantizationConfig | None" = None
 
+    model_root_prefix: str = ""
+    """Prefix the model is loaded under when it is not the top-level model, e.g.
+    `"draft_model"` for a speculative drafter. Runtime layer prefixes include it,
+    but the checkpoint's quantization config does not, so it must be stripped
+    before layer names are matched against targets."""
+
     def __init__(self):
         super().__init__()
         # mapping is updated by models as they initialize
@@ -248,6 +254,25 @@ class QuantizationConfig(ABC):
 
         return WeightsMapper(orig_to_new_suffix={".g_idx": None})
 
+    def strip_model_root_prefix(self, prefix: str) -> str:
+        """Convert a runtime layer prefix into a checkpoint-relative layer name.
+
+        Args:
+            prefix: the layer's runtime prefix, which is rooted at
+                `model_root_prefix`.
+
+        Returns:
+            The layer name as the checkpoint's quantization config refers to it.
+        """
+        root = self.model_root_prefix
+        if not root:
+            return prefix
+        if prefix == root:
+            return ""
+        if prefix.startswith(f"{root}."):
+            return prefix[len(root) + 1 :]
+        return prefix
+
     def apply_vllm_mapper(  # noqa: B027
         self, hf_to_vllm_mapper: "WeightsMapper"
     ):
@@ -295,6 +320,7 @@ def resolve_quant_method(
         UnquantizedLinearMethod,
     )
 
+    prefix = quant_config.strip_model_root_prefix(prefix)
     base_quant_method = quant_config.get_quant_method(layer, prefix)
     if quant_config.online_quantization_config is None:
         return base_quant_method
