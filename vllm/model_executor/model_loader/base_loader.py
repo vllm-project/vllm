@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
@@ -9,6 +10,12 @@ import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.expert_substitution import (
+    clear_expert_substitution_load_state,
+    intercept_expert_substitution_weights,
+    validate_expert_substitution_model,
+    validate_expert_substitution_weights_loaded,
+)
 from vllm.model_executor.model_loader.reload import finalize_layerwise_processing
 from vllm.model_executor.model_loader.utils import (
     initialize_model,
@@ -52,6 +59,18 @@ class BaseModelLoader(ABC):
         log_model_inspection(model)
         return model
 
+    def _load_weights_from_iterator(
+        self, model: nn.Module, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> set[str] | None:
+        """Load checkpoint tensors, including model-independent replacements."""
+        weights, substitution_params = intercept_expert_substitution_weights(
+            model, weights
+        )
+        loaded_weights = model.load_weights(weights)
+        if loaded_weights is not None:
+            loaded_weights.update(substitution_params)
+        return loaded_weights
+
     @instrument(span_name="Load model")
     def load_model(
         self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
@@ -71,8 +90,12 @@ class BaseModelLoader(ABC):
                     prefix=prefix,
                 )
 
+            validate_expert_substitution_model(model_config.hf_config, model)
+            clear_expert_substitution_load_state(model)
+
             logger.debug("Loading weights on %s ...", load_device)
             self.load_weights(model, model_config)
+            validate_expert_substitution_weights_loaded(model)
 
             # Log peak GPU memory after loading weights. This is needed
             # to have test coverage on peak memory for online quantization.
