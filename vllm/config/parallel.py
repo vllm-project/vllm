@@ -5,7 +5,7 @@ import os
 import socket
 from collections.abc import Callable
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Literal, Self, overload
+from typing import TYPE_CHECKING, Any, Literal, Self, cast, overload
 
 import regex as re
 import torch
@@ -581,10 +581,14 @@ class ParallelConfig:
             self.numa_bind = True
 
         if self.enable_eplb:
-            if not current_platform.is_cuda_alike() and not current_platform.is_xpu():
+            if not (
+                current_platform.supports_eplb()
+                or current_platform.is_cuda_alike()
+                or current_platform.is_xpu()
+            ):
                 raise ValueError(
-                    "Expert parallelism load balancing is only supported on "
-                    "CUDA devices or ROCm devices or XPU devices now."
+                    "Expert parallelism load balancing is not supported "
+                    "on this platform."
                 )
             if not self.enable_expert_parallel:
                 raise ValueError("enable_expert_parallel must be True to use EPLB.")
@@ -1135,6 +1139,27 @@ class ParallelConfig:
             )
 
         if self.enable_eplb and self.eplb_config.communicator is None:
+            platform_backend = current_platform.get_default_eplb_communicator()
+            if platform_backend is not None:
+                if platform_backend not in (
+                    "torch_nccl",
+                    "torch_gloo",
+                    "nixl",
+                    "pynccl",
+                ):
+                    raise ValueError(f"Unknown EPLB communicator: {platform_backend}")
+                if self.eplb_config.use_async and platform_backend in (
+                    "torch_nccl",
+                    "pynccl",
+                ):
+                    raise ValueError(
+                        f"{platform_backend} communicator is incompatible with "
+                        "async EPLB."
+                    )
+                self.eplb_config.communicator = cast(
+                    EPLBCommunicatorBackend, platform_backend
+                )
+                return
             # Prefer NIXL when available: zero-copy RDMA reads, compatible
             # with both async EPLB and elastic EP.
             # Fallbacks: pynccl for elastic EP (stateless groups need it),
