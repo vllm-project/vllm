@@ -29,6 +29,7 @@ def _prepare_dflash_inputs_to_capture(
     attn_groups: list[list[AttentionGroup]],
     kv_cache_config: KVCacheConfig,
     max_model_len: int,
+    dcp_size: int,
     skip_attn: bool,
     causal: bool | Mapping[int, bool],
 ) -> AttentionState:
@@ -46,7 +47,7 @@ def _prepare_dflash_inputs_to_capture(
             input_buffers.dcp_local_seq_lens,
             input_batch.seq_lens,
             input_batch.num_reqs,
-            block_tables.cp_size,
+            dcp_size,
             block_tables.cp_rank,
             block_tables.cp_interleave,
             num_reqs_padded=input_batch.num_reqs_after_padding,
@@ -104,6 +105,7 @@ class DFlashCudaGraphManager(CudaGraphManager):
                 attn_groups,
                 kv_cache_config,
                 max_model_len,
+                self.vllm_config.parallel_config.decode_context_parallel_size,
                 skip_attn=(desc.cg_mode == CUDAGraphMode.PIECEWISE),
                 causal=causal,
             )
