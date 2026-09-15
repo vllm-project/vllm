@@ -3,6 +3,7 @@
 """A layer that compute logits from hidden_stats."""
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from functools import cache
 
 import torch
@@ -19,6 +20,7 @@ from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
+    VocabParallelEmbeddingShardIndices,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
@@ -51,6 +53,14 @@ def _topk(scores: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor]:
     if impl is None or not scores.is_cuda:
         return torch.topk(scores, k, dim=-1)
     return impl(scores, k, sorted=True, deterministic=True)
+
+
+@dataclass(frozen=True)
+class LocalLogits:
+    """Vocabulary-sharded logits and the layout needed to interpret them."""
+
+    logits: torch.Tensor
+    shard_indices: VocabParallelEmbeddingShardIndices
 
 
 # --8<-- [start:logits_processor]
@@ -132,6 +142,36 @@ class LogitsProcessor(PluggableLayer):
             # None may be returned for rank > 0
             logits = tensor_model_parallel_gather(logits)
         return logits
+
+    def get_local_logits(
+        self,
+        lm_head: VocabParallelEmbedding,
+        hidden_states: torch.Tensor,
+        embedding_bias: torch.Tensor | None = None,
+    ) -> LocalLogits | None:
+        """Return post-processed logits before TP vocabulary gathering.
+
+        ``logits_as_input`` has no vocabulary-shard layout, so callers must
+        retain the regular gathered path in that case.
+        """
+        if self.logits_as_input:
+            return None
+
+        logits = self._apply_head(lm_head, hidden_states, embedding_bias)
+        if self.soft_cap is not None:
+            logits = torch.tanh(logits / self.soft_cap) * self.soft_cap
+        if self.scale != 1.0:
+            logits *= self.scale
+
+        shard_indices = lm_head.shard_indices
+        org_end = shard_indices.num_org_elements
+        added_start = shard_indices.num_org_elements_padded
+        added_end = added_start + shard_indices.num_added_elements
+        if org_end < added_start:
+            logits[..., org_end:added_start] = -float("inf")
+        if added_end < logits.shape[-1]:
+            logits[..., added_end:] = -float("inf")
+        return LocalLogits(logits, shard_indices)
 
     def _apply_head(
         self,
