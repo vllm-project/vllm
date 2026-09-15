@@ -404,18 +404,22 @@ class AsyncLLM(EngineClient):
                 raise NotImplementedError
 
             # Streaming input case.
-            return await self._add_streaming_input_request(
-                request_id,
-                prompt,
-                params,
-                arrival_time,
-                lora_request,
-                tokenization_kwargs,
-                trace_headers,
-                priority,
-                data_parallel_rank,
-                session_id,
-            )
+            try:
+                return await self._add_streaming_input_request(
+                    request_id,
+                    prompt,
+                    params,
+                    arrival_time,
+                    lora_request,
+                    tokenization_kwargs,
+                    trace_headers,
+                    priority,
+                    data_parallel_rank,
+                    session_id,
+                )
+            except asyncio.CancelledError:
+                await self.abort(request_id, internal=False)
+                raise
 
         # Convert Input --> Request.
         if isinstance(prompt, EngineCoreRequest):
@@ -485,24 +489,32 @@ class AsyncLLM(EngineClient):
         # Use cloned params that may have been updated in process_inputs()
         params = request.params
 
-        if is_pooling or params.n == 1:
-            await self._add_request(request, prompt_text, None, 0, queue)
+        try:
+            if is_pooling or params.n == 1:
+                await self._add_request(request, prompt_text, None, 0, queue)
+                return queue
+
+            parent_params = params
+            assert isinstance(parent_params, SamplingParams)
+
+            # Fan out child requests (for n>1).
+            parent_request = ParentRequest(request)
+            for idx in range(parent_params.n):
+                request_id, child_params = parent_request.get_child_info(idx)
+                child_request = request if idx == parent_params.n - 1 else copy(request)
+                child_request.request_id = request_id
+                child_request.sampling_params = child_params
+                await self._add_request(
+                    child_request, prompt_text, parent_request, idx, queue
+                )
             return queue
-
-        parent_params = params
-        assert isinstance(parent_params, SamplingParams)
-
-        # Fan out child requests (for n>1).
-        parent_request = ParentRequest(request)
-        for idx in range(parent_params.n):
-            request_id, child_params = parent_request.get_child_info(idx)
-            child_request = request if idx == parent_params.n - 1 else copy(request)
-            child_request.request_id = request_id
-            child_request.sampling_params = child_params
-            await self._add_request(
-                child_request, prompt_text, parent_request, idx, queue
-            )
-        return queue
+        except asyncio.CancelledError:
+            # The caller never receives the collector and can therefore never
+            # abort these requests; any state already registered with the
+            # OutputProcessor would leak. external_req_id covers all children.
+            assert request.external_req_id is not None
+            await self.abort(request.external_req_id, internal=False)
+            raise
 
     async def _add_request(
         self,
