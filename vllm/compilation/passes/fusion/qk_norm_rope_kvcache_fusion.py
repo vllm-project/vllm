@@ -232,11 +232,13 @@ class QkNormRopeKvCachePattern:
         self.k_size = self.num_kv_heads * self.head_size
         self.v_size = self.num_kv_heads * self.head_size_v
 
-        self.rope_matcher = MatcherRotaryEmbedding(
-            is_neox=is_neox,
-            head_size=self.head_size,
-            num_heads=self.num_heads,
-            num_kv_heads=self.num_kv_heads,
+        self.rope_matcher: MatcherRotaryEmbedding | MatcherMRotaryEmbedding = (
+            MatcherRotaryEmbedding(
+                is_neox=is_neox,
+                head_size=self.head_size,
+                num_heads=self.num_heads,
+                num_kv_heads=self.num_kv_heads,
+            )
         )
 
     def get_inputs(self) -> list:
@@ -497,11 +499,10 @@ class QkNormRopeKvCachePattern:
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         # make_fx counts `self` in bound-method code params; wrap as plain fns.
-        # Distinct names per branch so mypy doesn't see one name, two signatures.
         if self.quant_query:
             if _USE_LAYERNAME:
 
-                def pattern_q(
+                def pattern_q_with_layer(
                     qkv,
                     positions,
                     q_weight,
@@ -520,7 +521,7 @@ class QkNormRopeKvCachePattern:
                         layer_name,
                     )
 
-                def replacement_q(
+                def replacement_q_with_layer(
                     qkv,
                     positions,
                     q_weight,
@@ -539,27 +540,30 @@ class QkNormRopeKvCachePattern:
                         layer_name,
                     )
 
+                self._register(pattern_q_with_layer, replacement_q_with_layer, pm_pass)
             else:
 
-                def pattern_q(
+                def pattern_q_without_layer(
                     qkv, positions, q_weight, k_weight, cos_sin_cache, q_scale
                 ):
                     return self.pattern_fp8_quant_query(
                         qkv, positions, q_weight, k_weight, cos_sin_cache, q_scale
                     )
 
-                def replacement_q(
+                def replacement_q_without_layer(
                     qkv, positions, q_weight, k_weight, cos_sin_cache, q_scale
                 ):
                     return self.replacement_fp8_quant_query(
                         qkv, positions, q_weight, k_weight, cos_sin_cache, q_scale
                     )
 
-            self._register(pattern_q, replacement_q, pm_pass)
+                self._register(
+                    pattern_q_without_layer, replacement_q_without_layer, pm_pass
+                )
         else:
             if _USE_LAYERNAME:
 
-                def pattern_noq(
+                def pattern_noq_with_layer(
                     qkv,
                     positions,
                     q_weight,
@@ -576,7 +580,7 @@ class QkNormRopeKvCachePattern:
                         layer_name,
                     )
 
-                def replacement_noq(
+                def replacement_noq_with_layer(
                     qkv,
                     positions,
                     q_weight,
@@ -593,19 +597,30 @@ class QkNormRopeKvCachePattern:
                         layer_name,
                     )
 
+                self._register(
+                    pattern_noq_with_layer, replacement_noq_with_layer, pm_pass
+                )
             else:
 
-                def pattern_noq(qkv, positions, q_weight, k_weight, cos_sin_cache):
+                def pattern_noq_without_layer(
+                    qkv, positions, q_weight, k_weight, cos_sin_cache
+                ):
                     return self.pattern_non_fp8_quant_query(
                         qkv, positions, q_weight, k_weight, cos_sin_cache
                     )
 
-                def replacement_noq(qkv, positions, q_weight, k_weight, cos_sin_cache):
+                def replacement_noq_without_layer(
+                    qkv, positions, q_weight, k_weight, cos_sin_cache
+                ):
                     return self.replacement_non_fp8_quant_query(
                         qkv, positions, q_weight, k_weight, cos_sin_cache
                     )
 
-            self._register(pattern_noq, replacement_noq, pm_pass)
+                self._register(
+                    pattern_noq_without_layer,
+                    replacement_noq_without_layer,
+                    pm_pass,
+                )
 
 
 class QkNormMRopeKvCachePattern(QkNormRopeKvCachePattern):
