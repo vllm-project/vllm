@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
+from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -31,7 +32,6 @@ def _hc_prenorm_gemm_outputs(
         compute_num_split,
     )
     from vllm.utils.deep_gemm import (
-        is_deep_gemm_supported,
         tf32_hc_prenorm_gemm,
     )
 
@@ -119,7 +119,6 @@ def mhc_pre_delayed_tilelang(
         compute_mhc_pre_num_splits,
     )
     from vllm.utils.deep_gemm import (
-        is_deep_gemm_supported,
         tf32_hc_prenorm_gemm,
     )
 
@@ -333,7 +332,6 @@ def mhc_fused_post_pre_delayed_tilelang(
         compute_mhc_pre_num_splits,
     )
     from vllm.utils.deep_gemm import (
-        is_deep_gemm_supported,
         tf32_hc_prenorm_gemm,
     )
 
@@ -551,32 +549,7 @@ def mhc_pre_tilelang(
     norm_weight: torch.Tensor | None = None,
     norm_eps: float = 1e-6,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Forward pass for mHC pre block.
-
-    Args:
-        residual: shape (..., hc_mult, hidden_size), dtype torch.bfloat16
-        fn: shape (hc_mult3, hc_mult * hidden_size), dtype torch.float32
-        hc_scale: shape (3,), dtype torch.float32
-        hc_base: shape (hc_mult3,), dtype torch.float32
-        rms_eps: RMS normalization epsilon
-        hc_pre_eps: pre-mix epsilon
-        hc_sinkhorn_eps: sinkhorn epsilon
-        hc_post_mult_value: post-mix multiplier value
-        sinkhorn_repeat: number of sinkhorn iterations
-        n_splits: retained for the shared MHC operator API; the active GEMM
-            backend selects its split factor internally.
-        norm_weight: optional RMSNorm weight, shape (hidden_size,), dtype
-            torch.bfloat16. When provided, RMSNorm is fused into the
-            layer_input write path of the big_fuse kernel.
-        norm_eps: epsilon for the fused RMSNorm; only consulted when
-            norm_weight is given.
-
-    Returns:
-        post_mix: shape (..., hc_mult), dtype torch.float32
-        comb_mix: shape (..., hc_mult, hc_mult), dtype torch.float32
-        layer_input: shape (..., hidden_size), dtype torch.bfloat16
-    """
+    """Forward pass for mHC pre block."""
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         _MHC_PRE_BIG_FUSE_TILELANG_KERNEL,
     )
@@ -668,7 +641,6 @@ def _mhc_pre_tilelang_fake(
     hidden_size = residual.shape[-1]
     outer_shape = residual.shape[:-2]
 
-    # Create empty tensors with correct shapes for meta device / shape inference
     post_mix = torch.empty(
         *outer_shape,
         hc_mult,
@@ -709,7 +681,6 @@ def mhc_pre_broadcast_tilelang(
     fn_broadcast: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """First-layer mHC pre for a residual broadcast from ``(T, H)``."""
-    # n_splits is retained for the shared API; split selection is internal.
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         _MHC_PRE_BIG_FUSE_TILELANG_KERNEL,
     )
@@ -753,13 +724,27 @@ def mhc_pre_broadcast_tilelang(
         num_tokens, hidden_size, dtype=torch.bfloat16, device=residual.device
     )
 
-    gemm_out_mul, gemm_out_sqrsum = _hc_prenorm_gemm_outputs(
-        residual_flat,
-        fn_broadcast,
-        hidden_size=hidden_size,
-        hc_mult=hc_mult,
-        use_tilelang_fallback=False,
-    )
+    if is_deep_gemm_supported():
+        gemm_out_mul, gemm_out_sqrsum = _hc_prenorm_gemm_outputs(
+            residual_flat,
+            fn_broadcast,
+            hidden_size=hidden_size,
+            hc_mult=hc_mult,
+            use_tilelang_fallback=False,
+        )
+    else:
+        # The TileLang prenorm GEMM only accepts (T, hc_mult * H) inputs, so the
+        # (T, H) broadcast residual uses the torch reference instead. It is a
+        # single split with a full FP32 matmul: correct, but not free.
+        gemm_out_mul = torch.empty(
+            1, num_tokens, hc_mult3, dtype=torch.float32, device=residual.device
+        )
+        gemm_out_sqrsum = torch.empty(
+            1, num_tokens, dtype=torch.float32, device=residual.device
+        )
+        _torch_hc_prenorm_gemm(
+            residual_flat, fn_broadcast, gemm_out_mul, gemm_out_sqrsum
+        )
     _MHC_PRE_BIG_FUSE_TILELANG_KERNEL(
         gemm_out_mul,
         gemm_out_sqrsum,
@@ -827,23 +812,7 @@ def mhc_fused_post_pre_tilelang(
     norm_weight: torch.Tensor | None = None,
     norm_eps: float = 1e-6,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Run one MHC post block followed by the next MHC pre block.
-
-    When ``norm_weight`` is provided, the layer_input_cur output is the
-    RMSNorm'd activation (fused into the kernel); otherwise it is the
-    raw pre-norm activation as before.
-
-    ``n_splits`` and ``tile_n`` are retained for the shared MHC operator API.
-    The TileLang path selects both values internally from the runtime shape.
-
-    Returns:
-        residual_cur: post-mapped residual, shape (..., hc_mult, hidden_size)
-        post_mix_cur: shape (..., hc_mult, 1)
-        comb_mix_cur: shape (..., hc_mult, hc_mult)
-        layer_input_cur: shape (..., hidden_size)
-    """
-
+    """Run one MHC post block followed by the next MHC pre block."""
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         _MHC_FUSED_TILELANG_KERNEL,
         _MHC_POST_TILELANG_KERNEL,

@@ -91,8 +91,6 @@ def test_hc_collapse_preserves_weighted_residual_sum(
     expected = (pre.unsqueeze(-1) * x.float()).sum(dim=1).to(x.dtype)
     actual = hc_collapse_triton(x, pre)
     assert actual.is_contiguous()
-    # BF16 rounding only: ptxas <13.1 contracts the FP32 mix into FFMA despite
-    # enable_fp_fusion=False, so compare within a ULP and pin the exact cases below.
     torch.testing.assert_close(actual, expected, atol=1.6e-2, rtol=1e-2)
     if num_tokens:
         torch.testing.assert_close(actual[0], x[0, -1], atol=0, rtol=0)
@@ -224,7 +222,6 @@ def test_deepseek_v41_mhc_pre_delayed(
         if entry == "carried":
             pre_mix = torch.rand(num_tokens, hc_mult, device=DEVICE)
             if num_tokens > 1:
-                # A constant collapse just above 1 rounds to BF16 1 before RMSNorm.
                 residual[1].fill_(1)
                 pre_mix[1].zero_()
                 pre_mix[1, 0] = 1.003
@@ -237,7 +234,6 @@ def test_deepseek_v41_mhc_pre_delayed(
         weight = torch.empty(hidden_size, dtype=torch.bfloat16, device=DEVICE)
         weight.uniform_(0.5, 1.5)
         norm_kwargs = dict(norm_weight=weight, norm_eps=norm_eps)
-        # Compare to the original collapse + CUDA RMSNorm, including BF16 rounding.
         unfused = mhc_pre_delayed_tilelang(*args, pre_mix=pre_mix, x=x)
         normalized = torch.empty_like(unfused[2])
         if num_tokens:
@@ -255,7 +251,6 @@ def test_deepseek_v41_mhc_pre_delayed(
             torch.testing.assert_close(eager, replayed, atol=0, rtol=0)
     if fused_norm and entry == "carried" and num_tokens > 1:
         torch.testing.assert_close(actual[2][1], expected[2][1], atol=0, rtol=0)
-    # DeepGEMM uses TF32 for the projection; the TileLang fallback uses FP32.
     atol, rtol = (1e-3, 1e-3) if use_deep_gemm else (1e-5, 1e-4)
     for i in (0, 1, 3):
         torch.testing.assert_close(actual[i], expected[i], atol=atol, rtol=rtol)
@@ -273,12 +268,6 @@ def mhc_fused_post_pre_delayed_ref(
     *mix_args,
     pre_mix: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Project the post result before it is rounded to BF16.
-
-    The fused kernel keeps the updated residual streams in registers, so its
-    projection sees the FP32 post result while the streams it stores are the
-    BF16 rounding of it.
-    """
     post = torch.einsum("tij,tih->tjh", comb_res_mix, residual.float())
     post = post + post_layer_mix * x.float().unsqueeze(-2)
     return mhc_pre_delayed_torch(
@@ -291,7 +280,6 @@ def mhc_fused_post_pre_delayed_ref(
 @pytest.mark.parametrize("hidden_size", [4096, 7168])
 @pytest.mark.parametrize("carried", [False, True])
 def test_deepseek_v41_mhc_fused_post_pre_delayed(num_tokens, hidden_size, carried):
-    """Fold the post block into the delayed pre without changing its outputs."""
     set_random_seed(0)
     hc_mult = 4
     mix_size = hc_mult * (hc_mult + 2)
@@ -331,7 +319,6 @@ def test_deepseek_v41_mhc_fused_post_pre_delayed(num_tokens, hidden_size, carrie
     if num_tokens == 0:
         return
 
-    # The post mapping and the collapse are what the unfused kernels produce.
     residual_ref = torch.ops.vllm.mhc_post_tilelang(
         x, residual, post_layer_mix, comb_res_mix
     )
@@ -344,8 +331,6 @@ def test_deepseek_v41_mhc_fused_post_pre_delayed(num_tokens, hidden_size, carrie
     post_ref, comb_ref, _, next_pre_ref = mhc_fused_post_pre_delayed_ref(
         x, residual, post_layer_mix, comb_res_mix, *mix_args, pre_mix=pre_mix
     )
-    # Above the fused kernel's token count the projection falls back to a
-    # split-k TF32 GEMM over the stored BF16 streams.
     tol = (
         1e-5
         if mhc_fused_post_pre_split_config(num_tokens, hidden_size, hc_mult) is not None
@@ -358,8 +343,6 @@ def test_deepseek_v41_mhc_fused_post_pre_delayed(num_tokens, hidden_size, carrie
     ):
         torch.testing.assert_close(actual, expected, atol=tol, rtol=tol)
 
-    # Folding the stream mean into the collapse must not change it, or anything
-    # else the op returns.
     captured = torch.ops.vllm.mhc_fused_post_pre_delayed_tilelang(
         x,
         residual,
@@ -376,13 +359,11 @@ def test_deepseek_v41_mhc_fused_post_pre_delayed(num_tokens, hidden_size, carrie
     for with_aux, without in zip(captured[:5], unchanged, strict=True):
         torch.testing.assert_close(with_aux, without, atol=0, rtol=0)
 
-    # The unnormalized epilogue has its own fused aux path.
     bare = torch.ops.vllm.mhc_fused_post_pre_delayed_tilelang(
         x, residual, post_layer_mix, comb_res_mix, *mix_args, pre_mix, None, 1e-6, True
     )
     torch.testing.assert_close(bare[5], bare[0].mean(dim=1), atol=0, rtol=0)
 
-    # Decode replays this op from a captured graph.
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         captured = torch.ops.vllm.mhc_fused_post_pre_delayed_tilelang(
@@ -435,7 +416,6 @@ def test_mhc_fused_post_pre_delayed_custom_op_supports_compile(carried, capture_
 def test_deepseek_v41_decoder_mixes_match_torch(
     entry, monkeypatch, default_vllm_config
 ):
-    """Preserve carried pre-mixes and Engram ordering at every decoder entry."""
     set_random_seed(0)
     decoder = DeepseekV41DecoderLayer.__new__(DeepseekV41DecoderLayer)
     nn.Module.__init__(decoder)
@@ -512,14 +492,6 @@ def test_deepseek_v41_decoder_mixes_match_torch(
 @pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
 @pytest.mark.parametrize("entry", ["fused", "engram"])
 def test_deepseek_v41_capture_previous_aux(entry, monkeypatch, default_vllm_config):
-    """Read the aux hidden state back out of the seam that already computed it.
-
-    The draft model's input is the mean over hc streams of the previous
-    layer's post. That post now runs inside this layer's fused pre, so the
-    captured value must equal a standalone ``mhc_post_tilelang`` on the same
-    inputs -- and Engram must not be folded into it, since the injection
-    happens after the aux consumers read the stream.
-    """
     set_random_seed(0)
     decoder = DeepseekV41DecoderLayer.__new__(DeepseekV41DecoderLayer)
     nn.Module.__init__(decoder)
@@ -585,7 +557,10 @@ def test_mhc_pre_delayed_custom_op_supports_compile(carried):
     )
 
 
-@pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
+@pytest.mark.skipif(
+    not HAS_TILELANG_MHC,
+    reason="TileLang MHC support required",
+)
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),
     reason="DeepGEMM Mega mHC requires SM100-family CUDA",
@@ -660,8 +635,6 @@ def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size):
         expected_previous_mix,
     )
     for i, (result, ref) in enumerate(zip(actual, expected, strict=True)):
-        # Match the existing mHC BF16 tolerance: post rounding differences
-        # can be amplified by cancellation in the carried collapse.
         atol, rtol = (1.6e-2, 1e-2) if i in (0, 3) else (1e-6, 1e-3)
         torch.testing.assert_close(result, ref, atol=atol, rtol=rtol)
 
@@ -669,7 +642,6 @@ def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size):
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
-            # DeepGEMM initializes barriers per stream before capture.
             mhc_shifted_post_pre_deep_gemm(*args)
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph, stream=stream):
@@ -703,7 +675,6 @@ def mhc_pre_ref(
     hc_post_mult_value: float,
     sinkhorn_repeat: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """mHC pre reference kernel from tilelang repo: https://github.com/tile-ai/tilelang/blob/d135bd1cd2d2eee74fbb41dd0a0831a427194c86/examples/deepseek_mhc/example_mhc_pre.py#L303"""
     hc_mult = residual.shape[-2]
 
     residual_flat = residual.flatten(-2, -1).float()
@@ -742,7 +713,6 @@ def mhc_post_ref(
     post_layer_mix: torch.Tensor,
     comb_res_mix: torch.Tensor,
 ) -> torch.Tensor:
-    """mHC post reference kernel from tilelang repo: https://github.com/tile-ai/tilelang/blob/d135bd1cd2d2eee74fbb41dd0a0831a427194c86/examples/deepseek_mhc/example_mhc_post.py#L68"""
     term2 = torch.bmm(comb_res_mix.mT, residual.float())
     return (x.float().unsqueeze(-2) * post_layer_mix + term2).bfloat16()
 
@@ -1078,11 +1048,6 @@ def test_mhc_fused_rocm_fallback_applies_norm(monkeypatch):
 @pytest.mark.parametrize("num_tokens", [1, 2, 7, 128, 1024])
 @pytest.mark.parametrize("carried", [False, True])
 def test_mhc_pre_delayed_rocm_aiter(num_tokens, carried):
-    """AITER must reproduce the delayed reference on both seam variants.
-
-    ``num_tokens`` spans the split-k choices AITER makes for the projection,
-    since the pre-mix is recovered from that unreduced output.
-    """
     set_random_seed(0)
     hc_mult, hidden_size = 4, 5120
     residual, fn, hc_scale, hc_base, _ = _rocm_mhc_inputs(
@@ -1111,11 +1076,9 @@ def test_mhc_pre_delayed_rocm_aiter(num_tokens, carried):
         *args, pre_mix=pre_mix
     )
 
-    # No post was requested, so the residual comes straight back.
     assert residual_out is residual
     for i in (0, 1, 3):
         torch.testing.assert_close(actual[i], expected[i], atol=1e-4, rtol=1e-3)
-    # The collapse is the same FP32 multiply-and-sum in both paths.
     torch.testing.assert_close(actual[2], expected[2], atol=0, rtol=0)
 
 
@@ -1124,14 +1087,6 @@ def test_mhc_pre_delayed_rocm_aiter(num_tokens, carried):
     reason="AITER mHC required",
 )
 def test_mhc_pre_delayed_rocm_aiter_declines_unsupported(monkeypatch):
-    """The broadcast seam and a fused norm must not take the AITER path.
-
-    Neither is expressible with AITER's pre kernels: the broadcast projects a
-    narrower ``x``, and ``mhc_pre_gemm_sqrsum`` folds no RMSNorm. What is
-    asserted here is the routing decision, which is what this gate owns; the
-    numerics of whichever fallback it lands on are covered by
-    ``test_deepseek_v41_mhc_pre_delayed``.
-    """
     set_random_seed(0)
     hc_mult, hidden_size = 4, 5120
     residual, fn, hc_scale, hc_base, norm_weight = _rocm_mhc_inputs(
@@ -1154,8 +1109,6 @@ def test_mhc_pre_delayed_rocm_aiter_declines_unsupported(monkeypatch):
     broadcast_fn = fn.view(-1, hc_mult, hidden_size).sum(1)
     broadcast_residual = x.unsqueeze(1).expand(-1, hc_mult, -1).contiguous()
     expected = mhc_pre_delayed_torch(broadcast_residual, broadcast_fn, *args[2:], x=x)
-    # forward_hip leads with the residual; no post was requested here, so it is
-    # the caller's own tensor and the reference's four outputs follow it.
     residual_out, *actual = op.forward_hip(
         broadcast_residual, broadcast_fn, *args[2:], x=x
     )
@@ -1167,9 +1120,6 @@ def test_mhc_pre_delayed_rocm_aiter_declines_unsupported(monkeypatch):
     op.forward_hip(*args, norm_weight=norm_weight, norm_eps=1e-6)
     assert not took_aiter, "a fused norm must not reach AITER"
 
-    # Positive control: the same inputs without a norm do take the AITER path,
-    # so the two declines above are the gate discriminating rather than the
-    # path being unavailable in this environment.
     op.forward_hip(*args)
     assert took_aiter
 
@@ -1371,8 +1321,6 @@ def _patch_first_rank_pp_group(monkeypatch):
 
 
 def test_deepseek_v4_mhc_broadcast_finalize_sums_hc_streams(monkeypatch):
-    """First finalize (at the end of load_weights) allocates
-    hc_attn_fn_broadcast as hc_attn_fn summed over hc streams."""
     _patch_first_rank_pp_group(monkeypatch)
     layer = _make_mhc_decoder_layer(hc_mult=2, hidden_size=8)
     model = SimpleNamespace(start_layer=0, end_layer=1, layers=[layer])
@@ -1385,9 +1333,6 @@ def test_deepseek_v4_mhc_broadcast_finalize_sums_hc_streams(monkeypatch):
 
 
 def test_deepseek_v4_mhc_broadcast_refit_refreshes_in_place(monkeypatch):
-    """Re-finalizing after a weight refit must copy into the existing
-    broadcast tensor so its address stays stable for captured CUDA graphs,
-    while picking up the new hc_attn_fn values."""
     _patch_first_rank_pp_group(monkeypatch)
     layer = _make_mhc_decoder_layer(hc_mult=2, hidden_size=8)
     model = SimpleNamespace(start_layer=0, end_layer=1, layers=[layer])
@@ -1412,11 +1357,6 @@ def test_deepseek_v4_mhc_broadcast_refit_refreshes_in_place(monkeypatch):
 def test_mhc_fused_post_pre_delayed_rocm_aiter(
     num_tokens, carried, default_vllm_config
 ):
-    """Folding the post into the pre projection must match doing them apart.
-
-    The residual is bfloat16, so the two accumulation orders are allowed to
-    land a rounding step apart; the tolerance here is one bfloat16 ULP.
-    """
     set_random_seed(0)
     hc_mult, hidden_size = 4, 5120
     residual, fn, hc_scale, hc_base, _ = _rocm_mhc_inputs(
@@ -1461,8 +1401,60 @@ def test_mhc_fused_post_pre_delayed_rocm_aiter(
     reason="AITER mHC required",
 )
 def test_mhc_fused_post_pre_delayed_falls_back_for_large_batches():
-    """AITER's heuristic hands large batches back to the unfused path."""
     from vllm._aiter_ops import rocm_aiter_ops
 
     assert not rocm_aiter_ops.mhc_fused_post_pre_delayed_prefers_unfused(1)
     assert rocm_aiter_ops.mhc_fused_post_pre_delayed_prefers_unfused(1 << 20)
+
+
+@pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
+@pytest.mark.parametrize("num_tokens", [1, 7, 128])
+def test_mhc_pre_broadcast_tilelang_deepgemm_fallback(num_tokens, monkeypatch):
+    """Verify mhc_pre_broadcast_tilelang routes to _torch_hc_prenorm_gemm
+    when DeepGEMM is disabled."""
+    import vllm.model_executor.kernels.mhc.tilelang as tilelang_module
+    from vllm.model_executor.kernels.mhc.tilelang import (
+        mhc_pre_broadcast_tilelang,
+    )
+
+    set_random_seed(0)
+    hc_mult, hidden_size = 4, 5120
+    residual = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device=DEVICE)
+    fn = (
+        torch.randn(24, hc_mult * hidden_size, dtype=torch.float32, device=DEVICE)
+        * 0.02
+    )
+    fn_broadcast = (
+        torch.randn(24, hidden_size, dtype=torch.float32, device=DEVICE) * 0.02
+    )
+    scale = torch.tensor([0.5, 0.25, 1.0], device=DEVICE)
+    base = torch.randn(24, device=DEVICE)
+    norm_weight = torch.ones(hidden_size, dtype=torch.bfloat16, device=DEVICE)
+
+    args = (residual, fn, scale, base, 1e-6, 1e-6, 1e-6, 2.0, 20)
+    kwargs = dict(norm_weight=norm_weight, norm_eps=1e-6, fn_broadcast=fn_broadcast)
+
+    # Disable DeepGEMM via monkeypatch
+    monkeypatch.setattr("vllm.utils.deep_gemm.is_deep_gemm_supported", lambda: False)
+
+    # Spy on _torch_hc_prenorm_gemm to assert it is called on the fallback path
+    torch_fallback_called = False
+    orig_torch_gemm = tilelang_module._torch_hc_prenorm_gemm
+
+    def spy_torch_gemm(*spy_args, **spy_kwargs):
+        nonlocal torch_fallback_called
+        torch_fallback_called = True
+        return orig_torch_gemm(*spy_args, **spy_kwargs)
+
+    monkeypatch.setattr(tilelang_module, "_torch_hc_prenorm_gemm", spy_torch_gemm)
+
+    out_fallback = mhc_pre_broadcast_tilelang(*args, **kwargs)
+
+    assert torch_fallback_called, (
+        "Torch fallback (_torch_hc_prenorm_gemm) was not called when "
+        "DeepGEMM was disabled!"
+    )
+    assert out_fallback[0].shape == (num_tokens, hc_mult, hidden_size)
+    assert out_fallback[1].shape == (num_tokens, hc_mult, 1)
+    assert out_fallback[2].shape == (num_tokens, hc_mult, hc_mult)
+    assert out_fallback[3].shape == (num_tokens, hidden_size)
