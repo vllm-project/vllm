@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import Enum
-from typing import TYPE_CHECKING, Literal, Union
+from typing import TYPE_CHECKING, Any, Literal, Union
 
 import torch
 
@@ -399,6 +399,12 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
     return None  # BF16 activation
 
 
+_FLEXIBLE_ACTIVATION_BACKENDS = {
+    Mxfp4MoeBackend.HUMMING,
+    Mxfp4MoeBackend.EMULATION,
+}
+
+
 def _user_moe_activation_override() -> QuantKey | None:
     """User's MoE activation override from quantization_config, or None."""
     args = get_current_vllm_config().model_config.quantization_config
@@ -466,8 +472,8 @@ def _filter_by_activation(
         return [
             b
             for b in backends
-            if _backend_activation_key(b) == requested_activation_key
-            or b == Mxfp4MoeBackend.EMULATION
+            if b in _FLEXIBLE_ACTIVATION_BACKENDS
+            or _backend_activation_key(b) == requested_activation_key
         ]
     bf16 = [b for b in backends if _backend_activation_key(b) is None]
     return bf16 if bf16 else backends
@@ -564,7 +570,7 @@ def select_mxfp4_moe_backend(
         for requested_backend in requested_backends:
             act_key = (
                 requested_activation_key
-                if requested_backend == Mxfp4MoeBackend.EMULATION
+                if requested_backend in _FLEXIBLE_ACTIVATION_BACKENDS
                 else _backend_activation_key(requested_backend)
             )
             try:
@@ -1365,6 +1371,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     w2_bias: torch.Tensor | None = None,
     _cache_permute_indices: dict[torch.Size, torch.Tensor] | None = None,
     activation: MoEActivation | None = None,
+    humming_input_schema: Any | None = None,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -1415,8 +1422,13 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             convert_to_humming_moe_kernel_format,
         )
 
+        # A caller that knows the checkpoint's activation scheme passes a
+        # HummingInputSchema; otherwise the conversion falls back to
+        # VLLM_HUMMING_INPUT_QUANT_CONFIG.
         convert_to_humming_moe_kernel_format(
-            layer, quant_config={"quant_method": "mxfp4"}
+            layer,
+            quant_config={"quant_method": "mxfp4"},
+            input_schema=humming_input_schema,
         )
         return (
             layer.w13_weight,
