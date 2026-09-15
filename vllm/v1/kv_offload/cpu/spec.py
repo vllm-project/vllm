@@ -169,13 +169,14 @@ class CPUOffloadingSpec(OffloadingSpec):
         # num_chunks == 0 would size the region to zero bytes, which cannot be
         # mmap'd; fall back to the tensor path (empty tensors) as before.
         if self._uses_shared_region() and self.num_chunks > 0:
+            # Normalize the device index to the current DP engine.  This is
+            # separate from `rank`: replicated layout intentionally maps every
+            # worker to slot 0, but only worker rank 0 should own unlinking.
+            world_size = self.config.parallel.world_size
+            worker_rank = torch.accelerator.current_device_index() % world_size
             # Replicated layout puts all ranks on slot 0 (single MLA copy);
             # otherwise each rank takes its own slot by physical device index.
-            if self.replicated_layout:
-                rank = 0
-            else:
-                world_size = self.config.parallel.world_size
-                rank = torch.accelerator.current_device_index() % world_size
+            rank = 0 if self.replicated_layout else worker_rank
             mmap_region = SharedOffloadRegion(
                 engine_id=self.config.engine_id,
                 num_chunks=self.num_chunks,
@@ -183,6 +184,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 kv_bytes_per_chunk=self.kv_bytes_per_chunk,
                 cpu_page_size=self.cpu_page_size_per_worker,
                 barrier=_all_workers_barrier,
+                unlink_owner=worker_rank == 0,
             )
         try:
             return CPUOffloadingWorker(
@@ -193,7 +195,7 @@ class CPUOffloadingSpec(OffloadingSpec):
             )
         except Exception:
             if mmap_region is not None:
-                mmap_region.cleanup()
+                mmap_region.abort_startup_cleanup()
             raise
 
     @override

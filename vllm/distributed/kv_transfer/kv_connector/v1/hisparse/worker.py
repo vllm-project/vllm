@@ -189,6 +189,11 @@ class HiSparseConnectorWorker:
         self.kv_cache_config = kv_cache_config
         self._initialized = False
 
+    def _release_host_cache_views(self) -> None:
+        """Drop connector-owned aliases before closing a shared mmap."""
+        self.host_caches = ()
+        self.resident_caches = ()
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         forward_context = self.vllm_config.compilation_config.static_forward_context
         cache_handles: list[HiSparseCacheHandle] = []
@@ -244,6 +249,7 @@ class HiSparseConnectorWorker:
                 is_host_writer=is_host_writer,
             )
         except Exception:
+            self._release_host_cache_views()
             release_pinned_state(
                 [cache.runtime for cache in cache_handles],
                 pinned_host_pools,
@@ -638,9 +644,9 @@ class HiSparseConnectorWorker:
             if source_index >= self._row_mirror_source_starts.shape[1]:
                 raise RuntimeError("HiSparse row DMA source index is out of range.")
             source_rows = self._row_mirror_source_starts[:, source_index]
-            source = self.resident_caches[layer_index]
-            destination = self.host_caches[layer_index]
-            row_bytes = source.shape[-1] * source.element_size()
+            source: torch.Tensor = self.resident_caches[layer_index]
+            destination: torch.Tensor = self.host_caches[layer_index]
+            row_bytes: int = source.shape[-1] * source.element_size()
             if (
                 source.stride(1) * source.element_size() != row_bytes
                 or destination.shape[1] * destination.element_size() != row_bytes
@@ -752,15 +758,15 @@ class HiSparseConnectorWorker:
             if source_index >= source_blocks_by_transfer.shape[1]:
                 raise RuntimeError("HiSparse spill DMA source index is out of range.")
             source_blocks = source_blocks_by_transfer[:, source_index]
-            source = self.resident_caches[layer_index]
-            destination = self.host_caches[layer_index]
+            source: torch.Tensor = self.resident_caches[layer_index]
+            destination: torch.Tensor = self.host_caches[layer_index]
             if np.any(source_blocks < 0) or np.any(source_blocks >= source.shape[0]):
                 raise RuntimeError("HiSparse spill DMA source is out of range.")
             if np.any(destination_rows < 0) or np.any(
                 destination_rows + self.kernel_block_size > destination.shape[0]
             ):
                 raise RuntimeError("HiSparse spill DMA destination is out of range.")
-            row_bytes = source.shape[-1] * source.element_size()
+            row_bytes: int = source.shape[-1] * source.element_size()
             descriptor_slice = slice(layer_index, descriptor_count, num_layers)
             descriptors.src_np[descriptor_slice] = (
                 source.data_ptr()
@@ -885,9 +891,11 @@ class HiSparseConnectorWorker:
             self._slot_mapping_staging.stream.synchronize()
         if self.dma_stream is not None:
             self.dma_stream.synchronize()
+        self._release_host_cache_views()
         release_pinned_state(
             [cache.runtime for cache in self.cache_handles],
             self.pinned_host_pools,
             self.shared_host_region,
         )
+        self.shared_host_region = None
         self._initialized = False

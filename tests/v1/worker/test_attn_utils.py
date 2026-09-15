@@ -242,11 +242,11 @@ def test_get_kv_sharing_fast_prefill_eligible_layers(monkeypatch: pytest.MonkeyP
 
 class _FakeSharedHostRegion:
     def __init__(self) -> None:
-        self.cleanup_calls = 0
+        self.abort_calls = 0
         self.base_tensor = torch.empty(1, dtype=torch.int8)
 
-    def cleanup(self) -> None:
-        self.cleanup_calls += 1
+    def abort_startup_cleanup(self) -> None:
+        self.abort_calls += 1
 
 
 def test_profiling_cleanup_releases_tp_shared_region_once(monkeypatch):
@@ -318,7 +318,63 @@ def test_init_hisparse_rolls_back_shared_region(monkeypatch, failure_phase):
             {},
             SimpleNamespace(),
         )
-    assert region.cleanup_calls == 1
+    assert region.abort_calls == 1
+
+
+def test_init_hisparse_drops_host_views_before_abort(monkeypatch):
+    """Startup abort detaches cache tensors before closing their mmap."""
+    region = _FakeSharedHostRegion()
+    host_pool = SimpleNamespace(
+        backing=torch.empty(1),
+        registered=torch.empty(1),
+        shared_region=region,
+    )
+    host_tensor = torch.empty(1)
+    kv_caches = {"host": host_tensor}
+    runtime = SimpleNamespace(
+        _host_cache=host_tensor,
+        registered_host_pool=host_tensor,
+        shared_host_region=region,
+    )
+    forward_context = {
+        "layer": SimpleNamespace(hisparse_cache=SimpleNamespace(runtime=runtime))
+    }
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC
+        ),
+        scheduler_config=SimpleNamespace(max_num_seqs=1, max_num_batched_tokens=1),
+    )
+
+    def abort_startup_cleanup():
+        assert not kv_caches
+        assert not hasattr(runtime, "_host_cache")
+        assert not hasattr(runtime, "registered_host_pool")
+        assert runtime.shared_host_region is None
+        region.abort_startup_cleanup()
+
+    host_pool.abort_startup_cleanup = abort_startup_cleanup
+    monkeypatch.setattr(attn_utils_module, "HiSparseHostPool", lambda *args: host_pool)
+    monkeypatch.setattr(
+        attn_utils_module, "allocate_hisparse_kv_caches", lambda *args: kv_caches
+    )
+    monkeypatch.setattr(
+        attn_utils_module,
+        "bind_hisparse_kv_caches",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("binding failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="binding failed"):
+        attn_utils_module.init_hisparse_kv_cache(
+            SimpleNamespace(),
+            torch.device("cpu"),
+            [],
+            vllm_config,
+            forward_context,
+            SimpleNamespace(),
+        )
+
+    assert region.abort_calls == 1
 
 
 def test_reshape_padded_kv_cache_strides_by_padded_page():

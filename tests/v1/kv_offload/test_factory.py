@@ -273,6 +273,30 @@ def test_tiering_spec_create_worker_folds_device_index_for_sharded_layout(monkey
     assert region_calls[0]["rank"] == 1
 
 
+def test_tiering_spec_aborts_region_when_worker_creation_fails(monkeypatch):
+    import vllm.v1.kv_offload.tiering.spec as tiering_spec_module
+
+    spec = _create_spec(
+        spec_name="TieringOffloadingSpec",
+        worker_kv_bytes_per_block=4096,
+        world_size=2,
+    )
+    assert isinstance(spec, TieringOffloadingSpec)
+
+    region = MagicMock()
+    monkeypatch.setattr(tiering_spec_module, "SharedOffloadRegion", lambda **_: region)
+    monkeypatch.setattr(
+        tiering_spec_module,
+        "CPUOffloadingWorker",
+        MagicMock(side_effect=RuntimeError("worker setup failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="worker setup failed"):
+        spec.create_worker(MagicMock())
+
+    region.abort_startup_cleanup.assert_called_once_with()
+
+
 @pytest.mark.parametrize("world_size", [2, 4, 8])
 def test_cpu_spec_replicated_sizing_on_shared_region(monkeypatch, world_size: int):
     # On shared-region (CUDA-alike) platforms the default spec now honors
@@ -386,6 +410,32 @@ def test_cpu_spec_create_worker_uses_mmap_on_cuda_alike(monkeypatch):
     assert worker_calls[0]["mmap_region"] is region
 
 
+def test_cpu_spec_aborts_region_when_worker_creation_fails(monkeypatch):
+    import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
+
+    worker_kv_bytes_per_block = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    spec = _create_spec(
+        cpu_bytes_to_use=worker_kv_bytes_per_block * 8,
+        worker_kv_bytes_per_block=worker_kv_bytes_per_block,
+        world_size=2,
+    )
+    assert isinstance(spec, CPUOffloadingSpec)
+
+    region = MagicMock()
+    monkeypatch.setattr(cpu_spec_module.current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(cpu_spec_module, "SharedOffloadRegion", lambda **_: region)
+    monkeypatch.setattr(
+        cpu_spec_module,
+        "CPUOffloadingWorker",
+        MagicMock(side_effect=RuntimeError("worker setup failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="worker setup failed"):
+        spec.create_worker(MagicMock())
+
+    region.abort_startup_cleanup.assert_called_once_with()
+
+
 def test_cpu_spec_create_worker_uses_tensor_path_off_cuda_alike(monkeypatch):
     import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
 
@@ -447,16 +497,28 @@ def test_cpu_spec_create_worker_skips_mmap_for_empty_cache(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("replicated_layout", "device_index", "world_size", "expected_rank"),
+    (
+        "replicated_layout",
+        "device_index",
+        "world_size",
+        "expected_rank",
+        "expected_owner",
+    ),
     [
-        (True, 5, 4, 0),  # replicated: always slot 0
-        (True, 0, 4, 0),  # replicated: slot 0 regardless of device
-        (False, 5, 4, 1),  # non-replicated: 5 % 4 == 1
-        (False, 7, 4, 3),  # non-replicated: 7 % 4 == 3
+        (True, 5, 4, 0, False),  # shared slot, worker rank 1
+        (True, 0, 4, 0, True),  # shared slot, worker rank 0
+        (False, 5, 4, 1, False),  # non-replicated: 5 % 4 == 1
+        (False, 7, 4, 3, False),  # non-replicated: 7 % 4 == 3
+        (False, 4, 4, 0, True),  # next DP engine's worker rank 0
     ],
 )
 def test_cpu_spec_create_worker_rank_assignment(
-    monkeypatch, replicated_layout, device_index, world_size, expected_rank
+    monkeypatch,
+    replicated_layout,
+    device_index,
+    world_size,
+    expected_rank,
+    expected_owner,
 ):
     import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
 
@@ -484,6 +546,7 @@ def test_cpu_spec_create_worker_rank_assignment(
     spec.create_worker(MagicMock())
 
     assert region_calls[0]["rank"] == expected_rank
+    assert region_calls[0]["unlink_owner"] is expected_owner
 
 
 def test_offloading_spec_has_replicated_layout_default():
