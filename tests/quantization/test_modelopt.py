@@ -789,6 +789,49 @@ def test_modelopt_nvfp4_moe_dispatches_to_marlin_when_w4a16(
         assert kwargs["activation_key"] is kNvfp4Dynamic
 
 
+def test_modelopt_nvfp4_moe_per_token_activation_from_hf_config():
+    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+        NvFp4MoeBackend,
+    )
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptNvFp4FusedMoE,
+    )
+
+    config = ModelOptNvFp4Config(
+        quant_method="NVFP4",
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+        group_size=16,
+    )
+    vllm_config = MagicMock()
+    vllm_config.model_config.hf_config.nvfp4_per_token_activation = True
+    moe_config = MagicMock()
+    moe_config.is_act_and_mul = False
+
+    experts_cls = MagicMock()
+    with (
+        patch(
+            "vllm.model_executor.layers.quantization.modelopt."
+            "get_current_vllm_config_or_none",
+            return_value=vllm_config,
+        ),
+        patch(
+            "vllm.model_executor.layers.quantization.modelopt.select_nvfp4_moe_backend",
+            return_value=(NvFp4MoeBackend.FLASHINFER_TRTLLM, experts_cls),
+        ),
+        patch(
+            "vllm.model_executor.layers.quantization.modelopt."
+            "is_global_sf_supported_for_nvfp4_backend",
+            return_value=True,
+        ),
+    ):
+        method = ModelOptNvFp4FusedMoE(config, moe_config)
+
+    assert method.per_token_activation
+    assert method.experts_cls is experts_cls
+
+
 @pytest.mark.parametrize(
     "per_layer_algo, expected_weight, expected_activation",
     [
