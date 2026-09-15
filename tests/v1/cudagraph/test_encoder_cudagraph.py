@@ -153,6 +153,14 @@ class TestGenerateBudgets:
         result = EncoderCudaGraphManager._generate_budgets(64, 8192)
         assert result == [64, 128, 256, 512, 1024, 2048, 4096, 8192]
 
+    def test_capture_skipped_without_supported_modalities(self):
+        manager = _make_manager_with_budgets([64])
+        manager.config.modalities = []
+
+        manager.capture(graph_pool=object())
+
+        assert manager.graph_pool is None
+
 
 # ---------------------------------------------------------------------------
 # _find_smallest_fitting_budget_given_tokens
