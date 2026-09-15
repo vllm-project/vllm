@@ -743,17 +743,6 @@ def test_decode_logprobs_match_prefill_logprobs(
         print(f"[Prompt {prompt_idx}] Decode logprobs: {decode_logprobs.tolist()}")
 
         # Step 2: For each token position, run prefill and compare.
-        #
-        # Build the prefix directly from token ids rather than reconstructing
-        # it from text. A `decode -> encode` round trip is not lossless for
-        # many BPE tokenizers (e.g. Qwen2.5-Coder merges adjacent tokens like
-        # `'.' + '#'` into `'.#'` after detokenization), which would silently
-        # change the token-level prefix and produce false mismatches in the
-        # comparisons below. Using `prompt_token_ids + decode_token_ids[:i]`
-        # guarantees the prefill request sees exactly the same token prefix
-        # as the decode path. As a side effect, this also avoids an O(N^2)
-        # extra `llm.generate` call per token that the previous text-based
-        # reconstruction needed.
         prompt_token_ids = list(decode_output.prompt_token_ids or [])
 
         print(f"\n[Prompt {prompt_idx}] Verifying each token via prefill...")
