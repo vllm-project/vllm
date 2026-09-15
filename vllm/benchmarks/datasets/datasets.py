@@ -1345,13 +1345,49 @@ class RandomMultiModalDataset(RandomDataset):
 # -----------------------------------------------------------------------------
 
 
+def _sharegpt_turns(conversations: list[dict], max_turns: int | None = None):
+    """Yield (prompt, completion) per assistant reply, prompt being the conversation so far.
+    """
+    history: list[str] = []
+    emitted = 0
+    i = 0
+    while i < len(conversations) - 1:
+        cur, nxt = conversations[i], conversations[i + 1]
+        cur_role = (cur.get("from") or "").strip().lower()
+        nxt_role = (nxt.get("from") or "").strip().lower()
+        cur_text = cur.get("value") or ""
+        if cur_role in {"human", "user"} and nxt_role in {
+            "gpt", "bing", "chatgpt", "bard"
+        }:
+            yield "".join(history + [cur_text]), (nxt.get("value") or "")
+            emitted += 1
+            if max_turns is not None and emitted >= max_turns:
+                return
+            history += [cur_text, nxt.get("value") or ""]
+            i += 2
+        else:
+            history.append(cur_text)
+            i += 1
+
+
 class ShareGPTDataset(BenchmarkDataset):
     """
     Implements the ShareGPT dataset.  Loads data from a JSON file and generates
     sample requests based on conversation turns.
     """
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(
+        self,
+        include_multi_turn: bool = False,
+        max_turns: int | None = None,
+        max_prompt_len: int = 1024,
+        max_total_len: int = 2048,
+        **kwargs,
+    ) -> None:
+        self.include_multi_turn = include_multi_turn
+        self.max_turns = max_turns
+        self.max_prompt_len = max_prompt_len
+        self.max_total_len = max_total_len
         super().__init__(**kwargs)
         self.load_data()
 
@@ -1370,6 +1406,18 @@ class ShareGPTDataset(BenchmarkDataset):
         random.seed(self.random_seed)
         if not getattr(self, "disable_shuffle", False):
             random.shuffle(self.data)
+        if self.include_multi_turn:
+            # Expand after shuffling so a conversation's turns stay in order.
+            self.data = [
+                {**entry, "conversations": [
+                    {"from": "human", "value": prompt},
+                    {"from": "gpt", "value": completion},
+                ]}
+                for entry in self.data
+                for prompt, completion in _sharegpt_turns(
+                    entry["conversations"], self.max_turns
+                )
+            ]
 
     def sample(
         self,
@@ -1408,6 +1456,8 @@ class ShareGPTDataset(BenchmarkDataset):
             if not is_valid_sequence(
                 prompt_len,
                 new_output_len,
+                max_prompt_len=self.max_prompt_len,
+                max_total_len=self.max_total_len,
                 skip_min_output_len_check=output_len is not None,
             ):
                 continue
@@ -1729,6 +1779,33 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         default=None,
         help="Output length for each request. Overrides the output length "
         "from the ShareGPT dataset.",
+    )
+    sharegpt_group.add_argument(
+        "--include-multi-turn",
+        action="store_true",
+        help="Emit one request per assistant reply instead of one per conversation. "
+        "Each prompt is the conversation so far, so request n's prompt is a prefix of "
+        "request n+1's.",
+    )
+    sharegpt_group.add_argument(
+        "--sharegpt-max-turns",
+        type=int,
+        default=None,
+        help="Max turns per conversation when --include-multi-turn is set.",
+    )
+    sharegpt_group.add_argument(
+        "--sharegpt-max-prompt-len",
+        type=int,
+        default=1024,
+        help="Drop ShareGPT requests whose prompt exceeds this many tokens "
+        "(default 1024). Raise it so long (e.g. multi-turn) prompts are not filtered",
+    )
+    sharegpt_group.add_argument(
+        "--sharegpt-max-total-len",
+        type=int,
+        default=2048,
+        help="Drop ShareGPT requests whose prompt+output exceeds this many tokens "
+        "(default 2048).",
     )
 
     timed_trace_group = parser.add_argument_group("timed-trace dataset options")
@@ -2384,6 +2461,10 @@ def get_samples(
                 random_seed=args.seed,
                 dataset_path=args.dataset_path,
                 disable_shuffle=args.disable_shuffle,
+                include_multi_turn=args.include_multi_turn,
+                max_turns=args.sharegpt_max_turns,
+                max_prompt_len=args.sharegpt_max_prompt_len,
+                max_total_len=args.sharegpt_max_total_len,
             ).sample(
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
