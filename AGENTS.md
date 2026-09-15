@@ -31,6 +31,7 @@ Do not open one-off PRs for tiny edits (single typo, isolated style change, one 
     - Test commands run and results.
     - Model evaluation results when the change affects output, accuracy, or serving.
     - Clear statement that AI assistance was used.
+- Use vLLM's `/pr-checklist` skill before submitting a PR to ensure quality and adherence to the contribution guidelines.
 
 ### Fail-closed behavior
 
