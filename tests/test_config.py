@@ -265,6 +265,24 @@ def test_compile_config_repr_succeeds():
 
 
 @pytest.mark.parametrize(
+    ("cache_dtype", "expected"),
+    [
+        ("auto", "auto (torch.bfloat16)"),
+        ("fp8", "fp8"),
+    ],
+)
+def test_kv_cache_dtype_str_resolves_auto(cache_dtype: str, expected: str):
+    import torch
+
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(cache_dtype=cache_dtype),
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+    )
+
+    assert VllmConfig.kv_cache_dtype_str(cast(VllmConfig, config)) == expected
+
+
+@pytest.mark.parametrize(
     ("env_value", "expected"),
     [
         (None, None),
