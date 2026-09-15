@@ -703,11 +703,13 @@ class EngineCore:
             self.capture_iteration_details(scheduler_output) as iteration_details,
             self.log_error_detail(scheduler_output),
         ):
+            # Observe execution failures before accepting the sampling output.
+            # Avoid resolving a shared future twice because Ray's result
+            # aggregation is stateful.
+            if exec_model_fut is not future:
+                exec_model_fut.result()
             model_output = future.result()
             if model_output is None:
-                # None from sample_tokens() implies that the original execute_model()
-                # call failed - raise that exception.
-                exec_model_fut.result()
                 raise RuntimeError("unexpected error")
 
         # Before processing the model output, process any aborts that happened
