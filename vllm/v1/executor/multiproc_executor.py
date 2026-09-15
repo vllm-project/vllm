@@ -366,10 +366,13 @@ class MultiprocExecutor(Executor):
     def execute_dummy_batch(self) -> None:
         self.collective_rpc("execute_dummy_batch", unique_reply_rank=self.output_rank)
 
-    def take_draft_token_ids(self) -> DraftTokenIds | None:
+    def take_draft_token_ids(self, step_id: int | None = None) -> DraftTokenIds | None:
         # OPTIMIZATION: Get output only from a single worker (output_rank)
+        kwargs = {} if step_id is None else {"step_id": step_id}
         return self.collective_rpc(
-            "take_draft_token_ids", unique_reply_rank=self.output_rank
+            "take_draft_token_ids",
+            unique_reply_rank=self.output_rank,
+            kwargs=kwargs,
         )
 
     def collective_rpc(  # type: ignore[override]

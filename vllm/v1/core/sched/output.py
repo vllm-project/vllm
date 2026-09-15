@@ -304,6 +304,10 @@ class SchedulerOutput:
     # Number of spec tokens to schedule for the next step.
     num_spec_tokens_to_schedule: int = 0
 
+    # Identity of this schedule() call (`Scheduler.current_step`). Used to
+    # retrieve the matching consumption-time draft-token snapshot.
+    scheduler_step: int = 0
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(
