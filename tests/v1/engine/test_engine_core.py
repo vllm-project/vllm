@@ -23,6 +23,7 @@ from vllm.config import (
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_num_threads
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import DPEngineCoreProc, EngineCore, EngineCoreProc
 from vllm.v1.executor.abstract import Executor
@@ -61,6 +62,45 @@ def make_request() -> EngineCoreRequest:
         cache_salt=None,
         data_parallel_rank=None,
     )
+
+
+class ThreadedUniProcExecutor(UniProcExecutor):
+    def initialize_from_config(self, kv_cache_configs: list[KVCacheConfig]) -> None:
+        super().initialize_from_config(kv_cache_configs)
+        self.thread_pool = ThreadPoolExecutor(max_workers=1)
+        self.sample_futures: list[Future[ModelRunnerOutput | None]] = []
+
+    def execute_model(
+        self,
+        scheduler_output: SchedulerOutput,
+        non_block: bool = False,
+    ) -> Future[ModelRunnerOutput | None]:
+        assert non_block
+
+        def execute() -> ModelRunnerOutput | None:
+            output = self.collective_rpc("execute_model", args=(scheduler_output,))
+            return copy.deepcopy(output[0])
+
+        return self.thread_pool.submit(execute)
+
+    def sample_tokens(
+        self,
+        grammar_output: GrammarOutput | None,
+        non_block: bool = False,
+    ) -> Future[ModelRunnerOutput | None]:
+        assert non_block
+
+        def sample() -> ModelRunnerOutput | None:
+            output = self.collective_rpc("sample_tokens", args=(grammar_output,))
+            return copy.deepcopy(output[0])
+
+        future = self.thread_pool.submit(sample)
+        self.sample_futures.append(future)
+        return future
+
+    def shutdown(self) -> None:
+        if hasattr(self, "thread_pool"):
+            self.thread_pool.shutdown(wait=False)
 
 
 @create_new_process_for_each_test()
@@ -252,53 +292,6 @@ def test_engine_core_concurrent_batches():
         request.sampling_params.max_tokens = max_tokens
         return request
 
-    class DummyExecutor(UniProcExecutor):
-        def initialize_from_config(self, kv_cache_configs: list[KVCacheConfig]) -> None:
-            super().initialize_from_config(kv_cache_configs)
-
-            # Create a thread pool with a single worker
-            self.thread_pool = ThreadPoolExecutor(max_workers=1)
-
-        def execute_model(
-            self,
-            scheduler_output,
-            non_block=False,
-        ) -> Future[ModelRunnerOutput | None]:
-            """Make execute_model non-blocking."""
-
-            # DummyExecutor used only for testing async case.
-            assert non_block
-
-            def _execute():
-                output = self.collective_rpc("execute_model", args=(scheduler_output,))
-                # Make a copy because output[0] may be reused
-                # by the next batch.
-                return copy.deepcopy(output[0])
-
-            # Use the thread pool instead of creating a new thread
-            return self.thread_pool.submit(_execute)
-
-        def sample_tokens(
-            self, grammar_output, non_block=False
-        ) -> Future[ModelRunnerOutput]:
-            """Make sample_tokens non-blocking."""
-
-            # DummyExecutor used only for testing async case.
-            assert non_block
-
-            def _execute():
-                output = self.collective_rpc("sample_tokens", args=(grammar_output,))
-                # Make a copy because output[0] may be reused
-                # by the next batch.
-                return copy.deepcopy(output[0])
-
-            # Use the thread pool instead of creating a new thread
-            return self.thread_pool.submit(_execute)
-
-        def shutdown(self):
-            if hasattr(self, "thread_pool"):
-                self.thread_pool.shutdown(wait=False)
-
     engine_args = EngineArgs(
         model=MODEL_NAME,
         # To test concurrent batches.
@@ -324,7 +317,9 @@ def test_engine_core_concurrent_batches():
         ),
     ):
         engine_core = EngineCore(
-            vllm_config=vllm_config, log_stats=False, executor_class=DummyExecutor
+            vllm_config=vllm_config,
+            log_stats=False,
+            executor_class=ThreadedUniProcExecutor,
         )
     assert engine_core.batch_queue is not None
 
@@ -397,6 +392,40 @@ def test_engine_core_concurrent_batches():
             )
         expected_num_tokens[req_id] += 1
         req_id = (req_id + 1) % 2
+
+
+@create_new_process_for_each_test()
+def test_batch_queue_propagates_model_runner_execution_error() -> None:
+    vllm_config = EngineArgs(
+        model=MODEL_NAME,
+        enforce_eager=True,
+        async_scheduling=True,
+    ).create_engine_config()
+    engine_core = EngineCore(
+        vllm_config=vllm_config,
+        executor_class=ThreadedUniProcExecutor,
+        log_stats=False,
+    )
+
+    execution_error = RuntimeError("model execution failed")
+    model_runner = engine_core.model_executor.driver_worker.model_runner
+    with patch.object(model_runner.model, "forward", side_effect=execution_error):
+        try:
+            engine_core.add_request(*engine_core.preprocess_add_request(make_request()))
+            assert engine_core.step_with_batch_queue()[0] is None
+            sample_future = engine_core.model_executor.sample_futures[0]
+
+            with pytest.raises(
+                RuntimeError, match="model execution failed"
+            ) as exc_info:
+                engine_core.step_with_batch_queue()
+
+            assert exc_info.value is execution_error
+            sample_output = sample_future.result()
+        finally:
+            engine_core.shutdown()
+
+    assert sample_output is None
 
 
 @multi_gpu_test(num_gpus=2)
