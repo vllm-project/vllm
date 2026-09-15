@@ -23,6 +23,7 @@ class ECOutputAggregator:
         finished_sending = set[str]()
         finished_recving = set[str]()
         worker_meta = None
+        connector_stats = None
         for model_runner_output in outputs:
             assert model_runner_output is not None
             ec_output = model_runner_output.ec_connector_output
@@ -37,9 +38,17 @@ class ECOutputAggregator:
                     meta if worker_meta is None else worker_meta.aggregate(meta)
                 )
 
+            if stats := ec_output.ec_connector_stats:
+                connector_stats = (
+                    stats
+                    if connector_stats is None
+                    else connector_stats.aggregate(stats)
+                )
+
         aggregated = ECConnectorOutput(
             finished_sending=finished_sending or None,
             finished_recving=finished_recving or None,
+            ec_connector_stats=connector_stats,
             ec_connector_worker_meta=worker_meta,
         )
         if aggregated.is_empty():
