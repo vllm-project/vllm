@@ -575,14 +575,14 @@ _STRIDE_PAD_BYTES = hybrid_module._STRIDE_PAD_BYTES
 
 
 def test_cliff_pad_bytes_only_moves_strides_on_the_cliff():
-    """Pad 2048 B multiples, leave everything else dense."""
-    # On the cliff (K % 4096 == 0): 2048, 4096, 6144, 8192 B rows.
-    for row_bytes in (2048, 4096, 6144, 8192):
+    """Pad 1024 B multiples, leave everything else dense."""
+    # On the cliff (K % 2048 == 0): 1024 B multiples.
+    for row_bytes in (1024, 2048, 4096, 5120, 6144, 7168, 8192):
         assert _cliff_pad_bytes(row_bytes) == _STRIDE_PAD_BYTES
 
-    # Off it, including strides that are 512 B multiples but not 2048 B ones:
-    # padding those measured as a small loss, and it costs weight memory.
-    for row_bytes in (1024, 1280, 1536, 2560, 4864, 5120, 9472):
+    # Off it, including strides that are 512 B multiples but not 1024 B ones:
+    # padding those measured as a real loss (-14% at M=1 on a 4864 B row).
+    for row_bytes in (1280, 1536, 2560, 4864, 9472, 12800):
         assert _cliff_pad_bytes(row_bytes) == 0
 
     # The padded stride is never back on the cliff.
