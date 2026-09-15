@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from functools import wraps
 from typing import Any
 
@@ -44,6 +45,24 @@ class EPLBController:
         self.state: EplbState | None = None
         self.suppressed = False
         self._has_registered_models = False
+
+    @contextmanager
+    def suppress(self) -> Iterator[None]:
+        """Keep warmup forwards from stepping EPLB or recording expert load."""
+        should_record = (
+            self.state.should_record_tensor if self.state is not None else None
+        )
+        was_suppressed = self.suppressed
+        was_recording = should_record.clone() if should_record is not None else None
+        self.suppressed = True
+        if should_record is not None:
+            should_record.fill_(False)
+        try:
+            yield
+        finally:
+            if should_record is not None and was_recording is not None:
+                should_record.copy_(was_recording)
+            self.suppressed = was_suppressed
 
     def prepare_load(self) -> None:
         self.state = None
