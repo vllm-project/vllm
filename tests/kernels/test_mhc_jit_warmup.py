@@ -17,6 +17,8 @@ from vllm.model_executor.kernels.mhc.tilelang_kernels import (
     MhcFusedTileLangKernel,
     MhcPostTileLangKernel,
     MhcPreBigFuseTileLangKernel,
+    mhc_fused_post_pre_split_config,
+    require_fused_post_pre_config,
 )
 from vllm.model_executor.warmup import jit_warmup_tilelang_helper
 
@@ -113,17 +115,32 @@ def test_mhc_pre_big_fuse_dispatch_matches_legacy_runtime_config(
 
 
 @pytest.mark.parametrize(
-    ("num_tokens", "hidden_size", "expected_n_splits", "expected_tile_n"),
-    [(4, 4096, 8, 2), (4, 8192, 4, 2), (8, 4096, 4, 3)],
+    ("num_tokens", "hidden_size", "expected_tile_n", "expected_n_splits"),
+    [
+        (1, 4096, 2, 8),
+        (4, 8192, 2, 8),
+        (8, 5120, 2, 8),
+        (16, 5120, 6, 8),
+        (32, 7168, 6, 8),
+    ],
 )
-def test_mhc_fused_dispatch_matches_legacy_runtime_config(
+def test_mhc_fused_dispatch_matches_the_launch_config(
     num_tokens: int,
     hidden_size: int,
-    expected_n_splits: int,
     expected_tile_n: int,
+    expected_n_splits: int,
 ) -> None:
-    kernel = MhcFusedTileLangKernel()
+    """The compile key must be the config the launch will actually use.
 
+    Both read mhc_fused_post_pre_split_config, so this pins the tuned bands
+    and guards against the two drifting apart again.
+    """
+    kernel = MhcFusedTileLangKernel()
+    tile_n, n_splits, n_thr = require_fused_post_pre_config(
+        num_tokens, hidden_size, hc_mult=4
+    )
+
+    assert (tile_n, n_splits) == (expected_tile_n, expected_n_splits)
     assert kernel.dispatch(
         num_tokens=num_tokens,
         hidden_size=hidden_size,
@@ -131,9 +148,18 @@ def test_mhc_fused_dispatch_matches_legacy_runtime_config(
     ) == kernel.CompileKey(
         hidden_size=hidden_size,
         hc_mult=4,
-        n_splits=expected_n_splits,
-        tile_n=expected_tile_n,
+        n_splits=n_splits,
+        tile_n=tile_n,
+        n_thr=n_thr,
     )
+
+
+def test_mhc_fused_declines_shapes_it_cannot_tile() -> None:
+    """Above the token cutoff, and for a hidden size the block cannot split."""
+    assert mhc_fused_post_pre_split_config(33, 5120, 4) is None
+    assert mhc_fused_post_pre_split_config(1, 5137, 4) is None
+    with pytest.raises(ValueError, match="does not cover num_tokens"):
+        require_fused_post_pre_config(33, 5120, 4)
 
 
 @pytest.mark.parametrize(
@@ -235,8 +261,9 @@ def test_mhc_fused_dispatch_matches_legacy_runtime_config(
             MhcFusedTileLangKernel.CompileKey(
                 hidden_size=4096,
                 hc_mult=4,
-                n_splits=4,
-                tile_n=3,
+                n_splits=8,
+                tile_n=6,
+                n_thr=128,
             ),
         ),
         (
@@ -246,6 +273,7 @@ def test_mhc_fused_dispatch_matches_legacy_runtime_config(
                 hc_mult=4,
                 n_splits=8,
                 tile_n=2,
+                n_thr=128,
             ),
         ),
         (
@@ -253,8 +281,9 @@ def test_mhc_fused_dispatch_matches_legacy_runtime_config(
             MhcFusedTileLangKernel.CompileKey(
                 hidden_size=8192,
                 hc_mult=4,
-                n_splits=4,
+                n_splits=8,
                 tile_n=2,
+                n_thr=128,
             ),
         ),
         (

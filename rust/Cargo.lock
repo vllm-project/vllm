@@ -5972,6 +5972,7 @@ dependencies = [
  "libc",
  "llm-multimodal",
  "openssl",
+ "prost",
  "prost-types",
  "rmp-serde",
  "rmpv",
