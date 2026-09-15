@@ -513,3 +513,64 @@ def test_select_explicit_triton_backend(is_lora_enabled):
 
     assert selected_backend == UnquantizedMoeBackend.TRITON
     assert experts_cls is not None
+
+
+@patch(
+    "vllm.utils.flashinfer.has_flashinfer",
+    return_value=True,
+)
+@patch(
+    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16ExpertsMonolithic.is_supported_config",
+    return_value=(False, None),
+)
+@patch(
+    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16ExpertsModular.is_supported_config",
+    return_value=(False, None),
+)
+@patch(
+    "vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe.has_flashinfer_cutlass_fused_moe",
+    return_value=True,
+)
+@pytest.mark.parametrize(
+    ("jit_unsupported_reason", "expected_backend"),
+    [
+        (None, UnquantizedMoeBackend.FLASHINFER_CUTLASS),
+        ("SM 12.x requires CUDA >= 12.9", UnquantizedMoeBackend.TRITON),
+    ],
+)
+def test_select_cuda_flashinfer_cutlass_requires_jit_preflight(
+    mock_has_flashinfer_cutlass_moe,
+    mock_is_supported_trtllm_modular,
+    mock_is_supported_trtllm_monolithic,
+    mock_has_flashinfer,
+    jit_unsupported_reason,
+    expected_backend,
+):
+    """On SM 12.x FlashInfer CUTLASS is auto-selected ahead of Triton. When
+    FlashInfer cannot JIT-compile for the GPU (toolkit too old, #50705) the
+    oracle must fall through to Triton instead of crashing the profile run."""
+    with (
+        patch.object(current_platform, "is_cuda", return_value=True),
+        patch.object(current_platform, "is_rocm", return_value=False),
+        patch.object(current_platform, "is_cpu", return_value=False),
+        patch.object(current_platform, "is_xpu", return_value=False),
+        patch.object(current_platform, "is_tpu", return_value=False),
+        patch.object(current_platform, "is_out_of_tree", return_value=False),
+        patch.object(current_platform, "is_device_capability", return_value=False),
+        patch.object(
+            current_platform,
+            "is_device_capability_family",
+            side_effect=lambda family, device_id=0: family == 120,
+        ),
+        patch.object(current_platform, "has_device_capability", return_value=True),
+        patch(
+            "vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe.flashinfer_jit_unsupported_reason",
+            return_value=jit_unsupported_reason,
+        ),
+    ):
+        selected_backend, experts_cls = select_unquantized_moe_backend(
+            moe_config=make_dummy_moe_config()
+        )
+
+        assert selected_backend == expected_backend
+        assert experts_cls is not None
