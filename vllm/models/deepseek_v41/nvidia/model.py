@@ -62,7 +62,9 @@ from vllm.models.deepseek_v4.nvidia.model import (
     DeepseekV4MoE as DeepseekV4MoEBase,
 )
 from vllm.models.deepseek_v4.nvidia.model import (
+    MegaGateRoutingMetadata,
     make_deepseek_v4_expert_params_mapping,
+    prepare_mega_gate_routing_metadata,
 )
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
@@ -325,6 +327,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         engram_mask: torch.Tensor | None = None,
         *,
         capture_previous_aux: bool = False,
+        mega_gate_metadata: MegaGateRoutingMetadata | None = None,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -452,7 +455,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 norm_eps=self.ffn_norm.variance_epsilon,
             )
         )
-        x = self.ffn(x, input_ids)
+        x = self.ffn(x, input_ids, mega_gate_metadata)
         return x, residual, post_mix, res_mix, ffn_pre, previous_aux
 
 
@@ -695,6 +698,16 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             hidden_states = sp_shard(hidden_states)
             input_ids = sp_shard(input_ids)
 
+        mega_gate_metadata = None
+        if self.use_mega_moe:
+            mega_gate_metadata = prepare_mega_gate_routing_metadata(
+                input_ids,
+                has_hash_routing=False,
+                image_sentinel_base_id=IMAGE_SENTINEL_BASE_ID
+                if getattr(self.config, "vision_n_layers", 0) > 0
+                else None,
+            )
+
         residual, post_mix, res_mix = None, None, None
         pre_mix: torch.Tensor | None = None
         if not get_pp_group().is_first_rank:
@@ -718,6 +731,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 engram_hashes,
                 engram_mask,
                 capture_previous_aux=idx in self.aux_hidden_state_layers,
+                mega_gate_metadata=mega_gate_metadata,
             )
             if previous_aux is not None:
                 # idx is the one-based id of the layer whose post this is.
