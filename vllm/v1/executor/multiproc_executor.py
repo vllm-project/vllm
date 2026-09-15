@@ -59,6 +59,7 @@ from vllm.utils.system_utils import (
     _maybe_force_spawn,
     decorate_logs,
     get_mp_context,
+    monitor_parent_death,
     set_process_title,
 )
 from vllm.utils.torch_utils import (
@@ -825,29 +826,17 @@ class WorkerProc:
         destroy_distributed_environment()
 
     def monitor_death_pipe(self, death_pipe, shutdown_requested: threading.Event):
-        if death_pipe is None:
-            return
+        # Capture queue references directly to avoid gc issues if capturing self
+        queues_to_shutdown = [self.rpc_broadcast_mq, self.worker_response_mq]
 
-        def death_pipe_monitor(queues_to_shutdown: list[MessageQueue]):
-            try:
-                # This will block until parent process exits (pipe closes)
-                death_pipe.recv()
-            except EOFError:
-                logger.info_once("Parent process exited, terminating worker queues")
-                shutdown_requested.set()
-                for mq in queues_to_shutdown:
-                    if mq is not None:
-                        mq.shutdown()
-            except Exception as e:
-                logger.warning("Death monitoring error: %s", e)
+        def on_parent_death():
+            logger.info_once("Parent process exited, terminating worker queues")
+            shutdown_requested.set()
+            for mq in queues_to_shutdown:
+                if mq is not None:
+                    mq.shutdown()
 
-        # Pass queue references directly to avoid gc issues if passing self
-        Thread(
-            target=death_pipe_monitor,
-            args=([self.rpc_broadcast_mq, self.worker_response_mq],),
-            daemon=True,
-            name="DeathPipeMonitor",
-        ).start()
+        monitor_parent_death(death_pipe, on_parent_death)
 
     @staticmethod
     def worker_main(*args, **kwargs):
