@@ -3,7 +3,9 @@
 import torch
 import torch.nn.functional as F
 
-from vllm.model_executor.hw_agnostic.custom_op import CustomOp
+from vllm.model_executor.hw_agnostic.custom_op import (
+    HwAgnosticCustomOp as CustomOp,
+)
 
 
 @CustomOp.register("silu_and_mul")
