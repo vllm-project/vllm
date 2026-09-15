@@ -424,7 +424,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
         assert isinstance(handle, tuple)
         assert isinstance(handle[0], str)
         assert isinstance(handle[1], str)
-        path = handle[1]
+        path = os.path.join(self.cache_dir, handle[0])
         inductor_compiled_graph = torch._inductor.CompiledArtifact.load(
             path=path, format=self.save_format
         )
