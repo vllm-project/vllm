@@ -57,6 +57,32 @@ def test_language_model_only_affects_model_hash():
     assert base_hash != lm_only_hash
 
 
+def test_zero_mm_limits_affect_model_hash():
+    """Limiting every supported modality to 0 puts the model in text-only
+    mode, which feeds the LM `input_ids` instead of `inputs_embeds`. That is a
+    different computation graph, so it must change the model config hash --
+    otherwise a compiled artifact traced for the multimodal path is reused for
+    the text-only path."""
+    model = "llava-hf/llava-1.5-7b-hf"
+    base_hash = ModelConfig(model).compute_hash()
+    text_only_hash = ModelConfig(
+        model, limit_mm_per_prompt={"image": 0}
+    ).compute_hash()
+    assert base_hash != text_only_hash
+
+
+def test_enable_mm_embeds_affects_model_hash():
+    """enable_mm_embeds keeps the multimodal code path alive even when every
+    modality limit is 0, so it also affects the LM computation graph."""
+    model = "llava-hf/llava-1.5-7b-hf"
+    zero_limits = {"image": 0}
+    text_only_hash = ModelConfig(model, limit_mm_per_prompt=zero_limits).compute_hash()
+    mm_embeds_hash = ModelConfig(
+        model, limit_mm_per_prompt=zero_limits, enable_mm_embeds=True
+    ).compute_hash()
+    assert text_only_hash != mm_embeds_hash
+
+
 @pytest.mark.parametrize("backend_arg", ["video_backend", "backend"])
 def test_use_gpu_video_backend_from_media_io_kwargs(backend_arg: str):
     config = MultiModalConfig(
