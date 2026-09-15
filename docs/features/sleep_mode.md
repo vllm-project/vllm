@@ -117,6 +117,11 @@ curl -X POST 'http://localhost:8000/wake_up?tags=kv_cache'
 !!! note
     These endpoints are only available when passing `VLLM_SERVER_DEV_MODE=1`.
 
+## Custom model loaders
+
+A custom `BaseModelLoader` can override the optional `on_sleep(level)` / `on_wake_up(tags)` hooks to react to GPU-memory-validity transitions.
+These are no-ops by default; see the docstrings on `BaseModelLoader` for the exact contract.
+
 ## Limitation
 
 On ROCm, the virtual memory allocation on ROCm is done through chunked memory allocation. You can control the chunk size through `VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE` (in MB). The default value is set at 256MB. The larger the chunk size the faster the performance. However, setting it too large will cause OOM. So if you encounter OOM when using sleep mode. Try reducing the chunk size. It is recommended to define the chunk size as a power of 2.
