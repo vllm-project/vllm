@@ -292,6 +292,47 @@ def test_deepseek_v4_renders_parsed_history_tool_arguments():
     assert 'parameter name="arguments"' not in prompt
 
 
+def test_deepseek_v4_suppresses_content_in_history_with_tool_calls():
+    messages = [
+        {"role": "user", "content": "What is the weather in Boston?"},
+        {
+            "role": "assistant",
+            "content": "Let me check the weather in Boston.",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "arguments": '{"location": "Boston"}',
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": "Sunny, 72F",
+        },
+    ]
+    conversation, _, _ = parse_chat_messages(
+        messages,
+        _model_config(),
+        content_format="string",
+    )
+
+    prompt = _tokenizer().apply_chat_template(
+        conversation=conversation,
+        messages=messages,
+        tokenize=False,
+    )
+
+    # Verify assistant prose before tool calls is suppressed
+    assert "Let me check the weather in Boston." not in prompt
+    assert "<｜DSML｜tool_calls>" in prompt
+    assert '<｜DSML｜parameter name="location" string="true">Boston' in prompt
+
+
 @pytest.mark.parametrize(
     ("reasoning_effort", "expected_prefix"),
     [
