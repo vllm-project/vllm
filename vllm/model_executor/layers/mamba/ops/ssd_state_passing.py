@@ -8,19 +8,27 @@
 
 import torch
 
-from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
+from vllm.model_executor.layers.mamba.ops.triton_helpers import (
+    batch_invariant_autotune_configs,
+    fast_exp,
+)
 from vllm.triton_utils import tl, triton
+
+_BATCH_INVARIANT_CONFIG = triton.Config({"BLOCK_SIZE": 256})
 
 
 @triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_SIZE": 64}),
-        triton.Config({"BLOCK_SIZE": 128}),
-        triton.Config({"BLOCK_SIZE": 256}),
-        triton.Config({"BLOCK_SIZE": 512}),
-        triton.Config({"BLOCK_SIZE": 1024}),
-        triton.Config({"BLOCK_SIZE": 2048}),
-    ],
+    configs=batch_invariant_autotune_configs(
+        [
+            triton.Config({"BLOCK_SIZE": 64}),
+            triton.Config({"BLOCK_SIZE": 128}),
+            _BATCH_INVARIANT_CONFIG,
+            triton.Config({"BLOCK_SIZE": 512}),
+            triton.Config({"BLOCK_SIZE": 1024}),
+            triton.Config({"BLOCK_SIZE": 2048}),
+        ],
+        pinned=_BATCH_INVARIANT_CONFIG,
+    ),
     key=["dim"],
 )
 @triton.jit
