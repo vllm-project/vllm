@@ -13,6 +13,7 @@ Test organization:
 """
 
 from collections.abc import Hashable
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -968,3 +969,99 @@ class TestInitInvariantValidation:
 
         with pytest.raises(ValueError, match="must be positive"):
             CompilationConfig(encoder_cudagraph_token_budgets=[-1, 64])
+
+
+# ---------------------------------------------------------------------------
+# BailingMoeV3VL (Ling-3.0-flash-VL) — CPU, no weights
+# ---------------------------------------------------------------------------
+
+_LING_MERGE = 2
+_LING_PATCH = 16
+_LING_VIT_HIDDEN = 8
+_LING_TEXT_HIDDEN = 6
+_LING_FLAT = 3 * 2 * _LING_PATCH**2
+
+
+class _FakeLingViT(torch.nn.Module):
+    """Qwen3-ViT stand-in exposing what the protocol reads; merges each 2x2
+    patch group like Ling's parameter-free patch merger."""
+
+    def __init__(self):
+        super().__init__()
+        self.spatial_merge_size = _LING_MERGE
+        self.patch_size = _LING_PATCH
+        self.proj = torch.nn.Linear(_LING_FLAT, _LING_VIT_HIDDEN)
+
+    def prepare_encoder_metadata(self, grid_thw_list, **kwargs):
+        num_patches = sum(t * h * w for t, h, w in grid_thw_list)
+        return {
+            "pos_embeds": torch.zeros(num_patches, _LING_VIT_HIDDEN),
+            "rotary_pos_emb_cos": torch.zeros(num_patches, 1),
+            "rotary_pos_emb_sin": torch.zeros(num_patches, 1),
+            "cu_seqlens": torch.tensor([0, num_patches], dtype=torch.int32),
+            "max_seqlen": torch.tensor(num_patches, dtype=torch.int32),
+            "sequence_lengths": None,
+        }
+
+    def forward(self, x, grid_thw, *, encoder_metadata=None):
+        if encoder_metadata is None:
+            encoder_metadata = self.prepare_encoder_metadata(grid_thw)
+        hidden = self.proj(x) + encoder_metadata["pos_embeds"]
+        return hidden.reshape(-1, _LING_VIT_HIDDEN * _LING_MERGE**2)
+
+
+def _make_ling_vl_model():
+    from vllm.model_executor.models.bailing_moe_v3_vl import (
+        BailingMoeV3VLForConditionalGeneration,
+    )
+
+    model = BailingMoeV3VLForConditionalGeneration.__new__(
+        BailingMoeV3VLForConditionalGeneration
+    )
+    torch.nn.Module.__init__(model)
+    model.config = SimpleNamespace(
+        text_config=SimpleNamespace(hidden_size=_LING_TEXT_HIDDEN)
+    )
+    model.model_config = SimpleNamespace(max_model_len=2048)
+    model.visual = _FakeLingViT()
+    model.linear_proj = torch.nn.Linear(
+        _LING_VIT_HIDDEN * _LING_MERGE**2, _LING_TEXT_HIDDEN
+    )
+    return model
+
+
+class TestBailingMoeV3VLEncoderCudaGraph:
+    """Guards the two places Ling-VL deviates from the Qwen3-VL template."""
+
+    def setup_method(self):
+        self.model = _make_ling_vl_model()
+
+    def test_config_uses_text_width_and_patch16_min_budget(self):
+        config = self.model.get_encoder_cudagraph_config()
+        assert config.modalities == ["image"]
+        # The graph covers linear_proj, so DP gather buffers are text-width.
+        assert config.out_hidden_size == _LING_TEXT_HIDDEN
+
+        vllm_config = SimpleNamespace(
+            scheduler_config=SimpleNamespace(max_num_batched_tokens=8192)
+        )
+        # 224x224 with 16px patches and 2x2 merge -> 7x7 tokens (not Qwen's 64).
+        assert self.model.get_encoder_cudagraph_budget_range(vllm_config) == (
+            49,
+            2048,
+        )
+
+    def test_graph_and_eager_paths_apply_projector_and_agree(self):
+        mm_kwargs = {
+            "pixel_values": torch.randn(12, _LING_FLAT),
+            "image_grid_thw": torch.tensor([[1, 2, 4], [1, 2, 2]]),
+        }
+        eager = self.model.encoder_eager_forward(mm_kwargs)
+        replay = self.model.prepare_encoder_cudagraph_replay_buffers(mm_kwargs, 2, 0)
+        assert set(replay.values) == set(
+            self.model.get_encoder_cudagraph_config().buffer_keys
+        )
+        graph = self.model.encoder_cudagraph_forward(dict(replay.values))
+
+        assert eager.shape == (3, _LING_TEXT_HIDDEN)
+        torch.testing.assert_close(graph, eager)
