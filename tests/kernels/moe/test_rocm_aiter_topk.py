@@ -29,6 +29,8 @@ aiter_available = importlib.util.find_spec("aiter") is not None
 if not aiter_available:
     pytest.skip("These tests require AITER to run.", allow_module_level=True)
 
+import aiter  # noqa: E402
+
 
 def test_rocm_aiter_biased_grouped_topk_custom_op_registration():
     """Test that the custom op is correctly registered."""
@@ -48,7 +50,22 @@ def test_rocm_aiter_grouped_topk_custom_op_registration():
     assert callable(torch.ops.vllm.rocm_aiter_grouped_topk)
 
 
-def test_rocm_aiter_biased_grouped_topk_torch_compile_compatibility():
+@pytest.mark.parametrize(
+    "correction_bias_dtype",
+    [
+        torch.bfloat16,
+        pytest.param(
+            torch.float32,
+            marks=pytest.mark.skipif(
+                not hasattr(aiter, "biased_grouped_topk_mixed_dtype"),
+                reason="AITER mixed-dtype biased grouped top-k is unavailable",
+            ),
+        ),
+    ],
+)
+def test_rocm_aiter_biased_grouped_topk_torch_compile_compatibility(
+    correction_bias_dtype: torch.dtype,
+):
     """Test that the op can be used with torch.compile."""
     # Create test tensors
     token = 64
@@ -61,7 +78,7 @@ def test_rocm_aiter_biased_grouped_topk_torch_compile_compatibility():
 
     gating_output = torch.randn((token, expert), dtype=torch.bfloat16, device="cuda")
     e_score_correction_bias = torch.randn(
-        (expert,), dtype=torch.bfloat16, device="cuda"
+        (expert,), dtype=correction_bias_dtype, device="cuda"
     )
 
     device = gating_output.device
