@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+import os
 import tempfile
 
 import huggingface_hub.constants
@@ -9,6 +11,7 @@ from huggingface_hub.utils import LocalEntryNotFoundError
 
 from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf,
+    filter_duplicate_safetensors_files,
     maybe_remap_kv_scale_name,
 )
 
@@ -43,6 +46,54 @@ def test_download_weights_from_hf():
             )
             is not None
         )
+
+
+def _write_index(tmpdir: str, index_file: str) -> None:
+    """Write an index referencing two shard files."""
+    index = {
+        "weight_map": {
+            "model.layer.weight": "model-00001-of-00002.safetensors",
+            "model.head.weight": "model-00002-of-00002.safetensors",
+        }
+    }
+    with open(os.path.join(tmpdir, index_file), "w") as f:
+        json.dump(index, f)
+
+
+def test_filter_duplicate_safetensors_files_missing_shard():
+    """A shard named in the index but absent on disk must be reported.
+
+    Without this the missing shard is silently filtered out and the model
+    loads with uninitialized weights (GitHub issue #34859).
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        index_file = "model.safetensors.index.json"
+        _write_index(tmpdir, index_file)
+
+        # Only the first shard exists; the second is missing.
+        shard1 = os.path.join(tmpdir, "model-00001-of-00002.safetensors")
+        open(shard1, "w").close()
+
+        with pytest.raises(FileNotFoundError, match="missing"):
+            filter_duplicate_safetensors_files([shard1], tmpdir, index_file)
+
+
+def test_filter_duplicate_safetensors_files_all_present():
+    """A complete checkpoint passes through untouched."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        index_file = "model.safetensors.index.json"
+        _write_index(tmpdir, index_file)
+
+        shards = []
+        for name in (
+            "model-00001-of-00002.safetensors",
+            "model-00002-of-00002.safetensors",
+        ):
+            path = os.path.join(tmpdir, name)
+            open(path, "w").close()
+            shards.append(path)
+
+        assert filter_duplicate_safetensors_files(shards, tmpdir, index_file) == shards
 
 
 class TestMaybeRemapKvScaleName:

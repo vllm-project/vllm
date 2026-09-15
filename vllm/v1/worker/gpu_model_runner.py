@@ -5629,13 +5629,22 @@ class GPUModelRunner(
             "Reloading and processing weights took %.2f seconds",
             diff_seconds,
         )
-        if self.model_config.quantization is None and loaded_weights is not None:
+        if loaded_weights is not None:
             weights_not_loaded = weights_to_load - loaded_weights
             if weights_not_loaded:
-                logger.warning(
-                    "Following weights were not loaded from checkpoint: %s",
-                    weights_not_loaded,
-                )
+                if self.model_config.quantization is None:
+                    logger.warning(
+                        "Following weights were not loaded from checkpoint: %s",
+                        weights_not_loaded,
+                    )
+                else:
+                    logger.warning(
+                        "Following weights were not loaded from checkpoint "
+                        "for quantized model (%s): %s. This may indicate "
+                        "missing shard files.",
+                        self.model_config.quantization,
+                        weights_not_loaded,
+                    )
 
         self.reset_encoder_cache()
         self.reset_mm_cache()
