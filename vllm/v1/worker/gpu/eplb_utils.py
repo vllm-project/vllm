@@ -46,6 +46,7 @@ class EPLBController:
         self._has_registered_models = False
 
     def prepare_load(self) -> None:
+        self.shutdown()
         self.state = None
         self._has_registered_models = False
         if self.parallel_config.enable_eplb:
@@ -110,6 +111,10 @@ class EPLBController:
         if eplb_models_added and self.state is not None and self.state.is_async:
             self.state.start_async_loop()
 
+    def shutdown(self) -> None:
+        if self.state is not None:
+            self.state.stop_async_loop()
+
     def step(
         self,
         is_dummy: bool = False,
@@ -148,6 +153,7 @@ class EPLBController:
         moe_model = get_mixture_of_experts_model(model)
         assert moe_model is not None
 
+        self.shutdown()
         self.state = EplbState.from_mapping(
             model=moe_model,
             model_config=model_config,

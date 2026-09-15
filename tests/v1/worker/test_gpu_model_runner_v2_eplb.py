@@ -32,6 +32,7 @@ class FakeEplbState:
         self.add_model_calls: list[tuple[Any, Any]] = []
         self.step_calls: list[tuple[bool, bool, bool]] = []
         self.async_started = False
+        self.async_stopped = False
         self.is_async = True
         self.built_from_mapping = False
         FakeEplbState.instances.append(self)
@@ -44,6 +45,9 @@ class FakeEplbState:
 
     def start_async_loop(self) -> None:
         self.async_started = True
+
+    def stop_async_loop(self) -> None:
+        self.async_stopped = True
 
     @classmethod
     def from_mapping(cls, **kwargs: Any) -> "FakeEplbState":
@@ -154,20 +158,53 @@ def test_v2_load_model_with_dummy_weights_skips_eplb_registration(monkeypatch):
     assert runner.eplb_state.async_started is False
 
 
+def test_v2_prepare_load_stops_existing_state_before_replacement(monkeypatch):
+    events: list[str] = []
+
+    class ReplacementState:
+        def __init__(self, _parallel_config, _device):
+            events.append("create")
+
+    old_state = SimpleNamespace(
+        stop_async_loop=lambda: events.append("stop"),
+    )
+    monkeypatch.setattr(eplb, "EplbState", ReplacementState)
+
+    runner = _make_runner()
+    runner.eplb.state = old_state
+
+    runner.eplb.prepare_load()
+
+    assert events == ["stop", "create"]
+    assert isinstance(runner.eplb.state, ReplacementState)
+
+
 def test_v2_setup_eplb_from_mapping_rebuilds_state(monkeypatch):
-    FakeEplbState.instances.clear()
-    FakeEplbState.from_mapping_kwargs = None
-    monkeypatch.setattr(eplb, "EplbState", FakeEplbState)
+    events: list[str] = []
+    from_mapping_kwargs: dict[str, Any] = {}
+    new_state = object()
+
+    class ReplacementState:
+        @classmethod
+        def from_mapping(cls, **kwargs):
+            events.append("create")
+            from_mapping_kwargs.update(kwargs)
+            return new_state
+
+    old_state = SimpleNamespace(
+        stop_async_loop=lambda: events.append("stop"),
+    )
+    monkeypatch.setattr(eplb, "EplbState", ReplacementState)
     monkeypatch.setattr(eplb, "get_mixture_of_experts_model", lambda model: model)
 
     runner = _make_runner(model=SimpleNamespace(is_moe=True))
+    runner.eplb.state = old_state
     mapping = torch.tensor([[0, 1, 2, 3]], dtype=torch.int64)
     mrv2.GPUModelRunner.setup_eplb_from_mapping(runner, mapping)
 
-    assert runner.eplb_state is not None
-    assert runner.eplb_state.built_from_mapping is True
-    assert FakeEplbState.from_mapping_kwargs is not None
-    assert FakeEplbState.from_mapping_kwargs["expanded_physical_to_logical"] is mapping
+    assert events == ["stop", "create"]
+    assert runner.eplb_state is new_state
+    assert from_mapping_kwargs["expanded_physical_to_logical"] is mapping
 
 
 def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
@@ -203,3 +240,44 @@ def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
     output = mrv2.GPUModelRunner.sample_tokens(runner, None)
     assert output in (EMPTY_MODEL_RUNNER_OUTPUT, None)
     assert events == ["receive", "postprocess_num_computed_tokens", "eplb"]
+
+
+def test_v2_eplb_controller_shutdown_stops_state(monkeypatch):
+    FakeEplbState.instances.clear()
+    monkeypatch.setattr(eplb, "EplbState", FakeEplbState)
+
+    runner = _make_runner()
+    runner.eplb.prepare_load()
+    state = runner.eplb.state
+    assert state is not None
+
+    runner.eplb.shutdown()
+
+    assert state.async_stopped is True
+
+
+def test_v2_gpu_model_runner_shutdown_stops_eplb_before_cleanup(monkeypatch):
+    eplb_stopped = False
+    synchronize_called = False
+
+    def stop_eplb():
+        nonlocal eplb_stopped
+        eplb_stopped = True
+
+    def synchronize():
+        nonlocal synchronize_called
+        assert eplb_stopped
+        synchronize_called = True
+
+    runner = _make_runner()
+    runner.eplb = SimpleNamespace(shutdown=stop_eplb)
+
+    monkeypatch.setattr(torch.accelerator, "synchronize", synchronize)
+    monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: None)
+    monkeypatch.setattr(mrv2, "free_before_shutdown", lambda _: None)
+    monkeypatch.setattr(mrv2.gc, "collect", lambda: None)
+
+    runner.shutdown()
+
+    assert eplb_stopped
+    assert synchronize_called
