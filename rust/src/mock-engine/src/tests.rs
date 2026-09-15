@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 use vllm_engine_core_client::protocol::output::EngineCoreFinishReason;
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
+use vllm_engine_core_client::protocol::stats::PrefillStats;
 use vllm_engine_core_client::test_utils::IpcNamespace;
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, TransportMode};
 
@@ -119,12 +120,22 @@ async fn chunk_size_one_outputs_one_token_per_update() {
     let first = stream.next().await.expect("first").expect("first ok");
     assert_eq!(first.new_token_ids.len(), 1);
     assert_eq!(first.finish_reason, None);
+    assert_eq!(
+        first.prefill_stats,
+        Some(PrefillStats {
+            num_prompt_tokens: 3,
+            num_computed_tokens: 3,
+            ..Default::default()
+        })
+    );
     let second = stream.next().await.expect("second").expect("second ok");
     assert_eq!(second.new_token_ids.len(), 1);
     assert_eq!(second.finish_reason, None);
+    assert!(second.prefill_stats.is_none());
     let third = stream.next().await.expect("third").expect("third ok");
     assert_eq!(third.new_token_ids.len(), 1);
     assert_eq!(third.finish_reason, Some(EngineCoreFinishReason::Length));
+    assert!(third.prefill_stats.is_none());
     assert!(stream.next().await.is_none());
 
     shutdown_mock(client, shutdown, task).await;
