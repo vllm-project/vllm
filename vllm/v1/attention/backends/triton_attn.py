@@ -18,7 +18,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
-from vllm.utils.math_utils import next_power_of_2
+from vllm.utils.math_utils import is_power_of_2, next_power_of_2
 from vllm.utils.torch_utils import get_dtype_size, is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -312,6 +312,26 @@ class TritonAttentionBackend(AttentionBackend):
         if block_size is None:
             return True
         return block_size % 16 == 0
+
+    @classmethod
+    def validate_configuration(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: CacheDType | None,
+        *args,
+        **kwargs,
+    ) -> list[str]:
+        invalid_reasons = super().validate_configuration(
+            head_size, dtype, kv_cache_dtype, *args, **kwargs
+        )
+        # INT4 rotates K/V with a Hadamard transform before packing, which is
+        # only defined on power-of-two rows.
+        if kv_cache_dtype == "int4_per_token_head" and not is_power_of_2(head_size):
+            invalid_reasons.append(
+                "int4_per_token_head requires a power-of-two head_size"
+            )
+        return invalid_reasons
 
     forward_includes_kv_cache_update: bool = False
 

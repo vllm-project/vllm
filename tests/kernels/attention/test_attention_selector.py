@@ -508,6 +508,49 @@ def test_per_head_quant_scales_backend_selection(
             assert backend_name in str(exc_info.value)
 
 
+@pytest.mark.skipif(
+    CudaPlatform is None, reason="CUDA platform is required for this test"
+)
+@pytest.mark.parametrize("head_size", [64, 128, 256])
+def test_int4_per_token_head_accepts_power_of_two_head_size(head_size: int):
+    """INT4 per-token-head KV cache is selectable on power-of-two head sizes."""
+    vllm_config = VllmConfig(cache_config=CacheConfig(block_size=64))
+    with (
+        set_current_vllm_config(vllm_config),
+        patch("vllm.platforms.current_platform", CudaPlatform()),
+    ):
+        backend = get_attn_backend(
+            head_size=head_size,
+            dtype=torch.float16,
+            kv_cache_dtype="int4_per_token_head",
+        )
+        assert backend.get_name() == "TRITON_ATTN"
+
+
+@pytest.mark.skipif(
+    CudaPlatform is None, reason="CUDA platform is required for this test"
+)
+@pytest.mark.parametrize("head_size", [80, 96, 192])
+def test_int4_per_token_head_rejects_non_power_of_two_head_size(head_size: int):
+    """The INT4 write path rotates K/V with a Hadamard transform, which is only
+    defined on power-of-two rows, so such configs must fail at selection time
+    instead of crashing inside the kernel."""
+    vllm_config = VllmConfig(cache_config=CacheConfig(block_size=64))
+    with (
+        set_current_vllm_config(vllm_config),
+        patch("vllm.platforms.current_platform", CudaPlatform()),
+    ):
+        with pytest.raises(ValueError) as exc_info:
+            get_attn_backend(
+                head_size=head_size,
+                dtype=torch.float16,
+                kv_cache_dtype="int4_per_token_head",
+            )
+        assert "int4_per_token_head requires a power-of-two head_size" in str(
+            exc_info.value
+        )
+
+
 @pytest.mark.parametrize(
     "backend_name,use_non_causal,should_succeed",
     [
