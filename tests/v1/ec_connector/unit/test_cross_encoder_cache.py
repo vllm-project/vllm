@@ -430,6 +430,7 @@ def test_publication_budget_charges_and_releases_backing_storage(backend):
         assert not backend._enqueue_save("a", tensor)
         backend.max_pending_bytes = 64
         assert backend._enqueue_save("a", tensor)
+        storage_owner = weakref.ref(tensor.untyped_storage())
         backend.max_pending_bytes = 128
         assert not backend._enqueue_save("b", tensor)
     del tensor
@@ -443,9 +444,44 @@ def test_publication_budget_charges_and_releases_backing_storage(backend):
     backend.shutdown()
     gc.collect()
     assert owner() is None and backend._pending_bytes == 0
+    assert storage_owner() is None
 
 
-def test_completion_race_preserves_failure_and_reclaims_other_items(backend):
+@pytest.mark.parametrize("rejected", [False, True])
+def test_shared_storage_budget_is_released_after_last_publication(backend, rejected):
+    batch = torch.arange(16, dtype=torch.float32).view(4, 4)
+    first: Future[None] = Future()
+    last: Future[None] = Future()
+    separate: Future[None] = Future()
+    backend.max_pending_items = 2
+    backend.max_pending_bytes = batch.nbytes
+    with patch.object(backend._executor, "submit", side_effect=[first, last, separate]):
+        assert backend._enqueue_save("a", batch[:2])
+        assert backend._enqueue_save("b", batch[2:])
+        assert backend._pending_bytes == batch.nbytes
+        assert not backend._enqueue_save("a", batch[:2])
+        assert not backend._enqueue_save("extra", batch[:1])
+        if rejected:
+            first.set_exception(store_client.EmbeddingStoreOperationError("rejected"))
+        else:
+            first.set_result(None)
+        backend.reap()
+        assert backend._pending_bytes == batch.nbytes
+        assert not backend._enqueue_save("c", torch.ones(2, 2))
+        last.set_result(None)
+        backend.reap()
+        assert backend._pending_bytes == 0
+        assert backend._enqueue_save("c", torch.ones(2, 2))
+        assert backend._pending_bytes == 16
+        separate.set_result(None)
+        backend.reap()
+        assert backend._pending_bytes == 0
+
+
+@pytest.mark.parametrize("shared_storage", [False, True])
+def test_completion_race_preserves_failure_and_reclaims_other_items(
+    backend, shared_storage
+):
     class RacingFuture(Future[None]):
         def done(self):
             observed = super().done()
@@ -455,11 +491,13 @@ def test_completion_race_preserves_failure_and_reclaims_other_items(backend):
 
     racing = RacingFuture()
     other: Future[None] = Future()
+    tensor = torch.ones(2, 2)
+    other_tensor = tensor[:1] if shared_storage else torch.ones(2, 2)
     with patch.object(backend._executor, "submit", side_effect=[racing, other]):
-        assert backend._enqueue_save("race", torch.ones(2, 2))
-        assert backend._enqueue_save("other", torch.ones(2, 2))
+        assert backend._enqueue_save("race", tensor)
+        assert backend._enqueue_save("other", other_tensor)
     backend.reap()
-    assert backend._pending_bytes == 32
+    assert backend._pending_bytes == (16 if shared_storage else 32)
     other.set_result(None)
     with pytest.raises(store_client.EmbeddingStoreError):
         backend.reap()

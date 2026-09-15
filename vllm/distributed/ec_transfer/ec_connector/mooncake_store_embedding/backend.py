@@ -28,7 +28,7 @@ logger = init_logger(__name__)
 class _StoreSave:
     tensor: torch.Tensor | None
     ready_event: torch.Event | None
-    budget_bytes: int
+    storage_ptr: int
 
     def release(self) -> None:
         self.tensor = None
@@ -55,6 +55,7 @@ class MooncakeEmbeddingStoreBackend:
             thread_name_prefix="ec-mooncake-store",
         )
         self._pending: dict[str, tuple[Future[None], _StoreSave]] = {}
+        self._pending_storages: dict[int, tuple[torch.UntypedStorage, int]] = {}
         self._pending_lock = threading.Lock()
         self._pending_bytes = 0
         self._step_candidates: set[str] = set()
@@ -113,10 +114,11 @@ class MooncakeEmbeddingStoreBackend:
         return loaded
 
     def _enqueue_save(self, identifier: str, tensor: torch.Tensor) -> bool:
-        """Admit contiguous outputs using their full retained storage size."""
+        """Admit contiguous outputs, charging each retained storage once."""
         if not tensor.is_contiguous():
             return False
-        budget_bytes = tensor.untyped_storage().nbytes()
+        storage = tensor.untyped_storage()
+        storage_ptr = storage.data_ptr()
         with self._pending_lock:
             if self._fatal_error is not None:
                 raise EmbeddingStoreError(
@@ -124,6 +126,8 @@ class MooncakeEmbeddingStoreBackend:
                 ) from self._fatal_error
             if self._closed or identifier in self._pending:
                 return False
+            _, ref_count = self._pending_storages.get(storage_ptr, (storage, 0))
+            budget_bytes = 0 if ref_count else storage.nbytes()
             if (
                 len(self._pending) >= self.max_pending_items
                 or self._pending_bytes + budget_bytes > self.max_pending_bytes
@@ -133,12 +137,14 @@ class MooncakeEmbeddingStoreBackend:
             save = _StoreSave(
                 tensor,
                 _record_tensor_ready_event(tensor),
-                budget_bytes,
+                storage_ptr,
             )
             future = self._executor.submit(
                 self._save, make_embedding_key(self.namespace, identifier), save
             )
             self._pending[identifier] = (future, save)
+            # Keep the storage alive until reaping so its address cannot be reused.
+            self._pending_storages[storage_ptr] = (storage, ref_count + 1)
             self._pending_bytes += budget_bytes
         return True
 
@@ -177,7 +183,12 @@ class MooncakeEmbeddingStoreBackend:
                         self._fatal_error = error
                     continue
                 del self._pending[identifier]
-                self._pending_bytes -= save.budget_bytes
+                storage, ref_count = self._pending_storages[save.storage_ptr]
+                if ref_count == 1:
+                    del self._pending_storages[save.storage_ptr]
+                    self._pending_bytes -= storage.nbytes()
+                else:
+                    self._pending_storages[save.storage_ptr] = (storage, ref_count - 1)
             fatal = self._fatal_error
         if fatal is not None:
             raise fatal

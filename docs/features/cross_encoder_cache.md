@@ -87,7 +87,8 @@ must consistently identify the same input; see [cached inputs](multimodal_inputs
   preprocessing, P2P delivery or the scheduler's Encoder budget reservation.
 - Publication is best-effort. A request can finish before its outputs reach the
   Store, so concurrent cold requests may still encode the same image.
-- Publication budgets count retained backing storage, not just tensor views.
+- Publication budgets count each retained backing storage once across pending
+  views. Its charge is released after the last view is safely reclaimed.
   Exceeding a budget skips the write. Store client buffers and the P2P pool
   consume additional memory.
 - Cache misses and recoverable read errors fall back to encoding. Recoverable
