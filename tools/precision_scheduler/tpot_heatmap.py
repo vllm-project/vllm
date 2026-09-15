@@ -42,7 +42,8 @@ from typing import Any
 THIS_DIR = Path(__file__).resolve().parent
 PRECISION_BF16 = "bf16"
 PRECISION_INT4 = "int4"
-PRECISIONS = (PRECISION_BF16, PRECISION_INT4)
+PRECISION_NVFP4 = "nvfp4"
+PRECISIONS = (PRECISION_BF16, PRECISION_INT4, PRECISION_NVFP4)
 POLICY_ENV = "VLLM_DUAL_PRECISION_POLICY"
 UNIFORM_W4_SPEC = "uniform_w4"
 CONNECTOR_MODULE = "synthetic_kv_connector"
@@ -221,6 +222,7 @@ def matrix_payload(
 
     bf16 = matrix(PRECISION_BF16)
     int4 = matrix(PRECISION_INT4)
+    nvfp4 = matrix(PRECISION_NVFP4)
     required_lookup = {
         (cell.batch_size, cell.seq_len): cell.required_kv_bytes for cell in cells or []
     }
@@ -232,28 +234,31 @@ def matrix_payload(
     required_kv_bytes = [
         [required_lookup.get((batch, seq)) for seq in seq_lens] for batch in batch_sizes
     ]
-    speedup = []
-    for bf16_row, int4_row in zip(bf16, int4, strict=True):
-        speedup.append(
+    def speedup_over(quantized: list[list[float | None]]) -> list[list[float | None]]:
+        return [
             [
                 left / right if left is not None and right not in (None, 0.0) else None
-                for left, right in zip(bf16_row, int4_row, strict=True)
+                for left, right in zip(bf16_row, quantized_row, strict=True)
             ]
-        )
+            for bf16_row, quantized_row in zip(bf16, quantized, strict=True)
+        ]
+
     return {
         "batch_sizes": batch_sizes,
         "seq_lens": seq_lens,
         "required_kv_bytes": required_kv_bytes,
         "bf16_tpot_ms": bf16,
         "int4_tpot_ms": int4,
-        "speedup_bf16_over_int4": speedup,
+        "nvfp4_tpot_ms": nvfp4,
+        "speedup_bf16_over_int4": speedup_over(int4),
+        "speedup_bf16_over_nvfp4": speedup_over(nvfp4),
     }
 
 
-def median_speedup(payload: dict[str, Any]) -> float | None:
-    values = [
-        v for row in payload["speedup_bf16_over_int4"] for v in row if v is not None
-    ]
+def median_speedup(
+    payload: dict[str, Any], key: str = "speedup_bf16_over_int4"
+) -> float | None:
+    values = [v for row in payload.get(key, []) for v in row if v is not None]
     return statistics.median(values) if values else None
 
 
@@ -271,25 +276,58 @@ def is_capacity_failure(error: BaseException) -> bool:
 
 
 def precision_environment(
-    precision: str, int4_model: str | None
+    precision: str,
+    int4_model: str | None,
+    nvfp4_model: str | None = None,
+    *,
+    standalone: bool = False,
 ) -> dict[str, str | None]:
     """Environment overrides selecting the base precision of one engine launch.
 
-    This is the forced-precision seam: BF16 rows run with the dual-precision policy
-    unset (vanilla behaviour); INT4 rows run with the decision-6 spec ``uniform_w4``
-    and the INT4 shadow checkpoint.  ``None`` means "remove from the environment".
+    This is the forced-precision seam.  There are two ways to reach a quantized row:
+
+    * ``standalone=False`` (default, the archived protocol): every engine loads the
+      BF16 ``--model`` and the INT4 row runs the decision-6 spec ``uniform_w4`` against
+      the INT4 shadow, i.e. inside the dual-precision runtime the scheduler itself uses.
+    * ``standalone=True``: each row is vanilla vLLM launched directly on that
+      precision's own checkpoint (see ``base_model_for_precision``), so every row is
+      symmetric and no dual-precision runtime takes part.
+
+    NVFP4 is always standalone: the dual-precision loader carries no FP4 shadow format,
+    so that row is vanilla vLLM on the NVFP4 checkpoint whatever ``standalone`` says.
+
+    ``None`` means "remove from the environment".
     """
     if precision == PRECISION_BF16:
+        return {POLICY_ENV: None}
+    if precision == PRECISION_NVFP4:
+        if not nvfp4_model:
+            raise ValueError("--nvfp4-model is required for the nvfp4 precision row")
         return {POLICY_ENV: None}
     if precision == PRECISION_INT4:
         if not int4_model:
             raise ValueError("--int4-model is required for the int4 precision row")
+        if standalone:
+            return {POLICY_ENV: None}
         return {
             POLICY_ENV: UNIFORM_W4_SPEC,
             "VLLM_DUAL_PRECISION_ROLLOUT": "1",
             "VLLM_DUAL_PRECISION_INT4_MODEL": str(int4_model),
         }
     raise ValueError(f"Unsupported precision: {precision}")
+
+
+def base_model_for_precision(precision: str, args: argparse.Namespace) -> str:
+    """Checkpoint this row's engine loads as its base model.
+
+    Only the standalone rows swap the base checkpoint.  Under the dual-precision
+    protocol every row loads ``--model`` and the INT4 weights arrive as a shadow.
+    """
+    if precision == PRECISION_NVFP4:
+        return str(args.nvfp4_model)
+    if precision == PRECISION_INT4 and args.standalone_base_precision:
+        return str(args.int4_model)
+    return str(args.model)
 
 
 def expected_keys(
@@ -542,11 +580,19 @@ def run_precision_row(args: argparse.Namespace, precision: str) -> int:
         "precision": precision,
         "git_sha": git_sha(),
         "model": args.model,
+        "base_model": base_model_for_precision(precision, args),
         "int4_model": args.int4_model,
+        "nvfp4_model": args.nvfp4_model,
+        "standalone_base_precision": bool(args.standalone_base_precision),
         "adapter": str(args.adapter) if args.adapter else None,
-        "policy_env": {
-            k: v for k, v in precision_environment(precision, args.int4_model).items()
-        },
+        "policy_env": dict(
+            precision_environment(
+                precision,
+                args.int4_model,
+                args.nvfp4_model,
+                standalone=args.standalone_base_precision,
+            )
+        ),
         "batch_sizes": batch_sizes,
         "seq_lens": seq_lens,
         "warmup_steps": args.warmup_steps,
@@ -569,7 +615,7 @@ def run_precision_row(args: argparse.Namespace, precision: str) -> int:
     atomic_write_json(manifest_path, manifest)
 
     llm_kwargs: dict[str, Any] = {
-        "model": args.model,
+        "model": base_model_for_precision(precision, args),
         "tensor_parallel_size": args.tensor_parallel_size,
         "max_model_len": max_model_len,
         "max_num_seqs": args.max_num_seqs or max(batch_sizes),
@@ -764,7 +810,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--batch-sizes", required=True, help="e.g. 1,2,4,8,16,32 or 1:32:1"
     )
     parser.add_argument("--seq-lens", required=True, help="e.g. 1024:8192:1024")
-    parser.add_argument("--precisions", default="bf16,int4", help="subset of bf16,int4")
+    parser.add_argument(
+        "--precisions", default="bf16,int4", help="subset of bf16,int4,nvfp4"
+    )
+    parser.add_argument(
+        "--nvfp4-model", help="NVFP4 checkpoint; required for the nvfp4 precision row"
+    )
+    parser.add_argument(
+        "--standalone-base-precision",
+        action="store_true",
+        help=(
+            "launch the int4 row as vanilla vLLM directly on --int4-model instead of "
+            "through the dual-precision runtime, so every row is symmetric "
+            "(nvfp4 is always standalone)"
+        ),
+    )
     parser.add_argument("--warmup-steps", type=int, default=2)
     parser.add_argument("--measurement-steps", type=int, default=9)
     parser.add_argument("--measurement-repetitions", type=int, default=1)
@@ -855,7 +915,13 @@ def main(argv: list[str] | None = None) -> int:
         if expected_keys(batch_sizes, seq_lens, (precision,)).issubset(done):
             continue
         env = dict(os.environ)
-        for key, value in precision_environment(precision, args.int4_model).items():
+        row_environment = precision_environment(
+            precision,
+            args.int4_model,
+            args.nvfp4_model,
+            standalone=args.standalone_base_precision,
+        )
+        for key, value in row_environment.items():
             if value is None:
                 env.pop(key, None)
             else:
@@ -894,9 +960,18 @@ def main(argv: list[str] | None = None) -> int:
             "precisions": list(args.precision_list),
             "model": args.model,
             "int4_model": args.int4_model,
+            "nvfp4_model": args.nvfp4_model,
+            "standalone_base_precision": bool(args.standalone_base_precision),
+            "base_models": {
+                precision: base_model_for_precision(precision, args)
+                for precision in args.precision_list
+            },
             "batch_sizes": batch_sizes,
             "seq_lens": seq_lens,
             "median_speedup_bf16_over_int4": median_speedup(payload),
+            "median_speedup_bf16_over_nvfp4": median_speedup(
+                payload, "speedup_bf16_over_nvfp4"
+            ),
             "git_sha": git_sha(),
             "finished_at": time.time(),
         },
