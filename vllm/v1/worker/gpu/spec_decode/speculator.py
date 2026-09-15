@@ -412,25 +412,29 @@ class DraftModelSpeculator(BaseSpeculator):
     ) -> torch.Tensor:
         if draft_logits is not None:
             logits = self.model.compute_logits(hidden_states)
-            sampled = gumbel_sample(
-                logits,
-                idx_mapping,
-                temperature,
-                seeds,
-                sample_src_positions,
-                apply_temperature=True,
-                is_drafting=True,
-                logits_cache=draft_logits,
-                logits_cache_col=draft_step,
-                use_fp64=self.use_fp64_gumbel,
-            )
             if self.draft_watermarker is not None:
-                sampled = self.draft_watermarker.sample(
+                sampled = self.draft_watermarker.sample_draft(
                     logits,
-                    sampled,
+                    idx_mapping=idx_mapping,
+                    temperature=temperature,
+                    seeds=seeds,
+                    positions=sample_src_positions,
+                    draft_step=draft_step,
+                    draft_logits=draft_logits,
+                    use_fp64=self.use_fp64_gumbel,
+                )
+            else:
+                sampled = gumbel_sample(
+                    logits,
                     idx_mapping,
                     temperature,
-                    draft_step,
+                    seeds,
+                    sample_src_positions,
+                    apply_temperature=True,
+                    is_drafting=True,
+                    logits_cache=draft_logits,
+                    logits_cache_col=draft_step,
+                    use_fp64=self.use_fp64_gumbel,
                 )
         elif self.use_local_argmax_reduction:
             return self.model.get_top_tokens(hidden_states)

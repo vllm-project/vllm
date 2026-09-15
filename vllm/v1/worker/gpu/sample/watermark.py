@@ -575,28 +575,58 @@ def _philox_gumbel_kernel(
     seeds_ptr,
     pos_ptr,
     temp_ptr,
+    logits_cache_ptr,
+    logits_cache_stride_0,
+    logits_cache_stride_1,
+    logits_cache_col_ptr,
+    logits_cache_source_ptr,
+    logits_cache_source_stride,
     key_0_value,
     key_1_value,
     vocab_size,
     CONTEXT_WIDTH: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     USE_FP64: tl.constexpr,
+    IS_DRAFTING: tl.constexpr,
+    PER_TOKEN_COL: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     block_index = tl.program_id(1)
     groups = block_index * (BLOCK_SIZE // 4) + tl.arange(0, BLOCK_SIZE // 4)
+    candidate = block_index * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = candidate < vocab_size
 
-    if skip_mask_ptr is not None:
+    req_state_idx = row
+    valid_req = True
+    if expanded_idx_mapping_ptr is not None:
         req_state_idx = tl.load(expanded_idx_mapping_ptr + row).to(tl.int64)
         valid_req = req_state_idx >= 0
+
+    if logits_cache_ptr is not None:
+        if PER_TOKEN_COL:
+            col = tl.load(logits_cache_col_ptr + row)
+        else:
+            col = tl.load(logits_cache_col_ptr)
+        cached_logits = tl.load(
+            logits_cache_source_ptr + row * logits_cache_source_stride + candidate,
+            mask=mask,
+        )
+        tl.store(
+            logits_cache_ptr
+            + req_state_idx * logits_cache_stride_0
+            + col * logits_cache_stride_1
+            + candidate,
+            cached_logits,
+            mask=mask & valid_req,
+        )
+
+    if skip_mask_ptr is not None:  # noqa: SIM102
         if tl.load(skip_mask_ptr + row):
             temp = tl.load(temp_ptr + req_state_idx, mask=valid_req, other=0.0).to(
                 tl.float32
             )
             seed = tl.load(seeds_ptr + req_state_idx, mask=valid_req, other=0)
             pos = tl.load(pos_ptr + row)
-            candidate = block_index * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-            mask = candidate < vocab_size
             logits_row = logits_ptr + row * logits_stride
             logits = tl.load(logits_row + candidate, mask=mask, other=float("-inf")).to(
                 tl.float32
@@ -608,7 +638,7 @@ def _philox_gumbel_kernel(
                 seed,
                 pos,
                 temp,
-                IS_DRAFTING=False,
+                IS_DRAFTING=IS_DRAFTING,
                 USE_FP64=USE_FP64,
                 APPLY_TEMPERATURE=False,
             )
@@ -667,12 +697,26 @@ def philox_gumbel_sample(
     seeds: torch.Tensor | None = None,
     positions: torch.Tensor | None = None,
     use_fp64: bool = False,
+    is_drafting: bool = False,
+    logits_cache: torch.Tensor | None = None,
+    logits_cache_col: torch.Tensor | None = None,
+    logits_cache_source: torch.Tensor | None = None,
 ) -> torch.Tensor:
     sampling_state = (expanded_idx_mapping, temperatures, seeds, positions)
     if skip_mask is None and any(value is not None for value in sampling_state):
         raise ValueError("sampling state requires skip_mask")
     if skip_mask is not None and any(value is None for value in sampling_state):
         raise ValueError("skip_mask requires complete sampling state")
+    if logits_cache is not None:
+        if logits_cache_col is None or logits_cache_source is None:
+            raise ValueError("logits cache requires its column and source logits")
+        if expanded_idx_mapping is None:
+            raise ValueError("logits cache requires expanded_idx_mapping")
+        assert logits_cache.size(-1) >= logits.shape[-1], (
+            f"draft logits cache vocab dim ({logits_cache.size(-1)}) is narrower "
+            f"than the sampled logits ({logits.shape[-1]}). Cached logits would be "
+            "truncated."
+        )
 
     if logits.stride(-1) != 1:
         logits = logits.contiguous()
@@ -684,6 +728,10 @@ def philox_gumbel_sample(
         expanded_idx_mapping = expanded_idx_mapping.contiguous()
     if positions is not None:
         positions = positions.contiguous()
+    if logits_cache_col is not None:
+        logits_cache_col = logits_cache_col.contiguous()
+    if logits_cache_source is not None and logits_cache_source.stride(-1) != 1:
+        logits_cache_source = logits_cache_source.contiguous()
     num_tokens, vocab_size = logits.shape
     block_size = 1024
     num_blocks = triton.cdiv(vocab_size, block_size)
@@ -707,12 +755,20 @@ def philox_gumbel_sample(
         seeds,
         positions,
         temperatures,
+        logits_cache,
+        logits_cache.stride(0) if logits_cache is not None else 0,
+        logits_cache.stride(1) if logits_cache is not None else 0,
+        logits_cache_col,
+        logits_cache_source,
+        logits_cache_source.stride(0) if logits_cache_source is not None else 0,
         key & _UINT32_MASK_VALUE,
         key >> 32,
         vocab_size,
         CONTEXT_WIDTH=contexts.shape[-1],
         BLOCK_SIZE=block_size,
         USE_FP64=use_fp64,
+        IS_DRAFTING=is_drafting,
+        PER_TOKEN_COL=logits_cache_col is not None and logits_cache_col.dim() > 0,
     )
     max_block_index = local_max.argmax(dim=-1, keepdim=True)
     return local_argmax.gather(dim=-1, index=max_block_index).view(-1)

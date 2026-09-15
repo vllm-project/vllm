@@ -8,6 +8,7 @@ from vllm.v1.watermarking.factory import create_watermarker
 from vllm.v1.watermarking.gumbel import GumbelWatermarker
 from vllm.v1.watermarking.prfs import PhiloxPRF
 from vllm.v1.watermarking.watermarker import (
+    RandomSampler,
     SupportsSpeculativeDecoding,
     Watermarker,
 )
@@ -80,27 +81,85 @@ class DraftWatermarker:
             processed_logits,
             contexts,
         ).token_ids
-        enabled = self.enabled[:num_rows] & (request_temperatures != 0)
+        steps, enabled = self._sampling_state(
+            logits, idx_mapping, request_temperatures, draft_step, contexts
+        )
+        sampled = torch.where(enabled, watermarked, ordinary_sampled)
+        contexts.copy_(torch.cat((contexts[:, 1:], sampled.unsqueeze(-1)), dim=-1))
+        return sampled
+
+    def _sampling_state(
+        self,
+        logits: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        request_temperatures: torch.Tensor,
+        draft_step: int | torch.Tensor,
+        contexts: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        num_rows = logits.shape[0]
         steps = torch.as_tensor(draft_step, device=logits.device, dtype=torch.int64)
         if steps.ndim == 0:
             steps = steps.expand(num_rows)
-        if self.deduplicate_contexts != "none":
-            assert self.all_token_ids is not None
-            assert self.prompt_lens is not None
-            assert self.total_lens is not None
-            enabled = draft_watermarking_mask(
-                self.all_token_ids,
-                idx_mapping,
-                self.prompt_lens,
-                self.total_lens,
-                self.prior_contexts,
-                contexts,
-                steps,
-                enabled,
-                self.deduplicate_contexts_max_history,
-                include_prompt=self.deduplicate_contexts == "all",
-            )
-        sampled = torch.where(enabled, watermarked, ordinary_sampled)
+        enabled = self.enabled[:num_rows] & (request_temperatures != 0)
+        if self.deduplicate_contexts == "none":
+            return steps, enabled
+        assert self.all_token_ids is not None
+        assert self.prompt_lens is not None
+        assert self.total_lens is not None
+        enabled = draft_watermarking_mask(
+            self.all_token_ids,
+            idx_mapping,
+            self.prompt_lens,
+            self.total_lens,
+            self.prior_contexts,
+            contexts,
+            steps,
+            enabled,
+            self.deduplicate_contexts_max_history,
+            include_prompt=self.deduplicate_contexts == "all",
+        )
+        return steps, enabled
+
+    def sample_draft(
+        self,
+        logits: torch.Tensor,
+        *,
+        idx_mapping: torch.Tensor,
+        temperature: torch.Tensor,
+        seeds: torch.Tensor,
+        positions: torch.Tensor,
+        draft_step: int | torch.Tensor,
+        draft_logits: torch.Tensor,
+        use_fp64: bool,
+    ) -> torch.Tensor:
+        num_rows = logits.shape[0]
+        request_temperatures = temperature[idx_mapping]
+        contexts = self.contexts[:num_rows]
+        steps, enabled = self._sampling_state(
+            logits, idx_mapping, request_temperatures, draft_step, contexts
+        )
+
+        processed_logits = logits / torch.where(
+            request_temperatures == 0, 1, request_temperatures
+        ).unsqueeze(-1)
+        random_sampler = RandomSampler(
+            expanded_idx_mapping=idx_mapping,
+            temperatures=temperature,
+            seeds=seeds,
+            positions=positions,
+            use_fp64=use_fp64,
+            is_drafting=True,
+            logits_cache=draft_logits,
+            logits_cache_col=steps,
+            logits_cache_source=logits,
+        )
+        sampled = self.watermarker.sample(
+            processed_logits,
+            contexts,
+            random_sampler=random_sampler,
+            skip_mask=~enabled,
+        ).token_ids
+
         contexts.copy_(torch.cat((contexts[:, 1:], sampled.unsqueeze(-1)), dim=-1))
         return sampled
 
