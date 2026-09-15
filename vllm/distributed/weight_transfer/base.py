@@ -241,7 +241,10 @@ class WeightSource(ABC):
 
 
 class ModuleSource(WeightSource):
-    """`WeightSource` over `module.named_parameters()` — the common case.
+    """`WeightSource` over every parameter name, including tied aliases.
+
+    Inference workers may keep a trainer's tied parameters on different
+    pipeline stages, so each name must be transferred even when storage is shared.
 
     Handles both plain dense modules and FSDP-sharded ones with no special
     casing: iteration all-gathers each `DTensor` via `full_tensor()` (a
@@ -255,11 +258,11 @@ class ModuleSource(WeightSource):
     def metadata(self) -> list[ParamMeta]:
         return [
             ParamMeta(name, p.dtype, tuple(p.shape))
-            for name, p in self._module.named_parameters()
+            for name, p in self._module.named_parameters(remove_duplicate=False)
         ]
 
     def __iter__(self) -> Iterator[tuple[str, torch.Tensor]]:
-        for name, param in self._module.named_parameters():
+        for name, param in self._module.named_parameters(remove_duplicate=False):
             yield name, materialize_full_tensor(param)
 
 

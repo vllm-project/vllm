@@ -63,8 +63,10 @@ the sender ships the result.
 
 #### ModuleSource
 
-`ModuleSource(module)` is the common case, over `module.named_parameters()`. It
-handles plain and FSDP-sharded modules with no special casing: iteration
+`ModuleSource(module)` includes every parameter name, including tied aliases.
+Inference workers may need these names on separate pipeline stages even when
+the trainer shares their storage. Each alias is materialized and transferred.
+It handles plain and FSDP-sharded modules with no special casing: iteration
 all-gathers each `DTensor` via `full_tensor()`, while `metadata()` reads the
 *global* `.shape` / `.dtype` and so never triggers a gather.
 
