@@ -108,3 +108,27 @@ def test_trace_replay_requires_v2_model_runner():
 
     with pytest.raises(ValueError, match="trace replay requires Model Runner V2"):
         VllmConfig._verify_trace_replay_config(config)
+
+
+def test_verify_value_error_is_surfaced_as_client_error():
+    """A plain `ValueError` from `SamplingParams.verify` (e.g. the fuzzable
+    `trace_decode_token_ids=[]`) must be converted to `VLLMValidationError`.
+
+    Otherwise `AsyncLLM.generate` wraps it in `EngineGenerateError` and the
+    API server returns an empty HTTP 500 instead of a 400 (as found by the
+    schemathesis fuzz of `POST /inference/v1/generate`)."""
+    processor = SimpleNamespace(
+        model_config=SimpleNamespace(
+            return_sampling_mask=False,
+            enable_trace_replay=True,
+            max_logprobs=20,
+        ),
+        vllm_config=SimpleNamespace(reasoning_config=None),
+        speculative_config=None,
+        structured_outputs_config=None,
+        tokenizer=None,
+    )
+    params = SamplingParams(trace_decode_token_ids=[])
+
+    with pytest.raises(VLLMValidationError, match="non-empty list"):
+        InputProcessor._validate_params(processor, params, ("generate",))
