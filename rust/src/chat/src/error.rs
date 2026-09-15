@@ -106,7 +106,8 @@ impl Error {
             | Self::InvalidReasoningControl { .. }
             | Self::DuplicateToolName { .. }
             | Self::ToolChoiceRequiresTools
-            | Self::ToolChoiceFunctionNotFound { .. } => true,
+            | Self::ToolChoiceFunctionNotFound { .. }
+            | Self::StructuralTag { .. } => true,
             Self::Text(error) => error.is_request_validation_error(),
             Self::UnsupportedMultimodalRenderer
             | Self::UnsupportedMultimodalContent(_)

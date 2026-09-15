@@ -5,7 +5,7 @@ pub mod reasoning;
 pub mod tool;
 pub mod unified;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::fmt;
 use std::str::FromStr;
@@ -122,6 +122,9 @@ impl fmt::Display for ParserSelection {
 pub struct ParserFactory<C> {
     creators: HashMap<String, C>,
     patterns: Vec<(String, String)>,
+    /// Names registered as unified-only placeholders: they construct no split
+    /// parser and must not be forwarded to the engine as a reasoning parser.
+    unified_dummies: HashSet<String>,
 }
 
 impl<C> Default for ParserFactory<C> {
@@ -129,11 +132,24 @@ impl<C> Default for ParserFactory<C> {
         Self {
             creators: HashMap::new(),
             patterns: Vec::new(),
+            unified_dummies: HashSet::new(),
         }
     }
 }
 
 impl<C> ParserFactory<C> {
+    /// Record `name` as a unified-only placeholder (see [`Self::unified_dummies`]).
+    pub fn mark_unified_dummy(&mut self, name: &str) -> &mut Self {
+        self.unified_dummies.insert(name.to_string());
+        self
+    }
+
+    /// Whether `name` is a unified-only placeholder with no engine-side
+    /// reasoning parser.
+    pub fn is_unified_dummy(&self, name: &str) -> bool {
+        self.unified_dummies.contains(name)
+    }
+
     /// Register a creator for a parser by an exact name.
     pub fn register_creator(&mut self, name: &str, creator: C) -> &mut Self {
         self.creators.insert(name.to_string(), creator);

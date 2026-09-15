@@ -36,6 +36,7 @@ pub mod names {
     pub const MINIMAX_M2: &str = "minimax_m2";
     pub const MINIMAX_M3: &str = "minimax_m3";
     pub const MISTRAL: &str = "mistral";
+    pub const MUSE_GLIMMER: &str = "muse_glimmer";
     pub const PHI4_MINI_JSON: &str = "phi4_mini_json";
     pub const QWEN3_CODER: &str = "qwen3_coder";
     pub const QWEN3_XML: &str = "qwen3_xml";
@@ -84,6 +85,8 @@ impl ToolParserFactory {
             .register_parser::<Qwen3CoderToolParser>(names::QWEN3_CODER)
             .register_parser::<SeedOssToolParser>(names::SEED_OSS);
 
+        factory.register_unified_dummy(names::MUSE_GLIMMER);
+
         factory
             .register_pattern("mistral-", names::MISTRAL)
             .register_pattern("mixtral-", names::MISTRAL)
@@ -120,7 +123,12 @@ impl ToolParserFactory {
             .register_pattern("minimax", names::MINIMAX_M2)
             .register_pattern("mm-m2", names::MINIMAX_M2)
             .register_pattern("seed-oss", names::SEED_OSS)
-            .register_pattern("seedoss", names::SEED_OSS);
+            .register_pattern("seedoss", names::SEED_OSS)
+            // Tool parser names are never forwarded to the engine; the
+            // patterns let tool-Auto resolve so that `--reasoning-parser
+            // muse_glimmer` alone lands on the unified path.
+            .register_pattern("muse-glimmer", names::MUSE_GLIMMER)
+            .register_pattern("muse_glimmer", names::MUSE_GLIMMER);
 
         factory
     }
@@ -131,6 +139,21 @@ impl ToolParserFactory {
         T: ToolParser + 'static,
     {
         self.register_creator(name, Arc::new(T::create))
+    }
+
+    /// Register a name-only placeholder for a unified parser, so that an
+    /// explicit `--tool-call-parser <name>` validates but constructing it on
+    /// the split tool-parsing path fails with a clear error.
+    fn register_unified_dummy(&mut self, name: &'static str) -> &mut Self {
+        self.mark_unified_dummy(name);
+        self.register_creator(
+            name,
+            Arc::new(move |_tools| {
+                Err(ToolParserError::DummyUnifiedParser {
+                    name: name.to_string(),
+                })
+            }),
+        )
     }
 
     /// Construct a parser from an exact name.

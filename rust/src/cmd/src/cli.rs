@@ -795,7 +795,15 @@ impl ServeArgs {
 }
 
 fn effective_engine_reasoning_parser(selection: &ParserSelection, model: &str) -> Option<String> {
-    selection.resolve_reasoning_name(model).map(str::to_owned)
+    let factory = vllm_chat::ReasoningParserFactory::global();
+    selection
+        .resolve_reasoning_name(model)
+        // Unified-only parsers have no engine-side reasoner: the Rust
+        // frontend owns output parsing, and their whole-generation structural
+        // tags must apply from token 0 — an engine reasoner would withhold
+        // grammars until a reasoning end the legacy parsers may never report.
+        .filter(|name| !factory.is_unified_dummy(name))
+        .map(str::to_owned)
 }
 
 /// Allocate fresh IPC endpoints for one managed frontend instance.
