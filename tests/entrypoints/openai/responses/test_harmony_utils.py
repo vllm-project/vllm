@@ -12,6 +12,7 @@ from openai.types.responses import (
 from openai.types.responses.response_output_item import McpCall
 from openai_harmony import Author, Message, Role, TextContent
 
+from tests.entrypoints.openai.utils import verify_harmony_messages
 from vllm.entrypoints.openai.responses.harmony import (
     harmony_to_response_output,
     response_previous_input_to_harmony,
@@ -93,6 +94,41 @@ class TestResponsePreviousInputToHarmony:
         assert messages[0].author.name == "functions.empty_tool"
         assert messages[0].content[0].text == ""
 
+    def test_harmony_format_refusal_content(self):
+        """Harmony-format messages must keep OpenAI refusal content parts."""
+        chat_msg = {
+            "author": {"role": "assistant"},
+            "channel": "final",
+            "content": [
+                {"type": "refusal", "refusal": "I can't help with that"},
+            ],
+        }
+
+        messages = response_previous_input_to_harmony(chat_msg)
+
+        assert len(messages) == 1
+        assert messages[0].author.role == Role.ASSISTANT
+        assert messages[0].channel == "final"
+        assert len(messages[0].content) == 1
+        assert messages[0].content[0].text == "I can't help with that"
+
+    def test_harmony_format_mixed_text_and_refusal_content(self):
+        chat_msg = {
+            "author": {"role": "assistant"},
+            "channel": "final",
+            "content": [
+                {"type": "text", "text": "Sorry, "},
+                {"type": "refusal", "refusal": "I can't help with that"},
+            ],
+        }
+
+        messages = response_previous_input_to_harmony(chat_msg)
+
+        assert len(messages) == 1
+        assert len(messages[0].content) == 2
+        assert messages[0].content[0].text == "Sorry, "
+        assert messages[0].content[1].text == "I can't help with that"
+
     def test_chat_message_without_role_raises_validation_error(self):
         """A chat-format message missing the 'role' key is invalid input."""
         chat_msg = {"content": "hello, no role here"}
@@ -102,6 +138,163 @@ class TestResponsePreviousInputToHarmony:
         ) as exc_info:
             response_previous_input_to_harmony(chat_msg)
         assert exc_info.value.parameter == "input"
+
+    def test_assistant_message_with_tool_calls_and_content(self):
+        chat_msg = {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "get_weather",
+                        "arguments": '{"location": "San Francisco"}',
+                    }
+                }
+            ],
+            "content": "I'll call the tool.",
+        }
+
+        messages = response_previous_input_to_harmony(chat_msg)
+
+        verify_harmony_messages(
+            messages,
+            [
+                {
+                    "role": "assistant",
+                    "channel": "commentary",
+                    "content": "I'll call the tool.",
+                },
+                {
+                    "role": "assistant",
+                    "channel": "commentary",
+                    "recipient": "functions.get_weather",
+                    "content": '{"location": "San Francisco"}',
+                    "content_type": "json",
+                },
+            ],
+        )
+
+    def test_assistant_message_with_tool_calls_and_reasoning(self):
+        chat_msg = {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "get_weather",
+                        "arguments": '{"location": "San Francisco"}',
+                    }
+                }
+            ],
+            "reasoning": "I should use the get_weather tool.",
+        }
+
+        messages = response_previous_input_to_harmony(chat_msg)
+
+        verify_harmony_messages(
+            messages,
+            [
+                {
+                    "role": "assistant",
+                    "channel": "analysis",
+                    "content": "I should use the get_weather tool.",
+                },
+                {
+                    "role": "assistant",
+                    "channel": "commentary",
+                    "recipient": "functions.get_weather",
+                    "content": '{"location": "San Francisco"}',
+                    "content_type": "json",
+                },
+            ],
+        )
+
+    def test_assistant_message_with_tool_calls_and_reasoning_and_content(self):
+        chat_msg = {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "get_weather",
+                        "arguments": '{"location": "San Francisco"}',
+                    }
+                }
+            ],
+            "reasoning": "I should use the get_weather tool.",
+            "content": "I'll call the tool.",
+        }
+
+        messages = response_previous_input_to_harmony(chat_msg)
+
+        verify_harmony_messages(
+            messages,
+            [
+                {
+                    "role": "assistant",
+                    "channel": "commentary",
+                    "content": "I'll call the tool.",
+                },
+                {
+                    "role": "assistant",
+                    "channel": "analysis",
+                    "content": "I should use the get_weather tool.",
+                },
+                {
+                    "role": "assistant",
+                    "channel": "commentary",
+                    "recipient": "functions.get_weather",
+                    "content": '{"location": "San Francisco"}',
+                    "content_type": "json",
+                },
+            ],
+        )
+
+    def test_assistant_message_with_reasoning_but_empty_content(self):
+        chat_msg = {
+            "role": "assistant",
+            "reasoning": "I'm thinking about the user's question.",
+            "content": "",
+        }
+
+        messages = response_previous_input_to_harmony(chat_msg)
+
+        verify_harmony_messages(
+            messages,
+            [
+                {
+                    "role": "assistant",
+                    "channel": "analysis",
+                    "content": "I'm thinking about the user's question.",
+                },
+            ],
+        )
+
+    def test_assistant_message_with_content_uses_final_channel(self):
+        chat_msg = {
+            "role": "assistant",
+            "content": "Hello! How can I help you today?",
+        }
+
+        messages = response_previous_input_to_harmony(chat_msg)
+
+        verify_harmony_messages(
+            messages,
+            [
+                {
+                    "role": "assistant",
+                    "channel": "final",
+                    "content": "Hello! How can I help you today?",
+                },
+            ],
+        )
+
+    def test_assistant_message_with_empty_content_is_omitted(self):
+        chat_msg = {
+            "role": "assistant",
+            "content": "",
+        }
+
+        messages = response_previous_input_to_harmony(chat_msg)
+
+        assert len(messages) == 0
 
 
 class TestHarmonyToResponseOutput:
