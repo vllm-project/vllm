@@ -1,7 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Fused per-channel affine transform."""
+"""Fused Normalisation on the Device.
+
+Equivalent to::
+
+    output = (input * rescale_factor - image_mean) / image_std
+
+This is implemented as a single per-channel affine transform::
+
+    output = input * weight[c] + bias[c]
+
+where::
+
+    weight = rescale_factor / image_std
+    bias = -image_mean / image_std
+"""
 
 import torch
 from torch import nn
@@ -123,7 +137,7 @@ if HAS_TRITON:
         block_l: int | None = None,
         num_warps: int | None = None,
     ):
-        """Fused per-channel affine transform with broadcast along the L axis.
+        """Fused per-channel affine transform for normalisation with broadcast along the L axis.
 
         Computes ``y = (x * weight[c] + bias[c]).to(y.dtype)`` in a single pass.
         Equivalent to::
@@ -235,7 +249,7 @@ if HAS_TRITON:
 
 class FusedInputNorm(nn.Module):
     """
-    Module that applies rescaling and normalization to input images.
+    Module that applies rescaling and normalisation to input images.
     Equivalent to: output = (input * rescale_factor - mean) / std
 
     Note on dtype semantics:
@@ -243,7 +257,7 @@ class FusedInputNorm(nn.Module):
     * ``dtype`` controls the *internal compute precision* — the dtype in which
       the per-channel ``weight`` / ``bias`` are stored and applied. It should
       normally be ``torch.float32``; other compute dtypes can introduce
-      precision loss during rescale + normalize.
+      precision loss during rescale + normalise.
     * ``visual_dtype`` (passed to :meth:`forward`) controls the *output tensor
       dtype* only. It is completely independent of the compute dtype and can
       legitimately differ from it (e.g. compute in fp32, emit bf16 for the
@@ -272,7 +286,7 @@ class FusedInputNorm(nn.Module):
         self._dtype = dtype
 
         # Model construction can set the accelerator as PyTorch's default
-        # device. Determine whether the normalization is an identity on CPU
+        # device. Determine whether the normalisation is an identity on CPU
         # so torch.allclose does not introduce a device synchronization while
         # the model is being initialized. The buffers registered below are then
         # moved to the caller's default device.
@@ -310,7 +324,7 @@ class FusedInputNorm(nn.Module):
                 "FusedInputNorm is initialized with compute dtype=%s, which "
                 "is not torch.float32. The per-channel weight/bias are stored "
                 "and applied at this reduced precision, which can cause "
-                "precision loss during rescale + normalize. Recommend "
+                "precision loss during rescale + normalise. Recommend "
                 "dtype=torch.float32 for computation; use visual_dtype in "
                 "forward() to select the output tensor dtype.",
                 dtype,
@@ -391,7 +405,7 @@ class FusedInputNorm(nn.Module):
             image_mean,
             image_std,
             rescale_factor,
-        ], "Some normalization parameters are still None after resolution."
+        ], "Some normalisation parameters are still None after resolution."
 
         # If no processing is needed, return an identity module
         if not do_rescale and not do_normalize:
@@ -419,7 +433,7 @@ class FusedInputNorm(nn.Module):
         visual_dtype: torch.dtype,
         out: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Apply rescale + normalize.
+        """Apply rescale + normalise.
 
         Args:
             grid_thw: Input tensor of shape ``(patches, size)`` where
@@ -471,7 +485,7 @@ class FusedInputNorm(nn.Module):
             )
 
         # ---- XPU fused custom kernel -------------------------------------
-        # On XPU, fuse the whole rescale + normalize into a single custom
+        # On XPU, fuse the whole rescale + normalise into a single custom
         # kernel. The eager path below materializes an fp32 intermediate and
         # then casts back, which adds device-side compute that cancels the
         # bandwidth saving of transferring uint8 pixel_values. The fused

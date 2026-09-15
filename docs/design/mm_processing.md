@@ -41,22 +41,39 @@ To accelerate the multi‑modal data pipeline (decoding, resizing, normalisation
 
 Traditionally, the CPU would divide pixel values by 255, then subtract the mean and divide by the standard deviation. We fuse these steps into one operation and run it entirely on the GPU.
 
-**How it works**: We use a dedicated `FusedInputNorm` module that bakes the rescale factor (1/255) directly into the layer's `weight` and `bias` parameters. Instead of performing three separate steps (scale, subtract, divide), the module does everything in a single affine transformation: `y = x * weight + bias`.
+`FusedInputNorm` implements this via `fused_input_norm_triton`, which applies a single per-channel affine transform:
 
-The parameters are set as follows:
+```text
+y = x * weight[c] + bias[c]
+```
 
-- `weight` controls both the standard deviation and the rescale factor
-- `bias` centers the data using the mean and the same rescale factor
+equivalent to:
 
-This means the module takes raw pixel values (0–255) and outputs properly normalised values without ever explicitly dividing by 255 as a separate step.
+```text
+y = (x * rescale_factor - image_mean[c]) / image_std[c]
+```
+
+with:
+
+```text
+weight[c] = rescale_factor / image_std[c]
+bias[c]   = -image_mean[c] / image_std[c]
+```
+
+The kernel takes raw pixel values(`uint8`), performs one fused multiply-add per channel, and folds the rescale factor into `weight`—no separate divide-by-255 step.
+
+#### Key Properties and Gains
+
+- **Single-pass fusion** — `y = x * weight[c] + bias[c]` in one kernel launch; input is read in its native dtype (`uint8`).
+- **float32 compute for free** — arithmetic runs in fp32 inside the kernel regardless of I/O dtypes. Accuracy matches fp32, with no extra bandwidth: intermediates stay in registers, and no global fp32 tensor is materialised.
+- **Preallocated output** — callers can pass a larger buffer; only the `[:N, :C, :L]` region is written, so buffers are reusable across calls.
+- **CPU offload & 50% PCIe savings** — normalisation/rescaling leaves the CPU entirely; sending `uint8` (1 byte) instead of `bf16` (2 bytes) halves transfer volume.
 
 #### Optimized Data Path for Fused Normalisation
 
-Performing fused normalisation directly on the device allows us to keep the entire transfer path—from **Entrypoint** through **Engine Core** to **GPU memory**—in **`uint8`**. This halves PCIe bandwidth and reduces CPU memory footprint.
+The transfer path **Entrypoint → Engine Core → Device Memory** stays in `uint8`. On device, `fused_input_norm_triton` computes in fp32 internally and writes the requested output dtype, `visual_dtype` (commonly `bf16`), directly—without a global fp32 intermediate.
 
-Only after data reaches GPU memory do we cast to `fp32` for the `FusedInputNorm` layer (to ensure numerical accuracy), then cast to `bf16` for subsequent layers—all within the GPU, avoiding any host‑side conversions.
-
-Overall path: **`Entrypoint (uint8) → Engine Core (uint8) → GPU Memory (uint8)`** → GPU‑local `fp32` `FusedInputNorm` → `bf16` output.
+Overall path: **`Entrypoint (uint8) → Engine Core (uint8) → Device Memory (uint8)`** → `fused_input_norm_triton` (fp32 compute) → `visual_dtype` output.
 
 #### Toggle: `mm_device_do_normalize`
 
@@ -71,8 +88,3 @@ This GPU‑side fusion is controlled by a config flag called **`mm_device_do_nor
 | `qwen2-vl`   | `Qwen2VLForConditionalGeneration`    | `Qwen/Qwen2-VL-2B-Instruct`, etc.   |
 | `qwen2.5-vl` | `Qwen2_5_VLForConditionalGeneration` | `Qwen/Qwen2.5-VL-3B-Instruct`, etc. |
 
-#### What We Gain Overall
-
-- **CPU offload**: The arithmetic for normalisation and rescaling is completely gone from the CPU.
-- **PCIe savings**: Sending `uint8` (1 byte) instead of `bf16` (2 bytes) slashes data transfer volume by **50%** .
-- **GPU overhead**: The fused kernel is very lightweight and can often be merged with subsequent CUDA operations, so it hardly adds any extra cost.
