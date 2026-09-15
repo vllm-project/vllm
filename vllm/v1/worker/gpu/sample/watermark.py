@@ -712,11 +712,22 @@ def philox_gumbel_sample(
             raise ValueError("logits cache requires its column and source logits")
         if expanded_idx_mapping is None:
             raise ValueError("logits cache requires expanded_idx_mapping")
+        assert logits_cache_source.shape == logits.shape, (
+            "logits cache source must match sampled logits shape"
+        )
+        assert logits_cache_source.device == logits.device, (
+            "logits cache source must be on the sampled logits device"
+        )
+        assert logits_cache_source.dtype == logits_cache.dtype, (
+            "logits cache source and destination must have the same dtype"
+        )
         assert logits_cache.size(-1) >= logits.shape[-1], (
             f"draft logits cache vocab dim ({logits_cache.size(-1)}) is narrower "
             f"than the sampled logits ({logits.shape[-1]}). Cached logits would be "
             "truncated."
         )
+    elif logits_cache_col is not None or logits_cache_source is not None:
+        raise ValueError("logits cache column and source require logits_cache")
 
     if logits.stride(-1) != 1:
         logits = logits.contiguous()

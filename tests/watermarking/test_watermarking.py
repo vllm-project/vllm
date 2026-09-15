@@ -1139,15 +1139,18 @@ def test_draft_sampler_uses_draft_key_and_advances_context(monkeypatch):
     assert torch.equal(draft_watermarker.contexts, torch.tensor([[2, 7], [4, 4]]))
 
 
-def test_draft_sampler_uses_ordinary_samples_for_repeated_contexts():
+def test_draft_sampler_uses_ordinary_samples_for_repeated_contexts(monkeypatch):
     class StubWatermarker:
         context_width = 1
 
         def __init__(self):
             self.samples = iter((2, 1, 8))
 
-        def sample(self, logits, contexts, random_sampler=None):
-            return WatermarkSample(torch.tensor([next(self.samples)]), logits)
+        def sample(self, logits, contexts, random_sampler=None, skip_mask=None):
+            watermarked = torch.tensor([next(self.samples)])
+            return WatermarkSample(
+                torch.where(skip_mask, random_sampler(logits), watermarked), logits
+            )
 
     draft_watermarker = DraftWatermarker(
         StubWatermarker(),
@@ -1166,15 +1169,43 @@ def test_draft_sampler_uses_ordinary_samples_for_repeated_contexts():
     )
     idx_mapping = torch.tensor([0])
     temperature = torch.tensor([1.0])
+    ordinary_samples = iter((torch.tensor([5]), torch.tensor([6]), torch.tensor([4])))
+    monkeypatch.setattr(
+        "vllm.v1.watermarking.watermarker.gumbel_sample",
+        lambda *args, **kwargs: next(ordinary_samples),
+    )
+    seeds = torch.tensor([0])
+    draft_logits = torch.zeros(1, 3, 8)
 
     first = draft_watermarker.sample(
-        torch.zeros(1, 8), torch.tensor([5]), idx_mapping, temperature, 0
+        torch.zeros(1, 8),
+        idx_mapping=idx_mapping,
+        temperature=temperature,
+        seeds=seeds,
+        positions=torch.tensor([0]),
+        draft_step=0,
+        draft_logits=draft_logits,
+        use_fp64=False,
     )
     second = draft_watermarker.sample(
-        torch.zeros(1, 8), torch.tensor([6]), idx_mapping, temperature, 1
+        torch.zeros(1, 8),
+        idx_mapping=idx_mapping,
+        temperature=temperature,
+        seeds=seeds,
+        positions=torch.tensor([1]),
+        draft_step=1,
+        draft_logits=draft_logits,
+        use_fp64=False,
     )
     repeated = draft_watermarker.sample(
-        torch.zeros(1, 8), torch.tensor([4]), idx_mapping, temperature, 2
+        torch.zeros(1, 8),
+        idx_mapping=idx_mapping,
+        temperature=temperature,
+        seeds=seeds,
+        positions=torch.tensor([2]),
+        draft_step=2,
+        draft_logits=draft_logits,
+        use_fp64=False,
     )
 
     assert first.item() == 2
@@ -1182,13 +1213,15 @@ def test_draft_sampler_uses_ordinary_samples_for_repeated_contexts():
     assert repeated.item() == 4
 
 
-def test_draft_sampler_deduplicates_against_committed_history():
+def test_draft_sampler_deduplicates_against_committed_history(monkeypatch):
     class StubWatermarker:
         context_width = 1
 
         @staticmethod
-        def sample(logits, contexts, random_sampler=None):
-            return WatermarkSample(torch.tensor([7]), logits)
+        def sample(logits, contexts, random_sampler=None, skip_mask=None):
+            return WatermarkSample(
+                torch.where(skip_mask, random_sampler(logits), 7), logits
+            )
 
     draft_watermarker = DraftWatermarker(
         StubWatermarker(),
@@ -1206,12 +1239,19 @@ def test_draft_sampler_deduplicates_against_committed_history():
         total_lens=torch.tensor([4]),
     )
 
+    monkeypatch.setattr(
+        "vllm.v1.watermarking.watermarker.gumbel_sample",
+        lambda *args, **kwargs: torch.tensor([4]),
+    )
     sampled = draft_watermarker.sample(
         torch.zeros(1, 8),
-        torch.tensor([4]),
-        torch.tensor([0]),
-        torch.tensor([1.0]),
-        0,
+        idx_mapping=torch.tensor([0]),
+        temperature=torch.tensor([1.0]),
+        seeds=torch.tensor([0]),
+        positions=torch.tensor([0]),
+        draft_step=0,
+        draft_logits=torch.zeros(1, 1, 8),
+        use_fp64=False,
     )
 
     assert sampled.item() == 4
@@ -1228,7 +1268,7 @@ def test_dspark_reduced_vocab_draft_sampler_applies_watermarking(monkeypatch):
     speculator.use_fp64_gumbel = False
     watermark_logits: list[torch.Tensor] = []
 
-    def sample_draft(
+    def sample(
         logits,
         idx_mapping,
         temperature,
@@ -1241,7 +1281,7 @@ def test_dspark_reduced_vocab_draft_sampler_applies_watermarking(monkeypatch):
         watermark_logits.append(logits.clone())
         return torch.tensor([4, 5])
 
-    speculator.draft_watermarker = SimpleNamespace(sample_draft=sample_draft)
+    speculator.draft_watermarker = SimpleNamespace(sample=sample)
 
     sampled = speculator._sample_logits(
         torch.tensor([[10.0, 20.0], [30.0, 40.0]]),
