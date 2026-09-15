@@ -351,11 +351,14 @@ class InprocClient(EngineCoreClient):
         *,
         executor_fail_callback: Callable | None = None,
     ):
+        # In-process LLM keeps EngineCore in the same object graph as LLM.
+        # Freezing that graph prevents gc.collect() from reaching LLM.__del__.
         self.engine_core = EngineCore(
             vllm_config,
             executor_class,
             log_stats,
             executor_fail_callback=executor_fail_callback,
+            freeze_gc_heap_on_init=False,
         )
 
     def get_output(self) -> EngineCoreOutputs:

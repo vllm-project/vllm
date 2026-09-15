@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import sys
 import time
 import weakref
 from collections.abc import Callable, Mapping
+from contextlib import ExitStack
 from copy import copy
 from typing import Any
 
@@ -87,6 +89,7 @@ class LLMEngine:
         else:
             self.dp_group = None
         self.should_execute_dummy_batch = False
+        self._shutdown = False
 
         self.renderer = renderer = renderer_from_config(self.vllm_config)
 
@@ -463,7 +466,37 @@ class LLMEngine:
             if isinstance(module, TorchCompileWithNoGuardsWrapper):
                 module.cleanup()
 
-    def __del__(self):
+    def _shutdown_dp_group(self) -> None:
         dp_group = getattr(self, "dp_group", None)
-        if dp_group is not None and not self.external_launcher_dp:
+        external_launcher_dp = getattr(self, "external_launcher_dp", False)
+        if dp_group is not None and not external_launcher_dp:
             stateless_destroy_torch_distributed_process_group(dp_group)
+            self.dp_group = None
+
+    def shutdown(self, timeout: float | None = None) -> None:
+        if getattr(self, "_shutdown", False):
+            return
+        self._shutdown = True
+        # ExitStack preserves the teardown order while ensuring a failure in
+        # one component cannot skip the remaining cleanup.
+        with ExitStack() as teardown:
+            teardown.callback(self._shutdown_dp_group)
+
+            if getattr(self, "engine_core", None):
+                teardown.callback(setattr, self, "engine_core", None)
+                teardown.callback(self.engine_core.shutdown, timeout=timeout)
+
+            # Drop the v0 compatibility alias before EngineCore empties the
+            # device cache.
+            if hasattr(self, "model_executor"):
+                self.model_executor = None  # type: ignore[assignment]
+
+            if renderer := getattr(self, "renderer", None):
+                teardown.callback(renderer.shutdown)
+            if finalizer := getattr(self, "_finalizer", None):
+                teardown.callback(finalizer)
+
+    def __del__(self):
+        if sys is None or sys.is_finalizing():
+            return
+        self.shutdown()

@@ -151,6 +151,7 @@ class UniProcExecutor(Executor):
 
     def shutdown(self) -> None:
         if worker := self.driver_worker:
+            self.driver_worker = None  # type: ignore[assignment]
             worker.shutdown()
 
     @classmethod
