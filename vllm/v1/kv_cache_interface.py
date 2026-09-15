@@ -1441,6 +1441,15 @@ class KVCacheConfig:
     hisparse_shared_host_pool: bool = False
     """Whether local TP ranks share one physical HiSparse host pool."""
 
+    @property
+    def allocated_bytes(self) -> int:
+        """Bytes in this worker's physical KV cache backing allocation."""
+        if not self.kv_cache_tensors:
+            return 0
+        sizes = {tensor.size for tensor in self.kv_cache_tensors}
+        assert len(sizes) == 1, "KV cache tensors must share one backing allocation."
+        return sizes.pop()
+
     @cached_property
     def transfer_group_ids(self) -> tuple[int, ...]:
         """IDs of cache groups that participate in external KV transfer."""
