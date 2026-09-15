@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashInfer."""
 
-from dataclasses import dataclass, replace
+import weakref
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import partial
-from typing import ClassVar
+from typing import ClassVar, NamedTuple
 
 import numpy as np
 import torch
@@ -67,6 +68,7 @@ from vllm.v1.attention.backend import (
     AttentionType,
     CommonAttentionMetadata,
     MultipleOf,
+    PersistentWorkspaceProfilingSupport,
 )
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
@@ -90,6 +92,10 @@ from vllm.v1.kv_cache_interface import (
     iter_layer_specs,
 )
 from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    is_workspace_manager_initialized,
+)
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = 2048 * 1024 * 1024
 FLASHINFER_PREFILL_WORKSPACE_BYTES_PER_ELEM = 16
@@ -100,6 +106,80 @@ FP4_DTYPE = torch.uint8
 logger = init_logger(__name__)
 
 trtllm_workspace_buffer = None
+
+
+def _buffer_nbytes(buffer: torch.Tensor | None) -> int:
+    if buffer is None:
+        return 0
+    return buffer.numel() * buffer.element_size()
+
+
+class FlashInferWorkspaceRoutes(NamedTuple):
+    native_prefill: bool
+    trtllm_prefill: bool
+    native_decode: bool
+    trtllm_decode: bool
+
+
+@dataclass
+class _FlashInferWorkspaceState:
+    buffer: torch.Tensor | None = None
+    wrappers: list[weakref.ReferenceType[object]] = field(default_factory=list)
+
+    def register_wrapper(self, wrapper: object) -> None:
+        if not any(registered is wrapper for registered in self._live_wrappers()):
+            self.wrappers.append(weakref.ref(wrapper))
+        self._reset_wrapper(wrapper)
+
+    def set_buffer(self, buffer: torch.Tensor) -> None:
+        if self.buffer is buffer:
+            return
+        self.buffer = buffer
+        self._reset_wrappers()
+
+    def _reset_wrappers(self) -> None:
+        for wrapper in self._live_wrappers():
+            self._reset_wrapper(wrapper)
+
+    def _live_wrappers(self) -> list[object]:
+        live_refs: list[weakref.ReferenceType[object]] = []
+        live_wrappers: list[object] = []
+        for wrapper_ref in self.wrappers:
+            wrapper = wrapper_ref()
+            if wrapper is None:
+                continue
+            live_refs.append(wrapper_ref)
+            live_wrappers.append(wrapper)
+        if len(live_refs) != len(self.wrappers):
+            self.wrappers = live_refs
+        return live_wrappers
+
+    def _reset_wrapper(self, wrapper: object) -> None:
+        if self.buffer is None or not hasattr(wrapper, "reset_workspace_buffer"):
+            return
+        int_workspace = getattr(wrapper, "_int_workspace_buffer", None)
+        if int_workspace is None:
+            return
+        current_buffer = getattr(wrapper, "_float_workspace_buffer", None)
+        if (
+            current_buffer is not None
+            and current_buffer.data_ptr() == self.buffer.data_ptr()
+            and _buffer_nbytes(current_buffer) == _buffer_nbytes(self.buffer)
+        ):
+            return
+        wrapper.reset_workspace_buffer(self.buffer, int_workspace)
+
+
+def _workspace_rebindable_wrappers(wrapper: object) -> tuple[object, ...]:
+    """The FlashInfer wrappers whose workspace the state can rebind.
+
+    The DCP prefill wrapper owns no workspace of its own; it holds two real
+    wrappers that captured the arena at construction time. Registering the
+    container would rebind nothing, so its members are registered instead.
+    """
+    if isinstance(wrapper, BatchDCPPrefillWrapper):
+        return (wrapper._context, wrapper._new_tokens)
+    return (wrapper,)
 
 
 def _get_trtllm_workspace_buffer():
@@ -696,6 +776,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.model_config = vllm_config.model_config
         self.attention_config = vllm_config.attention_config
         self._workspace_buffer = None
+        self._workspace_state = _FlashInferWorkspaceState()
         self._prefill_wrapper: (
             BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper | None
         ) = None  # Wrapper for prefill/append
@@ -899,6 +980,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 "sinks, please use trtllm on blackwell or flash attention on "
                 "earlier GPUs."
             )
+        self.use_trtllm_prefill_attention = self._resolve_trtllm_prefill_attention()
         capability = current_platform.get_device_capability()
         arch = f"sm{capability.major}{capability.minor}" if capability else "unknown"
         decode_backend = (
@@ -1011,33 +1093,158 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         else:
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
-    def _get_workspace_buffer(self):
-        if self._workspace_buffer is None:
-            buffer_size = envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
-            if envs.VLLM_BATCH_INVARIANT:
-                buffer_size = FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT
-            else:
-                # FlashInfer prefill temp buffers (batch_prefill_tmp_v, ...)
-                # scale with the prefill chunk and query-head footprint, NOT
-                # context length. The fixed ~394 MiB default is too small for
-                # wide-head models at the default 8192-token chunk on some
-                # archs (e.g. sm_120), where FlashInfer hard-errors instead of
-                # growing. Size to the batch's head footprint; never shrink
-                # below the configured default.
-                est = (
-                    self.max_num_batched_tokens
-                    * self.num_qo_heads
-                    * self.head_dim
-                    * FLASHINFER_PREFILL_WORKSPACE_BYTES_PER_ELEM
-                )
-                buffer_size = max(buffer_size, est)
-            self._workspace_buffer = torch.zeros(
-                buffer_size, dtype=torch.uint8, device=self.device
+    @classmethod
+    def get_persistent_workspace_memory_profiling_support(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> PersistentWorkspaceProfilingSupport:
+        if vllm_config.parallel_config.decode_context_parallel_size > 1:
+            return PersistentWorkspaceProfilingSupport.UNSUPPORTED
+        kv_specs = iter_layer_specs(kv_cache_spec)
+        # Non-causal execution owns a separate prefill wrapper that is not
+        # covered by the causal reservation contract below.
+        if any(getattr(spec, "non_causal", False) for spec in kv_specs):
+            return PersistentWorkspaceProfilingSupport.UNSUPPORTED
+        return PersistentWorkspaceProfilingSupport.REQUIRED
+
+    def _default_workspace_buffer_size(self) -> int:
+        if envs.VLLM_BATCH_INVARIANT:
+            return FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT
+        # FlashInfer prefill temp buffers scale with the prefill chunk and
+        # query-head footprint, rather than the context length.
+        estimated_prefill_size = (
+            self.max_num_batched_tokens
+            * self.num_qo_heads
+            * self.head_dim
+            * FLASHINFER_PREFILL_WORKSPACE_BYTES_PER_ELEM
+        )
+        return max(
+            envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,
+            estimated_prefill_size,
+        )
+
+    def _resolve_trtllm_prefill_attention(self) -> bool:
+        """Resolve the shape-invariant prefill backend once per builder."""
+        # Page sizes >= 128 must use trtllm-gen; force it for prefill too.
+        force_use_trtllm = (
+            True
+            if self.page_size >= 128
+            else self.attention_config.use_trtllm_attention
+        )
+        return use_trtllm_attention(
+            self.num_qo_heads,
+            self.num_kv_heads,
+            self.max_num_batched_tokens,
+            self.model_config.max_model_len,
+            self.dcp_world_size,
+            self.cache_dtype,
+            self.q_data_type_prefill,
+            is_prefill=True,
+            force_use_trtllm=force_use_trtllm,
+            has_sinks=self.has_sinks,
+            has_spec=self.reorder_batch_threshold > 1,
+        )
+
+    def _get_workspace_routes(self) -> FlashInferWorkspaceRoutes:
+        non_causal = getattr(self.kv_cache_spec, "non_causal", False)
+        trtllm_prefill = self.use_trtllm_prefill_attention and not non_causal
+        native_prefill = (
+            non_causal or self.model_config.is_mm_prefix_lm or not trtllm_prefill
+        )
+        # Dedicated XQA decode also serves non-causal batches, so its workspace
+        # must be reserved before the arena is locked.
+        trtllm_decode = self.use_trtllm_decode_attention and (
+            not non_causal or self.use_xqa
+        )
+        native_decode = not self.use_trtllm_decode_attention and not non_causal
+        return FlashInferWorkspaceRoutes(
+            native_prefill=native_prefill,
+            trtllm_prefill=trtllm_prefill,
+            native_decode=native_decode,
+            trtllm_decode=trtllm_decode,
+        )
+
+    def _allocate_workspace_buffer(self, buffer_size: int) -> torch.Tensor:
+        buffer_size = max(int(buffer_size), 1)
+        if self.use_vllm_workspace_manager_for_workspace_buffer():
+            manager = current_workspace_manager()
+            (workspace_buffer,) = manager.get_simultaneous(
+                ((buffer_size,), torch.uint8),
             )
+            return workspace_buffer
+        return torch.zeros(buffer_size, dtype=torch.uint8, device=self.device)
+
+    def _get_workspace_buffer(self, buffer_size: int | None = None):
+        if buffer_size is None:
+            buffer_size = self._default_workspace_buffer_size()
+        if _buffer_nbytes(self._workspace_state.buffer) < buffer_size:
+            self._workspace_state.set_buffer(
+                self._allocate_workspace_buffer(buffer_size)
+            )
+        assert self._workspace_state.buffer is not None
+        self._workspace_buffer = self._workspace_state.buffer
         return self._workspace_buffer
 
+    @staticmethod
+    def use_vllm_workspace_manager_for_workspace_buffer() -> bool:
+        return is_workspace_manager_initialized()
+
+    def get_workspace_buffer_state(self) -> _FlashInferWorkspaceState:
+        return self._workspace_state
+
+    def set_workspace_buffer_state(self, workspace_state: _FlashInferWorkspaceState):
+        self._workspace_state = workspace_state
+        self._workspace_buffer = workspace_state.buffer
+
     def set_workspace_buffer(self, workspace_buffer: torch.Tensor):
+        self._workspace_state.set_buffer(workspace_buffer)
         self._workspace_buffer = workspace_buffer
+
+    def rebind_workspace_after_reservation(self) -> None:
+        if not self.use_vllm_workspace_manager_for_workspace_buffer():
+            return
+        workspace_buffer = current_workspace_manager().get_workspace()
+        if workspace_buffer is None:
+            return
+        self._workspace_state.set_buffer(workspace_buffer)
+        self._workspace_buffer = workspace_buffer
+
+    def _register_workspace_wrapper(self, wrapper: object) -> None:
+        for inner in _workspace_rebindable_wrappers(wrapper):
+            self._workspace_state.register_wrapper(inner)
+
+    def _live_workspace_wrappers(self) -> list[object]:
+        """Every wrapper this builder owns, de-duplicated."""
+        wrappers = [
+            getattr(self, name, None)
+            for name in (
+                "_prefill_wrapper",
+                "_noncausal_prefill_wrapper",
+                "_decode_wrapper",
+                "_cascade_wrapper",
+            )
+        ]
+        wrappers += list(getattr(self, "_decode_wrappers_cudagraph", {}).values())
+        unique: dict[int, object] = {}
+        for wrapper in wrappers:
+            if wrapper is not None:
+                unique.setdefault(id(wrapper), wrapper)
+        return list(unique.values())
+
+    def _actual_int_workspace_bytes(self) -> int:
+        """Int workspace the wrappers actually hold.
+
+        FlashInfer allocates it lazily on the first plan rather than from the
+        shared arena, so it is not in the arena's size and has to be counted
+        here for the reservation to report what was really taken.
+        """
+        total = 0
+        for wrapper in self._live_workspace_wrappers():
+            buffer = getattr(wrapper, "_int_workspace_buffer", None)
+            if isinstance(buffer, torch.Tensor):
+                total += _buffer_nbytes(buffer)
+        return total
 
     @staticmethod
     def _get_flashinfer_trtllm_api_decode_kernel() -> FlashInferDecodeKernel:
@@ -1159,6 +1366,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                             backend="auto",
                         )
                     )
+                self._register_workspace_wrapper(self._noncausal_prefill_wrapper)
             return self._noncausal_prefill_wrapper
 
         if self._prefill_wrapper is None:
@@ -1193,6 +1401,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         get_flashinfer_layout_string(self.kv_cache_layout),
                         backend=backend,
                     )
+            self._register_workspace_wrapper(self._prefill_wrapper)
         assert self._prefill_wrapper is not None
         return self._prefill_wrapper
 
@@ -1227,6 +1436,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 use_tensor_cores=True,
                 backend=backend,
             )
+            self._register_workspace_wrapper(decode_wrapper)
 
             # save the decode wrapper
             if use_cudagraph:
@@ -1243,7 +1453,82 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 self._get_workspace_buffer(),
                 get_flashinfer_layout_string(self.kv_cache_layout),
             )
+            self._register_workspace_wrapper(self._cascade_wrapper)
         return self._cascade_wrapper
+
+    def _direct_trtllm_workspace_bytes(
+        self, workspace_routes: FlashInferWorkspaceRoutes
+    ) -> int:
+        """Materialize direct trtllm-gen's module-global workspace.
+
+        It is allocated outside the shared arena on first use, so the
+        reservation has to touch it here for memory profiling to see it.
+        """
+        if not (workspace_routes.trtllm_prefill or workspace_routes.trtllm_decode):
+            return 0
+        return _buffer_nbytes(_get_trtllm_workspace_buffer())
+
+    def _reserved_workspace_bytes(self, trtllm_workspace_bytes: int) -> int:
+        return (
+            _buffer_nbytes(self._workspace_state.buffer)
+            + self._actual_int_workspace_bytes()
+            + trtllm_workspace_bytes
+        )
+
+    def reserve_workspace_for_cudagraph_capture(self) -> int:
+        """Materialize the CUDA graph decode wrappers before the arena locks."""
+        if self.use_dcp or not self.use_vllm_workspace_manager_for_workspace_buffer():
+            return 0
+
+        workspace_routes = self._get_workspace_routes()
+        if workspace_routes.native_decode and self.enable_cuda_graph:
+            for batch_size in self.compilation_config.cudagraph_capture_sizes or []:
+                if 0 < batch_size <= self._decode_cudagraph_max_bs:
+                    self._get_decode_wrapper(batch_size, use_cudagraph=True)
+
+        return self._reserved_workspace_bytes(
+            self._direct_trtllm_workspace_bytes(workspace_routes)
+        )
+
+    def reserve_workspace_for_memory_profiling(self) -> int:
+        """Materialize every persistent wrapper the active routes will use.
+
+        Each wrapper allocates a dedicated int workspace outside the shared
+        arena on construction, and the shared arena itself is grown lazily.
+        Doing both here puts them inside the window that memory profiling
+        measures, so KV cache sizing subtracts them instead of finding them
+        taken after execution has already locked the arena.
+        """
+        if self.use_dcp or not self.use_vllm_workspace_manager_for_workspace_buffer():
+            return 0
+
+        workspace_routes = self._get_workspace_routes()
+        # Grow the shared float arena to its default before the wrappers below
+        # are built, so none of them can be the allocation that grows it after
+        # the lock. The arena only ever grows, so ordering does not change the
+        # final size.
+        if workspace_routes.native_prefill or workspace_routes.native_decode:
+            self._get_workspace_buffer(self._default_workspace_buffer_size())
+
+        if workspace_routes.native_prefill:
+            self._get_prefill_wrapper(causal=True)
+
+        if workspace_routes.native_decode:
+            max_decode_tokens = min(
+                self.vllm_config.scheduler_config.max_num_seqs,
+                self.vllm_config.scheduler_config.max_num_batched_tokens,
+                self.model_config.max_model_len,
+            )
+            if max_decode_tokens > 0:
+                self._get_decode_wrapper(max_decode_tokens, use_cudagraph=False)
+            if self.enable_cuda_graph:
+                for batch_size in self.compilation_config.cudagraph_capture_sizes or []:
+                    if 0 < batch_size <= self._decode_cudagraph_max_bs:
+                        self._get_decode_wrapper(batch_size, use_cudagraph=True)
+
+        return self._reserved_workspace_bytes(
+            self._direct_trtllm_workspace_bytes(workspace_routes)
+        )
 
     def _compute_flashinfer_kv_metadata(
         self,
@@ -1336,24 +1621,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # - Prefill (FI native or TRTLLM)
         # - Decode (FI native, XQA, or trtllm-gen)
         use_cascade = common_prefix_len > 0
-        uses_spec_reorder = self.reorder_batch_threshold > 1
-        # Page sizes >= 128 must use trtllm-gen; force it for prefill too.
-        prefill_force_trtllm = (
-            True if page_size >= 128 else self.attention_config.use_trtllm_attention
-        )
-        prefill_use_trtllm = causal and use_trtllm_attention(
-            self.num_qo_heads,
-            self.num_kv_heads,
-            num_prefill_tokens,
-            max_seq_len,
-            self.dcp_world_size,
-            self.cache_dtype,
-            self.q_data_type_prefill,
-            is_prefill=True,
-            force_use_trtllm=prefill_force_trtllm,
-            has_sinks=self.has_sinks,
-            has_spec=uses_spec_reorder,
-        )
+        prefill_use_trtllm = causal and self.use_trtllm_prefill_attention
         decode_with_flashinfer_trtllm_api = self.use_trtllm_decode_attention and (
             causal or self.use_xqa
         )

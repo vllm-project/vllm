@@ -3,11 +3,12 @@
 
 import inspect
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from itertools import accumulate
 from math import prod
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -15,6 +16,9 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.math_utils import round_up
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
+
+if TYPE_CHECKING:
+    from vllm.config.parallel import ParallelConfig
 
 logger = init_logger(__name__)
 
@@ -29,6 +33,9 @@ _GiB = 1024**3
 
 # Global workspace manager instance
 _manager: "WorkspaceManager | None" = None
+_workspace_ubatch_id: ContextVar[int | None] = ContextVar(
+    "workspace_ubatch_id", default=None
+)
 _workspace_lane: ContextVar[int] = ContextVar("vllm_workspace_lane", default=0)
 
 
@@ -42,6 +49,27 @@ def use_workspace_lane(lane: int) -> Iterator[None]:
         yield
     finally:
         _workspace_lane.reset(token)
+
+
+class PersistentWorkspaceLease:
+    """Keep profiling-only owners of persistent workspace allocations alive."""
+
+    def __init__(self, owners: Sequence[object] | None = None) -> None:
+        self._owners = list(owners) if owners is not None else []
+
+    def release(self) -> None:
+        self._owners.clear()
+
+    def __enter__(self) -> "PersistentWorkspaceLease":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.release()
+
+
+def get_num_workspace_ubatches(parallel_config: "ParallelConfig") -> int:
+    """Return the number of workspace arenas required by a worker."""
+    return max(1, parallel_config.num_ubatches)
 
 
 class WorkspaceManager:
@@ -59,7 +87,7 @@ class WorkspaceManager:
     ):
         self._device = device
         # Cache num ubatches at init based on configuration (default to 1)
-        self._num_ubatches = num_ubatches if num_ubatches is not None else 1
+        self._num_ubatches = max(1, num_ubatches if num_ubatches is not None else 1)
         if num_lanes < 1:
             raise ValueError(f"num_lanes must be at least one, got {num_lanes}.")
         self._num_lanes = num_lanes
@@ -114,7 +142,9 @@ class WorkspaceManager:
         return self._locked
 
     def get_simultaneous(
-        self, *shapes_and_dtypes: tuple[tuple[int, ...], torch.dtype]
+        self,
+        *shapes_and_dtypes: tuple[tuple[int, ...], torch.dtype],
+        ubatch_id: int | None = None,
     ) -> list[torch.Tensor]:
         """Get multiple workspace tensors simultaneously from a single allocation.
 
@@ -131,7 +161,7 @@ class WorkspaceManager:
         # Calculate cumulative offsets using itertools.accumulate
         offsets = list(accumulate([0] + aligned_bytes[:-1]))
 
-        current_workspace = self._ensure_workspace_size(total_bytes)
+        current_workspace = self._ensure_workspace_size(total_bytes, ubatch_id)
 
         return [
             current_workspace[offsets[i] : offsets[i] + actual_bytes[i]]
@@ -140,7 +170,46 @@ class WorkspaceManager:
             for i in range(len(shapes_and_dtypes))
         ]
 
-    def _ensure_workspace_size(self, required_bytes: int) -> torch.Tensor:
+    def _resolve_ubatch_id(self, ubatch_id: int | None = None) -> int:
+        if ubatch_id is None:
+            ubatch_id = _workspace_ubatch_id.get()
+        if ubatch_id is None:
+            ubatch_id = dbo_current_ubatch_id()
+        if not 0 <= ubatch_id < self._num_ubatches:
+            raise IndexError(
+                f"Workspace ubatch id {ubatch_id} is outside the configured "
+                f"range [0, {self._num_ubatches})."
+            )
+        return ubatch_id
+
+    def _resolve_lane(self) -> int:
+        lane = _workspace_lane.get()
+        if lane >= self._num_lanes:
+            raise RuntimeError(
+                f"Workspace lane {lane} is not configured; manager has "
+                f"{self._num_lanes} lane(s)."
+            )
+        return lane
+
+    def _resolve_workspace_id(self, ubatch_id: int | None = None) -> int:
+        return (
+            self._resolve_ubatch_id(ubatch_id) * self._num_lanes + self._resolve_lane()
+        )
+
+    def get_workspace(self, ubatch_id: int | None = None) -> torch.Tensor | None:
+        """Return the backing allocation for an ubatch/lane without resizing it."""
+        return self._current_workspaces[self._resolve_workspace_id(ubatch_id)]
+
+    def workspace_sizes_bytes(self) -> tuple[int, ...]:
+        """Return the allocated size of every ubatch workspace."""
+        return tuple(
+            self._workspace_size_bytes(workspace)
+            for workspace in self._current_workspaces
+        )
+
+    def _ensure_workspace_size(
+        self, required_bytes: int, ubatch_id: int | None = None
+    ) -> torch.Tensor:
         """Ensure workspace is allocated and large enough, return current workspace.
 
         Args:
@@ -149,13 +218,8 @@ class WorkspaceManager:
         Returns:
             The current workspace tensor.
         """
-        ubatch_id = dbo_current_ubatch_id()
-        lane = _workspace_lane.get()
-        if lane >= self._num_lanes:
-            raise RuntimeError(
-                f"Workspace lane {lane} is not configured; manager has "
-                f"{self._num_lanes} lane(s)."
-            )
+        ubatch_id = self._resolve_ubatch_id(ubatch_id)
+        lane = self._resolve_lane()
         workspace_id = ubatch_id * self._num_lanes + lane
         current_workspace = self._current_workspaces[workspace_id]
         current_size = self._workspace_size_bytes(current_workspace)
@@ -243,6 +307,16 @@ def current_workspace_manager() -> "WorkspaceManager":
         "with a device before using workspace functions."
     )
     return _manager
+
+
+@contextmanager
+def use_workspace_ubatch_id(ubatch_id: int) -> Iterator[None]:
+    """Route workspace requests to an explicit ubatch during initialization."""
+    token = _workspace_ubatch_id.set(ubatch_id)
+    try:
+        yield
+    finally:
+        _workspace_ubatch_id.reset(token)
 
 
 def init_workspace_manager(

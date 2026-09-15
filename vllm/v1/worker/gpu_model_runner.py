@@ -233,7 +233,12 @@ from vllm.v1.worker.utils import (
     is_residual_scattered_for_sp,
     raise_if_nan_logits,
 )
-from vllm.v1.worker.workspace import lock_workspace
+from vllm.v1.worker.workspace import (
+    PersistentWorkspaceLease,
+    current_workspace_manager,
+    lock_workspace,
+    use_workspace_ubatch_id,
+)
 
 from .utils import (
     AttentionGroup,
@@ -6657,10 +6662,129 @@ class GPUModelRunner(
             if self.encoder_cudagraph_manager is not None:
                 logger.info("Initialized EncoderCudaGraphManager for vision encoder")
 
+    def _reserve_attention_workspace(self, *, memory_profiling: bool) -> int:
+        if not getattr(self, "attn_groups", None):
+            return 0
+
+        reserved_before = torch.accelerator.memory_reserved(self.device)
+        builders: list[tuple[int, Any]] = []
+        for attn_group in self._attn_group_iterator():
+            for ubatch_id, builder in enumerate(attn_group.metadata_builders):
+                with use_workspace_ubatch_id(ubatch_id):
+                    if memory_profiling:
+                        builder.reserve_workspace_for_memory_profiling()
+                    else:
+                        builder.reserve_workspace_for_cudagraph_capture()
+                builders.append((ubatch_id, builder))
+        for ubatch_id, builder in builders:
+            with use_workspace_ubatch_id(ubatch_id):
+                builder.rebind_workspace_after_reservation()
+        torch.accelerator.synchronize()
+        torch.accelerator.empty_cache()
+        reserved_after = torch.accelerator.memory_reserved(self.device)
+        return max(reserved_after - reserved_before, 0)
+
+    def _reserve_attention_workspace_for_cudagraph_capture(self) -> int:
+        return self._reserve_attention_workspace(memory_profiling=False)
+
+    @staticmethod
+    def _workspace_sizes_exceed(
+        limits: tuple[int, ...], current: tuple[int, ...]
+    ) -> bool:
+        return len(current) != len(limits) or any(
+            current_size > limit for current_size, limit in zip(current, limits)
+        )
+
+    def record_persistent_attention_workspace_profile(self) -> None:
+        self._profiled_persistent_workspace_sizes = (
+            current_workspace_manager().workspace_sizes_bytes()
+        )
+
+    def reserve_persistent_attention_workspace(self) -> int:
+        manager = current_workspace_manager()
+        arena_before = manager.workspace_sizes_bytes()
+        profiled_sizes = getattr(self, "_profiled_persistent_workspace_sizes", None)
+        if profiled_sizes is not None and self._workspace_sizes_exceed(
+            profiled_sizes, arena_before
+        ):
+            raise AssertionError(
+                "Attention workspace arena exceeded its profiled size before "
+                "persistent workspace finalization: "
+                f"profiled={profiled_sizes}, current={arena_before}."
+            )
+        reserved_bytes = self._reserve_attention_workspace(memory_profiling=True)
+        arena_after = manager.workspace_sizes_bytes()
+        if profiled_sizes is not None and self._workspace_sizes_exceed(
+            profiled_sizes, arena_after
+        ):
+            raise AssertionError(
+                "Attention workspace arena exceeded its profiled size during "
+                "persistent workspace finalization: "
+                f"profiled={profiled_sizes}, current={arena_after}."
+            )
+        if profiled_sizes is None:
+            self._profiled_persistent_workspace_sizes = arena_after
+        return reserved_bytes
+
+    def prepare_profiling_workspace(
+        self,
+    ) -> PersistentWorkspaceLease:
+        lease: PersistentWorkspaceLease | None = None
+        try:
+            with set_current_vllm_config(self.vllm_config):
+                self._init_minimal_kv_cache_for_profiling()
+            self._reserve_attention_workspace(memory_profiling=True)
+            owners = [
+                builder
+                for attn_group in self._attn_group_iterator()
+                for builder in attn_group.metadata_builders
+            ]
+            lease = PersistentWorkspaceLease(owners)
+            self._cleanup_profiling_kv_cache()
+        except Exception:
+            if lease is not None:
+                lease.release()
+            try:
+                self._cleanup_profiling_kv_cache()
+            except Exception:
+                logger.exception(
+                    "Failed to clean up profiling KV cache after persistent "
+                    "workspace preparation failed"
+                )
+            raise
+
+        # The reservation above is part of the activation peak the profiler is
+        # about to measure, not of it.
+        torch.accelerator.reset_peak_memory_stats(self.device)
+        assert lease is not None
+        return lease
+
     @torch.inference_mode()
-    def profile_cudagraph_memory(self) -> int:
-        with set_current_vllm_config(self.vllm_config):
-            self._init_minimal_kv_cache_for_profiling()
+    def profile_cudagraph_memory(
+        self, *, persistent_workspace_profiled: bool = False
+    ) -> int:
+        # Rebuilding the minimal KV metadata must not grow an arena that was
+        # already included in memory profiling; otherwise the later allocation
+        # would escape KV sizing.
+        arena_before = (
+            current_workspace_manager().workspace_sizes_bytes()
+            if persistent_workspace_profiled
+            else ()
+        )
+        try:
+            with set_current_vllm_config(self.vllm_config):
+                self._init_minimal_kv_cache_for_profiling()
+            if persistent_workspace_profiled:
+                arena_after_init = current_workspace_manager().workspace_sizes_bytes()
+                if self._workspace_sizes_exceed(arena_before, arena_after_init):
+                    raise AssertionError(
+                        "Attention workspace arena grew while rebuilding CUDA "
+                        "graph profiling metadata: "
+                        f"{arena_before} -> {arena_after_init}."
+                    )
+        except Exception:
+            self._cleanup_profiling_kv_cache()
+            raise
 
         saved_num_cudagraph_captured = compilation_counter.num_cudagraph_captured
 
@@ -6885,6 +7009,7 @@ class GPUModelRunner(
             )
 
         with self._freeze_gc(), graph_capture(device=self.device):
+            self._reserve_attention_workspace_for_cudagraph_capture()
             torch.accelerator.synchronize()
             torch.accelerator.empty_cache()
             start_free_gpu_memory = torch.accelerator.get_memory_info()[0]
@@ -6933,17 +7058,14 @@ class GPUModelRunner(
         )
         return cuda_graph_size
 
-    def _warmup_and_capture(
+    def _warmup_before_cudagraph_capture(
         self,
         desc: BatchDescriptor,
         cudagraph_runtime_mode: CUDAGraphMode,
         profile_seq_lens: int | None = None,
         allow_microbatching: bool = False,
         num_warmups: int | None = None,
-        profiler: AbstractContextManager[Any] | None = None,
     ):
-        if profiler is None:
-            profiler = nullcontext()
         if num_warmups is None:
             num_warmups = self.compilation_config.cudagraph_num_of_warmups
         force_attention = cudagraph_runtime_mode == CUDAGraphMode.FULL
@@ -6963,6 +7085,25 @@ class GPUModelRunner(
             # Warmups may use auxiliary streams. Ensure all of their work has
             # completed before beginning CUDA graph capture.
             torch.accelerator.synchronize()
+
+    def _warmup_and_capture(
+        self,
+        desc: BatchDescriptor,
+        cudagraph_runtime_mode: CUDAGraphMode,
+        profile_seq_lens: int | None = None,
+        allow_microbatching: bool = False,
+        num_warmups: int | None = None,
+        profiler: AbstractContextManager[Any] | None = None,
+    ):
+        self._warmup_before_cudagraph_capture(
+            desc,
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
+            profile_seq_lens=profile_seq_lens,
+            allow_microbatching=allow_microbatching,
+            num_warmups=num_warmups,
+        )
+        if profiler is None:
+            profiler = nullcontext()
         with (
             profiler,
             torch.profiler.record_function(
