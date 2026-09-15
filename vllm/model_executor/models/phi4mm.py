@@ -3,7 +3,7 @@
 import math
 import typing
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Any, Literal, TypeAlias
+from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeAlias
 
 import numpy as np
 import torch
@@ -33,6 +33,10 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItems,
     NestedTensors,
 )
+
+if TYPE_CHECKING:
+    from vllm.multimodal.inputs import MultiModalKwargsItem
+
 from vllm.multimodal.parse import (
     AudioProcessorItems,
     ImageEmbeddingItems,
@@ -1059,6 +1063,8 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         ],
     }
 
+    supports_tower_connector_lora = True
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             "base_layer.": "",
@@ -1323,3 +1329,38 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             connector=["audio_projection_for_vision", "audio_projection"],
             tower_model=["vision_encoder", "embed_tokens_extend"],
         )
+
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: "MultiModalKwargsItem | None",
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        """
+        For image: Phi4MMImageEncoder's SigLIP tower processes full-resolution
+        patches, and only *after* the tower does `image_token_compression`
+        (a 2x2 nn.AvgPool2d, i.e. a 4x token reduction) run, right before the
+        connector. So tower token count is 4x the LM-side placeholder count,
+        while the connector (a shape-preserving projection) receives and
+        outputs the already-compressed count.
+
+        For audio: audio_projection / audio_projection_for_vision are
+        shape-preserving in the token dimension — all downsampling (NeMo
+        conv subsampling, qformer, and the linear_downsample_rate reshape)
+        happens upstream, inside tower processing / _compute_audio_embed_size.
+        So tower and connector token counts both equal the LM-side
+        placeholder count for audio.
+        """
+        if modality.startswith("image"):
+            compression = self.vision_encoder.image_token_compression
+            if compression is not None:
+                kh, kw = torch.nn.modules.utils._pair(compression.kernel_size)
+                tower_tokens = num_mm_embeds * kh * kw
+            else:
+                tower_tokens = num_mm_embeds
+            connector_tokens = num_mm_embeds
+            return tower_tokens, connector_tokens
+        if modality.startswith("audio"):
+            return num_mm_embeds, num_mm_embeds
+        raise ValueError(f"Unsupported modality for LoRA token counts: {modality}")
