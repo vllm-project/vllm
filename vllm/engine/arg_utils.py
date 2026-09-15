@@ -2088,16 +2088,23 @@ class EngineArgs:
             kv_offloading_backend=self.kv_offloading_backend,
         )
 
-        if resolved_cache_dtype.startswith("turboquant_"):
+        uses_turboquant_backend = (
+            resolved_cache_dtype.startswith("turboquant_")
+            or resolved_cache_dtype == "ultraquant_4bit"
+        )
+        if uses_turboquant_backend:
             from vllm.model_executor.layers.quantization.turboquant.config import (
                 TurboQuantConfig,
             )
 
             boundary = TurboQuantConfig.get_boundary_skip_layers(model_config)
             existing = set(cache_config.kv_cache_dtype_skip_layers)
+            combined = existing | set(boundary)
+            numeric_values = {value for value in combined if value.isdigit()}
+            special_values = combined - numeric_values
             cache_config.kv_cache_dtype_skip_layers = sorted(
-                existing | set(boundary), key=int
-            )
+                numeric_values, key=int
+            ) + sorted(special_values)
 
         ray_runtime_env = None
         if is_ray_initialized():
@@ -2472,14 +2479,14 @@ class EngineArgs:
                 "specified; defaulting to TRITON_ATTN."
             )
 
-        # TurboQuant requires FlashAttention 2 — FA3 boundary layers assert
-        # FlashAttentionImpl which fails with TurboQuantAttentionImpl.
-        if resolved_cache_dtype.startswith("turboquant_") and (
+        # Packed TurboQuant-family backends require FlashAttention 2.
+        if uses_turboquant_backend and (
             attention_config.flash_attn_version is None
             or attention_config.flash_attn_version >= 3
         ):
             logger.warning(
-                "TurboQuant is not yet compatible with FlashAttention >= 3. "
+                "The selected compressed KV cache is not yet compatible with "
+                "FlashAttention >= 3. "
                 "Overriding flash_attn_version to 2. To silence this "
                 "warning, pass --attention-config.flash_attn_version=2"
             )

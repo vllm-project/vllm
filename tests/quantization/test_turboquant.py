@@ -320,6 +320,7 @@ class TestTurboQuantWorkspaceReservation:
         max_model_len: int = 8192,
         dtype: torch.dtype = torch.float16,
         max_num_kv_splits: int = 4,
+        model_head_size: int = 128,
     ):
         return SimpleNamespace(
             scheduler_config=SimpleNamespace(
@@ -331,6 +332,7 @@ class TestTurboQuantWorkspaceReservation:
                 max_model_len=max_model_len,
                 dtype=dtype,
                 get_num_attention_heads=lambda parallel_config: 8,
+                get_head_size=lambda: model_head_size,
             ),
             parallel_config=SimpleNamespace(
                 tensor_parallel_size=2,
@@ -342,14 +344,14 @@ class TestTurboQuantWorkspaceReservation:
         )
 
     @staticmethod
-    def _fake_kv_cache_spec():
+    def _fake_kv_cache_spec(head_size: int = 128):
         from vllm.v1.kv_cache_interface import FullAttentionSpec
 
         return FullAttentionSpec(
             block_size=32,
             num_kv_heads=4,
-            head_size=128,
-            head_size_v=128,
+            head_size=head_size,
+            head_size_v=head_size,
             dtype=torch.uint8,
             state_content_bytes=102,
         )
@@ -394,6 +396,44 @@ class TestTurboQuantWorkspaceReservation:
                 ((1, 4, 8192, 128), torch.float16),
             ),
         ]
+
+    def test_continuation_prefill_buffers_use_model_head_dim(self, monkeypatch):
+        """Packed specs report an effective head size derived from the slot.
+
+        The continuation dequant targets hold real K/V, so they must be sized
+        on the model head dim; sizing them on the smaller spec head size
+        under-reserves and pushes continuation onto per-layer fallbacks.
+        """
+        from vllm.v1.attention.backends import turboquant_attn
+
+        calls = []
+
+        class FakeWorkspaceManager:
+            def get_simultaneous(self, *shapes_and_dtypes):
+                calls.append(shapes_and_dtypes)
+
+        monkeypatch.setattr(
+            turboquant_attn,
+            "current_workspace_manager",
+            lambda: FakeWorkspaceManager(),
+        )
+        monkeypatch.setattr(
+            turboquant_attn,
+            "is_workspace_manager_initialized",
+            lambda: True,
+        )
+
+        turboquant_attn.TurboQuantMetadataBuilder(
+            kv_cache_spec=self._fake_kv_cache_spec(head_size=136),
+            layer_names=["layers.0.self_attn.attn"],
+            vllm_config=self._fake_vllm_config(model_head_size=256),
+            device=torch.device("cuda"),
+        )
+
+        assert calls[1] == (
+            ((1, 4, 8192, 256), torch.float16),
+            ((1, 4, 8192, 256), torch.float16),
+        )
 
     def test_metadata_builder_skips_continuation_prefill_when_disabled(
         self, monkeypatch
