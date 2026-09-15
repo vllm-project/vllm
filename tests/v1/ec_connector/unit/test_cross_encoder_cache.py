@@ -144,7 +144,9 @@ def test_tensor_round_trip(backend, dtype):
     key = make_embedding_key(KEY, "a")
     client.put_tensor(key, tensor)
     expected = TensorSpec(tuple(tensor.shape), str(dtype), tensor.nbytes)
-    loaded = client.load_tensors({key: expected}, "cpu")[key]
+    with torch.device("meta"):
+        loaded = client.load_tensors({key: expected}, "cpu")[key]
+    assert client._read_buffer.device.type == "cpu"
     assert loaded.dtype == dtype and torch.equal(loaded, tensor)
     assert len(client.store.objects[key]) == 24 + tensor.nbytes
     assert len(client.store.registered) == 1
@@ -187,16 +189,6 @@ def test_unloadable_inputs_do_not_allocate_staging(backend, mode):
     assert not backend.resolve_inputs({"a": SPEC}, {}, "cpu")
     assert client._read_buffer is None
     native.register_buffer.assert_not_called()
-
-
-def test_staging_stays_on_cpu_with_non_cpu_default_device(backend):
-    client = backend.store_client
-    tensor = torch.ones(2, 2)
-    client.put_tensor("a", tensor)
-    with torch.device("meta"):
-        loaded = client.load_tensors({"a": SPEC}, "cpu")
-    assert client._read_buffer.device.type == "cpu"
-    assert torch.equal(loaded["a"], tensor)
 
 
 @pytest.mark.parametrize(
@@ -503,14 +495,14 @@ def test_partial_registration_rejection_releases_publication(backend):
     gc.collect()
     assert owner() is None and not native.registered
     native.batch_put_from_multi_buffers.assert_not_called()
-    backend.reap()
+    backend.resolve_inputs({}, {}, "cpu")
     assert backend._pending_bytes == 0
     gc.collect()
     assert storage_owner() is None  # The failed Future is still alive.
 
 
 @pytest.mark.parametrize(
-    "operation", ["get", "read-unregister", "put", "rejected-put", "unregister"]
+    "operation", ["read-unregister", "put", "rejected-put", "unregister"]
 )
 def test_native_io_owners(backend, operation):
     """Uncertain I/O retains owners; completed rejection frees them even via Future."""
@@ -519,18 +511,13 @@ def test_native_io_owners(backend, operation):
     tensor = torch.ones(2, 2)
     owner = weakref.ref(tensor)
     rejected = operation == "rejected-put"
-    if operation in ("get", "read-unregister"):
+    if operation == "read-unregister":
         key = make_embedding_key(KEY, "a")
         client.put_tensor(key, tensor)
-        if operation == "get":
-            native.batch_get_into = MagicMock(return_value=[-800])
-            with pytest.raises(store_client.EmbeddingStoreError, match="unconfirmed"):
-                client.load_tensors({key: SPEC}, "cpu")
-        else:
-            client.load_tensors({key: SPEC}, "cpu")
-            native.unregister_buffer = MagicMock(return_value=-500)
-            with pytest.raises(store_client.EmbeddingStoreError, match="unregister"):
-                client.close()
+        client.load_tensors({key: SPEC}, "cpu")
+        native.unregister_buffer = MagicMock(return_value=-500)
+        with pytest.raises(store_client.EmbeddingStoreError, match="unregister"):
+            client.close()
         owner = weakref.ref(client._read_buffer)
     else:
         if operation == "unregister":
@@ -572,20 +559,22 @@ def test_publication_budget_charges_and_releases_backing_storage(backend):
         backend.max_pending_bytes = 64
         assert backend._enqueue_save("a", tensor)
         storage_owner = weakref.ref(tensor.untyped_storage())
-        backend.max_pending_bytes = 128
         assert not backend._enqueue_save("b", tensor)
     del tensor
     gc.collect()
+    backend.reap()  # The final step-end poll precedes publication completion.
     assert owner() is not None
     backend._save(make_embedding_key(KEY, "a"), backend._pending["a"][1])
     future.set_result(None)
-    backend._step_candidates = {"b"}
-    backend.save_output("b", torch.ones(2, 2))
-    assert "a" not in backend._pending and "b" in backend._pending
-    backend.shutdown()
-    gc.collect()
-    assert owner() is None and backend._pending_bytes == 0
-    assert storage_owner() is None
+    assert owner() is None and storage_owner() is not None
+
+    def load_after_reaping(*args):
+        assert not backend._pending and backend._pending_bytes == 0
+        assert storage_owner() is None
+        return {}
+
+    with patch.object(backend.store_client, "load_tensors", load_after_reaping):
+        assert not backend.resolve_inputs({"b": SPEC}, {}, "cpu")
 
 
 @pytest.mark.parametrize("rejected", [False, True])

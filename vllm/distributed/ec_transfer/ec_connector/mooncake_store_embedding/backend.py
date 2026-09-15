@@ -74,6 +74,7 @@ class MooncakeEmbeddingStoreBackend:
         device: torch.device | str,
     ) -> set[str]:
         """Load outputs before encoding; unresolved items retain normal computation."""
+        self.reap()
         self._step_candidates = set(expected_tensors)
         candidates = [key for key in expected_tensors if key not in encoder_cache]
         if not candidates:
