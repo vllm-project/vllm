@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import ray
@@ -29,6 +30,98 @@ HIDDEN_SIZE = 7168
 LATENT_SIZE = 3584
 EPS = 0.1
 TOP_K = 8
+
+
+def test_shared_output_ar_uses_one_slot_without_ubatching() -> None:
+    assert latent_moe_runner._num_shared_output_ar_slots(0) == 1
+    assert latent_moe_runner._num_shared_output_ar_slots(1) == 1
+    assert latent_moe_runner._num_shared_output_ar_slots(2) == 2
+
+
+def test_shared_output_reduction_overlaps_routed_experts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        latent_moe_runner.envs, "VLLM_KIMI_K3_SHARED_OUTPUT_AR_OVERLAP", True
+    )
+    hidden = torch.ones(2, 2)
+    shared_input = torch.full((2, 3), 2.0)
+    shared = MagicMock()
+    shared.output = shared_input + 1
+    reducer = MagicMock(side_effect=lambda value, *, slot: value * 2)
+    reducer.supports.return_value = True
+    execute = MagicMock(side_effect=lambda main, aux, *_: (main(), aux()))
+    monkeypatch.setattr(latent_moe_runner, "maybe_execute_in_parallel", execute)
+    monkeypatch.setattr(latent_moe_runner, "dbo_current_ubatch_id", lambda: 1)
+    monkeypatch.setattr(latent_moe_runner, "aux_stream", lambda: object())
+
+    runner = object.__new__(latent_moe_runner.LatentMoERunner)
+    runner.enable_k3_latent_moe_tail_fusion = False
+    runner._shared_output_ar = reducer
+    runner._shared_output_ar_events = ((object(), object()),) * 2
+    runner._shared_experts = shared
+    runner.routed_experts = SimpleNamespace(forward_monolithic=lambda x, **_: x * 3)
+
+    shared_out, routed_out = runner._apply_quant_method(
+        hidden, torch.empty(2, 1), shared_input
+    )
+
+    execute.assert_called_once()
+    shared.assert_called_once_with(
+        shared_input, latent_moe_runner.SharedExpertsOrder.NO_OVERLAP
+    )
+    assert reducer.call_args.args[0] is shared.output
+    assert reducer.call_args.kwargs == {"slot": 1}
+    torch.testing.assert_close(shared_out, torch.full_like(shared_input, 6))
+    torch.testing.assert_close(routed_out, hidden * 3)
+
+
+def test_shared_output_ar_defers_to_fused_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        latent_moe_runner.envs, "VLLM_KIMI_K3_SHARED_OUTPUT_AR_OVERLAP", True
+    )
+    shared_input = torch.empty(2, 3)
+    reducer = MagicMock()
+    reducer.supports.return_value = True
+
+    runner = object.__new__(latent_moe_runner.LatentMoERunner)
+    runner._shared_output_ar = reducer
+    runner.enable_k3_latent_moe_tail_fusion = True
+    runner._k3_latent_moe_tail_op = SimpleNamespace(
+        contract=SimpleNamespace(max_num_tokens=2)
+    )
+    assert not runner._overlap_shared_ar(shared_input)
+    runner._k3_latent_moe_tail_op.contract.max_num_tokens = 1
+    assert runner._overlap_shared_ar(shared_input)
+    monkeypatch.setattr(
+        latent_moe_runner.envs, "VLLM_KIMI_K3_SHARED_OUTPUT_AR_OVERLAP", False
+    )
+    assert not runner._overlap_shared_ar(shared_input)
+
+
+def test_pre_reduced_shared_output_skips_second_all_reduce(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shared = torch.full((2, 3), 5.0)
+    routed = torch.full((2, 2), 2.0)
+    weight = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
+    all_reduce = MagicMock(side_effect=lambda value: value * 10)
+    monkeypatch.setattr(
+        latent_moe_runner, "tensor_model_parallel_all_reduce", all_reduce
+    )
+
+    runner = object.__new__(latent_moe_runner.LatentMoERunner)
+    runner.routed_output_transform = SimpleNamespace(
+        norm=None, up_proj=SimpleNamespace(weight=weight)
+    )
+    runner._maybe_reduce_final_output = lambda value, *args, **kwargs: value
+
+    result = runner._pre_reduced_shared_tail(routed, shared, None)
+
+    torch.testing.assert_close(result, torch.mm(routed * 10, weight.t()) + shared)
+    all_reduce.assert_called_once_with(routed)
 
 
 def test_deferred_finalize_enabled_before_moe_kernel_setup(
