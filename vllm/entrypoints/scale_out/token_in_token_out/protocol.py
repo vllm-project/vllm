@@ -354,6 +354,7 @@ class GenerateStreamResponse(BaseModel):
     )
     choices: list[GenerateResponseStreamChoice]
     usage: UsageInfo | None = Field(default=None)
+    weight_version: str | None = None
 
 
 class GenerateResponse(BaseModel):
@@ -369,6 +370,7 @@ class GenerateResponse(BaseModel):
     created: int | None = None
     choices: list[GenerateResponseChoice]
     usage: UsageInfo | None = Field(default=None)
+    weight_version: str | None = None
     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
 
     kv_transfer_params: dict[str, Any] | None = Field(
