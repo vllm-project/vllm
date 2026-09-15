@@ -159,6 +159,7 @@ _fp8_fp4_mqa_logits_impl: Callable[..., Any] | None = None
 _fp8_fp4_paged_mqa_logits_impl: Callable[..., Any] | None = None
 _get_paged_mqa_logits_metadata_impl: Callable[..., Any] | None = None
 _tf32_hc_prenorm_gemm_impl: Callable[..., Any] | None = None
+_bf16_mega_gate_impl: Callable[..., Any] | None = None
 _get_mn_major_tma_aligned_tensor_impl: Callable[..., Any] | None = None
 _get_mk_alignment_for_contiguous_layout_impl: Callable[..., Any] | None = None
 _get_theoretical_mk_alignment_for_contiguous_layout_impl: Callable[..., Any] | None = (
@@ -232,6 +233,7 @@ def _lazy_init() -> None:
     global _fp8_fp4_mqa_logits_impl, _fp8_fp4_paged_mqa_logits_impl
     global _get_paged_mqa_logits_metadata_impl
     global _tf32_hc_prenorm_gemm_impl
+    global _bf16_mega_gate_impl
     global _get_mn_major_tma_aligned_tensor_impl
     global _get_mk_alignment_for_contiguous_layout_impl
     global _get_theoretical_mk_alignment_for_contiguous_layout_impl
@@ -251,6 +253,7 @@ def _lazy_init() -> None:
         or _fp8_fp4_paged_mqa_logits_impl is not None
         or _get_paged_mqa_logits_metadata_impl is not None
         or _tf32_hc_prenorm_gemm_impl is not None
+        or _bf16_mega_gate_impl is not None
         or _get_mk_alignment_for_contiguous_layout_impl is not None
         or _transform_sf_into_required_layout_impl is not None
         or _pack_ue8m0_to_int_impl is not None
@@ -290,6 +293,7 @@ def _lazy_init() -> None:
         _dg, "get_paged_mqa_logits_metadata", None
     )
     _tf32_hc_prenorm_gemm_impl = getattr(_dg, "tf32_hc_prenorm_gemm", None)
+    _bf16_mega_gate_impl = getattr(_dg, "bf16_mega_gate", None)
     _get_mn_major_tma_aligned_tensor_impl = getattr(
         _dg, "get_mn_major_tma_aligned_tensor", None
     )
@@ -455,6 +459,55 @@ def cublaslt_gemm_nt(*args, **kwargs):
     if _cublaslt_gemm_nt_impl is None:
         return _missing(*args, **kwargs)
     return _cublaslt_gemm_nt_impl(*args, **kwargs)
+
+
+def bf16_mega_gate(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    num_topk: int,
+    *,
+    scoring_func: str,
+    routed_scaling_factor: float,
+    ep_rank: int,
+    bias: torch.Tensor | None = None,
+    image_bias: torch.Tensor | None = None,
+    image_token_mask: torch.Tensor | None = None,
+    fix_routing_mask: torch.Tensor | None = None,
+    unmapped_topk_idx: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run DeepGEMM Mega Gate.
+
+    The output order follows vLLM's router contract: weights, then indices.
+    Passing PyTorch-owned outputs to DeepGEMM makes their storage part of CUDA
+    graph capture.
+    """
+    _lazy_init()
+    if _bf16_mega_gate_impl is None:
+        raise RuntimeError(
+            "DeepGEMM MegaMoE requires a DeepGEMM build with bf16_mega_gate."
+        )
+
+    topk_idx = torch.empty((x.shape[0], num_topk), dtype=torch.int64, device=x.device)
+    topk_weights = torch.empty(
+        (x.shape[0], num_topk), dtype=torch.float32, device=x.device
+    )
+    _bf16_mega_gate_impl(
+        x,
+        weight,
+        num_topk,
+        use_shared_as_routed=False,
+        num_shared_experts=0,
+        routed_scaling_factor=routed_scaling_factor,
+        ep_rank=ep_rank,
+        scoring_func=scoring_func,
+        bias=bias,
+        image_bias=image_bias,
+        image_token_mask=image_token_mask,
+        fix_routing_mask=fix_routing_mask,
+        unmapped_topk_idx=unmapped_topk_idx,
+        out=(topk_idx, topk_weights),
+    )
+    return topk_weights, topk_idx
 
 
 def fp8_gemm_nt(*args, **kwargs):
@@ -780,6 +833,7 @@ def should_use_deepgemm_for_fp8_linear(
 
 __all__ = [
     "calc_diff",
+    "bf16_mega_gate",
     "DeepGemmQuantScaleFMT",
     "fp8_gemm_nt",
     "fp8_einsum",
