@@ -1484,7 +1484,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         input_batch = pcp.maybe_partition_pcp_batch(
             self.pcp_manager,
             input_batch,
-            padded_num_tokens=batch_desc.num_tokens,
+            batch_desc,
         )
         return input_batch
 
@@ -1512,7 +1512,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def prepare_dummy_attn(
         self, input_batch: InputBatch, valid_state_slots: bool = False
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
-        block_tables = self.block_tables.get_dummy_block_tables(input_batch.num_reqs)
+        block_table_provider = self.pcp_manager or self.block_tables
+        block_tables = block_table_provider.get_dummy_block_tables(input_batch.num_reqs)
         if valid_state_slots:
             state_slots = torch.arange(
                 1,
@@ -1761,30 +1762,34 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.input_buffers,
                 max_query_len=batch_desc.max_query_len,
             )
-            if not skip_attn_for_dummy_run:
-                block_tables, slot_mappings = self.prepare_dummy_attn(
-                    input_batch, valid_dummy_state_slots
-                )
-                if context_len:
-                    if self.extensible_kv_cache is not None:
-                        num_blocks = self.extensible_kv_cache.num_committed_blocks
-                    else:
-                        num_blocks = self.kv_cache_config.num_blocks
-
-                    set_dummy_context(
-                        input_batch,
-                        self.block_tables,
-                        context_len,
-                        num_blocks,
-                        self.max_model_len,
-                    )
-            else:
+            if self.pcp_manager is not None:
+                input_batch = self.pcp_manager.prepare_inputs_to_capture(input_batch)
+            if skip_attn_for_dummy_run:
                 assert batch_desc.cg_mode != CUDAGraphMode.FULL, (
                     "Attention metadata must be prepared for dummy runs when using "
                     "FULL cudagraph mode."
                 )
                 block_tables = None
                 slot_mappings = None
+            else:
+                block_tables, slot_mappings = self.prepare_dummy_attn(
+                    input_batch, valid_dummy_state_slots
+                )
+            if not skip_attn_for_dummy_run and context_len:
+                assert block_tables is not None
+                num_blocks = (
+                    self.extensible_kv_cache.num_committed_blocks
+                    if self.extensible_kv_cache is not None
+                    else self.kv_cache_config.num_blocks
+                )
+                set_dummy_context(
+                    input_batch,
+                    self.block_tables,
+                    context_len,
+                    num_blocks,
+                    self.max_model_len,
+                    input_block_tables=block_tables,
+                )
 
         attn_metadata = None
         slot_mappings_by_layer = None
