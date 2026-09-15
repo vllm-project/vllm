@@ -33,9 +33,6 @@ from vllm.models.deepseek_v41.common.ops import (
     fused_indexer_q_rope_quant,
     indexer_k_norm_rope_store,
 )
-from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
-    rope_quant_insert,
-)
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import (
@@ -59,7 +56,6 @@ from vllm.models.deepseek_v41.common.rope import build_deepseek_v4_rope
 from vllm.models.deepseek_v41.compressor import DeepseekCompressor
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.deep_gemm import fp8_einsum
 from vllm.utils.multi_stream_utils import (
     execute_in_parallel,
     maybe_execute_in_parallel,
@@ -199,20 +195,28 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     # workspace allocated in _forward_prefill and is also read by the dummy-run
     # path to pre-reserve that workspace.
     PREFILL_CHUNK_SIZE: ClassVar[int] = 4
+
     # ---- attention-interface contract, declared by the platform subclass ----
-    # True when ``forward_mqa``'s ``q`` is the raw wq_b output -- neither
-    # Q-normed nor RoPE'd -- because the attention kernel applies both itself.
-    # The layer then only inserts KV before calling it.
-    accepts_unnormed_unroped_query: ClassVar[bool] = False
-    # True when ``forward_mqa`` fills a QuantizedActivation whose inverse RoPE
-    # and FP8 cast already happened inside the attention kernel, so ``wo_a``
-    # consumes it directly and only ``wo_b`` is left. False means bf16
-    # ``[N, padded_heads, head_dim]`` output that still needs ``_o_proj``.
-    produces_inv_roped_quantized_output: ClassVar[bool] = False
-    # The packed KV record this layer's kernel prefers when --kv-cache-dtype is
-    # unspecific ("auto" / "fp8"). Mega attention overrides it: its kernel is
-    # the one that can read an NVFP4 compressed cache.
-    packed_kv_cache_dtype: ClassVar[CacheDType] = "fp8_ds_mla"
+
+    @property
+    def accepts_unnormed_unroped_query(self) -> bool:
+        """Whether ``forward_mqa``'s ``q`` is the raw ``wq_b`` output.
+
+        True when the attention kernel applies the Q norm and RoPE itself, and
+        reads Q in its own chunk-interleaved layout, so the layer only
+        zero-pads Q to ``padded_heads`` and inserts KV before calling it.
+        """
+        return False
+
+    @property
+    def packed_kv_cache_dtype(self) -> CacheDType:
+        """The packed KV record this layer's kernel prefers.
+
+        What an unspecific ``--kv-cache-dtype`` (``auto`` / ``fp8``) resolves
+        to. Mega attention overrides it: its kernel is the one that can read
+        an NVFP4 compressed cache.
+        """
+        return "fp8_ds_mla"
 
     @classmethod
     @abstractmethod
@@ -247,9 +251,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
         Takes the buffer whole, so each layer owns the shape it allocated: the
         bf16 layers slice off their padding heads and apply the inverse RoPE,
-        while a layer declaring ``produces_inv_roped_quantized_output`` gets a
-        QuantizedActivation whose inverse RoPE and FP8 cast the attention
-        kernel already did, and only has wo_a and wo_b left.
+        while a layer whose attention kernel already did the inverse RoPE and
+        the FP8 cast gets a QuantizedActivation and has only wo_a and wo_b
+        left.
         """
         raise NotImplementedError
 
@@ -655,27 +659,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             device=hidden_states.device,
         )
 
-    def _wo_a_einsum(self, attn_out: "QuantizedActivation") -> torch.Tensor:
-        """Grouped ``wo_a`` over an already-quantized attention output.
-
-        The activation's scale is DeepGEMM's packed-ue8m0 MN-major layout, so
-        this consumes the attention kernel's output with no repacking.
-        """
-        z = torch.empty(
-            (attn_out.data.shape[0], self.n_local_groups, self.o_lora_rank),
-            dtype=torch.bfloat16,
-            device=attn_out.data.device,
-        )
-        groups = self.n_local_groups
-        fp8_einsum(
-            "bhr,hdr->bhd",
-            (attn_out.data[:, :groups], attn_out.scale[:, :groups]),
-            (self.wo_a.weight, self.wo_a.weight_scale),
-            z,
-            recipe=self._einsum_recipe,
-        )
-        return z
-
     @cached_property
     def _can_fuse_query_quant(self) -> bool:
         from vllm.models.deepseek_v41.common.ops.query_quant import (
@@ -774,7 +757,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             q = self._wq_b_proj(qr, qr_scale).view(
                 -1, self.n_local_heads, self.head_dim
             )
-            return self._prepare_q_and_insert_kv(q, kv, positions, attn_metadata)
+            return self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
 
         index_q: torch.Tensor | None = None
         index_q_scale: torch.Tensor | None = None
@@ -925,7 +908,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # ([num_tokens, padded_heads, head_dim]).
         self.forward_mqa(q, kv, positions, out)
 
-    def _prepare_q_and_insert_kv(
+    def _fused_qnorm_rope_kv_insert(
         self,
         q: torch.Tensor,
         kv: torch.Tensor,
@@ -936,57 +919,26 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     ) -> torch.Tensor:
         """Ready ``q`` for the attention kernel and publish this step's KV.
 
-        With ``accepts_unnormed_unroped_query`` the kernel applies the Q norm
-        and RoPE itself, so only the KV half runs here and ``q`` is handed on
-        untouched.
+        One launch does both. With ``accepts_unnormed_unroped_query`` the
+        attention kernel norms and rotates Q itself and reads it in its own
+        chunk-interleaved layout, so the Q half of the launch is a zero-pad to
+        ``padded_heads`` -- and nothing at all once the shard is that wide.
         """
-        if self.accepts_unnormed_unroped_query:
-            self._insert_swa_kv(kv, positions, attn_metadata)
-            return q
-        return self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
-
-    def _insert_swa_kv(
-        self,
-        kv: torch.Tensor,
-        positions: torch.Tensor,
-        attn_metadata: (
-            dict[str, AttentionMetadata] | list[dict[str, AttentionMetadata]] | None
-        ),
-    ) -> None:
-        """RoPE + quantize + insert this step's KV into the SWA cache."""
-        if not isinstance(attn_metadata, dict):
-            return  # profile run: no slots reserved
-        swa_metadata = cast(
-            "DeepseekSparseSWAMetadata", attn_metadata[self.swa_cache_layer.prefix]
-        )
-        rope_quant_insert(
-            kv,
-            positions,
-            self.rotary_emb.cos_sin_cache,
-            self.swa_cache_layer.kv_cache,
-            swa_metadata.slot_mapping,
-            compress_ratio=1,
-        )
-
-    def _fused_qnorm_rope_kv_insert(
-        self,
-        q: torch.Tensor,
-        kv: torch.Tensor,
-        positions: torch.Tensor,
-        attn_metadata: (
-            dict[str, AttentionMetadata] | list[dict[str, AttentionMetadata]] | None
-        ),
-    ) -> torch.Tensor:
+        fused_q_layout = self.accepts_unnormed_unroped_query
         if not isinstance(attn_metadata, dict):
             # Profile run: kernel doesn't fire; produce a padded tensor so
             # downstream FlashMLA gets the right shape.
-            if self.n_local_heads < self.padded_heads:
-                return F.pad(
-                    q,
-                    (0, 0, 0, self.padded_heads - self.n_local_heads),
-                    value=0.0,
-                )
-            return q
+            if self.n_local_heads >= self.padded_heads:
+                return q
+            if fused_q_layout:
+                # Padding heads interleave with the live ones in that layout,
+                # so no pad of `q` reproduces it -- and nothing reads it here.
+                return q.new_zeros((q.shape[0], self.padded_heads, q.shape[2]))
+            return F.pad(
+                q,
+                (0, 0, 0, self.padded_heads - self.n_local_heads),
+                value=0.0,
+            )
 
         swa_metadata = cast(
             "DeepseekSparseSWAMetadata | None",
@@ -1005,23 +957,35 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         if cache_dtype == torch.uint8:
             # fp8_ds_mla UE8M0 paged path. Horizontally fused:
             #   Q side: GPT-J RoPE, zero-filling the padding head slots; the
-            #           kernel allocates and returns the padded q tensor.
+            #           kernel allocates and returns the padded q tensor. With
+            #           `fused_q_layout` it only zero-pads, and q_head_padded=0
+            #           drops the Q pass entirely when there is no padding.
             #   KV side: GPT-J RoPE + UE8M0 FP8 quant + paged cache insert.
             swa_kv_cache_2d = swa_kv_cache.view(swa_kv_cache.shape[0], -1)
-            return torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+            pad_to = (
+                0
+                if fused_q_layout and self.n_local_heads == self.padded_heads
+                else self.padded_heads
+            )
+            q_padded = torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
                 q,
                 kv,
                 swa_kv_cache_2d,
                 swa_metadata.slot_mapping,
                 positions,
                 cos_sin_cache,
-                self.padded_heads,
+                pad_to,
                 self.eps,
                 swa_metadata.block_size,
                 False,
                 self.kv_mxfp8,
+                fused_q_layout,
             )
+            return q if pad_to == 0 else q_padded
 
+        assert not fused_q_layout, (
+            "the chunk-interleaved Q layout only pairs with a packed KV record"
+        )
         # Plain-row path: the [num_blocks, block_size, 512] cache stores the KV
         # row in its element dtype (no Q padding). bf16 rewrites q in place;
         # per-tensor fp8 writes a separately-allocated fp8 q and quantizes the

@@ -6,13 +6,15 @@ Times the full set of per-layer ops each path runs in a decode step, captured
 in a CUDA graph -- eager timing is dominated by launch overhead and flatters
 whichever path launches fewer kernels.
 
-    mega:     rope_quant_insert (KV only) + pad_fused_q_heads + mega kernel
+    mega:     fused_qnorm_rope_kv_rope_quant_insert (Q pad + KV insert)
+              + mega kernel
     split-KV: fused_qnorm_rope_kv_rope_quant_insert (Q RoPE + pad + KV insert)
               + flash_mla_with_kvcache + fused_inv_rope_fp8_quant
 
-The Q RoPE and head padding are fused into the split-KV path's KV insert, so
-that op is charged to it; the mega path pays a KV-only insert plus a separate
-pad, and its kernel does the Q RoPE, the inverse RoPE and the FP8 cast.
+Both arms fuse their Q preparation into the KV insert, so that op is charged
+to both; the mega arm's Q side is only a zero-pad (nothing at all when the
+shard is already at the kernel head count) because its kernel does the Q RoPE,
+the inverse RoPE and the FP8 cast.
 
 ``--local-heads`` is the variable that decides the outcome: the mega kernel
 absorbs work proportional to the live head count while paying for the padded
@@ -39,7 +41,10 @@ from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
     rope_quant_insert,
 )
 from vllm.models.deepseek_v41.common.ops.fused_layout import permute_q_to_fused
-from vllm.models.deepseek_v41.common.ops.q_layout import pad_fused_q_heads
+from vllm.models.deepseek_v41.nvidia.flash_mla_mega_attn import (
+    alloc_mega_attn_output,
+    is_flashmla_mega_attn_supported,
+)
 from vllm.utils.math_utils import round_up
 
 HEAD_DIM, ROPE_DIM = 512, 64
@@ -137,28 +142,51 @@ def bench_decode(s_q, device, topk_extra, extra_bytes, local_heads):
     ex_len = torch.full((s_q,), topk_extra, device=device, dtype=torch.int32)
     sink = torch.zeros(padded_heads, device=device)
     sched = fm.FlashMLASchedMeta()
-    out = fm.alloc_mega_attn_output(s_q, n_wv_group, device)
+    out = alloc_mega_attn_output(s_q, n_wv_group, device)
     swa4 = swa.unsqueeze(-2)
     extra4 = extra.unsqueeze(-2)
     swa_2d = swa_backing
 
     def mega():
-        rope_quant_insert(kv, positions, cos_sin, swa, slot_mapping, 1)
-        q_pad = pad_fused_q_heads(q_fused, padded_heads)
-        fm.flash_mla_mega_attn_decode(
-            q_pad,
+        # One launch zero-pads the fused-layout Q and inserts the SWA KV.
+        q_pad = torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+            q_fused,
+            kv,
+            swa_2d,
+            slot_mapping,
+            positions,
+            cos_sin,
+            0 if padded_heads == local_heads else padded_heads,
+            1e-6,
+            SWA_BLOCK,
+            False,
+            True,
+            True,
+        )
+        torch.ops._flashmla_C.fused_norm_rope_attn_rope_cast_decode(
+            q_fused if padded_heads == local_heads else q_pad,
             swa4,
             swa_idx,
             scale,
+            HEAD_DIM,
+            sink,
+            swa_len,
+            extra4,
+            ex_idx,
+            ex_len,
+            False,
+            0.0,
             pos32,
+            False,
+            64,
             cos_sin,
             n_wv_group,
-            out,
-            attn_sink=sink,
-            topk_length=swa_len,
-            extra_k_cache=extra4,
-            extra_indices=ex_idx,
-            extra_topk_length=ex_len,
+            32,
+            True,
+            True,
+            True,
+            out.data,
+            out.scale,
         )
 
     def split_kv():
@@ -222,7 +250,7 @@ def main():
         help="compressed-cache record: 528 (V4.1 fp8) or 288 (V4.1 NVFP4)",
     )
     args = parser.parse_args()
-    ok, reason = fm.is_flashmla_mega_attn_supported()
+    ok, reason = is_flashmla_mega_attn_supported()
     if not ok:
         raise SystemExit(reason)
     device = torch.device("cuda")

@@ -425,6 +425,10 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "bool is_neox, Tensor position_ids, "
       "int forced_token_heads_per_warp=-1) -> ()");
 
+  // q_head_padded is the padded Q head count of the returned tensor, or 0 to
+  // do the KV insert alone and return an empty tensor.  q_fused_layout reads
+  // and writes Q in FlashMLA's mega-attention chunk-interleaved layout and
+  // leaves the Q norm and RoPE to that kernel.
   ops.def(
       "fused_deepseek_v4_kv_rope_insert("
       "Tensor kv, Tensor! k_cache, Tensor slot_mapping, Tensor position_ids, "
@@ -436,7 +440,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor q_in, Tensor kv, Tensor! k_cache, "
       "Tensor slot_mapping, Tensor position_ids, Tensor cos_sin_cache, "
       "int q_head_padded, float eps, int cache_block_size, "
-      "bool apply_q_norm=True, bool kv_mxfp8=False) -> Tensor");
+      "bool apply_q_norm=True, bool kv_mxfp8=False, "
+      "bool q_fused_layout=False) -> Tensor");
 
   // FlashInfer V4 full-cache variants: write Q in place (bf16) or to a separate
   // FP8 tensor, and KV into a contiguous 512-wide token-strided cache.
