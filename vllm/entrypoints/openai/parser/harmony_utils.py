@@ -24,6 +24,7 @@ from openai_harmony import (
 
 from vllm import envs
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -123,9 +124,10 @@ def get_system_message(
     if reasoning_effort is not None:
         if reasoning_effort not in REASONING_EFFORT:
             supported_values = ", ".join(REASONING_EFFORT)
-            raise ValueError(
+            raise VLLMValidationError(
                 f"reasoning_effort={reasoning_effort!r} is not supported by "
-                f"Harmony. Supported values are: {supported_values}."
+                f"Harmony. Supported values are: {supported_values}.",
+                parameter="reasoning_effort",
             )
         sys_msg_content = sys_msg_content.with_reasoning_effort(
             REASONING_EFFORT[reasoning_effort]
@@ -181,7 +183,10 @@ def get_developer_message(
             elif tool.type == "function":
                 function_tools.append(tool)
             else:
-                raise ValueError(f"tool type {tool.type} not supported")
+                raise VLLMValidationError(
+                    f"tool type {tool.type!r} is not supported.",
+                    parameter="tools",
+                )
         if function_tools:
             function_tool_descriptions = [
                 create_tool_definition(tool) for tool in function_tools
@@ -297,7 +302,10 @@ def extract_instructions_from_messages(
         elif hasattr(first_message, "model_dump"):
             first_message = first_message.model_dump(exclude_none=True)
         else:
-            raise ValueError(f"Unknown message type: {type(first_message)}")
+            raise VLLMValidationError(
+                f"Unknown message type: {type(first_message)}",
+                parameter="input",
+            )
 
     if first_message.get("role") not in (
         "system",

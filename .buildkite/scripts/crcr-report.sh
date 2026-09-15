@@ -39,10 +39,36 @@ fi
 # the agent exposes only its own step, so the job list comes from the REST API.
 TOKEN_SECRET_KEY="${CRCR_BUILDKITE_TOKEN_SECRET_KEY:-CRCR_BUILDKITE_API_TOKEN}"
 BK_TOKEN="${BUILDKITE_API_TOKEN:-}"
-if [[ -z "${BK_TOKEN}" ]] && command -v buildkite-agent >/dev/null 2>&1; then
+if [[ -z "${BK_TOKEN}" ]]; then
     # Not in the job environment, so read it from a Buildkite secret. The agent
     # redacts values fetched this way from the log.
-    BK_TOKEN="$(buildkite-agent secret get "${TOKEN_SECRET_KEY}" 2>/dev/null)" || BK_TOKEN=""
+    #
+    # Report why a lookup failed. Swallowing stderr made a missing secret, a
+    # denied policy and an unusable agent indistinguishable, all surfacing as the
+    # same "no token" line. Only stderr is echoed -- stdout is the secret.
+    if ! command -v buildkite-agent >/dev/null 2>&1; then
+        echo "buildkite-agent is not on PATH; cannot read secret '${TOKEN_SECRET_KEY}'"
+    else
+        secret_err="$(mktemp)"
+        # Deliberately not passing --skip-redaction. On the deployed agent
+        # (v3.73.1) the flag cannot help: secret_get.go creates the Job API
+        # client unconditionally and only checks SkipRedaction afterwards, so
+        # under the docker plugin -- which does not expose the Job API socket to
+        # the container -- it fails before the flag is read. That ordering was
+        # only fixed in v3.107.0. Skipping redaction would also stop the token
+        # being registered with the log redactor, for no gain here.
+        if BK_TOKEN="$(buildkite-agent secret get "${TOKEN_SECRET_KEY}" 2>"${secret_err}")"; then
+            if [[ -z "${BK_TOKEN}" ]]; then
+                echo "secret '${TOKEN_SECRET_KEY}' resolved but is empty"
+            fi
+        else
+            BK_TOKEN=""
+            echo "buildkite-agent secret get '${TOKEN_SECRET_KEY}' failed" \
+                "(agent $(buildkite-agent --version 2>&1 | head -1)):"
+            sed 's/^/    /' "${secret_err}"
+        fi
+        rm -f "${secret_err}"
+    fi
 fi
 if [[ -z "${BK_TOKEN}" ]]; then
     echo "no Buildkite API token (env BUILDKITE_API_TOKEN or secret" \
