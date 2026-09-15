@@ -34,10 +34,20 @@ def get_deepseek_v32_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
             if not thinking:
                 thinking_mode = "chat"
             conversation = kwargs.get("conversation", messages)
-            messages = conversation.copy()
+            messages = list(conversation)
             if tools is not None and len(tools) > 0:
-                messages.insert(0, {"role": "system"})
-                messages[0]["tools"] = tools  # type: ignore[typeddict-unknown-key]
+                # Attach request-level tools to the leading system/developer message
+                # so they render after its content, matching the reference encoder.
+                # If there is no such message, create one to preserve tool support.
+                if messages and messages[0].get("role") in ("system", "developer"):
+                    head = dict(messages[0])
+                    head["tools"] = tools  # type: ignore[typeddict-unknown-key]
+                    messages[0] = head
+                else:
+                    messages.insert(
+                        0,
+                        {"role": "system", "tools": tools},  # type: ignore[typeddict-unknown-key]
+                    )
 
             # Historical reasoning content is dropped when a new user message
             # is introduced
