@@ -157,6 +157,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     **{"deepseek_v41": "DeepseekV41Config"},
     inkling_mm_model="InklingMMConfig",
     inkling_model="InklingModelConfig",
+    xingchen4="DeepseekV3Config",
 )
 
 _SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators", "medusa"}
