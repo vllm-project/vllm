@@ -32,6 +32,24 @@ Design doc: <https://docs.google.com/document/d/1aed8KtC6XkXtdoV87pWT0a8OJlZ-Cpn
 
 ## 2  Usage Example
 
+### Encoder CUDA graphs
+
+ModelRunnerV2 encoder-only instances can capture and replay vision encoder CUDA
+graphs for models implementing `SupportsEncoderCudaGraph`. Add
+`--compilation-config '{"cudagraph_mm_encoder":true}'` to the encoder server.
+This is disabled by default and independent of the decoder's `cudagraph_mode`;
+`--enforce-eager` disables encoder graphs as well.
+
+Inputs exceeding the largest encoder graph budget, and unsupported modalities,
+use the existing eager encoder path. Tune `encoder_cudagraph_token_budgets`,
+`encoder_cudagraph_max_vision_items_per_batch`, and
+`encoder_cudagraph_max_frames_per_batch` in the compilation configuration to
+control capture cost and memory use. Encoder outputs are copied out of graph
+buffers before caching and EC transfer.
+
+The Mooncake integration script accepts `E_CUDAGRAPH_MM_ENCODER=1` to enable
+graphs on E while preserving the PD configuration.
+
 The current reference pathway is **ExampleConnector**.  
 Below ready-to-run scripts shows the workflow:
 
