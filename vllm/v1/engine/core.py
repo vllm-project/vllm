@@ -53,6 +53,7 @@ from vllm.v1.core.kv_cache_utils import (
     init_none_hash,
     resolve_kv_cache_block_sizes,
     update_kv_cache_capacity,
+    warn_if_decode_exceeds_cudagraph_capture_size,
 )
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -355,6 +356,10 @@ class EngineCore:
         self.model_executor.initialize_from_config(kv_cache_configs)
         if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
             self.model_executor.compile_or_warm_up_model()
+
+        warn_if_decode_exceeds_cudagraph_capture_size(
+            vllm_config, scheduler_kv_cache_config
+        )
 
         elapsed = time.time() - start
         compile_time = vllm_config.compilation_config.compilation_time
