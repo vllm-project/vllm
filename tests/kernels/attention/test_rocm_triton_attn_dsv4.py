@@ -1282,6 +1282,65 @@ def test_fused_inverse_rope_gptj_matches_rotary_native(
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
 
 
+@requires_gfx950
+@pytest.mark.parametrize("num_tokens", [255, 256, 257])
+@torch.inference_mode()
+def test_fused_inverse_rope_gptj_prefill_boundary(
+    num_tokens: int, default_vllm_config
+) -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _fused_inverse_rope_gptj
+
+    device = torch.device("cuda")
+    torch.manual_seed(1)
+    rotary_emb = _make_dsv4_rotary(device)
+    o = torch.randn(num_tokens, 64, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    positions = torch.randint(
+        0, _ROTARY_CACHE_LEN, (num_tokens,), dtype=torch.int32, device=device
+    )
+
+    actual = _fused_inverse_rope_gptj(
+        o, positions, rotary_emb.cos_sin_cache, ROPE_HEAD_DIM
+    )
+    expected = _inv_rope_via_rotary_native(rotary_emb, o, positions)
+
+    assert torch.equal(actual[..., :NOPE_HEAD_DIM], expected[..., :NOPE_HEAD_DIM])
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+@requires_gfx950
+@torch.inference_mode()
+def test_fused_inverse_rope_gptj_prefill_cudagraph(default_vllm_config) -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _fused_inverse_rope_gptj
+
+    device = torch.device("cuda")
+    torch.manual_seed(2)
+    rotary_emb = _make_dsv4_rotary(device)
+    o = torch.randn(256, 64, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    positions = torch.randint(
+        0, _ROTARY_CACHE_LEN, (256,), dtype=torch.int32, device=device
+    )
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            _fused_inverse_rope_gptj(
+                o, positions, rotary_emb.cos_sin_cache, ROPE_HEAD_DIM
+            )
+    torch.cuda.current_stream().wait_stream(stream)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        actual = _fused_inverse_rope_gptj(
+            o, positions, rotary_emb.cos_sin_cache, ROPE_HEAD_DIM
+        )
+    graph.replay()
+    expected = _inv_rope_via_rotary_native(rotary_emb, o, positions)
+
+    assert torch.equal(actual[..., :NOPE_HEAD_DIM], expected[..., :NOPE_HEAD_DIM])
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+
 @torch.inference_mode()
 def test_fused_inverse_rope_gptj_empty(default_vllm_config) -> None:
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _fused_inverse_rope_gptj
