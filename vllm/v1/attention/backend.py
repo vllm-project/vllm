@@ -205,6 +205,11 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
+    def get_batch_invariant_prefill_chunk_size(cls) -> int | None:
+        """Return the canonical prefill partition required for BIC."""
+        return None
+
+    @classmethod
     def supports_kv_connector(cls) -> bool:
         return True
 
