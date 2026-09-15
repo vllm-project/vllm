@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Sequence
 from typing import Any
 
 from vllm.config import ModelConfig
@@ -335,9 +336,29 @@ class OnlineDerenderer:
                 tokenizer, delta_tids, updated_state, skip_special_tokens=skip_special
             )
 
+            # NOTE for the parser-aware streaming path: the generate chat
+            # streaming path suppresses logprobs entirely when a parser is
+            # configured and reasoning is hidden, because decoded logprob
+            # token text would leak hidden reasoning. Unreachable here (the
+            # parser path fails closed above); mirror that suppression when
+            # it lands.
+            resolved_logprobs = None
+            if choice.logprobs is not None:
+                resolved_logprobs = _resolve_logprobs(
+                    choice.logprobs,
+                    tokenizer,
+                    initial_context_token_ids=state.logprob_context_token_ids,
+                )
+
             include_role = not updated_state.role_sent
-            if include_role:
-                updated_state = updated_state.model_copy(update={"role_sent": True})
+            updated_state = updated_state.model_copy(
+                update={
+                    "role_sent": True,
+                    "logprob_context_token_ids": _logprob_context_tail(
+                        state.logprob_context_token_ids, delta_tids
+                    ),
+                }
+            )
 
             delta = DeltaMessage(
                 role="assistant" if include_role else None,
@@ -347,6 +368,7 @@ class OnlineDerenderer:
                 ChatCompletionResponseStreamChoice(
                     index=choice.index,
                     delta=delta,
+                    logprobs=resolved_logprobs,
                     finish_reason=choice.finish_reason,
                 )
             )
@@ -488,10 +510,32 @@ class OnlineDerenderer:
             new_text, updated_state = self._detokenize_delta(
                 tokenizer, delta_tids, updated_state, skip_special_tokens=skip_special
             )
+
+            completion_logprobs = None
+            if choice.logprobs is not None:
+                resolved = _resolve_logprobs(
+                    choice.logprobs,
+                    tokenizer,
+                    initial_context_token_ids=state.logprob_context_token_ids,
+                )
+                completion_logprobs = _convert_chat_logprobs_to_completion_logprobs(
+                    resolved, initial_text_offset=state.logprob_text_offset
+                )
+
+            updated_state = updated_state.model_copy(
+                update={
+                    "logprob_context_token_ids": _logprob_context_tail(
+                        state.logprob_context_token_ids, delta_tids
+                    ),
+                    "logprob_text_offset": state.logprob_text_offset + len(new_text),
+                }
+            )
+
             stream_choices.append(
                 CompletionResponseStreamChoice(
                     index=choice.index,
                     text=new_text,
+                    logprobs=completion_logprobs,
                     finish_reason=choice.finish_reason,
                 )
             )
@@ -514,6 +558,18 @@ class OnlineDerenderer:
             usage=usage,
         )
         return chunk, updated_state
+
+
+# Number of preceding sampled token IDs `_correct_decoded_token` reads to
+# repair U+FFFD from byte-fallback tokenization.
+_LOGPROB_CONTEXT_WINDOW = 4
+
+
+def _logprob_context_tail(
+    context_token_ids: list[int], delta_token_ids: list[int]
+) -> list[int]:
+    """Advance the carried logprob context by this chunk's sampled tokens."""
+    return (list(context_token_ids) + list(delta_token_ids))[-_LOGPROB_CONTEXT_WINDOW:]
 
 
 def _parse_token_id_placeholder(token: str) -> int | None:
@@ -565,13 +621,20 @@ def _correct_decoded_token(
 
 
 def _resolve_logprobs(
-    logprobs: ChatCompletionLogProbs, tokenizer: TokenizerLike
+    logprobs: ChatCompletionLogProbs,
+    tokenizer: TokenizerLike,
+    initial_context_token_ids: Sequence[int] = (),
 ) -> ChatCompletionLogProbs:
-    """Resolve token_id:N placeholders in a ChatCompletionLogProbs object."""
+    """Resolve token_id:N placeholders in a ChatCompletionLogProbs object.
+
+    ``initial_context_token_ids`` seeds the byte-fallback correction context
+    with sampled IDs from preceding chunks (streaming), so multi-byte
+    characters split across chunk boundaries still resolve.
+    """
     if logprobs.content is None:
         return logprobs
 
-    context_token_ids: list[int] = []
+    context_token_ids: list[int] = list(initial_context_token_ids)
     resolved_content = []
 
     for entry in logprobs.content:
@@ -611,9 +674,14 @@ def _resolve_logprobs(
 
 def _convert_chat_logprobs_to_completion_logprobs(
     logprobs: ChatCompletionLogProbs,
+    initial_text_offset: int = 0,
 ) -> CompletionLogProbs:
     """Convert ChatCompletionLogProbs (per-token objects) to CompletionLogProbs
-    (parallel flat lists) as required by the /v1/completions response schema."""
+    (parallel flat lists) as required by the /v1/completions response schema.
+
+    ``initial_text_offset`` keeps ``text_offset`` absolute across streaming
+    chunks, mirroring the generate streaming path.
+    """
     if logprobs.content is None:
         return CompletionLogProbs()
 
@@ -622,7 +690,7 @@ def _convert_chat_logprobs_to_completion_logprobs(
     top_logprobs_list: list[dict[str, float] | None] = []
     text_offset: list[int] = []
 
-    offset = 0
+    offset = initial_text_offset
     for entry in logprobs.content:
         text_offset.append(offset)
         tokens.append(entry.token)
