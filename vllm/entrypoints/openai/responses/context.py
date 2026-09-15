@@ -24,7 +24,6 @@ from vllm import envs
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.generate.base.protocol import FunctionCall
 from vllm.entrypoints.mcp.tool import Tool
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.parser.harmony_utils import render_for_completion
@@ -156,6 +155,24 @@ def _create_json_parse_error_messages(
             content=[content],
             recipient=Role.ASSISTANT,
             channel=last_msg.channel,
+        )
+    ]
+
+
+def _create_json_parse_error_response_items(
+    last_msg: ResponseFunctionToolCall, e: json.JSONDecodeError
+) -> list[ResponseInputOutputItem]:
+    error_msg = (
+        f"Error parsing tool arguments as JSON: {str(e)}. "
+        "Please ensure the tool call arguments are valid JSON and try again."
+    )
+    return [
+        ResponseFunctionToolCallOutputItem(
+            id=f"fco_{random_uuid()}",
+            type="function_call_output",
+            call_id=last_msg.call_id,
+            output=error_msg,
+            status="completed",
         )
     ]
 
@@ -423,7 +440,9 @@ class ParsableContext(ConversationContext):
         return False
 
     async def call_python_tool(
-        self, tool_session: Union["ClientSession", Tool], last_msg: FunctionCall
+        self,
+        tool_session: Union["ClientSession", Tool],
+        last_msg: ResponseFunctionToolCall,
     ) -> list[ResponseInputOutputItem]:
         self.called_tools.add("python")
         if isinstance(tool_session, Tool):
@@ -446,18 +465,14 @@ class ParsableContext(ConversationContext):
         return [message]
 
     async def call_search_tool(
-        self, tool_session: Union["ClientSession", Tool], last_msg: FunctionCall
+        self,
+        tool_session: Union["ClientSession", Tool],
+        last_msg: ResponseFunctionToolCall,
     ) -> list[ResponseInputOutputItem]:
         self.called_tools.add("browser")
         if isinstance(tool_session, Tool):
             return await tool_session.get_result_parsable_context(self)
-        if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
-            try:
-                args = json.loads(last_msg.arguments)
-            except json.JSONDecodeError as e:
-                return _create_json_parse_error_messages(last_msg, e)
-        else:
-            args = json.loads(last_msg.arguments)
+        args = json.loads(last_msg.arguments)
         result = await tool_session.call_tool("search", args)
         result_str = result.content[0].text
 
@@ -472,8 +487,10 @@ class ParsableContext(ConversationContext):
         return [message]
 
     async def call_container_tool(
-        self, tool_session: Union["ClientSession", Tool], last_msg: Message
-    ) -> list[Message]:
+        self,
+        tool_session: Union["ClientSession", Tool],
+        last_msg: ResponseFunctionToolCall,
+    ) -> list[ResponseInputOutputItem]:
         """
         Call container tool. Expect this to be run in a stateful docker
         with command line terminal.
@@ -494,13 +511,7 @@ class ParsableContext(ConversationContext):
         if isinstance(tool_session, Tool):
             return await tool_session.get_result_parsable_context(self)
         # tool_name = last_msg.recipient.split(".")[1].split(" ")[0]
-        if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
-            try:
-                args = json.loads(last_msg.arguments)
-            except json.JSONDecodeError as e:
-                return _create_json_parse_error_messages(last_msg, e)
-        else:
-            args = json.loads(last_msg.arguments)
+        args = json.loads(last_msg.arguments)
         result = await tool_session.call_tool("exec", args)
         result_str = result.content[0].text
 
@@ -521,6 +532,11 @@ class ParsableContext(ConversationContext):
         # change this to a mcp_ function call
         last_msg.id = f"{MCP_PREFIX}{random_uuid()}"
         self.response_messages[-1] = last_msg
+        if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
+            try:
+                json.loads(last_msg.arguments)
+            except json.JSONDecodeError as e:
+                return _create_json_parse_error_response_items(last_msg, e)
         if last_msg.name == "code_interpreter":
             return await self.call_python_tool(self._tool_sessions["python"], last_msg)
         elif last_msg.name == "web_search_preview":
