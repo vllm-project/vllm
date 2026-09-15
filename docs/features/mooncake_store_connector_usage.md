@@ -232,6 +232,34 @@ Mooncake environment variables (`MOONCAKE_OFFLOAD_FILE_STORAGE_PATH`,
 `MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES`, etc.). Those are independent of
 the vLLM JSON config.
 
+### Using NoF Storage
+
+To store KV cache in NoF, use a Mooncake build with `USE_NOF` and GPU
+staging support (`USE_CUDA` for NVIDIA GPUs), and register a NoF segment
+with the Mooncake master.
+
+Configure SPDK hugepages and leave `MC_STORE_USE_HUGEPAGE` unset
+(`0` also enables this option).
+
+In the Mooncake JSON configuration, set `protocol` to `tcp` or `rdma` and
+size `local_buffer_size` for the expected batch sizes and concurrency.
+If the vLLM instance does not contribute memory to the Store, also set
+`mode` to `standalone-store` and `global_segment_size` to `0`.
+
+Pass the following JSON to `--kv-transfer-config` to store KV cache only
+in NoF:
+
+```json
+{
+  "kv_connector": "MooncakeStoreConnector",
+  "kv_role": "kv_both",
+  "kv_connector_extra_config": {
+    "replica_num": 0,
+    "nof_replica_num": 1
+  }
+}
+```
+
 ### Tenant Isolation
 
 Set `tenant_id` in the Mooncake JSON config when different vLLM deployments should use separate Mooncake tenant namespaces:
@@ -272,6 +300,11 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
 - **kv_both**: The instance both stores and loads KV caches. Use this for single-node CPU offloading or prefiller instances.
 
 ### kv_connector_extra_config
+
+- `replica_num` (int): Number of memory replicas to create. Default: `1`.
+- `nof_replica_num` (int): Number of NoF replicas to create. Default: `0`.
+
+At least one of `replica_num` and `nof_replica_num` must be greater than zero.
 
 - `load_async` (bool): Enable asynchronous loading for better compute-I/O overlap. Default: `true`.
 - `lookup_async` (bool): Run the external prefix-cache lookup on a background thread so it never blocks the scheduler step. The request is held until the in-flight lookup completes, then resumed on a later step. Default: `false`.
