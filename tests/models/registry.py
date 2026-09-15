@@ -795,6 +795,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "Agnes-AI/Agnes-3.0-Flash",
         trust_remote_code=True,
         max_model_len=2048,
+        min_transformers_version="5.12",
     ),
     "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
     "AudioFlamingo3ForConditionalGeneration": _HfExamplesInfo(
