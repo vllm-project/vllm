@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
+from vllm.config import ParallelConfig
 from vllm.multimodal.processing import InputProcessingContext
 
 
@@ -371,7 +372,7 @@ def test_dspark_shares_target_embedding_with_smaller_draft_vocabulary():
             attention_backend=None,
             kv_cache_dtype=None,
         ),
-        parallel_config=SimpleNamespace(tensor_parallel_size=1),
+        parallel_config=ParallelConfig(),
         attention_config=SimpleNamespace(backend=None),
         cache_config=SimpleNamespace(),
         load_config=SimpleNamespace(),
