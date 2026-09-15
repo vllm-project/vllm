@@ -1448,7 +1448,7 @@ class Worker(WorkerBase):
                 if isinstance(update_info, list):
                     parallel_config = self.vllm_config.parallel_config
                     local_update_info = update_info[
-                        parallel_config.data_parallel_rank * parallel_config.world_size
+                        parallel_config.data_parallel_index * parallel_config.world_size
                         + self.rank
                     ]
                 else:
