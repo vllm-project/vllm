@@ -41,6 +41,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.kv_offload.base import (
+    KV_OFFLOAD_CONFIG_INFO,
     GPULoadStoreSpec,
     Locality,
     LookupResult,
@@ -542,6 +543,9 @@ class OffloadingConnectorScheduler:
             spec, vllm_config, kv_cache_config
         )
         self.manager: OffloadingManager = spec.get_manager()
+        # Read after get_manager(), because a tiered spec builds its tiers
+        # inside that call. The values stay fixed for the process lifetime.
+        self._info_labelvalues = spec.info_labelvalues()
         self._connector_stats = OffloadingConnectorStats()
 
         full_attention_groups: list[int] = []
@@ -1895,6 +1899,12 @@ class OffloadingConnectorScheduler:
                 stats = manager_stats
             else:
                 stats.aggregate(manager_stats)
+
+        # Static per-engine tier configuration. Written on every call, because
+        # a Prometheus child holds the last value it received.
+        if stats is None:
+            stats = OffloadingConnectorStats()
+        stats.set_gauge(KV_OFFLOAD_CONFIG_INFO, 1, self._info_labelvalues)
 
         return stats
 

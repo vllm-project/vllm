@@ -114,6 +114,7 @@ def test_swa_offload_window_covers_unaligned_hit(boundary, eagle, left_state):
             enable_kv_cache_events=False, self_describing_kv_events=False
         ),
         get_manager=lambda: manager,
+        info_labelvalues=lambda: (),
     )
     config = SimpleNamespace(
         speculative_config=None,
