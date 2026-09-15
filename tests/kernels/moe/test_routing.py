@@ -75,6 +75,37 @@ def test_degenerate_grouped_config_uses_standard_topk() -> None:
     )
 
 
+def test_platform_router_constructor_accepts_compatible_sibling() -> None:
+    def choose_constructor(selected_cls):
+        if selected_cls is FusedTopKRouter:
+            return lambda **kwargs: FusedTopKBiasRouter(**kwargs)
+        return selected_cls
+
+    with (
+        patch.object(current_platform, "is_cpu", return_value=False),
+        patch.object(
+            current_platform,
+            "get_fused_moe_router_constructor",
+            side_effect=choose_constructor,
+        ),
+    ):
+        router = create_fused_moe_router(top_k=2, global_num_experts=8)
+    assert isinstance(router, FusedTopKBiasRouter)
+
+
+def test_platform_router_constructor_rejects_non_router() -> None:
+    with (
+        patch.object(current_platform, "is_cpu", return_value=False),
+        patch.object(
+            current_platform,
+            "get_fused_moe_router_constructor",
+            return_value=lambda **kwargs: object(),
+        ),
+        pytest.raises(TypeError, match="must return FusedMoERouter"),
+    ):
+        create_fused_moe_router(top_k=2, global_num_experts=8)
+
+
 def test_multiple_expert_groups_use_grouped_topk() -> None:
     router = create_fused_moe_router(
         top_k=4,
