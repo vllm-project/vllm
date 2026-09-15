@@ -26,6 +26,9 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
     CompressedTensorsMoEMethod,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    reconcile_nvfp4_moe_w13_scales,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kNvfp4Static,
@@ -201,15 +204,16 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         )
         delattr(layer, "w2_weight_packed")
 
-        # Use a single gscale for w13.
-        if self.moe.is_act_and_mul and not torch.allclose(
-            layer.w13_weight_global_scale[:, 0], layer.w13_weight_global_scale[:, 1]
-        ):
-            logger.warning_once(
-                "w1_weight_global_scale must match w3_weight_global_scale. "
-                "Accuracy may be affected.",
+        w13_weight_scale = layer.w13_weight_scale
+        # CT stores global scales as divisors; use the kernel multiplier form.
+        w13_weight_scale_2 = 1.0 / layer.w13_weight_global_scale
+        if self.moe.is_act_and_mul and self.nvfp4_backend != NvFp4MoeBackend.HUMMING:
+            w13_weight_scale, w13_weight_scale_2 = reconcile_nvfp4_moe_w13_scales(
+                w13_weight_scale,
+                w13_weight_scale_2,
             )
-        w13_weight_global_scale = layer.w13_weight_global_scale[:, 0].contiguous()
+        else:
+            w13_weight_scale_2 = w13_weight_scale_2[:, 0].contiguous()
 
         # Shuffle weights into the NvFp4 kernel format.
         (
@@ -225,8 +229,8 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             nvfp4_backend=self.nvfp4_backend,
             layer=layer,
             w13=layer.w13_weight,
-            w13_scale=layer.w13_weight_scale,
-            w13_scale_2=(1.0 / w13_weight_global_scale),
+            w13_scale=w13_weight_scale,
+            w13_scale_2=w13_weight_scale_2,
             a13_scale=(1.0 / layer.w13_input_global_scale),
             w2=layer.w2_weight,
             w2_scale=layer.w2_weight_scale,
