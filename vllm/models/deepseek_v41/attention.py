@@ -354,6 +354,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             prefix=f"{prefix}.wo_b",
         )
 
+        self.wo_b_reduce_scatter: Callable[[torch.Tensor], torch.Tensor] | None = None
+
         # Initialize rotary embedding before the indexer/compressor consume it.
         self.rotary_emb = build_deepseek_v4_rope(
             config,
@@ -594,6 +596,11 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
         # Inverse-RoPE + wo_a + wo_b output projection (platform-specific).
         return self._o_proj(o, positions)
+
+    def _wo_b_proj(self, x: torch.Tensor) -> torch.Tensor:
+        if self.wo_b_reduce_scatter is not None:
+            return self.wo_b_reduce_scatter(x)
+        return self.wo_b(x)
 
     @cached_property
     def _can_fuse_query_quant(self) -> bool:
