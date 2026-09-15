@@ -192,7 +192,7 @@ def test_voxtral_realtime_forward(audio_assets, tokenizer, vllm_runner, monkeypa
     "cudagraph_mode",
     [CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.FULL_AND_PIECEWISE],
 )
-@create_new_process_for_each_test()
+@create_new_process_for_each_test(method="spawn")
 def test_voxtral_realtime_cudagraph(
     audio_assets, tokenizer, vllm_runner, monkeypatch, cudagraph_mode
 ):
