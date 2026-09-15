@@ -13,12 +13,35 @@ request because to_sampling_params() never fell back to defaults.
 
 import pytest
 
+from vllm.config import ModelConfig
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
 )
+
+
+def test_generation_config_stop_ids_reach_openai_sampling_params(monkeypatch):
+    """Model generation metadata reaches the per-request OpenAI sampler."""
+    model_config = object.__new__(ModelConfig)
+    model_config.generation_config = "auto"
+    model_config.override_generation_config = {}
+    monkeypatch.setattr(
+        ModelConfig,
+        "try_get_generation_config",
+        lambda self: {"stop_token_ids": [200012, 200002]},
+    )
+
+    defaults = model_config.get_diff_sampling_param()
+    request = CompletionRequest(model="test-model", prompt="hello")
+    sampling_params = request.to_sampling_params(
+        max_tokens=100,
+        default_sampling_params=defaults,
+    )
+
+    assert defaults["stop_token_ids"] == [200012, 200002]
+    assert sampling_params.stop_token_ids == [200012, 200002]
 
 
 class TestChatCompletionStopTokenIds:
