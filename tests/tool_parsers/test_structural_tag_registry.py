@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from xgrammar import Grammar, StructuralTag
+from xgrammar import Grammar, StructuralTag, builtin_structural_tag
 from xgrammar.testing import _is_grammar_accept_string
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -81,10 +81,14 @@ def test_supported_structural_tag_models_include_vllm_builtins():
 
 
 @pytest.mark.parametrize("choice", ["auto", "required", "get_weather"])
-def test_deepseek_v41_format_constraints_ignore_parameter_schema(
+def test_deepseek_v41_older_xgrammar_keeps_format_constraints(
     choice,
     sample_tools_strict,
+    monkeypatch,
 ):
+    monkeypatch.setattr(
+        builtin_structural_tag, "get_deepseek_v4_1_structural_tag", None, raising=False
+    )
     tool_choice = (
         ChatCompletionNamedToolChoiceParam(
             function=ChatCompletionNamedFunction(name=choice)
@@ -128,7 +132,11 @@ def test_deepseek_v41_named_choice_emits_one_call(sample_tools):
         reasoning=False,
     )
     grammar = Grammar.from_structural_tag(tag)
-    call = '<｜DSML｜ invoke name="get_weather">\n</｜DSML｜ invoke>\n'
+    call = (
+        '<｜DSML｜ invoke name="get_weather">\n'
+        '<｜DSML｜ parameter name="city" string="true">Paris</｜DSML｜ parameter>\n'
+        "</｜DSML｜ invoke>\n"
+    )
     assert _is_grammar_accept_string(
         grammar, "\n\n<｜DSML｜ calls>\n" + call + "</｜DSML｜ calls>"
     )
@@ -138,6 +146,72 @@ def test_deepseek_v41_named_choice_emits_one_call(sample_tools):
     assert (
         get_model_structural_tag("deepseek_v41", sample_tools, "auto", reasoning=False)
         is None
+    )
+
+
+@pytest.mark.skipif(
+    not hasattr(builtin_structural_tag, "get_deepseek_v4_1_structural_tag"),
+    reason="Requires XGrammar's DeepSeek V4.1 builtin",
+)
+@pytest.mark.parametrize("choice", ["auto", "required", "get_weather"])
+@pytest.mark.parametrize("reasoning", [False, True])
+def test_deepseek_v41_constrains_parameters_after_reasoning(
+    sample_tools_strict, choice, reasoning
+):
+    """Strict calls must enforce the schema without requiring another think close."""
+    tool_choice = (
+        ChatCompletionNamedToolChoiceParam(
+            function=ChatCompletionNamedFunction(name=choice)
+        )
+        if choice == "get_weather"
+        else choice
+    )
+    sample_tools_strict[0].function.parameters["additionalProperties"] = False
+    tag = get_model_structural_tag(
+        "deepseek_v41", sample_tools_strict, tool_choice, reasoning=reasoning
+    )
+    grammar = Grammar.from_structural_tag(tag)
+    begin = '\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name="get_weather">\n'
+    end = "</｜DSML｜ invoke>\n</｜DSML｜ calls>"
+    parameter = (
+        '<｜DSML｜ parameter name="city" string="true">Paris</｜DSML｜ parameter>\n'
+    )
+    assert _is_grammar_accept_string(grammar, begin + parameter + end)
+    for invalid in (
+        "",  # missing required city
+        parameter * 2,
+        parameter.replace('name="city"', 'name="unknown"'),
+        parameter.replace('string="true">Paris', 'string="false">42'),
+        parameter.replace("｜ parameter", "｜parameter"),
+        '{"city":"Paris"}',  # the encoder emits DSML parameters, not a JSON body
+    ):
+        assert not _is_grammar_accept_string(grammar, begin + invalid + end)
+    assert not _is_grammar_accept_string(
+        grammar, "reason</think>" + begin + parameter + end
+    )
+    assert _is_grammar_accept_string(grammar, "Hello") == (choice == "auto")
+
+
+@pytest.mark.skipif(
+    not hasattr(builtin_structural_tag, "get_deepseek_v4_1_structural_tag"),
+    reason="Requires XGrammar's DeepSeek V4.1 builtin",
+)
+def test_deepseek_v41_non_strict_parallel_calls_keep_typed_dsml(sample_tools):
+    sample_tools[0].function.strict = False
+    tag = get_model_structural_tag(
+        "deepseek_v41", sample_tools, "required", reasoning=False
+    )
+    grammar = Grammar.from_structural_tag(tag)
+    call = (
+        '<｜DSML｜ invoke name="get_weather">\n'
+        '<｜DSML｜ parameter name="extra" string="false">'
+        '{"nested":[true,null,1.5]}</｜DSML｜ parameter>\n'
+        "</｜DSML｜ invoke>\n"
+    )
+    output = "\n\n<｜DSML｜ calls>\n" + call * 2 + "</｜DSML｜ calls>"
+    assert _is_grammar_accept_string(grammar, output)
+    assert not _is_grammar_accept_string(
+        grammar, output.replace('{"nested":[true,null,1.5]}', "invalid")
     )
 
 
