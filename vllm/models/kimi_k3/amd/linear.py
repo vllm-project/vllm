@@ -7,7 +7,7 @@ from typing import Any
 import torch
 from torch import nn
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
@@ -22,6 +22,7 @@ from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    DCPGroupColumnParallelLinear,
     MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
@@ -68,6 +69,7 @@ from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.ops.dcp import resolve_dcp_q_replicate
 
 logger = init_logger(__name__)
 
@@ -352,6 +354,17 @@ class KimiMLAAttention(nn.Module):
         self.use_nope = use_nope
         assert self.use_nope is True
         assert num_heads % tp_size == 0
+        # Under DCP the KV cache is sharded across the group, so decode
+        # all-gathers the query every layer. Sharding the query projection over
+        # DCP *groups* instead makes each rank materialize the group's whole
+        # head set, dropping that collective; ``MultiHeadLatentAttentionWrapper``
+        # picks the replicated path up from ``qrep_active`` and takes this
+        # rank's shard back via ``_local_view`` for prefill.
+        q_proj_cls = (
+            DCPGroupColumnParallelLinear
+            if resolve_dcp_q_replicate(get_current_vllm_config().parallel_config)
+            else ColumnParallelLinear
+        )
         if self.q_lora_rank is not None:
             self.fused_qkv_a_proj = MergedColumnParallelLinear(
                 self.hidden_size,
@@ -374,7 +387,7 @@ class KimiMLAAttention(nn.Module):
                 self.q_lora_rank,
                 eps=config.rms_norm_eps,
             )
-            self.q_b_proj = ColumnParallelLinear(
+            self.q_b_proj = q_proj_cls(
                 self.q_lora_rank,
                 self.num_heads * self.qk_head_dim,
                 bias=False,
@@ -382,7 +395,7 @@ class KimiMLAAttention(nn.Module):
                 prefix=f"{prefix}.q_b_proj",
             )
         else:
-            self.q_proj = ColumnParallelLinear(
+            self.q_proj = q_proj_cls(
                 self.hidden_size,
                 self.num_heads * self.qk_head_dim,
                 bias=False,
