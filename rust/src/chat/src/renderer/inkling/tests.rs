@@ -88,7 +88,7 @@ impl Tokenizer for FixtureTokenizer {
 }
 
 fn renderer() -> InklingChatRenderer {
-    InklingChatRenderer::new(Arc::new(FixtureTokenizer)).unwrap()
+    InklingChatRenderer::new(Arc::new(FixtureTokenizer), Default::default()).unwrap()
 }
 
 fn render_token_ids(request: &ChatRequest) -> Vec<u32> {

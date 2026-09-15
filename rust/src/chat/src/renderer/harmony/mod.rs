@@ -50,8 +50,9 @@ impl HarmonyChatRenderer {
     ///   unset, the renderer uses the current local date with a UTC fallback.
     /// - `VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS` moves leading instructions
     ///   into the system model identity when set to a non-zero integer.
-    pub fn new() -> Result<Self> {
+    pub fn new(default_template_kwargs: HashMap<String, Value>) -> Result<Self> {
         Self::with_options(
+            default_template_kwargs,
             env_system_start_date(),
             env_use_harmony_system_instructions(),
         )
@@ -63,23 +64,18 @@ impl HarmonyChatRenderer {
     /// Production code should call [`Self::new`] so the renderer observes the
     /// same environment contract as the Python Harmony path.
     pub fn with_options(
+        default_template_kwargs: HashMap<String, Value>,
         system_start_date: impl Into<String>,
         use_system_instructions: bool,
     ) -> Result<Self> {
         Ok(Self {
             encoding: harmony_encoding()?,
-            default_template_kwargs: HashMap::new(),
+            default_template_kwargs,
             options: Options {
                 system_start_date: system_start_date.into(),
                 use_system_instructions,
             },
         })
-    }
-
-    /// Set deployment defaults used below explicit request reasoning controls.
-    pub fn with_default_template_kwargs(mut self, kwargs: HashMap<String, Value>) -> Self {
-        self.default_template_kwargs = kwargs;
-        self
     }
 
     /// Render a chat request directly to Harmony token IDs.

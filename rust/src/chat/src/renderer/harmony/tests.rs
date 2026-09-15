@@ -35,7 +35,8 @@ fn fixture_path(name: &str) -> PathBuf {
 }
 
 fn test_renderer(use_system_instructions: bool) -> HarmonyChatRenderer {
-    HarmonyChatRenderer::with_options(PINNED_DATE, use_system_instructions).unwrap()
+    HarmonyChatRenderer::with_options(Default::default(), PINNED_DATE, use_system_instructions)
+        .unwrap()
 }
 
 fn render_token_ids(request: &ChatRequest) -> Vec<u32> {
@@ -147,9 +148,12 @@ fn rejects_invalid_reasoning_effort() {
 
 #[test]
 fn normalized_reasoning_respects_harmony_capability_and_deployment_effort() {
-    let renderer = test_renderer(false).with_default_template_kwargs(
+    let renderer = HarmonyChatRenderer::with_options(
         [("reasoning_effort".to_string(), serde_json::json!("low"))].into(),
-    );
+        PINNED_DATE,
+        false,
+    )
+    .unwrap();
     let mut request = ChatRequest::for_test();
     request.chat_options.reasoning_effort = Some(EffortValue::from("none"));
     request

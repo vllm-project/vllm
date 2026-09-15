@@ -70,30 +70,26 @@ impl HfChatBackend {
                 options,
                 multimodal_render_info,
             )?),
-            RendererSelection::DeepSeekV32 => Arc::new(
-                DeepSeekV32ChatRenderer::new()
-                    .with_default_template_kwargs(options.default_chat_template_kwargs),
-            ),
-            RendererSelection::DeepSeekV4 => Arc::new(
-                DeepSeekV4ChatRenderer::new()
-                    .with_default_template_kwargs(options.default_chat_template_kwargs),
-            ),
-            RendererSelection::DeepSeekV41 => Arc::new(
-                DeepSeekV41ChatRenderer::new()
-                    .with_default_template_kwargs(options.default_chat_template_kwargs),
-            ),
-            RendererSelection::Harmony => Arc::new(
-                HarmonyChatRenderer::new()?
-                    .with_default_template_kwargs(options.default_chat_template_kwargs),
-            ),
-            RendererSelection::Inkling => Arc::new(
-                InklingChatRenderer::new(tokenizer.clone())?
-                    .with_default_template_kwargs(options.default_chat_template_kwargs),
-            ),
-            RendererSelection::KimiK3 => Arc::new(
-                KimiK3ChatRenderer::new(tokenizer.clone())
-                    .with_default_template_kwargs(options.default_chat_template_kwargs),
-            ),
+            RendererSelection::DeepSeekV32 => Arc::new(DeepSeekV32ChatRenderer::new(
+                options.default_chat_template_kwargs,
+            )),
+            RendererSelection::DeepSeekV4 => Arc::new(DeepSeekV4ChatRenderer::new(
+                options.default_chat_template_kwargs,
+            )),
+            RendererSelection::DeepSeekV41 => Arc::new(DeepSeekV41ChatRenderer::new(
+                options.default_chat_template_kwargs,
+            )),
+            RendererSelection::Harmony => Arc::new(HarmonyChatRenderer::new(
+                options.default_chat_template_kwargs,
+            )?),
+            RendererSelection::Inkling => Arc::new(InklingChatRenderer::new(
+                tokenizer.clone(),
+                options.default_chat_template_kwargs,
+            )?),
+            RendererSelection::KimiK3 => Arc::new(KimiK3ChatRenderer::new(
+                tokenizer.clone(),
+                options.default_chat_template_kwargs,
+            )),
         };
 
         info!(

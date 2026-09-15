@@ -81,19 +81,16 @@ impl InklingSpecialTokenIds {
 }
 
 impl InklingChatRenderer {
-    pub fn new(tokenizer: DynTokenizer) -> Result<Self> {
+    pub fn new(
+        tokenizer: DynTokenizer,
+        default_template_kwargs: HashMap<String, Value>,
+    ) -> Result<Self> {
         let special = InklingSpecialTokenIds::resolve(tokenizer.as_ref())?;
         Ok(Self {
             tokenizer,
             special,
-            default_template_kwargs: HashMap::new(),
+            default_template_kwargs,
         })
-    }
-
-    /// Set deployment defaults used below explicit request reasoning controls.
-    pub fn with_default_template_kwargs(mut self, kwargs: HashMap<String, Value>) -> Self {
-        self.default_template_kwargs = kwargs;
-        self
     }
 
     fn write_text_tokens(&self, out: &mut Vec<u32>, text: &str) -> Result<()> {

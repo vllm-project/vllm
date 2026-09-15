@@ -15,7 +15,7 @@ use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
 use crate::request::{ChatMessage, ChatRequest, ChatTool, GenerationPromptMode};
 
 fn render_request(request: &ChatRequest) -> String {
-    DeepSeekV4ChatRenderer::new()
+    DeepSeekV4ChatRenderer::default()
         .render(request)
         .unwrap()
         .prompt
@@ -350,7 +350,7 @@ fn normalized_reasoning_drives_both_prompt_and_compatibility_kwargs() {
     ] {
         let mut request = ChatRequest::for_test();
         request.chat_options.template_kwargs = serde_json::from_value(kwargs).unwrap();
-        let rendered = DeepSeekV4ChatRenderer::new().render(&request).unwrap();
+        let rendered = DeepSeekV4ChatRenderer::default().render(&request).unwrap();
         let prompt = rendered.prompt.into_text().unwrap();
         assert_eq!(prompt.ends_with("<think>"), enabled);
         assert_eq!(prompt.contains("Reasoning Effort:"), enabled);
@@ -453,8 +453,8 @@ fn reasoning_effort_template_kwarg_selects_effort() {
 #[test]
 fn tool_call_arguments_preserve_non_objects_like_recipe() {
     let renderers: [(&dyn ChatRenderer, &str); 2] = [
-        (&DeepSeekV4ChatRenderer::new(), "parameter"),
-        (&DeepSeekV41ChatRenderer::new(), " parameter"),
+        (&DeepSeekV4ChatRenderer::default(), "parameter"),
+        (&DeepSeekV41ChatRenderer::default(), " parameter"),
     ];
     for arguments in [
         "not json",

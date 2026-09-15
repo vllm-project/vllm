@@ -26,16 +26,11 @@ pub struct KimiK3ChatRenderer {
 
 impl KimiK3ChatRenderer {
     /// Create a Kimi K3 renderer.
-    pub fn new(tokenizer: DynTokenizer) -> Self {
+    pub fn new(tokenizer: DynTokenizer, default_template_kwargs: HashMap<String, Value>) -> Self {
         Self {
             tokenizer,
-            default_template_kwargs: HashMap::new(),
+            default_template_kwargs,
         }
-    }
-    /// Set deployment defaults used below explicit request reasoning controls.
-    pub fn with_default_template_kwargs(mut self, kwargs: HashMap<String, Value>) -> Self {
-        self.default_template_kwargs = kwargs;
-        self
     }
 }
 

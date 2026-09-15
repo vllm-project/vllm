@@ -19,7 +19,7 @@ use crate::request::{
 use crate::{ChatRenderer, ChatRole};
 
 fn render_request(request: &ChatRequest) -> String {
-    DeepSeekV32ChatRenderer::new()
+    DeepSeekV32ChatRenderer::default()
         .render(request)
         .unwrap()
         .prompt
@@ -35,7 +35,7 @@ fn standard_effort_enables_binary_thinking_and_none_disables_it() {
         (EffortValue::from("none"), false),
     ] {
         request.chat_options.reasoning_effort = Some(effort);
-        let rendered = DeepSeekV32ChatRenderer::new().render(&request).unwrap();
+        let rendered = DeepSeekV32ChatRenderer::default().render(&request).unwrap();
         assert_eq!(
             rendered.prompt.into_text().unwrap().ends_with("<think>"),
             enabled
@@ -48,7 +48,7 @@ fn standard_effort_enables_binary_thinking_and_none_disables_it() {
 }
 
 fn render_result(request: &ChatRequest) -> Result<String, Error> {
-    DeepSeekV32ChatRenderer::new().render(request).map(|rendered| {
+    DeepSeekV32ChatRenderer::default().render(request).map(|rendered| {
         rendered
             .prompt
             .into_text()
@@ -366,7 +366,7 @@ fn render_rejects_multimodal_input() {
         ..ChatRequest::for_test()
     };
 
-    let error = DeepSeekV32ChatRenderer::new().render(&request).unwrap_err();
+    let error = DeepSeekV32ChatRenderer::default().render(&request).unwrap_err();
 
     assert!(matches!(
         error,

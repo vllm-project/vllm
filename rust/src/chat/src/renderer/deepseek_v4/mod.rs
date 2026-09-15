@@ -19,13 +19,10 @@ pub struct DeepSeekV4ChatRenderer {
 }
 
 impl DeepSeekV4ChatRenderer {
-    pub fn new() -> Self {
-        Self::default()
-    }
-    /// Set deployment defaults used below explicit request reasoning controls.
-    pub fn with_default_template_kwargs(mut self, kwargs: HashMap<String, Value>) -> Self {
-        self.default_template_kwargs = kwargs;
-        self
+    pub fn new(default_template_kwargs: HashMap<String, Value>) -> Self {
+        Self {
+            default_template_kwargs,
+        }
     }
 }
 

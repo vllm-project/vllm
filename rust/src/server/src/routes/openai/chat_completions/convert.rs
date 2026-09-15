@@ -791,7 +791,7 @@ mod tests {
         );
 
         let tokenizer = Arc::new(TestTokenizer::new());
-        let prompt = KimiK3ChatRenderer::new(tokenizer.clone())
+        let prompt = KimiK3ChatRenderer::new(tokenizer.clone(), Default::default())
             .render(&prepared.chat_request)
             .expect("Kimi K3 rendering succeeds")
             .prompt;

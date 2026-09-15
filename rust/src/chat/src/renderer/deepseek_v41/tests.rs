@@ -16,7 +16,7 @@ use crate::request::{
 };
 
 fn render(request: &ChatRequest) -> String {
-    DeepSeekV41ChatRenderer::new()
+    DeepSeekV41ChatRenderer::default()
         .render(request)
         .unwrap()
         .prompt
@@ -65,7 +65,7 @@ fn inlines_image_placeholder_at_image_part_positions() {
     // The placeholder is unconditional (matching the Python encoding's
     // `IMAGE_PLACEHOLDER`); requests to a multimodal-less backend fail later,
     // at media preparation.
-    let renderer = DeepSeekV41ChatRenderer::new();
+    let renderer = DeepSeekV41ChatRenderer::default();
     let request = ChatRequest {
         messages: vec![ChatMessage::User {
             content: ChatContent::Parts(vec![
@@ -88,7 +88,7 @@ fn inlines_image_placeholder_at_image_part_positions() {
 
 #[test]
 fn media_order_follows_reordered_tool_results() {
-    let renderer = DeepSeekV41ChatRenderer::new();
+    let renderer = DeepSeekV41ChatRenderer::default();
     let request = ChatRequest {
         messages: vec![
             ChatMessage::assistant_blocks(vec![
@@ -137,7 +137,7 @@ fn media_order_follows_reordered_tool_results() {
 
 #[test]
 fn media_order_excludes_dropped_historical_developer_content() {
-    let renderer = DeepSeekV41ChatRenderer::new();
+    let renderer = DeepSeekV41ChatRenderer::default();
     let request = ChatRequest {
         messages: vec![
             ChatMessage::developer(vec![image_part("historical-image")], None),
@@ -202,8 +202,8 @@ fn accepts_numeric_template_effort_with_top_level_precedence() {
 
 #[test]
 fn enabling_with_none_inherits_deployment_effort_and_reports_numeric_control() {
-    let renderer = DeepSeekV41ChatRenderer::new()
-        .with_default_template_kwargs([("reasoning_effort".to_string(), json!(37))].into());
+    let renderer =
+        DeepSeekV41ChatRenderer::new([("reasoning_effort".to_string(), json!(37))].into());
     let mut request = request();
     request.chat_options.reasoning_effort = Some(EffortValue::from("none"));
     request
@@ -245,13 +245,13 @@ fn rejects_undefined_effort_names_and_invalid_numeric_budgets() {
     ] {
         let mut request = request();
         request.chat_options.template_kwargs.insert("reasoning_effort".into(), effort);
-        let error = DeepSeekV41ChatRenderer::new().render(&request).unwrap_err();
+        let error = DeepSeekV41ChatRenderer::default().render(&request).unwrap_err();
         assert!(error.is_request_validation_error());
     }
     for effort in [EffortValue::from("minimal"), EffortValue::from("medium")] {
         let mut request = request();
         request.chat_options.reasoning_effort = Some(effort);
-        let error = DeepSeekV41ChatRenderer::new().render(&request).unwrap_err();
+        let error = DeepSeekV41ChatRenderer::default().render(&request).unwrap_err();
         assert!(error.is_request_validation_error());
     }
 }

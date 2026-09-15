@@ -39,8 +39,10 @@ fn test_tokenizer() -> TestTokenizer {
 #[test]
 fn native_effort_overrides_stay_within_their_request_or_deployment_source() {
     let tokenizer = Arc::new(test_tokenizer());
-    let renderer = KimiK3ChatRenderer::new(tokenizer.clone())
-        .with_default_template_kwargs([("thinking_effort".to_string(), json!("max"))].into());
+    let renderer = KimiK3ChatRenderer::new(
+        tokenizer.clone(),
+        [("thinking_effort".to_string(), json!("max"))].into(),
+    );
     for (kwargs, typed, effort) in [
         (json!({}), Some(EffortValue::from("low")), "low"),
         (
@@ -87,7 +89,10 @@ fn native_effort_overrides_stay_within_their_request_or_deployment_source() {
 }
 
 fn render_token_ids(request: &crate::request::ChatRequest, tokenizer: DynTokenizer) -> Vec<u32> {
-    let prompt = KimiK3ChatRenderer::new(tokenizer).render(request).unwrap().prompt;
+    let prompt = KimiK3ChatRenderer::new(tokenizer, Default::default())
+        .render(request)
+        .unwrap()
+        .prompt;
     let Prompt::TokenIds(token_ids) = prompt else {
         panic!("kimi k3 renderer should return token IDs")
     };
@@ -359,7 +364,7 @@ fn media_order_follows_reordered_tool_results() {
         ),
     ];
     request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
-    let renderer = KimiK3ChatRenderer::new(Arc::new(test_tokenizer()));
+    let renderer = KimiK3ChatRenderer::new(Arc::new(test_tokenizer()), Default::default());
 
     let rendered = renderer.render(&request).unwrap();
     let media_order = rendered.media_order.unwrap();
@@ -496,7 +501,7 @@ fn rejects_removed_medium_thinking_effort() {
         .template_kwargs
         .insert("thinking_effort".to_string(), json!("medium"));
 
-    let error = KimiK3ChatRenderer::new(Arc::new(test_tokenizer()))
+    let error = KimiK3ChatRenderer::new(Arc::new(test_tokenizer()), Default::default())
         .render(&request)
         .unwrap_err();
 
