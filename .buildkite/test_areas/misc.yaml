@@ -305,6 +305,19 @@ steps:
   - pip install 'modelscope<1.38'
   - pytest -v -s test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
+  mirror:
+    amd:
+      label: ":amd: (MI355) Regression"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 25
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      source_file_dependencies:
+      - tests/test_regression.py
+      - vllm/
+      - tests/test_regression
 
 - label: ":nvidia: (H200 MIG 35GB) Examples"
   device: h200_35gb
@@ -623,3 +636,17 @@ steps:
   commands:
     - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
     - pytest -v -s v1/spec_decode/test_acceptance_length.py -m slow_test
+  mirror:
+    amd:
+      label: ":amd: (MI355) Acceptance Length (Large Models)"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 45
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      source_file_dependencies:
+      - vllm/v1/spec_decode/
+      - vllm/model_executor/models/mlp_speculator.py
+      - tests/v1/spec_decode/test_acceptance_length.py
+      - vllm/platforms/rocm.py

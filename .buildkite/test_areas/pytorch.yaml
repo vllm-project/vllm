@@ -122,6 +122,21 @@ steps:
     - tests/compile/passes
   commands:
   - pytest -s -v compile/passes --ignore compile/passes/distributed
+  mirror:
+    amd:
+      label: ':amd: (MI355) PyTorch Compilation Passes'
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 80
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/
+      - tests/compile/passes
+      - vllm/platforms/rocm.py
+      commands:
+      - pytest -s -v compile/passes --ignore compile/passes/distributed
 
 - label: ":nvidia: (H200 MIG 35GB) PyTorch Fullgraph"
   device: h200_35gb

@@ -30,6 +30,27 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
 
+- label: ":amd: (MI355) LM Eval Small Models Harness"
+  key: amd-lm-eval-small-models-harness
+  dind: false
+  device: mi355_1
+  timeout_in_minutes: 35
+  depends_on:
+  - image-build-amd
+  working_dir: /vllm-workspace/.buildkite/lm-eval-harness
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  - vllm/model_executor/models/
+  - vllm/model_executor/model_loader/
+  - vllm/v1/attention/backends/
+  - vllm/v1/attention/selector.py
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - .buildkite/lm-eval-harness/
+  commands:
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-small-rocm.txt
+
 - label: ":nvidia: (H200 MIG 35GB) LM Eval Watermarking"
   device: h200_35gb
   key: lm-eval-watermarking
