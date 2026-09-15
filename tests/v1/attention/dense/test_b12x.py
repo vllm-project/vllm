@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from tests.v1.attention.test_attention_backends import (
+from tests.v1.attention.dense.test_attention_backends import (
     BATCH_SPECS,
     _test_backend_correctness,
 )
