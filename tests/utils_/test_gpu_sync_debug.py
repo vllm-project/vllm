@@ -162,7 +162,9 @@ def test_without_env_set(monkeypatch):
 
 def _pageable_h2d_nonblocking():
     # Pageable source: the "async" copy is staged through pageable memory.
-    torch.zeros(4).to("cuda", non_blocking=True)
+    torch.zeros(4).to(
+        "cuda", non_blocking=True
+    )  # gpu-sync-ok: fixture for runtime sync checker
 
 
 def _pinned_h2d_nonblocking():
@@ -188,11 +190,15 @@ def _dtype_converting_h2d_nonblocking():
 
 
 def _pageable_h2d_via_cuda():
-    torch.zeros(4).cuda(non_blocking=True)
+    torch.zeros(4).cuda(
+        non_blocking=True
+    )  # gpu-sync-ok: fixture for runtime sync checker
 
 
 def _pageable_h2d_via_copy_():
-    torch.zeros(4, device="cuda").copy_(torch.zeros(4), non_blocking=True)
+    torch.zeros(4, device="cuda").copy_(
+        torch.zeros(4), non_blocking=True
+    )  # gpu-sync-ok: fixture for runtime sync checker
 
 
 def _d2h_via_to():
@@ -225,7 +231,9 @@ def _transposed_d2h_via_copy_():
 
 def _empty_h2d_nonblocking():
     # Empty (e.g. first-step penalties): no CUDA call is issued at all.
-    torch.zeros(0).to("cuda", non_blocking=True)
+    torch.zeros(0).to(
+        "cuda", non_blocking=True
+    )  # gpu-sync-ok: fixture for runtime sync checker
 
 
 def _dtype_converting_d2h_via_copy_():
