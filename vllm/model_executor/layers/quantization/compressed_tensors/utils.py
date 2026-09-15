@@ -75,6 +75,7 @@ def find_matched_target(
     module: Module,
     targets: Iterable[str],
     fused_mapping: Mapping[str, list[str]] = MappingProxyType({}),
+    match_module: bool = True,
 ) -> str | None:
     """
     Helper function to look up which "target" in the compressed-tensors
@@ -98,16 +99,17 @@ def find_matched_target(
         module: torch.nn.Module
         targets: list of targets to match the layer against
         fused_mapping: map from fused layer names to its components
+        match_module: whether to fall back to matching the module class name
     """
 
     if layer_name is None:
         layer_name = ""
 
-    matched_target = (
-        _find_first_match(layer_name, targets)
-        or _match_fused_layer(layer_name, targets, fused_mapping)
-        or _find_first_match(module.__class__.__name__, targets, True)
+    matched_target = _find_first_match(layer_name, targets) or _match_fused_layer(
+        layer_name, targets, fused_mapping
     )
+    if matched_target is None and match_module:
+        matched_target = _find_first_match(module.__class__.__name__, targets, True)
 
     return matched_target
 
