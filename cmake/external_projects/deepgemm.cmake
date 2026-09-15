@@ -32,7 +32,7 @@ else()
   # Pinned to the tip of the fork's dev branch: upstream 2.8.0 plus the SM120
   # port, the SM90 paged-MQA kv_block=32/next_n=4 port, configurable SwiGLU
   # alpha/beta, and SiTU for FP8/FP4 Mega MoE.
-  set(_DEEPGEMM_UPSTREAM_TAG "9a86ae2b78991f1c8e6e95945a591e1ca3b19ce7")
+  set(_DEEPGEMM_UPSTREAM_TAG "ad1f1726aa540a76c1d26d6a120effb8de21eaa4")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
