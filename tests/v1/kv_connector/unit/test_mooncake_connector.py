@@ -29,6 +29,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     _compute_sender_transfer_plan,
     _validate_asymmetric_region_lengths,
     get_mooncake_bootstrap_addr,
+    group_concurrent_contiguous,
     should_launch_bootstrap_server,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
@@ -153,6 +154,44 @@ def _make_test_kv_cache_config() -> KVCacheConfig:
                 ),
             )
         ],
+    )
+
+
+def _make_lazy_grouping_case():
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.shutdown = MagicMock()
+    worker.tp_rank = 0
+    worker.tp_size = 1
+    worker.use_mla = False
+    worker.kv_cache_config = _make_test_kv_cache_config()
+    worker._physical_blocks_per_logical_kv_block = 1
+    worker.transfer_topo = SimpleNamespace(
+        local_replicates_kv_cache=False,
+        total_num_kv_heads=4,
+    )
+
+    def region(base_addr):
+        return SimpleNamespace(
+            base_addr=base_addr,
+            block_len=0x100,
+            kv_block_len=0x100,
+            group_index=0,
+        )
+
+    ready_reqs = [("d-group-cache", SimpleNamespace(local_block_ids=[[10, 11]]))]
+    xfer_meta = SimpleNamespace(
+        remote_hostname="consumer-host",
+        remote_port=54321,
+        remote_tp_size=1,
+        remote_tp_rank=0,
+        req_blocks={"d-group-cache": ("xfer-group-cache", [[20, 21]])},
+    )
+    return (
+        worker,
+        ready_reqs,
+        xfer_meta,
+        [region(0x1000), region(0x2000)],
+        [region(0xA000), region(0xB000)],
     )
 
 
@@ -343,24 +382,115 @@ async def test_build_transfer_params_separates_prefill_pp_layers():
             expected_by_pp_rank[pp_rank]["layers"]
         )
 
-        (
-            src_ptrs,
-            dst_ptrs,
-            lengths,
-            err_reqs,
-            err_msg,
-        ) = await worker._build_transfer_params(
-            ready_reqs=[("d-req-pp", send_meta)],
-            agent_meta=xfer_meta,
-            local_regions=aligned_local,
-            remote_regions=aligned_remote,
-        )
+        with patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+            "mooncake_connector.group_concurrent_contiguous",
+            wraps=group_concurrent_contiguous,
+        ) as group_spy:
+            (
+                src_ptrs,
+                dst_ptrs,
+                lengths,
+                err_reqs,
+                err_msg,
+            ) = await worker._build_transfer_params(
+                ready_reqs=[("d-req-pp", send_meta)],
+                agent_meta=xfer_meta,
+                local_regions=aligned_local,
+                remote_regions=aligned_remote,
+            )
 
+        group_spy.assert_called_once_with([10, 11], [20, 21])
         assert err_reqs == []
         assert err_msg is None
         assert src_ptrs == expected_by_pp_rank[pp_rank]["src_ptrs"]
         assert dst_ptrs == expected_by_pp_rank[pp_rank]["dst_ptrs"]
         assert lengths == [2 * block_len, 2 * block_len]
+
+
+@pytest.mark.asyncio
+async def test_build_transfer_params_grouping_cache_is_request_local():
+    worker, ready_reqs, xfer_meta, local_regions, remote_regions = (
+        _make_lazy_grouping_case()
+    )
+    ready_reqs.append(("d-group-cache-2", ready_reqs[0][1]))
+    xfer_meta.req_blocks["d-group-cache-2"] = (
+        "xfer-group-cache-2",
+        [[20, 21]],
+    )
+
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+        "mooncake_connector.group_concurrent_contiguous",
+        wraps=group_concurrent_contiguous,
+    ) as group_spy:
+        await worker._build_transfer_params(
+            ready_reqs,
+            xfer_meta,
+            local_regions,
+            remote_regions,
+        )
+
+    assert group_spy.call_count == 2
+
+
+@pytest.mark.parametrize(
+    ("plans", "expected_events", "expected_result"),
+    [
+        pytest.param(
+            [(False, 0, 0, 0x100), (True, 0, 0, 0x100)],
+            ["plan", "plan", "group"],
+            ([0x2000 + 10 * 0x100], [0xB000 + 20 * 0x100], [2 * 0x100], [], None),
+            id="false-then-true",
+        ),
+        pytest.param(
+            [(False, 0, 0, 0x100), (False, 0, 0, 0x100)],
+            ["plan", "plan"],
+            ([], [], [], [], None),
+            id="all-false",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_build_transfer_params_groups_only_for_transferring_regions(
+    plans,
+    expected_events,
+    expected_result,
+):
+    worker, ready_reqs, xfer_meta, local_regions, remote_regions = (
+        _make_lazy_grouping_case()
+    )
+    events = []
+    remaining_plans = iter(plans)
+
+    def sender_plan(**kwargs):
+        events.append("plan")
+        return next(remaining_plans)
+
+    def group_blocks(src_ids, dst_ids):
+        events.append("group")
+        return group_concurrent_contiguous(src_ids, dst_ids)
+
+    with (
+        patch.object(worker, "_get_sender_transfer_plan", side_effect=sender_plan),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+            "mooncake_connector.group_concurrent_contiguous",
+            side_effect=group_blocks,
+        ) as group_spy,
+    ):
+        result = await worker._build_transfer_params(
+            ready_reqs,
+            xfer_meta,
+            local_regions,
+            remote_regions,
+        )
+
+    assert events == expected_events
+    assert group_spy.call_count == expected_events.count("group")
+    if group_spy.called:
+        group_spy.assert_called_once_with([10, 11], [20, 21])
+    assert result == expected_result
 
 
 @pytest.mark.asyncio
