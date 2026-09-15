@@ -75,14 +75,17 @@ steps:
     - |
       # One whole standard/ directory set per replica; no -m filter, every file
       # below standard/ is claimed by exactly one branch. Trailing comments are
-      # pytest minutes measured in validation build 88954.
+      # pytest minutes measured in validation build 89163.
       set -eu
       case "$$BUILDKITE_PARALLEL_JOB" in
-        0) pytest -v -s models/multimodal/standard/vit_cudagraph --num-shards=3 --shard-id=0 ;;  # 5.0m
-        1) pytest -v -s models/multimodal/standard/vit_cudagraph --num-shards=3 --shard-id=1 ;;  # 15.4m
-        2) pytest -v -s models/multimodal/standard/vit_cudagraph --num-shards=3 --shard-id=2 ;;  # 14.3m
-        3)  # 15.1m
-          pytest -v -s models/multimodal/standard/audio models/multimodal/standard/interleaved models/multimodal/standard/mapping models/multimodal/standard/pooling
+        0)  # 8.5m
+          pytest -v -s models/multimodal/standard/vit_cudagraph --num-shards=3 --shard-id=0
+          pytest -v -s models/multimodal/standard/audio
+          ;;
+        1) pytest -v -s models/multimodal/standard/vit_cudagraph --num-shards=3 --shard-id=1 ;;  # 12.6m
+        2) pytest -v -s models/multimodal/standard/vit_cudagraph --num-shards=3 --shard-id=2 ;;  # 11.0m
+        3)  # 7.6m
+          pytest -v -s models/multimodal/standard/interleaved models/multimodal/standard/mapping models/multimodal/standard/pooling
           pytest -v -s models/multimodal/standard/memory_leak
           cd ..
           VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/standard/whisper  # mp_method="spawn" needs the repo root as cwd
