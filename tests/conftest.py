@@ -454,6 +454,8 @@ class HfRunner:
                 trust_remote_code=trust_remote_code,
             )
         self.device = self.get_default_device()
+        # Populated by generate_greedy_logprobs_limit(return_full_logprobs=True).
+        self.full_logprobs: list[torch.Tensor] | None = None
         self.dtype = dtype = _get_and_verify_dtype(
             self.model_name,
             self.config,
@@ -801,12 +803,16 @@ class HfRunner:
         self,
         hidden_states: tuple[tuple[torch.Tensor, ...], ...],
         num_logprobs: int | None,
-    ) -> tuple[list[dict[int, float]], int]:
+        return_full_logprobs: bool = False,
+    ) -> tuple[list[dict[int, float]], int, torch.Tensor | None]:
         seq_logprobs = self._hidden_states_to_seq_logprobs(hidden_states)
         output_len = len(hidden_states)
 
         # convert to dict
         seq_logprobs_lst: list[dict[int, float]] = []
+        full_logprobs_lst: list[torch.Tensor] | None = (
+            [] if return_full_logprobs else None
+        )
         for tok_idx, tok_logprobs in enumerate(seq_logprobs):
             # drop prompt logprobs
             if tok_idx == 0:
@@ -819,9 +825,17 @@ class HfRunner:
 
             seq_logprobs_lst.append(tok_logprobs_dct)
 
+            if full_logprobs_lst is not None:
+                # Keep the whole row rather than a top-k slice, so that any
+                # token id can be looked up once the model is released.
+                full_logprobs_lst.append(tok_logprobs[0].cpu())
+
+        full_logprobs = torch.stack(full_logprobs_lst) if full_logprobs_lst else None
+
         return (
             seq_logprobs_lst,
             output_len,
+            full_logprobs,
         )
 
     def generate_greedy_logprobs_limit(
@@ -834,8 +848,15 @@ class HfRunner:
         videos: PromptVideoInput | None = None,
         use_cache: bool = True,
         tokenization_kwargs: dict[str, Any] | None = None,
+        return_full_logprobs: bool = False,
         **kwargs: Any,
     ) -> list[TokensTextLogprobs]:
+        """
+        If `return_full_logprobs` is set, the complete log-softmax row at each
+        generated position is recorded on `self.full_logprobs`, indexed as
+        `[prompt] -> Tensor[position, vocab]`. It is held on CPU and outlives
+        this runner, so any token id can be scored after the model is released.
+        """
         all_inputs = self.get_inputs(
             prompts,
             images=images,
@@ -845,6 +866,7 @@ class HfRunner:
         )
 
         all_logprobs: list[list[dict[int, float]]] = []
+        all_full_logprobs: list[torch.Tensor] = []
         all_output_ids: list[list[int]] = []
         all_output_strs: list[str] = []
 
@@ -870,14 +892,21 @@ class HfRunner:
             (
                 seq_logprobs_lst,
                 output_len,
-            ) = self._hidden_states_to_logprobs(hidden_states, num_logprobs)
+                full_logprobs,
+            ) = self._hidden_states_to_logprobs(
+                hidden_states, num_logprobs, return_full_logprobs
+            )
 
             all_logprobs.append(seq_logprobs_lst)
+            if full_logprobs is not None:
+                all_full_logprobs.append(full_logprobs)
             seq_ids = output.sequences[0]
             output_len = len(seq_logprobs_lst)
             output_ids = seq_ids[-output_len:]
             all_output_ids.append(output_ids.tolist())
             all_output_strs.append(self.tokenizer.decode(output_ids))
+
+        self.full_logprobs = all_full_logprobs if return_full_logprobs else None
 
         outputs = zip(all_output_ids, all_output_strs, all_logprobs)
         return [
