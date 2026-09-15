@@ -4,7 +4,9 @@
 import pytest
 import torch
 
+from tests.utils import multi_gpu_test
 from vllm import LLM, PoolingParams
+from vllm.config import PoolerConfig
 from vllm.lora.request import LoRARequest
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -100,6 +102,7 @@ def test_native_classification_model_with_modules_to_save(
         2,
     ],
 )
+@multi_gpu_test(num_gpus=2)
 def test_batched_loras(
     qwen3_guard_star_trek_lora_files: str,
     qwen3_guard_new_zealand_lora_files: str,
@@ -139,3 +142,40 @@ def test_batched_loras(
         atol=2e-2,
         rtol=2e-2,
     )
+
+
+def test_token_classification_rejects_head_lora(
+    qwen3_guard_star_trek_lora_files: str,
+) -> None:
+    llm = LLM(
+        model=MODEL_NAME,
+        runner="pooling",
+        convert="classify",
+        pooler_config=PoolerConfig(task="token_classify"),
+        hf_overrides={"num_labels": 2},
+        dtype="float16",
+        enable_lora=True,
+        max_lora_rank=16,
+        enforce_eager=True,
+        max_model_len=512,
+        gpu_memory_utilization=0.5,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="token_classify only supports LoRA on the model backbone",
+    ):
+        llm.encode(
+            PROMPTS["star_trek"],
+            pooling_params=PoolingParams(
+                task="token_classify",
+                use_activation=False,
+            ),
+            pooling_task="token_classify",
+            lora_request=LoRARequest(
+                "star-trek",
+                1,
+                qwen3_guard_star_trek_lora_files,
+            ),
+            use_tqdm=False,
+        )
