@@ -91,7 +91,6 @@ async def do_rerank(request: RerankRequest, raw_request: Request):
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
     },
 )
-@with_cancellation
 async def do_rerank_v1(request: RerankRequest, raw_request: Request):
     logger.warning_once(
         "To indicate that the rerank API is not part of the standard OpenAI"
@@ -110,6 +109,5 @@ async def do_rerank_v1(request: RerankRequest, raw_request: Request):
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
     },
 )
-@with_cancellation
 async def do_rerank_v2(request: RerankRequest, raw_request: Request):
     return await do_rerank(request, raw_request)
