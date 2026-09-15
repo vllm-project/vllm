@@ -873,9 +873,7 @@ class Platform:
             alignment_attn_page_size_1_token = attn_page_size_1_token
         else:
             alignment_attn_page_size_1_token = (
-                attn_page_size_1_token
-                * alignment_num_kv_heads
-                // local_num_kv_heads
+                attn_page_size_1_token * alignment_num_kv_heads // local_num_kv_heads
             )
 
         # Compute mamba page size
