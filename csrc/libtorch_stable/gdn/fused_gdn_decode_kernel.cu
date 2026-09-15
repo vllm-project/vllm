@@ -158,7 +158,7 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
     const void* __restrict__ norm_weight, __nv_bfloat16* __restrict__ out,
     int H, int HV, int state_indices_width, int dt_bias_type,
     bool norm_weight_is_bf16, float scale, float norm_eps,
-    GdnDecodeStrides strides) {
+    GdnDecodeStrides strides, int num_output_tokens) {
   const int request = blockIdx.x;
   const int value_head = blockIdx.y;
   const int tid = threadIdx.x;
@@ -167,6 +167,16 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
   const int bos = cu_seqlens[request];
   const int eos = cu_seqlens[request + 1];
   const int num_tokens = eos - bos;
+  // The last request owns the padded tail, including an empty final request.
+  if (request == gridDim.x - 1) {
+    for (int linear = tid; linear < (num_output_tokens - eos) * kDimV;
+         linear += kThreads) {
+      const int token = eos + linear / kDimV;
+      const int value = linear % kDimV;
+      out[(static_cast<int64_t>(token) * HV + value_head) * kDimV + value] =
+          __float2bfloat16(0.0f);
+    }
+  }
   if (num_tokens <= 0) {
     return;
   }
@@ -410,7 +420,8 @@ void launch_gdn_decode_post_conv_mtp(
           num_key_heads, num_value_heads,
           static_cast<int>(state_indices.size(1)), dt_bias_type,
           norm_weight.scalar_type() == ScalarType::BFloat16,
-          static_cast<float>(scale), static_cast<float>(norm_eps), strides);
+          static_cast<float>(scale), static_cast<float>(norm_eps), strides,
+          static_cast<int>(out.size(0)));
   const cudaError_t error = cudaGetLastError();
   STD_TORCH_CHECK(error == cudaSuccess,
                   "GDN decode MTP post-conv kernel launch failed: ",
@@ -526,9 +537,9 @@ void fused_gdn_decode_post_conv_mtp(
                   "output_gate must have shape [L, HV, 128]");
   STD_TORCH_CHECK(norm_weight.is_contiguous() && norm_weight.numel() == kDimV,
                   "norm_weight must be contiguous with 128 elements");
-  STD_TORCH_CHECK(out.dim() == 3 && out.size(0) == num_tokens &&
+  STD_TORCH_CHECK(out.dim() == 3 && out.size(0) >= num_tokens &&
                       out.size(1) == num_value_heads && out.size(2) == kDimV,
-                  "out must have shape [L, HV, 128]");
+                  "out must have shape [L_padded, HV, 128] with L_padded >= L");
   STD_TORCH_CHECK(mixed_qkv.stride(1) == 1,
                   "mixed_qkv channels must be contiguous");
   STD_TORCH_CHECK(a.stride(1) == 1 && b.stride(1) == 1,
