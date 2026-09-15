@@ -6,6 +6,7 @@ import torch
 from PIL import Image
 
 from vllm.multimodal.parse import (
+    AudioProcessorItems,
     ImageProcessorItems,
     MultiModalDataParser,
     VideoProcessorItems,
@@ -55,9 +56,49 @@ def test_frame_size_hwc_chw(frame):
     assert items.get_frame_size(0) == (W, H)
 
 
+def test_video_with_metadata_tensor_passthrough():
+    """Tensor frames pass through unchanged regardless of device: HF video
+    processors accept tensors, and device-resident frames (e.g. NVDEC-decoded)
+    must not be copied back to host."""
+    frames = torch.zeros((4, H, W, 3), dtype=torch.uint8)
+    video, metadata = MultiModalDataParser()._get_video_with_metadata(frames)
+
+    assert video is frames
+    assert metadata is None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+def test_video_with_metadata_keeps_device_tensor():
+    """Device-resident frames (e.g. NVDEC-decoded) pass through as tensors,
+    so a device-side HF processor can consume them without a D2H copy."""
+    frames = torch.zeros((4, H, W, 3), dtype=torch.uint8, device="cuda")
+    video, metadata = MultiModalDataParser()._get_video_with_metadata(frames)
+
+    assert video is frames
+    assert metadata is None
+
+
+@pytest.mark.parametrize(
+    "frames",
+    [
+        [np.zeros((H, W, 3), dtype=np.uint8) for _ in range(2)],
+        [torch.zeros((H, W, 3), dtype=torch.uint8) for _ in range(2)],
+    ],
+)
+def test_parse_video_frame_list_as_single_video(frames):
+    """A list of decoded frames must represent one video item."""
+    items = MultiModalDataParser().parse_mm_data({"video": frames})["video"]
+
+    assert items.get_count() == 1
+    video = items.get(0)
+    assert isinstance(video, np.ndarray)
+    np.testing.assert_array_equal(video, np.stack([np.asarray(f) for f in frames]))
+
+
 @pytest.mark.parametrize(
     "modality,processor_cls",
     [
+        ("audio", AudioProcessorItems),
         ("image", ImageProcessorItems),
         ("video", VideoProcessorItems),
     ],
@@ -68,3 +109,19 @@ def test_parse_mm_data_accepts_none_cached_item(modality, processor_cls):
     assert isinstance(items, processor_cls)
     assert len(items) == 1
     assert items.get(0) is None
+
+
+def test_cached_audio_items_preserve_positions_during_resampling():
+    waveform = np.arange(16, dtype=np.float32)
+    parser = MultiModalDataParser(
+        target_sr=16000, target_channels=1, audio_resample_method="scipy"
+    )
+    items = parser.parse_mm_data(
+        {"audio": [None, (waveform, 8000), None, (waveform, 16000)]}
+    )["audio"]
+
+    assert len(items) == 4
+    assert items.get(0) is None
+    assert items.get(2) is None
+    assert len(items.get(1)) == 32
+    np.testing.assert_array_equal(items.get(3), waveform)
