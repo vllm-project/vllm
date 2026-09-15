@@ -13,6 +13,7 @@ import importlib
 import os
 from contextlib import contextmanager, suppress
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -23,6 +24,11 @@ from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.distributed.utils import is_weak_contiguous
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+
+# Expose the adjacent implementation directory without a shadowing __init__.py.
+__path__ = [str(Path(__file__).with_suffix(""))]
+if __spec__ is not None:
+    __spec__.submodule_search_locations = __path__
 
 logger = init_logger(__name__)
 
@@ -360,7 +366,7 @@ class RDNA4AllReduce:
 
         props = torch.cuda.get_device_properties(self.device)
         if self.world_size == 2 and "gfx1201" in getattr(props, "gcnArchName", ""):
-            from .rdna4_all_reduce_mapped_tp2 import RDNA4TP2MappedAllReduce
+            from .rdna4_all_reduce.mapped_tp2 import RDNA4TP2MappedAllReduce
 
             self._tp2_mapped = RDNA4TP2MappedAllReduce(
                 group=self.group,
@@ -378,7 +384,7 @@ class RDNA4AllReduce:
         elif self.world_size in (4, 8) and "gfx1201" in getattr(
             props, "gcnArchName", ""
         ):
-            from .rdna4_all_reduce_mapped import RDNA4MappedAllReduce
+            from .rdna4_all_reduce.mapped import RDNA4MappedAllReduce
 
             mapped_max_size = min(
                 self.max_size,
@@ -724,7 +730,7 @@ class RDNA4AllReduce:
         )
         launcher = self._p2p_launchers.get(key)
         if launcher is None:
-            from .flydsl_kernels.rdna4_all_reduce_p2p import (
+            from .rdna4_all_reduce.flydsl_kernels.rdna4_all_reduce_p2p import (
                 make_p2p_tp4_push_rsag_launcher,
             )
 
@@ -772,7 +778,7 @@ class RDNA4AllReduce:
         key = ("tp2_one_shot", blocks, threads)
         launcher = self._p2p_launchers.get(key)
         if launcher is None:
-            from .flydsl_kernels.rdna4_all_reduce_tp2 import (
+            from .rdna4_all_reduce.flydsl_kernels.rdna4_all_reduce_tp2 import (
                 make_p2p_tp2_one_shot_launcher,
             )
 
@@ -835,7 +841,7 @@ class RDNA4AllReduce:
         )
         launcher = self._p2p_launchers.get(key)
         if launcher is None:
-            from .flydsl_kernels.rdna4_all_reduce_p2p import (
+            from .rdna4_all_reduce.flydsl_kernels.rdna4_all_reduce_p2p import (
                 make_p2p_tp4_pull_launcher,
             )
 
@@ -896,7 +902,7 @@ class RDNA4AllReduce:
         )
         launcher = self._p2p_launchers.get(key)
         if launcher is None:
-            from .flydsl_kernels.rdna4_all_reduce_p2p import (
+            from .rdna4_all_reduce.flydsl_kernels.rdna4_all_reduce_p2p import (
                 make_p2p_hierarchical_tp8_launcher,
             )
 

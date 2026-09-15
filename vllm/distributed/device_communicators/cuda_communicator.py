@@ -72,6 +72,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 rocm_aiter_ops.is_custom_all_reduce_enabled()
             )
 
+        is_rdna4 = False
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_rdna4
+
+            is_rdna4 = on_rdna4()
+
         self.use_custom_allreduce = use_custom_allreduce
         self.use_torch_symm_mem = use_torch_symm_mem
         self.use_flashinfer_allreduce = use_flashinfer_allreduce
@@ -115,11 +121,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.use_aiter_ag_rs: bool = False
         self.rdna4_ar_comm: RDNA4AllReduce | None = None
 
-        if (
-            use_custom_allreduce
-            and self.world_size in (2, 4, 8)
-            and current_platform.is_rocm()
-        ):
+        if use_custom_allreduce and self.world_size in (2, 4, 8) and is_rdna4:
             try:
                 self.rdna4_ar_comm = RDNA4AllReduce(
                     group=self.cpu_group,
@@ -156,11 +158,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 device=self.device,
             )
 
-        if (
-            self.use_aiter_allreduce
-            and self.world_size > 1
-            and self.rdna4_ar_comm is None
-        ):
+        if self.use_aiter_allreduce and self.world_size > 1:
             self.aiter_ar_comm = AiterCustomAllreduce(
                 group=self.cpu_group,
                 device=self.device,
@@ -168,8 +166,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         if (
             use_custom_allreduce
+            and not is_rdna4
             and self.aiter_ar_comm is None
-            and self.rdna4_ar_comm is None
             and self.world_size > 1
         ):
             # Initialize a custom fast all-reduce implementation.
@@ -199,8 +197,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         if (
             use_custom_allreduce
-            and self.rdna4_ar_comm is None
             and self.world_size > 1
+            and not is_rdna4
             and current_platform.is_rocm()
         ):
             # Initialize a custom quick all-reduce implementation for AMD.
