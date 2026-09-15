@@ -38,6 +38,10 @@ class LoadConfig:
     - "instanttensor" will load the Safetensors weights on CUDA devices using
       InstantTensor, which enables distributed loading with pipelined prefetching
       and fast direct I/O.
+    - "fastsafetensors" will load the Safetensors weights directly onto the
+      GPU using the fastsafetensors library, via GPUDirect Storage where it is
+      available. See the fastsafetensors page in the Extensions section for
+      more information.
     - "ipc_cache" will map post-quantized weights from a local weight cache
       daemon via CUDA IPC for fast engine restarts. See
       `vllm/model_executor/model_loader/weight_cache/daemon.py` for how to
