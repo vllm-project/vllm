@@ -380,9 +380,10 @@ class BaseConfigParser(Parser):
 
         args.weight_byte_size = get_dtype_size(torch_dtype)
 
-        # FIXME: handle this better by parsing whether activations use
-        # bf16, fp32, etc...
-        args.activation_byte_size = 2
+        # Activations are produced in the model's compute dtype. Quantization
+        # overrides weight_byte_size below but leaves activations alone, so
+        # this stays keyed on the model dtype.
+        args.activation_byte_size = get_dtype_size(torch_dtype)
 
         args.dp_size = vllm_config.parallel_config.data_parallel_size
         args.tp_size = vllm_config.parallel_config.tensor_parallel_size
