@@ -20,6 +20,7 @@ import regex as re
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.logger import init_logger
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
@@ -27,6 +28,8 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
+
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike
@@ -68,6 +71,23 @@ def _glm47_arg_converter(raw_args: str, partial: bool) -> str:
                 params[key] = match.group("value")
 
     return json.dumps(params, ensure_ascii=False)
+
+
+def _glm53_always_thinks(tokenizer: TokenizerLike) -> bool:
+    # GLM-5.3 keeps the GLM-4.x prompt and tool-call format but replaces the
+    # enable_thinking toggle with an always-on "Reasoning Effort:" header, so
+    # its generation prompt always opens <think> and the model output carries
+    # no opening tag.
+    template = getattr(tokenizer, "chat_template", None)
+    return (
+        isinstance(template, str)
+        and "[gMASK]<sop>" in template
+        and "Reasoning Effort:" in template
+        and "enable_thinking" not in template
+        and "<tool_call>" in template
+        and "<arg_key>" in template
+        and "<arg_value>" in template
+    )
 
 
 @functools.cache
@@ -184,6 +204,16 @@ class Glm47MoeParser(ParserEngine):
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
         thinking = chat_kwargs.get("thinking", None)
         enable_thinking = chat_kwargs.get("enable_thinking", None)
+        if (thinking is False or enable_thinking is False) and _glm53_always_thinks(
+            tokenizer
+        ):
+            logger.warning_once(
+                "Ignoring enable_thinking/thinking: the GLM-5.3 chat template "
+                "has no thinking switch, so reasoning is always on and "
+                "disabling extraction would leak it into the content."
+            )
+            thinking = None
+            enable_thinking = None
         self.thinking_enabled = (
             True
             if thinking is None and enable_thinking is None
