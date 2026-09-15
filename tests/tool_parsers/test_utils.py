@@ -13,6 +13,8 @@ from vllm.tool_parsers.utils import (
     escape_ctrl_chars_in_strings,
     escape_nested_quotes_in_strings,
     extract_types_from_schema,
+    find_tool_properties,
+    get_json_schema_from_tools,
     get_parameter_value,
     handle_single_tool,
     make_valid_python,
@@ -764,3 +766,269 @@ class TestRenameReservedKwargs:
             "path": "x",
             "from": 1,
         }
+
+
+def _make_tool(name: str, params: dict):
+    """Helper to build a ChatCompletionToolsParam for testing."""
+    from openai.types.chat.chat_completion_tool_param import (
+        ChatCompletionToolParam,
+    )
+
+    from vllm.entrypoints.openai.chat_completion.protocol import (
+        ChatCompletionToolsParam,
+    )
+
+    raw: ChatCompletionToolParam = {
+        "type": "function",
+        "function": {"name": name, "parameters": params},
+    }
+    return ChatCompletionToolsParam.model_validate(raw)
+
+
+class TestFindToolPropertiesRefResolution:
+    """Tests for $ref/$defs resolution in find_tool_properties."""
+
+    PARAMS_WITH_DEFS = {
+        "type": "object",
+        "$defs": {
+            "Period": {
+                "type": "object",
+                "properties": {"kind": {"type": "string"}},
+            }
+        },
+        "properties": {
+            "period": {"$ref": "#/$defs/Period"},
+            "count": {"type": "integer"},
+        },
+    }
+
+    def test_ref_resolved_to_concrete_type(self):
+        tools = [_make_tool("sales", self.PARAMS_WITH_DEFS)]
+        props = find_tool_properties(tools, "sales")
+        assert props["period"]["type"] == "object"
+        assert "$ref" not in props["period"]
+
+    def test_non_ref_property_unchanged(self):
+        tools = [_make_tool("sales", self.PARAMS_WITH_DEFS)]
+        props = find_tool_properties(tools, "sales")
+        assert props["count"] == {"type": "integer"}
+
+    def test_ref_inside_anyof_resolved(self):
+        params = {
+            "type": "object",
+            "$defs": {"Foo": {"type": "object"}},
+            "properties": {
+                "bar": {"anyOf": [{"$ref": "#/$defs/Foo"}, {"type": "null"}]},
+            },
+        }
+        props = find_tool_properties([_make_tool("fn", params)], "fn")
+        types = set(extract_types_from_schema(props["bar"]))
+        assert types == {"object", "null"}
+
+    def test_legacy_definitions_ref_resolved(self):
+        params = {
+            "type": "object",
+            "definitions": {"Count": {"type": "integer"}},
+            "properties": {"count": {"$ref": "#/definitions/Count"}},
+        }
+        props = find_tool_properties([_make_tool("fn", params)], "fn")
+        assert props["count"] == {"type": "integer"}
+
+    def test_escaped_json_pointer_resolved(self):
+        params = {
+            "type": "object",
+            "$defs": {"Metric/Value~v1": {"type": "number"}},
+            "properties": {
+                "metric": {"$ref": "#/$defs/Metric~1Value~0v1"},
+            },
+        }
+        props = find_tool_properties([_make_tool("fn", params)], "fn")
+        assert props["metric"] == {"type": "number"}
+
+    def test_cyclic_ref_preserved(self):
+        params = {
+            "type": "object",
+            "$defs": {"Node": {"$ref": "#/$defs/Node"}},
+            "properties": {"node": {"$ref": "#/$defs/Node"}},
+        }
+        props = find_tool_properties([_make_tool("fn", params)], "fn")
+        assert props["node"] == {"$ref": "#/$defs/Node"}
+
+    def test_ref_with_sibling_keeps_sibling(self):
+        params = {
+            "type": "object",
+            "$defs": {"Payload": {"type": "object"}},
+            "properties": {
+                "payload": {
+                    "$ref": "#/$defs/Payload",
+                    "description": "Referenced payload.",
+                },
+            },
+        }
+        props = find_tool_properties([_make_tool("fn", params)], "fn")
+        assert props["payload"] == {
+            "type": "object",
+            "description": "Referenced payload.",
+        }
+
+    def test_coercion_works_after_ref_resolution(self):
+        tools = [_make_tool("sales", self.PARAMS_WITH_DEFS)]
+        props = find_tool_properties(tools, "sales")
+        types = extract_types_from_schema(props["period"])
+        result = coerce_to_schema_type('{"kind": "week"}', types)
+        assert result == {"kind": "week"}
+        assert isinstance(result, dict)
+
+
+INNER_DEF = {
+    "Inner": {
+        "type": "object",
+        "properties": {"kind": {"type": "string"}, "n": {"type": "integer"}},
+    }
+}
+
+
+class TestRefResolutionCoverage:
+    """Every subschema position that can hold a ``$ref`` must be descended.
+
+    Asserting that no ``$ref`` survives anywhere is what distinguishes these
+    from the shapes that already resolved; asserting the resolved shape would
+    pass either way for the positions the recursion used to skip.
+    """
+
+    @pytest.mark.parametrize(
+        "schema",
+        [
+            pytest.param(
+                {"type": "object", "additionalProperties": {"$ref": "#/$defs/Inner"}},
+                id="additionalProperties",
+            ),
+            pytest.param(
+                {
+                    "type": "array",
+                    "prefixItems": [
+                        {"$ref": "#/$defs/Inner"},
+                        {"$ref": "#/$defs/Inner"},
+                    ],
+                },
+                id="prefixItems",
+            ),
+            pytest.param(
+                {"type": "array", "items": [{"$ref": "#/$defs/Inner"}]},
+                id="items-as-list",
+            ),
+            pytest.param(
+                {"type": "array", "items": {"$ref": "#/$defs/Inner"}},
+                id="items-as-dict",
+            ),
+            pytest.param({"not": {"$ref": "#/$defs/Inner"}}, id="not"),
+            pytest.param(
+                {"type": "array", "contains": {"$ref": "#/$defs/Inner"}},
+                id="contains",
+            ),
+        ],
+    )
+    def test_no_ref_survives(self, schema):
+        params = {
+            "type": "object",
+            "$defs": INNER_DEF,
+            "properties": {"arg": schema},
+        }
+        props = find_tool_properties([_make_tool("fn", params)], "fn")
+        assert "$ref" not in json.dumps(props["arg"])
+
+    def test_pointer_into_definition_resolved(self):
+        """``#/$defs/Inner/properties/n`` must resolve to the integer subschema.
+
+        Tool schemas on this path are caller-supplied — zod-to-json-schema
+        emits this form for a re-used sub-schema — and an unresolved pointer
+        falls back to ``["string"]``, which is the double-encoding this whole
+        module exists to prevent.
+        """
+        params = {
+            "type": "object",
+            "$defs": INNER_DEF,
+            "properties": {"n": {"$ref": "#/$defs/Inner/properties/n"}},
+        }
+        props = find_tool_properties([_make_tool("fn", params)], "fn")
+        assert props["n"] == {"type": "integer"}
+        assert coerce_to_schema_type("42", extract_types_from_schema(props["n"])) == 42
+
+    def test_definition_name_containing_slash(self):
+        """A pointer is ambiguous with a name containing ``/``; prefer the name."""
+        params = {
+            "type": "object",
+            "$defs": {"v1/User": {"type": "object", "properties": {}}},
+            "properties": {"user": {"$ref": "#/$defs/v1/User"}},
+        }
+        props = find_tool_properties([_make_tool("fn", params)], "fn")
+        assert props["user"]["type"] == "object"
+
+    def test_unresolvable_pointer_left_alone(self):
+        params = {
+            "type": "object",
+            "$defs": INNER_DEF,
+            "properties": {"x": {"$ref": "#/$defs/Inner/properties/missing"}},
+        }
+        props = find_tool_properties([_make_tool("fn", params)], "fn")
+        assert props["x"] == {"$ref": "#/$defs/Inner/properties/missing"}
+
+    def test_cyclic_ref_still_bounded(self):
+        params = {
+            "type": "object",
+            "$defs": {
+                "Node": {
+                    "type": "object",
+                    "properties": {"child": {"$ref": "#/$defs/Node"}},
+                }
+            },
+            "properties": {"root": {"$ref": "#/$defs/Node"}},
+        }
+        props = find_tool_properties([_make_tool("fn", params)], "fn")
+        assert props["root"]["type"] == "object"
+        assert props["root"]["properties"]["child"] == {"$ref": "#/$defs/Node"}
+
+
+class TestToolSchemaDefs:
+    """Tests that _get_tool_schema_defs does not mutate tool params."""
+
+    def test_defs_preserved_after_schema_generation(self):
+        params = {
+            "type": "object",
+            "$defs": {
+                "Period": {
+                    "type": "object",
+                    "properties": {"kind": {"type": "string"}},
+                }
+            },
+            "properties": {
+                "period": {"$ref": "#/$defs/Period"},
+            },
+        }
+        tools = [_make_tool("sales", params)]
+
+        get_json_schema_from_tools("required", tools)
+
+        assert "$defs" in tools[0].function.parameters
+
+    def test_coercion_works_after_schema_generation(self):
+        params = {
+            "type": "object",
+            "$defs": {
+                "Period": {
+                    "type": "object",
+                    "properties": {"kind": {"type": "string"}},
+                }
+            },
+            "properties": {
+                "period": {"$ref": "#/$defs/Period"},
+            },
+        }
+        tools = [_make_tool("sales", params)]
+
+        get_json_schema_from_tools("required", tools)
+
+        props = find_tool_properties(tools, "sales")
+        types = extract_types_from_schema(props["period"])
+        result = coerce_to_schema_type('{"kind": "week"}', types)
+        assert result == {"kind": "week"}
