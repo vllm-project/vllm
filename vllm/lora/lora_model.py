@@ -66,6 +66,7 @@ class LoRAModel:
         rank: int,
         loras: dict[str, LoRALayerWeights],
         is_3d_lora_weight: bool = False,
+        target_parameters: list[str] | None = None,
     ) -> None:
         """
         Args:
@@ -76,6 +77,9 @@ class LoRAModel:
                 fused (gate_up_proj / down_proj) layout. Propagated from the
                 originating LoRARequest. Only consulted by the LoRA model
                 manager when enable_mixed_moe_lora_format is on.
+            target_parameters: the PEFT 0.18+ ``target_parameters`` list from
+                adapter_config.json, propagated for downstream consumers (e.g.
+                _stack_moe_lora_weights) to detect the loaded 3D MoE layout.
 
         """
         self.id = lora_model_id
@@ -86,6 +90,7 @@ class LoRAModel:
         self.rank = rank
         self.loras: dict[str, LoRALayerWeights] = loras
         self.is_3d_lora_weight = is_3d_lora_weight
+        self.target_parameters: list[str] | None = target_parameters
 
     def clone(self, lora_model_id: int) -> "LoRAModel":
         """Return a copy of the object with different ids.
@@ -96,6 +101,11 @@ class LoRAModel:
             rank=self.rank,
             loras=self.loras.copy(),
             is_3d_lora_weight=self.is_3d_lora_weight,
+            target_parameters=(
+                list(self.target_parameters)
+                if self.target_parameters is not None
+                else None
+            ),
         )
 
     def get_lora(self, module_name: str) -> LoRALayerWeights | None:
@@ -161,7 +171,12 @@ class LoRAModel:
                 if pin_memory:
                     loras[module_name].lora_b = loras[module_name].lora_b.pin_memory()
 
-        return cls(lora_model_id, peft_helper.r, loras)
+        return cls(
+            lora_model_id,
+            peft_helper.r,
+            loras,
+            target_parameters=peft_helper.target_parameters,
+        )
 
     @classmethod
     def from_local_checkpoint(
