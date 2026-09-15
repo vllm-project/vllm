@@ -211,6 +211,12 @@ class OMPProcessManager:
         cpu_arch = current_platform.get_cpu_architecture()
         if cpu_arch == CpuArchEnum.S390X:
             allowed_numa_nodes = sorted(set(cpu.numa_node for cpu in logical_cpu_list))
+        else:
+            # Memory affinity can include nodes excluded by CPU affinity.
+            cpu_numa_nodes = {cpu.numa_node for cpu in logical_cpu_list}
+            allowed_numa_nodes = [
+                node for node in allowed_numa_nodes if node in cpu_numa_nodes
+            ]
 
         assert (
             len(allowed_numa_nodes) >= local_world_size or self.simulate_multi_node
