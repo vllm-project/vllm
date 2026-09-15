@@ -20,7 +20,6 @@ import torch
 from vllm.config import VllmConfig
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import (
@@ -37,11 +36,7 @@ from vllm.v1.attention.backends.utils import (
     compute_causal_conv1d_metadata,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import (
-    MambaSpec,
-    get_mamba_prefill_checkpoint_position,
-    is_mamba_prefill_checkpoint_valid,
-)
+from vllm.v1.kv_cache_interface import MambaSpec
 
 if TYPE_CHECKING:
     from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
@@ -263,12 +258,6 @@ class KDARecoverSSMCommitMetadata:
 
 
 @dataclass
-class KDACheckpointMetadata:
-    checkpoint_offsets: torch.Tensor
-    state_indices: torch.Tensor
-
-
-@dataclass
 class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
     spec_token_start: int | None = None
     non_spec_token_start: int | None = None
@@ -278,7 +267,6 @@ class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
     recoverssm_context: "KDARecoverSSMCommitContext | None" = field(
         default=None, repr=False, compare=False
     )
-    checkpoint: KDACheckpointMetadata | None = None
 
     def commit_recoverssm_state(
         self, num_accepted_tokens: torch.Tensor
@@ -602,78 +590,11 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             has_initial_state = None
 
         checkpoint = None
-        checkpoint_enabled = (
-            self.vllm_config.cache_config.mamba_cache_mode == "align"
-            and self.kv_cache_spec.num_prefill_checkpoint_blocks > 0
-        )
-        if num_prefills > 0 and checkpoint_enabled:
-            # prepare checkpoint metadata
-            assert m.seq_lens_cpu_upper_bound is not None
+        if num_prefills > 0:
             request_rows = list(range(m.num_reqs))
             if spec_sequence_masks_cpu is not None:
-                # get non spec request rows
                 request_rows = active_non_spec_mask_cpu.nonzero().flatten().tolist()
-            all_query_lens = query_start_loc_cpu.diff().tolist()
-            query_lens = [all_query_lens[row] for row in request_rows]
-            seq_lens = m.seq_lens_cpu_upper_bound.tolist()
-            block_size = self.kv_cache_spec.block_size
-            hash_block_size = (
-                self.vllm_config.cache_config.prefix_match_unit or block_size
-            )
-            speculative_config = self.vllm_config.speculative_config
-            drop_eagle_block = (
-                speculative_config is not None
-                and speculative_config.use_eagle_block_drop()
-            )
-            checkpoint_splits = []
-            checkpoint_cols = []
-            for row, query_len in zip(request_rows, query_lens):
-                seq_len = seq_lens[row]
-                query_start = seq_len - query_len
-                checkpoint_position = get_mamba_prefill_checkpoint_position(
-                    seq_len,
-                    hash_block_size,
-                    drop_eagle_block=drop_eagle_block,
-                )
-                offset = checkpoint_position - query_start
-                valid = is_mamba_prefill_checkpoint_valid(
-                    query_start=query_start,
-                    query_end=seq_len,
-                    checkpoint_position=checkpoint_position,
-                    hash_block_size=hash_block_size,
-                    mamba_block_size=block_size,
-                    checkpoint_alignment=(
-                        self.kv_cache_spec.prefill_checkpoint_alignment
-                    ),
-                )
-                offset = offset if valid else 0
-                first_len = offset or query_len
-                checkpoint_splits.append((first_len, query_len - first_len))
-                checkpoint_cols.append(cdiv(seq_len, block_size) - 2 if valid else -1)
-            if any(tail for _, tail in checkpoint_splits):
-                checkpoint_offsets_tensor = async_tensor_h2d(
-                    [first if tail else 0 for first, tail in checkpoint_splits],
-                    dtype=torch.int32,
-                    device=query_start_loc.device,
-                )
-                request_rows_tensor = async_tensor_h2d(
-                    request_rows, dtype=torch.int64, device=query_start_loc.device
-                )
-                checkpoint_cols_tensor = async_tensor_h2d(
-                    checkpoint_cols, dtype=torch.int64, device=query_start_loc.device
-                )
-                checkpoint_state_indices = m.block_table_tensor[
-                    request_rows_tensor, checkpoint_cols_tensor
-                ]
-                checkpoint_state_indices = torch.where(
-                    checkpoint_cols_tensor >= 0,
-                    checkpoint_state_indices,
-                    NULL_BLOCK_ID,
-                )
-                checkpoint = KDACheckpointMetadata(
-                    checkpoint_offsets_tensor,
-                    checkpoint_state_indices,
-                )
+            checkpoint = self._build_checkpoint_metadata(m, request_rows)
 
         # Prepare per-request tensors for cudagraph replay. num_actual_tokens
         # may be token-padded, while state/query/acceptance metadata is indexed
