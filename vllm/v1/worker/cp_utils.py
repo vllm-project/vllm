@@ -120,6 +120,71 @@ class ContextParallelLayout:
 DEFAULT_CP_LAYOUT = ContextParallelLayout()
 
 
+@triton.jit
+def cp_global_to_local_pos(
+    pos,
+    CP_WORLD_SIZE: tl.constexpr,
+    CP_RANK: tl.constexpr,
+    CP_KV_CACHE_INTERLEAVE_SIZE: tl.constexpr,
+):
+    rank_stride = CP_WORLD_SIZE * CP_KV_CACHE_INTERLEAVE_SIZE
+    base = pos // rank_stride * CP_KV_CACHE_INTERLEAVE_SIZE
+    remainder = pos - base * CP_WORLD_SIZE
+    extra = tl.minimum(
+        tl.maximum(remainder - CP_RANK * CP_KV_CACHE_INTERLEAVE_SIZE, 0),
+        CP_KV_CACHE_INTERLEAVE_SIZE,
+    )
+    return base + extra
+
+
+@triton.jit
+def cp_is_local_pos(
+    pos,
+    CP_WORLD_SIZE: tl.constexpr,
+    CP_RANK: tl.constexpr,
+    CP_KV_CACHE_INTERLEAVE_SIZE: tl.constexpr,
+):
+    return (pos // CP_KV_CACHE_INTERLEAVE_SIZE) % CP_WORLD_SIZE == CP_RANK
+
+
+@triton.jit
+def cp_global_to_local_block(
+    pos,
+    block_size,
+    CP_WORLD_SIZE: tl.constexpr,
+    CP_RANK: tl.constexpr,
+    CP_KV_CACHE_INTERLEAVE_SIZE: tl.constexpr,
+):
+    """Map a global logical position to a rank-local physical block address."""
+    virtual_block_size = block_size * CP_WORLD_SIZE
+    block_idx = pos // virtual_block_size
+    virtual_offset = pos - block_idx * virtual_block_size
+    block_offset = (
+        virtual_offset // (CP_WORLD_SIZE * CP_KV_CACHE_INTERLEAVE_SIZE)
+    ) * CP_KV_CACHE_INTERLEAVE_SIZE + (virtual_offset % CP_KV_CACHE_INTERLEAVE_SIZE)
+    is_local = cp_is_local_pos(
+        virtual_offset,
+        CP_WORLD_SIZE,
+        CP_RANK,
+        CP_KV_CACHE_INTERLEAVE_SIZE,
+    )
+    return block_idx, block_offset, is_local
+
+
+def get_total_cp_world_size():
+    try:
+        pcp_world_size = get_pcp_group().world_size
+    except AssertionError:
+        # PCP might not be initialized in testing
+        pcp_world_size = 1
+    try:
+        dcp_world_size = get_dcp_group().world_size
+    except AssertionError:
+        # DCP might not be initialized in testing
+        dcp_world_size = 1
+    return dcp_world_size * pcp_world_size
+
+
 def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
     pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
     dcp_size = vllm_config.parallel_config.decode_context_parallel_size
