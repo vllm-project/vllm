@@ -57,6 +57,25 @@ python3 tools/recipes/recipe_json_to_vllm_config.py \
 python3 tools/recipes/recipe_json_to_vllm_config.py recipe.json
 ```
 
+### 1.1 Test New or Modified Recipes from a Preview page
+
+A Recipes pull request can expose the same JSON API through its Vercel preview.
+Use that preview as the recipe source with `--api-base` to validate new or
+modified recipes before they are available at `https://recipes.vllm.ai`.
+
+```bash
+PREVIEW=https://vllm-recipes-git-fork-intel-ai-tce-dockerin-f4c148-inferact-inc.vercel.app
+
+python3 tools/recipes/recipe_json_to_vllm_config.py \
+  --api-base "$PREVIEW" \
+  --model meta-llama/Llama-3.2-1B-Instruct \
+  --hardware xeon6
+```
+
+Replace `PREVIEW` with the Vercel preview URL for the Recipes PR being tested.
+Preview URLs are temporary and intended for development and validation; the
+production Recipes API remains the default source.
+
 All paths generate `config.yml` and `env.sh`. See
 [REFERENCE.md](REFERENCE.md) for recipe discovery, strategy selection, direct
 JSON input, custom output files, and deployment scope.
@@ -79,9 +98,10 @@ requested. See [RUNTIME_TUNING.md](RUNTIME_TUNING.md#hardware-information).
 
 ## 3. Workload Information (Optional)
 
-Workload hints can refine scheduler settings for one initial deployment
-suggestion. Inputs include token lengths, concurrency, and optional latency or
-capacity objectives.
+Workload hints calculate explicit scheduler seeds for optional benchmark
+tuning. The directly deployable `config.yml` keeps recipe-provided scheduler
+settings or lets vLLM resolve its defaults. Inputs include token lengths,
+concurrency, and optional latency or capacity objectives.
 
 ```bash
 python3 tools/recipes/recipe_json_to_vllm_config.py \
@@ -101,8 +121,9 @@ inputs and how runtime parameters are calculated.
 
 ## 4. Sweep Tuning (Optional)
 
-Use `--generate-sweep` when the initial scheduler suggestion should be validated
-with `vllm bench sweep serve`. The sweep benchmarks nearby scheduler values and
+Use `--generate-sweep` to compare the workload-derived scheduler seed with
+vLLM's resolved defaults using `vllm bench sweep serve`. The sweep benchmarks
+nearby scheduler values and
 `recommend.py` produces one measured `recommended-config.yml` plus the
 selection evidence in `recommendation.json`.
 
@@ -119,6 +140,29 @@ python3 tools/recipes/recipe_json_to_vllm_config.py \
 
 See [SWEEP_TUNING.md](SWEEP_TUNING.md) for the benchmark, recommendation, and
 vLLM CPU Docker-shell workflow.
+
+Each generated sweep package also contains a standalone `visualize.py` helper,
+`requirements.txt`, and `VISUALIZATION.md`. Run the helper only after the
+benchmark stages finish; it reads existing `summary.json` files and never runs
+or resumes a sweep.
+
+For end-to-end tuning, `--generate-full-sweep` runs
+`TP/DP -> max_concurrency -> scheduler`. `--generate-concurrency-sweep` can be
+used independently, and `--generate-scheduler-sweep` is the explicit
+scheduler-only name (`--generate-sweep` remains an alias).
+
+Xeon TP/DP sweeps temporarily enable explicit NUMA-aware OMP binding by
+default. Disable that workaround with `--no-tp-dp-numa-bind-workaround` after
+the vLLM CPU DP NUMA-binding fix is available.
+
+To tune only the parallel layout, use
+`--generate-parallel-layout-sweep`. Hardware detection supplies the effective
+NUMA-node count. The sweep generates every supported factor pair that uses all
+NUMA nodes and also includes the largest supported TP size that does not exceed
+the NUMA-node count, even if that candidate leaves some NUMA nodes idle. This
+mode stops after TP/DP selection; use `--generate-full-sweep` to continue with
+concurrency and scheduler tuning. Generated TP values are limited to the
+supported set `1, 2, 4, 8`.
 
 ## Start vLLM
 
