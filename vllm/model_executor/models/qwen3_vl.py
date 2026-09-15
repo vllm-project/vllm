@@ -407,9 +407,10 @@ class Qwen3_VisionMLP(nn.Module):
         act_fn: Callable[[torch.Tensor], torch.Tensor] = F.silu,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        num_heads: int | None = None,
     ):
         super().__init__()
-        use_data_parallel = is_vit_use_data_parallel()
+        use_data_parallel = is_vit_use_data_parallel(num_heads)
         self.linear_fc1 = ColumnParallelLinear(
             in_features,
             hidden_features,
@@ -476,6 +477,7 @@ class Qwen3_VisionBlock(nn.Module):
             bias=True,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
+            num_heads=num_heads,
         )
 
     def forward(
@@ -510,9 +512,10 @@ class Qwen3_VisionPatchMerger(nn.Module):
         use_postshuffle_norm: bool = False,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        num_heads: int | None = None,
     ) -> None:
         super().__init__()
-        use_data_parallel = is_vit_use_data_parallel()
+        use_data_parallel = is_vit_use_data_parallel(num_heads)
         self.hidden_size = context_dim * (spatial_merge_size**2)
 
         self.use_postshuffle_norm = use_postshuffle_norm
@@ -584,7 +587,7 @@ class Qwen3_VisionTransformer(nn.Module):
         self.num_grid_per_side = int(self.num_position_embeddings**0.5)
         self._rot_pos_ids_cache = LRUCache(capacity=1024)
 
-        use_data_parallel = is_vit_use_data_parallel()
+        use_data_parallel = is_vit_use_data_parallel(self.num_heads)
         self.tp_size = (
             1
             if use_data_parallel
@@ -629,6 +632,7 @@ class Qwen3_VisionTransformer(nn.Module):
             spatial_merge_size=self.spatial_merge_size,
             quant_config=quant_config,
             prefix=f"{prefix}.merger",
+            num_heads=self.num_heads,
         )
 
         self.deepstack_merger_list = nn.ModuleList(
@@ -641,6 +645,7 @@ class Qwen3_VisionTransformer(nn.Module):
                     norm_layer=norm_layer,
                     quant_config=quant_config,
                     prefix=f"{prefix}.deepstack_merger_list.{layer_idx}",
+                    num_heads=self.num_heads,
                 )
                 for layer_idx in range(len(self.deepstack_visual_indexes))
             ]
@@ -1856,7 +1861,10 @@ class Qwen3VLForConditionalGeneration(
         self.model_config = vllm_config.model_config
         self._tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
         self.multimodal_config = multimodal_config
-        self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
+        self.use_data_parallel = (
+            multimodal_config.mm_encoder_tp_mode == "data"
+            or is_vit_use_data_parallel(config.vision_config.num_heads)
+        )
         self._init_video_pruning(multimodal_config)
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):

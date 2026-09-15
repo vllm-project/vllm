@@ -15,6 +15,7 @@ from vllm.distributed.parallel_state import (
 from vllm.model_executor.models.vision import (
     FusedInputNorm,
     get_load_balance_assignment,
+    is_vit_use_data_parallel,
     resolve_visual_encoder_outputs,
     run_dp_sharded_mrope_vision_model,
     run_dp_sharded_vision_model,
@@ -552,3 +553,44 @@ def test_fused_input_norm_identity_passthrough():
     pixel_values = torch.randn(8, 3 * 196, dtype=torch.float32)
     out = norm(pixel_values, visual_dtype=torch.bfloat16)
     torch.testing.assert_close(out, pixel_values.to(torch.bfloat16))
+
+
+@pytest.mark.parametrize(
+    ("num_heads", "tp_size", "expected"),
+    [
+        (16, 3, True),
+        (16, 5, True),
+        (16, 7, True),
+        (16, 2, False),
+        (16, 4, False),
+        (16, 8, False),
+        (12, 3, False),
+        (24, 3, False),
+    ],
+)
+def test_is_vit_use_data_parallel_divisibility(num_heads, tp_size, expected):
+    from unittest.mock import patch
+
+    with patch(
+        "vllm.model_executor.models.vision.get_multimodal_config",
+        return_value=None,
+    ), patch(
+        "vllm.model_executor.models.vision.get_tensor_model_parallel_world_size",
+        return_value=tp_size,
+    ):
+        result = is_vit_use_data_parallel(num_heads)
+    assert result is expected
+
+
+def test_is_vit_use_data_parallel_no_num_heads():
+    from unittest.mock import patch
+
+    with patch(
+        "vllm.model_executor.models.vision.get_multimodal_config",
+        return_value=None,
+    ), patch(
+        "vllm.model_executor.models.vision.get_tensor_model_parallel_world_size",
+        return_value=3,
+    ):
+        result = is_vit_use_data_parallel()
+    assert result is False
