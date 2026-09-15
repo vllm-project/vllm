@@ -265,7 +265,13 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             ValueError: If ``unbound_store_timeout_s`` is not a positive
                 number, or anything convertible to one.
         """
-        super().__init__(offloading_spec, primary_kv_view, tier_type)
+        backpressure_detector = kwargs.pop("backpressure_detector", None)
+        super().__init__(
+            offloading_spec,
+            primary_kv_view,
+            tier_type,
+            backpressure_detector=backpressure_detector,
+        )
         try:
             timeout_s = float(unbound_store_timeout_s)
         except (TypeError, ValueError):
