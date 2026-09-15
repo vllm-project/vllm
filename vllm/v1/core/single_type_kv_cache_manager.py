@@ -1796,10 +1796,10 @@ class MambaManager(SingleTypeKVCacheManager):
                     self._checkpoints.pop(request_id, None)
             if num_new_blocks > 0:
                 blocks_allocated = request_id in self._allocated_block_reqs
-                if not (checkpoint_block and blocks_allocated):
-                    num_new_blocks = 1 + int(has_partial_hit) + checkpoint_block
-                    if not blocks_allocated:
-                        num_new_blocks += self.num_speculative_blocks
+                physical_block_cap = 1 + int(has_partial_hit) + checkpoint_block
+                if not blocks_allocated or checkpoint_block:
+                    physical_block_cap += self.num_speculative_blocks
+                num_new_blocks = min(num_new_blocks, physical_block_cap)
 
             num_evictable_computed_blocks = self._get_num_evictable_blocks(
                 new_computed_blocks
