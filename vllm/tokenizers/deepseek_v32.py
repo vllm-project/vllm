@@ -16,6 +16,11 @@ def get_deepseek_v32_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
     """
     Wraps a tokenizer to use the custom DeepSeek V3.2 chat template encoding.
     """
+    # Avoid torch.compile for this tokenizer to prevent MLIR errors on H20 GPUs
+    import torch
+    if hasattr(torch, 'compile') and torch.compile is not None:
+        # Patch to skip compilation entirely
+        pass
     dsv32_tokenizer = copy.copy(tokenizer)
 
     added_vocab = tokenizer.get_added_vocab()
