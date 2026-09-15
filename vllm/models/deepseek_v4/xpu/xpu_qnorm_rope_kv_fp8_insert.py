@@ -37,8 +37,8 @@ def _xpu_qnorm_rope_kernel(
     cos_sin_cache layout: [max_pos, ROPE_DIM] with first HALF_ROPE=cos,
     second HALF_ROPE=sin.
     """
-    token_idx = tl.program_id(0)
-    head_idx = tl.program_id(1)
+    token_idx = tl.program_id(0).to(tl.int64)
+    head_idx = tl.program_id(1).to(tl.int64)
 
     if token_idx >= num_tokens:
         return
