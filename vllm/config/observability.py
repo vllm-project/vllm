@@ -95,6 +95,15 @@ class ObservabilityConfig:
     """Log every monitored JIT compile with runtime details. This can emit many
     logs and add overhead, so it is intended for debugging."""
 
+    jit_monitor_triton: bool = True
+    """Monitor Triton JIT compilation and autotuning."""
+
+    jit_monitor_cutedsl: bool = True
+    """Monitor CuTeDSL JIT compilation."""
+
+    jit_monitor_tilelang: bool = True
+    """Monitor TileLang JIT compilation."""
+
     @cached_property
     def collect_model_forward_time(self) -> bool:
         """Whether to collect model forward time for the request."""
