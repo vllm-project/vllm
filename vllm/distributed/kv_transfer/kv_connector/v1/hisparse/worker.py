@@ -744,6 +744,10 @@ class HiSparseConnectorWorker:
             for transfer in transfers:
                 host_start = transfer.host_block_id * self.kernel_block_size
                 resident_block = transfer.resident_block_ids[source_index]
+                # Each import pays one H2D page copy and enqueue per layer/rank
+                # instead of tail prefill on D. Restore the prompt rows before
+                # decode appends to this page; unused rows do not extend the
+                # logical sequence.
                 destination[resident_block].copy_(
                     source[host_start : host_start + self.kernel_block_size],
                     non_blocking=True,
