@@ -601,6 +601,13 @@ class SamplingParams(
             raise VLLMValidationError(
                 f"top_k must be an integer, got {type(self.top_k).__name__}"
             )
+        # Model Runner V2 stores per-request seeds in an int64 tensor.
+        if self.seed is not None and not -(2**63) <= self.seed <= 2**63 - 1:
+            raise VLLMValidationError(
+                f"seed must be in [-2**63, 2**63 - 1], got {self.seed}.",
+                parameter="seed",
+                value=self.seed,
+            )
         if not 0.0 <= self.min_p <= 1.0:
             raise VLLMValidationError(f"min_p must be in [0, 1], got {self.min_p}.")
         if self.max_tokens is not None and self.max_tokens < 1:
