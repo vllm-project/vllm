@@ -86,6 +86,48 @@ class SamplingType(IntEnum):
 # maybe make msgspec?
 @dataclass
 class StructuredOutputsParams:
+    """Parameters for constrained / structured output generation.
+
+    Exactly one of the constraint fields (``json``, ``regex``, ``choice``,
+    ``grammar``, ``json_object``, ``structural_tag``) must be set per
+    request; the others must remain ``None``.  The selected constraint is
+    used to build a logit processor that restricts the token distribution
+    so that the model output always satisfies the constraint.
+
+    Args:
+        json: A JSON schema given either as a JSON-encoded string or as a
+            plain Python ``dict``.  The model output will be valid JSON
+            that conforms to the supplied schema.
+        regex: A regular-expression pattern string.  The model output will
+            match the pattern exactly.
+        choice: A list of strings from which the model must pick exactly
+            one.  Equivalent to an enum constraint.
+        grammar: A context-free grammar expressed in GBNF (GGML BNF)
+            format.  The model output will be a string accepted by the
+            grammar.
+        json_object: When ``True``, the model output will be any valid
+            JSON object (no schema enforcement beyond well-formedness).
+        disable_any_whitespace: When ``True``, suppress the extra
+            whitespace that some backends insert between tokens to improve
+            readability.  Defaults to ``False``.
+        disable_additional_properties: When ``True``, disallow JSON keys
+            that are not explicitly listed in the schema's ``properties``
+            (equivalent to ``"additionalProperties": false``).  Defaults
+            to ``False``.
+        whitespace_pattern: An optional regex pattern that overrides the
+            default whitespace handling used by the guided-decoding
+            backend.
+        structural_tag: A structural-tag specification string consumed by
+            backends that support tag-based structured generation.
+
+    Example:
+        >>> from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+        >>> schema = {"type": "object", "properties": {"name": {"type": "string"}},
+        ...           "required": ["name"]}
+        >>> guided = StructuredOutputsParams(json=schema)
+        >>> params = SamplingParams(guided_decoding=guided)
+    """
+
     # One of these fields will be used to build a logit processor.
     json: str | dict | None = None
     regex: str | None = None
