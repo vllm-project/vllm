@@ -19,12 +19,12 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCacheTensor,
     GPULoadStoreSpec,
     TransferResult,
-    resolve_device_pointers,
 )
 from vllm.v1.kv_offload.cpu import gpu_worker
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.pointer_utils import resolve_device_pointers
 
 NUM_GPU_BLOCKS = [64]
 NUM_CPU_BLOCKS = [256]

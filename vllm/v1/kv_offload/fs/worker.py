@@ -18,6 +18,7 @@ from vllm.v1.kv_offload.base import (
     TransferResult,
 )
 from vllm.v1.kv_offload.file_mapper import FileMapper
+from vllm.v1.kv_offload.pointer_utils import iter_groups
 
 logger = init_logger(__name__)
 
@@ -174,7 +175,7 @@ class FSOffloadingWorker(OffloadingWorker):
         key_idx = 0
         io_fn = self.write_block if is_store else self.read_block
 
-        for g in device_ptrs.iter_groups(self._block_size_factor):
+        for g in iter_groups(device_ptrs, self._block_size_factor):
             dev_blk = 0
             for i in range(g.n_chunks):
                 key = keys[key_idx]

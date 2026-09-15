@@ -30,6 +30,7 @@ from vllm.v1.kv_offload.cpu.swap_blocks_triton import (
     THRESHOLD_BYTES,
     swap_blocks_batch,
 )
+from vllm.v1.kv_offload.pointer_utils import iter_groups
 
 logger = init_logger(__name__)
 
@@ -506,7 +507,7 @@ class SingleDirectionOffloadingHandler:
         cpu_offset = 0
         op_idx = 0
         num_transfer_bytes = 0
-        for g in device_ptrs.iter_groups(self.blocks_per_chunk):
+        for g in iter_groups(device_ptrs, self.blocks_per_chunk):
             cpu_end_offset = cpu_offset + g.n_chunks
             assert cpu_end_offset <= num_cpu_blocks
 

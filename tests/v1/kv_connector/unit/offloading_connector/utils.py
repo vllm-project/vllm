@@ -140,7 +140,7 @@ class MockOffloadingSpec(OffloadingSpec):
         self.handler = MockOffloadingWorker(self._gpu_spec_map)
 
         import vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker as _cm
-        from vllm.v1.kv_offload.base import resolve_device_pointers as _orig
+        from vllm.v1.kv_offload.pointer_utils import resolve_device_pointers as _orig
 
         def _tracking_resolve(
             device_spec: GPULoadStoreSpec, kv_caches: CanonicalKVCaches

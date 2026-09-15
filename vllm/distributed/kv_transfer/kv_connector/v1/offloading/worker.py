@@ -30,8 +30,8 @@ from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
     OffloadingSpec,
     OffloadingWorker,
-    resolve_device_pointers,
 )
+from vllm.v1.kv_offload.pointer_utils import resolve_device_pointers
 
 logger = init_logger(__name__)
 
