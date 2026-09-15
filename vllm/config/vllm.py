@@ -1647,10 +1647,6 @@ class VllmConfig:
             and self.kv_transfer_config is not None
             and self.kv_transfer_config.has_connector("HiSparseConnector")
         ):
-            # HiSparseConnector cannot run without the attention-side HiSparse
-            # layout, and configuring the layout without the connector always
-            # fails at startup, so the connector alone implies the default
-            # attention config. Explicit values below only tune it.
             self.attention_config.hisparse_config = HiSparseConfig()
 
         if self.attention_config.hisparse_config is not None:
