@@ -599,6 +599,54 @@ def test_engram_rejects_empty_head_shards(tp_size, dp_size, n_heads, monkeypatch
         ParallelEngramEmbedding(n_heads * 17, 64, (17,) * n_heads)
 
 
+def test_engram_packed_exchange_respects_small_batch_fallback(monkeypatch):
+    """Only eligible token counts use byte transport; WKV still sees BF16."""
+    routes = []
+    exchanged_dtypes = []
+
+    class FakeEmbedding(torch.nn.Module):
+        tp_size = 2
+        dp_size = 1
+        part_n_hash_cols = 1
+        n_hash_cols = 2
+        dim = 32
+        block_size = 32
+
+        def lookup(self, ids, out, background=False, packed=False):
+            routes.append(packed)
+            out.fill_(1 if packed else 5)
+
+    module = Engram.__new__(Engram)
+    torch.nn.Module.__init__(module)
+    module.embed_tokens = FakeEmbedding()
+    module.use_sequence_parallel = False
+    module.staged_rows = torch.empty(3, 1, 32, dtype=torch.bfloat16)
+    module.staged_packed_rows = torch.empty(3, 1, 33, dtype=torch.uint8)
+    module._packed_min_tokens = 2
+    module._prefetch_stream = None
+
+    def gather(rows, dim):
+        exchanged_dtypes.append(rows.dtype)
+        return torch.cat((rows, rows), dim=dim)
+
+    def reconstruct(packed, out, block_size):
+        assert packed.dtype == torch.uint8 and block_size == 32
+        out.fill_(5)
+
+    monkeypatch.setattr(engram_ops, "tensor_model_parallel_all_gather", gather)
+    monkeypatch.setattr(nvidia_engram_ops, "tensor_model_parallel_all_gather", gather)
+    monkeypatch.setattr(nvidia_engram_ops, "dequantize_packed_engram_rows", reconstruct)
+
+    for num_tokens in (1, 2):
+        hashes = torch.zeros(num_tokens, 2, dtype=torch.int32)
+        module.prepare_embeddings(hashes)
+        rows = module.embed(hashes)
+        assert rows.dtype == torch.bfloat16
+        assert torch.all(rows == 5)
+    assert routes == [False, True]
+    assert exchanged_dtypes == [torch.bfloat16, torch.uint8]
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 @pytest.mark.parametrize("cpu_offload", [False, True])
 @pytest.mark.parametrize("tp_size", [1, 2, 4, 8])
@@ -622,6 +670,7 @@ def test_engram_head_shards_reconstruct_checkpoint(cpu_offload, tp_size, monkeyp
         engram_ops, "get_tensor_model_parallel_world_size", lambda: tp_size
     )
     shards = []
+    packed_shards = []
     layers = []
     for rank in range(tp_size):
         monkeypatch.setattr(
@@ -644,10 +693,26 @@ def test_engram_head_shards_reconstruct_checkpoint(cpu_offload, tp_size, monkeyp
         )
         layer.lookup(ids, out)
         shards.append(out)
+        packed = torch.empty(
+            len(ids),
+            layer.part_n_hash_cols,
+            dim + dim // layer.block_size,
+            device="cuda",
+            dtype=torch.uint8,
+        )
+        layer.lookup(ids, packed, packed=True)
+        packed_shards.append(packed)
         layers.append(layer)
     gathered = torch.cat(shards, dim=1)
     torch.testing.assert_close(gathered[:, : len(head_sizes)], expected, rtol=0, atol=0)
     assert torch.count_nonzero(gathered[:, len(head_sizes) :]) == 0
+    gathered_packed = torch.cat(packed_shards, dim=1)
+    reconstructed = torch.empty_like(expected)
+    engram_ops.dequantize_packed_engram_rows(
+        gathered_packed[:, : len(head_sizes)], reconstructed, 32
+    )
+    torch.testing.assert_close(reconstructed, expected, rtol=0, atol=0)
+    assert torch.count_nonzero(gathered_packed[:, len(head_sizes) :]) == 0
     assert sum(layer.part_num_embeddings for layer in layers) == num_rows
 
     def gather(local, dim):
@@ -663,6 +728,20 @@ def test_engram_head_shards_reconstruct_checkpoint(cpu_offload, tp_size, monkeyp
     module.staged_rows = torch.empty_like(shards[0])
     module.prepare_embeddings(ids)
     torch.testing.assert_close(module.embed(ids), expected, rtol=0, atol=0)
+    module.staged_packed_rows = torch.empty_like(packed_shards[0])
+    module._packed_min_tokens = 1
+
+    def gather_packed(local, dim):
+        torch.testing.assert_close(local, packed_shards[0], rtol=0, atol=0)
+        return torch.cat(packed_shards, dim=dim)
+
+    monkeypatch.setattr(
+        nvidia_engram_ops, "tensor_model_parallel_all_gather", gather_packed
+    )
+    module.prepare_embeddings(ids)
+    torch.testing.assert_close(module.embed(ids), expected, rtol=0, atol=0)
+    module.staged_packed_rows = None
+    module._packed_current = False
     # Slicing before head reordering must preserve padded heads and tokens.
     module.use_sequence_parallel = True
     chunk = (len(ids) + tp_size - 1) // tp_size
@@ -850,7 +929,13 @@ def test_engram_prefetch_detects_missing_dependency(monkeypatch, missing_depende
 
 
 def _run_engram_prepared_rows(
-    cpu_offload, capture, tp_size=1, rank=0, use_sequence_parallel=False, delay=None
+    cpu_offload,
+    capture,
+    tp_size=1,
+    rank=0,
+    use_sequence_parallel=False,
+    delay=None,
+    packed_exchange=False,
 ):
     from vllm.compilation.breakable_cudagraph import (
         BreakableCUDAGraphCapture,
@@ -893,6 +978,16 @@ def _run_engram_prepared_rows(
         dtype=torch.bfloat16,
         device="cuda",
     )
+    if packed_exchange:
+        assert cpu_offload and tp_size > 1 and not use_sequence_parallel
+        engram.staged_packed_rows = torch.empty(
+            num_tokens,
+            layer.part_n_hash_cols,
+            layer.dim + layer.dim // layer.block_size,
+            dtype=torch.uint8,
+            device="cuda",
+        )
+        engram._packed_min_tokens = 1
     # Match the non-contiguous per-layer slice of the model hash tensor.
     hashes = torch.randint(
         0,
@@ -988,3 +1083,29 @@ def test_engram_head_collectives_survive_graph_breaks():
     if torch.accelerator.device_count() < 2:
         pytest.skip("Requires two GPUs")
     torch.multiprocessing.spawn(_engram_tp_worker, args=(2, get_open_port()), nprocs=2)
+
+
+def _engram_packed_tp_worker(rank, port):
+    from tests.utils import init_test_distributed_environment
+    from vllm.distributed import cleanup_dist_env_and_memory
+
+    torch.accelerator.set_device_index(rank)
+    init_test_distributed_environment(2, 1, rank, str(port), local_rank=rank)
+    try:
+        for capture in ("eager", "full", "breakable"):
+            _run_engram_prepared_rows(True, capture, 2, rank, packed_exchange=True)
+    finally:
+        cleanup_dist_env_and_memory()
+
+
+@pytest.mark.distributed(num_gpus=2)
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+def test_engram_packed_head_exchange_survives_graph_breaks():
+    """FP8 transport reconstructs the same BF16 rows on each replay."""
+    from vllm.utils.network_utils import get_open_port
+
+    if torch.accelerator.device_count() < 2:
+        pytest.skip("Requires two GPUs")
+    torch.multiprocessing.spawn(
+        _engram_packed_tp_worker, args=(get_open_port(),), nprocs=2
+    )

@@ -56,6 +56,14 @@ class EngramConfig:
     memory without per-step Engram DP collectives. Requires sufficient
     /dev/shm capacity and a shared IPC namespace."""
 
+    packed_fp8_exchange: bool = False
+    """Keep CPU-offloaded Engram rows in checkpoint FP8 format through the
+    TP head exchange, then reconstruct the existing BF16 WKV input."""
+
+    packed_fp8_exchange_min_tokens: int = Field(default=256, ge=1)
+    """Minimum token count for packed exchange. Tune this crossover on the
+    serving hardware; smaller batches use BF16 staging."""
+
     @model_validator(mode="after")
     def _validate_shared_memory(self) -> Self:
         if self.dp_shared_memory and not self.cpu_offload:
