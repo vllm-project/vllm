@@ -734,7 +734,7 @@ Using KV cache metrics for load pattern configuration:
 vllm bench throughput \
   --model NousResearch/Hermes-3-Llama-3.1-8B \
   --dataset-name sonnet \
-  --dataset-path vllm/benchmarks/sonnet.txt \
+  --dataset-path benchmarks/sonnet.txt \
   --num-prompts 10
 ```
 
