@@ -19,6 +19,10 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.distributed.aux_output_connector.connector import (
+    AuxOutputRequestOutput,
+    AuxOutputSchedulerConnector,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnector,
     HiSparseConnectorScheduler,
@@ -130,6 +134,41 @@ def test_add_requests():
         scheduler.add_request(request)
         assert request.request_id in scheduler.requests
         assert len(scheduler.waiting) == i + 1
+
+
+def test_routed_experts_prompt_start_at_prompt_end():
+    """A prompt-end offset should return empty routing data, not crash."""
+    scheduler = create_scheduler()
+    (request,) = create_requests(num_requests=1)
+    request.sampling_params.routed_experts_prompt_start = request.num_prompt_tokens
+    scheduler.aux_output_connector = AuxOutputSchedulerConnector()
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    assert scheduler_output.aux_output_connector_metadata.requests == {
+        request.request_id: request.num_prompt_tokens
+    }
+
+    outputs = scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+            aux_output_connector_output={
+                request.request_id: AuxOutputRequestOutput(
+                    request.num_prompt_tokens,
+                    np.empty((0, 1, 1), dtype=np.uint8),
+                )
+            },
+        ),
+    )
+
+    output = outputs[request.client_index].outputs[0]
+    assert output.new_token_ids == [0]
+    assert output.routed_experts is None
 
 
 def test_finish_request():
@@ -3684,7 +3723,6 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     )
     request.structured_output_request = Mock()
     request.structured_output_request.grammar = Mock(spec=StructuredOutputGrammar)
-    request.structured_output_request.grammar.accept_tokens.return_value = False
     request.status = RequestStatus.RUNNING
     request.num_computed_tokens = request.num_tokens
 
@@ -3692,10 +3730,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.connector = None
     scheduler.ec_connector = None
     scheduler.structured_output_manager = Mock()
-    scheduler.structured_output_manager.should_advance.return_value = True
-    scheduler.structured_output_manager.trim_reasoning_for_advance.side_effect = (
-        lambda request, new_token_ids: new_token_ids
-    )
+    scheduler.structured_output_manager.accept_tokens.return_value = False
     scheduler.requests = {request.request_id: request}
     scheduler.running = [request]
     scheduler.waiting = Mock()
@@ -3743,8 +3778,8 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     )
     engine_core_outputs = scheduler.update_from_output(output, model_runner_output)
 
-    request.structured_output_request.grammar.accept_tokens.assert_called_once_with(
-        request.request_id, [123]
+    scheduler.structured_output_manager.accept_tokens.assert_called_once_with(
+        request, [123]
     )
     assert request.resumable is False
     assert request.status == RequestStatus.FINISHED_ERROR
@@ -6582,16 +6617,15 @@ def _decode_ready_request(scheduler):
     return request
 
 
-def test_update_draft_token_ids_strips_ngram_padding(monkeypatch):
-    """ngram_gpu pads unfilled draft slots with -1; update_draft_token_ids must
+def test_update_draft_token_ids_strips_ngram_padding():
+    """ngram_gpu pads unfilled draft slots with -1; manager validation must
     strip them before grammar.validate_tokens (which otherwise raises)."""
     scheduler = create_scheduler(num_speculative_tokens=4)
     request = _decode_ready_request(scheduler)
 
     grammar = _RecordingGrammar()
-    request.structured_output_request = SimpleNamespace(grammar=grammar)
-    monkeypatch.setattr(
-        scheduler.structured_output_manager, "should_advance", lambda req: True
+    request.structured_output_request = SimpleNamespace(
+        grammar=grammar, reasoning_ended=True
     )
 
     scheduler.update_draft_token_ids(
@@ -6602,16 +6636,15 @@ def test_update_draft_token_ids_strips_ngram_padding(monkeypatch):
     assert request.spec_token_ids == [10, 11]
 
 
-def test_update_draft_token_ids_in_output_strips_padding(monkeypatch):
+def test_update_draft_token_ids_in_output_strips_padding():
     """Same guard on the output path; the -1 pad-back for the rejected count
-    is preserved (only the input to validate_tokens is stripped)."""
+    is preserved (only the input to manager validation is stripped)."""
     scheduler = create_scheduler(num_speculative_tokens=4)
     request = _decode_ready_request(scheduler)
 
     grammar = _RecordingGrammar()
-    request.structured_output_request = SimpleNamespace(grammar=grammar)
-    monkeypatch.setattr(
-        scheduler.structured_output_manager, "should_advance", lambda req: True
+    request.structured_output_request = SimpleNamespace(
+        grammar=grammar, reasoning_ended=True
     )
 
     scheduler_output = SimpleNamespace(

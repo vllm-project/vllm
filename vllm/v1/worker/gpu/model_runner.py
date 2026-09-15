@@ -184,7 +184,6 @@ logger = init_logger(__name__)
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
-    @JitWarmupRegistry.capture
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -199,6 +198,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.speculative_config is not None and self.speculative_config.use_dspark()
         )
         self.observability_config = vllm_config.observability_config
+        self.jit_warmup_registry = JitWarmupRegistry(vllm_config)
 
         self.device = device
         self.dtype = self.model_config.dtype
@@ -396,7 +396,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logger.info_once("Loading model from scratch...")
 
             # Capture warmup providers selected while constructing the model.
-            with self.jit_warmup_registry.activate():  # type: ignore[attr-defined]
+            with self.jit_warmup_registry.activate():
                 self.model = model_loader.load_model(
                     vllm_config=self.vllm_config,
                     model_config=self.vllm_config.model_config,
@@ -458,50 +458,47 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Initialize samplers. Model states may override via custom_sampler().
         if self.is_last_pp_rank and not self.is_pooling_model:
-            with self.jit_warmup_registry.activate():  # type: ignore[attr-defined]
-                sampler_kwargs: dict[str, Any] = {
-                    "max_num_reqs": self.max_num_reqs,
-                    "vocab_size": self.vocab_size,
-                    "device": self.device,
-                    "req_states": self.req_states,
-                    "logprobs_mode": self.model_config.logprobs_mode,
-                    "num_speculative_tokens": self.decode_query_len,
-                    "use_fp64_gumbel": self.model_config.use_fp64_gumbel,
-                    "enable_trace_replay": self.model_config.enable_trace_replay,
-                    "reasoning_config": self.vllm_config.reasoning_config,
-                    "return_sampling_mask": self.model_config.return_sampling_mask,
-                }
-                if self.vllm_config.watermark_config is None:
-                    self.sampler = Sampler(**sampler_kwargs)
-                else:
-                    wm_config = self.vllm_config.watermark_config
-                    watermarker = create_watermarker(wm_config)
-                    if self.speculative_config is not None:
-                        watermarker = create_speculative_target_watermarker(watermarker)
-                    self.sampler = GPUWatermarkSampler(
-                        watermarker,
-                        deduplicate_contexts=wm_config.deduplicate_contexts,
-                        deduplicate_contexts_max_history=(
-                            wm_config.deduplicate_contexts_max_history
-                        ),
-                        **sampler_kwargs,
-                    )
-                custom = self.model_state.custom_sampler(self.sampler)
+            sampler_kwargs: dict[str, Any] = {
+                "max_num_reqs": self.max_num_reqs,
+                "vocab_size": self.vocab_size,
+                "device": self.device,
+                "req_states": self.req_states,
+                "logprobs_mode": self.model_config.logprobs_mode,
+                "num_speculative_tokens": self.decode_query_len,
+                "use_fp64_gumbel": self.model_config.use_fp64_gumbel,
+                "enable_trace_replay": self.model_config.enable_trace_replay,
+                "reasoning_config": self.vllm_config.reasoning_config,
+                "return_sampling_mask": self.model_config.return_sampling_mask,
+            }
+            if self.vllm_config.watermark_config is None:
+                self.sampler = Sampler(**sampler_kwargs)
+            else:
+                wm_config = self.vllm_config.watermark_config
+                watermarker = create_watermarker(wm_config)
+                if self.speculative_config is not None:
+                    watermarker = create_speculative_target_watermarker(watermarker)
+                self.sampler = GPUWatermarkSampler(
+                    watermarker,
+                    deduplicate_contexts=wm_config.deduplicate_contexts,
+                    deduplicate_contexts_max_history=(
+                        wm_config.deduplicate_contexts_max_history
+                    ),
+                    **sampler_kwargs,
+                )
+            custom = self.model_state.custom_sampler(self.sampler)
 
-                if custom:
-                    self.vllm_config._check_watermarking_unsupported(
-                        custom_sampler=True
-                    )
-                    self.sampler, self.rejection_sampler = custom
-                elif self.speculative_config is not None:
-                    self.rejection_sampler = RejectionSampler(
-                        self.sampler,
-                        self.speculative_config,
-                        self.device,
-                        watermark_key=speculative_target_watermark_key(
-                            self.vllm_config.watermark_config
-                        ),
-                    )
+            if custom:
+                self.vllm_config._check_watermarking_unsupported(custom_sampler=True)
+                self.sampler, self.rejection_sampler = custom
+            elif self.speculative_config is not None:
+                self.rejection_sampler = RejectionSampler(
+                    self.sampler,
+                    self.speculative_config,
+                    self.device,
+                    watermark_key=speculative_target_watermark_key(
+                        self.vllm_config.watermark_config
+                    ),
+                )
             self.prompt_logprobs_worker = PromptLogprobsWorker(
                 self.max_num_reqs,
                 logprobs_mode=self.model_config.logprobs_mode,
@@ -632,12 +629,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         draft_attn_layer_names = None
         if isinstance(self.speculator, DraftModelSpeculator):
             draft_attn_layer_names = self.speculator.draft_attn_layer_names
-        self.attn_groups, attn_cg_support, self.kernel_block_sizes = init_attn_backend(
-            self.kv_cache_config,
-            self.vllm_config,
-            self.device,
-            draft_layer_names=draft_attn_layer_names,
-        )
+        # Metadata builders select attention kernels that need JIT warmup.
+        with self.jit_warmup_registry.activate():
+            (
+                self.attn_groups,
+                attn_cg_support,
+                self.kernel_block_sizes,
+            ) = init_attn_backend(
+                self.kv_cache_config,
+                self.vllm_config,
+                self.device,
+                draft_layer_names=draft_attn_layer_names,
+            )
         additional_attn_cg_support = self.model_state.get_additional_cg_support()
         attn_cg_support = attn_cg_support.narrow(*additional_attn_cg_support)
         # The speculator clears the flag at load time when the checkpoint has
@@ -717,6 +720,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             decode_query_len=self.decode_query_len,
             lora_capture_cases=self.lora_capture_cases,
             varlen_decode=self.adaptive_verification is not None,
+            ubatch_runner=self.ubatch_runner,
         )
         if self.cache_config.kv_sharing_fast_prefill and self.pcp_manager is None:
             self.fast_prefill = FastPrefillHelper(
@@ -738,7 +742,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.speculator.init_cudagraph_manager(cudagraph_mode)
 
         # Capture warmup providers that depend on allocated KV-cache strides.
-        with self.jit_warmup_registry.activate():  # type: ignore[attr-defined]
+        with self.jit_warmup_registry.activate():
             kv_caches_dict = init_kv_cache(
                 self.compilation_config.static_forward_context,
                 self.kv_cache_config,
@@ -924,12 +928,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # during actual execution.
         assert self.sampler is not None
         self.sampler(logits, dummy_input_batch)
-        if self.rejection_sampler is not None:
-            # Warm head-dtype logits; scheduler warmup covers processed FP32 logits.
-            assert self.speculator is not None
-            self.rejection_sampler(
-                logits, dummy_input_batch, self.speculator.draft_logits
-            )
 
     @torch.inference_mode()
     def _dummy_pooler_run(self, hidden_states: torch.Tensor) -> None:
@@ -985,6 +983,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def profile_cudagraph_memory(self) -> int:
         """Estimate the GPU memory required to capture CUDA graphs."""
         return _profile_cudagraph_memory(self)
+
+    def needs_cudagraph_capture(self) -> bool:
+        """Whether capture_model() has any CUDA graphs left to capture."""
+        return (
+            self.model_state.supports_mm_inputs
+            and self.model_state.encoder_runner.has_cudagraph()
+        ) or (
+            self.cudagraph_manager is not None
+            and self.cudagraph_manager.needs_capture()
+        )
 
     @torch.inference_mode()
     def capture_model(self, *, profile_only: bool = False) -> int:
@@ -1134,7 +1142,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             if self.pooling_runner is not None:
                 assert new_req_data.pooling_params is not None
-                assert new_req_data.prompt_token_ids is not None
                 self.pooling_runner.add_request(
                     req_id,
                     req_index,
@@ -1458,7 +1465,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         input_batch = pcp.maybe_partition_pcp_batch(
             self.pcp_manager,
             input_batch,
-            padded_num_tokens=batch_desc.num_tokens,
+            batch_desc,
         )
         return input_batch
 
@@ -1486,7 +1493,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def prepare_dummy_attn(
         self, input_batch: InputBatch, valid_state_slots: bool = False
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
-        block_tables = self.block_tables.get_dummy_block_tables(input_batch.num_reqs)
+        block_table_provider = self.pcp_manager or self.block_tables
+        block_tables = block_table_provider.get_dummy_block_tables(input_batch.num_reqs)
         if valid_state_slots:
             state_slots = torch.arange(
                 1,
@@ -1740,25 +1748,29 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.input_buffers,
                 max_query_len=batch_desc.max_query_len,
             )
-            if not skip_attn_for_dummy_run:
-                block_tables, slot_mappings = self.prepare_dummy_attn(
-                    input_batch, valid_dummy_state_slots
-                )
-                if context_len:
-                    set_dummy_context(
-                        input_batch,
-                        self.block_tables,
-                        context_len,
-                        self.kv_cache_config.num_blocks,
-                        self.max_model_len,
-                    )
-            else:
+            if self.pcp_manager is not None:
+                input_batch = self.pcp_manager.prepare_inputs_to_capture(input_batch)
+            if skip_attn_for_dummy_run:
                 assert batch_desc.cg_mode != CUDAGraphMode.FULL, (
                     "Attention metadata must be prepared for dummy runs when using "
                     "FULL cudagraph mode."
                 )
                 block_tables = None
                 slot_mappings = None
+            else:
+                block_tables, slot_mappings = self.prepare_dummy_attn(
+                    input_batch, valid_dummy_state_slots
+                )
+            if not skip_attn_for_dummy_run and context_len:
+                assert block_tables is not None
+                set_dummy_context(
+                    input_batch,
+                    self.block_tables,
+                    context_len,
+                    self.kv_cache_config.num_blocks,
+                    self.max_model_len,
+                    input_block_tables=block_tables,
+                )
 
         attn_metadata = None
         slot_mappings_by_layer = None
@@ -1781,7 +1793,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert self.ubatch_runner is not None
             assert block_tables is not None and slot_mappings is not None
             ubatch_state = self.ubatch_runner.prepare(
-                input_batch, block_tables, slot_mappings
+                input_batch,
+                block_tables,
+                slot_mappings,
+                cg_mode=batch_desc.cg_mode,
+                for_capture=dummy_run and batch_desc.cg_mode == CUDAGraphMode.FULL,
             )
         elif not (dummy_run and skip_attn_for_dummy_run):
             assert slot_mappings is not None
@@ -2111,6 +2127,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if self.speculator is not None:
             assert self.sampler is not None
+            if isinstance(self.speculator, DraftModelSpeculator):
+                self.speculator.observe_verification(
+                    input_batch.idx_mapping, num_sampled, num_rejected
+                )
             # Let the target override the hidden state fed to the drafter
             # (e.g. DeepSeek V4 MTP needs the pre-hc_head residual). The
             # target returns a persistent buffer sized at max_num_batched_tokens;

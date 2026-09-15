@@ -89,7 +89,10 @@ def test_watermark_config_cli():
 @pytest.mark.parametrize(
     "options",
     [
-        ["--engram-config", '{"cpu_offload": false, "embedding_across_dp": true}'],
+        [
+            "--engram-config",
+            '{"cpu_offload": false, "embedding_across_dp": true}',
+        ],
         [
             "--engram-config.cpu_offload",
             "false",
@@ -98,9 +101,8 @@ def test_watermark_config_cli():
         ],
     ],
 )
-def test_engram_config_cli(options, monkeypatch):
-    """CLI settings take precedence over the legacy offload environment."""
-    monkeypatch.setenv("VLLM_PLE_CPU_OFFLOAD", "1")
+def test_engram_config_cli(options):
+    """JSON and dotted CLI options independently control Engram settings."""
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = EngineArgs.from_cli_args(parser.parse_args(options))
     assert args.engram_config is not None
@@ -109,14 +111,26 @@ def test_engram_config_cli(options, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "options, provided",
-    [([], False), (["--engram-config", "{}"], True)],
+    "options,provided,dp_shared_memory",
+    [
+        ([], False, False),
+        (["--engram-config", "{}"], True, False),
+        (
+            ["--engram-config", '{"dp_shared_memory": true}'],
+            True,
+            True,
+        ),
+        (["--engram-config.dp_shared_memory", "true"], True, True),
+    ],
 )
-def test_engram_config_cli_optional(options, provided):
-    """An explicit empty config must remain distinct from an omitted config."""
+def test_engram_config_cli_optional(options, provided, dp_shared_memory):
+    """Explicit configs honor defaults and the JSON/dotted DP shared-memory flag."""
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = EngineArgs.from_cli_args(parser.parse_args(options))
     assert (args.engram_config is not None) == provided
+    if provided:
+        assert args.engram_config.cpu_offload is True
+        assert args.engram_config.dp_shared_memory is dp_shared_memory
 
 
 @pytest.mark.parametrize(

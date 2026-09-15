@@ -166,7 +166,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """Pre-process metadata; defer NIXL ops to the writer thread."""
-        if self.pcp_rank > 0:
+        if self.pcp_rank > 0 and not self.pcp_dcp_sharded:
             return
 
         # D-side: track reqs waiting for P to push.
@@ -341,7 +341,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 self._log_failure(
                     failure_type="push_reg_handshake_failed", req_id=rid, error=e
                 )
-                self._handle_failed_transfer(rid, None)
+                self._failed_recv_reqs.put(rid)
                 return
             # Re-queue for the writer to send now that the handshake is done.
             self._reg_send_inbox.put((rid, rd))
@@ -354,14 +354,16 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     def _do_send_reg_notif(self, req_id: str, reg_data: dict[str, Any]) -> None:
         engine_id = reg_data["remote_engine_id"]
         notif_msg = PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(reg_data)
-        agents = self._remote_agents.get(engine_id)
+        # _remote_agents is mutated on other threads; snapshot under the lock.
+        with self._handshake_lock:
+            agents = dict(self._remote_agents.get(engine_id) or {})
         if not agents:
             logger.error(
                 "No remote agents for engine %s; cannot send registration for %s",
                 engine_id,
                 req_id,
             )
-            self._handle_failed_transfer(req_id, None)
+            self._failed_recv_reqs.put(req_id)
             return
         for rank, agent_name in agents.items():
             try:
@@ -720,9 +722,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             # don't have a ``_recving_metadata`` entry to invalidate, so
             # we just release the handle and let the engine reschedule
             # via the lease / watchdog.
-            if handle is not None:
-                self.nixl_wrapper.release_xfer_handle(handle)
-            self.xfer_stats.record_failed_transfer()
+            if not self._handle_failed_transfer(request_id, handle):
+                return handle
             return None
 
     # --- Notification handling on engine main thread ------------------ #
@@ -801,7 +802,16 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # ``_pop_done_transfers`` mutates ``_sending_transfers``; the
         # writer thread also appends to it, so guard the pop.
         with self._sending_transfers_lock:
-            done_pushing = self._pop_done_transfers(self._sending_transfers)
+            done_pushing, failed_pushing = self._pop_done_transfers(
+                self._sending_transfers
+            )
+        # A failed send must never be reported as done: its blocks
+        # are freed via the lease / watchdog instead.
+        done_pushing = {
+            req_id
+            for req_id in done_pushing - failed_pushing
+            if req_id in self._recving_metadata
+        }
         for req_id in done_pushing:
             self._reqs_to_send.pop(req_id, None)
             self._reqs_to_process.discard(req_id)

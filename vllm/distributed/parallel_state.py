@@ -32,6 +32,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
+from math import gcd
 from multiprocessing import shared_memory
 from typing import TYPE_CHECKING, Any, Protocol
 from unittest.mock import patch
@@ -1558,6 +1559,23 @@ def get_etp_group() -> GroupCoordinator:
     return _ETP
 
 
+_ENGRAM_DP: GroupCoordinator | None = None
+
+
+def get_engram_dp_group() -> GroupCoordinator | None:
+    """Return the DP replicas that share one engram embedding table.
+
+    None when every replica holds a full (TP-sharded) copy, which is the case
+    for models without engram layers and for replicas that span nodes.
+    """
+    return _ENGRAM_DP
+
+
+def get_engram_dp_size() -> int:
+    """Number of DP replicas one engram embedding table is sharded over."""
+    return _ENGRAM_DP.world_size if _ENGRAM_DP is not None else 1
+
+
 _DCP: GroupCoordinator | None = None
 
 
@@ -1933,6 +1951,29 @@ def _elastic_join_warmup_ctx() -> AbstractContextManager[Any]:
     return nullcontext()
 
 
+def _engram_dp_shard_size(
+    world_size: int,
+    data_parallel_size: int,
+    replica_size: int,
+) -> int:
+    """Size of DP shards aligned with complete replicas and node boundaries."""
+    node_count = get_node_count()
+    replicas_per_node, remainder = divmod(world_size, node_count * replica_size)
+    if remainder:
+        return 1
+    # Shards must divide both the DP group and each node's replica count.
+    shard_size = gcd(data_parallel_size, replicas_per_node)
+    if shard_size == 1 or node_count == 1:
+        return shard_size
+    ranks_per_node = replicas_per_node * replica_size
+    for start in range(0, world_size, ranks_per_node):
+        same_node = in_the_same_node_as(get_world_group().cpu_group, start)
+        node_ranks = [rank for rank, local in enumerate(same_node) if local]
+        if node_ranks != list(range(start, start + ranks_per_node)):
+            return 1
+    return shard_size
+
+
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
@@ -2053,6 +2094,40 @@ def initialize_model_parallel(
             get_world_group().local_rank,
             backend,
             group_name="etp",
+        )
+
+    # Build the node-local DP group used to shard or share an Engram table.
+    global _ENGRAM_DP
+    assert _ENGRAM_DP is None, "engram data parallel group is already initialized"
+    engram_dp_size = 1
+    engram_config = config.engram_config
+    if (
+        engram_config is not None
+        and config.model_config is not None
+        and config.model_config.architecture == "DeepseekV41ForCausalLM"
+        and not enable_elastic_ep
+    ):
+        engram_dp_size = _engram_dp_shard_size(
+            world_size,
+            data_parallel_size,
+            tensor_model_parallel_size
+            * pipeline_model_parallel_size
+            * prefill_context_model_parallel_size,
+        )
+    if engram_dp_size > 1:
+        group_ranks = (
+            all_ranks.permute(0, 2, 3, 4, 1).reshape(-1, engram_dp_size).unbind(0)
+        )
+        _ENGRAM_DP = init_model_parallel_group(
+            [x.tolist() for x in group_ranks],
+            get_world_group().local_rank,
+            backend,
+            group_name="edp",
+        )
+        logger.info_once(
+            "Engram node-local DP group size: %d (TP=%d)",
+            engram_dp_size,
+            tensor_model_parallel_size,
         )
 
     # Build the DCP model-parallel groups.
@@ -2303,6 +2378,11 @@ def destroy_model_parallel():
     if _TP:
         _TP.destroy()
     _TP = None
+
+    global _ENGRAM_DP
+    if _ENGRAM_DP:
+        _ENGRAM_DP.destroy()
+    _ENGRAM_DP = None
 
     global _DCP
     if _DCP:
