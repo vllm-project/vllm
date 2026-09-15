@@ -2,16 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-import prometheus_client
 import regex as re
-from fastapi import FastAPI, Response
+from fastapi import FastAPI
 from prometheus_client import make_asgi_app
 from prometheus_fastapi_instrumentator import Instrumentator
 from prometheus_fastapi_instrumentator import routing as _pfi_routing
 from starlette.routing import Match, Mount
 from starlette.types import Scope
 
-from vllm.v1.metrics.prometheus import get_prometheus_registry
+from vllm.v1.metrics.prometheus import (
+    get_prometheus_instrumentator_registry,
+    get_prometheus_registry,
+)
 
 
 def _patch_instrumentator_route_walk() -> None:
@@ -49,19 +51,12 @@ def _patch_instrumentator_route_walk() -> None:
 _patch_instrumentator_route_walk()
 
 
-class PrometheusResponse(Response):
-    media_type = prometheus_client.CONTENT_TYPE_LATEST
-
-
 def attach_router(app: FastAPI):
     """Mount prometheus metrics to a FastAPI app."""
 
     registry = get_prometheus_registry()
+    instrumentator_registry = get_prometheus_instrumentator_registry(registry)
 
-    # `response_class=PrometheusResponse` is needed to return an HTTP response
-    # with header "Content-Type: text/plain; version=0.0.4; charset=utf-8"
-    # instead of the default "application/json" which is incorrect.
-    # See https://github.com/trallnag/prometheus-fastapi-instrumentator/issues/163#issue-1296092364
     Instrumentator(
         excluded_handlers=[
             "/metrics",
@@ -71,11 +66,13 @@ def attach_router(app: FastAPI):
             "/version",
             "/server_info",
         ],
-        registry=registry,
-    ).add().instrument(app).expose(app, response_class=PrometheusResponse)
+        registry=instrumentator_registry,
+    ).add().instrument(app)
 
-    # Add prometheus asgi middleware to route /metrics requests
-    metrics_route = Mount("/metrics", make_asgi_app(registry=registry))
+    # Keep the previous uncompressed response behavior. Filtering and content
+    # negotiation are still handled by prometheus_client.
+    prometheus_app = make_asgi_app(registry=registry, disable_compression=True)
+    metrics_route = Mount("/metrics", prometheus_app)
 
     # Workaround for 307 Redirect for /metrics
     metrics_route.path_regex = re.compile("^/metrics(?P<path>.*)$")
