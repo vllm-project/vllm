@@ -47,6 +47,7 @@ from vllm.distributed.weight_transfer.sharded_rdt_common import (
     ALLOWED_OPS,
     buffer_alloc_bytes,
     check_ray_rdt_version,
+    register_nixl_memory,
 )
 from vllm.logger import init_logger
 
@@ -334,8 +335,6 @@ class _RDTProducerServer:
         doc). The warmup buffer stays registered so the agent's CUDA-HMEM path
         stays initialized.
         """
-        from ray.experimental import register_nixl_memory
-
         self._nixl_warmup_buf = torch.zeros(1 << 20, dtype=torch.uint8, device="cuda")
         with self._reg_lock:
             register_nixl_memory(self._nixl_warmup_buf)
@@ -510,8 +509,6 @@ class _RDTProducerServer:
         """Allocate + NIXL-register one serve slot: the single allocation seam,
         so registration cannot be skipped on either of the two paths that make
         buffers (the init-time reservation and the serve-path backstop)."""
-        from ray.experimental import register_nixl_memory
-
         t = torch.empty(nbytes, dtype=torch.uint8, device=self._serve_device)
         with self._reg_lock:
             register_nixl_memory(t)
