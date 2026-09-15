@@ -149,6 +149,20 @@ KVConnectorFactory.register_connector(
 )
 
 
+def test_load_failure_notifies_every_connector():
+    connector = object.__new__(MultiConnector)
+    connector._connectors = [
+        MagicMock(spec_set=KVConnectorBase_V1),
+        MagicMock(spec_set=KVConnectorBase_V1),
+    ]
+    request_ids = {"req-0", "req-1"}
+
+    connector.on_load_failure(request_ids)
+
+    for child in connector._connectors:
+        child.on_load_failure.assert_called_once_with(request_ids)
+
+
 def test_register_finished_partial_tail_notifies_every_connector():
     connector = object.__new__(MultiConnector)
     first = MagicMock(spec_set=KVConnectorBase_V1)

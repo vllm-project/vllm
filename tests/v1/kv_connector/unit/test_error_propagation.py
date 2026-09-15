@@ -90,6 +90,7 @@ def test_error_propagation_sync_load(fail_scheduler: Scheduler):
     assert output.finish_reason == FinishReason.ERROR
 
     assert len(fail_scheduler.running) == 0
+    fail_scheduler.connector.on_load_failure.assert_not_called()
 
 
 def test_error_propagation_async_load(fail_scheduler: Scheduler):
@@ -146,3 +147,4 @@ def test_error_propagation_async_load(fail_scheduler: Scheduler):
 
     assert len(fail_scheduler.waiting) == 0
     assert len(fail_scheduler.skipped_waiting) == 0
+    fail_scheduler.connector.on_load_failure.assert_not_called()
