@@ -2,7 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import threading
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
+
+import pytest
+from prometheus_client import REGISTRY, Counter, Gauge, Histogram
 
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     MooncakeConnector,
@@ -11,7 +16,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import (
     MooncakeKVConnectorStats,
+    MooncakePromMetrics,
 )
+from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 
 
 def test_is_empty_on_fresh_stats():
@@ -279,3 +286,66 @@ def test_expired_request_bumps_counter():
     assert worker.xfer_stats.data["num_kv_expired_reqs"] == [1]
     # Expired transfer also cleaned out of reqs_need_send.
     assert "tid1" not in worker.reqs_need_send
+
+
+TEST_MODEL = "test-model"
+MODEL_LABELS = {"model_name": TEST_MODEL, "engine": "0"}
+
+
+def _sample(series: str) -> float | None:
+    return REGISTRY.get_sample_value(series, MODEL_LABELS)
+
+
+def _fake_vllm_config() -> Any:
+    return SimpleNamespace(kv_transfer_config=SimpleNamespace())
+
+
+@pytest.fixture
+def exported_series():
+    """Build Mooncake's metrics through the connector factory and record one
+    stats interval into the real Prometheus registry."""
+    unregister_vllm_metrics()
+    prom_metrics = MooncakeConnector.build_prom_metrics(
+        vllm_config=_fake_vllm_config(),  # type: ignore[arg-type]
+        metric_types={Gauge: Gauge, Counter: Counter, Histogram: Histogram},
+        labelnames=["model_name", "engine"],
+        per_engine_labelvalues={0: [TEST_MODEL, "0"]},
+    )
+    assert isinstance(prom_metrics, MooncakePromMetrics)
+    # Distinct sample counts per stats key, so a key wired to the wrong series
+    # cannot pass below.
+    prom_metrics.observe(
+        {
+            "transfer_duration": [0.001, 2.0],
+            "bytes_transferred": [1024],
+            "num_descriptors": [4, 6, 8],
+            "num_failed_transfers": [1],
+            "num_failed_recvs": [1, 1],
+            "num_kv_expired_reqs": [1, 1, 1],
+        },
+        engine_idx=0,
+    )
+    yield
+    unregister_vllm_metrics()
+
+
+@pytest.mark.usefixtures("exported_series")
+def test_transfer_histograms_are_exported():
+    assert _sample("vllm:mooncake_xfer_time_seconds_count") == 2
+    assert _sample("vllm:mooncake_xfer_time_seconds_sum") == 2.0 + 0.001
+    # 0.001s falls into the lowest bucket (0.005s), 2.0s into +Inf.
+    assert (
+        REGISTRY.get_sample_value(
+            "vllm:mooncake_xfer_time_seconds_bucket", {**MODEL_LABELS, "le": "0.005"}
+        )
+        == 1
+    )
+    assert _sample("vllm:mooncake_bytes_transferred_count") == 1
+    assert _sample("vllm:mooncake_num_descriptors_sum") == 4 + 6 + 8
+
+
+@pytest.mark.usefixtures("exported_series")
+def test_failure_counters_are_exported():
+    assert _sample("vllm:mooncake_num_failed_transfers_total") == 1
+    assert _sample("vllm:mooncake_num_failed_recvs_total") == 2
+    assert _sample("vllm:mooncake_num_kv_expired_reqs_total") == 3

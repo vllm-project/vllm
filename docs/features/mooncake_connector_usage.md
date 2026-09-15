@@ -70,6 +70,31 @@ Now you can send requests to the proxy server through port 8000.
 - **mooncake_protocol**: Mooncake connector protocol. (default "rdma")
 - **device_name**: Comma-separated whitelist of RDMA devices (e.g. `"mlx5_0,mlx5_1"`) to restrict topology discovery to. Empty discovers every device. Useful on hosts exposing a mix of InfiniBand and RoCE ports, where both peers must settle on the same link layer.
 
+## Prometheus Metrics
+
+The following Prometheus metrics are exported when MooncakeConnector is active.
+Each one carries the standard `model_name` and `engine` labels.
+
+| Metric name | Type | Description |
+| ------------- | ------ | ------------- |
+| `vllm:mooncake_xfer_time_seconds` | Histogram | Per-transfer RDMA copy duration (seconds). |
+| `vllm:mooncake_bytes_transferred` | Histogram | Bytes moved per transfer. |
+| `vllm:mooncake_num_descriptors` | Histogram | Descriptor count per transfer. More descriptors mean more fragmented or larger KV cache allocations. |
+| `vllm:mooncake_num_failed_transfers` | Counter | Cumulative count of failed KV-block transfers. |
+| `vllm:mooncake_num_failed_recvs` | Counter | Cumulative count of failed KV-block receives. |
+| `vllm:mooncake_num_kv_expired_reqs` | Counter | Requests whose KV blocks expired on the prefiller before the decoder read them (tracked on the P instance). |
+
+!!! note
+    Mooncake is push-based, so the prefiller (P) is the side that performs the
+    transfer and reports it: the three histograms above are only populated on P
+    instances. The decoder (D) reports the failures it observes, which is what
+    `vllm:mooncake_num_failed_recvs` counts.
+
+!!! tip
+    High `vllm:mooncake_num_kv_expired_reqs` indicates that the prefiller's
+    lease duration (`VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT`) is too short for your
+    network or workload. Increase it via that environment variable.
+
 ## Example Scripts/Code
 
 Refer to these example scripts in the vLLM repository:

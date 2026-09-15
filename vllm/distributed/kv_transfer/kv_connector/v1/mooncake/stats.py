@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Stats container for the Mooncake connector."""
+"""Stats and Prometheus metrics for the Mooncake connector."""
 
 import threading
 from dataclasses import dataclass
@@ -8,12 +8,16 @@ from typing import Any
 
 import numpy as np
 
+from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KV_TRANSFER_BYTES_BUCKETS,
+    KV_TRANSFER_DESCRIPTOR_BUCKETS,
+    KV_TRANSFER_XFER_TIME_BUCKETS,
     KVConnectorStats,
+    KVTransferPromMetrics,
+    PromMetric,
+    PromMetricT,
 )
-
-# TODO(mooncake-stats): add MooncakePromMetrics (mirror NixlPromMetrics)
-# and wire it via MooncakeConnector.build_prom_metrics in a follow-up PR.
 
 
 @dataclass
@@ -58,8 +62,8 @@ class MooncakeKVConnectorStats(KVConnectorStats):
             self.data["bytes_transferred"].append(total_bytes)
             self.data["num_descriptors"].append(num_descs)
 
-    # Failure counters store a list of 1s so a future Prom counter can iterate
-    # with .inc(list_item), mirroring NIXL's NixlPromMetrics.observe.
+    # Each failure appends a single unit, which KVTransferPromMetrics sums into
+    # one counter increment.
     def record_failed_transfer(self):
         with self._lock:
             self.data["num_failed_transfers"].append(1)
@@ -144,3 +148,58 @@ class MooncakeKVConnectorStats(KVConnectorStats):
     @property
     def num_successful_transfers(self) -> int:
         return len(self.data["transfer_duration"])
+
+
+class MooncakePromMetrics(KVTransferPromMetrics):
+    """Prometheus metrics for Mooncake KV Cache transfers.
+
+    Mooncake is P-push, so the histograms are only populated on the prefiller
+    (P) instance; the counters are bumped wherever the failure was detected.
+    """
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ):
+        super().__init__(vllm_config, metric_types, labelnames, per_engine_labelvalues)
+
+        self.mooncake_histogram_xfer_time = self.declare_histogram(
+            name="vllm:mooncake_xfer_time_seconds",
+            documentation="Histogram of transfer duration for Mooncake"
+            " KV Cache transfers.",
+            stats_key="transfer_duration",
+            buckets=KV_TRANSFER_XFER_TIME_BUCKETS,
+        )
+        self.mooncake_histogram_bytes_transferred = self.declare_histogram(
+            name="vllm:mooncake_bytes_transferred",
+            documentation="Histogram of bytes transferred per Mooncake"
+            " KV Cache transfer.",
+            stats_key="bytes_transferred",
+            buckets=KV_TRANSFER_BYTES_BUCKETS,
+        )
+        self.mooncake_histogram_num_descriptors = self.declare_histogram(
+            name="vllm:mooncake_num_descriptors",
+            documentation="Histogram of number of descriptors per Mooncake"
+            " KV Cache transfer.",
+            stats_key="num_descriptors",
+            buckets=KV_TRANSFER_DESCRIPTOR_BUCKETS,
+        )
+        self.counter_mooncake_num_failed_transfers = self.declare_counter(
+            name="vllm:mooncake_num_failed_transfers",
+            documentation="Number of failed Mooncake KV Cache transfers.",
+            stats_key="num_failed_transfers",
+        )
+        self.counter_mooncake_num_failed_recvs = self.declare_counter(
+            name="vllm:mooncake_num_failed_recvs",
+            documentation="Number of failed Mooncake KV Cache receives.",
+            stats_key="num_failed_recvs",
+        )
+        self.counter_mooncake_num_kv_expired_reqs = self.declare_counter(
+            name="vllm:mooncake_num_kv_expired_reqs",
+            documentation="Number of requests that had their KV expire. "
+            "NOTE: This metric is tracked on the P instance.",
+            stats_key="num_kv_expired_reqs",
+        )
