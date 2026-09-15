@@ -7,14 +7,20 @@ delegates to the configured weight transfer engine and tracks whether an update
 session is active. These tests verify that delegation and the session guard.
 """
 
+from types import SimpleNamespace
+from unittest.mock import Mock
+
 import pytest
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import DeviceConfig, VllmConfig, get_current_vllm_config
 from vllm.lora.layers import BaseLayerWithLoRA
+from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.v1.worker.gpu_model_runner import _get_parameter_for_reload
 from vllm.v1.worker.gpu_worker import Worker
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 
 class _RecordingEngine:
@@ -54,8 +60,17 @@ class _RecordingModelRunner:
     def __init__(self) -> None:
         self.seen_config: VllmConfig | None = None
         self.reset_lora_calls = 0
+        self.model = nn.Module()
+        self.draft_model = None
+        self.eplb_state = None
 
-    def reload_weights(self) -> None:
+    def get_model(self):
+        return self.model
+
+    def get_draft_model(self):
+        return self.draft_model
+
+    def reload_weights(self, *args, **kwargs) -> None:
         self.seen_config = get_current_vllm_config()
 
     def reset_lora_state(self) -> None:
@@ -64,7 +79,7 @@ class _RecordingModelRunner:
 
 def _make_worker(engine: _RecordingEngine | None) -> Worker:
     worker = object.__new__(Worker)
-    worker.vllm_config = VllmConfig()
+    worker.vllm_config = VllmConfig(device_config=DeviceConfig("cpu"))
     worker.weight_transfer_engine = engine
     worker._weight_update_active = False
     worker._weight_update_is_draft = False
@@ -80,6 +95,74 @@ def test_reload_weights_sets_current_config():
     Worker.reload_weights(worker)
 
     assert model_runner.seen_config is worker.vllm_config
+
+
+@pytest.mark.parametrize("is_checkpoint_format", [True, False])
+def test_reload_rejects_eplb_before_delegating(is_checkpoint_format):
+    worker = _make_worker(None)
+    model = Mock(spec=MixtureOfExperts, num_moe_layers=1)
+    worker.model_runner.model = model
+    worker.model_runner.eplb_state = SimpleNamespace(
+        model_states={"model": SimpleNamespace(model=model, rebalanced=False)}
+    )
+
+    with pytest.raises(RuntimeError, match="models managed by EPLB"):
+        worker.reload_weights(is_checkpoint_format=is_checkpoint_format)
+
+    assert worker.model_runner.seen_config is None
+
+
+@pytest.mark.parametrize("is_draft", [True, False])
+@pytest.mark.parametrize("pending_rebalance", [True, False])
+def test_eplb_update_rejected_before_session_starts(is_draft, pending_rebalance):
+    engine = _RecordingEngine()
+    engine.supports_draft_weight_update = True
+    worker = _make_worker(engine)
+    model = Mock(spec=MixtureOfExperts, num_moe_layers=1)
+    target = "draft_model" if is_draft else "model"
+    setattr(worker.model_runner, target, model)
+    worker.model_runner.eplb_state = SimpleNamespace(
+        model_states={
+            "model": SimpleNamespace(model=model, rebalanced=pending_rebalance)
+        }
+    )
+    worker._set_draft_weight_update_target = Mock()
+
+    with pytest.raises(RuntimeError, match="models managed by EPLB"):
+        if is_draft:
+            worker.start_draft_weight_update()
+        else:
+            worker.start_weight_update()
+
+    assert not engine.started
+    assert engine.reset_count == 0
+    assert not worker._weight_update_active
+    worker._set_draft_weight_update_target.assert_not_called()
+
+
+@pytest.mark.parametrize("is_draft", [True, False])
+def test_dense_update_allowed_when_other_model_uses_eplb(is_draft):
+    engine = _RecordingEngine()
+    engine.supports_draft_weight_update = True
+    worker = _make_worker(engine)
+    model = Mock(spec=MixtureOfExperts, num_moe_layers=1)
+    worker.model_runner.model = model if is_draft else nn.Module()
+    worker.model_runner.draft_model = nn.Module() if is_draft else model
+    worker.model_runner.eplb_state = SimpleNamespace(
+        model_states={"model": SimpleNamespace(model=model, rebalanced=True)}
+    )
+    worker._set_draft_weight_update_target = Mock()
+
+    if is_draft:
+        worker.start_draft_weight_update()
+    else:
+        worker.start_weight_update()
+    worker.update_weights({"names": ["w"]})
+    worker.finish_weight_update()
+
+    assert engine.update_calls == [{"names": ["w"]}]
+    assert engine.finished
+    assert not worker._weight_update_active
 
 
 def test_reload_parameter_lookup_preserves_lora_module_names():

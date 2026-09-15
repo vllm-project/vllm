@@ -36,6 +36,13 @@ engine drives on your behalf:
 | [sparse_nccl](nccl.md#sparse-nccl) | NCCL broadcast | Checkpoint-coordinate sparse weight patches |
 | [sharded_rdt](sharded_rdt.md) | NIXL / Ray Direct Transport (pull-based) | Very large models where each worker needs only its own slice (MoE with expert parallelism) |
 
+!!! warning
+    Weight updates and `reload_weights` cannot target a model managed by Expert
+    Parallel Load Balancing (EPLB). Checkpoint loading uses the initial expert
+    placement, and pending rebalances can overwrite updated weights. Start the
+    engine with EPLB disabled for weight updates. Expert parallelism without
+    EPLB remains supported.
+
 ## Quickstart
 
 ### Inference Side
