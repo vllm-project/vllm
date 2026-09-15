@@ -1230,11 +1230,13 @@ RUN --mount=type=cache,target=/opt/uv/cache \
                 libcublas-dev-${CUDA_VERSION_DASH} \
                 libcusolver-dev-${CUDA_VERSION_DASH}"; \
     if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
-        uv pip install --system -r /tmp/kv_connectors.txt --no-build || ( \
+        uv pip install --system -r /tmp/kv_connectors.txt --no-build \
+            --constraint /vllm-workspace/torch_lib_versions.txt || ( \
             # if the above fails, install from source
             apt-get update -y && \
             apt-get install -y --no-install-recommends --allow-change-held-packages ${BUILD_PKGS} && \
-            uv pip install --system -r /tmp/kv_connectors.txt --no-build-isolation && \
+            uv pip install --system -r /tmp/kv_connectors.txt --no-build-isolation \
+                --constraint /vllm-workspace/torch_lib_versions.txt && \
             apt-get purge -y ${BUILD_PKGS} && \
             # clean up -dev packages, keep runtime libraries
             rm -rf /var/lib/apt/lists/* \
@@ -1245,8 +1247,14 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         MOONCAKE_VERSION=$(python3 -c "import importlib.metadata as m; print(m.version('mooncake-transfer-engine'))" 2>/dev/null || true) && \
         if [ "${CUDA_MAJOR}" = "13" ] && [ -n "${MOONCAKE_VERSION}" ]; then \
             uv pip uninstall --system mooncake-transfer-engine 2>/dev/null || true; \
-            uv pip install --system "mooncake-transfer-engine-cuda13==${MOONCAKE_VERSION}"; \
-        fi; \
+            uv pip install --system \
+                "mooncake-transfer-engine-cuda13==${MOONCAKE_VERSION}" \
+                --constraint /vllm-workspace/torch_lib_versions.txt; \
+        fi && \
+        uv pip freeze --system | grep -i "^torch=\|^torchvision=\|^torchaudio=" \
+            | diff -u /vllm-workspace/torch_lib_versions.txt - && \
+        uv pip check --system && \
+        python3 -c "import torch, torchvision, torchvision.ops, torchaudio, vllm"; \
     fi
 
 # Mooncake registers GPU memory for RDMA via nvidia-peermem by default. Hosts
