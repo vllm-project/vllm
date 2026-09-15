@@ -22,7 +22,8 @@ CHUNK_SIZE = 1024
 
 @dataclass
 class _TokenIdScores:
-    token_ids: torch.Tensor  # [num_ids], on device
+    token_ids: torch.Tensor  # [num_rows, num_ids], on device
+    pad: torch.Tensor  # [num_rows, num_ids] bool, True at padded columns
     start: int  # first prompt row to score
     scores: torch.Tensor | None = None  # [num_rows, num_ids], filled per chunk
 
@@ -52,11 +53,11 @@ class PromptLogprobsWorker:
         if uses_prompt_logprobs:
             self.in_progress_prompt_logprobs[req_id] = []
         if sampling_params.prompt_logprob_token_ids is not None:
+            # Small arrays decode read-only, which torch.from_numpy rejects.
+            ids = np.require(sampling_params.prompt_logprob_token_ids, requirements="W")
+            ids = async_tensor_h2d(ids, self.device, torch.int64)
             self.token_id_scores[req_id] = _TokenIdScores(
-                async_tensor_h2d(
-                    sampling_params.prompt_logprob_token_ids, self.device, torch.int64
-                ),
-                sampling_params.prompt_logprob_start or 0,
+                ids.clamp_min(0), ids < 0, sampling_params.prompt_logprob_start or 0
             )
 
     def remove_request(self, req_id: str) -> None:
@@ -70,7 +71,7 @@ class PromptLogprobsWorker:
         input_batch: InputBatch,
         prompt_lens: np.ndarray,
     ) -> dict[str, torch.Tensor]:
-        """Score each request's fixed IDs on this chunk; emit on the last chunk."""
+        """Score each request's per-row IDs on this chunk; emit on the last chunk."""
         if not self.token_id_scores:
             return {}
         logits_mode = self.logprobs_mode in ("raw_logits", "processed_logits")
@@ -87,10 +88,7 @@ class PromptLogprobsWorker:
             if chunk_start >= prompt_len or prompt_len < input_batch.prefill_len_np[i]:
                 continue
             if req.scores is None:
-                req.scores = hidden_states.new_empty(
-                    (max(prompt_len - 1 - req.start, 0), len(req.token_ids)),
-                    dtype=torch.float32,
-                )
+                req.scores = torch.empty_like(req.token_ids, dtype=torch.float32)
             # The last prompt row predicts the first decode token; skip it.
             lo = max(req.start, chunk_start)
             hi = min(chunk_end, prompt_len - 1)
@@ -98,13 +96,14 @@ class PromptLogprobsWorker:
             for a in range(lo, hi, CHUNK_SIZE):
                 b = min(a + CHUNK_SIZE, hi)
                 logits = logits_fn(hidden_states[base + a : base + b])
-                ids = req.token_ids.expand(b - a, -1)
+                ids = req.token_ids[a - req.start : b - req.start]
                 req.scores[a - req.start : b - req.start] = (
                     logits.gather(-1, ids)
                     if logits_mode
                     else compute_token_logprobs(logits, ids)
                 )
             if chunk_end >= prompt_len:
+                req.scores.masked_fill_(req.pad, float("-inf"))
                 out[req_id] = req.scores
                 req.scores = None
         return out
