@@ -35,6 +35,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.triton_utils.allocation import set_triton_allocator
 from vllm.utils.math_utils import next_power_of_2
+from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.platform_utils import get_device_name_as_file_name
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -1406,6 +1407,21 @@ def get_default_config(
             num_stages = 4
         else:
             num_stages = 3
+
+        # `block_n` above saturates at 128, so the N tile stops scaling with
+        # the batch even though this branch's comment promises large batches
+        # more output parallelism. Widening it to 256 once each expert's GEMM
+        # has the rows to fill it measured 1.04-1.09x (Qwen3-30B-A3B,
+        # E=128/topk=8) and 1.16-1.19x (Mixtral 8x7B, E=8/topk=2) on H100 for
+        # M >= 1024. Below that the same tile is a 2-9% regression on both
+        # shapes, so the batch gate carries the change rather than the tile
+        # size alone. Raising num_stages was measured separately and is a
+        # 4-6% regression on its own, so only N moves here. bf16/fp16 only;
+        # quantized tiles are unmeasured and keep today's config.
+        if dtype is None and M >= 1024 and current_platform.is_cuda_alike():
+            wide_n_bytes = (block_m * block_k + block_k * 256) * 2 * num_stages
+            if wide_n_bytes <= get_max_shared_memory_bytes():
+                block_n = 256
 
         config = {
             "BLOCK_SIZE_M": block_m,
