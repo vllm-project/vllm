@@ -8,7 +8,7 @@ from dataclasses import MISSING, Field, asdict, dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pydantic
 import pytest
@@ -1518,6 +1518,65 @@ def test_draft_model_enables_async_scheduling_by_default():
     )
 
     assert cfg.scheduler_config.async_scheduling is True
+
+
+@pytest.mark.parametrize(
+    ("target_ep", "draft_is_moe", "expected_draft_ep"),
+    [
+        pytest.param(False, False, False, id="target-ep-off-dense-draft"),
+        pytest.param(False, True, False, id="target-ep-off-moe-draft"),
+        pytest.param(True, False, False, id="target-ep-on-dense-draft"),
+        pytest.param(True, True, True, id="target-ep-on-moe-draft"),
+    ],
+)
+def test_draft_inherits_ep_only_for_moe(
+    target_ep: bool,
+    draft_is_moe: bool,
+    expected_draft_ep: bool,
+):
+    draft_model_config = MagicMock()
+    draft_model_config.model = "draft-model"
+    draft_model_config.is_moe = draft_is_moe
+    draft_model_config.hf_config.model_type = "llama"
+    draft_model_config.hf_config.n_predict = None
+    draft_model_config.max_model_len = 4096
+    draft_model_config.get_vocab_size.return_value = 100
+
+    def verify_draft_parallel_config(parallel_config: ParallelConfig) -> None:
+        if parallel_config.enable_expert_parallel:
+            ModelConfig._verify_with_expert_parallelism(draft_model_config)
+
+    draft_model_config.verify_with_parallel_config.side_effect = (
+        verify_draft_parallel_config
+    )
+
+    target_model_config = MagicMock()
+    target_model_config.hf_overrides = None
+    target_model_config.tokenizer = "target-model"
+    target_model_config.max_model_len = 4096
+    target_model_config.get_vocab_size.return_value = 100
+    target_parallel_config = ParallelConfig(
+        tensor_parallel_size=2,
+        enable_expert_parallel=target_ep,
+    )
+
+    with patch("vllm.config.speculative.ModelConfig", return_value=draft_model_config):
+        speculative_config = SpeculativeConfig(
+            method="draft_model",
+            model="draft-model",
+            num_speculative_tokens=1,
+            draft_tensor_parallel_size=1,
+            target_model_config=target_model_config,
+            target_parallel_config=target_parallel_config,
+        )
+
+    assert (
+        speculative_config.draft_parallel_config.enable_expert_parallel
+        is expected_draft_ep
+    )
+    assert speculative_config.draft_parallel_config.tensor_parallel_size == 1
+    assert target_parallel_config.enable_expert_parallel is target_ep
+    assert target_parallel_config.tensor_parallel_size == 2
 
 
 @pytest.mark.parametrize(
@@ -3255,8 +3314,6 @@ def test_mtp_draft_uses_model_weights_not_local_cache(mock_model_config_cls):
     """Regression test: MTP + runai_streamer should use model_weights (original
     S3 URL) for the draft model, not model (local cache dir set by
     pull_runai_model_from_obj_storage)."""
-    from unittest.mock import MagicMock
-
     s3_url = "s3://my-bucket/Qwen3-35B-A3B-FP8"
     local_cache = "/root/.cache/vllm/assets/model_streamer/abcd1234"
 

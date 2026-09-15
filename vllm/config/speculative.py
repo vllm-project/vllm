@@ -1547,7 +1547,9 @@ class SpeculativeConfig:
 
                 self.draft_parallel_config = (
                     SpeculativeConfig.create_draft_parallel_config(
-                        self.target_parallel_config, self.draft_tensor_parallel_size
+                        self.target_parallel_config,
+                        self.draft_tensor_parallel_size,
+                        self.draft_model_config.is_moe,
                     )
                 )
 
@@ -1743,6 +1745,7 @@ class SpeculativeConfig:
     def create_draft_parallel_config(
         target_parallel_config: ParallelConfig,
         speculative_draft_tensor_parallel_size: int,
+        draft_is_moe: bool,
     ) -> ParallelConfig:
         """Create a parallel config for use by the draft worker.
 
@@ -1751,7 +1754,9 @@ class SpeculativeConfig:
         draft_parallel_config = ParallelConfig(
             pipeline_parallel_size=1,
             tensor_parallel_size=speculative_draft_tensor_parallel_size,
-            enable_expert_parallel=target_parallel_config.enable_expert_parallel,
+            enable_expert_parallel=(
+                target_parallel_config.enable_expert_parallel and draft_is_moe
+            ),
             distributed_executor_backend=target_parallel_config.distributed_executor_backend,
             max_parallel_loading_workers=target_parallel_config.max_parallel_loading_workers,
             disable_custom_all_reduce=target_parallel_config.disable_custom_all_reduce,
