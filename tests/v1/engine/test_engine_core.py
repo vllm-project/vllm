@@ -331,9 +331,7 @@ def test_engine_core_concurrent_batches():
         ),
     ):
         engine_core = EngineCore(
-            vllm_config=vllm_config,
-            log_stats=False,
-            executor_class=DummyExecutor,
+            vllm_config=vllm_config, log_stats=False, executor_class=DummyExecutor
         )
     assert engine_core.batch_queue is not None
 
