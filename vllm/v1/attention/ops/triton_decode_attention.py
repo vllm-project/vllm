@@ -278,6 +278,7 @@ def _decode_att_m_fwd(
 @triton.jit
 def _fwd_grouped_kernel_stage1(
     Q,
+    Q_PE,
     K_Buffer,
     V_Buffer,
     sm_scale,
@@ -287,6 +288,8 @@ def _fwd_grouped_kernel_stage1(
     stride_req_to_tokens_b,
     stride_qbs,
     stride_qh,
+    stride_qpe_bs,
+    stride_qpe_h,
     stride_buf_kpbs,
     stride_buf_kbs,
     stride_buf_kh,
@@ -338,13 +341,20 @@ def _fwd_grouped_kernel_stage1(
     )
 
     if BLOCK_DPE > 0:
+        # offs_dpe indexes the packed [nope | pe] layout (used for K below);
+        # Q_PE is its own pointer to the pe segment, so its last-dim offset
+        # is rebased to 0. When the caller passes a packed q, Q_PE is simply
+        # a view of q starting at BLOCK_DMODEL and the addresses are
+        # identical to indexing Q with offs_dpe.
         offs_dpe = BLOCK_DMODEL + tl.arange(0, BLOCK_DPE)
         mask_dpe = offs_dpe < Lk
         off_qpe = (
-            cur_batch * stride_qbs + cur_head[:, None] * stride_qh + offs_dpe[None, :]
+            cur_batch * stride_qpe_bs
+            + cur_head[:, None] * stride_qpe_h
+            + (offs_dpe - BLOCK_DMODEL)[None, :]
         )
         qpe = tl.load(
-            Q + off_qpe,
+            Q_PE + off_qpe,
             mask=(mask_h[:, None]) & (mask_dpe[None, :]),
             other=0.0,
             cache_modifier=".ca",
@@ -507,6 +517,20 @@ def _decode_grouped_att_m_fwd(
     if is_hip_:
         BLOCK = 16
 
+    # q may arrive as (q_nope, q_pe): feed the pe segment to the kernel
+    # through its own pointer instead of materializing the head-dim concat.
+    # The zero-copy path requires the nope width to coincide with the
+    # BLOCK_DMODEL boundary the kernel splits the packed layout at;
+    # otherwise fall back to the packed concat.
+    if isinstance(q, tuple):
+        if BLOCK_DPE > 0 and q[0].shape[-1] == BLOCK_DMODEL:
+            q, q_pe = q
+        else:
+            q = torch.cat(q, dim=-1)
+            q_pe = q[..., BLOCK_DMODEL:] if BLOCK_DPE > 0 else q
+    else:
+        q_pe = q[..., BLOCK_DMODEL:] if BLOCK_DPE > 0 else q
+
     batch, head_num = q.shape[0], q.shape[1]
     kv_group_num = q.shape[1] // k_buffer.shape[-2]
 
@@ -533,6 +557,7 @@ def _decode_grouped_att_m_fwd(
 
     _fwd_grouped_kernel_stage1[grid](
         q,
+        q_pe,
         k_buffer,
         v_buffer,
         sm_scale,
@@ -542,6 +567,8 @@ def _decode_grouped_att_m_fwd(
         Req_to_tokens.stride(0),
         q.stride(0),
         q.stride(1),
+        q_pe.stride(0),
+        q_pe.stride(1),
         _page_stride(k_buffer, page_size),
         k_buffer.stride(-3),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
         k_buffer.stride(-2),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
@@ -748,8 +775,9 @@ def decode_attention_fwd_grouped(
         v_scale,
         is_mla=is_mla,
     )
+    q_sample = q[0] if isinstance(q, tuple) else q
     _decode_softmax_reducev_fwd(
-        attn_logits, q, o, lse, v_buffer, b_seq_len, num_kv_splits
+        attn_logits, q_sample, o, lse, v_buffer, b_seq_len, num_kv_splits
     )
 
 
@@ -772,14 +800,20 @@ def decode_attention_fwd(
 ):
     assert num_kv_splits == attn_logits.shape[2]
 
-    if k_scale is None:
-        k_scale = torch.tensor(1.0, dtype=torch.float32, device=q.device)
-    if v_scale is None:
-        v_scale = torch.tensor(1.0, dtype=torch.float32, device=q.device)
+    # q may be a packed [*, nope | pe] tensor or a (q_nope, q_pe) tuple; the
+    # grouped path consumes the tuple zero-copy (see _decode_grouped_att_m_fwd).
+    q_sample = q[0] if isinstance(q, tuple) else q
 
-    kv_group_num = q.shape[1] // v_buffer.shape[-2]
+    if k_scale is None:
+        k_scale = torch.tensor(1.0, dtype=torch.float32, device=q_sample.device)
+    if v_scale is None:
+        v_scale = torch.tensor(1.0, dtype=torch.float32, device=q_sample.device)
+
+    kv_group_num = q_sample.shape[1] // v_buffer.shape[-2]
 
     if kv_group_num == 1:
+        if isinstance(q, tuple):
+            q = torch.cat(q, dim=-1)
         # MHA
         decode_attention_fwd_normal(
             q,
