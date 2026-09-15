@@ -188,7 +188,6 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         scale already is DeepGEMM's packed-ue8m0 MN-major layout, so the
         einsum consumes the kernel's output with no repacking.
         """
-        del positions
         groups = self.n_local_groups
         z = torch.empty(
             (attn_out.data.shape[0], groups, self.o_lora_rank),
@@ -295,7 +294,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
             ((self.max_num_batched_tokens,), torch.int32),
         )
 
-    def _decode_extra(
+    def _decode_compressed_kv_and_topk(
         self,
         flashmla_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_metadata: "DeepseekSparseSWAMetadata",
@@ -331,7 +330,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         cache beside an fp8 SWA one), and the indices ``[s_q, topk]`` int32
         slot ids (``block * page + offset``, ``-1`` invalid).
         """
-        extra_cache, extra_idx, extra_len = self._decode_extra(
+        extra_cache, extra_idx, extra_len = self._decode_compressed_kv_and_topk(
             flashmla_metadata, swa_metadata
         )
         assert swa_metadata.decode_swa_indices is not None
