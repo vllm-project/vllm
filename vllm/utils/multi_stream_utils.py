@@ -102,7 +102,7 @@ def execute_in_parallel(
         result of aux_fns[i] (or None when skipped).
     """
     aux_results: list[Any]
-    if aux_streams is None or not enable:
+    if aux_streams is None or not enable or torch.cuda.is_current_stream_capturing():
         default_result = default_fn()
         aux_results = [fn() if fn is not None else None for fn in aux_fns]
         return default_result, aux_results
