@@ -109,11 +109,9 @@ def _combine_topk_swa_indices_kernel(
     gather_lens_ptr,
     M,
     N,
-    num_tokens,
     TOP_K: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
     WINDOW_SIZE: tl.constexpr,
-    PADDED_WINDOW: tl.constexpr,
     TOPK_WIDTH: tl.constexpr,
     PADDED_TOP_K: tl.constexpr,
 ):
@@ -123,13 +121,8 @@ def _combine_topk_swa_indices_kernel(
 
     base = tl.load(query_start_loc_ptr)
     query_start = tl.load(query_start_loc_ptr + batch_idx) - base
-    query_claimed_end = tl.load(query_start_loc_ptr + batch_idx + 1) - base
-    # Positions come from the metadata as written. V4.1's mixed prefill metadata
-    # can make query_start_loc claim more tokens than topk_indices has rows, so
-    # the loop stops at the rows that exist -- but clamping query_len here would
-    # shift start_pos and with it every token's position.
-    query_len = query_claimed_end - query_start
-    query_end = tl.minimum(query_claimed_end, num_tokens)
+    query_end = tl.load(query_start_loc_ptr + batch_idx + 1) - base
+    query_len = query_end - query_start
     seq_len = tl.load(seq_lens_ptr + batch_idx)
     gather_len = tl.load(gather_lens_ptr + batch_idx)
     start_pos = seq_len - query_len
@@ -138,8 +131,7 @@ def _combine_topk_swa_indices_kernel(
     for token_idx in range(query_start + worker_id, query_end, num_workers):
         token_idx_in_query = token_idx - query_start
         pos = start_pos + token_idx_in_query
-        # The warmup batch gives pos < 0; the combined_lens store below is
-        # unmasked, so a negative length would reach it.
+        # A negative pos would reach the unmasked combined_lens store below.
         topk_len = tl.maximum(tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K), 0)
         swa_len = tl.maximum(tl.minimum(pos + 1, WINDOW_SIZE), 0)
 
@@ -159,8 +151,7 @@ def _combine_topk_swa_indices_kernel(
             mask=topk_mask,
         )
 
-        # tl.arange needs a power of two; swa_len masks the padding off.
-        swa_offset = tl.arange(0, PADDED_WINDOW)
+        swa_offset = tl.arange(0, WINDOW_SIZE)
         tl.store(
             combined_indices_ptr
             + token_idx * combined_indices_stride
@@ -199,12 +190,9 @@ def combine_topk_swa_indices(
         dtype=torch.int32,
         device=topk_indices.device,
     )
-    # Zeros: the early return below hands these back unwritten.
-    combined_lens = torch.zeros(
+    combined_lens = torch.empty(
         num_tokens, dtype=torch.int32, device=topk_indices.device
     )
-    if num_tokens == 0 or num_reqs == 0:
-        return combined_indices, combined_lens
 
     _combine_topk_swa_indices_kernel[(num_reqs, 128)](
         combined_indices,
@@ -217,15 +205,10 @@ def combine_topk_swa_indices(
         gather_lens,
         M,
         N,
-        num_tokens,
-        # 0 on the layers that pass compress_ratio == 0, which would otherwise
-        # fold to a // 0 at JIT time; TOPK_WIDTH bounds the logical width.
-        TOP_K=(
-            0 if compress_ratio <= 0 or topk <= 0 else min(topk, topk_indices.shape[-1])
-        ),
-        COMPRESS_RATIO=max(int(compress_ratio), 1),
+        TOP_K=min(topk, topk_indices.shape[-1]),
+        # max(): the swa-only layers pass 0, which would fold to a // 0 at JIT.
+        COMPRESS_RATIO=max(compress_ratio, 1),
         WINDOW_SIZE=window_size,
-        PADDED_WINDOW=triton.next_power_of_2(window_size),
         TOPK_WIDTH=topk_indices.shape[-1],
         PADDED_TOP_K=triton.next_power_of_2(topk_indices.shape[-1]),
     )

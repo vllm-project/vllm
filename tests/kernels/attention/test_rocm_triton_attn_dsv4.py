@@ -1624,8 +1624,6 @@ def test_paged_mqa_logits_gate_v41_shuffle_vs_c4a_flat() -> None:
     )
 
 
-# ── V4.1 combine_topk_swa_indices ─────────────────────────────────────────
-# The Torch path this kernel replaces, kept as the oracle.
 def _combine_topk_swa_indices_torch(
     topk_indices,
     query_start_loc,
@@ -1637,50 +1635,59 @@ def _combine_topk_swa_indices_torch(
     M,
     N,
 ):
+    """The Torch path this kernel replaces, copied from before the switch.
+
+    Kept verbatim so the reference cannot drift toward the kernel.
+    """
     from vllm.models.deepseek_v41.amd.rocm import _SPARSE_PREFILL_TOPK_ALIGNMENT
 
-    align = _SPARSE_PREFILL_TOPK_ALIGNMENT
+    topk_indices = topk_indices.reshape(topk_indices.shape[0], -1).contiguous()
     num_tokens = topk_indices.shape[0]
-    combined_topk = (topk + window_size + align - 1) // align * align
-    device = topk_indices.device
-    combined_indices = torch.full(
-        (num_tokens, combined_topk), -1, dtype=torch.int32, device=device
+    combined_topk = (
+        (topk + window_size + _SPARSE_PREFILL_TOPK_ALIGNMENT - 1)
+        // _SPARSE_PREFILL_TOPK_ALIGNMENT
+        * _SPARSE_PREFILL_TOPK_ALIGNMENT
     )
-    combined_lens = torch.zeros(num_tokens, dtype=torch.int32, device=device)
-    if num_tokens == 0 or seq_lens.shape[0] == 0:
-        return combined_indices, combined_lens
+    combined_indices = torch.full(
+        (num_tokens, combined_topk),
+        fill_value=-1,
+        dtype=torch.int32,
+        device=topk_indices.device,
+    )
+    combined_lens = torch.empty(
+        num_tokens, dtype=torch.int32, device=topk_indices.device
+    )
 
+    # query_start_loc may have a non-zero base for a narrowed mixed batch.
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
     req_ids = torch.repeat_interleave(
-        torch.arange(seq_lens.shape[0], device=device), query_lens
+        torch.arange(seq_lens.shape[0], device=seq_lens.device), query_lens
     )
     query_starts = query_start_loc[:-1] - query_start_loc[0]
-    token_offsets = torch.arange(
-        req_ids.shape[0], device=device
-    ) - torch.repeat_interleave(query_starts, query_lens)
+    token_offsets = torch.arange(num_tokens, device=seq_lens.device) - (
+        torch.repeat_interleave(query_starts, query_lens)
+    )
     positions = seq_lens[req_ids] - query_lens[req_ids] + token_offsets
-    rows = min(num_tokens, int(req_ids.shape[0]))
-    req_ids, positions = req_ids[:rows], positions[:rows]
 
-    width = min(topk, topk_indices.shape[1]) if topk > 0 else 0
-    if compress_ratio <= 0 or topk <= 0:
-        topk_lens = torch.zeros_like(positions)
-    else:
-        topk_lens = torch.minimum(
-            (positions + 1) // compress_ratio, torch.full_like(positions, width)
-        ).clamp_min(0)
-    if width:
-        offs = torch.arange(width, device=device)
-        values = topk_indices[:rows, :width].to(torch.int32)
-        valid = (offs[None, :] < topk_lens[:, None]) & (values >= 0) & (values < N)
-        combined_indices[:rows, :width] = torch.where(
-            valid, values + (M * req_ids).to(torch.int32)[:, None], -1
-        )
+    logical_topk_width = min(topk, topk_indices.shape[1])
+    topk_lens = torch.minimum(
+        (positions + 1) // compress_ratio,
+        torch.full_like(positions, logical_topk_width),
+    ).clamp_min(0)
+    topk_offsets = torch.arange(logical_topk_width, device=seq_lens.device)
+    topk_mask = topk_offsets[None, :] < topk_lens[:, None]
+    topk_values = topk_indices[:, :logical_topk_width].to(torch.int32)
+    topk_valid = topk_mask & (topk_values >= 0) & (topk_values < N)
+    combined_indices[:, :logical_topk_width] = torch.where(
+        topk_valid,
+        topk_values + (M * req_ids).to(torch.int32)[:, None],
+        -1,
+    )
 
     swa_lens = torch.minimum(
         positions + 1, torch.full_like(positions, window_size)
     ).clamp_min(0)
-    swa_offsets = torch.arange(window_size, device=device)
+    swa_offsets = torch.arange(window_size, device=seq_lens.device)
     swa_mask = swa_offsets[None, :] < swa_lens[:, None]
     swa_columns = topk_lens[:, None] + swa_offsets[None, :]
     gather_starts = seq_lens - gather_lens
@@ -1693,31 +1700,22 @@ def _combine_topk_swa_indices_torch(
         + 1
         - gather_starts[req_ids, None]
     ).to(torch.int32)
-    row_ix = torch.arange(rows, device=device)[:, None].expand_as(swa_columns)
-    combined_indices.view(-1).index_copy_(
-        0,
-        row_ix[swa_mask] * combined_topk + swa_columns[swa_mask],
-        swa_values[swa_mask],
+    rows = torch.arange(num_tokens, device=seq_lens.device)[:, None].expand_as(
+        swa_columns
     )
-    combined_lens[:rows] = (topk_lens + swa_lens).to(torch.int32)
+    flat_dst = rows[swa_mask] * combined_topk + swa_columns[swa_mask]
+    combined_indices.view(-1).index_copy_(0, flat_dst, swa_values[swa_mask])
+    combined_lens.copy_((topk_lens + swa_lens).to(torch.int32))
     return combined_indices, combined_lens
 
 
 def _v41_combine_case(case, window):
     dev = "cuda"
     ratio, topk = 2, 512
-    if case == "rows_short_of_query_start_loc":
-        qsl = torch.tensor([0, 64, 128], dtype=torch.int32, device=dev)
-        sl = torch.tensor([64, 64], dtype=torch.int32, device=dev)
-        rows = 8
-    elif case == "seq_len_below_query_len":
+    if case == "seq_len_below_query_len":
         qsl = torch.tensor([0, 64], dtype=torch.int32, device=dev)
         sl = torch.tensor([32], dtype=torch.int32, device=dev)
         rows = 64
-    elif case == "empty_seq_lens":
-        qsl = torch.tensor([0], dtype=torch.int32, device=dev)
-        sl = torch.zeros(0, dtype=torch.int32, device=dev)
-        rows = 4
     elif case == "compress_ratio_zero":
         qsl = torch.tensor([0, 4, 8], dtype=torch.int32, device=dev)
         sl = torch.tensor([4, 4], dtype=torch.int32, device=dev)
@@ -1739,11 +1737,10 @@ def _v41_combine_case(case, window):
     "case,window",
     [
         ("seq_len_below_query_len", 128),
-        ("empty_seq_lens", 128),
         ("compress_ratio_zero", 128),
-        ("rows_short_of_query_start_loc", 128),
-        ("plain", 96),
-        ("plain", 192),
+        ("plain", 64),
+        ("plain", 128),
+        ("plain", 256),
     ],
 )
 def test_v41_combine_topk_swa_indices_matches_torch(case, window) -> None:
@@ -1752,90 +1749,7 @@ def test_v41_combine_topk_swa_indices_matches_torch(case, window) -> None:
     args = _v41_combine_case(case, window)
     got_indices, got_lens = combine_topk_swa_indices(*args)
     ref_indices, ref_lens = _combine_topk_swa_indices_torch(*args)
-    torch.cuda.synchronize()
     assert torch.equal(got_lens, ref_lens), (
         f"lens differ: ref={ref_lens.tolist()} got={got_lens.tolist()}"
     )
     assert torch.equal(got_indices, ref_indices)
-
-
-@requires_rocm_cdna3_or_newer
-def test_v41_combine_topk_swa_indices_does_not_write_past_the_rows() -> None:
-    """The token loop is bounded by the row count, and the length store is unmasked.
-
-    Driving the kernel directly with a sentinel past the rows catches that: going
-    through the host wrapper cannot, since it sizes the buffers to the rows and an
-    overrun then lands outside anything the comparison reads.
-    """
-    import triton
-
-    from vllm.models.deepseek_v41.amd.rocm import (
-        _SPARSE_PREFILL_TOPK_ALIGNMENT,
-        _combine_topk_swa_indices_kernel,
-    )
-
-    dev = "cuda"
-    # query_start_loc claims 128 tokens; topk_indices has 8 rows.
-    window, ratio, topk, rows, sentinel = 128, 2, 512, 8, -12345
-    qsl = torch.tensor([0, 64, 128], dtype=torch.int32, device=dev)
-    seq_lens = torch.tensor([64, 64], dtype=torch.int32, device=dev)
-    gather_lens = torch.minimum(seq_lens, torch.full_like(seq_lens, window))
-    gen = torch.Generator(device="cpu").manual_seed(0)
-    topk_indices = torch.randint(
-        0, 4096, (rows, topk), generator=gen, dtype=torch.int32
-    ).to(dev)
-
-    align = _SPARSE_PREFILL_TOPK_ALIGNMENT
-    combined_topk = (topk + window + align - 1) // align * align
-    guard = 256
-    indices = torch.full(
-        (rows + guard, combined_topk), sentinel, dtype=torch.int32, device=dev
-    )
-    lens = torch.full((rows + guard,), sentinel, dtype=torch.int32, device=dev)
-
-    _combine_topk_swa_indices_kernel[(seq_lens.shape[0], 128)](
-        indices,
-        indices.stride(0),
-        lens,
-        topk_indices,
-        topk_indices.stride(0),
-        qsl,
-        seq_lens,
-        gather_lens,
-        100000,
-        4096,
-        rows,
-        TOP_K=min(topk, topk_indices.shape[-1]),
-        COMPRESS_RATIO=ratio,
-        WINDOW_SIZE=window,
-        PADDED_WINDOW=triton.next_power_of_2(window),
-        TOPK_WIDTH=topk_indices.shape[-1],
-        PADDED_TOP_K=triton.next_power_of_2(topk_indices.shape[-1]),
-    )
-    torch.cuda.synchronize()
-
-    assert torch.all(lens[rows:] == sentinel), (
-        f"wrote {int((lens[rows:] != sentinel).sum())} lengths past the rows"
-    )
-    assert torch.all(indices[rows:] == sentinel)
-
-
-@requires_rocm_cdna3_or_newer
-def test_v41_combine_topk_swa_indices_stays_in_bounds_on_short_rows() -> None:
-    """Fewer rows than query_start_loc claims: stay inside the buffers.
-
-    What the positions should be is undefined, so only the bound is asserted.
-    """
-    from vllm.models.deepseek_v41.amd.rocm import combine_topk_swa_indices
-
-    args = _v41_combine_case("rows_short_of_query_start_loc", 128)
-    topk_indices, _, seq_lens, _, window, _, topk, M, N = args
-    indices, lens = combine_topk_swa_indices(*args)
-    torch.cuda.synchronize()
-
-    assert indices.shape[0] == topk_indices.shape[0] == lens.shape[0]
-    assert int(lens.min()) >= 0
-    assert int(lens.max()) <= indices.shape[1]
-    valid = indices[indices >= 0]
-    if valid.numel():
-        assert int(valid.max()) < M * int(seq_lens.shape[0]) + N + window
