@@ -83,8 +83,8 @@ class UVAOffloader(BaseOffloader):
         if self.cpu_offload_bytes >= self.cpu_offload_max_bytes:
             return module
 
-        # offload parameters to CPU
-        # use pin_memory if possible, which helps cudagraph capture speed
+        # Pin only the fallback path; the UVA helper allocates mapped host
+        # memory for unpinned tensors.
         offloaded_parameters = False
         for name, p in module.named_parameters():
             if self.cpu_offload_bytes >= self.cpu_offload_max_bytes:
@@ -111,7 +111,7 @@ class UVAOffloader(BaseOffloader):
                     continue
 
             cpu_data = p.data.to(device="cpu")
-            if self.pin_memory:
+            if self.pin_memory and not self.uva_offloading:
                 cpu_data = cpu_data.pin_memory()
 
             if not self.uva_offloading:
