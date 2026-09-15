@@ -47,8 +47,9 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   9: Add block_strides
 #  10: Add dense virtual transfer pages for compressed MLA caches
 #  11: Add per-region transfer geometry and memory types to NixlAgentMetadata
+#  12: Validate primary model revision compatibility
 #
-NIXL_CONNECTOR_VERSION: int = 11
+NIXL_CONNECTOR_VERSION: int = 12
 
 
 @dataclass
@@ -147,7 +148,8 @@ def compute_nixl_compatibility_hash(
 
     Factors included:
     - vLLM version and NIXL connector version
-    - Model architecture (name, dtype, KV heads, layers)
+    - Model identity and architecture (name, revision, code revision, dtype,
+      KV heads, layers)
     - KV cache format (dtype, sliding window)
     - Attention backend
     - EAGLE/MTP configuration that affects transferred state
@@ -178,8 +180,13 @@ def compute_nixl_compatibility_hash(
         # Version compatibility
         "vllm_version": vllm_version,
         "nixl_connector_version": NIXL_CONNECTOR_VERSION,
-        # Model architecture - affects KV cache shape
+        # Model identity and architecture
         "model": model_config.model,
+        # The model's ResolvedRevision stringifies as the requested ref (e.g.
+        # "main"); .resolved holds the immutable model commit actually loaded.
+        "revision": getattr(model_config.revision, "resolved", model_config.revision),
+        # Compare the supplied code revision; vLLM does not resolve it.
+        "code_revision": model_config.code_revision,
         "dtype": str(model_config.dtype),
         "num_kv_heads": model_config.get_total_num_kv_heads(),
         "head_size": model_config.get_head_size(),
