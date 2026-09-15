@@ -204,6 +204,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         self.top_k = top_k
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
+        self.unpadded_intermediate_size = intermediate_size
         self.num_shared_experts = num_shared_experts
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
 
@@ -386,6 +387,17 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         # the generic linear post-load hook replaces the raw checkpoint scales
         # with its 128x128 DeepGEMM layout.
         checkpoint_scale_dtypes = (torch.float8_e8m0fnu, torch.uint8)
+        unpadded_size = self.unpadded_intermediate_size * self.num_shared_experts
+        padding = self.intermediate_size * self.num_shared_experts - unpadded_size
+        pad_weights = (
+            padding > 0
+            and gate_up_weight.dtype == torch.float8_e4m3fn
+            and down_weight.dtype == torch.float8_e4m3fn
+            and gate_up_weight.shape == (2 * unpadded_size, self.hidden_size)
+            and down_weight.shape == (self.hidden_size, unpadded_size)
+            and gate_up_scale.dtype in checkpoint_scale_dtypes
+            and down_scale.dtype in checkpoint_scale_dtypes
+        )
         if (
             gate_up_scale.dtype in checkpoint_scale_dtypes
             and down_scale.dtype in checkpoint_scale_dtypes
@@ -396,6 +408,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
                 gate_up_scale,
                 gate_up_weight.shape[0],
                 gate_up_weight.shape[1],
+                padding=(padding, 0) if pad_weights else (0, 0),
             )
             down_scale = self._prepare_shared_expert_scale(
                 deep_gemm,
@@ -403,11 +416,26 @@ class DeepseekV4MegaMoEExperts(nn.Module):
                 down_scale,
                 down_weight.shape[0],
                 down_weight.shape[1],
+                padding=(0, padding) if pad_weights else (0, 0),
             )
 
         if gate_up_scale is None or down_scale is None:
             self.num_shared_experts = 0
             return
+
+        if pad_weights:
+            # Pad gate/up separately so the SwiGLU split stays at the midpoint.
+            gate_up_weight = (
+                torch.nn.functional.pad(
+                    gate_up_weight.view(torch.uint8).unflatten(0, (2, unpadded_size)),
+                    (0, 0, 0, padding),
+                )
+                .flatten(0, 1)
+                .view(gate_up_weight.dtype)
+            )
+            down_weight = torch.nn.functional.pad(
+                down_weight.view(torch.uint8), (0, padding)
+            ).view(down_weight.dtype)
 
         shared_intermediate_size = self.intermediate_size * self.num_shared_experts
         expected_gate_up_shape = (
@@ -449,11 +477,11 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         # released instead of adding roughly 0.7 GiB per rank on DSV4-Flash.
         # The generic linear post-load hook may still repack the serial scales,
         # but this shared MLP is never called after native fusion is enabled.
-        gate_up.weight.data = transformed_l1[0]
-        self._transformed_shared_l1_weights = (
-            gate_up.weight.data,
-            transformed_l1[1],
-        )
+        # Padded weights need separate storage: the generic linear post-load
+        # hooks still expect the original checkpoint weight/scale shapes.
+        if not pad_weights:
+            gate_up.weight.data = transformed_l1[0]
+        self._transformed_shared_l1_weights = transformed_l1
         self._transformed_shared_l2_weights = transformed_l2
 
     def _prepare_shared_expert_scale(
@@ -463,6 +491,8 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         scale: torch.Tensor,
         mn: int,
         k: int,
+        *,
+        padding: tuple[int, int] = (0, 0),
     ) -> torch.Tensor | None:
         block_size = getattr(linear, "weight_block_size", None)
         if block_size is None or len(block_size) != 2:
@@ -497,6 +527,19 @@ class DeepseekV4MegaMoEExperts(nn.Module):
             .repeat_interleave(block_k // 32, dim=1)[:mn, : k // 32]
             .contiguous()
         )
+        pad_m, pad_k = padding
+        if pad_m:
+            scale_1x32 = torch.nn.functional.pad(
+                scale_1x32.unflatten(0, (2, mn // 2)),
+                (0, 0, 0, pad_m),
+                value=1.0,
+            ).flatten(0, 1)
+            mn += 2 * pad_m
+        if pad_k:
+            scale_1x32 = torch.nn.functional.pad(
+                scale_1x32, (0, pad_k // 32), value=1.0
+            )
+            k += pad_k
         # The grouped API is used with a singleton dimension to request the
         # MN-major, TMA-aligned packed-UE8M0 strides, then squeezed back to the
         # 2D layout required for a shared expert.
