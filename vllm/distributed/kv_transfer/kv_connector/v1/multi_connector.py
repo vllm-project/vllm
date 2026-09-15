@@ -47,6 +47,7 @@ logger = init_logger(__name__)
 class MultiKVConnectorMetadata(KVConnectorMetadata):
     metadata: tuple[KVConnectorMetadata, ...]
     extra_async_saves: dict[str, int] | None = None
+    requests_to_connector: dict[str, int] | None = None
 
 
 @dataclass
@@ -202,6 +203,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         # A mapping from request id to the index of the connector chosen to
         # load the request from (if any).
         self._requests_to_connector: dict[str, int] = {}
+        self._new_requests_to_connector: dict[str, int] = {}
 
         # Keeps track of *additional* remaining async saves (beyond 1) to be
         # finished per request. Not needed for async loads since we only allow
@@ -272,6 +274,8 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         assert isinstance(connector_metadata, MultiKVConnectorMetadata)
         if connector_metadata.extra_async_saves:
             self._extra_async_saves.update(connector_metadata.extra_async_saves)
+        if connector_metadata.requests_to_connector:
+            self._requests_to_connector.update(connector_metadata.requests_to_connector)
         for c, cm in zip(self._connectors, connector_metadata.metadata):
             c.bind_connector_metadata(cm)
         super().bind_connector_metadata(connector_metadata)
@@ -340,9 +344,18 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         self, finished_req_ids: set[str]
     ) -> KVConnectorTransferResults:
         results = KVConnectorTransferResults()
-        for connector in self._connectors:
+        for i, connector in enumerate(self._connectors):
             child_results = connector.get_transfer_results(finished_req_ids)
-            results.finished_recving.update(child_results.finished_recving)
+            
+            # Aggregate finished recving request ids.
+            # Only trust the finished_recving signal from the connector
+            # that was actually assigned to load this request's KV.
+            for req_id in child_results.finished_recving:
+                if self._requests_to_connector.get(req_id, -1) == i:
+                    results.finished_recving.add(req_id)
+                    # Pop it so we don't return it again and avoid memory leak
+                    self._requests_to_connector.pop(req_id, None)
+
             results.failed_recving.update(child_results.failed_recving)
             for req_id in child_results.finished_sending:
                 extra_pending = self._extra_async_saves.get(req_id)
@@ -426,6 +439,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             # to this request.
             if to_return[0] == 0 and toks > 0:
                 self._requests_to_connector[request.request_id] = i
+                self._new_requests_to_connector[request.request_id] = i
                 to_return = (toks, load_async)
         return to_return
 
@@ -456,6 +470,9 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         if self._extra_async_saves:
             metadata.extra_async_saves = self._extra_async_saves
             self._extra_async_saves = {}
+        if self._new_requests_to_connector:
+            metadata.requests_to_connector = self._new_requests_to_connector
+            self._new_requests_to_connector = {}
         return metadata
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
