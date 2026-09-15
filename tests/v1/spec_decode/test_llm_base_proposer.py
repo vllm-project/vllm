@@ -31,6 +31,7 @@ class _FakeAttentionGroup:
         self.kernel_block_size = None
 
     def create_metadata_builders(self, vllm_config, device, kernel_block_size=None):
+        self.vllm_config = vllm_config
         self.kernel_block_size = kernel_block_size
 
     def get_metadata_builder(self):
@@ -110,3 +111,28 @@ def test_draft_layer_iteration_is_deterministic(monkeypatch: pytest.MonkeyPatch)
         assert len(proposer.draft_attn_groups) == 1
         assert proposer.draft_attn_groups[0].layer_names == expected_order
         assert proposer.block_size == KERNEL_BLOCK_SIZE
+
+
+def test_initialize_attn_backend_passes_draft_vllm_config(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Metadata builders for draft attention groups must receive
+    draft_vllm_config instead of target vllm_config to avoid attention
+    head mismatch issues (fixes #45669)."""
+    layer_names = {"draft.0.self_attn.attn"}
+    proposer = _make_proposer(monkeypatch, layer_names)
+
+    target_cfg = SimpleNamespace(name="target_config")
+    draft_cfg = SimpleNamespace(name="draft_config")
+    proposer.vllm_config = target_cfg
+    proposer._draft_vllm_config = draft_cfg
+
+    proposer.initialize_attn_backend(
+        _make_kv_cache_config(layer_names),
+        kernel_block_sizes=[KERNEL_BLOCK_SIZE],
+    )
+
+    assert len(proposer.draft_attn_groups) == 1
+    assert proposer.draft_attn_groups[0].vllm_config is draft_cfg
+    assert proposer.draft_attn_groups[0].vllm_config is not target_cfg
+
