@@ -47,12 +47,6 @@ meets_multi_gpu_requirements = pytest.mark.skipif(
     reason="Requires deep_ep or deep_gemm or flashinfer packages",
 )
 
-if current_platform.is_fp8_fnuz():
-    pytest.skip(
-        "Tests in this file require float8_e4m3fn and platform does not support",
-        allow_module_level=True,
-    )
-
 
 def format_result(verbose, msg, ex=None):
     if ex is not None:
@@ -68,6 +62,28 @@ def format_result(verbose, msg, ex=None):
         print(f"PASSED {msg}")
     else:
         print(".", end="")
+
+
+def assert_aiter_quant_scheme_case(config: Config) -> None:
+    """Make the AITER (weight_quant_key, activation_quant_key) pair this
+    config exercises explicit, instead of AiterExperts being reached only
+    indirectly through the general quant-config sweep.
+    See https://github.com/vllm-project/vllm/issues/54966."""
+    fe_cls = config.fused_experts_type
+    if getattr(fe_cls, "__name__", "") != "AiterExperts":
+        return
+
+    if config.quant_config is None:
+        w_key, a_key = None, None
+    else:
+        w_key, a_key = config.fp8_quant_key_pair()
+
+    assert fe_cls._supports_quant_scheme(w_key, a_key), (
+        f"AITER case (weight_key={w_key}, activation_key={a_key}) reached "
+        "the modular-kernel harness, but AiterExperts._supports_quant_scheme "
+        "does not declare it supported."
+    )
+    print(f"[AITER case] weight_key={w_key}, activation_key={a_key}")
 
 
 def rank_worker(
@@ -124,6 +140,25 @@ def rank_worker(
                 )
                 count -= 1
                 continue
+
+            # Skip unsupported: AITER x DeepEP-HT/Mori dispatch crashes
+            # with an illegal memory access at world_size>1 on gfx942.
+            # https://github.com/vllm-project/vllm/issues/57029
+            if (
+                config.world_size > 1
+                and getattr(config.fused_experts_type, "__name__", "") == "AiterExperts"
+                and getattr(config.prepare_finalize_type, "__name__", "")
+                in ("DeepEPHTPrepareAndFinalize", "MoriPrepareAndFinalize")
+            ):
+                print(
+                    f"Skipping[{pgi.rank}]: m={m}, topk={topk}"
+                    " (AITER x DeepEP-HT/Mori illegal memory access,"
+                    " https://github.com/vllm-project/vllm/issues/57029)"
+                )
+                count -= 1
+                continue
+
+            assert_aiter_quant_scheme_case(config)
 
             # modular kernel out
             mk_out = run_modular_kernel(pgi, vllm_config, config, weights, rank_tensors)
