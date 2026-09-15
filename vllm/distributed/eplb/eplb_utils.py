@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility functions for EPLB (Expert Parallel Load Balancing)."""
 
+import contextlib
 import os
 import threading
 
@@ -11,6 +12,22 @@ from vllm.config import ParallelConfig
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+
+@contextlib.contextmanager
+def device_stream(stream: torch.Stream | None):
+    """Platform-agnostic context manager that activates *stream* as the
+    current accelerator stream for the duration of the ``with`` block.
+    A no-op when *stream* is ``None``."""
+    if stream is None:
+        yield
+        return
+    prev = torch.accelerator.current_stream()
+    torch.accelerator.set_stream(stream)
+    try:
+        yield
+    finally:
+        torch.accelerator.set_stream(prev)
 
 
 class CpuGpuEvent:
@@ -31,10 +48,10 @@ class CpuGpuEvent:
     """
 
     def __init__(self):
-        self._event = torch.cuda.Event()
+        self._event = torch.Event()
         self._recorded = threading.Event()
 
-    def wait(self, stream: torch.cuda.Stream | None = None):
+    def wait(self, stream: torch.Stream | None = None):
         """
         Blocks the calling thread until record finishes. Used to guarantee that the
         record kernel is called before wait.
@@ -45,7 +62,7 @@ class CpuGpuEvent:
         self._event.wait(stream)
         self._recorded.clear()
 
-    def record(self, stream: torch.cuda.Stream | None = None):
+    def record(self, stream: torch.Stream | None = None):
         """
         Unblocks the waiting thread after calling event.record().
 
@@ -56,7 +73,7 @@ class CpuGpuEvent:
                 "CpuGpuEvent.record() called before the previous event was "
                 "consumed by wait()"
             )
-        self._event = torch.cuda.Event()
+        self._event = torch.Event()
         self._event.record(stream)
         self._recorded.set()
 
