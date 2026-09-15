@@ -9,8 +9,8 @@ use vllm_tokenizer::{DecodedText, DynTokenizer, TokenAnchor, TokenAttribution};
 use super::{
     CohereCmdReasoningParser, DeepSeekR1ReasoningParser, DelimitedReasoningParser,
     DelimitedReasoningParserBuilder, KimiReasoningParser, MiniMaxM3ReasoningParser,
-    Qwen3ReasoningParser, ReasoningDelta, ReasoningParser, Result, SeedOssReasoningParser,
-    Step3p5ReasoningParser,
+    PoolsideV1ReasoningParser, Qwen3ReasoningParser, ReasoningDelta, ReasoningParser, Result,
+    SeedOssReasoningParser, Step3p5ReasoningParser,
 };
 
 pub(crate) const THINK_START_ID: u32 = 256;
@@ -462,4 +462,42 @@ fn delimited_framing_preserves_body_token_attributions() {
     assert_eq!(collected.content_text, "    answer");
     assert_eq!(collected.reasoning_ids, [3, 4]);
     assert_eq!(collected.content_ids, [9]);
+}
+
+#[test]
+fn poolside_v1_content_without_prompt_boundary() {
+    // With no prompt boundary the shared state machine defaults to content, so
+    // a stray `</think>` in the stream is not treated as a reasoning close.
+    let tokenizer = Arc::new(fake_tokenizer());
+    let mut parser = PoolsideV1ReasoningParser::new(tokenizer).unwrap();
+
+    let delta = push_str(&mut parser, "reason</think>answer");
+    assert_eq!(delta.reasoning, None);
+    assert_eq!(content_str(&delta), Some("reason</think>answer"));
+}
+
+#[test]
+fn poolside_v1_thinking_turn_starts_in_reasoning() {
+    // The Laguna template renders `<assistant><think>` when thinking is
+    // enabled, so the prompt boundary opens the completion inside reasoning.
+    let tokenizer = Arc::new(fake_tokenizer());
+    let mut parser = PoolsideV1ReasoningParser::new(tokenizer).unwrap();
+    parser.initialize(&[THINK_START_ID]).unwrap();
+
+    let delta = push_str(&mut parser, "reason</think>answer");
+    assert_eq!(reasoning_str(&delta), Some("reason"));
+    assert_eq!(content_str(&delta), Some("answer"));
+}
+
+#[test]
+fn poolside_v1_non_thinking_turn_starts_in_content() {
+    // The Laguna template renders `<assistant></think>` when thinking is
+    // disabled, so the prompt boundary starts the completion in content.
+    let tokenizer = Arc::new(fake_tokenizer());
+    let mut parser = PoolsideV1ReasoningParser::new(tokenizer).unwrap();
+    parser.initialize(&[THINK_END_ID]).unwrap();
+
+    let delta = push_str(&mut parser, "answer");
+    assert_eq!(delta.reasoning, None);
+    assert_eq!(content_str(&delta), Some("answer"));
 }
