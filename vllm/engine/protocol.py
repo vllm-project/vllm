@@ -36,6 +36,11 @@ class StreamingInput:
 
     prompt: EngineInput
     sampling_params: SamplingParams | None = None
+    segment_id: int | None = None
+    truncate_to_token: int | None = None
+    audio_history_token_end: int | None = None
+    new_audio_feature_count: int = 0
+    final_segment: bool = False
 
 
 class EngineClient(ABC):
