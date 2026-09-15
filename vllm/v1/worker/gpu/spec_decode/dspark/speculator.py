@@ -136,7 +136,7 @@ class DSparkSpeculator(DFlashSpeculator):
         # sample_pos is the predicted token's position P. Sampling keys a draw
         # by the position before the sampled token, P-1.
         if self.draft_watermarker is not None:
-            return self.draft_watermarker.sample_draft(
+            return self.draft_watermarker.sample(
                 logits,
                 idx_mapping=idx_map,
                 temperature=self.temperature,

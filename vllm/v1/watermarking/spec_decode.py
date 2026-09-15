@@ -63,31 +63,6 @@ class DraftWatermarker:
         self.prompt_lens = prompt_lens
         self.total_lens = total_lens
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        ordinary_sampled: torch.Tensor,
-        idx_mapping: torch.Tensor,
-        temperature: torch.Tensor,
-        draft_step: int | torch.Tensor,
-    ) -> torch.Tensor:
-        num_rows = logits.shape[0]
-        request_temperatures = temperature[idx_mapping]
-        processed_logits = logits / torch.where(
-            request_temperatures == 0, 1, request_temperatures
-        ).unsqueeze(-1)
-        contexts = self.contexts[:num_rows]
-        watermarked = self.watermarker.sample(
-            processed_logits,
-            contexts,
-        ).token_ids
-        steps, enabled = self._sampling_state(
-            logits, idx_mapping, request_temperatures, draft_step, contexts
-        )
-        sampled = torch.where(enabled, watermarked, ordinary_sampled)
-        contexts.copy_(torch.cat((contexts[:, 1:], sampled.unsqueeze(-1)), dim=-1))
-        return sampled
-
     def _sampling_state(
         self,
         logits: torch.Tensor,
@@ -120,7 +95,7 @@ class DraftWatermarker:
         )
         return steps, enabled
 
-    def sample_draft(
+    def sample(
         self,
         logits: torch.Tensor,
         *,

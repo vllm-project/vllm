@@ -413,7 +413,7 @@ class DraftModelSpeculator(BaseSpeculator):
         if draft_logits is not None:
             logits = self.model.compute_logits(hidden_states)
             if self.draft_watermarker is not None:
-                sampled = self.draft_watermarker.sample_draft(
+                sampled = self.draft_watermarker.sample(
                     logits,
                     idx_mapping=idx_mapping,
                     temperature=temperature,
