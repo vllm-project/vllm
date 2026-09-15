@@ -349,7 +349,11 @@ __device__ __forceinline__ void writeDsMlaCache(
   for (int offset = 4; offset > 0; offset /= 2) {
     max_abs = fmaxf(max_abs, VLLM_SHFL_XOR_SYNC_WIDTH(max_abs, offset, 8));
   }
-  float const tile_scale = fmaxf(max_abs / kFp8ScaleDivisor, FLT_MIN);
+  float tile_scale = fmaxf(max_abs / kFp8ScaleDivisor, FLT_MIN);
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000 && __CUDA_ARCH__ < 1100
+  // FlashMLA's SM100 reader consumes the scale as E8M0.
+  tile_scale = exp2f(ceilf(log2f(tile_scale)));
+#endif
   if ((laneId & 7) == 0) {
     reinterpret_cast<float*>(row)[kKvLoraRank / 4 + tile] = tile_scale;
   }
