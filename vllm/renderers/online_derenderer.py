@@ -4,7 +4,10 @@ from typing import Any
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
-from vllm.entrypoints.generate.base.protocol import DeltaMessage, ToolCall
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaMessage,
+    ToolCall,
+)
 from vllm.entrypoints.generate.base.serving import resolve_token_id_placeholder
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProbs,
@@ -29,6 +32,9 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
 )
 from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.entrypoints.serve.utils.tool_calls_utils import (
+    maybe_filter_parallel_tool_calls,
+)
 from vllm.logger import init_logger
 from vllm.parser import Parser, ParserManager
 from vllm.renderers import BaseRenderer
@@ -93,6 +99,11 @@ class OnlineDerenderer:
         self._derender_completion_async = make_async(
             self._derender_completion, executor=renderer._executor
         )
+        # Replay is O(n) per chunk (unlike the O(delta) detok-only paths),
+        # so it must not run on the event loop either.
+        self._derender_chat_stream_parsed_async = make_async(
+            self._derender_chat_stream_parsed, executor=renderer._executor
+        )
 
     async def derender_chat(
         self,
@@ -142,6 +153,7 @@ class OnlineDerenderer:
                     tokenizer,
                     chat_request.tools,
                     chat_template_kwargs=chat_template_kwargs,
+                    model_config=self.model_config,
                 )
                 reasoning, content, tool_calls = parser.parse(
                     decoded_text,
@@ -275,23 +287,30 @@ class OnlineDerenderer:
         state: DerenderStreamState | None = None,
         chat_request: ChatCompletionRequest | None = None,
         prompt_tokens: int | None = None,
+        prompt_token_ids: list[int] | None = None,
     ) -> tuple[ChatCompletionStreamResponse, DerenderStreamState]:
         """Process one GenerateStreamResponse chunk for streaming chat derender.
 
-        TODO: parse path for reasoning and tool calls is implemented in future PR.
-
-        Unlike OpenAI's API, which always emits ``role: "assistant"`` on the
+        Unlike OpenAI's API, which always emits `role: "assistant"` on the
         very first chunk, this emits it on the first chunk with a non empty
-        ``choices`` list. A leading usage only chunk therefore defers the
+        `choices` list. A leading usage only chunk therefore defers the
         role to the following content chunk instead of sending an empty
         role only delta.
 
         Args:
             model: Model name for the response object.
-            generate_chunk: One SSE chunk from ``/inference/v1/generate``.
-            state: Client carried detok state (``None`` for first call).
-            chat_request: Original ChatCompletionRequest from ``/render``.
+            generate_chunk: One SSE chunk from `/inference/v1/generate`.
+            state: Client carried detok state (`None` for first call).
+            chat_request: Original ChatCompletionRequest from `/render`.
+                Required when a reasoning or tool parser is configured
+                (validated by the caller — see `ServingDerender`) because
+                plain detokenization would leak raw parser markup into `content`.
             prompt_tokens: Prompt token count for the usage chunk.
+            prompt_token_ids: Prompt token IDs. Parser path onlyThe IDs lets
+                `parse_delta` settle its initial reasoning state. Required
+                when a reasoning or tool parser is configured (validated by
+                the caller — see ``ServingDerender``). Without it reasoning
+                left open by the prompt would be misclassified as content.
 
         Returns:
             (chunk, updated_state) — the derendered SSE chunk and the state
@@ -300,26 +319,34 @@ class OnlineDerenderer:
         if state is None:
             state = DerenderStreamState()
 
-        if self.parser is not None:
-            # TODO: Follow on PR will implement the parse path.  Check on the
-            # parser alone (fail closed). A parser configured model must never
-            # fall through to plain detok on the streaming path, even when
-            # ``chat_request`` is omitted or reasoning/tool markup would leak
-            # into ``delta.content``.
-            raise NotImplementedError(
-                "Streaming chat derender is not yet supported for models with "
-                "a reasoning or tool parser configured. Use the non-streaming "
-                "derender endpoint (stream=false) for parsed output."
-            )
-
         # A single DerenderStreamState is threaded through every choice in
         # this chunk. Correct only when there is at most one choice per SSE
         # event (n=1, one call per index), as the streaming derender
         # protocol assumes. Multiple choices sharing one chunk would corrupt
-        # each other's detok window.
+        # each other's detok/parser state.
         if len(generate_chunk.choices) > 1:
             raise ValueError(
                 "derender_chat_stream expects at most one choice per chunk"
+            )
+
+        parser_cls = self.parser
+        if parser_cls is not None:
+            # Fail (mirrors ServingDerender's pre-check) because a parser
+            # configured model must never fall through to plain detok or
+            # reasoning/tool markup would leak into `delta.content`.
+            if chat_request is None:
+                raise ValueError(
+                    "chat_request is required for streaming chat derender "
+                    "when a tool or reasoning parser is configured"
+                )
+            return await self._derender_chat_stream_parsed_async(
+                parser_cls,
+                model,
+                generate_chunk,
+                state,
+                chat_request,
+                prompt_tokens,
+                prompt_token_ids,
             )
 
         tokenizer = self.renderer.get_tokenizer()
@@ -350,6 +377,203 @@ class OnlineDerenderer:
                     finish_reason=choice.finish_reason,
                 )
             )
+
+        usage: UsageInfo | None = None
+        if generate_chunk.usage is not None:
+            u = generate_chunk.usage
+            pt = prompt_tokens if prompt_tokens is not None else (u.prompt_tokens or 0)
+            ct = u.completion_tokens or 0
+            usage = UsageInfo(
+                prompt_tokens=pt,
+                completion_tokens=ct,
+                total_tokens=pt + ct,
+            )
+
+        chunk = ChatCompletionStreamResponse(
+            id=generate_chunk.request_id,
+            model=model,
+            choices=stream_choices,
+            usage=usage,
+        )
+        return chunk, updated_state
+
+    def _derender_chat_stream_parsed(
+        self,
+        parser_cls: type[Parser],
+        model: str,
+        generate_chunk: GenerateStreamResponse,
+        state: DerenderStreamState,
+        chat_request: ChatCompletionRequest,
+        prompt_tokens: int | None,
+        prompt_token_ids: list[int] | None,
+    ) -> tuple[ChatCompletionStreamResponse, DerenderStreamState]:
+        """Parser path for streaming chat derender: replay + `parse_delta`.
+
+        Parser internal state (buffered markup, reasoning/tool phase, etc.)
+        cannot be serialized into `DerenderStreamState`, so each call
+        builds a fresh parser and replays every prior output token through
+        `parse_delta` (discarding the result) before processing this
+        chunk's tokens for real.
+
+        Replay is fed one token at a time through a fresh incremental
+        detokenizer with special tokens preserved (``skip_special_tokens=
+        False``), since `DerenderStreamState` only carries a flat
+        `output_token_ids` list and not the original per chunk boundaries
+        those tokens arrived in. This makes replay's parser state
+        reconstruction independent of how the client chunked prior calls.
+
+        The current chunk's tokens by contrast are fed to `parse_delta`
+        in a single call using their own `token_ids`/text as given, i.e.
+        the same granularity `generate_chunk` arrived with. This matches
+        the standard (non derender) streaming path which calls
+        `parse_delta` once per engine step with that step's full
+        `delta_token_ids` (more than one token under e.g. speculative
+        decoding) rather than one call per token.
+        """
+        tokenizer = self.renderer.get_tokenizer()
+
+        chat_template_kwargs: dict[str, Any] = {}
+        if not self.use_harmony:
+            chat_template_kwargs = (
+                chat_request.build_chat_params(
+                    self.chat_template,
+                    self.chat_template_content_format,
+                )
+                .with_defaults(self.default_chat_template_kwargs)
+                .chat_template_kwargs
+            )
+
+        parser = parser_cls(
+            tokenizer,
+            chat_request.tools,
+            chat_template_kwargs=chat_template_kwargs,
+            model_config=self.model_config,
+        )
+
+        # Ephemeral incremental detok window, local to this call. Threaded
+        # across both the replay and current chunk phases (via `nonlocal`)
+        # so multi-byte characters split across that boundary still decode
+        # correctly. Discarded once the call returns.
+        detok_state = DerenderStreamState()
+
+        def _replay(token_ids: list[int]) -> None:
+            """Feed prior output tokens through `parse_delta` one at a
+            time discarding the result. Only reconstructs parser state and
+            never `finished` since that only applies to the current chunk.
+            """
+            nonlocal detok_state
+            for tok_id in token_ids:
+                text, detok_state = self._detokenize_delta(
+                    tokenizer, [tok_id], detok_state, skip_special_tokens=False
+                )
+                parser.parse_delta(
+                    text,
+                    [tok_id],
+                    chat_request,
+                    prompt_token_ids=prompt_token_ids,
+                    finished=False,
+                )
+
+        # Replay history to reconstruct parser state. The result is thrown
+        # away and only the current chunk's emission goes to the client.
+        _replay(state.output_token_ids)
+
+        stream_choices: list[ChatCompletionResponseStreamChoice] = []
+        output_token_ids = list(state.output_token_ids)
+        role_sent = state.role_sent
+        tools_streamed = state.tools_streamed
+        last_tool_call_ids = list(state.last_tool_call_ids)
+
+        # At most one choice: the caller (derender_chat_stream) already
+        # rejects >1 before dispatching here. role_sent/tools_streamed/
+        # output_token_ids below are updated for that single choice, not
+        # accumulated across choices. Looping over generate_chunk.choices
+        # could silently corrupt output if chunks were ever allowed to
+        # contain multiple choices.
+        if generate_chunk.choices:
+            choice = generate_chunk.choices[0]
+            delta_tids = choice.token_ids or []
+            is_finished = choice.finish_reason is not None
+
+            if delta_tids:
+                # One parse_delta call for the whole chunk (producer
+                # granularity), not one per token. See the granularity note
+                # in this method's docstring.
+                text, detok_state = self._detokenize_delta(
+                    tokenizer, delta_tids, detok_state, skip_special_tokens=False
+                )
+                delta_message = parser.parse_delta(
+                    text,
+                    delta_tids,
+                    chat_request,
+                    prompt_token_ids=prompt_token_ids,
+                    finished=is_finished,
+                )
+            elif is_finished:
+                # Finish only chunk (no new tokens). Still flush any
+                # buffered tool call arguments.
+                delta_message = parser.parse_delta(
+                    "",
+                    [],
+                    chat_request,
+                    prompt_token_ids=prompt_token_ids,
+                    finished=True,
+                )
+            else:
+                delta_message = None
+
+            output_token_ids.extend(delta_tids)
+
+            if delta_message is None:
+                delta_message = DeltaMessage()
+
+            if delta_message.tool_calls:
+                tools_streamed = True
+                for tc in delta_message.tool_calls:
+                    if tc.id is None:
+                        continue
+                    if tc.index < len(last_tool_call_ids):
+                        # Pin: reuse the ID already recorded for this index
+                        # rather than one a from scratch replay regenerated.
+                        # Real trigger not just defensive with
+                        # tool_choice="required",
+                        # extract_required_tool_call_streaming resets
+                        # function_name_returned to False whenever the
+                        # partial JSON transiently fails to parse which
+                        # re-emits id+name for the same index on replay.
+                        tc.id = last_tool_call_ids[tc.index]
+                    else:
+                        last_tool_call_ids.append(tc.id)
+
+            if not role_sent:
+                delta_message.role = "assistant"
+                role_sent = True
+
+            finish_reason = choice.finish_reason
+            if finish_reason is not None:
+                is_named_tool_choice = (
+                    type(chat_request.tool_choice) is ChatCompletionNamedToolChoiceParam
+                )
+                if tools_streamed and not is_named_tool_choice:
+                    finish_reason = "tool_calls"
+
+            stream_choice = ChatCompletionResponseStreamChoice(
+                index=choice.index,
+                delta=delta_message,
+                finish_reason=finish_reason,
+            )
+            stream_choices.append(
+                maybe_filter_parallel_tool_calls(stream_choice, chat_request)
+            )
+
+        updated_state = state.model_copy(
+            update={
+                "output_token_ids": output_token_ids,
+                "role_sent": role_sent,
+                "tools_streamed": tools_streamed,
+                "last_tool_call_ids": last_tool_call_ids,
+            }
+        )
 
         usage: UsageInfo | None = None
         if generate_chunk.usage is not None:
