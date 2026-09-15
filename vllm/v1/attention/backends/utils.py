@@ -8,6 +8,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Protocol,
+    TypeVar,
     cast,
 )
 
@@ -44,6 +45,19 @@ logger = init_logger(__name__)
 
 PAD_SLOT_ID = -1
 NULL_BLOCK_ID = 0
+
+
+ImplT = TypeVar("ImplT", bound=AttentionImpl)
+
+
+def find_attention_impl_variant(
+    impl: AttentionImpl, impl_cls: type[ImplT]
+) -> ImplT | None:
+    for variant in impl.get_impl_variants():
+        if isinstance(variant, impl_cls):
+            return cast(ImplT, variant)
+    return None
+
 
 _LN_2 = math.log(2.0)
 
@@ -342,8 +356,8 @@ def get_per_layer_parameters(
     per_layer_params: dict[str, PerLayerParameters] = {}
 
     for key, layer in layers.items():
-        impl = layer.impl
-        assert isinstance(impl, cls_)
+        impl = find_attention_impl_variant(layer.impl, cls_)
+        assert impl is not None
 
         # Infer hyperparameters from the attention layer
         window_size = getattr(impl, "sliding_window", None)
@@ -478,7 +492,7 @@ def make_local_attention_virtual_batches(
     query_start_loc_np = common_attn_metadata.query_start_loc_cpu.numpy()
     with gpu_sync_allowed():
         # TODO see https://github.com/vllm-project/vllm/pull/31852
-        seq_lens_np = common_attn_metadata.seq_lens_cpu.numpy()
+        seq_lens_np = common_attn_metadata.seq_lens.cpu().numpy()
     block_table = common_attn_metadata.block_table_tensor
     device = common_attn_metadata.query_start_loc.device
 
@@ -541,8 +555,6 @@ def make_local_attention_virtual_batches(
     #   seqlens_k_local = [4, 2, 4, 4, 4, 1, 4, 1]
     seqlens_k_local = np.full(cu_num_blocks[-1], attn_chunk_size, dtype=np.int32)
     seqlens_k_local[cu_num_blocks - 1] = tokens_in_last_block
-    num_computed_tokens_local = seqlens_k_local - seqlens_q_local
-
     k_seqstarts_absolute = np.repeat(seq_lens_np, local_blocks) - (
         rarange * attn_chunk_size + np.repeat(tokens_in_last_block, local_blocks)
     )
@@ -612,9 +624,7 @@ def make_local_attention_virtual_batches(
         block_table_tensor=block_table_local,
         slot_mapping=common_attn_metadata.slot_mapping,
         causal=True,
-        seq_lens_cpu_upper_bound=common_attn_metadata.seq_lens_cpu_upper_bound,
-        _seq_lens_cpu=seq_lens_cpu,
-        _num_computed_tokens_cpu=torch.from_numpy(num_computed_tokens_local),
+        seq_lens_cpu_upper_bound=seq_lens_cpu,
     ), make_block_table
 
 
@@ -626,8 +636,13 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
         # Skip computing fast prefill path
         return common_attn_metadata
 
-    assert common_attn_metadata.logits_indices_padded is not None
-    assert common_attn_metadata.num_logits_indices is not None
+    if (
+        common_attn_metadata.logits_indices_padded is None
+        or common_attn_metadata.num_logits_indices is None
+    ):
+        # Fast prefill not armed for this step (e.g. cudagraph capture, or a
+        # pure-decode step): run the KV-sharing layers on the full batch.
+        return common_attn_metadata
 
     logits_indices_padded = common_attn_metadata.logits_indices_padded
     num_logits_indices = common_attn_metadata.num_logits_indices
@@ -687,8 +702,6 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
         slot_mapping=common_attn_metadata.slot_mapping,
         causal=True,
         seq_lens_cpu_upper_bound=common_attn_metadata.seq_lens_cpu_upper_bound,
-        _seq_lens_cpu=common_attn_metadata._seq_lens_cpu,
-        _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
     )
     return common_attn_metadata
 
@@ -1014,6 +1027,9 @@ def create_fast_prefill_custom_backend(
                         common_attn_metadata.logits_indices_padded
                     )
                     self.num_logits_indices = common_attn_metadata.num_logits_indices
+                    self._attention_backend_variant = getattr(
+                        metadata, "_attention_backend_variant", 0
+                    )
 
             return KVSharingFastPrefillAttentionMetadata(metadata, common_attn_metadata)
 
@@ -1078,7 +1094,7 @@ def compute_causal_conv1d_metadata(
 def get_dcp_local_seq_lens(
     seq_lens: torch.Tensor,
     dcp_size: int = 1,
-    dcp_rank: int | None = None,
+    dcp_rank: int | torch.Tensor | None = None,
     cp_kv_cache_interleave_size: int = 1,
 ) -> torch.Tensor:
     """While using dcp, kv_cache size stored on each rank may be different,
@@ -1096,6 +1112,12 @@ def get_dcp_local_seq_lens(
             dcp_size,
         )
         seq_lens_tiled = seq_lens_i32.unsqueeze(-1)
+    elif isinstance(dcp_rank, torch.Tensor):
+        assert dcp_rank.dtype == torch.int32
+        assert dcp_rank.device == seq_lens.device
+        assert dcp_rank.numel() == 1
+        rank_offsets = dcp_rank
+        seq_lens_tiled = seq_lens_i32
     else:
         rank_offsets = torch.tensor(dcp_rank, dtype=torch.int32, device=seq_lens.device)
         seq_lens_tiled = seq_lens_i32

@@ -131,6 +131,7 @@ RUN dnf install -y --setopt=install_weak_deps=False \
         git \
         curl \
         sudo \
+        elfutils-devel \
         rdma-core-devel \
     && dnf clean all \
     && rm -rf /var/cache/dnf
@@ -960,7 +961,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # Install FlashInfer JIT cache (requires CUDA-version-specific index URL)
 # https://docs.flashinfer.ai/installation.html
 # From versions.json: .flashinfer.version
-ARG FLASHINFER_VERSION=0.6.18
+ARG FLASHINFER_VERSION=0.6.18.post1
 RUN --mount=type=cache,target=/opt/uv/cache \
     if [ "${INSTALL_RUBIN_PRERELEASE}" != "true" ]; then \
         uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
