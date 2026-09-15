@@ -27,6 +27,9 @@ def _run_eagle_correctness(
     model_impl: str,
     attn_backend: str,
     vllm_runner,
+    *,
+    parallel_drafting: bool = False,
+    num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None,
 ):
     """
     Compare the outputs of an original LLM and a speculative LLM
@@ -75,6 +78,18 @@ def _run_eagle_correctness(
         max_model_len = 2048
         max_num_batched_tokens = 128 if enable_chunked_prefill else max_model_len
 
+        speculative_config = {
+            "method": method,
+            "model": spec_model_name,
+            "num_speculative_tokens": 3,
+            "max_model_len": max_model_len,
+            "parallel_drafting": parallel_drafting,
+        }
+        if num_speculative_tokens_per_batch_size is not None:
+            speculative_config["num_speculative_tokens_per_batch_size"] = (
+                num_speculative_tokens_per_batch_size
+            )
+
         with vllm_runner(
             model_name,
             block_size=None,
@@ -97,12 +112,7 @@ def _run_eagle_correctness(
             block_size=None,
             trust_remote_code=True,
             tensor_parallel_size=tp_size,
-            speculative_config={
-                "method": method,
-                "model": spec_model_name,
-                "num_speculative_tokens": 3,
-                "max_model_len": max_model_len,
-            },
+            speculative_config=speculative_config,
             max_model_len=max_model_len,
             max_num_batched_tokens=max_num_batched_tokens,
             enable_chunked_prefill=enable_chunked_prefill,

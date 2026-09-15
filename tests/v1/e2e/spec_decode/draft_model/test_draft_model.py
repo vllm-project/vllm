@@ -36,6 +36,7 @@ class ArgsTest:
     # Defaults
     enforce_eager: bool = True
     parallel_drafting: bool = False
+    num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None
     target_tensor_parallel_size: int = 1
     draft_tensor_parallel_size: int = 1
     max_model_len: int = 2048
@@ -121,6 +122,24 @@ def test_draft_model_parallel_drafting(vllm_runner):
         enforce_eager=False,
         expected_acceptance_len=2.3,  # ref: 2.52
         expected_acceptance_rate=0.4,  # ref: 0.51
+    )
+    assert_draft_model_correctness(args, vllm_runner)
+
+
+@single_gpu_only
+def test_draft_model_parallel_drafting_dynamic_sd(vllm_runner):
+    """PARD remains correct when Dynamic SD lowers the runtime draft length."""
+    args = ArgsTest(
+        target_model="Qwen/Qwen3-1.7B",
+        draft_model="amd/PARD-Qwen3-0.6B",
+        dataset="likaixin/InstructCoder",
+        num_speculative_tokens=3,
+        num_speculative_tokens_per_batch_size=[(1, 32, 3), (33, 100, 1)],
+        sampling_config=greedy_sampling(),
+        parallel_drafting=True,
+        enforce_eager=False,
+        expected_acceptance_len=1.5,
+        expected_acceptance_rate=0.25,
     )
     assert_draft_model_correctness(args, vllm_runner)
 
@@ -315,21 +334,27 @@ def assert_draft_model_correctness(args: ArgsTest, vllm_runner):
         dataset=args.dataset, n=args.num_prompts
     )
 
+    speculative_config = {
+        "model": args.draft_model,
+        "method": "draft_model",
+        "num_speculative_tokens": args.num_speculative_tokens,
+        "max_model_len": args.max_model_len,
+        "enforce_eager": args.enforce_eager,
+        "draft_tensor_parallel_size": args.draft_tensor_parallel_size,
+        "parallel_drafting": args.parallel_drafting,
+    }
+    if args.num_speculative_tokens_per_batch_size is not None:
+        speculative_config["num_speculative_tokens_per_batch_size"] = (
+            args.num_speculative_tokens_per_batch_size
+        )
+
     with vllm_runner(
         args.target_model,
         block_size=None,
         trust_remote_code=False,
         enable_chunked_prefill=None,
         compilation_config=CompilationConfig(),
-        speculative_config={
-            "model": args.draft_model,
-            "method": "draft_model",
-            "num_speculative_tokens": args.num_speculative_tokens,
-            "max_model_len": args.max_model_len,
-            "enforce_eager": args.enforce_eager,
-            "draft_tensor_parallel_size": args.draft_tensor_parallel_size,
-            "parallel_drafting": args.parallel_drafting,
-        },
+        speculative_config=speculative_config,
         max_num_seqs=100,  # limit cudagraph capture runtime
         max_model_len=args.max_model_len,
         gpu_memory_utilization=args.gpu_memory_utilization,

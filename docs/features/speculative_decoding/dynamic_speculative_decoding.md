@@ -71,6 +71,8 @@ VLLM_USE_V2_MODEL_RUNNER=0 vllm serve meta-llama/Llama-3.1-8B-Instruct \
 
 ## Limitations
 
-* Tested with Eagle, Eagle-3, and DFlash. Other SD methods may or may not work out of the box
+* Tested with Eagle, Eagle-3, DFlash, PARD (`draft_model` with
+  `parallel_drafting: true`), and P-Eagle (`eagle` / `eagle3` with
+  `parallel_drafting: true`). Other SD methods may or may not work out of the box
 * Full Cudagraph only works with Model Runner V2. MRv1 only supports piece-wise cuda graph with this feature
 * Not compatible with data parallelism (`--data-parallel-size > 1`). Each DP rank schedules independently, so ranks can pick different K values, causing DP collective divergence and deadlocks. When DP is enabled, vLLM automatically disables `num_speculative_tokens_per_batch_size` and falls back to the static `num_speculative_tokens` value.
