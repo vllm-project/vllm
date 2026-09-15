@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
+
 import torch
 import torch.nn as nn
 
@@ -31,7 +33,7 @@ def deep_gemm_fp8_o_proj(
     positions: torch.Tensor,
     cos_sin_cache: torch.Tensor,
     wo_a: nn.Module,
-    wo_b: nn.Module,
+    wo_b: Callable[[torch.Tensor], torch.Tensor],
     *,
     n_groups: int,
     heads_per_group: int,

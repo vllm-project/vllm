@@ -428,7 +428,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             x = sp_all_gather(x)[: positions.shape[0]]
 
         x = self.attn(positions, x, None)
-        if self.use_sequence_parallel:
+        if self.use_sequence_parallel and self.attn.wo_b_reduce_scatter is None:
             x = sp_reduce_scatter(x)
 
         residual, post_mix, res_mix, x, ffn_pre, _ = mhc_shifted_post_pre(
@@ -527,6 +527,11 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             ),
             prefix=f"{prefix}.layers",
         )
+
+        if envs.VLLM_DSV41_GEMM_RS:
+            from .ops.gemm_rs import enable_wo_b_gemm_rs
+
+            enable_wo_b_gemm_rs(self.layers, vllm_config)
 
         # The n-gram hash needs a slot-keyed rolling store of compressed ids
         # (chunked prefill / decode lookback); key it off the first local
