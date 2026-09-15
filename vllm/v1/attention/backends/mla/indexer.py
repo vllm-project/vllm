@@ -10,7 +10,7 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
-from vllm.model_executor.warmup.jit_warmup import kernel_launcher
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher, zip_inputs
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonPointerInputVariant,
@@ -27,7 +27,7 @@ from vllm.utils.deep_gemm import (
 )
 from vllm.utils.math_utils import round_down
 from vllm.utils.platform_utils import num_compute_units
-from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -47,7 +47,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
 )
-from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 
 logger = init_logger(__name__)
 
@@ -338,14 +337,14 @@ def build_pcp_global_chunk_plan(
             + local
         )
 
-    cu = async_copy_to_gpu(cu, device=device)
+    cu = async_tensor_h2d(cu, device=device)
     return PCPGlobalChunkPlan(
         row_start_cu=cu[0],
         global_cu=cu[1],
         padded_local_cu=cu[2],
         padded_local_total=padded_total,
         total=total,
-        deinterleave_idx=async_copy_to_gpu(idx, device=device),
+        deinterleave_idx=async_tensor_h2d(idx, device=device),
     )
 
 
@@ -493,6 +492,14 @@ class BuildPrefillChunkMetadataKernel(
         dcp_world = parallel_config.decode_context_parallel_size
         dcp_interleave = parallel_config.cp_kv_cache_interleave_size
         dcp_rank = get_dcp_group().rank_in_group if dcp_world > 1 else 0
+        dcp_cases = [dict(DCP_RANK=dcp_rank, DCP_WORLD=dcp_world)]
+        if parallel_config.prefill_context_parallel_size > 1 and dcp_world > 1:
+            # PCP+DCP prefill constructs a global PCP chunk plan and therefore
+            # dispatches this kernel with already-localized row starts. The
+            # runtime key is normalized to rank 0/world 1 in that path; warm it
+            # explicitly so one PCP rank cannot enter a collective while
+            # another rank is still compiling the first real inference batch.
+            dcp_cases.append(dict(DCP_RANK=0, DCP_WORLD=1))
         compress_ratios = tuple(
             dict.fromkeys(
                 max(1, int(ratio))
@@ -506,17 +513,33 @@ class BuildPrefillChunkMetadataKernel(
         if index_kpool and index_kpool > 1 and index_kpool not in compress_ratios:
             compress_ratios = compress_ratios + (index_kpool,)
         return self._trace_dispatch(self.dispatch)(
+            zip_inputs(*dcp_cases),
             # Cover Triton's divisible, exact-one, and generic i32 classes.
             query_slice_start=(0, 1, 2),
             query_slice_stop=(1, 2 * max_tokens - 1, 2 * max_tokens),
-            DCP_RANK=dcp_rank,
-            DCP_WORLD=dcp_world,
             DCP_INTERLEAVE=dcp_interleave,
             BLOCK_SIZE=self.BLOCK_SIZE,
             COMPRESS_RATIO=list(compress_ratios),
+            # PCP's global cumulative lengths are the second row of one packed
+            # allocation, so their pointer is not always 16-byte aligned.
+            # Prefill chunking can independently unalign uncompressed lengths.
             input_variant=(
-                TritonPointerInputVariant.from_alignment(uncompressed_seq_lens=True),
-                TritonPointerInputVariant.from_alignment(uncompressed_seq_lens=False),
+                TritonPointerInputVariant.from_alignment(
+                    uncompressed_seq_lens=True,
+                    cu_compressed_seq_lens=True,
+                ),
+                TritonPointerInputVariant.from_alignment(
+                    uncompressed_seq_lens=True,
+                    cu_compressed_seq_lens=False,
+                ),
+                TritonPointerInputVariant.from_alignment(
+                    uncompressed_seq_lens=False,
+                    cu_compressed_seq_lens=True,
+                ),
+                TritonPointerInputVariant.from_alignment(
+                    uncompressed_seq_lens=False,
+                    cu_compressed_seq_lens=False,
+                ),
             ),
         )
 
@@ -527,7 +550,9 @@ class BuildPrefillChunkMetadataKernel(
             uncompressed_seq_lens=compile_key.input_variant.pointer(
                 "uncompressed_seq_lens", torch.int32
             ),
-            cu_compressed_seq_lens=int32_ptr,
+            cu_compressed_seq_lens=compile_key.input_variant.pointer(
+                "cu_compressed_seq_lens", torch.int32
+            ),
             row_start_cu_compressed_seq_lens=int32_ptr,
             token_to_seq=int32_ptr,
             cu_compressed_seq_len_ks=int32_ptr,
@@ -836,6 +861,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             dtype=torch.int32,
             device=self.device,
         )
+        # Materialize the rank on device during builder initialization. Creating
+        # this scalar in build() would introduce a GPU<->CPU sync in the decode
+        # hot path.
+        self.dcp_rank_tensor = torch.tensor(
+            self.dcp_rank, dtype=torch.int32, device=self.device
+        )
         self.expanded_block_table_buffer = torch.zeros(
             (scheduler_config.max_num_batched_tokens, block_table_width),
             dtype=torch.int32,
@@ -889,7 +920,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         local_seq_lens = get_dcp_local_seq_lens(
             seq_lens,
             self.dcp_world_size,
-            self.dcp_rank,
+            self.dcp_rank_tensor,
             self.cp_kv_cache_interleave_size,
         )
         if seq_lens_is_buffer_view:
@@ -1085,6 +1116,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             for request_slice, query_slice in chunk_specs
         ]
 
+    def _prefill_split_seq_lens(self, seq_lens_cpu: torch.Tensor) -> torch.Tensor:
+        """Per-request KV lengths the prefill chunker budgets logits with;
+        subclasses whose logits rows are wider than the context override."""
+        return seq_lens_cpu
+
     @staticmethod
     def _split_indexer_prefill_chunks(
         compressed_seq_lens_cpu: torch.Tensor,
@@ -1247,7 +1283,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 )
             else:
                 chunk_specs = self._split_indexer_prefill_chunks(
-                    compressed_seq_lens_cpu[num_decodes:],
+                    self._prefill_split_seq_lens(compressed_seq_lens_cpu[num_decodes:]),
                     prefill_query_lens_cpu,
                     self.max_prefill_buffer_size,
                     max_logits_bytes,

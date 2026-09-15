@@ -36,6 +36,18 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
 from vllm.utils.math_utils import next_power_of_2
 
+# Per-token byte width of the two paged fp8 records. Both put a page's whole
+# data region ahead of its whole scale region, so ``k_cache.shape[-1]`` -- the
+# width the KV-cache spec publishes -- identifies the record:
+#   V4   (584 B): 448 fp8 e4m3 NoPE + 64 bf16 RoPE, then 7 UE8M0 scales of 64
+#                 dims each plus a pad byte.
+#   V4.1 (528 B): all 512 dims as fp8 e4m3 (RoPE included), then 16 UE8M0
+#                 scales of 32 dims each. FlashMLA's ``ModelType::V41``.
+V4_BYTES_PER_TOKEN = 584
+V41_BYTES_PER_TOKEN = 528
+V41_QUANT_BLOCK = 32
+V41_NUM_SCALES = 512 // V41_QUANT_BLOCK  # 16
+
 
 @triton.jit
 def quantize_and_insert_k_kernel(
@@ -163,6 +175,67 @@ def quantize_and_insert_k_kernel(
         tl.store(bf16_out_ptr + chunk_offsets, bf16_vals)
 
 
+@triton.jit
+def _quantize_and_insert_k_mxfp8_kernel(
+    k_ptr,  # [num_tokens, 512] bf16
+    slot_mapping_ptr,  # [num_tokens] int64
+    k_cache_ptr,  # [num_blocks, block_bytes] as uint8 (flattened view)
+    num_tokens,
+    head_dim: tl.constexpr,  # 512, RoPE dims included
+    scale_dim: tl.constexpr,  # 16
+    quant_block: tl.constexpr,  # 32 dims per UE8M0 scale
+    cache_block_size: tl.constexpr,  # paged cache block size, in tokens
+    block_stride: tl.constexpr,  # total bytes per block (padded)
+    fp8_max: tl.constexpr,
+    use_fnuz: tl.constexpr = False,
+):
+    """Quantize a bf16 K row to MXFP8 and insert it into a V4.1 paged cache.
+
+    One program per token. Unlike the V4 record there is no bf16 tail, so every
+    dim is scaled.
+    """
+    pid = tl.program_id(0)
+    if pid >= num_tokens:
+        return
+
+    slot_idx = tl.load(slot_mapping_ptr + pid)
+    if slot_idx == -1:
+        return
+
+    block_idx = slot_idx // cache_block_size
+    pos_in_block = slot_idx % cache_block_size
+
+    # int64: block_idx * block_stride can exceed 2^31 with many KV-cache blocks.
+    cache_block_ptr = k_cache_ptr + block_idx.to(tl.int64) * block_stride
+    token_data_ptr = cache_block_ptr + pos_in_block * head_dim
+    token_scale_ptr = (
+        cache_block_ptr + cache_block_size * head_dim + pos_in_block * scale_dim
+    )
+
+    d = tl.arange(0, head_dim)
+    x = tl.load(k_ptr + pid.to(tl.int64) * head_dim + d).to(tl.float32)
+
+    tiles = tl.reshape(x, (scale_dim, quant_block))
+    # Floor the absmax like the CUDA encoder so an all-zero tile still lands on
+    # a finite scale.
+    amax = tl.maximum(tl.max(tl.abs(tiles), 1), 1e-4)
+    exponent = tl.ceil(tl.log2(amax * (1.0 / fp8_max)))
+    scaled = tl.clamp(
+        tiles * tl.reshape(tl.exp2(-exponent), (scale_dim, 1)), -fp8_max, fp8_max
+    )
+    if use_fnuz:  # noqa: SIM108
+        fp8 = scaled.to(tl.float8e4b8)
+    else:
+        fp8 = scaled.to(tl.float8e4nv)
+    tl.store(
+        token_data_ptr + d, tl.reshape(fp8.to(tl.uint8, bitcast=True), (head_dim,))
+    )
+
+    # UE8M0 encoding: stored_value = exponent + 127 (bias).
+    encoded = tl.minimum(tl.maximum(exponent + 127.0, 0.0), 255.0)
+    tl.store(token_scale_ptr + tl.arange(0, scale_dim), encoded.to(tl.uint8))
+
+
 def quantize_and_insert_k_cache(
     k: torch.Tensor,  # [num_tokens, 512] bf16
     k_cache: torch.Tensor,  # [num_blocks, block_bytes] uint8
@@ -170,16 +243,13 @@ def quantize_and_insert_k_cache(
     block_size: int = 64,
     is_ue8m0: bool = True,
     use_fnuz: bool = False,
+    bytes_per_token: int = V4_BYTES_PER_TOKEN,
 ):
     """
     Quantize K tensor and insert into paged K cache.
 
-    K Cache block layout (block_size=64 tokens):
-    - First 64 * 576 = 36864 bytes: Token data
-      - Each token: 448 bytes (fp8) + 128 bytes (bf16)
-    - Next 64 * 8 = 512 bytes: Scales
-      - Each token: 8 bytes (uint8 scales, 7 real + 1 padding)
-    - Padded to multiple of 576
+    ``bytes_per_token`` picks the record (see the module header): the V4 one,
+    or V4.1's all-dims MXFP8 one.
 
     ``use_fnuz=True`` selects FNUZ E4M3 cache encoding and is only valid on
     platforms whose FP8 format is FNUZ. ``use_fnuz=False`` selects OCP E4M3,
@@ -195,6 +265,26 @@ def quantize_and_insert_k_cache(
     # padding. Always use slot_mapping.shape[0] as the token count.
     num_tokens = slot_mapping.shape[0]
     block_stride = k_cache.stride(0)  # bytes per block
+
+    if bytes_per_token == V41_BYTES_PER_TOKEN:
+        if use_fnuz and not current_platform.is_fp8_fnuz():
+            raise ValueError("use_fnuz=True requires a platform using FNUZ FP8")
+        _quantize_and_insert_k_mxfp8_kernel[(num_tokens,)](
+            k,
+            slot_mapping,
+            k_cache,
+            num_tokens,
+            head_dim=512,
+            scale_dim=V41_NUM_SCALES,
+            quant_block=V41_QUANT_BLOCK,
+            cache_block_size=block_size,
+            block_stride=block_stride,
+            fp8_max=get_fp8_min_max()[1]
+            if use_fnuz
+            else torch.finfo(torch.float8_e4m3fn).max,
+            use_fnuz=use_fnuz,
+        )
+        return
 
     TOKEN_FP8_DIM = 448
     TOKEN_BF16_DIM = 64
@@ -343,6 +433,69 @@ def _dequantize_and_gather_k_kernel(
             tl.store(output_row_ptr + bf16_output_offset + chunk_offsets, bf16_vals)
 
 
+@triton.jit
+def _dequantize_and_gather_k_mxfp8_kernel(
+    out_ptr,
+    out_stride0,
+    out_stride1,
+    k_cache_ptr,
+    seq_lens_ptr,
+    block_table_ptr,
+    offset,
+    gather_lens_ptr,
+    max_blocks_per_seq: tl.constexpr,
+    head_dim: tl.constexpr,  # 512
+    scale_dim: tl.constexpr,  # 16
+    quant_block: tl.constexpr,  # 32
+    cache_block_size: tl.constexpr,
+    block_stride: tl.constexpr,
+    use_fnuz: tl.constexpr = False,
+):
+    """Gather V4.1 MXFP8 rows into a bf16 workspace, dequantizing in place."""
+    batch_idx = tl.program_id(0)
+    worker_id = tl.program_id(1)
+    num_workers = tl.num_programs(1)
+
+    seq_len = tl.load(seq_lens_ptr + batch_idx)
+    if gather_lens_ptr is not None:  # noqa: SIM108
+        gather_len = tl.load(gather_lens_ptr + batch_idx)
+    else:
+        gather_len = seq_len
+    start_pos = seq_len - gather_len
+
+    d = tl.arange(0, head_dim)
+    s = tl.arange(0, scale_dim)
+    for i in range(worker_id, gather_len, num_workers):
+        pos = start_pos + i
+        block_in_seq = pos // cache_block_size
+        pos_in_block = pos % cache_block_size
+
+        block_table_row_ptr = block_table_ptr + batch_idx * max_blocks_per_seq
+        physical_block_idx = tl.load(block_table_row_ptr + block_in_seq)  # int32
+
+        # int64: physical_block_idx * block_stride can exceed 2^31.
+        cache_block_ptr = k_cache_ptr + physical_block_idx.to(tl.int64) * block_stride
+        token_data_ptr = cache_block_ptr + pos_in_block * head_dim
+        token_scale_ptr = (
+            cache_block_ptr + cache_block_size * head_dim + pos_in_block * scale_dim
+        )
+
+        x_uint8 = tl.load(token_data_ptr + d)
+        if use_fnuz:
+            x_fp8 = x_uint8.to(tl.float8e4b8, bitcast=True)
+        else:
+            x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
+        tiles = tl.reshape(x_fp8.to(tl.float32), (scale_dim, quant_block))
+
+        # UE8M0: scale = 2^(stored_value - 127).
+        encoded = tl.load(token_scale_ptr + s)
+        scale = tl.exp2(encoded.to(tl.float32) - 127.0)
+        dequant = tl.reshape(tiles * tl.reshape(scale, (scale_dim, 1)), (head_dim,))
+
+        output_row_ptr = out_ptr + batch_idx * out_stride0 + (offset + i) * out_stride1
+        tl.store(output_row_ptr + d, dequant.to(tl.bfloat16))
+
+
 def dequantize_and_gather_k_cache_triton(
     # [num_reqs, max_num_tokens, head_size]
     out: torch.Tensor,
@@ -358,6 +511,28 @@ def dequantize_and_gather_k_cache_triton(
     offset: int,
     use_fnuz: bool = False,
 ) -> None:
+    num_reqs = seq_lens.shape[0]
+    NUM_WORKERS = 128
+    if k_cache.shape[-1] == V41_BYTES_PER_TOKEN:
+        _dequantize_and_gather_k_mxfp8_kernel[(num_reqs, NUM_WORKERS)](
+            out,
+            out.stride(0),
+            out.stride(1),
+            k_cache,
+            seq_lens,
+            block_table,
+            offset,
+            gather_lens,
+            max_blocks_per_seq=block_table.shape[-1],
+            head_dim=512,
+            scale_dim=V41_NUM_SCALES,
+            quant_block=V41_QUANT_BLOCK,
+            cache_block_size=block_size,
+            block_stride=k_cache.stride(0),
+            use_fnuz=use_fnuz,
+        )
+        return
+
     TOKEN_FP8_DIM = 448
     TOKEN_BF16_DIM = 64
     TOKEN_SCALE_DIM = 8
@@ -365,8 +540,6 @@ def dequantize_and_gather_k_cache_triton(
     FP8_MAX = 448.0
     TOKEN_DATA_SIZE = TOKEN_FP8_DIM + TOKEN_BF16_DIM * 2
 
-    num_reqs = seq_lens.shape[0]
-    NUM_WORKERS = 128
     _dequantize_and_gather_k_kernel[(num_reqs, NUM_WORKERS)](
         out,
         out.stride(0),
@@ -408,6 +581,8 @@ def dequantize_and_gather_k_cache(
 ) -> None:
     """Dequantize and gather a paged DSv4 K cache.
 
+    The record is read off ``k_cache.shape[-1]``; see the module header.
+
     ``use_fnuz`` MUST match the encoder of the specific cache being read:
     ``False`` for ``compressed_k_cache`` (Triton encoder is OCP everywhere),
     ``current_platform.is_fp8_fnuz()`` for ``swa_k_cache`` (C++ encoder
@@ -419,6 +594,7 @@ def dequantize_and_gather_k_cache(
             _DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL,
         )
 
+        mxfp8 = k_cache.shape[-1] == V41_BYTES_PER_TOKEN
         _DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL(
             out=out,
             k_cache=k_cache,
@@ -427,6 +603,8 @@ def dequantize_and_gather_k_cache(
             block_table=block_table,
             block_size=block_size,
             offset=offset,
+            fp8_dim=512 if mxfp8 else 448,
+            group_size=V41_QUANT_BLOCK if mxfp8 else 64,
         )
         return
 

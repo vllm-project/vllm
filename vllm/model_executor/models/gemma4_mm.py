@@ -24,6 +24,7 @@ from PIL import Image as PILImage
 from torch import nn
 from transformers import AutoModel, BatchFeature
 from transformers.models.gemma4 import (
+    Gemma4AudioFeatureExtractor,
     Gemma4Config,
     Gemma4Processor,
     Gemma4VisionConfig,
@@ -456,6 +457,28 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
 # ---------------------------------------------------------------------------
 
 
+def _dummy_audio_num_samples(processor: Any) -> int:
+    """Length in samples of a worst-case dummy audio item.
+
+    ``fft_length`` is set in ``Gemma4AudioFeatureExtractor.__init__`` and is not
+    defined by ``Gemma4UnifiedAudioFeatureExtractor``, which the encoder-free
+    Gemma 4 variant uses. Reading it unconditionally therefore raises
+    ``AttributeError`` during memory profiling on that variant, which is reached
+    whenever audio is the modality with the largest per-item token count.
+
+    For any other extractor, fall back to the audio budget the processor itself
+    declares -- the same pair of values used to warn about over-long audio
+    elsewhere in this file.
+    """
+    feature_extractor = processor.feature_extractor
+    if isinstance(feature_extractor, Gemma4AudioFeatureExtractor):
+        return feature_extractor.fft_length
+
+    sampling_rate = feature_extractor.sampling_rate
+    max_duration_s = processor.audio_seq_length * processor.audio_ms_per_token / 1000.0
+    return int(max_duration_s * sampling_rate)
+
+
 class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
@@ -508,7 +531,7 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
         }
 
         if num_audios > 0:
-            audio_len = processor.feature_extractor.fft_length
+            audio_len = _dummy_audio_num_samples(processor)
             data["audio"] = self._get_dummy_audios(
                 length=audio_len,
                 num_audios=num_audios,
