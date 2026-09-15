@@ -26,6 +26,26 @@ fn render_request(request: &ChatRequest) -> String {
         .expect("deepseek renderer should return text prompt")
 }
 
+#[test]
+fn standard_effort_enables_binary_thinking_and_none_disables_it() {
+    let mut request = ChatRequest::for_test();
+    for (effort, enabled) in [
+        (crate::ReasoningEffort::High, true),
+        (crate::ReasoningEffort::None, false),
+    ] {
+        request.chat_options.reasoning_effort = Some(effort);
+        let rendered = DeepSeekV32ChatRenderer::new().render(&request).unwrap();
+        assert_eq!(
+            rendered.prompt.into_text().unwrap().ends_with("<think>"),
+            enabled
+        );
+        assert_eq!(
+            rendered.effective_template_kwargs["enable_thinking"],
+            enabled
+        );
+    }
+}
+
 fn render_result(request: &ChatRequest) -> Result<String, Error> {
     DeepSeekV32ChatRenderer::new().render(request).map(|rendered| {
         rendered

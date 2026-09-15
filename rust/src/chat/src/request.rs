@@ -673,29 +673,6 @@ impl ChatRequest {
         self.tool_context.parsing_enabled()
     }
 
-    /// Return the request-level thinking toggle when explicitly requested.
-    ///
-    /// We currently accept the two request kwargs `thinking` and
-    /// `enable_thinking`. Both must be booleans when present. If both are
-    /// present, they must have the same value. If neither key is provided,
-    /// return `None`.
-    pub(crate) fn enable_thinking(&self) -> Result<Option<bool>> {
-        let thinking = self.parse_template_bool("thinking")?;
-        let enable_thinking = self.parse_template_bool("enable_thinking")?;
-
-        match (thinking, enable_thinking) {
-            (None, None) => Ok(None),
-            (Some(thinking), Some(enable_thinking)) if thinking != enable_thinking => {
-                Err(Error::ChatTemplate(
-                    "template kwargs `thinking` and `enable_thinking` must match when both are set"
-                        .to_string(),
-                ))
-            }
-            (Some(thinking), _) => Ok(Some(thinking)),
-            (None, Some(enable_thinking)) => Ok(Some(enable_thinking)),
-        }
-    }
-
     pub(crate) fn parse_template_bool(&self, key: &str) -> Result<Option<bool>> {
         match self.chat_options.template_kwargs.get(key) {
             None => Ok(None),
@@ -726,7 +703,7 @@ mod tests {
     use serde_json::{json, to_value};
 
     use super::{
-        ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatRole, ChatTool, ChatToolChoice,
+        ChatContent, ChatContentPart, ChatMessage, ChatRole, ChatTool, ChatToolChoice,
         ResolvedToolContext,
     };
     use crate::Error;
@@ -917,58 +894,6 @@ mod tests {
         assert!(matches!(
             error,
             Error::ToolChoiceFunctionNotFound { name } if name == "missing"
-        ));
-    }
-
-    #[test]
-    fn enable_thinking_is_none_when_no_kwargs_are_present() {
-        let request = ChatRequest::for_test();
-        assert_eq!(request.enable_thinking().unwrap(), None);
-    }
-
-    #[test]
-    fn enable_thinking_accepts_matching_duplicate_kwargs() {
-        let mut request = ChatRequest::for_test();
-        request.chat_options.template_kwargs.insert("thinking".to_string(), json!(true));
-        request
-            .chat_options
-            .template_kwargs
-            .insert("enable_thinking".to_string(), json!(true));
-
-        assert_eq!(request.enable_thinking().unwrap(), Some(true));
-    }
-
-    #[test]
-    fn enable_thinking_rejects_non_boolean_kwargs() {
-        let mut request = ChatRequest::for_test();
-        request
-            .chat_options
-            .template_kwargs
-            .insert("thinking".to_string(), json!("yes"));
-
-        assert!(matches!(
-            request.enable_thinking(),
-            Err(Error::ChatTemplate(message))
-                if message.contains("`thinking` must be a boolean")
-        ));
-    }
-
-    #[test]
-    fn enable_thinking_rejects_conflicting_duplicate_kwargs() {
-        let mut request = ChatRequest::for_test();
-        request
-            .chat_options
-            .template_kwargs
-            .insert("thinking".to_string(), json!(false));
-        request
-            .chat_options
-            .template_kwargs
-            .insert("enable_thinking".to_string(), json!(true));
-
-        assert!(matches!(
-            request.enable_thinking(),
-            Err(Error::ChatTemplate(message))
-                if message.contains("`thinking` and `enable_thinking` must match")
         ));
     }
 }

@@ -16,7 +16,7 @@ use self::format::{
     ChatTemplateContentFormat, ChatTemplateContentFormatOption as ContentFormatOption,
 };
 use self::template::{CompiledChatTemplate, TemplateContext};
-use super::{ChatRenderer, RenderedPrompt, effective_template_kwargs};
+use super::{ChatRenderer, RenderedPrompt};
 use crate::error::Result;
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
 use crate::{
@@ -32,6 +32,31 @@ mod tojson;
 pub use template::{load_chat_template, resolve_chat_template};
 
 pub use self::format::ChatTemplateContentFormatOption;
+
+/// Extract the effective chat-template kwargs visible to the renderer from the request,
+/// using the provided defaults as the base.
+fn effective_template_kwargs(
+    default_template_kwargs: &HashMap<String, JsonValue>,
+    request: &ChatRequest,
+) -> HashMap<String, JsonValue> {
+    let mut kwargs = default_template_kwargs.clone();
+    kwargs.extend(request.chat_options.template_kwargs.clone());
+
+    if let Some(reasoning_effort) = request.chat_options.reasoning_effort {
+        kwargs.insert(
+            "reasoning_effort".to_string(),
+            JsonValue::String(reasoning_effort.as_str().to_string()),
+        );
+        if !request.chat_options.template_kwargs.contains_key("enable_thinking") {
+            kwargs.insert(
+                "enable_thinking".to_string(),
+                serde_json::json!(reasoning_effort != crate::ReasoningEffort::None),
+            );
+        }
+    }
+
+    kwargs
+}
 
 /// Template-visible placeholder tokens per supported modality.
 ///
@@ -1205,6 +1230,38 @@ mod tests {
             rendered.effective_template_kwargs.get("enable_thinking"),
             Some(&Value::Bool(true))
         );
+    }
+
+    #[test]
+    fn chat_template_keeps_native_control_conflicts_and_raw_effort_values() {
+        for effort in [
+            serde_json::json!(37),
+            serde_json::json!(null),
+            serde_json::json!("none"),
+        ] {
+            let mut request = sample_request(vec![ChatMessage::user("hello")]);
+            request.chat_options.template_kwargs = [
+                ("thinking".to_string(), serde_json::json!("custom-mode")),
+                ("enable_thinking".to_string(), serde_json::json!(true)),
+                ("reasoning_effort".to_string(), effort),
+            ]
+            .into();
+            let original = request.chat_options.clone();
+            let rendered = HfChatRenderer::new(
+                Some(
+                    "{{ thinking }}|{{ enable_thinking }}|{{ reasoning_effort is none }}"
+                        .to_string(),
+                ),
+                HashMap::new(),
+                ChatTemplateContentFormatOption::Auto,
+            )
+            .unwrap()
+            .render(&request)
+            .unwrap();
+            assert!(rendered.prompt.into_text().unwrap().starts_with("custom-mode|True|"));
+            assert_eq!(rendered.effective_template_kwargs, original.template_kwargs);
+            assert_eq!(request.chat_options, original);
+        }
     }
 
     #[test]

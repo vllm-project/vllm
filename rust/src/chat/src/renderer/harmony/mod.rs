@@ -5,21 +5,25 @@
 
 pub(crate) mod encoding;
 
+use std::collections::HashMap;
+
 use openai_harmony::HarmonyEncoding;
 use openai_harmony::chat::{
     Author, Conversation, DeveloperContent, Message, ReasoningEffort as HarmonyReasoningEffort,
     Role, SystemContent, ToolDescription,
 };
+use serde_json::Value;
 use thiserror_ext::AsReport as _;
 use time::macros::format_description;
 use vllm_text::Prompt;
 
 use self::encoding::harmony_encoding;
-use super::{ChatRenderer, RenderedPrompt, request_template_kwargs};
+use super::reasoning::{EffortValue, ReasoningControl};
+use super::{ChatRenderer, RenderedPrompt};
+use crate::AssistantMessageExt as _;
 use crate::error::{Error, Result};
 use crate::event::AssistantContentBlock;
 use crate::request::{ChatContent, ChatMessage, ChatRequest, ChatTool, GenerationPromptMode};
-use crate::{AssistantMessageExt as _, ReasoningEffort};
 
 const SYSTEM_START_DATE_ENV: &str = "VLLM_SYSTEM_START_DATE";
 const HARMONY_SYSTEM_INSTRUCTIONS_ENV: &str = "VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS";
@@ -28,6 +32,7 @@ const HARMONY_SYSTEM_INSTRUCTIONS_ENV: &str = "VLLM_GPT_OSS_HARMONY_SYSTEM_INSTR
 pub struct HarmonyChatRenderer {
     encoding: &'static HarmonyEncoding,
     options: Options,
+    default_template_kwargs: HashMap<String, Value>,
 }
 
 struct Options {
@@ -62,6 +67,7 @@ impl HarmonyChatRenderer {
     ) -> Result<Self> {
         Ok(Self {
             encoding: harmony_encoding()?,
+            default_template_kwargs: HashMap::new(),
             options: Options {
                 system_start_date: system_start_date.into(),
                 use_system_instructions,
@@ -69,11 +75,21 @@ impl HarmonyChatRenderer {
         })
     }
 
+    /// Set deployment defaults used below explicit request reasoning controls.
+    pub fn with_default_template_kwargs(mut self, kwargs: HashMap<String, Value>) -> Self {
+        self.default_template_kwargs = kwargs;
+        self
+    }
+
     /// Render a chat request directly to Harmony token IDs.
     ///
     /// Harmony owns both prompt formatting and tokenization, so the Rust
     /// frontend bypasses the generic HF tokenizer path for GPT-OSS input.
-    fn render_token_ids(&self, request: &ChatRequest) -> Result<Vec<u32>> {
+    fn render_token_ids(
+        &self,
+        request: &ChatRequest,
+        effort: HarmonyReasoningEffort,
+    ) -> Result<Vec<u32>> {
         if request.has_multimodal() {
             return Err(Error::UnsupportedMultimodalContent("image_url"));
         }
@@ -86,7 +102,8 @@ impl HarmonyChatRenderer {
             ));
         }
 
-        let messages = auto_drop_analysis_messages(to_harmony_messages(request, &self.options)?);
+        let messages =
+            auto_drop_analysis_messages(to_harmony_messages(request, &self.options, effort)?);
         let conversation = Conversation::from_messages(messages);
         // Pass `None` so oss-harmony does not apply its narrower built-in
         // analysis-drop policy after the Rust-side Python-parity cleanup above.
@@ -114,10 +131,13 @@ impl ChatRenderer for HarmonyChatRenderer {
     /// Render a chat request as [`Prompt::TokenIds`] with template kwargs echoed
     /// for downstream accounting/debugging.
     fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
+        let reasoning = ReasoningControl::resolve(request, &self.default_template_kwargs)?
+            .fallback(ReasoningControl::enabled("medium"));
+        let effort = to_harmony_reasoning_effort(reasoning.effort())?;
         Ok(RenderedPrompt {
-            prompt: Prompt::TokenIds(self.render_token_ids(request)?),
+            prompt: Prompt::TokenIds(self.render_token_ids(request, effort)?),
             media_order: None,
-            effective_template_kwargs: request_template_kwargs(request),
+            effective_template_kwargs: reasoning.template_kwargs(request),
         })
     }
 }
@@ -127,12 +147,21 @@ impl ChatRenderer for HarmonyChatRenderer {
 /// This adds the Harmony system/developer preamble, peels at most one leading
 /// system/developer instruction message, and then lowers the remaining chat
 /// history message-by-message.
-fn to_harmony_messages(request: &ChatRequest, options: &Options) -> Result<Vec<Message>> {
+fn to_harmony_messages(
+    request: &ChatRequest,
+    options: &Options,
+    effort: HarmonyReasoningEffort,
+) -> Result<Vec<Message>> {
     let (instructions, leading_developer_tools, remaining_messages) =
         peel_leading_instructions(&request.messages)?;
     let tool_call_names = tool_call_names(&request.messages);
-    let mut messages =
-        build_harmony_preamble(request, instructions, leading_developer_tools, options)?;
+    let mut messages = build_harmony_preamble(
+        request,
+        instructions,
+        leading_developer_tools,
+        options,
+        effort,
+    )?;
 
     for message in remaining_messages {
         messages.extend(to_harmony_message(message, &tool_call_names, options)?);
@@ -177,12 +206,13 @@ fn build_harmony_preamble(
     instructions: Option<String>,
     leading_developer_tools: Option<&[ChatTool]>,
     options: &Options,
+    effort: HarmonyReasoningEffort,
 ) -> Result<Vec<Message>> {
     let mut messages = vec![Message::from_role_and_content(
         Role::System,
         system_content(
             instructions.as_deref().filter(|_| options.use_system_instructions),
-            request.chat_options.reasoning_effort,
+            Some(effort),
             &options.system_start_date,
         )?,
     )];
@@ -227,18 +257,18 @@ fn preamble_tool_descriptions(
 
 /// Construct the Harmony system content for the request preamble.
 ///
-/// Harmony defaults the reasoning effort to `medium` when none is provided, so
-/// this only sets an explicit effort after validating vLLM's request value.
+/// The preamble receives normalized effort; later system messages use Harmony's
+/// own default when their effort is omitted.
 fn system_content(
     instructions: Option<&str>,
-    reasoning_effort: Option<ReasoningEffort>,
+    reasoning_effort: Option<HarmonyReasoningEffort>,
     system_start_date: &str,
 ) -> Result<SystemContent> {
     let mut content =
         SystemContent::new().with_conversation_start_date(system_start_date.to_string());
 
     if let Some(reasoning_effort) = reasoning_effort {
-        content = content.with_reasoning_effort(to_harmony_reasoning_effort(reasoning_effort)?);
+        content = content.with_reasoning_effort(reasoning_effort);
     }
 
     if let Some(instructions) = instructions.filter(|text| !text.is_empty()) {
@@ -445,20 +475,17 @@ fn to_tool_descriptions(tools: &[ChatTool]) -> Vec<ToolDescription> {
         .collect()
 }
 
-/// Map supported OpenAI reasoning-effort values onto Harmony's enum.
+/// Map supported reasoning-effort values onto Harmony's enum.
 fn to_harmony_reasoning_effort(
-    reasoning_effort: ReasoningEffort,
+    reasoning_effort: Option<&EffortValue>,
 ) -> Result<HarmonyReasoningEffort> {
-    match reasoning_effort {
-        ReasoningEffort::Low => Ok(HarmonyReasoningEffort::Low),
-        ReasoningEffort::Medium => Ok(HarmonyReasoningEffort::Medium),
-        ReasoningEffort::High => Ok(HarmonyReasoningEffort::High),
-        ReasoningEffort::None
-        | ReasoningEffort::Minimal
-        | ReasoningEffort::XHigh
-        | ReasoningEffort::Max => Err(Error::ChatTemplate(format!(
-            "reasoning_effort={:?} is not supported by Harmony. Supported values are: low, medium, high.",
-            reasoning_effort.as_str()
+    match reasoning_effort.and_then(EffortValue::as_str) {
+        Some("low") => Ok(HarmonyReasoningEffort::Low),
+        Some("medium") => Ok(HarmonyReasoningEffort::Medium),
+        Some("high") => Ok(HarmonyReasoningEffort::High),
+        _ => Err(Error::InvalidReasoningEffort(format!(
+            "reasoning_effort={} is not supported by Harmony. Supported values are: low, medium, high.",
+            reasoning_effort.unwrap_or(&EffortValue::from("none"))
         ))),
     }
 }

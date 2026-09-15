@@ -105,7 +105,7 @@ fn fixture_request(name: &str) -> ChatRequest {
 
 fn inkling_fixture_options() -> FixtureRequestOptions {
     FixtureRequestOptions {
-        enable_thinking: Some(false),
+        enable_thinking: None,
         no_generation_prompt_when_last_assistant: false,
     }
 }
@@ -285,6 +285,43 @@ fn defaults_reasoning_effort_to_high() {
 }
 
 #[test]
+fn normalized_mode_and_scalar_are_reflected_in_prompt_and_kwargs() {
+    for (kwargs, expected, enabled) in [
+        (
+            json!({"enable_thinking": true, "reasoning_effort": "none"}),
+            "0.9",
+            true,
+        ),
+        (
+            json!({"thinking": false, "reasoning_effort": 10}),
+            "0.0",
+            false,
+        ),
+        (json!({"reasoning_effort": 0}), "0.0", false),
+        (json!({"reasoning_effort": null}), "0.9", true),
+        (json!({"reasoning_effort": 0.37}), "0.37", true),
+    ] {
+        let mut request = ChatRequest::for_test();
+        request.chat_options.template_kwargs = serde_json::from_value(kwargs).unwrap();
+        let rendered = renderer().render(&request).unwrap();
+        let prompt = render_symbolic_tokens(&rendered.prompt.into_token_ids().unwrap());
+        assert!(prompt.contains(&format!("Thinking effort level: {expected}<|end_message|>")));
+        assert_eq!(
+            rendered.effective_template_kwargs["enable_thinking"],
+            enabled
+        );
+        assert_eq!(
+            rendered.effective_template_kwargs["reasoning_effort"],
+            if enabled {
+                json!(expected.parse::<f64>().unwrap())
+            } else {
+                json!("none")
+            }
+        );
+    }
+}
+
+#[test]
 fn renders_numeric_reasoning_effort_template_kwarg() {
     let mut request = ChatRequest::for_test();
     request
@@ -301,18 +338,31 @@ fn renders_numeric_reasoning_effort_template_kwarg() {
 }
 
 #[test]
-fn ignores_unsupported_reasoning_effort_values() {
-    for value in [json!(true), json!("invalid"), json!(null)] {
+fn ignores_unsupported_reasoning_effort_names() {
+    let mut request = ChatRequest::for_test();
+    request
+        .chat_options
+        .template_kwargs
+        .insert("reasoning_effort".to_string(), json!("invalid"));
+
+    assert_eq!(
+        render_symbolic_tokens(&render_token_ids(&request)),
+        "<|message_user|><|content_text|>test<|end_message|><|message_model|>"
+    );
+}
+
+#[test]
+fn rejects_invalid_reasoning_effort_types() {
+    for value in [json!(true), json!([]), json!({})] {
         let mut request = ChatRequest::for_test();
         request
             .chat_options
             .template_kwargs
             .insert("reasoning_effort".to_string(), value);
 
-        assert_eq!(
-            render_symbolic_tokens(&render_token_ids(&request)),
-            "<|message_user|><|content_text|>test<|end_message|><|message_model|>"
-        );
+        let error = renderer().render(&request).unwrap_err();
+        assert!(error.is_request_validation_error());
+        assert!(error.as_report().to_string().contains("must be a string or number"));
     }
 }
 

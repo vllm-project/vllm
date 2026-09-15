@@ -13,6 +13,7 @@ use serde::Serialize;
 use serde_json::Value;
 use serde_json_fmt::JsonFormat;
 
+use super::super::reasoning::ReasoningControl;
 use crate::error::{Error, Result};
 use crate::request::{ChatContent, ChatMessage, ChatRequest, ChatRole, ChatTool};
 use crate::{AssistantContentBlock, AssistantMessageExt, AssistantToolCall};
@@ -41,9 +42,31 @@ struct RenderedToolSchema<'a> {
     strict: Option<bool>,
 }
 
+/// V3.2 uses standard effort grades as a binary thinking request.
+pub(super) fn resolve_reasoning(control: ReasoningControl) -> Result<ReasoningControl> {
+    if let Some(effort) = control.effort()
+        && !matches!(
+            effort.as_str(),
+            Some("minimal" | "low" | "medium" | "high" | "xhigh" | "max")
+        )
+    {
+        return Err(Error::InvalidReasoningEffort(format!(
+            "DeepSeek V3.2 reasoning_effort must be minimal, low, medium, high, xhigh, or max, got {effort}"
+        )));
+    }
+    Ok(if control.is_enabled() {
+        ReasoningControl::Enabled { effort: None }
+    } else {
+        ReasoningControl::Disabled
+    })
+}
+
 /// Render one chat request into the final prompt string.
-pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
-    let thinking_mode = match request.enable_thinking()?.unwrap_or(false) {
+pub(super) fn render_request(
+    request: &ChatRequest,
+    reasoning: &ReasoningControl,
+) -> Result<String> {
+    let thinking_mode = match reasoning.is_enabled() {
         true => ThinkingMode::Thinking,
         false => ThinkingMode::Chat,
     };

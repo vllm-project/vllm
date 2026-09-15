@@ -37,6 +37,56 @@ fn test_tokenizer() -> TestTokenizer {
         .with_special_token(IMAGE_PLACEHOLDER, MEDIA_ID)
 }
 
+#[test]
+fn native_effort_overrides_stay_within_their_request_or_deployment_source() {
+    let tokenizer = Arc::new(test_tokenizer());
+    let renderer = KimiK3ChatRenderer::new(tokenizer.clone())
+        .with_default_template_kwargs([("thinking_effort".to_string(), json!("max"))].into());
+    for (kwargs, typed, effort) in [
+        (json!({}), Some(ReasoningEffort::Low), "low"),
+        (
+            json!({"enable_thinking": true, "reasoning_effort": "none"}),
+            None,
+            "max",
+        ),
+        (
+            json!({"thinking_effort": "high"}),
+            Some(ReasoningEffort::None),
+            "none",
+        ),
+        (
+            json!({"thinking": true, "thinking_effort": "high"}),
+            Some(ReasoningEffort::None),
+            "high",
+        ),
+    ] {
+        let mut request = crate::ChatRequest::for_test();
+        request.chat_options.reasoning_effort = typed;
+        request.chat_options.template_kwargs = serde_json::from_value(kwargs).unwrap();
+        let rendered = renderer.render(&request).unwrap();
+        let prompt = tokenizer.decode(&rendered.prompt.into_token_ids().unwrap(), false).unwrap();
+        let enabled = effort != "none";
+        assert_eq!(prompt.ends_with("<|open|>think<|sep|>"), enabled);
+        assert_eq!(
+            rendered.effective_template_kwargs["reasoning_effort"],
+            effort
+        );
+        assert_eq!(
+            rendered.effective_template_kwargs["enable_thinking"],
+            enabled
+        );
+        if enabled {
+            assert!(prompt.contains(&format!("thinking_effort={effort}")));
+            assert_eq!(
+                rendered.effective_template_kwargs["thinking_effort"],
+                effort
+            );
+        } else {
+            assert!(!rendered.effective_template_kwargs.contains_key("thinking_effort"));
+        }
+    }
+}
+
 fn render_token_ids(request: &crate::request::ChatRequest, tokenizer: DynTokenizer) -> Vec<u32> {
     let prompt = KimiK3ChatRenderer::new(tokenizer).render(request).unwrap().prompt;
     let Prompt::TokenIds(token_ids) = prompt else {
@@ -452,7 +502,7 @@ fn rejects_removed_medium_thinking_effort() {
         .unwrap_err();
 
     expect![[r#"
-        ChatTemplate(
+        InvalidReasoningEffort(
             "unsupported thinking_effort=\"medium\"; supported values are `low`, `high`, and `max`",
         )
     "#]]

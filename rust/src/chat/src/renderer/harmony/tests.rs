@@ -22,7 +22,7 @@ fn fixture_request(input_name: &str) -> ChatRequest {
     fixture_chat_request(
         &fixture_path(input_name),
         FixtureRequestOptions {
-            enable_thinking: Some(false),
+            enable_thinking: None,
             no_generation_prompt_when_last_assistant: false,
         },
     )
@@ -142,8 +142,39 @@ fn rejects_invalid_reasoning_effort() {
 
     let error = test_renderer(false).render(&request).unwrap_err();
 
-    expect![[r#"chat template error: reasoning_effort="none" is not supported by Harmony. Supported values are: low, medium, high."#]]
+    expect![[r#"reasoning_effort="none" is not supported by Harmony. Supported values are: low, medium, high."#]]
         .assert_eq(&error.to_report_string());
+}
+
+#[test]
+fn normalized_reasoning_respects_harmony_capability_and_deployment_effort() {
+    let renderer = test_renderer(false).with_default_template_kwargs(
+        [("reasoning_effort".to_string(), serde_json::json!("low"))].into(),
+    );
+    let mut request = ChatRequest::for_test();
+    request.chat_options.reasoning_effort = Some(ReasoningEffort::None);
+    request
+        .chat_options
+        .template_kwargs
+        .insert("enable_thinking".into(), serde_json::json!(true));
+    let rendered = renderer.render(&request).unwrap();
+    let prompt = harmony_encoding()
+        .unwrap()
+        .tokenizer()
+        .decode_utf8(rendered.prompt.into_token_ids().unwrap())
+        .unwrap();
+    assert!(prompt.contains("Reasoning: low"));
+    assert_eq!(
+        rendered.effective_template_kwargs["reasoning_effort"],
+        "low"
+    );
+    assert_eq!(rendered.effective_template_kwargs["enable_thinking"], true);
+
+    request
+        .chat_options
+        .template_kwargs
+        .insert("thinking".into(), serde_json::json!(false));
+    assert!(renderer.render(&request).is_err());
 }
 
 #[test]

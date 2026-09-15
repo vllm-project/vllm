@@ -305,16 +305,65 @@ fn reasoning_effort_none_disables_thinking() {
         messages: vec![ChatMessage::user("answer directly")],
         ..ChatRequest::for_test()
     };
-    request
-        .chat_options
-        .template_kwargs
-        .insert("thinking".to_string(), Value::Bool(true));
     request.chat_options.reasoning_effort = Some(ReasoningEffort::None);
 
     let rendered = render_request(&request);
 
     expect!["<｜begin▁of▁sentence｜><｜User｜>answer directly<｜Assistant｜></think>"]
         .assert_eq(&rendered);
+}
+
+#[test]
+fn normalized_reasoning_drives_both_prompt_and_compatibility_kwargs() {
+    for (kwargs, enabled, effort, prefix) in [
+        (
+            serde_json::json!({"enable_thinking": true, "reasoning_effort": "none"}),
+            true,
+            "high",
+            "Absolute maximum",
+        ),
+        (
+            serde_json::json!({"thinking": true, "enable_thinking": false}),
+            true,
+            "high",
+            "Absolute maximum",
+        ),
+        (
+            serde_json::json!({"thinking": false, "enable_thinking": true, "reasoning_effort": "max"}),
+            false,
+            "none",
+            "",
+        ),
+        (
+            serde_json::json!({"reasoning_effort": "xhigh"}),
+            true,
+            "high",
+            "Absolute maximum",
+        ),
+        (
+            serde_json::json!({"reasoning_effort": "max"}),
+            true,
+            "max",
+            "Beyond maximum",
+        ),
+    ] {
+        let mut request = ChatRequest::for_test();
+        request.chat_options.template_kwargs = serde_json::from_value(kwargs).unwrap();
+        let rendered = DeepSeekV4ChatRenderer::new().render(&request).unwrap();
+        let prompt = rendered.prompt.into_text().unwrap();
+        assert_eq!(prompt.ends_with("<think>"), enabled);
+        assert_eq!(prompt.contains("Reasoning Effort:"), enabled);
+        assert!(prompt.contains(prefix));
+        assert_eq!(rendered.effective_template_kwargs["thinking"], enabled);
+        assert_eq!(
+            rendered.effective_template_kwargs["enable_thinking"],
+            enabled
+        );
+        assert_eq!(
+            rendered.effective_template_kwargs["reasoning_effort"],
+            effort
+        );
+    }
 }
 
 #[test]
@@ -380,7 +429,7 @@ fn trailing_system_transitions_in_chat_and_thinking_modes() {
 }
 
 #[test]
-fn reasoning_effort_template_kwarg_is_ignored() {
+fn reasoning_effort_template_kwarg_selects_effort() {
     let mut request = ChatRequest {
         messages: vec![ChatMessage::user("solve it")],
         ..ChatRequest::for_test()
@@ -396,7 +445,7 @@ fn reasoning_effort_template_kwarg_is_ignored() {
 
     let rendered = render_request(&request);
 
-    assert!(rendered.starts_with("<｜begin▁of▁sentence｜>Reasoning Effort: Absolute maximum"));
+    assert!(rendered.starts_with("<｜begin▁of▁sentence｜>Reasoning Effort: Beyond maximum"));
     assert!(rendered.ends_with("<｜Assistant｜><think>"));
 }
 

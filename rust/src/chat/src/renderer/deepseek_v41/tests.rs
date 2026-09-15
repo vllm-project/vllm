@@ -197,6 +197,38 @@ fn accepts_numeric_template_effort_with_top_level_precedence() {
 }
 
 #[test]
+fn enabling_with_none_inherits_deployment_effort_and_reports_numeric_control() {
+    let renderer = DeepSeekV41ChatRenderer::new()
+        .with_default_template_kwargs([("reasoning_effort".to_string(), json!(37))].into());
+    let mut request = request();
+    request.chat_options.reasoning_effort = Some(ReasoningEffort::None);
+    request
+        .chat_options
+        .template_kwargs
+        .insert("enable_thinking".into(), json!(true));
+    let rendered = renderer.render(&request).unwrap();
+    let prompt = rendered.prompt.into_text().unwrap();
+    assert!(prompt.contains("Reasoning Effort: 37 (range 1-100"));
+    assert!(prompt.ends_with("<think>"));
+    assert_eq!(rendered.effective_template_kwargs["reasoning_effort"], 37);
+    assert_eq!(rendered.effective_template_kwargs["enable_thinking"], true);
+
+    request.chat_options.template_kwargs.insert("thinking".into(), json!(false));
+    request
+        .chat_options
+        .template_kwargs
+        .insert("reasoning_effort".into(), json!(101));
+    request.chat_options.reasoning_effort = None;
+    let rendered = renderer.render(&request).unwrap();
+    assert!(rendered.prompt.into_text().unwrap().ends_with("</think>"));
+    assert_eq!(
+        rendered.effective_template_kwargs["reasoning_effort"],
+        "none"
+    );
+    assert_eq!(rendered.effective_template_kwargs["enable_thinking"], false);
+}
+
+#[test]
 fn rejects_undefined_effort_names_and_invalid_numeric_budgets() {
     for effort in [
         json!("medium"),
@@ -227,7 +259,7 @@ fn chat_mode_and_none_effort_use_closed_thinking_prefix() {
     let expected = expect!["<｜begin▁of▁sentence｜><｜User｜>question<｜Assistant｜></think>"];
     expected.assert_eq(&render(&request));
 
-    request.chat_options.template_kwargs.insert("thinking".into(), json!(true));
+    request.chat_options.template_kwargs.remove("thinking");
     request.chat_options.reasoning_effort = Some(ReasoningEffort::None);
     expected.assert_eq(&render(&request));
 }
