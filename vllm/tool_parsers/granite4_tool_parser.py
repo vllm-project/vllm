@@ -26,15 +26,15 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
+from vllm.tool_parsers.utils import dump_tool_arguments
 
 logger = init_logger(__name__)
 
 
 def dump_args(args: None | dict[str, Any] | str) -> str | None:
-    if args is None or isinstance(args, str):
-        return args
-    else:
-        return json.dumps(args, ensure_ascii=False)
+    if args is None:
+        return None
+    return dump_tool_arguments(args)
 
 
 class _FunctionCallCtor(Protocol):
