@@ -33,6 +33,7 @@ import uvicorn
 from fastapi import FastAPI, Response
 
 import vllm.entrypoints.launchers.dp_supervisor as dp_sup
+from vllm.entrypoints.cli import serve
 from vllm.entrypoints.launchers.dp_supervisor import (
     CHILD_EXIT_GRACE_S,
     DPSupervisor,
@@ -455,6 +456,153 @@ async def test_start_server_no_log_config_when_no_filter(monkeypatch):
     config = captured_config[0]
     assert config.log_config == uvicorn.Config(app=None).log_config
     assert config.access_log is True
+
+
+def _headless_process(name: str, sentinel: int, exitcode: int = 0) -> SimpleNamespace:
+    return SimpleNamespace(
+        name=name,
+        sentinel=sentinel,
+        exitcode=exitcode,
+        start=lambda: None,
+    )
+
+
+class _FakeHeadlessContext:
+    def __init__(self, processes: list[SimpleNamespace]) -> None:
+        self._processes = iter(processes)
+
+    def Process(self, **kwargs) -> SimpleNamespace:
+        process = next(self._processes)
+        assert kwargs["name"] == process.name
+        return process
+
+
+class _FakeHeadlessExecutor:
+    def __init__(self, is_failed: bool) -> None:
+        self.is_failed = is_failed
+        self.monitor_calls: list[bool] = []
+        self.shutdown_calls = 0
+
+    def start_worker_monitor(self, inline: bool) -> None:
+        self.monitor_calls.append(inline)
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
+
+
+def _headless_config(
+    data_parallel_size: int,
+    pipeline_parallel_size_local: int | None = 1,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            assigned_physical_gpu_ids=None,
+            data_parallel_size=data_parallel_size,
+            pipeline_parallel_size_local=pipeline_parallel_size_local,
+        )
+    )
+
+
+def _headless_executor_config() -> SimpleNamespace:
+    return SimpleNamespace(
+        parallel_config=SimpleNamespace(),
+        model_config=SimpleNamespace(is_moe=True),
+    )
+
+
+def test_headless_executor_raises_after_inner_worker_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = _FakeHeadlessExecutor(is_failed=True)
+    monkeypatch.setattr(
+        serve,
+        "MultiprocExecutor",
+        lambda *_args, **_kwargs: executor,
+    )
+    monkeypatch.setattr(
+        serve, "set_assigned_physical_gpu_ids_for_dp_rank", lambda *_: None
+    )
+    monkeypatch.setattr(serve, "set_process_title", lambda *_: None)
+    monkeypatch.setattr(serve, "decorate_logs", lambda: None)
+
+    with pytest.raises(RuntimeError, match="Headless executor worker failed"):
+        serve._run_headless_executor(_headless_executor_config(), 0, None)
+
+    assert executor.monitor_calls == [True]
+    assert executor.shutdown_calls == 1
+
+
+def test_single_headless_executor_runs_inline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = _FakeHeadlessExecutor(is_failed=False)
+    monkeypatch.setattr(
+        serve,
+        "MultiprocExecutor",
+        lambda *_args, **_kwargs: executor,
+    )
+
+    serve._run_headless_executors(
+        _headless_config(2, pipeline_parallel_size_local=None)
+    )
+
+    assert executor.monitor_calls == [True]
+    assert executor.shutdown_calls == 0
+
+
+def test_headless_executors_shut_down_after_clean_child_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processes = [
+        _headless_process("HeadlessExecutor_DP0", 10),
+        _headless_process("HeadlessExecutor_DP1", 11),
+    ]
+    waited_on: list[set[int]] = []
+    shutdown_calls: list[list[SimpleNamespace]] = []
+    monkeypatch.setattr(
+        serve, "get_mp_context", lambda: _FakeHeadlessContext(processes)
+    )
+
+    def wait(sentinels, timeout):
+        assert timeout == 1
+        waited_on.append(set(sentinels))
+        return [10]
+
+    monkeypatch.setattr(serve.connection, "wait", wait)
+    monkeypatch.setattr(serve, "shutdown", shutdown_calls.append)
+
+    serve._run_headless_executors(_headless_config(len(processes)))
+
+    assert waited_on == [{10, 11}]
+    assert shutdown_calls == [processes]
+
+
+def test_headless_executors_raises_for_nonzero_child_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processes = [
+        _headless_process("HeadlessExecutor_DP0", 10),
+        _headless_process("HeadlessExecutor_DP1", 11, exitcode=17),
+    ]
+    waited_on: list[set[int]] = []
+    shutdown_calls: list[list[SimpleNamespace]] = []
+    monkeypatch.setattr(
+        serve, "get_mp_context", lambda: _FakeHeadlessContext(processes)
+    )
+
+    def wait(sentinels, timeout):
+        assert timeout == 1
+        waited_on.append(set(sentinels))
+        return [11]
+
+    monkeypatch.setattr(serve.connection, "wait", wait)
+    monkeypatch.setattr(serve, "shutdown", shutdown_calls.append)
+
+    with pytest.raises(RuntimeError, match=r"HeadlessExecutor_DP1 exited with code 17"):
+        serve._run_headless_executors(_headless_config(len(processes)))
+
+    assert waited_on == [{10, 11}]
+    assert shutdown_calls == [processes]
 
 
 # ---------------------------------------------------------------------------
