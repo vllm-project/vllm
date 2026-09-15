@@ -241,7 +241,7 @@ Unfortunately, because auto-tuning takes quite a long time (from seconds to minu
 
 ## Cudagraph Capture
 
-vLLM's V1 architecture uses piecewise cudagraph that aligns with the piecewise compilation. The full computation graph is split as mentioned above, and we only capture the cudagraph for the piece of graph between attention operations (including the first graph before any attention operation, and the last graph after all the attention operation). This is based on a common observation: computation between attentions are usually token-wise and easy to deal with for cudagraph; while the attention operation is non-trivial to be cudagraph compatible. Thus, by running the attention operation in eager mode while the rest operations in cudagraph, we keep the flexibility of the attention operation.
+Piecewise cudagraph capture aligns with piecewise compilation: the full computation graph is split as mentioned above, and each piece between attention operations (including the first graph before any attention operation, and the last graph after all the attention operation) can be captured as its own cudagraph, with attention itself running eager. This is `CUDAGraphMode.PIECEWISE`, one mode among several — see [CUDA Graphs](cuda_graphs.md) for the full set of modes, including the current default (`FULL_AND_PIECEWISE`, which also captures full cudagraphs for uniform-decode batches) and how the runtime dispatcher picks between them per batch.
 
 The piecewise cudagraph also has fine-grained memory management. The purpose is to only exclude the attention kernel from cudagraph, while keeping all the rest modules and the memory allocation operations in the cudagraph. This is why the attention operation in V1 has the output tensor as the input of the attention.
 
@@ -255,7 +255,3 @@ vllm serve meta-llama/Llama-3.2-1B \
 ```
 
 Then it will only capture cudagraph for the specified sizes. It can be useful to have fine-grained control over the cudagraph capture.
-
-### Full Cudagraph capture
-
-It is possible to include attention as part of the cudagraph if using an attention backend that is cudagraph compatible. This can improve performance in some cases such as decode speed for smaller models or MOEs. See [CUDA Graphs](cuda_graphs.md) for more details.
