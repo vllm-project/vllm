@@ -100,6 +100,15 @@ class InputProcessor:
                 self.structured_outputs_config,
                 self.tokenizer,
             )
+            if (
+                params.prompt_logprob_token_ids is not None
+                and not self.vllm_config.use_v2_model_runner
+            ):
+                raise VLLMValidationError(
+                    "prompt_logprob_token_ids requires the V2 model runner "
+                    "(VLLM_USE_V2_MODEL_RUNNER=1).",
+                    parameter="prompt_logprob_token_ids",
+                )
 
             if self.model_config.return_sampling_mask:
                 if params.temperature <= 0:
@@ -364,6 +373,18 @@ class InputProcessor:
                     parameter="routed_experts_prompt_start",
                     value=sampling_params.routed_experts_prompt_start,
                 )
+            rows = sampling_params.prompt_logprob_token_ids
+            if rows is not None:
+                start = sampling_params.prompt_logprob_start or 0
+                num_rows = max(prompt_len - 1 - start, 0)
+                if len(rows) != num_rows:
+                    raise VLLMValidationError(
+                        f"prompt_logprob_token_ids has {len(rows)} rows, but the "
+                        f"prompt has {num_rows} scored rows "
+                        f"(prompt_len - 1 - prompt_logprob_start).",
+                        parameter="prompt_logprob_token_ids",
+                        value=len(rows),
+                    )
             # If unset max tokens, then generate up to the max_model_len.
             if sampling_params.max_tokens is None:
                 sampling_params.max_tokens = (

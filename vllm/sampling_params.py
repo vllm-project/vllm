@@ -11,6 +11,7 @@ from functools import cached_property
 from typing import Annotated, Any
 
 import msgspec
+import numpy as np
 from pydantic import BeforeValidator
 from pydantic.dataclasses import dataclass
 
@@ -20,6 +21,7 @@ from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.mistral import is_mistral_tokenizer
+from vllm.utils.torch_utils import make_ndarray_with_pad
 from vllm.v1.serial_utils import PydanticMsgspecMixin
 
 logger = init_logger(__name__)
@@ -293,6 +295,11 @@ class SamplingParams(
     prompt_logprobs: int | None = None
     """Number of log probabilities to return per prompt token.
     When set to -1, return all `vocab_size` log probabilities."""
+    prompt_logprob_token_ids: np.ndarray | None = None
+    """Token IDs to score per causal prompt row: an integer array of shape
+    [num_rows, num_ids], -1 padding shorter rows. Nested lists are padded."""
+    prompt_logprob_start: int | None = None
+    """First causal prompt row to score; defaults to the first row."""
     logprob_token_ids: list[int] | None = None
     """Specific token IDs to return logprobs for. More efficient than
     logprobs=-1 when you only need logprobs for a small set of tokens.
@@ -402,6 +409,8 @@ class SamplingParams(
         min_tokens: int = 0,
         logprobs: int | None = None,
         prompt_logprobs: int | None = None,
+        prompt_logprob_token_ids: np.ndarray | list[list[int]] | None = None,
+        prompt_logprob_start: int | None = None,
         detokenize: bool = True,
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
@@ -468,6 +477,8 @@ class SamplingParams(
             min_tokens=min_tokens,
             logprobs=logprobs,
             prompt_logprobs=prompt_logprobs,
+            prompt_logprob_token_ids=prompt_logprob_token_ids,
+            prompt_logprob_start=prompt_logprob_start,
             logprob_token_ids=logprob_token_ids,
             detokenize=detokenize,
             skip_special_tokens=skip_special_tokens,
@@ -497,6 +508,11 @@ class SamplingParams(
 
         if self.seed == -1:
             self.seed = None
+
+        if isinstance(self.prompt_logprob_token_ids, list):
+            self.prompt_logprob_token_ids = make_ndarray_with_pad(
+                self.prompt_logprob_token_ids, -1, np.int64
+            )
 
         self.thinking_token_budget = validate_thinking_token_budget(
             self.thinking_token_budget
@@ -544,7 +560,10 @@ class SamplingParams(
             # If prefix caching is enabled,
             # the output of prompt logprobs may less than n_prompt_tokens,
             # we need to skip reading cache at this request.
-            self.skip_reading_prefix_cache = self.prompt_logprobs is not None
+            self.skip_reading_prefix_cache = (
+                self.prompt_logprobs is not None
+                or self.prompt_logprob_token_ids is not None
+            )
 
     def _verify_args(self) -> None:
         _verify_num_sequences(self.n, "n")
@@ -896,6 +915,51 @@ class SamplingParams(
                     parameter="prompt_logprobs",
                     value=num_prompt_logprobs,
                 )
+
+        # Validate prompt_logprob_token_ids.
+        ids = self.prompt_logprob_token_ids
+        if ids is not None:
+            if (
+                not isinstance(ids, np.ndarray)
+                or ids.ndim != 2
+                or 0 in ids.shape
+                or ids.dtype.kind not in "iu"
+            ):
+                raise VLLMValidationError(
+                    "prompt_logprob_token_ids must be a non-empty integer array "
+                    "of shape [num_rows, num_ids].",
+                    parameter="prompt_logprob_token_ids",
+                    value=getattr(ids, "shape", type(ids).__name__),
+                )
+            n = ids.shape[1]
+            if n > max_logprobs:
+                raise VLLMValidationError(
+                    f"Requested {n} token ids per row in prompt_logprob_token_ids, "
+                    f"which is greater than max allowed: {max_logprobs}. "
+                    f"Set max_logprobs (--max-logprobs) to at least {n}.",
+                    parameter="prompt_logprob_token_ids",
+                    value=n,
+                )
+            vocab_size = model_config.get_vocab_size()
+            if ids.min() < -1 or ids.max() >= vocab_size:
+                raise VLLMValidationError(
+                    "prompt_logprob_token_ids contain out-of-vocab token ids "
+                    f"(-1 pads a row). Vocabulary size: {vocab_size}",
+                    parameter="prompt_logprob_token_ids",
+                    value=[int(ids.min()), int(ids.max())],
+                )
+            if self.prompt_logprob_start is not None and self.prompt_logprob_start < 0:
+                raise VLLMValidationError(
+                    "prompt_logprob_start must be non-negative.",
+                    parameter="prompt_logprob_start",
+                    value=self.prompt_logprob_start,
+                )
+        elif self.prompt_logprob_start is not None:
+            raise VLLMValidationError(
+                "prompt_logprob_start requires prompt_logprob_token_ids.",
+                parameter="prompt_logprob_start",
+                value=self.prompt_logprob_start,
+            )
 
     def _validate_stop_token_ids(self, model_config: ModelConfig) -> None:
         """Validate stop_token_ids are within vocabulary range."""
