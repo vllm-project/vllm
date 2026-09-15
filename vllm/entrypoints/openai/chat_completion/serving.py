@@ -402,6 +402,7 @@ class OpenAIServingChat(GenerateBaseServing):
                 mm_token_counts=mm_token_counts,
             )
 
+        reasoning_effort = chat_template_kwargs.get("reasoning_effort")
         return await self.chat_completion_full_generator(
             request,
             result_generator,
@@ -412,6 +413,9 @@ class OpenAIServingChat(GenerateBaseServing):
             request_metadata,
             parser=parser,
             mm_token_counts=mm_token_counts,
+            reasoning_effort=(
+                reasoning_effort if isinstance(reasoning_effort, str) else None
+            ),
         )
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
@@ -529,6 +533,9 @@ class OpenAIServingChat(GenerateBaseServing):
                     # Send first response for each request.n (index) with
                     # the role
                     role = self.get_chat_request_role(request)
+                    reasoning_effort = (chat_template_kwargs or {}).get(
+                        "reasoning_effort"
+                    )
 
                     # ``res.prompt`` is the rendered chat-templated prompt
                     prompt_text = res.prompt if request.return_prompt_text else None
@@ -545,6 +552,9 @@ class OpenAIServingChat(GenerateBaseServing):
                             logprobs=None,
                             finish_reason=None,
                         )
+
+                        if isinstance(reasoning_effort, str):
+                            choice_data.delta.reasoning_effort = reasoning_effort
 
                         # return prompt_token_ids at the first chunk ever
                         chunk = ChatCompletionStreamResponse(
@@ -920,6 +930,7 @@ class OpenAIServingChat(GenerateBaseServing):
         request_metadata: RequestResponseMetadata,
         parser: Parser | None = None,
         mm_token_counts: dict[str, int] | None = None,
+        reasoning_effort: str | None = None,
     ) -> ErrorResponse | ChatCompletionResponse:
         created_time = int(time.time())
         final_res: RequestOutput | None = None
@@ -1064,6 +1075,7 @@ class OpenAIServingChat(GenerateBaseServing):
             # citation-aware handlers use this to surface grounding
             # metadata cached on the reasoning parser.
             message = self._finalize_response_message(message, parser=parser)
+            message.reasoning_effort = reasoning_effort
 
             # In OpenAI's API, when a tool is called, the finish_reason is:
             # "tool_calls" for "auto" or "required" tool calls,

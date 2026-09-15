@@ -951,6 +951,105 @@ async def test_serving_chat_returns_correct_model_name():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    ("server_kwargs", "request_kwargs", "expected_effort"),
+    [
+        pytest.param(
+            {"reasoning_effort": "low"},
+            {
+                "chat_template_kwargs": {"reasoning_effort": "medium"},
+                "reasoning_effort": "high",
+            },
+            "high",
+            id="top-level-overrides-nested-and-server",
+        ),
+        pytest.param(
+            {"reasoning_effort": "low"},
+            {"chat_template_kwargs": {"reasoning_effort": "custom"}},
+            "custom",
+            id="nested-overrides-server",
+        ),
+        pytest.param(
+            {"reasoning_effort": "low"},
+            {"reasoning_effort": None},
+            "low",
+            id="server-default",
+        ),
+        pytest.param(
+            {"reasoning_effort": "high"},
+            {"reasoning_effort": "none"},
+            "none",
+            id="explicit-none-is-known",
+        ),
+        pytest.param({}, {}, None, id="absent-is-unknown"),
+        pytest.param(
+            {},
+            {"chat_template_kwargs": {"reasoning_effort": None}},
+            None,
+            id="null-is-unknown",
+        ),
+        pytest.param(
+            {"reasoning_effort": "high"},
+            {"chat_template_kwargs": {"reasoning_effort": 7}},
+            None,
+            id="non-string-is-unknown",
+        ),
+    ],
+)
+async def test_chat_response_reasoning_effort(
+    stream, server_kwargs, request_kwargs, expected_effort
+):
+    """Responses retain configured effort without guessing template defaults."""
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = MagicMock()
+    serving = _build_serving_chat(mock_engine)
+    serving.default_chat_template_kwargs = server_kwargs
+    messages = [{"role": "user", "content": "Test"}]
+    serving.online_renderer.render_chat = AsyncMock(
+        return_value=(messages, [{"type": "tokens", "prompt_token_ids": [1, 2, 3]}])
+    )
+    output = _make_metrics_request_output(metrics=None)
+    second_choice = _make_metrics_request_output(metrics=None).outputs[0]
+    second_choice.index = 1
+    output.outputs.append(second_choice)
+    mock_engine.generate.return_value = _single_request_output(output)
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=messages,
+        max_tokens=10,
+        n=2,
+        stream=stream,
+        **request_kwargs,
+    )
+
+    response = await serving.create_chat_completion(request)
+    if not stream:
+        assert isinstance(response, ChatCompletionResponse)
+        choices = json.loads(response.model_dump_json())["choices"]
+        assert [choice["index"] for choice in choices] == [0, 1]
+        for choice in choices:
+            assert choice["message"]["content"] == "Hello"
+            assert choice["message"]["reasoning_effort"] == expected_effort
+    else:
+        deltas_by_choice: dict[int, list[dict]] = {0: [], 1: []}
+        async for line in response:
+            payload = line.removeprefix("data: ").strip()
+            if payload == "[DONE]":
+                continue
+            for choice in json.loads(payload)["choices"]:
+                deltas_by_choice[choice["index"]].append(choice["delta"])
+        for deltas in deltas_by_choice.values():
+            assert deltas[0]["role"] == "assistant"
+            assert deltas[0].get("reasoning_effort") == expected_effort
+            assert "".join(delta.get("content", "") for delta in deltas) == "Hello"
+            assert all("reasoning_effort" not in delta for delta in deltas[1:])
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [True, False])
 async def test_admission_rejection_escapes_before_response_starts(stream):
     """Overload rejections must propagate out of create_chat_completion.
