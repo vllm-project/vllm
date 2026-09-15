@@ -30,8 +30,8 @@ use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
 use vllm_server::{
     ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
-    DEFAULT_KEEP_ALIVE_TIMEOUT, HttpListenerMode, LoraModulePath, ParserSelection, RenderConfig,
-    RendererSelection,
+    DEFAULT_KEEP_ALIVE_TIMEOUT, GrpcServiceSelection, HttpListenerMode, LoraModulePath,
+    ParserSelection, RenderConfig, RendererSelection,
 };
 
 use crate::cli::ssl::SslArgs;
@@ -248,6 +248,15 @@ pub struct SharedRuntimeArgs {
     #[arg(long)]
     #[serde(default)]
     pub grpc_port: Option<u16>,
+    /// gRPC services to mount on `--grpc-port`: `configured` (the default)
+    /// derives them from the engine configuration, `all` mounts every service
+    /// and serves the deprecated `Control` aliases of the RPCs that moved to
+    /// `Lora`, `KvTransfer` and `RlControl`, or pass a comma-separated list of
+    /// `inference`, `control`, `kv-transfer`, `rl-control`, `lora`. A list
+    /// naming a service the engines are not configured for fails startup.
+    #[arg(long, default_value_t)]
+    #[serde(default)]
+    pub grpc_services: GrpcServiceSelection,
     /// Maximum time to wait for active requests to drain during shutdown.
     #[arg(long, default_value_t = 0)]
     #[serde(default)]
@@ -519,6 +528,7 @@ impl SharedRuntimeArgs {
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
+            grpc_services: self.grpc_services,
             shutdown_timeout,
             keep_alive_timeout,
             profiler,
@@ -575,6 +585,7 @@ impl SharedRuntimeArgs {
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
+            grpc_services: self.grpc_services,
             shutdown_timeout,
             keep_alive_timeout,
             profiler,

@@ -3,18 +3,19 @@
 
 use std::sync::Arc;
 
-use serde_json::Value as JsonValue;
 use thiserror_ext::AsReport as _;
-use tokio::sync::Mutex;
-use tonic::{Code, Request, Response, Status};
+use tonic::{Request, Response, Status};
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
-use vllm_engine_core_client::protocol::lora::LoraRequest;
-use vllm_engine_core_client::protocol::utility::PauseMode as EnginePauseMode;
 
-use super::{ControlServer, pb};
-use crate::config::LoraModulePath;
-use crate::lora::{LoadLoraError, LoraDisabledError, LoraPathAccessError, UnloadLoraError};
+use crate::grpc::pb::kv_transfer_server::KvTransfer as _;
+use crate::grpc::pb::lora_server::Lora as _;
+use crate::grpc::pb::rl_control_server::RlControl as _;
+use crate::grpc::rl_control::rl_capabilities;
+use crate::grpc::{
+    ControlServer, KvTransferServiceImpl, LoraServiceImpl, RlControlServiceImpl, pb,
+};
+use crate::grpc_services::{GrpcServices, mounted_entries, service_entry};
 use crate::state::AppState;
 
 pub(crate) type ControlGrpcService = ControlServer<ControlServiceImpl>;
@@ -22,15 +23,56 @@ pub(crate) type ControlGrpcService = ControlServer<ControlServiceImpl>;
 /// gRPC control service backed by the shared application state.
 pub struct ControlServiceImpl {
     state: Arc<AppState>,
-    rl_lock: Mutex<()>,
+    kv_transfer: Arc<KvTransferServiceImpl>,
+    rl_control: Arc<RlControlServiceImpl>,
+    lora: Arc<LoraServiceImpl>,
 }
 
 impl ControlServiceImpl {
-    pub fn new(state: Arc<AppState>) -> Self {
+    pub fn new(
+        state: Arc<AppState>,
+        kv_transfer: Arc<KvTransferServiceImpl>,
+        rl_control: Arc<RlControlServiceImpl>,
+        lora: Arc<LoraServiceImpl>,
+    ) -> Self {
         Self {
             state,
-            rl_lock: Mutex::new(()),
+            kv_transfer,
+            rl_control,
+            lora,
         }
+    }
+
+    /// The `KvTransfer` implementation behind the deprecated `Control` aliases,
+    /// or `Unimplemented` unless `--grpc-services all` serves them.
+    fn kv_transfer(&self) -> Result<&KvTransferServiceImpl, Status> {
+        self.aliased(&self.kv_transfer, GrpcServices::KV_TRANSFER)
+    }
+
+    /// The `RlControl` implementation behind the deprecated `Control` aliases,
+    /// or `Unimplemented` unless `--grpc-services all` serves them.
+    fn rl_control(&self) -> Result<&RlControlServiceImpl, Status> {
+        self.aliased(&self.rl_control, GrpcServices::RL_CONTROL)
+    }
+
+    /// The `Lora` implementation behind the deprecated `Control.LoadLora` and
+    /// `Control.UnloadLora` aliases, or `Unimplemented` unless
+    /// `--grpc-services all` serves them.
+    fn lora(&self) -> Result<&LoraServiceImpl, Status> {
+        self.aliased(&self.lora, GrpcServices::LORA)
+    }
+
+    fn aliased<'a, T>(&self, target: &'a T, flag: GrpcServices) -> Result<&'a T, Status> {
+        if self.state.grpc_control_aliases() {
+            return Ok(target);
+        }
+        let entry = service_entry(flag)
+            .ok_or_else(|| Status::unimplemented("the requested service is not mounted"))?;
+        Err(Status::unimplemented(format!(
+            "the deprecated vllm.Control aliases for {} are only served with `--grpc-services \
+             all`; call {} directly",
+            entry.service_name, entry.service_name,
+        )))
     }
 
     fn ready(&self) -> &EngineCoreReadyResponse {
@@ -52,129 +94,9 @@ impl ControlServiceImpl {
             world_size: ready.world_size,
         }
     }
-
-    fn weight_transfer_backend(&self) -> Option<&str> {
-        let responses = self.client().ready_responses();
-        let backend = responses.first()?.weight_transfer_backend.as_deref()?;
-        responses
-            .iter()
-            .all(|ready| ready.weight_transfer_backend.as_deref() == Some(backend))
-            .then_some(backend)
-    }
-
-    fn sleep_mode_enabled(&self) -> bool {
-        self.client().ready_responses().iter().all(|ready| ready.enable_sleep_mode)
-    }
-
-    fn draft_weight_updates_enabled(&self) -> bool {
-        self.client()
-            .ready_responses()
-            .iter()
-            .all(|ready| ready.supports_draft_weight_updates)
-    }
-
-    fn rl_capabilities(&self) -> pb::RlCapabilities {
-        let backend = self.weight_transfer_backend();
-        pb::RlCapabilities {
-            weight_transfer_enabled: backend.is_some(),
-            weight_transfer_backend: backend.unwrap_or_default().to_string(),
-            sleep_mode_enabled: self.sleep_mode_enabled(),
-            draft_weight_updates_enabled: self.draft_weight_updates_enabled(),
-        }
-    }
-
-    fn require_weight_transfer(&self) -> Result<(), Status> {
-        self.weight_transfer_backend().map(|_| ()).ok_or_else(|| {
-            Status::failed_precondition(
-                "weight transfer is not configured; start vLLM with --weight-transfer-config",
-            )
-        })
-    }
-
-    fn require_sleep_mode(&self) -> Result<(), Status> {
-        self.sleep_mode_enabled().then_some(()).ok_or_else(|| {
-            Status::failed_precondition(
-                "sleep mode is not configured; start vLLM with --enable-sleep-mode",
-            )
-        })
-    }
 }
 
 const GRPC_API_VERSION: &str = "vllm";
-
-fn utility_status(method: &'static str, error: vllm_engine_core_client::Error) -> Status {
-    Status::internal(format!("{method} failed: {}", error.to_report_string()))
-}
-
-fn pause_mode(mode: i32) -> Result<EnginePauseMode, Status> {
-    match pb::PauseMode::try_from(mode) {
-        Ok(pb::PauseMode::Unspecified | pb::PauseMode::Abort) => Ok(EnginePauseMode::Abort),
-        Ok(pb::PauseMode::Wait) => Ok(EnginePauseMode::Wait),
-        Ok(pb::PauseMode::Keep) => Ok(EnginePauseMode::Keep),
-        Err(_) => Err(Status::invalid_argument("invalid pause mode")),
-    }
-}
-
-fn json_object(bytes: &[u8], field: &'static str) -> Result<JsonValue, Status> {
-    let value = serde_json::from_slice::<JsonValue>(bytes).map_err(|error| {
-        Status::invalid_argument(format!(
-            "{field} must contain valid JSON: {}",
-            error.to_report_string()
-        ))
-    })?;
-    if !value.is_object() {
-        return Err(Status::invalid_argument(format!(
-            "{field} must contain a JSON object"
-        )));
-    }
-    Ok(value)
-}
-
-fn weight_version(value: String) -> Result<String, Status> {
-    if value.trim().is_empty() {
-        return Err(Status::invalid_argument("weight_version must not be empty"));
-    }
-    Ok(value)
-}
-
-fn lora_to_proto(adapter: &LoraRequest) -> pb::LoraAdapter {
-    pb::LoraAdapter {
-        lora_id: adapter.lora_int_id.min(i64::MAX as u64) as i64,
-        lora_name: adapter.lora_name.clone(),
-        source_path: adapter.lora_path.clone(),
-    }
-}
-
-fn load_lora_status(error: LoadLoraError) -> Status {
-    let code = match &error {
-        LoadLoraError::Disabled(_) => Code::FailedPrecondition,
-        LoadLoraError::InvalidAdapter { .. } => Code::InvalidArgument,
-        LoadLoraError::PathAccess(LoraPathAccessError::InvalidPath { .. }) => Code::InvalidArgument,
-        LoadLoraError::PathAccess(LoraPathAccessError::InvalidConfiguration { .. }) => {
-            Code::Internal
-        }
-        LoadLoraError::AlreadyLoaded { .. } | LoadLoraError::BaseModelName { .. } => {
-            Code::AlreadyExists
-        }
-        LoadLoraError::Engine { .. } | LoadLoraError::NotLoaded { .. } => Code::Internal,
-    };
-    Status::new(code, error.to_report_string())
-}
-
-fn unload_lora_status(error: UnloadLoraError) -> Status {
-    let code = match &error {
-        UnloadLoraError::Disabled(_) => Code::FailedPrecondition,
-        UnloadLoraError::NotFound { .. } => Code::NotFound,
-        UnloadLoraError::IntIdMismatch { .. }
-        | UnloadLoraError::Engine { .. }
-        | UnloadLoraError::NotRemoved { .. } => Code::Internal,
-    };
-    Status::new(code, error.to_report_string())
-}
-
-fn list_loras_status(error: LoraDisabledError) -> Status {
-    Status::failed_precondition(error.to_report_string())
-}
 
 #[tonic::async_trait]
 impl pb::control_server::Control for ControlServiceImpl {
@@ -194,7 +116,10 @@ impl pb::control_server::Control for ControlServiceImpl {
             max_running_requests: ready.max_num_seqs,
             max_batched_tokens: ready.max_num_batched_tokens,
             max_loras: ready.max_loras,
-            rl_capabilities: Some(self.rl_capabilities()),
+            rl_capabilities: Some(rl_capabilities(&self.client().ready_responses())),
+            services: mounted_entries(self.state.grpc_services())
+                .map(|entry| entry.proto as i32)
+                .collect(),
         }))
     }
 
@@ -243,275 +168,122 @@ impl pb::control_server::Control for ControlServiceImpl {
         Ok(Response::new(pb::AbortResponse {}))
     }
 
+    async fn list_loras(
+        &self,
+        request: Request<pb::ListLorasRequest>,
+    ) -> Result<Response<pb::ListLorasResponse>, Status> {
+        self.lora.list_loras(request).await
+    }
+
     async fn load_lora(
         &self,
         request: Request<pb::LoadLoraRequest>,
     ) -> Result<Response<pb::LoadLoraResponse>, Status> {
-        let request = request.into_inner();
-        let module = LoraModulePath {
-            name: request.lora_name,
-            path: request.source_path,
-            base_model_name: None,
-            is_3d_lora_weight: false,
-        };
-        let adapter = self.state.load_lora(module, false).await.map_err(load_lora_status)?;
-        Ok(Response::new(pb::LoadLoraResponse {
-            adapter: Some(lora_to_proto(&adapter)),
-        }))
+        self.lora()?.load_lora(request).await
     }
 
     async fn unload_lora(
         &self,
         request: Request<pb::UnloadLoraRequest>,
     ) -> Result<Response<pb::UnloadLoraResponse>, Status> {
-        let name = request.into_inner().lora_name;
-        if name.trim().is_empty() {
-            return Err(Status::invalid_argument("lora_name is required"));
-        }
-
-        let adapter = self
-            .state
-            .list_loras()
-            .await
-            .map_err(list_loras_status)?
-            .into_iter()
-            .find(|adapter| adapter.lora_name == name)
-            .ok_or_else(|| Status::not_found(format!("LoRA adapter `{name}` is not loaded")))?;
-        let adapter = self
-            .state
-            .unload_lora(&name, Some(adapter.lora_int_id))
-            .await
-            .map_err(unload_lora_status)?;
-        Ok(Response::new(pb::UnloadLoraResponse {
-            adapter: Some(lora_to_proto(&adapter)),
-        }))
-    }
-
-    async fn list_loras(
-        &self,
-        _request: Request<pb::ListLorasRequest>,
-    ) -> Result<Response<pb::ListLorasResponse>, Status> {
-        let mut adapters = self.state.list_loras().await.map_err(list_loras_status)?;
-        adapters.sort_by(|left, right| left.lora_name.cmp(&right.lora_name));
-        Ok(Response::new(pb::ListLorasResponse {
-            adapters: adapters.iter().map(lora_to_proto).collect(),
-        }))
+        self.lora()?.unload_lora(request).await
     }
 
     async fn get_kv_event_sources(
         &self,
-        _request: Request<pb::GetKvEventSourcesRequest>,
+        request: Request<pb::GetKvEventSourcesRequest>,
     ) -> Result<Response<pb::GetKvEventSourcesResponse>, Status> {
-        let client = self.state.engine_core_client();
-        let sources = client.ready_responses().into_iter().filter_map(kv_event_source).collect();
-        Ok(Response::new(pb::GetKvEventSourcesResponse { sources }))
+        self.kv_transfer()?.get_kv_event_sources(request).await
     }
 
     async fn pause_generation(
         &self,
         request: Request<pb::PauseGenerationRequest>,
     ) -> Result<Response<pb::PauseGenerationResponse>, Status> {
-        let request = request.into_inner();
-        let mode = pause_mode(request.mode)?;
-        let clear_cache = request.clear_cache.unwrap_or(true);
-        let _guard = self.rl_lock.lock().await;
-        self.client()
-            .pause_scheduler(mode, clear_cache)
-            .await
-            .map_err(|error| utility_status("pause_generation", error))?;
-        Ok(Response::new(pb::PauseGenerationResponse {}))
+        self.rl_control()?.pause_generation(request).await
     }
 
     async fn resume_generation(
         &self,
-        _request: Request<pb::ResumeGenerationRequest>,
+        request: Request<pb::ResumeGenerationRequest>,
     ) -> Result<Response<pb::ResumeGenerationResponse>, Status> {
-        let _guard = self.rl_lock.lock().await;
-        self.client()
-            .resume_scheduler()
-            .await
-            .map_err(|error| utility_status("resume_generation", error))?;
-        Ok(Response::new(pb::ResumeGenerationResponse {}))
+        self.rl_control()?.resume_generation(request).await
     }
 
     async fn is_paused(
         &self,
-        _request: Request<pb::IsPausedRequest>,
+        request: Request<pb::IsPausedRequest>,
     ) -> Result<Response<pb::IsPausedResponse>, Status> {
-        let paused = self
-            .client()
-            .is_scheduler_paused()
-            .await
-            .map_err(|error| utility_status("is_paused", error))?;
-        Ok(Response::new(pb::IsPausedResponse { paused }))
+        self.rl_control()?.is_paused(request).await
     }
 
     async fn sleep(
         &self,
         request: Request<pb::SleepRequest>,
     ) -> Result<Response<pb::SleepResponse>, Status> {
-        self.require_sleep_mode()?;
-        let request = request.into_inner();
-        let mode = pause_mode(request.mode)?;
-        let level = request.level.unwrap_or(1);
-        let _guard = self.rl_lock.lock().await;
-        self.client()
-            .sleep(level, mode)
-            .await
-            .map_err(|error| utility_status("sleep", error))?;
-        Ok(Response::new(pb::SleepResponse {}))
+        self.rl_control()?.sleep(request).await
     }
 
     async fn wake_up(
         &self,
         request: Request<pb::WakeUpRequest>,
     ) -> Result<Response<pb::WakeUpResponse>, Status> {
-        self.require_sleep_mode()?;
-        let tags = request.into_inner().tags;
-        let tags = (!tags.is_empty()).then_some(tags);
-        let _guard = self.rl_lock.lock().await;
-        self.client()
-            .wake_up(tags)
-            .await
-            .map_err(|error| utility_status("wake_up", error))?;
-        Ok(Response::new(pb::WakeUpResponse {}))
+        self.rl_control()?.wake_up(request).await
     }
 
     async fn is_sleeping(
         &self,
-        _request: Request<pb::IsSleepingRequest>,
+        request: Request<pb::IsSleepingRequest>,
     ) -> Result<Response<pb::IsSleepingResponse>, Status> {
-        let sleeping = self
-            .client()
-            .is_sleeping()
-            .await
-            .map_err(|error| utility_status("is_sleeping", error))?;
-        Ok(Response::new(pb::IsSleepingResponse { sleeping }))
+        self.rl_control()?.is_sleeping(request).await
     }
 
     async fn init_weight_transfer_engine(
         &self,
         request: Request<pb::InitWeightTransferEngineRequest>,
     ) -> Result<Response<pb::InitWeightTransferEngineResponse>, Status> {
-        self.require_weight_transfer()?;
-        let init_info = json_object(&request.into_inner().init_info_json, "init_info_json")?;
-        let _guard = self.rl_lock.lock().await;
-        self.client()
-            .init_weight_transfer_engine(init_info)
-            .await
-            .map_err(|error| utility_status("init_weight_transfer_engine", error))?;
-        Ok(Response::new(pb::InitWeightTransferEngineResponse {}))
+        self.rl_control()?.init_weight_transfer_engine(request).await
     }
 
     async fn start_weight_update(
         &self,
-        _request: Request<pb::StartWeightUpdateRequest>,
+        request: Request<pb::StartWeightUpdateRequest>,
     ) -> Result<Response<pb::StartWeightUpdateResponse>, Status> {
-        self.require_weight_transfer()?;
-        let _guard = self.rl_lock.lock().await;
-        self.client()
-            .start_weight_update()
-            .await
-            .map_err(|error| utility_status("start_weight_update", error))?;
-        Ok(Response::new(pb::StartWeightUpdateResponse {}))
+        self.rl_control()?.start_weight_update(request).await
     }
 
     async fn start_draft_weight_update(
         &self,
-        _request: Request<pb::StartDraftWeightUpdateRequest>,
+        request: Request<pb::StartDraftWeightUpdateRequest>,
     ) -> Result<Response<pb::StartDraftWeightUpdateResponse>, Status> {
-        self.require_weight_transfer()?;
-        if !self.draft_weight_updates_enabled() {
-            return Err(Status::failed_precondition(
-                "draft weight updates require a configured speculative draft model",
-            ));
-        }
-        let _guard = self.rl_lock.lock().await;
-        self.client()
-            .start_draft_weight_update()
-            .await
-            .map_err(|error| utility_status("start_draft_weight_update", error))?;
-        Ok(Response::new(pb::StartDraftWeightUpdateResponse {}))
+        self.rl_control()?.start_draft_weight_update(request).await
     }
 
     async fn update_weights(
         &self,
         request: Request<pb::UpdateWeightsRequest>,
     ) -> Result<Response<pb::UpdateWeightsResponse>, Status> {
-        self.require_weight_transfer()?;
-        let update_info = json_object(&request.into_inner().update_info_json, "update_info_json")?;
-        let _guard = self.rl_lock.lock().await;
-        self.client()
-            .update_weights(update_info)
-            .await
-            .map_err(|error| utility_status("update_weights", error))?;
-        Ok(Response::new(pb::UpdateWeightsResponse {}))
+        self.rl_control()?.update_weights(request).await
     }
 
     async fn finish_weight_update(
         &self,
         request: Request<pb::FinishWeightUpdateRequest>,
     ) -> Result<Response<pb::FinishWeightUpdateResponse>, Status> {
-        self.require_weight_transfer()?;
-        let version = request.into_inner().weight_version.map(weight_version).transpose()?;
-        let _guard = self.rl_lock.lock().await;
-        self.client()
-            .finish_weight_update()
-            .await
-            .map_err(|error| utility_status("finish_weight_update", error))?;
-        if let Some(version) = version {
-            self.client()
-                .set_weight_version(&version)
-                .await
-                .map_err(|error| utility_status("update_weight_version", error))?;
-        }
-        Ok(Response::new(pb::FinishWeightUpdateResponse {}))
+        self.rl_control()?.finish_weight_update(request).await
     }
 
     async fn update_weight_version(
         &self,
         request: Request<pb::UpdateWeightVersionRequest>,
     ) -> Result<Response<pb::UpdateWeightVersionResponse>, Status> {
-        let version = weight_version(request.into_inner().weight_version)?;
-        let _guard = self.rl_lock.lock().await;
-        self.client()
-            .set_weight_version(&version)
-            .await
-            .map_err(|error| utility_status("update_weight_version", error))?;
-        Ok(Response::new(pb::UpdateWeightVersionResponse {}))
+        self.rl_control()?.update_weight_version(request).await
     }
 
     async fn get_weight_version(
         &self,
-        _request: Request<pb::GetWeightVersionRequest>,
+        request: Request<pb::GetWeightVersionRequest>,
     ) -> Result<Response<pb::GetWeightVersionResponse>, Status> {
-        let weight_version = self
-            .client()
-            .get_weight_version()
-            .await
-            .map_err(|error| utility_status("get_weight_version", error))?;
-        Ok(Response::new(pb::GetWeightVersionResponse {
-            weight_version,
-        }))
+        self.rl_control()?.get_weight_version(request).await
     }
-}
-
-pub(super) fn kv_event_source(response: &EngineCoreReadyResponse) -> Option<pb::KvEventSource> {
-    let config = response.kv_events_config.as_ref()?;
-    if !config.enable_kv_cache_events || config.publisher != "zmq" {
-        return None;
-    }
-
-    Some(pb::KvEventSource {
-        transport: "zmq".to_string(),
-        endpoint: config.endpoint.clone(),
-        topic: config.topic.clone(),
-        replay_endpoint: config.replay_endpoint.clone().unwrap_or_default(),
-        data_parallel_rank: Some(response.data_parallel_rank),
-        encoding: "msgpack".to_string(),
-        schema_version: 1,
-        buffer_steps: config.buffer_steps,
-        hwm: config.hwm,
-        max_queue_size: config.max_queue_size,
-    })
 }

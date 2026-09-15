@@ -3,20 +3,29 @@
 
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
-use tonic::server::NamedService;
 use tonic_health::ServingStatus;
 use tonic_health::server::HealthReporter;
 use tracing::{info, warn};
 
-use super::{ControlGrpcService, InferenceGrpcService};
+use crate::grpc_services::{GrpcServices, mounted_entries};
+
+/// Names of the mounted services, in [`GrpcServices`] order.
+fn service_names(services: GrpcServices) -> impl Iterator<Item = &'static str> {
+    mounted_entries(services).map(|entry| entry.service_name)
+}
+
+pub(crate) async fn mark_serving(health_reporter: &HealthReporter, services: GrpcServices) {
+    for name in service_names(services) {
+        health_reporter.set_service_status(name, ServingStatus::Serving).await;
+    }
+}
 
 pub(crate) async fn monitor_health(
     mut health_reporter: HealthReporter,
     mut engine_health: watch::Receiver<bool>,
     shutdown: CancellationToken,
+    services: GrpcServices,
 ) {
-    let inference_service = InferenceGrpcService::NAME;
-    let control_service = ControlGrpcService::NAME;
     let status = ServingStatus::NotServing;
     let health_event_first = tokio::select! {
         result = engine_health.wait_for(|healthy| !*healthy) => {
@@ -45,9 +54,10 @@ pub(crate) async fn monitor_health(
         }
     };
 
-    health_reporter.set_not_serving::<InferenceGrpcService>().await;
-    health_reporter.set_not_serving::<ControlGrpcService>().await;
-    // Both gRPC services use the same engine client, so overall server health
+    for name in service_names(services) {
+        health_reporter.set_service_status(name, status).await;
+    }
+    // Every gRPC service uses the same engine client, so overall server health
     // mirrors their shared engine health.
     health_reporter.set_service_status("", status).await;
 
@@ -59,7 +69,8 @@ pub(crate) async fn monitor_health(
         );
     }
 
-    health_reporter.clear_service_status(inference_service).await;
-    health_reporter.clear_service_status(control_service).await;
+    for name in service_names(services) {
+        health_reporter.clear_service_status(name).await;
+    }
     health_reporter.clear_service_status("").await;
 }
