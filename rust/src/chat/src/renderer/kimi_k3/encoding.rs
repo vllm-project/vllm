@@ -11,9 +11,9 @@ use serde_json::{Map, Value, json};
 use vllm_tokenizer::Tokenizer;
 
 use super::super::MediaPartSource;
-use super::super::reasoning::ReasoningControl;
 use crate::EffortValue;
 use crate::error::{Error, Result};
+use crate::reasoning::ReasoningControl;
 use crate::request::{
     ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatTool, ChatToolChoice,
 };
@@ -252,13 +252,27 @@ pub(super) fn resolve_reasoning(
     request: &ChatRequest,
     defaults: &HashMap<String, Value>,
 ) -> Result<ReasoningControl> {
-    let reasoning = ReasoningControl::from_request(request)?
-        .with_effort(request.chat_options.template_kwargs.get("thinking_effort"))?
-        .fallback(
-            ReasoningControl::from_template_kwargs(defaults)?
-                .with_effort(defaults.get("thinking_effort"))?,
-        )
-        .fallback(ReasoningControl::enabled(DEFAULT_THINKING_EFFORT));
+    fn with_native_effort(
+        control: ReasoningControl,
+        kwargs: &HashMap<String, Value>,
+    ) -> Result<ReasoningControl> {
+        // Disabled sources discard even malformed native overrides.
+        if matches!(control, ReasoningControl::Disabled) {
+            return Ok(control);
+        }
+        let effort = kwargs.get("thinking_effort").map(EffortValue::try_from).transpose()?;
+        Ok(control.with_effort(effort))
+    }
+
+    let reasoning = with_native_effort(
+        ReasoningControl::from_request(request)?,
+        &request.chat_options.template_kwargs,
+    )?
+    .fallback(with_native_effort(
+        ReasoningControl::from_template_kwargs(defaults)?,
+        defaults,
+    )?)
+    .fallback(ReasoningControl::enabled(DEFAULT_THINKING_EFFORT));
     if let Some(value) = reasoning.effort() {
         let effort = value.as_str().ok_or_else(|| {
             Error::InvalidReasoningEffort(format!(

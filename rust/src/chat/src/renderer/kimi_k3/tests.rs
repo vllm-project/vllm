@@ -86,6 +86,39 @@ fn native_effort_overrides_stay_within_their_request_or_deployment_source() {
             assert!(!rendered.effective_template_kwargs.contains_key("thinking_effort"));
         }
     }
+
+    // Each source parses its native override only while reasoning is active.
+    for value in [json!(true), json!(false), json!([]), json!({}), json!(null)] {
+        for disabled in [false, true] {
+            for deployment in [false, true] {
+                let mut source = std::collections::HashMap::from([(
+                    "thinking_effort".to_string(),
+                    value.clone(),
+                )]);
+                if disabled {
+                    source.insert("thinking".to_string(), json!(false));
+                }
+                let mut request = crate::ChatRequest::for_test();
+                let defaults = if deployment {
+                    source
+                } else {
+                    request.chat_options.template_kwargs = source;
+                    Default::default()
+                };
+                let result = KimiK3ChatRenderer::new(tokenizer.clone(), defaults).render(&request);
+                if disabled {
+                    let rendered = result.unwrap();
+                    assert_eq!(
+                        rendered.effective_template_kwargs["reasoning_effort"],
+                        "none"
+                    );
+                    assert!(!rendered.effective_template_kwargs.contains_key("thinking_effort"));
+                } else {
+                    assert!(result.unwrap_err().is_request_validation_error());
+                }
+            }
+        }
+    }
 }
 
 fn render_token_ids(request: &crate::request::ChatRequest, tokenizer: DynTokenizer) -> Vec<u32> {

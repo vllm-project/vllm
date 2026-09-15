@@ -18,12 +18,12 @@ use time::macros::format_description;
 use vllm_text::Prompt;
 
 use self::encoding::harmony_encoding;
-use super::reasoning::ReasoningControl;
 use super::{ChatRenderer, RenderedPrompt};
 use crate::AssistantMessageExt as _;
 use crate::EffortValue;
 use crate::error::{Error, Result};
 use crate::event::AssistantContentBlock;
+use crate::reasoning::ReasoningControl;
 use crate::request::{ChatContent, ChatMessage, ChatRequest, ChatTool, GenerationPromptMode};
 
 const SYSTEM_START_DATE_ENV: &str = "VLLM_SYSTEM_START_DATE";

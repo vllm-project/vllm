@@ -18,7 +18,6 @@ pub mod harmony;
 pub mod hf;
 mod inkling;
 mod kimi_k3;
-mod reasoning;
 mod selection;
 #[cfg(test)]
 mod test_utils;

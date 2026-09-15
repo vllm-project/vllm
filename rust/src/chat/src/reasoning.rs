@@ -15,16 +15,75 @@
 //! decision for downstream consumers. HF prepares raw template inputs separately.
 
 use std::collections::HashMap;
+use std::fmt;
 
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::{Number, Value, json};
 
-use crate::EffortValue;
 use crate::error::{Result, invalid_reasoning_control};
 use crate::request::ChatRequest;
 
+/// A model-specific reasoning effort, before or after renderer lowering.
+///
+/// Strings preserve model-specific names; JSON numbers preserve integer and
+/// floating-point representations for model-local range validation. Missing/null
+/// effort is represented by `Option::None` in [`crate::ChatOptions`].
+/// Supported names and ranges are validated by each renderer or HF template.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum EffortValue {
+    String(String),
+    Number(Number),
+}
+
+impl TryFrom<&Value> for EffortValue {
+    type Error = crate::error::Error;
+
+    fn try_from(value: &Value) -> Result<Self> {
+        match value {
+            Value::String(value) => Ok(Self::String(value.clone())),
+            Value::Number(value) => Ok(Self::Number(value.clone())),
+            _ => Err(invalid_reasoning_control!(
+                "reasoning effort must be a string or number, got {value}"
+            )),
+        }
+    }
+}
+
+impl From<&str> for EffortValue {
+    fn from(value: &str) -> Self {
+        Self::String(value.to_owned())
+    }
+}
+
+impl fmt::Display for EffortValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::String(value) => json!(value).fmt(f),
+            Self::Number(value) => value.fmt(f),
+        }
+    }
+}
+
+impl EffortValue {
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::String(value) => Some(value),
+            Self::Number(_) => None,
+        }
+    }
+
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            Self::Number(value) => value.as_f64(),
+            Self::String(_) => None,
+        }
+    }
+}
+
 /// Reasoning intent for one source, or the result of falling back across sources.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) enum ReasoningControl {
+pub(crate) enum ReasoningControl {
     /// This source leaves the mode and effort to a lower-priority source.
     Default,
     /// Reasoning is explicitly disabled; lower-priority defaults preserve this mode.
@@ -35,7 +94,7 @@ pub(super) enum ReasoningControl {
 
 impl ReasoningControl {
     /// Parse request controls; the typed effort field takes precedence over kwargs effort.
-    pub(super) fn from_request(request: &ChatRequest) -> Result<Self> {
+    pub(crate) fn from_request(request: &ChatRequest) -> Result<Self> {
         Self::from_kwargs(
             &request.chat_options.template_kwargs,
             request.chat_options.reasoning_effort.as_ref(),
@@ -43,7 +102,7 @@ impl ReasoningControl {
     }
 
     /// Parse a deployment source, whose controls all come from template kwargs.
-    pub(super) fn from_template_kwargs(kwargs: &HashMap<String, Value>) -> Result<Self> {
+    pub(crate) fn from_template_kwargs(kwargs: &HashMap<String, Value>) -> Result<Self> {
         Self::from_kwargs(kwargs, None)
     }
 
@@ -100,7 +159,7 @@ impl ReasoningControl {
     ///
     /// Each source validates its selected input types. Model adapters subsequently
     /// apply their model default and validate/map the resulting effective effort.
-    pub(super) fn resolve(
+    pub(crate) fn resolve(
         request: &ChatRequest,
         defaults: &HashMap<String, Value>,
     ) -> Result<Self> {
@@ -112,7 +171,7 @@ impl ReasoningControl {
     /// `Default` inherits the whole lower-priority state. `Enabled { effort: None }`
     /// inherits effort only from enabled defaults and retains its enabled mode.
     /// Explicit disabling and concrete effort are final at this priority level.
-    pub(super) fn fallback(self, defaults: Self) -> Self {
+    pub(crate) fn fallback(self, defaults: Self) -> Self {
         match (self, defaults) {
             (Self::Default, defaults) => defaults,
             (Self::Enabled { effort: None }, Self::Enabled { effort }) => Self::Enabled { effort },
@@ -123,33 +182,32 @@ impl ReasoningControl {
     /// Apply a model-native effort override within one source, before fallback.
     ///
     /// Disabled mode discards the override. Otherwise a supplied override enables
-    /// reasoning and replaces this source's effort after string/number validation.
-    /// The model adapter owns the override's names and numeric range; for example,
-    /// K3 validates `thinking_effort` against its supported string grades.
-    pub(super) fn with_effort(self, effort: Option<&Value>) -> Result<Self> {
-        Ok(match (self, effort) {
+    /// reasoning and replaces this source's effort. The model adapter owns input
+    /// parsing, supported names, and numeric ranges.
+    pub(crate) fn with_effort(self, effort: Option<EffortValue>) -> Self {
+        match (self, effort) {
             (Self::Disabled, _) => Self::Disabled,
             (_, Some(effort)) => Self::Enabled {
-                effort: Some(EffortValue::try_from(effort)?),
+                effort: Some(effort),
             },
             (control, None) => control,
-        })
+        }
     }
 
     /// Construct an enabled model default or a model-lowered concrete effort.
-    pub(super) fn enabled(effort: impl Into<EffortValue>) -> Self {
+    pub(crate) fn enabled(effort: impl Into<EffortValue>) -> Self {
         Self::Enabled {
             effort: Some(effort.into()),
         }
     }
 
     /// Report the resolved mode; callers apply model defaults before rendering.
-    pub(super) fn is_enabled(&self) -> bool {
+    pub(crate) fn is_enabled(&self) -> bool {
         matches!(self, Self::Enabled { .. })
     }
 
     /// Return the active effort, which may still be missing before model fallback.
-    pub(super) fn effort(&self) -> Option<&EffortValue> {
+    pub(crate) fn effort(&self) -> Option<&EffortValue> {
         match self {
             Self::Enabled { effort } => effort.as_ref(),
             Self::Default | Self::Disabled => None,
@@ -161,7 +219,7 @@ impl ReasoningControl {
     /// Preserve request extras and write both toggle aliases plus the effective
     /// effort. Disabled mode emits `"none"`; enabled mode with no effective effort
     /// clears the original effort key. `Default` preserves request kwargs.
-    pub(super) fn template_kwargs(&self, request: &ChatRequest) -> HashMap<String, Value> {
+    pub(crate) fn template_kwargs(&self, request: &ChatRequest) -> HashMap<String, Value> {
         let mut kwargs = request.chat_options.template_kwargs.clone();
         if matches!(self, Self::Default) {
             return kwargs;
@@ -325,18 +383,6 @@ mod tests {
             assert_eq!(
                 ReasoningControl::from_request(&request).unwrap(),
                 ReasoningControl::enabled("high")
-            );
-
-            // Model-native overrides follow the same disabled-mode short circuit.
-            assert!(
-                ReasoningControl::Default
-                    .with_effort(Some(&value))
-                    .unwrap_err()
-                    .is_request_validation_error()
-            );
-            assert_eq!(
-                ReasoningControl::Disabled.with_effort(Some(&value)).unwrap(),
-                ReasoningControl::Disabled
             );
         }
     }

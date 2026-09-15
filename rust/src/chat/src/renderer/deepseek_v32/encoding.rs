@@ -13,8 +13,8 @@ use serde::Serialize;
 use serde_json::Value;
 use serde_json_fmt::JsonFormat;
 
-use super::super::reasoning::ReasoningControl;
 use crate::error::{Error, Result};
+use crate::reasoning::ReasoningControl;
 use crate::request::{ChatContent, ChatMessage, ChatRequest, ChatRole, ChatTool};
 use crate::{AssistantContentBlock, AssistantMessageExt, AssistantToolCall};
 

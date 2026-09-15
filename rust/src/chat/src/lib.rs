@@ -15,7 +15,6 @@ pub use backend::{
     ChatBackend, ChatTextBackend, DynChatBackend, DynChatTextBackend, LoadModelBackendsOptions,
     LoadedModelBackends, NewChatOutputProcessorOptions, load_model_backends,
 };
-pub use effort::EffortValue;
 pub use error::{Error, Result};
 pub use event::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessage, AssistantMessageExt,
@@ -32,6 +31,7 @@ pub use parser::reasoning::{
 };
 pub use parser::tool::{ToolParser, ToolParserError, ToolParserFactory};
 pub use parser::{ParserSelection, validate_parser_overrides};
+pub use reasoning::EffortValue;
 pub use renderer::hf::ChatTemplateContentFormatOption;
 pub use renderer::{
     ChatRenderer, DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DeepSeekV41ChatRenderer,
@@ -48,12 +48,12 @@ pub use vllm_llm::FinishReason;
 pub use vllm_text::GenerationConfigMode;
 
 mod backend;
-mod effort;
 mod error;
 mod event;
 pub mod multimodal;
 mod output;
 mod parser;
+mod reasoning;
 mod renderer;
 mod request;
 mod stream;

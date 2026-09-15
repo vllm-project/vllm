@@ -8,9 +8,9 @@ use std::collections::HashMap;
 use serde_json::Value;
 use vllm_text::Prompt;
 
-use super::reasoning::ReasoningControl;
 use super::{ChatRenderer, RenderedPrompt};
 use crate::Result;
+use crate::reasoning::ReasoningControl;
 use crate::request::ChatRequest;
 
 /// Dedicated DeepSeek V3.2 renderer.
