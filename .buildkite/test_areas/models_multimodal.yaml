@@ -125,6 +125,7 @@ steps:
       label: ":amd: (MI355) Multimodal Processor Shard %N"
       dind: false
       device: mi355_1
+      parallelism: 4
       timeout_in_minutes: 115
       depends_on:
       - image-build-amd
