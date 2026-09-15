@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock, Mock, call
 
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
 from vllm.v1.engine import EngineCoreOutputs, FinishReason
@@ -21,17 +21,13 @@ from vllm.v1.utils import compute_iteration_details
 
 def test_abort_metrics_do_not_count_as_engine_iterations():
     stat_logger = MagicMock(
-        histogram_iteration_tokens={idx: MagicMock() for idx in (0, 1)},
-        counter_request_success={
-            FinishReason.ABORT: {idx: MagicMock() for idx in (0, 1)}
-        },
+        histogram_iteration_tokens={idx: Mock() for idx in (0, 1)},
+        counter_request_success={FinishReason.ABORT: {idx: Mock() for idx in (0, 1)}},
         kv_cache_metrics_enabled=False,
         gauge_lora_info=None,
     )
     abort_stats = IterationStats()
-    abort_stats.finished_requests.append(
-        FinishedRequestStats(finish_reason=FinishReason.ABORT)
-    )
+    abort_stats.finished_requests.append(FinishedRequestStats(FinishReason.ABORT))
     PrometheusStatLogger.record(stat_logger, None, abort_stats, engine_idx=1)
 
     for sched_stats, token_count in [(None, 3), (SchedulerStats(), 0)]:

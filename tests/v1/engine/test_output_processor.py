@@ -1453,17 +1453,11 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
 
 
 @pytest.mark.parametrize(
-    ("runner", "abort_stage"),
-    [
-        ("generate", "queued"),
-        ("generate", "prefill"),
-        ("generate", "decode"),
-        ("pooling", "prefill"),
-    ],
+    ("pooling", "abort_stage"),
+    [(False, "queued"), (False, "prefill"), (False, "decode"), (True, "prefill")],
 )
-def test_abort_requests_updates_finished_stats(runner: str, abort_stage: str):
+def test_abort_requests_updates_finished_stats(pooling: bool, abort_stage: str):
     decoding = abort_stage == "decode"
-    pooling = runner == "pooling"
     processor = OutputProcessor(None, log_stats=True)
     request = EngineCoreRequest(
         request_id="request-0",
@@ -1487,11 +1481,9 @@ def test_abort_requests_updates_finished_stats(runner: str, abort_stage: str):
         request_stats = processor.request_states[child.request_id].stats
         assert request_stats is not None
         request_stats.queued_ts = 1.0
-        if abort_stage != "queued":
-            request_stats.scheduled_ts = 2.0
+        request_stats.scheduled_ts = 0.0 if abort_stage == "queued" else 2.0
         if decoding:
-            request_stats.first_token_ts = 3.0
-            request_stats.last_token_ts = 5.0
+            request_stats.first_token_ts, request_stats.last_token_ts = 3.0, 5.0
             request_stats.num_generation_tokens = 3
 
     stats = IterationStats()

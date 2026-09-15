@@ -221,12 +221,6 @@ class EngineCoreClient(ABC):
     def abort_requests(self, request_ids: list[str]) -> None:
         raise NotImplementedError
 
-    def group_requests_by_engine(
-        self, request_ids: list[str]
-    ) -> dict[int | None, list[str]]:
-        """Group requests by logger engine index; None means ownership is unknown."""
-        return {0: request_ids} if request_ids else {}
-
     def add_lora(self, lora_request: LoRARequest) -> bool:
         raise NotImplementedError
 
