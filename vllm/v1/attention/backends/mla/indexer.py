@@ -10,7 +10,7 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
-from vllm.model_executor.warmup.jit_warmup import kernel_launcher
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher, zip_inputs
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonPointerInputVariant,
@@ -493,6 +493,14 @@ class BuildPrefillChunkMetadataKernel(
         dcp_world = parallel_config.decode_context_parallel_size
         dcp_interleave = parallel_config.cp_kv_cache_interleave_size
         dcp_rank = get_dcp_group().rank_in_group if dcp_world > 1 else 0
+        dcp_cases = [dict(DCP_RANK=dcp_rank, DCP_WORLD=dcp_world)]
+        if parallel_config.prefill_context_parallel_size > 1 and dcp_world > 1:
+            # PCP+DCP prefill constructs a global PCP chunk plan and therefore
+            # dispatches this kernel with already-localized row starts. The
+            # runtime key is normalized to rank 0/world 1 in that path; warm it
+            # explicitly so one PCP rank cannot enter a collective while
+            # another rank is still compiling the first real inference batch.
+            dcp_cases.append(dict(DCP_RANK=0, DCP_WORLD=1))
         compress_ratios = tuple(
             dict.fromkeys(
                 max(1, int(ratio))
@@ -506,11 +514,10 @@ class BuildPrefillChunkMetadataKernel(
         if index_kpool and index_kpool > 1 and index_kpool not in compress_ratios:
             compress_ratios = compress_ratios + (index_kpool,)
         return self._trace_dispatch(self.dispatch)(
+            zip_inputs(*dcp_cases),
             # Cover Triton's divisible, exact-one, and generic i32 classes.
             query_slice_start=(0, 1, 2),
             query_slice_stop=(1, 2 * max_tokens - 1, 2 * max_tokens),
-            DCP_RANK=dcp_rank,
-            DCP_WORLD=dcp_world,
             DCP_INTERLEAVE=dcp_interleave,
             BLOCK_SIZE=self.BLOCK_SIZE,
             COMPRESS_RATIO=list(compress_ratios),
