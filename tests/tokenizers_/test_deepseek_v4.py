@@ -454,18 +454,7 @@ def test_deepseek_v4_image_blocks_become_placeholders():
 
 
 def test_deepseek_v4_image_blocks_match_reference_spacing():
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "第一张图"},
-                {"type": "image_url", "image_url": {"url": "file:///a.png"}},
-                {"type": "text", "text": "和第二张图"},
-                {"type": "image_url", "image_url": {"url": "file:///b.png"}},
-                {"type": "text", "text": "分别是什么？"},
-            ],
-        }
-    ]
+    messages, _ = _load_reference_case(5)
 
     prompt = _tokenizer().apply_chat_template(
         messages,
@@ -474,9 +463,11 @@ def test_deepseek_v4_image_blocks_match_reference_spacing():
     )
 
     assert prompt == (
-        "<｜begin▁of▁sentence｜><｜User｜>第一张图\n\n"
+        "<｜begin▁of▁sentence｜>You are a helpful vision assistant."
+        "<｜User｜>请按“第一张、第二张”的顺序回答：第一张图\n\n"
         "<｜deepseek_image｜>\n\n和第二张图\n\n"
-        "<｜deepseek_image｜>\n\n分别是什么？<｜Assistant｜></think>"
+        "<｜deepseek_image｜>\n\n中分别是什么食材？"
+        "它们通常食用的部位分别是什么？<｜Assistant｜></think>"
     )
 
 
