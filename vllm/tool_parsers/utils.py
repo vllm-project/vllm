@@ -12,11 +12,13 @@ from typing import Any, TypeAlias
 
 import partial_json_parser
 from openai.types.responses import (
+    CustomTool,
     FunctionTool,
     NamespaceTool,
     ToolChoiceFunction,
 )
 from openai.types.responses.tool import Tool as ResponsesTool
+from openai.types.responses.tool_choice_custom import ToolChoiceCustom
 from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.generate.base.protocol import (
@@ -182,22 +184,67 @@ def flat_namespace_tool_name(namespace: str, name: str) -> str:
     return f"{namespace}{_NAMESPACE_TOOL_SEPARATOR}{name}"
 
 
+def custom_tool_parameters() -> dict[str, Any]:
+    """JSON schema used to present a Responses ``custom`` tool to function parsers."""
+    return {
+        "type": "object",
+        "properties": {
+            "input": {
+                "type": "string",
+                "description": "Freeform input for the custom tool.",
+            }
+        },
+        "required": ["input"],
+    }
+
+
+def _tool_attr(obj: Any, key: str) -> Any:
+    return obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
+
+
+def custom_tool_description(tool: Any) -> str:
+    """Keep the original description and append a grammar when present."""
+    description = _tool_attr(tool, "description") or "Custom tool (freeform input)."
+    fmt = _tool_attr(tool, "format")
+    if _tool_attr(fmt, "type") != "grammar" or not _tool_attr(fmt, "definition"):
+        return description
+    syntax = _tool_attr(fmt, "syntax")
+    label = f"{syntax} grammar" if syntax else "grammar"
+    return f"{description}\n\n{label}:\n{_tool_attr(fmt, 'definition')}"
+
+
+def custom_tool_to_function_dict(
+    tool: Any,
+    name: str | None = None,
+) -> dict[str, Any]:
+    """Render a Responses custom tool as a Chat/Responses function definition."""
+    return {
+        "type": "function",
+        "name": name or tool.name,
+        "description": custom_tool_description(tool),
+        "parameters": custom_tool_parameters(),
+    }
+
+
+_RESPONSES_CALLABLE_TOOLS = (FunctionTool, NamespaceTool, CustomTool)
+
+
 def iter_response_function_tool_info(
     tool: ResponsesTool,
 ) -> list[tuple[str, dict[str, Any] | None]]:
     if isinstance(tool, FunctionTool):
         return [(tool.name, tool.parameters)]
+    if isinstance(tool, CustomTool):
+        return [(tool.name, custom_tool_parameters())]
     if not isinstance(tool, NamespaceTool):
         return []
-
-    namespace = tool.name
     return [
         (
-            flat_namespace_tool_name(namespace, namespaced_tool.name),
-            namespaced_tool.parameters,
+            flat_namespace_tool_name(tool.name, child.name),
+            custom_tool_parameters() if child.type == "custom" else child.parameters,
         )
-        for namespaced_tool in tool.tools
-        if namespaced_tool.type == "function"
+        for child in tool.tools
+        if child.type in ("function", "custom")
     ]
 
 
@@ -206,18 +253,21 @@ def iter_response_function_tool_dicts(
 ) -> list[dict[str, Any]]:
     function_tools: list[dict[str, Any]] = []
     for tool in tools:
-        if isinstance(tool, NamespaceTool):
-            namespace = tool.name
-            for namespaced_tool in tool.tools:
-                if namespaced_tool.type != "function":
-                    continue
-                tool_dict = namespaced_tool.model_dump()
-                tool_dict["name"] = flat_namespace_tool_name(
-                    namespace, namespaced_tool.name
-                )
-                function_tools.append(tool_dict)
-        elif isinstance(tool, FunctionTool):
+        if isinstance(tool, FunctionTool):
             function_tools.append(tool.model_dump())
+        elif isinstance(tool, CustomTool):
+            function_tools.append(custom_tool_to_function_dict(tool))
+        elif isinstance(tool, NamespaceTool):
+            for child in tool.tools:
+                if child.type not in ("function", "custom"):
+                    continue
+                name = flat_namespace_tool_name(tool.name, child.name)
+                if child.type == "custom":
+                    function_tools.append(custom_tool_to_function_dict(child, name=name))
+                else:
+                    tool_dict = child.model_dump()
+                    tool_dict["name"] = name
+                    function_tools.append(tool_dict)
     return function_tools
 
 
@@ -233,7 +283,7 @@ def build_responses_tool_call_name_map(
             continue
         namespace = tool.name
         for namespaced_tool in tool.tools:
-            if namespaced_tool.type != "function":
+            if namespaced_tool.type not in ("function", "custom"):
                 continue
             flat_name = flat_namespace_tool_name(namespace, namespaced_tool.name)
             name_map[flat_name] = ResponsesToolCallName(
@@ -277,7 +327,7 @@ def find_tool_properties(
     if not tools:
         return {}
     for tool in tools:
-        if isinstance(tool, (FunctionTool, NamespaceTool)):
+        if isinstance(tool, _RESPONSES_CALLABLE_TOOLS):
             for name, params in iter_response_function_tool_info(tool):
                 if name == tool_name:
                     return (params or {}).get("properties", {})
@@ -298,7 +348,7 @@ def find_tool_name(
     if not tools:
         return False
     for tool in tools:
-        if isinstance(tool, (FunctionTool, NamespaceTool)):
+        if isinstance(tool, _RESPONSES_CALLABLE_TOOLS):
             for name, _ in iter_response_function_tool_info(tool):
                 if name == tool_name:
                     return True
@@ -354,7 +404,7 @@ def _get_json_schema_from_tools(
     fn_tool_schemas: list[dict[str, Any]] = []
     fn_tools: list[Tool] = []
     for tool in tools:
-        if isinstance(tool, (FunctionTool, NamespaceTool)):
+        if isinstance(tool, _RESPONSES_CALLABLE_TOOLS):
             fn_tool_schemas.extend(
                 _get_tool_schema_from_name_and_params(name, params)
                 for name, params in iter_response_function_tool_info(tool)
@@ -379,20 +429,23 @@ def _get_json_schema_from_tools(
 
 
 def get_json_schema_from_tools(
-    tool_choice: str | ToolChoiceFunction | ChatCompletionNamedToolChoiceParam,
+    tool_choice: str
+    | ToolChoiceFunction
+    | ToolChoiceCustom
+    | ChatCompletionNamedToolChoiceParam,
     tools: list[Tool] | None,
 ) -> str | dict | None:
     # tool_choice: "none"
     if tool_choice in ("none", None) or tools is None:
         return None
-    # tool_choice: Forced Function (Responses)
+    # tool_choice: Forced Function / Custom (Responses)
     if (not isinstance(tool_choice, str)) and isinstance(
-        tool_choice, ToolChoiceFunction
+        tool_choice, (ToolChoiceFunction, ToolChoiceCustom)
     ):
         tool_name = tool_choice.name
         responses_tool_map: dict[str, dict[str, Any] | None] = {}
         for tool in tools:
-            if not isinstance(tool, (FunctionTool, NamespaceTool)):
+            if not isinstance(tool, _RESPONSES_CALLABLE_TOOLS):
                 continue
             for name, params in iter_response_function_tool_info(tool):
                 responses_tool_map[name] = params
