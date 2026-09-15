@@ -28,9 +28,11 @@ if(DEEPGEMM_SRC_DIR)
   message(STATUS "DeepGEMM using local DEEPGEMM_SRC_DIR: ${deepgemm_SOURCE_DIR}")
 else()
   # Keep in sync with tools/install_deepgemm.sh
-  set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/deepseek-ai/DeepGEMM.git")
-  # DeepGEMM 2.8.0 with the SM100 Mega Gate API (upstream PR 432).
-  set(_DEEPGEMM_UPSTREAM_TAG "39d8c4cacc2c07c1fa9921c6c29c6a8a2da75359")
+  set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/vllm-project/DeepGEMM.git")
+  # Pinned to the tip of the fork's dev branch: upstream 2.8.0 plus the SM120
+  # port, the SM90 paged-MQA kv_block=32/next_n=4 port, configurable SwiGLU
+  # alpha/beta, and SiTU for FP8/FP4 Mega MoE.
+  set(_DEEPGEMM_UPSTREAM_TAG "9a86ae2b78991f1c8e6e95945a591e1ca3b19ce7")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
@@ -58,18 +60,28 @@ else()
   message(STATUS "DeepGEMM is available at ${deepgemm_SOURCE_DIR}")
 endif()
 
-# This DeepGEMM revision requires CUDA 12.9+.
+# DeepGEMM requires CUDA 12.3+ for SM90, 12.9+ for SM100 (official upstream),
+# and 12.8+ for SM120 / SM12x. CUDA 13+ can use the family-specific SM12x
+# arch; CUDA 12.x builds the arch-specific SM120/SM121 variants.
 set(DEEPGEMM_SUPPORT_ARCHS)
-if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.9)
+if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3)
   list(APPEND DEEPGEMM_SUPPORT_ARCHS "9.0a")
-  list(APPEND DEEPGEMM_SUPPORT_ARCHS "10.0f")
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.4)
-    list(APPEND DEEPGEMM_SUPPORT_ARCHS "10.7f")
+endif()
+if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.9)
+    list(APPEND DEEPGEMM_SUPPORT_ARCHS "10.0f")
+    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.4)
+      list(APPEND DEEPGEMM_SUPPORT_ARCHS "10.7f")
+    endif()
+  else()
+    list(APPEND DEEPGEMM_SUPPORT_ARCHS "10.0a")
+  endif()
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    list(APPEND DEEPGEMM_SUPPORT_ARCHS "12.0f")
+  else()
+    list(APPEND DEEPGEMM_SUPPORT_ARCHS "12.0a" "12.1a")
   endif()
 endif()
-
-# The previous nv_dev pin also supported 12.0f on CUDA 13+ and 12.0a/12.1a
-# on CUDA 12.x. Restore those archs when rebasing onto an SM120-capable pin.
 
 cuda_archs_loose_intersection(DEEPGEMM_ARCHS
   "${DEEPGEMM_SUPPORT_ARCHS}" "${CUDA_ARCHS}")
@@ -109,7 +121,7 @@ if(DEEPGEMM_ARCHS)
   message(STATUS "DeepGEMM _C will be built for: ${_dg_pythons}")
 
   # add_custom_command does no implicit header scanning; glob explicitly so
-  # header-only edits in DeepGEMM/CUTLASS/DeepJIT re-trigger the rebuild.
+  # header-only edits in DeepGEMM/cutlass/deep_jit re-trigger the rebuild.
   file(GLOB_RECURSE _dg_headers
     "${deepgemm_SOURCE_DIR}/csrc/*.h"
     "${deepgemm_SOURCE_DIR}/csrc/*.hpp"
