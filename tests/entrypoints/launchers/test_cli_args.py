@@ -2,15 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
+import vllm.entrypoints.launchers.cli_args as cli_args_module
 from tests.utils import VLLM_PATH
 from vllm.entrypoints.launchers.cli_args import (
     make_arg_parser,
     validate_parsed_serve_args,
 )
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
+from vllm.exceptions import VLLMValidationError
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 LORA_MODULE = {
@@ -204,7 +207,7 @@ def test_chat_template_validation_for_happy_paths(serve_parser):
 def test_chat_template_validation_for_sad_paths(serve_parser):
     """Ensure validation fails if the chat template doesn't exist"""
     args = serve_parser.parse_args(args=["--chat-template", "does/not/exist"])
-    with pytest.raises(ValueError):
+    with pytest.raises(VLLMValidationError):
         validate_parsed_serve_args(args)
 
 
@@ -329,6 +332,26 @@ def test_default_chat_template_kwargs_default_none(serve_parser):
     """Ensure default_chat_template_kwargs defaults to None"""
     args = serve_parser.parse_args(args=[])
     assert args.default_chat_template_kwargs is None
+
+
+@pytest.mark.parametrize(
+    "default_kwargs,cohere_format,expected",
+    [
+        (None, "cmd3", {"cohere_format": "cmd3"}),
+        (
+            {"cohere_format": "cmd4", "custom": True},
+            "cmd3",
+            {"cohere_format": "cmd4", "custom": True},
+        ),
+    ],
+)
+def test_resolve_default_chat_template_kwargs(default_kwargs, cohere_format, expected):
+    args = SimpleNamespace(
+        default_chat_template_kwargs=default_kwargs,
+        cohere_format=cohere_format,
+    )
+
+    assert cli_args_module.resolve_default_chat_template_kwargs(args) == expected
 
 
 def test_default_chat_template_kwargs_invalid_json(serve_parser):
