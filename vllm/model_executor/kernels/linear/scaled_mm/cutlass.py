@@ -166,6 +166,18 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     ) -> tuple[bool, str | None]:
         if not current_platform.is_cuda():
             return False, "requires CUDA."
+        if compute_capability is None:
+            capability_tuple = current_platform.get_device_capability()
+            compute_capability = (
+                -1 if capability_tuple is None else capability_tuple.to_int()
+            )
+        if not ops.cutlass_scaled_mm_supports_fp8(compute_capability):
+            return (
+                False,
+                "CUTLASS FP8 GEMM is unavailable for compute capability "
+                f"{compute_capability} with this CUDA build (needs SM89 with "
+                "CUDA 12.4 or newer, or SM90+ with CUDA 12.0 or newer).",
+            )
         return True, None
 
     @classmethod
