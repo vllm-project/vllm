@@ -6,6 +6,7 @@ import mmap
 import tempfile
 import weakref
 from contextlib import ExitStack
+from functools import cached_property
 
 import numpy as np
 import torch
@@ -34,6 +35,10 @@ from vllm.models.deepseek_v41.common.engram import (
 )
 from vllm.models.deepseek_v41.common.engram import (
     ParallelEngramEmbedding as BaseParallelEngramEmbedding,
+)
+from vllm.models.deepseek_v41.common.ops.engram_quant import (
+    can_quantize_engram_gather,
+    quantize_gathered_engram_rows,
 )
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
@@ -401,3 +406,22 @@ class Engram(BaseEngram):
             staged = self.staged_rows[: slot * self.embed_tokens.dp_size]
             return _gather_engram_rows(staged, num_tokens)
         return super()._ready_rows(num_tokens)
+
+    @cached_property
+    def _can_quantize_gather(self) -> bool:
+        return can_quantize_engram_gather(self.embed_tokens, self.wkv)
+
+    def _project_embeddings(self, hash_ids: torch.Tensor) -> torch.Tensor:
+        if not self._can_quantize_gather:
+            return super()._project_embeddings(hash_ids)
+        num_tokens = hash_ids.shape[0]
+        gathered = tensor_model_parallel_all_gather(self._ready_rows(num_tokens), dim=0)
+        width = self.embed_tokens.n_hash_cols * self.embed_tokens.dim
+        if not self.use_sequence_parallel:
+            return self.wkv(quantize_gathered_engram_rows(gathered, num_tokens, width))
+        tp_size = self.embed_tokens.tp_size
+        chunk = (num_tokens + tp_size - 1) // tp_size
+        quantized = quantize_gathered_engram_rows(
+            gathered, num_tokens, width, get_tensor_model_parallel_rank() * chunk, chunk
+        )
+        return self.wkv(quantized)

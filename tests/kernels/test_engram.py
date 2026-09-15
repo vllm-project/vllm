@@ -971,6 +971,28 @@ def _engram_tp_worker(rank, tp_size, port):
     torch.accelerator.set_device_index(rank)
     init_test_distributed_environment(tp_size, 1, rank, str(port), local_rank=rank)
     try:
+        from vllm.distributed import tensor_model_parallel_all_gather
+        from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+            mxfp8_e4m3_quantize,
+        )
+        from vllm.models.deepseek_v41.common.ops.engram_quant import (
+            quantize_gathered_engram_rows,
+        )
+        from vllm.utils.flashinfer import has_flashinfer_cutedsl
+
+        if current_platform.has_device_capability(100) and has_flashinfer_cutedsl():
+            torch.manual_seed(rank)
+            rows = torch.randn(129, 8, 32, device="cuda", dtype=torch.bfloat16)
+            reference = tensor_model_parallel_all_gather(rows, dim=1)[:, :15]
+            gathered = tensor_model_parallel_all_gather(rows, dim=0)
+            actual = quantize_gathered_engram_rows(gathered, 129, 15 * 32)
+            expected, scales = mxfp8_e4m3_quantize(
+                reference.flatten(-2), is_sf_swizzled_layout=True
+            )
+            assert torch.equal(
+                actual.data.view(torch.uint8), expected.view(torch.uint8)
+            )
+            assert torch.equal(actual.scale, scales)
         for cpu_offload in (False, True):
             for sp in (False, True):
                 for capture in ("eager", "compiled", "full", "breakable"):
@@ -988,3 +1010,261 @@ def test_engram_head_collectives_survive_graph_breaks():
     if torch.accelerator.device_count() < 2:
         pytest.skip("Requires two GPUs")
     torch.multiprocessing.spawn(_engram_tp_worker, args=(2, get_open_port()), nprocs=2)
+
+
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100), reason="MXFP8 needs Blackwell"
+)
+@pytest.mark.parametrize("num_tokens", [0, 1, 17, 128, 129, 8192])
+@pytest.mark.parametrize(
+    "tp_size,n_heads,dim", [(2, 24, 256), (4, 23, 256), (8, 15, 32)]
+)
+@pytest.mark.parametrize("token_window", ["all", "sp_first", "sp_last"])
+def test_engram_gather_quant_bitwise(num_tokens, tp_size, n_heads, dim, token_window):
+    """Reorder heads, drop padding, and select an SP token window bitwise."""
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        mxfp8_e4m3_quantize,
+    )
+    from vllm.models.deepseek_v41.common.ops.engram_quant import (
+        quantize_gathered_engram_rows,
+    )
+    from vllm.utils.flashinfer import has_flashinfer_cutedsl
+
+    if not has_flashinfer_cutedsl():
+        pytest.skip("FlashInfer CuTe-DSL is required")
+    torch.manual_seed(0)
+    local_heads = (n_heads + tp_size - 1) // tp_size
+    gathered = torch.randn(
+        tp_size, num_tokens, local_heads, dim, device="cuda", dtype=torch.bfloat16
+    )
+    gathered[:, :1] = 0
+    gathered[:, 1:2] *= 1e-37
+    gathered[:, 2:3] *= 1e30
+    # Poison unused heads so accidentally including padding changes the result.
+    gathered[-1, :, n_heads - (tp_size - 1) * local_heads :] = float("nan")
+    source = gathered.flatten(0, 1)
+    width = n_heads * dim
+    expected_input = gathered.movedim(0, 1).reshape(
+        num_tokens, tp_size * local_heads, dim
+    )
+    expected_input = expected_input[:, :n_heads].flatten(-2)
+    if token_window == "all":
+        token_start, out_tokens = 0, num_tokens
+    else:
+        out_tokens = (num_tokens + tp_size - 1) // tp_size
+        token_start = (tp_size - 1 if token_window == "sp_last" else 0) * out_tokens
+    window = expected_input[token_start : token_start + out_tokens]
+    # The last SP shard quantizes rows past num_tokens as zeros.
+    expected_input = torch.nn.functional.pad(
+        window, (0, 0, 0, out_tokens - window.shape[0])
+    )
+    args = (source, num_tokens, width, token_start, out_tokens)
+    actual = quantize_gathered_engram_rows(*args)
+    assert actual.orig_shape == torch.Size((out_tokens, width))
+    assert actual.orig_dtype == gathered.dtype
+    if out_tokens == 0:
+        assert actual.data.numel() == actual.scale.numel() == 0
+        return
+    expected, scales = mxfp8_e4m3_quantize(expected_input, is_sf_swizzled_layout=True)
+    for replay in (False, True):
+        if replay:
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                actual = quantize_gathered_engram_rows(*args)
+            graph.replay()
+        assert torch.equal(actual.data.view(torch.uint8), expected.view(torch.uint8))
+        assert torch.equal(actual.scale, scales)
+
+
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100), reason="MXFP8 needs Blackwell"
+)
+def test_engram_gather_quant_bf16_rounding_bitwise():
+    """Cover every finite BF16 value, signed zero, and MXFP8 rounding boundaries."""
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        mxfp8_e4m3_quantize,
+    )
+    from vllm.models.deepseek_v41.common.ops.engram_quant import (
+        quantize_gathered_engram_rows,
+    )
+    from vllm.utils.flashinfer import has_flashinfer_cutedsl
+
+    if not has_flashinfer_cutedsl():
+        pytest.skip("FlashInfer CuTe-DSL is required")
+    bits = torch.arange(65536, device="cuda", dtype=torch.int32).to(torch.uint16)
+    values = bits.view(torch.bfloat16)
+    values = values[torch.isfinite(values)]
+    values = torch.nn.functional.pad(values, (0, 65536 - values.numel()))
+    # Constant groups exercise scale rounding; mixed groups exercise FP8 rounding.
+    for x in (
+        values.repeat_interleave(32).reshape(-1, 1024),
+        values.reshape(-1, 32).T.contiguous().reshape(-1, 1024),
+    ):
+        tokens, width = x.shape
+        gathered = x.reshape(tokens, 2, 512).transpose(0, 1).contiguous()
+        actual = quantize_gathered_engram_rows(
+            gathered.reshape(2 * tokens, 2, 256), tokens, width
+        )
+        expected, scales = mxfp8_e4m3_quantize(x, is_sf_swizzled_layout=True)
+        assert torch.equal(actual.data.view(torch.uint8), expected.view(torch.uint8))
+        assert torch.equal(actual.scale, scales)
+
+
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100), reason="MXFP8 needs Blackwell"
+)
+@pytest.mark.parametrize("backend", ["cute-dsl", "cutlass"])
+@pytest.mark.parametrize("num_tokens,n_heads", [(1, 24), (17, 23), (256, 24)])
+@pytest.mark.parametrize("sp_rank", [None, 1, 3])
+def test_engram_quantized_gather_preserves_wkv(
+    backend, num_tokens, n_heads, sp_rank, monkeypatch
+):
+    """The real MXFP8 projection skips requantization and stays bitwise equal."""
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.kernels.linear.mxfp8 import Mxfp8LinearLayerConfig
+    from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
+        FlashInferCutedslMxfp8LinearKernel,
+        FlashInferCutlassMxfp8LinearKernel,
+    )
+    from vllm.model_executor.layers.fusion.quant_activation import (
+        expose_input_quant_key,
+    )
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        mxfp8_e4m3_quantize,
+    )
+    from vllm.models.deepseek_v41.common.ops.engram_quant import (
+        can_quantize_engram_gather,
+    )
+    from vllm.models.deepseek_v41.quant_config import DeepseekV4FP8Config
+
+    cls = (
+        FlashInferCutedslMxfp8LinearKernel
+        if backend == "cute-dsl"
+        else FlashInferCutlassMxfp8LinearKernel
+    )
+    supported, reason = cls.is_supported()
+    if not supported:
+        pytest.skip(reason)
+    torch.manual_seed(0)
+    tp, dim, output_size = 4, 256, 640
+    width = n_heads * dim
+    with set_current_vllm_config(VllmConfig()):
+        config = DeepseekV4FP8Config.from_config(
+            {
+                "quant_method": "fp8",
+                "activation_scheme": "dynamic",
+                "weight_block_size": [32, 32],
+                "scale_fmt": "ue8m0",
+                "expert_dtype": "fp4",
+            }
+        )
+        linear = ReplicatedLinear.__new__(ReplicatedLinear)
+        torch.nn.Module.__init__(linear)
+        linear.bias = None
+        linear.skip_bias_add = linear.return_bias = False
+        weight, scales = mxfp8_e4m3_quantize(
+            torch.randn(output_size, width, device="cuda", dtype=torch.bfloat16)
+        )
+        linear.weight = torch.nn.Parameter(weight, requires_grad=False)
+        linear.weight_scale = torch.nn.Parameter(scales, requires_grad=False)
+        method = config.get_quant_method(linear, "model.layers.2.engram.wkv")
+        method.out_dtype = torch.bfloat16
+        method.kernel = cls(Mxfp8LinearLayerConfig())
+        linear.quant_method = method
+        method.kernel.process_weights_after_loading(linear)
+        expose_input_quant_key(linear, method.kernel)
+
+        module = Engram.__new__(Engram)
+        torch.nn.Module.__init__(module)
+        module.wkv = linear
+        module.use_sequence_parallel = sp_rank is not None
+        for ops in (engram_ops, nvidia_engram_ops):
+            monkeypatch.setattr(ops, "get_tensor_model_parallel_rank", lambda: sp_rank)
+        module.embed_tokens = torch.nn.Identity()
+        module.embed_tokens.tp_size = tp
+        module.embed_tokens.dp_size = 1
+        module.embed_tokens.n_hash_cols = n_heads
+        module.embed_tokens.dim = dim
+        rows = torch.randn(
+            tp,
+            num_tokens,
+            (n_heads + tp - 1) // tp,
+            dim,
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        module.staged_rows = rows[0]
+        ids = torch.empty(num_tokens, n_heads, device="cuda", dtype=torch.int32)
+        monkeypatch.setattr(
+            engram_ops,
+            "tensor_model_parallel_all_gather",
+            lambda x, dim: torch.cat(list(rows.unbind(0)), dim=dim),
+        )
+        expected = CommonEngram._project_embeddings(module, ids)
+
+        def gather(x, dim):
+            assert dim == 0
+            return rows.flatten(0, 1)
+
+        def reject_requantization(*args, **kwargs):
+            raise AssertionError("fused Engram input must skip quantization")
+
+        monkeypatch.setattr(
+            nvidia_engram_ops, "tensor_model_parallel_all_gather", gather
+        )
+        monkeypatch.setattr(
+            "vllm.model_executor.kernels.linear.mxfp8.flashinfer.mxfp8_e4m3_quantize",
+            reject_requantization,
+        )
+        assert can_quantize_engram_gather(module.embed_tokens, linear)
+        for run in (
+            module._project_embeddings,
+            torch.compile(
+                module._project_embeddings,
+                backend="eager",
+                fullgraph=True,
+                dynamic=True,
+            ),
+        ):
+            actual = run(ids)
+            assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = module._project_embeddings(ids)
+        graph.replay()
+        assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
+
+        # Breakable capture: the prefetch wait becomes a real eager break and
+        # the fused segment after it must replay against refreshed rows.
+        import vllm.envs as envs
+        from vllm.compilation.breakable_cudagraph import (
+            BreakableCUDAGraphCapture,
+            eager_break_during_capture,
+        )
+
+        module._prefetch_stream = torch.cuda.Stream()
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(envs, "VLLM_USE_BREAKABLE_CUDAGRAPH", True)
+            finish = eager_break_during_capture(inspect.unwrap(Engram._finish_prefetch))
+            module._finish_prefetch = finish.__get__(module, Engram)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            capture = BreakableCUDAGraphCapture()
+            with capture:
+                actual = module._project_embeddings(ids)
+            assert capture.num_eager_breaks == 1
+            rows.copy_(torch.randn_like(rows))
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(
+                    "vllm.model_executor.kernels.linear.mxfp8.flashinfer"
+                    ".mxfp8_e4m3_quantize",
+                    mxfp8_e4m3_quantize,
+                )
+                expected = CommonEngram._project_embeddings(module, ids)
+            capture.replay()
+        torch.cuda.current_stream().wait_stream(stream)
+        assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
+        linear.requires_unquantized_input = True
+        assert not can_quantize_engram_gather(module.embed_tokens, linear)
