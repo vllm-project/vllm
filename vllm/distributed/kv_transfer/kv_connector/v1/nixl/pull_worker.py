@@ -169,6 +169,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_region_groups = self.dst_region_group_ids[engine_id]
         local_region_groups = self.region_group_ids or remote_region_groups
         if not local_block_ids:
+            # Region expansion cannot index empty groups. Pass empty specs to
+            # _read_blocks so its existing cache-hit notification path runs.
             read_specs = [
                 ReadSpec(remote_rank=rank, local_block_ids=[], remote_block_ids=[])
                 for rank in plan.all_source_ranks
