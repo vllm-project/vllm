@@ -21,6 +21,7 @@ from vllm.sampling_params import (
     BeamSearchParams,
     RequestOutputKind,
     SamplingParams,
+    merge_request_extra_args,
 )
 from vllm.utils import random_uuid
 
@@ -262,7 +263,7 @@ class TranslationRequest(OpenAIBaseModel):
             output_kind=RequestOutputKind.DELTA
             if self.stream
             else RequestOutputKind.FINAL_ONLY,
-            extra_args=self.vllm_xargs,
+            extra_args=merge_request_extra_args(self.vllm_xargs) or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
         )
 
