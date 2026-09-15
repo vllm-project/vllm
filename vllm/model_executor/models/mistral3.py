@@ -220,7 +220,9 @@ class Mistral3ProcessingInfo(BaseProcessingInfo):
     ) -> PixtralHFEncoderInfo:
         processor = self.get_hf_processor()
         size = processor.image_processor.size
-        merged_kwargs = self.ctx.get_merged_mm_kwargs(mm_processor_kwargs or {})
+        merged_kwargs = self.ctx.get_merged_mm_kwargs(
+            mm_processor_kwargs or {}, modality="image"
+        )
         if override_size := merged_kwargs.get("size"):
             size = size | override_size
 

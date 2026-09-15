@@ -200,3 +200,92 @@ def test_video_loader_consistency(
         static_outputs["mm_kwargs"].get_data(),
         dynamic_outputs["mm_kwargs"].get_data(),
     )
+
+
+# Far above any stock GLM-4.1V pixel budget, so an override is unmistakable.
+_SCOPED_MAX_PIXELS = 469762048
+
+
+def _probe_max_pixels(
+    model_id: str, mm_processor_kwargs: dict | None
+) -> tuple[int, int]:
+    """Return the (video, image) pixel budgets vLLM computes."""
+    ctx = build_model_context(
+        model_id,
+        mm_processor_kwargs=mm_processor_kwargs,
+        limit_mm_per_prompt={"image": 1, "video": 1},
+    )
+    info = MULTIMODAL_REGISTRY.create_processor(ctx.model_config).info
+    return info._get_video_max_pixels(), info._get_image_max_pixels()
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("model_id", ["zai-org/GLM-4.1V-9B-Thinking"])
+def test_videos_kwargs_max_pixels_does_not_leak_into_image_budget(model_id: str):
+    """A scoped ``videos_kwargs`` override must reach only the video budget.
+
+    The HF processor already honors the nested dict, so when vLLM's own
+    budget reads ignore it the two disagree about how many tokens a video
+    expands to.
+    """
+    stock_video, stock_image = _probe_max_pixels(model_id, None)
+    assert stock_video != _SCOPED_MAX_PIXELS
+    assert stock_image != _SCOPED_MAX_PIXELS
+
+    scoped_video, scoped_image = _probe_max_pixels(
+        model_id, {"videos_kwargs": {"max_pixels": _SCOPED_MAX_PIXELS}}
+    )
+    assert scoped_video == _SCOPED_MAX_PIXELS
+    assert scoped_image == stock_image
+
+    # A flat override keeps the previous shared-namespace behavior.
+    flat_video, flat_image = _probe_max_pixels(
+        model_id, {"max_pixels": _SCOPED_MAX_PIXELS}
+    )
+    assert flat_video == _SCOPED_MAX_PIXELS
+    assert flat_image == _SCOPED_MAX_PIXELS
+
+
+# Well below any stock GLM-4.1V image budget, so a leak into the shared
+# upper bound is unmistakable.
+_SMALL_MAX_PIXELS = 1_003_520
+
+
+def _probe_budgets(model_id: str, mm_processor_kwargs: dict | None) -> dict:
+    ctx = build_model_context(
+        model_id,
+        mm_processor_kwargs=mm_processor_kwargs,
+        limit_mm_per_prompt={"image": 1, "video": 1},
+    )
+    info = MULTIMODAL_REGISTRY.create_processor(ctx.model_config).info
+    return {
+        "image_max_pixels": info._get_image_max_pixels(),
+        "size_bound": tuple(info.get_image_size_with_most_features()),
+        "video_frames": info._get_max_video_frames(30_000),
+    }
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("model_id", ["zai-org/GLM-4.1V-9B-Thinking"])
+def test_images_kwargs_max_pixels_does_not_leak_into_video_budget(model_id: str):
+    """An image-scoped override must not move the shared size upper bound.
+
+    ``get_image_size_with_most_features`` feeds the video frame budget and the
+    dummy data as well as the image budget. Scoping that bound to ``image``
+    would let an image-only override shrink the profiled video budget, which
+    no override of that modality should touch.
+    """
+    stock = _probe_budgets(model_id, None)
+    scoped = _probe_budgets(
+        model_id, {"images_kwargs": {"max_pixels": _SMALL_MAX_PIXELS}}
+    )
+
+    # The override reaches the per-item image read it is meant for.
+    assert stock["image_max_pixels"] != _SMALL_MAX_PIXELS
+    assert scoped["image_max_pixels"] == _SMALL_MAX_PIXELS
+
+    # It must not reach the bound that video sizing and dummy data share.
+    assert (scoped["size_bound"], scoped["video_frames"]) == (
+        stock["size_bound"],
+        stock["video_frames"],
+    )
