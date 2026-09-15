@@ -375,8 +375,13 @@ class Platform:
         selected_backend: "AttentionBackendEnum",
         attn_selector_config: "AttentionSelectorConfig",
         num_heads: int | None = None,
+        layout_constraint: tuple[str, ...] | None = None,
     ) -> str:
-        """Get the attention backend class of a device."""
+        """Get the attention backend class of a device.
+
+        ``layout_constraint`` names the KV cache layouts already-built attention
+        layers share; backends supporting none of them cannot be selected.
+        """
         return ""
 
     @classmethod
