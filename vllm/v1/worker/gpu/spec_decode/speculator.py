@@ -304,6 +304,7 @@ class DraftModelSpeculator(BaseSpeculator):
         step: int,
         causal: bool | Mapping[int, bool] = True,
         dcp_local_seq_lens: torch.Tensor | None = None,
+        seq_lens_cpu_lower_bound: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
         num_reqs_padded = batch_desc.num_reqs or num_reqs
         # A FULL graph replays a captured shape whose padded requests each hold
@@ -335,6 +336,19 @@ class DraftModelSpeculator(BaseSpeculator):
             out=draft_seq_lens_cpu_upper_bound[:num_reqs],
         )
         draft_seq_lens_cpu_upper_bound[:num_reqs].clamp_(max=self.max_model_len)
+        draft_seq_lens_cpu_lower_bound = None
+        if seq_lens_cpu_lower_bound is not None:
+            # The verification just run may have rejected up to
+            # num_speculative_steps drafts that the target bounds still count.
+            draft_seq_lens_cpu_lower_bound = torch.zeros(
+                num_reqs_padded, dtype=torch.int32, device="cpu"
+            )
+            torch.add(
+                seq_lens_cpu_lower_bound[:num_reqs],
+                step - self.num_speculative_steps,
+                out=draft_seq_lens_cpu_lower_bound[:num_reqs],
+            )
+            draft_seq_lens_cpu_lower_bound[:num_reqs].clamp_(min=0)
         if dcp_local_seq_lens is None and self.block_tables.cp_size > 1:
             # Draft steps advance and rewind their own global sequence lengths,
             # so the target model's DCP-local lengths may already be stale.
@@ -368,6 +382,7 @@ class DraftModelSpeculator(BaseSpeculator):
             causal=causal,
             seq_lens_cpu_upper_bound=draft_seq_lens_cpu_upper_bound,
             is_prefilling=self.draft_is_prefilling[:num_reqs],
+            seq_lens_cpu_lower_bound=draft_seq_lens_cpu_lower_bound,
         )
         return attn_metadata
 
@@ -523,6 +538,7 @@ class DraftModelSpeculator(BaseSpeculator):
         step: int,
         causal: bool | Mapping[int, bool] = True,
         dcp_local_seq_lens: torch.Tensor | None = None,
+        seq_lens_cpu_lower_bound: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
         query_start_loc_np = self.arange_np[: num_reqs + 1] * num_query_per_req
         return self._build_attn_metadata(
@@ -533,4 +549,5 @@ class DraftModelSpeculator(BaseSpeculator):
             step=step,
             causal=causal,
             dcp_local_seq_lens=dcp_local_seq_lens,
+            seq_lens_cpu_lower_bound=seq_lens_cpu_lower_bound,
         )
