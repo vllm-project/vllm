@@ -151,11 +151,6 @@ def replace_as(
     return target_cls(**kwargs)
 
 
-def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
-    """Return True if *kv_cache_dtype* needs per-token-head scales."""
-    return get_kv_quant_mode(kv_cache_dtype).is_per_token_head
-
-
 class KVCacheSpecKind(str, Enum):
     FULL_ATTENTION = "full_attention"
     MLA_ATTENTION = "mla_attention"
