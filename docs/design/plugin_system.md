@@ -53,6 +53,20 @@ Every plugin has three parts:
 
 - **Stat logger plugins** (with group name `vllm.stat_logger_plugins`): The primary use case for these plugins is to register custom, out-of-the-tree loggers into vLLM. The entry point should be a class that subclasses StatLoggerBase.
 
+  A general plugin may pair with a stat logger plugin to export metrics whose
+  source state lives in the engine-core process. The general plugin registers
+  a lightweight snapshot callback with
+  [`register_external_metrics_provider`][vllm.v1.metrics.external.register_external_metrics_provider].
+  vLLM periodically collects the callback and delivers its namespaced,
+  JSON-serializable payload through `SchedulerStats.external_metrics`. The stat
+  logger plugin consumes that payload in the API process and owns the metric
+  definitions and exporter integration. Provider callbacks run on the engine
+  core thread, so they must not perform blocking I/O or expensive work. A
+  provider must be registered during general plugin initialization, before the
+  engine core constructs its scheduler. Prometheus collectors defined by the
+  stat logger plugin should use the plugin's own metric namespace rather than
+  vLLM's reserved `vllm` namespace.
+
 - **Endpoint plugins** (with group name `vllm.endpoint_plugins`): The primary use case for these plugins is to register custom, out-of-the-tree HTTP routes on the OpenAI compatible API server. Unlike the other plugin groups above, endpoint plugins are loaded only in the API server front end process and are **not loaded by default**. See [Endpoint Plugins](endpoint_plugins.md) for the interface and [Security](../usage/security.md#endpoint-plugins) for the opt-in and trust model.
 
 ## Guidelines for Writing Plugins
