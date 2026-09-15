@@ -907,6 +907,30 @@ def _is_escaped(text: str, index: int) -> bool:
     return backslashes % 2 == 1
 
 
+def split_pythonic_tool_calls(text: str) -> tuple[str, str] | None:
+    """Split ``[call(...), ...]`` from any text that follows it.
+
+    Returns ``(call_list, trailing_text)`` once the list opened by the leading
+    ``[`` has closed, or None if the text does not start with ``[`` or the list
+    is still open. Brackets inside string literals are ignored.
+    """
+    if not text.startswith("["):
+        return None
+    bracket_stack: list[str] = []
+    for index, char in enumerate(text):
+        if bracket_stack and bracket_stack[-1] in {"'", '"'}:
+            if char == bracket_stack[-1] and not _is_escaped(text, index):
+                bracket_stack.pop()
+            continue
+        if char in {"[", "(", "{", "'", '"'}:
+            bracket_stack.append(char)
+        elif char in {"]", ")", "}"}:
+            bracket_stack.pop()
+            if not bracket_stack:
+                return text[: index + 1], text[index + 1 :]
+    return None
+
+
 def make_valid_python(text: str) -> tuple[str, str] | None:
     """Attempt to close all open brackets/quotes to make partial Python valid.
 
