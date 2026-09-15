@@ -162,6 +162,25 @@ class XPUPlatform(Platform):
         if selected_backend == AttentionBackendEnum.TRITON_ATTN:
             logger.info_once("Using Triton backend.")
             return AttentionBackendEnum.TRITON_ATTN.get_path()
+        elif attn_selector_config.use_batch_invariant:
+            # Flash Attention on XPU has not been validated for batch
+            # invariance. Honor an explicit Flash Attention request;
+            # otherwise fall back to Triton Attention, which implements
+            # batch-invariant kernels.
+            if selected_backend == AttentionBackendEnum.FLASH_ATTN:
+                logger.warning_once(
+                    "Using Flash Attention on XPU with batch invariance "
+                    "enabled because it was explicitly requested. This "
+                    "backend has not been validated for batch invariance "
+                    "on XPU and may produce non-deterministic results "
+                    "across batch sizes."
+                )
+                return AttentionBackendEnum.FLASH_ATTN.get_path()
+            logger.info_once(
+                "VLLM_BATCH_INVARIANT is enabled. Using Triton Attention "
+                "backend on XPU, which implements batch-invariant kernels."
+            )
+            return AttentionBackendEnum.TRITON_ATTN.get_path()
         elif attn_selector_config.use_mm_prefix:
             # Flash Attention on XPU has no FA4 kernel, so it cannot apply the
             # multimodal prefix-LM bidirectional mask. Honor an explicit Flash

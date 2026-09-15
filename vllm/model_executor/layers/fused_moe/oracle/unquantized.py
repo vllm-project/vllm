@@ -93,7 +93,13 @@ def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBac
             _move_to_back(_AVAILABLE_BACKENDS, UnquantizedMoeBackend.FLASHINFER_CUTLASS)
 
     elif current_platform.is_xpu():
-        _AVAILABLE_BACKENDS = [UnquantizedMoeBackend.XPU]
+        # XPUExperts does not support batch invariance; TRITON is kept as a
+        # fallback so VLLM_BATCH_INVARIANT=1 still resolves to a valid
+        # (batch-invariant) backend on XPU.
+        _AVAILABLE_BACKENDS = [
+            UnquantizedMoeBackend.XPU,
+            UnquantizedMoeBackend.TRITON,
+        ]
     elif current_platform.is_cpu():
         _AVAILABLE_BACKENDS = [UnquantizedMoeBackend.CPU]
     return _AVAILABLE_BACKENDS

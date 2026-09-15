@@ -6,6 +6,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 from .base_device_communicator import DeviceCommunicatorBase
@@ -46,6 +47,23 @@ class XpuCommunicator(DeviceCommunicatorBase):
                 logger.info("Using AgRs manager on XPU device.")
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+        if envs.VLLM_BATCH_INVARIANT:
+            # XCCL changes its reduction order with message size. Gather first
+            # and accumulate in rank order, independent of the token batch.
+            flat_input = input_.reshape(-1)
+            gathered = torch.empty(
+                (self.world_size, flat_input.numel()),
+                dtype=input_.dtype,
+                device=input_.device,
+            )
+            dist.all_gather_into_tensor(
+                gathered.view(-1), flat_input, group=self.device_group
+            )
+            output = gathered[0].clone()
+            for rank in range(1, self.world_size):
+                output.add_(gathered[rank])
+            return output.view(input_.shape)
+
         output = input_.clone()
         dist.all_reduce(output, group=self.device_group)
         return output
