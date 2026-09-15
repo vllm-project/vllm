@@ -602,14 +602,14 @@ def _engram_lookup_kernel(
     QUANT_BLOCK: tl.constexpr,
     BLOCK_R: tl.constexpr,
     GRID,
+    PACKED: tl.constexpr,
 ):
-    """Gather fp8 rows, apply their ue8m0 block scales, write bf16.
+    """Gather fp8 rows, writing packed bytes or dequantized bf16.
 
     Only this rank's heads are read; padded heads write zeros for all-gather.
     `weight`/`scales` may address pinned host memory through UVA.
     """
     cols = tl.arange(0, DIM)
-    scale_cols = cols // QUANT_BLOCK
     for base in tl.range(tl.program_id(0) * BLOCK_R, num_rows, GRID * BLOCK_R):
         rows = base + tl.arange(0, BLOCK_R)
         valid = rows < num_rows
@@ -628,18 +628,118 @@ def _engram_lookup_kernel(
             mask=owned[:, None],
             other=0.0,
         )
-        scale = tl.load(
-            scales + local[:, None] * (DIM // QUANT_BLOCK) + scale_cols[None, :],
-            mask=owned[:, None],
+        if PACKED:
+            packed_dim = DIM + DIM // QUANT_BLOCK
+            scale_cols = tl.arange(0, DIM // QUANT_BLOCK)
+            scale_bytes = tl.load(
+                scales + local[:, None] * (DIM // QUANT_BLOCK) + scale_cols[None, :],
+                mask=owned[:, None],
+                other=0,
+            )
+            tl.store(
+                out + rows[:, None] * packed_dim + cols[None, :],
+                values.to(tl.uint8, bitcast=True),
+                mask=valid[:, None],
+            )
+            tl.store(
+                out + rows[:, None] * packed_dim + DIM + scale_cols[None, :],
+                scale_bytes,
+                mask=valid[:, None],
+            )
+        else:
+            scale_cols = cols // QUANT_BLOCK
+            scale = tl.load(
+                scales + local[:, None] * (DIM // QUANT_BLOCK) + scale_cols[None, :],
+                mask=owned[:, None],
+                other=0,
+            )
+            # ue8m0 is a power of two, so its byte *is* the fp32 exponent field.
+            scale = (scale.to(tl.int32) << 23).to(tl.float32, bitcast=True)
+            tl.store(
+                out + rows[:, None] * DIM + cols[None, :],
+                (values.to(tl.float32) * scale).to(tl.bfloat16),
+                mask=valid[:, None],
+            )
+
+
+@triton.jit(
+    do_not_specialize=[
+        "num_rows",
+        "packed_stride_t",
+        "packed_stride_h",
+        "out_stride_t",
+        "out_stride_h",
+        "GRID",
+    ]
+)
+def _engram_dequant_packed_kernel(
+    packed,
+    out,
+    num_rows,
+    packed_stride_t,
+    packed_stride_h,
+    out_stride_t,
+    out_stride_h,
+    NUM_HEADS: tl.constexpr,
+    DIM: tl.constexpr,
+    QUANT_BLOCK: tl.constexpr,
+    BLOCK_R: tl.constexpr,
+    GRID,
+):
+    cols = tl.arange(0, DIM)
+    scale_cols = cols // QUANT_BLOCK
+    for base in tl.range(tl.program_id(0) * BLOCK_R, num_rows, GRID * BLOCK_R):
+        rows = base + tl.arange(0, BLOCK_R)
+        valid = rows < num_rows
+        token = (rows // NUM_HEADS).to(tl.int64)
+        head = rows % NUM_HEADS
+        src = packed + token * packed_stride_t + head * packed_stride_h
+        values = tl.load(src[:, None] + cols[None, :], mask=valid[:, None], other=0)
+        scales = tl.load(
+            src[:, None] + DIM + scale_cols[None, :],
+            mask=valid[:, None],
             other=0,
         )
-        # ue8m0 is a power of two, so its byte *is* the fp32 exponent field.
-        scale = (scale.to(tl.int32) << 23).to(tl.float32, bitcast=True)
+        scale = (scales.to(tl.int32) << 23).to(tl.float32, bitcast=True)
+        values = values.to(tl.float8e4nv, bitcast=True).to(tl.float32)
+        dst = out + token * out_stride_t + head * out_stride_h
         tl.store(
-            out + rows[:, None] * DIM + cols[None, :],
-            (values.to(tl.float32) * scale).to(tl.bfloat16),
+            dst[:, None] + cols[None, :],
+            (values * scale).to(tl.bfloat16),
             mask=valid[:, None],
         )
+
+
+def dequantize_packed_engram_rows(
+    packed: torch.Tensor, out: torch.Tensor, block_size: int
+) -> None:
+    """Reconstruct the same BF16 rows produced by the ordinary lookup."""
+    assert packed.dtype == torch.uint8 and out.dtype == torch.bfloat16
+    assert packed.shape[:2] == out.shape[:2]
+    assert packed.shape[2] == out.shape[2] + out.shape[2] // block_size
+    assert packed.stride(2) == out.stride(2) == 1
+    num_rows = out.shape[0] * out.shape[1]
+    if not num_rows:
+        return
+    tiles = triton.cdiv(num_rows, 16)
+    num_sms = torch.cuda.get_device_properties(
+        torch.accelerator.current_device_index()
+    ).multi_processor_count
+    grid = min(tiles, num_sms * 4)
+    _engram_dequant_packed_kernel[(grid,)](
+        packed,
+        out,
+        num_rows,
+        packed.stride(0),
+        packed.stride(1),
+        out.stride(0),
+        out.stride(1),
+        NUM_HEADS=out.shape[1],
+        DIM=out.shape[2],
+        QUANT_BLOCK=block_size,
+        BLOCK_R=16,
+        GRID=grid,
+    )
 
 
 class ParallelEngramEmbedding(nn.Module):
@@ -704,12 +804,23 @@ class ParallelEngramEmbedding(nn.Module):
         return self.weight.data, self.weight_scale_inv.data
 
     def lookup(
-        self, indices: torch.Tensor, out: torch.Tensor, background: bool = False
+        self,
+        indices: torch.Tensor,
+        out: torch.Tensor,
+        background: bool = False,
+        packed: bool = False,
     ) -> None:
-        """Look up local heads of [T, heads] into [T, local_heads, dim] bf16.
+        """Look up local heads into BF16 rows or FP8 values/scales bytes.
 
         `background` limits the grid to leave SMs for concurrent work.
         """
+        expected_dim = self.dim + self.dim // self.block_size if packed else self.dim
+        assert out.shape == (
+            indices.shape[0],
+            self.part_n_hash_cols,
+            expected_dim,
+        )
+        assert out.dtype == (torch.uint8 if packed else torch.bfloat16)
         rows = indices.shape[0] * self.part_n_hash_cols
         if not rows:
             return
@@ -735,6 +846,7 @@ class ParallelEngramEmbedding(nn.Module):
             QUANT_BLOCK=self.block_size,
             BLOCK_R=16,
             GRID=grid,
+            PACKED=packed,
         )
 
     def forward(self, indices: torch.Tensor) -> torch.Tensor:
