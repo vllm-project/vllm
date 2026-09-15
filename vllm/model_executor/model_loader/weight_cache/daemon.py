@@ -3,9 +3,11 @@
 """Weight cache daemon for fast engine restarts.
 
 One daemon process per GPU holds the post-quantized, TP-sharded weights of its
-rank in GPU memory and serves CUDA IPC handles to vLLM engines over a Unix
-domain socket. Restarting engines map the weights via zero-copy IPC instead of
-reloading from disk.
+rank and serves them to vLLM engines over a Unix domain socket. On CUDA/ROCm
+this is a real device IPC handle (zero-copy). On platforms with no such
+handle the daemon instead holds the weights on the host and ships them to
+engines by value, still skipping disk I/O and re-quantization on restart at
+the cost of a per-engine H2D copy.
 
 Launch one daemon per TP rank with a single command:
 
@@ -75,6 +77,7 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     get_socket_path,
     recv_msg,
     send_msg,
+    send_tensor,
     verify_peer_is_owner,
 )
 from vllm.platforms import current_platform
@@ -87,7 +90,7 @@ logger = init_logger("vllm.model_executor.model_loader.weight_cache.daemon")
 
 def export_entries(
     model: torch.nn.Module,
-) -> tuple[dict[str, TensorEntry], dict[str, str]]:
+) -> tuple[dict[str, TensorEntry], dict[str, str], dict[str, torch.Tensor]]:
     """Export a model's tensors, preserving tied-parameter aliases.
 
     ``named_parameters``/``named_buffers`` are iterated with
@@ -102,12 +105,15 @@ def export_entries(
     that PyTorch registers a reference for each IPC mapping's lifetime.
 
     Returns:
-        A ``(entries, aliases)`` pair where ``entries`` maps a canonical name to
-        its ``TensorEntry`` and ``aliases`` maps each duplicate name to its
-        canonical name.
+        ``(entries, aliases, stream_tensors)``: ``entries`` maps a canonical
+        name to its ``TensorEntry``, ``aliases`` maps each duplicate name to
+        its canonical name, and ``stream_tensors`` maps each canonical name
+        with no IPC handle to its raw CPU tensor, for the caller to send via
+        ``send_tensor``.
     """
     entries: dict[str, TensorEntry] = {}
     aliases: dict[str, str] = {}
+    stream_tensors: dict[str, torch.Tensor] = {}
     canonical_by_id: dict[int, str] = {}
 
     def _add(name: str, tensor: torch.Tensor, kind: str) -> None:
@@ -116,7 +122,10 @@ def export_entries(
             aliases[name] = canonical
             return
         canonical_by_id[id(tensor)] = name
-        entries[name] = TensorEntry.from_tensor(tensor, kind)
+        entry, raw_tensor = TensorEntry.from_tensor(tensor, kind)
+        entries[name] = entry
+        if raw_tensor is not None:
+            stream_tensors[name] = raw_tensor
 
     for name, param in model.named_parameters(remove_duplicate=False):
         _add(name, param, "param")
@@ -126,7 +135,7 @@ def export_entries(
         if name in entries or name in aliases:
             continue
         _add(name, buffer, "buffer")
-    return entries, aliases
+    return entries, aliases, stream_tensors
 
 
 def get_daemon_model(vllm_config: VllmConfig) -> torch.nn.Module:
@@ -136,6 +145,11 @@ def get_daemon_model(vllm_config: VllmConfig) -> torch.nn.Module:
     weight load, so an unsupported method fails fast. Online quantization
     always fails the check, so load_model's finalize step for it is
     unnecessary here.
+
+    On platforms with no real device IPC handle, the model is built and its
+    weights loaded directly on the host instead, only round-tripping through
+    the device if the checkpoint is pre-quantized and its repacking step
+    needs device kernels.
     """
     model_config = vllm_config.model_config
     load_config = vllm_config.load_config
@@ -144,12 +158,22 @@ def get_daemon_model(vllm_config: VllmConfig) -> torch.nn.Module:
     target_device = torch.device(
         device_config.device if load_config.device is None else load_config.device
     )
+    host_resident = current_platform.is_xpu()
+    build_device = torch.device("cpu") if host_resident else target_device
     with set_default_torch_dtype(model_config.dtype):
-        with target_device:
+        with build_device:
             model = loader.create_model(vllm_config, model_config)
         check_ipc_quant_support(model)
         loader.load_weights(model, model_config)
-        process_weights_after_loading(model, model_config, target_device)
+        if host_resident and model_config.quantization is not None:
+            # Repacking kernels for pre-quantized checkpoints may require the
+            # real device; stage the model there just for this step.
+            model.to(target_device)
+            process_weights_after_loading(model, model_config, target_device)
+            model.to("cpu")
+            torch.accelerator.empty_cache()
+        else:
+            process_weights_after_loading(model, model_config, build_device)
     return model.eval()
 
 
@@ -294,7 +318,7 @@ class WeightCacheDaemon:
             send_msg(conn, {"status": "error", "message": "Weights were released"})
             return
         gpu_uuid = get_current_device_uuid()
-        entries, aliases = export_entries(self.model)
+        entries, aliases, stream_tensors = export_entries(self.model)
         send_msg(
             conn,
             {
@@ -304,6 +328,13 @@ class WeightCacheDaemon:
                 "gpu_uuid": gpu_uuid,
             },
         )
+        # Stream raw tensor bytes for any entry exported as metadata-only
+        # above, in the same order entries were sent so the client can match
+        # each payload to its entry as it reads them.
+        for name in entries:
+            tensor = stream_tensors.get(name)
+            if tensor is not None:
+                send_tensor(conn, tensor)
         logger.info_once(
             "Weight cache daemon rank %d sent %d tensors (+%d aliases) to engine",
             self.tp_rank,
