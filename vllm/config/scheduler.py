@@ -9,6 +9,12 @@ from pydantic import Field, field_validator
 from typing_extensions import Self
 
 from vllm.config.utils import config
+from vllm.config_specs.scheduler import (
+    RunnerType as RunnerType,
+)
+from vllm.config_specs.scheduler import (
+    SchedulerPolicy as SchedulerPolicy,
+)
 from vllm.logger import init_logger
 from vllm.utils.hashing import safe_hash
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -18,14 +24,12 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-RunnerType = Literal["generate", "pooling", "draft"]
-SchedulerPolicy = Literal["fcfs", "priority"]
-
 
 @config
 class SchedulerConfig:
     """Scheduler configuration."""
 
+    # BEGIN GENERATED SchedulerFields runtime
     max_model_len: InitVar[int]
     """Maximum length of a sequence (including prompt and generated text).
 
@@ -36,36 +40,35 @@ class SchedulerConfig:
     """True if the model is an encoder-decoder model.
 
     Note: This is stored in the ModelConfig, and is used only here to
-    disable chunked prefill and prefix caching for encoder-decoder models.
-    """
+    disable chunked prefill and prefix caching for encoder-decoder models."""
 
     DEFAULT_MAX_NUM_BATCHED_TOKENS: ClassVar[int] = 2048
+
     DEFAULT_MAX_NUM_BATCHED_TOKENS_FOR_BATCHED_DP: ClassVar[int] = 256
+
     DEFAULT_MAX_NUM_SEQS: ClassVar[int] = 128
 
-    runner_type: RunnerType = "generate"
+    runner_type: Literal["generate", "pooling", "draft"] = "generate"
     """The runner type to launch for the model."""
 
-    max_num_batched_tokens: int = Field(default=DEFAULT_MAX_NUM_BATCHED_TOKENS, ge=1)
+    max_num_batched_tokens: int = Field(default=2048, ge=1)
     """Maximum number of tokens that can be processed in a single iteration.
 
     The default value here is mainly for convenience when testing.
-    In real usage, this should be set in `EngineArgs.create_engine_config`.
-    """
+    In real usage, this should be set in `EngineArgs.create_engine_config`."""
 
     max_num_scheduled_tokens: int | None = Field(default=None, ge=0)
     """Maximum number of tokens that the scheduler may issue in a single iteration.
-    
+
     This is usually equal to max_num_batched_tokens, but can be smaller in cases
     when the model might append tokens into the batch (such as speculative decoding).
     Defaults to max_num_batched_tokens."""
 
-    max_num_seqs: int = Field(default=DEFAULT_MAX_NUM_SEQS, ge=1)
+    max_num_seqs: int = Field(default=128, ge=1)
     """Maximum number of sequences to be processed in a single iteration.
 
     The default value here is mainly for convenience when testing.
-    In real usage, this should be set in `EngineArgs.create_engine_config`.
-    """
+    In real usage, this should be set in `EngineArgs.create_engine_config`."""
 
     long_prefill_token_threshold: int = Field(default=0, ge=0)
     """For chunked prefill, a request is considered long if the prompt is
@@ -118,27 +121,24 @@ class SchedulerConfig:
     on the remaining `max_num_batched_tokens`.
 
     The default value here is mainly for convenience when testing.
-    In real usage, this should be set in `EngineArgs.create_engine_config`.
-    """
+    In real usage, this should be set in `EngineArgs.create_engine_config`."""
 
     is_multimodal_model: bool = False
     """True if the model is multimodal."""
 
-    # TODO (ywang96): Make this configurable.
     max_num_encoder_input_tokens: int = Field(init=False)
     """Multimodal encoder compute budget, only used in V1.
 
     NOTE: This is not currently configurable. It will be overridden by
     max_num_batched_tokens in case max multimodal embedding size is larger."""
 
-    # TODO (ywang96): Make this configurable.
     encoder_cache_size: int = Field(init=False)
     """Multimodal encoder cache size, only used in V1.
 
     NOTE: This is not currently configurable. It will be overridden by
     max_num_batched_tokens in case max multimodal embedding size is larger."""
 
-    policy: SchedulerPolicy = "fcfs"
+    policy: Literal["fcfs", "priority"] = "fcfs"
     """The scheduling policy to use:
 
     - "fcfs" means first come first served, i.e. requests are handled in order 
@@ -154,8 +154,6 @@ class SchedulerConfig:
     some image tokens can be scheduled (like TTTTIIIII, leaving IIIII),
     it will be scheduled as TTTT in one step and IIIIIIIIII in the next."""
 
-    # scheduler class or path. "vllm.v1.core.sched.scheduler.Scheduler"
-    # (default) or "mod.custom_class".
     scheduler_cls: str | type[object] | None = None
     """The scheduler class to use. "vllm.v1.core.sched.scheduler.Scheduler" is
     the default scheduler. Can be a class directly or the path to a class of
@@ -166,8 +164,7 @@ class SchedulerConfig:
     for all attention layers even if there are multiple type of attention layers
     like full attention and sliding window attention.
     If set to None, the default value will be determined based on the environment
-    and starting configuration.
-    """
+    and starting configuration."""
 
     scheduler_reserve_full_isl: bool = True
     """If True, the scheduler checks whether the full input sequence length
@@ -189,14 +186,15 @@ class SchedulerConfig:
 
     async_scheduling: bool | None = None
     """If set to False, disable async scheduling. Async scheduling helps to
-    avoid gaps in GPU utilization, leading to better latency and throughput.
-    """
+    avoid gaps in GPU utilization, leading to better latency and throughput."""
 
     stream_interval: int = Field(default=1, ge=1)
     """The interval (or buffer size) for streaming in terms of token length.
     A smaller value (1) makes streaming smoother by sending each token immediately,
     while a larger value (e.g., 10) reduces host overhead and may increase throughput
     by batching multiple tokens before sending."""
+
+    # END GENERATED SchedulerFields runtime
 
     @staticmethod
     def default_factory(**kwargs):

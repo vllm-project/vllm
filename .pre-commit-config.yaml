@@ -309,6 +309,13 @@ repos:
     require_serial: true
     stages: [pre-commit] # Only run locally as Buildkite will cover this
     files: ^rust/.*(\.rs|Cargo\.toml|rustfmt\.toml)$
+  - id: generate-config-inputs
+    name: Check generated config inputs are current
+    entry: python tools/generate_config_inputs.py
+    language: python
+    pass_filenames: false
+    additional_dependencies: ["ruff==0.14.0"]
+    files: ^(tools/generate_config_inputs\.py|vllm/config_specs/.*\.py|vllm/engine/arg_utils\.py|vllm/config/scheduler\.py)$
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion
