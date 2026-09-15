@@ -17,7 +17,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 if TYPE_CHECKING:
     from torch.distributed import PrefixStore, ProcessGroup
 
-    from vllm.config import VllmConfig
+    from vllm.config import ParallelConfig, VllmConfig
     from vllm.config.kernel import IrOpPriorityConfig
     from vllm.inputs import EngineInput
     from vllm.pooling_params import PoolingParams
@@ -1077,9 +1077,30 @@ class Platform:
         return cls.is_cuda_alike()
 
     @classmethod
-    def get_default_eplb_communicator(cls) -> str | None:
-        """Override EPLB communicator auto-selection, if needed."""
-        return None
+    def check_and_update_eplb_config(cls, parallel_config: "ParallelConfig") -> None:
+        """Choose and validate the platform's EPLB communicator."""
+        eplb_config = parallel_config.eplb_config
+        if eplb_config.communicator is not None:
+            return
+
+        # Preserve the existing NIXL preference and elastic/static fallbacks.
+        from vllm.distributed.nixl_utils import is_nixl_available
+
+        if is_nixl_available():
+            eplb_config.communicator = "nixl"
+        elif parallel_config.enable_elastic_ep:
+            eplb_config.communicator = "pynccl"
+        else:
+            eplb_config.communicator = "torch_gloo"
+
+        if eplb_config.use_async and eplb_config.communicator in (
+            "torch_nccl",
+            "pynccl",
+        ):
+            raise ValueError(
+                f"{eplb_config.communicator} communicator is incompatible with "
+                "async EPLB."
+            )
 
     @classmethod
     def is_integrated_gpu(cls, device_id: int = 0) -> bool:

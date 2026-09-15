@@ -4,7 +4,7 @@
 import os
 import socket
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Literal, cast, overload
+from typing import TYPE_CHECKING, Any, Literal, overload
 
 import regex as re
 import torch
@@ -1027,43 +1027,8 @@ class ParallelConfig:
                 "backend is mp, uni or external_launcher."
             )
 
-        if self.enable_eplb and self.eplb_config.communicator is None:
-            platform_backend = current_platform.get_default_eplb_communicator()
-            if platform_backend is not None:
-                if platform_backend not in (
-                    "torch_nccl",
-                    "torch_gloo",
-                    "nixl",
-                    "pynccl",
-                ):
-                    raise ValueError(f"Unknown EPLB communicator: {platform_backend}")
-                if self.eplb_config.use_async and platform_backend in (
-                    "torch_nccl",
-                    "pynccl",
-                ):
-                    raise ValueError(
-                        f"{platform_backend} communicator is incompatible with "
-                        "async EPLB."
-                    )
-                self.eplb_config.communicator = cast(
-                    EPLBCommunicatorBackend, platform_backend
-                )
-                return
-            # Prefer NIXL when available: zero-copy RDMA reads, compatible
-            # with both async EPLB and elastic EP.
-            # Fallbacks: pynccl for elastic EP (stateless groups need it),
-            # torch_gloo for static EP.  torch_nccl is avoided because NCCL
-            # is incompatible with async EPLB (multi-stream conflicts) and
-            # batched isend/irecv hangs under high load.
-            # See https://github.com/pytorch/pytorch/issues/174288
-            from vllm.distributed.nixl_utils import is_nixl_available
-
-            if is_nixl_available():
-                self.eplb_config.communicator = "nixl"
-            elif self.enable_elastic_ep:
-                self.eplb_config.communicator = "pynccl"
-            else:
-                self.eplb_config.communicator = "torch_gloo"
+        if self.enable_eplb:
+            current_platform.check_and_update_eplb_config(self)
 
     @property
     def use_ray(self) -> bool:

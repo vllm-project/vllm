@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 import pytest
 import torch
 
-from vllm.config.parallel import ParallelConfig
+from vllm.config.parallel import EPLBConfig, ParallelConfig
 from vllm.distributed.eplb.async_worker import run_rebalance_experts
 from vllm.distributed.eplb.eplb_state import (
     EplbLayerState,
@@ -17,20 +17,59 @@ from vllm.distributed.eplb.eplb_state import (
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
     FusedTopKRouter,
 )
+from vllm.platforms.interface import Platform
 
 
-def test_platform_can_enable_eplb_and_select_communicator():
+@pytest.mark.parametrize("communicator", [None, "torch_gloo"])
+def test_parallel_config_delegates_eplb_config_to_platform(communicator):
+    def configure(config):
+        if config.eplb_config.communicator is None:
+            config.eplb_config.communicator = "torch_gloo"
+
     with patch("vllm.config.parallel.current_platform") as platform:
         platform.supports_eplb.return_value = True
         platform.is_cuda_alike.return_value = False
-        platform.get_default_eplb_communicator.return_value = "torch_gloo"
+        platform.check_and_update_eplb_config.side_effect = configure
         config = ParallelConfig(
             enable_eplb=True,
             enable_expert_parallel=True,
             tensor_parallel_size=2,
             distributed_executor_backend="uni",
+            eplb_config=EPLBConfig(communicator=communicator),
         )
     assert config.eplb_config.communicator == "torch_gloo"
+    platform.check_and_update_eplb_config.assert_called_once_with(config)
+
+
+@pytest.mark.parametrize(
+    ("nixl_available", "elastic", "expected"),
+    [(True, False, "nixl"), (False, False, "torch_gloo"), (False, True, "pynccl")],
+)
+def test_platform_preserves_default_communicator_selection(
+    nixl_available, elastic, expected
+):
+    config = SimpleNamespace(
+        eplb_config=EPLBConfig(use_async=False),
+        enable_elastic_ep=elastic,
+    )
+    with patch(
+        "vllm.distributed.nixl_utils.is_nixl_available",
+        return_value=nixl_available,
+    ):
+        Platform.check_and_update_eplb_config(config)
+    assert config.eplb_config.communicator == expected
+
+
+def test_platform_rejects_async_pynccl_fallback():
+    config = SimpleNamespace(
+        eplb_config=EPLBConfig(use_async=True),
+        enable_elastic_ep=True,
+    )
+    with (
+        patch("vllm.distributed.nixl_utils.is_nixl_available", return_value=False),
+        pytest.raises(ValueError, match="incompatible with async EPLB"),
+    ):
+        Platform.check_and_update_eplb_config(config)
 
 
 def test_async_planner_uses_state_hook():
