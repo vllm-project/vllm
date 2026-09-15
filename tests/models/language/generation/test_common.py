@@ -377,22 +377,12 @@ def test_models(
                     prompt_embeds, max_tokens, num_logprobs
                 )
 
-    # On MI355 with The Rock 7.14, overlaps stop at token 27.
-    # Issue arises due to hipblaslt kernel selections differences between ROCm
-    # versions.
-    skip_last_tokens_0 = 0 if not on_gfx950() else 5
-
-    if MOE_NEAR_TIE_TOL > 0:
-        # That truncation drops exactly the tokens the rescue is aimed at, so
-        # measuring it against the truncated comparison would prove nothing.
-        skip_last_tokens_0 = 0
 
     check_logprobs_close(
         outputs_0_lst=hf_outputs,
         outputs_1_lst=vllm_outputs,
         name_0="hf",
         name_1="vllm",
-        skip_last_tokens_0=skip_last_tokens_0,
     )
     if prompt_embeds is not None:
         check_logprobs_close(
