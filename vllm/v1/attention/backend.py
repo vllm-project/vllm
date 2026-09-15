@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar
 
 import numpy as np
 import torch
+from typing_extensions import Self
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic64Sym,
@@ -487,6 +488,19 @@ class CommonAttentionMetadata:
     def replace(self, **kwargs) -> "CommonAttentionMetadata":
         return replace(self, **kwargs)
 
+    def replace_tokens(self, **fields) -> "CommonAttentionMetadata":
+        """A copy over another set of this batch's tokens (same requests): the
+        fields given replace the current ones, and what was derived from the
+        token set is dropped."""
+        return replace(
+            self,
+            logits_indices_padded=None,
+            num_logits_indices=None,
+            _num_computed_tokens_cache=None,
+            _token_to_req_indices_cache=None,
+            **fields,
+        )
+
     def compute_num_computed_tokens(self) -> torch.Tensor:
         """Compute num_computed_tokens on device (seq_lens - query_lens)."""
         if self._num_computed_tokens_cache is None:
@@ -611,6 +625,19 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
 
     def set_kernel_block_size(self, kernel_block_size: int) -> None:
         self.kernel_block_size = kernel_block_size
+
+    def clone(self, **kwargs) -> Self:
+        """A builder constructed like this one, with buffers of its own."""
+        clone = type(self)(
+            self.kv_cache_spec,
+            self.layer_names,
+            self.vllm_config,
+            self.device,
+            **kwargs,
+        )
+        if self.kernel_block_size is not None:
+            clone.set_kernel_block_size(self.kernel_block_size)
+        return clone
 
     @classmethod
     def get_cudagraph_support(
