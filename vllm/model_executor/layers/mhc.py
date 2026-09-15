@@ -967,10 +967,18 @@ class MHCFusedPostPreOp(CustomOp):
 
 
 def hc_expand(x: torch.Tensor, n: int) -> torch.Tensor:
-    """[s, hidden_size] -> [s, n * hidden_size] by replication."""
-    return x.unsqueeze(1).expand(-1, n, -1).contiguous()
+    """[..., hidden_size] -> [..., n, hidden_size] by replication.
+
+    The mHC axis is inserted second-to-last for any input rank, which is what
+    hc_pre/hc_post expect: they read shape[-2:] as (hc_mult, hidden_size) and
+    treat everything before it as outer dims. The previous
+    ``unsqueeze(1).expand(-1, n, -1)`` only worked for rank-2 [s, hidden];
+    model runners that feed bucketed rank-3/rank-4 activations inserted the
+    axis in the wrong place and passed too few sizes to expand.
+    """
+    return x.unsqueeze(-2).expand(*x.shape[:-1], n, x.shape[-1]).contiguous()
 
 
 def hc_contract(x: torch.Tensor, n: int) -> torch.Tensor:
-    """[s, n * hidden_size] -> [s, hidden_size] by averaging."""
-    return x.mean(dim=1)
+    """[..., n, hidden_size] -> [..., hidden_size] by averaging."""
+    return x.mean(dim=-2)
