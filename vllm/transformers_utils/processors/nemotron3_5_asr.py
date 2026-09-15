@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Sequence
 
 import numpy as np
@@ -13,7 +12,9 @@ from transformers import BatchFeature
 from transformers.audio_utils import mel_filter_bank
 from transformers.feature_extraction_sequence_utils import SequenceFeatureExtractor
 
-logger = logging.getLogger(__name__)
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 _LOG_ZERO_GUARD_VALUE = 2**-24
 
@@ -103,9 +104,14 @@ class NemotronAsrStreamingFeatureExtractor(SequenceFeatureExtractor):
         max_length: int | None = None,
         sampling_rate: int | None = None,
         device: str | torch.device = "cpu",
+        center: bool = True,
         **kwargs,
     ) -> BatchFeature:
         del return_attention_mask, kwargs
+        if not center:
+            raise ValueError(
+                "Nemotron 3.5 ASR feature extraction requires center=True."
+            )
         if sampling_rate is not None and sampling_rate != self.sampling_rate:
             raise ValueError(
                 f"Expected sampling rate {self.sampling_rate}, got {sampling_rate}."

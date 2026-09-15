@@ -1423,6 +1423,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "CohereAsrForConditionalGeneration": _HfExamplesInfo(
         "CohereLabs/cohere-transcribe-03-2026", trust_remote_code=True
     ),
+    "Nemotron3_5AsrForRNNT": _HfExamplesInfo(
+        "nvidia/nemotron-3.5-asr-streaming-0.6b",
+        min_transformers_version="5.13.0",
+        enforce_eager=True,
+    ),
     "NemotronParseForConditionalGeneration": _HfExamplesInfo(
         "nvidia/NVIDIA-Nemotron-Parse-v1.2", trust_remote_code=True
     ),

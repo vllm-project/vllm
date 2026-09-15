@@ -607,6 +607,7 @@ _MULTIMODAL_MODELS = {
         "cohere_asr",
         "CohereAsrForConditionalGeneration",
     ),
+    "Nemotron3_5AsrForRNNT": ("nemotron3_5_asr", "Nemotron3_5AsrForRNNT"),
     "NemotronParseForConditionalGeneration": (
         "nemotron_parse",
         "NemotronParseForConditionalGeneration",

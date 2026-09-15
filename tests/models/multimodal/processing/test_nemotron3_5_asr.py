@@ -146,12 +146,15 @@ def test_nemotron_processor_builds_encoder_decoder_contract(
     expected_encoder_frames: int,
 ) -> None:
     processor = _build_processor(valid_mel_frames)
+    processor.info.ctx.model_config.hf_config.encoder_config.max_position_embeddings = (
+        32
+    )
     mm_items = processor.info.parse_mm_data({"audio": np.zeros(1600, dtype=np.float32)})
 
     processed = processor(
         "",
         mm_items=mm_items,
-        hf_processor_mm_kwargs={"language": "en-US"},
+        hf_processor_mm_kwargs={"language": "en-US", "sampling_rate": 16000},
     )
 
     assert processed["prompt_token_ids"] == [13087]
@@ -224,7 +227,34 @@ def test_nemotron_dummy_audio_is_bounded(
     assert valid_frames.item() == expected_encoder_frames
 
 
-def test_nemotron_offline_feature_extractor_masks_extra_stft_frame() -> None:
+@pytest.mark.parametrize(
+    ("num_samples", "kwargs", "error"),
+    [
+        (159, {}, "audio samples"),
+        (4000, {}, "audio samples"),
+        (1600, {"is_streaming": True}, "streaming audio chunks"),
+        (
+            1600,
+            {"audio_kwargs": {"padding": "max_length", "max_length": 4800}},
+            "Padded audio",
+        ),
+    ],
+)
+def test_nemotron_processor_rejects_unsupported_audio(
+    num_samples, kwargs, error
+) -> None:
+    processor = _build_processor(valid_mel_frames=25)
+    processor.info.ctx.processor = Nemotron3_5AsrProcessor(
+        NemotronAsrStreamingFeatureExtractor(feature_size=128), _Tokenizer()
+    )
+    mm_items = processor.info.parse_mm_data(
+        {"audio": np.zeros(num_samples, dtype=np.float32)}
+    )
+    with pytest.raises(ValueError, match=error):
+        processor("", mm_items=mm_items, hf_processor_mm_kwargs=kwargs)
+
+
+def test_nemotron_centered_feature_extractor_masks_extra_stft_frame() -> None:
     feature_extractor = NemotronAsrStreamingFeatureExtractor(feature_size=128)
 
     output = feature_extractor(
@@ -267,7 +297,10 @@ def test_nemotron_feature_extractor_matches_transformers() -> None:
     )
 
 
-def test_nemotron_feature_extractor_works_with_hf_processor() -> None:
+@pytest.mark.parametrize(("language", "prompt_id"), [("en-US", 0), ("auto", 101)])
+def test_nemotron_feature_extractor_works_with_hf_processor(
+    language: str, prompt_id: int
+) -> None:
     processor = Nemotron3_5AsrProcessor(
         NemotronAsrStreamingFeatureExtractor(feature_size=128),
         _Tokenizer(),
@@ -278,10 +311,10 @@ def test_nemotron_feature_extractor_works_with_hf_processor() -> None:
     output = processor(
         audio=np.zeros(1600, dtype=np.float32),
         sampling_rate=16000,
-        language="en-US",
+        language=language,
     )
 
     assert output["input_features"].shape == (1, 11, 128)
     assert output["attention_mask"].sum().item() == 10
-    assert output["prompt_ids"].tolist() == [0]
+    assert output["prompt_ids"].tolist() == [prompt_id]
     assert output["num_lookahead_tokens"] == 3
