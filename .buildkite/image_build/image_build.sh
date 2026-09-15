@@ -80,18 +80,44 @@ setup_buildx_builder() {
 }
 
 annotate_image_tags() {
-    .buildkite/scripts/annotate-image-build.sh \
-        "${IMAGE_TAG:-}" "${IMAGE_TAG_LATEST:-}"
+    local tags=("${IMAGE_TAG:-}" "${IMAGE_TAG_LATEST:-}")
+    if [[ "${VLLM_CI_PUBLISH_ZSTD}" == "1" ]]; then
+        tags+=("${IMAGE_TAG}-zstd")
+        if [[ -n "${IMAGE_TAG_LATEST:-}" ]]; then
+            tags+=("${IMAGE_TAG_LATEST}-zstd")
+        fi
+    fi
+    .buildkite/scripts/annotate-image-build.sh "${tags[@]}"
 }
 
 check_and_skip_if_image_exists() {
     if [[ -n "${IMAGE_TAG:-}" ]]; then
         echo "--- :mag: Checking if image exists"
-        if docker manifest inspect "${IMAGE_TAG}" >/dev/null 2>&1; then
+        if [[ "${VLLM_CI_PUBLISH_ZSTD}" == "0" ]] &&
+            docker manifest inspect "${IMAGE_TAG}" >/dev/null 2>&1; then
             echo "Image already exists: ${IMAGE_TAG}"
             echo "Skipping build"
             annotate_image_tags
             exit 0
+        fi
+        if [[ "${VLLM_CI_PUBLISH_ZSTD}" == "1" ]]; then
+            local required_tags=("${IMAGE_TAG}" "${IMAGE_TAG}-zstd")
+            if [[ -n "${IMAGE_TAG_LATEST:-}" ]]; then
+                required_tags+=("${IMAGE_TAG_LATEST}" "${IMAGE_TAG_LATEST}-zstd")
+            fi
+            local image all_exist=1
+            for image in "${required_tags[@]}"; do
+                if ! docker manifest inspect "${image}" >/dev/null 2>&1; then
+                    echo "Image not found: ${image}"
+                    all_exist=0
+                fi
+            done
+            if [[ "${all_exist}" == "1" ]]; then
+                echo "All gzip and zstd images already exist"
+                echo "Skipping build"
+                annotate_image_tags
+                exit 0
+            fi
         fi
         echo "Image not found, proceeding with build"
     fi
@@ -154,7 +180,7 @@ print_bake_config() {
     local bake_tmp
     bake_tmp="$(mktemp -d)"
     BAKE_CONFIG_FILE="${bake_tmp}/bake-config-build-${BUILDKITE_BUILD_NUMBER:-local}.json"
-    docker buildx bake -f "${VLLM_BAKE_FILE_PATH}" -f "${CI_HCL_PATH}" --print "${TARGET}" | tee "${BAKE_CONFIG_FILE}" || true
+    docker buildx bake "${BAKE_FILES[@]}" --print "${TARGET}" | tee "${BAKE_CONFIG_FILE}" || true
     echo "Saved bake config to ${BAKE_CONFIG_FILE}"
     echo "--- :arrow_down: Uploading bake config to Buildkite"
     (cd "$(dirname "${BAKE_CONFIG_FILE}")" && buildkite-agent artifact upload "$(basename "${BAKE_CONFIG_FILE}")")
@@ -212,6 +238,15 @@ BUILDKITE_COMMIT=$3
 BRANCH=$4
 IMAGE_TAG=$5
 IMAGE_TAG_LATEST=${6:-} # only used for main branch, optional
+VLLM_CI_PUBLISH_ZSTD="${VLLM_CI_PUBLISH_ZSTD:-0}"
+
+case "${VLLM_CI_PUBLISH_ZSTD}" in
+    0 | 1) ;;
+    *)
+        echo "Error: VLLM_CI_PUBLISH_ZSTD must be 0 or 1" >&2
+        exit 1
+        ;;
+esac
 
 # When TORCH_NIGHTLY=1, build the base CI image against PyTorch nightly so the
 # entire existing pipeline runs on nightly torch (CUDA/GPU lane only). Delegate
@@ -219,6 +254,10 @@ IMAGE_TAG_LATEST=${6:-} # only used for main branch, optional
 # normal IMAGE_TAG that every test step already pulls -- no separate image tag,
 # no duplicate "vLLM Against PyTorch Nightly" pipeline section.
 if [[ "${TORCH_NIGHTLY:-0}" == "1" ]]; then
+    if [[ "${VLLM_CI_PUBLISH_ZSTD}" == "1" ]]; then
+        echo "Error: VLLM_CI_PUBLISH_ZSTD=1 does not support TORCH_NIGHTLY=1" >&2
+        exit 1
+    fi
     echo "--- :warning: TORCH_NIGHTLY=1 -- building base image on PyTorch nightly"
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     exec "${SCRIPT_DIR}/image_build_torch_nightly.sh" \
@@ -230,8 +269,17 @@ TARGET="test-ci"
 VLLM_BAKE_FILE_PATH="${VLLM_BAKE_FILE_PATH:-docker/docker-bake.hcl}"
 BUILDER_NAME="${BUILDER_NAME:-vllm-builder}"
 CI_HCL_URL="${CI_HCL_URL:-https://raw.githubusercontent.com/vllm-project/ci-infra/main/docker/ci.hcl}"
-CI_HCL_PATH="/tmp/ci.hcl"
+CI_HCL_PATH="${CI_HCL_PATH:-/tmp/ci.hcl}"
+ZSTD_HCL_PATH="${ZSTD_HCL_PATH:-.buildkite/image_build/zstd.hcl}"
 BUILDKIT_SOCKET="/run/buildkit/buildkitd.sock"
+BAKE_FILES=(-f "${VLLM_BAKE_FILE_PATH}" -f "${CI_HCL_PATH}")
+if [[ "${VLLM_CI_PUBLISH_ZSTD}" == "1" ]]; then
+    if [[ -z "${IMAGE_TAG}" ]]; then
+        echo "Error: IMAGE_TAG must be nonempty when publishing zstd" >&2
+        exit 1
+    fi
+    BAKE_FILES+=(-f "${ZSTD_HCL_PATH}")
+fi
 
 prepare_cache_tags
 ecr_login
@@ -267,6 +315,7 @@ echo "TARGET: ${TARGET}"
 echo "vLLM bake file: ${VLLM_BAKE_FILE_PATH}"
 echo "BUILDER_NAME: ${BUILDER_NAME}"
 echo "CI_HCL_URL: ${CI_HCL_URL}"
+echo "VLLM_CI_PUBLISH_ZSTD: ${VLLM_CI_PUBLISH_ZSTD}"
 echo "BUILDKIT_SOCKET: ${BUILDKIT_SOCKET}"
 
 echo "--- :mag: Cache tags"
@@ -309,7 +358,7 @@ BUILD_TMP_DIR="$(mktemp -d)"
 trap 'rm -rf -- "${BUILD_TMP_DIR}"' EXIT
 BUILD_METADATA_FILE="${BUILD_TMP_DIR}/build-metadata.json"
 BUILD_STATUS=0
-docker --debug buildx bake -f "${VLLM_BAKE_FILE_PATH}" -f "${CI_HCL_PATH}" \
+docker --debug buildx bake "${BAKE_FILES[@]}" \
     --progress plain --metadata-file "${BUILD_METADATA_FILE}" "${TARGET}" || BUILD_STATUS=$?
 
 record_buildkit_trace "${BUILD_METADATA_FILE}" || true
