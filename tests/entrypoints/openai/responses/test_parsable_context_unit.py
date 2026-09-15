@@ -6,10 +6,13 @@ These tests verify that ParsableContext correctly delegates to the unified
 Parser (via parse) and properly builds response output items.
 """
 
+import json
 from collections.abc import Sequence
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from openai.types.responses import ResponseFunctionToolCall
 
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
@@ -17,6 +20,7 @@ from vllm.entrypoints.generate.base.protocol import (
     FunctionCall,
     ToolCall,
 )
+from vllm.entrypoints.mcp.tool import HarmonyPythonTool
 from vllm.entrypoints.openai.responses.context import ParsableContext
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -312,6 +316,65 @@ def test_process_extracts_tool_calls():
     assert tool_item.name == "get_weather"
     assert tool_item.arguments == '{"location": "Paris"}'
     assert tool_item.status == "completed"
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "session_name", "dispatched_name", "arguments"),
+    [
+        ("code_interpreter", "python", "python", {"code": "print(42)"}),
+        ("web_search_preview", "browser", "search", {"query": "vLLM"}),
+        ("container.exec", "container", "exec", {"cmd": ["pwd"]}),
+    ],
+)
+@pytest.mark.asyncio
+async def test_builtin_tool_output_preserves_function_call_id(
+    tool_name, session_name, dispatched_name, arguments
+):
+    """Built-in tool outputs remain correlated with their originating call."""
+    tool_session = MagicMock()
+    tool_session.call_tool = AsyncMock(
+        return_value=SimpleNamespace(content=[SimpleNamespace(text="result")])
+    )
+    context = _make_context(None, available_tools=[session_name])
+    tool_call = ResponseFunctionToolCall(
+        id=f"fc_{session_name}",
+        call_id=f"call_{session_name}",
+        type="function_call",
+        name=tool_name,
+        arguments=json.dumps(arguments),
+    )
+    context.response_messages.append(tool_call)
+    context._tool_sessions[session_name] = tool_session
+
+    output = await context.call_tool()
+
+    tool_session.call_tool.assert_awaited_once_with(dispatched_name, arguments)
+    assert output[0].call_id == tool_call.call_id
+
+
+@pytest.mark.asyncio
+async def test_local_python_tool_output_preserves_function_call_id():
+    """Local code-interpreter output remains correlated with its call."""
+
+    async def process(_):
+        yield SimpleNamespace(content=[SimpleNamespace(text="result")])
+
+    python_tool = object.__new__(HarmonyPythonTool)
+    python_tool.python_tool = MagicMock(process=process)
+    context = _make_context(None, available_tools=["python"])
+    tool_call = ResponseFunctionToolCall(
+        id="fc_python",
+        call_id="call_python",
+        type="function_call",
+        name="code_interpreter",
+        arguments='{"code": "print(42)"}',
+    )
+    context.response_messages.append(tool_call)
+    context._tool_sessions["python"] = python_tool
+
+    output = await context.call_tool()
+
+    assert output[0].call_id == tool_call.call_id
 
 
 # ---------------------------------------------------------------------------

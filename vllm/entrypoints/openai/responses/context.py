@@ -24,7 +24,6 @@ from vllm import envs
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.generate.base.protocol import FunctionCall
 from vllm.entrypoints.mcp.tool import Tool
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.parser.harmony_utils import render_for_completion
@@ -423,7 +422,9 @@ class ParsableContext(ConversationContext):
         return False
 
     async def call_python_tool(
-        self, tool_session: Union["ClientSession", Tool], last_msg: FunctionCall
+        self,
+        tool_session: Union["ClientSession", Tool],
+        last_msg: ResponseFunctionToolCall,
     ) -> list[ResponseInputOutputItem]:
         self.called_tools.add("python")
         if isinstance(tool_session, Tool):
@@ -438,7 +439,7 @@ class ParsableContext(ConversationContext):
         message = ResponseFunctionToolCallOutputItem(
             id=f"mcpo_{random_uuid()}",
             type="function_call_output",
-            call_id=f"call_{random_uuid()}",
+            call_id=last_msg.call_id,
             output=result_str,
             status="completed",
         )
@@ -446,7 +447,9 @@ class ParsableContext(ConversationContext):
         return [message]
 
     async def call_search_tool(
-        self, tool_session: Union["ClientSession", Tool], last_msg: FunctionCall
+        self,
+        tool_session: Union["ClientSession", Tool],
+        last_msg: ResponseFunctionToolCall,
     ) -> list[ResponseInputOutputItem]:
         self.called_tools.add("browser")
         if isinstance(tool_session, Tool):
@@ -464,7 +467,7 @@ class ParsableContext(ConversationContext):
         message = ResponseFunctionToolCallOutputItem(
             id=f"fco_{random_uuid()}",
             type="function_call_output",
-            call_id=f"call_{random_uuid()}",
+            call_id=last_msg.call_id,
             output=result_str,
             status="completed",
         )
@@ -472,8 +475,10 @@ class ParsableContext(ConversationContext):
         return [message]
 
     async def call_container_tool(
-        self, tool_session: Union["ClientSession", Tool], last_msg: Message
-    ) -> list[Message]:
+        self,
+        tool_session: Union["ClientSession", Tool],
+        last_msg: ResponseFunctionToolCall,
+    ) -> list[ResponseInputOutputItem]:
         """
         Call container tool. Expect this to be run in a stateful docker
         with command line terminal.
@@ -507,7 +512,7 @@ class ParsableContext(ConversationContext):
         message = ResponseFunctionToolCallOutputItem(
             id=f"fco_{random_uuid()}",
             type="function_call_output",
-            call_id=f"call_{random_uuid()}",
+            call_id=last_msg.call_id,
             output=result_str,
             status="completed",
         )
