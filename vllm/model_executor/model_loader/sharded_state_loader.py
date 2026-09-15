@@ -91,6 +91,59 @@ class ShardedStateLoader(BaseModelLoader):
                     result[k] = t
         return result
 
+    @staticmethod
+    def _get_subtensor_aliases(
+        tensors: dict[str, torch.Tensor],
+    ) -> dict[str, str]:
+        """Return a mapping from filtered subtensor / aliased keys to the canonical
+        key that is retained in _filter_subtensors.
+        """
+        same_storage_groups: dict[Any, list[tuple[str, torch.Tensor]]] = (
+            collections.defaultdict(list)
+        )
+        for key, tensor in tensors.items():
+            if tensor.numel():
+                ptr = tensor.untyped_storage().data_ptr()
+                same_storage_groups[tensor.device, ptr].append((key, tensor))
+
+        def get_end_ptr(tensor: torch.Tensor) -> int:
+            return tensor.view(-1)[-1].data_ptr() + tensor.element_size()
+
+        aliases: dict[str, str] = {}
+        for group in same_storage_groups.values():
+            group_canonicals: list[str] = []
+            for k, t in group:
+                a, b = t.data_ptr(), get_end_ptr(t)
+                for k2, t2 in group:
+                    if not t2.is_contiguous():
+                        continue
+                    a2, b2 = t2.data_ptr(), get_end_ptr(t2)
+                    if a < a2 or b2 < b:
+                        continue
+                    if a2 < a or b < b2 or not t.is_contiguous():
+                        break
+                    if k2 < k:
+                        break
+                else:
+                    group_canonicals.append(k)
+
+            canon_set = set(group_canonicals)
+            for k, t in group:
+                if k in canon_set:
+                    continue
+                a, b = t.data_ptr(), get_end_ptr(t)
+                for c_k in group_canonicals:
+                    c_t = next(t2 for k2, t2 in group if k2 == c_k)
+                    a2, b2 = c_t.data_ptr(), get_end_ptr(c_t)
+                    if a2 <= a and b <= b2:
+                        aliases[k] = c_k
+                        break
+                else:
+                    if group_canonicals:
+                        aliases[k] = group_canonicals[0]
+
+        return aliases
+
     def _prepare_weights(self, model_name_or_path: str, revision: str | None):
         if is_s3(model_name_or_path) or os.path.isdir(model_name_or_path):
             return model_name_or_path
@@ -109,6 +162,7 @@ class ShardedStateLoader(BaseModelLoader):
 
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
         from vllm.distributed import get_tensor_model_parallel_rank
+        from vllm.model_executor.models.utils import WeightsMapper
 
         model_weights = model_config.model
         if model_weights_override := model_config.model_weights:
@@ -133,14 +187,58 @@ class ShardedStateLoader(BaseModelLoader):
                 f"Could not find checkpoint files '{pattern}', only "
                 f"pre-sharded checkpoints are currently supported!"
             )
-        state_dict = self._filter_subtensors(model.state_dict())
+        raw_state_dict = model.state_dict()
+        subtensor_aliases = self._get_subtensor_aliases(raw_state_dict)
+        state_dict = self._filter_subtensors(raw_state_dict)
+        loaded_keys: set[str] = set()
+        mapper = getattr(model, "hf_to_vllm_mapper", None)
+
         counter_before_loading_weights = time.perf_counter()
         for key, tensor in self.iterate_over_files(filepaths):
             # If loading with LoRA enabled, additional padding may
             # be added to certain parameters. We only load into a
             # narrowed view of the parameter data.
-            param_data = state_dict[key].data
-            param_shape = state_dict[key].shape
+            target_key = key
+            if mapper is not None:
+                mapped = mapper._map_name(target_key)
+                if mapped is not None:
+                    target_key = mapped
+
+            if target_key not in state_dict:
+                if target_key in subtensor_aliases:
+                    target_key = subtensor_aliases[target_key]
+                else:
+                    resolved = WeightsMapper.resolve_shared_param_name(
+                        target_key, state_dict
+                    )
+                    if resolved is not None:
+                        target_key = resolved
+
+            if target_key not in state_dict:
+                if (
+                    target_key in loaded_keys
+                    or key in loaded_keys
+                    or (
+                        target_key in subtensor_aliases
+                        and subtensor_aliases[target_key] in loaded_keys
+                    )
+                ):
+                    continue
+                if (
+                    WeightsMapper.resolve_shared_param_name(target_key, loaded_keys)
+                    is not None
+                ):
+                    continue
+                logger.warning(
+                    "Key '%s' (resolved as '%s') not found in state_dict or "
+                    "already loaded; skipping.",
+                    key,
+                    target_key,
+                )
+                continue
+
+            param_data = state_dict[target_key].data
+            param_shape = state_dict[target_key].shape
             for dim, size in enumerate(tensor.shape):
                 if size < param_shape[dim]:
                     param_data = param_data.narrow(dim, 0, size)
@@ -148,11 +246,13 @@ class ShardedStateLoader(BaseModelLoader):
                 logger.warning(
                     "loading tensor of shape %s into parameter '%s' of shape %s",
                     tensor.shape,
-                    key,
+                    target_key,
                     param_shape,
                 )
             param_data.copy_(tensor)
-            state_dict.pop(key)
+            loaded_keys.add(target_key)
+            loaded_keys.add(key)
+            state_dict.pop(target_key)
         counter_after_loading_weights = time.perf_counter()
         logger.info_once(
             "Loading weights took %.2f seconds",
