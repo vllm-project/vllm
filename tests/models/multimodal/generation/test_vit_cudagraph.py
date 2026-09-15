@@ -400,6 +400,8 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         max_tokens=32,
         vllm_runner_kwargs={
             "trust_remote_code": True,
+            # Hybrid linear attention: mamba align mode needs chunked prefill.
+            "enable_chunked_prefill": True,
             "load_format": "dummy",
             "hf_overrides": partial(
                 dummy_hf_overrides,
