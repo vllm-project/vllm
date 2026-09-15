@@ -33,6 +33,14 @@ pub(crate) fn build_router(state: Arc<RenderState>) -> Router {
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions/render", post(render_chat))
         .route("/v1/completions/render", post(render_completion))
+        .route(
+            "/v1/chat/completions/derender",
+            post(crate::routes::derender::derender_chat_render),
+        )
+        .route(
+            "/v1/completions/derender",
+            post(crate::routes::derender::derender_completion_render),
+        )
         .with_state(state)
         .layer(DefaultBodyLimit::max(DEFAULT_REQUEST_BODY_LIMIT_BYTES))
 }

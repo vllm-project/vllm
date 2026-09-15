@@ -434,7 +434,10 @@ pub enum MessageContent {
 ///
 /// Do not skip serializing `None` fields here: non-streaming response types
 /// should serialize `None` as explicit `null`.
-#[derive(Debug, Clone, Serialize)]
+///
+/// `Deserialize` is derived for the derender endpoints, which accept `Usage`
+/// embedded in `GenerateResponse` / `GenerateStreamResponse` request bodies.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Usage {
     pub prompt_tokens: usize,
     pub total_tokens: usize,
@@ -479,7 +482,7 @@ impl Usage {
 }
 
 /// Mirrors the Python vLLM `PromptTokenUsageInfo` class.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PromptTokenUsageInfo {
     pub cached_tokens: usize,
 }
@@ -604,13 +607,16 @@ pub struct PromptLogprob {
 pub type PromptLogprobs = Vec<Option<HashMap<u32, PromptLogprob>>>;
 
 /// Mirrors the Python vLLM `ChatCompletionLogProbs` class.
-#[derive(Debug, Clone, Serialize)]
+///
+/// `Deserialize` is derived for the derender endpoints, which accept
+/// chat-shaped logprobs embedded in `GenerateResponse` request bodies.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ChatLogProbs {
     pub content: Option<Vec<ChatLogProbsContent>>,
 }
 
 /// Mirrors the Python vLLM `ChatCompletionLogProbsContent` class.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ChatLogProbsContent {
     pub token: String,
     pub logprob: f32,
@@ -619,7 +625,7 @@ pub struct ChatLogProbsContent {
 }
 
 /// Mirrors the Python vLLM `ChatCompletionLogProb` class.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TopLogProb {
     pub token: String,
     pub logprob: f32,
