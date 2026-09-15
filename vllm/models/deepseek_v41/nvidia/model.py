@@ -555,26 +555,14 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # Keep mHC independent of the streams used inside attention.
         mhc_stream = None
         if (
-            envs.VLLM_DSV41_MHC_OVERLAP
-            and current_platform.is_device_capability_family(100)
+            current_platform.is_device_capability_family(100)
             and is_deep_gemm_supported()
             and config.hidden_size == 5120
             and config.hc_mult == 4
-            and self.use_mega_moe
-            and self.use_sequence_parallel
-            and self.parallel_config.tensor_parallel_size == 8
-            and self.parallel_config.data_parallel_size == 1
-            and self.parallel_config.pipeline_parallel_size == 1
             and not self.parallel_config.enable_dbo
-            and vllm_config.speculative_config is None
             and vllm_config.lora_config is None
         ):
             mhc_stream = torch.cuda.Stream()
-        if envs.VLLM_DSV41_MHC_OVERLAP:
-            logger.info(
-                "DSv4.1 mHC overlap enabled for this configuration: %s",
-                mhc_stream is not None,
-            )
 
         # Reserved topk indices buffer for all Indexer layers to reuse.
         self.topk_indices_buffer = torch.empty(
