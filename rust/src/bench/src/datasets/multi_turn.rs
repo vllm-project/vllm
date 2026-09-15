@@ -350,6 +350,27 @@ pub fn load_sharegpt_multi_turn(
         .as_array()
         .ok_or_else(|| BenchError::Config("ShareGPT file must contain a JSON array".into()))?;
 
+    load_sharegpt_multi_turn_from_rows(
+        tokenizer,
+        entries,
+        num_conversations,
+        output_len_override,
+        max_turns,
+        seed,
+        request_id_prefix,
+    )
+}
+
+/// Load multi-turn conversations from deserialized ShareGPT rows.
+pub fn load_sharegpt_multi_turn_from_rows(
+    tokenizer: &TokenizerKind,
+    entries: &[serde_json::Value],
+    num_conversations: usize,
+    output_len_override: Option<usize>,
+    max_turns: Option<usize>,
+    seed: u64,
+    request_id_prefix: &str,
+) -> Result<Vec<MultiTurnConversation>> {
     // Filter entries with at least 4 messages (2 turns: user+assistant+user+assistant)
     let mut filtered: Vec<&serde_json::Value> = entries
         .iter()
@@ -506,6 +527,42 @@ fn gen_prompt_to_target_len(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_load_sharegpt_multi_turn_from_hf_rows() {
+        let tokenizer =
+            TokenizerKind::Tiktoken(crate::tiktoken::load_builtin_tiktoken("gpt2").unwrap());
+        let rows = vec![serde_json::json!({
+            "conversations": [
+                {"from": "human", "value": "hello"},
+                {"from": "gpt", "value": "hi"},
+                {"from": "human", "value": "how are you?"},
+                {"from": "gpt", "value": "great"}
+            ]
+        })];
+
+        let conversations =
+            load_sharegpt_multi_turn_from_rows(&tokenizer, &rows, 1, Some(7), None, 42, "hf-")
+                .unwrap();
+        let actual = conversations
+            .iter()
+            .map(|conversation| {
+                (
+                    conversation.conversation_id.as_str(),
+                    conversation
+                        .turns
+                        .iter()
+                        .map(|turn| (turn.user_message.as_ref(), turn.expected_output_len))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            actual,
+            vec![("hf-conv-0", vec![("hello", 7), ("how are you?", 7)])]
+        );
+    }
 
     fn common_prefix_bytes(strings: &[&str]) -> usize {
         if strings.is_empty() {

@@ -34,12 +34,9 @@ def server():
         "--enable-return-routed-experts",
         "--hf-overrides",
         '{"sliding_window": null}',
+        "--enable-scale-out",
     ]
-    with RemoteOpenAIServer(
-        MODEL_NAME,
-        args,
-        env_dict={"VLLM_ENABLE_SCALE_OUT_ENDPOINTS": "1"},
-    ) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
