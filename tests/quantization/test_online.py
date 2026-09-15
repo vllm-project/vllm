@@ -504,6 +504,51 @@ def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
         ModelConfig(model=str(tmp_path), quantization="fp8_per_channel")
 
 
+def test_nvfp4_per_token_backend_contract() -> None:
+    from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_moe import (
+        FlashInferCuteDSLExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
+        FlashInferExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.marlin_moe import MarlinExperts
+    from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
+        TrtLlmNvFp4ExpertsModular,
+        TrtLlmNvFp4ExpertsMonolithic,
+    )
+    from vllm.model_executor.layers.fused_moe.modular_kernel import (
+        FusedMoEActivationFormat,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kNvfp4DynamicToken,
+        kNvfp4Static,
+    )
+
+    scheme = (kNvfp4Static, kNvfp4DynamicToken)
+    assert TrtLlmNvFp4ExpertsMonolithic._supports_quant_scheme(*scheme)
+    assert TrtLlmNvFp4ExpertsModular._supports_quant_scheme(*scheme)
+    assert FlashInferCuteDSLExperts._supports_quant_scheme(*scheme)
+    assert FlashInferCuteDSLExperts._supports_no_act_and_mul()
+    assert not FlashInferExperts._supports_quant_scheme(*scheme)
+    assert not MarlinExperts._supports_quant_scheme(*scheme)
+
+    for experts_cls in (
+        TrtLlmNvFp4ExpertsMonolithic,
+        TrtLlmNvFp4ExpertsModular,
+    ):
+        supported, reason = experts_cls.is_supported_config(
+            experts_cls,
+            SimpleNamespace(is_act_and_mul=False),
+            *scheme,
+            FusedMoEActivationFormat.Standard,
+        )
+        assert not supported
+        assert reason == (
+            "kernel does not support per-token NVFP4 activation scaling "
+            "for non-gated MoE"
+        )
+
+
 @pytest.mark.skipif(
     not is_quant_method_supported("fp8"),
     reason="FP8 is not supported on this GPU type.",
@@ -1178,14 +1223,36 @@ def test_online_int8_moe_w2_scale_matches_unsharded(monkeypatch) -> None:
     ),
     reason="NVFP4 weight quantization needs a Blackwell (SM100) GPU.",
 )
-def test_online_nvfp4_quantizes_original_expert_weights() -> None:
+@pytest.mark.parametrize("e4m3_max", [None, 256, 448])
+def test_online_nvfp4_quantizes_original_expert_weights(monkeypatch, e4m3_max) -> None:
+    from flashinfer import fp4_quantize
+
+    monkeypatch.setenv("FLASHINFER_NVFP4_4OVER6", "0" if e4m3_max is None else "1")
+    monkeypatch.setenv(
+        "FLASHINFER_NVFP4_4OVER6_E4M3_USE_256", str(int(e4m3_max == 256))
+    )
+    monkeypatch.setenv("FLASHINFER_NVFP4_4OVER6_ERR_MODE", "MSE")
+    monkeypatch.setenv("FLASHINFER_NVFP4_4OVER6_ERR_USE_FAST_MATH", "1")
+    monkeypatch.setenv("FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH", "0")
+    monkeypatch.setenv("TRTLLM_DISABLE_FP4_QUANT_FAST_MATH", "0")
     torch.manual_seed(0)
     weight = torch.randn(2, 32, 32, device="cuda", dtype=torch.bfloat16)
+    weight[1, -1, -1] = 20.75
 
     quantized, block_scale, global_decode_scale = _quantize_moe_weight_to_nvfp4(weight)
-    global_encode_scale = 1.0 / global_decode_scale
+    amax = weight.float().abs().amax((1, 2))
+    if e4m3_max is None:
+        global_encode_scale = (6.0 * 448) / amax
+        expected_decode_scale = global_encode_scale.reciprocal()
+    else:
+        global_encode_scale = torch.div(6.0 * e4m3_max, amax)
+        expected_decode_scale = torch.div(1.0, global_encode_scale)
+    torch.testing.assert_close(
+        global_decode_scale, expected_decode_scale, rtol=0, atol=0
+    )
+    quantize = scaled_fp4_quant if e4m3_max is None else fp4_quantize
     expected = [
-        scaled_fp4_quant(
+        quantize(
             expert_weight,
             expert_scale,
             is_sf_swizzled_layout=False,
@@ -1202,9 +1269,44 @@ def test_online_nvfp4_quantizes_original_expert_weights() -> None:
         torch.stack([expert_weight for expert_weight, _ in expected]),
     )
     assert torch.equal(
-        block_scale,
-        torch.stack([expert_scale for _, expert_scale in expected]),
+        block_scale.view(torch.uint8),
+        torch.stack([expert_scale for _, expert_scale in expected]).view(torch.uint8),
     )
+
+
+@pytest.mark.skipif(
+    not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
+    ),
+    reason="Per-token NVFP4 quantization needs a Blackwell (SM100) GPU.",
+)
+@pytest.mark.parametrize("e4m3_max", [256, 448])
+def test_online_nvfp4_per_token_4over6_scale(monkeypatch, e4m3_max):
+    from flashinfer import SfLayout, nvfp4_quantize
+
+    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+        quantize_nvfp4_per_token_input,
+    )
+
+    monkeypatch.setenv("FLASHINFER_NVFP4_4OVER6", "1")
+    monkeypatch.setenv(
+        "FLASHINFER_NVFP4_4OVER6_E4M3_USE_256", str(int(e4m3_max == 256))
+    )
+    monkeypatch.setenv("FLASHINFER_NVFP4_4OVER6_ERR_MODE", "MSE")
+    monkeypatch.setenv("FLASHINFER_NVFP4_4OVER6_ERR_USE_FAST_MATH", "1")
+    monkeypatch.setenv("FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH", "1")
+    torch.manual_seed(0)
+    x = torch.randn(17, 64, device="cuda", dtype=torch.bfloat16)
+    x[0].zero_()
+    actual = quantize_nvfp4_per_token_input(x)
+    expected = nvfp4_quantize(
+        x,
+        1.0 / (6.0 * e4m3_max),
+        sfLayout=SfLayout.layout_linear,
+        per_token_activation=True,
+    )
+    for output, reference in zip(actual, expected):
+        torch.testing.assert_close(output, reference, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(
