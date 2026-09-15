@@ -114,19 +114,15 @@ The runtime performs the following sequence:
 3. Set replacement-route weights to zero for regular MoE computation.
 4. Map retained logical IDs to compact physical rows.
 5. Execute retained routes with a decomposed MoE backend.
-6. Reduce retained expert output across tensor-parallel ranks.
-7. Add the replicated constant contribution once after that reduction.
+6. Add the constant contribution on one tensor-parallel rank, or locally when
+   the backend already returns reduced output.
+7. Continue through the runner's normal combine and reduction path.
 
-The generic path replaces substituted routes with valid physical IDs carrying
-zero weights. This preserves the fixed `[num_tokens, top_k]` backend contract
-and works without substitution-specific backend support, but it may schedule
-dummy GEMMs. Backends may optimize this by accepting the logical-to-physical
-expert map and omitting invalid routes. The Triton implementation excludes
-these routes from alignment, padding, GEMM scheduling, and reduction.
-
-Both paths allocate full MLP weights only for retained experts. The generic path
-therefore provides the checkpoint's weight-memory saving; optimized route
-skipping additionally avoids the dummy compute and its memory traffic.
+The runtime replaces substituted routes with valid physical IDs carrying zero
+weights. This preserves the fixed `[num_tokens, top_k]` backend contract and
+works without substitution-specific backend support, but it may schedule dummy
+GEMMs. Full MLP weights are allocated only for retained experts, preserving the
+checkpoint's weight-memory saving.
 
 ## Supported configurations
 
@@ -146,4 +142,3 @@ The initial implementation supports:
 - Unquantized FP16 and BF16 retained experts.
 - Tensor parallelism.
 - Compatible decomposed MoE backends through the generic zero-weight path.
-- Optimized invalid-route skipping on the Triton backend.

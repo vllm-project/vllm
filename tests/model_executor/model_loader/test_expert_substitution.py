@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 import torch
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 from transformers import DeepseekV2Config, DeepseekV2ForCausalLM
 
 from vllm.config import (
@@ -16,12 +16,14 @@ from vllm.config import (
     ModelConfig,
     VllmConfig,
 )
-from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
+from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
-def _write_tiny_deepseek_substitution_checkpoint(model_dir: Path) -> torch.Tensor:
+def _write_tiny_deepseek_substitution_checkpoint(
+    model_dir: Path, *, include_value: bool = True
+) -> torch.Tensor:
     config = DeepseekV2Config(
         architectures=["DeepseekV2ForCausalLM"],
         vocab_size=32,
@@ -92,7 +94,8 @@ def _write_tiny_deepseek_substitution_checkpoint(model_dir: Path) -> torch.Tenso
         0
     ].contiguous()
     substitution_value = torch.arange(config.hidden_size, dtype=torch.float16)
-    weights[value_name] = substitution_value
+    if include_value:
+        weights[value_name] = substitution_value
     config.save_pretrained(model_dir)
     save_file(weights, model_dir / "model.safetensors")
     return substitution_value
@@ -102,8 +105,18 @@ def _write_tiny_deepseek_substitution_checkpoint(model_dir: Path) -> torch.Tenso
     not current_platform.is_cuda_alike(), reason="requires a CUDA-like device"
 )
 @pytest.mark.usefixtures("dist_init", "workspace_init")
-def test_transform_only_config_loads_substituted_expert_checkpoint(tmp_path: Path):
-    expected_value = _write_tiny_deepseek_substitution_checkpoint(tmp_path)
+@pytest.mark.parametrize("load_format", ["safetensors", "runai_streamer", "tensorizer"])
+@pytest.mark.parametrize(
+    "missing_value", [False, True], ids=["complete", "missing-value"]
+)
+def test_transform_only_config_loads_substituted_expert_checkpoint(
+    tmp_path: Path, load_format: str, missing_value: bool
+):
+    if load_format == "runai_streamer":
+        pytest.importorskip("runai_model_streamer")
+    expected_value = _write_tiny_deepseek_substitution_checkpoint(
+        tmp_path, include_value=not missing_value
+    )
     model_config = ModelConfig(
         model=str(tmp_path),
         tokenizer=str(tmp_path),
@@ -117,7 +130,19 @@ def test_transform_only_config_loads_substituted_expert_checkpoint(tmp_path: Pat
     assert model_config.model_arch_config.quantization_config is None
     assert "quant_method" not in model_config.hf_config.compression_config
 
-    load_config = LoadConfig(load_format="safetensors", use_tqdm_on_load=False)
+    extra_config = {}
+    if load_format == "tensorizer":
+        tensorizer = pytest.importorskip("tensorizer")
+        tensorizer_path = tmp_path / "model.tensors"
+        serializer = tensorizer.TensorSerializer(tensorizer_path)
+        serializer.write_state_dict(load_file(tmp_path / "model.safetensors"))
+        serializer.close()
+        extra_config = {"tensorizer_config": {"tensorizer_uri": str(tensorizer_path)}}
+    load_config = LoadConfig(
+        load_format=load_format,
+        use_tqdm_on_load=False,
+        model_loader_extra_config=extra_config,
+    )
     vllm_config = VllmConfig(
         model_config=model_config,
         device_config=DeviceConfig(device="cuda"),
@@ -125,7 +150,14 @@ def test_transform_only_config_loads_substituted_expert_checkpoint(tmp_path: Pat
         attention_config=AttentionConfig(backend=AttentionBackendEnum.TRITON_MLA),
         kernel_config=KernelConfig(moe_backend="triton"),
     )
-    model = DefaultModelLoader(load_config).load_model(vllm_config, model_config)
+    loader = get_model_loader(load_config)
+    if missing_value:
+        with pytest.raises(
+            ValueError, match="constant expert value|expert_substitution"
+        ):
+            loader.load_model(vllm_config, model_config)
+        return
+    model = loader.load_model(vllm_config, model_config)
 
     substitution = model.model.layers[0].mlp.experts.routed_experts.expert_substitution
     assert substitution is not None

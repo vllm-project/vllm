@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
@@ -11,6 +12,7 @@ from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.expert_substitution import (
     clear_expert_substitution_load_state,
+    intercept_expert_substitution_weights,
     validate_expert_substitution_model,
     validate_expert_substitution_weights_loaded,
 )
@@ -56,6 +58,18 @@ class BaseModelLoader(ABC):
         log_online_quantization(vllm_config)
         log_model_inspection(model)
         return model
+
+    def _load_weights_from_iterator(
+        self, model: nn.Module, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> set[str] | None:
+        """Load checkpoint tensors, including model-independent replacements."""
+        weights, substitution_params = intercept_expert_substitution_weights(
+            model, weights
+        )
+        loaded_weights = model.load_weights(weights)
+        if loaded_weights is not None:
+            loaded_weights.update(substitution_params)
+        return loaded_weights
 
     @instrument(span_name="Load model")
     def load_model(

@@ -11,9 +11,6 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from torch import nn
 from typing_extensions import Self
 
-from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
-
 
 class _SchemaModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -212,118 +209,6 @@ def parse_expert_substitution_config(
     return ExpertSubstitutionConfig(version=schema.version, targets=tuple(targets))
 
 
-@triton.jit
-def _constant_expert_output_kernel(
-    top_k: tl.constexpr,
-    expert_indices_ptr: tl.tensor,
-    expert_scales_ptr: tl.tensor,
-    substitution_index_ptr: tl.tensor,
-    substitution_values_ptr: tl.tensor,
-    output_ptr: tl.tensor,
-    num_tokens: int,
-    hidden_dim: int,
-    value_hidden_dim: int,
-    num_logical_experts: int,
-    indices_stride: int,
-    indices_stride_k: int,
-    scales_stride: int,
-    scales_stride_k: int,
-    values_stride_e: int,
-    values_stride_h: int,
-    output_stride: int,
-    BLOCK_SIZE: tl.constexpr,
-) -> None:
-    pid = tl.program_id(0)
-    num_dim_blocks = tl.cdiv(hidden_dim, BLOCK_SIZE)
-    token_id = pid // num_dim_blocks
-    dim_offset = (pid % num_dim_blocks) * BLOCK_SIZE
-    offsets = dim_offset + tl.arange(0, BLOCK_SIZE)
-
-    result = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
-    for route_id in range(top_k):
-        expert_id = tl.load(
-            expert_indices_ptr
-            + token_id * indices_stride
-            + route_id * indices_stride_k,
-            mask=token_id < num_tokens,
-            other=-1,
-        ).to(tl.int64)
-        valid_expert = (expert_id >= 0) & (expert_id < num_logical_experts)
-        safe_expert_id = tl.where(valid_expert, expert_id, 0)
-        substitution_row = tl.load(
-            substitution_index_ptr + safe_expert_id,
-            mask=valid_expert,
-            other=-1,
-        ).to(tl.int64)
-        is_substitution = substitution_row >= 0
-        safe_substitution_row = tl.where(is_substitution, substitution_row, 0)
-
-        scale = tl.load(
-            expert_scales_ptr + token_id * scales_stride + route_id * scales_stride_k,
-            mask=(token_id < num_tokens) & is_substitution,
-            other=0.0,
-        ).to(tl.float32)
-        values = tl.load(
-            substitution_values_ptr
-            + safe_substitution_row * values_stride_e
-            + offsets * values_stride_h,
-            mask=is_substitution & (offsets < value_hidden_dim),
-            other=0.0,
-        ).to(tl.float32)
-        result += values * scale
-
-    tl.store(
-        output_ptr + token_id * output_stride + offsets,
-        result,
-        mask=(token_id < num_tokens) & (offsets < hidden_dim),
-    )
-
-
-@triton.jit
-def _transform_expert_routes_kernel(
-    expert_indices_ptr: tl.tensor,
-    expert_scales_ptr: tl.tensor,
-    expert_map_ptr: tl.tensor,
-    num_routes: int,
-    top_k: tl.constexpr,
-    num_logical_experts: int,
-    indices_stride: int,
-    indices_stride_k: int,
-    scales_stride: int,
-    scales_stride_k: int,
-    keep_logical_ids: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-) -> None:
-    route_offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    route_mask = route_offsets < num_routes
-    token_id = route_offsets // top_k
-    topk_id = route_offsets - token_id * top_k
-
-    expert_id = tl.load(
-        expert_indices_ptr + token_id * indices_stride + topk_id * indices_stride_k,
-        mask=route_mask,
-        other=-1,
-    ).to(tl.int64)
-    valid_expert = (expert_id >= 0) & (expert_id < num_logical_experts)
-    safe_expert_id = tl.where(valid_expert, expert_id, 0)
-    physical_expert_id = tl.load(
-        expert_map_ptr + safe_expert_id,
-        mask=valid_expert,
-        other=-1,
-    )
-    tl.store(
-        expert_scales_ptr + token_id * scales_stride + topk_id * scales_stride_k,
-        0.0,
-        mask=route_mask & (physical_expert_id < 0),
-    )
-    if not keep_logical_ids:
-        tl.store(
-            expert_indices_ptr + token_id * indices_stride + topk_id * indices_stride_k,
-            tl.where(physical_expert_id >= 0, physical_expert_id, 0),
-            mask=route_mask,
-        )
-
-
 class ConstantExpertSubstitution(nn.Module):
     """Execute the homogeneous ``constant-v1`` substitution format."""
 
@@ -335,13 +220,13 @@ class ConstantExpertSubstitution(nn.Module):
     ) -> None:
         super().__init__()
         self.target = target
-        self.layout = ExpertLayout.from_substitutions(
+        layout = ExpertLayout.from_substitutions(
             target.num_logical_experts, target.substituted_expert_ids
         )
-        self.num_logical_experts = self.layout.num_logical_experts
-        self.num_compute_experts = len(self.layout.compute_expert_ids)
-        self._compute_expert_ids = self.layout.compute_expert_ids
-        self.substituted_expert_ids = self.layout.substituted_expert_ids
+        self.num_logical_experts = layout.num_logical_experts
+        self.num_compute_experts = len(layout.compute_expert_ids)
+        self._compute_expert_ids = layout.compute_expert_ids
+        self.substituted_expert_ids = layout.substituted_expert_ids
         self._value_tensor_names = {
             spec.logical_expert_id: spec.value_tensor for spec in target.replacements
         }
@@ -350,7 +235,7 @@ class ConstantExpertSubstitution(nn.Module):
         }
 
         logical_to_physical = torch.tensor(
-            self.layout.logical_to_physical, dtype=torch.int32
+            layout.logical_to_physical, dtype=torch.int32
         )
         substitution_index = torch.full(
             (self.num_logical_experts,), -1, dtype=torch.int32
@@ -372,34 +257,22 @@ class ConstantExpertSubstitution(nn.Module):
             ),
             requires_grad=False,
         )
-        self.values.weight_loader = self.weight_loader
 
     @property
     def compute_expert_ids(self) -> tuple[int, ...]:
         return self._compute_expert_ids
 
-    @property
-    def expert_map(self) -> torch.Tensor:
-        return self.logical_to_physical
-
-    def weight_loader(
+    def load_value(
         self,
-        param: nn.Parameter,
         loaded_weight: torch.Tensor,
-        weight_name: str | None = None,
-        shard_id: str | None = None,
-        expert_id: int | None = None,
-        return_success: bool = False,
-        **_: Any,
-    ) -> bool | None:
-        if expert_id is None:
-            raise ValueError("expert_id is required when loading a substitution value")
+        expert_id: int,
+    ) -> None:
         row = self._substituted_expert_to_row.get(int(expert_id))
         if row is None:
             raise ValueError(
                 f"logical expert {expert_id} is not a constant substitution"
             )
-        target = param.data[row]
+        target = self.values.data[row]
         if loaded_weight.ndim != 1 or loaded_weight.shape[0] != target.shape[0]:
             raise ValueError(
                 f"substitution value for expert {expert_id} has shape "
@@ -410,7 +283,6 @@ class ConstantExpertSubstitution(nn.Module):
                 device=target.device, dtype=target.dtype
             )
         )
-        return True if return_success else None
 
     def clear_loaded_values(self) -> None:
         self.values.data.fill_(torch.nan)
@@ -425,118 +297,39 @@ class ConstantExpertSubstitution(nn.Module):
                 f"tensor(s), first missing logical expert IDs: {preview}"
             )
 
-    def _compute_substitution_output_torch(
-        self,
-        hidden_states: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-    ) -> torch.Tensor:
-        output = torch.zeros_like(hidden_states)
-        if topk_ids.numel() == 0:
-            return output
-        valid = (topk_ids >= 0) & (topk_ids < self.num_logical_experts)
-        safe_ids = torch.where(valid, topk_ids, torch.zeros_like(topk_ids)).long()
-        substitution_rows = self.substitution_index[safe_ids].long()
-        substitution_mask = valid & (substitution_rows >= 0)
-        gathered = self.values[substitution_rows.clamp_min(0)]
-        scales = topk_weights.to(gathered.dtype) * substitution_mask.to(gathered.dtype)
-        result = torch.sum(gathered * scales.unsqueeze(-1), dim=1)
-        output[..., : result.shape[-1]].copy_(result.to(output.dtype))
-        return output
-
-    def _compute_substitution_output(
-        self,
-        hidden_states: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-    ) -> torch.Tensor:
-        if self.values.size(-1) > hidden_states.size(-1):
-            raise ValueError(
-                "constant expert hidden size exceeds the routed output size: "
-                f"{self.values.size(-1)} > {hidden_states.size(-1)}"
-            )
-        if (
-            not hidden_states.is_cuda
-            or not current_platform.is_cuda_alike()
-            or topk_ids.numel() == 0
-        ):
-            return self._compute_substitution_output_torch(
-                hidden_states, topk_weights, topk_ids
-            )
-
-        output = torch.empty_like(hidden_states)
-        num_tokens = hidden_states.size(0)
-        hidden_dim = hidden_states.size(-1)
-        if num_tokens == 0 or hidden_dim == 0:
-            return output
-        top_k = topk_ids.size(-1)
-        grid = lambda meta: (num_tokens * triton.cdiv(hidden_dim, meta["BLOCK_SIZE"]),)
-        _constant_expert_output_kernel[grid](
-            top_k,
-            topk_ids,
-            topk_weights,
-            self.substitution_index,
-            self.values,
-            output,
-            num_tokens,
-            hidden_dim,
-            self.values.size(-1),
-            self.num_logical_experts,
-            topk_ids.stride(0),
-            topk_ids.stride(1),
-            topk_weights.stride(0),
-            topk_weights.stride(1),
-            self.values.stride(0),
-            self.values.stride(1),
-            output.stride(0),
-            BLOCK_SIZE=256,
-        )
-        return output
-
     def transform_routes(
         self,
         hidden_states: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        *,
-        skip_invalid_routes: bool,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        substitution_output = self._compute_substitution_output(
-            hidden_states, topk_weights, topk_ids
+        if self.values.size(-1) > hidden_states.size(-1):
+            raise ValueError(
+                "constant expert hidden size exceeds the routed output size: "
+                f"{self.values.size(-1)} > {hidden_states.size(-1)}"
+            )
+        substitution_output = torch.zeros_like(hidden_states)
+        if topk_ids.numel() == 0:
+            return topk_weights, topk_ids, substitution_output
+
+        valid = (topk_ids >= 0) & (topk_ids < self.num_logical_experts)
+        safe_ids = torch.where(valid, topk_ids, torch.zeros_like(topk_ids)).long()
+        substitution_rows = self.substitution_index[safe_ids].long()
+        substitution_mask = valid & (substitution_rows >= 0)
+        # Keep router weights and constant accumulation in FP32 until the final cast.
+        gathered = self.values[substitution_rows.clamp_min(0)].float()
+        scales = topk_weights.float() * substitution_mask
+        result = torch.sum(gathered * scales.unsqueeze(-1), dim=1)
+        substitution_output[..., : result.shape[-1]].copy_(
+            result.to(substitution_output.dtype)
         )
 
-        if topk_ids.numel() > 0:
-            if topk_ids.is_cuda and current_platform.is_cuda_alike():
-                num_routes = topk_ids.numel()
-                top_k = topk_ids.size(-1)
-                grid = lambda meta: (triton.cdiv(num_routes, meta["BLOCK_SIZE"]),)
-                _transform_expert_routes_kernel[grid](
-                    topk_ids,
-                    topk_weights,
-                    self.logical_to_physical,
-                    num_routes,
-                    top_k,
-                    self.num_logical_experts,
-                    topk_ids.stride(0),
-                    topk_ids.stride(1),
-                    topk_weights.stride(0),
-                    topk_weights.stride(1),
-                    keep_logical_ids=skip_invalid_routes,
-                    BLOCK_SIZE=256,
-                )
-            else:
-                valid = (topk_ids >= 0) & (topk_ids < self.num_logical_experts)
-                safe_ids = torch.where(
-                    valid, topk_ids, torch.zeros_like(topk_ids)
-                ).long()
-                physical_ids = self.logical_to_physical[safe_ids]
-                topk_weights.masked_fill_(~(valid & (physical_ids >= 0)), 0.0)
-                if not skip_invalid_routes:
-                    topk_ids.copy_(physical_ids.clamp_min(0).to(topk_ids.dtype))
+        physical_ids = self.logical_to_physical[safe_ids]
+        topk_weights.masked_fill_(~(valid & (physical_ids >= 0)), 0.0)
+        topk_ids.copy_(physical_ids.clamp_min(0).to(topk_ids.dtype))
 
-        # Optimized backends consume logical IDs plus the expert map and omit
-        # invalid routes. The generic path consumes valid compact physical IDs;
-        # substituted slots remain only as zero-weight placeholders.
+        # Backends consume valid compact physical IDs; substituted slots remain
+        # only as zero-weight placeholders.
         return topk_weights, topk_ids, substitution_output
 
     def make_expert_params_mapping(
@@ -546,7 +339,6 @@ class ConstantExpertSubstitution(nn.Module):
         ckpt_down_proj_name: str,
         ckpt_up_proj_name: str,
         ckpt_prefix: str | None = None,
-        checkpoint_prefix_to_strip: str = "",
         routed_experts_prefix: str = "routed_experts",
         base_layer: str = "",
     ) -> list[tuple[str, str, int, str]]:
@@ -556,7 +348,7 @@ class ConstantExpertSubstitution(nn.Module):
             if routed_experts_prefix
             else f"{moe_prefix}."
         )
-        mapping = [
+        return [
             (
                 f"{runtime_prefix}{base_layer}w13_"
                 if weight_name in (ckpt_gate_proj_name, ckpt_up_proj_name)
@@ -574,30 +366,6 @@ class ConstantExpertSubstitution(nn.Module):
                 ("w3", ckpt_up_proj_name),
             )
         ]
-        mapping.extend(
-            (
-                f"{runtime_prefix}expert_substitution.values",
-                self._strip_checkpoint_prefix(
-                    self._value_tensor_names[logical_expert_id],
-                    checkpoint_prefix_to_strip,
-                ),
-                logical_expert_id,
-                "constant",
-            )
-            for logical_expert_id in self.substituted_expert_ids
-        )
-        return mapping
-
-    @staticmethod
-    def _strip_checkpoint_prefix(tensor_name: str, prefix: str) -> str:
-        if not prefix:
-            return tensor_name
-        if not tensor_name.startswith(prefix):
-            raise ValueError(
-                f"substitution tensor {tensor_name!r} does not start with "
-                f"the expected checkpoint prefix {prefix!r}"
-            )
-        return tensor_name.removeprefix(prefix)
 
 
 def make_expert_substitution(
@@ -676,11 +444,7 @@ def intercept_expert_substitution_weights(
                 yield name, loaded_weight
                 continue
             for param_name, substitution, expert_id in substitution_mappings:
-                substitution.weight_loader(
-                    substitution.values,
-                    loaded_weight,
-                    expert_id=expert_id,
-                )
+                substitution.load_value(loaded_weight, expert_id)
                 loaded_params.add(param_name)
 
     return remaining_weights(), loaded_params

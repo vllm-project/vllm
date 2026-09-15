@@ -219,13 +219,6 @@ class RoutedExperts(PluggableLayer):
 
     @property
     def expert_map(self) -> torch.Tensor | None:
-        if self.expert_substitution is not None:
-            return (
-                self.expert_substitution.expert_map
-                if self.moe_config.skip_invalid_expert_routes
-                else None
-            )
-
         # AITER fused-MoE kernels consume the 0/1 expert_mask; every other
         # backend consumes the canonical -1/local-slot map. Ask the active
         # experts kernel which it wants (only AITER sets consumes_expert_mask)
@@ -875,11 +868,6 @@ class RoutedExperts(PluggableLayer):
                 weight_name = qual_name.replace(weight_name, param_name)
                 param_name = weight_name.removeprefix(f"{self.layer_name}.")
                 param = getattr(self, param_name, None)
-                if (
-                    param is None
-                    and getattr(self, "expert_substitution", None) is not None
-                ):
-                    param = self.get_parameter(param_name)
                 if param is None:
                     if param_name.endswith(("w13_bias", "w2_bias")):
                         continue
@@ -1012,17 +1000,12 @@ class RoutedExperts(PluggableLayer):
                 substitution = module.expert_substitution
                 if substitution is not None:
                     target_prefix = substitution.target.module_path
-                    if target_prefix == moe_prefix:
+                    if target_prefix == moe_prefix or target_prefix.endswith(
+                        f".{moe_prefix}"
+                    ):
                         ckpt_prefix = moe_prefix
-                        checkpoint_prefix_to_strip = ""
-                    elif target_prefix.endswith(f".{moe_prefix}"):
-                        ckpt_prefix = moe_prefix
-                        checkpoint_prefix_to_strip = target_prefix.removesuffix(
-                            moe_prefix
-                        )
                     elif moe_prefix.endswith(f".{target_prefix}"):
                         ckpt_prefix = target_prefix
-                        checkpoint_prefix_to_strip = ""
                     else:
                         raise ValueError(
                             "expert substitution target path "
@@ -1034,7 +1017,6 @@ class RoutedExperts(PluggableLayer):
                         substitution.make_expert_params_mapping(
                             moe_prefix=moe_prefix,
                             ckpt_prefix=ckpt_prefix,
-                            checkpoint_prefix_to_strip=checkpoint_prefix_to_strip,
                             ckpt_gate_proj_name=ckpt_gate_proj_name,
                             ckpt_down_proj_name=ckpt_down_proj_name,
                             ckpt_up_proj_name=ckpt_up_proj_name,

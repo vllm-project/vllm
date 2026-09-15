@@ -11,7 +11,6 @@ from tests.kernels.moe.modular_kernel_tools.parallel_utils import (
     ProcessGroupInfo,
     parallel_launch_with_config,
 )
-from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
@@ -27,10 +26,6 @@ from vllm.model_executor.layers.fused_moe.expert_substitution import (
 )
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
     FlashInferExperts,
-)
-from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
-from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
-    moe_align_block_size,
 )
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.models.mixtral import MixtralMoE
@@ -123,6 +118,30 @@ def _config_for_target(
     }
     targets[module_path] = target
     return _config(raw_config)
+
+
+def _model_with_routed_experts(
+    *routed_experts: RoutedExperts | None,
+    wrapper: tuple[str, ...] = (),
+) -> torch.nn.Module:
+    model = torch.nn.Module()
+    container = model
+    for name in wrapper:
+        child = torch.nn.Module()
+        container.add_module(name, child)
+        container = child
+
+    layers = torch.nn.ModuleList(torch.nn.Module() for _ in routed_experts)
+    container.add_module("layers", layers)
+    for layer, routed in zip(layers, routed_experts):
+        if routed is None:
+            continue
+        experts = torch.nn.Module()
+        experts.add_module("routed_experts", routed)
+        mlp = torch.nn.Module()
+        mlp.add_module("experts", experts)
+        layer.add_module("mlp", mlp)
+    return model
 
 
 def test_parse_expert_substitution_config():
@@ -270,7 +289,6 @@ def test_constant_substitution_transforms_routes_and_computes_side_output():
         torch.zeros(3, 2),
         topk_weights,
         topk_ids,
-        skip_invalid_routes=False,
     )
 
     assert substitution.compute_expert_ids == (0, 2, 4)
@@ -289,54 +307,53 @@ def test_constant_substitution_transforms_routes_and_computes_side_output():
     )
 
 
-def test_optimized_substitution_keeps_logical_routes_for_expert_map():
-    substitution = ConstantExpertSubstitution(_target(), 2, torch.float32)
-    substitution.values.data.zero_()
-    topk_ids = torch.tensor([[1, 2], [4, 3]])
-    original_ids = topk_ids.clone()
-    topk_weights = torch.ones(2, 2)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda_alike(),
+                reason="requires a CUDA-like platform",
+            ),
+        ),
+    ],
+)
+def test_constant_substitution_preserves_router_weight_precision(dtype, device):
+    substitution = ConstantExpertSubstitution(_target(), 1, dtype).to(device)
+    substitution.values.data.copy_(
+        torch.tensor([[60000.0], [-60000.0]], dtype=dtype, device=device)
+    )
+    topk_weights = torch.tensor([[0.5001, 0.4999]], dtype=torch.float32, device=device)
+    topk_ids = torch.tensor([[1, 3]], device=device)
+    # Nearly cancelling constants must retain the difference between FP32 weights.
+    expected = (topk_weights.double() @ substitution.values.double()).to(dtype)
 
-    compute_weights, compute_ids, _ = substitution.transform_routes(
-        torch.zeros(2, 2),
-        topk_weights,
-        topk_ids,
-        skip_invalid_routes=True,
+    _, _, actual = substitution.transform_routes(
+        torch.zeros(1, 1, dtype=dtype, device=device), topk_weights, topk_ids
     )
 
-    torch.testing.assert_close(compute_ids, original_ids)
-    torch.testing.assert_close(
-        compute_weights,
-        torch.tensor([[0.0, 1.0], [1.0, 0.0]]),
-    )
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
 def test_constant_substitution_loads_explicit_tensor_and_compacts_mapping():
     substitution = ConstantExpertSubstitution(
         _target((1, 3), num_logical_experts=4), 3, torch.float32
     )
-    substitution.values.weight_loader(
-        substitution.values,
-        torch.tensor([1.0, 2.0, 3.0]),
-        expert_id=3,
-    )
+    substitution.load_value(torch.tensor([1.0, 2.0, 3.0]), expert_id=3)
     with pytest.raises(ValueError, match="logical expert IDs: \\[1\\]"):
         substitution.validate_loaded_values("test layer")
 
     mapping = substitution.make_expert_params_mapping(
         moe_prefix="layers.1.mlp.experts",
         ckpt_prefix="layers.1.mlp.experts",
-        checkpoint_prefix_to_strip="model.",
         ckpt_gate_proj_name="gate_proj",
         ckpt_down_proj_name="down_proj",
         ckpt_up_proj_name="up_proj",
     )
-    assert len(mapping) == 2 * 3 + 2
-    assert (
-        "layers.1.mlp.experts.routed_experts.expert_substitution.values",
-        "layers.1.mlp.expert_replacements.3.value",
-        3,
-        "constant",
-    ) in mapping
+    assert len(mapping) == 2 * 3
     assert (
         "layers.1.mlp.experts.routed_experts.w13_",
         "layers.1.mlp.experts.2.gate_proj.",
@@ -355,19 +372,7 @@ def test_model_mapping_delegates_to_routed_experts_layout():
     torch.nn.Module.__init__(routed_experts)
     routed_experts.expert_substitution = substitution
 
-    model = torch.nn.Module()
-    layers = torch.nn.ModuleList([torch.nn.Module(), torch.nn.Module()])
-    model.add_module("layers", layers)
-    regular_runner = torch.nn.Module()
-    regular_runner.add_module("routed_experts", regular_experts)
-    regular_mlp = torch.nn.Module()
-    regular_mlp.add_module("experts", regular_runner)
-    layers[0].add_module("mlp", regular_mlp)
-    experts = torch.nn.Module()
-    experts.add_module("routed_experts", routed_experts)
-    mlp = torch.nn.Module()
-    mlp.add_module("experts", experts)
-    layers[1].add_module("mlp", mlp)
+    model = _model_with_routed_experts(regular_experts, routed_experts)
 
     mapping = RoutedExperts.make_expert_params_mapping(
         model,
@@ -378,8 +383,8 @@ def test_model_mapping_delegates_to_routed_experts_layout():
     )
 
     assert mapping[0][0] == "layers.0.mlp.experts.routed_experts.w13_"
-    assert mapping[-1][0].endswith("expert_substitution.values")
-    assert mapping[-1][1] == "layers.1.mlp.expert_replacements.3.value"
+    assert mapping[-1][0] == "layers.1.mlp.experts.routed_experts.w13_"
+    assert mapping[-1][1] == "layers.1.mlp.experts.4.up_proj."
 
 
 def test_model_mapping_accepts_runtime_wrapper_prefix():
@@ -389,18 +394,11 @@ def test_model_mapping_accepts_runtime_wrapper_prefix():
         _target(), 3, torch.float32
     )
 
-    model = torch.nn.Module()
-    language_model = torch.nn.Module()
-    model.add_module("language_model", language_model)
-    checkpoint_model = torch.nn.Module()
-    language_model.add_module("model", checkpoint_model)
-    layers = torch.nn.ModuleList([torch.nn.Module(), torch.nn.Module()])
-    checkpoint_model.add_module("layers", layers)
-    experts = torch.nn.Module()
-    experts.add_module("routed_experts", routed_experts)
-    mlp = torch.nn.Module()
-    mlp.add_module("experts", experts)
-    layers[1].add_module("mlp", mlp)
+    model = _model_with_routed_experts(
+        None,
+        routed_experts,
+        wrapper=("language_model", "model"),
+    )
 
     mapping = RoutedExperts.make_expert_params_mapping(
         model,
@@ -416,7 +414,7 @@ def test_model_mapping_accepts_runtime_wrapper_prefix():
         0,
         "w1",
     )
-    assert mapping[-1][1] == "model.layers.1.mlp.expert_replacements.3.value"
+    assert mapping[-1][1] == "model.layers.1.mlp.experts.4.up_proj."
 
 
 def test_model_mapping_rejects_invalid_runtime_module_path():
@@ -446,14 +444,7 @@ def test_model_mapping_rejects_mismatched_target_path():
     routed_experts.expert_substitution = ConstantExpertSubstitution(
         _target(), 3, torch.float32
     )
-    model = torch.nn.Module()
-    layers = torch.nn.ModuleList([torch.nn.Module()])
-    model.add_module("layers", layers)
-    experts = torch.nn.Module()
-    experts.add_module("routed_experts", routed_experts)
-    mlp = torch.nn.Module()
-    mlp.add_module("experts", experts)
-    layers[0].add_module("mlp", mlp)
+    model = _model_with_routed_experts(routed_experts)
 
     with pytest.raises(ValueError, match="does not match runtime MoE module"):
         RoutedExperts.make_expert_params_mapping(
@@ -471,11 +462,7 @@ def test_constant_substitution_requires_a_vector_tensor():
     )
 
     with pytest.raises(ValueError, match=r"has shape \(1, 3\), expected \(3,\)"):
-        substitution.values.weight_loader(
-            substitution.values,
-            torch.ones(1, 3),
-            expert_id=1,
-        )
+        substitution.load_value(torch.ones(1, 3), expert_id=1)
 
 
 def test_make_expert_substitution_matches_canonical_module_path():
@@ -498,34 +485,6 @@ def test_make_expert_substitution_matches_canonical_module_path():
             hidden_size=16,
         )
         is None
-    )
-
-
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="requires a CUDA-like platform"
-)
-def test_invalid_substitution_routes_are_not_scheduled_or_reduced():
-    topk_ids = torch.tensor([[0, 1], [2, 3]], device="cuda")
-    expert_map = torch.tensor([0, -1, 1, -1], dtype=torch.int32, device="cuda")
-    _, expert_ids, num_tokens_post_pad = moe_align_block_size(
-        topk_ids,
-        block_size=4,
-        num_experts=4,
-        expert_map=expert_map,
-        ignore_invalid_experts=True,
-    )
-    assert num_tokens_post_pad.item() == 8
-    torch.testing.assert_close(
-        expert_ids[:2].cpu(), torch.tensor([0, 1], dtype=torch.int32)
-    )
-
-    route_outputs = torch.full((2, 2, 16), 1000.0, device="cuda")
-    route_outputs[0, 0] = 1.0
-    route_outputs[1, 0] = 2.0
-    output = torch.empty(2, 16, device="cuda")
-    ops.moe_sum(route_outputs, output, topk_ids, expert_map)
-    torch.testing.assert_close(
-        output, torch.tensor([[1.0] * 16, [2.0] * 16], device="cuda")
     )
 
 
@@ -564,14 +523,12 @@ def test_standard_fused_moe_model_discovers_substitution_without_adapter(dist_in
     not current_platform.is_cuda_alike(), reason="requires a CUDA-like platform"
 )
 @pytest.mark.parametrize(
-    ("moe_backend", "optimized_backend"),
+    "moe_backend",
     [
-        pytest.param("triton", False, id="triton-generic"),
-        pytest.param("triton", True, id="triton-optimized"),
+        pytest.param("triton", id="triton"),
         pytest.param(
             "flashinfer_cutlass",
-            False,
-            id="flashinfer-cutlass-generic",
+            id="flashinfer-cutlass",
             marks=pytest.mark.skipif(
                 not FlashInferExperts._supports_current_device(),
                 reason="FlashInfer CUTLASS is unavailable on this platform",
@@ -579,9 +536,7 @@ def test_standard_fused_moe_model_discovers_substitution_without_adapter(dist_in
         ),
     ],
 )
-def test_fused_moe_combines_compact_experts_and_substitution(
-    dist_init, monkeypatch, moe_backend, optimized_backend
-):
+def test_fused_moe_combines_compact_experts_and_substitution(dist_init, moe_backend):
     hidden_size = 256
     prefix = "test_constant_expert_substitution"
     vllm_config = VllmConfig()
@@ -592,12 +547,6 @@ def test_fused_moe_combines_compact_experts_and_substitution(
     )
     vllm_config.compilation_config.static_forward_context = {}
     vllm_config.kernel_config.moe_backend = moe_backend
-    if moe_backend == "triton" and not optimized_backend:
-        monkeypatch.setattr(
-            TritonExperts,
-            "supports_invalid_expert_routes",
-            staticmethod(lambda: False),
-        )
 
     with set_current_vllm_config(vllm_config), set_forward_context(None, vllm_config):
         init_workspace_manager(torch.accelerator.current_device_index())
@@ -613,14 +562,11 @@ def test_fused_moe_combines_compact_experts_and_substitution(
         substitution = layer.routed_experts.expert_substitution
         assert substitution is not None
         assert layer.routed_experts.w13_weight.shape[0] == 2
-        assert layer.moe_config.skip_invalid_expert_routes is optimized_backend
-        substitution.values.weight_loader(
-            substitution.values,
+        substitution.load_value(
             torch.full((hidden_size,), 0.5, dtype=torch.bfloat16, device="cuda"),
             expert_id=1,
         )
-        substitution.values.weight_loader(
-            substitution.values,
+        substitution.load_value(
             torch.full((hidden_size,), 0.75, dtype=torch.bfloat16, device="cuda"),
             expert_id=3,
         )
@@ -641,7 +587,6 @@ def test_fused_moe_combines_compact_experts_and_substitution(
                 hidden_states,
                 topk_weights,
                 topk_ids,
-                skip_invalid_routes=optimized_backend,
             )
         )
         expected = layer._quant_method.apply(

@@ -135,7 +135,13 @@ def test_arm_cpu_unquantized_kernel_selection(
     ],
 )
 @patch(
-    "vllm.utils.flashinfer.has_flashinfer",
+    "vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe."
+    "has_flashinfer_cutlass_fused_moe",
+    return_value=False,
+)
+@patch(
+    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe."
+    "has_flashinfer_trtllm_fused_moe",
     return_value=False,
 )
 @patch(
@@ -144,13 +150,18 @@ def test_arm_cpu_unquantized_kernel_selection(
 )
 def test_select_default_backend_by_platform(
     mock_aiter_enabled,
-    mock_has_flashinfer,
+    mock_has_flashinfer_trtllm,
+    mock_has_flashinfer_cutlass,
     monkeypatch,
     platform_method,
     expected_backend,
 ):
     """Test default backend selection per platform with all optional
-    accelerators (FlashInfer, AITER) disabled."""
+    accelerators (FlashInfer, AITER) disabled.
+
+    Patch the feature probes directly because their cached results can outlive
+    changes to has_flashinfer().
+    """
     with patch(
         "vllm.model_executor.layers.fused_moe.oracle.unquantized.current_platform"
     ) as mock_platform:

@@ -382,8 +382,6 @@ def FusedMoEFactory(
         # since model_config is not set in the pytest test.
         moe_in_dtype = params_dtype
 
-    moe_backend = vllm_config.kernel_config.moe_backend
-
     moe_config = FusedMoEConfig(
         num_experts=global_num_experts,
         experts_per_token=top_k,
@@ -394,7 +392,7 @@ def FusedMoEFactory(
         num_logical_experts=logical_num_experts,
         moe_parallel_config=moe_parallel_config,
         in_dtype=moe_in_dtype,
-        moe_backend=moe_backend,
+        moe_backend=vllm_config.kernel_config.moe_backend,
         router_logits_dtype=router_logits_dtype,
         max_num_tokens=max_num_batched_tokens,
         elastic_ep_max_dp_size=vllm_config.parallel_config.elastic_ep_max_dp_size,
@@ -410,7 +408,6 @@ def FusedMoEFactory(
         activation_situ_linear_beta=activation_situ_linear_beta,
         max_capture_size=vllm_config.compilation_config.max_cudagraph_capture_size,
         skip_final_all_reduce=skip_final_all_reduce,
-        skip_invalid_expert_routes=False,
         require_decomposed_backend=expert_substitution is not None,
     )
 
@@ -459,15 +456,7 @@ def FusedMoEFactory(
             "expert substitution requires a decomposed MoE backend"
         )
     if expert_substitution is not None:
-        moe_config.skip_invalid_expert_routes = (
-            routed_experts.quant_method.supports_invalid_expert_routes
-        )
-        if moe_config.skip_invalid_expert_routes:
-            logger.info_once(
-                "Using optimized invalid-route skipping for expert substitution."
-            )
-        else:
-            logger.info_once("Using the generic zero-weight expert-substitution path.")
+        logger.info_once("Using the generic zero-weight expert-substitution path.")
 
     if runner_cls is None:
         runner_cls = MoERunner
@@ -489,7 +478,6 @@ def FusedMoEFactory(
         routed_scaling_factor=routed_scaling_factor
         if apply_routed_scale_to_output
         else 1.0,
-        expert_substitution=expert_substitution,
         **runner_args if runner_args is not None else {},
     )
 
