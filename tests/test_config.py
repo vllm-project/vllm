@@ -8,7 +8,7 @@ from dataclasses import MISSING, Field, asdict, dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pydantic
 import pytest
@@ -1601,6 +1601,32 @@ def test_draft_inherits_ep_only_for_moe(
     assert speculative_config.draft_parallel_config.tensor_parallel_size == tp_size
     assert target_parallel_config.enable_expert_parallel is target_ep
     assert target_parallel_config.tensor_parallel_size == tp_size
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("target_ep", [False, True], ids=["ep-off", "ep-on"])
+@pytest.mark.parametrize("pass_none", [False, True], ids=["omitted", "explicit-none"])
+def test_draft_parallel_config_preserves_ep_without_model(
+    target_ep: bool, pass_none: bool
+):
+    """Legacy callers without draft model information keep EP inheritance."""
+    target_parallel_config = ParallelConfig(
+        tensor_parallel_size=2,
+        enable_expert_parallel=target_ep,
+        distributed_executor_backend="mp",
+    )
+    if pass_none:
+        draft_parallel_config = SpeculativeConfig.create_draft_parallel_config(
+            target_parallel_config, 2, draft_model_config=None
+        )
+    else:
+        draft_parallel_config = SpeculativeConfig.create_draft_parallel_config(
+            target_parallel_config, 2
+        )
+
+    assert draft_parallel_config.enable_expert_parallel is target_ep
+    assert draft_parallel_config.tensor_parallel_size == 2
+    assert target_parallel_config.enable_expert_parallel is target_ep
 
 
 @pytest.mark.parametrize(
@@ -3338,6 +3364,8 @@ def test_mtp_draft_uses_model_weights_not_local_cache(mock_model_config_cls):
     """Regression test: MTP + runai_streamer should use model_weights (original
     S3 URL) for the draft model, not model (local cache dir set by
     pull_runai_model_from_obj_storage)."""
+    from unittest.mock import MagicMock
+
     s3_url = "s3://my-bucket/Qwen3-35B-A3B-FP8"
     local_cache = "/root/.cache/vllm/assets/model_streamer/abcd1234"
 
