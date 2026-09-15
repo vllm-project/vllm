@@ -84,6 +84,7 @@ pub(super) fn render_request(
         find_last_user_render_index(request.messages.as_slice(), render_offset);
     let last_user_actual_index = find_last_user_actual_index(request.messages.as_slice());
     let continue_final_message = request.chat_options.continue_final_message();
+    let add_generation_prompt = request.chat_options.add_generation_prompt();
     let mut prompt = String::from(BOS_TOKEN);
 
     if !initial_tools.is_empty() {
@@ -102,6 +103,7 @@ pub(super) fn render_request(
             thinking_mode,
             drop_thinking,
             continue_final_message,
+            add_generation_prompt,
         )?;
     }
 
@@ -133,11 +135,13 @@ fn render_message(
     thinking_mode: ThinkingMode,
     drop_thinking: bool,
     continue_final_message: bool,
+    add_generation_prompt: bool,
 ) -> Result<()> {
     let render_index = message_index as isize + render_offset;
     let opens_thinking = render_index == last_user_render_index;
     let after_last_user_turn = render_index > last_user_render_index;
     let after_or_at_last_user_turn = render_index >= last_user_render_index;
+    let add_generation_prompt = message_index + 1 != messages.len() || add_generation_prompt;
 
     match message {
         ChatMessage::System { content } => render_system_message(out, Some(content), &[]),
@@ -146,11 +150,13 @@ fn render_message(
             content,
             tools.as_deref().unwrap_or(&[]),
             thinking_mode == ThinkingMode::Thinking && opens_thinking,
+            add_generation_prompt,
         ),
         ChatMessage::User { content } => render_user_message(
             out,
             content,
             thinking_mode == ThinkingMode::Thinking && opens_thinking,
+            add_generation_prompt,
         ),
         ChatMessage::Assistant { content } => render_assistant_message(
             out,
@@ -218,6 +224,7 @@ fn render_developer_message(
     content: &ChatContent,
     tools: &[ChatTool],
     opens_thinking: bool,
+    add_generation_prompt: bool,
 ) -> Result<()> {
     if content.is_empty() {
         return Err(Error::ChatTemplate(
@@ -232,7 +239,7 @@ fn render_developer_message(
     }
     out.push_str("\n\n# The user's message is: ");
     write_chat_content(out, content)?;
-    write_user_like_suffix(out, opens_thinking);
+    write_user_like_suffix(out, opens_thinking, add_generation_prompt);
     Ok(())
 }
 
@@ -242,17 +249,20 @@ fn render_user_message(
     out: &mut String,
     content: &ChatContent,
     opens_thinking: bool,
+    add_generation_prompt: bool,
 ) -> Result<()> {
     out.push_str("<｜User｜>");
     write_chat_content(out, content)?;
-    write_user_like_suffix(out, opens_thinking);
+    write_user_like_suffix(out, opens_thinking, add_generation_prompt);
     Ok(())
 }
 
 /// Shared trailing wrapper used by both real user turns and native developer
 /// turns after their content has already been written.
-// TODO: respect `add_generation_prompt` option
-fn write_user_like_suffix(out: &mut String, opens_thinking: bool) {
+fn write_user_like_suffix(out: &mut String, opens_thinking: bool, add_generation_prompt: bool) {
+    if !add_generation_prompt {
+        return;
+    }
     out.push_str("<｜Assistant｜>");
     if opens_thinking {
         out.push_str(THINKING_START_TOKEN);
