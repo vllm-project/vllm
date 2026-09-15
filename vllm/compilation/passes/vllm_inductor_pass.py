@@ -282,6 +282,27 @@ def fold_consecutive_reshapes(gm: fx.GraphModule) -> None:
         gm.graph.erase_node(inp)
 
 
+def remove_noop_reshapes(gm: fx.GraphModule) -> None:
+    """Drop reshape ops whose output shape equals their input shape.
+
+    Companion to :func:`fold_consecutive_reshapes`. ``make_fx`` records a
+    reshape to the shape the input already has; the compiled graph has already
+    dropped it, so the pattern only matches once we drop it too.
+    """
+    aten_reshape = torch.ops.aten.reshape.default
+    for node in list(gm.graph.nodes):
+        if not is_func(node, aten_reshape):
+            continue
+        inp = node.args[0]
+        if not isinstance(inp, fx.Node):
+            continue
+        val, inp_val = node.meta.get("val"), inp.meta.get("val")
+        if val is None or inp_val is None or val.shape != inp_val.shape:
+            continue
+        node.replace_all_uses_with(inp)
+        gm.graph.erase_node(node)
+
+
 def _remove_noop_permutes(gm: fx.GraphModule) -> None:
     for node in gm.graph.nodes:
         if not is_func(node, torch.ops.aten.permute.default):
