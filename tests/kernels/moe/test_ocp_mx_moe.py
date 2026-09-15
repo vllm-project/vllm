@@ -2011,3 +2011,157 @@ def test_emulation_a_mxfp6_moe_forward_quantizes_activations():
         "w_mxfp4_a_mxfp6_e3m2 output is bit-identical to weight-only w_mxfp4:"
         " the emulation never fake-quantized the activations"
     )
+
+
+def test_convert_weight_to_mxfp4_cutlass_swizzles_scales_per_expert():
+    """CUTLASS W4A4 consumes the E8M0 block scales in a tiled layout.
+
+    Packed MXFP4 checkpoints (compressed-tensors, AutoRound) store flat
+    ``[E, N, K // 32]`` scales, so the converter has to swizzle every expert
+    while leaving the packed weights in their checkpoint form.
+    """
+    from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
+        swizzle_mxfp4_scales,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        convert_weight_to_mxfp4_moe_kernel_format,
+    )
+
+    num_experts, hidden_size, intermediate_size = 2, 256, 128
+    w13_n = 2 * intermediate_size
+    gen = torch.Generator().manual_seed(0)
+
+    def rand_u8(*shape: int) -> torch.Tensor:
+        return torch.randint(0, 256, shape, dtype=torch.uint8, generator=gen)
+
+    w13 = rand_u8(num_experts, w13_n, hidden_size // 2)
+    w2 = rand_u8(num_experts, hidden_size, intermediate_size // 2)
+    w13_scale = rand_u8(num_experts, w13_n, hidden_size // 32)
+    w2_scale = rand_u8(num_experts, hidden_size, intermediate_size // 32)
+
+    out_w13, out_w2, out_w13_scale, out_w2_scale, w13_bias, w2_bias = (
+        convert_weight_to_mxfp4_moe_kernel_format(
+            mxfp4_backend=Mxfp4MoeBackend.CUTLASS_MXFP4_MXFP4,
+            layer=torch.nn.Module(),
+            w13_weight=w13,
+            w2_weight=w2,
+            w13_weight_scale=w13_scale,
+            w2_weight_scale=w2_scale,
+        )
+    )
+
+    # W4A4 CUTLASS reads the checkpoint packing directly; only scales move.
+    assert out_w13.data_ptr() == w13.data_ptr()
+    assert out_w2.data_ptr() == w2.data_ptr()
+    assert w13_bias is None and w2_bias is None
+
+    expected_w13_scale = torch.stack(
+        [
+            swizzle_mxfp4_scales(w13_scale[e], w13_n, hidden_size).reshape(
+                w13_n, hidden_size // 32
+            )
+            for e in range(num_experts)
+        ]
+    )
+    expected_w2_scale = torch.stack(
+        [
+            swizzle_mxfp4_scales(w2_scale[e], hidden_size, intermediate_size).reshape(
+                hidden_size, intermediate_size // 32
+            )
+            for e in range(num_experts)
+        ]
+    )
+    assert torch.equal(out_w13_scale, expected_w13_scale)
+    assert torch.equal(out_w2_scale, expected_w2_scale)
+    # A no-op here would feed the kernel scales in the wrong tile order.
+    assert not torch.equal(out_w13_scale, w13_scale)
+    assert not torch.equal(out_w2_scale, w2_scale)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Marlin repack requires CUDA"
+)
+def test_packed_mxfp4_moe_method_converts_weights_for_marlin(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Packed MXFP4 checkpoints must reach Marlin via the pure converter.
+
+    ``prepare_moe_fp4_layer_for_marlin`` rewrites the layer in place and
+    allocates a ``workspace`` the modular kernel never reads; the shared oracle
+    routes to ``prepare_moe_mxfp4_layer_for_marlin`` instead and hands the
+    repacked tensors back to the caller.
+    """
+    from vllm.model_executor.layers.fused_moe.experts.marlin_moe import MarlinExperts
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
+        compressed_tensors_moe_w4a4_mxfp4 as ct_mxfp4,
+    )
+
+    num_experts, hidden_size, intermediate_size = 2, 256, 128
+    w13_n = 2 * intermediate_size
+
+    monkeypatch.setattr(
+        ct_mxfp4,
+        "select_mxfp4_moe_backend",
+        lambda moe, candidates: (Mxfp4MoeBackend.MARLIN, MarlinExperts),
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.utils.marlin_utils_fp4."
+        "prepare_moe_fp4_layer_for_marlin",
+        lambda *args, **kwargs: pytest.fail(
+            "packed MXFP4 must use the pure Marlin converter"
+        ),
+    )
+    processed_layers: list[torch.nn.Module] = []
+    kernel = types.SimpleNamespace(
+        fused_experts=types.SimpleNamespace(
+            process_weights_after_loading=processed_layers.append
+        )
+    )
+    monkeypatch.setattr(ct_mxfp4, "make_mxfp4_moe_kernel", lambda **_: kernel)
+
+    method = ct_mxfp4.CompressedTensorsW4A4Mxfp4MoEMethod(
+        types.SimpleNamespace(w13_num_shards=2, moe_backend="auto")
+    )
+    monkeypatch.setattr(method, "get_fused_moe_quant_config", lambda _: object())
+
+    layer = torch.nn.Module()
+    layer._expert_routing_tables = lambda: ()
+    method.create_weights(
+        layer,
+        num_experts=num_experts,
+        hidden_size=hidden_size,
+        intermediate_size_per_partition=intermediate_size,
+        params_dtype=torch.bfloat16,
+    )
+    gen = torch.Generator().manual_seed(0)
+    for name in ("w13_weight_packed", "w2_weight_packed"):
+        param = getattr(layer, name)
+        param.data.copy_(
+            torch.randint(0, 256, param.shape, dtype=torch.uint8, generator=gen)
+        )
+    # E8M0 exponent bias: an all-127 scale is exactly 1.0.
+    layer.w13_weight_scale.data.fill_(127)
+    layer.w2_weight_scale.data.fill_(127)
+    layer.to(torch.device("cuda"))
+
+    method.process_weights_after_loading(layer)
+
+    assert not hasattr(layer, "w13_weight_packed")
+    assert not hasattr(layer, "w2_weight_packed")
+    # Marlin repacks the 4-bit weights into its own int32 tile layout ...
+    assert layer.w13_weight.dtype == torch.int32
+    assert layer.w2_weight.dtype == torch.int32
+    # ... and permutes the scales into [E, K // group_size, N].
+    assert layer.w13_weight_scale.dtype == torch.float8_e8m0fnu
+    assert layer.w13_weight_scale.shape == (num_experts, hidden_size // 32, w13_n)
+    assert layer.w2_weight_scale.shape == (
+        num_experts,
+        intermediate_size // 32,
+        hidden_size,
+    )
+    # The in-place helper's workspace is dead weight for the modular kernel,
+    # which allocates its own.
+    assert not hasattr(layer, "workspace")
+    assert processed_layers == [layer]

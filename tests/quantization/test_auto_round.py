@@ -1057,16 +1057,15 @@ def test_inc_mxfp4_linear_method_registers_and_processes_weights(
 
 
 @pytest.mark.parametrize(
-    ("moe_backend", "is_xpu", "mxfp4_backend"),
+    ("moe_backend", "mxfp4_backend"),
     [
-        ("auto", True, Mxfp4MoeBackend.XPU),
-        ("b12x", False, Mxfp4MoeBackend.B12X_MXFP4_MXFP8),
+        ("auto", Mxfp4MoeBackend.XPU),
+        ("b12x", Mxfp4MoeBackend.B12X_MXFP4_MXFP8),
     ],
 )
 def test_inc_mxfp4_moe_method_preserves_checkpoint_packing(
     monkeypatch,
     moe_backend: str,
-    is_xpu: bool,
     mxfp4_backend: Mxfp4MoeBackend,
 ) -> None:
     captured = {}
@@ -1082,19 +1081,13 @@ def test_inc_mxfp4_moe_method_preserves_checkpoint_packing(
 
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe."
-        "CutlassExpertsMxfp4._supports_current_device",
-        lambda: False,
-    )
-    monkeypatch.setattr(current_platform, "is_xpu", lambda: is_xpu)
-    monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe."
         "select_mxfp4_moe_backend",
-        lambda moe: (mxfp4_backend, expected_experts_cls),
+        lambda moe, candidates: (mxfp4_backend, expected_experts_cls),
     )
     monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe."
-        "prepare_moe_fp4_layer_for_marlin",
-        lambda layer: pytest.fail("packed backends must not use Marlin packing"),
+        "vllm.model_executor.layers.quantization.utils.marlin_utils_fp4."
+        "prepare_moe_mxfp4_layer_for_marlin",
+        lambda *args: pytest.fail("packed backends must not use Marlin packing"),
     )
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe."
