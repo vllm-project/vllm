@@ -468,10 +468,16 @@ class KVCacheCoordinator(ABC):
         sparse-retention group has not cached yet; 0 unless hybrid)."""
         pass
 
-    def new_step_starts(self) -> None:
+    def new_step_starts(self, step_seq: int = 0) -> None:
         """Notify each manager that a new step is starting."""
         for manager in self.single_type_managers:
-            manager.new_step_starts()
+            manager.new_step_starts(step_seq)
+
+    def commit_step(self, step_seq: int = 0) -> None:
+        """Notify each manager that a scheduled step has committed (its GPU
+        writes have landed)."""
+        for manager in self.single_type_managers:
+            manager.commit_step(step_seq)
 
 
 class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
