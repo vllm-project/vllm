@@ -24,7 +24,7 @@
 """Inference-only Ernie VL model compatible with HuggingFace weights."""
 
 import math
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
 from functools import partial
 from typing import Annotated, Any, Literal
 
@@ -539,7 +539,7 @@ class Ernie4_5_VisionTransformer(nn.Module):
         else:
             max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
 
-        cu_seqlens = cu_seqlens.to(device, non_blocking=True)
+        cu_seqlens = async_tensor_h2d(cu_seqlens, device)
 
         return {
             "rotary_pos_emb": rotary_pos_emb,
@@ -1674,6 +1674,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         device,
         dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
@@ -1739,8 +1740,8 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         # Eager fallback: run the full pipeline (ViT + resampler). The result
         # is scattered directly, so it must be the post-merge embeddings.
         pixel_values = mm_kwargs["pixel_values"].type(self.vision_model.dtype)
-        grid_thw = mm_kwargs["image_grid_thw"].to(
-            self.vision_model.device, non_blocking=True
+        grid_thw = async_tensor_h2d(
+            mm_kwargs["image_grid_thw"], self.vision_model.device
         )
         image_features = self.vision_model(pixel_values, grid_thw)
         return self.resampler_model(image_features, grid_thw)
@@ -1761,7 +1762,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         output = outputs["default"]
         assert batch_mm_kwargs is not None
         grid_thw_cpu = batch_mm_kwargs["image_grid_thw"]
-        grid_thw = grid_thw_cpu.to(output.device, non_blocking=True)
+        grid_thw = async_tensor_h2d(grid_thw_cpu, output.device)
         # The valid token count slices the graph output for the eager
         # resampler call, so it has to come back to the host.
         num_valid = int(
