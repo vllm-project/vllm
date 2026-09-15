@@ -1186,10 +1186,18 @@ class RelPositionMultiHeadAttention(CohereASRMultiHeadAttention):
         matrix_bd = torch.matmul(q_with_bias_v, p.transpose(-2, -1))
         matrix_bd = self.rel_shift(matrix_bd)
 
-        # drops extra elements in the matrix_bd to match the matrix_ac's size
-        matrix_ac = torch.matmul(q_with_bias_u, k.transpose(-2, -1))
-        matrix_bd = matrix_bd[:, :, :, : matrix_ac.size(-1)]
-        scores = (matrix_ac + matrix_bd) / self.s_d_k  # (batch, head, time1, time2)
+        # drops extra elements in matrix_bd to match the key sequence length
+        matrix_bd = matrix_bd[:, :, :, : k.size(-2)]
+        batch, heads, query_len, key_len = matrix_bd.shape
+        scale = 1.0 / self.s_d_k
+        scores = torch.baddbmm(
+            matrix_bd.flatten(0, 1),
+            q_with_bias_u.flatten(0, 1),
+            k.transpose(-2, -1).flatten(0, 1),
+            beta=scale,
+            alpha=scale,
+        ).view(batch, heads, query_len, key_len)
+
         return self.forward_attention(v, scores, mask)
 
 
