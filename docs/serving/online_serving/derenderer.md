@@ -60,8 +60,7 @@ Launch the two servers first:
 
 ```bash
 vllm launch render meta-llama/Llama-3.2-1B-Instruct --port 8100
-VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1 vllm serve \
-    meta-llama/Llama-3.2-1B-Instruct --tokens-only --port 8200
+vllm serve meta-llama/Llama-3.2-1B-Instruct --tokens-only --port 8200
 ```
 
 ```python
