@@ -230,6 +230,20 @@ class DeepSeekMultiTokenPredictor(nn.Module):
         )
         return logits
 
+    def get_top_tokens(
+        self,
+        hidden_states: torch.Tensor,
+        spec_step_idx: int = 0,
+    ) -> torch.Tensor:
+        current_step_idx = spec_step_idx % self.num_mtp_layers
+        mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
+        # Vocab-parallel argmax for the greedy draft: per-rank head projection
+        # + local argmax + a [batch, 2*tp] (value, index) reduce, instead of
+        # all-gathering the full vocab logits.
+        return self.logits_processor.get_top_tokens(
+            mtp_layer.shared_head.head, mtp_layer.shared_head(hidden_states)
+        )
+
 
 @support_torch_compile
 class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
@@ -295,6 +309,15 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
         spec_step_idx: int = 0,
     ) -> torch.Tensor | None:
         return self.model.compute_logits(hidden_states, spec_step_idx)
+
+    def get_top_tokens(
+        self,
+        hidden_states: torch.Tensor,
+        spec_step_idx: int = 0,
+    ) -> torch.Tensor:
+        # Greedy-draft path used when use_local_argmax_reduction is enabled:
+        # vocab-parallel argmax, no full-vocab logits.
+        return self.model.get_top_tokens(hidden_states, spec_step_idx)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
