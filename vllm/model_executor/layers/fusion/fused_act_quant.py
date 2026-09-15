@@ -5,21 +5,27 @@ Producer side of the QuantizedActivation contract for activation layers.
 
 Given an activation module and the downstream linear it feeds, fuse the
 activation with that linear's input quantization into a single kernel when the
-linear advertises a consumable input_quant_key (see quant_activation.py).
+linear advertises a consumable input quantization key (see quant_activation.py).
 Falls back to the plain activation when nothing matches, so a model forward can
 always call maybe_fused_act_quant unconditionally.
 
 This is the manual-fusion counterpart to ActivationQuantFusionPass: when fusion
-fires here the silu_and_mul pattern is already consumed, so the compiler pass
-finds nothing to rewrite and the two never double-fuse.
+fires here, the activation and quantization are already consumed, so a compiler
+pass cannot fuse the same boundary again.
 """
 
 from collections.abc import Callable
 
 import torch
 
-from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+from vllm.model_executor.layers.activation import ReLUSquaredActivation, SiluAndMul
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    get_input_quant_key,
+)
+from vllm.model_executor.layers.fusion.relu2_fp8_quant import (
+    relu_squared_static_fp8_quant,
+)
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -139,11 +145,45 @@ def _silu_and_mul_nvfp4_dynamic(
     )
 
 
-# (activation module type, consumer input_quant_key) -> fused producer.
-# Mirrors ActivationQuantFusionPass.FUSED_OPS; add a row to migrate a scheme.
+# (activation module type, consumer input quantization key) -> fused producer.
+# Add a row for each supported manual producer.
 _FUSED_ACT_QUANT: dict[tuple[type, QuantKey], Callable] = {
     (SiluAndMul, kFp8StaticTensorSym): _silu_and_mul_fp8_static,
 }
+
+
+def _relu_squared_static_fp8_quant_supported(
+    act_fn: torch.nn.Module,
+    x: torch.Tensor,
+    linear: LinearBase,
+) -> bool:
+    """Return whether the ReLU2 static-FP8 producer can consume this input."""
+    scale = getattr(linear, "input_scale", None)
+    return (
+        isinstance(act_fn, ReLUSquaredActivation)
+        and x.is_cuda
+        and x.dtype == torch.bfloat16
+        and x.is_contiguous()
+        and isinstance(scale, torch.Tensor)
+        and scale.dtype == torch.float32
+        and scale.device == x.device
+        and scale.numel() == 1
+    )
+
+
+# Optional per-entry predicates preserve the unconditional fallback contract
+# for producers whose supported inputs are narrower than their registry key.
+_FUSED_ACT_QUANT_SUPPORT: dict[
+    tuple[type, QuantKey], Callable[[torch.nn.Module, torch.Tensor, LinearBase], bool]
+] = {}
+
+# This path is validated on SM90 and newer CUDA devices.
+if current_platform.is_cuda() and current_platform.has_device_capability(90):
+    _RELU2_STATIC_FP8_KEY = (ReLUSquaredActivation, kFp8StaticTensorSym)
+    _FUSED_ACT_QUANT[_RELU2_STATIC_FP8_KEY] = relu_squared_static_fp8_quant
+    _FUSED_ACT_QUANT_SUPPORT[_RELU2_STATIC_FP8_KEY] = (
+        _relu_squared_static_fp8_quant_supported
+    )
 
 # Add CUDA-specific entries for dynamic block quantization
 if current_platform.is_cuda_alike():
@@ -161,12 +201,14 @@ def maybe_fused_act_quant(
 ) -> "torch.Tensor | QuantizedActivation":
     """Apply act_fn, fusing the downstream linear's input quant when possible.
 
-    Returns a QuantizedActivation when a fused kernel matches
-    (act_fn, linear.input_quant_key), else the plain activated tensor.
+    Returns a QuantizedActivation when a fused kernel matches the activation and
+    the consumer's effective input quantization key, else the plain activation.
     """
-    key = getattr(linear, "input_quant_key", None)
+    key = get_input_quant_key(linear)
     if key is not None:
-        producer = _FUSED_ACT_QUANT.get((type(act_fn), key))
-        if producer is not None:
+        registry_key = (type(act_fn), key)
+        producer = _FUSED_ACT_QUANT.get(registry_key)
+        support = _FUSED_ACT_QUANT_SUPPORT.get(registry_key)
+        if producer is not None and (support is None or support(act_fn, x, linear)):
             return producer(x, linear)
     return act_fn(x)
