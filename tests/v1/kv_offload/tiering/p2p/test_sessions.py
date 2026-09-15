@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Sequence
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -30,6 +31,7 @@ from vllm.v1.kv_offload.tiering.p2p.session import (
     P2PSession,
     StoreResult,
 )
+from vllm.v1.kv_offload.tiering.p2p.session import client as client_module
 from vllm.v1.kv_offload.tiering.p2p.session.client import (
     _ABORT_ACK_TIMEOUT_S,
     _LOAD_TIMEOUT_S,
@@ -736,6 +738,112 @@ class TestClientFlows:
 
 class TestLookupFlow:
     """Consumer-side state machine for do_p2p_fetch lookups."""
+
+    @pytest.fixture
+    def lookup_clock(self, monkeypatch):
+        clock = SimpleNamespace(now=0.0)
+        monkeypatch.setattr(
+            client_module, "time", SimpleNamespace(monotonic=lambda: clock.now)
+        )
+        return clock
+
+    def test_lookup_deadline_starts_after_handshake(self, lookup_clock):
+        session, conn, _ = _make_session()
+        session.register_lookup("req-1", b"hA")
+        session.flush_pending_lookups()
+        lookup_clock.now = 100.0
+        session.poll()
+        assert session.alive
+
+        _activate(session, conn)
+        session.flush_pending_lookups()
+        lookups = [m for m in conn._sent if m[TYPE_KEY] == LookupMsg.TYPE]
+        assert len(lookups) == 1
+        lookup_clock.now += 29
+        session.poll()
+        assert session.alive
+        lookup_clock.now += 1
+        session.poll()
+        assert not session.alive
+        assert session.close().failed_req_ids == ["req-1"]
+
+    def test_partial_response_does_not_extend_lookup_deadline(self, lookup_clock):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.register_lookup("req-1", b"hA")
+        session.register_lookup("req-1", b"hB")
+        session.flush_pending_lookups()
+        lookup_clock.now = 29.0
+        conn.enqueue(
+            {
+                TYPE_KEY: LookupRespMsg.TYPE,
+                LookupRespMsg.KV_REQUEST_ID: "req-1",
+                LookupRespMsg.KEYS: [b"hA"],
+                LookupRespMsg.HITS: [True],
+            }
+        )
+        session.poll()
+        assert session.register_lookup("req-1", b"hA") is True
+        assert session.register_lookup("req-1", b"hB") is None
+        session.register_lookup("req-1", b"hC")
+        session.flush_pending_lookups()
+
+        lookup_clock.now += 1
+        conn.enqueue(
+            {
+                TYPE_KEY: LookupRespMsg.TYPE,
+                LookupRespMsg.KV_REQUEST_ID: "req-1",
+                LookupRespMsg.KEYS: [b"hB", b"hC"],
+                LookupRespMsg.HITS: [True, True],
+            }
+        )
+        session.poll()
+        assert not session.alive
+        assert session.close().failed_req_ids == ["req-1"]
+
+    @pytest.mark.parametrize("action", ["resolve", "finish", "fetch"])
+    def test_lookup_deadline_cleared_before_next_batch(self, lookup_clock, action):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.register_lookup("req-1", b"hA")
+        session.register_lookup("req-1", b"hB")
+        session.flush_pending_lookups()
+        lookup_clock.now = 29.0
+        conn.enqueue(
+            {
+                TYPE_KEY: LookupRespMsg.TYPE,
+                LookupRespMsg.KV_REQUEST_ID: "req-1",
+                LookupRespMsg.KEYS: [b"hA"],
+                LookupRespMsg.HITS: [True],
+            }
+        )
+        session.poll()
+        if action == "resolve":
+            conn.enqueue(
+                {
+                    TYPE_KEY: LookupRespMsg.TYPE,
+                    LookupRespMsg.KV_REQUEST_ID: "req-1",
+                    LookupRespMsg.KEYS: [b"hB"],
+                    LookupRespMsg.HITS: [False],
+                }
+            )
+            session.poll()
+        elif action == "finish":
+            session.finish_request("req-1")
+        else:
+            session.request_blocks(1, "req-1", [b"hA"], [0])
+
+        lookup_clock.now += 2
+        session.poll()
+        assert session.alive
+        session.register_lookup("req-1", b"hC")
+        session.flush_pending_lookups()
+        lookup_clock.now += 29
+        session.poll()
+        assert session.alive
+        lookup_clock.now += 1
+        session.poll()
+        assert not session.alive
 
     def test_aggregate_flush_resolve_round_trip(self):
         """register_lookup → flush sends one LookupMsg → response
