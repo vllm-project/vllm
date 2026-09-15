@@ -14,7 +14,6 @@ from vllm.v1.kv_offload.base import (
     CanonicalPageMapping,
     CopyRun,
     GPULoadStoreSpec,
-    resolve_device_pointers,
 )
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.gpu_worker import (
@@ -25,6 +24,7 @@ from vllm.v1.kv_offload.cpu.gpu_worker import (
     pin_mmap_region,
 )
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.pointer_utils import resolve_device_pointers
 
 
 def _ref(mapping: CanonicalPageMapping, tensor_idx: int = 0) -> CanonicalKVCacheRef:
