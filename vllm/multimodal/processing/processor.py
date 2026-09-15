@@ -1309,6 +1309,21 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         """
         return replace(cached_update, item_idx=new_item_idx)
 
+    def _get_mm_hashes(self, inputs: ProcessorInputs) -> MultiModalHashes:
+        """Get each item's processor and encoder cache identity."""
+        return inputs.get_mm_hashes(
+            self.info.model_id,
+            self.info.ctx.get_mm_config().mm_hasher_algorithm,
+        )
+
+    def _get_cache_missing_processor_kwargs(
+        self,
+        inputs: ProcessorInputs,
+        mm_is_cached: MultiModalIsCached,
+    ) -> Mapping[str, object]:
+        """Select processor options for the items missing from the cache."""
+        return inputs.hf_processor_mm_kwargs
+
     def _merge_mm_kwargs(
         self,
         cache: BaseMultiModalProcessorCache,
@@ -1380,10 +1395,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         # Use overrides if provided; fallback to data-dependent hashing.
         with timing_ctx.record("get_mm_hashes"):
-            mm_hashes = inputs.get_mm_hashes(
-                self.info.model_id,
-                self.info.ctx.get_mm_config().mm_hasher_algorithm,
-            )
+            mm_hashes = self._get_mm_hashes(inputs)
 
         mm_prompt_updates = self._get_mm_prompt_updates(
             inputs.mm_data_items,
@@ -1415,10 +1427,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             return self._apply_hf_processor(inputs, timing_ctx)
 
         with timing_ctx.record("get_mm_hashes"):
-            mm_hashes = inputs.get_mm_hashes(
-                self.info.model_id,
-                self.info.ctx.get_mm_config().mm_hasher_algorithm,
-            )
+            mm_hashes = self._get_mm_hashes(inputs)
 
         with timing_ctx.record("get_cache_missing_items"):
             mm_is_cached, mm_missing_data_items = self._get_cache_missing_items(
@@ -1427,25 +1436,29 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 mm_hashes=mm_hashes,
             )
 
+        missing_processor_kwargs = self._get_cache_missing_processor_kwargs(
+            inputs, mm_is_cached
+        )
+
         # NOTE: The prompt does not correspond to `mm_missing_data_items`,
         # so we can't apply prompt updates until the new multimodal
         # items are combined with the cached multimodal items
         with timing_ctx.record("apply_hf_processor"):
             mm_missing_processed_data = self._apply_hf_processor_main(
                 mm_items=mm_missing_data_items,
-                hf_processor_mm_kwargs=inputs.hf_processor_mm_kwargs,
+                hf_processor_mm_kwargs=missing_processor_kwargs,
             )
 
         mm_missing_kwargs = MultiModalKwargsItems.from_hf_inputs(
             mm_missing_processed_data,
             self._get_mm_fields_config(
-                mm_missing_processed_data, inputs.hf_processor_mm_kwargs
+                mm_missing_processed_data, missing_processor_kwargs
             ),
         )
 
         mm_missing_prompt_updates = self._get_mm_prompt_updates(
             mm_missing_data_items,
-            inputs.hf_processor_mm_kwargs,
+            missing_processor_kwargs,
             mm_missing_kwargs,
         )
 
