@@ -433,6 +433,27 @@ def has_flashinfer_fused_kda_decode() -> bool:
 
 
 @functools.cache
+def has_flashinfer_cutedsl_decode() -> bool:
+    """Return ``True`` if the CuteDSL paged decode wrapper is available."""
+    if not has_flashinfer_cutedsl():
+        return False
+    mod = _get_submodule("flashinfer.cute_dsl.attention")
+    if mod is None or not hasattr(mod, "BatchDecodePagedCuteDSLWrapper"):
+        return False
+    try:
+        from flashinfer.cute_dsl.availability import is_cute_dsl_arch_supported
+    except ImportError:
+        return False
+    capability = current_platform.get_device_capability()
+    if capability is None:
+        return False
+    try:
+        return bool(is_cute_dsl_arch_supported(capability.major, capability.minor))
+    except (RuntimeError, TypeError, ValueError):
+        return False
+
+
+@functools.cache
 def has_flashinfer_trtllm_fused_moe() -> bool:
     """Return `True` if FlashInfer TRTLLM fused MoE is available."""
     if not has_flashinfer_moe():
