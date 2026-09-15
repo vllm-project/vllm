@@ -307,6 +307,7 @@ def gemma4_config(thinking: bool = False) -> ParserEngineConfig:
             "TOOL_START": TOOL_CALL_START,
             "TOOL_END": TOOL_CALL_END,
             "CALL_PREFIX": "call:",
+            "COLON": ":",
             "OPEN_BRACE": "{",
             "OPEN_PAREN": "(",
         },
@@ -349,6 +350,13 @@ def gemma4_config(thinking: bool = False) -> ParserEngineConfig:
                 (EventType.TOOL_CALL_END,),
             ),
             (ParserState.TOOL_PREAMBLE, "CALL_PREFIX"): Transition(
+                ParserState.TOOL_NAME,
+                (),
+            ),
+            # Bare opener: some checkpoints emit "<|tool_call>:name{...}"
+            # without the "call" prefix.  Match the colon directly so the
+            # tool call is not silently dropped.
+            (ParserState.TOOL_PREAMBLE, "COLON"): Transition(
                 ParserState.TOOL_NAME,
                 (),
             ),
