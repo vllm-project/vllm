@@ -187,11 +187,9 @@ class K3DSparkModel(nn.Module):
             self.config.markov_rank,
             prefix=maybe_prefix(prefix, "markov_head"),
         )
-        # Acceptance-confidence head for adaptive verification (confidence-scheduled
-        # draft budget). Config-driven so a checkpoint without one (fixed spec
-        # decode) simply leaves it None; input width mirrors the generic DSpark
-        # head: hidden_size, plus markov_rank when the head consumes the Markov
-        # embedding. Built here; weights load via load_weights below.
+        # Acceptance-confidence head for adaptive verification. Config-driven, so a
+        # checkpoint without one (fixed spec decode) leaves it None. Input width
+        # mirrors the generic DSpark head.
         self.confidence_head: DSparkConfidenceHead | None = None
         if getattr(self.config, "enable_confidence_head", False):
             with_markov = getattr(self.config, "confidence_head_with_markov", False)
@@ -419,9 +417,8 @@ class K3DSparkForCausalLM(nn.Module):
     has_own_embed_tokens = False
     has_own_lm_head = False
     draft_id_to_target_id = None
-    # embed_tokens / lm_head are aliased from the target, never loaded here.
-    # confidence_head is skipped only when the draft did not build one (fixed
-    # spec decode); load_weights adds it dynamically in that case.
+    # confidence_head is no longer skipped unconditionally; load_weights adds it
+    # back only when the draft did not build one.
     checkpoint_skip_substrs = ("embed_tokens", "lm_head")
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -508,9 +505,8 @@ class K3DSparkForCausalLM(nn.Module):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # The frozen target embedding and LM head are shared after this
-        # draft-specific checkpoint is loaded. The confidence head IS loaded when
-        # the draft built one (adaptive verification); when it did not (fixed spec
-        # decode) skip any confidence_head weights the checkpoint carries.
+        # draft-specific checkpoint is loaded. Skip the checkpoint's confidence_head
+        # weights only when this draft did not build one.
         skip_substrs = list(self.checkpoint_skip_substrs)
         if self.model.confidence_head is None:
             skip_substrs.append("confidence_head")
