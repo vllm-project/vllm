@@ -615,6 +615,77 @@ def test_internal_checkpoint_uses_partial_hash_lifecycle():
     assert num_computed == 112
 
 
+@pytest.mark.parametrize(
+    "retention_interval,transient_published",
+    [(None, True), (0, False)],
+)
+def test_internal_checkpoint_publication_respects_retention(
+    retention_interval, transient_published
+):
+    """With retention_interval=0, a mid-prompt internal checkpoint is
+    request-local and must not enter the prefix cache; the prompt-end
+    checkpoint keeps the existing publication behavior. Dense retention
+    (None) is unchanged.
+    """
+    hash_block_size = 16
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=hash_block_size,
+        full_block_size=hash_block_size,
+        mamba_block_size=32,
+        num_prefill_checkpoint_blocks=1,
+    )
+    manager.coordinator.retention_interval = retention_interval
+
+    request = make_request("producer", list(range(240)), hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(request)
+
+    # Mid-prompt chunk: exports a transient checkpoint at 112.
+    assert manager.allocate_slots(request, 128, num_computed, computed_blocks)
+    transient_hash = request.block_hashes[112 // hash_block_size - 1]
+    transient_hit = manager.block_pool.get_cached_block(transient_hash, [1])
+    assert (transient_hit is not None) == transient_published
+
+    request.num_computed_tokens = 128
+    manager.new_step_starts()
+
+    # Final chunk: the prompt-end checkpoint at 224 stays published.
+    assert manager.allocate_slots(request, 112) is not None
+    end_hash = request.block_hashes[224 // hash_block_size - 1]
+    assert manager.block_pool.get_cached_block(end_hash, [1]) is not None
+
+
+def test_transient_checkpoint_evicts_retained_boundary_hash():
+    """With retention_interval=0, the checkpoint slot can coincide with a
+    reachable boundary block that this step's full-block pass just hashed.
+    The checkpoint state overwrites the slot, so the stale boundary hash
+    must be evicted rather than left pointing at the wrong state.
+    """
+    hash_block_size = 16
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=hash_block_size,
+        full_block_size=hash_block_size,
+        mamba_block_size=32,
+        num_prefill_checkpoint_blocks=1,
+    )
+    manager.coordinator.retention_interval = 0
+
+    request = make_request("producer", list(range(240)), hash_block_size, sha256)
+    # Block 2 ends at the shared-prefix junction 96, so the full-block pass
+    # hashes it as a retained boundary.
+    request.shared_prefix_boundary = 96
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(request)
+    assert manager.allocate_slots(request, 128, num_computed, computed_blocks)
+
+    # The same slot is the transient checkpoint block (state@112): both the
+    # boundary hash and the checkpoint itself must stay unpublished.
+    boundary_hash = request.block_hashes[96 // hash_block_size - 1]
+    assert manager.block_pool.get_cached_block(boundary_hash, [1]) is None
+    checkpoint_hash = request.block_hashes[112 // hash_block_size - 1]
+    assert manager.block_pool.get_cached_block(checkpoint_hash, [1]) is None
+
+
 def test_eagle_block_aligned_checkpoint_replaces_newer_hash():
     hash_block_size = mamba_block_size = 32
     manager = make_full_mamba_manager(

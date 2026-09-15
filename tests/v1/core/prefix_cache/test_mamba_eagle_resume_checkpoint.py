@@ -299,7 +299,14 @@ def test_a_junction_past_the_prompt_falls_back_and_registers_nothing():
     running = request.num_computed_tokens
     assert not mamba.req_to_blocks["r"][running // block_size].is_null
     request.shared_prefix_boundary = running
-    assert mamba._cache_partial_tail_block(request, running) is None
+    assert (
+        mamba._cache_partial_tail_block(
+            request,
+            running,
+            retention_interval=manager.coordinator.retention_interval,
+        )
+        is None
+    )
 
 
 @pytest.mark.parametrize("eagle_group", [None, 0])
