@@ -499,6 +499,12 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
             )
         )
 
+        self._eager_prefetch: bool = bool(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.eager_prefetch", False
+            )
+        )
+
         server_url = f"{server_host}:{server_port}"
         zmq_context = zmq.Context.instance()
         if self.role == KVConnectorRole.SCHEDULER:
@@ -799,6 +805,16 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
             "vLLM hit is: %d, Need to load is %d", num_computed_tokens, need_to_load
         )
         return need_to_load, need_to_load > 0
+
+    def on_new_request(self, request: "Request") -> None:
+        if not self._eager_prefetch or request.resumable:
+            return
+        tracker = self._get_or_create_request_tracker(request)
+        self.scheduler_adapter.maybe_submit_lookup_request(
+            request.request_id,
+            token_ids=list(request.all_token_ids),
+            cache_salt=tracker.cache_salt,
+        )
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
