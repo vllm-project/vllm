@@ -19,6 +19,7 @@ from vllm.distributed.device_communicators import shm_broadcast
 from vllm.distributed.device_communicators.shm_broadcast import (
     MessageQueue,
     ShmRingBuffer,
+    SpinCondition,
     _rebuild_tensor,
     _reduce_tensor,
     check_shm_free_space,
@@ -357,6 +358,49 @@ def worker_fn_test_busy_to_idle():
 
 def test_message_queue_busy_to_idle():
     distributed_run(worker_fn_test_busy_to_idle, 4)
+
+
+@pytest.mark.parametrize(
+    ("busy_sleep_s", "expected_sleep"),
+    [("0", None), ("0.00025", 0.00025)],
+)
+def test_spin_condition_busy_sleep(monkeypatch, busy_sleep_s, expected_sleep):
+    monkeypatch.setenv("VLLM_SHM_BROADCAST_BUSY_SLEEP_S", busy_sleep_s)
+    context = mock.MagicMock()
+
+    with (
+        mock.patch.object(shm_broadcast.zmq, "Poller") as poller_cls,
+        mock.patch.object(shm_broadcast.time, "monotonic", return_value=1.0),
+    ):
+        condition = SpinCondition(
+            is_reader=True,
+            context=context,
+            notify_address="inproc://test-spin-condition",
+        )
+        with (
+            mock.patch.object(shm_broadcast, "sched_yield") as sched_yield,
+            mock.patch.object(shm_broadcast.time, "sleep") as sleep,
+        ):
+            condition.wait()
+
+        sched_yield.assert_called_once_with()
+        poller_cls.return_value.poll.assert_not_called()
+        if expected_sleep is None:
+            sleep.assert_not_called()
+        else:
+            sleep.assert_called_once_with(expected_sleep)
+
+
+@pytest.mark.parametrize("busy_sleep_s", ["-0.001", "nan", "inf", "-inf"])
+def test_spin_condition_rejects_invalid_busy_sleep(monkeypatch, busy_sleep_s):
+    monkeypatch.setenv("VLLM_SHM_BROADCAST_BUSY_SLEEP_S", busy_sleep_s)
+
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        SpinCondition(
+            is_reader=True,
+            context=mock.MagicMock(),
+            notify_address="inproc://test-spin-condition-invalid",
+        )
 
 
 @worker_fn_wrapper
