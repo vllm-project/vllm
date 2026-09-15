@@ -871,8 +871,10 @@ def _causal_conv1d_update_kernel(
         # - accept 1 tokens: [history2, ..., historyM, draft1]
         # - accept 2 tokens: [history3, ..., historyM, draft1, draft2]
         # - and so on.
-        conv_state_token_offset = (
-            tl.load(num_accepted_tokens_ptr + idx_seq).to(tl.int64) - 1
+        # num_accepted_tokens can be 0 for stale rows whose sampled tokens
+        # were discarded; clamp so the offset stays in bounds.
+        conv_state_token_offset = tl.maximum(
+            tl.load(num_accepted_tokens_ptr + idx_seq).to(tl.int64) - 1, 0
         )
     else:
         conv_state_token_offset = 0
