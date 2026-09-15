@@ -637,13 +637,16 @@ class TestPostToolContentDeferral:
 # ── TestFixArgTypes ──────────────────────────────────────────────────
 
 
-def _make_tool(name: str, properties: dict) -> ChatCompletionToolsParam:
+def _make_tool_with_parameters(name: str, parameters: dict) -> ChatCompletionToolsParam:
     return ChatCompletionToolsParam(
         type="function",
-        function=FunctionDefinition(
-            name=name,
-            parameters={"type": "object", "properties": properties},
-        ),
+        function=FunctionDefinition(name=name, parameters=parameters),
+    )
+
+
+def _make_tool(name: str, properties: dict) -> ChatCompletionToolsParam:
+    return _make_tool_with_parameters(
+        name, {"type": "object", "properties": properties}
     )
 
 
@@ -793,6 +796,102 @@ class TestFixArgTypes:
         result = engine._fix_arg_types('{"vals": ["42", "3.14"]}', "f")
         parsed = json.loads(result)
         assert parsed["vals"] == [42, 3.14]
+
+    def test_double_encoded_object_fields_coerced(self):
+        """Decoding a stringified object must not skip its own fields.
+
+        XML formats serialise every argument as a string, so the decoded
+        object still carries string values that the schema types out.
+        """
+        tool = _make_tool(
+            "f",
+            {
+                "item": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "age": {"type": "integer"},
+                    },
+                },
+            },
+        )
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types(
+            json.dumps({"item": json.dumps({"name": "Alice", "age": "42"})}), "f"
+        )
+        assert json.loads(result) == {"item": {"name": "Alice", "age": 42}}
+
+    def test_double_encoded_object_fields_coerced_under_any_of(self):
+        """Same repair when the object type is declared through a combinator.
+
+        OpenAI's documented user-or-address example: the property carries no
+        ``properties`` of its own, only ``anyOf`` branches that do.
+        """
+        tool = _make_tool(
+            "f",
+            {
+                "item": {
+                    "anyOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "age": {"type": "integer"},
+                            },
+                        },
+                        {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                        },
+                    ]
+                },
+            },
+        )
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types(
+            json.dumps({"item": json.dumps({"name": "Alice", "age": "42"})}), "f"
+        )
+        assert json.loads(result) == {"item": {"name": "Alice", "age": 42}}
+
+    def test_const_property_not_stringified(self):
+        """A ``const`` schema types the property, so a correct value survives.
+
+        Without ``const`` inference no type is found and the ``["string"]``
+        fallback turns the only admissible value into a string.
+        """
+        tool = _make_tool("f", {"retries": {"const": 3}})
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"retries": 3}', "f")
+        assert json.loads(result) == {"retries": 3}
+
+    def test_root_combinator_does_not_disable_coercion(self):
+        """Properties under a root combinator must still reach coercion.
+
+        A flat lookup reads {} here and bails out for the whole tool call,
+        even though the schema types every argument.
+        """
+        tool = _make_tool_with_parameters(
+            "f",
+            {
+                "type": "object",
+                "allOf": [{"properties": {"days": {"type": "integer"}}}],
+                "required": ["days"],
+            },
+        )
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"days": "3"}', "f")
+        assert json.loads(result) == {"days": 3}
+
+    def test_array_not_substituted_for_object_property(self):
+        """Parsing to the wrong type is worse than not coercing at all.
+
+        The value fits the declared ``string`` alternative, which only stays
+        reachable if the mistyped ``object`` parse is rejected.
+        """
+        tool = _make_tool("f", {"item": {"type": ["object", "string"]}})
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"item": "[1,2]"}', "f")
+        assert json.loads(result) == {"item": "[1,2]"}
 
 
 # ── TestBuildExtractedResult ─────────────────────────────────────────
