@@ -27,6 +27,9 @@ from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
 from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
 )
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    load_moe_expert_slice_to_flashinfer_trtllm_block_layout,
+)
 from vllm.model_executor.utils import (
     is_weights_pre_processed,
     replace_parameter,
@@ -54,6 +57,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         self.unquantized_backend, self.experts_cls = select_unquantized_moe_backend(
             moe_config=self.moe,
         )
+        self._permute_indices_cache: dict = {}
 
     @property
     def supports_eplb(self) -> bool:
@@ -142,6 +146,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             w13_weight=w13,
             w2_weight=w2,
         )
+        if self.unquantized_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:
+            # Runtime layout differs from checkpoint layout; weight updates go
+            # through `load_weight_slice_in_kernel_format` instead.
+            w13_new.flashinfer_trtllm_block_layout = True
+            w2_new.flashinfer_trtllm_block_layout = True
         # `moe_kernel` is initialized to None in FusedMoEMethodBase.__init__;
         # On the first call we replace the parameter normally. On subsequent
         # calls (e.g. RL weight updates that re-trigger
@@ -183,8 +192,50 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             routing_tables=layer._expert_routing_tables(),
         )
 
+    def load_weight_slice_in_kernel_format(
+        self,
+        layer: "RoutedExperts",
+        param: torch.Tensor,
+        loaded_weight: torch.Tensor,
+        shard_id: str,
+        expert_id: int,
+    ) -> bool:
+        """Weight-update path for kernels whose runtime weight layout is not the
+        checkpoint layout. Writes a checkpoint-format slice of one (local) expert
+        directly into the kernel-format parameter. Returns False when the
+        parameter is still in checkpoint format (initial load), in which case
+        the caller falls back to the regular loader."""
+        if not getattr(param, "flashinfer_trtllm_block_layout", False):
+            return False
+        if not self.moe.is_act_and_mul:
+            raise NotImplementedError(
+                "In-place weight update of FlashInfer TRTLLM MoE weights is only "
+                "supported for gated (w1/w3) experts."
+            )
+        parallel = self.moe.moe_parallel_config
+        if parallel.tp_size > 1:
+            # TP shards the intermediate dim: w1/w3 rows, w2 columns.
+            dim = 1 if shard_id == "w2" else 0
+            per_rank = loaded_weight.shape[dim] // parallel.tp_size
+            loaded_weight = loaded_weight.narrow(
+                dim, per_rank * parallel.tp_rank, per_rank
+            )
+        load_moe_expert_slice_to_flashinfer_trtllm_block_layout(
+            self._permute_indices_cache,
+            param.data[expert_id],
+            loaded_weight.to(device=param.device, dtype=torch.bfloat16),
+            shard_id,
+            self.moe.intermediate_size_per_partition,
+        )
+        return True
+
     def process_weights_after_loading(self, layer: "RoutedExperts") -> None:
         super().process_weights_after_loading(layer)
+
+        if getattr(layer.w13_weight, "flashinfer_trtllm_block_layout", False):
+            # Weight update: slices were already written in kernel layout by
+            # `load_weight_slice_in_kernel_format`; nothing to re-process.
+            return
 
         if is_weights_pre_processed():
             # Weights are already in runtime format; rebuild the kernel only.
