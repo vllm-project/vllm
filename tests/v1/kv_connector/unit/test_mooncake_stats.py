@@ -9,6 +9,8 @@ from unittest.mock import MagicMock
 import pytest
 from prometheus_client import REGISTRY, Counter, Gauge, Histogram
 
+from vllm.config import KVTransferConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorProm
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     MooncakeConnector,
     MooncakeConnectorWorker,
@@ -300,10 +302,24 @@ def _fake_vllm_config() -> Any:
     return SimpleNamespace(kv_transfer_config=SimpleNamespace())
 
 
+def _recorded_stats() -> dict[str, list[float | int]]:
+    """Drive the real stats container, so the keys observed below are the ones
+    the connector actually produces rather than keys restated in this test."""
+    stats = MooncakeKVConnectorStats()
+    stats.record_transfer(duration_s=0.001, total_bytes=1024, num_descs=4)
+    stats.record_transfer(duration_s=2.0, total_bytes=2048, num_descs=6)
+    stats.record_failed_transfer()
+    stats.record_failed_recv()
+    stats.record_failed_recv()
+    stats.record_kv_expired_req()
+    stats.record_kv_expired_req()
+    stats.record_kv_expired_req()
+    return stats.clone_and_reset().to_dict()
+
+
 @pytest.fixture
 def exported_series():
-    """Build Mooncake's metrics through the connector factory and record one
-    stats interval into the real Prometheus registry."""
+    """Record one interval from the real stats container into the real registry."""
     unregister_vllm_metrics()
     prom_metrics = MooncakeConnector.build_prom_metrics(
         vllm_config=_fake_vllm_config(),  # type: ignore[arg-type]
@@ -312,36 +328,44 @@ def exported_series():
         per_engine_labelvalues={0: [TEST_MODEL, "0"]},
     )
     assert isinstance(prom_metrics, MooncakePromMetrics)
-    # Distinct sample counts per stats key, so a key wired to the wrong series
-    # cannot pass below.
-    prom_metrics.observe(
-        {
-            "transfer_duration": [0.001, 2.0],
-            "bytes_transferred": [1024],
-            "num_descriptors": [4, 6, 8],
-            "num_failed_transfers": [1],
-            "num_failed_recvs": [1, 1],
-            "num_kv_expired_reqs": [1, 1, 1],
-        },
-        engine_idx=0,
-    )
+    prom_metrics.observe(_recorded_stats(), engine_idx=0)
     yield
     unregister_vllm_metrics()
 
 
+def test_kv_connector_prom_wires_the_mooncake_metrics():
+    """The production entry point resolves the connector and builds its metrics."""
+    unregister_vllm_metrics()
+    try:
+        prom = KVConnectorProm(
+            vllm_config=SimpleNamespace(
+                kv_transfer_config=KVTransferConfig(
+                    kv_connector="MooncakeConnector", kv_role="kv_producer"
+                )
+            ),
+            labelnames=["model_name", "engine"],
+            per_engine_labelvalues={0: [TEST_MODEL, "0"]},
+        )
+        assert isinstance(prom.prom_metrics, MooncakePromMetrics)
+    finally:
+        unregister_vllm_metrics()
+
+
 @pytest.mark.usefixtures("exported_series")
 def test_transfer_histograms_are_exported():
+    # One distinct sum per histogram, so a series fed by the wrong stats key
+    # cannot pass.
     assert _sample("vllm:mooncake_xfer_time_seconds_count") == 2
     assert _sample("vllm:mooncake_xfer_time_seconds_sum") == 2.0 + 0.001
-    # 0.001s falls into the lowest bucket (0.005s), 2.0s into +Inf.
+    # 0.001s falls into the lowest bucket (0.005s), 2.0s past the last edge.
     assert (
         REGISTRY.get_sample_value(
             "vllm:mooncake_xfer_time_seconds_bucket", {**MODEL_LABELS, "le": "0.005"}
         )
         == 1
     )
-    assert _sample("vllm:mooncake_bytes_transferred_count") == 1
-    assert _sample("vllm:mooncake_num_descriptors_sum") == 4 + 6 + 8
+    assert _sample("vllm:mooncake_bytes_transferred_sum") == 1024 + 2048
+    assert _sample("vllm:mooncake_num_descriptors_sum") == 4 + 6
 
 
 @pytest.mark.usefixtures("exported_series")
