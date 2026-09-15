@@ -367,6 +367,7 @@ def test_partial_registration_rejection_releases_publication(backend):
     tensor = torch.ones(2, 2)
     owner = weakref.ref(tensor)
     assert backend._enqueue_save("a", tensor)
+    storage_owner = weakref.ref(tensor.untyped_storage())
     future = backend._pending["a"][0]
     with pytest.raises(store_client.EmbeddingStoreOperationError, match="register"):
         future.result(timeout=5)
@@ -376,12 +377,15 @@ def test_partial_registration_rejection_releases_publication(backend):
     native.batch_put_from_multi_buffers.assert_not_called()
     backend.reap()
     assert backend._pending_bytes == 0
+    gc.collect()
+    assert storage_owner() is None  # The failed Future is still alive.
 
 
 @pytest.mark.parametrize("operation", ["get", "put", "rejected-put", "unregister"])
 def test_native_io_owners(backend, operation):
     """Uncertain I/O retains owners; completed rejection frees them even via Future."""
     native, client = backend.store_client.store, backend.store_client
+    backend.max_pending_bytes = SPEC.nbytes
     tensor = torch.ones(2, 2)
     owner = weakref.ref(tensor)
     rejected = operation == "rejected-put"
@@ -412,7 +416,13 @@ def test_native_io_owners(backend, operation):
     gc.collect()
     if rejected:
         assert owner() is None  # A live Future must not retain the tensor.
-        backend.reap()
+        tensor = torch.ones(4, 4)  # Too large for admission after reaping.
+        caller_owner = weakref.ref(tensor)
+        backend._step_candidates = {"next"}
+        backend.save_output("next", tensor)
+        del tensor
+        gc.collect()
+        assert caller_owner() is None
         assert backend._pending_bytes == 0 and not native.registered
     else:
         assert owner() is not None and native.registered

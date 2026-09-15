@@ -176,6 +176,8 @@ class MooncakeEmbeddingStoreBackend:
                     future.result()  # Already done: never waits on Store I/O.
                 except (EmbeddingStoreOperationError, OSError) as error:
                     logger.warning("Store PUT failed for %s: %s", identifier, error)
+                    # This failure is consumed; do not retain publisher/caller frames.
+                    error.__traceback__ = None
                 except BaseException as error:
                     # The client may still own unsafe native-I/O buffers. Keep
                     # their charge and fatal result until worker termination.
