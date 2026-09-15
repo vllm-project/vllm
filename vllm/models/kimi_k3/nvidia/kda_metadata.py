@@ -21,7 +21,7 @@ from vllm.config import VllmConfig
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import async_tensor_h2d
-from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionBackend,
     GDNAttentionMetadata,
@@ -296,6 +296,15 @@ class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
 
 
 class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
+    # The native KDA spec-decode kernels (causal_conv1d_update /
+    # fused_recurrent_kda) run off device per-request query_start_loc +
+    # num_accepted_tokens with a fixed max_query_len = num_spec + 1 window, and
+    # build stages that metadata into the persistent decode-cudagraph buffers.
+    # A graph captured at the uniform k+1 promise therefore replays any
+    # 1..k+1 ragged mix, so adaptive verification can capture full varlen decode
+    # graphs (ALWAYS) instead of the UNIFORM_BATCH default inherited from GDN.
+    _cudagraph_support = AttentionCGSupport.ALWAYS
+
     def __init__(
         self,
         kv_cache_spec: MambaSpec,
@@ -658,3 +667,16 @@ class KimiK3KDAAttentionBackend(GDNAttentionBackend):
     @staticmethod
     def get_builder_cls() -> type[KimiK3KDAMetadataBuilder]:
         return KimiK3KDAMetadataBuilder
+
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        # Unlike the generic SSM opt-out (GDNAttentionBackend.is_ssm -> False),
+        # K3 KDA plans its speculative decode from the DEVICE query offsets:
+        # KimiK3KDAMetadataBuilder.build derives spec_query_start_loc from
+        # query_start_loc.diff() (device), and RecoverSSM commits per request via
+        # commit_len = min(num_accepted[device], query_len) with spec_query_len
+        # only a fixed upper-bound window. Adaptive verification's on-device draft
+        # trimming (ragged lengths <= 1 + num_speculative_tokens) is therefore a
+        # special case the existing kernels already handle, so K3 KDA can run a
+        # device/CPU query-length mismatch that plain SSM backends cannot.
+        return True
