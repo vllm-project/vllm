@@ -766,10 +766,85 @@ def test_qsa_decode_selection_correctness(
 
 
 @requires_qsa_kernels
+@pytest.mark.parametrize("logits_mb", [0, 1])
+def test_qsa_prefill_reuses_profiled_workspace(
+    workspace_init, monkeypatch: pytest.MonkeyPatch, logits_mb: int
+) -> None:
+    """Growing contexts reuse profiled storage without corrupting top-k selection."""
+    from vllm.models.qwen4_exp.nvidia import qsa as qsa_layer
+    from vllm.v1.worker.workspace import current_workspace_manager
+
+    monkeypatch.setenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", str(logits_mb))
+    max_model_len, compress_ratio, token_topk = 8192, 4, 2048
+    owner = SimpleNamespace(
+        indexer=SimpleNamespace(max_logits_width=max_model_len // compress_ratio)
+    )
+    monkeypatch.setattr(
+        qsa_layer, "get_forward_context", lambda: SimpleNamespace(attn_metadata=None)
+    )
+    dummy = torch.empty(5, 128, device="cuda")
+    qsa_layer.Qwen4ExpQSAAttention._run_qsa(
+        owner, dummy, torch.arange(5, device="cuda"), dummy, dummy, dummy, dummy
+    )
+    manager = current_workspace_manager()
+    manager.lock()
+    workspace, scratch = qsa_indexer_ops.get_qsa_prefill_workspace(
+        max_model_len // compress_ratio
+    )
+    assert workspace.data_ptr() + workspace.numel() * 4 <= scratch.data_ptr()
+    storage_ptrs = []
+    topk = qsa_indexer_ops._topk
+
+    def record_topk(logits, *args, **kwargs):
+        storage_ptrs.append(logits.data_ptr())
+        return topk(logits, *args, **kwargs)
+
+    monkeypatch.setattr(qsa_indexer_ops, "_topk", record_topk)
+    torch.manual_seed(2)
+    q = torch.randn(5, 4, 128, device="cuda", dtype=torch.bfloat16)
+    cache = torch.randn(32, 64, 1, 128, device="cuda", dtype=torch.bfloat16)
+    page_table = torch.arange(32, device="cuda", dtype=torch.int32).view(1, -1)
+    query_start_loc = torch.tensor([0, 5], device="cuda", dtype=torch.int32)
+    token_to_req = torch.zeros(5, device="cuda", dtype=torch.int32)
+    actual = torch.empty(
+        5, token_topk // compress_ratio, device="cuda", dtype=torch.int32
+    )
+    for context_len in (2048, 4096, 8192):
+        positions = torch.arange(context_len - 5, context_len, device="cuda")
+        visible = ((positions + 1) // compress_ratio).to(torch.int32)
+        workspace.fill_(float("nan"))
+        qsa_indexer_ops.qsa_select_paged_prefill(
+            q,
+            cache,
+            page_table,
+            query_start_loc,
+            visible,
+            token_topk,
+            compress_ratio,
+            5,
+            actual,
+            context_len,
+        )
+        expected = _qsa_select_paged_reference(
+            q,
+            cache,
+            page_table,
+            token_to_req,
+            positions,
+            torch.tensor([context_len], device="cuda"),
+            token_topk,
+            compress_ratio,
+        )
+        torch.testing.assert_close(actual.sort().values, expected.sort().values)
+    assert set(storage_ptrs) == {workspace.data_ptr()}
+
+
+@requires_qsa_kernels
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
 @pytest.mark.parametrize("seq_len_slack", [0, 1792])
 @pytest.mark.parametrize("force_chunk", [False, True])
 def test_qsa_prefill_selection_correctness(
+    workspace_init,
     monkeypatch: pytest.MonkeyPatch,
     seq_len_slack: int,
     force_chunk: bool,

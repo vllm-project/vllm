@@ -16,6 +16,7 @@ from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
 from vllm.transformers_utils.configs.qwen4_exp import (
     Qwen4ExpTextConfig,
 )
+from vllm.utils.math_utils import cdiv, round_up
 
 from ..common.qsa_cache import (
     QSACompressedKeyCache,
@@ -117,6 +118,9 @@ class QSAIndexer(nn.Module):
         self.index_head_dim = int(config.indexer_head_dim)
         self.token_topk = int(config.indexer_budget)
         self.compress_ratio = int(config.indexer_compress_ratio)
+        self.max_logits_width = round_up(
+            cdiv(vllm_config.model_config.max_model_len, self.compress_ratio), 64
+        )
         self.rotary_emb = rotary_emb
         self.use_fused_pre_indexer = _supports_fused_pre_indexer(
             rotary_emb,
