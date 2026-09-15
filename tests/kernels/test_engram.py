@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import bisect
 import inspect
+from contextlib import nullcontext
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -724,12 +726,70 @@ def test_engram_lookup_matches_torch(cpu_offload, background, num_tokens):
     assert torch.equal(out, expected)
 
 
+@pytest.mark.parametrize("capture", ["eager", "full", "breakable"])
+def test_engram_lookup_fallback_does_not_wait_on_previous_batch(monkeypatch, capture):
+    """Changing the route must not wait on an event from a previous batch."""
+    current = Mock()
+    streams, events = [Mock(), Mock()], [Mock(), Mock()]
+    stream_iter, event_iter = iter(streams), iter(events)
+    slot = [0]
+    monkeypatch.setattr(torch.cuda, "Stream", lambda **kwargs: next(stream_iter))
+    monkeypatch.setattr(torch.cuda, "Event", lambda: next(event_iter))
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda: current)
+    monkeypatch.setattr(torch.cuda, "stream", lambda stream: nullcontext())
+    monkeypatch.setattr(
+        torch.cuda, "is_current_stream_capturing", lambda: capture == "full"
+    )
+    monkeypatch.setattr(
+        nvidia_engram_ops.BreakableCUDAGraphCapture,
+        "is_active",
+        lambda: capture == "breakable",
+    )
+    monkeypatch.setattr(engram_ops, "dbo_current_ubatch_id", lambda: slot[0])
+    module = Engram.__new__(Engram)
+    torch.nn.Module.__init__(module)
+    module.staged_rows = torch.empty(2, 1, 1)
+    module._init_lookup_staging(2, True)
+    record_stream = Mock()
+    monkeypatch.setattr(torch.Tensor, "record_stream", record_stream)
+    lookup = Mock(side_effect=lambda ids, out, **kwargs: out.copy_(ids.unsqueeze(-1)))
+    module.embed_tokens = SimpleNamespace(lookup=lookup)
+
+    for i, (slot_id, allowed) in enumerate(
+        [(0, True), (1, True), (0, False), (1, False), (0, True)]
+    ):
+        slot[0] = slot_id
+        current.reset_mock()
+        ids = torch.full((2, 1), i, dtype=torch.int32)
+        rows = module.prepare_embeddings(ids, allow_overlap=allowed)
+        module.wait_for_embeddings()
+        background = allowed and capture == "eager"
+        assert lookup.call_args.kwargs.get("background", False) is background
+        torch.testing.assert_close(rows.squeeze(-1), ids.float())
+        if background:
+            current.wait_event.assert_called_once_with(events[slot[0]])
+        else:
+            current.wait_event.assert_not_called()
+        if i == 2 and capture == "eager":
+            # Falling back in slot 0 must preserve slot 1's outstanding event.
+            slot[0] = 1
+            module.wait_for_embeddings()
+            current.wait_event.assert_called_once_with(events[1])
+
+    current.reset_mock()
+    module.prepare_embeddings(ids)
+    module.wait_for_embeddings()
+    assert "background" not in lookup.call_args.kwargs
+    current.wait_event.assert_not_called()
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 @pytest.mark.parametrize(
     "backend,cpu_offload", [("nvidia", None), ("nvidia", False), ("common", False)]
 )
-def test_engram_constructor_honors_offload(monkeypatch, backend, cpu_offload):
-    """Default offload uses pinned storage and a side stream; False uses HBM."""
+@pytest.mark.parametrize("overlap", [False, True])
+def test_engram_constructor_honors_offload(monkeypatch, backend, cpu_offload, overlap):
+    """Pinned storage overlaps only when configuration and the batch allow it."""
     from vllm.config import EngramConfig
 
     config = SimpleNamespace(hidden_size=16, hc_mult=1, rms_norm_eps=1e-6)
@@ -745,7 +805,12 @@ def test_engram_constructor_honors_offload(monkeypatch, backend, cpu_offload):
         if cpu_offload is None
         else EngramConfig(cpu_offload=cpu_offload),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
+        parallel_config=SimpleNamespace(use_ubatching=False),
+        model_config=SimpleNamespace(enforce_eager=True),
+        use_v2_model_runner=False,
     )
+    vllm_config.engram_config.lookup_overlap = overlap
+    vllm_config.engram_config.lookup_overlap_max_seq_len = 8
     offloaded = backend == "nvidia" and vllm_config.engram_config.cpu_offload
     if backend == "common":
         vllm_config.engram_config = None
@@ -784,7 +849,8 @@ def test_engram_constructor_honors_offload(monkeypatch, backend, cpu_offload):
         device="cuda",
         dtype=torch.int32,
     )
-    module.prepare_embeddings(ids)
+    kwargs = {"allow_overlap": overlap} if backend == "nvidia" else {}
+    module.prepare_embeddings(ids, **kwargs)
     expected = _reference_lookup(
         layer.weight.cuda(),
         layer.weight_scale_inv.cuda(),
@@ -793,8 +859,8 @@ def test_engram_constructor_honors_offload(monkeypatch, backend, cpu_offload):
         layer.vocab_end_idx,
     )
     torch.testing.assert_close(module.embed(ids), expected, atol=0, rtol=0)
-    if offloaded:
-        assert streams == [module._prefetch_stream]
+    if offloaded and overlap:
+        assert streams == [module._lookup_streams[0]]
         assert streams[0] != main
     else:
         assert streams == [main]
@@ -806,9 +872,12 @@ def test_engram_constructor_honors_offload(monkeypatch, backend, cpu_offload):
     [(False, None), (True, None), (True, "producer"), (True, "lookup")],
 )
 @pytest.mark.parametrize("capture", ["eager", "full", "breakable"])
-def test_engram_prepared_rows_survive_graph_breaks(cpu_offload, capture, delay):
+@pytest.mark.parametrize("overlap", [False, True])
+def test_engram_prepared_rows_survive_graph_breaks(
+    cpu_offload, capture, delay, overlap
+):
     """Temporary lookup IDs survive allocator reuse and graph replay."""
-    _run_engram_prepared_rows(cpu_offload, capture, delay=delay)
+    _run_engram_prepared_rows(cpu_offload, capture, delay=delay, overlap=overlap)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
@@ -844,13 +913,19 @@ def test_engram_prefetch_detects_missing_dependency(monkeypatch, missing_depende
         with pytest.raises(
             AssertionError, match=r"Tensor-likes are not (?:equal|close)!"
         ):
-            _run_engram_prepared_rows(True, "eager", delay=delay)
+            _run_engram_prepared_rows(True, "eager", delay=delay, overlap=True)
     finally:
         torch.accelerator.synchronize()
 
 
 def _run_engram_prepared_rows(
-    cpu_offload, capture, tp_size=1, rank=0, use_sequence_parallel=False, delay=None
+    cpu_offload,
+    capture,
+    tp_size=1,
+    rank=0,
+    use_sequence_parallel=False,
+    delay=None,
+    overlap=False,
 ):
     from vllm.compilation.breakable_cudagraph import (
         BreakableCUDAGraphCapture,
@@ -874,7 +949,6 @@ def _run_engram_prepared_rows(
     engram = Engram.__new__(Engram)
     torch.nn.Module.__init__(engram)
     engram.embed_tokens = layer
-    engram._prefetch_stream = torch.cuda.Stream() if cpu_offload else None
     # Exercise the production eager boundaries even when the test process
     # imported Engram before breakable graphs were enabled.
     if capture == "breakable":
@@ -893,6 +967,7 @@ def _run_engram_prepared_rows(
         dtype=torch.bfloat16,
         device="cuda",
     )
+    engram._init_lookup_staging(1, overlap and cpu_offload)
     # Match the non-contiguous per-layer slice of the model hash tensor.
     hashes = torch.randint(
         0,
@@ -916,7 +991,7 @@ def _run_engram_prepared_rows(
         if delay == "producer":
             torch.cuda._sleep(2_000_000)
         # Drop the last reference to a non-contiguous input after launching lookup.
-        engram.prepare_embeddings(hashes.clone()[:, 1])
+        engram.prepare_embeddings(hashes.clone()[:, 1], allow_overlap=overlap)
         # Exercise same-size allocator reuse before consuming the prefetched rows.
         torch.empty_like(hashes).fill_(layer.part_num_embeddings - 1)
         if cap is not None:
@@ -939,7 +1014,7 @@ def _run_engram_prepared_rows(
         with torch.cuda.stream(warmup), graph:
             step(graph)
         torch.cuda.current_stream().wait_stream(warmup)
-        assert graph.num_eager_breaks == (3 if cpu_offload else 1)
+        assert graph.num_eager_breaks == 1
 
     for _ in range(3):
         # Eager prefill can overwrite staging rows between decode replays.
@@ -974,17 +1049,28 @@ def _engram_tp_worker(rank, tp_size, port):
         for cpu_offload in (False, True):
             for sp in (False, True):
                 for capture in ("eager", "compiled", "full", "breakable"):
-                    _run_engram_prepared_rows(cpu_offload, capture, tp_size, rank, sp)
+                    for overlap in (False, True):
+                        _run_engram_prepared_rows(
+                            cpu_offload, capture, tp_size, rank, sp, overlap=overlap
+                        )
     finally:
         cleanup_dist_env_and_memory()
 
 
-@pytest.mark.distributed(num_gpus=2)
+@pytest.mark.parametrize(
+    "tp_size",
+    [
+        pytest.param(2, marks=pytest.mark.distributed(num_gpus=2)),
+        pytest.param(4, marks=pytest.mark.distributed(num_gpus=4)),
+    ],
+)
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
-def test_engram_head_collectives_survive_graph_breaks():
-    """All-gather preserves head order and local SP tokens across graph replay."""
+def test_engram_head_collectives_survive_graph_breaks(tp_size):
+    """All-gather preserves staged SP tokens across graph and compile replay."""
     from vllm.utils.network_utils import get_open_port
 
-    if torch.accelerator.device_count() < 2:
-        pytest.skip("Requires two GPUs")
-    torch.multiprocessing.spawn(_engram_tp_worker, args=(2, get_open_port()), nprocs=2)
+    if torch.accelerator.device_count() < tp_size:
+        pytest.skip(f"Requires {tp_size} GPUs")
+    torch.multiprocessing.spawn(
+        _engram_tp_worker, args=(tp_size, get_open_port()), nprocs=tp_size
+    )
