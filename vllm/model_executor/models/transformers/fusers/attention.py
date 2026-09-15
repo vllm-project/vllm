@@ -5,7 +5,7 @@
 import ast
 import inspect
 import textwrap
-from collections.abc import Hashable
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cache
 from typing import TYPE_CHECKING, ClassVar
@@ -37,10 +37,10 @@ def _is_interface_lookup(node: ast.expr | None) -> bool:
 
 
 @cache
-def interface_call(cls: type[nn.Module]) -> ast.Call | None:
-    """The attention interface call in `cls.forward`, if it makes exactly one."""
+def interface_call(forward: Callable) -> ast.Call | None:
+    """The attention interface call in `forward`, if it makes exactly one."""
     try:
-        source = inspect.getsource(inspect.unwrap(cls.forward))
+        source = inspect.getsource(inspect.unwrap(forward))
         tree = ast.parse(textwrap.dedent(source))
     except (AttributeError, OSError, SyntaxError, TypeError):
         return None
@@ -98,9 +98,7 @@ class AttentionFuser(BaseFuser):
     def match(
         cls, graph: fx.Graph | None, module: nn.Module
     ) -> "AttentionFuser | None":
-        module_cls = type(module)
-        assert isinstance(module_cls, Hashable)
-        if (call := interface_call(module_cls)) is None:
+        if (call := interface_call(type(module).forward)) is None:
             return None
         scaling = [kw.value for kw in call.keywords if kw.arg == "scaling"]
         scale_expr = scaling[0] if len(scaling) == 1 else None
@@ -123,14 +121,13 @@ class AttentionFuser(BaseFuser):
         self, module: nn.Module, prefix: str, vllm_config: "VllmConfig"
     ) -> nn.Module:
         if (sinks := self.sinks(module)) is not None:
+            assert isinstance(self.s_aux_expr, ast.Attribute)
             size = sinks.numel() // vllm_config.parallel_config.tensor_parallel_size
             device = vllm_config.device_config.device
             data = torch.empty(size, dtype=sinks.dtype, device=device)
             sinks_param = nn.Parameter(data, requires_grad=False)
             set_weight_attrs(sinks_param, {"weight_loader": sharded_weight_loader(0)})
-            s_aux_expr = self.s_aux_expr
-            assert isinstance(s_aux_expr, ast.Attribute)
-            setattr(module, s_aux_expr.attr, sinks_param)
+            setattr(module, self.s_aux_expr.attr, sinks_param)
         return module
 
     def layer_index(self, module: nn.Module) -> int | None:
