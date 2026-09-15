@@ -51,7 +51,7 @@ BACKEND_KV_DTYPE_EXCLUDES: dict[str, set[str]] = {
 
 MLA_PREFILL_DIR = BACKENDS_DIR / "mla" / "prefill"
 MLA_PREFILL_REGISTRY_FILE = MLA_PREFILL_DIR / "registry.py"
-MLA_PREFILL_SELECTOR_FILE = MLA_PREFILL_DIR / "selector.py"
+PLATFORM_INTERFACE_FILE = REPO_ROOT / "vllm" / "platforms" / "interface.py"
 
 
 # ---------------------------------------------------------------------------
@@ -320,31 +320,33 @@ def parse_mla_prefill_registry() -> dict[str, str]:
 
 
 def parse_mla_prefill_priorities() -> dict[str, list[str]]:
-    """Parse MLA prefill backend priorities from selector.py.
+    """Parse MLA prefill backend priorities from platforms/interface.py.
 
     Returns:
         A dict with keys like 'blackwell' and 'default' containing
         lists of backend enum names in priority order.
 
     """
-    if not MLA_PREFILL_SELECTOR_FILE.exists():
+    if not PLATFORM_INTERFACE_FILE.exists():
         return {}
 
     try:
-        tree = ast.parse(MLA_PREFILL_SELECTOR_FILE.read_text())
+        tree = ast.parse(PLATFORM_INTERFACE_FILE.read_text())
     except Exception:
         return {}
 
     priorities: dict[str, list[str]] = {}
 
     for node in ast.walk(tree):
-        if not isinstance(node, ast.FunctionDef):
+        if not isinstance(node, ast.ClassDef) or node.name != "Platform":
             continue
-        if node.name != "_get_mla_prefill_backend_priorities":
+
+        method = find_method(node, "get_mla_prefill_backend_priorities")
+        if method is None:
             continue
 
         # Look for if statements checking device_capability.major
-        for stmt in ast.walk(node):
+        for stmt in ast.walk(method):
             if not isinstance(stmt, ast.If):
                 continue
 

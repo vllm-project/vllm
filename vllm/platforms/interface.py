@@ -24,6 +24,12 @@ if TYPE_CHECKING:
     from vllm.sampling_params import SamplingParams
     from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.v1.attention.backend import AttentionBackend
+    from vllm.v1.attention.backends.mla.prefill.base import (
+        MLADimensions,
+        MLAPrefillBackend,
+    )
+    from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
+    from vllm.v1.attention.backends.mla.prefill.selector import MLAPrefillSelectorConfig
     from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     FlexibleArgumentParser = object
@@ -409,6 +415,55 @@ class Platform:
             f"Using default backend {AttentionBackendEnum.TORCH_SDPA} for vit attention"
         )
         return AttentionBackendEnum.TORCH_SDPA
+
+    @classmethod
+    def get_mla_prefill_backend_cls(
+        cls,
+        mla_selector_config: "MLAPrefillSelectorConfig",
+    ) -> "type[MLAPrefillBackend] | None":
+        """Get the MLA prefill backend class of a device.
+
+        Platforms that have a single, fixed MLA prefill backend can override
+        this to return it directly. Returning ``None`` (the default) defers
+        to priority-based selection via
+        [get_mla_prefill_backend_priorities][].
+        """
+        return None
+
+    @classmethod
+    def get_mla_prefill_backend_priorities(
+        cls,
+        mla_dimensions: "MLADimensions",
+    ) -> "list[MLAPrefillBackendEnum]":
+        """Get MLA prefill backends in priority order (highest first)."""
+        from vllm.v1.attention.backends.mla.prefill.base import MLADimensions
+        from vllm.v1.attention.backends.mla.prefill.registry import (
+            MLAPrefillBackendEnum,
+        )
+
+        device_capability = cls.get_device_capability()
+        if device_capability is None:
+            return [MLAPrefillBackendEnum.FLASH_ATTN]
+        if device_capability.major == 10:  # Blackwell
+            if mla_dimensions == MLADimensions(
+                qk_nope_head_dim=192,
+                qk_rope_head_dim=64,
+                v_head_dim=256,
+            ):
+                return [
+                    MLAPrefillBackendEnum.TRTLLM_RAGGED,
+                    MLAPrefillBackendEnum.FLASH_ATTN,
+                    MLAPrefillBackendEnum.FLASHINFER,
+                    MLAPrefillBackendEnum.TOKENSPEED_MLA,
+                ]
+            return [
+                MLAPrefillBackendEnum.FLASH_ATTN,
+                MLAPrefillBackendEnum.TRTLLM_RAGGED,
+                MLAPrefillBackendEnum.FLASHINFER,
+                MLAPrefillBackendEnum.TOKENSPEED_MLA,
+            ]
+        # Hopper (SM90) and older
+        return [MLAPrefillBackendEnum.FLASH_ATTN]
 
     @classmethod
     def get_device_capability(

@@ -22,6 +22,8 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.kernel import IrOpPriorityConfig
     from vllm.utils.argparse_utils import FlexibleArgumentParser
+    from vllm.v1.attention.backends.mla.prefill.base import MLADimensions
+    from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
     from vllm.v1.attention.selector import AttentionSelectorConfig
 
 logger = init_logger(__name__)
@@ -778,6 +780,20 @@ class RocmPlatform(Platform):
 
         logger.info_once("Using Torch SDPA backend for ViT model.")
         return AttentionBackendEnum.TORCH_SDPA
+
+    @classmethod
+    def get_mla_prefill_backend_priorities(
+        cls,
+        mla_dimensions: "MLADimensions",
+    ) -> "list[MLAPrefillBackendEnum]":
+        from vllm.v1.attention.backends.mla.prefill.registry import (
+            MLAPrefillBackendEnum,
+        )
+
+        return [
+            MLAPrefillBackendEnum.ROCM_AITER_FA,
+            MLAPrefillBackendEnum.FLASH_ATTN,
+        ]
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
