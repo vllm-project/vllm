@@ -10,6 +10,7 @@ from tests.kernels.mamba.utils import selective_state_update_ref
 from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops  # noqa: F401
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
+    override_ssm_config,
     selective_scan_fn,
     selective_state_update,
 )
@@ -187,6 +188,115 @@ def selective_scan_opcheck_fn(
         ),
         test_utils=["test_schema", "test_faketensor"],
     )
+
+
+@pytest.mark.parametrize("cache_dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("tie_hdim", [True, False])
+@pytest.mark.parametrize("has_z", [False, True])
+@pytest.mark.skipif(current_platform.is_cpu(), reason="Requires the Triton SSU kernel")
+def test_selective_state_update_round_state_each_token(cache_dtype, tie_hdim, has_z):
+    """Packed and partitioned replay must match single-token SSU output/cache bits."""
+    set_random_seed(0)
+    nheads, dim, dstate = 4, 32, 128
+    lengths = [1, 7, 32, 256]
+    offsets = [0, 1, 8, 40, 296]
+    slots = [4, 1, 5, 2]
+    indices = torch.tensor(slots, dtype=torch.int32, device=DEVICE)
+    state = torch.randn(7, nheads, dim, dstate, dtype=cache_dtype, device=DEVICE)
+    x = torch.randn(offsets[-1], nheads, dim, dtype=torch.bfloat16, device=DEVICE)
+    dt = torch.randn(offsets[-1], nheads, 1, device=DEVICE).expand_as(x)
+    A = (-torch.rand(nheads, 1, 1, device=DEVICE) - 1).expand(nheads, dim, dstate)
+    dt_bias = (torch.rand(nheads, 1, device=DEVICE) - 4).expand(nheads, dim)
+    if not tie_hdim:
+        dt, A, dt_bias = dt.contiguous(), A.contiguous(), dt_bias.contiguous()
+    B = torch.randn(offsets[-1], 1, dstate, dtype=x.dtype, device=DEVICE)
+    C = torch.randn_like(B)
+    D = torch.randn(nheads, dim, device=DEVICE)
+    z = torch.randn_like(x) if has_z else None
+
+    def update(cache, output, token_ids, state_indices, **kwargs):
+        token_dt = (
+            dt[token_ids, :, :1].expand(-1, -1, dim) if tie_hdim else dt[token_ids]
+        )
+        selective_state_update(
+            cache,
+            x[token_ids],
+            token_dt,
+            A,
+            B[token_ids],
+            C[token_ids],
+            D,
+            dt_bias,
+            z=z[token_ids] if z is not None else None,
+            dt_softplus=True,
+            out=output,
+            state_batch_indices=state_indices,
+            **kwargs,
+        )
+
+    # Pin the launch shape so this test isolates packed replay semantics from
+    # effective-batch-dependent tuning.
+    with override_ssm_config((4, 4)):
+        reference_state = state.clone()
+        reference_out = torch.empty_like(x)
+        for seq, (start, end) in enumerate(zip(offsets[:-1], offsets[1:])):
+            for token in range(start, end):
+                update(
+                    reference_state,
+                    reference_out[token : token + 1],
+                    slice(token, token + 1),
+                    indices[seq : seq + 1],
+                )
+
+        # Include an unaligned split and empty sequences once shorter histories end.
+        for chunk_size in (256, 17):
+            actual_state = state.clone()
+            actual_out = torch.empty_like(x)
+            for start in range(0, max(lengths), chunk_size):
+                counts = [max(0, min(chunk_size, n - start)) for n in lengths]
+                token_ids = torch.tensor(
+                    [
+                        offsets[i] + start + j
+                        for i, n in enumerate(counts)
+                        for j in range(n)
+                    ],
+                    device=DEVICE,
+                )
+                cu_seqlens = torch.tensor(
+                    [0, *counts], dtype=torch.int32, device=DEVICE
+                )
+                cu_seqlens = cu_seqlens.cumsum(0, dtype=torch.int32)
+                output = torch.empty_like(x[token_ids])
+                update(
+                    actual_state,
+                    output,
+                    token_ids,
+                    indices,
+                    cu_seqlens=cu_seqlens,
+                    round_state_each_token=True,
+                )
+                actual_out[token_ids] = output
+            assert (
+                torch.isfinite(actual_out).all() and torch.isfinite(actual_state).all()
+            )
+            assert torch.equal(
+                actual_out.view(torch.uint8), reference_out.view(torch.uint8)
+            )
+            # Comparing the entire cache also checks that unused slots were not written.
+            assert torch.equal(
+                actual_state.view(torch.uint8), reference_state.view(torch.uint8)
+            )
+
+
+@pytest.mark.parametrize("unsupported", ["stochastic_rounding", "speculative_decoding"])
+def test_selective_state_update_round_state_each_token_rejects_unsupported(unsupported):
+    kwargs = (
+        {"enable_stochastic_rounding": True}
+        if unsupported == "stochastic_rounding"
+        else {"num_accepted_tokens": torch.ones(1, dtype=torch.int32)}
+    )
+    with pytest.raises(ValueError, match="round_state_each_token does not support"):
+        selective_state_update(*([None] * 8), round_state_each_token=True, **kwargs)
 
 
 @pytest.mark.parametrize("wtype", [torch.float32])

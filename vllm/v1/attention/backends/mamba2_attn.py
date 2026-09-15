@@ -6,6 +6,7 @@ from typing import Any
 
 import torch
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
@@ -101,6 +102,25 @@ class Mamba2AttentionBackend(AttentionBackend):
     def is_ssm(cls) -> bool:
         return True
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
+
+
+@dataclass(frozen=True)
+class Mamba2SSMGroup:
+    """Contiguous prefill rows sharing the original-prompt or history path."""
+
+    row_start: int
+    row_end: int
+    token_start: int
+    token_end: int
+    replay: bool
+    query_start_loc: torch.Tensor
+    cu_chunk_seqlens: torch.Tensor | None = None
+    seq_idx: torch.Tensor | None = None
+    last_chunk_indices: torch.Tensor | None = None
+
 
 @dataclass
 class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
@@ -109,6 +129,7 @@ class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
 
     # Chunk-related metadata (only for prefill)
     seq_idx_p: torch.Tensor | None = None
+    ssm_groups: list[Mamba2SSMGroup] | None = None
 
 
 class Mamba2AttentionMetadataBuilder(
@@ -148,6 +169,7 @@ class Mamba2AttentionMetadataBuilder(
         cu_chunk_seqlen_p = None
         last_chunk_indices_p = None
         prep_initial_states = False
+        ssm_groups = None
 
         # Compute seq_idx for prefill only
         if common.num_prefills > 0:
@@ -168,6 +190,28 @@ class Mamba2AttentionMetadataBuilder(
                     common_attn_metadata,
                 )
             )
+            if envs.VLLM_BATCH_INVARIANT:
+                prompt_lens = kwargs.get("mamba_prompt_lens_cpu")
+                if prompt_lens is None:
+                    raise ValueError(
+                        "Mamba2 BI recovery requires original prompt lengths"
+                    )
+                computed, starts = self._prefill_cpu_metadata(
+                    common, common_attn_metadata
+                )
+                prompt_lens = prompt_lens[common.num_decodes : common.num_reqs]
+                if bool(
+                    (
+                        (computed < prompt_lens)
+                        & (computed + torch.diff(starts) > prompt_lens)
+                    ).any()
+                ):
+                    raise ValueError(
+                        "Mamba2 BI step crosses the original prompt boundary"
+                    )
+                replay = (computed >= prompt_lens).tolist()
+                if any(replay):
+                    ssm_groups = self._build_ssm_groups(computed, starts, replay)
 
         return replace(
             common,
@@ -176,4 +220,46 @@ class Mamba2AttentionMetadataBuilder(
             seq_idx_p=seq_idx_p,
             cu_chunk_seqlen_p=cu_chunk_seqlen_p,
             last_chunk_indices_p=last_chunk_indices_p,
+            ssm_groups=ssm_groups,
         )
+
+    def _build_ssm_groups(
+        self,
+        computed: torch.Tensor,
+        starts: torch.Tensor,
+        replay: list[bool],
+    ) -> list[Mamba2SSMGroup]:
+        """Partition only recovery batches; keep request order and cache slots."""
+        groups = []
+        for is_replay, rows in itertools.groupby(
+            range(len(replay)), replay.__getitem__
+        ):
+            row_ids = list(rows)
+            first, end = row_ids[0], row_ids[-1] + 1
+            token_start, token_end = int(starts[first]), int(starts[end])
+            group_starts = starts[first : end + 1] - token_start
+            chunks = seq_idx = last = None
+            if not is_replay:
+                chunks_cpu, seq_cpu, last_cpu = self._compute_chunk_metadata(
+                    self.chunk_size, end - first, computed[first:end], group_starts
+                )
+                chunks, seq_idx, last = (
+                    async_tensor_h2d(values, dtype=torch.int32, device=self.device)
+                    for values in (chunks_cpu, seq_cpu, last_cpu)
+                )
+            groups.append(
+                Mamba2SSMGroup(
+                    first,
+                    end,
+                    token_start,
+                    token_end,
+                    is_replay,
+                    async_tensor_h2d(
+                        group_starts.tolist(), dtype=torch.int32, device=self.device
+                    ),
+                    chunks,
+                    seq_idx,
+                    last,
+                )
+            )
+        return groups

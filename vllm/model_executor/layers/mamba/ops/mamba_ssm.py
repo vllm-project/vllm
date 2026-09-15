@@ -309,6 +309,7 @@ def _selective_scan_update_kernel(
     BLOCK_SIZE_DSTATE: tl.constexpr,
     USE_RS_ROUNDING: tl.constexpr,
     PHILOX_ROUNDS: tl.constexpr,
+    ROUND_STATE_EACH_TOKEN: tl.constexpr,
 ):
     pid_m = tl.program_id(axis=0)
     pid_b = tl.program_id(axis=1)
@@ -454,6 +455,11 @@ def _selective_scan_update_kernel(
             out *= z * tl.sigmoid(z)
         tl.store(out_ptrs, out, mask=offs_m < dim)
 
+        if ROUND_STATE_EACH_TOKEN:
+            # Match the cache store/load between single-token decode calls.
+            # The current output must use the unrounded state, just as decode does.
+            state = state.to(state_ptr.dtype.element_ty).to(tl.float32)
+
         x_ptr += stride_x_batch
         dt_ptr += stride_dt_batch
         B_ptr += stride_B_batch
@@ -514,6 +520,7 @@ def selective_state_update(
     is_blackwell=False,
     enable_stochastic_rounding=False,
     cache_philox_rounds=0,
+    round_state_each_token=False,
 ):
     """
     Argument:
@@ -539,7 +546,17 @@ def selective_state_update(
             tells the kernel which initial state to use
         cu_seqlens: (batch,)
             length per sequence, for variable length in speculative decoding cases
+        round_state_each_token: Round recurrent state to the cache dtype after
+            each token's output, matching repeated single-token SSU calls.
+            Only supports non-speculative updates without stochastic rounding.
     """
+    if round_state_each_token and (
+        enable_stochastic_rounding or num_accepted_tokens is not None
+    ):
+        raise ValueError(
+            "round_state_each_token does not support stochastic rounding "
+            "or speculative decoding"
+        )
     if state.dim() == 3:
         state = state.unsqueeze(1)
     if x.dim() == 2:
@@ -698,6 +715,7 @@ def selective_state_update(
             num_warps=num_warps,
             USE_RS_ROUNDING=enable_stochastic_rounding,
             PHILOX_ROUNDS=cache_philox_rounds,
+            ROUND_STATE_EACH_TOKEN=round_state_each_token,
         )
 
 
