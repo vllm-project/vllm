@@ -258,7 +258,7 @@ def _warmup_kernels(
     # Upper bound on the decode steps built in `decode_steps` below.
     num_decode_steps = 1
     if not model_runner.is_pooling_model:
-        num_decode_steps = 5 if num_spec_steps > 0 else 3
+        num_decode_steps = 6 if num_spec_steps > 0 else 4
     # Size the block allocation for the worst case: every request advancing
     # decode_query_len tokens on every decode step.
     decode_len = prompt_len + num_decode_steps * decode_query_len
@@ -306,14 +306,14 @@ def _warmup_kernels(
 
     # SamplingParams exercising all sampling features.
     if model_runner.is_pooling_model:
-        sampling_params = None
+        sampling_params_list = [None]
         pooling_task = model_runner.model_config.get_pooling_task(
             model_runner.get_supported_tasks()
         )
         pooling_params = PoolingParams(task=pooling_task)
         pooling_params.verify(model_runner.model_config)
     else:
-        sampling_params = SamplingParams.for_sampler_warmup()
+        sampling_params_list = SamplingParams.for_all_sampler_warmup_configs()
         pooling_params = None
 
     # Assign distinct block IDs per request per group. 0 null block, start from 1.
@@ -334,7 +334,7 @@ def _warmup_kernels(
             Request(
                 req_ids[i],
                 prompt_token_ids,
-                sampling_params,
+                sampling_params_list[i % len(sampling_params_list)],
                 pooling_params,
                 mm_features=warmup_mm_features,
             ),
@@ -435,15 +435,46 @@ def _warmup_kernels(
                 # Exercise the model paths that split a batch by whether each
                 # request received draft tokens.
                 decode_steps.append(([0, 1], [False, False]))
-        if num_reqs > 1:
+
+            # Single-request steps covering unseeded, seeded, and greedy configs.
             decode_steps.append(([0], [use_spec_decode]))
             if use_spec_decode:
                 decode_steps.append(([0], [False]))
+
+            decode_steps.append(([1], [use_spec_decode]))
+            if use_spec_decode:
+                decode_steps.append(([1], [False]))
+
+            if num_reqs >= 3:
+                decode_steps.append(([2], [use_spec_decode]))
+                if use_spec_decode:
+                    decode_steps.append(([2], [False]))
         elif use_spec_decode:
             decode_steps.append(([0], [False]))
 
+        def _update_req_sampling_params(req_index: int, params: SamplingParams) -> None:
+            """Updates a specific request slot in the sampler with a new
+            configuration."""
+            if model_runner.is_last_pp_rank and model_runner.sampler is not None:
+                model_runner.sampler.add_request(req_index, prompt_len, params)
+                model_runner.sampler.apply_staged_writes()
+
         for step_indices, step_spec_flags in decode_steps:
             _run_decode_step(step_indices, step_spec_flags)
+
+        # Single-request steps covering seeded (#54425) and greedy (#54455).
+        # Ensures coverage even when num_reqs < 3, while staying within the
+        # budgeted num_decode_steps per request.
+        req_seeded = 0
+        req_greedy = 1 if num_reqs >= 2 else 0
+
+        _update_req_sampling_params(
+            req_seeded, SamplingParams(temperature=0.9, seed=42)
+        )
+        _run_decode_step([req_seeded], [False])
+
+        _update_req_sampling_params(req_greedy, SamplingParams(temperature=0.0))
+        _run_decode_step([req_greedy], [use_spec_decode])
 
     # Clean up - process finish_req_ids.
     cleanup_output = SchedulerOutput.make_empty()
