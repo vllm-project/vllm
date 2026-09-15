@@ -60,7 +60,7 @@ class KVQuantMode(IntEnum):
     # generic kernel mode (is_per_token_head / is_nvfp4 / is_turboquant all
     # False). Registered handlers return this when they own kernel selection
     # rather than reusing an upstream kernel path. See KVCacheDTypeHandler.
-    BACKEND = 10
+    BACKEND = 11
 
     @property
     def is_per_token_head(self) -> bool:
