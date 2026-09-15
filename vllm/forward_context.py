@@ -209,6 +209,15 @@ def is_forward_context_available() -> bool:
     return _forward_context is not None
 
 
+def in_piecewise_cudagraph() -> bool:
+    """Whether the current forward runs in piecewise cudagraph mode (graph
+    segments separated by eager breaks), at capture or replay time."""
+    return (
+        is_forward_context_available()
+        and get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+    )
+
+
 def create_forward_context(
     attn_metadata: Any,
     vllm_config: VllmConfig,
