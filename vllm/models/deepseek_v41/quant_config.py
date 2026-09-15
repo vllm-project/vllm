@@ -139,6 +139,16 @@ class DeepseekV4FP8Config(Fp8Config):
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant, hf_config=None
     ) -> QuantizationMethods | None:
+        # A Quark export carrying per-layer specs is mixed precision (e.g.
+        # DeepSeek-V4.1-Flash: MXFP4 experts alongside per-block MXFP8
+        # attention). ``from_config`` below rewrites the config into a single
+        # global FP8 scheme, which would discard those specs and force every
+        # layer onto the same path, so leave these to QuarkConfig instead.
+        if isinstance(hf_quant_cfg, dict) and (
+            hf_quant_cfg.get("quant_method") == "quark"
+            and hf_quant_cfg.get("layer_quant_config")
+        ):
+            return None
         if not (
             isinstance(hf_quant_cfg, dict)
             and (
