@@ -269,6 +269,22 @@ class DFlashQwen3Attention(nn.Module):
 
 
 class DFlashQwen3DecoderLayer(nn.Module):
+    def build_mlp(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        config: Qwen3Config,
+        quant_config: QuantizationConfig | None,
+        prefix: str,
+    ) -> nn.Module:
+        return Qwen3MLP(
+            hidden_size=config.hidden_size,
+            intermediate_size=config.intermediate_size,
+            hidden_act=config.hidden_act,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -321,10 +337,9 @@ class DFlashQwen3DecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
         )
-        self.mlp = Qwen3MLP(
-            hidden_size=self.hidden_size,
-            intermediate_size=config.intermediate_size,
-            hidden_act=config.hidden_act,
+        self.mlp = self.build_mlp(
+            vllm_config=vllm_config,
+            config=config,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
@@ -372,8 +387,11 @@ class DFlashQwen3Model(nn.Module):
             ".q_proj": (".qkv_proj", "q"),
             ".k_proj": (".qkv_proj", "k"),
             ".v_proj": (".qkv_proj", "v"),
-            ".gate_proj": (".gate_up_proj", 0),
-            ".up_proj": (".gate_up_proj", 1),
+            # Routed expert weights are handled separately by the MoE loader.
+            ".mlp.gate_proj": (".mlp.gate_up_proj", 0),
+            ".mlp.up_proj": (".mlp.gate_up_proj", 1),
+            ".shared_expert.gate_proj": (".shared_expert.gate_up_proj", 0),
+            ".shared_expert.up_proj": (".shared_expert.gate_up_proj", 1),
         },
     )
 
