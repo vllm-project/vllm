@@ -28,6 +28,14 @@ _EOM = "<|eom|>"
 _EOT = "<|eot|>"
 _FUNCTION_CALLS_OPEN = "<atem:function_calls>"
 _REASONING_OPEN = "to=self<|message|>"
+# What the model GENERATES to open its reasoning channel, leading space and all.
+# The chat template renders the assistant header as
+# ``<|start|>assistant to=self<|message|>`` and ends the generation prompt after
+# ``<|start|>assistant``, so the space belongs to the first generated token: the
+# model emits `` to``, not ``to``, and the two are different ids.
+# ``thinking_token_budget`` matches these ids against the output by exact slice
+# and silently never fires if the spelling differs.
+_GENERATED_REASONING_OPEN = " to=self<|message|>"
 _ASSISTANT_TURN_OPEN = "<|start|>assistant"
 # A channel header: ``to=<recipient><|message|>`` where recipient is ``self``
 # (reasoning), ``user`` (final answer) or ``<tool>[.<fn>]`` (tool call).
@@ -134,6 +142,30 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         """
         request.skip_special_tokens = False
         return request
+
+    @property
+    def reasoning_start_str(self) -> str:
+        """Opens a reasoning message; see ``_GENERATED_REASONING_OPEN``.
+
+        Declaring this and ``reasoning_end_str`` is what lets
+        ``ReasoningConfig.initialize_token_ids`` enable
+        ``thinking_token_budget`` for MuseGlimmer. Without them the config
+        returns early, ``reasoning_config.enabled`` stays False, and any
+        request carrying a budget is rejected with HTTP 400.
+        """
+        return _GENERATED_REASONING_OPEN
+
+    @property
+    def reasoning_end_str(self) -> str:
+        """The marker that ends a reasoning message, and only that.
+
+        Deliberately NOT the full transition
+        ``<|eom|><|start|>assistant to=user<|message|>``: that string does not
+        just end reasoning, it decides the next recipient, and forcing it on a
+        tool turn sends the answer to the user instead of the tool. Forcing the
+        bare marker leaves the recipient to the model.
+        """
+        return _EOM
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         """Whether the model has left reasoning and opened a TOOL channel.
