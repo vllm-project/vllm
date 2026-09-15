@@ -745,6 +745,7 @@ def test_engram_constructor_honors_offload(monkeypatch, backend, cpu_offload):
         if cpu_offload is None
         else EngramConfig(cpu_offload=cpu_offload),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
+        parallel_config=SimpleNamespace(use_ubatching=False),
     )
     offloaded = backend == "nvidia" and vllm_config.engram_config.cpu_offload
     if backend == "common":
@@ -798,6 +799,45 @@ def test_engram_constructor_honors_offload(monkeypatch, backend, cpu_offload):
         assert streams[0] != main
     else:
         assert streams == [main]
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.parametrize("cpu_offload", [False, True])
+def test_engram_prepared_rows_keep_microbatches_isolated(cpu_offload, monkeypatch):
+    """Preparing a second microbatch must preserve the first one's lookup rows."""
+    layer = _make_embedding(cpu_offload)
+    module = Engram.__new__(Engram)
+    torch.nn.Module.__init__(module)
+    module.embed_tokens = layer
+    module.use_sequence_parallel = False
+    module._prefetch_stream = torch.cuda.Stream() if cpu_offload else None
+    module.staged_rows = torch.empty(
+        8, 24, layer.dim, dtype=torch.bfloat16, device="cuda"
+    )
+    module._init_lookup_staging(2)
+    prepared = []
+    for slot, tokens in enumerate((7, 3)):
+        monkeypatch.setattr(engram_ops, "dbo_current_ubatch_id", lambda slot=slot: slot)
+        ids = torch.randint(
+            layer.vocab_start_idx,
+            layer.vocab_end_idx,
+            (tokens, 24),
+            dtype=torch.int32,
+            device="cuda",
+        )
+        rows = module.prepare_embeddings(ids)
+        prepared.append((ids, rows))
+    assert prepared[0][1].data_ptr() != prepared[1][1].data_ptr()
+    # Explicit rows must also work while another microbatch is current.
+    for ids, rows in prepared:
+        expected = _reference_lookup(
+            layer.weight.cuda(),
+            layer.weight_scale_inv.cuda(),
+            ids,
+            layer.vocab_start_idx,
+            layer.vocab_end_idx,
+        )
+        torch.testing.assert_close(module.embed(ids, rows), expected, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")

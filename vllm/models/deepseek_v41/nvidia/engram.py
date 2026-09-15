@@ -370,13 +370,14 @@ class Engram(BaseEngram):
         if self.embed_tokens.cpu_offload:
             self._prefetch_stream = torch.cuda.Stream(device=self.staged_rows.device)
 
-    def prepare_embeddings(self, hash_ids: torch.Tensor) -> None:
+    def prepare_embeddings(self, hash_ids: torch.Tensor) -> torch.Tensor:
         """Prefetch local shared rows or the DP group's gathered hash IDs."""
         if self._prefetch_stream is None:
             return super().prepare_embeddings(hash_ids)
-        rows = self.staged_rows[: hash_ids.shape[0]]
+        rows = self._lookup_staging()[: hash_ids.shape[0]]
         assert rows.shape[0] == hash_ids.shape[0], "engram staging buffer too small"
         self._start_prefetch(hash_ids, rows, self._prefetch_stream)
+        return rows
 
     @eager_break_during_capture
     def _start_prefetch(
@@ -393,11 +394,15 @@ class Engram(BaseEngram):
     def _finish_prefetch(self, stream: torch.cuda.Stream) -> None:
         torch.cuda.current_stream().wait_stream(stream)
 
-    def _ready_rows(self, num_tokens: int) -> torch.Tensor:
+    def _ready_rows(
+        self, num_tokens: int, prepared_rows: torch.Tensor | None = None
+    ) -> torch.Tensor:
         if self._prefetch_stream is not None:
             self._finish_prefetch(self._prefetch_stream)
         if self.embed_tokens.dp_size > 1:
             slot = engram_gathered_num_tokens()
-            staged = self.staged_rows[: slot * self.embed_tokens.dp_size]
+            staged = super()._ready_rows(
+                slot * self.embed_tokens.dp_size, prepared_rows
+            )
             return _gather_engram_rows(staged, num_tokens)
-        return super()._ready_rows(num_tokens)
+        return super()._ready_rows(num_tokens, prepared_rows)
