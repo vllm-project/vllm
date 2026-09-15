@@ -18,6 +18,7 @@ import torch
 import zmq
 from msgspec import msgpack
 from pydantic import GetCoreSchemaHandler
+from pydantic.errors import PydanticSchemaGenerationError
 from pydantic_core import core_schema
 
 from vllm import envs
@@ -508,6 +509,13 @@ def run_method(
     return func(*args, **kwargs)
 
 
+def _builtins_enc_hook(obj: Any) -> Any:
+    """JSON form of array-typed Struct fields, e.g. prompt_logprob_token_ids."""
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    raise NotImplementedError(f"Objects of type {type(obj)} are not supported")
+
+
 class PydanticMsgspecMixin:
     """Make a ``msgspec.Struct`` compatible with Pydantic for both
     **validation** (JSON/dict -> Struct) and **serialization**
@@ -546,8 +554,12 @@ class PydanticMsgspecMixin:
                 continue
             msgspec_field = msgspec_fields[name]
 
-            # typed_dict_field using the handler to get the schema
-            field_schema = handler(hint)
+            # typed_dict_field using the handler to get the schema; arrays
+            # and tensors have no JSON schema and are accepted as-is.
+            try:
+                field_schema = handler(hint)
+            except PydanticSchemaGenerationError:
+                field_schema = core_schema.any_schema()
 
             # Add default value to the schema.
             # Mark fields with defaults as not required so the generated
@@ -610,7 +622,7 @@ class PydanticMsgspecMixin:
         Uses ``msgspec.to_builtins`` which respects ``omit_defaults=True``,
         so only fields that differ from their declared defaults are included.
         """
-        raw = msgspec.to_builtins(value)
+        raw = msgspec.to_builtins(value, enc_hook=_builtins_enc_hook)
         if not isinstance(raw, dict):
             return raw
 

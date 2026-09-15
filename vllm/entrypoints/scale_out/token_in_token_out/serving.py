@@ -7,7 +7,6 @@ import time
 from collections.abc import AsyncGenerator
 from collections.abc import Sequence as GenericSequence
 
-import msgspec
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
@@ -43,6 +42,7 @@ from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
+from vllm.v1.serial_utils import MsgpackEncoder
 
 from .mm_features import (
     mm_kwargs_from_features,
@@ -145,7 +145,7 @@ class ServingTokens(GenerateBaseServing):
                 "the coordinator, or use stop_token_ids."
             )
         try:
-            msgspec.msgpack.encode(
+            MsgpackEncoder().encode(
                 (
                     sampling_params,
                     request.kv_transfer_params,
