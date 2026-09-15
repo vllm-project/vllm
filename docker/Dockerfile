@@ -1300,6 +1300,10 @@ RUN --mount=type=cache,target=/opt/uv/cache \
             uv pip install --system -c /tmp/kv-constraints.txt "mooncake-transfer-engine-cuda13==${MOONCAKE_VERSION}"; \
         fi; \
         rm -f /tmp/kv-installed.txt /tmp/kv-constraints.txt; \
+        uv pip freeze --system | grep -i "^torch=\|^torchvision=\|^torchaudio=" \
+            | diff -u /vllm-workspace/torch_lib_versions.txt - && \
+        uv pip check --system && \
+        python3 -c "import torch, torchvision, torchvision.ops, torchaudio, vllm"; \
     fi
 
 # Mooncake registers GPU memory for RDMA via nvidia-peermem by default. Hosts
