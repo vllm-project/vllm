@@ -61,6 +61,8 @@ pub type DynChatTextBackend = Arc<dyn ChatTextBackend>;
 /// Frontend-side chat backend loading options.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LoadModelBackendsOptions {
+    /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
+    pub revision: Option<String>,
     /// Which generation-config sampling defaults to inherit.
     pub generation_config: GenerationConfigMode,
     /// Which chat renderer implementation to use.

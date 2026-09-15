@@ -3,9 +3,10 @@
 
 import torch.nn as nn
 
-from vllm.config import ModelConfig, VllmConfig, replace
+from vllm.config import ModelConfig, ParallelConfig, VllmConfig, replace
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
 
 logger = init_logger(__name__)
 
@@ -28,6 +29,29 @@ def _resolve_dspark_attention_backend(
             )
         return target_backend
     return None
+
+
+def _get_dspark_parallel_config(
+    parallel_config: ParallelConfig,
+    tensor_parallel_size: int,
+) -> ParallelConfig:
+    if parallel_config.enable_eplb:
+        logger.warning_once(
+            "EPLB is disabled for the DSpark draft model. EPLB remains enabled "
+            "for the target model."
+        )
+
+    return replace(
+        parallel_config,
+        pipeline_parallel_size=1,
+        tensor_parallel_size=tensor_parallel_size,
+        enable_eplb=False,
+        eplb_config=replace(
+            parallel_config.eplb_config,
+            num_redundant_experts=0,
+        ),
+        enable_elastic_ep=False,
+    )
 
 
 def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Module:
@@ -53,12 +77,9 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
 
     draft_vllm_config = replace(
         vllm_config,
-        parallel_config=replace(
+        parallel_config=_get_dspark_parallel_config(
             vllm_config.parallel_config,
-            pipeline_parallel_size=1,
-            tensor_parallel_size=(
-                speculative_config.draft_parallel_config.tensor_parallel_size
-            ),
+            speculative_config.draft_parallel_config.tensor_parallel_size,
         ),
         attention_config=replace(
             vllm_config.attention_config,
@@ -73,6 +94,7 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
             if speculative_config.kv_cache_dtype is not None
             else vllm_config.cache_config
         ),
+        load_config=get_pp_safe_draft_load_config(vllm_config.load_config),
     )
     # VllmConfig post-init restores the target's quant config because the target
     # config is retained for DSpark's target-layer metadata, so we must override it.
