@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import threading
 import weakref
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from vllm.v1.executor import multiproc_executor
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor, WorkerProc
 from vllm.v1.outputs import DraftTokenIds
 
@@ -93,3 +96,35 @@ def test_take_draft_token_ids_uses_execute_model_timeout(monkeypatch, stalled):
             executor.take_draft_token_ids()
     else:
         assert executor.take_draft_token_ids() is draft
+
+
+def test_collective_rpc_fails_cleanly_if_shutdown_during_serialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    serialization_started = threading.Event()
+    continue_serialization = threading.Event()
+
+    def blocking_dumps(obj: Any, protocol: int) -> bytes:
+        serialization_started.set()
+        assert continue_serialization.wait(timeout=5)
+        return b"serialized"
+
+    monkeypatch.setattr(multiproc_executor.cloudpickle, "dumps", blocking_dumps)
+
+    executor: Any = MultiprocExecutor.__new__(MultiprocExecutor)
+    executor.rpc_broadcast_mq = SimpleNamespace(shutdown=lambda: None)
+    executor.response_mqs = []
+    executor.workers = []
+    executor.is_failed = False
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        rpc = pool.submit(executor.collective_rpc, lambda: None, non_block=True)
+        assert serialization_started.wait(timeout=5)
+
+        executor.is_failed = True
+        executor.shutdown()
+        assert executor.rpc_broadcast_mq is None
+        continue_serialization.set()
+
+        with pytest.raises(RuntimeError, match=r"Executor failed\."):
+            rpc.result(timeout=5)
