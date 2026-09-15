@@ -35,7 +35,10 @@ if current_platform.is_cuda_alike() or current_platform.is_xpu():
         RMSNormReshapeFusionPass,
     )
     from .fusion.qk_norm_rope_fusion import QKNormRoPEFusionPass
-    from .fusion.sequence_parallelism import SequenceParallelismPass
+    from .fusion.sequence_parallelism import (
+        SequenceParallelismMoEPass,
+        SequenceParallelismPass,
+    )
     from .utility.split_coalescing import SplitCoalescingPass
 
 if current_platform.is_cuda_alike():
@@ -160,6 +163,8 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
             if self.pass_config.enable_sp:
                 self.passes += [SequenceParallelismPass(config)]
+            if self.pass_config.enable_sp_moe:
+                self.passes += [SequenceParallelismMoEPass(config)]
                 if self.pass_config.fuse_gemm_comms:
                     self.passes += [AsyncTPPass(config)]
 
