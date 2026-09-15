@@ -152,6 +152,15 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             )
 
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
+        # With a single KV head the 3D decode grid is only as wide as the
+        # segment count, so the default leaves most of the GPU idle. The
+        # buffers below are sized from this value, so the launch grid in
+        # unified_attention() matches by construction.
+        if self.num_heads_kv == 1 and current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx1151
+
+            if on_gfx1151():
+                self.num_par_softmax_segments = 32
         headdim_padded = next_power_of_2(self.headdim)
         self.softmax_segm_output = torch.empty(
             (
