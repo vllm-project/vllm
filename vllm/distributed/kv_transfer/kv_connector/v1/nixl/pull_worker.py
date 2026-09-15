@@ -303,6 +303,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 local_dram_handle=local_dram_handle,
                 remote_xfer_side_handle=remote_xfer_side_handle,
                 expected_consumers=plan.local_consumers,
+                awaiting_kvs=meta.awaiting_kvs,
             ):
                 return
 
@@ -327,6 +328,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         local_dram_handle: int | None,
         remote_xfer_side_handle: int,
         expected_consumers: int,
+        awaiting_kvs: bool,
     ) -> bool:
         """
         Post a READ point-to-point xfer request from a single local worker to
@@ -387,6 +389,11 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     remote_agent_name=agent_name,
                 )
                 self.xfer_stats.record_failed_notification()
+            # Report even on notification failure: the KV is already local, and
+            # an unreported parked request would hold its blocks forever.
+            # Notify-only recvs must stay unreported (scheduler asserts).
+            if awaiting_kvs:
+                self._recving_transfers.setdefault(request_id, [])
             return True
 
         if read_spec.block_ids_by_region:
