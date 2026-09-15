@@ -10,13 +10,13 @@ from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
     compute_fp8_einsum_recipe,
     deep_gemm_fp8_o_proj,
 )
-from vllm.models.deepseek_v4_1.attention import DeepseekV4Attention
-from vllm.models.deepseek_v4_1.common.ops import (
+from vllm.models.deepseek_v41.attention import DeepseekV4Attention
+from vllm.models.deepseek_v41.common.ops import (
     combine_topk_swa_indices,
     compute_global_topk_indices_and_lens,
     dequantize_and_gather_k_cache,
 )
-from vllm.models.deepseek_v4_1.sparse_mla import (
+from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4FlashMLABackend,
     DeepseekV4FlashMLAMetadata,
     DeepseekV41SparseSWAMetadataBuilder,
