@@ -11,6 +11,8 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     auto_drop_analysis_messages,
     create_tool_definition,
     extract_function_from_recipient,
+    extract_instructions_from_messages,
+    get_developer_message,
     get_system_message,
     has_custom_tools,
     is_function_recipient,
@@ -981,6 +983,38 @@ class TestGetSystemMessage:
         ) as exc_info:
             get_system_message(reasoning_effort="max")
         assert exc_info.value.parameter == "reasoning_effort"
+
+
+class TestGetDeveloperMessage:
+    """Tests for get_developer_message tool validation."""
+
+    def test_unsupported_tool_type_raises_validation_error(self) -> None:
+        tool = ChatCompletionToolsParam(
+            function={
+                "name": "report_status",
+                "parameters": _TOOL_PARAMETERS,
+            }
+        )
+        # A tool type that is neither a builtin nor "function" is invalid input.
+        tool.type = "unsupported_tool_type"
+        with pytest.raises(
+            VLLMValidationError, match="tool type 'unsupported_tool_type'"
+        ) as exc_info:
+            get_developer_message(tools=[tool])
+        assert exc_info.value.parameter == "tools"
+
+
+class TestExtractInstructionsFromMessages:
+    """Tests for extract_instructions_from_messages input validation."""
+
+    def test_unknown_message_type_raises_validation_error(self) -> None:
+        # A message that is neither a dict nor has to_dict/model_dump is
+        # invalid user input.
+        with pytest.raises(
+            VLLMValidationError, match="Unknown message type"
+        ) as exc_info:
+            extract_instructions_from_messages([123])
+        assert exc_info.value.parameter == "input"
 
 
 class TestResponseInputToHarmonyReasoningItem:
