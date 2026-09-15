@@ -59,6 +59,7 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.penalties import use_penalty
+from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
 from vllm.v1.worker.gpu.states import RequestState
 
 from .interfaces import (
@@ -333,6 +334,15 @@ class DiffusionGemmaForConditionalGeneration(
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         if logits is not None and self.final_logit_softcapping is not None:
+            logits = _softcap_logits(logits, self.final_logit_softcapping)
+        return logits
+
+    def compute_diffusion_logits_local(
+        self, hidden_states: torch.Tensor
+    ) -> torch.Tensor:
+        logits = self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
+        assert logits is not None
+        if self.final_logit_softcapping is not None:
             logits = _softcap_logits(logits, self.final_logit_softcapping)
         return logits
 
@@ -657,6 +667,214 @@ def _compiled_sample_step(
     return scaled
 
 
+def _tp_all_reduce_sum(
+    tensor: torch.Tensor, tp_size: int, tp_group_name: str
+) -> torch.Tensor:
+    if tp_size == 1:
+        return tensor
+    return torch.ops.vllm.all_reduce(tensor, group_name=tp_group_name)
+
+
+def _tp_all_gather_last_dim(
+    tensor: torch.Tensor, tp_size: int, tp_group_name: str
+) -> torch.Tensor:
+    if tp_size == 1:
+        return tensor
+    return torch.ops.vllm.all_gather(tensor, -1, tp_size, group_name=tp_group_name)
+
+
+def _dense_compatible_local_uniform(
+    shape: tuple[int, int],
+    vocab_size: int,
+    vocab_start: int,
+    vocab_end: int,
+    device: torch.device,
+) -> torch.Tensor:
+    full = torch.rand((*shape, vocab_size), device=device, dtype=torch.float32)
+    return full[..., vocab_start:vocab_end]
+
+
+def _global_token_argmax(
+    local_values: torch.Tensor,
+    local_indices: torch.Tensor,
+    vocab_size: int,
+    tp_size: int,
+    tp_group_name: str,
+) -> torch.Tensor:
+    if tp_size == 1:
+        return local_indices
+
+    pair = torch.stack([local_values.float(), local_indices.float()], dim=-1)
+    gathered = _tp_all_gather_last_dim(pair, tp_size, tp_group_name)
+    gathered = gathered.view(*local_values.shape, tp_size, 2)
+    values = gathered[..., 0]
+    indices = gathered[..., 1].to(torch.int64)
+    max_values = values.max(dim=-1, keepdim=True).values
+    tied_indices = torch.where(values == max_values, indices, vocab_size)
+    return tied_indices.min(dim=-1).values
+
+
+def _diffusion_gemma_local_sample_step(
+    # Local logits from this TP rank [num_decode * CL, local_vocab]
+    local_logits: torch.Tensor,
+    # Request mapping
+    decode_slots: torch.Tensor,
+    decode_idx: torch.Tensor,
+    all_slots: torch.Tensor,
+    valid_canvas_len: torch.Tensor,
+    # State tensors (modified in-place)
+    canvas: torch.Tensor,
+    argmax_canvas: torch.Tensor,
+    step_tensor: torch.Tensor,
+    is_encoder_phase: torch.Tensor,
+    confident_tensor: torch.Tensor,
+    sc_embeds: torch.Tensor,
+    embed_weight: torch.Tensor,
+    normalizer: torch.Tensor,
+    history: torch.Tensor,
+    history_len_tensor: torch.Tensor,
+    # Output tensors (modified in-place)
+    sampled: torch.Tensor,
+    num_sampled: torch.Tensor,
+    draft_tokens: torch.Tensor,
+    # Scalar config
+    max_denoising_steps: float,
+    t_min: float,
+    t_max: float,
+    confidence_threshold: float,
+    vocab_size: int,
+    CL: int,
+    ST: int,
+    entropy_bound: float,
+    local_vocab_start: int,
+    local_vocab_end: int,
+    tp_size: int,
+    tp_group_name: str,
+) -> None:
+    num_decode = decode_slots.shape[0]
+    device = decode_slots.device
+
+    steps_f = step_tensor[decode_slots].float()
+    remaining = (max_denoising_steps - steps_f).clamp(min=1.0)
+    temp = t_min + (t_max - t_min) * (remaining / max_denoising_steps)
+
+    local_logits_3d = local_logits.reshape(num_decode, CL, -1).float()
+    scaled_local = local_logits_3d / temp[:, None, None].clamp(min=1e-10)
+
+    u_local = _dense_compatible_local_uniform(
+        (num_decode, CL), vocab_size, local_vocab_start, local_vocab_end, device
+    ).clamp(min=1e-20)
+    gumbel_local = -torch.log(-torch.log(u_local))
+    noisy_local = scaled_local + gumbel_local * (temp[:, None, None] > 0).float()
+
+    local_noisy_vals, local_noisy_idx = noisy_local.max(dim=-1)
+    local_argmax_vals, local_argmax_idx = scaled_local.max(dim=-1)
+    local_noisy_idx = local_noisy_idx + local_vocab_start
+    local_argmax_idx = local_argmax_idx + local_vocab_start
+    new_tokens = _global_token_argmax(
+        local_noisy_vals, local_noisy_idx, vocab_size, tp_size, tp_group_name
+    )
+    argmax_tokens = _global_token_argmax(
+        local_argmax_vals, local_argmax_idx, vocab_size, tp_size, tp_group_name
+    )
+
+    local_max = local_argmax_vals
+    gathered_max = _tp_all_gather_last_dim(
+        local_max.unsqueeze(-1), tp_size, tp_group_name
+    )
+    global_max = gathered_max.max(dim=-1).values
+    exp_shifted = torch.exp(scaled_local - global_max.unsqueeze(-1))
+    local_exp_sum = exp_shifted.sum(dim=-1)
+    local_exp_x_sum = (exp_shifted * scaled_local).sum(dim=-1)
+    stats = torch.stack([local_exp_sum, local_exp_x_sum], dim=-1)
+    stats = _tp_all_reduce_sum(stats, tp_size, tp_group_name)
+    global_exp_sum = stats[..., 0]
+    global_exp_x_sum = stats[..., 1]
+
+    token_entropy = (
+        torch.log(global_exp_sum) + global_max - global_exp_x_sum / global_exp_sum
+    )
+    mean_entropy = token_entropy.mean(dim=-1)
+    confident_tensor[decode_slots] = mean_entropy < confidence_threshold
+
+    sorted_ent, sorted_idx = torch.sort(token_entropy, dim=-1)
+    cumsum_ent = torch.cumsum(sorted_ent, dim=-1)
+    cummax_ent = torch.cummax(sorted_ent, dim=-1).values
+    sorted_mask = (cumsum_ent - cummax_ent) <= entropy_bound
+    eb_mask = torch.zeros_like(sorted_mask)
+    eb_mask.scatter_(1, sorted_idx, sorted_mask)
+
+    is_commit = is_encoder_phase[decode_slots]
+    is_denoise = ~is_commit
+    cur_step = step_tensor[decode_slots].float()
+    new_step_val = torch.where(
+        is_denoise,
+        (cur_step + 1).to(step_tensor.dtype),
+        step_tensor.new_zeros(num_decode),
+    )
+    step_tensor[decode_slots] = new_step_val
+
+    random_tokens = torch.randint(
+        0, vocab_size, (num_decode, CL), device=device, dtype=canvas.dtype
+    )
+    denoise_canvas = torch.where(eb_mask, new_tokens, random_tokens)
+    canvas[decode_slots] = torch.where(
+        is_commit.unsqueeze(1), random_tokens, denoise_canvas
+    )
+
+    hist_len = history_len_tensor[decode_slots]
+    write_pos = hist_len % ST
+    for i in range(ST):
+        write_here = ((write_pos == i) & is_denoise).unsqueeze(1)
+        history[decode_slots, i] = torch.where(
+            write_here, argmax_tokens, history[decode_slots, i]
+        )
+
+    argmax_canvas[decode_slots] = torch.where(
+        is_denoise.unsqueeze(1), argmax_tokens, argmax_canvas[decode_slots]
+    )
+
+    new_hist_len = torch.where(is_denoise, hist_len + 1, hist_len.new_zeros(num_decode))
+    history_len_tensor[decode_slots] = new_hist_len
+
+    sampled[decode_idx] = argmax_canvas[decode_slots].to(
+        sampled.dtype
+    ) * is_commit.unsqueeze(1).to(sampled.dtype)
+    num_sampled[decode_idx] = is_commit.to(num_sampled.dtype) * valid_canvas_len.to(
+        num_sampled.dtype
+    )
+
+    ref = history[decode_slots, 0]
+    mismatch = torch.zeros(num_decode, device=device, dtype=torch.int32)
+    for h in range(1, ST):
+        mismatch = mismatch + (ref != history[decode_slots, h]).sum(dim=-1).int()
+    stable = mismatch == 0
+
+    step_after = step_tensor[decode_slots]
+    converged = (stable & confident_tensor[decode_slots] & (new_hist_len >= ST)) | (
+        step_after >= max_denoising_steps
+    )
+    is_encoder_phase[decode_slots] = torch.where(
+        is_commit, is_commit.new_zeros(num_decode), converged
+    )
+
+    sc_keep = (is_denoise & ~is_encoder_phase[decode_slots])[:, None, None]
+    local_probs = (exp_shifted / global_exp_sum.unsqueeze(-1)).to(embed_weight.dtype)
+    soft_embeds = torch.matmul(
+        local_probs, embed_weight[: local_vocab_end - local_vocab_start]
+    )
+    soft_embeds = _tp_all_reduce_sum(soft_embeds, tp_size, tp_group_name)
+    soft_embeds = soft_embeds * normalizer
+    sc_embeds[decode_slots] = soft_embeds * sc_keep
+
+    newly_converged = (converged & is_denoise).unsqueeze(1)
+    canvas[decode_slots] = torch.where(
+        newly_converged, argmax_canvas[decode_slots], canvas[decode_slots]
+    )
+
+    draft_tokens[all_slots, :CL] = canvas[all_slots]
+
+
 class DiffusionGemmaRequestStates:
     """Pre-allocated GPU tensors for DiffusionGemma per-request state.
 
@@ -856,6 +1074,7 @@ class DiffusionGemmaModelState(ModelState):
             sc_vocab_start=shard.org_vocab_start_index,
             sc_vocab_end=shard.org_vocab_end_index,
             tp_size=tp_group.world_size,
+            tp_rank=tp_group.rank_in_group,
             tp_group_name=tp_group.unique_name,
         ), None
 
@@ -1064,6 +1283,7 @@ class DiffusionSampler:
         sc_vocab_start: int = 0,
         sc_vocab_end: int | None = None,
         tp_size: int = 1,
+        tp_rank: int = 0,
         tp_group_name: str = "",
     ):
         self.sampling_states = sampler.sampling_states
@@ -1079,6 +1299,7 @@ class DiffusionSampler:
         self.sc_vocab_start = sc_vocab_start
         self.sc_vocab_end = sc_vocab_end if sc_vocab_end is not None else vocab_size
         self.tp_size = tp_size
+        self.tp_rank = tp_rank
         self.tp_group_name = tp_group_name
         self.canvas_length = (
             diffusion_config.canvas_length if diffusion_config is not None else 32
@@ -1112,6 +1333,50 @@ class DiffusionSampler:
         # Populated after the post-sample kernel detects convergence; consumed
         # on the subsequent commit step when num_sampled=CANVAS_LEN.
         self._pending_logprobs: dict[int, LogprobsTensors] = {}
+
+    def _has_exact_local_vocab_shard(self) -> bool:
+        if self.tp_size <= 1:
+            return False
+        if self.vocab_size % self.tp_size != 0:
+            return False
+        local_vocab_size = self.vocab_size // self.tp_size
+        return (
+            self.sc_vocab_end - self.sc_vocab_start == local_vocab_size
+            and self.sc_vocab_start == self.tp_rank * local_vocab_size
+            and self.sc_vocab_end == (self.tp_rank + 1) * local_vocab_size
+            and self.embed_weight.shape[0] >= local_vocab_size
+        )
+
+    def can_sample_local_logits(
+        self, input_batch: Any, grammar_output: Any | None = None
+    ) -> bool:
+        if grammar_output is not None or input_batch.num_draft_tokens == 0:
+            return False
+        if not self._has_exact_local_vocab_shard():
+            return False
+        if input_batch.num_reqs != 1:
+            return False
+
+        per_req_nlogits_np = np.diff(
+            input_batch.cu_num_logits_np[: input_batch.num_reqs + 1]
+        )
+        if (
+            per_req_nlogits_np.shape[0] != 1
+            or per_req_nlogits_np[0] != self.canvas_length
+        ):
+            return False
+
+        slots_np = input_batch.idx_mapping_np[: input_batch.num_reqs]
+        states = self.sampling_states
+        if states.max_num_logprobs(slots_np) != NO_LOGPROBS:
+            return False
+        if np.any(states.seeds_set[slots_np]):
+            return False
+        if np.any(states.top_k.np[slots_np] != states.vocab_size):
+            return False
+        if np.any(states.top_p.np[slots_np] != 1.0):
+            return False
+        return not np.any(states.min_p.np[slots_np] != 0.0)
 
     def add_request(self, req_idx: int, prompt_len: int, sampling_params: Any) -> None:
         if use_penalty(sampling_params):
@@ -1424,4 +1689,77 @@ class DiffusionSampler:
             per_req_nlogits_np,
             device,
             logprobs_tensors=logprobs_tensors,
+        )
+
+    def sample_local_logits(
+        self,
+        local_logits: torch.Tensor,
+        input_batch: Any,
+    ) -> SamplerOutput:
+        num_reqs = input_batch.num_reqs
+        device = local_logits.device
+        states = self.diffusion_states
+        CL = self.canvas_length
+
+        per_req_nlogits_np = np.diff(input_batch.cu_num_logits_np[: num_reqs + 1])
+        decode_indices_np = np.where(per_req_nlogits_np > 0)[0]
+        decode_slots_np = input_batch.idx_mapping_np[:num_reqs][decode_indices_np]
+        num_decode = len(decode_indices_np)
+
+        self._decode_slots.np[:num_decode] = decode_slots_np
+        self._decode_idx.np[:num_decode] = decode_indices_np
+        self._decode_slots.copy_to_uva()
+        self._decode_idx.copy_to_uva()
+        decode_slots = self._decode_slots.gpu[:num_decode]
+        decode_idx = self._decode_idx.gpu[:num_decode]
+
+        valid_canvas_len_np = per_req_nlogits_np[per_req_nlogits_np > 0]
+        valid_canvas_len = async_copy_to_gpu(
+            valid_canvas_len_np.astype(np.int64), device=device
+        )
+
+        sampled = self._sampled[:num_reqs]
+        num_sampled = self._num_sampled[:num_reqs]
+        sampled.zero_()
+        num_sampled.zero_()
+
+        _diffusion_gemma_local_sample_step(
+            local_logits,
+            decode_slots,
+            decode_idx,
+            input_batch.idx_mapping[:num_reqs],
+            valid_canvas_len,
+            states.canvas,
+            states.argmax_canvas,
+            states.step,
+            states.is_encoder_phase,
+            states.confident,
+            states.self_conditioning_embeds,
+            self.embed_weight,
+            self.normalizer,
+            states.accepted_canvas_history,
+            states.accepted_canvas_history_len,
+            sampled,
+            num_sampled,
+            self.req_states.draft_tokens,
+            max_denoising_steps=float(states.max_denoising_steps),
+            t_min=self.t_min,
+            t_max=self.t_max,
+            confidence_threshold=self.confidence_threshold,
+            vocab_size=self.vocab_size,
+            CL=CL,
+            ST=states.stability_threshold,
+            entropy_bound=self.entropy_bound,
+            local_vocab_start=self.sc_vocab_start,
+            local_vocab_end=self.sc_vocab_end,
+            tp_size=self.tp_size,
+            tp_group_name=self.tp_group_name,
+        )
+
+        return self._build_output(
+            input_batch,
+            sampled,
+            num_sampled,
+            per_req_nlogits_np,
+            device,
         )
