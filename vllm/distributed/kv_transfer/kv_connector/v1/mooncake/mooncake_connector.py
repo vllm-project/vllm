@@ -1153,8 +1153,8 @@ class MooncakeConnectorWorker:
             pp_rank=self.pp_rank,
             addr=worker_addr,
         )
-        timeout = envs.VLLM_MOONCAKE_BOOTSTRAP_REGISTER_TIMEOUT
-        max_attempts = envs.VLLM_MOONCAKE_BOOTSTRAP_REGISTER_MAX_ATTEMPTS
+        timeout = envs.VLLM_MOONCAKE_CONNECTOR_TIMEOUT
+        max_attempts = envs.VLLM_MOONCAKE_CONNECTOR_MAX_ATTEMPTS
         backoff = 1.0
         for attempt in range(1, max_attempts + 1):
             try:
@@ -1828,8 +1828,8 @@ class MooncakeConnectorWorker:
 
         # httpx applies the timeout to each phase (connect, read, write, pool)
         # rather than to the whole request, so budget for all four.
-        register_timeout = envs.VLLM_MOONCAKE_BOOTSTRAP_REGISTER_TIMEOUT
-        max_attempts = envs.VLLM_MOONCAKE_BOOTSTRAP_REGISTER_MAX_ATTEMPTS
+        register_timeout = envs.VLLM_MOONCAKE_CONNECTOR_TIMEOUT
+        max_attempts = envs.VLLM_MOONCAKE_CONNECTOR_MAX_ATTEMPTS
         backoff_total = sum(min(2.0**i, 10.0) for i in range(max_attempts - 1))
         ready_timeout = max_attempts * 4 * register_timeout + backoff_total + 30.0
         ready_event = threading.Event()

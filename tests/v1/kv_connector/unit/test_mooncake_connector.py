@@ -564,8 +564,8 @@ async def test_register_worker_recovers_from_slow_bootstrap_server(monkeypatch):
 
     port = get_open_port()
     monkeypatch.setenv("VLLM_MOONCAKE_BOOTSTRAP_PORT", str(port))
-    monkeypatch.setenv("VLLM_MOONCAKE_BOOTSTRAP_REGISTER_TIMEOUT", "0.5")
-    monkeypatch.setenv("VLLM_MOONCAKE_BOOTSTRAP_REGISTER_MAX_ATTEMPTS", "5")
+    monkeypatch.setenv("VLLM_MOONCAKE_CONNECTOR_TIMEOUT", "0.5")
+    monkeypatch.setenv("VLLM_MOONCAKE_CONNECTOR_MAX_ATTEMPTS", "5")
 
     server = MooncakeBootstrapServer("127.0.0.1", port)
     server.start()
@@ -738,7 +738,7 @@ class _FlakyAsyncClient:
 async def test_register_worker_retries_on_read_timeout(monkeypatch):
     """A slow rank-0 bootstrap response must be retried, not treated as fatal."""
 
-    monkeypatch.setenv("VLLM_MOONCAKE_BOOTSTRAP_REGISTER_MAX_ATTEMPTS", "5")
+    monkeypatch.setenv("VLLM_MOONCAKE_CONNECTOR_MAX_ATTEMPTS", "5")
     monkeypatch.setattr(asyncio, "sleep", AsyncMock())
 
     calls: list[int] = []
@@ -758,7 +758,7 @@ async def test_register_worker_retries_on_read_timeout(monkeypatch):
 async def test_register_worker_raises_after_max_attempts(monkeypatch):
     """Terminal registration failure must raise, not loop forever."""
 
-    monkeypatch.setenv("VLLM_MOONCAKE_BOOTSTRAP_REGISTER_MAX_ATTEMPTS", "3")
+    monkeypatch.setenv("VLLM_MOONCAKE_CONNECTOR_MAX_ATTEMPTS", "3")
     monkeypatch.setattr(asyncio, "sleep", AsyncMock())
 
     calls: list[int] = []
@@ -780,8 +780,8 @@ async def test_sender_listener_failure_propagates_to_caller(monkeypatch):
     """A terminal registration failure must surface via the Future rather than
     leaving register_kv_caches blocked on its ready event."""
 
-    monkeypatch.setenv("VLLM_MOONCAKE_BOOTSTRAP_REGISTER_TIMEOUT", "0.1")
-    monkeypatch.setenv("VLLM_MOONCAKE_BOOTSTRAP_REGISTER_MAX_ATTEMPTS", "1")
+    monkeypatch.setenv("VLLM_MOONCAKE_CONNECTOR_TIMEOUT", "0.1")
+    monkeypatch.setenv("VLLM_MOONCAKE_CONNECTOR_MAX_ATTEMPTS", "1")
 
     loop = asyncio.new_event_loop()
     thread = threading.Thread(target=loop.run_forever, daemon=True)
