@@ -1183,3 +1183,38 @@ def test_placeholder_draft_token_rejected_random(rejection_sampler):
     assert sampled[0, 1].item() == vocab_size - 1
     recovered = sampled[0, 2].item()
     assert 0 <= recovered < vocab_size
+
+
+@pytest.mark.parametrize(
+    ("x", "replace_from", "replace_to"),
+    [
+        # Production dtypes from apply_sampling_constraints: fp32 temperature
+        # (with the GREEDY_TEMPERATURE=0 -> 1 rewrite), fp32 top_p, int32
+        # top_k. The CPU shim used to route these through an int64 copy,
+        # discarding the kernel's writes (output stayed uninitialized) and
+        # truncating the float values (0.7 -> 0 -> "replaced" with 1).
+        (torch.tensor([0.7, 0.5, 0.9], dtype=torch.float32), 0, 1),
+        (torch.tensor([0.9, 0.0, 0.3], dtype=torch.float32), 0, 0),
+        (torch.tensor([5, 40, 1], dtype=torch.int32), 0, 0),
+        (torch.tensor([10, 20, 30], dtype=torch.int64), 0, 0),
+    ],
+)
+def test_expand_kernel_cpu_shim_writes_output_at_caller_dtype(
+    x: torch.Tensor, replace_from: int, replace_to: int
+):
+    """The CPU expand shim must fill the caller's buffer in-place at the
+    caller's dtype, honoring the replace_from -> replace_to rewrite without
+    integer truncation of float inputs."""
+    from vllm.utils import cpu_triton_utils as cpu_tl
+
+    cu_num_tokens = torch.tensor([2, 5, 6], dtype=torch.int64)
+    counts = torch.tensor([2, 3, 1], dtype=torch.int64)
+
+    # Sentinel-filled output: proves the shim writes through, not into a
+    # discarded int64 temporary.
+    output = torch.full((6,), -777, dtype=x.dtype)
+    cpu_tl._expand_kernel_impl(output, x, cu_num_tokens, replace_from, replace_to)
+
+    expected_vals = torch.where(x == replace_from, torch.full_like(x, replace_to), x)
+    expected = torch.repeat_interleave(expected_vals, counts)
+    assert torch.equal(output, expected)

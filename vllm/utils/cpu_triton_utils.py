@@ -413,13 +413,20 @@ def _expand_kernel_impl(
     replace_to,
     MAX_NUM_TOKENS=None,
 ):
-    torch.ops._C.expand_kernel_impl(
-        _ensure_int64(output),
-        _ensure_int64(input_val),
-        _ensure_int64(cu_num_tokens),
-        replace_from,
-        replace_to,
+    # The C++ expand kernel is int64-only, but the production callers
+    # (expand_batch_to_tokens) pass float32 temperature/top_p and int32
+    # top_k with `output` allocated in the same dtype. Routing through
+    # _ensure_int64 would discard the kernel's writes (the converted
+    # output is a copy that is never copied back) and truncate float
+    # inputs, so expand natively at the caller's dtype instead.
+    counts = torch.diff(cu_num_tokens, prepend=cu_num_tokens.new_zeros(1))
+    vals = torch.where(
+        input_val == replace_from,
+        torch.full_like(input_val, replace_to),
+        input_val,
     )
+    expanded = torch.repeat_interleave(vals, counts)
+    output[: expanded.shape[0]] = expanded
 
 
 def _sample_recovered_tokens_kernel_impl(
