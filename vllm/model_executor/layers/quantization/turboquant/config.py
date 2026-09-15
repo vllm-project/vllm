@@ -218,6 +218,18 @@ class TurboQuantConfig:
         Valid presets: turboquant_k8v4, turboquant_4bit_nc, etc.
         """
         if cache_dtype not in TQ_PRESETS:
+            if cache_dtype == "auto":
+                # A layer whose cache dtype resolved to "auto" (e.g. a
+                # linear-attention / state layer in a hybrid model, or a
+                # boundary skip) cannot be TurboQuant-compressed. Name the
+                # real cause instead of the generic "unknown dtype".
+                raise ValueError(
+                    "TurboQuant KV cache cannot represent a layer with cache "
+                    "dtype 'auto' (e.g. linear-attention / state layers of a "
+                    "hybrid model). --kv-cache-dtype turboquant_* applies only "
+                    "to full-attention layers; feed the state layer to its own "
+                    "backend (e.g. LinearAttentionBackend) instead."
+                )
             valid = ", ".join(TQ_PRESETS.keys())
             raise ValueError(
                 f"Unknown TurboQuant cache dtype: {cache_dtype!r}. "
