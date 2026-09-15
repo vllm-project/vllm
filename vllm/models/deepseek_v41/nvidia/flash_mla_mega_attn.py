@@ -39,6 +39,7 @@ from vllm.models.deepseek_v41.sparse_mla import (
     FlashMLAMegaAttnBackend,
 )
 from vllm.utils.math_utils import round_up
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.ops.flashmla import (
     alloc_mega_attn_output,
     flash_mla_mega_attn_decode,
@@ -135,6 +136,19 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
     ) -> QuantizedActivation:
         return alloc_mega_attn_output(num_tokens, self.n_wv_group, hidden_states.device)
 
+    def _prepare_q_and_insert_kv(
+        self,
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        positions: torch.Tensor,
+        attn_metadata: (
+            dict[str, AttentionMetadata] | list[dict[str, AttentionMetadata]] | None
+        ),
+    ) -> torch.Tensor:
+        self._insert_swa_kv(kv, positions, attn_metadata)
+        # MRV2 captures this preparation before the eager attention region.
+        return pad_fused_q_heads(q, self.padded_heads)
+
     # ---- forward -----------------------------------------------------------
 
     def forward_mqa(
@@ -151,10 +165,8 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
             )
         attn_metadata = get_forward_context().attn_metadata
         if attn_metadata is None:
-            # Warmup dummy run: reserve the prefill workspace and compile the
-            # Q padding kernel, then produce zeros.
+            # Warmup dummy run: reserve the prefill workspace and produce zeros.
             self._reserve_prefill_workspace(q)
-            pad_fused_q_heads(q, self.padded_heads)
             output.data.zero_()
             output.scale.zero_()
             return
@@ -172,11 +184,11 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         # The kernel takes int32 RoPE positions.
         positions_int32 = positions.to(torch.int32)
         num_decode_tokens = swa_metadata.num_decode_tokens
-        q_padded = pad_fused_q_heads(q, self.padded_heads)
+        assert q.shape[1] == self.padded_heads
 
         if swa_metadata.num_prefills > 0:
             self._forward_prefill_mega(
-                q_padded[num_decode_tokens:],
+                q[num_decode_tokens:],
                 positions_int32[num_decode_tokens:],
                 flashmla_metadata,
                 swa_metadata,
@@ -185,7 +197,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
             )
         if swa_metadata.num_decodes > 0:
             self._forward_decode_mega(
-                q_padded[:num_decode_tokens],
+                q[:num_decode_tokens],
                 positions_int32[:num_decode_tokens],
                 flashmla_metadata,
                 swa_metadata,

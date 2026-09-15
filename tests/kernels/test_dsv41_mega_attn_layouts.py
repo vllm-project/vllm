@@ -7,6 +7,8 @@ The kernel's Q and O layouts are produced by permuting ``wq_b`` rows and
 agree with a reference that permutes the activation instead.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -94,3 +96,45 @@ def test_pad_fused_q_heads(local_heads: int, padded_heads: int):
     want = q.reshape(num_tokens, 32, local_heads, 16)
     torch.testing.assert_close(got[:, :, :local_heads], want)
     assert (got[:, :, local_heads:] == 0).all()
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.parametrize("local_heads", [16, 64])
+@pytest.mark.parametrize("capture", [False, True])
+def test_query_preparation_replays_padded_heads(local_heads, capture):
+    """Attention input preparation publishes padded Q before the eager break."""
+    from vllm.models.deepseek_v41.nvidia.flash_mla_mega_attn import (
+        DeepseekV4MegaAttnAttention,
+    )
+
+    layer = SimpleNamespace(padded_heads=64, _insert_swa_kv=lambda *args: None)
+    q = torch.randn(7, local_heads, HEAD_DIM, dtype=torch.bfloat16, device="cuda")
+    kv = torch.empty(7, HEAD_DIM, dtype=q.dtype, device=q.device)
+    positions = torch.arange(7, device=q.device)
+
+    def prepare():
+        return DeepseekV4MegaAttnAttention._prepare_q_and_insert_kv(
+            layer, q, kv, positions, None
+        )
+
+    out = prepare()
+    graph = None
+    if capture and local_heads != 64:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            out = prepare()
+    for factor in (0.25, -0.75):
+        q.copy_(torch.randn_like(q) * factor)
+        if graph is None:
+            out = prepare()
+        else:
+            graph.replay()
+        assert out.shape == (7, 64, HEAD_DIM)
+        chunks = out.reshape(7, 32, 64, 16)
+        torch.testing.assert_close(
+            chunks[:, :, :local_heads],
+            q.reshape(7, 32, local_heads, 16),
+            rtol=0,
+            atol=0,
+        )
+        assert (chunks[:, :, local_heads:] == 0).all()
