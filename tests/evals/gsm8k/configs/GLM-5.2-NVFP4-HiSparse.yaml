@@ -5,6 +5,7 @@ num_questions: 1319
 num_fewshot: 5
 max_tokens: 256
 max_concurrency: 32
+request_timeout_seconds: 1800
 startup_max_wait_seconds: 1200
 server_args: >-
   --tensor-parallel-size 4
