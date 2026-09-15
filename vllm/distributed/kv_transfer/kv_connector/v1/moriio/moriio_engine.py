@@ -314,13 +314,9 @@ class MoRIIOWriter:
         request_info = self._get_remote_alloc_info(task.transfer_id)
         with self._write_state_lock:
             request_info.completion_request_id = task.request_id
-            request_info.completion_remote_notify_port = task.remote_notify_port
             # Wide-EP multi-pod: task.remote_ip addresses only the first pod,
             # so resolve the per-rank host from multi_pod_hosts (falls back to
             # task.remote_ip for single-pod or on any indexing miss).
-            # Read from task (per-request) instead of shared worker state to
-            # avoid race conditions when concurrent requests target different
-            # decode pods.
             _remote_ip = task.remote_ip
             _hosts = task.multi_pod_hosts
             _dp_local = task.remote_dp_size_local
@@ -329,7 +325,16 @@ class MoRIIOWriter:
                 if 0 <= _pod_idx < len(_hosts):
                     _remote_ip = _hosts[_pod_idx]
             request_info.completion_remote_ip = _remote_ip
-            request_info.completion_remote_dp_size_local = _dp_local
+            # Resolve the final notify port under the lock so finalize only
+            # reads it. The offset uses the per-pod local rank (% dp_local),
+            # since each pod binds notify sockets only for its local ranks;
+            # single-pod is bit-identical (modulus is a no-op).
+            _decode_dp_rank_for_port = int(request_info.decode_dp_rank)
+            if _dp_local > 0:
+                _decode_dp_rank_for_port = _decode_dp_rank_for_port % _dp_local
+            request_info.completion_notify_port = task.remote_notify_port + (
+                get_port_offset(_decode_dp_rank_for_port, self.worker.tp_rank)
+            )
             if task.transfer_id in self._sealed_writes:
                 request_info.writes_expected = self._sealed_writes[task.transfer_id]
 
@@ -465,9 +470,9 @@ class MoRIIOWriter:
             if request_info.completion_notified:
                 return
             request_id = request_info.completion_request_id
-            remote_notify_port = request_info.completion_remote_notify_port
+            remote_port = request_info.completion_notify_port
             remote_ip = request_info.completion_remote_ip
-            if request_id is None or remote_notify_port is None or remote_ip is None:
+            if request_id is None or remote_port is None or remote_ip is None:
                 return
             transfer_statuses = list(request_info.transfer_statuses)
             request_info.transfer_statuses.clear()
@@ -476,18 +481,6 @@ class MoRIIOWriter:
         # Wait for this request's transfers to complete.
         self.worker.moriio_wrapper.waiting_for_transfer_complete(transfer_statuses)
 
-        # The notify port offset must use the per-pod local rank
-        # (% dp_local), since each pod binds notify sockets only for its local
-        # ranks. Single-pod is bit-identical (modulus is a no-op).
-        # Read from request_info (per-request) instead of shared worker state to
-        # avoid races when concurrent requests target different decode pods.
-        _dp_local = int(request_info.completion_remote_dp_size_local or 0)
-        _decode_dp_rank_for_port = int(request_info.decode_dp_rank)
-        if _dp_local > 0:
-            _decode_dp_rank_for_port = _decode_dp_rank_for_port % _dp_local
-        remote_port = remote_notify_port + get_port_offset(
-            _decode_dp_rank_for_port, self.worker.tp_rank
-        )
         # Consider using RDMA immediate data in decode side
         # to eliminate the need for this notification.
         # Consider including the first gen token from prefill in the notification

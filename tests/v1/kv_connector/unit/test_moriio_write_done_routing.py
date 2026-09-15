@@ -209,7 +209,7 @@ def test_finalize_port_ignores_stale_worker_dp_local():
         remote_dp_size_local=8,
     )
     writer._execute_write_task(task)
-    assert info.completion_remote_dp_size_local == 8
+    assert info.completion_notify_port == base + get_port_offset(9 % 8, 0)
 
     info.writes_expected = 1
     info.writes_done = 1
@@ -231,7 +231,7 @@ def test_finalize_single_pod_port_uses_global_rank():
     task = _write_task("tA", "10.0.0.1", multi_pod_hosts=[], remote_dp_size_local=0)
     writer._execute_write_task(task)
     assert info.completion_remote_ip == "10.0.0.1"
-    assert info.completion_remote_dp_size_local == 0
+    assert info.completion_notify_port == base + get_port_offset(3, 2)
 
     info.writes_expected = 1
     info.writes_done = 1

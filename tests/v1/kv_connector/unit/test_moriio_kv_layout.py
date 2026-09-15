@@ -450,7 +450,9 @@ def test_write_completion_notifies_once_after_all_sealed_writes_finish():
     request_info = RemoteAllocInfo(block_ids=[4, 5], writes_expected=2)
     request_info.transfer_statuses.extend(["status-a", "status-b"])
     request_info.completion_request_id = "req"
-    request_info.completion_remote_notify_port = 7000
+    # Final notify port is resolved in _execute_write_task; finalize reads it
+    # as-is, so set the already-offset value (base 7000 + tp_rank-2 offset).
+    request_info.completion_notify_port = 7002
     request_info.completion_remote_ip = "127.0.0.1"
     wrapper.done_remote_allocate_req_dict["xfer"] = request_info
     writer = _writer_with_fake_worker(
