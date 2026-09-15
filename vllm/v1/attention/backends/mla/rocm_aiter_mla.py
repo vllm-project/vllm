@@ -433,6 +433,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     # Served by passing the mask to the kernel; _build_decode turns away the
     # shapes AITER has no non-causal kernel for.
     supports_non_causal_multi_token_decode: ClassVar[bool] = True
+    # Set from the common metadata every build; a batch is causal unless the
+    # drafter says otherwise.
+    _decode_causal: bool = True
 
     @staticmethod
     def _uniform_padded_mtp_qo_len(
@@ -1004,8 +1007,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
         dcp_tot_seq_lens_device: torch.Tensor | None,
-        causal: bool = True,
     ) -> AiterMLADecodeMetadata:
+        causal = self._decode_causal
         device = self.device
         num_reqs = seq_lens_device.size(0)
         qo_len = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
@@ -1247,6 +1250,11 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> AiterMLAMetadata:
+        # The common MLA builder owns the causal flag but its _build_decode
+        # contract is shared with CUDA backends. Keep this ROCm-specific state
+        # on the per-ubatch Aiter builder instead of changing that shared API;
+        # super().build invokes _build_decode synchronously.
+        self._decode_causal = common_attn_metadata.causal
         attn_metadata = super().build(
             common_prefix_len, common_attn_metadata, fast_build
         )

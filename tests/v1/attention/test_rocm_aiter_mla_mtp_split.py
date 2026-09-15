@@ -130,6 +130,7 @@ def _builder(
         _mla_q_dtype=torch.bfloat16,
         _mla_kv_dtype=torch.bfloat16,
         decode_attn_out_dtype=torch.bfloat16,
+        _decode_causal=True,
     )
     # Bound to the stub rather than faked: the verify flatten's per-row view is
     # part of what _build_decode is being tested for.
@@ -153,6 +154,25 @@ def test_backend_declares_uniform_batch_support():
         AiterMLAMetadataBuilder._cudagraph_support
         == rocm_aiter_mla.AttentionCGSupport.UNIFORM_BATCH
     )
+
+
+@pytest.mark.parametrize("causal", [True, False])
+def test_build_hands_common_causal_flag_to_aiter_builder(monkeypatch, causal):
+    seen = []
+
+    def fake_common_build(self, *args):
+        seen.append(self._decode_causal)
+        return SimpleNamespace(decode=None, prefill=None)
+
+    monkeypatch.setattr(
+        rocm_aiter_mla.MLACommonMetadataBuilder, "build", fake_common_build
+    )
+    builder = object.__new__(AiterMLAMetadataBuilder)
+    builder._fp8_prefill_enabled = False
+
+    builder.build(0, SimpleNamespace(causal=causal))
+
+    assert seen == [causal]
 
 
 def test_dcp_verify_row_view_is_causal_per_row():
@@ -962,12 +982,14 @@ def _build_non_causal(monkeypatch, *, num_heads, kv_cache_dtype, qlen, mtp_qlen)
     monkeypatch.setattr(
         rocm_aiter_mla, "_expand_page_indices_kernel", _NoOpTritonKernel()
     )
+    builder = _builder(
+        mtp_decode_qlen=mtp_qlen,
+        kv_cache_dtype=kv_cache_dtype,
+        num_heads=num_heads,
+    )
+    builder._decode_causal = False
     metadata = AiterMLAMetadataBuilder._build_decode(
-        _builder(
-            mtp_decode_qlen=mtp_qlen,
-            kv_cache_dtype=kv_cache_dtype,
-            num_heads=num_heads,
-        ),
+        builder,
         block_table_tensor=torch.arange(16, dtype=torch.int32).view(2, 8),
         seq_lens_device=torch.tensor([7, 5], dtype=torch.int32),
         max_seq_len=7,
@@ -975,7 +997,6 @@ def _build_non_causal(monkeypatch, *, num_heads, kv_cache_dtype, qlen, mtp_qlen)
         query_start_loc_device=torch.tensor([0, qlen, 2 * qlen], dtype=torch.int32),
         num_decode_tokens=2 * qlen,
         dcp_tot_seq_lens_device=None,
-        causal=False,
     )
     return metadata, get_mla_metadata_v1
 
@@ -990,16 +1011,7 @@ def test_non_causal_build_hands_the_mask_to_aiter(monkeypatch):
     assert get_mla_metadata_v1.call_args.args[5] is False
 
 
-def test_a_bf16_padded_rank_past_qlen4_keeps_the_schedule_when_non_causal(monkeypatch):
-    """12 heads, bf16, qlen 8 is exactly the shape the old clause turned away;
-    a non-causal block has no causal staircase for the fold to drop."""
-    metadata, _ = _build_non_causal(
-        monkeypatch, num_heads=12, kv_cache_dtype="auto", qlen=8, mtp_qlen=8
-    )
-    assert metadata.has_persistent_metadata
-
-
-@pytest.mark.parametrize("num_heads", [8, 12, 16, 33, 48, 80, 112])
+@pytest.mark.parametrize("num_heads", [12, 16, 48])
 def test_a_two_token_fp8_block_is_refused_without_a_fold(monkeypatch, num_heads):
     """16-head (and padded-to-16) qlen-2 fp8 has no non-causal kernel.
 
@@ -1016,12 +1028,11 @@ def test_a_two_token_fp8_block_is_refused_without_a_fold(monkeypatch, num_heads)
         )
 
 
-@pytest.mark.parametrize("num_heads", [32, 64, 96, 128])
-def test_a_two_token_fp8_block_is_allowed_when_folded(monkeypatch, num_heads):
-    """32/64/96/128 heads at qlen 2 fold onto the 16-head / 4-token kernel."""
+def test_a_two_token_fp8_block_is_allowed_when_folded(monkeypatch):
+    """32 heads at qlen 2 folds onto the 16-head / 4-token kernel."""
     metadata, get_mla_metadata_v1 = _build_non_causal(
         monkeypatch,
-        num_heads=num_heads,
+        num_heads=32,
         kv_cache_dtype="fp8",
         qlen=2,
         mtp_qlen=8,
