@@ -131,6 +131,16 @@ TEST_TYPES = [
     #   for group_scale_type in [None, torch.float16]),
 ]
 
+QQQ_TYPE = TypeConfig(
+    act_type=torch.int8,
+    weight_type=scalar_types.uint4b8,
+    output_type=torch.float16,
+    group_scale_type=torch.float16,
+    group_zero_type=None,
+    channel_scale_type=torch.float,
+    token_scale_type=torch.float,
+)
+
 # TODO: in future PR refactor this and `is_quant_method_supported` in the kernel
 #  unit tests to a common utility function. Currently the use of
 #  `is_quant_method_supported` conflates kernels with quantization methods
@@ -342,6 +352,14 @@ def test_machete_heuristic(shape, types: TypeConfig):
 
         tensors = create_test_tensors(shape, types, group_size)
         machete_mm_test_helper(types, tensors, group_size)
+
+
+@pytest.mark.skipif(
+    not IS_SUPPORTED_BY_GPU, reason="Machete is not supported on this GPU type."
+)
+def test_machete_qqq():
+    tensors = create_test_tensors((64, 4096, 4096), QQQ_TYPE, group_size=128)
+    machete_mm_test_helper(QQQ_TYPE, tensors, group_size=128)
 
 
 # Test working on other devices
