@@ -153,7 +153,9 @@ else:
         record_enabled: torch.Tensor,
         num_unpadded_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return topk_ids
+        raise RuntimeError(
+            "EPLB mapping requires a device-specific map_and_record hook"
+        )
 
 
 class BaseRouter(FusedMoERouter):
@@ -215,10 +217,6 @@ class BaseRouter(FusedMoERouter):
             ]
             if eplb_state.map_and_record is not None:
                 return eplb_state.map_and_record(topk_ids, num_unpadded_tokens)
-            if not current_platform.is_cuda_alike():
-                raise RuntimeError(
-                    "EPLB mapping requires a device-specific map_and_record hook"
-                )
             return eplb_map_to_physical_and_record(
                 topk_ids=topk_ids,
                 logical_to_physical_map=eplb_state.logical_to_physical_map,

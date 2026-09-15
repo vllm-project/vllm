@@ -14,9 +14,13 @@ from vllm.distributed.eplb.eplb_state import (
     EplbState,
     _move_to_workspace,
 )
+from vllm.model_executor.layers.fused_moe.router.base_router import (
+    eplb_map_to_physical_and_record,
+)
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
     FusedTopKRouter,
 )
+from vllm.platforms import current_platform
 from vllm.platforms.interface import Platform
 
 
@@ -194,3 +198,43 @@ def test_router_uses_device_specific_mapping_hook():
     ):
         assert router._apply_eplb_mapping(logical_ids) is mapped_ids
     callback.assert_called_once_with(logical_ids, state.num_unpadded_tokens_tensors[0])
+
+
+def test_router_uses_default_mapping_without_platform_gate():
+    mapped_ids = torch.tensor([[1]])
+    state = EplbLayerState(
+        expert_load_view=torch.zeros(2),
+        logical_to_physical_map=torch.arange(2).unsqueeze(-1),
+        logical_replica_count=torch.ones(2),
+        should_record_tensor=torch.ones((), dtype=torch.bool),
+        num_unpadded_tokens_tensors=[torch.tensor(1)],
+    )
+    router = FusedTopKRouter(top_k=1, global_num_experts=2, eplb_state=state)
+    with (
+        patch(
+            "vllm.model_executor.layers.fused_moe.router.base_router.dbo_current_ubatch_id",
+            return_value=0,
+        ),
+        patch(
+            "vllm.model_executor.layers.fused_moe.router.base_router.current_platform.is_cuda_alike",
+            return_value=False,
+        ),
+        patch(
+            "vllm.model_executor.layers.fused_moe.router.base_router.eplb_map_to_physical_and_record",
+            return_value=mapped_ids,
+        ) as default_mapping,
+    ):
+        assert router._apply_eplb_mapping(torch.tensor([[0]])) is mapped_ids
+    default_mapping.assert_called_once()
+
+
+@pytest.mark.skipif(current_platform.is_cuda_alike(), reason="Non-CUDA fallback only")
+def test_non_cuda_default_mapping_fails_closed():
+    with pytest.raises(RuntimeError, match="device-specific map_and_record hook"):
+        eplb_map_to_physical_and_record(
+            topk_ids=torch.tensor([[0]]),
+            expert_load_view=torch.zeros(1),
+            logical_to_physical_map=torch.tensor([[0]]),
+            logical_replica_count=torch.ones(1),
+            record_enabled=torch.ones((), dtype=torch.bool),
+        )
