@@ -14,12 +14,17 @@ use vllm_chat::{
 };
 use vllm_text::TextRequestProcessor;
 
-use crate::{HttpListenerMode, listener::Listener};
+use crate::{
+    HttpListenerMode, TlsConfig,
+    listener::{Listener, MaybeTlsListener},
+    tls,
+};
 
 /// Configuration for the engine-free text rendering server.
 #[derive(Debug)]
 pub struct RenderConfig {
     pub model: String,
+    pub revision: Option<String>,
     pub served_model_name: Vec<String>,
     pub host: String,
     pub port: u16,
@@ -29,8 +34,9 @@ pub struct RenderConfig {
     pub chat_template: Option<String>,
     pub default_chat_template_kwargs: HashMap<String, Value>,
     pub chat_template_content_format: ChatTemplateContentFormatOption,
-    pub max_model_len: u32,
+    pub max_model_len: Option<u32>,
     pub max_logprobs: Option<i32>,
+    pub tls: Option<TlsConfig>,
 }
 
 impl RenderConfig {
@@ -41,6 +47,9 @@ impl RenderConfig {
         if self.max_logprobs.is_some_and(|value| value < -1) {
             bail!("max_logprobs must be non-negative or -1");
         }
+        if let Some(tls) = &self.tls {
+            tls.validate()?;
+        }
         Ok(())
     }
 }
@@ -48,6 +57,9 @@ impl RenderConfig {
 pub(crate) struct RenderState {
     pub(crate) model: String,
     pub(crate) served_model_names: Vec<String>,
+    /// Unlike `text.max_model_len()` this stays `None` when unset,
+    /// so model cards advertise `null` instead of the `u32::MAX`.
+    pub(crate) max_model_len: Option<u32>,
     pub(crate) text: TextRequestProcessor,
     pub(crate) chat: ChatRequestProcessor,
 }
@@ -56,6 +68,8 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
     let loaded = load_model_backends(
         &config.model,
         LoadModelBackendsOptions {
+            revision: config.revision.clone(),
+            generation_config: Default::default(),
             renderer: config.renderer,
             language_model_only: true,
             chat_template: config.chat_template.clone(),
@@ -68,7 +82,8 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
     .context("failed to load renderer/tokenizer backends")?;
     let served_model_names =
         crate::effective_served_model_names(&config.model, &config.served_model_name);
-    let text = TextRequestProcessor::new(loaded.text_backend, config.max_model_len)
+    let max_model_len = config.max_model_len.unwrap_or(u32::MAX);
+    let text = TextRequestProcessor::new(loaded.text_backend, max_model_len)
         .with_max_logprobs(config.max_logprobs);
     let chat = ChatRequestProcessor::render_only(loaded.chat_backend).with_parser_selections(
         config.tool_call_parser.clone(),
@@ -77,6 +92,7 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
     Ok(Arc::new(RenderState {
         model: config.model.clone(),
         served_model_names,
+        max_model_len: config.max_model_len,
         text,
         chat,
     }))
@@ -86,6 +102,12 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
 /// to an inference engine.
 pub async fn serve_render(config: RenderConfig, shutdown: CancellationToken) -> Result<()> {
     config.validate().context("invalid render server configuration")?;
+    let tls_config = config
+        .tls
+        .as_ref()
+        .map(tls::build_server_config)
+        .transpose()
+        .context("invalid TLS configuration")?;
     let state = tokio::select! {
         result = build_state(&config) => result?,
         _ = shutdown.cancelled() => return Ok(()),
@@ -98,8 +120,18 @@ pub async fn serve_render(config: RenderConfig, shutdown: CancellationToken) -> 
         .await
         .with_context(|| format!("failed to bind {}:{}", config.host, config.port))?;
     let address = listener.local_addr_display()?;
+    let scheme = if tls_config.is_some() {
+        "https"
+    } else {
+        "http"
+    };
+    let listener = match tls_config {
+        Some(context) => MaybeTlsListener::tls(listener, context),
+        None => MaybeTlsListener::plain(listener),
+    };
     info!(
         %address,
+        scheme,
         model = %config.model,
         "starting engine-free Rust render server"
     );
@@ -120,6 +152,7 @@ mod tests {
         let error = serve_render(
             RenderConfig {
                 model: "test-model".to_string(),
+                revision: None,
                 served_model_name: Vec::new(),
                 host: "127.0.0.1".to_string(),
                 port: 8000,
@@ -129,8 +162,9 @@ mod tests {
                 chat_template: None,
                 default_chat_template_kwargs: HashMap::new(),
                 chat_template_content_format: ChatTemplateContentFormatOption::Auto,
-                max_model_len: 128,
+                max_model_len: Some(128),
                 max_logprobs: None,
+                tls: None,
             },
             shutdown,
         )

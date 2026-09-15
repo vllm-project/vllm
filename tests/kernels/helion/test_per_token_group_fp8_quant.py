@@ -230,14 +230,3 @@ class TestPerTokenGroupFp8QuantIntegration:
         assert kernel_wrapper.op_name == "per_token_group_fp8_quant"
         assert kernel_wrapper._config_picker is not None
         assert kernel_wrapper._mutates_args == ["output_q", "output_s"]
-
-    def test_fake_impl_functionality(self):
-        skip_if_platform_unsupported("per_token_group_fp8_quant")
-        from vllm.kernels.helion.register import get_registered_kernels
-
-        registered_kernels = get_registered_kernels()
-        kernel_wrapper = registered_kernels["per_token_group_fp8_quant"]
-        fake_impl = kernel_wrapper._fake_impl
-
-        args = _generate_fake_input(16, 4096, 128)
-        assert fake_impl(*args) is None

@@ -248,7 +248,7 @@ class HrmTextDecoderLayer(nn.Module):
         self,
         config: PretrainedConfig,
         layer_idx_in_stack: int,
-        stack_kind: str,
+        stack_kind: Literal["L", "H"],
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -312,7 +312,7 @@ class HrmTextStack(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        stack_kind: str,
+        stack_kind: Literal["L", "H"],
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -521,6 +521,5 @@ class HrmTextForCausalLM(nn.Module):
         return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = ["lm_head."] if self.config.tie_word_embeddings else None
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

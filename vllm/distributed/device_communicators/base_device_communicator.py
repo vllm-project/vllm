@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from weakref import WeakValueDictionary
 
 import torch
@@ -157,6 +159,16 @@ class All2AllManagerBase:
     def destroy(self):
         pass
 
+    def stage_ep_size(self) -> None:
+        pass
+
+    def commit_ep_size(self) -> None:
+        pass
+
+    @contextmanager
+    def mask_remote_ranks(self) -> Iterator[None]:
+        yield
+
 
 class DeviceCommunicatorBase:
     """
@@ -225,6 +237,12 @@ class DeviceCommunicatorBase:
 
     def checkpoint_restore(self) -> None:
         """Restore communicator state after checkpoint (default: no-op)."""
+
+    def suspend(self) -> None:
+        """Release reclaimable communicator memory (default: no-op)."""
+
+    def resume(self) -> None:
+        """Restore memory released by ``suspend`` (default: no-op)."""
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         if dim < 0:

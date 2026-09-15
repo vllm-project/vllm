@@ -8,7 +8,6 @@ Owns transports and a single bidirectional P2PSession per remote peer.
 
 from __future__ import annotations
 
-import os
 import time
 import uuid
 from collections.abc import Iterable, Sequence
@@ -19,9 +18,11 @@ from typing_extensions import override
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.v1.core.kv_cache_utils import get_none_hash_seed
 from vllm.v1.kv_offload.base import (
     LookupResult,
     OffloadKey,
+    OffloadPolicy,
     ReqContext,
     RequestOffloadingContext,
     ScheduleEndContext,
@@ -46,9 +47,17 @@ logger = init_logger(__name__)
 # Reap unbound store batches that have been parked without a FetchMsg
 # binding them to a session for longer than this. Protects against the
 # prefiller buffering blocks for a decoder that never asks (decoder died,
-# network partition, lost kv_request_id). Must be longer than the per-store
-# deadline so the store-timeout path fires first for individual jobs.
+# network partition, lost kv_request_id). Applies only while a batch is
+# unbound: binding hands it to the session, which times the job out under
+# _STORE_TIMEOUT_S instead.
+# Overridable per tier via the ``unbound_store_timeout_s`` config key.
 _UNBOUND_STORE_TIMEOUT_S = 60.0
+
+# How long a reaped kv_request_id is remembered so a fetch that arrives
+# after the reap can be rejected immediately. Must exceed the consumer's
+# load timeout (session.client._LOAD_TIMEOUT_S): past that the consumer has
+# already given up on its own, so there is nobody left to reject.
+_REAPED_ID_RETENTION_S = 60.0
 
 # Time we wait during shutdown for inflight transfers to drain via
 # cancel(mode="wait") before falling back to mode="immediate". Bounded
@@ -207,6 +216,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         port: int | None = None,
         backends: list[str] | None = None,
         num_threads: int = 4,
+        unbound_store_timeout_s: float = _UNBOUND_STORE_TIMEOUT_S,
         **kwargs: Any,
     ) -> None:
         """Initialize the P2P secondary tier manager.
@@ -244,23 +254,38 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             num_threads: NIXL agent worker threads for the UCX-only
                 branch. Ignored when ``backends`` contains a non-UCX
                 entry.
+            unbound_store_timeout_s: Seconds a producer holds stored blocks
+                for a consumer that has not fetched them yet, before
+                ``_reap_unbound_stores`` drops them. Raise it for
+                deployments whose prefills outlast the default; the blocks
+                keep primary-tier slots pinned for the whole window.
             **kwargs: Reserved for future tier-specific options.
+
+        Raises:
+            ValueError: If ``unbound_store_timeout_s`` is not a positive
+                number, or anything convertible to one.
         """
         super().__init__(offloading_spec, primary_kv_view, tier_type)
-        # Block hashes chain from NONE_HASH, seeded from PYTHONHASHSEED
-        # (see init_none_hash in v1/core/kv_cache_utils.py). Peers with
-        # different seeds compute different hashes for identical content, so
-        # lookups silently miss and no KV crosses the wire. Require it here so
-        # a misconfigured P2P instance fails at startup rather than degrading
-        # silently; the value is also verified against each peer on handshake.
-        hash_seed = os.getenv("PYTHONHASHSEED")
-        if hash_seed is None:
+        try:
+            timeout_s = float(unbound_store_timeout_s)
+        except (TypeError, ValueError):
+            timeout_s = float("nan")
+        if not timeout_s > 0:
             raise ValueError(
-                "PYTHONHASHSEED must be set for P2P KV offload so that block "
-                "hashes match across instances. Set it to a fixed value (e.g. "
-                "PYTHONHASHSEED=0) on every P2P peer."
+                f"unbound_store_timeout_s must be a positive number, got "
+                f"{unbound_store_timeout_s!r}"
             )
-        self._hash_seed = hash_seed
+        self._unbound_store_timeout_s = timeout_s
+
+        # Block hashes chain from NONE_HASH (see v1/core/kv_cache_utils.py).
+        # Peers whose seeds differ compute different hashes for identical
+        # content, so lookups silently miss and no KV crosses the wire. The
+        # seed is advertised and verified against each peer during the
+        # handshake, so a mismatch is rejected loudly instead of degrading
+        # silently. Resolved lazily in _get_hash_seed: this tier is built
+        # before init_none_hash runs, and a non-cryptographic hash algorithm
+        # seeds NONE_HASH randomly, so the value is only known afterwards.
+        self._hash_seed: str | None = None
         if host is None:
             host = envs.VLLM_P2P_SIDE_CHANNEL_HOST
         if port is None:
@@ -307,8 +332,16 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         # kv_request_id → list of batches submit_store'd before any peer
         # asked for that id. Drained into a session by _on_session_fetch
         # when the corresponding FetchMsg arrives, or surfaced as failures
-        # by _reap_unbound_stores after _UNBOUND_STORE_TIMEOUT_S.
+        # by _reap_unbound_stores after _unbound_store_timeout_s.
         self._unbound_stores: dict[str, list[_UnboundStoreBatch]] = {}
+        # kv_request_id → time its parked batches were reaped. Nothing under
+        # one of these ids can be served any more, so a FetchMsg for it is
+        # rejected on the spot by _poll_once instead of parking demand until
+        # the consumer's own load timeout, and submit_store fails rather than
+        # re-parking under it — a prefill that outran the timeout would
+        # otherwise keep pinning fresh primary-tier slots, one timeout at a
+        # time. Entries are pruned after _REAPED_ID_RETENTION_S.
+        self._reaped_stores: dict[str, float] = {}
 
         self._finished_jobs: list[JobResult] = []
         # kv_request_ids that hit a transport/session failure; On load lookup()
@@ -366,11 +399,18 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         prefiller side, sessions are created when the consumer's inbound
         connection arrives in _accept_new_peers — submit_store no longer
         pre-creates anything.
+
+        Producer-leg requests (``remote_decoder`` present) ask for
+        REQUEST_LEVEL: the peer needs every block of the request, not just
+        the ones this request computed.
         """
         _annotate_req_context(req_context)
         source = req_context.get_state(P2PSourceInfo)
         if source is not None:
             self._get_or_create_session(source.peer_id)
+        dest = req_context.get_state(P2PDestInfo)
+        if dest is not None and dest.kv_request_id:
+            return RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
         return RequestOffloadingContext()
 
     @override
@@ -387,7 +427,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         kv_transfer_params; if a session has bound the id, finish it. If
         no session has bound the id yet, this is a no-op: parked batches
         in `_unbound_stores` are left in place and cleaned up only by
-        `_reap_unbound_stores` after `_UNBOUND_STORE_TIMEOUT_S`.
+        `_reap_unbound_stores` after `_unbound_store_timeout_s`.
         """
         source = req_context.get_state(P2PSourceInfo)
         dest = req_context.get_state(P2PDestInfo)
@@ -414,7 +454,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     def submit_store(self, job_metadata: TransferJob) -> None:
         job_id = job_metadata.job_id
         keys = list(job_metadata.keys)
-        block_ids = job_metadata.block_ids
+        block_ids = job_metadata.chunk_ids.tolist()
 
         assert len(keys) == len(block_ids)
 
@@ -440,6 +480,22 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             logger.warning(
                 "P2P %s: submit_store missing kv_request_id",
                 self._local_id,
+            )
+            self._finished_jobs.append(JobResult(job_id=job_id, success=False))
+            return
+
+        # This id's earlier batches were already reaped, so the consumer has
+        # either given up or will be rejected by the fetch path. Parking more
+        # would pin primary-tier slots for another full timeout on blocks
+        # nobody can fetch, so fail the job now — a prefill that outran the
+        # timeout falls back to local recompute on the decoder either way.
+        if kv_request_id in self._reaped_stores:
+            logger.warning(
+                "P2P %s: submit_store for reaped kv_request_id=%s job_id=%d "
+                "— failing without parking",
+                self._local_id,
+                kv_request_id,
+                job_id,
             )
             self._finished_jobs.append(JobResult(job_id=job_id, success=False))
             return
@@ -473,7 +529,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     def submit_load(self, job_metadata: TransferJob) -> None:
         job_id = job_metadata.job_id
         keys = list(job_metadata.keys)
-        block_ids = job_metadata.block_ids
+        block_ids = job_metadata.chunk_ids
 
         source = job_metadata.req_context.get_state(P2PSourceInfo)
         logger.debug(
@@ -602,6 +658,12 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     # Internal
     # ------------------------------------------------------------------
 
+    def _get_hash_seed(self) -> str:
+        """The seed NONE_HASH was derived from, resolved on first session."""
+        if self._hash_seed is None:
+            self._hash_seed = get_none_hash_seed()
+        return self._hash_seed
+
     def _get_or_create_session(self, peer_id: str) -> P2PSession:
         """Return the existing session for peer_id, or open one outbound.
 
@@ -621,7 +683,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             local_id=self._local_id,
             transport=self._data,
             local_block_len=self._data.block_len,
-            local_hash_seed=self._hash_seed,
+            local_hash_seed=self._get_hash_seed(),
             conn=conn,
         )
         self._sessions[peer_id] = session
@@ -643,7 +705,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                     local_id=self._local_id,
                     transport=self._data,
                     local_block_len=self._data.block_len,
-                    local_hash_seed=self._hash_seed,
+                    local_hash_seed=self._get_hash_seed(),
                     conn=conn,
                 )
                 logger.info(
@@ -698,13 +760,27 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         """Time out submit_store batches that no peer has ever fetched.
 
         Walks `_unbound_stores` for entries whose oldest batch is older
-        than `_UNBOUND_STORE_TIMEOUT_S`. Drops the kv_request_id, surfaces
-        every batched job as failed, and adds the id to `_failed_req_ids`
-        so a late inbound FetchMsg short-circuits to a clean rejection.
+        than `_unbound_store_timeout_s`. Drops the kv_request_id, surfaces
+        every batched job as failed, and records the id in `_reaped_stores`
+        so a late inbound FetchMsg is rejected in one round trip and a late
+        `submit_store` fails instead of re-parking under the reaped id.
+
+        Also expires `_reaped_stores` entries whose consumer can no longer
+        be waiting, which is why this runs before the empty check below.
         """
+        now = time.monotonic()
+        if self._reaped_stores:
+            retention_deadline = now - _REAPED_ID_RETENTION_S
+            for kid in [
+                kid
+                for kid, reaped_at in self._reaped_stores.items()
+                if reaped_at <= retention_deadline
+            ]:
+                del self._reaped_stores[kid]
+
         if not self._unbound_stores:
             return
-        deadline = time.monotonic() - _UNBOUND_STORE_TIMEOUT_S
+        deadline = now - self._unbound_store_timeout_s
         expired: list[str] | None = None
         for kid, batches in self._unbound_stores.items():
             # Batches are appended in arrival order, so the head is oldest.
@@ -716,7 +792,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             return
         for kid in expired:
             batches = self._unbound_stores.pop(kid)
-            self._failed_req_ids.add(kid)
+            self._reaped_stores[kid] = now
             for batch in batches:
                 self._finished_jobs.append(
                     JobResult(job_id=batch.job_id, success=False)
@@ -726,7 +802,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 "without a fetch — failing %d job(s)",
                 self._local_id,
                 kid,
-                _UNBOUND_STORE_TIMEOUT_S,
+                self._unbound_store_timeout_s,
                 len(batches),
             )
 
@@ -770,6 +846,24 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             # inline in dispatch, so the replayed add_stored_blocks calls
             # match that demand and submit transfers immediately.
             for kv_request_id in result.new_fetch_ids:
+                if kv_request_id in self._reaped_stores:
+                    # This id's blocks were already reaped, so no
+                    # submit_store will ever satisfy the demand on_fetch
+                    # just recorded. Finalize the round now: the peer gets
+                    # TransferDoneMsg(success=False) on this tick and falls
+                    # back to local prefill, instead of parking until its
+                    # own load timeout expires. The id is deliberately left
+                    # unbound so any later submit_store keeps taking the
+                    # reject path. Batches re-parked between the reap and the
+                    # retention prune are failed here rather than left to a
+                    # second reap, which would pin their slots for another
+                    # full timeout.
+                    session.finish_request(kv_request_id)
+                    for batch in self._unbound_stores.pop(kv_request_id, ()):
+                        self._finished_jobs.append(
+                            JobResult(job_id=batch.job_id, success=False)
+                        )
+                    continue
                 self._kv_to_session[kv_request_id] = session
                 for batch in self._unbound_stores.pop(kv_request_id, ()):
                     session.add_stored_blocks(
@@ -801,6 +895,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                     JobResult(job_id=batch.job_id, success=False)
                 )
         self._unbound_stores.clear()
+        self._reaped_stores.clear()
         self._control.close()
         self._data.close()
 

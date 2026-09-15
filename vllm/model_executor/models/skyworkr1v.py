@@ -29,13 +29,23 @@ from vllm.transformers_utils.processors.internvl import (
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsMultiModal,
+    SupportsPP,
+    supports_pp,
+)
 from .internvl import (
     BaseInternVLDummyInputsBuilder,
     BaseInternVLMultiModalProcessor,
     BaseInternVLProcessingInfo,
 )
-from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    init_vllm_registered_model,
+    maybe_prefix,
+)
 
 
 class SkyworkR1VImagePixelInputs(TensorSchema):
@@ -120,6 +130,25 @@ class SkyworkR1VProcessingInfo(BaseInternVLProcessingInfo):
     dummy_inputs=BaseInternVLDummyInputsBuilder,
 )
 class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix=dict.fromkeys(
+            [
+                "action_embed",
+                "temporal_embed",
+                "track_embed",
+                "track_embed_decoder",
+                "box_token",
+                "cg_criterion",
+                "cg_model",
+                "loc_encoder",
+                "loc_decoder",
+                "sam",
+                "temporal_token",
+                "track_token",
+            ]
+        )
+    )
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
@@ -132,7 +161,7 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.multimodal_config
+        multimodal_config = vllm_config.model_config.get_multimodal_config()
 
         self.config = config
         self.multimodal_config = multimodal_config
@@ -158,20 +187,22 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
             )
 
         with self._mark_language_model(vllm_config):
-            self.language_model = init_vllm_registered_model(
+            language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
                 hf_config=config.text_config,
                 prefix=maybe_prefix(prefix, "language_model"),
             )
+            self.language_model = language_model
+            assert supports_pp(language_model)
 
-        self.img_context_token_id = None
+        self.img_context_token_id: int | None = None
         self.visual_token_mask = None
         self.make_empty_intermediate_tensors = (
-            self.language_model.make_empty_intermediate_tensors
+            language_model.make_empty_intermediate_tensors
         )
 
     def _patch_quant_config(
-        self, config: PretrainedConfig, quant_config: QuantizationConfig
+        self, config: PretrainedConfig, quant_config: QuantizationConfig | None
     ):
         # the awq models from OpenGVLab missing `modules_to_not_convert`
         # patch the quant_config to add `modules_to_not_convert` back
@@ -208,7 +239,7 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
     def _init_mlp1(
         self,
         config: PretrainedConfig,
-        quant_config: QuantizationConfig,
+        quant_config: QuantizationConfig | None,
         prefix: str = "",
     ) -> nn.Module:
         vit_hidden_size = config.vision_config.hidden_size
@@ -381,19 +412,5 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = [
-            "action_embed",
-            "temporal_embed",
-            "track_embed",
-            "track_embed_decoder",
-            "box_token",
-            "cg_criterion",
-            "cg_model",
-            "loc_encoder",
-            "loc_decoder",
-            "sam",
-            "temporal_token",
-            "track_token",
-        ]
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-        return loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

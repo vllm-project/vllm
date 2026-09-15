@@ -68,7 +68,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .ernie45 import Ernie4_5ForCausalLM
@@ -244,33 +244,37 @@ class PaddleOCRVLDummyInputsBuilder(BaseDummyInputsBuilder[PaddleOCRVLProcessing
 class PaddleOCRVLMultiModalProcessor(
     BaseMultiModalProcessor[PaddleOCRVLProcessingInfo]
 ):
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        if mm_data:
-            final_mm_kwargs = dict(mm_kwargs or {})
-            final_mm_kwargs.setdefault("images_kwargs", {})
-            # vLLM use PIL.Image, always set channel_last
-            final_mm_kwargs["input_data_format"] = ChannelDimension.LAST
-            processed_outputs = self.info.ctx.call_hf_processor(
-                self.info.get_hf_processor(**final_mm_kwargs),
-                dict(text=prompt, **mm_data),
-                dict(**mm_kwargs, **tok_kwargs),
-            )
-            num_patches_per_image = processed_outputs["image_grid_thw"].prod(-1)
-            processed_outputs["pixel_values"] = processed_outputs["pixel_values"].split(
-                num_patches_per_image.tolist()
-            )
-        else:
-            tokenizer = self.info.get_tokenizer()
-            processed_outputs = tokenizer(
-                prompt, add_special_tokens=True, return_tensors="pt"
-            )
-        return processed_outputs
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not mm_data:
+            return BatchFeature(dict(passthrough_data))
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+
+        final_mm_kwargs = dict(hf_processor_mm_kwargs or {})
+        final_mm_kwargs.setdefault("images_kwargs", {})
+        # vLLM use PIL.Image, always set channel_last
+        final_mm_kwargs["input_data_format"] = ChannelDimension.LAST
+        processed_data = self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**final_mm_kwargs),
+            dict(text=prompt_text, **mm_data),
+            hf_processor_mm_kwargs,
+        )
+        num_patches_per_image = processed_data["image_grid_thw"].prod(-1)
+        processed_data["pixel_values"] = processed_data["pixel_values"].split(
+            num_patches_per_image.tolist()
+        )
+        processed_data.update(passthrough_data)
+
+        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -279,7 +283,7 @@ class PaddleOCRVLMultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
-            image_grid_thw=MultiModalFieldConfig.batched("image"),
+            image_grid_thw=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         )
 
     def _get_prompt_updates(
@@ -408,8 +412,8 @@ class SiglipVisionEmbeddings(nn.Module):
 
         self.num_patches = (self.image_size // self.patch_size) ** 2
         self.num_positions = self.num_patches
-        self.cache_position_embedding = dict()
-        self.cache_position_count = dict()
+        self.cache_position_embedding: dict[tuple[int, int], torch.Tensor] = {}
+        self.cache_position_count: dict[tuple[int, int], int] = {}
         self.position_embedding = nn.Embedding(self.num_positions, self.embed_dim)
 
         self.register_buffer(
@@ -465,7 +469,7 @@ class SiglipVisionEmbeddings(nn.Module):
         if len(self.cache_position_embedding) >= max_cache:
             min_hit_grid = min(
                 self.cache_position_count,
-                key=self.cache_position_count.get,
+                key=self.cache_position_count.__getitem__,
             )
             self.cache_position_count.pop(min_hit_grid)
             self.cache_position_embedding.pop(min_hit_grid)
@@ -479,8 +483,7 @@ class SiglipVisionEmbeddings(nn.Module):
         self,
         pixel_values: torch.FloatTensor,
         position_ids: torch.Tensor | None = None,
-        image_grid_thw: list[tuple[int, int, int] | list[tuple[int, int, int]]]
-        | None = None,
+        image_grid_thw: Sequence[tuple[int, int, int]] | None = None,
         interpolate_pos_encoding=False,
     ) -> torch.Tensor:
         if pixel_values.dim() == 4:
@@ -504,6 +507,7 @@ class SiglipVisionEmbeddings(nn.Module):
 
             start = 0
             tmp_embeddings = list()
+            assert image_grid_thw is not None
             for image_grid in image_grid_thw:
                 t, h, w = image_grid
                 end = start + t * h * w
@@ -860,7 +864,7 @@ class SiglipVisionTransformer(nn.Module):
         height_position_ids: torch.Tensor | None = None,
         width_position_ids: torch.Tensor | None = None,
         cu_seqlens: torch.Tensor | None = None,
-        image_grid_thw: torch.Tensor | None = None,
+        image_grid_thw: Sequence[tuple[int, int, int]] | None = None,
     ) -> torch.Tensor:
         hidden_states = self.embeddings(
             pixel_values,
@@ -887,7 +891,16 @@ class SiglipVisionModel(nn.Module):
             ".q_proj": (".qkv_proj", "q"),
             ".k_proj": (".qkv_proj", "k"),
             ".v_proj": (".qkv_proj", "v"),
-        }
+        },
+        # The SigLIP attention pooling head and packing pos embedding are
+        # present in the checkpoint but absent from this vision tower.
+        orig_to_new_substr={
+            "head.attention": None,
+            "head.layernorm": None,
+            "head.mlp": None,
+            "head.probe": None,
+            "packing_position_embedding": None,
+        },
     )
 
     def __init__(
@@ -921,8 +934,7 @@ class SiglipVisionModel(nn.Module):
         pixel_values,
         interpolate_pos_encoding: bool = False,
         position_ids: torch.Tensor | None = None,
-        image_grid_thw: list[tuple[int, int, int] | list[tuple[int, int, int]]]
-        | None = None,
+        image_grid_thw: Sequence[tuple[int, int, int]] | None = None,
         cu_seqlens: torch.Tensor | None = None,
     ) -> BaseModelOutputWithPooling:
         return self.vision_model(
@@ -934,18 +946,7 @@ class SiglipVisionModel(nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # Skip the SigLIP attention pooling head and packing pos embedding
-        # present in the checkpoint but absent from this vision tower.
-        loader = AutoWeightsLoader(
-            self,
-            skip_substrs=[
-                "head.attention",
-                "head.layernorm",
-                "head.mlp",
-                "head.probe",
-                "packing_position_embedding",
-            ],
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
@@ -1027,17 +1028,24 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         tokens_per_second = getattr(self.config.vision_config, "tokens_per_second", 1.0)
         for mm_feature in sorted(mm_features, key=lambda f: f.mm_position.offset):
             offset = mm_feature.mm_position.offset
+            feature_data = mm_feature.data
+            assert feature_data is not None
             if mm_feature.modality == "image":
-                t, h, w = mm_feature.data["image_grid_thw"].data.tolist()
+                grid_data = feature_data["image_grid_thw"].data
+                assert isinstance(grid_data, torch.Tensor)
+                t, h, w = grid_data.tolist()
                 assert t == 1, f"Image must have 1 frame, got {t}"
                 yield offset, 1, h // spatial_merge_size, w // spatial_merge_size, 1.0
             elif mm_feature.modality == "video":
-                t, h, w = mm_feature.data["video_grid_thw"].data.tolist()
+                grid_data = feature_data["video_grid_thw"].data
+                assert isinstance(grid_data, torch.Tensor)
+                t, h, w = grid_data.tolist()
                 second_per_grid_ts = 1.0
-                if mm_feature.data.get("second_per_grid_ts", None):
-                    second_per_grid_ts = mm_feature.data[
-                        "second_per_grid_ts"
-                    ].data.item()
+                second_per_grid_item = feature_data.get("second_per_grid_ts")
+                if second_per_grid_item is not None:
+                    second_per_grid_data = second_per_grid_item.data
+                    assert isinstance(second_per_grid_data, torch.Tensor)
+                    second_per_grid_ts = second_per_grid_data.item()
                 t_factor = second_per_grid_ts * tokens_per_second
                 yield (
                     offset,
@@ -1134,10 +1142,17 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         siglip_position_ids.append(image_position_ids)
         cu_seqlens.append(cu_seqlens[-1] + numel)
 
-        # Both are built on the host; stage them over non-blocking.
-        siglip_position_ids = torch.concat(siglip_position_ids, dim=0).to(
-            pixel_values.device, non_blocking=True
-        )
+        # Both are built on the host; concat straight into a pinned buffer
+        # so the H2D copy stays non-blocking.
+        siglip_position_ids = torch.concat(
+            siglip_position_ids,
+            dim=0,
+            out=torch.empty(
+                sum(t.numel() for t in siglip_position_ids),
+                dtype=torch.int64,
+                pin_memory=PIN_MEMORY,
+            ),
+        ).to(pixel_values.device, non_blocking=True)
         cu_seqlens = async_tensor_h2d(
             cu_seqlens, dtype=torch.int32, device=pixel_values.device
         )
