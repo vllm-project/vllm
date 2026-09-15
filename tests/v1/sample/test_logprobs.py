@@ -1143,6 +1143,30 @@ def test_spec_decode_logprobs(
         ignore_eos=False,
         presence_penalty=-1.0,
     )
+    active_sampling_params = SamplingParams(
+        temperature=0.7,
+        top_k=1,
+        seed=0,
+        logprobs=0,
+        max_tokens=10,
+        ignore_eos=False,
+    )
+    custom_sampling_params = SamplingParams(
+        temperature=0,
+        presence_penalty=-1.0,
+        logprob_token_ids=[0, 1, 2],
+        max_tokens=10,
+        ignore_eos=False,
+    )
+    requests = [
+        sampling_params,
+        penalty_sampling_params,
+        active_sampling_params,
+    ]
+    # TODO: Include ngram after Model Runner V2 support lands (#40704).
+    if method == "eagle":
+        requests.append(custom_sampling_params)
+    prompts = [prompt] * len(requests)
 
     max_model_len = 256
     llm_kwargs = dict(
@@ -1164,9 +1188,7 @@ def test_spec_decode_logprobs(
         model=model_name,
         **llm_kwargs,
     )
-    ref_results = ref_llm.generate(
-        [prompt, prompt], [sampling_params, penalty_sampling_params]
-    )
+    ref_results = ref_llm.generate(prompts, requests)
     # Collect logprobs outputs from reference LLM.
     ref_logprobs = []
     for results in ref_results:
@@ -1185,9 +1207,7 @@ def test_spec_decode_logprobs(
         speculative_config=spec_config_with_len,
         **llm_kwargs,
     )
-    spec_results = spec_llm.generate(
-        [prompt, prompt], [sampling_params, penalty_sampling_params]
-    )
+    spec_results = spec_llm.generate(prompts, requests)
     # Collect logprobs outputs from spec decode LLM.
     spec_logprobs = []
     for results in spec_results:
@@ -1291,6 +1311,23 @@ def test_prompt_logprobs_with_chunking_and_preemption():
         assert preemptions > 0, "Test did not trigger any preemptions"
 
         print(f"Test passed with {preemptions} preemptions")
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_token_logprobs_apply_virtual_temperature(dtype: torch.dtype):
+    from vllm.v1.worker.gpu.sample.logprob import compute_token_logprobs
+
+    logits = torch.randn(3, 257, device="cuda", dtype=dtype)
+    token_ids = torch.tensor([[1, 7], [9, 3], [5, 11]], device="cuda")
+    temperatures = torch.tensor([0.6, 1.5, 0.0], device="cuda")
+    effective = torch.where(temperatures == 0.0, 1.0, temperatures)
+
+    actual = compute_token_logprobs(logits, token_ids, temperatures)
+    expected = torch.log_softmax(logits.float() / effective[:, None], dim=-1).gather(
+        -1, token_ids
+    )
+    torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
 
 
 @large_gpu_mark(min_gb=24)

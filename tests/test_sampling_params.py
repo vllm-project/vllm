@@ -51,6 +51,23 @@ def test_non_diffusion_models_unaffected():
     params.verify(MockModelConfig(), None, None, None)
 
 
+@dataclass
+class MockSpeculativeConfig:
+    enable_adaptive_verification: bool = False
+
+
+def test_spec_decode_rejects_nonzero_min_p():
+    params = SamplingParams(min_p=1e-6)
+    with pytest.raises(VLLMValidationError, match="speculative decoding"):
+        params.verify(MockModelConfig(), MockSpeculativeConfig(), None, None)
+
+
+def test_spec_decode_accepts_zero_min_p():
+    SamplingParams(min_p=0.0).verify(
+        MockModelConfig(), MockSpeculativeConfig(), None, None
+    )
+
+
 @pytest.mark.parametrize("value", [-(2**63) - 1, 2**64])
 def test_extra_args_rejects_nested_integer_overflow(value):
     """Reject extension values before they reach the engine transport."""
