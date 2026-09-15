@@ -16,7 +16,12 @@ from .chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from .cumsum import chunk_local_cumsum
 from .l2norm import l2norm_fwd
 from .solve_tril import solve_tril
-from .utils import FLA_CHUNK_SIZE, SUPPRESS_LEVEL, input_guard
+from .utils import (
+    FLA_CHUNK_SIZE,
+    SUPPRESS_LEVEL,
+    gdn_workspace_tracker,
+    input_guard,
+)
 from .wy_fast import recompute_w_u_fwd
 
 
@@ -34,55 +39,61 @@ def chunk_gated_delta_rule_fwd(
     chunk_offsets: torch.Tensor | None = None,
     core_attn_out: torch.Tensor | None = None,
 ):
-    g = chunk_local_cumsum(
-        g, chunk_size=FLA_CHUNK_SIZE, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices
-    )
-    # obtain WY representation. u is actually the new v.
-    A = chunk_scaled_dot_kkt_fwd(
-        k=k,
-        beta=beta,
-        g=g,
-        cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices,
-        output_dtype=torch.float32,
-    )
-    A = solve_tril(
-        A=A, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices, output_dtype=k.dtype
-    )
-    w, u = recompute_w_u_fwd(
-        k=k,
-        v=v,
-        beta=beta,
-        A=A,
-        g_cumsum=g,
-        cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices,
-    )
-    h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
-        k=k,
-        w=w,
-        u=u,
-        g=g,
-        initial_state=initial_state,
-        output_final_state=output_final_state,
-        cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices,
-        chunk_offsets=chunk_offsets,
-    )
-    o = chunk_fwd_o(
-        q=q,
-        k=k,
-        v=v_new,
-        h=h,
-        g=g,
-        scale=scale,
-        cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices,
-        core_attn_out=core_attn_out,
-    )
-    if SUPPRESS_LEVEL < 3:
-        return g, o, A, final_state, None, None, None
-    elif SUPPRESS_LEVEL >= 3:
+    with gdn_workspace_tracker.track_call():
+        g = chunk_local_cumsum(
+            g,
+            chunk_size=FLA_CHUNK_SIZE,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+        )
+        # obtain WY representation. u is actually the new v.
+        A = chunk_scaled_dot_kkt_fwd(
+            k=k,
+            beta=beta,
+            g=g,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            output_dtype=torch.float32,
+        )
+        A = solve_tril(
+            A=A,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            output_dtype=k.dtype,
+        )
+        w, u = recompute_w_u_fwd(
+            k=k,
+            v=v,
+            beta=beta,
+            A=A,
+            g_cumsum=g,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+        )
+        h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
+            k=k,
+            w=w,
+            u=u,
+            g=g,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            chunk_offsets=chunk_offsets,
+        )
+        o = chunk_fwd_o(
+            q=q,
+            k=k,
+            v=v_new,
+            h=h,
+            g=g,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            core_attn_out=core_attn_out,
+        )
+        if SUPPRESS_LEVEL < 3:
+            return g, o, A, final_state, None, None, None
         return g, o, A, final_state, w, h, v_new
 
 
