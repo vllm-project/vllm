@@ -531,6 +531,13 @@ class Platform:
         return torch.inference_mode(mode=True)
 
     @classmethod
+    def current_device_index(cls) -> int:
+        """Get the index of the current device for the platform."""
+        if not torch.accelerator.is_available():
+            return 0
+        return torch.accelerator.current_device_index()
+
+    @classmethod
     def set_device(cls, device: torch.device) -> None:
         """
         Set the device for the current platform.
