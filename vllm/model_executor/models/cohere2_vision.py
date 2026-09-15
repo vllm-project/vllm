@@ -45,6 +45,7 @@ from vllm.multimodal.processing import (
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
+from .cohere2_max_patches import validate_cohere2_max_patches
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsMultiModal,
@@ -151,7 +152,29 @@ class Cohere2VisionProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self) -> Cohere2VisionConfig:
         return self.ctx.get_hf_config(Cohere2VisionConfig)
 
+    def _max_patches_limit(self) -> int:
+        """Server-owned cap: operator config overlay, else processor default."""
+        processor = self.ctx.get_hf_processor(Cohere2VisionProcessor)
+        default = processor.image_processor.max_patches
+        configured = (
+            self.ctx.model_config.get_multimodal_config().mm_processor_kwargs or {}
+        )
+        if not isinstance(configured, Mapping):
+            return default
+        nested = configured.get("images_kwargs")
+        if isinstance(nested, Mapping) and "max_patches" in nested:
+            value = nested["max_patches"]
+        elif "max_patches" in configured:
+            value = configured["max_patches"]
+        else:
+            return default
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            return default
+        return value
+
     def get_hf_processor(self, **kwargs: object) -> Cohere2VisionProcessor:
+        if kwargs:
+            validate_cohere2_max_patches(kwargs, self._max_patches_limit())
         return self.ctx.get_hf_processor(Cohere2VisionProcessor, **kwargs)
 
     def get_image_processor(self, **kwargs: object):
@@ -179,6 +202,7 @@ class Cohere2VisionProcessingInfo(BaseProcessingInfo):
         Calculate the number of image patches for a given image.
         Uses the HF processor to determine the actual number of patches.
         """
+        validate_cohere2_max_patches(mm_kwargs, self._max_patches_limit())
         image_processor: Cohere2VisionImageProcessorFast = processor.image_processor
 
         return image_processor.get_number_of_image_patches(
