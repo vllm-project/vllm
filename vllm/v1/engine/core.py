@@ -36,7 +36,7 @@ from vllm.multimodal.cache import MultiModalCacheMissError
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
-from vllm.utils import numa_utils
+from vllm.utils import length_from_prompt_token_ids_or_embeds, numa_utils
 from vllm.utils.gc_utils import (
     freeze_gc_heap,
     maybe_attach_gc_debug_callback,
@@ -983,6 +983,17 @@ class EngineCore:
         This function could be directly used in input processing thread to allow
         request initialization running in parallel with Model forward
         """
+        if request.sampling_params is not None:
+            prompt_start = request.sampling_params.routed_experts_prompt_start
+            prompt_len = length_from_prompt_token_ids_or_embeds(
+                request.prompt_token_ids, request.prompt_embeds
+            )
+            if not 0 <= prompt_start <= prompt_len:
+                raise ValueError(
+                    "routed_experts_prompt_start must be between 0 and the "
+                    f"prompt length ({prompt_len}), got {prompt_start}."
+                )
+
         # Note on thread safety: no race condition.
         # `mm_receiver_cache` is reset at the end of LLMEngine init,
         # and will only be accessed in the input processing thread afterwards.
