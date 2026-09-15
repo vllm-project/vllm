@@ -78,11 +78,12 @@ class ThinkingBudgetState:
             end_ids, dtype=torch.int32, device=self.device
         )
 
-    def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
+    def add_request(self, req_idx: int, sampling_params: SamplingParams) -> bool:
         if not self.enabled:
-            return
+            return False
         budget = sampling_params.thinking_token_budget
-        self.use_thinking_budget[req_idx] = budget is not None
+        use_thinking_budget = budget is not None
+        self.use_thinking_budget[req_idx] = use_thinking_budget
         if budget is None:
             budget = -1
         else:
@@ -91,6 +92,7 @@ class ThinkingBudgetState:
         if self.thinking_token_budget.np[req_idx] != budget:
             self.thinking_token_budget.np[req_idx] = budget
             self._budget_dirty = True
+        return use_thinking_budget
 
     def apply_staged_writes(self) -> None:
         if not self.enabled:

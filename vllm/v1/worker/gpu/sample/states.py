@@ -38,7 +38,7 @@ class SamplingStates:
         # -1 means no logprobs are requested.
         self.num_logprobs.fill(NO_LOGPROBS)
 
-    def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
+    def add_request(self, req_idx: int, sampling_params: SamplingParams) -> bool:
         self.temperature.np[req_idx] = sampling_params.temperature
         self.top_p.np[req_idx] = sampling_params.top_p
         top_k = sampling_params.top_k
@@ -59,6 +59,16 @@ class SamplingStates:
         elif num_logprobs == -1:
             num_logprobs = self.vocab_size
         self.num_logprobs[req_idx] = num_logprobs
+
+        # Mirrors the early-outs in apply_temperature(), apply_min_p() and
+        # get_top_k_top_p().
+        temperature = self.temperature.np[req_idx]
+        return bool(
+            (temperature != 0.0 and temperature != 1.0)
+            or self.min_p.np[req_idx] != 0.0
+            or top_k != self.vocab_size
+            or self.top_p.np[req_idx] != 1.0
+        )
 
     def apply_staged_writes(self) -> None:
         self.temperature.copy_to_uva()

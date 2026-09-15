@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -190,15 +192,14 @@ def test_v2_greedy_sampling_applies_thinking_budget():
     """Greedy-only requests must not bypass thinking-budget processing."""
     req_states = _make_req_states([1, START, 10, 11, 12], prompt_len=1)
     sampler = Sampler(
+        vllm_config=SimpleNamespace(reasoning_config=MockReasoningConfig()),
         max_num_reqs=4,
         vocab_size=VOCAB_SIZE,
         device=DEVICE,
         req_states=req_states,
-        reasoning_config=MockReasoningConfig(),
     )
     sampler.add_request(
         req_idx=3,
-        prompt_len=1,
         sampling_params=SamplingParams(
             temperature=0.0,
             thinking_token_budget=3,
