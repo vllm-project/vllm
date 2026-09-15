@@ -346,12 +346,23 @@ class ObjectSerde(ABC):
 class MsgpackSerde(ObjectSerde):
     def __init__(self):
         # Delayed import to avoid circular dependency
+        import vllm.envs as envs
         from vllm.multimodal.inputs import MultiModalKwargsItem
         from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
         self.encoder = MsgpackEncoder()
-        self.tensor_decoder = MsgpackDecoder(torch.Tensor, share_mem=False)
-        self.mm_decoder = MsgpackDecoder(MultiModalKwargsItem, share_mem=False)
+        # Tensors read out of the shm ring must be copied out before the slot
+        # is reused (share_mem=False). By default that copy is pinned, but
+        # pinned host memory is never returned to the OS by the CUDA host
+        # allocator, so variable-sized multimodal tensors grow the pinned pool
+        # without bound. Opt out to pageable copies via env.
+        pin_tensors = False if envs.VLLM_SHM_OBJECT_STORAGE_DISABLE_PIN_MEMORY else None
+        self.tensor_decoder = MsgpackDecoder(
+            torch.Tensor, share_mem=False, pin_tensors=pin_tensors
+        )
+        self.mm_decoder = MsgpackDecoder(
+            MultiModalKwargsItem, share_mem=False, pin_tensors=pin_tensors
+        )
         self._mm_kwargs_item_cls = MultiModalKwargsItem
 
     def serialize(self, value: Any) -> tuple[bytes | list[bytes], int, bytes, int]:

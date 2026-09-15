@@ -325,9 +325,14 @@ class MsgpackDecoder:
         t: Any | None = None,
         share_mem: bool = True,
         oob_tensor_provider: OOBTensorProvider | None = None,
+        pin_tensors: bool | None = None,
     ):
         self.share_mem = share_mem
-        self.pin_tensors = PIN_MEMORY
+        # When ``pin_tensors`` is None, fall back to pinning whenever pinned
+        # memory is available (the historical default). Callers that retain
+        # decoded tensors only transiently can pass ``False`` to use pageable
+        # copies and avoid growing the (never-freed) pinned host pool.
+        self.pin_tensors = PIN_MEMORY if pin_tensors is None else pin_tensors
         args = () if t is None else (t,)
         self.decoder = msgpack.Decoder(
             *args, ext_hook=self.ext_hook, dec_hook=self.dec_hook
