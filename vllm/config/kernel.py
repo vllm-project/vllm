@@ -270,6 +270,12 @@ class KernelConfig:
                    running QDQ on activations.
     """
 
+    nvfp4_dynamic_max_tokens: int = Field(default=0, ge=0, le=16)
+    """Experimental CuTe NVFP4 A16 cutoff. Zero selects CuTe W4A4 for every call."""
+
+    nvfp4_dynamic_silu_max_tokens: int | None = Field(default=None, ge=0, le=16)
+    """A16 cutoff for fused SiLU down projections. None inherits the linear cutoff."""
+
     linear_backend: LinearBackend = "auto"
     """Backend for linear layer GEMM kernels. Available options:
 
@@ -298,12 +304,6 @@ class KernelConfig:
     - "xpu": Use XPU kernels
     - "xpu_woq": Use XPU kernels for weight-only quantization (e.g. W8A16)
     """
-
-    nvfp4_dynamic_max_tokens: int = Field(default=0, ge=0, le=16)
-    """Experimental CuTe NVFP4 A16 cutoff. Zero selects CuTe W4A4 for every call."""
-
-    nvfp4_dynamic_silu_max_tokens: int | None = Field(default=None, ge=0, le=16)
-    """A16 cutoff for fused SiLU down projections. None inherits the linear cutoff."""
 
     @field_validator("moe_backend", mode="before")
     @classmethod

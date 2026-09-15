@@ -1049,15 +1049,7 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     # back to emulation. It overrides --linear-backend.
     force_kernel: type[NvFp4LinearKernel] | None = None
     linear_backend = _get_linear_backend()
-    if linear_backend == "flashinfer_cutedsl_dynamic":
-        from .nvfp4.dynamic_cutedsl import FlashInferCuTeDynamicNvFp4LinearKernel
-
-        if use_a16:
-            raise ValueError("Dynamic CuTe NVFP4 requires a calibrated W4A4 checkpoint")
-        if envs.VLLM_BATCH_INVARIANT:
-            raise ValueError("Dynamic CuTe NVFP4 does not support VLLM_BATCH_INVARIANT")
-        force_kernel = FlashInferCuTeDynamicNvFp4LinearKernel
-    elif envs.VLLM_BATCH_INVARIANT:
+    if envs.VLLM_BATCH_INVARIANT:
         bi_supported, reason = CutlassNvFp4LinearKernel.is_supported()
         if bi_supported:
             if linear_backend not in ("auto", "cutlass"):
@@ -1098,6 +1090,15 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
             force_kernel = FlashInferCuteDslNvFp4W4A16LinearKernel
         else:
             force_kernel = MarlinNvFp4LinearKernel
+
+    if linear_backend == "flashinfer_cutedsl_dynamic":
+        from .nvfp4.dynamic_cutedsl import FlashInferCuTeDynamicNvFp4LinearKernel
+
+        if use_a16:
+            raise ValueError("Dynamic CuTe NVFP4 requires a calibrated W4A4 checkpoint")
+        if envs.VLLM_BATCH_INVARIANT:
+            raise ValueError("Dynamic CuTe NVFP4 does not support VLLM_BATCH_INVARIANT")
+        force_kernel = FlashInferCuTeDynamicNvFp4LinearKernel
 
     if force_kernel is not None:
         if use_a16 and force_kernel not in a16_kernels:

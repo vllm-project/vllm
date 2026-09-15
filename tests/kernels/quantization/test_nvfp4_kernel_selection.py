@@ -37,7 +37,27 @@ def test_dynamic_cutedsl_rejects_uncalibrated_weight_only_checkpoint(monkeypatch
     from vllm.model_executor.kernels import linear
 
     monkeypatch.setattr(
-        linear, "_get_linear_backend", lambda: "flashinfer_cutedsl_dynamic"
+        linear, "_get_linear_backend", lambda **kwargs: "flashinfer_cutedsl_dynamic"
     )
     with pytest.raises(ValueError, match="calibrated W4A4 checkpoint"):
         linear.init_nvfp4_linear_kernel(use_a16=True)
+
+
+@pytest.mark.parametrize("batch_invariant_supported", [False, True])
+def test_dynamic_cutedsl_rejects_batch_invariant_mode(
+    monkeypatch, batch_invariant_supported
+):
+    """Explicit dynamic selection must not silently override determinism."""
+    from vllm.model_executor.kernels import linear
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setattr(
+        linear, "_get_linear_backend", lambda **kwargs: "flashinfer_cutedsl_dynamic"
+    )
+    monkeypatch.setattr(
+        CutlassNvFp4LinearKernel,
+        "is_supported",
+        lambda: (batch_invariant_supported, "test platform"),
+    )
+    with pytest.raises(ValueError, match="does not support VLLM_BATCH_INVARIANT"):
+        linear.init_nvfp4_linear_kernel()
