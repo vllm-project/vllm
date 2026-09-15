@@ -33,6 +33,22 @@ steps:
   - vllm/model_executor/layers/quantization/modelopt.py
   commands:
     - pytest -v -s fusion/
+  mirror:
+    amd:
+      label: ":amd: (MI300) Quantized Fusions"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 45
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - tests/fusion
+      - vllm/model_executor/layers/fusion
+      - vllm/model_executor/kernels/linear
+      - vllm/model_executor/layers/quantization/compressed_tensors
+      - vllm/model_executor/layers/quantization/modelopt.py
+      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (B200) Quantized MoE"
   key: quantized-moe-test-b200
