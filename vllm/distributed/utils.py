@@ -551,14 +551,33 @@ def fetch_group_ports(store: Store, key: str, count: int) -> list[int]:
     return list(struct.unpack(f"!{count}I", store.get(key)))
 
 
+# Per-process flag: startup (weight load, KV setup, graph capture) is done and
+# the busy loop is about to start. Under FT, gloo groups created before this
+# point are given no cpu timeout, because uneven rank startup would trip it;
+# groups created later (recovery reinit) get the configured timeout.
+_steady_state_entered = False
+
+
+def enter_steady_state() -> None:
+    global _steady_state_entered
+    _steady_state_entered = True
+
+
 def get_cpu_distributed_timeout_or_none() -> timedelta | None:
     from vllm.config import get_current_vllm_config_or_none
 
     vllm_config = get_current_vllm_config_or_none()
     if vllm_config is None:
         return None
-    timeout_seconds = vllm_config.parallel_config.cpu_distributed_timeout_seconds
+    parallel_config = vllm_config.parallel_config
+    if parallel_config.enable_fault_tolerance and not _steady_state_entered:
+        return None
+    timeout_seconds = parallel_config.cpu_distributed_timeout_seconds
     return timedelta(seconds=timeout_seconds) if timeout_seconds is not None else None
+
+
+def set_gloo_backend_timeout(group: ProcessGroup, timeout: timedelta) -> None:
+    group._get_backend(torch.device("cpu"))._set_default_timeout(timeout)
 
 
 def get_distributed_timeout_or_none() -> timedelta | None:
