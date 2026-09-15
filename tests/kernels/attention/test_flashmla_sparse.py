@@ -4,6 +4,152 @@ import pytest
 import torch
 
 
+def test_dsv41_decode_reuses_physical_selection_until_source_or_metadata_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Followers attend with the source's exact physical IDs and lengths;
+    a new source or request metadata must publish a fresh selection."""
+    from types import SimpleNamespace
+
+    from vllm.models.deepseek_v41.nvidia import flashmla
+
+    mapping_calls = []
+    attended = []
+
+    def map_selection(
+        topk, token_to_req, block_table, block_size, is_valid, *, output_buffers=None
+    ):
+        mapping_calls.append(output_buffers)
+        physical, lengths = (
+            output_buffers
+            if output_buffers is not None
+            else (torch.empty_like(topk), torch.empty(topk.shape[0], dtype=torch.int32))
+        )
+        local = topk.clamp(min=0)
+        req = token_to_req[:, None]
+        slot_ids = (
+            block_table[req, local // block_size] * block_size + local % block_size
+        )
+        physical.copy_(torch.where(topk >= 0, slot_ids, -1))
+        lengths.copy_((topk >= 0).sum(dim=1).to(torch.int32) * is_valid.to(torch.int32))
+        return physical, lengths
+
+    def attend(**kwargs):
+        attended.append(
+            (
+                kwargs["extra_indices_in_kvcache"].clone(),
+                kwargs["extra_topk_length"].clone(),
+            )
+        )
+        return kwargs["out"], None
+
+    monkeypatch.setattr(flashmla, "compute_global_topk_indices_and_lens", map_selection)
+    monkeypatch.setattr(flashmla, "flash_mla_with_kvcache", attend)
+    topk = torch.tensor([[0, 3, -1], [1, 2, -1]], dtype=torch.int32)
+    buffers = (
+        torch.full((3, 3), -99, dtype=torch.int32),
+        torch.full((3,), -99, dtype=torch.int32),
+    )
+    layer = SimpleNamespace(
+        topk_indices_buffer=topk,
+        physical_selection_buffers=buffers,
+        index_source_layer_id=24,
+        compress_ratio=1,
+        swa_cache_layer=SimpleNamespace(kv_cache=torch.empty(1, 2, 1)),
+        scale=1.0,
+        attn_sink=torch.empty(1),
+    )
+    source = SimpleNamespace(
+        block_size=2,
+        block_table=torch.tensor([[5, 6], [7, 8]], dtype=torch.int32),
+        physical_selection_source_id=None,
+        physical_selection_swa_metadata=None,
+        physical_selection=None,
+    )
+    swa = SimpleNamespace(
+        num_decodes=2,
+        num_decode_tokens=2,
+        num_prefills=0,
+        max_decode_query_len=1,
+        is_valid_token=torch.tensor([True, False]),
+        token_to_req_indices=torch.tensor([0, 1], dtype=torch.int32),
+        decode_swa_indices=torch.empty(2, 1, 1, dtype=torch.int32),
+        decode_swa_lens=torch.empty(2, dtype=torch.int32),
+        tile_sched_swaonly=object(),
+        tile_sched_c1a=object(),
+        tile_sched_c2a=object(),
+    )
+    q = torch.empty(2, 1, 1)
+    output = torch.empty_like(q)
+
+    def forward():
+        flashmla.DeepseekV4FlashMLAAttention._forward_decode(
+            layer, q, torch.empty(1, 2, 1), swa, source, False, output
+        )
+
+    for _ in range(4):
+        forward()
+    assert len(mapping_calls) == 1
+    assert mapping_calls[0] is not None
+    assert attended[-1][0][:, 0].tolist() == [[10, 13, -1], [15, 16, -1]]
+    assert attended[-1][1].tolist() == [2, 0]
+
+    layer.index_source_layer_id = 28
+    topk[0, 0] = 2
+    forward()
+    assert len(mapping_calls) == 2
+    assert attended[-1][0][0, 0, 0] == 12
+
+    source = SimpleNamespace(**vars(source))
+    source.block_table = torch.tensor([[9, 10], [11, 12]], dtype=torch.int32)
+    source.physical_selection_source_id = None
+    source.physical_selection_swa_metadata = None
+    source.physical_selection = None
+    swa.token_to_req_indices = torch.tensor([1, 0], dtype=torch.int32)
+    forward()
+    assert len(mapping_calls) == 3
+    assert attended[-1][0][0, 0, 0] == 24
+
+    swa = SimpleNamespace(**vars(swa))
+    swa.is_valid_token = torch.tensor([False, True])
+    forward()
+    assert len(mapping_calls) == 4
+    assert attended[-1][1].tolist() == [0, 2]
+
+    swa.num_prefills = 1
+    forward()
+    assert len(mapping_calls) == 5
+    assert mapping_calls[-1] is None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA graph coverage")
+def test_dsv41_physical_selection_buffers_refresh_on_graph_replay() -> None:
+    """Captured physicalization reads current logical IDs and block tables."""
+    from vllm.models.deepseek_v41.common.ops import (
+        compute_global_topk_indices_and_lens,
+    )
+
+    topk = torch.tensor([[0, 3, -1]], dtype=torch.int32, device="cuda")
+    token_to_req = torch.zeros(1, dtype=torch.int32, device="cuda")
+    block_table = torch.tensor([[5, 7]], dtype=torch.int32, device="cuda")
+    is_valid = torch.ones(1, dtype=torch.bool, device="cuda")
+    buffers = (torch.empty_like(topk), torch.empty(1, dtype=torch.int32, device="cuda"))
+    args = (topk, token_to_req, block_table, 2, is_valid)
+
+    compute_global_topk_indices_and_lens(*args, output_buffers=buffers)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        compute_global_topk_indices_and_lens(*args, output_buffers=buffers)
+
+    topk[0, 0] = 2
+    block_table[0, 0] = 11
+    block_table[0, 1] = 13
+    graph.replay()
+    expected = compute_global_topk_indices_and_lens(*args)
+    torch.testing.assert_close(buffers[0], expected[0], rtol=0, atol=0)
+    torch.testing.assert_close(buffers[1], expected[1], rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("sm120", [False, True])
 def test_deepseek_v4_c128a_adaptive_width_has_capture_stable_stride(
     monkeypatch: pytest.MonkeyPatch,

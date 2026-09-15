@@ -532,6 +532,30 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             prefix=f"{prefix}.layers",
         )
 
+        if (
+            vllm_config.attention_config.dsv41_reuse_physical_selection
+            and not self.parallel_config.use_ubatching
+            and self.parallel_config.prefill_context_parallel_size == 1
+            and self.parallel_config.decode_context_parallel_size == 1
+        ):
+            flashmla_layers = [
+                layer.attn
+                for layer in islice(self.layers, self.start_layer, self.end_layer)
+                if isinstance(layer, DeepseekV4DecoderLayer)
+                and isinstance(layer.attn, DeepseekV4FlashMLAAttention)
+            ]
+            if flashmla_layers:
+                max_decode_rows = min(
+                    vllm_config.scheduler_config.max_num_seqs,
+                    vllm_config.scheduler_config.max_num_batched_tokens,
+                )
+                physical_selection_buffers = (
+                    torch.empty(max_decode_rows, config.index_topk, dtype=torch.int32),
+                    torch.empty(max_decode_rows, dtype=torch.int32),
+                )
+                for attn in flashmla_layers:
+                    attn.physical_selection_buffers = physical_selection_buffers
+
         # The n-gram hash needs a slot-keyed rolling store of compressed ids
         # (chunked prefill / decode lookback); key it off the first local
         # layer's sliding-window KV cache. Only PP ranks owning an engram

@@ -140,6 +140,10 @@ class DeepseekV4FlashMLAMetadata(AttentionMetadata):
     block_size: int
     topk_tokens: int
 
+    physical_selection_source_id: int | None = None
+    physical_selection_swa_metadata: object | None = None
+    physical_selection: tuple[torch.Tensor, torch.Tensor] | None = None
+
 
 class DeepseekV4SparseMLAMetadataBuilder(
     AttentionMetadataBuilder[DeepseekV4FlashMLAMetadata]
