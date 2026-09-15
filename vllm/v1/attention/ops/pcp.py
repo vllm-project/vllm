@@ -12,22 +12,35 @@ def _gather_prefill_cache_inputs(
     tensors: tuple[torch.Tensor, ...],
     slot_mapping: torch.Tensor,
     num_decode_tokens: int,
+    shard_decode_requests: bool = False,
 ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
-    """Keep replicated decode writes local and gather partitioned prefills."""
+    """Gather PCP cache inputs while preserving replicated KV-cache state.
+
+    PCP-only execution shards decode requests across ranks. In that mode each
+    rank must gather the other owners' decode KV as well as partitioned prefill
+    KV so every PCP rank retains a complete cache replica. DCP execution keeps
+    decode requests replicated and uses the legacy prefill-only gather.
+    """
     local_num_tokens = tensors[0].shape[0]
     assert all(tensor.shape[0] == local_num_tokens for tensor in tensors)
     assert 0 <= num_decode_tokens <= local_num_tokens
 
+    pcp_group = get_pcp_group()
+    pcp_size = pcp_group.world_size
+    gathered_slot_mapping = slot_mapping[: pcp_size * local_num_tokens]
+    if shard_decode_requests:
+        gathered_inputs = tuple(
+            pcp_group.all_gather(tensor.contiguous(), dim=0) for tensor in tensors
+        )
+        return gathered_inputs, gathered_slot_mapping
+
     if num_decode_tokens == local_num_tokens:
         return tensors, slot_mapping[:num_decode_tokens]
 
-    pcp_group = get_pcp_group()
     gathered_prefills = tuple(
         pcp_group.all_gather(tensor[num_decode_tokens:].contiguous(), dim=0)
         for tensor in tensors
     )
-    pcp_size = pcp_group.world_size
-    gathered_slot_mapping = slot_mapping[: pcp_size * local_num_tokens]
     if num_decode_tokens == 0:
         return gathered_prefills, gathered_slot_mapping
 
@@ -51,6 +64,7 @@ def maybe_gather_mla_latent_cache_inputs(
     slot_mapping: torch.Tensor | None,
     num_decode_tokens: int | None,
     use_pcp: bool,
+    pcp_shard_decode_requests: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     if not use_pcp or num_decode_tokens is None:
         return kv_c_normed, k_pe, slot_mapping
@@ -61,6 +75,7 @@ def maybe_gather_mla_latent_cache_inputs(
         (kv_c_normed, k_pe_flat),
         slot_mapping,
         num_decode_tokens,
+        pcp_shard_decode_requests,
     )
     cache_k_pe = cache_k_pe_flat.view(-1, *k_pe.shape[1:])
     return cache_kv_c, cache_k_pe, cache_slot_mapping
@@ -71,11 +86,12 @@ def maybe_gather_indexer_k(
     slot_mapping: torch.Tensor,
     num_decode_tokens: int,
     use_pcp: bool,
+    pcp_shard_decode_requests: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if not use_pcp:
         return k, slot_mapping
     (cache_k,), cache_slot_mapping = _gather_prefill_cache_inputs(
-        (k,), slot_mapping, num_decode_tokens
+        (k,), slot_mapping, num_decode_tokens, pcp_shard_decode_requests
     )
     return cache_k, cache_slot_mapping
 
