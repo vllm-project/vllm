@@ -179,7 +179,7 @@ class EmbeddingTokenizeParamsMixin(PoolingTokenizeParamsMixin):
         pooler_config = model_config.pooler_config
         if pooler_config is not None:
             if pooler_config.enable_chunked_processing:
-                max_total_tokens = None
+                max_total_tokens = pooler_config.max_embed_len
             else:
                 max_embed_len = pooler_config.max_embed_len or default_max_total_tokens
                 max_output_tokens = default_max_total_tokens - max_embed_len
