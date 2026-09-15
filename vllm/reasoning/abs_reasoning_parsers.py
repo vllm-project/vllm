@@ -69,6 +69,19 @@ class ReasoningParser:
         """
         return False
 
+    @property
+    def emits_reasoning_span(self) -> bool:
+        """Whether this request's output opens with a reasoning span.
+
+        Consulted when building a structural tag: the grammars xgrammar
+        derives for the two cases are not interchangeable. A reasoning grammar
+        expects the output to close a thinking block, while a non-reasoning one
+        excludes the thinking markers outright. Parsers whose thinking mode is
+        request-dependent should override this; the default preserves the
+        historical assumption that no reasoning span is emitted.
+        """
+        return False
+
     @abstractmethod
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         """
