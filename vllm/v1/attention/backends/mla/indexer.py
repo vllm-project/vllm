@@ -862,6 +862,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             dtype=torch.int32,
             device=self.device,
         )
+        # Materialize the rank on device during builder initialization. Creating
+        # this scalar in build() would introduce a GPU<->CPU sync in the decode
+        # hot path.
+        self.dcp_rank_tensor = torch.tensor(
+            self.dcp_rank, dtype=torch.int32, device=self.device
+        )
         self.expanded_block_table_buffer = torch.zeros(
             (scheduler_config.max_num_batched_tokens, block_table_width),
             dtype=torch.int32,
@@ -915,7 +921,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         local_seq_lens = get_dcp_local_seq_lens(
             seq_lens,
             self.dcp_world_size,
-            self.dcp_rank,
+            self.dcp_rank_tensor,
             self.cp_kv_cache_interleave_size,
         )
         if seq_lens_is_buffer_view:
