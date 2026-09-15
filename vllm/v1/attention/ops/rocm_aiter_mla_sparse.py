@@ -55,13 +55,9 @@ def _get_aiter_sparse_prefill_opus() -> Callable[..., torch.Tensor] | None:
     logger.info_once("Using AITER OPUS for large sparse MLA prefill on gfx950")
     return pa_sparse_prefill_opus
 
-
-_GFX950_C4A_AITER_MAX_COMPRESSED_SEQ_LEN = 64 * 1024
-_GFX950_C4A_NATIVE_MAX_ROWS = 256
 # Conservative perf gate, not a correctness bound: OPUS is correct for any query
 # count, but Triton stays faster below this measured crossover.
 _GFX950_AITER_SPARSE_PREFILL_OPUS_MIN_QUERIES = 1024
-
 
 def _get_aiter_top_k_kernel(
     *,
@@ -73,17 +69,6 @@ def _get_aiter_top_k_kernel(
 ) -> Callable[..., None] | None:
     if compress_ratio <= 1 or not on_gfx950:
         return None
-
-    if not is_prefill:
-        assert max_valid_seq_len is not None
-        # AITER v0.1.19 decode is one-block only. This measured gfx950
-        # FP32/k=1024 compressed-row boundary is independent of the native
-        # split-count boundary in sampler.cu.
-        if (
-            num_rows <= _GFX950_C4A_NATIVE_MAX_ROWS
-            and max_valid_seq_len > _GFX950_C4A_AITER_MAX_COMPRESSED_SEQ_LEN
-        ):
-            return None
 
     topk_ops = _get_aiter_topk_ops()
     if topk_ops is None:
