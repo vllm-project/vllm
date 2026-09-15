@@ -19,13 +19,13 @@ logger = init_logger(__name__)
 _SUPPORTED_BACKENDS = (
     Fp8MoeBackend.FLASHINFER_TRTLLM,
     Fp8MoeBackend.DEEPGEMM,
+    Fp8MoeBackend.HUMMING,
     Fp8MoeBackend.MARLIN,
     Fp8MoeBackend.XPU,
     # AITER FlyDSL (gfx950): auto-picked by select_mxfp8_moe_backend when
     # is_supported_config passes (gfx950 + flydsl installed + not EP). On other
     # devices / no flydsl / EP it is skipped and native is used.
     Fp8MoeBackend.AITER_MXFP8,
-    Fp8MoeBackend.HUMMING,
     Fp8MoeBackend.TRITON_MXFP8,
     Fp8MoeBackend.EMULATION,
 )
