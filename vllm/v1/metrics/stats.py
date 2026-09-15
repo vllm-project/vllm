@@ -328,6 +328,7 @@ class RequestSpecDecodeMetrics:
     num_spec_tokens: int
     histogram: list[int] = field(default_factory=list)
     num_draft_tokens: int = 0
+    num_emitted_tokens: int = 0
     per_step_accepted: list[int] = field(default_factory=list)
     per_step_drafted: list[int] = field(default_factory=list)
 
@@ -339,10 +340,15 @@ class RequestSpecDecodeMetrics:
         )
 
     def observe(
-        self, num_draft_tokens: int, num_accepted: int, detailed: bool = False
+        self,
+        num_draft_tokens: int,
+        num_accepted: int,
+        num_emitted: int,
+        detailed: bool = False,
     ) -> None:
         self.histogram[num_accepted] += 1
         self.num_draft_tokens += num_draft_tokens
+        self.num_emitted_tokens += num_emitted
         if detailed:
             self.per_step_accepted.append(num_accepted)
             self.per_step_drafted.append(num_draft_tokens)
@@ -352,13 +358,13 @@ class RequestSpecDecodeMetrics:
 
         ``acceptance_histogram`` is a dense list indexed by accepted draft count
         ``j`` (length ``num_spec_tokens + 1``). ``mean_acceptance_length``
-        includes the bonus token (``j + 1``); ``draft_acceptance_rate`` is
-        draft-only, full precision. Per-step arrays are included only when
-        populated (``detailed`` level).
+        is the average number of emitted tokens per step (including the bonus token);
+        ``draft_acceptance_rate`` is draft-only, full precision. Per-step arrays
+        are included only when populated (``detailed`` level).
         """
         num_spec_steps = sum(self.histogram)
         num_accepted = sum(j * count for j, count in enumerate(self.histogram))
-        mean_al = 1.0 + num_accepted / num_spec_steps if num_spec_steps else 1.0
+        mean_al = self.num_emitted_tokens / num_spec_steps if num_spec_steps else 1.0
         rate = num_accepted / self.num_draft_tokens if self.num_draft_tokens else 0.0
         result: dict[str, Any] = {
             "mean_acceptance_length": mean_al,
@@ -367,6 +373,7 @@ class RequestSpecDecodeMetrics:
             "num_spec_steps": num_spec_steps,
             "num_accepted_draft_tokens": num_accepted,
             "num_draft_tokens": self.num_draft_tokens,
+            "num_emitted_tokens": self.num_emitted_tokens,
             "num_spec_tokens": self.num_spec_tokens,
         }
         if self.per_step_accepted:

@@ -18,7 +18,9 @@ from vllm.v1.metrics.stats import RequestSpecDecodeMetrics
 def _metrics(pairs, num_spec_tokens=3, detailed=False):
     s = RequestSpecDecodeMetrics.new(num_spec_tokens)
     for k, j in pairs:
-        s.observe(num_draft_tokens=k, num_accepted=j, detailed=detailed)
+        s.observe(
+            num_draft_tokens=k, num_accepted=j, num_emitted=j + 1, detailed=detailed
+        )
     return s
 
 
@@ -60,6 +62,7 @@ def test_to_dict_summary_omits_per_step_arrays():
         "num_accepted_draft_tokens": 9,
         "num_draft_tokens": 15,
         "num_spec_tokens": 3,
+        "num_emitted_tokens": 14,
     }
 
 
@@ -91,6 +94,7 @@ def test_empty_metrics_do_not_divide_by_zero():
     d = RequestSpecDecodeMetrics.new(3).to_dict()
     assert d["num_spec_steps"] == 0
     assert d["num_draft_tokens"] == 0
+    assert d["num_emitted_tokens"] == 0
     assert d["draft_acceptance_rate"] == 0.0
     assert d["mean_acceptance_length"] == 1.0
     assert "per_step_accepted" not in d
@@ -102,11 +106,12 @@ def test_observe_records_proposed_and_accepted_independently():
     # grammar-invalidated-draft subtraction happens in the scheduler before
     # observe() -- see test_per_request_spec_decode_subtracts_invalid_drafts.)
     s = RequestSpecDecodeMetrics.new(num_spec_tokens=3)
-    s.observe(num_draft_tokens=2, num_accepted=1)
-    s.observe(num_draft_tokens=3, num_accepted=1)
+    s.observe(num_draft_tokens=2, num_accepted=1, num_emitted=2)
+    s.observe(num_draft_tokens=3, num_accepted=1, num_emitted=2)
     d = s.to_dict()
     assert d["acceptance_histogram"] == [0, 2, 0, 0]  # both steps accepted 1
     assert d["num_draft_tokens"] == 5  # proposed summed independently: 2 + 3
+    assert d["num_emitted_tokens"] == 4
 
 
 def test_engine_core_output_round_trips_spec_decode_metrics():
