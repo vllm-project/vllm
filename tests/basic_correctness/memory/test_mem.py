@@ -13,7 +13,7 @@ from vllm.device_allocator import get_mem_allocator_instance
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 
-from ..utils import create_new_process_for_each_test, requires_fp8
+from ...utils import create_new_process_for_each_test, requires_fp8
 
 DEVICE_TYPE = current_platform.device_type
 
