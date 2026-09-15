@@ -148,6 +148,32 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_v4_streaming_misspelled_closer_split_across_chunks() {
+        let wire = concat!(
+            "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"get_weather\">\n",
+            "<｜DSML｜parameter name=\"location\" string=\"true\">first</｜DSML｜>\n",
+            "<｜DSML｜parameter name=\"date\" string=\"true\">second</｜DSML｜parameter>\n",
+            "</｜DSML｜invoke>\n</｜DSML｜tool_calls>",
+        );
+        for split in wire.char_indices().map(|(i, _)| i).chain(std::iter::once(wire.len())) {
+            let mut parser = DeepSeekV4ToolParser::new(&test_tools());
+            let output = collect_stream(&mut parser, &[&wire[..split], &wire[split..]]);
+
+            assert!(output.normal_text().is_empty(), "split {split}");
+            assert_eq!(output.calls().len(), 1, "split {split}");
+            assert!(
+                !output.calls()[0].arguments.contains("DSML"),
+                "split {split}"
+            );
+            assert_eq!(
+                serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+                json!({ "location": "first", "date": "second" }),
+                "split {split}"
+            );
+        }
+    }
+
+    #[test]
     fn tool_framing_preserves_body_whitespace_across_chunk_boundaries() {
         assert_tool_framing_preserves_body_whitespace::<DeepSeekV4ToolParser>(
             "\n\n",

@@ -2,10 +2,10 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use winnow::ascii::{multispace0 as ws0, multispace1 as ws1};
-use winnow::combinator::{alt, delimited, eof, repeat, seq, terminated};
+use winnow::combinator::{alt, delimited, eof, opt, peek, repeat, seq, terminated};
 use winnow::prelude::*;
 use winnow::stream::Partial;
-use winnow::token::{literal, rest, take_until};
+use winnow::token::{literal, rest, take_until, take_while};
 
 use super::parameters::ToolSchemas;
 use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len_mul, take_until_marker};
@@ -21,6 +21,11 @@ pub use deepseek_v32::DeepSeekV32ToolParser;
 pub use deepseek_v41::DeepSeekV41ToolParser;
 
 type DsmlInput<'i> = Partial<&'i str>;
+
+/// Prefix shared by every DSML opener, in every dialect.
+const DSML_OPEN: &str = "<｜DSML｜";
+/// Prefix shared by every DSML closer, in every dialect.
+const DSML_CLOSE: &str = "</｜DSML｜";
 
 #[derive(Debug, Clone, Copy)]
 struct DsmlTokens {
@@ -293,6 +298,13 @@ fn parse_invoke_params(invoke_body: &str, tokens: DsmlTokens) -> ModalResult<Vec
 }
 
 /// Parse a DSML parameter block.
+///
+/// The value ends at the first DSML tag. The sigil is rendered from special
+/// tokens the model cannot emit as content, so whatever `</｜DSML｜...>`
+/// follows the value is its closer, well-formed or not (`</｜DSML｜>` is seen
+/// in production); reading on to the next well-formed closer would swallow
+/// every parameter in between. A `<｜DSML｜...` opener closes the value
+/// implicitly and is left for the next parameter.
 fn parse_parameter(input: &mut &str, tokens: DsmlTokens) -> ModalResult<DsmlParameter> {
     seq! {DsmlParameter {
         _: literal(tokens.parameter_start),
@@ -302,9 +314,24 @@ fn parse_parameter(input: &mut &str, tokens: DsmlTokens) -> ModalResult<DsmlPara
         is_string: string_attr.map(|value| value == "true"),
         _: ws0,
         _: ">",
-        value: take_until(0.., tokens.parameter_end).map(str::to_string),
-        _: literal(tokens.parameter_end),
+        value: take_until(0.., (DSML_CLOSE, DSML_OPEN)).map(str::to_string),
+        _: parameter_end,
     }}
+    .parse_next(input)
+}
+
+/// Parse the end of a DSML parameter value: any `</｜DSML｜...>` closer, or an
+/// implicit close before the next opener.
+fn parameter_end(input: &mut &str) -> ModalResult<()> {
+    alt((
+        (
+            DSML_CLOSE,
+            take_while(0.., |c| c != '<' && c != '>'),
+            opt('>'),
+        )
+            .void(),
+        peek(DSML_OPEN).void(),
+    ))
     .parse_next(input)
 }
 
