@@ -154,6 +154,50 @@ def causal_conv1d_opcheck_fn(
     bias = bias.contiguous() if bias is not None else None
 
 
+@pytest.mark.parametrize("operation", ["prefill", "update"])
+@pytest.mark.parametrize("width", [2, 3, 4])
+@pytest.mark.parametrize(
+    "itype,eps",
+    [(torch.bfloat16, 2**-7), (torch.float16, 2**-10), (torch.float32, 2**-7)],
+    ids=["bf16", "fp16", "fp32"],
+)
+def test_causal_conv1d_preserves_product_precision(operation, width, itype, eps):
+    """Cancellation must retain product bits until FP32 accumulation."""
+    dim = 257  # Also exercise the masked channel tail.
+    x = torch.full((1, dim), -1.0, dtype=itype, device=DEVICE)
+    weight = torch.zeros((dim, width), dtype=itype, device=DEVICE)
+    weight[:, -2] = 1 + eps
+    weight[:, -1] = 1 + 2 * eps
+    # Reserve slot zero as the null block.
+    conv_state = torch.zeros((2, dim, width - 1), dtype=itype, device=DEVICE)
+    conv_state[1, :, -1] = 1 + eps
+    state_indices = torch.tensor([1], dtype=torch.int32, device=DEVICE)
+    expected_state = conv_state.clone()
+    expected_state[1] = torch.cat([conv_state[1, :, 1:], x.T], dim=-1)
+
+    if operation == "prefill":
+        out = causal_conv1d_fn(
+            x.T,
+            weight,
+            bias=None,
+            conv_states=conv_state,
+            query_start_loc=torch.tensor([0, 1], dtype=torch.int32, device=DEVICE),
+            cache_indices=state_indices,
+            has_initial_state=torch.tensor([True], device=DEVICE),
+            activation=None,
+        )
+    else:
+        out = causal_conv1d_update(
+            x, conv_state, weight, conv_state_indices=state_indices
+        )
+
+    # (1 + eps)**2 - (1 + 2*eps) == eps**2, exactly representable here.
+    # Rounding the first product to BF16/FP16 loses eps**2 before the sum.
+    expected = torch.full_like(out, eps**2)
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)
+    torch.testing.assert_close(conv_state, expected_state, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("itype", [torch.bfloat16])
 @pytest.mark.parametrize("silu_activation", [False, True])
 @pytest.mark.parametrize("has_bias", [False, True])
