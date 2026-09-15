@@ -214,14 +214,14 @@ def resolve_kda_prefill_backend(backend: str) -> KDAPrefillBackend:
     """Resolve the Kimi-K3 ROCm prefill backend."""
     if backend not in ("auto", "triton", "flashkda", "fused"):
         raise ValueError(f"Unsupported KDA prefill backend: {backend}")
-    if backend == "auto" and bool(rocm_aiter_ops.is_enabled()):
-        return "flashkda"
     if backend == "fused" and not is_fused_kda_chunk_supported():
         raise RuntimeError(
             "The fused KDA chunk kernel requires gfx950 and a build that includes it."
         )
     if backend == "auto":
-        return "fused" if is_fused_kda_chunk_supported() else "triton"
+        if is_fused_kda_chunk_supported():
+            return "fused"
+        return "flashkda" if bool(rocm_aiter_ops.is_enabled()) else "triton"
     return cast(KDAPrefillBackend, backend)
 
 

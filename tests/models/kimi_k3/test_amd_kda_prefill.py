@@ -25,24 +25,28 @@ def _relative_error(actual: torch.Tensor, expected: torch.Tensor) -> float:
 
 
 @pytest.mark.parametrize(
-    ("requested", "aiter_enabled", "expected"),
+    ("requested", "fused_supported", "aiter_enabled", "expected"),
     [
-        ("auto", True, "flashkda"),
-        ("auto", False, "triton"),
-        ("triton", True, "triton"),
-        ("flashkda", False, "flashkda"),
+        ("auto", True, True, "fused"),
+        ("auto", True, False, "fused"),
+        ("auto", False, True, "flashkda"),
+        ("auto", False, False, "triton"),
+        ("triton", True, True, "triton"),
+        ("flashkda", True, False, "flashkda"),
+        ("fused", True, False, "fused"),
     ],
 )
 def test_resolve_kda_prefill_backend(
     monkeypatch: pytest.MonkeyPatch,
     requested: str,
+    fused_supported: bool,
     aiter_enabled: bool,
     expected: str,
 ) -> None:
     monkeypatch.setattr(
         kda_prefill,
         "is_fused_kda_chunk_supported",
-        lambda: False,
+        lambda: fused_supported,
     )
     monkeypatch.setattr(
         kda_prefill.rocm_aiter_ops,
@@ -53,6 +57,19 @@ def test_resolve_kda_prefill_backend(
     actual = kda_prefill.resolve_kda_prefill_backend(requested)
 
     assert actual == expected
+
+
+def test_explicit_fused_backend_requires_kernel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        kda_prefill,
+        "is_fused_kda_chunk_supported",
+        lambda: False,
+    )
+
+    with pytest.raises(RuntimeError, match="fused KDA chunk kernel requires"):
+        kda_prefill.resolve_kda_prefill_backend("fused")
 
 
 def test_kda_conv1d_weight_loader_populates_prefill_and_decode_copies() -> None:
