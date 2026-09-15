@@ -573,6 +573,39 @@ def test_partial_hit_then_internal_checkpoint_uses_distinct_mamba_blocks():
     assert mamba_blocks[3].block_id == running_block_id
 
 
+def test_full_sequence_admission_after_external_mamba_allocation():
+    """Full-ISL admission must count physical states, not null table slots."""
+    hash_block_size = 16
+    block_size = 32
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=hash_block_size,
+        full_block_size=block_size,
+        mamba_block_size=block_size,
+        num_blocks=45,
+        num_speculative_blocks=3,
+        num_prefill_checkpoint_blocks=1,
+    )
+    request = make_request("external", list(range(1000)), hash_block_size, sha256)
+
+    loaded_blocks = manager.allocate_slots(
+        request,
+        num_new_tokens=0,
+        num_external_computed_tokens=block_size,
+        delay_cache_blocks=True,
+    )
+    assert loaded_blocks is not None
+    request.num_computed_tokens = block_size
+
+    resumed_blocks = manager.allocate_slots(
+        request,
+        num_new_tokens=hash_block_size,
+        full_sequence_must_fit=True,
+    )
+
+    assert resumed_blocks is not None
+
+
 def test_internal_checkpoint_uses_partial_hash_lifecycle():
     hash_block_size = 16
     mamba_block_size = 32
