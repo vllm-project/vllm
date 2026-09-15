@@ -29,9 +29,11 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.deepseek_v2 import _try_load_fp8_indexer_wk
+from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.model_executor.models.utils import (
     get_pp_missing_layer_names,
     is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory,
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
@@ -518,11 +520,13 @@ class HYV4MultiTokenPredictor(nn.Module):
         return self.logits_processor(lm_head, proj_input)
 
 
-class HYV4MTP(nn.Module):
+class HYV4MTP(nn.Module, SupportsPP):
     """HY V4 MTP draft head.
 
     Not a pipeline-parallel stage: the draft head always runs on a single rank,
-    matching `DeepseekV32MTP` / `KimiK3MTP` / `HYV3MTP`.
+    matching `DeepseekV32MTP` / `KimiK3MTP` / `HYV3MTP`. SupportsPP + the empty
+    intermediate-tensors factory only satisfy the config verification path that
+    copies pipeline_parallel_size from the target into draft_parallel_config.
     """
 
     packed_modules_mapping = {
@@ -541,6 +545,9 @@ class HYV4MTP(nn.Module):
         )
         self.quant_config = self.model.quant_config
         self.sampler = Sampler()
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], self.config.hidden_size
+        )
 
     def set_topk_indices_buffer(self, topk_indices_buffer: torch.Tensor) -> None:
         """Share the target sparse-index buffer with every draft consumer.
@@ -565,7 +572,7 @@ class HYV4MTP(nn.Module):
             )
             attn_impl.topk_indices_buffer = topk_indices_buffer
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
