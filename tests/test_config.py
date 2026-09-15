@@ -866,7 +866,10 @@ def test_models_default_to_v2_model_runner(model_config, expected, monkeypatch):
 
 def test_v1_model_runner_rejects_v2_only_features():
     config = SimpleNamespace(
-        parallel_config=ParallelConfig(prefill_context_parallel_size=2),
+        parallel_config=ParallelConfig(
+            prefill_context_parallel_size=2,
+            distributed_executor_backend="mp",
+        ),
         scheduler_config=SchedulerConfig.default_factory(async_scheduling=False),
         speculative_config=None,
         model_config=None,
@@ -1050,7 +1053,10 @@ def test_v1_model_runner_rejects_pipeline_parallelism_with_async_scheduling():
     """Only the async combination desyncs the grammar FSM (#45014), so plain
     PP>1 must stay usable on the V1 model runner."""
     config = SimpleNamespace(
-        parallel_config=ParallelConfig(pipeline_parallel_size=2),
+        parallel_config=ParallelConfig(
+            pipeline_parallel_size=2,
+            distributed_executor_backend="mp",
+        ),
         scheduler_config=SchedulerConfig.default_factory(async_scheduling=False),
         speculative_config=None,
         model_config=None,
