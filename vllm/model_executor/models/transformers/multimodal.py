@@ -1216,7 +1216,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         if isinstance(features, tuple):
             return features[0]
         if isinstance(features, dict):
-            return features["pooler_output"]
+            return features.pooler_output  # type: ignore[attr-defined]
         return features
 
     def embed_multimodal(self, **kwargs) -> MultiModalEmbeddings:
