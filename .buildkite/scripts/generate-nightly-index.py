@@ -110,14 +110,29 @@ def parse_from_filename(file: str) -> WheelFileInfo:
     )
 
 
-def generate_project_list(subdir_names: list[str], comment: str = "") -> str:
+def generate_project_list(
+    subdir_names: list[str], comment: str = "", url_prefix: str = ""
+) -> str:
     """
     Generate project list HTML content linking to each project & variant subdirectory.
+
+    Args:
+        subdir_names: List of subdirectory names to link to.
+        comment: Optional comment to include in the generated HTML.
+        url_prefix: Root-relative URL prefix of this index (e.g. "nightly",
+            "rocm/nightly" or a commit hash). When set, links are generated as
+            root-relative paths ("/{url_prefix}/{name}/") so they resolve correctly
+            even when the page is accessed without a trailing slash (the S3 REST
+            endpoint does not redirect directory URLs lacking a trailing slash).
+            When empty, plain relative links are generated.
     """
     href_tags = []
     for name in sorted(subdir_names):
         name = name.strip("/").strip(".")
-        href_tags.append(f'    <a href="{name}/">{name}/</a><br/>')
+        if url_prefix:
+            href_tags.append(f'    <a href="/{url_prefix}/{name}/">{name}/</a><br/>')
+        else:
+            href_tags.append(f'    <a href="{name}/">{name}/</a><br/>')
     return INDEX_HTML_TEMPLATE.format(items="\n".join(href_tags), comment=comment)
 
 
@@ -155,6 +170,7 @@ def generate_index_and_metadata(
     default_variant: str | None = None,
     alias_to_default: str | None = None,
     comment: str = "",
+    url_prefix: str = "",
 ):
     """
     Generate index for all wheel files.
@@ -302,7 +318,9 @@ def generate_index_and_metadata(
             subdir_names = subdir_names.union(packages)
         else:
             # generate project list for this variant directly
-            project_list_str = generate_project_list(sorted(packages), comment_tmpl)
+            project_list_str = generate_project_list(
+                sorted(packages), comment_tmpl, f"{url_prefix}/{variant}"
+            )
             with open(variant_dir / "index.html", "w") as f:
                 f.write(project_list_str)
 
@@ -322,7 +340,9 @@ def generate_index_and_metadata(
                 f.write(metadata_str)
 
     # Generate top-level project list index
-    project_list_str = generate_project_list(sorted(subdir_names), comment_tmpl)
+    project_list_str = generate_project_list(
+        sorted(subdir_names), comment_tmpl, url_prefix
+    )
     with open(index_base_dir / "index.html", "w") as f:
         f.write(project_list_str)
 
@@ -468,5 +488,6 @@ if __name__ == "__main__":
         default_variant=None,
         alias_to_default=args.alias_to_default,
         comment=args.comment.strip(),
+        url_prefix=version.strip("/"),
     )
     print(f"Successfully generated index and metadata in {output_dir}")
