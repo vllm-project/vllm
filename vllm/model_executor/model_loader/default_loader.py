@@ -431,21 +431,29 @@ class DefaultModelLoader(BaseModelLoader):
             "Loading weights took %.2f seconds",
             self.counter_after_loading_weights - self.counter_before_loading_weights,
         )
-        # We only enable strict check for non-quantized models
-        # that have loaded weights tracking by default.
-        default_enable_weights_track = (
-            model_config.quantization is None and loaded_weights is not None
-        )
+        # Quantized checkpoints can legitimately omit parameters, so they only
+        # warn by default while non-quantized models still fail hard. An
+        # explicit enable_weights_track opts into the strict check either way.
+        explicitly_enabled = self.enable_weights_track is not None
         enable_weights_track = (
             self.enable_weights_track
-            if self.enable_weights_track is not None
-            else default_enable_weights_track
+            if explicitly_enabled
+            else loaded_weights is not None
         )
         if enable_weights_track:
-            self.track_weights_loading(model, loaded_weights)
+            self.track_weights_loading(
+                model,
+                loaded_weights,
+                strict=explicitly_enabled or model_config.quantization is None,
+                quantization=model_config.quantization,
+            )
 
     def track_weights_loading(
-        self, model: nn.Module, loaded_weights: set[str] | None
+        self,
+        model: nn.Module,
+        loaded_weights: set[str] | None,
+        strict: bool = True,
+        quantization: str | None = None,
     ) -> None:
         weights_to_load = {name for name, _ in model.named_parameters()}
         if loaded_weights is not None:
@@ -464,7 +472,15 @@ class DefaultModelLoader(BaseModelLoader):
                         loaded_weights.add(full_name)
             weights_not_loaded = weights_to_load - loaded_weights
             if weights_not_loaded:
-                raise ValueError(
-                    "Following weights were not initialized from "
-                    f"checkpoint: {weights_not_loaded}"
+                if strict:
+                    raise ValueError(
+                        "Following weights were not initialized from "
+                        f"checkpoint: {weights_not_loaded}"
+                    )
+                logger.warning(
+                    "Following weights were not initialized from checkpoint "
+                    "for quantized model (%s): %s. This may indicate missing "
+                    "shard files.",
+                    quantization,
+                    weights_not_loaded,
                 )
