@@ -22,6 +22,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "BailingMoeV3VisionConfig": "vllm.transformers_utils.configs.bailing_moe_v3_vl",
     "BailingMoeV3VLConfig": "vllm.transformers_utils.configs.bailing_moe_v3_vl",
     "ChatGLMConfig": "vllm.transformers_utils.configs.chatglm",
+    "GigaChat35Config": "vllm.transformers_utils.configs.gigachat3_5",
     "ColModernVBertConfig": "vllm.transformers_utils.configs.colmodernvbert",
     "ColPaliConfig": "vllm.transformers_utils.configs.colpali",
     "ColQwen3Config": "vllm.transformers_utils.configs.colqwen3",
@@ -114,6 +115,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
 }
 
 __all__ = [
+    "GigaChat35Config",
     "AfmoeConfig",
     "AXK1Config",
     "BagelConfig",
