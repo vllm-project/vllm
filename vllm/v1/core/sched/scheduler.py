@@ -40,6 +40,7 @@ from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
+    UNO_STEP_TIMING_DEBUG,
     CachedRequestData,
     GrammarOutput,
     KVConnectorBlockState,
@@ -102,6 +103,7 @@ class Scheduler(SchedulerInterface):
         self.spec_decode_metrics_level = (
             self.observability_config.per_request_spec_decode_metrics
         )
+        self._uno_step_timing_next_id = 0
         self.kv_metrics_collector: KVCacheMetricsCollector | None = None
         if self.observability_config.kv_cache_metrics:
             self.kv_metrics_collector = KVCacheMetricsCollector(
@@ -192,6 +194,9 @@ class Scheduler(SchedulerInterface):
 
         # req_id -> Request
         self.requests: dict[str, Request] = {}
+        # Preserve the Uno length-tail policy across preemption, but not across
+        # request lifetimes (including a new streaming-input turn).
+        self._uno_tail_requests: set[Request] = set()
         # Scheduling policy
         try:
             self.policy = SchedulingPolicy(self.scheduler_config.policy)
@@ -263,6 +268,9 @@ class Scheduler(SchedulerInterface):
         self.use_eagle_block_drop = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
         self.num_lookahead_tokens = vllm_config.num_lookahead_tokens
+        self.use_uno = (
+            speculative_config is not None and speculative_config.method == "uno"
+        )
         # Positions past the computed tokens that the drafter reads mid-prefill.
         # Eagle-family drafters read 1 ahead, but multi-module MTP reads
         # num_spec_tokens ahead at chunked-prefill boundaries. Determines the
@@ -560,6 +568,7 @@ class Scheduler(SchedulerInterface):
         return max(num_new_tokens, 0)
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
+        schedule_start = time.perf_counter() if UNO_STEP_TIMING_DEBUG else None
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -723,6 +732,10 @@ class Scheduler(SchedulerInterface):
                 # allow the lower-priority requests to be scheduled.
                 req_index += 1
                 continue
+
+            num_new_tokens = self._apply_uno_tail_policy(
+                request, request.num_computed_tokens, num_new_tokens
+            )
 
             # Schedule newly needed KV blocks for the request.
             with record_function_or_nullcontext("schedule: allocate_slots"):
@@ -1058,11 +1071,14 @@ class Scheduler(SchedulerInterface):
                             + self.num_sampled_tokens_per_step
                             <= self.max_model_len
                         ):
+                            padded_num_tokens = self._apply_uno_tail_policy(
+                                request, num_computed_tokens, padded_num_tokens
+                            )
                             if padded_num_tokens > request_token_budget:
                                 # Prefer to not schedule than schedule un-padded.
                                 break
                             num_new_tokens = padded_num_tokens
-                            pad_spec_decode = True
+                            pad_spec_decode = padded_num_tokens > 1
 
                     threshold = self.scheduler_config.long_prefill_token_threshold
                     if 0 < threshold < num_new_tokens:
@@ -1128,6 +1144,13 @@ class Scheduler(SchedulerInterface):
                     if num_new_tokens == 0:
                         # The request cannot be scheduled.
                         break
+
+                if not load_kv_async:
+                    num_new_tokens = self._apply_uno_tail_policy(
+                        request, num_computed_tokens, num_new_tokens
+                    )
+                    if request in self._uno_tail_requests:
+                        pad_spec_decode = False
 
                 # During async KV load, no forward pass is run yet.
                 # Allocate speculative lookahead slots later to avoid
@@ -1405,6 +1428,47 @@ class Scheduler(SchedulerInterface):
                 scheduled_encoder_inputs
             )
 
+        # Snapshot before async scheduling adds this step's placeholders. A
+        # nonfinal prefill cannot contribute the current target-sample token.
+        zero_next_draft_req_ids: set[str] = set()
+        uno_tail_debug = [] if schedule_start is not None else None
+        if self.use_uno:
+            for req_id, num_tokens in num_scheduled_tokens.items():
+                request = self.requests[req_id]
+                in_tail = request in self._uno_tail_requests
+                if in_tail:
+                    zero_next_draft_req_ids.add(req_id)
+                if uno_tail_debug is not None:
+                    will_sample = (
+                        request.num_computed_tokens + num_tokens
+                        >= request.num_tokens + request.num_output_placeholders
+                    )
+                    uno_tail_debug.append(
+                        {
+                            "req_id": req_id,
+                            "O": request.num_output_tokens,
+                            "P": request.num_output_placeholders,
+                            "B": int(request.num_output_placeholders > 0),
+                            "M": self._uno_output_token_limit(request),
+                            "current_k": len(
+                                scheduled_spec_decode_tokens.get(req_id, ())
+                            ),
+                            "will_sample": will_sample,
+                            "sound_bound": (
+                                will_sample
+                                and self._will_finish_after_next_sample(request)
+                            ),
+                            "tail_mode": in_tail,
+                        }
+                    )
+        skip_speculator_proposal = (
+            self.use_uno
+            and bool(num_scheduled_tokens)
+            and all(
+                req_id in zero_next_draft_req_ids for req_id in num_scheduled_tokens
+            )
+        )
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -1426,6 +1490,8 @@ class Scheduler(SchedulerInterface):
             kv_cache_block_copies=pending_kv_cache_block_copies,
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
+            skip_speculator_proposal=skip_speculator_proposal,
+            zero_next_draft_req_ids=zero_next_draft_req_ids,
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
         )
 
@@ -1454,7 +1520,70 @@ class Scheduler(SchedulerInterface):
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
+        if schedule_start is not None:
+            self._uno_step_timing_next_id += 1
+            scheduler_output.debug_uno_step_id = self._uno_step_timing_next_id
+            scheduler_output.debug_schedule_wall_ms = (
+                time.perf_counter() - schedule_start
+            ) * 1000
+            logger.info(
+                "UNO_STEP_TIMING_SCHEDULE step_id=%d schedule_wall_ms=%.3f "
+                "scheduled_request_count=%d finished_before_step_count=%d "
+                "skip_speculator_proposal=%s tail_mode_rows=%d uno_rows=%s",
+                scheduler_output.debug_uno_step_id,
+                scheduler_output.debug_schedule_wall_ms,
+                len(scheduler_output.num_scheduled_tokens),
+                len(scheduler_output.finished_req_ids),
+                scheduler_output.skip_speculator_proposal,
+                len(zero_next_draft_req_ids),
+                uno_tail_debug,
+            )
         return scheduler_output
+
+    def _uno_output_token_limit(self, request: Request) -> int:
+        return min(request.max_tokens, self.max_model_len - request.num_prompt_tokens)
+
+    def _will_finish_after_next_sample(self, request: Request) -> bool:
+        """Diagnostic lower bound for a step qualified as sampling.
+
+        The schedule trace reports this separately from the persistent tail's
+        upper-bound trigger; this predicate does not choose tail entry.
+
+        Uno permits one unresolved sampling step when a new step is scheduled.
+        That step guarantees only one output token regardless of draft width.
+        Deliver-mode preemption cannot resume until stale output is observed.
+        An earlier stop also makes subsequent proposals unusable.
+        """
+        unresolved_steps = int(request.num_output_placeholders > 0)
+        return (
+            request.num_output_tokens + unresolved_steps + 1
+            >= self._uno_output_token_limit(request)
+        )
+
+    def _apply_uno_tail_policy(
+        self, request: Request, num_computed_tokens: int, num_new_tokens: int
+    ) -> int:
+        """Choose K=0 before KV admission for a possibly terminal Uno step."""
+        if not self.use_uno:
+            return num_new_tokens
+        target_queries = (
+            request.num_tokens + request.num_output_placeholders - num_computed_tokens
+        )
+        if num_new_tokens < target_queries:
+            # Preserve nonfinal prefill chunks without treating them as samples.
+            return num_new_tokens
+        max_output = num_new_tokens - target_queries + 1
+        # This upper-bound policy deliberately forgoes usable drafts.
+        enter_tail = (
+            request.num_output_tokens + request.num_output_placeholders + max_output
+            >= self._uno_output_token_limit(request)
+        )
+        if enter_tail:
+            self._uno_tail_requests.add(request)
+        if request in self._uno_tail_requests:
+            request.spec_token_ids = []
+            return target_queries
+        return num_new_tokens
 
     def _build_kv_connector_meta(
         self, connector: KVConnectorBase_V1, scheduler_output: SchedulerOutput
@@ -1576,6 +1705,8 @@ class Scheduler(SchedulerInterface):
 
         Discards the last sampled output token from the prior input chunk.
         """
+
+        self._uno_tail_requests.discard(session)
 
         # Current streaming input behaviour: Keep only computed output tokens
         # (discard final sampled output token).
@@ -2052,6 +2183,30 @@ class Scheduler(SchedulerInterface):
                 request.status = RequestStatus.FINISHED_STOPPED
                 stopped = True
 
+            if (
+                self.use_uno
+                and UNO_STEP_TIMING_DEBUG
+                and scheduler_output.debug_uno_step_id is not None
+            ):
+                debug_k = len(scheduled_spec_token_ids or ())
+                debug_accepted = max(len(generated_token_ids) - 1, 0) if debug_k else 0
+                logger.info(
+                    "UNO_STEP_TIMING_OUTPUT step_id=%d req_id=%s O_before=%d "
+                    "O_after=%d P_after=%d current_k=%d accepted=%d rejected=%d "
+                    "emitted=%d stale=%s stopped=%s",
+                    scheduler_output.debug_uno_step_id,
+                    req_id,
+                    num_output_tokens_before,
+                    request.num_output_tokens,
+                    request.num_output_placeholders,
+                    debug_k,
+                    debug_accepted,
+                    debug_k - debug_accepted,
+                    len(new_token_ids),
+                    output_is_stale,
+                    stopped,
+                )
+
             if new_token_ids and self.structured_output_manager.should_advance(
                 request, new_token_ids=new_token_ids
             ):
@@ -2201,6 +2356,16 @@ class Scheduler(SchedulerInterface):
             # This is a rare case and unlikely to impact performance.
             self.waiting.remove_requests(stopped_preempted_reqs)
             self.skipped_waiting.remove_requests(stopped_preempted_reqs)
+
+        if UNO_STEP_TIMING_DEBUG and scheduler_output.debug_uno_step_id is not None:
+            logger.info(
+                "UNO_STEP_TIMING_FINISH step_id=%d finished_this_step_count=%d "
+                "finished_running_count=%d finished_preempted_count=%d",
+                scheduler_output.debug_uno_step_id,
+                len(stopped_running_reqs) + len(stopped_preempted_reqs),
+                len(stopped_running_reqs),
+                len(stopped_preempted_reqs),
+            )
 
         error_req_ids = set(self.grammar_compile_error_reqs)
         self.grammar_compile_error_reqs.clear()
@@ -2427,8 +2592,8 @@ class Scheduler(SchedulerInterface):
                 # The request may have been finished. Skip.
                 continue
 
-            if request.is_prefill_chunk:
-                # Ignore draft tokens for prefill chunks.
+            if request.is_prefill_chunk or request in self._uno_tail_requests:
+                # Ignore stale proposals for prefill chunks and persistent tails.
                 if request.spec_token_ids:
                     request.spec_token_ids = []
                 continue
@@ -2582,6 +2747,7 @@ class Scheduler(SchedulerInterface):
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         assert request.is_finished()
 
+        self._uno_tail_requests.discard(request)
         self._inflight_prefills.discard(request)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
 

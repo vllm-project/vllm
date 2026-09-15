@@ -278,7 +278,8 @@ def gumbel_sample(
     local_max_dtype = torch.float64 if use_fp64 else torch.float32
     local_max = logits.new_empty(num_tokens, num_blocks, dtype=local_max_dtype)
     per_token_col = logits_cache_col is not None and logits_cache_col.dim() > 0
-    _gumbel_sample_kernel[(num_tokens, num_blocks)](
+    launch_grid = (num_tokens, num_blocks)
+    _gumbel_sample_kernel[launch_grid](
         local_argmax,
         local_argmax.stride(0),
         local_max,

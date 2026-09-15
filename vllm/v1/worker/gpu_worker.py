@@ -88,6 +88,7 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
+from vllm.v1.worker.gpu.launch_key_debug import mark_launch_key_serving_ready
 from vllm.v1.worker.sentinel.gpu_worker_sentinel import WorkerSentinel
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
@@ -98,7 +99,7 @@ from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...model_executor.model_loader import TensorizerLoader
-from .gpu.warmup import warmup_kernels
+from .gpu.warmup import run_uno_served_jit_self_check, warmup_kernels
 from .utils import request_memory
 
 logger = init_logger(__name__)
@@ -933,6 +934,12 @@ class Worker(WorkerBase):
             mode=self.observability_config.jit_monitor_mode,
             verbose=self.observability_config.jit_monitor_verbose,
         )
+        # Run the Uno-only startup assertion while the monitor is armed but
+        # before launch-key receipts begin labeling customer work as served.
+        run_uno_served_jit_self_check(
+            self.model_runner, self.execute_model, self.sample_tokens
+        )
+        mark_launch_key_serving_ready()
 
         # Freeze the worker heap so the GC won't scan static objects
         # (model weights, KV caches, CUDA graphs) during inference.

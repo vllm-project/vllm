@@ -255,6 +255,20 @@ def test_triton_hook_error_mode_raises():
         hook(**_triton_hook_kwargs("error_kernel"))
 
 
+def test_capture_compilations_preserves_error_mode():
+    """A bounded check records the event but cannot soften fail-fast mode."""
+    with mock.patch.object(jit_monitor, "_mode", "error"):
+        with jit_monitor.capture_compilations() as captured:
+            with pytest.raises(RuntimeError, match="Triton kernel JIT compilation"):
+                jit_monitor._handle_jit_event(
+                    backend="Triton",
+                    event="kernel JIT compilation",
+                    fn_name="captured_error_kernel",
+                    detail="key=error-key",
+                )
+    assert [event.fn_name for event in captured] == ["captured_error_kernel"]
+
+
 # ------------------------------------------------------------------
 # CuTeDSL hook
 # ------------------------------------------------------------------

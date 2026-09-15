@@ -27,6 +27,8 @@ import importlib
 import os
 from collections.abc import Iterator, Mapping
 from contextlib import suppress
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any, Literal, cast
 
 from vllm.logger import init_logger
@@ -44,9 +46,35 @@ _tilelang_hook_installed: bool = False
 _tilelang_jitimpl_compile_depth: int = 0
 
 
+@dataclass(frozen=True)
+class JitCompilation:
+    """One compilation observed while a bounded startup check is running."""
+
+    backend: str
+    event: str
+    fn_name: str
+    detail: str | None
+
+
+_captured_compilations: ContextVar[list[JitCompilation] | None] = ContextVar(
+    "vllm_jit_monitor_captured_compilations", default=None
+)
+
+
 def is_active() -> bool:
     """Return whether the JIT compilation monitor is currently active."""
     return _active
+
+
+@contextlib.contextmanager
+def capture_compilations() -> Iterator[list[JitCompilation]]:
+    """Collect JIT events for a bounded self-check without changing monitor mode."""
+    compilations: list[JitCompilation] = []
+    token = _captured_compilations.set(compilations)
+    try:
+        yield compilations
+    finally:
+        _captured_compilations.reset(token)
 
 
 def activate(*, mode: JitMonitorMode = "warn", verbose: bool = False) -> None:
@@ -130,6 +158,10 @@ def _handle_jit_event(
     )
     detail_suffix = f" ({detail})" if detail else ""
     args = (backend, event, fn_name, detail_suffix)
+
+    captured = _captured_compilations.get()
+    if captured is not None:
+        captured.append(JitCompilation(backend, event, fn_name, detail))
 
     if _mode == "error":
         raise RuntimeError(message % args)
@@ -227,7 +259,11 @@ def _format_verbose_triton_compile_details(kwargs: Mapping[str, object]) -> str:
 
 
 def _log_triton_jit_compile(fn_name: str, kwargs) -> None:
-    detail = _format_verbose_triton_compile_details(kwargs) if _verbose else None
+    detail = (
+        _format_verbose_triton_compile_details(kwargs)
+        if _verbose or _captured_compilations.get() is not None
+        else None
+    )
     _handle_jit_event(
         backend="Triton",
         event="kernel JIT compilation",
@@ -286,6 +322,11 @@ def _log_cutedsl_jit_compile(fn_name: str) -> None:
         backend="CuTeDSL",
         event="JIT compilation",
         fn_name=fn_name,
+        detail=(
+            "key=<unavailable>"
+            if _captured_compilations.get() is not None
+            else None
+        ),
     )
 
 
@@ -512,7 +553,7 @@ def _setup_tilelang_jit_hook() -> None:
             _tilelang_jitimpl_compile_depth += 1
             try:
                 detail = None
-                if _verbose:
+                if _verbose or _captured_compilations.get() is not None:
                     detail = _format_verbose_tilelang_compile_details(
                         self, args, kwargs, cache_key
                     )
