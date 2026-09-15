@@ -225,7 +225,7 @@ class TestUpdateConnectorOutput:
         """Test that _kv_cache_events is set when it was None."""
         kv_events = LMCacheKVEvents(num_workers=1)
         event = BlockStored(
-            block_hashes=["hash1"],
+            block_hashes=[b"hash1"],
             parent_block_hash=None,
             token_ids=[1, 2],
             block_size=16,
@@ -246,7 +246,7 @@ class TestUpdateConnectorOutput:
         # Set up existing events
         existing_events = LMCacheKVEvents(num_workers=2)
         event1 = BlockStored(
-            block_hashes=["hash1"],
+            block_hashes=[b"hash1"],
             parent_block_hash=None,
             token_ids=[1],
             block_size=16,
@@ -262,7 +262,7 @@ class TestUpdateConnectorOutput:
         # Create new events to add
         new_events = LMCacheKVEvents(num_workers=1)
         event2 = BlockStored(
-            block_hashes=["hash2"],
+            block_hashes=[b"hash2"],
             parent_block_hash=None,
             token_ids=[2],
             block_size=16,
@@ -293,7 +293,7 @@ class TestUpdateConnectorOutput:
         # Create new events from 3 workers
         new_events = LMCacheKVEvents(num_workers=3)
         event = BlockStored(
-            block_hashes=["hash1"],
+            block_hashes=[b"hash1"],
             parent_block_hash=None,
             token_ids=[1],
             block_size=16,
@@ -315,7 +315,7 @@ class TestUpdateConnectorOutput:
         # First update
         events1 = LMCacheKVEvents(num_workers=1)
         event1 = BlockStored(
-            block_hashes=["hash1"],
+            block_hashes=[b"hash1"],
             parent_block_hash=None,
             token_ids=[1],
             block_size=16,
@@ -330,7 +330,7 @@ class TestUpdateConnectorOutput:
         # Second update
         events2 = LMCacheKVEvents(num_workers=2)
         event2 = BlockStored(
-            block_hashes=["hash2"],
+            block_hashes=[b"hash2"],
             parent_block_hash=None,
             token_ids=[2],
             block_size=16,
@@ -345,7 +345,7 @@ class TestUpdateConnectorOutput:
         # Third update
         events3 = LMCacheKVEvents(num_workers=1)
         event3 = BlockStored(
-            block_hashes=["hash3"],
+            block_hashes=[b"hash3"],
             parent_block_hash=None,
             token_ids=[3],
             block_size=16,
@@ -367,7 +367,7 @@ class TestUpdateConnectorOutput:
         # First update with actual events
         events1 = LMCacheKVEvents(num_workers=1)
         event1 = BlockStored(
-            block_hashes=["hash1"],
+            block_hashes=[b"hash1"],
             parent_block_hash=None,
             token_ids=[1],
             block_size=16,
@@ -407,7 +407,7 @@ class TestTakeEvents:
         # Set up events
         kv_events = LMCacheKVEvents(num_workers=1)
         event1 = BlockStored(
-            block_hashes=["hash1"],
+            block_hashes=[b"hash1"],
             parent_block_hash=None,
             token_ids=[1],
             block_size=16,
@@ -416,7 +416,7 @@ class TestTakeEvents:
             lora_name=None,
         )
         event2 = BlockStored(
-            block_hashes=["hash2"],
+            block_hashes=[b"hash2"],
             parent_block_hash=None,
             token_ids=[2],
             block_size=16,
@@ -443,7 +443,7 @@ class TestTakeEvents:
         # Set up events from multiple workers
         kv_events = LMCacheKVEvents(num_workers=3)
         common_event = BlockStored(
-            block_hashes=["hash_common"],
+            block_hashes=[b"hash_common"],
             parent_block_hash=None,
             token_ids=[1],
             block_size=16,
@@ -452,7 +452,7 @@ class TestTakeEvents:
             lora_name=None,
         )
         uncommon_event = BlockStored(
-            block_hashes=["hash_uncommon"],
+            block_hashes=[b"hash_uncommon"],
             parent_block_hash=None,
             token_ids=[2],
             block_size=16,
@@ -483,7 +483,7 @@ class TestTakeEvents:
         # First call with events
         kv_events1 = LMCacheKVEvents(num_workers=1)
         event1 = BlockStored(
-            block_hashes=["hash1"],
+            block_hashes=[b"hash1"],
             parent_block_hash=None,
             token_ids=[1],
             block_size=16,
@@ -506,7 +506,7 @@ class TestTakeEvents:
         # Third call after adding new events
         kv_events2 = LMCacheKVEvents(num_workers=1)
         event2 = BlockStored(
-            block_hashes=["hash2"],
+            block_hashes=[b"hash2"],
             parent_block_hash=None,
             token_ids=[2],
             block_size=16,
@@ -526,7 +526,7 @@ class TestTakeEvents:
         # Set up events from 2 workers with no common events
         kv_events = LMCacheKVEvents(num_workers=2)
         event1 = BlockStored(
-            block_hashes=["hash1"],
+            block_hashes=[b"hash1"],
             parent_block_hash=None,
             token_ids=[1],
             block_size=16,
@@ -535,7 +535,7 @@ class TestTakeEvents:
             lora_name=None,
         )
         event2 = BlockStored(
-            block_hashes=["hash2"],
+            block_hashes=[b"hash2"],
             parent_block_hash=None,
             token_ids=[2],
             block_size=16,
@@ -687,8 +687,8 @@ class TestIntegrationScenarios:
 
         # Define common and unique events
         common_event = BlockStored(
-            block_hashes=["hash_common"],
-            parent_block_hash="parent_common",
+            block_hashes=[b"hash_common"],
+            parent_block_hash=b"parent_common",
             token_ids=[1, 2, 3],
             block_size=16,
             lora_id=None,
@@ -697,8 +697,8 @@ class TestIntegrationScenarios:
         )
 
         worker1_unique_event = BlockStored(
-            block_hashes=["hash_worker1"],
-            parent_block_hash="parent_w1",
+            block_hashes=[b"hash_worker1"],
+            parent_block_hash=b"parent_w1",
             token_ids=[4, 5],
             block_size=16,
             lora_id=None,
@@ -707,8 +707,8 @@ class TestIntegrationScenarios:
         )
 
         worker2_unique_event = BlockStored(
-            block_hashes=["hash_worker2"],
-            parent_block_hash="parent_w2",
+            block_hashes=[b"hash_worker2"],
+            parent_block_hash=b"parent_w2",
             token_ids=[6, 7],
             block_size=16,
             lora_id=None,
@@ -717,8 +717,8 @@ class TestIntegrationScenarios:
         )
 
         worker3_unique_event = BlockStored(
-            block_hashes=["hash_worker3"],
-            parent_block_hash="parent_w3",
+            block_hashes=[b"hash_worker3"],
+            parent_block_hash=b"parent_w3",
             token_ids=[8, 9],
             block_size=16,
             lora_id=None,
@@ -740,7 +740,7 @@ class TestIntegrationScenarios:
         worker2_events.add_events([common_event, worker3_unique_event])
 
         # Create ModelRunnerOutput instances for each worker
-        worker_outputs = []
+        worker_outputs: list[ModelRunnerOutput | None] = []
         for i, worker_events in enumerate(
             [worker0_events, worker1_events, worker2_events]
         ):
@@ -765,6 +765,8 @@ class TestIntegrationScenarios:
 
         # Use the real aggregation mechanism (like MultiprocExecutor.execute_model)
         aggregated_output = aggregator.aggregate(worker_outputs, output_rank=0)
+        assert aggregated_output is not None
+        assert aggregated_output.kv_connector_output is not None
         kv_cache_events = aggregated_output.kv_connector_output.kv_cache_events
 
         assert isinstance(kv_cache_events, LMCacheKVEvents)
@@ -781,6 +783,6 @@ class TestIntegrationScenarios:
         assert aggregated_events[0] == common_event
 
         # Verify the common event properties
-        assert aggregated_events[0].block_hashes == ["hash_common"]
-        assert aggregated_events[0].parent_block_hash == "parent_common"
+        assert aggregated_events[0].block_hashes == [b"hash_common"]
+        assert aggregated_events[0].parent_block_hash == b"parent_common"
         assert aggregated_events[0].token_ids == [1, 2, 3]

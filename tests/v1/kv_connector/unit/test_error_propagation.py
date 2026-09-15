@@ -34,6 +34,7 @@ def _make_get_num_new_matched_tokens(
 def fail_scheduler():
     """scheduler with kv_load_failure_policy='fail'"""
     vllm_config = create_vllm_config()
+    assert vllm_config.kv_transfer_config is not None
     vllm_config.kv_transfer_config.kv_load_failure_policy = "fail"
     return create_scheduler(vllm_config)
 

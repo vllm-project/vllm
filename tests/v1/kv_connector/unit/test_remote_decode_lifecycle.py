@@ -148,6 +148,7 @@ def test_short_prompt_lifecycle():
     # Even though tokens < block_size, there will be kv xfer for partial block.
     eco = scheduler.update_from_output(scheduler_output, model_runner_output)
     kv_transfer_params = eco[0].outputs[0].kv_transfer_params
+    assert kv_transfer_params is not None
 
     assert len(kv_transfer_params["remote_block_ids"]) == 1
 
@@ -205,6 +206,7 @@ def test_prefix_cache_lifecycle():
     model_runner_output = create_model_runner_output(reqs=[request_remote])
     eco = scheduler.update_from_output(scheduler_output, model_runner_output)
     kv_transfer_params = eco[0].outputs[0].kv_transfer_params
+    assert kv_transfer_params is not None
 
     # Ensure we send all block ids, including the partial blocks,
     # even if there is a cache hit.
@@ -258,7 +260,7 @@ def test_abort_during_kv_transfer():
     scheduler_output = scheduler.schedule()
     model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
     model_runner_output.kv_connector_output = KVConnectorOutput(
-        finished_sending=[request.request_id]
+        finished_sending={request.request_id}
     )
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert_scheduler_empty(scheduler)

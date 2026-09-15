@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import threading
+from collections import defaultdict
 
 import pytest
 
@@ -250,7 +251,7 @@ def test_worker_get_finished_counts_structured_release_fan_in():
     worker.is_producer = True
     worker.mode = MoRIIOMode.READ
     worker.world_size = 4
-    worker.moriio_wrapper = FakeWrapper()
+    worker.moriio_wrapper = FakeWrapper()  # type: ignore[assignment]
     worker.transfer_id_to_request_id = {"tx-fanin": "req-fanin"}
     worker._consumer_notification_counts = {}
     worker._completed_consumer_notifications = set()
@@ -290,10 +291,11 @@ def test_read_completion_sends_structured_release_with_consumer_tp_size():
         def shutdown(self):
             pass
 
+    wrapper = FakeWrapper()
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker.world_size = 8
-    worker.moriio_wrapper = FakeWrapper()
-    worker._recving_transfers = {"req": {"layer0": DoneStatus()}}
+    worker.moriio_wrapper = wrapper  # type: ignore[assignment]
+    worker._recving_transfers = defaultdict(dict, {"req": {"layer0": DoneStatus()}})
     worker._recving_transfers_callback_addr = {
         "req": ("127.0.0.1", "7000", "tx-release")
     }
@@ -301,7 +303,7 @@ def test_read_completion_sends_structured_release_with_consumer_tp_size():
     worker._recving_transfers_start = {}
 
     assert worker._pop_done_transfers() == {"tx-release"}
-    assert worker.moriio_wrapper.sent == [
+    assert wrapper.sent == [
         (
             "tx-release",
             "127.0.0.1",
