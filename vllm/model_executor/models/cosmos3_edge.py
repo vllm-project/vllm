@@ -18,13 +18,14 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
 from vllm.utils.torch_utils import async_tensor_h2d
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
     SupportsPP,
@@ -487,6 +488,7 @@ def _cosmos3_edge_diffusers_prefix_map() -> dict[str, str]:
 class Cosmos3EdgeForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
+    SupportsLoRA,
     SupportsPP,
     SupportsMRoPE,
 ):
@@ -544,6 +546,7 @@ class Cosmos3EdgeForConditionalGeneration(
     allow_patterns_overrides = ["[tv]*er/*.safetensors"]
 
     supports_encoder_tp_data = True
+    supports_tower_connector_lora = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -749,6 +752,17 @@ class Cosmos3EdgeForConditionalGeneration(
             connector="visual.projector",
             tower_model="visual.",
         )
+
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
+        merge_size = self.visual.spatial_merge_size
+        return num_mm_embeds * merge_size**2, num_mm_embeds
 
     def get_mrope_input_positions(
         self,
