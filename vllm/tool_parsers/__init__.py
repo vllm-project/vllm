@@ -166,6 +166,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "olmo3_tool_parser",
         "Olmo3PythonicToolParser",
     ),
+    "plamo3": (
+        "plamo3_engine_tool_parser",
+        "Plamo3EngineToolParser",
+    ),
     "muse_glimmer": (
         "muse_glimmer_tool_parser",
         "MuseGlimmerToolParser",
