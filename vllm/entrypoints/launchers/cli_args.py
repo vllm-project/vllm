@@ -181,6 +181,13 @@ class BaseFrontendArgs:
     If set to True, only enable the Tokens In<>Out endpoint.
     This is intended for use in a Disaggregated Everything setup.
     """
+    enable_scale_out: bool = False
+    """
+    If set to True, register the scale-out endpoints (`/render`, `/derender`,
+    and `/inference/v1/generate`) on `vllm serve`. Has no effect on
+    `vllm launch render` or `vllm serve --tokens-only`, which always register
+    their required endpoints regardless of this flag.
+    """
     fingerprint_mode: Literal["full", "hash", "custom", "none"] = "full"
     """Controls the ``system_fingerprint`` field on responses.
 
