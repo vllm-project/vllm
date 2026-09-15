@@ -221,6 +221,12 @@ class KernelConfig:
     Platform defaults appended automatically during VllmConfig.__post_init__.
     """
 
+    nvfp4_dynamic_max_tokens: int = Field(default=0, ge=0, le=16)
+    """Experimental CuTe NVFP4 A16 cutoff. Zero selects CuTe W4A4 for every call."""
+
+    nvfp4_dynamic_silu_max_tokens: int | None = Field(default=None, ge=0, le=16)
+    """A16 cutoff for fused SiLU down projections. None inherits the linear cutoff."""
+
     enable_flashinfer_autotune: bool = None  # type: ignore[assignment]
     """If True, run FlashInfer autotuning during kernel warmup."""
 
@@ -269,12 +275,6 @@ class KernelConfig:
     - "emulation": use BF16/FP16 GEMM, dequantizing weights and
                    running QDQ on activations.
     """
-
-    nvfp4_dynamic_max_tokens: int = Field(default=0, ge=0, le=16)
-    """Experimental CuTe NVFP4 A16 cutoff. Zero selects CuTe W4A4 for every call."""
-
-    nvfp4_dynamic_silu_max_tokens: int | None = Field(default=None, ge=0, le=16)
-    """A16 cutoff for fused SiLU down projections. None inherits the linear cutoff."""
 
     linear_backend: LinearBackend = "auto"
     """Backend for linear layer GEMM kernels. Available options:

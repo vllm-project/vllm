@@ -397,7 +397,8 @@ def main():
             json.dumps(before) + "\n"
         )
         del stock_layer, marlin_layer, packed, logical_sf, sf
-    verify_sources(args.source_manifest)
+    if args.source_manifest is not None:
+        verify_sources(args.source_manifest)
     (args.output / "complete.json").write_text(
         json.dumps(
             {"passed": True, "rows": len(rows), "qualify_only": args.qualify_only}
