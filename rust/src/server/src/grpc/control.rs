@@ -195,12 +195,7 @@ impl pb::control_server::Control for ControlServiceImpl {
             max_batched_tokens: ready.max_num_batched_tokens,
             max_loras: ready.max_loras,
             rl_capabilities: Some(self.rl_capabilities()),
-            effective_attention_block_size: ready.effective_attention_block_size.filter(|size| {
-                self.client()
-                    .ready_responses()
-                    .iter()
-                    .all(|response| response.effective_attention_block_size == Some(*size))
-            }),
+            effective_attention_block_size: self.client().effective_attention_block_size(),
         }))
     }
 
