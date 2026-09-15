@@ -31,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import *
+from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_config
 from vllm.triton_utils import triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -52,8 +53,8 @@ def clear_triton_cache():
     # Force Python garbage collection
     gc.collect()
 
-    # Clear CUDA memory cache
-    if torch.cuda.is_available():
+    # Clear accelerator memory cache
+    if torch.accelerator.is_available():
         torch.accelerator.empty_cache()
 
     # Try to clear Triton's runtime cache
@@ -257,7 +258,7 @@ def benchmark_config(
                     moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
                     in_dtype=init_dtype,
                     routing_method=RoutingMethodType.TopK,
-                    device="cuda",
+                    device=current_platform.device_type,
                 ),
             )
             deep_gemm_experts = mk.FusedMoEKernel(
@@ -303,9 +304,9 @@ def benchmark_config(
     run()
     torch.accelerator.synchronize()
 
-    # Capture 10 invocations with CUDA graph
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
+    # Capture 10 invocations with an accelerator graph
+    graph = torch.accelerator.Graph()
+    with graph:
         for _ in range(10):
             run()
     torch.accelerator.synchronize()
@@ -361,11 +362,33 @@ def get_rocm_tuning_space(use_fp16):
     return param_ranges
 
 
+def get_xpu_tuning_space(use_fp16):
+    # BLOCK_SIZE_N=32 and num_warps=32 never won; grf_mode=256 beat 128 on B70.
+    block_m_range = [16, 32, 64, 128, 256]
+    block_n_range = [64, 128]
+    block_k_range = [32, 64]
+    num_warps_range = [4, 8, 16]
+    group_m_range = [1, 8, 16]
+    num_stage_range = [3, 4]
+
+    return {
+        "BLOCK_SIZE_M": block_m_range,
+        "BLOCK_SIZE_N": block_n_range,
+        "BLOCK_SIZE_K": block_k_range,
+        "GROUP_SIZE_M": group_m_range,
+        "num_warps": num_warps_range,
+        "num_stages": num_stage_range,
+        "grf_mode": ["256"],
+    }
+
+
 def get_configs_compute_bound(use_fp16, block_quant_shape) -> list[dict[str, int]]:
     configs: list[BenchmarkConfig] = []
 
     if current_platform.is_rocm():
         param_ranges = get_rocm_tuning_space(use_fp16)
+    elif current_platform.is_xpu():
+        param_ranges = get_xpu_tuning_space(use_fp16)
     else:
         # Reduced search space for faster tuning.
         # TODO(woosuk): Increase the search space and use a performance model to
@@ -406,6 +429,14 @@ def get_configs_compute_bound(use_fp16, block_quant_shape) -> list[dict[str, int
             if not (n_aligned and k_aligned):
                 configs.remove(config)
     return configs
+
+
+def prune_xpu_search_space(num_tokens, search_space, topk, num_experts):
+    # Cap the tile by rows routed to one expert, not total rows: wider tiles
+    # just pad and are the slowest to compile.
+    rows_per_expert = (num_tokens * topk + num_experts - 1) // num_experts
+    max_block_m = max(16, triton.next_power_of_2(rows_per_expert))
+    return [c for c in search_space if c["BLOCK_SIZE_M"] <= max_block_m]
 
 
 def prune_rocm_search_space(
@@ -519,16 +550,15 @@ def merge_unique_dicts(list1, list2):
     return result
 
 
-@ray.remote(num_gpus=1)
 class BenchmarkWorker:
-    def __init__(self, seed: int) -> None:
-        torch.set_default_device("cuda")
+    def __init__(self, seed: int, use_ray: bool = True) -> None:
+        torch.set_default_device(current_platform.device_type)
         set_random_seed(seed)
         self.seed = seed
         # Get the device ID to allocate tensors and kernels
         # on the respective GPU. This is required for Ray to work
         # correctly with multi-GPU tuning on the ROCm platform.
-        self.device_id = int(ray.get_gpu_ids()[0])
+        self.device_id = int(ray.get_gpu_ids()[0]) if use_ray else 0
 
     def benchmark(
         self,
@@ -619,6 +649,10 @@ class BenchmarkWorker:
                 is_fp16,
                 topk,
             )
+        elif current_platform.is_xpu():
+            search_space = prune_xpu_search_space(
+                num_tokens, search_space, topk, num_experts
+            )
 
         need_device_guard = False
         if current_platform.is_rocm():
@@ -690,6 +724,7 @@ def sort_config(config: BenchmarkConfig) -> BenchmarkConfig:
             else {}
         ),
         **({"kpack": config["kpack"]} if "kpack" in config else {}),
+        **({"grf_mode": config["grf_mode"]} if "grf_mode" in config else {}),
         **({"SPLIT_K": config["SPLIT_K"]} if "SPLIT_K" in config else {}),
     }
 
@@ -959,20 +994,29 @@ def main(args: argparse.Namespace):
         os.environ["ROCR_VISIBLE_DEVICES"] = val
         del os.environ["HIP_VISIBLE_DEVICES"]
 
-    ray.init()
-    num_gpus = int(ray.available_resources()["GPU"])
-    workers = [BenchmarkWorker.remote(args.seed) for _ in range(num_gpus)]
+    if args.no_ray:
+        # Some accelerators (e.g. XPU) don't register Ray's "GPU" resource.
+        worker = BenchmarkWorker(args.seed, use_ray=False)
 
-    def _distribute(method: str, inputs: list[Any]) -> list[Any]:
-        outputs = []
-        worker_idx = 0
-        for input_args in inputs:
-            worker = workers[worker_idx]
+        def _distribute(method: str, inputs: list[Any]) -> list[Any]:
             worker_method = getattr(worker, method)
-            output = worker_method.remote(*input_args)
-            outputs.append(output)
-            worker_idx = (worker_idx + 1) % num_gpus
-        return ray.get(outputs)
+            return [worker_method(*input_args) for input_args in inputs]
+    else:
+        ray.init()
+        num_gpus = int(ray.available_resources()["GPU"])
+        remote_worker_cls = ray.remote(num_gpus=1)(BenchmarkWorker)
+        workers = [remote_worker_cls.remote(args.seed) for _ in range(num_gpus)]
+
+        def _distribute(method: str, inputs: list[Any]) -> list[Any]:
+            outputs = []
+            worker_idx = 0
+            for input_args in inputs:
+                worker = workers[worker_idx]
+                worker_method = getattr(worker, method)
+                output = worker_method.remote(*input_args)
+                outputs.append(output)
+                worker_idx = (worker_idx + 1) % num_gpus
+            return ray.get(outputs)
 
     if args.tune:
         # int4_w4a16 weights are uint8-packed, not fp16; treat like fp8 for
@@ -1082,6 +1126,13 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--batch-size", type=int, nargs="+", required=False)
     parser.add_argument("--tune", action="store_true")
+    parser.add_argument(
+        "--no-ray",
+        action="store_true",
+        help="Run in a single process instead of distributing over Ray actors. "
+        "Required on accelerators that do not register Ray's 'GPU' resource "
+        "(e.g. Intel XPU).",
+    )
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--model-prefix", type=str, required=False)
     args = parser.parse_args()
