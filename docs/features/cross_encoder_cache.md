@@ -73,6 +73,7 @@ These options belong in the producer's `ec_connector_extra_config`:
 | `embedding_model_identity` | Configured model path | Override the model field in Store keys. Matching multimodal identifiers are still required. |
 | `store_max_pending_items` | `32` | Maximum pending publications per Encoder. Must be positive. |
 | `store_max_pending_bytes` | `2147483648` (2 GiB) | Maximum retained tensor storage for pending publications per Encoder. Must be positive. |
+| `store_read_buffer_bytes` | `134217728` (128 MiB) | Maximum reusable CPU staging buffer per Encoder; pinned for CUDA outputs. Must be positive. |
 
 Encoders sharing outputs must use the same immutable weights, compatible
 preprocessing and matching multimodal identifiers. Use the same configured model
@@ -85,6 +86,12 @@ must consistently identify the same input; see [cached inputs](multimodal_inputs
 
 - Store reads are synchronous. Reuse skips Encoder computation, but not
   preprocessing, P2P delivery or the scheduler's Encoder budget reservation.
+- Hits are read in batches through one lazily allocated, registered CPU staging
+  buffer. Each chunk is copied to independent output tensors before the buffer
+  is reused. Reads are split by `store_read_buffer_bytes`; an individual object
+  larger than this capacity (including its 24-byte header) falls back to encoding.
+  Staging memory is additional to the Store's `local_buffer_size` and is released
+  on healthy shutdown. The first load includes allocation and registration costs.
 - Publication is best-effort. A request can finish before its outputs reach the
   Store, so concurrent cold requests may still encode the same image.
 - Publication budgets count each retained backing storage once across pending

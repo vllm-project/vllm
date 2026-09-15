@@ -99,28 +99,30 @@ class MemoryStore:
         )
         return [0]
 
-    def get_into_ranges(self, pointers, keys, dst_offsets, src_offsets, sizes):
-        [ptr], [[key]], [[[dst]]], [[[src]]], [[[size]]] = (
-            pointers,
-            keys,
-            dst_offsets,
-            src_offsets,
-            sizes,
-        )
-        obj = self.objects.get(key)
-        if obj is None:
-            return [[[-704]]]
-        if src + size > len(obj):
-            return [[[-600]]]
-        payload = obj[src : src + size]
-        ctypes.memmove(ptr + dst, payload, len(payload))
-        return [[[len(payload)]]]
+    def batch_get_into(self, keys, pointers, sizes):
+        results = []
+        for key, ptr, size in zip(keys, pointers, sizes, strict=True):
+            assert any(
+                base <= ptr and ptr + size <= base + capacity
+                for base, capacity in self.registered.items()
+            )
+            obj = self.objects.get(key)
+            if obj is None:
+                results.append(-704)
+            elif len(obj) > size:
+                results.append(-600)
+            else:
+                ctypes.memmove(ptr, obj, len(obj))
+                results.append(len(obj))
+        return results
 
 
 @pytest.fixture
 def backend():
     instance = store_backend.MooncakeEmbeddingStoreBackend(
-        store_client.MooncakeEmbeddingStoreClient(MemoryStore()),
+        store_client.MooncakeEmbeddingStoreClient(
+            MemoryStore(), read_buffer_bytes=1024
+        ),
         KEY,
         max_pending_items=32,
         max_pending_bytes=2 * 1024**3,
@@ -128,6 +130,11 @@ def backend():
     yield instance
     # Some tests deliberately poison I/O; always stop the Python executor.
     instance._executor.shutdown(wait=True)
+    if (
+        not instance.store_client._poisoned
+        and instance.store_client._read_buffer is not None
+    ):
+        instance.store_client.close()
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
@@ -137,10 +144,110 @@ def test_tensor_round_trip(backend, dtype):
     key = make_embedding_key(KEY, "a")
     client.put_tensor(key, tensor)
     expected = TensorSpec(tuple(tensor.shape), str(dtype), tensor.nbytes)
-    loaded = client.load_tensor(key, expected, "cpu")
+    loaded = client.load_tensors({key: expected}, "cpu")[key]
     assert loaded.dtype == dtype and torch.equal(loaded, tensor)
     assert len(client.store.objects[key]) == 24 + tensor.nbytes
-    assert not client.store.registered
+    assert len(client.store.registered) == 1
+
+
+@pytest.mark.parametrize("capacity", [80, 120])
+def test_batch_reads_reuse_registration_without_aliasing_outputs(backend, capacity):
+    client, native = backend.store_client, backend.store_client.store
+    client._read_buffer_bytes = capacity
+    tensors = {key: torch.full((2, 2), float(i)) for i, key in enumerate("abc")}
+    for key, tensor in tensors.items():
+        client.put_tensor(key, tensor)
+    native.register_buffer = MagicMock(wraps=native.register_buffer)
+    native.unregister_buffer = MagicMock(wraps=native.unregister_buffer)
+    native.batch_get_into = MagicMock(wraps=native.batch_get_into)
+    expected = dict.fromkeys(tensors, SPEC)
+    first = client.load_tensors(expected, "cpu")
+    for key, tensor in tensors.items():
+        native.objects[key] = native.objects[key][:24] + struct.pack(
+            "<4f", *[tensor[0, 0].item() + 10] * 4
+        )
+    second = client.load_tensors(expected, "cpu")
+    assert all(torch.equal(first[key], tensor) for key, tensor in tensors.items())
+    assert all(torch.equal(second[key], tensor + 10) for key, tensor in tensors.items())
+    assert native.batch_get_into.call_count == (4 if capacity == 80 else 2)
+    native.register_buffer.assert_called_once()
+    native.unregister_buffer.assert_not_called()
+    client.close()
+    native.unregister_buffer.assert_called_once()
+    assert not native.registered
+
+
+@pytest.mark.parametrize("mode", ["miss", "oversized"])
+def test_unloadable_inputs_do_not_allocate_staging(backend, mode):
+    client, native = backend.store_client, backend.store_client.store
+    client._read_buffer_bytes = 39
+    if mode == "oversized":
+        client.put_tensor(make_embedding_key(KEY, "a"), torch.ones(2, 2))
+    native.register_buffer = MagicMock(wraps=native.register_buffer)
+    assert not backend.resolve_inputs({"a": SPEC}, {}, "cpu")
+    assert client._read_buffer is None
+    native.register_buffer.assert_not_called()
+
+
+@pytest.mark.parametrize("results", [[40, -800], [40], [40, True], [[40], [40]], None])
+def test_unsafe_batch_result_retains_whole_staging(backend, results):
+    client, native = backend.store_client, backend.store_client.store
+    native.batch_get_into = MagicMock(return_value=results)
+    native.unregister_buffer = MagicMock(wraps=native.unregister_buffer)
+    for _ in range(2):
+        with pytest.raises(store_client.EmbeddingStoreError, match="unconfirmed"):
+            client.load_tensors(dict.fromkeys("ab", SPEC), "cpu")
+    native.batch_get_into.assert_called_once()
+    with pytest.raises(store_client.EmbeddingStoreError, match="unconfirmed"):
+        client.close()
+    native.unregister_buffer.assert_not_called()
+    assert client._read_buffer is client._unsafe_owners[0]
+
+
+@pytest.mark.parametrize("failure", ["allocation", "completion"])
+def test_copy_failure_preserves_staging_lifetime(backend, failure):
+    """Emulate CUDA allocation/event boundaries without requiring a GPU."""
+    client = backend.store_client
+    for key in "ab":
+        client.put_tensor(key, torch.ones(2, 2))
+    allocate, copy = torch.empty, torch.Tensor.copy_
+    targets: list[torch.Tensor] = []
+    copies: list[torch.Tensor] = []
+    ready = MagicMock()
+    ready.synchronize.side_effect = RuntimeError("copy failure")
+
+    def allocate_on_cpu(*args, **kwargs):
+        is_target = kwargs.get("device") == torch.device("cuda")
+        if is_target and targets and failure == "allocation":
+            raise torch.OutOfMemoryError("allocation failure")
+        kwargs.update(device="cpu", pin_memory=False)
+        tensor = allocate(*args, **kwargs)
+        if is_target:
+            targets.append(tensor)
+        return tensor
+
+    def record_copy(target, source, **kwargs):
+        copies.append(target)
+        return copy(target, source, **kwargs)
+
+    with (
+        patch.object(torch, "empty", side_effect=allocate_on_cpu),
+        patch.object(torch, "Event", return_value=ready),
+        patch.object(torch.accelerator, "current_stream"),
+        patch.object(torch.Tensor, "copy_", new=record_copy),
+        pytest.raises(RuntimeError, match="allocation failure|unconfirmed"),
+    ):
+        client.load_tensors(dict.fromkeys("ab", SPEC), "cuda")
+    if failure == "allocation":
+        assert not copies and not client._poisoned
+    else:
+        assert len(copies) == 2 and client._poisoned
+        assert all(
+            any(owner is target for owner in client._unsafe_owners)
+            for target in targets
+        )
+        with pytest.raises(store_client.EmbeddingStoreError, match="unconfirmed"):
+            client.close()
 
 
 def test_non_matrix_output_is_rejected_before_registration(backend):
@@ -229,18 +336,16 @@ def test_reuse_pipeline(backend, mode):
         native.objects[key] = native.objects[key][:-1]
         hits.remove("b")
     if mode in ("get-failure", "lease-expired"):
-        read = native.get_into_ranges
+        read = native.batch_get_into
 
-        def failed_read(pointers, keys, dst, src, sizes):
-            if keys == [[make_embedding_key(KEY, "b")]] and src == [[[24]]]:
-                if mode == "lease-expired":
-                    # Native ranged GET checks the lease after the transfer.
-                    read(pointers, keys, dst, src, sizes)
-                    return [[[-707]]]
-                return [[[-704]]]
-            return read(pointers, keys, dst, src, sizes)
+        def failed_read(keys, pointers, sizes):
+            results = read(keys, pointers, sizes)
+            results[keys.index(make_embedding_key(KEY, "b"))] = (
+                -707 if mode == "lease-expired" else -704
+            )
+            return results
 
-        native.get_into_ranges = failed_read
+        native.batch_get_into = failed_read
         hits.remove("b")
     if mode == "registration-failure":
         native.register_buffer = MagicMock(return_value=-500)
@@ -310,7 +415,7 @@ def test_reuse_pipeline(backend, mode):
     assert not native.registered
     if mode in ("miss", "legacy"):
         other = store_backend.MooncakeEmbeddingStoreBackend(
-            store_client.MooncakeEmbeddingStoreClient(native),
+            store_client.MooncakeEmbeddingStoreClient(native, read_buffer_bytes=1024),
             KEY,
             max_pending_items=32,
             max_pending_bytes=2 * 1024**3,
@@ -328,7 +433,8 @@ def test_reuse_pipeline(backend, mode):
 
 
 @pytest.mark.parametrize(
-    "mismatch", ["revision", "shape", "dtype", "magic", "short-header", "short-data"]
+    "mismatch",
+    ["revision", "shape", "dtype", "magic", "short-header", "short-data", "long-data"],
 )
 def test_incompatible_output_is_a_miss(backend, mismatch):
     key = make_embedding_key(KEY, "a")
@@ -343,17 +449,19 @@ def test_incompatible_output_is_a_miss(backend, mismatch):
         objects[key] = objects[key][:23]
     elif mismatch == "short-data":
         objects[key] = objects[key][:-1]
+    elif mismatch == "long-data":
+        objects[key] += b"extra"
     expected = replace(SPEC, shape=(4, 1)) if mismatch == "shape" else SPEC
     outputs: dict[str, torch.Tensor] = {}
     assert not backend.resolve_inputs({"a": expected}, outputs, "cpu")
-    assert not outputs and not backend.store_client.store.registered
+    assert not outputs
     tensor = torch.ones(2, 2)
     backend.store_client.put_tensor(
         make_embedding_key(backend.namespace, "valid"), tensor
     )
     assert backend.resolve_inputs({"valid": SPEC}, outputs, "cpu") == {"valid"}
     assert torch.equal(outputs["valid"], tensor)
-    assert not backend.store_client.store.registered
+    assert len(backend.store_client.store.registered) == 1
 
 
 def test_partial_registration_rejection_releases_publication(backend):
@@ -381,7 +489,9 @@ def test_partial_registration_rejection_releases_publication(backend):
     assert storage_owner() is None  # The failed Future is still alive.
 
 
-@pytest.mark.parametrize("operation", ["get", "put", "rejected-put", "unregister"])
+@pytest.mark.parametrize(
+    "operation", ["get", "read-unregister", "put", "rejected-put", "unregister"]
+)
 def test_native_io_owners(backend, operation):
     """Uncertain I/O retains owners; completed rejection frees them even via Future."""
     native, client = backend.store_client.store, backend.store_client
@@ -389,18 +499,19 @@ def test_native_io_owners(backend, operation):
     tensor = torch.ones(2, 2)
     owner = weakref.ref(tensor)
     rejected = operation == "rejected-put"
-    if operation == "get":
+    if operation in ("get", "read-unregister"):
         key = make_embedding_key(KEY, "a")
         client.put_tensor(key, tensor)
-        read = native.get_into_ranges
-        native.get_into_ranges = lambda ptrs, keys, dst, src, sizes: (
-            [[[-800]]] if src == [[[24]]] else read(ptrs, keys, dst, src, sizes)
-        )
-        with (
-            patch.object(store_client.torch, "empty", return_value=tensor),
-            pytest.raises(store_client.EmbeddingStoreError, match="unconfirmed"),
-        ):
-            client.load_tensor(key, SPEC, "cpu")
+        if operation == "get":
+            native.batch_get_into = MagicMock(return_value=[-800])
+            with pytest.raises(store_client.EmbeddingStoreError, match="unconfirmed"):
+                client.load_tensors({key: SPEC}, "cpu")
+        else:
+            client.load_tensors({key: SPEC}, "cpu")
+            native.unregister_buffer = MagicMock(return_value=-500)
+            with pytest.raises(store_client.EmbeddingStoreError, match="unregister"):
+                client.close()
+        owner = weakref.ref(client._read_buffer)
     else:
         if operation == "unregister":
             native.unregister_buffer = MagicMock(return_value=-500)

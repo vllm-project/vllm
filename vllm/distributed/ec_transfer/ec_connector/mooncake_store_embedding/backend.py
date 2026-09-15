@@ -91,26 +91,26 @@ class MooncakeEmbeddingStoreBackend:
             )
             return set()
 
+        hits = {
+            pool_key: expected_tensors[identifier]
+            for identifier, pool_key, hit in zip(
+                candidates, pool_keys, exists, strict=True
+            )
+            if hit
+        }
+        try:
+            tensors = self.store_client.load_tensors(hits, device)
+        except (EmbeddingStoreOperationError, OSError):
+            logger.warning(
+                "Mooncake embedding Store GET failed; falling back to encoder",
+                exc_info=True,
+            )
+            return set()
         loaded: set[str] = set()
-        for identifier, pool_key, hit in zip(
-            candidates, pool_keys, exists, strict=True
-        ):
-            if not hit:
-                continue
-            try:
-                target = self.store_client.load_tensor(
-                    pool_key, expected_tensors[identifier], device
-                )
-            except (EmbeddingStoreOperationError, OSError):
-                logger.warning(
-                    "Mooncake embedding Store GET failed for identifier=%s; "
-                    "falling back to encoder",
-                    identifier,
-                    exc_info=True,
-                )
-                continue
-            encoder_cache[identifier] = target
-            loaded.add(identifier)
+        for identifier, pool_key in zip(candidates, pool_keys, strict=True):
+            if pool_key in tensors:
+                encoder_cache[identifier] = tensors[pool_key]
+                loaded.add(identifier)
         return loaded
 
     def _enqueue_save(self, identifier: str, tensor: torch.Tensor) -> bool:

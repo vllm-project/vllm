@@ -72,6 +72,7 @@ class MooncakeECConfig:
     cross_encoder_cache: bool = False
     store_max_pending_items: int = 32
     store_max_pending_bytes: int = 2 * 1024**3
+    store_read_buffer_bytes: int = 128 * 1024**2
 
     @classmethod
     def from_vllm_config(cls, vllm_config: VllmConfig) -> MooncakeECConfig:
@@ -147,5 +148,8 @@ class MooncakeECConfig:
             ),
             store_max_pending_bytes=_positive_int(
                 "store_max_pending_bytes", get("store_max_pending_bytes", 2 * 1024**3)
+            ),
+            store_read_buffer_bytes=_positive_int(
+                "store_read_buffer_bytes", get("store_read_buffer_bytes", 128 * 1024**2)
             ),
         )
