@@ -298,7 +298,7 @@ def _gqa_sparse_decode_kernel(
     # attention range instead of letting padded rows produce negative lengths.
     kv_len = tl.maximum(query_pos + 1, 0)
 
-    # Valid block count from seq_len (no sentinel): min(topk, cdiv(kv_len, blk)).
+    # Upper bound on top-k entries from causal length; entries may be sentinels.
     idx_base = t_ptr + pid_kh * stride_th + pid_b * stride_tn
     num_blocks = (kv_len + BLOCK_SIZE_K - 1) // BLOCK_SIZE_K
     real_topk = tl.minimum(max_topk, num_blocks)

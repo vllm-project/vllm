@@ -2226,13 +2226,20 @@ def test_decode_sparse_attention_correctness(
 
 @pytest.mark.parametrize("kv_layout", ["NHD", "HND"], indirect=True)
 @pytest.mark.parametrize("capture_graph", [False, True])
+@pytest.mark.parametrize("num_reqs", [2, 17], ids=["split-k", "single-chunk"])
+@pytest.mark.parametrize(
+    "invalid_block", [-1, 1_000_000], ids=["sentinel", "out-of-range"]
+)
 def test_decode_sparse_attention_ignores_invalid_topk(
-    kv_layout: KVCacheLayout, capture_graph: bool
+    kv_layout: KVCacheLayout, capture_graph: bool, num_reqs: int, invalid_block: int
 ):
     """Unused top-k entries must not be dereferenced as block-table indices."""
     torch.manual_seed(0)
     decode_query_len = 4
-    seq_lens = torch.tensor([decode_query_len, 4096], device="cuda", dtype=torch.int32)
+    seq_lens = torch.full(
+        (num_reqs,), decode_query_len, device="cuda", dtype=torch.int32
+    )
+    seq_lens[1] = 4096
     q = torch.randn(
         seq_lens.numel() * decode_query_len,
         NUM_Q_HEADS,
@@ -2242,11 +2249,11 @@ def test_decode_sparse_attention_ignores_invalid_topk(
     )
     kv_cache = _allocate_main_kv_via_contract(1, kv_layout)
 
-    # All logical blocks alias the single valid page. With a contiguous two-row
+    # All logical blocks alias the single valid page. With a contiguous multi-row
     # table, row 1's raw pointer offset -1 resolves to the final element of row
     # 0. Poison that exact location so an unsafe load deterministically forms an
     # out-of-range KV-cache pointer.
-    clean_block_table = torch.zeros(2, 32, device="cuda", dtype=torch.int32)
+    clean_block_table = torch.zeros(num_reqs, 32, device="cuda", dtype=torch.int32)
     block_table = clean_block_table.clone()
     block_table[0, -1] = 1_000_000
     topk_idx = torch.full(
@@ -2256,6 +2263,12 @@ def test_decode_sparse_attention_ignores_invalid_topk(
         dtype=torch.int32,
     )
     topk_idx[..., 0] = 0
+    # Request 1 has invalid entries both before and after its valid block.
+    # Two requests produce empty split-K chunks; 17 put the full top-k in one
+    # chunk, exercising neutral updates before and after a nonempty softmax.
+    request_topk = topk_idx[:, decode_query_len : 2 * decode_query_len]
+    request_topk.fill_(invalid_block)
+    request_topk[..., TOPK // 2] = 0
 
     expected = _reference_sparse_attn(
         q,
