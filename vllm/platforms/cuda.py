@@ -331,7 +331,6 @@ class CudaPlatformBase(Platform):
         parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config
 
-
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
 

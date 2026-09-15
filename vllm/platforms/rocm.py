@@ -922,7 +922,6 @@ class RocmPlatform(Platform):
         compilation_config = vllm_config.compilation_config
         parallel_config = vllm_config.parallel_config
 
-
         if (
             compilation_config.cudagraph_mode.has_full_cudagraphs()
             and parallel_config.prefill_context_parallel_size > 1
