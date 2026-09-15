@@ -25,6 +25,9 @@ from vllm.utils.flashinfer import has_flashinfer
 
 logger = init_logger(__name__)
 
+_MAX_INT32 = 2**31 - 1
+_MIN_PACKED_TOPK_TP_SIZE = 8
+
 
 @cache
 def _flashinfer_topk() -> Callable[..., tuple[torch.Tensor, torch.Tensor]] | None:
@@ -284,9 +287,24 @@ class LogitsProcessor(PluggableLayer):
         # Convert shard-local indices to global vocab indices.
         ids = ids.to(torch.int64) + lm_head.shard_indices.org_vocab_start_index
 
-        if lm_head.tp_size > 1:
-            values = tensor_model_parallel_all_gather(values, dim=-1)
-            ids = tensor_model_parallel_all_gather(ids, dim=-1)
+        tp_size = lm_head.tp_size
+        if tp_size > 1:
+            if (
+                tp_size >= _MIN_PACKED_TOPK_TP_SIZE
+                and lm_head.num_embeddings_padded <= _MAX_INT32
+            ):
+                # Bit-cast IDs so packing is lossless beyond FP32's integer range.
+                packed_ids = ids.to(torch.int32).view(torch.float32)
+                candidates = torch.cat((values.float(), packed_ids), dim=-1)
+                candidates = tensor_model_parallel_all_gather(candidates, dim=-1)
+                candidates = candidates.unflatten(-1, (tp_size, 2, k))
+                values = candidates[..., 0, :].flatten(-2)
+                ids = (
+                    candidates[..., 1, :].flatten(-2).view(torch.int32).to(torch.int64)
+                )
+            else:
+                values = tensor_model_parallel_all_gather(values, dim=-1)
+                ids = tensor_model_parallel_all_gather(ids, dim=-1)
             values, selected = _topk(values, k)
             ids = ids.gather(-1, selected)
 
