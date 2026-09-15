@@ -153,7 +153,7 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def start_profile(self) -> None:
+    async def start_profile(self, profile_prefix: str | None = None) -> None:
         """Start profiling the engine"""
         ...
 
