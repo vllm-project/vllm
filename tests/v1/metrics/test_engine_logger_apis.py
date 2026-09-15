@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -8,7 +10,47 @@ from tests.plugins.vllm_add_dummy_stat_logger.dummy_stat_logger.dummy_stat_logge
     DummyStatLogger,
 )
 from vllm.v1.engine.async_llm import AsyncEngineArgs, AsyncLLM
+from vllm.v1.metrics.loggers import (
+    ITERATION_PHASE_DECODE,
+    ITERATION_PHASE_PREFILL,
+    LoggingStatLogger,
+    PrometheusStatLogger,
+    StatLoggerRequirements,
+    get_stat_logger_requirements,
+)
 from vllm.v1.metrics.ray_wrappers import RayPrometheusStatLogger
+from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
+
+
+class IterationDetailsStatLogger(DummyStatLogger):
+    @classmethod
+    def get_requirements(cls, vllm_config) -> StatLoggerRequirements:
+        return StatLoggerRequirements(iteration_details=True)
+
+
+class InvalidRequirementsStatLogger(DummyStatLogger):
+    @classmethod
+    def get_requirements(cls, vllm_config):
+        return object()
+
+
+def make_vllm_config():
+    return SimpleNamespace()
+
+
+def make_prometheus_iteration_logger():
+    stat_logger = object.__new__(PrometheusStatLogger)
+    request_histograms = {
+        phase: {0: Mock()}
+        for phase in (ITERATION_PHASE_PREFILL, ITERATION_PHASE_DECODE)
+    }
+    token_histograms = {
+        phase: {0: Mock()}
+        for phase in (ITERATION_PHASE_PREFILL, ITERATION_PHASE_DECODE)
+    }
+    stat_logger.histogram_iteration_requests = request_histograms
+    stat_logger.histogram_iteration_tokens_by_phase = token_histograms
+    return stat_logger, request_histograms, token_histograms
 
 
 @pytest.fixture
@@ -64,3 +106,96 @@ async def test_async_llm_add_to_default_loggers(log_stats_enabled_engine_args):
     assert engine.log_stats
 
     engine.shutdown()
+
+
+def test_get_stat_logger_requirements_merges_plugin_requests():
+    requirements = get_stat_logger_requirements(
+        [DummyStatLogger, IterationDetailsStatLogger], make_vllm_config()
+    )
+
+    assert requirements == StatLoggerRequirements(iteration_details=True)
+
+
+def test_get_stat_logger_requirements_keeps_existing_plugins_compatible():
+    requirements = get_stat_logger_requirements([DummyStatLogger], make_vllm_config())
+
+    assert requirements == StatLoggerRequirements()
+
+
+def test_get_stat_logger_requirements_rejects_invalid_result():
+    with pytest.raises(
+        TypeError,
+        match=r"get_requirements\(\) must return StatLoggerRequirements",
+    ):
+        get_stat_logger_requirements(
+            [InvalidRequirementsStatLogger], make_vllm_config()
+        )
+
+
+def test_prometheus_requests_iteration_details():
+    requirements = PrometheusStatLogger.get_requirements(make_vllm_config())
+
+    assert requirements.iteration_details
+
+
+def test_prometheus_records_phase_aware_iteration_distributions():
+    stat_logger, request_histograms, token_histograms = (
+        make_prometheus_iteration_logger()
+    )
+    scheduler_stats = SchedulerStats(
+        iteration_details=SchedulerIterationDetails(
+            iteration_index=1,
+            num_ctx_requests=2,
+            num_ctx_tokens=3,
+            num_generation_requests=4,
+            num_generation_tokens=5,
+            elapsed_ms=6,
+        )
+    )
+
+    stat_logger._record_iteration_metrics(scheduler_stats, 0)
+
+    request_histograms[ITERATION_PHASE_PREFILL][0].observe.assert_called_once_with(2)
+    token_histograms[ITERATION_PHASE_PREFILL][0].observe.assert_called_once_with(3)
+    request_histograms[ITERATION_PHASE_DECODE][0].observe.assert_called_once_with(4)
+    token_histograms[ITERATION_PHASE_DECODE][0].observe.assert_called_once_with(5)
+
+
+@pytest.mark.parametrize(
+    "details",
+    [None, SchedulerIterationDetails(0, 0, 0, 0, 0, 0, is_dummy=True)],
+)
+def test_prometheus_skips_non_model_iterations(details):
+    stat_logger, request_histograms, token_histograms = (
+        make_prometheus_iteration_logger()
+    )
+
+    stat_logger._record_iteration_metrics(SchedulerStats(iteration_details=details), 0)
+
+    for histogram in (*request_histograms.values(), *token_histograms.values()):
+        histogram[0].observe.assert_not_called()
+
+
+def test_iteration_collection_does_not_enable_iteration_logging(monkeypatch):
+    log_info = Mock()
+    monkeypatch.setattr("vllm.v1.metrics.loggers.logger.info", log_info)
+    stat_logger = object.__new__(LoggingStatLogger)
+    stat_logger.vllm_config = SimpleNamespace(
+        observability_config=SimpleNamespace(
+            enable_logging_iteration_details=False,
+        )
+    )
+    scheduler_stats = SchedulerStats(
+        iteration_details=SchedulerIterationDetails(
+            iteration_index=1,
+            num_ctx_requests=2,
+            num_ctx_tokens=3,
+            num_generation_requests=4,
+            num_generation_tokens=5,
+            elapsed_ms=6,
+        )
+    )
+
+    LoggingStatLogger._log_iteration_details(stat_logger, scheduler_stats, 0)
+
+    log_info.assert_not_called()

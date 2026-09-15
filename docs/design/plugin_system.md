@@ -59,6 +59,32 @@ Every plugin has three parts:
 
 - **Being re-entrant**: The function specified in the entry point should be re-entrant, meaning it can be called multiple times without causing issues. This is necessary because the function might be called multiple times in some processes.
 
+### Stat logger plugin iteration details
+
+Stat logger plugins can request the existing scheduler iteration details without
+enabling per-iteration INFO logging. Declare the requirement on the plugin class
+and read the details from `SchedulerStats` in the existing `record` callback:
+
+```python
+from vllm.v1.metrics.loggers import StatLoggerBase, StatLoggerRequirements
+
+
+class CustomStatLogger(StatLoggerBase):
+    @classmethod
+    def get_requirements(cls, vllm_config) -> StatLoggerRequirements:
+        return StatLoggerRequirements(iteration_details=True)
+
+    def record(self, scheduler_stats, iteration_stats, **kwargs) -> None:
+        if scheduler_stats is not None and scheduler_stats.iteration_details:
+            observe_iteration(scheduler_stats.iteration_details)
+```
+
+Requesting iteration details enables their collection but does not enable
+per-iteration INFO logging. Collection remains disabled when no plugin requests
+it and `--enable-logging-iteration-details` is not set. As with the rest of the
+stat logger interface, `SchedulerStats` and its iteration details are not stable
+interfaces and may change in future versions.
+
 ### Platform plugins guidelines
 
 1. Create a platform plugin project, for example, `vllm_add_dummy_platform`. The project structure should look like this:
