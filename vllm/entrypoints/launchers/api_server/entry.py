@@ -16,6 +16,7 @@ import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
+from vllm.multimodal.paged_shm.server import maybe_start_paged_shm_server
 from vllm.reasoning import ReasoningParserManager
 from vllm.tool_parsers import ToolParserManager
 from vllm.usage.usage_lib import UsageContext
@@ -81,6 +82,8 @@ async def build_async_engine_client_from_engine_args(
     # Create the EngineConfig (determines if we can use V1).
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
+    paged_shm_server = maybe_start_paged_shm_server(vllm_config.model_config)
+
     from vllm.v1.engine.async_llm import AsyncLLM
 
     async_llm: AsyncLLM | None = None
@@ -110,6 +113,8 @@ async def build_async_engine_client_from_engine_args(
     finally:
         if async_llm:
             async_llm.shutdown(timeout=vllm_config.shutdown_timeout)
+        if paged_shm_server is not None:
+            paged_shm_server.shutdown()
 
 
 async def build_and_serve(
