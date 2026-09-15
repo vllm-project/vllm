@@ -1241,21 +1241,6 @@ def multi_thread_pt_weights_iterator(
             del state
 
 
-def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
-    """convert PySafeSlice object from safetensors to torch.Tensor
-
-    PySafeSlice object supports indexing, which is done before loading the
-    actual tensor and can reduce the amount of memory being read into the
-    memory. However, it does not support more advanced functionalities
-    like `.view()` or `.t()`. Therefore, if we need to modify the loaded
-    tensor with these more complicated operators, we need to convert to
-    tensor first.
-    """
-    if not isinstance(x, torch.Tensor):
-        x = x[:]
-    return x
-
-
 def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
     """Default weight loader."""
     try:
@@ -1356,6 +1341,10 @@ def initialize_single_dummy_weight(
     if param.device.type == "meta":
         return  # deferred to finalize_layerwise_processing (e.g. online quant)
 
+    if (dummy_weight_value := getattr(param, "dummy_weight_value", None)) is not None:
+        param.fill_(dummy_weight_value)
+        return
+
     if not torch.is_floating_point(param):
         if current_platform.is_rocm():
             # On ROCm, integer params (e.g. GPTQ qweight/qzeros) are left
@@ -1391,10 +1380,9 @@ def initialize_single_dummy_weight(
     generator.manual_seed(seed)
     if torch.finfo(param.data.dtype).bits < 16:
         # uniform_ doesn't support < 16-bit datatypes (FP8)
-        dtype = param.data.dtype
-        tmp_param = param.data.to(torch.float16)
-        tmp_param = tmp_param.uniform_(low, high, generator=generator).to(dtype)
-        param.data.copy_(tmp_param)
+        tmp_param = torch.empty_like(param, dtype=torch.float16)
+        tmp_param.uniform_(low, high, generator=generator)
+        param.copy_(tmp_param)
     else:
         param.uniform_(low, high, generator=generator)
 
@@ -1558,8 +1546,6 @@ def maybe_remap_moe_expert_param_name(
         "w2_bias",
         "w13_scale",
         "w2_scale",
-        "w13_g_idx",
-        "w2_g_idx",
         "w13_qweight",
         "w2_qweight",
         "w13_qzeros",

@@ -50,13 +50,12 @@ impl DefaultChatOutputProcessor {
         tool_call_parser: &ParserSelection,
         reasoning_parser: &ParserSelection,
     ) -> ChatResult<Self> {
-        let parser = if tool_call_parser == reasoning_parser
-            && let Some(parser) = Self::resolve_optional_unified_parser(
-                request.tools(),
-                model_id,
-                tokenizer.clone(),
-                tool_call_parser,
-            )? {
+        let parser = if let Some(parser) = Self::resolve_optional_unified_parser(
+            request.tools(),
+            tokenizer.clone(),
+            tool_call_parser.resolve_tool_name(model_id),
+            reasoning_parser.resolve_reasoning_name(model_id),
+        )? {
             parser
         } else {
             let tool_parsing_enabled = request.tool_parsing_enabled();
@@ -105,7 +104,7 @@ impl DefaultChatOutputProcessor {
     ) -> ChatResult<Box<dyn ToolParser>> {
         let factory = ToolParserFactory::global();
         let parser_name = match selection {
-            ParserSelection::Auto => factory.resolve_name_for_model(model_id).ok_or_else(|| {
+            ParserSelection::Auto => selection.resolve_tool_name(model_id).ok_or_else(|| {
                 Error::ParserUnavailableForModel {
                     kind: "tool",
                     model_id: model_id.to_string(),
@@ -123,21 +122,22 @@ impl DefaultChatOutputProcessor {
 
     fn resolve_optional_unified_parser(
         tools: &[ChatTool],
-        model_id: &str,
         tokenizer: DynTokenizer,
-        selection: &ParserSelection,
+        tool_name: Option<&str>,
+        reasoning_name: Option<&str>,
     ) -> ChatResult<Option<Box<dyn UnifiedParser>>> {
         let factory = UnifiedParserFactory::global();
-        let parser_name = match selection {
-            ParserSelection::Auto => factory.resolve_name_for_model(model_id),
-            ParserSelection::None => None,
-            ParserSelection::Explicit(name) if factory.contains(name) => Some(name.as_str()),
-            ParserSelection::Explicit(_) => None,
-        };
-
-        let Some(parser_name) = parser_name else {
+        let Some(parser_name) =
+            tool_name.into_iter().chain(reasoning_name).find(|name| factory.contains(name))
+        else {
             return Ok(None);
         };
+        if tool_name != reasoning_name {
+            return Err(Error::IncompatibleParserSelections {
+                tool: tool_name.unwrap_or("none").to_owned(),
+                reasoning: reasoning_name.unwrap_or("none").to_owned(),
+            });
+        }
 
         let parser = factory.create(parser_name, tools, tokenizer)?;
 
@@ -151,11 +151,7 @@ impl DefaultChatOutputProcessor {
         selection: &ParserSelection,
     ) -> ChatResult<Option<Box<dyn ReasoningParser>>> {
         let factory = ReasoningParserFactory::global();
-        let parser_name = match selection {
-            ParserSelection::Auto => factory.resolve_name_for_model(model_id),
-            ParserSelection::None => None,
-            ParserSelection::Explicit(name) => Some(name.as_str()),
-        };
+        let parser_name = selection.resolve_reasoning_name(model_id);
 
         let Some(parser_name) = parser_name else {
             REASONING_PARSER_LOG_ONCE.call_once(|| info!("reasoning parsing disabled"));
@@ -195,7 +191,6 @@ mod tests {
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::DefaultChatOutputProcessor;
-    use crate::Error;
     use crate::parser::ParserSelection;
     use crate::request::ChatRequest;
 
@@ -237,11 +232,29 @@ mod tests {
     }
 
     #[test]
-    fn mixed_gemma4_selection_uses_split_dummy_error() {
+    fn auto_and_explicit_gemma4_selections_use_unified_parser() {
+        let explicit = ParserSelection::Explicit("gemma4".to_string());
+        for (tool, reasoning) in [
+            (&ParserSelection::Auto, &explicit),
+            (&explicit, &ParserSelection::Auto),
+        ] {
+            DefaultChatOutputProcessor::new(
+                &mut ChatRequest::for_test(),
+                "google/gemma-4-27b-it",
+                tokenizer(),
+                tool,
+                reasoning,
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn conflicting_unified_parser_selections_report_resolved_names() {
         let mut request = ChatRequest::for_test();
         let error = match DefaultChatOutputProcessor::new(
             &mut request,
-            "other-model",
+            "Qwen/Qwen3-8B",
             tokenizer(),
             &ParserSelection::Auto,
             &ParserSelection::Explicit("gemma4".to_string()),
@@ -250,12 +263,7 @@ mod tests {
             Err(error) => error,
         };
 
-        let Error::ParserInitialization { error, .. } = error else {
-            panic!("expected parser initialization error");
-        };
-        assert_eq!(
-            error.to_string(),
-            "`gemma4` only provides a unified parser; the same reasoning parser and tool parser should be specified together"
-        );
+        expect_test::expect!["unified parsing requires the tool and reasoning selections to resolve to the same parser; resolved tool=qwen3_xml, reasoning=gemma4"]
+            .assert_eq(&format!("{error}"));
     }
 }
