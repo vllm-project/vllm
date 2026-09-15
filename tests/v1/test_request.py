@@ -83,3 +83,12 @@ def test_request_priority_comparison():
     r_id_a = make_req("req_a", priority=0, preemptions=0, arrival=1.0)
     r_id_b = make_req("req_b", priority=0, preemptions=0, arrival=1.0)
     assert r_id_a < r_id_b
+
+    # 5. Starvation cap: preemptions capped at 3
+    r_cap_3 = make_req("cap_3", priority=0, preemptions=3, arrival=1.0)
+    r_cap_10 = make_req("cap_10", priority=0, preemptions=10, arrival=1.0)
+    assert r_cap_3.sort_key[1] == -3
+    assert r_cap_10.sort_key[1] == -3
+    # With equal capped preemptions, earlier arrival_time breaks the tie
+    r_cap_10_late = make_req("cap_10_late", priority=0, preemptions=10, arrival=2.0)
+    assert r_cap_3 < r_cap_10_late
