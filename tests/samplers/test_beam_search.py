@@ -51,13 +51,16 @@ MODELS = ["TinyLlama/TinyLlama-1.1B-Chat-v1.0"]
 
 @pytest.mark.parametrize(("abort_after", "prompt_token"), [(0, 1), (1, 1), (0, 0)])
 @pytest.mark.parametrize("terminal_logprobs", [None, [], [{11: Logprob(-0.1)}]])
-def test_beam_search_abort_preserves_prefixes_and_other_prompts(
+def test_beam_search_abort_returns_partial_outputs_and_continues_other_prompts(
     monkeypatch,
     abort_after: int,
     prompt_token: int,
     terminal_logprobs: SampleLogprobs | None,
 ) -> None:
-    """Abort ends only the affected prompt, preserving its scored prefixes."""
+    """Return tokens and scores from the last completed step for aborted prompts.
+
+    Other prompts in the batch continue generating.
+    """
 
     def run_requests(prompts, **kwargs):
         results = []

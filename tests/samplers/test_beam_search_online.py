@@ -113,13 +113,13 @@ async def test_beam_search_respects_skip_special_tokens(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("abort_after", "prompt_token"), [(0, 1), (1, 1), (0, 0)])
 @pytest.mark.parametrize("terminal_logprobs", [None, [], [{11: Logprob(-0.1)}]])
-async def test_beam_search_abort_preserves_prefixes(
+async def test_beam_search_abort_returns_partial_outputs(
     monkeypatch,
     abort_after: int,
     prompt_token: int,
     terminal_logprobs: SampleLogprobs | None,
 ) -> None:
-    """An aborted child ends the search, including siblings that returned a token."""
+    """Abort returns each beam's tokens and scores from the last completed step."""
     calls = 0
 
     async def generate(prompt, *args, **kwargs):
