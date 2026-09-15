@@ -108,6 +108,7 @@ def test_pcp_still_honours_an_explicit_a2a(on_rocm):
     cfg.dcp_comm_backend = "a2a"
     assert _apply(cfg).dcp_comm_backend == "a2a"
 
+
 def test_hook_is_registered_for_both_k3_architectures():
     """The MTP draft shares the target's config class; if only the main model
     were mapped, the draft would combine with ag_rs and the two halves of the
