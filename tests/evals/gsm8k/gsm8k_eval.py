@@ -18,7 +18,9 @@ import aiohttp
 import numpy as np
 import regex as re
 import requests
+from requests.adapters import HTTPAdapter
 from tqdm.asyncio import tqdm
+from urllib3.util.retry import Retry
 
 from vllm.assets.base import VLLM_S3_BUCKET_URL
 
@@ -34,12 +36,22 @@ def download_and_cache_file(url: str, filename: str | None = None) -> str:
         return filename
 
     print(f"Downloading from {url} to {filename}")
-    response = requests.get(url, stream=True)
-    response.raise_for_status()
+    retry = Retry(
+        total=3,
+        backoff_factor=1,
+        status_forcelist=(500, 502, 503, 504),
+        allowed_methods=("GET",),
+    )
+    with requests.Session() as session:
+        adapter = HTTPAdapter(max_retries=retry)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        response = session.get(url, stream=True, timeout=30)
+        response.raise_for_status()
 
-    with open(filename, "wb") as f:
-        for chunk in response.iter_content(chunk_size=1024):
-            f.write(chunk)
+        with open(filename, "wb") as f:
+            for chunk in response.iter_content(chunk_size=1024):
+                f.write(chunk)
 
     return filename
 
