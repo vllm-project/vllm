@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 from contextlib import contextmanager
+from typing import cast
 
 import pytest
 import torch
@@ -15,7 +15,6 @@ from vllm.platforms import current_platform
 from ....utils import large_gpu_mark
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import TokensTextLogprobsPromptLogprobs, check_logprobs_close
-from vllm.platforms.rocm import on_gfx950
 
 # Models that require embedding scaling for prompt_embeds test
 EMBED_SCALING_MODELS = {
@@ -35,14 +34,16 @@ AITER_MODEL_LIST = [
     "Qwen/Qwen3-8B",
 ]
 
-# MoE top-2 near-tie second chance -- a diagnostic, off unless the env var is
-# set. tiny-mixtral diverges on one expert at a router tie that is exact in HF
-# and one ULP wide in vLLM; this lets vLLM adopt HF's pair when the two
-# selections swap exactly one expert for one other and those two are within
-# `tol` in vLLM's own fp32 router logits. 0.01 is calibrated: the decisive flip
-# margin is 0.0068 and the nearest non-tie 0.0176. It lets vLLM read HF's
-# answer, so it is not a test policy -- it shows the flip is the sole cause.
-MOE_NEAR_TIE_TOL = float(os.environ.get("VLLM_MOE_NEAR_TIE_TOL") or 0.0)
+# MoE top-2 near-tie second chance. tiny-mixtral diverges on one expert at a
+# router tie that is exact in HF and one ULP wide in vLLM; this lets vLLM adopt
+# HF's pair when the two selections swap exactly one expert for one other and
+# those two are within `tol` in vLLM's own fp32 router logits. 0.01 is
+# calibrated: the decisive flip margin is 0.0068 and the nearest non-tie 0.0176.
+# It lets vLLM read HF's answer, so it is not a test policy -- it shows the flip
+# is the sole cause. Set to 0 to disable. Deliberately a constant and not an env
+# var: the rescue monkeypatches a class in this process, so it has to be decided
+# at import time in whatever process ends up importing this module.
+MOE_NEAR_TIE_TOL = 0.01
 
 
 @contextmanager
@@ -52,16 +53,33 @@ def record_hf_expert_choice(hf_model, store: dict[int, torch.Tensor]):
         yield
         return
 
+    # A router is a `gate` that owns `experts`; a dense gated MLP has neither.
+    # Index the MoE layers only, so the numbering matches the order vLLM's
+    # routers are first seen in -- a model that interleaves dense and MoE
+    # layers would otherwise be keyed two different ways on the two sides.
+    gates = [
+        layer.mlp.gate
+        for layer in getattr(getattr(hf_model.model, "model", None), "layers", [])
+        if hasattr(getattr(layer, "mlp", None), "gate")
+        and hasattr(layer.mlp, "experts")
+    ]
+    if not gates:
+        yield
+        return
+
     rows: dict[int, list[torch.Tensor]] = {}
-    hooks = [
-        layer.mlp.gate.register_forward_hook(
-            # out[2] is top_k_index.
-            lambda module, args, out, i=i: rows.setdefault(i, []).append(
-                out[2].detach().reshape(-1, out[2].shape[-1]).cpu()
+
+    def record(module, args, out, i):
+        # (_, top_k_weights, top_k_index) -- anything else is not a router.
+        if isinstance(out, tuple) and len(out) == 3:
+            ids = out[2]
+            rows.setdefault(i, []).append(
+                ids.detach().reshape(-1, ids.shape[-1]).cpu()
             )
-        )
-        for i, layer in enumerate(hf_model.model.model.layers)
-        if hasattr(layer.mlp, "gate")
+
+    hooks = [
+        gate.register_forward_hook(lambda m, args, out, i=i: record(m, args, out, i))
+        for i, gate in enumerate(gates)
     ]
     try:
         yield
@@ -347,10 +365,16 @@ def test_models(
         # builder and layer consistent and preserves the L4 test path.
         vllm_kwargs["attention_config"] = {"flash_attn_version": 2}
 
-    if MOE_NEAR_TIE_TOL > 0:
+    # Only when HF actually routed something -- a dense model records nothing,
+    # so it keeps the default engine setup.
+    if MOE_NEAR_TIE_TOL > 0 and hf_expert_choice:
         # The rescue matches router rows against HF positionally, and CUDA
         # graph replay skips Python for every decode row.
         vllm_kwargs["enforce_eager"] = True
+        # The rescue patches FusedMoERouter in *this* process. By default
+        # EngineCore is spawned into a child, which re-imports vllm and never
+        # sees the patch -- it would silently no-op. Keep the engine in-process.
+        monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
     with vllm_runner(
         model,
