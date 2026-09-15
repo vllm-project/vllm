@@ -8,10 +8,11 @@ use serde_json::Value;
 
 use super::DeepSeekV4ChatRenderer;
 use crate::ChatRenderer;
+use crate::EffortValue;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::renderer::deepseek_v41::DeepSeekV41ChatRenderer;
 use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
-use crate::request::{ChatMessage, ChatRequest, ChatTool, GenerationPromptMode, ReasoningEffort};
+use crate::request::{ChatMessage, ChatRequest, ChatTool, GenerationPromptMode};
 
 fn render_request(request: &ChatRequest) -> String {
     DeepSeekV4ChatRenderer::new()
@@ -31,13 +32,13 @@ fn thinking_request(messages: Vec<ChatMessage>) -> ChatRequest {
         .chat_options
         .template_kwargs
         .insert("thinking".to_string(), Value::Bool(true));
-    request.chat_options.reasoning_effort = Some(ReasoningEffort::Low);
+    request.chat_options.reasoning_effort = Some(EffortValue::from("low"));
     request
 }
 
 fn fixture_request(input_name: &str) -> ChatRequest {
     let mut request = fixture_chat_request(&fixture_path(input_name), deepseek_fixture_options());
-    request.chat_options.reasoning_effort = Some(ReasoningEffort::Low);
+    request.chat_options.reasoning_effort = Some(EffortValue::from("low"));
     request
 }
 
@@ -203,7 +204,7 @@ fn reasoning_effort_max_adds_prefix_when_thinking_is_enabled() {
         .chat_options
         .template_kwargs
         .insert("thinking".to_string(), Value::Bool(true));
-    request.chat_options.reasoning_effort = Some(ReasoningEffort::Max);
+    request.chat_options.reasoning_effort = Some(EffortValue::from("max"));
 
     let rendered = render_request(&request);
 
@@ -226,7 +227,7 @@ fn reasoning_effort_high_adds_0731_high_prefix() {
         .chat_options
         .template_kwargs
         .insert("thinking".to_string(), Value::Bool(true));
-    request.chat_options.reasoning_effort = Some(ReasoningEffort::High);
+    request.chat_options.reasoning_effort = Some(EffortValue::from("high"));
 
     let rendered = render_request(&request);
 
@@ -258,7 +259,7 @@ fn reasoning_effort_xhigh_maps_to_high() {
         messages: vec![ChatMessage::user("solve it")],
         ..ChatRequest::for_test()
     };
-    request.chat_options.reasoning_effort = Some(ReasoningEffort::XHigh);
+    request.chat_options.reasoning_effort = Some(EffortValue::from("xhigh"));
 
     let rendered = render_request(&request);
 
@@ -268,7 +269,7 @@ fn reasoning_effort_xhigh_maps_to_high() {
 
 #[test]
 fn minimal_and_medium_reasoning_effort_map_to_low() {
-    for effort in [ReasoningEffort::Minimal, ReasoningEffort::Medium] {
+    for effort in [EffortValue::from("minimal"), EffortValue::from("medium")] {
         let mut request = ChatRequest {
             messages: vec![ChatMessage::user("solve it")],
             ..ChatRequest::for_test()
@@ -292,7 +293,7 @@ fn reasoning_effort_low_keeps_the_default_prompt() {
         .chat_options
         .template_kwargs
         .insert("thinking".to_string(), Value::Bool(true));
-    request.chat_options.reasoning_effort = Some(ReasoningEffort::Low);
+    request.chat_options.reasoning_effort = Some(EffortValue::from("low"));
 
     let rendered = render_request(&request);
 
@@ -305,7 +306,7 @@ fn reasoning_effort_none_disables_thinking() {
         messages: vec![ChatMessage::user("answer directly")],
         ..ChatRequest::for_test()
     };
-    request.chat_options.reasoning_effort = Some(ReasoningEffort::None);
+    request.chat_options.reasoning_effort = Some(EffortValue::from("none"));
 
     let rendered = render_request(&request);
 
@@ -387,7 +388,7 @@ fn system_to_assistant_transitions_in_chat_and_thinking_modes() {
             .chat_options
             .template_kwargs
             .insert("enable_thinking".to_string(), Value::Bool(enable_thinking));
-        request.chat_options.reasoning_effort = Some(ReasoningEffort::Low);
+        request.chat_options.reasoning_effort = Some(EffortValue::from("low"));
         render_request(&request)
     });
 
@@ -415,7 +416,7 @@ fn trailing_system_transitions_in_chat_and_thinking_modes() {
             .chat_options
             .template_kwargs
             .insert("enable_thinking".to_string(), Value::Bool(enable_thinking));
-        request.chat_options.reasoning_effort = Some(ReasoningEffort::Low);
+        request.chat_options.reasoning_effort = Some(EffortValue::from("low"));
         render_request(&request)
     });
 
@@ -649,7 +650,7 @@ fn drop_thinking_false_keeps_prior_assistant_reasoning() {
         .chat_options
         .template_kwargs
         .insert("drop_thinking".to_string(), Value::Bool(false));
-    request.chat_options.reasoning_effort = Some(ReasoningEffort::Low);
+    request.chat_options.reasoning_effort = Some(EffortValue::from("low"));
 
     let rendered = render_request(&request);
 

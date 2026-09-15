@@ -9,12 +9,11 @@ use thiserror_ext::AsReport as _;
 use super::HarmonyChatRenderer;
 use super::encoding::harmony_encoding;
 use crate::ChatRenderer;
+use crate::EffortValue;
 use crate::error::Error;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
-use crate::request::{
-    ChatContentPart, ChatMessage, ChatRequest, GenerationPromptMode, ReasoningEffort,
-};
+use crate::request::{ChatContentPart, ChatMessage, ChatRequest, GenerationPromptMode};
 
 const PINNED_DATE: &str = "2025-06-28";
 
@@ -138,7 +137,7 @@ fn drops_stale_analysis_fixture() {
 #[test]
 fn rejects_invalid_reasoning_effort() {
     let mut request = ChatRequest::for_test();
-    request.chat_options.reasoning_effort = Some(ReasoningEffort::None);
+    request.chat_options.reasoning_effort = Some(EffortValue::from("none"));
 
     let error = test_renderer(false).render(&request).unwrap_err();
 
@@ -152,7 +151,7 @@ fn normalized_reasoning_respects_harmony_capability_and_deployment_effort() {
         [("reasoning_effort".to_string(), serde_json::json!("low"))].into(),
     );
     let mut request = ChatRequest::for_test();
-    request.chat_options.reasoning_effort = Some(ReasoningEffort::None);
+    request.chat_options.reasoning_effort = Some(EffortValue::from("none"));
     request
         .chat_options
         .template_kwargs

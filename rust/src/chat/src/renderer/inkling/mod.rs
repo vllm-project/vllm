@@ -8,8 +8,9 @@ use thiserror_ext::AsReport as _;
 use vllm_text::Prompt;
 use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
 
-use super::reasoning::{EffortValue, ReasoningControl};
+use super::reasoning::ReasoningControl;
 use super::{ChatRenderer, RenderedPrompt};
+use crate::EffortValue;
 use crate::error::{Error, Result};
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatTool};
 use crate::{AssistantContentBlock, AssistantToolCall};

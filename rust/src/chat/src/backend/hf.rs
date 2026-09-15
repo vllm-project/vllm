@@ -323,7 +323,7 @@ mod tests {
         assert!(rendered.prompt.into_text().unwrap().ends_with("</think>"));
         assert_eq!(rendered.effective_template_kwargs["enable_thinking"], false);
 
-        request.chat_options.reasoning_effort = Some(crate::ReasoningEffort::Max);
+        request.chat_options.reasoning_effort = Some(crate::EffortValue::from("max"));
         let rendered = backend.chat_renderer().render(&request).unwrap();
         let prompt = rendered.prompt.into_text().unwrap();
         assert!(prompt.contains("Reasoning Effort: Beyond maximum"));

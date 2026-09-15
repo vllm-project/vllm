@@ -18,9 +18,10 @@ use time::macros::format_description;
 use vllm_text::Prompt;
 
 use self::encoding::harmony_encoding;
-use super::reasoning::{EffortValue, ReasoningControl};
+use super::reasoning::ReasoningControl;
 use super::{ChatRenderer, RenderedPrompt};
 use crate::AssistantMessageExt as _;
+use crate::EffortValue;
 use crate::error::{Error, Result};
 use crate::event::AssistantContentBlock;
 use crate::request::{ChatContent, ChatMessage, ChatRequest, ChatTool, GenerationPromptMode};

@@ -17,7 +17,8 @@ use serde_json_fmt::JsonFormat;
 use llm_multimodal::DEEPSEEK_V41_IMAGE_PLACEHOLDER;
 
 use super::MediaPartSource;
-use super::reasoning::{EffortValue, ReasoningControl};
+use super::reasoning::ReasoningControl;
+use crate::EffortValue;
 use crate::error::{Error, Result};
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatTool};
 use crate::{AssistantContentBlock, AssistantMessageExt, AssistantToolCall};

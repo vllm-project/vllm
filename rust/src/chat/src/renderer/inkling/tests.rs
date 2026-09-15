@@ -9,6 +9,7 @@ use serde_json::json;
 use thiserror_ext::AsReport;
 use vllm_text::tokenizer::Tokenizer;
 
+use crate::EffortValue;
 use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
 
 use super::{
@@ -17,7 +18,7 @@ use super::{
     MESSAGE_TOOL, MESSAGE_USER,
 };
 use crate::event::{AssistantContentBlock, AssistantToolCall};
-use crate::request::{ChatMessage, ChatRequest, GenerationPromptMode, ReasoningEffort};
+use crate::request::{ChatMessage, ChatRequest, GenerationPromptMode};
 use crate::{ChatRenderer, Error};
 
 struct FixtureTokenizer;
@@ -206,13 +207,13 @@ fn renders_request_and_developer_tools_as_tool_declare() {
 #[test]
 fn renders_named_reasoning_effort_after_tool_declarations() {
     for (effort, expected) in [
-        (ReasoningEffort::None, "0.0"),
-        (ReasoningEffort::Minimal, "0.1"),
-        (ReasoningEffort::Low, "0.2"),
-        (ReasoningEffort::Medium, "0.7"),
-        (ReasoningEffort::High, "0.9"),
-        (ReasoningEffort::XHigh, "0.99"),
-        (ReasoningEffort::Max, "0.99"),
+        (EffortValue::from("none"), "0.0"),
+        (EffortValue::from("minimal"), "0.1"),
+        (EffortValue::from("low"), "0.2"),
+        (EffortValue::from("medium"), "0.7"),
+        (EffortValue::from("high"), "0.9"),
+        (EffortValue::from("xhigh"), "0.99"),
+        (EffortValue::from("max"), "0.99"),
     ] {
         let mut request = fixture_request("tool_declare_input.json");
         request.chat_options.reasoning_effort = Some(effort);

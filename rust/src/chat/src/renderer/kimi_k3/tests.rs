@@ -15,11 +15,10 @@ use vllm_tokenizer::test_utils::TestTokenizer;
 
 use super::KimiK3ChatRenderer;
 use crate::ChatRenderer;
+use crate::EffortValue;
 use crate::renderer::kimi_k3::encoding::{CLOSE, END_OF_MSG, IMAGE_PLACEHOLDER, OPEN, SEP};
 use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
-use crate::request::{
-    ChatContentPart, ChatMessage, ChatTool, GenerationPromptMode, ReasoningEffort,
-};
+use crate::request::{ChatContentPart, ChatMessage, ChatTool, GenerationPromptMode};
 use crate::{AssistantContentBlock, AssistantToolCall};
 
 const OPEN_ID: u32 = 256;
@@ -43,7 +42,7 @@ fn native_effort_overrides_stay_within_their_request_or_deployment_source() {
     let renderer = KimiK3ChatRenderer::new(tokenizer.clone())
         .with_default_template_kwargs([("thinking_effort".to_string(), json!("max"))].into());
     for (kwargs, typed, effort) in [
-        (json!({}), Some(ReasoningEffort::Low), "low"),
+        (json!({}), Some(EffortValue::from("low")), "low"),
         (
             json!({"enable_thinking": true, "reasoning_effort": "none"}),
             None,
@@ -51,12 +50,12 @@ fn native_effort_overrides_stay_within_their_request_or_deployment_source() {
         ),
         (
             json!({"thinking_effort": "high"}),
-            Some(ReasoningEffort::None),
+            Some(EffortValue::from("none")),
             "none",
         ),
         (
             json!({"thinking": true, "thinking_effort": "high"}),
-            Some(ReasoningEffort::None),
+            Some(EffortValue::from("none")),
             "high",
         ),
     ] {
@@ -481,7 +480,7 @@ fn enable_thinking_true_overrides_standard_none() {
 #[test]
 fn typed_none_disables_thinking() {
     let mut request = crate::request::ChatRequest::for_test();
-    request.chat_options.reasoning_effort = Some(ReasoningEffort::None);
+    request.chat_options.reasoning_effort = Some(EffortValue::from("none"));
 
     let rendered = render_request(&request);
 

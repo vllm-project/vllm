@@ -15,70 +15,12 @@
 //! decision for downstream consumers. HF prepares raw template inputs separately.
 
 use std::collections::HashMap;
-use std::fmt;
 
-use serde::Serialize;
-use serde_json::{Number, Value, json};
+use serde_json::{Value, json};
 
+use crate::EffortValue;
 use crate::error::{Result, invalid_reasoning_control};
-use crate::request::{ChatRequest, ReasoningEffort};
-
-/// A native effort value, before or after model-specific mapping.
-///
-/// Strings preserve model-specific names; JSON numbers preserve integer and
-/// floating-point representations for model-local range validation. Missing/null
-/// standard effort is represented by `Option::None` in [`ReasoningControl`].
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(untagged)]
-pub(super) enum EffortValue {
-    String(String),
-    Number(Number),
-}
-
-impl TryFrom<&Value> for EffortValue {
-    type Error = crate::error::Error;
-
-    fn try_from(value: &Value) -> Result<Self> {
-        match value {
-            Value::String(value) => Ok(Self::String(value.clone())),
-            Value::Number(value) => Ok(Self::Number(value.clone())),
-            _ => Err(invalid_reasoning_control!(
-                "reasoning effort must be a string or number, got {value}"
-            )),
-        }
-    }
-}
-
-impl From<&str> for EffortValue {
-    fn from(value: &str) -> Self {
-        Self::String(value.to_owned())
-    }
-}
-
-impl fmt::Display for EffortValue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::String(value) => json!(value).fmt(f),
-            Self::Number(value) => value.fmt(f),
-        }
-    }
-}
-
-impl EffortValue {
-    pub(super) fn as_str(&self) -> Option<&str> {
-        match self {
-            Self::String(value) => Some(value),
-            Self::Number(_) => None,
-        }
-    }
-
-    pub(super) fn as_f64(&self) -> Option<f64> {
-        match self {
-            Self::Number(value) => value.as_f64(),
-            Self::String(_) => None,
-        }
-    }
-}
+use crate::request::ChatRequest;
 
 /// Reasoning intent for one source, or the result of falling back across sources.
 #[derive(Debug, Clone, PartialEq)]
@@ -92,11 +34,11 @@ pub(super) enum ReasoningControl {
 }
 
 impl ReasoningControl {
-    /// Parse request kwargs and the typed OpenAI effort, which wins over kwargs effort.
+    /// Parse request controls; the typed effort field takes precedence over kwargs effort.
     pub(super) fn from_request(request: &ChatRequest) -> Result<Self> {
         Self::from_kwargs(
             &request.chat_options.template_kwargs,
-            request.chat_options.reasoning_effort,
+            request.chat_options.reasoning_effort.as_ref(),
         )
     }
 
@@ -108,7 +50,7 @@ impl ReasoningControl {
     /// Select controls within one source, then derive its mode and optional effort.
     fn from_kwargs(
         kwargs: &HashMap<String, Value>,
-        typed_effort: Option<ReasoningEffort>,
+        typed_effort: Option<&EffortValue>,
     ) -> Result<Self> {
         // Presence sets alias priority: `thinking` wins, including when its value
         // is invalid. Validate the selected spelling as a boolean.
@@ -123,10 +65,10 @@ impl ReasoningControl {
                 })
             })
             .transpose()?;
-        // The typed OpenAI field wins over kwargs. A selected JSON null means
+        // The typed request field wins over kwargs. A selected JSON null means
         // omitted effort; keep raw JSON until the toggle decides whether it is used.
         let effort = typed_effort
-            .map(|effort| json!(effort.as_str()))
+            .map(|effort| json!(effort))
             .or_else(|| kwargs.get("reasoning_effort").cloned())
             .filter(|effort| !effort.is_null());
 
@@ -378,7 +320,7 @@ mod tests {
     #[test]
     fn typed_effort_wins_over_kwargs_without_mutating_the_request() {
         let mut request = ChatRequest::for_test();
-        request.chat_options.reasoning_effort = Some(ReasoningEffort::High);
+        request.chat_options.reasoning_effort = Some(EffortValue::from("high"));
         request.chat_options.template_kwargs = kwargs(json!({"reasoning_effort": 37}));
         let original = request.clone();
         let control =
@@ -423,7 +365,7 @@ mod tests {
 
             // A typed request effort shadows malformed kwargs effort.
             let mut request = ChatRequest::for_test();
-            request.chat_options.reasoning_effort = Some(ReasoningEffort::High);
+            request.chat_options.reasoning_effort = Some(EffortValue::from("high"));
             request.chat_options.template_kwargs = kwargs(json!({"reasoning_effort": value}));
             assert_eq!(
                 ReasoningControl::from_request(&request).unwrap(),

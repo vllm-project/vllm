@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use thiserror_ext::AsReport;
 
 use super::DeepSeekV32ChatRenderer;
+use crate::EffortValue;
 use crate::error::Error;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
@@ -30,8 +31,8 @@ fn render_request(request: &ChatRequest) -> String {
 fn standard_effort_enables_binary_thinking_and_none_disables_it() {
     let mut request = ChatRequest::for_test();
     for (effort, enabled) in [
-        (crate::ReasoningEffort::High, true),
-        (crate::ReasoningEffort::None, false),
+        (EffortValue::from("high"), true),
+        (EffortValue::from("none"), false),
     ] {
         request.chat_options.reasoning_effort = Some(effort);
         let rendered = DeepSeekV32ChatRenderer::new().render(&request).unwrap();

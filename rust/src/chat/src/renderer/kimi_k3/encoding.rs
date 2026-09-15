@@ -11,7 +11,8 @@ use serde_json::{Map, Value, json};
 use vllm_tokenizer::Tokenizer;
 
 use super::super::MediaPartSource;
-use super::super::reasoning::{EffortValue, ReasoningControl};
+use super::super::reasoning::ReasoningControl;
+use crate::EffortValue;
 use crate::error::{Error, Result};
 use crate::request::{
     ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatTool, ChatToolChoice,

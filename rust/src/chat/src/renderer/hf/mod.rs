@@ -42,15 +42,15 @@ fn effective_template_kwargs(
     let mut kwargs = default_template_kwargs.clone();
     kwargs.extend(request.chat_options.template_kwargs.clone());
 
-    if let Some(reasoning_effort) = request.chat_options.reasoning_effort {
+    if let Some(reasoning_effort) = &request.chat_options.reasoning_effort {
         kwargs.insert(
             "reasoning_effort".to_string(),
-            JsonValue::String(reasoning_effort.as_str().to_string()),
+            serde_json::json!(reasoning_effort),
         );
         if !request.chat_options.template_kwargs.contains_key("enable_thinking") {
             kwargs.insert(
                 "enable_thinking".to_string(),
-                serde_json::json!(reasoning_effort != crate::ReasoningEffort::None),
+                serde_json::json!(reasoning_effort.as_str() != Some("none")),
             );
         }
     }
@@ -605,9 +605,10 @@ mod tests {
     use vllm_text::backend::hf::{HfSpecialTokens, NamedSpecialToken};
 
     use super::{ChatTemplateContentFormatOption, HfChatRenderer, MultimodalRenderInfo};
+    use crate::EffortValue;
     use crate::request::{
         ChatContentPart, ChatMessage, ChatRequest, ChatRole, ChatTool, ChatToolChoice,
-        GenerationPromptMode, ReasoningEffort, ResolvedToolContext,
+        GenerationPromptMode, ResolvedToolContext,
     };
     use crate::{AssistantContentBlock, ChatRenderer, Error, Result};
 
@@ -1174,7 +1175,7 @@ mod tests {
     #[test]
     fn chat_template_reasoning_effort_overrides_template_kwargs() {
         let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
-        request.chat_options.reasoning_effort = Some(ReasoningEffort::Max);
+        request.chat_options.reasoning_effort = Some(EffortValue::from("max"));
         request.chat_options.template_kwargs.insert(
             "reasoning_effort".to_string(),
             Value::String("low".to_string()),
@@ -1206,7 +1207,7 @@ mod tests {
     #[test]
     fn chat_template_reasoning_effort_preserves_request_enable_thinking() {
         let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
-        request.chat_options.reasoning_effort = Some(ReasoningEffort::None);
+        request.chat_options.reasoning_effort = Some(EffortValue::from("none"));
         request
             .chat_options
             .template_kwargs
@@ -1230,6 +1231,40 @@ mod tests {
             rendered.effective_template_kwargs.get("enable_thinking"),
             Some(&Value::Bool(true))
         );
+    }
+
+    #[test]
+    fn chat_template_preserves_typed_effort_values() {
+        for effort in [
+            serde_json::json!(37),
+            serde_json::json!(0.37),
+            serde_json::json!("custom"),
+            serde_json::json!("none"),
+        ] {
+            let mut request = sample_request(vec![ChatMessage::user("hello")]);
+            request.chat_options.reasoning_effort =
+                Some(serde_json::from_value(effort.clone()).unwrap());
+            request.chat_options.template_kwargs = [
+                ("reasoning_effort".to_string(), serde_json::json!("high")),
+                ("enable_thinking".to_string(), serde_json::json!(true)),
+            ]
+            .into();
+            let original = request.chat_options.clone();
+            let rendered = HfChatRenderer::new(
+                Some("{{ reasoning_effort|tojson }}|{{ enable_thinking }}".to_string()),
+                HashMap::new(),
+                ChatTemplateContentFormatOption::Auto,
+            )
+            .unwrap()
+            .render(&request)
+            .unwrap();
+            assert_eq!(rendered.prompt, Prompt::Text(format!("{effort}|True")));
+            assert_eq!(
+                rendered.effective_template_kwargs["reasoning_effort"],
+                effort
+            );
+            assert_eq!(request.chat_options, original);
+        }
     }
 
     #[test]

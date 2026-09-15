@@ -8,9 +8,10 @@ use serde_json::{Value, json};
 
 use super::DeepSeekV41ChatRenderer;
 use crate::ChatRenderer;
+use crate::EffortValue;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
-use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest, ReasoningEffort};
+use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
 
 fn render(request: &ChatRequest) -> String {
     DeepSeekV41ChatRenderer::new()
@@ -163,10 +164,11 @@ fn image_part(uuid: &str) -> ChatContentPart {
 fn maps_reasoning_effort_to_reference_numeric_budget() {
     for (effort, budget) in [
         (None, 50),
-        (Some(ReasoningEffort::Low), 25),
-        (Some(ReasoningEffort::High), 50),
-        (Some(ReasoningEffort::XHigh), 75),
-        (Some(ReasoningEffort::Max), 100),
+        (Some(EffortValue::from("low")), 25),
+        (Some(EffortValue::from("high")), 50),
+        (Some(EffortValue::from("xhigh")), 75),
+        (Some(EffortValue::from("max")), 100),
+        (Some(EffortValue::Number(37.into())), 37),
     ] {
         let mut request = request();
         request.chat_options.reasoning_effort = effort;
@@ -191,7 +193,7 @@ fn accepts_numeric_template_effort_with_top_level_precedence() {
         request.chat_options.template_kwargs.insert("reasoning_effort".into(), effort);
         assert!(render(&request).contains(&format!("Reasoning Effort: {budget} (range 1-100")));
 
-        request.chat_options.reasoning_effort = Some(ReasoningEffort::XHigh);
+        request.chat_options.reasoning_effort = Some(EffortValue::from("xhigh"));
         assert!(render(&request).contains("Reasoning Effort: 75 (range 1-100"));
     }
 }
@@ -201,7 +203,7 @@ fn enabling_with_none_inherits_deployment_effort_and_reports_numeric_control() {
     let renderer = DeepSeekV41ChatRenderer::new()
         .with_default_template_kwargs([("reasoning_effort".to_string(), json!(37))].into());
     let mut request = request();
-    request.chat_options.reasoning_effort = Some(ReasoningEffort::None);
+    request.chat_options.reasoning_effort = Some(EffortValue::from("none"));
     request
         .chat_options
         .template_kwargs
@@ -244,7 +246,7 @@ fn rejects_undefined_effort_names_and_invalid_numeric_budgets() {
         let error = DeepSeekV41ChatRenderer::new().render(&request).unwrap_err();
         assert!(error.is_request_validation_error());
     }
-    for effort in [ReasoningEffort::Minimal, ReasoningEffort::Medium] {
+    for effort in [EffortValue::from("minimal"), EffortValue::from("medium")] {
         let mut request = request();
         request.chat_options.reasoning_effort = Some(effort);
         let error = DeepSeekV41ChatRenderer::new().render(&request).unwrap_err();
@@ -260,7 +262,7 @@ fn chat_mode_and_none_effort_use_closed_thinking_prefix() {
     expected.assert_eq(&render(&request));
 
     request.chat_options.template_kwargs.remove("thinking");
-    request.chat_options.reasoning_effort = Some(ReasoningEffort::None);
+    request.chat_options.reasoning_effort = Some(EffortValue::from("none"));
     expected.assert_eq(&render(&request));
 }
 
