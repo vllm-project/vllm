@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import UserDict
+from contextlib import nullcontext
 from dataclasses import dataclass
+from queue import SimpleQueue
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import msgspec
 import numpy as np
@@ -20,6 +24,25 @@ from vllm.multimodal.inputs import (
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 pytestmark = pytest.mark.cpu_test
+
+
+class _InputProcessed(Exception):
+    pass
+
+
+class _OneShotPoller:
+    def __init__(self, socket):
+        self.socket = socket
+        self.polled = False
+
+    def register(self, *_args):
+        pass
+
+    def poll(self):
+        if self.polled:
+            raise _InputProcessed
+        self.polled = True
+        return [(self.socket, 1)]
 
 
 class UnrecognizedType(UserDict):
@@ -362,6 +385,118 @@ def test_non_multimodal_tensor_with_ipc_none_value():
     assert isinstance(decoded, RequestWithTensor)
     assert decoded.data == "test_data_with_none"
     assert decoded.prompt_embeds is None
+
+
+def test_add_batch_round_trip_through_core_input_queue(monkeypatch):
+    """Exercise the real MP client encoding and core input queue path."""
+    from vllm import PoolingParams
+    from vllm.v1.engine import EngineCoreRequest, EngineCoreRequestType
+    from vllm.v1.engine import core as core_module
+    from vllm.v1.engine.core import EngineCoreProc
+    from vllm.v1.engine.core_client import SyncMPClient
+
+    class Socket:
+        sent_message = None
+
+        def send_multipart(self, message, *, copy=False):
+            self.sent_message = message
+
+        def send(self, _message):
+            pass
+
+        def recv_multipart(self, *, copy=False):
+            assert self.sent_message is not None
+            _, request_type, *data_frames = self.sent_message
+            return [
+                SimpleNamespace(buffer=memoryview(request_type)),
+                *(memoryview(frame) for frame in data_frames),
+            ]
+
+    requests = [
+        EngineCoreRequest(
+            request_id=f"request-{i}",
+            prompt_token_ids=[i, i + 1],
+            prompt_embeds=(
+                torch.arange(1024, dtype=torch.float32).reshape(32, 32)
+                if i == 2
+                else None
+            ),
+            mm_features=None,
+            sampling_params=None,
+            pooling_params=PoolingParams(),
+            arrival_time=float(i),
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+            current_wave=i,
+        )
+        for i in range(4)
+    ]
+
+    socket = Socket()
+    client = object.__new__(SyncMPClient)
+    client.is_dp = False
+    client.engines_running = False
+    client.core_engine = b"core-0"
+    client.encoder = MsgpackEncoder(size_threshold=256)
+    client.input_socket = socket
+    client.ensure_alive = MagicMock()
+
+    client.add_requests(requests)
+
+    assert socket.sent_message is not None
+    assert socket.sent_message[1] == EngineCoreRequestType.ADD_BATCH.value
+    assert len(socket.sent_message) > 3  # Type + msgpack payload + OOB tensor frame.
+
+    core = object.__new__(EngineCoreProc)
+    core.tensor_ipc_receiver = None
+    core.input_queue = SimpleQueue()
+    core.preprocess_add_request = MagicMock(
+        side_effect=lambda request: (request, request.current_wave)
+    )
+    core._make_ready_response = MagicMock(return_value={"ready": True})
+    poller = _OneShotPoller(socket)
+    monkeypatch.setattr(
+        core_module,
+        "make_zmq_socket",
+        lambda *_args, **_kwargs: nullcontext(socket),
+    )
+    monkeypatch.setattr(core_module.zmq, "Poller", lambda: poller)
+
+    with pytest.raises(_InputProcessed):
+        core.process_input_sockets(["inproc://input"], None, b"core-0", MagicMock())
+
+    request_type, decoded_batch = core.input_queue.get_nowait()
+    assert request_type == EngineCoreRequestType.ADD_BATCH
+    decoded_requests = [request for request, _wave in decoded_batch]
+    assert [request.request_id for request in decoded_requests] == [
+        request.request_id for request in requests
+    ]
+    assert [wave for _request, wave in decoded_batch] == [0, 1, 2, 3]
+    assert decoded_requests[2].prompt_embeds is not None
+    assert torch.equal(decoded_requests[2].prompt_embeds, requests[2].prompt_embeds)
+
+    core._reject_add_in_shutdown = MagicMock(return_value=False)
+    core.add_request = MagicMock()
+    core._handle_client_request(request_type, decoded_batch)
+    assert [call.args[0].request_id for call in core.add_request.call_args_list] == [
+        request.request_id for request in requests
+    ]
+
+
+def test_add_batch_preserves_single_request_fail_fast_semantics():
+    from vllm.v1.engine import EngineCoreRequestType
+    from vllm.v1.engine.core import EngineCoreProc
+
+    core = object.__new__(EngineCoreProc)
+    core._reject_add_in_shutdown = MagicMock(return_value=False)
+    core.add_request = MagicMock(side_effect=[None, RuntimeError("admission failed")])
+    requests = [(SimpleNamespace(request_id=f"request-{i}"), i) for i in range(3)]
+
+    with pytest.raises(RuntimeError, match="admission failed"):
+        core._handle_client_request(EngineCoreRequestType.ADD_BATCH, requests)
+
+    assert core.add_request.call_count == 2
 
 
 def test_multiple_senders_single_receiver_ipc():

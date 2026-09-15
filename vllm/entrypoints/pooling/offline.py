@@ -446,6 +446,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                         params=[x["params"] for x in requests],
                         lora_requests=[x["lora_requests"] for x in requests],
                         priorities=[x["priorities"] for x in requests],
+                        batch_engine_requests=True,
                     )
 
                     for request_id in request_ids:
