@@ -87,6 +87,20 @@ class TestCohereChatV2Request:
         )
         assert req.max_tokens == 0
 
+    @pytest.mark.parametrize("seed", [-(2**63) - 1, 2**63, 2**64])
+    def test_out_of_range_seed_rejected(self, seed):
+        with pytest.raises(ValidationError):
+            CohereChatV2Request(
+                model="m", messages=[{"role": "user", "content": "hi"}], seed=seed
+            )
+
+    @pytest.mark.parametrize("seed", [-(2**63), 2**63 - 1])
+    def test_int64_boundary_seed_allowed(self, seed):
+        req = CohereChatV2Request(
+            model="m", messages=[{"role": "user", "content": "hi"}], seed=seed
+        )
+        assert req.seed == seed
+
     def test_invalid_tool_choice_rejected(self):
         with pytest.raises(ValidationError):
             CohereChatV2Request(
