@@ -17,10 +17,17 @@ Usage:
 Example:
     torchrun --nproc_per_node=2 benchmark_device_communicators.py
     --sequence-lengths 512 1024 2048 --num-warmup 10 --num-trials 100
+
+    torchrun --nproc_per_node=2 benchmark_device_communicators.py
+    --skew-delays-us 0 50 100 250 500 1000
+    --calibration-shapes 8627x8192 16384x8192
+    --calibration-backends pynccl --output-json skew.json
 """
 
 import json
 import os
+import socket
+import statistics
 import time
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -84,6 +91,64 @@ COLLECTIVE_BASELINE = {
     "all-gather": "pynccl_ag",
     "reduce-scatter": "pynccl_rs",
 }
+ALL_REDUCE_BACKENDS = sorted(
+    name for name, collective in COMM_COLLECTIVE.items() if collective == "all-reduce"
+)
+
+
+def _parse_tensor_shape(value: str) -> tuple[int, int]:
+    """Parse a positive two-dimensional tensor shape such as ``8192x4096``."""
+    dimensions = value.lower().split("x")
+    if len(dimensions) != 2:
+        raise ValueError(f"expected ROWSxCOLS, got {value!r}")
+    rows, columns = map(int, dimensions)
+    if rows <= 0 or columns <= 0:
+        raise ValueError(f"tensor dimensions must be positive, got {value!r}")
+    return rows, columns
+
+
+def _delay_us_to_cycles(delay_us: int, clock_rate_khz: int) -> int:
+    """Convert a requested delay to the cycles expected by ``torch.cuda._sleep``."""
+    if delay_us < 0:
+        raise ValueError("delay must be non-negative")
+    if clock_rate_khz <= 0:
+        raise ValueError("GPU clock rate must be positive")
+    return round(delay_us * clock_rate_khz / 1000)
+
+
+def _build_trial_record(trial: int, rank_records: list[dict]) -> dict:
+    """Combine rank-local measurements without assuming cross-node clock sync."""
+    rank_records = sorted(rank_records, key=lambda record: record["rank"])
+    hosts = {record["host"] for record in rank_records}
+    host_enqueue_spread_us = None
+    if len(hosts) == 1:
+        enqueue_times = [record["host_enqueue_ns"] for record in rank_records]
+        host_enqueue_spread_us = (max(enqueue_times) - min(enqueue_times)) / 1000
+    return {
+        "trial": trial,
+        "host_enqueue_spread_us": host_enqueue_spread_us,
+        "max_gpu_collective_ms": max(
+            record["gpu_collective_ms"] for record in rank_records
+        ),
+        "ranks": rank_records,
+    }
+
+
+def _require_calibration_results(results, backends, shapes, delays_us):
+    """Reject empty output or missing explicitly requested calibration cases."""
+    if not results:
+        raise RuntimeError("No supported all-reduce calibration cases")
+    if backends:
+        expected = {
+            (b, tuple(s), d) for b in backends for s in shapes for d in delays_us
+        }
+        observed = {
+            (r["backend"], tuple(r["shape"]), r["requested_delay_us"]) for r in results
+        }
+        if missing := expected - observed:
+            raise RuntimeError(
+                f"Unavailable or unsupported calibration cases: {missing}"
+            )
 
 
 class CommunicatorBenchmark:
@@ -96,6 +161,7 @@ class CommunicatorBenchmark:
         device: torch.device,
         cpu_group: ProcessGroup,
         sequence_lengths: list[int],
+        calibration_shapes: list[tuple[int, int]] | None = None,
     ):
         self.rank = rank
         self.world_size = world_size
@@ -105,6 +171,11 @@ class CommunicatorBenchmark:
         # Calculate max_size_override based on largest sequence length
         max_seq_len = max(sequence_lengths)
         max_tensor_elements = max_seq_len * HIDDEN_SIZE
+        if calibration_shapes:
+            max_tensor_elements = max(
+                max_tensor_elements,
+                max(rows * columns for rows, columns in calibration_shapes),
+            )
         self.max_size_override = max_tensor_elements * BENCHMARK_DTYPE.itemsize + 1
         # AITER has effective max size of half the max size, so we double it, and
         # account for AG output size (which is world_size larger)
@@ -237,14 +308,8 @@ class CommunicatorBenchmark:
                 )
                 self.aiter_comm = None
 
-    def benchmark_allreduce(
-        self, sequence_length: int, num_warmup: int, num_trials: int
-    ) -> dict[str, float]:
-        """Benchmark allreduce operations for all available communicators."""
-
-        results = {}
-
-        # Define communicators with their benchmark functions
+    def _allreduce_entries(self):
+        """Return all available all-reduce benchmark implementations."""
         communicators = []
 
         if self.custom_allreduce is not None:
@@ -255,7 +320,7 @@ class CommunicatorBenchmark:
                     "ca_1stage",
                     lambda t, c=comm: c.custom_all_reduce(t),
                     lambda t, c=comm: c.should_custom_ar(t),
-                    comm.capture(),
+                    lambda c=comm: c.capture(),
                     {"VLLM_CUSTOM_ALLREDUCE_ALGO": "1stage"},
                     None,  # no destroy function
                 )
@@ -266,7 +331,7 @@ class CommunicatorBenchmark:
                     "ca_2stage",
                     lambda t, c=comm: c.custom_all_reduce(t),
                     lambda t, c=comm: c.should_custom_ar(t),
-                    comm.capture(),
+                    lambda c=comm: c.capture(),
                     {"VLLM_CUSTOM_ALLREDUCE_ALGO": "2stage"},
                     None,  # no destroy function
                 )
@@ -279,7 +344,7 @@ class CommunicatorBenchmark:
                     "pynccl",
                     lambda t, c=comm: c.all_reduce(t),
                     lambda t: True,  # Always available if initialized
-                    nullcontext(),
+                    nullcontext,
                     {},  # no env variable needed
                     None,  # no destroy function
                 )
@@ -289,7 +354,7 @@ class CommunicatorBenchmark:
                     "pynccl-symm",
                     lambda t: torch.ops.vllm.all_reduce_symmetric_with_copy(t),
                     lambda t: True,  # Always available if initialized
-                    nullcontext(),
+                    nullcontext,
                     {},  # no env variable needed
                     None,  # no destroy function
                 )
@@ -302,7 +367,7 @@ class CommunicatorBenchmark:
                     "symm_mem_multimem",
                     lambda t, c=comm: c.all_reduce(t),
                     lambda t, c=comm: c.should_use_symm_mem(t),
-                    nullcontext(),
+                    nullcontext,
                     {},  # no env variable needed
                     None,  # no destroy function
                 )
@@ -315,7 +380,7 @@ class CommunicatorBenchmark:
                     "symm_mem_two_shot",
                     lambda t, c=comm: c.all_reduce(t),
                     lambda t, c=comm: c.should_use_symm_mem(t),
-                    nullcontext(),
+                    nullcontext,
                     {},  # no env variable needed
                     None,  # no destroy function needed
                 )
@@ -328,7 +393,7 @@ class CommunicatorBenchmark:
                     "flashinfer_trtllm",
                     lambda t, c=comm: c.all_reduce(t),
                     lambda t, c=comm: c.should_use_fi_ar(t),
-                    nullcontext(),
+                    nullcontext,
                     {"VLLM_FLASHINFER_ALLREDUCE_BACKEND": "trtllm"},
                     lambda c=comm: c.destroy(),
                 )
@@ -338,21 +403,30 @@ class CommunicatorBenchmark:
                     "flashinfer_mnnvl",
                     lambda t, c=comm: c.all_reduce(t),
                     lambda t, c=comm: c.should_use_fi_ar(t),
-                    nullcontext(),
+                    nullcontext,
                     {"VLLM_FLASHINFER_ALLREDUCE_BACKEND": "mnnvl"},
                     lambda c=comm: c.destroy(),
                 )
             )
+
+        return communicators
+
+    def benchmark_allreduce(
+        self, sequence_length: int, num_warmup: int, num_trials: int
+    ) -> dict[str, float]:
+        """Benchmark allreduce operations for all available communicators."""
+
+        results = {}
 
         # Benchmark each communicator
         for (
             name,
             allreduce_fn,
             should_use_fn,
-            context,
+            context_factory,
             env_dict,
             destroy_fn,
-        ) in communicators:
+        ) in self._allreduce_entries():
             # Save original values and apply new environment variables
             saved_env = {key: os.environ.get(key) for key in env_dict}
             for key, value in env_dict.items():
@@ -362,7 +436,7 @@ class CommunicatorBenchmark:
                     sequence_length,
                     allreduce_fn,
                     should_use_fn,
-                    context,
+                    context_factory(),
                     num_warmup,
                     num_trials,
                 )
@@ -440,6 +514,189 @@ class CommunicatorBenchmark:
             raise RuntimeError(
                 f"CUDA graph benchmark failed for communicator: {e}"
             ) from e
+
+    def benchmark_skew_calibration(
+        self,
+        tensor_shapes: list[tuple[int, int]],
+        delays_us: list[int],
+        delayed_rank: int,
+        execution_mode: str,
+        num_warmup: int,
+        num_trials: int,
+        backends: list[str] | None,
+    ) -> list[dict]:
+        """Measure per-rank all-reduce residence under controlled arrival skew."""
+        selected = set(backends) if backends else None
+        results = []
+        for (
+            name,
+            allreduce_fn,
+            should_use_fn,
+            context_factory,
+            env_dict,
+            destroy_fn,
+        ) in self._allreduce_entries():
+            if selected is not None and name not in selected:
+                continue
+
+            saved_env = {key: os.environ.get(key) for key in env_dict}
+            os.environ.update(env_dict)
+            try:
+                for tensor_shape in tensor_shapes:
+                    results.extend(
+                        self._benchmark_skew_single(
+                            backend=name,
+                            tensor_shape=tensor_shape,
+                            delays_us=delays_us,
+                            delayed_rank=delayed_rank,
+                            execution_mode=execution_mode,
+                            num_warmup=num_warmup,
+                            num_trials=num_trials,
+                            allreduce_fn=allreduce_fn,
+                            should_use_fn=should_use_fn,
+                            context=context_factory(),
+                        )
+                    )
+            finally:
+                if destroy_fn is not None:
+                    destroy_fn()
+                for key, original_value in saved_env.items():
+                    if original_value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = original_value
+
+        if self.rank == 0:
+            _require_calibration_results(results, backends, tensor_shapes, delays_us)
+        return results
+
+    def _benchmark_skew_single(
+        self,
+        backend: str,
+        tensor_shape: tuple[int, int],
+        delays_us: list[int],
+        delayed_rank: int,
+        execution_mode: str,
+        num_warmup: int,
+        num_trials: int,
+        allreduce_fn: Callable[[torch.Tensor], torch.Tensor | None],
+        should_use_fn: Callable[[torch.Tensor], bool],
+        context,
+    ) -> list[dict]:
+        stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            tensor = torch.full(
+                tensor_shape,
+                self.rank + 1,
+                dtype=BENCHMARK_DTYPE,
+                device=self.device,
+            )
+
+        supported = should_use_fn(tensor)
+        rank_support: list[bool | None] = [None] * self.world_size
+        dist.all_gather_object(rank_support, supported, group=self.cpu_group)
+        if not all(rank_support):
+            logger.info(
+                "Skipping unsupported backend=%s shape=%s", backend, tensor_shape
+            )
+            return []
+
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                allreduce_fn(tensor)
+        torch.accelerator.synchronize()
+
+        if execution_mode == "cuda_graph":
+            dist.barrier(group=self.cpu_group)
+            with torch.cuda.stream(stream), context:
+                graph = torch.cuda.CUDAGraph()
+                graph_pool = torch.cuda.graph_pool_handle()
+                set_graph_pool_id(graph_pool)
+                with torch.cuda.graph(graph, pool=graph_pool, stream=stream):
+                    graph_output = allreduce_fn(tensor)
+
+            def run_collective():
+                graph.replay()
+                return graph_output
+
+        else:
+
+            def run_collective():
+                return allreduce_fn(tensor)
+
+        output = run_collective()
+        torch.accelerator.synchronize()
+        if output is None:
+            raise RuntimeError(f"{backend} returned no output during validation")
+        expected = self.world_size * (self.world_size + 1) // 2
+        if not torch.all(output == expected).item():
+            raise RuntimeError(
+                f"{backend} produced incorrect output for shape={tensor_shape}"
+            )
+
+        clock_rate_khz = torch.cuda.get_device_properties(self.device).clock_rate
+        host = socket.gethostname()
+        # Reuse events so lazy event initialization is paid during warmup.
+        delay_start, arrival, completion = (
+            torch.cuda.Event(enable_timing=True) for _ in range(3)
+        )
+        cases = []
+        for delay_us in delays_us:
+            delay_cycles = _delay_us_to_cycles(delay_us, clock_rate_khz)
+            local_trials = []
+            for trial in range(-num_warmup, num_trials):
+                dist.barrier(group=self.cpu_group)
+                host_enqueue_ns = time.perf_counter_ns()
+                with torch.cuda.stream(stream):
+                    delay_start.record(stream)
+                    if self.rank == delayed_rank and delay_cycles:
+                        torch.cuda._sleep(delay_cycles)
+                    arrival.record(stream)
+                    output = run_collective()
+                    completion.record(stream)
+                completion.synchronize()
+                host_complete_ns = time.perf_counter_ns()
+                if trial >= 0:
+                    local_trials.append(
+                        {
+                            "rank": self.rank,
+                            "host": host,
+                            "host_enqueue_ns": host_enqueue_ns,
+                            "host_complete_ns": host_complete_ns,
+                            "host_elapsed_ms": (host_complete_ns - host_enqueue_ns)
+                            / 1e6,
+                            "requested_delay_us": delay_us
+                            if self.rank == delayed_rank
+                            else 0,
+                            "delay_cycles": delay_cycles
+                            if self.rank == delayed_rank
+                            else 0,
+                            "measured_gpu_delay_ms": delay_start.elapsed_time(arrival),
+                            "gpu_collective_ms": arrival.elapsed_time(completion),
+                        }
+                    )
+
+            # Merge rank records after timing; CUDA clocks are never compared.
+            gathered = [None] * self.world_size if self.rank == 0 else None
+            dist.gather_object(local_trials, gathered, dst=0, group=self.cpu_group)
+            if self.rank == 0:
+                assert gathered is not None
+                cases.append(
+                    {
+                        "backend": backend,
+                        "collective": "all-reduce",
+                        "shape": list(tensor_shape),
+                        "payload_bytes": tensor.numel() * tensor.element_size(),
+                        "execution_mode": execution_mode,
+                        "delayed_rank": delayed_rank,
+                        "requested_delay_us": delay_us,
+                        "trials": [
+                            _build_trial_record(i, list(records))
+                            for i, records in enumerate(zip(*gathered, strict=True))
+                        ],
+                    }
+                )
+        return cases
 
     def benchmark_ag_rs(
         self, sequence_length: int, num_warmup: int, num_trials: int
@@ -599,6 +856,24 @@ def print_results(
     print("All times are in milliseconds (ms) per operation")
 
 
+def print_skew_calibration_results(results: list[dict]) -> None:
+    """Print one row per backend, shape, and injected-delay calibration case."""
+    print("\nAll-reduce calibration (GPU residence includes waiting and launch gaps)")
+    for result in results:
+        critical = [trial["max_gpu_collective_ms"] for trial in result["trials"]]
+        measured = [
+            trial["ranks"][result["delayed_rank"]]["measured_gpu_delay_ms"] * 1000
+            for trial in result["trials"]
+        ]
+        shape = "x".join(str(dimension) for dimension in result["shape"])
+        print(
+            f"{result['backend']} {shape} {result['execution_mode']}: "
+            f"delay={result['requested_delay_us']} us "
+            f"(measured p50={statistics.median(measured):.1f} us), "
+            f"max-rank residence p50={statistics.median(critical):.4f} ms"
+        )
+
+
 def main():
     parser = FlexibleArgumentParser(description="Benchmark device communicators")
 
@@ -620,13 +895,74 @@ def main():
 
     parser.add_argument("--output-json", type=str, help="Output results to JSON file")
 
+    parser.add_argument(
+        "--skew-delays-us",
+        type=int,
+        nargs="+",
+        help="Enable rank-skew calibration with these device-side delays",
+    )
+
+    parser.add_argument(
+        "--skew-rank",
+        type=int,
+        help="Rank delayed during rank-skew calibration (default: 0)",
+    )
+
+    parser.add_argument(
+        "--calibration-shapes",
+        type=_parse_tensor_shape,
+        nargs="+",
+        metavar="ROWSxCOLS",
+        help="Exact per-rank BF16 input shapes for rank-skew calibration",
+    )
+
+    parser.add_argument(
+        "--calibration-backends",
+        choices=ALL_REDUCE_BACKENDS,
+        nargs="+",
+        help="All-reduce backends to calibrate (default: all available)",
+    )
+
+    parser.add_argument(
+        "--calibration-execution-mode",
+        choices=("eager", "cuda_graph"),
+        help="Calibration execution mode (default: cuda_graph)",
+    )
+
     args = parser.parse_args()
+
+    calibration_shapes = args.calibration_shapes
+    if args.skew_delays_us is None:
+        if any(
+            value is not None
+            for value in (
+                calibration_shapes,
+                args.calibration_backends,
+                args.calibration_execution_mode,
+                args.skew_rank,
+            )
+        ):
+            parser.error("calibration options require --skew-delays-us")
+    else:
+        if min(args.skew_delays_us) < 0 or args.num_warmup < 0 or args.num_trials <= 0:
+            parser.error("delays/warmups must be non-negative and trials positive")
+        args.skew_rank = 0 if args.skew_rank is None else args.skew_rank
+        args.calibration_execution_mode = (
+            args.calibration_execution_mode or "cuda_graph"
+        )
+        calibration_shapes = calibration_shapes or [
+            (sequence_length, HIDDEN_SIZE) for sequence_length in args.sequence_lengths
+        ]
+        if any(min(shape) <= 0 for shape in calibration_shapes):
+            parser.error("calibration tensor dimensions must be positive")
 
     # Initialize distributed
     if not dist.is_initialized():
         dist.init_process_group(backend="gloo")
     rank = dist.get_rank()
     world_size = dist.get_world_size()
+    if args.skew_delays_us is not None and not 0 <= args.skew_rank < world_size:
+        parser.error(f"--skew-rank must be in [0, {world_size})")
 
     # Set device
     device = torch.device(f"cuda:{rank}")
@@ -641,8 +977,47 @@ def main():
 
     # Initialize benchmark
     benchmark = CommunicatorBenchmark(
-        rank, world_size, device, cpu_group, args.sequence_lengths
+        rank,
+        world_size,
+        device,
+        cpu_group,
+        args.sequence_lengths,
+        calibration_shapes=calibration_shapes,
     )
+
+    if args.skew_delays_us is not None:
+        assert calibration_shapes is not None
+        calibration_results = benchmark.benchmark_skew_calibration(
+            tensor_shapes=calibration_shapes,
+            delays_us=args.skew_delays_us,
+            delayed_rank=args.skew_rank,
+            execution_mode=args.calibration_execution_mode,
+            num_warmup=args.num_warmup,
+            num_trials=args.num_trials,
+            backends=args.calibration_backends,
+        )
+        if rank == 0:
+            print_skew_calibration_results(calibration_results)
+            if args.output_json:
+                output_data = {
+                    "schema_version": 1,
+                    "mode": "all_reduce_rank_skew_calibration",
+                    "world_size": world_size,
+                    "dtype": str(BENCHMARK_DTYPE),
+                    "tensor_shapes": calibration_shapes,
+                    "delayed_rank": args.skew_rank,
+                    "requested_delays_us": args.skew_delays_us,
+                    "execution_mode": args.calibration_execution_mode,
+                    "num_warmup": args.num_warmup,
+                    "num_trials": args.num_trials,
+                    "results": calibration_results,
+                }
+                with open(args.output_json, "w") as f:
+                    json.dump(output_data, f, indent=2)
+                logger.info("Results saved to %s", args.output_json)
+        if cpu_group != dist.group.WORLD:
+            dist.destroy_process_group(cpu_group)
+        return
 
     # Run benchmarks
     all_results = {}
