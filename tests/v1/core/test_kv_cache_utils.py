@@ -3934,6 +3934,8 @@ def test_unify_hybrid_kv_cache_specs():
         "layer_1": before_spec_1,
         "layer_2": before_spec_2,
     }
+    kv_cache_spec["draft_layer_1"] = replace(before_spec_1, dcp_sharded=False)
+    kv_cache_spec["draft_layer_2"] = replace(before_spec_2, dcp_sharded=False)
     kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
     expected_spec_1 = new_kv_cache_spec(block_size=64)
     expected_spec_2 = new_kv_cache_spec(
@@ -3942,6 +3944,7 @@ def test_unify_hybrid_kv_cache_specs():
     assert kv_cache_spec["layer_1"] == expected_spec_1
     assert kv_cache_spec["layer_2"] == expected_spec_2
     assert kv_cache_spec["layer_2"].page_size_bytes == 64 * 1024
+    assert kv_cache_spec["draft_layer_2"] == replace(expected_spec_2, dcp_sharded=False)
 
     # 2. has_full_attention and has_chunked_local_attention
     before_spec_1 = new_kv_cache_spec()
@@ -3990,6 +3993,11 @@ def test_unify_hybrid_kv_cache_specs():
         "layer_2": new_chunked_local_attention_spec(attention_chunk_size=512),
     }
 
+    with pytest.raises(ValueError):
+        kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
+
+    # Replicated Mamba state still requires the hybrid cache manager.
+    kv_cache_spec = {"attention": new_kv_cache_spec(), "mamba": new_mamba_spec()}
     with pytest.raises(ValueError):
         kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
 
