@@ -29,6 +29,11 @@ _DEEPGEMM_BLACKWELL_EXCLUDED_MODEL_TYPES: set[str] = {
     "qwen3_5_moe_text",
 }
 
+# KV page sizes (in cache entries) supported by the paged-MQA logits kernels
+# (fp8_fp4_paged_mqa_logits / get_paged_mqa_logits_metadata). Larger storage
+# blocks must be virtually split into one of these page sizes.
+PAGED_MQA_PAGE_SIZES = (32, 64)
+
 
 def should_auto_disable_deep_gemm(model_type: str | None) -> bool:
     """Check if DeepGemm should be auto-disabled for this model on Blackwell.
@@ -275,7 +280,11 @@ def _lazy_init() -> None:
     _fp8_gemm_nt_impl = getattr(_dg, "fp8_gemm_nt", None)
     _fp8_einsum_impl = getattr(_dg, "fp8_einsum", None)
     _grouped_impl = getattr(_dg, "m_grouped_fp8_gemm_nt_contiguous", None)
-    _grouped_masked_impl = getattr(_dg, "fp8_m_grouped_gemm_nt_masked", None)
+    # DeepGEMM 2.8.0 dropped the legacy `fp8_*` aliases; keep both spellings so
+    # an externally pinned older DeepGEMM still resolves.
+    _grouped_masked_impl = getattr(
+        _dg, "m_grouped_fp8_gemm_nt_masked", None
+    ) or getattr(_dg, "fp8_m_grouped_gemm_nt_masked", None)
     _grouped_fp4_impl = getattr(_dg, "m_grouped_fp8_fp4_gemm_nt_contiguous", None)
     # DeepGEMM exposes fp8_fp4_*_mqa_logits as the canonical symbols that
     # handle both the FP8 and FP4 Q/K paths via a tuple-typed `q`.
@@ -648,6 +657,13 @@ def fp8_fp4_paged_mqa_logits(
     _lazy_init()
     if _fp8_fp4_paged_mqa_logits_impl is None:
         return _missing()
+    # DeepGEMM asserts block_tables.stride(-1)==1. A trailing size-1 dim
+    # (e.g. block_table shape [B,1] for short seqs under a large block_size)
+    # can be a transposed view where .contiguous() is a no-op (torch treats the
+    # size-1 dim's stride as irrelevant) yet stride(-1)!=1, failing the kernel.
+    # clone to contiguous format to force stride(-1)==1.
+    if block_tables.dim() >= 2 and block_tables.stride(-1) != 1:
+        block_tables = block_tables.clone(memory_format=torch.contiguous_format)
     kwargs = {} if indices is None else {"indices": indices}
     return _fp8_fp4_paged_mqa_logits_impl(
         q,
