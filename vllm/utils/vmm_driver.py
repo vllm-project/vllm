@@ -158,16 +158,19 @@ class VmmDriver:
             return
         raise RuntimeError(f"GPU driver error {result}: {self.error_string(result)}")
 
-    def _make_alloc_prop(self, device_index: int) -> _MemAllocationProp:
+    def _make_alloc_prop(
+        self, device_index: int, exportable: bool = False
+    ) -> _MemAllocationProp:
         prop = _MemAllocationProp()
         prop.type = _MEM_ALLOCATION_TYPE_PINNED
         prop.location.type = _MEM_LOCATION_TYPE_DEVICE
         prop.location.id = device_index
         prop.allocFlags.compressionType = _MEM_ALLOCATION_COMP_NONE
+        prop.requestedHandleTypes = 1 if exportable else 0  # POSIX file descriptor
         return prop
 
-    def granularity(self, device_index: int) -> int:
-        prop = self._make_alloc_prop(device_index)
+    def granularity(self, device_index: int, *, exportable: bool = False) -> int:
+        prop = self._make_alloc_prop(device_index, exportable)
         granularity = ctypes.c_size_t()
         self._check(
             self._fns["get_granularity"](
@@ -187,9 +190,9 @@ class VmmDriver:
     def free_reserved(self, ptr: int, size: int) -> None:
         self._check(self._fns["address_free"](ptr, size))
 
-    def create(self, size: int, device_index: int) -> int:
+    def create(self, size: int, device_index: int, *, exportable: bool = False) -> int:
         """Create a physical memory handle of `size` bytes."""
-        prop = self._make_alloc_prop(device_index)
+        prop = self._make_alloc_prop(device_index, exportable)
         handle = MemHandle()
         self._check(
             self._fns["create"](ctypes.byref(handle), size, ctypes.byref(prop), 0)
@@ -245,6 +248,35 @@ class CudaVmmDriver(VmmDriver):
         lib.cuDevicePrimaryCtxRetain.restype = ctypes.c_int
         lib.cuCtxSetCurrent.argtypes = [_Context]
         lib.cuCtxSetCurrent.restype = ctypes.c_int
+        lib.cuMemExportToShareableHandle.argtypes = [
+            ctypes.c_void_p,
+            MemHandle,
+            ctypes.c_int,
+            ctypes.c_ulonglong,
+        ]
+        lib.cuMemExportToShareableHandle.restype = ctypes.c_int
+        lib.cuMemImportFromShareableHandle.argtypes = [
+            ctypes.POINTER(MemHandle),
+            ctypes.c_void_p,
+            ctypes.c_int,
+        ]
+        lib.cuMemImportFromShareableHandle.restype = ctypes.c_int
+
+    def export_fd(self, handle: int) -> int:
+        fd = ctypes.c_int(-1)
+        self._check(
+            self._lib.cuMemExportToShareableHandle(ctypes.byref(fd), handle, 1, 0)
+        )
+        return fd.value
+
+    def import_fd(self, fd: int) -> int:
+        handle = MemHandle()
+        self._check(
+            self._lib.cuMemImportFromShareableHandle(
+                ctypes.byref(handle), ctypes.c_void_p(fd), 1
+            )
+        )
+        return handle.value
 
     def error_string(self, code: int) -> str:
         msg = ctypes.c_char_p()

@@ -36,7 +36,13 @@ class ExtensibleKVCache:
     layer for layer-outermost layouts, one overall for block-outermost.
     """
 
-    def __init__(self, kv_cache_config: KVCacheConfig, device: torch.device):
+    def __init__(
+        self,
+        kv_cache_config: KVCacheConfig,
+        device: torch.device,
+        *,
+        exportable: bool = False,
+    ):
         tensors = kv_cache_config.kv_cache_tensors
         assert tensors, "Extensible KV cache requires at least one KV cache tensor."
         sizes = {tensor.size for tensor in tensors}
@@ -62,7 +68,10 @@ class ExtensibleKVCache:
         # the profiled activation peak the warmup steps are about to hit.
         self.reserved_headroom_bytes = 0
         self.buffer = ExtensibleTensor(
-            self.size, device=device, num_segments=self.size // segment_bytes
+            self.size,
+            device=device,
+            num_segments=self.size // segment_bytes,
+            exportable=exportable,
         )
 
     def allocate(self, size: int) -> torch.Tensor:
@@ -78,6 +87,10 @@ class ExtensibleKVCache:
         contents): UCX cannot RDMA a range spanning several allocations.
         """
         num_blocks = min(num_blocks, self.capacity_blocks)
+        if self.buffer._peer_mappings is not None:
+            self.buffer._peer_mappings._identical(
+                ("commit", max(num_blocks, self.num_committed_blocks), defragment)
+            )
         if defragment and self.buffer.num_physical_chunks > self.buffer.num_segments:
             self.buffer.release_physical()
             self.num_committed_blocks = 0
@@ -227,6 +240,8 @@ def extend_kv_cache(runner: "GPUModelRunner", num_blocks: int) -> None:
             for layer_name, layer in forward_context.items()
             if isinstance(getattr(layer, "kv_cache", None), torch.Tensor)
         }
+    if domain := getattr(runner, "pcp_vmm_domain", None):
+        domain.bind(kv_caches, forward_context)
     runner.kv_connector = get_kv_connector(runner.vllm_config, kv_caches)
 
 

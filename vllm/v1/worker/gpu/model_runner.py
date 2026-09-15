@@ -594,9 +594,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.cp_interleave = self.parallel_config.cp_kv_cache_interleave_size
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
+        if getattr(self, "pcp_vmm_domain", None) is not None:
+            raise RuntimeError("Close the direct-final KV domain before reinitializing")
         self.extensible_kv_cache: ExtensibleKVCache | None = None
+        self.pcp_vmm_domain = None
+        if envs.VLLM_USE_PCP_DIRECT_KV:
+            from vllm.model_executor.layers.attention.direct_kv import (
+                validate_direct_final,
+            )
+
+            validate_direct_final(self.vllm_config, extensible)
         if extensible:
-            self.extensible_kv_cache = ExtensibleKVCache(kv_cache_config, self.device)
+            self.extensible_kv_cache = ExtensibleKVCache(
+                kv_cache_config, self.device, exportable=envs.VLLM_USE_PCP_DIRECT_KV
+            )
 
         block_table_max_model_len = self.max_model_len
         if self.is_encoder_decoder:
@@ -774,6 +785,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.kv_caches = [
             cache for cache in kv_caches_dict.values() if cache.device == self.device
         ]
+        if envs.VLLM_USE_PCP_DIRECT_KV:
+            from vllm.distributed import get_pcp_group
+            from vllm.model_executor.layers.attention.direct_kv import KVCacheVmmDomain
+
+            assert self.extensible_kv_cache is not None
+            self.pcp_vmm_domain = KVCacheVmmDomain(
+                get_pcp_group(), self.extensible_kv_cache.buffer
+            )
+            self.pcp_vmm_domain.bind(
+                kv_caches_dict, self.compilation_config.static_forward_context
+            )
         if is_profiling:
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:
@@ -2263,6 +2285,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
         torch.accelerator.synchronize()
+        if domain := getattr(self, "pcp_vmm_domain", None):
+            domain.close()
+            self.pcp_vmm_domain = None
+        if cache := getattr(self, "extensible_kv_cache", None):
+            cache.free()
+            self.extensible_kv_cache = None
         self.cudagraph_manager = None
         self.fast_prefill = None
         if hasattr(self, "kv_caches"):

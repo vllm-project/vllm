@@ -76,6 +76,19 @@ def test_validate_config_rejects_full_graph_for_prefills():
         )
 
 
+def test_sparse_decode_graphs_require_direct_final(monkeypatch):
+    config = _make_config(CUDAGraphMode.FULL_DECODE_ONLY)
+    config.model_config.hf_text_config.index_topk = 2048
+    monkeypatch.setenv("VLLM_USE_PCP_DIRECT_KV", "0")
+    with pytest.raises(NotImplementedError, match="sparse MLA PCP"):
+        PCPManager.validate_config(config, supports_mm_inputs=False)
+    monkeypatch.setenv("VLLM_USE_PCP_DIRECT_KV", "1")
+    PCPManager.validate_config(config, supports_mm_inputs=False)
+    config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
+    with pytest.raises(NotImplementedError, match="sparse MLA PCP"):
+        PCPManager.validate_config(config, supports_mm_inputs=False)
+
+
 def test_replicated_decode_piecewise_graph_padding(monkeypatch):
     manager = PCPManager(
         pcp_world_size=2,
