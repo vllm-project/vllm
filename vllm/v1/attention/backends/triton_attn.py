@@ -117,8 +117,15 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         self.num_heads_q = get_num_attention_heads_from_layers(
             vllm_config, layer_names
         ) or model_config.get_num_attention_heads(vllm_config.parallel_config)
-        self.num_heads_kv = model_config.get_num_kv_heads(vllm_config.parallel_config)
-        self.headdim = model_config.get_head_size()
+        # A metadata builder is constructed per KV-cache group, so the model-global
+        # getters do not describe its layers once a model mixes attention types:
+        # Gemma 4 gives its full-attention layers a larger head dim and fewer KV
+        # heads than its sliding ones. ``kv_cache_spec`` carries the per-rank values
+        # for exactly the layers served here, and is the same thing
+        # ``unified_attention`` derives its launch grid from at runtime. The softmax
+        # scratch holds attention *outputs*, hence ``head_size_v``.
+        self.num_heads_kv = kv_cache_spec.num_kv_heads
+        self.headdim = kv_cache_spec.head_size_v
 
         # Check if CUDA Graphs are enabled for decode
         self.decode_cudagraph_enabled = (
@@ -136,7 +143,15 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         # must be at least equal to the threshold below.
         # If this threshold is not reached (i.e., the batch size is not large enough),
         # the 3D kernel will be selected instead.
-        self.seq_threshold_3D = MIN_LAUNCH_GRID_SIZE_2D // self.num_heads_kv
+        # The threshold also sizes the softmax scratch below, and the 3D path only
+        # runs when num_seqs <= seq_threshold_3D, so cap it at max_num_seqs: anything
+        # above that is unreachable and only takes memory away from the KV cache.
+        # max() guards num_heads_kv > MIN_LAUNCH_GRID_SIZE_2D, where the threshold
+        # would otherwise be 0.
+        self.seq_threshold_3D = min(
+            max(1, MIN_LAUNCH_GRID_SIZE_2D // self.num_heads_kv),
+            vllm_config.scheduler_config.max_num_seqs,
+        )
 
         # Modify the threshold if needed.
         if self.decode_cudagraph_enabled:
