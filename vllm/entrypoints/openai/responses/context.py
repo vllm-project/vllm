@@ -565,6 +565,7 @@ class ParsableContext(ConversationContext):
         mcp_tools: dict[str, Mcp],
     ):
         if tool_server:
+            initialized_session = False
             for tool_name in self.available_tools:
                 if tool_name in self._tool_sessions:
                     continue
@@ -577,6 +578,8 @@ class ParsableContext(ConversationContext):
                     tool_server.new_session(tool_name, request_id, headers)
                 )
                 self._tool_sessions[tool_name] = tool_session
+                initialized_session = True
+            if initialized_session:
                 exit_stack.push_async_exit(self.cleanup_session)
 
     async def cleanup_session(self, *args, **kwargs) -> None:
@@ -863,6 +866,7 @@ class HarmonyContext(ConversationContext):
         mcp_tools: dict[str, Mcp],
     ):
         if tool_server:
+            initialized_session = False
             for tool_name in self.available_tools:
                 if tool_name not in self._tool_sessions:
                     tool_type = _map_tool_name_to_tool_type(tool_name)
@@ -873,7 +877,9 @@ class HarmonyContext(ConversationContext):
                         tool_server.new_session(tool_name, request_id, headers)
                     )
                     self._tool_sessions[tool_name] = tool_session
-                    exit_stack.push_async_exit(self.cleanup_session)
+                    initialized_session = True
+            if initialized_session:
+                exit_stack.push_async_exit(self.cleanup_session)
 
     async def call_container_tool(
         self, tool_session: Union["ClientSession", Tool], last_msg: Message
