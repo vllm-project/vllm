@@ -20,9 +20,8 @@ Constraints:
   - x / residual must be bfloat16; hc_fn weights stay float32 (the checkpoint
     keeps them out of fp8 quantization via modules_to_not_convert)
 
-The fused modules own no parameters: they hold references to the weights of the
-eager layer they replace, bound in ``process_weights_after_loading`` (invoked
-generically for every ``HpcModule`` by the model loader).
+The fused modules own no parameters: their forwards read the weights of the
+eager layer they replace directly via the captured owner reference.
 
 NOTE: The reference implementation also offers a cross-layer post+pre fusion
 (``HpcIHCPostPre``) that folds one segment's post into the next segment's pre.
@@ -147,41 +146,26 @@ class HpcIHCPre(HpcModule):
         object.__setattr__(self, "_fallback_op", fallback_op)
         # Same anti-cycle idiom for the fused RMSNorm owner (a sibling module).
         object.__setattr__(self, "_norm_owner", norm_owner)
-        self.weight = None
-        self.hc_scale = None
-        self.hc_base = None
-        self.rms_weight = None
-        self.rms_eps = 0.0
 
     @classmethod
     def support(cls, hc_mult: int, hidden_size: int) -> bool:
         return _ihc_supported(hc_mult, hidden_size)
 
-    def process_weights_after_loading(self, model=None):
-        # hc_fn is a ReplicatedLinear whose weight is [2 * hc_mult, hc_mult * d].
-        # It stays float32 -- the HPC kernel consumes fp32 weights directly, so
-        # there is no conversion (and no precision loss) here.
-        owner = self._fallback_op
-        self.weight = owner.hc_fn.weight
-        self.hc_scale = owner.hc_scale
-        self.hc_base = owner.hc_base
-        if self._norm_owner is not None:
-            self.rms_weight = self._norm_owner.weight
-            self.rms_eps = self._norm_owner.variance_epsilon
-
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         import hpc
 
+        owner = self._fallback_op
+        norm_owner = self._norm_owner
         return hpc.fuse_ihc_pre(
             x,
-            self.weight,
-            self.hc_scale,
-            self.hc_base,
+            owner.hc_fn.weight,
+            owner.hc_scale,
+            owner.hc_base,
             self.norm_eps,
             self.hc_eps,
             self.magnitude,
-            self.rms_weight,
-            self.rms_eps,
+            norm_owner.weight if norm_owner is not None else None,
+            norm_owner.variance_epsilon if norm_owner is not None else 0.0,
         )
 
 
@@ -233,29 +217,20 @@ class HpcIHCHead(HpcModule):
         self.norm_eps = norm_eps
         # See HpcIHCPre: keep the owner out of the module tree.
         object.__setattr__(self, "_fallback_op", fallback_op)
-        self.weight = None
-        self.hc_scale = None
-        self.hc_base = None
 
     @classmethod
     def support(cls, hc_mult: int, hidden_size: int) -> bool:
         return _ihc_supported(hc_mult, hidden_size)
 
-    def process_weights_after_loading(self, model=None):
-        # hc_head_fn weight is [hc_mult, hc_mult * d], float32.
-        owner = self._fallback_op
-        self.weight = owner.hc_head_fn.weight
-        self.hc_scale = owner.hc_head_scale
-        self.hc_base = owner.hc_head_base
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         import hpc
 
+        owner = self._fallback_op
         return hpc.fuse_ihc_head(
             x,
-            self.weight,
-            self.hc_scale,
-            self.hc_base,
+            owner.hc_head_fn.weight,
+            owner.hc_head_scale,
+            owner.hc_head_base,
             self.norm_eps,
             self.hc_eps,
         )

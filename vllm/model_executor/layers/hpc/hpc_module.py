@@ -11,8 +11,5 @@ class HpcModule(nn.Module):
     def support(cls, *args, **kwargs):
         return True
 
-    def process_weights_after_loading(self, model):
-        pass
-
     def forward(self, *args, **kwargs):
         pass
