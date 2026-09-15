@@ -98,20 +98,14 @@ def build_verification_layout(
     num_reqs = capacities.shape[0]
     cu_num_logits[:1].zero_()
     torch.cumsum(
-        capacities + num_bonus_tokens,
-        dim=0,
-        out=cu_num_logits[1 : num_reqs + 1],
+        capacities + num_bonus_tokens, dim=0, out=cu_num_logits[1 : num_reqs + 1]
     )
     query_start_loc[:1].zero_()
     torch.cumsum(
-        capacities + num_non_draft_tokens,
-        dim=0,
-        out=query_start_loc[1 : num_reqs + 1],
+        capacities + num_non_draft_tokens, dim=0, out=query_start_loc[1 : num_reqs + 1]
     )
-    if num_tokens is not None:
-        query_start_loc[num_reqs + 1 :].fill_(num_tokens)
-    else:
-        query_start_loc[num_reqs + 1 :] = query_start_loc[num_reqs]
+    tail = num_tokens if num_tokens is not None else query_start_loc[num_reqs]
+    query_start_loc[num_reqs + 1 :] = tail
     return cu_num_logits[: num_reqs + 1], query_start_loc
 
 

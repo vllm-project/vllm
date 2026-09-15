@@ -286,11 +286,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             and self.speculative_config.use_multi_module_mtp()
             else 1
         )
-
-        # General request states.
         use_dense_all_token_ids = (
             self.speculative_config is not None and self.speculative_config.use_ngram()
         )
+
+        # General request states.
         self.req_states = RequestState(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
@@ -1389,9 +1389,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
         elif draft_trimmer is not None:
-            # Clamp scheduled draft slots to the drafter's valid counts on
-            # GPU. CPU-side totals remain upper bounds; the trimmed gap is
-            # treated as padding downstream.
+            # Clamp scheduled draft slots to the drafter's valid counts on GPU.
+            # CPU-side totals remain upper bounds; trimmed gap treated as padding.
             cu_num_logits, query_start_loc = draft_trimmer.trim(
                 idx_mapping, num_draft_tokens_per_req, num_scheduled_tokens_np
             )
