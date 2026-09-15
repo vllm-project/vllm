@@ -201,6 +201,21 @@ class BlockPool:
         # are still being read until the pool reuses them.
         self._reuse_watchers: dict[int, Callable[[KVCacheBlock], None]] = {}
 
+        # Monotonic counters used to attribute exact physical block activity to
+        # a request by taking deltas around the scheduler's synchronous cache
+        # operations. These counters do not participate in cache decisions.
+        self._num_block_allocations = 0
+        self._num_block_evictions = 0
+        self._num_new_full_blocks = 0
+
+    def get_block_activity(self) -> tuple[int, int, int]:
+        """Return cumulative (allocations, evictions, new full blocks)."""
+        return (
+            self._num_block_allocations,
+            self._num_block_evictions,
+            self._num_new_full_blocks,
+        )
+
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
     ) -> list[KVCacheBlock] | None:
@@ -301,6 +316,7 @@ class BlockPool:
                 blk,
                 num_tokens=num_hash_tokens,
             )
+            self._num_new_full_blocks += 1
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
 
@@ -676,6 +692,7 @@ class BlockPool:
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
         ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
+        self._num_block_allocations += len(ret)
 
         if self._reuse_watchers:
             self._notify_reuse(ret)
@@ -744,6 +761,7 @@ class BlockPool:
             return False
 
         self._emit_block_removed_events(evicted_hashes)
+        self._num_block_evictions += 1
         return True
 
     def touch(self, blocks: Sequence[KVCacheBlock]) -> None:

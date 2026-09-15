@@ -15,6 +15,7 @@ from vllm import RequestOutput
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.base.protocol import (
     PerRequestMetrics,
+    PrefixCacheMetrics,
     SpeculativeDecodingMetrics,
 )
 from vllm.entrypoints.generate.beam_search.online import BeamSearchOnlineMixin
@@ -37,7 +38,7 @@ from vllm.tracing import (
     extract_trace_headers,
     log_tracing_disabled_warning,
 )
-from vllm.v1.metrics.stats import RequestStateStats
+from vllm.v1.metrics.stats import PrefillStats, RequestStateStats
 
 logger = init_logger(__name__)
 
@@ -50,6 +51,7 @@ PRIORITY_HEADER = "X-Vllm-Priority"
 def build_per_request_timing_metrics(
     metrics: RequestStateStats | None,
     num_generation_tokens: int,
+    prefill_stats: PrefillStats | None = None,
 ) -> PerRequestMetrics:
     """Build per-request timing metrics from ``RequestStateStats``.
 
@@ -59,39 +61,53 @@ def build_per_request_timing_metrics(
     over the inference interval (scheduling to last output token), so it counts
     the prefill/TTFT phase and is not simply the reciprocal of ``mean_itl_ms``.
     Each field is left ``None`` when the timestamps it depends on are
-    unavailable.
+    unavailable. When ``prefill_stats`` is available, the experimental
+    prompt/KV breakdown is attached as ``prefix_cache``.
     """
-    if metrics is None:
-        return PerRequestMetrics()
-
-    queued_ts = metrics.queued_ts
-    scheduled_ts = metrics.scheduled_ts
-    first_token_ts = metrics.first_token_ts
-    last_token_ts = metrics.last_token_ts
-
     time_to_first_token_ms: float | None = None
     generation_time_ms: float | None = None
     queue_time_ms: float | None = None
     mean_itl_ms: float | None = None
     tokens_per_second: float | None = None
 
-    if scheduled_ts > 0 and first_token_ts > 0:
-        time_to_first_token_ms = (first_token_ts - scheduled_ts) * 1000
+    if metrics is not None:
+        queued_ts = metrics.queued_ts
+        scheduled_ts = metrics.scheduled_ts
+        first_token_ts = metrics.first_token_ts
+        last_token_ts = metrics.last_token_ts
 
-    if first_token_ts > 0 and last_token_ts > 0:
-        generation_time_ms = (last_token_ts - first_token_ts) * 1000
+        if scheduled_ts > 0 and first_token_ts > 0:
+            time_to_first_token_ms = (first_token_ts - scheduled_ts) * 1000
 
-    if queued_ts > 0 and scheduled_ts > 0:
-        queue_time_ms = (scheduled_ts - queued_ts) * 1000
+        if first_token_ts > 0 and last_token_ts > 0:
+            generation_time_ms = (last_token_ts - first_token_ts) * 1000
 
-    if first_token_ts > 0 and last_token_ts > 0 and num_generation_tokens > 1:
-        decode_time = last_token_ts - first_token_ts
-        mean_itl_ms = decode_time / (num_generation_tokens - 1) * 1000
+        if queued_ts > 0 and scheduled_ts > 0:
+            queue_time_ms = (scheduled_ts - queued_ts) * 1000
 
-    if scheduled_ts > 0 and last_token_ts > 0:
-        inference_time_ms = (last_token_ts - scheduled_ts) * 1000
-        if inference_time_ms > 0:
-            tokens_per_second = num_generation_tokens / inference_time_ms * 1000
+        if first_token_ts > 0 and last_token_ts > 0 and num_generation_tokens > 1:
+            decode_time = last_token_ts - first_token_ts
+            mean_itl_ms = decode_time / (num_generation_tokens - 1) * 1000
+
+        if scheduled_ts > 0 and last_token_ts > 0:
+            inference_time_ms = (last_token_ts - scheduled_ts) * 1000
+            if inference_time_ms > 0:
+                tokens_per_second = num_generation_tokens / inference_time_ms * 1000
+
+    prefix_cache_metrics = None
+    if prefill_stats is not None:
+        prefix_cache_metrics = PrefixCacheMetrics(
+            num_computed_tokens=prefill_stats.num_computed_tokens,
+            num_cached_tokens=prefill_stats.num_cached_tokens,
+            num_local_cached_tokens=prefill_stats.num_local_cached_tokens,
+            num_external_cached_tokens=prefill_stats.num_external_cached_tokens,
+            num_cache_creation_tokens=prefill_stats.num_cache_creation_tokens,
+            num_new_full_blocks=prefill_stats.num_new_full_blocks,
+            num_block_allocations=prefill_stats.num_block_allocations,
+            num_block_evictions=prefill_stats.num_block_evictions,
+            num_prefill_chunks=prefill_stats.num_prefill_chunks,
+            prefill_time_ms=time_to_first_token_ms,
+        )
 
     return PerRequestMetrics(
         time_to_first_token_ms=time_to_first_token_ms,
@@ -99,6 +115,7 @@ def build_per_request_timing_metrics(
         queue_time_ms=queue_time_ms,
         mean_itl_ms=mean_itl_ms,
         tokens_per_second=tokens_per_second,
+        prefix_cache=prefix_cache_metrics,
     )
 
 
