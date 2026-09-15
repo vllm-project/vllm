@@ -168,8 +168,14 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         local_block_ids = meta.local_physical_block_ids
         remote_region_groups = self.dst_region_group_ids[engine_id]
         local_region_groups = self.region_group_ids or remote_region_groups
-        groups_differ = local_region_groups != remote_region_groups
-        if groups_differ:
+        if not local_block_ids:
+            # Region expansion cannot index empty groups. Pass empty specs to
+            # _read_blocks so its existing cache-hit notification path runs.
+            read_specs = [
+                ReadSpec(remote_rank=rank, local_block_ids=[], remote_block_ids=[])
+                for rank in plan.all_source_ranks
+            ]
+        elif local_region_groups != remote_region_groups:
             if not self.use_mla or self._has_mamba:
                 raise NotImplementedError(
                     "Different NIXL cache-group layouts are only supported for "
