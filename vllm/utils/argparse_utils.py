@@ -281,6 +281,10 @@ class FlexibleArgumentParser(ArgumentParser):
                 )
 
                 if args[model_idx] == "--model":
+                    if model_idx + 1 >= len(args) or str(args[model_idx + 1]).startswith(
+                        "-"
+                    ):
+                        self.error("argument --model: expected one argument")
                     model_tag = args[model_idx + 1]
                     rest_start_idx = model_idx + 2
                 else:
