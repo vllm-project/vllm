@@ -21,7 +21,6 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
@@ -302,11 +301,8 @@ def _insert_context_kv(
 
 class DSparkDeepseekV4ForCausalLM(nn.Module):
     # Draft weights ship in the target checkpoint (mtp.*) without embed/head, so
-    # load_dspark_model aliases the target's — except under PP, where the
-    # target's table sits on the first stage and the drafter loads its own
-    # copy of the shared embed weight (see load_weights).
+    # load_dspark_model always aliases the target's.
     has_own_embed_tokens = False
-    loads_own_embed_under_pp = True
     has_own_lm_head = False
     # Full-vocab draft: draft ids are target ids, no remapping needed.
     draft_id_to_target_id = None
@@ -433,18 +429,11 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         head_start = n_local_head * tp_rank
         head_end = n_local_head * (tp_rank + 1)
 
-        # Under pipeline parallelism the drafter only exists on the last stage,
-        # where the target's embedding table is a PPMissingLayer placeholder, so
-        # the draft loads its own copy of the shared embedding weight.
-        load_own_embed = get_pp_group().world_size > 1
         for name, loaded_weight in weights:
-            if load_own_embed and name == "embed.weight":
-                name = "model.embed_tokens.weight"
-            else:
-                mapped = self._remap_dspark_name(name)
-                if mapped is None:
-                    continue
-                name = mapped
+            mapped = self._remap_dspark_name(name)
+            if mapped is None:
+                continue
+            name = mapped
             if "confidence_head." in name:
                 loaded_confidence_head = True
 
