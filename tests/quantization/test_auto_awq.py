@@ -299,35 +299,17 @@ def test_auto_awq_batch_invariant_uses_fused_gemm(
     )
 
 
-@pytest.mark.skipif(
-    not (current_platform.is_cuda() and current_platform.is_device_capability(89)),
-    reason="The fused AWQ BI GEMM path only dispatches on SM89.",
-)
-def test_auto_awq_batch_invariant_dispatch_ignores_input_contiguity(monkeypatch):
-    """The fused kernel and the legacy dequant+matmul fallback are not
-    numerically identical, so a layer's dispatch choice must not depend on
-    incidental input contiguity: a non-contiguous activation must still
-    route to the fused kernel, not silently fall back to the other
-    algorithm for what is otherwise the same layer."""
-    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+class _FakeQuantConfig:
+    def __init__(self, pack_factor: int = 8):
+        self.pack_factor = pack_factor
 
+
+def _make_fake_awq_layer_and_method(
+    k: int, n: int, group_size: int, device: torch.device
+):
+    """Build a minimal (layer, method) pair that exercises
+    AutoAWQLinearMethod.apply's dispatch logic without a full model load."""
     import vllm.model_executor.layers.quantization.auto_awq as auto_awq_module
-
-    fused_calls = 0
-    original_fused_gemm = auto_awq_module.awq_gemm_fused_fp32
-
-    def _counting_fused_gemm(*args, **kwargs):
-        nonlocal fused_calls
-        fused_calls += 1
-        return original_fused_gemm(*args, **kwargs)
-
-    monkeypatch.setattr(auto_awq_module, "awq_gemm_fused_fp32", _counting_fused_gemm)
-
-    class _FakeQuantConfig:
-        pack_factor = 8
-
-    device = torch.device(current_platform.device_type)
-    k, n, group_size, m = 3584, 512, 128, 16
 
     layer = SimpleNamespace()
     layer.qweight = torch.randint(
@@ -346,6 +328,42 @@ def test_auto_awq_batch_invariant_dispatch_ignores_input_contiguity(monkeypatch)
         auto_awq_module.AutoAWQLinearMethod
     )
     method.quant_config = _FakeQuantConfig()
+    return layer, method
+
+
+def _count_fused_calls(monkeypatch) -> list[int]:
+    """Patch awq_gemm_fused_fp32 with a call counter; returns a 1-item list
+    holding the running count (mutable cell, since the closure needs to be
+    read after the patched calls happen)."""
+    import vllm.model_executor.layers.quantization.auto_awq as auto_awq_module
+
+    counter = [0]
+    original_fused_gemm = auto_awq_module.awq_gemm_fused_fp32
+
+    def _counting_fused_gemm(*args, **kwargs):
+        counter[0] += 1
+        return original_fused_gemm(*args, **kwargs)
+
+    monkeypatch.setattr(auto_awq_module, "awq_gemm_fused_fp32", _counting_fused_gemm)
+    return counter
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.is_device_capability(89)),
+    reason="The fused AWQ BI GEMM path only dispatches on SM89.",
+)
+def test_auto_awq_batch_invariant_dispatch_ignores_input_contiguity(monkeypatch):
+    """The fused kernel and the legacy dequant+matmul fallback are not
+    numerically identical, so a layer's dispatch choice must not depend on
+    incidental input contiguity: a non-contiguous activation must still
+    route to the fused kernel, not silently fall back to the other
+    algorithm for what is otherwise the same layer."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    fused_calls = _count_fused_calls(monkeypatch)
+
+    device = torch.device(current_platform.device_type)
+    k, n, group_size, m = 3584, 512, 128, 16
+    layer, method = _make_fake_awq_layer_and_method(k, n, group_size, device)
 
     x_contig = torch.rand((m, k), dtype=torch.float16, device=device)
     padded = torch.zeros((m, 2 * k), dtype=torch.float16, device=device)
@@ -357,9 +375,9 @@ def test_auto_awq_batch_invariant_dispatch_ignores_input_contiguity(monkeypatch)
     out_contig = method.apply(layer, x_contig)
     out_noncontig = method.apply(layer, x_noncontig)
 
-    assert fused_calls == 2, (
+    assert fused_calls[0] == 2, (
         "Expected both the contiguous and non-contiguous inputs to dispatch "
-        f"to the fused kernel; got {fused_calls} fused call(s)."
+        f"to the fused kernel; got {fused_calls[0]} fused call(s)."
     )
     # assert_close(atol=0, rtol=0) still treats +0.0 and -0.0 as equal;
     # compare raw bytes to catch that and any other bit-level divergence.
@@ -367,3 +385,53 @@ def test_auto_awq_batch_invariant_dispatch_ignores_input_contiguity(monkeypatch)
         out_contig.contiguous().view(torch.uint8),
         out_noncontig.contiguous().view(torch.uint8),
     )
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.is_device_capability(89)),
+    reason="The fused AWQ BI GEMM path only dispatches on SM89.",
+)
+def test_auto_awq_dispatch_disabled_without_batch_invariant(monkeypatch):
+    """With VLLM_BATCH_INVARIANT unset, an otherwise fusable layer must not
+    take the fused path (it should use the plain awq_gemm/matmul paths)."""
+    monkeypatch.delenv("VLLM_BATCH_INVARIANT", raising=False)
+    fused_calls = _count_fused_calls(monkeypatch)
+
+    device = torch.device(current_platform.device_type)
+    k, n, group_size, m = 3584, 512, 128, 16
+    layer, method = _make_fake_awq_layer_and_method(k, n, group_size, device)
+    x = torch.rand((m, k), dtype=torch.float16, device=device)
+
+    method.apply(layer, x)
+
+    assert fused_calls[0] == 0, (
+        "Expected the fused BI GEMM to never be dispatched when "
+        f"VLLM_BATCH_INVARIANT is unset; got {fused_calls[0]} fused call(s)."
+    )
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.is_device_capability(89)),
+    reason="The fused AWQ BI GEMM path only dispatches on SM89.",
+)
+def test_auto_awq_dispatch_falls_back_for_unsupported_group_size(monkeypatch):
+    """A real AWQ config using group_size=64 (a supported general AWQ group
+    size, just not one the fused kernel implements) must fall back to the
+    legacy dequant+matmul path under batch-invariant mode rather than
+    raising, since the dispatch condition -- not the kernel itself -- is
+    what must reject it."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    fused_calls = _count_fused_calls(monkeypatch)
+
+    device = torch.device(current_platform.device_type)
+    k, n, group_size, m = 3584, 512, 64, 16
+    layer, method = _make_fake_awq_layer_and_method(k, n, group_size, device)
+    x = torch.rand((m, k), dtype=torch.float16, device=device)
+
+    out = method.apply(layer, x)
+
+    assert fused_calls[0] == 0, (
+        "Expected group_size=64 to fall back to the legacy path under "
+        f"batch-invariant mode; got {fused_calls[0]} fused call(s)."
+    )
+    assert torch.isfinite(out).all()
