@@ -32,8 +32,11 @@ from bench_dataset import (
 from bench_utils import TEXT_SEPARATOR, Color, logger
 from transformers import AutoTokenizer  # type: ignore
 
+from vllm.benchmarks.lib.utils import redact_sensitive_namespace
+
 NUM_TOKENS_FROM_DATASET = 0
 TERM_SIGNAL = None
+_SENSITIVE_ARG_FIELDS = ("api_key", "header")
 
 
 class ConversationSampling(str, Enum):
@@ -1548,7 +1551,7 @@ async def main() -> None:
 
     args = parser.parse_args()
 
-    logger.info(args)
+    logger.info(redact_sensitive_namespace(args, _SENSITIVE_ARG_FIELDS))
 
     logger.info(f"{Color.GREEN}Input parameters:{Color.RESET}")
     logger.info(f"url={args.url}")

@@ -23,9 +23,6 @@ class AllSparkLinearKernel(MPLinearKernel):
 
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
-        if c.has_g_idx:
-            return False, "Act reordering currently not supported by AllSpark"
-
         if c.zero_points:
             return False, "Zero points currently not supported by AllSpark"
 
@@ -91,7 +88,7 @@ class AllSparkLinearKernel(MPLinearKernel):
     ) -> torch.Tensor:
         c = self.config
         gemm_args = self.gemm_args
-        w_q, w_s, _, _ = self._get_weight_params(layer)
+        w_q, w_s, _ = self._get_weight_params(layer)
 
         reshaped_x = x.reshape(-1, x.shape[-1])
         out_shape = x.shape[:-1] + (c.partition_weight_shape[1],)

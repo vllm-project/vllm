@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable, Set
+from dataclasses import replace
 
 import torch
 from torch import nn
@@ -382,6 +383,7 @@ class BertModel(nn.Module, SupportsQuant):
             ".self.key": (".self.qkv_proj", "k"),
             ".self.value": (".self.qkv_proj", "v"),
         },
+        orig_to_new_prefix={"pooler.": None},
     )
 
     def __init__(
@@ -416,12 +418,15 @@ class BertModel(nn.Module, SupportsQuant):
         return self.encoder(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["pooler."])
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class BertPoolingModel(BertModel):
     is_pooling_model = True
+
+    # Unlike `BertModel`, this model has a pooler to load weights into.
+    hf_to_vllm_mapper = replace(BertModel.hf_to_vllm_mapper, orig_to_new_prefix={})
 
     def __init__(
         self,
@@ -488,11 +493,13 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         weights_list = list(weights)
 
+        orig_to_new_prefix: dict[str, str | None] = {"lm_head.": None}
         has_model_prefix = any(name.startswith("model.") for name, _ in weights_list)
         if not has_model_prefix:
-            mapper = WeightsMapper(orig_to_new_prefix={"": "model."})
+            orig_to_new_prefix[""] = "model."
+        mapper = WeightsMapper(orig_to_new_prefix=orig_to_new_prefix)
 
-        loader = AutoWeightsLoader(self, skip_prefixes=["lm_head."])
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights_list, mapper=mapper)
 
     def _build_model(self, vllm_config: VllmConfig, prefix: str = "") -> BertModel:

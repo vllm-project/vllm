@@ -10,13 +10,14 @@ import torch.nn as nn
 from transformers import BatchFeature, LlavaNextVideoConfig, LlavaNextVideoProcessor
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import (
@@ -181,6 +182,7 @@ class LlavaNextVideoDummyInputsBuilder(
         )
 
         video_overrides = mm_options.get("video")
+        assert video_overrides is None or isinstance(video_overrides, VideoDummyOptions)
 
         return {
             "video": self._get_dummy_videos(
@@ -220,6 +222,7 @@ class LlavaNextVideoMultiModalProcessor(
             if isinstance(videos, VideoEmbeddingItems):
                 num_video_tokens = videos.get_feature_size(item_idx)
             else:
+                assert isinstance(videos, VideoProcessorItems)
                 image_size = videos.get_frame_size(item_idx)
                 num_video_tokens = self.info.get_num_video_tokens(
                     image_width=image_size.width,
@@ -322,6 +325,8 @@ class LlavaNextVideoForConditionalGeneration(
             "lm_head.": "language_model.lm_head.",
         }
     )
+
+    supports_tower_connector_lora = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -490,31 +495,30 @@ class LlavaNextVideoForConditionalGeneration(
             tower_model="vision_tower",
         )
 
-    def get_num_mm_encoder_tokens(
+    def get_mm_lora_token_counts(
         self,
-        num_video_tokens: int,
-    ) -> int:
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
+
         # Invert the spatial pooling done by `vision_resampler`: each frame
         # contributes `pooled_grid_length ** 2` tokens after the language
         # model's placeholder count, but `patch_grid_length ** 2` tokens
         # when it leaves the vision encoder.
         pooled_tokens_per_frame = self.pooled_grid_length**2
-        if num_video_tokens <= 0 or pooled_tokens_per_frame <= 0:
-            return 0
-
-        num_frames = num_video_tokens // pooled_tokens_per_frame
-        return num_frames * (self.patch_grid_length**2)
-
-    def get_num_mm_connector_tokens(
-        self,
-        num_vision_tokens: int,
-    ) -> int:
-        # The projector is length-preserving; it runs after
-        # `vision_resampler` has already pooled each frame down to
-        # `pooled_grid_length ** 2` tokens.
         patch_tokens_per_frame = self.patch_grid_length**2
-        if num_vision_tokens <= 0 or patch_tokens_per_frame <= 0:
-            return 0
+        if (
+            num_mm_embeds <= 0
+            or pooled_tokens_per_frame <= 0
+            or patch_tokens_per_frame <= 0
+        ):
+            return 0, 0
 
-        num_frames = num_vision_tokens // patch_tokens_per_frame
-        return num_frames * (self.pooled_grid_length**2)
+        num_frames = num_mm_embeds // pooled_tokens_per_frame
+        return (
+            num_frames * patch_tokens_per_frame,
+            num_frames * pooled_tokens_per_frame,
+        )

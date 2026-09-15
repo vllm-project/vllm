@@ -11,8 +11,11 @@ import vllm
 import vllm.envs as envs
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.launchers.api_server.entry import run_server, setup_server
-from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
-from vllm.entrypoints.openai.dp_supervisor import run_dp_supervisor
+from vllm.entrypoints.launchers.cli_args import (
+    make_arg_parser,
+    validate_parsed_serve_args,
+)
+from vllm.entrypoints.launchers.dp_supervisor import run_dp_supervisor
 from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
@@ -52,7 +55,7 @@ class ServeSubcommand(CLISubcommand):
             args.model = args.model_tag
 
         if getattr(args, "grpc", False):
-            from vllm.entrypoints.grpc_server import serve_grpc
+            from vllm.entrypoints.launchers.grpc_server import serve_grpc
 
             uvloop.run(serve_grpc(args))
             return

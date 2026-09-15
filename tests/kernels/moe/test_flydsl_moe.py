@@ -15,6 +15,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950
+from vllm.utils.torch_utils import set_random_seed
 
 if not (current_platform.is_rocm() and on_gfx950()):
     pytest.skip("This test can only run on ROCm and gfx950.", allow_module_level=True)
@@ -41,11 +42,58 @@ RoutingBuffers = tuple[
 ]
 
 
+def _assert_flydsl_matches_reference(
+    actual: torch.Tensor,
+    expected: torch.Tensor,
+    *,
+    atol: float = 0.5,
+    rtol: float = 0.1,
+    max_mismatch_fraction: float = 1e-5,
+    max_error_ratio: float = 3.0,
+) -> None:
+    """Compare kernels without making accuracy depend on output size.
+
+    The FlyDSL and reference kernels accumulate BF16 values in different
+    orders. A strict allclose makes one expected rounding outlier fail an
+    otherwise accurate output, which becomes increasingly likely for the
+    largest token counts (up to 117 million output elements here).
+
+    Keep the original elementwise tolerance for 99.999% of values, while also
+    bounding every tolerated outlier to three times its elementwise tolerance.
+    """
+    assert actual.shape == expected.shape
+
+    mismatch = ~torch.isclose(actual, expected, atol=atol, rtol=rtol)
+    mismatch_count = int(mismatch.sum().item())
+    total = actual.numel()
+    allowed_mismatches = int(total * max_mismatch_fraction)
+    mismatch_msg = (
+        f"FlyDSL/reference mismatch: {mismatch_count}/{total} values "
+        f"({mismatch_count / total:.6%}) exceed atol={atol}, rtol={rtol}; "
+        f"allowed <= {allowed_mismatches}/{total} "
+        f"({max_mismatch_fraction:.6%})"
+    )
+    assert mismatch_count <= allowed_mismatches, mismatch_msg
+
+    if mismatch_count:
+        actual_mismatch = actual[mismatch].float()
+        expected_mismatch = expected[mismatch].float()
+        abs_error = (actual_mismatch - expected_mismatch).abs()
+        tolerance = atol + rtol * expected_mismatch.abs()
+        worst_error_ratio = (abs_error / tolerance).max().item()
+        assert worst_error_ratio <= max_error_ratio, (
+            f"{mismatch_msg}; worst error is {worst_error_ratio:.4f}x its "
+            f"elementwise tolerance (allowed <= {max_error_ratio:.4f}x)"
+        )
+
+
 @pytest.mark.parametrize(
     "num_tokens", [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
 )
 @pytest.mark.parametrize("inter_dim", [256, 512])
 def test_flydsl_moe(num_tokens: int, inter_dim: int):
+    set_random_seed(0)
+
     device = "cuda"
     topk = 8
     num_experts = 384
@@ -172,7 +220,7 @@ def test_flydsl_moe(num_tokens: int, inter_dim: int):
         scale_is_bf16=True,
     )
 
-    assert torch.allclose(out, out_ref, atol=0.5, rtol=0.1)
+    _assert_flydsl_matches_reference(out, out_ref)
 
 
 if __name__ == "__main__":
