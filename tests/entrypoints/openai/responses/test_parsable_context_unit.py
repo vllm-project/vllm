@@ -162,11 +162,13 @@ def _make_request_output(
     text: str = "Hello, world!",
     token_ids: Sequence[int] = (1, 2, 3),
     finish_reason: str = "stop",
+    prompt_token_ids: Sequence[int] | None = (),
+    num_cached_tokens: int | None = 0,
 ) -> RequestOutput:
     return RequestOutput(
         request_id="test",
         prompt=None,
-        prompt_token_ids=[],
+        prompt_token_ids=(None if prompt_token_ids is None else list(prompt_token_ids)),
         prompt_logprobs=None,
         outputs=[
             CompletionOutput(
@@ -179,6 +181,7 @@ def _make_request_output(
             )
         ],
         finished=True,
+        num_cached_tokens=num_cached_tokens,
     )
 
 
@@ -361,3 +364,60 @@ def test_num_init_messages_offset():
     items = ctx.make_response_output_items()
     assert len(items) == 1
     assert items[0].type == "message"
+
+
+# ---------------------------------------------------------------------------
+# Tests: token usage
+# ---------------------------------------------------------------------------
+
+
+def test_single_turn_token_usage():
+    ctx = _make_context(_NoOpParser)
+
+    ctx.append_output(
+        _make_request_output(
+            prompt_token_ids=(10, 11, 12, 13),
+            token_ids=(20, 21, 22),
+            num_cached_tokens=2,
+        )
+    )
+
+    assert ctx.num_prompt_tokens == 4
+    assert ctx.num_output_tokens == 3
+    assert ctx.num_cached_tokens == 2
+    assert ctx.num_tool_output_tokens == 0
+    assert len(ctx.all_turn_metrics) == 1
+    turn = ctx.all_turn_metrics[0]
+    assert turn.input_tokens == 4
+    assert turn.output_tokens == 3
+    assert turn.cached_input_tokens == 2
+    assert turn.tool_output_tokens == 0
+
+
+def test_multi_turn_token_usage_counts_tool_output():
+    ctx = _make_context(_NoOpParser)
+
+    ctx.append_output(
+        _make_request_output(
+            prompt_token_ids=(10, 11, 12, 13),
+            token_ids=(20, 21),
+            num_cached_tokens=1,
+        )
+    )
+    ctx.append_output(
+        _make_request_output(
+            prompt_token_ids=(10, 11, 12, 13, 20, 21, 30, 31, 32),
+            token_ids=(40, 41, 42),
+            num_cached_tokens=4,
+        )
+    )
+
+    assert ctx.num_prompt_tokens == 13
+    assert ctx.num_output_tokens == 5
+    assert ctx.num_cached_tokens == 5
+    assert ctx.num_tool_output_tokens == 3
+    assert len(ctx.all_turn_metrics) == 2
+    assert [turn.input_tokens for turn in ctx.all_turn_metrics] == [4, 9]
+    assert [turn.output_tokens for turn in ctx.all_turn_metrics] == [2, 3]
+    assert [turn.cached_input_tokens for turn in ctx.all_turn_metrics] == [1, 4]
+    assert [turn.tool_output_tokens for turn in ctx.all_turn_metrics] == [0, 3]
