@@ -101,13 +101,20 @@ class CPUOffloadingSpec(OffloadingSpec):
             )
 
         world_size = config.parallel.world_size
+        group_bytes = [group.kv_bytes_per_block for group in config.groups]
+        self.compact_group_layout = len(group_bytes) > 1 and all(group_bytes)
+        worker_kv_bytes_per_block = (
+            max(group_bytes)
+            if self.compact_group_layout
+            else config.worker_kv_bytes_per_block
+        )
         self.num_chunks = 0
         self.kv_bytes_per_chunk = 0
         self.cpu_page_size_per_worker = 0
         self.replicated_layout = config.replicated_layout and self._uses_shared_region()
         if config.worker_kv_bytes_per_block > 0 and world_size > 0:
             num_copies = 1 if self.replicated_layout else world_size
-            kv_bytes_per_block = config.worker_kv_bytes_per_block * num_copies
+            kv_bytes_per_block = worker_kv_bytes_per_block * num_copies
             kv_bytes_per_chunk = kv_bytes_per_block * self.blocks_per_chunk
 
             # calculate cpu_page_size_per_worker
@@ -125,6 +132,11 @@ class CPUOffloadingSpec(OffloadingSpec):
             # |--- W0-C0---|---- W1-C0---| ... |---- Wn-C0---| *** maybe-pad *** |
             # or |--- C0 (single copy) ---| *** maybe-pad *** |
             self.kv_bytes_per_chunk = aligned_kv_bytes_per_chunk
+
+        if self.compact_group_layout:
+            # Secondary tiers copy whole slots. Isolate old all-group rows and
+            # layouts with different padding even if their payload is portable.
+            self.storage_format = f"grouped-v1-{self.kv_bytes_per_chunk}"
 
         # scheduler-side
         self._manager: OffloadingManager | None = None
@@ -190,6 +202,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 blocks_per_chunk=self.blocks_per_chunk,
                 num_cpu_chunks=self.num_chunks,
                 mmap_region=mmap_region,
+                compact_group_layout=self.compact_group_layout,
             )
         except Exception:
             if mmap_region is not None:
