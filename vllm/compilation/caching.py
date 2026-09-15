@@ -589,6 +589,21 @@ def aot_compile_hash_factors(vllm_config: VllmConfig) -> list[str]:
     return factors
 
 
+def lora_wrap_hash_factor(model: torch.nn.Module) -> str:
+    # LoRA wrapping moves weights from <prefix>.weight to
+    # <prefix>.base_layer.weight, and VllmConfig does not see the wrap state,
+    # so two runs whose module trees differ only in wrapping would otherwise
+    # share one AOT artifact directory (#55383).
+    from vllm.lora.layers import BaseLayerWithLoRA
+
+    wrapped = sorted(
+        name
+        for name, mod in model.named_modules()
+        if isinstance(mod, BaseLayerWithLoRA)
+    )
+    return hashlib.sha256(str(wrapped).encode()).hexdigest()
+
+
 def _compute_code_hash_with_content(file_contents: dict[str, str]) -> str:
     items = list(sorted(file_contents.items(), key=lambda x: x[0]))
     hash_content = []
