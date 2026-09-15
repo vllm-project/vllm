@@ -1,0 +1,24 @@
+def read_steps_from_job_dir(job_dir: str):
+    global_config = get_global_config()
+    steps = []
+    for root, _, files in os.walk(job_dir):
+        for file in files:
+            if not file.endswith('.yaml'):
+                continue
+            yaml_path = os.path.join(root, file)
+            with open(yaml_path, 'r') as f:
+                data = yaml.safe_load(f)
+            group_depends_on = data.get('depends_on')
+            file_steps = parse_steps_from_yaml(data)
+            if group_depends_on:
+                for step in file_steps:
+                    if not step.depends_on:
+                        step.depends_on = group_depends_on
+                    if not step.working_dir and global_config['github_repo_name'] == 'vllm-project/vllm':
+                        step.working_dir = '/vllm-workspace/tests'
+                    step.source_file_dependencies = getattr(step, 'source_file_dependencies', [])
+                    if not step.source_file_dependencies:
+                        step.source_file_dependencies = []
+                    step.source_file_dependencies.append(os.path.relpath(yaml_path))
+            steps.extend(file_steps)
+    return steps

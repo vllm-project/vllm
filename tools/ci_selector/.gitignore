@@ -1,0 +1,8 @@
+# The coverage table is a build artifact generated from a CI sweep.
+# Fetch it and put it here as `table.json.gz` -- see ci_selector/coverage/source.py.
+coverage-data/
+
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
