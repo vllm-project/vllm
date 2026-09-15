@@ -186,7 +186,10 @@ if [[ -n "${rocm_wheel}" ]]; then
 elif [[ "${is_rocm}" == "1" ]]; then
     VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base_commit VLLM_USE_PRECOMPILED=1 python3 setup.py develop --no-deps
 else
-    VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base_commit VLLM_USE_PRECOMPILED=1 pip3 install -vvv -e .
+    # RELEASE-ONLY: torch==2.14.0 is a pre-release that is not on PyPI yet, so pull
+    # it from the PyTorch test channel. Drop this once torch 2.14.0 is published to PyPI.
+    VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base_commit VLLM_USE_PRECOMPILED=1 pip3 install -vvv -e . \
+        --extra-index-url https://download.pytorch.org/whl/test/cu130
 fi
 # Run the script
 python3 -c 'import vllm'
