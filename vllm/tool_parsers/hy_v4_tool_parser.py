@@ -746,13 +746,15 @@ class HYV4ToolExtractor:
                 tool_calls.extend(result["tool_calls"])
 
             # Continue only after the current tool call has completed and the
-            # remaining structural payload starts with another tool call.
+            # remaining structural payload holds another tool call (possibly
+            # behind inter-tag padding, which the loop top drops).
             # A literal ``<tool_call>`` may legitimately appear inside an open
             # string argument; in that case the current tool name is still set
             # and the buffer has not been consumed, so continuing would spin on
             # the same buffer forever.
-            if self._streaming_tool_name is None and self._buffer.startswith(
-                self.tool_call_start_token
+            if (
+                self._streaming_tool_name is None
+                and self._buffer.find(self.tool_call_start_token) != -1
             ):
                 continue
             break
