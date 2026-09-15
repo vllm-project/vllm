@@ -67,6 +67,8 @@ def make_request() -> EngineCoreRequest:
 class DummyExecutor(UniProcExecutor):
     def initialize_from_config(self, kv_cache_configs: list[KVCacheConfig]) -> None:
         super().initialize_from_config(kv_cache_configs)
+
+        # Create a thread pool with a single worker
         self.thread_pool = ThreadPoolExecutor(max_workers=1)
         self.sample_futures: list[Future[ModelRunnerOutput | None]] = []
 
@@ -75,12 +77,18 @@ class DummyExecutor(UniProcExecutor):
         scheduler_output: SchedulerOutput,
         non_block: bool = False,
     ) -> Future[ModelRunnerOutput | None]:
+        """Make execute_model non-blocking."""
+
+        # DummyExecutor used only for testing async case.
         assert non_block
 
         def execute() -> ModelRunnerOutput | None:
             output = self.collective_rpc("execute_model", args=(scheduler_output,))
+            # Make a copy because output[0] may be reused
+            # by the next batch.
             return copy.deepcopy(output[0])
 
+        # Use the thread pool instead of creating a new thread
         return self.thread_pool.submit(execute)
 
     def sample_tokens(
@@ -88,12 +96,18 @@ class DummyExecutor(UniProcExecutor):
         grammar_output: GrammarOutput | None,
         non_block: bool = False,
     ) -> Future[ModelRunnerOutput | None]:
+        """Make sample_tokens non-blocking."""
+
+        # DummyExecutor used only for testing async case.
         assert non_block
 
         def sample() -> ModelRunnerOutput | None:
             output = self.collective_rpc("sample_tokens", args=(grammar_output,))
+            # Make a copy because output[0] may be reused
+            # by the next batch.
             return copy.deepcopy(output[0])
 
+        # Use the thread pool instead of creating a new thread
         future = self.thread_pool.submit(sample)
         self.sample_futures.append(future)
         return future
