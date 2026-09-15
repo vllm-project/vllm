@@ -116,17 +116,13 @@ For example, a typical single-node deployment with 4 GPUs (`vllm serve -tp=4`) h
 
 - 1 API server + 1 engine core + 4 GPU workers = **6 processes**
 
-<figure markdown="1">
 ![V1 Process Architecture - TP=4](../assets/design/arch_overview/v1_process_architecture_tp4.png)
-</figure>
 
 A data parallel deployment with 8 GPUs (`vllm serve -tp=2 -dp=4`) has:
 
 - 4 API servers + 4 engine cores + 8 GPU workers + 1 DP coordinator = **17 processes**
 
-<figure markdown="1">
 ![V1 Process Architecture - TP=2, DP=4](../assets/design/arch_overview/v1_process_architecture_tp2_dp4.png)
-</figure>
 
 For CPU resource sizing recommendations, see
 [CPU Resources for GPU Deployments](../configuration/optimization.md#cpu-resources-for-gpu-deployments).
