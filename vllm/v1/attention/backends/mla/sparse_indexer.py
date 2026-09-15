@@ -18,7 +18,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
-    SPARSE_TOPK_KERNEL_SUPPORTED,
+    check_deep_select_layout,
     has_deep_select,
     pick_sparse_block_kv,
 )
@@ -66,9 +66,6 @@ class SparseMQARowsMetadata:
 @dataclass
 class DeepseekV41SparseIndexerMetadata(DeepseekV32IndexerMetadata):
     sparse_block_kv: int = 0
-    zero_starts: torch.Tensor | None = None
-    """[max_rows] int32 zeros: ``row_ks`` for decode and the prefill top-k
-    kernel's row starts."""
     sparse_decode: SparseMQARowsMetadata | None = None
     sparse_prefill: list[SparseMQARowsMetadata] | None = None
     """Parallel to ``prefill.chunks``."""
@@ -134,10 +131,19 @@ class DeepseekV41SparseIndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder)
             raise ValueError(
                 f"{prefix} requires the varlen paged MQA logits decode layout."
             )
-        if not has_deep_select() and topk_tokens not in SPARSE_TOPK_KERNEL_SUPPORTED:
+        # The top-k runs on the kernels' bf16 logits with DeepSelect; there is
+        # no fp32 fallback, so the other top-k backends cannot be honored.
+        topk_backend = vllm_config.kernel_config.sparse_indexer_topk_backend
+        if not has_deep_select():
             raise ValueError(
-                f"{prefix} without the DeepSelect extension requires index_topk in "
-                f"{SPARSE_TOPK_KERNEL_SUPPORTED}, got {topk_tokens}."
+                f"{prefix} requires the DeepSelect top-k extension "
+                "(vllm._deepselect_C) for this GPU."
+            )
+        if topk_backend not in ("auto", "deep_select"):
+            raise ValueError(
+                f"{prefix} uses DeepSelect for the top-k; "
+                f"kernel_config.sparse_indexer_topk_backend='{topk_backend}' "
+                "is not supported with it."
             )
         self.sparse_block_kv = pick_sparse_block_kv(candidate_block_size)
         if kv_cache_spec.block_size % self.sparse_block_kv != 0:
@@ -148,11 +154,12 @@ class DeepseekV41SparseIndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder)
         self.num_sparse_blocks = candidate_topk_blocks * (
             candidate_block_size // self.sparse_block_kv
         )
-        # Sparse logits are bf16 plus an fp32 copy for the top-k; make the
-        # prefill chunker size chunks as if every row were this wide.
-        self.min_split_seq_len = (
-            self.num_sparse_blocks * self.sparse_block_kv * (2 + 4) + 3
-        ) // 4
+        num_sparse_cols = self.num_sparse_blocks * self.sparse_block_kv
+        check_deep_select_layout(num_sparse_cols, topk_tokens)
+        # Sparse logits are bf16 [rows, num_sparse_cols]; make the prefill
+        # chunker (which budgets fp32 [rows, seq_len]) size chunks as if every
+        # row were this wide.
+        self.min_split_seq_len = (num_sparse_cols * 2 + 3) // 4
 
         # Rows are indexed by batch token (decode rows first, then prefill
         # chunks by token range), like ``arange_buffer``.
@@ -163,7 +170,7 @@ class DeepseekV41SparseIndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder)
         )
         self.end_buffer = torch.zeros(max_rows, **int32)
         self.col_indices_buffer = torch.zeros((max_rows, topk_tokens), **int32)
-        self.zero_starts = torch.zeros(max_rows, **int32)
+        self.zero_row_ks = torch.zeros(max_rows, **int32)
         logger.info_once(
             "DeepSeek V4.1 indexer: candidate consumers score only the candidate "
             "blocks with DeepGEMM sparse MQA logits (%d sparse blocks of %d "
@@ -195,7 +202,6 @@ class DeepseekV41SparseIndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder)
         metadata = DeepseekV41SparseIndexerMetadata(
             **{f.name: getattr(base, f.name) for f in fields(base)},
             sparse_block_kv=self.sparse_block_kv,
-            zero_starts=self.zero_starts,
         )
         if base.decode is not None:
             decode = base.decode
@@ -207,7 +213,7 @@ class DeepseekV41SparseIndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder)
             metadata.sparse_decode = self._rows(
                 0,
                 rows,
-                row_ks=self.zero_starts[:rows],
+                row_ks=self.zero_row_ks[:rows],
                 row_ke=decode.seq_lens.view(-1),
                 block_table=decode.block_table,
                 row_indices=(

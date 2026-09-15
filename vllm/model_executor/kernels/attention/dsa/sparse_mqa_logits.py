@@ -6,9 +6,9 @@ The candidate-source indexer publishes the top candidate blocks (in units of
 ``candidate_block_size`` compressed positions). Instead of scoring every KV
 position and masking the dense logits down to those blocks, this path scores
 only the candidate tokens with DeepGEMM's sparse MQA logits kernels
-(``fp8_fp4_(paged_)sparse_mqa_logits``, DeepGEMM >= 2.8, SM100 only) and runs
-the row top-k directly in the compressed sparse space, remapping the selected
-columns back to request-local positions.
+(``fp8_fp4_(paged_)sparse_mqa_logits``, DeepGEMM >= 2.8, SM100 only), runs
+DeepSelect's top-k directly on the bf16 logits they produce, and remaps the
+selected columns back to request-local positions.
 
 Only the MXFP4 indexer cache is supported: the kernels require UE8M0-packed
 (granularity-32) Q/KV scales, which is exactly the MXFP4 cache layout. The
@@ -23,11 +23,9 @@ import importlib.util
 
 import torch
 
-from vllm import _custom_ops as ops
 from vllm.model_executor.layers.indexer_topk import (
     deep_select_topk,
-    get_indexer_topk,
-    is_deep_select_supported,
+    get_deep_select_stride_requirement,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -41,10 +39,6 @@ from vllm.utils.deep_gemm import (
 # Sparse-block sizes (in tokens) supported by the DeepGEMM kernels.
 SPARSE_BLOCK_KV_CHOICES = (16, 8)
 
-# vllm's radix top-k kernels (the fallback when DeepSelect is unavailable)
-# support only these k.
-SPARSE_TOPK_KERNEL_SUPPORTED = (512, 1024, 2048)
-
 
 def has_deep_select() -> bool:
     """Whether the DeepSelect top-k extension is built and this GPU runs it."""
@@ -55,15 +49,25 @@ def has_deep_select() -> bool:
     )
 
 
-def use_deep_select_topk(logits: torch.Tensor, topk_tokens: int, backend: str) -> bool:
-    """DeepSelect takes the sparse kernels' bf16 logits directly (no fp32
-    cast), so it is the default here whenever it is available; the other
-    ``sparse_indexer_topk_backend`` values are honored as configured."""
-    if backend not in ("auto", "deep_select"):
-        return False
-    if backend == "deep_select":
-        return True  # let the dispatcher raise the specific unmet constraint
-    return has_deep_select() and is_deep_select_supported(logits, topk_tokens)
+def check_deep_select_layout(num_sparse_cols: int, topk_tokens: int) -> None:
+    """Raise unless DeepSelect accepts the sparse logits layout.
+
+    The sparse kernels return contiguous bf16 ``[rows, num_sparse_cols]``
+    logits and the top-k writes int32 ``[rows, topk_tokens]`` indices;
+    DeepSelect needs both row strides aligned (1024B / 32B on SM100).
+    """
+    in_align, out_align = get_deep_select_stride_requirement()
+    logits_row_bytes = num_sparse_cols * torch.bfloat16.itemsize
+    if num_sparse_cols >= 2**23 or logits_row_bytes % in_align != 0:
+        raise ValueError(
+            f"DeepSelect needs the sparse logits row ({num_sparse_cols} bf16 "
+            f"columns, {logits_row_bytes} B) to be {in_align}B-aligned."
+        )
+    if topk_tokens > 4096 or (topk_tokens * torch.int32.itemsize) % out_align != 0:
+        raise ValueError(
+            f"DeepSelect needs topk <= 4096 with a {out_align}B-aligned int32 "
+            f"output row, got topk={topk_tokens}."
+        )
 
 
 _INT32_BIG = tl.constexpr(2**31 - 1)
@@ -72,10 +76,15 @@ _INT32_BIG = tl.constexpr(2**31 - 1)
 @triton.jit
 def _expand_candidates_kernel(
     cand_ptr,
+    cand_stride,
     ks_ptr,
+    ks_stride,
     ke_ptr,
+    ke_stride,
     si_ptr,
+    si_stride,
     end_ptr,
+    end_stride,
     K: tl.constexpr,
     S: tl.constexpr,
     RATIO: tl.constexpr,
@@ -90,10 +99,10 @@ def _expand_candidates_kernel(
     because block ids are sorted.
     """
     row = tl.program_id(0)
-    ks = tl.load(ks_ptr + row)
-    ke = tl.load(ke_ptr + row)
+    ks = tl.load(ks_ptr + row * ks_stride)
+    ke = tl.load(ke_ptr + row * ke_stride)
     cols = tl.arange(0, K)
-    cand = tl.load(cand_ptr + row * K + cols)  # K is pow2, no mask needed
+    cand = tl.load(cand_ptr + row * cand_stride + cols)  # K is pow2, no mask
     if RATIO == 2:
         cand = tl.interleave(cand * RATIO, cand * RATIO + 1)
 
@@ -113,7 +122,7 @@ def _expand_candidates_kernel(
     last_rel = tl.max(tl.where(valid, cand, -1))
     pad_val = tl.where(n_valid > 0, last_rel + base, base)
     tl.store(
-        si_ptr + row * S + tl.arange(0, S),
+        si_ptr + row * si_stride + tl.arange(0, S),
         tl.where(tl.arange(0, S) < n_valid, si, pad_val),
     )
 
@@ -123,19 +132,20 @@ def _expand_candidates_kernel(
     last_start = last_rel * SBK + ks
     fill = tl.minimum(tl.maximum(ke - last_start, 1), SBK)
     end = tl.where(n_valid > 0, (n_valid - 1) * SBK + fill, 0)
-    tl.store(end_ptr + row, end)
+    tl.store(end_ptr + row * end_stride, end)
 
 
 @triton.jit
 def _sparse_topk_remap_kernel(
     col_ptr,
-    si_ptr,
-    ks_ptr,
-    out_ptr,
-    k,
-    S,
     col_stride,
+    si_ptr,
+    si_stride,
+    ks_ptr,
+    ks_stride,
+    out_ptr,
     out_stride,
+    k,
     SBK: tl.constexpr,
     K_POW2: tl.constexpr,
 ):
@@ -145,12 +155,12 @@ def _sparse_topk_remap_kernel(
     ``(si[row, j] - ks // SBK) * SBK + o``; -1 columns stay -1.
     """
     row = tl.program_id(0)
-    ks_base = tl.load(ks_ptr + row) // SBK
+    ks_base = tl.load(ks_ptr + row * ks_stride) // SBK
     cols = tl.arange(0, K_POW2)
     c = tl.load(col_ptr + row * col_stride + cols, mask=cols < k, other=-1)
     valid = c >= 0
     cc = tl.where(valid, c, 0)
-    blocks = tl.load(si_ptr + row * S + cc // SBK)
+    blocks = tl.load(si_ptr + row * si_stride + cc // SBK)
     pos = (blocks - ks_base) * SBK + cc % SBK
     tl.store(out_ptr + row * out_stride + cols, tl.where(valid, pos, -1), mask=cols < k)
 
@@ -178,14 +188,15 @@ def candidate_blocks_to_sparse_indices(
 
     Args:
         candidate_blocks: [rows, K] int32 request-local candidate block ids
-            (-1 padded), in units of ``candidate_block_size`` positions.
+            (-1 padded), in units of ``candidate_block_size`` positions. K
+            must be a power of two (the in-kernel sort); rows may be strided.
         row_ks/row_ke: [rows] int32 per-row K range; bounds are in the same
             (packed-workspace) coordinates the sparse kernel iterates over.
             Pass zeros for the paged path, whose blocks are context-relative.
         candidate_block_size: Positions per candidate block.
         sparse_block_kv: Positions per sparse block (8 or 16).
         out: Optional ``(sparse_indices, end)`` buffers to write into,
-            shaped [rows, K * ratio] and [rows], both int32 and contiguous.
+            shaped [rows, K * ratio] and [rows], both int32.
 
     Returns:
         sparse_indices: [rows, K * ratio] int32 block ids for DeepGEMM,
@@ -199,86 +210,40 @@ def candidate_blocks_to_sparse_indices(
     """
     rows, num_candidates = candidate_blocks.shape
     ratio = candidate_block_size // sparse_block_kv
+    assert ratio * sparse_block_kv == candidate_block_size and ratio in (1, 2), (
+        candidate_block_size,
+        sparse_block_kv,
+    )
+    assert num_candidates & (num_candidates - 1) == 0, num_candidates
     num_sparse = num_candidates * ratio
-    device = candidate_blocks.device
     if out is None:
+        device = candidate_blocks.device
         out = (
             torch.empty(rows, num_sparse, dtype=torch.int32, device=device),
             torch.empty(rows, dtype=torch.int32, device=device),
         )
     sparse_indices, end = out
     assert sparse_indices.shape == (rows, num_sparse) and end.shape == (rows,)
-    assert sparse_indices.is_contiguous() and end.is_contiguous()
+    assert candidate_blocks.stride(1) == 1 and sparse_indices.stride(1) == 1
+    for t in (candidate_blocks, row_ks, row_ke, sparse_indices, end):
+        assert t.dtype == torch.int32, t.dtype
 
-    # Fused Triton path: the whole expansion + filter + sort in one launch.
-    if (
-        candidate_blocks.is_cuda
-        and candidate_blocks.is_contiguous()
-        and row_ks.dtype == row_ke.dtype == candidate_blocks.dtype == torch.int32
-        and row_ks.is_contiguous()
-        and row_ke.is_contiguous()
-        and num_candidates & (num_candidates - 1) == 0  # tl.sort needs pow2
-        and ratio in (1, 2)
-    ):
-        _expand_candidates_kernel[(rows,)](
-            candidate_blocks,
-            row_ks,
-            row_ke,
-            sparse_indices,
-            end,
-            K=num_candidates,
-            S=num_sparse,
-            RATIO=ratio,
-            SBK=sparse_block_kv,
-            num_warps=16,
-        )
-        return sparse_indices, end
-
-    # Expand each candidate block into its `ratio` sparse blocks. All math
-    # stays in int32: garbage candidate values (cudagraph warmup runs on
-    # uninitialized buffers) overflow to negatives and get filtered below.
-    offsets = torch.arange(ratio, device=device, dtype=torch.int32)
-    blocks = (candidate_blocks.unsqueeze(-1) * ratio + offsets).flatten(1)
-
-    # Keep only blocks inside the row's KV range [0, ke - ks); the lower
-    # bound is free since candidates are non-negative.
-    kv_lens = (row_ke - row_ks).clamp(min=0)
-    max_block = (kv_lens + sparse_block_kv - 1) // sparse_block_kv
-    valid = (blocks >= 0) & (blocks < max_block.unsqueeze(1))
-
-    # Sort ascending; invalid entries take the sentinel value and so end up
-    # last, forming the padding region. Candidates are unique per row by
-    # construction, and the kernel tolerates repeated padding blocks (that is
-    # DeepGEMM's own padding convention), so no dedup pass is needed.
-    big = torch.iinfo(torch.int32).max
-    sorted_blocks, _ = torch.where(valid, blocks, big).sort(dim=1)
-    n_valid = (sorted_blocks != big).sum(dim=1, dtype=torch.int32)
-
-    # Relative -> kernel block id: anchor at the row's ks rounded down to a
-    # sparse-block boundary (identity for the paged path, where ks == 0).
-    base = row_ks // sparse_block_kv
-    kernel_blocks = torch.where(
-        sorted_blocks != big, sorted_blocks, 0
-    ) + base.unsqueeze(1)
-
-    # Pad with the last valid block; empty rows repeat the first in-range
-    # block (matches the DeepGEMM test convention of repeating/0-padding).
-    last_slot = (n_valid - 1).clamp(min=0).unsqueeze(1).long()
-    last_block = kernel_blocks.gather(1, last_slot).squeeze(1)
-    pad = torch.arange(num_sparse, device=device) >= n_valid.unsqueeze(1)
-    sparse_indices.copy_(torch.where(pad, last_block.unsqueeze(1), kernel_blocks))
-
-    # Valid sparse-token column count. Blocks are sorted, so only the last
-    # valid block can extend past ke.
-    ks_mod = row_ks % sparse_block_kv
-    last_start = last_block * sparse_block_kv + ks_mod
-    last_fill = (row_ke - last_start).clamp(min=1, max=sparse_block_kv)
-    end.copy_(
-        torch.where(
-            n_valid > 0,
-            (n_valid - 1) * sparse_block_kv + last_fill,
-            torch.zeros_like(n_valid),
-        )
+    _expand_candidates_kernel[(rows,)](
+        candidate_blocks,
+        candidate_blocks.stride(0),
+        row_ks,
+        row_ks.stride(0),
+        row_ke,
+        row_ke.stride(0),
+        sparse_indices,
+        sparse_indices.stride(0),
+        end,
+        end.stride(0),
+        K=num_candidates,
+        S=num_sparse,
+        RATIO=ratio,
+        SBK=sparse_block_kv,
+        num_warps=16,
     )
     return sparse_indices, end
 
@@ -293,9 +258,6 @@ def sparse_topk_remap(
     topk_indices: torch.Tensor,
     *,
     col_indices: torch.Tensor,
-    zero_starts: torch.Tensor | None = None,
-    decode: bool,
-    topk_backend: str = "auto",
 ) -> None:
     """Row top-k over sparse logits, remapped to request-local positions.
 
@@ -303,72 +265,33 @@ def sparse_topk_remap(
     request-local position
     ``(sparse_indices[row, j] - ks // sparse_block_kv) * sparse_block_kv + o``.
 
-    The valid columns form a prefix (block ids are sorted), so the per-row
-    ``end`` bounds drive the top-k kernels directly. DeepSelect consumes the
-    bf16 logits as they come out of the sparse kernels; the fp32-only
-    fallbacks (the dense path's radix kernels) get an exact bf16 -> fp32
-    cast. Slots beyond a row's valid count come back as -1.
+    DeepSelect consumes the bf16 logits as they come out of the sparse
+    kernels; the valid columns form a prefix (block ids are sorted), so the
+    per-row ``end`` bounds drive it directly. Slots beyond a row's valid
+    count come back as -1.
 
     Args:
         col_indices: [rows, topk_tokens] int32 scratch for the sparse-column
             top-k result (row stride 32B-aligned for DeepSelect).
-        zero_starts: [rows] int32 zeros; the prefill fallback kernel's row
-            starts (sparse columns always start at 0).
-        decode: Selects the decode dispatcher or the prefill kernel for the
-            fp32 fallback.
-        topk_backend: ``kernel_config.sparse_indexer_topk_backend``.
     """
     rows, width = logits.shape
-    assert width >= topk_tokens, (width, topk_tokens)
-    assert col_indices.shape[0] >= rows and col_indices.shape[1] == topk_tokens
+    assert logits.dtype == torch.bfloat16 and width >= topk_tokens
+    assert end.dtype == torch.int32 and end.shape == (rows,)
     cols = col_indices[:rows]
-    end_i32 = end if end.dtype == torch.int32 else end.to(torch.int32)
-    if use_deep_select_topk(logits, topk_tokens, topk_backend):
-        deep_select_topk(logits, topk_tokens, end=end_i32, output_idx=cols)
-    elif decode:
-        get_indexer_topk(topk_backend)(
-            logits.float(), end_i32.view(-1, 1), 1, cols, topk_tokens, width
-        )
-    else:
-        assert zero_starts is not None
-        logits_f32 = logits.float()
-        ops.top_k_per_row_prefill(
-            logits_f32,
-            zero_starts[:rows],
-            end_i32,
-            cols,
-            rows,
-            logits_f32.stride(0),
-            logits_f32.stride(1),
-            topk_tokens,
-        )
-
-    # Remap sparse column -> request-local position, keeping the kernels' -1
-    # padding. A selected column is ``sparse_idx[c // sbk] * sbk + c % sbk``
-    # in kernel coordinates; subtract the row's aligned ks to make it
-    # request-local (identity for decode, where ks == 0).
-    if cols.is_cuda and (topk_tokens & (topk_tokens - 1)) == 0:
-        _sparse_topk_remap_kernel[(rows,)](
-            cols,
-            sparse_indices,
-            row_ks,
-            topk_indices,
-            topk_tokens,
-            sparse_indices.shape[1],
-            cols.stride(0),
-            topk_indices.stride(0),
-            SBK=sparse_block_kv,
-            K_POW2=triton.next_power_of_2(topk_tokens),
-        )
-        return
-
-    valid_col = cols >= 0
-    cols64 = cols.long().clamp(min=0)
-    blocks = sparse_indices.gather(1, cols64 // sparse_block_kv)
-    pos = (blocks.long() - (row_ks // sparse_block_kv).unsqueeze(1)) * sparse_block_kv
-    pos = pos + cols64 % sparse_block_kv
-    pos = torch.where(valid_col, pos, -1)
-    topk_indices[:, :topk_tokens] = pos.to(torch.int32)
+    deep_select_topk(logits, topk_tokens, end=end, output_idx=cols)
+    _sparse_topk_remap_kernel[(rows,)](
+        cols,
+        cols.stride(0),
+        sparse_indices,
+        sparse_indices.stride(0),
+        row_ks,
+        row_ks.stride(0),
+        topk_indices,
+        topk_indices.stride(0),
+        topk_tokens,
+        SBK=sparse_block_kv,
+        K_POW2=triton.next_power_of_2(topk_tokens),
+    )
 
 
 def sparse_mqa_logits_prefill_chunk(
@@ -388,9 +311,7 @@ def sparse_mqa_logits_prefill_chunk(
     sparse_indices: torch.Tensor,
     end: torch.Tensor,
     col_indices: torch.Tensor,
-    zero_starts: torch.Tensor,
     kernel_metadata: torch.Tensor | None = None,
-    topk_backend: str = "auto",
 ) -> torch.Tensor:
     """Sparse-MQA logits + top-k for one prefill chunk (packed KV workspace).
 
@@ -399,14 +320,14 @@ def sparse_mqa_logits_prefill_chunk(
         q_scale: [rows, H] int32 packed UE8M0 Q scales.
         k_quant: [total_kv, D] packed K workspace (MXFP4 viewed as int8).
         k_scale: [total_kv] int32 packed UE8M0 K scales.
-        weights: [rows, H] raw per-head weights (cast to bf16 internally);
-            the sparse kernels require bf16 and do not fold the Q scale in.
+        weights: [rows, H] bf16 per-head weights; the sparse kernels take
+            bf16 and do not fold the Q scale in.
         cu_seqlen_ks/cu_seqlen_ke: [rows] int32 per-token K bounds in the
             packed workspace.
         candidate_blocks: [rows, K] int32 request-local candidate block ids.
         topk_indices: [rows, topk_tokens] output buffer.
-        sparse_indices/end/col_indices/zero_starts: Caller-owned scratch,
-            see `candidate_blocks_to_sparse_indices` and `sparse_topk_remap`.
+        sparse_indices/end/col_indices: Caller-owned scratch, see
+            `candidate_blocks_to_sparse_indices` and `sparse_topk_remap`.
         kernel_metadata: DeepGEMM schedule from a previous call with the same
             candidates and bounds (i.e. another indexer layer in the same
             step). When given, the candidate expansion is skipped and
@@ -415,6 +336,7 @@ def sparse_mqa_logits_prefill_chunk(
     Returns:
         The DeepGEMM schedule metadata used, for reuse by later layers.
     """
+    assert weights.dtype == torch.bfloat16, weights.dtype
     if kernel_metadata is None:
         candidate_blocks_to_sparse_indices(
             candidate_blocks,
@@ -435,7 +357,7 @@ def sparse_mqa_logits_prefill_chunk(
     logits = fp8_fp4_sparse_mqa_logits(
         (q, q_scale),
         (k_quant, k_scale),
-        weights.to(torch.bfloat16),
+        weights,
         kernel_metadata,
         sparse_indices.shape[1],
         sparse_block_kv,
@@ -449,9 +371,6 @@ def sparse_mqa_logits_prefill_chunk(
         topk_tokens,
         topk_indices,
         col_indices=col_indices,
-        zero_starts=zero_starts,
-        decode=False,
-        topk_backend=topk_backend,
     )
     return kernel_metadata
 
@@ -475,7 +394,6 @@ def sparse_mqa_logits_paged_decode(
     end: torch.Tensor,
     col_indices: torch.Tensor,
     kernel_metadata: torch.Tensor | None = None,
-    topk_backend: str = "auto",
 ) -> torch.Tensor:
     """Sparse-MQA logits + top-k for paged decode rows.
 
@@ -487,7 +405,7 @@ def sparse_mqa_logits_paged_decode(
         q_scale: [rows, 1, H] int32 packed UE8M0 Q scales.
         kv_cache: 4D [num_pages, page_kv, 1, head_bytes] uint8 fused cache
             view; the page stride must be 512B-aligned.
-        weights: [rows, H] raw per-head weights.
+        weights: [rows, H] bf16 per-head weights.
         context_lens: [rows] int32 per-row (compressed) context lengths.
         block_table: [rows, P] int32 per-row page table, ``stride(-1) == 1``.
         row_indices: [rows] int32 row -> request map (pairing only affects
@@ -503,6 +421,7 @@ def sparse_mqa_logits_paged_decode(
     """
     rows = q.shape[0]
     page_kv = kv_cache.shape[1]
+    assert weights.dtype == torch.bfloat16, weights.dtype
     assert kv_cache.stride(0) % 512 == 0, (
         "paged cache page stride must be 512B-aligned: "
         f"shape={tuple(kv_cache.shape)} stride={kv_cache.stride()}"
@@ -532,7 +451,7 @@ def sparse_mqa_logits_paged_decode(
     logits = fp8_fp4_paged_sparse_mqa_logits(
         (q, q_scale),
         kv_cache,
-        weights.to(torch.bfloat16),
+        weights,
         kernel_metadata,
         sparse_indices.shape[1],
         sparse_block_kv,
@@ -546,7 +465,5 @@ def sparse_mqa_logits_paged_decode(
         topk_tokens,
         topk_indices,
         col_indices=col_indices,
-        decode=True,
-        topk_backend=topk_backend,
     )
     return kernel_metadata

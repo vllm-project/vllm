@@ -90,7 +90,8 @@ class AttentionConfig:
     """DeepSeek V4.1 two-level indexer: score only the candidate blocks with
     DeepGEMM's sparse MQA-logits kernels instead of computing dense logits over
     the whole context and masking them. Requires `indexer_kv_dtype="mxfp4"`,
-    an SM100-class GPU and DeepGEMM >= 2.8. The sparse path costs
+    an SM100-class GPU, DeepGEMM >= 2.8 and the DeepSelect top-k extension
+    (the top-k runs on the kernels' bf16 logits). The sparse path costs
     O(candidate blocks) per query regardless of context length, so it pays off
     for long contexts (roughly 32K tokens and beyond) and is slower below."""
 

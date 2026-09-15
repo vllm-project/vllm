@@ -1151,22 +1151,45 @@ class DeepseekV4Indexer(nn.Module):
             and candidate_block_buffer is not None
             and not candidate_write
         )
-        indexer_cls = SparseMQAIndexer if use_sparse_logits else SparseAttnIndexer
-        self.indexer_op = indexer_cls(
-            self.k_cache,
-            self.quant_block_size,
-            self.scale_fmt,
-            self.topk_tokens,
-            self.head_dim,
-            self.max_model_len,
-            self.max_total_seq_len,
-            self.topk_indices_buffer,
-            skip_k_cache_insert=True,
-            use_fp4_cache=self.use_fp4_kv,
-            compress_ratio=self.compress_ratio,
-            candidate_blocks=candidate_block_buffer,
-            candidate_block_size=candidate_block_size,
-            candidate_write=candidate_write,
+        self.indexer_op: SparseAttnIndexer | SparseMQAIndexer
+        if use_sparse_logits:
+            if not self.use_fp4_kv:
+                raise ValueError(
+                    "attention_config.indexer_sparse_logits requires the MXFP4 "
+                    "indexer cache (attention_config.indexer_kv_dtype='mxfp4')."
+                )
+            assert candidate_block_buffer is not None
+            assert topk_indices_buffer is not None
+            self.indexer_op = SparseMQAIndexer(
+                self.k_cache,
+                self.topk_tokens,
+                self.head_dim,
+                self.max_total_seq_len,
+                topk_indices_buffer,
+                candidate_block_buffer,
+                candidate_block_size,
+            )
+        else:
+            self.indexer_op = SparseAttnIndexer(
+                self.k_cache,
+                self.quant_block_size,
+                self.scale_fmt,
+                self.topk_tokens,
+                self.head_dim,
+                self.max_model_len,
+                self.max_total_seq_len,
+                self.topk_indices_buffer,
+                skip_k_cache_insert=True,
+                use_fp4_cache=self.use_fp4_kv,
+                compress_ratio=self.compress_ratio,
+                candidate_blocks=candidate_block_buffer,
+                candidate_block_size=candidate_block_size,
+                candidate_write=candidate_write,
+            )
+        # The fused Q kernel writes the per-head weights in the dtype the
+        # scoring kernels take, so no cast runs per step.
+        self.indexer_weights_dtype = (
+            SparseMQAIndexer.weights_dtype if use_sparse_logits else torch.float32
         )
 
     def _produce_k(
