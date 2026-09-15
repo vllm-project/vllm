@@ -3,11 +3,12 @@
 
 
 from collections.abc import Sequence
+from dataclasses import replace
 
 import torch
 from torch import nn
 
-from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
+from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.config.mamba import MambaBackendEnum
 from vllm.distributed import (
     divide,
@@ -66,7 +67,7 @@ from vllm.utils.torch_utils import (
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec, MambaSpec
 
 logger = init_logger(__name__)
 
@@ -1189,6 +1190,21 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     cu_seqlens=query_start_loc_d,
                     is_blackwell=self.is_blackwell,
                 )
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
+        spec = super().get_kv_cache_spec(vllm_config)
+        if not isinstance(spec, MambaSpec):
+            return spec
+        # Align mode can export the block-boundary state from inside one
+        # forward pass, so the scheduler need not split the prefill. The
+        # metadata builder puts a chunk end exactly on the checkpoint, so any
+        # token position works and no alignment is required.
+        align = vllm_config.cache_config.mamba_cache_mode == "align"
+        return replace(
+            spec,
+            num_prefill_checkpoint_blocks=int(align),
+            prefill_checkpoint_alignment=1 if align else None,
+        )
 
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         assert self.model_config is not None

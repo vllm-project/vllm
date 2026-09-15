@@ -10,6 +10,8 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     create_vllm_config,
 )
+from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.v1.attention.backends.mamba2_attn import (
     Mamba2AttentionMetadataBuilder,
 )
@@ -239,3 +241,39 @@ def test_builder_emits_nothing_outside_align_mode():
     meta = _build(builder, seq_lens=[900], query_lens=[900])
 
     assert meta.checkpoint_chunk_idx is None
+
+
+def _call_get_kv_cache_spec(monkeypatch, mamba_cache_mode: str) -> MambaSpec:
+    """Drive MambaMixer2.get_kv_cache_spec without building a real layer.
+
+    Patching the base implementation means `super()` returns a known spec, so
+    none of the layer's instance state (or distributed init) is touched.
+    """
+    base = MambaSpec(
+        block_size=MAMBA_BLOCK_SIZE,
+        shapes=((16, 64),),
+        dtypes=(torch.float16,),
+        mamba_cache_mode=mamba_cache_mode,
+    )
+    monkeypatch.setattr(MambaBase, "get_kv_cache_spec", lambda self, cfg: base)
+    vllm_config = create_vllm_config(block_size=MAMBA_BLOCK_SIZE)
+    vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
+    layer = object.__new__(MambaMixer2)
+    return MambaMixer2.get_kv_cache_spec(layer, vllm_config)
+
+
+def test_align_mode_opts_into_unaligned_checkpoints(monkeypatch):
+    """Align mode requests one checkpoint block at any token position."""
+    spec = _call_get_kv_cache_spec(monkeypatch, "align")
+
+    assert spec.num_prefill_checkpoint_blocks == 1
+    assert spec.prefill_checkpoint_alignment == 1
+
+
+@pytest.mark.parametrize("mode", ["all", "none"])
+def test_non_align_modes_do_not_opt_in(monkeypatch, mode):
+    """`all` already caches every boundary; `none` has no prefix cache."""
+    spec = _call_get_kv_cache_spec(monkeypatch, mode)
+
+    assert spec.num_prefill_checkpoint_blocks == 0
+    assert spec.prefill_checkpoint_alignment is None
