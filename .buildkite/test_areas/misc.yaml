@@ -130,6 +130,7 @@ steps:
   source_file_dependencies: *v1-core-kv-metrics-deps
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-offload.sh
     - pytest -v -s v1/kv_offload
     - pytest -v -s v1/simple_kv_offload
   mirror:
