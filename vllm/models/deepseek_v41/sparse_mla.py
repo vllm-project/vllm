@@ -260,3 +260,23 @@ class FlashMLAMegaAttnBackend(DeepseekV4FlashMLABackend):
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         return capability.major == 10
+
+    @classmethod
+    def supports_combination(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: CacheDType | None,
+        block_size: int | None,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        use_mm_prefix: bool,
+        device_capability: DeviceCapability,
+    ) -> str | None:
+        # Imported here: the layer module imports this backend class.
+        from vllm.models.deepseek_v41.nvidia.flash_mla_mega_attn import (
+            is_flashmla_mega_attn_supported,
+        )
+
+        return is_flashmla_mega_attn_supported()[1]
