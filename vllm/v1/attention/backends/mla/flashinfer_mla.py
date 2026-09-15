@@ -124,9 +124,7 @@ class FlashInferMLADecodeMetadata(MLACommonDecodeMetadata):
     flattened_seq_lens: torch.Tensor | None = None
     # Row count the flattened tensors were built for (0 = not built), not a query len.
     query_len: int = 0
-    query_start_loc_device: torch.Tensor | None = None
-    # Ragged decode (flashinfer #3238); unset for single-token decode.
-    cum_seq_lens_q: torch.Tensor | None = None
+    query_start_loc: torch.Tensor | None = None
     max_query_len: int = 1
 
 
@@ -136,8 +134,12 @@ class FlashInferMLAMetadata(MLACommonMetadata[FlashInferMLADecodeMetadata]):
 
 
 class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[FlashInferMLAMetadata]):
-    # trtllm-gen tiles ragged queries from cum_seq_lens_q (flashinfer #3238), so one
-    # k+1 graph replays any 1..k+1 mix (full varlen decode, not piecewise).
+    # ALWAYS is required, not merely claimed: maybe_create_adaptive_verification_manager
+    # rejects any builder whose min_cg_support is below it, so UNIFORM_BATCH makes
+    # adaptive verification refuse to start. Matches DeepseekV4FlashMLAMetadataBuilder,
+    # upstream's other adaptive-verification backend, which reports ALWAYS next to its
+    # own num_prefill_tokens branch. The kernels tile ragged queries from the device
+    # query offsets (flashinfer #3238), so one k+1 graph replays any 1..k+1 mix.
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.VARLEN
     # Non-causal DSpark blocks are flattened to single-token rows in forward_mqa.
@@ -176,8 +178,7 @@ class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[FlashInferMLAMetadat
             block_table=block_table_tensor,
             seq_lens=seq_lens_device,
             dcp_tot_seq_lens=dcp_tot_seq_lens_device,
-            query_start_loc_device=query_start_loc_device,
-            cum_seq_lens_q=query_start_loc_device if max_query_len > 1 else None,
+            query_start_loc=query_start_loc_device,
             max_query_len=max_query_len,
         )
 
@@ -370,10 +371,10 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
                 causal=True,
             )
             q = q.unsqueeze(1)
-        elif attn_metadata.decode.cum_seq_lens_q is not None:
+        elif attn_metadata.decode.max_query_len > 1:
             # Causal spec decode: keep q compact and let the kernel tile each
             # request's length (uniform 1+k and adaptive ragged). Mirrors vllm #52157.
-            cum_seq_lens_q = attn_metadata.decode.cum_seq_lens_q
+            cum_seq_lens_q = attn_metadata.decode.query_start_loc
             max_q_len = attn_metadata.decode.max_query_len
         elif attn_metadata.num_decode_tokens % attn_metadata.num_decodes != 0:
             logger.warning_once(
@@ -403,14 +404,13 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
         # fall back to cute-dsl for those.
         decode_backend = _select_mla_decode_backend(runtime_num_heads)
         if cum_seq_lens_q is not None:
+            # Both decode backends tile ragged queries from cum_seq_lens_q, but
+            # neither returns LSE on that path (flashinfer #3238). DCP is the
+            # only LSE consumer and takes an earlier branch, so this only guards
+            # against a future caller wiring the two together.
             assert not return_lse, (
                 "FlashInferMLA ragged decode cannot return LSE; DCP (which needs "
                 "LSE) and adaptive variable-length decode are mutually exclusive."
-            )
-            assert decode_backend is None, (
-                "FlashInferMLA ragged decode requires trtllm-gen, but num_heads="
-                f"{runtime_num_heads} forces the cute-dsl backend, which does not "
-                "support cum_seq_lens_q."
             )
         extra_kwargs = {}
         if decode_backend:
@@ -479,7 +479,7 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
         # One row per query token, mapped to its request via searchsorted on device
         # offsets -- not repeat_interleave(uniform_len), which only lines up for
         # uniform batches and hands ragged rows another request's KV (silent garbage).
-        cu = decode.query_start_loc_device
+        cu = decode.query_start_loc
         assert cu is not None, (
             "FlashInferMLA flattened decode needs the device query offsets; "
             "_build_decode must keep them even when the kernel gets no ragged trace."

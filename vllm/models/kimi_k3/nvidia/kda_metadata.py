@@ -296,8 +296,13 @@ class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
 
 
 class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
-    # ALWAYS (overrides GDN's UNIFORM_BATCH): KDA reads per-request offsets off
-    # device within a fixed k+1 window, so one k+1 graph replays any 1..k+1 mix.
+    # Overrides GDN's UNIFORM_BATCH because adaptive verification demands it:
+    # maybe_create_adaptive_verification_manager raises unless every builder's
+    # min_cg_support is ALWAYS, so inheriting UNIFORM_BATCH here is what makes the
+    # engine fail at initialize_kv_cache with "every attention builder must report
+    # AttentionCGSupport.ALWAYS, but KimiK3KDAAttentionBackend reports ...".
+    # KDA reads per-request offsets off device within a fixed k+1 window, so one k+1
+    # graph replays any 1..k+1 mix.
     _cudagraph_support = AttentionCGSupport.ALWAYS
 
     def __init__(
