@@ -317,7 +317,6 @@ def _get_torchaudio_resampler(
     # `torchaudio.transforms.Resample` precomputes its kernel for a fixed
     # (orig_sr, target_sr) pair; cache instances so repeated requests at a
     # common input rate skip the kernel rebuild.
-    orig_sr, target_sr = _bounded_resample_rates(orig_sr, target_sr)
     return torchaudio.transforms.Resample(orig_sr, target_sr)
 
 
