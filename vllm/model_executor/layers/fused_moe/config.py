@@ -1340,6 +1340,8 @@ class FusedMoEConfig:
 
     # Set by __post_init__
     intermediate_size_per_partition: int = -1
+    # Use the allocated width as the checkpoint TP stride, including for scales.
+    tp_shard_with_padding: bool = False
     rocm_aiter_fmoe_enabled: bool = False
     aiter_fmoe_shared_expert_enabled: bool = False
 

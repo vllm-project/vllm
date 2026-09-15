@@ -24,9 +24,7 @@ from vllm.model_executor.layers.fused_moe import (
     SharedExperts,
     UnquantizedFusedMoEMethod,
 )
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEQuantConfig,
-)
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
@@ -84,6 +82,7 @@ from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     is_deep_gemm_supported,
 )
+from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -509,6 +508,37 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # Set weight key and activation key for kernel compatibility
         if self.block_quant:
             assert self.weight_block_size is not None
+            # TRTLLM needs intact checkpoint blocks. Decide the allocation
+            # before refinement/backend selection. The loader uses the padded
+            # allocation as its checkpoint stride for both weights and scales.
+            if (
+                self.moe.moe_backend == "flashinfer_trtllm"
+                and self.quant_config.is_checkpoint_fp8_serialized
+                and self.weight_block_size == [128, 128]
+                and self.moe.tp_size > 1
+                and self.moe.intermediate_size_per_partition % 128 != 0
+            ):
+                if (
+                    self.moe.intermediate_size % 128 != 0
+                    or self.moe.hidden_dim % 128 != 0
+                    or self.moe.ep_size != 1
+                    or self.moe.is_lora_enabled
+                    or self.moe.has_bias
+                ):
+                    raise ValueError(
+                        "Block-aligned FP8 TP sharding requires 128-aligned "
+                        "global expert dimensions, pure TP, and no LoRA or "
+                        "expert bias."
+                    )
+                self.moe.tp_shard_with_padding = True
+                self.moe.intermediate_size_per_partition = round_up(
+                    self.moe.intermediate_size_per_partition, 128
+                )
+                logger.info_once(
+                    "FP8 TRTLLM TP loading uses complete checkpoint blocks: "
+                    "local allocation %d, without weight requantization.",
+                    self.moe.intermediate_size_per_partition,
+                )
             # TP shards the intermediate dim of the expert weights, so a
             # per-shard size that is not a multiple of the checkpoint's block
             # size makes the checkpoint's block scales impossible to shard
