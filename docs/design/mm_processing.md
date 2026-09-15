@@ -64,10 +64,10 @@ The kernel takes raw pixel values(`uint8`), performs one fused multiply-add per 
 
 #### Key Properties and Gains
 
+- **CPU offload & 50% PCIe savings** — normalisation/rescaling leaves the CPU entirely; sending `uint8` (1 byte) instead of `bf16` (2 bytes) halves transfer volume.
 - **Single-pass fusion** — `y = x * weight[c] + bias[c]` in one kernel launch; input is read in its native dtype (`uint8`).
 - **float32 compute for free** — arithmetic runs in fp32 inside the kernel regardless of I/O dtypes. Accuracy matches fp32, with no extra bandwidth: intermediates stay in registers, and no global fp32 tensor is materialised.
 - **Preallocated output** — callers can pass a larger buffer; only the `[:N, :C, :L]` region is written, so buffers are reusable across calls.
-- **CPU offload & 50% PCIe savings** — normalisation/rescaling leaves the CPU entirely; sending `uint8` (1 byte) instead of `bf16` (2 bytes) halves transfer volume.
 
 #### Optimized Data Path for Fused Normalisation
 
@@ -87,4 +87,3 @@ This GPU‑side fusion is controlled by a config flag called **`mm_device_do_nor
 |--------------|--------------------------------------|-------------------------------------|
 | `qwen2-vl`   | `Qwen2VLForConditionalGeneration`    | `Qwen/Qwen2-VL-2B-Instruct`, etc.   |
 | `qwen2.5-vl` | `Qwen2_5_VLForConditionalGeneration` | `Qwen/Qwen2.5-VL-3B-Instruct`, etc. |
-

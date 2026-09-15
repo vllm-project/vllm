@@ -305,8 +305,16 @@ class FusedInputNorm(nn.Module):
         )
 
         if not self.is_identity:
-            self.register_buffer("weight", weight_cpu.to(dtype=dtype))
-            self.register_buffer("bias", bias_cpu.to(dtype=dtype))
+            image_mean_tensor = torch.tensor(image_mean, dtype=dtype) * (
+                1.0 / rescale_factor
+            )
+            image_std_tensor = torch.tensor(image_std, dtype=dtype) * (
+                1.0 / rescale_factor
+            )
+            weight = 1.0 / image_std_tensor
+            bias = -image_mean_tensor / image_std_tensor
+            self.register_buffer("weight", weight)
+            self.register_buffer("bias", bias)
         else:
             self.register_buffer("weight", None)
             self.register_buffer("bias", None)
@@ -454,21 +462,17 @@ class FusedInputNorm(nn.Module):
             visual_dtype: Desired output dtype.
             out: Optional preallocated output buffer. Must be contiguous, on
                 the same device as ``grid_thw``, with dtype ``visual_dtype``
-                and shape ``(N_out, size)`` where ``N_out >= patches``. Only
-                the leading ``patches`` rows are written; the returned tensor
-                is a view restricted to that region. Useful for steady-state
-                inference loops where the caller can reuse a buffer sized for
-                the maximum batch across calls.
-
+                and shape ``(N_out, size)`` where ``N_out >= patches``.
         Returns:
             The transformed tensor of shape ``(patches, size)`` and dtype
             ``visual_dtype`` (a view into ``out`` when supplied, or a freshly
-            allocated tensor).
+            produced tensor).
         """
         assert grid_thw.ndim == 2
         patches, size = grid_thw.shape
 
-        # ---- output buffer: always materialize an ``out_view`` ------------
+        # ---- optional caller-provided output buffer -----------------------
+        out_view: torch.Tensor | None = None
         if out is not None:
             assert out.dim() == 2, f"out must be 2D, got {out.dim()}D"
             assert out.shape[0] >= patches, (
@@ -485,22 +489,20 @@ class FusedInputNorm(nn.Module):
                 f"out.device={out.device} != grid_thw.device={grid_thw.device}"
             )
             out_view = out[:patches]
-        else:
-            out_view = torch.empty(
-                (patches, size), dtype=visual_dtype, device=grid_thw.device
-            )
 
-        # ---- identity shortcut -------------------------------------------
+        # ---- identity shortcut --------------------------------------------
         if self.is_identity:
-            out_view.copy_(grid_thw)
-            return out_view
+            if out_view is not None:
+                out_view.copy_(grid_thw)
+                return out_view
+            return grid_thw.to(visual_dtype, copy=False)
 
         assert size % self.channel == 0, (
             f"size={size} is not divisible by channel={self.channel}"
         )
         patch_size = size // self.channel
 
-        # ---- Triton fast path --------------------------------------------
+        # ---- Triton fast path ---------------------------------------------
         if (
             HAS_TRITON
             and grid_thw.dtype in _SUPPORTED_INPUTS
@@ -513,6 +515,14 @@ class FusedInputNorm(nn.Module):
             # requires contiguous inputs.
             x = grid_thw if grid_thw.is_contiguous() else grid_thw.contiguous()
             x3 = x.view(patches, self.channel, patch_size)
+
+            # The Triton kernel writes in-place into a destination buffer, so
+            # this is the one path that genuinely needs ``out_view`` to exist
+            # before dispatch.
+            if out_view is None:
+                out_view = torch.empty(
+                    (patches, size), dtype=visual_dtype, device=grid_thw.device
+                )
             y3 = out_view.view(patches, self.channel, patch_size)
 
             fused_input_norm_triton(
@@ -524,7 +534,7 @@ class FusedInputNorm(nn.Module):
             )
             return out_view
 
-        # ---- XPU fused custom kernel -------------------------------------
+        # ---- XPU fused custom kernel --------------------------------------
         # On XPU, fuse the whole rescale + normalise into a single custom
         # kernel. The eager path below materializes an fp32 intermediate and
         # then casts back, which adds device-side compute that cancels the
@@ -535,17 +545,23 @@ class FusedInputNorm(nn.Module):
             and grid_thw.dtype == torch.uint8
             and self.weight.dtype == torch.float32
         ):
-            out_view.copy_(
-                torch.ops.vllm.xpu_fused_input_norm(
-                    grid_thw, self.weight, self.bias, visual_dtype
-                )
+            y = torch.ops.vllm.xpu_fused_input_norm(
+                grid_thw, self.weight, self.bias, visual_dtype
             )
+            if out_view is None:
+                return y
+            out_view.copy_(y)
             return out_view
 
-        # ---- Fallback eager path -----------------------------------------
+        # ---- Fallback eager path ------------------------------------------
         x = grid_thw.to(self.dtype).view(patches, self.channel, patch_size)
         x = x * self.weight.view(1, self.channel, 1) + self.bias.view(
             1, self.channel, 1
         )
-        out_view.copy_(x.view(patches, size))
+        y = x.view(patches, size)
+        if out_view is None:
+            if y.dtype != visual_dtype:
+                y = y.to(visual_dtype)
+            return y
+        out_view.copy_(y)
         return out_view

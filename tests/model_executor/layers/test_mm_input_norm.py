@@ -489,7 +489,7 @@ class TestFusedInputNormOutBuffer:
         assert torch.all(out[4:] == 7.0)
 
     def test_validation(self):
-        """`out` with a wrong shape / dtype must be rejected."""
+        """`out` with a wrong shape / dtype / device must be rejected."""
         channel = 3
         norm = FusedInputNorm(
             image_mean=_RGB_MEAN,
@@ -512,6 +512,13 @@ class TestFusedInputNormOutBuffer:
                 pixel_values,
                 visual_dtype=torch.float32,
                 out=torch.empty_like(pixel_values, dtype=torch.bfloat16),
+            )
+        # Wrong device.
+        with pytest.raises(AssertionError):
+            norm(
+                pixel_values,
+                visual_dtype=torch.float32,
+                out=torch.empty_like(pixel_values, device="cpu"),
             )
 
     def test_identity_out_buffer(self):
@@ -536,11 +543,7 @@ class TestFusedInputNormOutBuffer:
 @requires_accelerator
 @requires_triton
 class TestFusedInputNormKernel:
-    """Direct tests of ``fused_input_norm_kernel``.
-
-    These bypass the module wrapper to exercise launch-config and
-    output-buffer semantics in isolation.
-    """
+    """Direct tests of the ``fused_input_norm_triton`` entry point."""
 
     @pytest.mark.parametrize("block_l", [128, 256, 1024, 2048])
     def test_block_sizes(self, block_l: int):
@@ -636,3 +639,42 @@ class TestFusedInputNormConstruction:
         std = torch.tensor(_RGB_STD, dtype=torch.float32) * inv_rescale
         torch.testing.assert_close(norm.weight, 1.0 / std)
         torch.testing.assert_close(norm.bias, -mean / std)
+
+    @pytest.mark.parametrize(
+        ("image_mean", "image_std", "rescale_factor", "is_identity"),
+        [
+            ([0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 1.0, True),
+            ([0.5, 0.5, 0.5], [0.25, 0.25, 0.25], 1 / 255, False),
+        ],
+    )
+    def test_fused_input_norm_initialization_on_device(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        image_mean: list[float],
+        image_std: list[float],
+        rescale_factor: float,
+        is_identity: bool,
+    ):
+        """Identity detection must not synchronize the default device."""
+        original_allclose = torch.allclose
+
+        def cpu_allclose(input: torch.Tensor, other: torch.Tensor, *args, **kwargs):
+            assert input.device.type == "cpu"
+            assert other.device.type == "cpu"
+            return original_allclose(input, other, *args, **kwargs)
+
+        monkeypatch.setattr(torch, "allclose", cpu_allclose)
+        # Exercise the real accelerator when available. The meta device gives
+        # the CPU-only test shard the same non-CPU default-device semantics
+        # without requiring a CUDA-enabled PyTorch build.
+        default_device = "cuda" if torch.cuda.is_available() else "meta"
+        with torch.device(default_device):
+            input_norm = FusedInputNorm(image_mean, image_std, rescale_factor)
+
+        assert input_norm.is_identity is is_identity
+        if is_identity:
+            assert input_norm.weight is None
+            assert input_norm.bias is None
+        else:
+            assert input_norm.weight.device.type == default_device
+            assert input_norm.bias.device.type == default_device
