@@ -65,6 +65,39 @@ _ci_otel_python() {
   fi
 }
 
+# The Docker test commands run as root, while /workdir is owned by the
+# Buildkite checkout user. Run the GPU sampler as that unprivileged identity so
+# any future project-code import cannot leave root-owned files in the checkout.
+_ci_otel_prepare_gpu_user() {
+  _CI_INFRA_GPU_UID=""
+  _CI_INFRA_GPU_GID=""
+  [ "$(id -u 2>/dev/null || :)" = "0" ] || return 0
+  command -v setpriv >/dev/null 2>&1 || return 1
+
+  _CI_INFRA_OTEL_WORKSPACE_DIR="${CI_INFRA_OTEL_WORKSPACE_DIR:-/workdir}"
+  [ -d "${_CI_INFRA_OTEL_WORKSPACE_DIR}" ] || return 1
+  # The owner fields are numeric and whitespace-free on GNU stat.
+  # shellcheck disable=SC2046
+  set -- $(stat -c '%u %g' -- "${_CI_INFRA_OTEL_WORKSPACE_DIR}" 2>/dev/null || :)
+  [ "$#" -eq 2 ] || return 1
+  case "$1:$2" in
+    *[!0-9:]* | 0:* | *:0) return 1 ;;
+  esac
+
+  _CI_INFRA_GPU_UID="$1"
+  _CI_INFRA_GPU_GID="$2"
+  chown "${_CI_INFRA_GPU_UID}:${_CI_INFRA_GPU_GID}" \
+    "${CI_INFRA_OTEL_SPOOL_DIR}" || return 1
+  chmod 0700 "${CI_INFRA_OTEL_SPOOL_DIR}" || return 1
+  if [ "${_CI_INFRA_OTEL_OWNS_RUNTIME}" = "1" ]; then
+    # Permit traversal to the private child spool, but not directory listing.
+    chmod 0711 "${CI_INFRA_OTEL_RUNTIME_DIR}" || return 1
+  fi
+  setpriv --reuid="${_CI_INFRA_GPU_UID}" \
+    --regid="${_CI_INFRA_GPU_GID}" --clear-groups --no-new-privs \
+    -- test -w "${CI_INFRA_OTEL_SPOOL_DIR}"
+}
+
 ci_otel_start() {
   _CI_INFRA_OTEL_COMMAND_INDEX="$1"
   _CI_INFRA_OTEL_COMMAND_LABEL="${2:-command ${_CI_INFRA_OTEL_COMMAND_INDEX}}"
@@ -87,9 +120,23 @@ ci_otel_start() {
   if [ "${CI_INFRA_GPU_SAMPLING:-1}" != "0" ] &&
     [ -f "${CI_INFRA_OTEL_DIR}/ci_gpu.py" ] &&
     command -v nvidia-smi >/dev/null 2>&1; then
-    PYTHONDONTWRITEBYTECODE=1 \
-      "${_CI_INFRA_OTEL_PYTHON}" "${CI_INFRA_OTEL_DIR}/ci_gpu.py" "$$" </dev/null &
-    _CI_INFRA_GPU_PID=$!
+    if _ci_otel_prepare_gpu_user; then
+      if [ -n "${_CI_INFRA_GPU_UID}" ]; then
+        PYTHONDONTWRITEBYTECODE=1 setpriv \
+          --reuid="${_CI_INFRA_GPU_UID}" --regid="${_CI_INFRA_GPU_GID}" \
+          --clear-groups --no-new-privs -- \
+          "${_CI_INFRA_OTEL_PYTHON}" "${CI_INFRA_OTEL_DIR}/ci_gpu.py" "$$" \
+          </dev/null &
+      else
+        PYTHONDONTWRITEBYTECODE=1 \
+          "${_CI_INFRA_OTEL_PYTHON}" "${CI_INFRA_OTEL_DIR}/ci_gpu.py" "$$" \
+          </dev/null &
+      fi
+      _CI_INFRA_GPU_PID=$!
+    else
+      echo "vLLM CI OTel: non-root GPU sampler unavailable; sampling disabled" \
+        >&2 || :
+    fi
   fi
 }
 
