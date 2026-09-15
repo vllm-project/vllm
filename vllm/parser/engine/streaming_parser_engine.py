@@ -403,6 +403,18 @@ class StreamingParserEngine:
         if transition is None:
             if self._has_drops and terminal == DROP_TERMINAL:
                 return []
+            # Long-context degeneration emits orphan structural closers
+            # (e.g. a bare ``</｜DSML｜parameter>``) while no tool call is open.
+            # Drop the tag instead of echoing the raw markup as text. Only
+            # the tool-owning pass absorbs; the skip-tool pass must pass the
+            # markup through so it still parses in the downstream tool
+            # adapter.
+            if (
+                terminal in self.config.absorb_terminals
+                and self.state in self._PLAIN_STATES
+                and not self.skip_tool_parsing
+            ):
+                return []
             # The projected skip state may not define the wrapper closer.
             if self.skip_tool_parsing and terminal in self._tool_exit_terminals:
                 self._in_skipped_tool_span = False
