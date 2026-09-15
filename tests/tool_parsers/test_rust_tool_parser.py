@@ -293,6 +293,47 @@ def test_rust_tool_parser_adapter_streaming_prefers_model_tool_call_ids() -> Non
         assert json.loads(collect_streamed_arguments(deltas, index)) == arguments
 
 
+def test_streaming_parse_error_preserves_committed_model_tool_call_id() -> None:
+    parser = KimiK2RustToolParser(MOCK_TOKENIZER, tools=sample_tools())
+    text = (
+        "<|tool_calls_section_begin|>"
+        "<|tool_call_begin|>functions.get_weather:0"
+        '<|tool_call_argument_begin|>{"location": "SF"}<|tool_call_end|>'
+        "<|tool_call_begin|>invalid<|tool_call_argument_begin|>{}"
+    )
+
+    delta = parser.extract_tool_calls_streaming(
+        previous_text="",
+        current_text=text,
+        delta_text=text,
+        previous_token_ids=[],
+        current_token_ids=[],
+        delta_token_ids=[1],
+        request=MagicMock(),
+    )
+
+    assert delta is not None
+    assert delta.tool_calls is not None
+    assert {tool_call.index for tool_call in delta.tool_calls} == {0}
+    assert [
+        tool_call.id for tool_call in delta.tool_calls if tool_call.id is not None
+    ] == ["functions.get_weather:0"]
+    assert [
+        tool_call.function.name
+        for tool_call in delta.tool_calls
+        if tool_call.function is not None and tool_call.function.name is not None
+    ] == ["get_weather"]
+    arguments = "".join(
+        tool_call.function.arguments
+        for tool_call in delta.tool_calls
+        if tool_call.function is not None and tool_call.function.arguments is not None
+    )
+    assert json.loads(arguments) == {"location": "SF"}
+    assert delta.content is not None
+    assert "invalid" in delta.content
+    assert "functions.get_weather:0" not in delta.content
+
+
 def test_rust_tool_parser_adapter_streaming_generates_ids_as_fallback() -> None:
     # DeepSeekV4 never emits model tool call IDs, so the bridge mints them.
     parser = DeepSeekV4RustToolParser(MOCK_TOKENIZER, tools=sample_tools())
