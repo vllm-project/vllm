@@ -3,14 +3,11 @@
 """Unit tests for mori-io write_done routing (#51681)."""
 
 import threading
-from collections import defaultdict
-from queue import Queue
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from vllm.distributed.kv_transfer.kv_connector.v1.moriio import moriio_engine
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     RemoteAllocInfo,
     ReqMeta,
@@ -21,23 +18,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import
     MoRIIOConnectorWorker,
 )
 
+from .utils import make_moriio_writer
+
 pytestmark = pytest.mark.cpu_test
-
-MoRIIOWriter = moriio_engine.MoRIIOWriter
-
-
-def _make_writer(fake_worker: Any) -> Any:
-    writer = MoRIIOWriter.__new__(MoRIIOWriter)
-    writer._worker_ref = lambda: fake_worker
-    writer._write_task_q = Queue()
-    writer._write_state_lock = threading.Lock()
-    writer._scheduled_writes = defaultdict(int)
-    writer._scheduled_layers = defaultdict(set)
-    writer._sealed_writes = {}
-    writer._deferred_tasks = []
-    writer._defer_timeout = 60.0
-    writer.ensure_worker_started = lambda: None
-    return writer
 
 
 def _fake_worker(
@@ -119,7 +102,7 @@ def test_execute_write_task_ip_is_per_task_under_overwrite():
     worker.multi_pod_hosts = ["10.0.0.2"]
     worker.remote_dp_size_local = 1
 
-    writer = _make_writer(worker)
+    writer = make_moriio_writer(worker)
     task_a = _write_task(
         "tA", "10.0.0.1", multi_pod_hosts=["10.0.0.1"], remote_dp_size_local=1
     )
@@ -135,7 +118,7 @@ def test_deferred_task_ip_is_per_task_under_overwrite():
     worker.multi_pod_hosts = ["10.0.0.2"]
     worker.remote_dp_size_local = 1
 
-    writer = _make_writer(worker)
+    writer = make_moriio_writer(worker)
     task_a = _write_task(
         "tA", "10.0.0.1", multi_pod_hosts=["10.0.0.1"], remote_dp_size_local=1
     )
@@ -152,7 +135,7 @@ def test_two_requests_resolve_distinct_hosts():
         "tB": RemoteAllocInfo(block_ids=None, decode_dp_rank=3),
     }
     worker = _fake_worker(alloc)
-    writer = _make_writer(worker)
+    writer = make_moriio_writer(worker)
 
     task_a = _write_task(
         "tA", "10.0.0.1", multi_pod_hosts=["10.0.0.1"], remote_dp_size_local=1
@@ -173,7 +156,7 @@ def test_finalize_notify_port_uses_pod_local_rank():
     info = RemoteAllocInfo(block_ids=None, decode_dp_rank=9)
     alloc = {"tA": info}
     worker = _fake_worker(alloc, tp_rank=0)
-    writer = _make_writer(worker)
+    writer = make_moriio_writer(worker)
 
     task = _write_task(
         "tA",
@@ -200,7 +183,7 @@ def test_finalize_port_ignores_stale_worker_dp_local():
     info = RemoteAllocInfo(block_ids=None, decode_dp_rank=9)
     alloc = {"tA": info}
     worker = _fake_worker(alloc, tp_rank=0, set_remote_dp_size_local=1)
-    writer = _make_writer(worker)
+    writer = make_moriio_writer(worker)
 
     task = _write_task(
         "tA",
@@ -226,7 +209,7 @@ def test_finalize_single_pod_port_uses_global_rank():
     info = RemoteAllocInfo(block_ids=None, decode_dp_rank=3)
     alloc = {"tA": info}
     worker = _fake_worker(alloc, tp_rank=2)
-    writer = _make_writer(worker)
+    writer = make_moriio_writer(worker)
 
     task = _write_task("tA", "10.0.0.1", multi_pod_hosts=[], remote_dp_size_local=0)
     writer._execute_write_task(task)
