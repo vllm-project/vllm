@@ -77,7 +77,7 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from ..common.engram import EngramLayout, NgramHashState
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
-from .engram import Engram, gather_engram_hashes
+from .engram import Engram, gather_engram_hashes, prepare_engram_embeddings
 
 if typing.TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
@@ -609,12 +609,12 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 gathered_hashes = gather_engram_hashes(
                     engram_hashes, dp_shared_memory=self.engram_dp_shared_memory
                 )
-                for layer in islice(self.layers, self.start_layer, self.end_layer):
-                    engram = getattr(layer, "engram", None)
-                    if engram is not None:
-                        engram.prepare_embeddings(
-                            gathered_hashes[:, engram.layer_hash_index]
-                        )
+                engrams = [
+                    engram
+                    for layer in islice(self.layers, self.start_layer, self.end_layer)
+                    if (engram := getattr(layer, "engram", None)) is not None
+                ]
+                prepare_engram_embeddings(engrams, gathered_hashes)
 
         full_num_tokens = positions.shape[0]
         if self.use_sequence_parallel:

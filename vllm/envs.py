@@ -302,6 +302,7 @@ if TYPE_CHECKING:
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_ENGRAM_DISK_OFFLOAD_DIR: str = ""
+    VLLM_ENGRAM_MOONCAKE_CONFIG: str = ""
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
     VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS: int = 0
@@ -2073,6 +2074,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ENGRAM_DISK_OFFLOAD_DIR": lambda: os.getenv(
         "VLLM_ENGRAM_DISK_OFFLOAD_DIR", ""
     ),
+    # Layout manifest for remotely served Engram rows. Mooncake connection
+    # settings continue to use the standard MOONCAKE_* environment variables.
+    "VLLM_ENGRAM_MOONCAKE_CONFIG": lambda: os.getenv("VLLM_ENGRAM_MOONCAKE_CONFIG", ""),
     "VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY": lambda: bool(
         int(os.getenv("VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY", "0"))
     ),

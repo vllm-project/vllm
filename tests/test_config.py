@@ -1175,6 +1175,58 @@ def test_engram_dp_shared_memory_requires_cpu_offload():
         EngramConfig(cpu_offload=False, dp_shared_memory=True)
 
 
+def test_engram_mooncake_requires_cpu_offload():
+    with pytest.raises(ValueError, match="requires cpu_offload"):
+        EngramConfig(cpu_offload=False, mooncake_config_path="layout.json")
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"dp_shared_memory": True, "mooncake_config_path": "layout.json"},
+        {
+            "disk_offload_dir": "/tmp/engram",
+            "mooncake_config_path": "layout.json",
+        },
+    ],
+)
+def test_engram_rejects_multiple_external_placements(options):
+    with pytest.raises(ValueError, match="alternative Engram placements"):
+        EngramConfig(**options)
+
+
+@pytest.mark.parametrize("load_format", ["auto", "pt", "sharded_state"])
+def test_engram_mooncake_requires_safetensors(load_format):
+    config = EngramConfig(mooncake_config_path="layout.json")
+    with pytest.raises(ValueError, match="requires load_format"):
+        config.verify_load_config(LoadConfig(load_format=load_format))
+
+
+@pytest.mark.parametrize("strategy", [None, "eager", "prefetch", "torchao"])
+def test_engram_mooncake_rejects_materialized_safetensors(strategy):
+    config = EngramConfig(mooncake_config_path="layout.json")
+    with pytest.raises(ValueError, match="requires.*safetensors_load_strategy='lazy'"):
+        config.verify_load_config(
+            LoadConfig(
+                load_format="safetensors",
+                safetensors_load_strategy=strategy,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "load_format,strategy", [("safetensors", "lazy"), ("dummy", None)]
+)
+def test_engram_mooncake_accepts_non_materializing_load(load_format, strategy):
+    config = EngramConfig(mooncake_config_path="layout.json")
+    config.verify_load_config(
+        LoadConfig(
+            load_format=load_format,
+            safetensors_load_strategy=strategy,
+        )
+    )
+
+
 @pytest.mark.parametrize(
     "dp_size,load_format,multithread,error",
     [

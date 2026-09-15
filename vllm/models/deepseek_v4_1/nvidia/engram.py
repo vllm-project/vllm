@@ -41,6 +41,12 @@ from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 logger = init_logger(__name__)
 
 
+def _discard_external_engram_weight(
+    param: torch.nn.Parameter, loaded_weight: torch.Tensor
+) -> None:
+    """The Mooncake publisher, rather than this process, owns table weights."""
+
+
 def engram_head_shard_rank() -> int:
     """This rank's slot among the hash-head shards of one engram table.
 
@@ -228,10 +234,15 @@ class ParallelEngramEmbedding(BaseParallelEngramEmbedding):
         cpu_offload: bool = False,
         dp_shared_memory: bool = False,
         disk_offload_dir: str | None = None,
+        mooncake_config_path: str | None = None,
+        model_layer_id: int | None = None,
+        layer_hash_index: int | None = None,
     ) -> None:
         self.cpu_offload = cpu_offload
         self.disk_offload_dir = disk_offload_dir
+        self.mooncake_config_path = mooncake_config_path
         self.dp_shared_memory = dp_shared_memory
+        self.mooncake_backend = None
         self.dp_size = get_engram_dp_size()
         if dp_shared_memory:
             if not cpu_offload:
@@ -252,13 +263,50 @@ class ParallelEngramEmbedding(BaseParallelEngramEmbedding):
                     "disk_offload_dir and dp_shared_memory are alternative "
                     "placements for the same table; enable only one."
                 )
-        # Only the UVA path needs UVA; a file-backed shard is read on the host.
-        if cpu_offload and disk_offload_dir is None and not is_uva_available():
+        if mooncake_config_path is not None:
+            if not cpu_offload:
+                raise ValueError("mooncake_config_path requires cpu_offload=True")
+            if dp_shared_memory or disk_offload_dir is not None:
+                raise ValueError(
+                    "Mooncake, disk, and shared-memory Engram placements are "
+                    "mutually exclusive"
+                )
+            if model_layer_id is None or layer_hash_index is None:
+                raise ValueError("Mooncake Engram requires model layer metadata")
+            self._weight_loader = _discard_external_engram_weight
+        # Only the pinned-host path needs UVA. Disk and Mooncake stage rows.
+        if (
+            cpu_offload
+            and disk_offload_dir is None
+            and mooncake_config_path is None
+            and not is_uva_available()
+        ):
             raise RuntimeError("Engram CPU offload requires UVA support")
         self._views: tuple[torch.Tensor, torch.Tensor] | None = None
         self._view_src: tuple[int, int] | None = None
         super().__init__(num_embeddings, dim, head_sizes, block_size)
-        if cpu_offload:
+        if mooncake_config_path is not None:
+            from .engram_mooncake import get_mooncake_engram_backend
+
+            num_shards, shard_rank = self._get_shard_info()
+            parallel_config = get_current_vllm_config().parallel_config
+            num_slots = 2 if parallel_config.enable_dbo else 1
+            self.mooncake_backend = get_mooncake_engram_backend(
+                mooncake_config_path, num_shards, shard_rank, num_slots
+            )
+            self.mooncake_backend.attach(
+                self,
+                model_layer_id,
+                layer_hash_index,
+                head_sizes,
+            )
+            logger.info(
+                "Engram layer %d uses Mooncake Store shard %d/%d",
+                model_layer_id,
+                shard_rank,
+                num_shards,
+            )
+        elif cpu_offload:
             # Constant dummy values avoid randomizing huge CPU lookup tables.
             set_weight_attrs(self.weight, {"dummy_weight_value": 1.0})
             # The ue8m0 encoding of scale 1.0 is exponent byte 127.
@@ -289,6 +337,13 @@ class ParallelEngramEmbedding(BaseParallelEngramEmbedding):
             return storage.weight, storage.weight_scale_inv
         if not self.cpu_offload:
             return super()._allocate_weights()
+        if self.mooncake_config_path is not None:
+            # Keep checkpoint parameter names loadable without retaining a
+            # local copy of the externally published table.
+            return (
+                torch.empty(0, self.dim, dtype=torch.float8_e4m3fn),
+                torch.empty(0, self.dim // self.block_size, dtype=torch.uint8),
+            )
         if self.disk_offload_dir is not None:
             return self._open_disk_shard(
                 self.disk_offload_dir,
@@ -314,6 +369,8 @@ class ParallelEngramEmbedding(BaseParallelEngramEmbedding):
         )
 
     def _storage(self) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.mooncake_config_path is not None:
+            raise RuntimeError("Mooncake Engram rows require model-level prefetch")
         if self._shared_memory is not None:
             return self._shared_memory.get_views(self.weight, self.weight_scale_inv)
         # A mapped file is read on the host, never through a UVA view.
@@ -330,6 +387,8 @@ class ParallelEngramEmbedding(BaseParallelEngramEmbedding):
         return self._views
 
     def forward(self, indices: torch.Tensor) -> torch.Tensor:
+        if self.mooncake_config_path is not None:
+            raise RuntimeError("Mooncake Engram rows require model-level prefetch")
         if self.dp_size == 1:
             return super().forward(indices)
         num_tokens = indices.shape[0]
@@ -382,15 +441,28 @@ class Engram(BaseEngram):
             cpu_offload=engram_config.cpu_offload,
             dp_shared_memory=engram_config.dp_shared_memory,
             disk_offload_dir=engram_config.disk_offload_dir,
+            mooncake_config_path=engram_config.mooncake_config_path,
+            model_layer_id=layout.layer_ids[layer_hash_index],
+            layer_hash_index=layer_hash_index,
         )
 
     def _init_staging(self, max_tokens: int, head_dim: int) -> None:
+        if self.embed_tokens.mooncake_backend is not None:
+            # Rows and packed bytes are double-buffered by the shared backend
+            # when DBO is active, so do not allocate the ordinary staging copy.
+            self.staged_rows = torch.empty(0, dtype=torch.bfloat16)
+            self.embed_tokens.mooncake_backend.initialize_buffers(
+                self.layer_hash_index, max_tokens * self.embed_tokens.dp_size
+            )
+            return
         super()._init_staging(max_tokens * self.embed_tokens.dp_size, head_dim)
         if self.embed_tokens.cpu_offload:
             self._prefetch_stream = torch.cuda.Stream(device=self.staged_rows.device)
 
     def prepare_embeddings(self, hash_ids: torch.Tensor) -> None:
         """Prefetch local shared rows or the DP group's gathered hash IDs."""
+        if self.embed_tokens.mooncake_backend is not None:
+            return
         if self._prefetch_stream is None:
             return super().prepare_embeddings(hash_ids)
         rows = self.staged_rows[: hash_ids.shape[0]]
@@ -438,6 +510,11 @@ class Engram(BaseEngram):
         torch.cuda.current_stream().wait_stream(stream)
 
     def _ready_rows(self, num_tokens: int) -> torch.Tensor:
+        if self.embed_tokens.mooncake_backend is not None:
+            staged = self.embed_tokens.mooncake_backend.rows(self.layer_hash_index)
+            if self.embed_tokens.dp_size > 1:
+                return _gather_engram_rows(staged, num_tokens)
+            return staged[:num_tokens]
         if self._prefetch_stream is not None and (
             self.embed_tokens.disk_offload_dir is None
         ):
@@ -447,3 +524,19 @@ class Engram(BaseEngram):
             staged = self.staged_rows[: slot * self.embed_tokens.dp_size]
             return _gather_engram_rows(staged, num_tokens)
         return super()._ready_rows(num_tokens)
+
+
+def prepare_engram_embeddings(
+    engrams: list[Engram], gathered_hashes: torch.Tensor
+) -> None:
+    """Start one multi-layer Mooncake read or the existing per-layer lookup."""
+    if not engrams:
+        return
+    backend = engrams[0].embed_tokens.mooncake_backend
+    if backend is None:
+        for engram in engrams:
+            engram.prepare_embeddings(gathered_hashes[:, engram.layer_hash_index])
+        return
+    if any(engram.embed_tokens.mooncake_backend is not backend for engram in engrams):
+        raise RuntimeError("all local Mooncake Engram layers must share one backend")
+    backend.prefetch(gathered_hashes)

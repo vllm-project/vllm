@@ -42,6 +42,10 @@ def _default_disk_offload_dir() -> str | None:
     return envs.VLLM_ENGRAM_DISK_OFFLOAD_DIR or None
 
 
+def _default_mooncake_config_path() -> str | None:
+    return envs.VLLM_ENGRAM_MOONCAKE_CONFIG or None
+
+
 @config
 class EngramConfig:
     """Configuration for Engram embedding storage and sharding."""
@@ -76,10 +80,31 @@ class EngramConfig:
     Point this at local NVMe. On a network filesystem every row gather becomes
     a network round trip. Defaults to VLLM_ENGRAM_DISK_OFFLOAD_DIR."""
 
+    mooncake_config_path: str | None = Field(
+        default_factory=_default_mooncake_config_path
+    )
+    """JSON layout manifest for Engram tables served by Mooncake Store.
+
+    Mooncake connection settings are read from the standard ``MOONCAKE_*``
+    environment variables. The backend batches all local Engram layers into
+    one ranged-read submission and only fetches the hash heads owned by this
+    TP/Engram-DP rank. Defaults to VLLM_ENGRAM_MOONCAKE_CONFIG."""
+
     @model_validator(mode="after")
     def _validate_shared_memory(self) -> Self:
         if self.dp_shared_memory and not self.cpu_offload:
             raise ValueError("dp_shared_memory requires cpu_offload=True")
+        if self.mooncake_config_path and not self.cpu_offload:
+            raise ValueError("mooncake_config_path requires cpu_offload=True")
+        placements = sum(
+            option is not None
+            for option in (self.disk_offload_dir, self.mooncake_config_path)
+        ) + int(self.dp_shared_memory)
+        if placements > 1:
+            raise ValueError(
+                "dp_shared_memory, disk_offload_dir, and mooncake_config_path "
+                "are alternative Engram placements"
+            )
         return self
 
     def verify_model_config(self, model_config: "ModelConfig | None") -> None:
@@ -120,6 +145,22 @@ class EngramConfig:
 
     def verify_load_config(self, load_config: "LoadConfig") -> None:
         """Shared tables require a loader that invokes parameter weight callbacks."""
+        if self.mooncake_config_path:
+            if load_config.load_format not in ("safetensors", "dummy"):
+                raise ValueError(
+                    "mooncake_config_path requires load_format 'safetensors' "
+                    f"or 'dummy'; got {load_config.load_format!r}."
+                )
+            if (
+                load_config.load_format == "safetensors"
+                and load_config.safetensors_load_strategy != "lazy"
+            ):
+                raise ValueError(
+                    "mooncake_config_path requires "
+                    "safetensors_load_strategy='lazy'; automatic, eager, or "
+                    "prefetch loading may read the external Engram tables "
+                    "into local memory."
+                )
         if self.dp_shared_memory and load_config.load_format not in (
             "auto",
             "safetensors",
