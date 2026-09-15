@@ -5,7 +5,7 @@ incremental lexing, and state-machine-driven semantic event emission."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from vllm.parser.engine.events import EventType, SemanticEvent
@@ -170,6 +170,15 @@ class StreamingParserEngine:
 
         self.skip_tool_parsing = False
         self.skip_reasoning_parsing = False
+        self._recovery_hold_active: bool = False
+        self._recovery_hold_events: list[SemanticEvent] = []
+        self._recovery_hold_raw: str = ""
+        self._recovery_hold_token_count: int = 0
+        self._recovery_hold_name: str = ""
+        self._recovery_prior_state: ParserState = ParserState.CONTENT
+        self._recovery_prior_tool_index: int = -1
+        self._recovery_outer_closer_pending: bool = False
+        self.recovery_tool_name_validator: Callable[[str], bool] | None = None
         self.reset(initial_state=initial_state)
 
     @property
@@ -212,6 +221,8 @@ class StreamingParserEngine:
         self._message_header_buffer = ""
         self._message_header_token_count = 0
         self._in_skipped_tool_span = False
+        self._clear_recovery_hold()
+        self._recovery_outer_closer_pending = False
         self._reset_args_state()
 
     def feed(
@@ -288,6 +299,9 @@ class StreamingParserEngine:
         events = self._process_scanner_items(self._scanner.flush_pending())
 
         events.extend(self._process_lex_tokens(self._lexer.flush()))
+
+        if self._recovery_hold_active:
+            events.extend(self._abort_recovery_hold())
 
         if self._args_buffer:
             events.append(
@@ -397,12 +411,29 @@ class StreamingParserEngine:
     def _on_terminal(
         self, terminal: str, value: str, token_count: int = 0
     ) -> list[SemanticEvent]:
+        if (
+            self._recovery_outer_closer_pending
+            and self.state == ParserState.CONTENT
+            and (terminal in self._tool_exit_terminals or terminal == "TOOL_END")
+        ):
+            self._recovery_outer_closer_pending = False
+            return []
+
         key = (self.state, terminal)
         transition = self.config.transitions.get(key)
 
         if transition is None:
             if self._has_drops and terminal == DROP_TERMINAL:
                 return []
+            if self._recovery_hold_active and self.state == ParserState.TOOL_NAME:
+                events = self._abort_recovery_hold()
+                events.extend(self._on_terminal(terminal, value, token_count))
+                return events
+            if self._recovery_hold_active and self.state == ParserState.TOOL_ARGS:
+                # DSML parameter closers are terminals but deliberately have
+                # no state transition. During recovery they are still part of
+                # the candidate invoke and must stay buffered as arguments.
+                return self._emit_for_state(value, token_count)
             # The projected skip state may not define the wrapper closer.
             if self.skip_tool_parsing and terminal in self._tool_exit_terminals:
                 self._in_skipped_tool_span = False
@@ -469,6 +500,13 @@ class StreamingParserEngine:
         return self._apply_transition(transition, value, token_count)
 
     def _emit_for_state(self, text: str, token_count: int = 0) -> list[SemanticEvent]:
+        if self._recovery_hold_active:
+            return self._hold_recovery_text(text, token_count)
+        return self._emit_for_state_now(text, token_count)
+
+    def _emit_for_state_now(
+        self, text: str, token_count: int = 0
+    ) -> list[SemanticEvent]:
         if self.state == ParserState.MESSAGE_HEADER:
             self._message_header_buffer += text
             self._message_header_token_count += token_count
@@ -496,12 +534,114 @@ class StreamingParserEngine:
             ]
         return []
 
+    def _hold_recovery_text(
+        self, text: str, token_count: int = 0
+    ) -> list[SemanticEvent]:
+        self._recovery_hold_raw += text
+        self._recovery_hold_token_count += token_count
+
+        if self.state == ParserState.TOOL_NAME:
+            self._recovery_hold_name += text
+            # Tool names are expected to be compact. Avoid delaying an entire
+            # response if ordinary prose happens to quote an unterminated
+            # invoke marker.
+            if len(self._recovery_hold_name) > 256 or "\n" in self._recovery_hold_name:
+                return self._abort_recovery_hold()
+
+        self._recovery_hold_events.extend(self._emit_for_state_now(text, token_count))
+        return []
+
     def _on_content(self, text: str, token_count: int = 0) -> list[SemanticEvent]:
         if not text:
             return []
         return self._emit_for_state(text, token_count)
 
     def _apply_transition(
+        self,
+        transition: Transition,
+        value: str,
+        token_count: int = 0,
+    ) -> list[SemanticEvent]:
+        if self._recovery_hold_active:
+            return self._advance_recovery_hold(transition, value, token_count)
+        if transition.provisional_tool_call:
+            if self.recovery_tool_name_validator is None:
+                return self._emit_for_state(value, token_count)
+            return self._begin_recovery_hold(transition, value, token_count)
+        if (
+            self._recovery_outer_closer_pending
+            and self.state == ParserState.CONTENT
+            and transition.next_state in self._TOOL_STATES
+        ):
+            self._recovery_outer_closer_pending = False
+        return self._run_transition(transition, value, token_count)
+
+    def _begin_recovery_hold(
+        self,
+        transition: Transition,
+        value: str,
+        token_count: int,
+    ) -> list[SemanticEvent]:
+        prior_state = self.state
+        prior_tool_index = self.tool_index
+        held_events = self._run_transition(transition, value, token_count)
+        self._recovery_hold_active = True
+        self._recovery_hold_events = held_events
+        self._recovery_hold_raw = value
+        self._recovery_hold_token_count = token_count
+        self._recovery_hold_name = ""
+        self._recovery_prior_state = prior_state
+        self._recovery_prior_tool_index = prior_tool_index
+        return []
+
+    def _advance_recovery_hold(
+        self,
+        transition: Transition,
+        value: str,
+        token_count: int,
+    ) -> list[SemanticEvent]:
+        self._recovery_hold_raw += value
+        self._recovery_hold_token_count += token_count
+
+        if self.state == ParserState.TOOL_NAME:
+            validator = self.recovery_tool_name_validator
+            if validator is None or not validator(self._recovery_hold_name):
+                return self._abort_recovery_hold()
+            self._recovery_hold_events.extend(
+                self._run_transition(transition, value, token_count)
+            )
+            return []
+
+        if self.state == ParserState.TOOL_ARGS:
+            if not transition.commit_provisional_tool_call:
+                return self._abort_recovery_hold()
+            self._recovery_hold_events.extend(
+                self._run_transition(transition, value, token_count)
+            )
+            events = self._recovery_hold_events
+            self._clear_recovery_hold()
+            self._recovery_outer_closer_pending = True
+            return events
+
+        return self._abort_recovery_hold()
+
+    def _abort_recovery_hold(self) -> list[SemanticEvent]:
+        raw = self._recovery_hold_raw
+        token_count = self._recovery_hold_token_count
+        self.state = self._recovery_prior_state
+        self.tool_index = self._recovery_prior_tool_index
+        self._reset_args_state()
+        self._clear_recovery_hold()
+        return self._emit_for_state_now(raw, token_count)
+
+    def _clear_recovery_hold(self) -> None:
+        self._recovery_hold_active = False
+        self._recovery_hold_events = []
+        self._recovery_hold_raw = ""
+        self._recovery_hold_token_count = 0
+        self._recovery_hold_name = ""
+
+    def _run_transition(
         self,
         transition: Transition,
         value: str,
