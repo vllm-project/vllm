@@ -46,6 +46,13 @@ class EngramConfig:
     Defaults to VLLM_PLE_CPU_OFFLOAD, which is enabled by default. An explicit
     value takes precedence over the environment variable."""
 
+    thp_packing: bool = False
+    """Pack private CPU-offloaded weights and scales into one aligned mapping
+    and request transparent huge pages (THP). Actual coverage depends on host
+    policy and memory availability. The default keeps the original separate
+    torch pinned allocations. Only applies to CPU-offloaded tables; THP
+    packing for DP shared memory is not yet implemented."""
+
     embedding_across_dp: bool = False
     """Shard embeddings across TP and all DP ranks when enabled.
     Otherwise, each DP rank has a separate TP-sharded embedding replica."""
