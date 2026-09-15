@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
 from concurrent.futures import Future
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import numpy as np
@@ -18,7 +19,12 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
+    HiSparseConnector,
+    HiSparseConnectorScheduler,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalKwargsItem,
@@ -33,6 +39,7 @@ from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.engine import FinishReason
+from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -44,6 +51,7 @@ from vllm.v1.outputs import (
     ECConnectorOutput,
     KVConnectorOutput,
     ModelRunnerOutput,
+    RoutedExpertsLists,
     SamplingMaskLists,
     make_empty_encoder_model_runner_output,
 )
@@ -124,6 +132,44 @@ def test_add_requests():
         assert len(scheduler.waiting) == i + 1
 
 
+def test_routed_experts_prompt_start_at_prompt_end():
+    """A prompt-end offset should return empty routing data, not crash."""
+    scheduler = create_scheduler()
+    (request,) = create_requests(num_requests=1)
+    request.sampling_params.routed_experts_prompt_start = request.num_prompt_tokens
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    num_tokens = scheduler_output.num_scheduled_tokens[request.request_id]
+
+    manager = Mock()
+    manager.routed_experts_by_slot = np.empty((0, 1, 1), dtype=np.uint8)
+    manager.get.return_value = np.empty((0, 1, 1), dtype=np.uint8)
+    scheduler.enable_return_routed_experts = True
+    scheduler.routed_experts_mgr = manager
+    scheduler._re_block_ids = {request.request_id: []}
+
+    outputs = scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+            routed_experts=RoutedExpertsLists(
+                routing_data=np.zeros((num_tokens, 1, 1), dtype=np.uint8),
+                slot_mapping=np.arange(num_tokens),
+            ),
+        ),
+    )
+
+    manager.get.assert_called_once_with(
+        [], request.num_prompt_tokens, token_start=request.num_prompt_tokens
+    )
+    assert outputs[request.client_index].outputs[0].routed_experts.shape == (0, 1, 1)
+
+
 def test_finish_request():
     scheduler = create_scheduler()
     requests = create_requests(num_requests=10)
@@ -145,6 +191,30 @@ def test_get_num_unfinished_requests():
     for i, request in enumerate(requests):
         scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_STOPPED)
         assert scheduler.get_num_unfinished_requests() == len(requests) - i - 1
+
+
+def _bind_hisparse_connector(scheduler):
+    connector = object.__new__(HiSparseConnector)
+    connector.connector_scheduler = HiSparseConnectorScheduler(async_speculative=False)
+    from tests.v1.core.test_prefix_caching import make_hisparse_kv_cache_manager
+
+    coordinator = get_hisparse_coordinator(make_hisparse_kv_cache_manager(16, 16))
+    connector.connector_scheduler.bind_coordinator(coordinator)
+    composite = object.__new__(MultiConnector)
+    composite._connectors = (connector,)
+    scheduler.connector = composite
+    return coordinator
+
+
+def test_pending_hisparse_spill_keeps_scheduler_alive():
+    """A final host spill must complete after the last request finishes."""
+    scheduler = create_scheduler()
+    coordinator = _bind_hisparse_connector(scheduler)
+    pending = coordinator.pending_spills
+    pending[0] = Mock()
+    assert scheduler.has_requests()
+    pending.clear()
+    assert not scheduler.has_requests()
 
 
 @pytest.mark.parametrize(
@@ -1178,6 +1248,45 @@ def test_preempt_during_execution():
     # sampled token id.
     assert len(requests[1].output_token_ids) == 1
     assert requests[1].output_token_ids[0] == 42
+
+
+def test_pending_hisparse_reclamation_defers_preemption(monkeypatch):
+    """Pending reclamation must stall rather than preempt its owning request."""
+    scheduler = create_scheduler(enable_prefix_caching=False)
+    request = create_requests(num_requests=1, num_tokens=16, block_size=16)[0]
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    monkeypatch.setattr(
+        scheduler.kv_cache_manager, "allocate_slots", Mock(return_value=None)
+    )
+    coordinator = _bind_hisparse_connector(scheduler)
+    monkeypatch.setattr(
+        scheduler.connector, "build_connector_meta", Mock(return_value=None)
+    )
+    monkeypatch.setattr(
+        coordinator,
+        "has_pending_reclamation",
+        Mock(return_value=True),
+    )
+
+    deferred_output = scheduler.schedule()
+
+    assert not deferred_output.num_scheduled_tokens
+    assert scheduler.running == [request]
+    assert request.status == RequestStatus.RUNNING
+    assert request.num_preemptions == 0
 
 
 def test_prefix_cache_query_not_inflated_by_connector_defer():
@@ -3565,7 +3674,6 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     )
     request.structured_output_request = Mock()
     request.structured_output_request.grammar = Mock(spec=StructuredOutputGrammar)
-    request.structured_output_request.grammar.accept_tokens.return_value = False
     request.status = RequestStatus.RUNNING
     request.num_computed_tokens = request.num_tokens
 
@@ -3573,10 +3681,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.connector = None
     scheduler.ec_connector = None
     scheduler.structured_output_manager = Mock()
-    scheduler.structured_output_manager.should_advance.return_value = True
-    scheduler.structured_output_manager.trim_reasoning_for_advance.side_effect = (
-        lambda request, new_token_ids: new_token_ids
-    )
+    scheduler.structured_output_manager.accept_tokens.return_value = False
     scheduler.requests = {request.request_id: request}
     scheduler.running = [request]
     scheduler.waiting = Mock()
@@ -3625,8 +3730,8 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     )
     engine_core_outputs = scheduler.update_from_output(output, model_runner_output)
 
-    request.structured_output_request.grammar.accept_tokens.assert_called_once_with(
-        request.request_id, [123]
+    scheduler.structured_output_manager.accept_tokens.assert_called_once_with(
+        request, [123]
     )
     assert request.resumable is False
     assert request.status == RequestStatus.FINISHED_ERROR
@@ -6425,3 +6530,90 @@ def test_encoder_input_skipped_when_connector_already_has_the_item(ec_role: str)
 
     assert output.num_scheduled_tokens[req_id] > 0
     assert not output.scheduled_encoder_inputs.get(req_id)
+
+
+class _RecordingGrammar:
+    """Records what reaches ``validate_tokens`` and raises on a negative id.
+
+    llguidance raises ``OverflowError`` on a negative token id, so this mirrors
+    the real failure: the tests below fail on the unpatched scheduler (the -1
+    padding reaches ``validate_tokens``) and pass once it is stripped first.
+    """
+
+    def __init__(self) -> None:
+        self.seen: list[list[int]] = []
+
+    def validate_tokens(self, tokens: list[int]) -> list[int]:
+        if any(t < 0 for t in tokens):
+            raise OverflowError("llguidance rejects negative token ids")
+        self.seen.append(list(tokens))
+        return tokens
+
+
+def _decode_ready_request(scheduler):
+    """Add one request and advance it out of prefill into decode."""
+    request = create_requests(num_requests=1, num_tokens=1)[0]
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    return request
+
+
+def test_update_draft_token_ids_strips_ngram_padding():
+    """ngram_gpu pads unfilled draft slots with -1; manager validation must
+    strip them before grammar.validate_tokens (which otherwise raises)."""
+    scheduler = create_scheduler(num_speculative_tokens=4)
+    request = _decode_ready_request(scheduler)
+
+    grammar = _RecordingGrammar()
+    request.structured_output_request = SimpleNamespace(
+        grammar=grammar, reasoning_ended=True
+    )
+
+    scheduler.update_draft_token_ids(
+        DraftTokenIds([request.request_id], [[10, 11, -1, -1]])
+    )
+
+    assert grammar.seen == [[10, 11]]
+    assert request.spec_token_ids == [10, 11]
+
+
+def test_update_draft_token_ids_in_output_strips_padding():
+    """Same guard on the output path; the -1 pad-back for the rejected count
+    is preserved (only the input to manager validation is stripped)."""
+    scheduler = create_scheduler(num_speculative_tokens=4)
+    request = _decode_ready_request(scheduler)
+
+    grammar = _RecordingGrammar()
+    request.structured_output_request = SimpleNamespace(
+        grammar=grammar, reasoning_ended=True
+    )
+
+    scheduler_output = SimpleNamespace(
+        scheduled_spec_decode_tokens={request.request_id: [0, 0, 0, 0]}
+    )
+    scheduler.update_draft_token_ids_in_output(
+        DraftTokenIds([request.request_id], [[10, 11, -1, -1]]),
+        scheduler_output,
+    )
+
+    # The grammar only saw the stripped prefix, never a -1.
+    assert grammar.seen == [[10, 11]]
+    # Two drafts were rejected (4 scheduled - 2 valid), padded back with -1.
+    assert scheduler_output.scheduled_spec_decode_tokens[request.request_id] == [
+        10,
+        11,
+        -1,
+        -1,
+    ]
+    assert scheduler_output.num_invalid_spec_tokens == {request.request_id: 2}

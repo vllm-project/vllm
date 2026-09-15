@@ -7,6 +7,7 @@ from bisect import bisect_right
 from collections.abc import (
     AsyncGenerator,
     Callable,
+    Hashable,
     Mapping,
     MutableSequence,
     Sequence,
@@ -30,7 +31,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 from transformers.models.whisper.tokenization_whisper import LANGUAGES
-from typing_extensions import Self, TypeIs
+from typing_extensions import Self, TypeIs, deprecated
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -419,23 +420,16 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
 
             yield
 
-    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
-        """
-        Implement this function to enable LoRA support
-        for the tower module of the multi-modal model.
-        Given the number of image tokens, output the number of
-        multi-modal encoder tokens.
-        """
-        ...
+    @deprecated(
+        "get_num_mm_encoder_tokens is deprecated; use get_mm_lora_token_counts instead."
+    )
+    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int: ...
 
-    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
-        """
-        Implement this function to enable LoRA support
-        for the connector module of the multi-modal model.
-        Given the number of vision tokens, output the number of
-        multi-modal connector tokens.
-        """
-        ...
+    @deprecated(
+        "get_num_mm_connector_tokens is deprecated; use "
+        "get_mm_lora_token_counts instead."
+    )
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int: ...
 
     def get_mm_lora_token_counts(
         self,
@@ -1782,9 +1776,9 @@ class SupportsMRoPE(Protocol):
             mm_features: Information about each multi-modal data item
 
         Returns:
-            Tuple of `(llm_positions, mrope_position_delta)`
-            - llm_positions: Tensor of shape `[3, num_tokens]` with T/H/W positions
-            - mrope_position_delta: Delta for position calculations
+            llm_positions: Tensor of shape `[num_dims, num_tokens]`, one row
+                per M-RoPE position channel (e.g. T/H/W).
+            mrope_position_delta: Delta for position calculations.
         """
         ...
 
@@ -1801,55 +1795,6 @@ def supports_mrope(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsMRoPE]] | TypeIs[SupportsMRoPE]:
     return isinstance(model, SupportsMRoPE)
-
-
-@runtime_checkable
-class SupportsXDRoPE(Protocol):
-    """The interface required for all models that support XD-RoPE."""
-
-    supports_xdrope: ClassVar[Literal[True]] = True
-    """
-    A flag that indicates this model supports XD-RoPE.
-
-    Note:
-        There is no need to redefine this flag if this class is in the
-        XDRope of your model class.
-    """
-
-    def get_xdrope_input_positions(
-        self,
-        input_tokens: list[int],
-        mm_features: list["MultiModalFeatureSpec"],
-    ) -> torch.Tensor:
-        """
-        Get XD-RoPE input positions and delta value for this specific model.
-
-        This method should be implemented by each model that supports XD-RoPE
-        to provide model-specific logic for computing input positions.
-
-        Args:
-            input_tokens: List of input token IDs
-            mm_features: Information about each multi-modal data item
-
-        Returns:
-            llm_positions: Tensor of shape `[xdrope_dim, num_tokens]` with
-            4D(P/W/H/T) or 3D(W/H/T) positions.
-        """
-        ...
-
-
-@overload
-def supports_xdrope(model: type[object]) -> TypeIs[type[SupportsXDRoPE]]: ...
-
-
-@overload
-def supports_xdrope(model: object) -> TypeIs[SupportsXDRoPE]: ...
-
-
-def supports_xdrope(
-    model: type[object] | object,
-) -> TypeIs[type[SupportsXDRoPE]] | TypeIs[SupportsXDRoPE]:
-    return isinstance(model, SupportsXDRoPE)
 
 
 @runtime_checkable
@@ -1924,6 +1869,11 @@ class SupportsEncoderCudaGraph(Protocol):
         - Qwen-family: slice concatenated pixel_values by cumulative
           patch offsets, subset grid_thw by indices.
         - Batched models (CLIP): index pixel_values along dim 0.
+
+        Models that configure ``EncoderCudaGraphConfig.capture_axes`` must
+        additionally store the resolved per-axis keys (one key per axis, in
+        order) under ``ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG`` in the returned
+        dict; the manager pops it before the kwargs are used elsewhere.
         """
         ...
 
@@ -1958,8 +1908,16 @@ class SupportsEncoderCudaGraph(Protocol):
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ) -> "EncoderCudaGraphCaptureInputs":
-        """Create dummy inputs and buffers for CUDA graph capture."""
+        """Create dummy inputs and buffers for CUDA graph capture.
+
+        Args:
+            axis_keys: The resolved capture-axis keys (one per axis of
+                ``EncoderCudaGraphConfig.capture_axes``) this capture is for.
+                None or empty when no capture axes are configured; models
+                without capture axes ignore it.
+        """
         ...
 
     def prepare_encoder_cudagraph_replay_buffers(

@@ -93,6 +93,8 @@ class GenerativeScoringRequest(OpenAIBaseModel):
     )
     priority: int = Field(
         default=0,
+        ge=-(2**63),
+        le=2**63 - 1,
         description=(
             "The priority of the request (lower means earlier handling; default: 0)."
         ),

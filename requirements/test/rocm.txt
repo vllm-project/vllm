@@ -134,7 +134,7 @@ cloudpickle==3.1.2
     #   tilelang
 cohere==7.0.8
     # via -r requirements/test/rocm.in
-cohere-melody==0.11.1
+cohere-melody==0.14.0
     # via -r requirements/test/rocm.in
 colorama==0.4.6
     # via
@@ -354,7 +354,7 @@ httpx==0.27.2
     #   schemathesis
 httpx2==2.12.0
     # via mcp
-huggingface-hub==1.28.0
+huggingface-hub==1.31.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt

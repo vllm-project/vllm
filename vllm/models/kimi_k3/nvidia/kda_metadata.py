@@ -270,6 +270,8 @@ class KDACheckpointMetadata:
 
 @dataclass
 class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
+    spec_token_start: int | None = None
+    non_spec_token_start: int | None = None
     flashinfer_prefill_query_start_loc: torch.Tensor | None = None
     flashinfer_prefill_seq_order: torch.Tensor | None = None
     recoverssm_commit: KDARecoverSSMCommitMetadata | None = None
@@ -422,6 +424,8 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                     spec_sequence_masks_cpu = None
 
         spec_request_indices = None
+        spec_token_start = None
+        non_spec_token_start = None
         if num_spec_decodes == 0:
             # The runner orders ordinary decodes before prefills.
             num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
@@ -517,6 +521,13 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 num_non_spec_tokens = num_prefill_tokens + num_decode_tokens
                 non_spec_token_indx = index[:num_non_spec_tokens]
                 spec_token_indx = index[num_non_spec_tokens:]
+
+                active_spec_mask = spec_sequence_masks_cpu[query_lens_cpu > 0]
+                # check if spec / non spec tokens are continuous
+                if (active_spec_mask[1:] != active_spec_mask[:-1]).sum().item() == 1:
+                    spec_first = active_spec_mask[0].item()
+                    spec_token_start = 0 if spec_first else num_non_spec_tokens
+                    non_spec_token_start = num_spec_decode_tokens if spec_first else 0
 
                 # Native spec uses one state slot per step. RecoverSSM keeps
                 # only the current checkpoint slot.
@@ -759,6 +770,8 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             spec_token_indx=spec_token_indx,
             non_spec_token_indx=non_spec_token_indx,
             num_accepted_tokens=num_accepted_tokens,
+            spec_token_start=spec_token_start,
+            non_spec_token_start=non_spec_token_start,
             flashinfer_prefill_query_start_loc=flashinfer_prefill_query_start_loc,
             flashinfer_prefill_seq_order=flashinfer_prefill_seq_order,
             recoverssm_commit=recoverssm_commit,

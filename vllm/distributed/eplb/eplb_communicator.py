@@ -34,6 +34,7 @@ from vllm.distributed.utils import is_weak_contiguous
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.torch_utils import PIN_MEMORY
 
 logger = init_logger(__name__)
 
@@ -204,7 +205,9 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
                         )
                     )
                     continue
-                cpu_tensor = torch.empty_like(tensor, device="cpu")
+                cpu_tensor = torch.empty_like(
+                    tensor, device="cpu", pin_memory=PIN_MEMORY
+                )
                 p2p_ops.append(
                     P2POp(
                         torch.distributed.irecv,

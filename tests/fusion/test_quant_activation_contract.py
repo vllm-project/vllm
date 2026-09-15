@@ -9,7 +9,12 @@ from vllm.model_executor.kernels.linear import (
     _POSSIBLE_FP8_BLOCK_KERNELS,
     _POSSIBLE_FP8_KERNELS,
     _POSSIBLE_INT8_KERNELS,
+    _POSSIBLE_MXFP8_KERNELS,
     _POSSIBLE_NVFP4_KERNELS,
+)
+from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
+    FlashInferCutedslMxfp8LinearKernel,
+    FlashInferCutlassMxfp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.nvfp4.base import (
     NvFp4LinearKernel,
@@ -37,6 +42,7 @@ from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     as_quantized_activation,
     expose_input_quant_key,
+    get_input_quant_key,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
@@ -50,6 +56,8 @@ SUPPORTING = {
     FlashInferFP8ScaledMMLinearKernel,
     FlashInferCutlassNvFp4LinearKernel,
     PerTensorTorchFP8ScaledMMLinearKernel,
+    FlashInferCutedslMxfp8LinearKernel,
+    FlashInferCutlassMxfp8LinearKernel,
 }
 
 
@@ -60,6 +68,7 @@ def _all_kernel_classes() -> list[type]:
         _POSSIBLE_FP8_BLOCK_KERNELS,
         _POSSIBLE_INT8_KERNELS,
         _POSSIBLE_NVFP4_KERNELS,
+        _POSSIBLE_MXFP8_KERNELS,
     ):
         for kernels in registry.values():
             for cls in kernels:
@@ -110,13 +119,13 @@ def test_bridge_marks_supporting_and_skips_others():
     supported = _probe(FlashInferCutlassNvFp4LinearKernel)
     layer = torch.nn.Module()
     expose_input_quant_key(layer, supported)
-    assert layer.input_quant_key == kNvfp4Dynamic
+    assert get_input_quant_key(layer) == kNvfp4Dynamic
 
     unsupported = _probe(FlashInferTrtllmNvFp4LinearKernel)
     assert unsupported.input_quant_key() is None
     layer = torch.nn.Module()
     expose_input_quant_key(layer, unsupported)
-    assert not hasattr(layer, "input_quant_key")
+    assert get_input_quant_key(layer) is None
 
 
 def test_as_quantized_activation_validates_key():

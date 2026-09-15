@@ -23,8 +23,8 @@ use serde_json::Value;
 use serde_with::{DefaultOnNull, OneOrMany, serde_as};
 use thiserror_ext::AsReport as _;
 use uuid::Uuid;
+use vllm_chat::GenerationConfigMode;
 use vllm_chat::multimodal::MmLimitPerPrompt;
-use vllm_chat::{GenerationConfigMode, ReasoningParserFactory};
 use vllm_engine_core_client::TransportMode;
 use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
@@ -110,6 +110,9 @@ pub enum BenchCommand {
 pub struct RenderArgs {
     /// Model identifier or local model directory containing tokenizer files.
     model: String,
+    /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
+    #[arg(long)]
+    revision: Option<String>,
     /// HTTP bind host.
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
@@ -139,9 +142,10 @@ pub struct RenderArgs {
     /// How message content is exposed to the chat template.
     #[arg(long, default_value_t)]
     chat_template_content_format: ChatTemplateContentFormatOption,
-    /// Maximum model context length used for request validation.
+    /// Maximum model context length used for request validation. When not set,
+    /// prompt-length validation is skipped and the engine enforces its own limit in later stage.
     #[arg(long)]
-    max_model_len: u32,
+    max_model_len: Option<u32>,
     /// Maximum accepted logprobs count; -1 disables the cap.
     #[arg(long, value_parser = clap::value_parser!(i32).range(-1..), allow_negative_numbers = true)]
     max_logprobs: Option<i32>,
@@ -156,6 +160,7 @@ impl RenderArgs {
 
         RenderConfig {
             model: self.model,
+            revision: self.revision,
             served_model_name: self.served_model_name,
             host: self.host,
             port: self.port,
@@ -193,6 +198,11 @@ pub struct SharedRuntimeArgs {
     /// Model identifier or local model directory used for backend loading and
     /// public model ID.
     pub model: String,
+
+    /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
+    #[arg(long)]
+    #[serde(default)]
+    pub revision: Option<String>,
 
     /// The source of generation-config sampling defaults. `"auto"` loads the
     /// model's defaults, while `"vllm"` uses vLLM's neutral defaults.
@@ -318,6 +328,15 @@ pub struct SharedRuntimeArgs {
     )]
     #[serde(default)]
     pub enable_request_id_headers: bool,
+
+    /// Register the scale-out `/inference/v1/generate` endpoint.
+    #[arg(
+        long,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default)]
+    pub enable_scale_out: bool,
 
     /// If provided, the server will require one of these keys to be presented
     /// in the Authorization header.
@@ -480,6 +499,7 @@ impl SharedRuntimeArgs {
                 None => CoordinatorMode::None,
             },
             model: self.model,
+            revision: self.revision,
             generation_config: self.generation_config,
             served_model_name: self.served_model_name,
             listener_mode: HttpListenerMode::InheritedFd { fd: listen_fd },
@@ -535,6 +555,7 @@ impl SharedRuntimeArgs {
             },
             coordinator_mode: CoordinatorMode::MaybeInProc,
             model: self.model,
+            revision: self.revision,
             generation_config: self.generation_config,
             served_model_name: self.served_model_name,
             listener_mode,
@@ -565,6 +586,7 @@ impl SharedRuntimeArgs {
             enable_log_requests: self.enable_log_requests,
             enable_prompt_tokens_details: self.enable_prompt_tokens_details,
             enable_request_id_headers: self.enable_request_id_headers,
+            enable_scale_out: self.enable_scale_out,
         }
     }
 
@@ -742,6 +764,7 @@ impl ServeArgs {
 
         self.managed_engine.clone().into_config(
             self.runtime.model.clone(),
+            self.runtime.revision.clone(),
             self.runtime.max_logprobs,
             profiler_config,
             reasoning_parser.as_deref(),
@@ -755,13 +778,7 @@ impl ServeArgs {
 }
 
 fn effective_engine_reasoning_parser(selection: &ParserSelection, model: &str) -> Option<String> {
-    match selection {
-        ParserSelection::Auto => ReasoningParserFactory::global()
-            .resolve_name_for_model(model)
-            .map(str::to_string),
-        ParserSelection::None => None,
-        ParserSelection::Explicit(name) => Some(name.clone()),
-    }
+    selection.resolve_reasoning_name(model).map(str::to_owned)
 }
 
 /// Allocate fresh IPC endpoints for one managed frontend instance.

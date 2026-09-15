@@ -15,7 +15,7 @@ requiring a real NIXL agent or network:
 * The worker matches D registrations against P finished blocks (both
   scenario directions) and forwards non-PUSH_REG NIXL notifs to the main
   thread's ``_get_new_notifs``.
-* ``get_finished`` enqueues evictions for the writer.
+* ``get_transfer_results`` enqueues evictions for the writer.
 """
 
 from __future__ import annotations
@@ -32,6 +32,9 @@ from unittest.mock import MagicMock, patch
 import msgspec
 import pytest
 
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorTransferResults,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
     NixlAgentMetadata,
@@ -347,16 +350,27 @@ class _StubWriterWorker(NixlPushConnectorWorker):
 
         # Base worker fields touched by start_load_kv / _get_new_notifs.
         w._recving_metadata = {}
+        w._pending_recv_notifs = {}
+        w._failed_recv_reqs = queue.Queue()
+        w._recv_failures = set()
         w._recving_transfers = defaultdict(list)
         w._reqs_to_process = set()
         w._reqs_to_send = {}
         w.consumer_notification_counts_by_req = defaultdict(int)
         w.tp_rank = 0
         w.pcp_rank = 0
+        w.pcp_dcp_sharded = False
         w.world_size = 1
         w.engine_id = "test-decode-engine"
         w._remote_agents = {}
+        w._handshake_lock = threading.RLock()
         w._physical_blocks_per_logical_kv_block = 1
+        w._uses_region_group_mapping = False
+        w.region_group_ids = [0]
+        w.dst_region_num_blocks = {}
+        w.dst_region_group_ids = {}
+        w.dst_uses_region_group_mapping = {}
+        w.dst_region_mem_types = {}
         # Single non-hybrid attention group, matching the stub block id lists.
         w._has_mamba = False
         w._is_csa_linear = False
@@ -404,6 +418,86 @@ def _registration_data(
         "remote_port": remote_port,
         "remote_tp_size": remote_tp_size,
     }
+
+
+class TestPushWriterRegSend:
+    """``_do_send_reg_notif``: the PUSH_REG goes to every handshaked agent of
+    the P engine, and the agent map is read under ``_handshake_lock`` so the
+    send can't race the handshake done-callback's insert or a concurrent
+    stale-engine eviction (X1)."""
+
+    def _reg_send_worker(self) -> tuple[_StubWriterWorker, list]:
+        w = _StubWriterWorker.fresh()
+        w.nixl_wrapper = MagicMock()
+        failures: list = []
+        w._handle_failed_transfer = lambda *a: failures.append(a)
+        return w, failures
+
+    def test_sends_to_all_agents_with_prefix_and_payload(self):
+        w, failures = self._reg_send_worker()
+        w._remote_agents["prefill-engine"] = {(0, 0): "agent-0", (0, 1): "agent-1"}
+        rd = _registration_data("req-1")
+
+        w._do_send_reg_notif("req-1", rd)
+
+        assert failures == []
+        calls = w.nixl_wrapper.send_notif.call_args_list
+        assert len(calls) == 2
+        assert {c.args[0] for c in calls} == {"agent-0", "agent-1"}
+        for call in calls:
+            notif = call.kwargs["notif_msg"]
+            assert notif.startswith(PUSH_REG_NOTIF_PREFIX)
+            # (Tuples decode back as lists, so compare identity fields.)
+            decoded = msgspec.msgpack.decode(notif[len(PUSH_REG_NOTIF_PREFIX) :])
+            assert decoded["request_id"] == "req-1"
+            assert decoded["decode_engine_id"] == rd["decode_engine_id"]
+            assert decoded["remote_engine_id"] == rd["remote_engine_id"]
+            assert decoded["local_block_ids"] == [
+                list(group) for group in rd["local_block_ids"]
+            ]
+
+    def test_queues_failed_request_when_engine_not_handshaked(self):
+        w, failures = self._reg_send_worker()
+
+        w._do_send_reg_notif("req-1", _registration_data("req-1"))
+
+        assert failures == []
+        assert w._failed_recv_reqs.get_nowait() == "req-1"
+        assert w._failed_recv_reqs.empty()
+        w.nixl_wrapper.send_notif.assert_not_called()
+
+    def test_agent_read_is_serialized_with_handshake_lock(self):
+        """While another thread holds ``_handshake_lock`` (as the handshake
+        done-callback does while writing ``_remote_agents``), the writer's
+        check-then-send must not run ahead of the critical section."""
+        w, failures = self._reg_send_worker()
+        w._remote_agents["prefill-engine"] = {(0, 0): "agent-0"}
+        rd = _registration_data("req-1")
+
+        w._handshake_lock.acquire()
+        done = threading.Event()
+        errors: list[BaseException] = []
+
+        def _send():
+            try:
+                w._do_send_reg_notif("req-1", rd)
+            except BaseException as e:  # pragma: no cover
+                errors.append(e)
+            finally:
+                done.set()
+
+        t = threading.Thread(target=_send)
+        t.start()
+        assert not done.wait(timeout=0.2)
+        w.nixl_wrapper.send_notif.assert_not_called()
+        assert failures == []
+
+        w._handshake_lock.release()
+        assert done.wait(timeout=2.0)
+        t.join(timeout=2.0)
+        assert errors == []
+        assert failures == []
+        assert w.nixl_wrapper.send_notif.call_count == 1
 
 
 class TestPushWriterMatching:
@@ -534,9 +628,11 @@ class TestPushWriterStartLoadKv:
         assert w._push_writer_wake.is_set()
         assert w.start_push_calls == []
 
-    def test_noncanonical_pcp_rank_skips_producer_work(self):
+    @pytest.mark.parametrize("sharded", [False, True])
+    def test_noncanonical_pcp_rank_only_pushes_distinct_shards(self, sharded):
         w = _StubWriterWorker.fresh()
         w.pcp_rank = 1
+        w.pcp_dcp_sharded = sharded
         w._send_heartbeats = MagicMock()
 
         meta = NixlConnectorMetadata()
@@ -546,11 +642,11 @@ class TestPushWriterStartLoadKv:
 
         w.start_load_kv(meta)
 
-        assert w._finished_blocks_inbox.empty()
-        assert "req" not in w._reqs_to_process
-        assert "req" not in w._reqs_to_send
-        assert not w._push_writer_wake.is_set()
-        w._send_heartbeats.assert_not_called()
+        assert w._finished_blocks_inbox.empty() is (not sharded)
+        assert ("req" in w._reqs_to_process) is sharded
+        assert ("req" in w._reqs_to_send) is sharded
+        assert w._push_writer_wake.is_set() is sharded
+        assert w._send_heartbeats.called is sharded
 
 
 # The P→D handshake must run on the base worker's background executor, never
@@ -713,6 +809,31 @@ def test_stale_engine_evicted_on_push():
     w.nixl_wrapper.remove_remote_agent.assert_called_once_with("agent-D-old")
 
 
+def test_cleanup_remote_engine_pops_under_handshake_lock():
+    """Regression (X1): eviction must not remove ``_remote_agents`` entries
+    while another thread is inside the lock's critical section (e.g. the
+    push writer reading the map to send a registration)."""
+    w = _eviction_worker(engine_ttl=30.0)
+    w._remote_agents["D-old"] = {(0, 0): "agent-D-old"}
+
+    w._handshake_lock.acquire()
+    done = threading.Event()
+
+    def _cleanup():
+        w._cleanup_remote_engine("D-old")
+        done.set()
+
+    t = threading.Thread(target=_cleanup)
+    t.start()
+    assert "D-old" in w._remote_agents
+
+    w._handshake_lock.release()
+    assert done.wait(timeout=2.0)
+    t.join(timeout=2.0)
+    assert "D-old" not in w._remote_agents
+    w.nixl_wrapper.remove_remote_agent.assert_called_once_with("agent-D-old")
+
+
 class TestPushWriterNotifs:
     def test_get_new_notifs_processes_forwarded_completion_notif(self):
         """Non-PUSH_REG notifs forwarded by the writer thread are drained
@@ -736,21 +857,19 @@ class TestPushWriterNotifs:
         assert notified == set()
         assert request_id in w._recving_transfers
 
-    def test_get_finished_evicts_completed_state(self):
-        """``get_finished`` should enqueue evictions and wake the writer."""
+    def test_get_transfer_results_evicts_completed_state(self):
+        """Transfer completion should enqueue evictions and wake the writer."""
         w = _StubWriterWorker.fresh()
 
-        # Stub the base ``get_finished`` to return one done_sending entry.
-        # Patch via the MRO's parent class.
         with patch.object(
             NixlPushConnectorWorker.__mro__[1],
-            "get_finished",
-            return_value=({"req-done"}, set()),
+            "get_transfer_results",
+            return_value=KVConnectorTransferResults(finished_sending={"req-done"}),
         ):
-            done_sending, done_recving = w.get_finished()
+            results = w.get_transfer_results()
 
-        assert "req-done" in done_sending
-        assert done_recving == set()
+        assert results.finished_sending == {"req-done"}
+        assert results.finished_recving == set()
         # Eviction enqueued for the writer.
         evicted = []
         while True:
@@ -760,6 +879,67 @@ class TestPushWriterNotifs:
                 break
         assert evicted == ["req-done"]
         assert w._push_writer_wake.is_set()
+
+    @staticmethod
+    def _pollable_worker() -> _StubWriterWorker:
+        """Stub worker with the extra base-worker state the real
+        ``get_transfer_results`` needs to poll ``_sending_transfers``."""
+        w = _StubWriterWorker.fresh()
+        w.transfer_topo = MagicMock()
+        w.nixl_wrapper = MagicMock()
+        w.xfer_stats = MagicMock()
+        w._log_failure = MagicMock()  # type: ignore[method-assign]
+        w._invalid_block_ids = queue.Queue()
+        w._pending_recv_notifs = {}
+        w._replicated_pcp_done_sending = set()
+        w.use_host_buffer = False
+        return w
+
+    def _make_sending_req(self, w: _StubWriterWorker) -> str:
+        request_id = "req-send-1"
+        w._sending_transfers[request_id] = [101, 102]
+        w._reqs_to_send[request_id] = time.perf_counter() + 60
+        w._reqs_to_process.add(request_id)
+        return request_id
+
+    def test_failed_push_send_is_not_reported_done_sending(self):
+        """A failed P-side WRITE must not surface as finished sending.
+
+        Reporting it would free P-side blocks as if the KV had been
+        delivered while D still waits for the data; the request must be
+        left to the lease / watchdog instead.
+        """
+        w = self._pollable_worker()
+        request_id = self._make_sending_req(w)
+        w.nixl_wrapper.check_xfer_state.side_effect = ["ERR", "DONE"]
+
+        results = w.get_transfer_results()
+
+        assert request_id not in results.finished_sending
+        # Lease tracking is preserved so the watchdog can reschedule.
+        assert request_id in w._reqs_to_send
+        assert request_id in w._reqs_to_process
+        # Both handles were still cleaned up.
+        assert request_id not in w._sending_transfers
+
+    def test_completed_push_send_waits_for_consumer_notif(self):
+        """P-side sends are completed by consumer notifs / lease expiry,
+        not by local WRITE-handle completion."""
+        w = self._pollable_worker()
+        request_id = self._make_sending_req(w)
+        w.nixl_wrapper.check_xfer_state.return_value = "DONE"
+
+        results = w.get_transfer_results()
+
+        assert request_id not in results.finished_sending
+        assert request_id in w._reqs_to_send
+        assert request_id not in w._sending_transfers
+
+        # The consumer notif is what completes the send.
+        w._pending_completion_notifs.put(f"{request_id}:1".encode())
+        results = w.get_transfer_results()
+        assert request_id in results.finished_sending
+        assert request_id not in w._reqs_to_send
 
 
 # ----------------------------------------------------------------- #
@@ -922,19 +1102,21 @@ class TestPushWriterNegative:
         assert len(w._pending_d_registrations) == 1
         assert w.start_push_calls == []
 
-    def test_get_finished_enqueues_eviction_for_each_done_request(self):
-        """``get_finished`` must enqueue an eviction for every request
+    def test_get_transfer_results_enqueues_each_completed_request(self):
+        """``get_transfer_results`` must enqueue every completed request
         in ``done_sending`` so the writer can drop stale matching state.
         Unlike the happy-path test, this verifies the *cardinality*: N
         completed requests -> N evictions, in order."""
         w = _StubWriterWorker.fresh()
         with patch.object(
             NixlPushConnectorWorker.__mro__[1],
-            "get_finished",
-            return_value=({"req-1", "req-2", "req-3"}, set()),
+            "get_transfer_results",
+            return_value=KVConnectorTransferResults(
+                finished_sending={"req-1", "req-2", "req-3"}
+            ),
         ):
-            done_sending, _ = w.get_finished()
-        assert done_sending == {"req-1", "req-2", "req-3"}
+            results = w.get_transfer_results()
+        assert results.finished_sending == {"req-1", "req-2", "req-3"}
 
         evicted: list[str] = []
         while True:
@@ -944,22 +1126,47 @@ class TestPushWriterNegative:
                 break
         assert sorted(evicted) == ["req-1", "req-2", "req-3"]
 
-    def test_get_finished_with_no_completions_does_not_enqueue_eviction(self):
+    def test_empty_transfer_results_do_not_enqueue_eviction(self):
         """If there's nothing newly done, no eviction should be enqueued.
         The wake event IS still set because ``get_finished`` always wakes
         the writer to drain notifs."""
         w = _StubWriterWorker.fresh()
         with patch.object(
             NixlPushConnectorWorker.__mro__[1],
-            "get_finished",
-            return_value=(set(), set()),
+            "get_transfer_results",
+            return_value=KVConnectorTransferResults(),
         ):
-            done_sending, done_recving = w.get_finished()
-        assert done_sending == set()
-        assert done_recving == set()
+            results = w.get_transfer_results()
+        assert results.finished_sending == set()
+        assert results.finished_recving == set()
         assert w._evict_finished_inbox.qsize() == 0
         # Wake set so the writer drains NIXL notifs even when idle.
         assert w._push_writer_wake.is_set()
+
+    def test_failed_push_transfer_does_not_evict_writer_state(self):
+        w = _StubWriterWorker.fresh()
+        w.nixl_wrapper = MagicMock()
+        w.nixl_wrapper.check_xfer_state.return_value = "ERR"
+        w.xfer_stats = MagicMock()
+        w._log_failure = MagicMock()
+        w._sending_transfers["req-failed"] = [17]
+        w._reqs_to_send["req-failed"] = time.perf_counter() + 30
+        w._reqs_to_process.add("req-failed")
+
+        with patch.object(
+            NixlPushConnectorWorker.__mro__[1],
+            "get_transfer_results",
+            return_value=KVConnectorTransferResults(),
+        ):
+            results = w.get_transfer_results()
+
+        assert results.finished_sending == set()
+        assert results.finished_recving == set()
+        assert "req-failed" not in w._sending_transfers
+        assert "req-failed" in w._reqs_to_send
+        assert "req-failed" in w._reqs_to_process
+        assert w._evict_finished_inbox.empty()
+        w.nixl_wrapper.release_xfer_handle.assert_called_once_with(17)
 
     def test_get_new_notifs_unknown_request_is_logged_and_skipped(self, caplog):
         """A completion notif for a request the worker doesn't know
@@ -1154,6 +1361,7 @@ class TestPushWriterMlaReplication:
             )
         }
         w._logical_to_kernel_block_ids = lambda block_ids, ratio: block_ids
+        w.dst_region_group_ids[engine_id] = [0]
         w.dst_xfer_side_handles = {engine_id: {r: 1000 + r for r in d_ranks}}
         w.src_xfer_handles_by_block_size = {16: 2000}
         w._remote_agents = {engine_id: {(0, r): f"agent-{r}" for r in d_ranks}}
@@ -1234,6 +1442,8 @@ class TestPushWriterMlaReplication:
             )
         }
         w._logical_to_kernel_block_ids = lambda block_ids, ratio: block_ids
+        w.region_group_ids = [0, 1, 2, 3]
+        w.dst_region_group_ids[engine_id] = [0, 1, 2, 3]
         w.dst_xfer_side_handles = {engine_id: {0: 1000, 1: 1001}}
         w.src_xfer_handles_by_tp_ratio = {(-2, 16): [2000, 2001]}
 
@@ -1314,6 +1524,15 @@ class TestPushPrefixCaching:
             )
         }
         w.dst_num_blocks = {engine_id: 10_000, w.engine_id: 10_000}
+        w.dst_region_num_blocks = {
+            engine_id: [10_000],
+            w.engine_id: [10_000],
+        }
+        w.dst_region_group_ids = {engine_id: [0], w.engine_id: [0]}
+        w.dst_uses_region_group_mapping = {
+            engine_id: False,
+            w.engine_id: False,
+        }
         w.dst_xfer_side_handles = {engine_id: {0: 5000}}
         w.src_xfer_handles_by_block_size = {16: 2000}
 

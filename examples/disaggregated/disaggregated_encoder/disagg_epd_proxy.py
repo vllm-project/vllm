@@ -22,7 +22,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
-import io
 import itertools
 import json
 import logging
@@ -34,10 +33,10 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import aiohttp
-import pybase64 as base64
+import msgspec
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 ###############################################################################
 # FastAPI app & global state
@@ -125,19 +124,6 @@ def content_uuid(item: dict) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
-def _b64_tensor(values: list) -> str:
-    import torch
-
-    buf = io.BytesIO()
-    flat = [v for item in values for v in (item if isinstance(item, list) else [item])]
-    # Floats stay float64 so timestamp strings format exactly as the
-    # encoder computed them.
-    dtype = torch.float64 if any(isinstance(v, float) for v in flat) else None
-    # Downstream stacks per item, so hand over a flat vector.
-    torch.save(torch.tensor(flat, dtype=dtype), buf)
-    return base64.b64encode(buf.getvalue()).decode()
-
-
 def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
     """Replace each media item with a metadata-only reference for the decoder.
 
@@ -172,7 +158,15 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
             # Whatever keys the encoder reported are the metadata its model
             # declared as needed to size the placeholder range; the proxy does
             # not need to know their names.
-            metadata = {k: _b64_tensor(v) for k, v in meta.items()}
+            # Downstream stacks per item; keep the existing per-item vector shape.
+            metadata = {
+                k: [
+                    x
+                    for item in v
+                    for x in (item if isinstance(item, list) else [item])
+                ]
+                for k, v in meta.items()
+            }
             if not metadata or not item_uuid:
                 # Nothing to size the placeholder range with. A processor cache
                 # hit is not a cause on its own: with the default `lru` type the
@@ -271,7 +265,7 @@ async def fanout_encoder_primer(
     for idx, (item, target_url) in enumerate(zip(mm_items, url_cycle)):
         # Derive a *child* request id:  <parent>:<index>:<random-short>
         child_req_id = f"{req_id}:{idx}:{uuid.uuid4().hex[:6]}"
-        headers = {"x-request-id": child_req_id}
+        headers = {"x-request-id": child_req_id, "Content-Type": "application/json"}
 
         # With --no-rewrite the decoder still receives the raw image and derives
         # the cache key by hashing it, so the encoder must do the same -- passing
@@ -284,7 +278,6 @@ async def fanout_encoder_primer(
         item_transfer_ids[idx] = transfer_id
 
         encoder_req = {
-            # You *may* need to keep additional fields
             "model": orig_request.get("model"),
             "messages": [
                 {
@@ -298,6 +291,14 @@ async def fanout_encoder_primer(
             # once the prompt is encoded and its embeddings are published.
             "stream": False,
         }
+        for key in (
+            "mm_processor_kwargs",
+            "media_io_kwargs",
+            "priority",
+            "session_id",
+        ):
+            if key in orig_request:
+                encoder_req[key] = orig_request[key]
         if consumer_zmq is not None:
             # No mm_hash here on purpose. The encoder's own
             # `mm_features[i].identifier` is derived from the uuid *and* the
@@ -314,7 +315,7 @@ async def fanout_encoder_primer(
         tasks.append(
             encode_session.post(
                 f"{target_url}/v1/chat/completions",
-                json=encoder_req,
+                data=msgspec.json.encode(encoder_req),
                 headers=headers,
             )
         )
@@ -354,7 +355,7 @@ async def fanout_encoder_primer(
         # The encoder reports each mm_hash's metadata (e.g. the grid) here,
         # keyed by the same uuid this proxy assigned above.
         try:
-            params = (await r.json()).get("ec_transfer_params") or {}
+            params = msgspec.json.decode(await r.read()).get("ec_transfer_params") or {}
         except Exception:
             logger.warning("[%s] Could not read encoder metadata #%d", req_id, idx)
             params = {}
@@ -384,7 +385,7 @@ async def fanout_encoder_primer(
                 # connector's own handle on the published embedding (for NIXL,
                 # peer_host/peer_port/size_bytes). The decoder's connector
                 # looks it up by mm_hash on the request, so carry it through.
-                ec_params[item_uuids.get(idx, ec_mm_hash)] = reported
+                ec_params[ec_mm_hash] = reported
                 if NO_REWRITE and consumer_zmq is not None:
                     ec_params.setdefault("ec_items", []).append(
                         {"mm_hash": ec_mm_hash, "transfer_id": item_transfer_ids[idx]}
@@ -414,7 +415,7 @@ async def maybe_prefill(
 
         prefill_response = await process_prefill_stage(req_data, p_url, req_id)
         # for nixl connector to facilitate kv transfer...
-        prefill_response_json = await prefill_response.json()
+        prefill_response_json = msgspec.json.decode(await prefill_response.read())
         kv_transfer_params = prefill_response_json.get("kv_transfer_params", {})
         if kv_transfer_params:
             return {**req_data, "kv_transfer_params": kv_transfer_params}
@@ -446,10 +447,12 @@ async def process_prefill_stage(
     if "stream_options" in prefill_request:
         del prefill_request["stream_options"]
 
-    headers = {"x-request-id": req_id}
+    headers = {"x-request-id": req_id, "Content-Type": "application/json"}
     try:
         prefill_response = await prefill_session.post(
-            f"{p_url}/v1/chat/completions", json=prefill_request, headers=headers
+            f"{p_url}/v1/chat/completions",
+            data=msgspec.json.encode(prefill_request),
+            headers=headers,
         )
         prefill_response.raise_for_status()
 
@@ -605,7 +608,7 @@ async def forward_non_stream(
     d_url: str,
     consumer_zmq: str | None,
     dp_rank: int | None = None,
-) -> dict:
+) -> Response:
     try:
         for attempt in range(DECODE_RETRIES + 1):
             _t0 = time.perf_counter()
@@ -615,12 +618,14 @@ async def forward_non_stream(
             _t2 = time.perf_counter()
 
             logger.info("[%s] Forwarding to decode: %s", req_id, d_url)
-            headers = {"x-request-id": req_id}
+            headers = {"x-request-id": req_id, "Content-Type": "application/json"}
             if dp_rank is not None:
                 headers["X-data-parallel-rank"] = str(dp_rank)
 
             async with decode_session.post(
-                f"{d_url}/v1/chat/completions", json=prepared, headers=headers
+                f"{d_url}/v1/chat/completions",
+                data=msgspec.json.encode(prepared),
+                headers=headers,
             ) as resp:
                 if resp.status >= 400:
                     detail = await resp.text()
@@ -644,7 +649,7 @@ async def forward_non_stream(
                         detail,
                     )
                     raise HTTPException(status_code=resp.status, detail=detail)
-                out = await resp.json()
+                out = await resp.read()
                 _t3 = time.perf_counter()
                 logger.info(
                     "STAGE %s encode=%.1f rewrite=%.1f decode=%.1f total=%.1f "
@@ -656,7 +661,15 @@ async def forward_non_stream(
                     (_t3 - _t0) * 1e3,
                     attempt,
                 )
-                return out
+                return Response(
+                    content=out,
+                    status_code=resp.status,
+                    headers={
+                        "Content-Type": resp.headers.get(
+                            "Content-Type", "application/json"
+                        )
+                    },
+                )
         raise HTTPException(status_code=500, detail="Decode failed after re-encoding")
 
     except HTTPException:
@@ -674,7 +687,7 @@ async def forward_stream(
     d_url: str,
     consumer_zmq: str | None,
     dp_rank: int | None = None,
-) -> AsyncIterator[str]:
+) -> AsyncIterator[bytes]:
     try:
         for attempt in range(DECODE_RETRIES + 1):
             _t0 = time.perf_counter()
@@ -684,14 +697,14 @@ async def forward_stream(
             _t2 = time.perf_counter()
 
             logger.info("[%s] Starting streaming from decode: %s", req_id, d_url)
-            headers = {"x-request-id": req_id}
+            headers = {"x-request-id": req_id, "Content-Type": "application/json"}
             if dp_rank is not None:
                 headers["X-data-parallel-rank"] = str(dp_rank)
 
             _first = None
             async with decode_session.post(
                 f"{d_url}/v1/chat/completions",
-                json=prepared,
+                data=msgspec.json.encode(prepared),
                 headers=headers,
             ) as resp:
                 # Retry only before the first chunk: once anything reached the
@@ -708,11 +721,11 @@ async def forward_stream(
                     )
                     continue
                 resp.raise_for_status()
-                async for chunk in resp.content.iter_chunked(1024):
+                async for chunk in resp.content.iter_any():
                     if chunk:
                         if _first is None:
                             _first = time.perf_counter()
-                        yield chunk.decode("utf-8", errors="ignore")
+                        yield chunk
             _t3 = time.perf_counter()
 
             logger.info(
@@ -746,7 +759,7 @@ async def forward_stream(
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     try:
-        req_data = await request.json()
+        req_data = msgspec.json.decode(await request.body())
         req_id = request.headers.get("x-request-id", str(uuid.uuid4()))
 
         e_urls = app.state.e_urls  # we want the full list for fan-out
@@ -771,10 +784,9 @@ async def chat_completions(request: Request):
                 ),
                 media_type="text/event-stream",
             )
-        result = await forward_non_stream(
+        return await forward_non_stream(
             req_data, req_id, e_urls, p_url, d_url, consumer_zmq, dp_rank
         )
-        return JSONResponse(content=result)
 
     except HTTPException:
         raise

@@ -633,13 +633,21 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
         if self.use_replayssm and not self.use_flashinfer_replayssm and num_decodes > 0:
             decode_base_cpu = common_attn_metadata.replayssm_decode_base_cpu
-            num_computed_tokens_cpu = common_attn_metadata._num_computed_tokens_cpu
-            if decode_base_cpu is None or num_computed_tokens_cpu is None:
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+            async_spec_decode = (
+                self.vllm_config.scheduler_config.async_scheduling
+                and self.vllm_config.speculative_config is not None
+            )
+            if decode_base_cpu is None or seq_lens_cpu is None or async_spec_decode:
                 raise ValueError(
-                    "--use-replayssm requires CPU decode-base and "
-                    "computed-token counts to derive decode write positions"
+                    "--use-replayssm requires exact CPU sequence lengths and "
+                    "decode-base counts to derive decode write positions"
                 )
-            num_computed_d = num_computed_tokens_cpu[:num_decodes]
+            query_lens_cpu = (
+                common_attn_metadata.query_start_loc_cpu[1 : num_decodes + 1]
+                - common_attn_metadata.query_start_loc_cpu[:num_decodes]
+            )
+            num_computed_d = seq_lens_cpu[:num_decodes] - query_lens_cpu
             decode_base_d = decode_base_cpu[:num_decodes]
             align_mode = self.vllm_config.cache_config.mamba_cache_mode == "align"
             block_size = self.kv_cache_spec.block_size
@@ -656,10 +664,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             # write_pos counts decode steps since the ring's last full-state
             # write (the anchor), so a resumed request re-anchors correctly.
             decode_steps_cpu = num_computed_d - effective_base
-            query_lens_cpu = (
-                common_attn_metadata.query_start_loc_cpu[1 : num_decodes + 1]
-                - common_attn_metadata.query_start_loc_cpu[:num_decodes]
-            )
             valid_decode_rows = query_lens_cpu > 0
             # A single-token prefill row replayed as decode (query_len==1 with
             # prior state) has decode_steps < 0; force it to a one-token flush

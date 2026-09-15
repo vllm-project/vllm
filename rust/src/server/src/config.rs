@@ -55,6 +55,8 @@ pub struct ApiServerOptions {
     pub enable_prompt_tokens_details: bool,
     /// When `true`, set `X-Request-Id` on every HTTP response.
     pub enable_request_id_headers: bool,
+    /// When `true`, register the scale-out `/inference/v1/generate` route.
+    pub enable_scale_out: bool,
 }
 
 /// CORS settings mirroring Python's `CORSMiddleware`; the default is permissive.
@@ -210,6 +212,8 @@ pub struct Config {
     pub coordinator_mode: CoordinatorMode,
     /// Backend model identifier used for engine-core loading.
     pub model: String,
+    /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
+    pub revision: Option<String>,
     /// Which generation-config sampling defaults to inherit.
     pub generation_config: GenerationConfigMode,
     /// Model name(s) exposed to clients via the OpenAI API. When non-empty,

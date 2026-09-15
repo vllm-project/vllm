@@ -36,6 +36,7 @@ from .inputs import (
     VideoItem,
 )
 from .media import MediaWithBytes
+from .video import DecodedFrames
 
 _T = TypeVar("_T")
 _I = TypeVar("_I")
@@ -547,6 +548,9 @@ class MultiModalDataParser:
     Args:
         target_sr (float, optional): Enables automatic resampling of audio
             items to the model's expected sampling rate.
+        audio_resample_method (str): Backend used for the resampling above.
+            Defaults to torchaudio; models with specific needs may override
+            (e.g. phi4mm uses scipy).
         target_channels (int, optional): Target number of audio channels.
             If provided, normalizes audio to this many channels (e.g., 1 for mono).
             If None, audio channels are passed through unchanged.
@@ -602,7 +606,9 @@ class MultiModalDataParser:
         *,
         target_sr: float | None = None,
         target_channels: int | None = None,
-        audio_resample_method: Literal["pyav", "scipy", "soxr"] = "pyav",
+        audio_resample_method: Literal["pyav", "scipy", "soxr", "torchaudio"] = (
+            "torchaudio"
+        ),
         video_needs_metadata: bool = False,
         expected_hidden_size: int | None = None,
         allow_missing_mm_embeddings: bool = False,
@@ -648,7 +654,7 @@ class MultiModalDataParser:
     def _get_video_with_metadata(
         self,
         video: VideoItem,
-    ) -> tuple[np.ndarray | MediaWithBytes[np.ndarray], dict[str, Any] | None]:
+    ) -> tuple[DecodedFrames | MediaWithBytes[DecodedFrames], dict[str, Any] | None]:
         if isinstance(video, MediaWithBytes):
             new_video, metadata = self._get_video_with_metadata(video.media)
             return MediaWithBytes(new_video, video.original_bytes), metadata
@@ -656,10 +662,11 @@ class MultiModalDataParser:
             return video
         if isinstance(video, list):
             return np.array(video), None
-        if isinstance(video, np.ndarray):
+        if isinstance(video, (np.ndarray, torch.Tensor)):
+            # Tensors pass through untouched: HF video processors accept them
+            # directly, and device tensors (e.g. NVDEC-decoded frames) must
+            # stay on-device to avoid a D2H round-trip.
             return video, None
-        if isinstance(video, torch.Tensor):
-            return video.numpy(), None
 
         assert_never(video)
 
@@ -673,7 +680,7 @@ class MultiModalDataParser:
         if self.is_embeddings(data):
             return AudioEmbeddingItems(data, self.expected_hidden_size)
 
-        data_items: list[AudioItem]
+        data_items: list[AudioItem | None]
         if (
             (is_list_of(data, float) and len(data) > 0)
             or (isinstance(data, (np.ndarray, torch.Tensor)) and data.ndim == 1)
@@ -685,8 +692,13 @@ class MultiModalDataParser:
         else:
             data_items = data  # type: ignore[assignment]
 
-        new_audios = list[np.ndarray]()
+        new_audios = list[np.ndarray | None]()
         for data_item in data_items:
+            # Requests can omit audio samples when reusing a cached UUID.
+            if data_item is None:
+                new_audios.append(None)
+                continue
+
             audio, orig_sr = self._get_audio_with_sr(data_item)
             if orig_sr is None:
                 new_audio = audio
@@ -741,8 +753,14 @@ class MultiModalDataParser:
             return VideoEmbeddingItems(data, self.expected_hidden_size)
 
         data_items: list[VideoItem]
-        if (is_list_of(data, PILImage.Image) and len(data) > 0) or (
-            isinstance(data, (np.ndarray, torch.Tensor)) and data.ndim == 4
+        if (
+            (is_list_of(data, PILImage.Image) and len(data) > 0)
+            or (
+                is_list_of(data, (np.ndarray, torch.Tensor), check="all")
+                and len(data) > 0
+                and all(item.ndim == 3 for item in data)
+            )
+            or (isinstance(data, (np.ndarray, torch.Tensor)) and data.ndim == 4)
         ):
             data_items = [data]
         elif isinstance(data, (np.ndarray, torch.Tensor)):
@@ -753,9 +771,9 @@ class MultiModalDataParser:
             data_items = data  # type: ignore[assignment]
 
         new_videos = list[
-            np.ndarray
-            | MediaWithBytes[np.ndarray]
-            | tuple[np.ndarray | MediaWithBytes[np.ndarray], dict[str, Any]]
+            DecodedFrames
+            | MediaWithBytes[DecodedFrames]
+            | tuple[DecodedFrames | MediaWithBytes[DecodedFrames], dict[str, Any]]
             | None
         ]()
         metadata_lst: list[dict[str, Any] | None] = []

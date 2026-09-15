@@ -336,6 +336,7 @@ class LoRAModelManager:
             "Activating LoRA. int id: %d, slot index: %d", lora_model.id, index
         )
         self.lora_index_to_id[index] = lora_model.id
+        num_lora_weights_applied = 0
         for module_name, module in self.modules.items():
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
             if not module_lora:
@@ -350,7 +351,15 @@ class LoRAModelManager:
                 module_lora.lora_a,
                 module_lora.lora_b,
             )
+            num_lora_weights_applied += 1
             logger.debug("Successfully loaded LoRA weights for module %s.", module_name)
+        if num_lora_weights_applied == 0:
+            logger.debug_once(
+                "No LoRA weights were applied for adapter %s on this worker. "
+                "Requests may use the base model; check --lora-target-modules. "
+                "This may be expected with pipeline or expert parallelism.",
+                lora_model.id,
+            )
         return True
 
     def _deactivate_adapter(self, lora_id: int):
