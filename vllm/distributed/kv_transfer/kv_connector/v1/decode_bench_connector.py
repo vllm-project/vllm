@@ -29,6 +29,13 @@ Usage:
         - fill_mean (float): Mean value for random normal fill (default: 0.015)
         - fill_std (float): Standard deviation for random fill (default: 0.0)
           Set to 0 for constant values, >0 for random sampling
+
+Limitations:
+    The fill is a once-per-request event issued synchronously inside the
+    scheduler step, so its cost lands in tail latency. Median ITL is unaffected,
+    but ITL p99 is not comparable to a real disaggregated decode instance. Use
+    this connector to compare decode configurations against each other rather
+    than to estimate absolute decode performance.
 """
 
 from dataclasses import dataclass
@@ -379,14 +386,46 @@ class DecodeBenchConnectorWorker:
             )
         }
 
+        # Scratch buffers for scattered random fills, keyed by
+        # (block_shape, dtype, device)
+        self._fill_buffers: dict[tuple, torch.Tensor] = {}
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Store references to the KV cache tensors."""
         self.kv_caches = kv_caches
 
+        # Linear-attention state tensors have no num_blocks dimension, so one
+        # buffer is shared by every slot and there is nothing to fill per
+        # request. Fill them once here instead.
+        num_state_tensors = 0
+        for group_idx, layer_names in self.group_to_layers.items():
+            fill_mean, fill_std = self._group_fill_params(group_idx)
+            for layer_name in layer_names:
+                kv_cache = kv_caches.get(layer_name)
+                if isinstance(kv_cache, (list, tuple)) and all(
+                    isinstance(tensor, torch.Tensor) for tensor in kv_cache
+                ):
+                    for state_tensor in kv_cache:
+                        self._fill_state_tensor(state_tensor, fill_mean, fill_std)
+                        num_state_tensors += 1
+
         logger.debug(
-            "DecodeBenchConnector: Registered %d KV cache layers",
+            "DecodeBenchConnector: Registered %d KV cache layers, pre-filled %d "
+            "linear-attention state tensors",
             len(kv_caches),
+            num_state_tensors,
         )
+
+    def _group_fill_params(self, group_idx: int) -> tuple[float, float]:
+        """Return the (mean, std) to use for one KV cache group.
+
+        Circular buffers may pack non-floating metadata alongside their
+        floating-point state, so arbitrary fill values are not
+        representation-safe for those groups.
+        """
+        if group_idx in self._zero_fill_group_ids:
+            return 0.0, 0.0
+        return self.fill_mean, self.fill_std
 
     def start_fill_kv(self, metadata: DecodeBenchConnectorMetadata):
         """
@@ -432,13 +471,7 @@ class DecodeBenchConnectorWorker:
 
         assert self.kv_caches is not None
 
-        # Circular buffers may pack non-floating metadata alongside their
-        # floating-point state, so arbitrary fill values are not representation-safe.
-        fill_mean, fill_std = (
-            (0.0, 0.0)
-            if group_idx in self._zero_fill_group_ids
-            else (self.fill_mean, self.fill_std)
-        )
+        fill_mean, fill_std = self._group_fill_params(group_idx)
 
         # Get the layers that belong to this group
         layer_names = self.group_to_layers.get(group_idx, [])
@@ -454,19 +487,16 @@ class DecodeBenchConnectorWorker:
             kv_cache = self.kv_caches[layer_name]
 
             # Attention layers store KV as a single block-indexed tensor whose
-            # first dim is num_blocks; fill the requested block rows. Hybrid /
-            # linear-attention layers (e.g. Mamba, Kimi Delta Attention) store
-            # their state as a list/tuple of tensors that are NOT block-indexed
-            # — each tensor is a single state buffer with no num_blocks
-            # dimension — so fill each tensor in its entirety with the same
-            # dummy values.
+            # first dim is num_blocks; fill the requested block rows.
+            # Linear-attention layers (e.g. Mamba, Kimi Delta Attention) store
+            # their state as a list/tuple of tensors that are NOT block-indexed,
+            # and those were filled once in register_kv_caches.
             if isinstance(kv_cache, torch.Tensor):
                 self._fill_block_tensor(kv_cache, block_ids, fill_mean, fill_std)
             elif isinstance(kv_cache, (list, tuple)) and all(
                 isinstance(t, torch.Tensor) for t in kv_cache
             ):
-                for state_tensor in kv_cache:
-                    self._fill_state_tensor(state_tensor, fill_mean, fill_std)
+                continue
             else:
                 logger.warning_once(
                     "DecodeBenchConnector: skipping fill for layer %s whose KV "
@@ -502,40 +532,48 @@ class DecodeBenchConnectorWorker:
             fill_mean: Mean value for the fill.
             fill_std: Standard deviation for the fill.
         """
-        # Convert block_ids to tensor on device
-        block_ids_tensor = torch.tensor(
-            block_ids, dtype=torch.long, device=kv_cache.device
-        )
-
-        # Filter invalid block IDs
-        valid_mask = block_ids_tensor < kv_cache.shape[0]
-        valid_block_ids = block_ids_tensor[valid_mask]
-
-        if len(valid_block_ids) == 0:
+        num_blocks = kv_cache.shape[0]
+        valid = [block_id for block_id in block_ids if block_id < num_blocks]
+        if not valid:
             return
 
-        # Create fill values - either constant or random
-        block_shape = kv_cache.shape[1:]
-        if fill_std > 0:
-            # Random normal sampling
-            fill_values = torch.normal(
-                mean=fill_mean,
-                std=fill_std,
-                size=(len(valid_block_ids),) + block_shape,
-                dtype=kv_cache.dtype,
-                device=kv_cache.device,
-            )
-        else:
-            # Constant fill value
-            fill_values = torch.full(
-                (len(valid_block_ids),) + block_shape,
-                fill_mean,
-                dtype=kv_cache.dtype,
-                device=kv_cache.device,
-            )
+        # Allocated block ids are usually one contiguous run, which a slice
+        # write handles without a temporary
+        lo, hi = valid[0], valid[-1] + 1
+        is_run = len(valid) == hi - lo and valid == list(range(lo, hi))
 
-        # Batch fill operation
-        kv_cache[valid_block_ids] = fill_values
+        if fill_std <= 0:
+            # A constant fill needs no temporary
+            if is_run:
+                kv_cache[lo:hi].fill_(fill_mean)
+            else:
+                index = torch.tensor(valid, dtype=torch.long, device=kv_cache.device)
+                kv_cache.index_fill_(0, index, fill_mean)
+            return
+
+        # Random fill: generate in place when contiguous, otherwise reuse one
+        # scratch buffer per layer shape
+        if is_run:
+            kv_cache[lo:hi].normal_(mean=fill_mean, std=fill_std)
+            return
+
+        buffer = self._get_fill_buffer(kv_cache, len(valid))
+        buffer.normal_(mean=fill_mean, std=fill_std)
+        index = torch.tensor(valid, dtype=torch.long, device=kv_cache.device)
+        kv_cache.index_copy_(0, index, buffer)
+
+    def _get_fill_buffer(self, kv_cache: torch.Tensor, num_rows: int) -> torch.Tensor:
+        """Return a scratch buffer for scattered random fills of this layer shape."""
+        key = (tuple(kv_cache.shape[1:]), kv_cache.dtype, kv_cache.device)
+        buffer = self._fill_buffers.get(key)
+        if buffer is None or buffer.shape[0] < num_rows:
+            buffer = torch.empty(
+                (num_rows,) + tuple(kv_cache.shape[1:]),
+                dtype=kv_cache.dtype,
+                device=kv_cache.device,
+            )
+            self._fill_buffers[key] = buffer
+        return buffer[:num_rows]
 
     def _fill_state_tensor(
         self, kv_cache: torch.Tensor, fill_mean: float, fill_std: float
