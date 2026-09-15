@@ -2178,12 +2178,7 @@ def _warn_if_unannotated_eagle_mamba(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> None:
-    """Warn when the flag-all eagle fallback will silently disable reuse.
-
-    With no group annotated, consumers flag every group as a draft group. That
-    widens a Mamba group's required lookup window to two consecutive chunks,
-    which align-mode checkpointing never produces, so reuse drops to zero with
-    no error and no metric to show it.
+    """Warn when no KV cache group could be identified as the draft model's.
 
     Args:
         vllm_config: Config supplying the speculative method, if any.
@@ -2206,13 +2201,8 @@ def _warn_if_unannotated_eagle_mamba(
         return
     logger.warning(
         "Speculative decoding (method=%s) is enabled but no KV cache group "
-        "could be identified as the draft model's, so every group -- "
-        "including Mamba groups %s -- will be treated as a draft group. A "
-        "Mamba group cannot satisfy the widened lookup window that implies, "
-        "so prefix-cache reuse across requests will be disabled and any "
-        "external KV offload tier will store without ever serving a hit.",
+        "could be identified as the draft model's.",
         spec_config.method,
-        mamba_groups,
     )
 
 
@@ -2221,6 +2211,38 @@ def _largest_divisor_at_most(value: int, limit: int) -> int:
         if value % candidate == 0:
             return candidate
     return 1
+
+
+def _ensure_min_page_size(
+    groups: list[KVCacheGroupSpec],
+    common_page: int,
+    hidden_specs: dict[str, HiddenStateCacheSpec],
+) -> tuple[list[KVCacheGroupSpec], int]:
+    """Scale up group block sizes so the common page is at least as large as
+    the biggest hidden-state per-token cost.
+
+    This protects the hidden state extraction feature, where we store hidden states in
+    the KV cache, and return them to clients using a custom hidden state connector.
+
+    Returns the (possibly scaled) groups and updated common page size.
+    """
+    max_per_token = max(
+        spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype)
+        for spec in hidden_specs.values()
+    )
+    if max_per_token <= common_page:
+        return groups, common_page
+
+    scale = cdiv(max_per_token, common_page)
+    common_page *= scale
+    scaled: list[KVCacheGroupSpec] = []
+    for g in groups:
+        s = g.kv_cache_spec
+        kw: dict[str, int] = {"block_size": s.block_size * scale}
+        if isinstance(s, (AttentionSpec, MambaSpec)) and s.page_size_padded is not None:
+            kw["page_size_padded"] = s.page_size_padded * scale
+        scaled.append(KVCacheGroupSpec(g.layer_names, replace(s, **kw)))
+    return scaled, common_page
 
 
 def get_kv_cache_groups(
@@ -2294,6 +2316,8 @@ def get_kv_cache_groups(
     # Add hidden-state layers back with page aligned to the common page.
     if hidden_specs:
         common_page = get_uniform_page_size([g.kv_cache_spec for g in groups])
+        # TP may shrink the common page below hidden-state per-token cost.
+        groups, common_page = _ensure_min_page_size(groups, common_page, hidden_specs)
         group_block_size = math.gcd(*(g.kv_cache_spec.block_size for g in groups))
         for name, spec in hidden_specs.items():
             per_token = spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype)
@@ -2363,9 +2387,11 @@ def update_kv_cache_capacity(
     vllm_config.cache_config.kv_cache_size_tokens = num_tokens
     vllm_config.cache_config.kv_cache_max_concurrency = max_concurrency
     max_model_len = vllm_config.model_config.max_model_len
+    device_type = vllm_config.device_config.device_type
     logger.info_once(
-        "GPU KV cache size: %s tokens, "
+        "%s KV cache size: %s tokens, "
         "Maximum concurrency for %s tokens per request: %.2fx",
+        "GPU" if device_type == "cuda" else device_type.upper(),
         f"{num_tokens:,}",
         f"{max_model_len:,}",
         max_concurrency,
