@@ -436,3 +436,61 @@ class TestBaseThinkingReasoningParserEdgeCases:
         # Should treat as regular content since tokens don't match exactly
         assert reasoning == ("<test:thinking>Not a real token</test:thinking>Content")
         assert content is None
+
+    def test_stop_buffer_desync_end_token_in_ids_but_not_text(self, test_tokenizer):
+        """Simulate stop-buffer desync where end_token_id is in delta_token_ids
+        but end_token text is held back from delta_text.
+
+        Round 1: delta_text trails delta_token_ids (end_token text buffered).
+        Round 2: released text contains end_token, no new tokens.
+        """
+        parser = TestThinkingReasoningParser(test_tokenizer)
+        end_token = parser.end_token
+        end_token_id = parser.end_token_id
+        start_token_id = parser.start_token_id
+
+        # ── Round 1: end_token_id in tokens but not in text ──
+        prev_text_r1 = "some reasoning "
+        prev_ids_r1 = [start_token_id, 100, 101]
+        delta_text_r1 = "tail "
+        delta_ids_r1 = [102, end_token_id, 200, 201]
+
+        msg1 = parser.extract_reasoning_streaming(
+            previous_text=prev_text_r1,
+            current_text=prev_text_r1 + delta_text_r1,
+            delta_text=delta_text_r1,
+            previous_token_ids=prev_ids_r1,
+            current_token_ids=prev_ids_r1 + delta_ids_r1,
+            delta_token_ids=delta_ids_r1,
+        )
+        # Must emit reasoning (not None) while the text catches up
+        assert msg1 is not None, "Round 1 should emit a delta message"
+        assert msg1.reasoning == "tail ", (
+            "Text trailing end_token should be emitted as reasoning"
+        )
+        assert msg1.content is None, (
+            "Content must remain None until the end_token text is visible"
+        )
+
+        # ── Round 2: end_token text now visible, no new tokens ──
+        prev_text_r2 = prev_text_r1 + delta_text_r1
+        prev_ids_r2 = prev_ids_r1 + delta_ids_r1
+        delta_text_r2 = end_token + " D E"
+        delta_ids_r2: list[int] = []
+
+        msg2 = parser.extract_reasoning_streaming(
+            previous_text=prev_text_r2,
+            current_text=prev_text_r2 + delta_text_r2,
+            delta_text=delta_text_r2,
+            previous_token_ids=prev_ids_r2,
+            current_token_ids=prev_ids_r2 + delta_ids_r2,
+            delta_token_ids=delta_ids_r2,
+        )
+        # Must split the released text on the end_token
+        assert msg2 is not None, "Round 2 should emit a delta message"
+        assert msg2.reasoning == "", (
+            "Empty reasoning section before end_token"
+        )
+        assert msg2.content == " D E", (
+            "Content after end_token should be routed as content"
+        )
