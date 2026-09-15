@@ -18,6 +18,7 @@ serde_json.workspace = true
 serde_with.workspace = true
 thiserror.workspace = true
 thiserror-ext.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 trait-set.workspace = true
 vllm-engine-core-client.workspace = true
@@ -27,11 +28,14 @@ vllm-tokenizer.workspace = true
 [dev-dependencies]
 expect-test.workspace = true
 futures.workspace = true
+rmp-serde.workspace = true
+rmpv.workspace = true
 serial_test.workspace = true
 tempfile.workspace = true
-tokio.workspace = true
+vllm-engine-core-client = { workspace = true, features = ["test-util"] }
 vllm-llm = { workspace = true, features = ["test-util"] }
 vllm-tokenizer = { workspace = true, features = ["test-utils"] }
+zeromq.workspace = true
 
 [lints]
 workspace = true
