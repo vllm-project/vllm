@@ -64,6 +64,9 @@ from vllm.models.deepseek_v4.nvidia.model import (
     make_deepseek_v4_expert_params_mapping,
 )
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
+from vllm.models.deepseek_v41.nvidia.flash_mla_mega_attn import (
+    DeepseekV4MegaAttnAttention,
+)
 from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
     DeepseekV4FlashInferMLAAttention,
     DeepseekV4FlashInferSM120Attention,
@@ -140,6 +143,8 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
         if device_capability is not None and device_capability.major == 12:
             return DeepseekV4FlashInferSM120Attention
         return DeepseekV4FlashInferMLAAttention
+    if backend is AttentionBackendEnum.FLASHMLA_MEGA_ATTN_DSV41:
+        return DeepseekV4MegaAttnAttention
     if backend in (
         AttentionBackendEnum.FLASHMLA_SPARSE,
         AttentionBackendEnum.FLASHMLA_SPARSE_DSV4,
@@ -936,6 +941,17 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             layer.ffn.finalize_mega_moe_weights()
 
+    def finalize_mega_attn_weights(self) -> None:
+        """Permute wq_b / wo_a into FlashMLA's mega-attention layouts.
+
+        A no-op for every other attention layer, and idempotent, so a second
+        post-load pass cannot permute twice.
+        """
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
+            finalize = getattr(layer.attn, "finalize_loaded_weights", None)
+            if finalize is not None:
+                finalize()
+
     def finalize_mhc_broadcast_weights(self) -> None:
         if not get_pp_group().is_first_rank or self.start_layer >= self.end_layer:
             return
@@ -1190,6 +1206,7 @@ class DeepseekV41LLMForCausalLM(
     def process_weights_after_loading(self) -> None:
         self.model.finalize_mega_moe_weights()
         self.model.finalize_mhc_broadcast_weights()
+        self.model.finalize_mega_attn_weights()
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
