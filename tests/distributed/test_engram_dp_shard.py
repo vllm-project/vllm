@@ -491,7 +491,9 @@ def _check_dummy_hash_model_forward(
     state.forward = lambda *args: ids.unsqueeze(1)
 
     class Decoder(SimpleNamespace):
-        def __call__(self, hidden, positions, input_ids, *args):
+        # Engram hashes and the mask stay the last positional arguments;
+        # **kwargs absorbs the decoder's keyword-only flags.
+        def __call__(self, hidden, positions, input_ids, *args, **kwargs):
             hashes, keep = args[-2:]
             if dp_shared_memory and dp_rank == 1:
                 assert hashes is None and keep is None
@@ -504,7 +506,8 @@ def _check_dummy_hash_model_forward(
                 if dp_rank == 1:
                     assert torch.all(hashes == engram_ops.DEAD_ID)
                 output = engram.embed(hashes[:, 0])
-            return output, None, None, None, None
+            # Trailing None is previous_aux; this stub captures no aux states.
+            return output, None, None, None, None, None
 
     model = SimpleNamespace(
         use_mega_moe=False,
