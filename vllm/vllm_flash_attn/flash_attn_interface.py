@@ -308,8 +308,6 @@ def flash_attn_varlen_func(
             )
         if s_aux is not None:
             raise NotImplementedError("FA2 does not support s_aux")
-        if num_splits > 1:
-            raise NotImplementedError("FA2 does not support num_splits > 1")
         if mask_mod is not None:
             raise NotImplementedError("FA2 does not support mask_mod")
         if aux_tensors is not None:
