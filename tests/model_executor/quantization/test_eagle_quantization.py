@@ -54,6 +54,13 @@ def test_get_draft_quant_config_without_draft_model():
     assert result is None
 
 
+@pytest.fixture(autouse=True)
+def _restore_default_device():
+    original = torch.get_default_device()
+    yield
+    torch.set_default_device(original)
+
+
 @torch.inference_mode()
 @pytest.mark.parametrize("device", DEVICES)
 def test_fc_layer_quant_config_usage(default_vllm_config, dist_init, device) -> None:
