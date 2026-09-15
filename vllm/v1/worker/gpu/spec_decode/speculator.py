@@ -135,9 +135,10 @@ class DraftModelSpeculator(BaseSpeculator):
             self.speculative_config.use_local_argmax_reduction
         )
 
-        # DP configuration
+        # Parallel configuration
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
+        self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
 
         self.eplb_state: EplbState | None = None
 
@@ -332,14 +333,14 @@ class DraftModelSpeculator(BaseSpeculator):
             out=draft_seq_lens_cpu_upper_bound[:num_reqs],
         )
         draft_seq_lens_cpu_upper_bound[:num_reqs].clamp_(max=self.max_model_len)
-        if dcp_local_seq_lens is None and self.block_tables.cp_size > 1:
+        if dcp_local_seq_lens is None and self.dcp_size > 1:
             # Draft steps advance and rewind their own global sequence lengths,
             # so the target model's DCP-local lengths may already be stale.
             dcp_local_seq_lens = prepare_dcp_local_seq_lens(
                 self.input_buffers.dcp_local_seq_lens,
                 self.input_buffers.seq_lens,
                 num_reqs,
-                self.block_tables.cp_size,
+                self.dcp_size,
                 self.block_tables.cp_rank,
                 self.block_tables.cp_interleave,
             )

@@ -435,7 +435,7 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.block_tables.input_block_tables[gid],
                 self.block_tables.kernel_block_sizes[gid],
                 self.block_tables.cp_rank,
-                self.block_tables.cp_size,
+                self.dcp_size,
                 self.block_tables.cp_interleave,
                 self.parallel_drafting_token_id,
                 self.num_query_per_req,
