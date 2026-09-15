@@ -22,10 +22,17 @@ from tests.v1.attention.utils import (
     create_vllm_config,
 )
 from vllm import _custom_ops as ops
-from vllm.config import HiSparseConfig, SpeculativeConfig, set_current_vllm_config
+from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+from vllm.config import (
+    CUDAGraphMode,
+    HiSparseConfig,
+    SpeculativeConfig,
+    set_current_vllm_config,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     HiSparseConnectorWorker,
 )
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention import mla_attention
 from vllm.model_executor.layers.attention.mla_attention import _use_masked_mha
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
@@ -895,6 +902,75 @@ def test_triton_convert_req_index_to_global_index_decode_only(
     )
 
     torch.testing.assert_close(result, reference_result, rtol=0, atol=0)
+
+
+def test_index_group_convert_during_piecewise_capture():
+    """In piecewise cudagraph mode the indexer is captured while the convert
+    runs in the following eager break. The convert's side stream must not
+    wait on ``logical_topk_ready`` there: an event recorded inside a captured
+    segment is graph-local, and an eager wait on it raises
+    cudaErrorInvalidValue."""
+    device = torch.device(DEVICE_TYPE)
+    num_tokens, num_topk, num_requests, blocks_per_req, block_size = 8, 128, 4, 4, 16
+
+    logical_topk_indices = torch.randint(
+        0,
+        block_size * blocks_per_req,
+        (num_tokens, num_topk),
+        dtype=torch.int32,
+        device=device,
+    )
+    builder = SparseMLAIndexGroupBuilder(logical_topk_indices)
+    group, layer_index = builder.register_layer(is_index_producing_layer=True)
+    assert layer_index == 0 and group.has_indexer
+
+    req_id = torch.arange(num_tokens, dtype=torch.int32, device=device) % num_requests
+    block_table = torch.arange(
+        num_requests * blocks_per_req, dtype=torch.int32, device=device
+    ).view(num_requests, blocks_per_req)
+    attn_metadata = SimpleNamespace(
+        req_id_per_token=req_id, block_table=block_table, block_size=block_size
+    )
+    expected = triton_convert_req_index_to_global_index(
+        req_id,
+        block_table,
+        logical_topk_indices,
+        BLOCK_SIZE=block_size,
+        NUM_TOPK_TOKENS=num_topk,
+    )
+
+    vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B")
+    marker = torch.zeros(1, device=device)
+    capture_stream = torch.cuda.Stream(device=device)
+    # torch.cuda.stream routes through vLLM's patched torch.cuda.set_stream,
+    # so current_stream() tracks the capture stream as in production.
+    with (
+        torch.cuda.stream(capture_stream),
+        set_forward_context(
+            None, vllm_config, cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE
+        ),
+    ):
+        capture = BreakableCUDAGraphCapture()
+        with capture:
+            marker.add_(1)
+            # Record inside a captured segment, convert in the eager
+            # break — mirrors mla.py -> unified_mla_attention_with_output.
+            group.set_logical_topk_ready(layer_index)
+            capture.add_eager(
+                lambda: group.convert_logical_to_physical_topk(
+                    layer_index,
+                    logical_topk_indices,
+                    attn_metadata,
+                    block_stride_rows=None,
+                    return_valid_counts=False,
+                )
+            )
+            marker.add_(1)
+        capture.replay()
+        capture_stream.synchronize()
+
+    result = group.physical_topk_indices[:num_tokens]
+    torch.testing.assert_close(result, expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("block_size", [16])

@@ -159,6 +159,7 @@ _fp8_fp4_mqa_logits_impl: Callable[..., Any] | None = None
 _fp8_fp4_paged_mqa_logits_impl: Callable[..., Any] | None = None
 _get_paged_mqa_logits_metadata_impl: Callable[..., Any] | None = None
 _tf32_hc_prenorm_gemm_impl: Callable[..., Any] | None = None
+_mega_mhc_impl: Callable[..., Any] | None = None
 _get_mn_major_tma_aligned_tensor_impl: Callable[..., Any] | None = None
 _get_mk_alignment_for_contiguous_layout_impl: Callable[..., Any] | None = None
 _get_theoretical_mk_alignment_for_contiguous_layout_impl: Callable[..., Any] | None = (
@@ -231,7 +232,7 @@ def _lazy_init() -> None:
     global _grouped_impl, _grouped_masked_impl, _grouped_fp4_impl
     global _fp8_fp4_mqa_logits_impl, _fp8_fp4_paged_mqa_logits_impl
     global _get_paged_mqa_logits_metadata_impl
-    global _tf32_hc_prenorm_gemm_impl
+    global _tf32_hc_prenorm_gemm_impl, _mega_mhc_impl
     global _get_mn_major_tma_aligned_tensor_impl
     global _get_mk_alignment_for_contiguous_layout_impl
     global _get_theoretical_mk_alignment_for_contiguous_layout_impl
@@ -251,6 +252,7 @@ def _lazy_init() -> None:
         or _fp8_fp4_paged_mqa_logits_impl is not None
         or _get_paged_mqa_logits_metadata_impl is not None
         or _tf32_hc_prenorm_gemm_impl is not None
+        or _mega_mhc_impl is not None
         or _get_mk_alignment_for_contiguous_layout_impl is not None
         or _transform_sf_into_required_layout_impl is not None
         or _pack_ue8m0_to_int_impl is not None
@@ -280,7 +282,11 @@ def _lazy_init() -> None:
     _fp8_gemm_nt_impl = getattr(_dg, "fp8_gemm_nt", None)
     _fp8_einsum_impl = getattr(_dg, "fp8_einsum", None)
     _grouped_impl = getattr(_dg, "m_grouped_fp8_gemm_nt_contiguous", None)
-    _grouped_masked_impl = getattr(_dg, "fp8_m_grouped_gemm_nt_masked", None)
+    # DeepGEMM 2.8.0 dropped the legacy `fp8_*` aliases; keep both spellings so
+    # an externally pinned older DeepGEMM still resolves.
+    _grouped_masked_impl = getattr(
+        _dg, "m_grouped_fp8_gemm_nt_masked", None
+    ) or getattr(_dg, "fp8_m_grouped_gemm_nt_masked", None)
     _grouped_fp4_impl = getattr(_dg, "m_grouped_fp8_fp4_gemm_nt_contiguous", None)
     # DeepGEMM exposes fp8_fp4_*_mqa_logits as the canonical symbols that
     # handle both the FP8 and FP4 Q/K paths via a tuple-typed `q`.
@@ -290,6 +296,7 @@ def _lazy_init() -> None:
         _dg, "get_paged_mqa_logits_metadata", None
     )
     _tf32_hc_prenorm_gemm_impl = getattr(_dg, "tf32_hc_prenorm_gemm", None)
+    _mega_mhc_impl = getattr(_dg, "mega_mhc", None)
     _get_mn_major_tma_aligned_tensor_impl = getattr(
         _dg, "get_mn_major_tma_aligned_tensor", None
     )
@@ -700,6 +707,15 @@ def tf32_hc_prenorm_gemm(
     )
 
 
+def mega_mhc(*args: Any, **kwargs: Any) -> None:
+    """Run DeepGEMM Mega mHC with caller-owned output tensors."""
+    _lazy_init()
+    if _mega_mhc_impl is None:
+        _missing()
+        return
+    _mega_mhc_impl(*args, **kwargs)
+
+
 def _ceil_to_ue8m0(x: torch.Tensor):
     return torch.pow(2.0, torch.ceil(torch.log2(x.abs())))
 
@@ -793,6 +809,7 @@ __all__ = [
     "per_block_cast_to_fp8",
     "is_deep_gemm_e8m0_used",
     "is_deep_gemm_supported",
+    "mega_mhc",
     "get_num_sms",
     "set_num_sms",
     "should_use_deepgemm_for_fp8_linear",

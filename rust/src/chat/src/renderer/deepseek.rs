@@ -224,21 +224,30 @@ pub(super) fn render_request_with_media_order(
             }
         }
 
-        if (is_user_like_entry(message, current_render_index as usize, dialect)
-            || (dialect == DsDialect::V4 && matches!(message, ChatMessage::System { .. })))
-            && next_rendered_entry_is_assistant_or_end(
+        if is_user_like_entry(message, current_render_index as usize, dialect)
+            || (dialect == DsDialect::V4 && matches!(message, ChatMessage::System { .. }))
+        {
+            // Skip the opener only at the last rendered entry when
+            // add_generation_prompt is off. Inspect the next rendered
+            // entry, not the raw index: V4 merges trailing tool results.
+            let should_write_transition = match next_rendered_entry(
                 request.messages.as_slice(),
                 message_index,
                 drop_historical_developers,
                 last_user_like_message_index,
-            )
-        {
-            write_assistant_transition(
-                &mut out,
-                thinking_mode,
-                drop_thinking,
-                current_render_index >= last_user_render_index,
-            );
+            ) {
+                Some(ChatMessage::Assistant { .. }) => true,
+                None => request.chat_options.add_generation_prompt(),
+                Some(_) => false,
+            };
+            if should_write_transition {
+                write_assistant_transition(
+                    &mut out,
+                    thinking_mode,
+                    drop_thinking,
+                    current_render_index >= last_user_render_index,
+                );
+            }
         }
     }
 
@@ -420,14 +429,17 @@ fn is_historical_developer(
         && last_user_like_message_index.is_some_and(|last_index| message_index < last_index)
 }
 
-/// Return whether the next rendered entry is assistant, or there is no next
-/// entry.
-fn next_rendered_entry_is_assistant_or_end(
+/// Return the next rendered message after `message_index`.
+///
+/// Skips merged user-content tails and dropped historical developers so the
+/// caller can tell a following assistant turn apart from the end of the
+/// conversation.
+fn next_rendered_entry(
     messages: &[ChatMessage],
     message_index: usize,
     drop_historical_developers: bool,
     last_user_like_message_index: Option<usize>,
-) -> bool {
+) -> Option<&ChatMessage> {
     let mut next_index = message_index + 1;
     while next_index < messages.len()
         && (is_following_user_content(messages, next_index)
@@ -441,10 +453,7 @@ fn next_rendered_entry_is_assistant_or_end(
         next_index += 1;
     }
 
-    messages
-        .get(next_index)
-        .map(|message| matches!(message, ChatMessage::Assistant { .. }))
-        .unwrap_or(true)
+    messages.get(next_index)
 }
 
 /// Render the tool preamble shown to the model for one DeepSeek dialect.
