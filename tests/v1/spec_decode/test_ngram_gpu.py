@@ -28,9 +28,11 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.v1.worker.gpu.attn_utils import AttentionCGSupportInfo
 from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     VariableDraftTrimmer,
     build_verification_layout,
+    maybe_create_draft_trimmer,
 )
 from vllm.v1.worker.gpu.spec_decode.ngram.speculator import NgramGPUSpeculator
 from vllm.v1.worker.gpu.states import RequestState
@@ -154,6 +156,7 @@ def _propose(
         next_prefill_tokens=torch.zeros(B, dtype=torch.int32, device=DEVICE),
         temperature=torch.zeros(B, dtype=torch.float32, device=DEVICE),
         seeds=torch.zeros(B, dtype=torch.int64, device=DEVICE),
+        dp_sync=None,
     )
     num_valid = spec.num_valid_drafts_for_trim[idx_mapping]
     return drafts.cpu().tolist(), num_valid.cpu().tolist()
@@ -164,9 +167,11 @@ def _propose(
 # ---------------------------------------------------------------------------
 
 
-def test_no_match_returns_zero_valid():
-    """No 2-gram match in [1,2,3,4,5] → 0 valid drafts, last_sampled fill."""
-    spec = _make_speculator(min_n=2, max_n=2, k=2)
+@pytest.mark.parametrize("max_model_len", [32, 300])
+def test_no_match_clears_previous_proposal(max_model_len):
+    spec = _make_speculator(min_n=2, max_n=2, k=2, max_model_len=max_model_len)
+    row = [0] * (max_model_len - 5) + [1, 2, 3, 1, 2]
+    assert _propose(spec, [row]) == ([[3, 1]], [2])
     drafts, num_valid = _propose(spec, [[1, 2, 3, 4, 5]], last_sampled=[42])
     assert num_valid == [0]
     assert drafts == [[42, 42]]
@@ -189,26 +194,31 @@ def test_falls_back_to_3gram_when_4gram_missing():
 
 
 def test_prefers_longer_ngram():
-    """Both a 4-gram and a 3-gram match exist → prefer the 4-gram match."""
+    """Prefer a 4-gram match over a more recent 3-gram match."""
     spec = _make_speculator(min_n=3, max_n=4, k=2)
-    drafts, num_valid = _propose(spec, [[2, 3, 4, 5, 1, 2, 3, 4, 1, 2, 3, 4]])
+    drafts, num_valid = _propose(
+        spec, [[1, 2, 3, 4, 50, 51, 2, 3, 4, 60, 61, 1, 2, 3, 4]]
+    )
     assert num_valid == [2]
-    assert drafts == [[1, 2]]
+    assert drafts == [[50, 51]]
 
 
 def test_picks_longest_match_among_2_3_4_grams():
-    """2-gram and 3-gram match, 4-gram does not → propose 3-gram match [1, 2]."""
+    """Prefer a 3-gram match over a more recent 2-gram match."""
     spec = _make_speculator(min_n=2, max_n=4, k=2)
-    drafts, num_valid = _propose(spec, [[3, 4, 5, 2, 3, 4, 1, 2, 3, 4]])
+    drafts, num_valid = _propose(spec, [[2, 3, 4, 50, 51, 3, 4, 60, 61, 1, 2, 3, 4]])
     assert num_valid == [2]
-    assert drafts == [[1, 2]]
+    assert drafts == [[50, 51]]
 
 
-def test_picks_rightmost_when_multiple_matches():
-    """Multiple 3-gram matches for suffix (1,2,3) → pick the right-most."""
-    spec = _make_speculator(min_n=3, max_n=3, k=2)
+@pytest.mark.parametrize("max_model_len", [32, 128, 257, 1025])
+def test_picks_rightmost_when_multiple_matches(max_model_len):
+    """Pick the last valid match across blocks, ignoring trailing tokens."""
+    spec = _make_speculator(min_n=3, max_n=3, k=2, max_model_len=max_model_len)
+    padding = [0] * (spec.block_l - 5) if spec.n_blocks > 1 else []
+    row = [1, 2, 3, 100] + padding + [1, 2, 3, 200, 1, 2, 3, 300, 1, 2, 3]
     drafts, num_valid = _propose(
-        spec, [[1, 2, 3, 100, 1, 2, 3, 200, 1, 2, 3, 300, 1, 2, 3]]
+        spec, [row + [1, 2, 3, 999, 1, 2, 3]], seq_lens=[len(row)]
     )
     assert num_valid == [2]
     assert drafts == [[300, 1]]
@@ -329,6 +339,7 @@ def test_dummy_run_does_not_touch_state():
         next_prefill_tokens=torch.zeros(1, dtype=torch.int32, device=DEVICE),
         temperature=torch.zeros(1, dtype=torch.float32, device=DEVICE),
         seeds=torch.zeros(1, dtype=torch.int64, device=DEVICE),
+        dp_sync=None,
         dummy_run=True,
     )
     assert drafts.shape == (1, 2)
@@ -399,3 +410,28 @@ def test_variable_draft_trimmer_clamps_to_num_valid():
     assert qsl.cpu().tolist()[:4] == [0, 2, 5, 12]
     # Padding tail equals the (GPU) batch total.
     assert qsl.cpu().tolist()[4:] == [12] * (max_num_reqs - 3)
+
+
+@pytest.mark.parametrize("batch_sharded_sampling", [False, True])
+def test_draft_trimmer_disabled_with_batch_sharded_sampling(batch_sharded_sampling):
+    """The sharder plans from CPU logits boundaries, so GPU trimming must stay off."""
+    cfg = _make_vllm_config(min_n=2, max_n=2, k=2)
+    cfg.parallel_config.enable_batch_sharded_sampling = batch_sharded_sampling
+    backend = SimpleNamespace(
+        __name__="FakeBackend",
+        supports_device_cpu_query_lens_mismatch=lambda: True,
+    )
+    trimmer = maybe_create_draft_trimmer(
+        vllm_config=cfg,
+        speculator=SimpleNamespace(
+            num_valid_drafts_for_trim=torch.zeros(8, dtype=torch.int32, device=DEVICE)
+        ),
+        attn_groups=[[SimpleNamespace(backend=backend, layer_names=set())]],
+        attn_cg_support=AttentionCGSupportInfo(),
+        req_states=SimpleNamespace(max_num_reqs=8, vocab_size=32, device=DEVICE),
+        query_start_loc=torch.empty(9, dtype=torch.int32, device=DEVICE),
+        num_bonus_tokens=1,
+    )
+    assert (trimmer is None) == batch_sharded_sampling
+    if trimmer is not None:
+        assert isinstance(trimmer, VariableDraftTrimmer)

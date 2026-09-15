@@ -209,6 +209,10 @@ def maybe_create_draft_trimmer(
         reason = f"varlen decode cudagraphs with {attn_cg_support.min_cg_attn_backend}"
     elif vllm_config.lora_config is not None:
         reason = "LoRA"
+    elif parallel_config.enable_batch_sharded_sampling:
+        # The sharder plans its all-to-all splits and local buffers from the
+        # CPU (untrimmed) logits boundaries.
+        reason = "batch-sharded sampling"
     elif parallel_config.pipeline_parallel_size > 1:
         reason = "pipeline parallelism"
     elif (

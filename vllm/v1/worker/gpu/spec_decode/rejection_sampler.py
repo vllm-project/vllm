@@ -110,7 +110,7 @@ class RejectionSampler:
         num_sampled: torch.Tensor,
         logits: torch.Tensor,
         cu_num_logits: torch.Tensor,
-        cu_num_logits_np: np.ndarray,
+        cu_num_logits_np: np.ndarray | None,
         max_num_logprobs: int,
     ) -> LogprobsTensors | None:
         if max_num_logprobs == NO_LOGPROBS:
@@ -132,10 +132,7 @@ class RejectionSampler:
         expanded_logits = num_logits != num_reqs
         cu_num_generated_tokens: list[int] | torch.Tensor | None = None
         if expanded_logits:
-            if self.enable_adaptive_verification:
-                # Adaptive verification keeps the true per-request boundaries
-                # on device only; cu_num_logits_np holds the pre-compacted
-                # layout.
+            if cu_num_logits_np is None:
                 cu_num_generated_tokens = cu_num_logits.clone()
             else:
                 cu_num_generated_tokens = cu_num_logits_np.tolist()
@@ -222,10 +219,8 @@ class RejectionSampler:
         num_reqs = input_batch.num_reqs
 
         if logits.shape[0] <= max_chunk_logits:
-            # One chunk covers the batch. Adaptive verification compacts the logits
-            # without updating cu_num_logits_np (it keeps the pre-compacted layout),
-            # so the stale sums must not pick chunk boundaries; its budget cap
-            # guarantees the compacted batch always lands here.
+            # GPU trimming can leave the CPU boundaries stale.
+            # Trimmed batches fit in one chunk.
             request_chunks: Iterable[tuple[int, int]] = ((0, num_reqs),)
         else:
             assert not self.enable_adaptive_verification
@@ -257,7 +252,11 @@ class RejectionSampler:
                 num_sampled,
                 processed_logits if use_processed_logits else logits[lo:hi],
                 chunk_cu_num_logits,
-                chunk_cu_num_logits_np,
+                (
+                    chunk_cu_num_logits_np
+                    if logits.shape[0] > max_chunk_logits
+                    else None
+                ),
                 max_num_logprobs,
             )
             if chunk_logprobs is not None:

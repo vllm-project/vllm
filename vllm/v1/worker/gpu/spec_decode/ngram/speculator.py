@@ -12,6 +12,7 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.speculator import BaseSpeculator
 
 if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.dp_utils import DPSyncState
     from vllm.v1.worker.gpu.states import RequestState
 
 
@@ -227,7 +228,7 @@ class NgramGPUSpeculator(BaseSpeculator):
         next_prefill_tokens: torch.Tensor,
         temperature: torch.Tensor,
         seeds: torch.Tensor,
-        num_tokens_across_dp: torch.Tensor | None = None,
+        dp_sync: DPSyncState | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
