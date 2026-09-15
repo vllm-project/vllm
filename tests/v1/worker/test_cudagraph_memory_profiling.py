@@ -328,7 +328,7 @@ def test_persistent_reserve_grows_arena_before_runtime_wrappers(monkeypatch):
     [
         pytest.param(1, False, True, id="single-rank"),
         pytest.param(2, False, False, id="dcp-fallback"),
-        pytest.param(1, True, False, id="mm-prefix-fallback"),
+        pytest.param(1, True, True, id="mm-prefix-profiled"),
     ],
 )
 def test_flashinfer_persistent_workspace_profile_gate(
@@ -353,33 +353,54 @@ def test_flashinfer_persistent_workspace_profile_gate(
     )
 
 
-def test_flashinfer_mm_prefix_route_does_not_open_the_profile_gate():
-    """A native-prefill route is not on its own enough to opt in.
+def test_flashinfer_mm_prefix_keeps_the_conservative_arena(monkeypatch):
+    """The model flag alone does not close the lifecycle.
 
-    mm-prefix reaches the native prefill leg, but through a wrapper the
-    reservation does not own, so the gate has to stay closed until it does.
+    What the arena has to survive is a wrapper built after the lock asking
+    for it with no argument. The reservation settles it at the default size,
+    which is exactly that request, so such a wrapper finds the arena rather
+    than growing a locked one.
     """
     pytest.importorskip("flashinfer")
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
 
+    default_float_bytes = 4096
     builder = _reservation_builder(
-        flashinfer_backend, default_float_bytes=4096, is_mm_prefix_lm=True
+        flashinfer_backend,
+        default_float_bytes=default_float_bytes,
+        is_mm_prefix_lm=True,
     )
     builder.use_trtllm_prefill_attention = True
-
     assert builder._get_workspace_routes().native_prefill
 
     config = SimpleNamespace(
         model_config=SimpleNamespace(is_mm_prefix_lm=True),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
     )
-    support = flashinfer_backend.FlashInferMetadataBuilder
     assert (
-        support.get_persistent_workspace_memory_profiling_support(
+        flashinfer_backend.FlashInferMetadataBuilder.get_persistent_workspace_memory_profiling_support(
             config, _attention_spec(128)
         )
-        is PersistentWorkspaceProfilingSupport.UNSUPPORTED
+        is PersistentWorkspaceProfilingSupport.REQUIRED
     )
+
+    _install_prefill_factories(builder, monkeypatch)
+    monkeypatch.setattr(
+        flashinfer_backend, "_get_trtllm_workspace_buffer", lambda: None
+    )
+
+    with _managed_workspace():
+        builder.reserve_workspace_for_memory_profiling()
+        arena = current_workspace_manager().get_workspace()
+        size_before, pointer_before = _nbytes(arena), arena.data_ptr()
+        assert size_before == default_float_bytes
+
+        lock_workspace()
+        # What a wrapper built after the lock asks for, with no argument.
+        late = builder._get_workspace_buffer()
+
+        assert _nbytes(late) == size_before
+        assert late.data_ptr() == pointer_before
 
 
 @pytest.mark.parametrize(
