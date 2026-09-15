@@ -294,13 +294,23 @@ def test_qwen_gdn_preference_preserves_other_kernel_priorities(platform_mock):
         DeepGemmFp8BlockScaledMMKernel,
         CutlassFp8BlockScaledMMKernel,
         MarlinFP8ScaledMMLinearKernel,
+        HummingFP8ScaledMMLinearKernel,
         TritonFp8BlockScaledMMKernel,
     ]
+    config = VllmConfig(kernel_config=KernelConfig(linear_backend="auto"))
+    with set_current_vllm_config(config):
+        kernels = _resolve_backend_kernels(
+            kernels,
+            "scaled-mm",
+            quantization="fp8_block_w8a8",
+            compute_capability=90,
+        )
 
     assert _apply_auto_kernel_preferences(make_qwen_gdn_config(), kernels) == [
         DeepGemmFp8BlockScaledMMKernel,
         TritonFp8BlockScaledMMKernel,
         CutlassFp8BlockScaledMMKernel,
+        HummingFP8ScaledMMLinearKernel,
         MarlinFP8ScaledMMLinearKernel,
     ]
 
@@ -387,6 +397,36 @@ def test_qwen_gdn_auto_falls_back_when_triton_is_unavailable(
     )
 
     assert selected is CutlassFp8BlockScaledMMKernel
+
+
+@patch("vllm.model_executor.kernels.linear.is_supported_and_can_implement_kernel")
+@patch("vllm.model_executor.kernels.linear.current_platform")
+def test_qwen_gdn_per_quant_backend_override_precedes_auto_preference(
+    platform_mock,
+    support_mock,
+):
+    platform_mock._enum = PlatformEnum.CUDA
+    support_mock.return_value = (True, "")
+    kernels = {
+        PlatformEnum.CUDA: [
+            CutlassFp8BlockScaledMMKernel,
+            TritonFp8BlockScaledMMKernel,
+        ]
+    }
+    config = VllmConfig(
+        kernel_config=KernelConfig(
+            linear_backend="auto",
+            linear_backend_per_quant={"fp8_block_w8a8": "cutlass"},
+        )
+    )
+
+    with set_current_vllm_config(config):
+        selected = choose_scaled_mm_linear_kernel(
+            make_qwen_gdn_config(), kernels, quantization="fp8_block_w8a8"
+        )
+
+    assert selected is CutlassFp8BlockScaledMMKernel
+    platform_mock.get_device_name.assert_not_called()
 
 
 @patch("vllm.model_executor.kernels.linear.is_supported_and_can_implement_kernel")
