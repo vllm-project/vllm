@@ -1434,6 +1434,8 @@ class KVCacheConfig:
     """The KV cache layout resolved by the engine core, adopted by all workers."""
     hisparse_host_num_blocks: int | None = None
     """Capacity of the dedicated HiSparse host-block manager, when enabled."""
+    model_config_hash: str | None = None
+    """Model configuration identity frozen before construction by the engine core."""
 
     hisparse_host_block_stride: int | None = None
     """Physical bytes between consecutive HiSparse host blocks."""

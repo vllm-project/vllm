@@ -7,13 +7,14 @@ import hashlib
 import math
 import os
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, NamedTuple, NewType, TypeAlias, cast, overload
 
 from vllm import envs
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
+from vllm.config.utils import hash_factors, normalize_value
 from vllm.logger import init_logger
 from vllm.utils.hashing import xxhash, xxhash_cbor
 from vllm.utils.math_utils import cdiv, round_up
@@ -53,6 +54,40 @@ from vllm.v1.utils import tensor_data
 
 if TYPE_CHECKING:
     from vllm.v1.core.block_pool import BlockPool
+
+
+def get_kv_cache_model_config_hash(model_config: ModelConfig) -> str:
+    """Snapshot model configuration before construction can mutate it.
+
+    Persistent KV can depend on more than the checkpoint name or RoPE settings:
+    for example, Phi3 selects its LongRoPE factors using the runtime maximum
+    length. Keep the complete text configuration, model computation dtype, and
+    construction-time maximum length. This is configuration identity, not a
+    fingerprint of checkpoint weights or every runtime kernel choice.
+    """
+    metadata_keys = {"_commit_hash", "_name_or_path", "transformers_version"}
+
+    def strip_metadata(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {
+                key: strip_metadata(item)
+                for key, item in value.items()
+                if key not in metadata_keys
+            }
+        if isinstance(value, (list, tuple)):
+            return [strip_metadata(item) for item in value]
+        return value
+
+    return hash_factors(
+        {
+            "schema_version": 1,
+            "hf_text_config": normalize_value(
+                strip_metadata(model_config.hf_text_config.to_dict())
+            ),
+            "dtype": normalize_value(model_config.dtype),
+            "max_model_len": model_config.max_model_len,
+        }
+    )
 
 
 # BlockHash represents the hash of a single KV-cache block used for
