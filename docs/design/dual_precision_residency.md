@@ -323,6 +323,16 @@ AutoRound), attach-time sanity probe cosine 0.9927, worst per-layer cosine
 The engine generates normally with the shadow attached
 (`tests/model_executor/dual_precision/test_nvfp4_shadow_gpu.py`, 2 passed).
 
+Attached is not the same as bound, and the first test only covered the former:
+the runner rebinds before every forward from the scheduler's decision, so its
+generation still ran on BF16. `test_nvfp4_switch_gpu.py` covers the switch
+itself, driving `VLLM_DUAL_PRECISION_POLICY=uniform_w4` in a child process per
+precision. Bound: `active_precision=int4` with all 152 of 152 shadow bindings
+pointing at the NVFP4 layer; unbound control: `bf16` with 0 of 152. Greedy
+decode off the shadow answers "The capital of France is" with Paris and
+"17 plus 25" with 42, so the FP4 path is producing real logits and not noise
+that merely happens to be finite (3 passed, 102 s).
+
 That the counts match exactly is the point: the residency and binding path is
 not format-aware. A binding holds two `LinearBase` objects and the forward runs
 through whichever is active, using that layer's own `quant_method`, so the only
