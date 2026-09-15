@@ -22,7 +22,10 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
-from vllm.models.common.ops import fused_q_kv_rmsnorm
+from vllm.models.common.ops.fused_qk_rmsnorm import (
+    _FUSED_Q_KV_RMSNORM_KERNEL,
+    fused_q_kv_rmsnorm,
+)
 from vllm.models.deepseek_v4.common.ops import (
     fused_indexer_q_rope_quant,
 )
@@ -47,6 +50,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.models.deepseek_v4.common.rope import build_deepseek_v4_rope
 from vllm.models.deepseek_v4.compressor import DeepseekCompressor
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import (
     execute_in_parallel,
@@ -102,10 +106,15 @@ def _resolve_dsv4_kv_cache_dtype(
     """
     if use_fp8_ds_mla_layout:
         # fp8_ds_mla block format: UE8M0 block-scaled fp8 packed as uint8.
-        assert kv_cache_dtype.startswith("fp8"), (
-            f"DeepseekV4 fp8_ds_mla layout only supports fp8 kv-cache, "
-            f"got {kv_cache_dtype}"
-        )
+        if kv_cache_dtype == "auto":
+            kv_cache_dtype = "fp8"
+        if not kv_cache_dtype.startswith("fp8"):
+            raise ValueError(
+                "DeepseekV4 fp8_ds_mla layout only supports fp8 "
+                f"kv-cache, got {kv_cache_dtype}. Please set "
+                "`--kv-cache-dtype fp8` or select a backend that supports "
+                "bfloat16 KV cache."
+            )
         if kv_cache_dtype != "fp8_ds_mla":
             if cache_config is not None:
                 cache_config.cache_dtype = "fp8_ds_mla"
@@ -205,6 +214,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         self.n_groups = config.o_groups
         self.n_local_groups = self.n_groups // tp_size
         self.window_size = config.sliding_window
+        # Vision variant: image spans are visible bidirectionally, widening
+        # prefill SWA index rows by up to max_image_tokens columns.
+        self.max_image_tokens = (
+            getattr(config, "vision_max_n_token", 0)
+            if getattr(config, "vision_n_layers", 0) > 0
+            else 0
+        )
         # NOTE(zyongye) Compress ratio can't be 0
         # we do this for because MTP layer is not included
         # in the compress ratio list
@@ -352,6 +368,101 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 prefix=f"{prefix}.compressor",
                 k_cache_prefix=self.prefix,
             )
+
+        if vllm_config.kernel_config.enable_jit_warmup:
+            from vllm.v1.attention.backends.mla.sparse_swa import (
+                _COMPUTE_PREFILL_METADATA_KERNEL,
+                _COMPUTE_SWA_INDICES_AND_LENS_KERNEL,
+            )
+
+            _COMPUTE_PREFILL_METADATA_KERNEL.register_warmup()
+            _COMPUTE_SWA_INDICES_AND_LENS_KERNEL.register_warmup(
+                window_size=self.window_size,
+                block_size=self.swa_cache_layer.block_size,
+                max_image_tokens=self.max_image_tokens,
+            )
+
+            if self.compress_ratio > 1:
+                from vllm.v1.attention.backends.mla.compressor_utils import (
+                    _COMPRESSED_SLOT_MAPPING_KERNEL,
+                )
+
+                _COMPRESSED_SLOT_MAPPING_KERNEL.register_warmup()
+
+            if self.indexer is not None:
+                from vllm.v1.attention.backends.mla.indexer import (
+                    _BUILD_PREFILL_CHUNK_METADATA_KERNEL,
+                    _PREPARE_UNIFORM_DECODE_KERNEL,
+                )
+
+                _PREPARE_UNIFORM_DECODE_KERNEL.register_warmup()
+                _BUILD_PREFILL_CHUNK_METADATA_KERNEL.register_warmup()
+
+            spec_config = vllm_config.speculative_config
+            if spec_config is not None and spec_config.use_dspark():
+                from vllm.v1.attention.backends.mla.sparse_swa import (
+                    _COMPUTE_DSPARK_NONCAUSAL_SWA_INDICES_KERNEL,
+                )
+
+                _COMPUTE_DSPARK_NONCAUSAL_SWA_INDICES_KERNEL.register_warmup(
+                    window_size=self.window_size,
+                    num_speculative_tokens=spec_config.num_speculative_tokens,
+                    block_size=self.swa_cache_layer.block_size,
+                )
+
+            if self.backend_cls.get_name() in (
+                "FLASHMLA_SPARSE_DSV4",
+                "ROCM_FLASHMLA_SPARSE_DSV4",
+                "XPU_V4_MLA_SPARSE",
+            ):
+                from vllm.models.deepseek_v4.common.ops.cache_utils import (
+                    _COMBINE_TOPK_SWA_INDICES_KERNEL,
+                )
+
+                _COMBINE_TOPK_SWA_INDICES_KERNEL.register_warmup()
+
+            from vllm.utils.import_utils import has_cutedsl
+
+            _FUSED_Q_KV_RMSNORM_KERNEL.register_warmup()
+
+            backend_name = self.backend_cls.get_name()
+            if current_platform.is_cuda():
+                from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (  # noqa: E501
+                    _FUSED_INV_ROPE_FP8_QUANT_KERNEL,
+                )
+
+                _FUSED_INV_ROPE_FP8_QUANT_KERNEL.register_warmup()
+
+                if self.compress_ratio == 128:
+                    from vllm.models.deepseek_v4.sparse_mla import (
+                        _BUILD_C128A_TOPK_METADATA_KERNEL,
+                    )
+
+                    _BUILD_C128A_TOPK_METADATA_KERNEL.register_warmup()
+
+                if backend_name == "FLASHMLA_SPARSE_DSV4":
+                    from vllm.models.deepseek_v4.common.ops.cache_utils import (
+                        _COMPUTE_GLOBAL_TOPK_INDICES_AND_LENS_KERNEL,
+                        _DEQUANTIZE_AND_GATHER_K_CACHE_KERNEL,
+                    )
+
+                    _COMPUTE_GLOBAL_TOPK_INDICES_AND_LENS_KERNEL.register_warmup()
+                    if has_cutedsl():
+                        from vllm.models.deepseek_v4.nvidia.ops.dequant_gather_k_cutedsl import (  # noqa: E501
+                            _DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL,
+                        )
+
+                        _DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL.register_warmup()
+                    else:
+                        _DEQUANTIZE_AND_GATHER_K_CACHE_KERNEL.register_warmup()
+                elif backend_name == "FLASHINFER_MLA_SPARSE_DSV4":
+                    from vllm.models.deepseek_v4.common.ops.cache_utils import (
+                        _BUILD_FLASHINFER_MIXED_SPARSE_INDICES_KERNEL,
+                        _COMPUTE_GLOBAL_TOPK_INDICES_AND_LENS_KERNEL,
+                    )
+
+                    _COMPUTE_GLOBAL_TOPK_INDICES_AND_LENS_KERNEL.register_warmup()
+                    _BUILD_FLASHINFER_MIXED_SPARSE_INDICES_KERNEL.register_warmup()
 
     def forward(
         self,
@@ -829,6 +940,21 @@ class DeepseekV4Indexer(nn.Module):
             "Using %s indexer cache for Lightning Indexer.",
             "MXFP4" if self.use_fp4_kv else "FP8",
         )
+        if vllm_config.kernel_config.enable_jit_warmup:
+            from vllm.utils.import_utils import has_cutedsl
+
+            if current_platform.is_cuda() and has_cutedsl():
+                from vllm.models.deepseek_v4.nvidia.ops.fused_indexer_q_cutedsl import (  # noqa: E501
+                    _INDEXER_Q_FP8_KERNEL,
+                    _INDEXER_Q_MXFP4_KERNEL,
+                )
+
+                indexer_q_kernel = (
+                    _INDEXER_Q_MXFP4_KERNEL
+                    if self.use_fp4_kv
+                    else _INDEXER_Q_FP8_KERNEL
+                )
+                indexer_q_kernel.register_warmup()
 
         # no tensor parallel, just replicated
         self.wq_b = ReplicatedLinear(
@@ -909,6 +1035,21 @@ class DeepseekV4Indexer(nn.Module):
             torch.cuda.Event(),
             torch.cuda.Event(),
         ]
+
+        if vllm_config.kernel_config.enable_jit_warmup:
+            from vllm.utils.import_utils import has_cutedsl
+
+            if not has_cutedsl() and not current_platform.is_xpu():
+                from vllm.models.deepseek_v4.common.ops.fused_indexer_q import (
+                    _FUSED_INDEXER_Q_ROPE_MXFP4_TRITON_KERNEL,
+                    _FUSED_INDEXER_Q_ROPE_QUANT_TRITON_KERNEL,
+                )
+
+                (
+                    _FUSED_INDEXER_Q_ROPE_MXFP4_TRITON_KERNEL
+                    if self.use_fp4_kv
+                    else _FUSED_INDEXER_Q_ROPE_QUANT_TRITON_KERNEL
+                ).register_warmup()
 
     def forward(
         self,

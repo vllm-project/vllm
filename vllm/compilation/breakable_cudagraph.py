@@ -42,6 +42,7 @@ from vllm.forward_context import (
     is_forward_context_available,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import weak_ref_tensor, weak_ref_tensors
@@ -54,6 +55,12 @@ def is_breakable_cudagraph_enabled() -> bool:
 
 
 F = TypeVar("F", bound=Callable[..., Any])
+
+
+def _weak_ref_capture_arg(arg: Any) -> Any:
+    if isinstance(arg, QuantizedActivation):
+        return arg.weak_ref()
+    return weak_ref_tensor(arg)
 
 
 def eager_break_during_capture(fn: F) -> F:
@@ -105,13 +112,8 @@ def eager_break_during_capture(fn: F) -> F:
         # Weak-ref args: strong refs in the replay lambda pin cudagraph-pool
         # slots across batch descriptors. cudagraph owns the slot, so the
         # weak_ref is safe to deref on replay.
-        weak_args = tuple(
-            weak_ref_tensor(a) if isinstance(a, torch.Tensor) else a for a in args
-        )
-        weak_kwargs = {
-            k: weak_ref_tensor(v) if isinstance(v, torch.Tensor) else v
-            for k, v in kwargs.items()
-        }
+        weak_args = tuple(_weak_ref_capture_arg(a) for a in args)
+        weak_kwargs = {k: _weak_ref_capture_arg(v) for k, v in kwargs.items()}
         return capture.add_eager(lambda: fn(*weak_args, **weak_kwargs))
 
     return wrapper  # type: ignore[return-value]
@@ -254,6 +256,10 @@ class BreakableCUDAGraphWrapper:
         * If runtime mode mismatch / NONE, run eagerly.
         * Otherwise, lazily capture per ``batch_descriptor`` and replay
           on subsequent invocations with the same descriptor.
+
+    When ``runtime_mode`` is given, only that mode is captured/replayed;
+    other non-NONE modes fall through, so the wrapper can be nested under
+    a ``CUDAGraphWrapper`` for another mode.
     """
 
     _all_instances: ClassVar[weakref.WeakSet[BreakableCUDAGraphWrapper]] = (
@@ -269,15 +275,14 @@ class BreakableCUDAGraphWrapper:
         self,
         runnable: Callable[..., Any],
         vllm_config: VllmConfig,
+        runtime_mode: CUDAGraphMode | None = None,
     ) -> None:
-        # Unlike the original CUDAGraphWrapper which strictly matches a
-        # single runtime_mode, this wrapper captures whatever the
-        # dispatcher emits (any non-NONE runtime_mode) -- breakable's
-        # capture is identical for prefill and decode, so there's nothing
-        # to dispatch on at the runtime_mode level. Entries are keyed by
-        # BatchDescriptor which already encodes batch shape / uniformity.
+        # runtime_mode=None matches any non-NONE dispatch mode; entries
+        # are keyed by BatchDescriptor, which already encodes batch
+        # shape / uniformity.
         self.runnable = runnable
         self.vllm_config = vllm_config
+        self.runtime_mode = runtime_mode
         self.compilation_config = vllm_config.compilation_config
         self.graph_pool = current_platform.get_global_graph_pool()
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
@@ -296,7 +301,9 @@ class BreakableCUDAGraphWrapper:
         raise AttributeError(key)
 
     def unwrap(self) -> Callable[..., Any]:
-        return self.runnable
+        # Recurse through nested wrappers to reach the original runnable.
+        runnable = self.runnable
+        return runnable.unwrap() if hasattr(runnable, "unwrap") else runnable
 
     @property
     def cudagraph_wrapper(self) -> BreakableCUDAGraphWrapper:
@@ -315,11 +322,13 @@ class BreakableCUDAGraphWrapper:
         batch_descriptor = forward_context.batch_descriptor
         cudagraph_runtime_mode = forward_context.cudagraph_runtime_mode
 
-        # Capture whenever the dispatcher says "some cudagraph mode" --
-        # breakable produces the same artifact regardless of PIECEWISE
-        # vs FULL, so we match either. Entries are keyed by batch
-        # descriptor, which already encodes prefill/decode distinctions.
-        if cudagraph_runtime_mode == CUDAGraphMode.NONE:
+        # By default (runtime_mode=None) match any non-NONE mode; a set
+        # runtime_mode restricts capture so other modes can be handled by
+        # an outer wrapper (e.g. CUDAGraphWrapper for FULL).
+        if cudagraph_runtime_mode == CUDAGraphMode.NONE or (
+            self.runtime_mode is not None
+            and cudagraph_runtime_mode != self.runtime_mode
+        ):
             return self.runnable(*args, **kwargs)
 
         assert batch_descriptor is not None
@@ -365,15 +374,13 @@ class BreakableCUDAGraphWrapper:
         else:
             set_graph_pool_id(current_platform.graph_pool_handle())
 
-        # Match torch.cuda.graph()'s pre-capture cleanup once per descriptor.
-        # We drive capture_begin/end directly and bypass torch.cuda.graph(),
-        # so its built-in gc + empty_cache never fire. Run them here once
-        # per _capture call -- NOT inside _begin_segment, since this capture
-        # session may issue many begin/end pairs (one per layer's break),
-        # and repeated gc would tank capture time the way it did for the
-        # pre-`gc_disable` piecewise path.
-        gc.collect()
-        torch.accelerator.empty_cache()
+        # Match torch.cuda.graph()'s pre-capture cleanup, which we bypass.
+        # Skip it when gc is disabled: bulk capture runs under
+        # freeze_gc_for_cudagraph_capture, which already did this cleanup,
+        # and repeating it per descriptor dominates capture time.
+        if gc.isenabled():
+            gc.collect()
+            torch.accelerator.empty_cache()
         # Sync the offloader's copy stream before capture so any in-flight
         # pre-capture prefetches are complete and don't leak into the graph.
         get_offloader().sync_prev_onload()

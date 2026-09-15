@@ -108,11 +108,22 @@ class Qwen2MoeMLP(nn.Module):
             )
         self.act_fn = SiluAndMul()
         self.expert_gate = expert_gate
+        from vllm.model_executor.kernels.linear.nvfp4.dynamic_cutedsl import (
+            FlashInferCuTeDynamicNvFp4LinearKernel,
+        )
+
+        kernel = getattr(self.down_proj.quant_method, "kernel", None)
+        self._dynamic_nvfp4 = isinstance(kernel, FlashInferCuTeDynamicNvFp4LinearKernel)
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
-        out = self.act_fn(gate_up)
-        out, _ = self.down_proj(out)
+        if self._dynamic_nvfp4:
+            out = self.down_proj.quant_method.kernel.apply_silu_or_linear(
+                self.down_proj, gate_up, True
+            )
+        else:
+            out = self.act_fn(gate_up)
+            out, _ = self.down_proj(out)
 
         if self.expert_gate is not None:
             out = F.sigmoid(self.expert_gate(x)[0]) * out

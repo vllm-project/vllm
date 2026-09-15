@@ -364,6 +364,12 @@ def main() -> None:
         type=int,
         help="Maximum number of concurrent requests",
     )
+    parser.add_argument(
+        "--request-timeout-seconds",
+        type=float,
+        default=600,
+        help="Timeout for each request, including time waiting for a connection",
+    )
     parser.add_argument("--save-results", type=str, help="Save results to JSON file")
 
     args = parser.parse_args()
@@ -377,6 +383,7 @@ def main() -> None:
         temperature=args.temperature,
         seed=args.seed,
         max_concurrency=args.max_concurrency,
+        request_timeout_seconds=args.request_timeout_seconds,
     )
 
     # Print results to terminal
