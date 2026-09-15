@@ -2213,8 +2213,8 @@ def _make_hybrid_attention_mamba_scheduler(
 def test_hybrid_store_uses_resolved_group_block_sizes() -> None:
     """Replicated groups must not be scaled by the DCP world size.
 
-    ``dcp_world_size_for_kv_cache_spec`` gives full attention the process DCP
-    size and every other spec 1. Reconstructing a group's geometry as
+    The spec's ``dcp_sharded`` flag controls its effective block size.
+    Reconstructing a group's geometry as
     ``spec.block_size * cp_world_size`` over-scales the replicated groups, so
     the eager store scan believes far fewer of their blocks are ready and
     silently offloads only a fraction of them.

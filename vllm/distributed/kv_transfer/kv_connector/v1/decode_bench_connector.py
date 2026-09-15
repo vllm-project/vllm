@@ -48,7 +48,6 @@ from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_utils import (
-    dcp_world_size_for_kv_cache_spec,
     resolve_dcp_kv_block_size,
 )
 from vllm.v1.kv_cache_interface import CircularBufferSpec, iter_layer_specs
@@ -195,13 +194,7 @@ class DecodeBenchConnectorScheduler:
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
         self.kv_cache_groups = kv_cache_config.kv_cache_groups
         self.group_block_sizes = tuple(
-            resolve_dcp_kv_block_size(
-                group.kv_cache_spec,
-                dcp_world_size_for_kv_cache_spec(
-                    group.kv_cache_spec,
-                    dcp_world_size,
-                ),
-            )
+            resolve_dcp_kv_block_size(group.kv_cache_spec, dcp_world_size)
             for group in self.kv_cache_groups
         )
 

@@ -144,12 +144,12 @@ class PCPManager:
         speculative_config = vllm_config.speculative_config
         if speculative_config is not None:
             if speculative_config.use_dspark():
-                # The replicated draft shares the target's DCP-sharded KV cache
-                # group, whose blocks only hold 1/DCP of the draft's KV.
-                dcp_size = parallel_config.decode_context_parallel_size
-                if dcp_size != 1:
+                if (
+                    speculative_config.draft_model_config.use_mla
+                    and parallel_config.decode_context_parallel_size != 1
+                ):
                     raise NotImplementedError(
-                        f"MRV2 PCP DSpark requires DCP=1; got DCP={dcp_size}."
+                        "MRV2 PCP with an MLA DSpark draft requires DCP=1."
                     )
             elif (
                 speculative_config.method != "mtp"

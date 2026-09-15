@@ -926,8 +926,6 @@ def test_flashinfer_xqa_single_token_decode_preserves_cudagraph_padding(monkeypa
     impl.o_sf_scale = None
     impl.window_left = -1
     impl.sinks = None
-    impl.cache_config = unittest.mock.Mock()
-    impl.cache_config.get_resolved_kv_cache_layout.return_value = KVCacheLayout.LBHNC
 
     layer = unittest.mock.Mock(
         _q_scale=torch.tensor(1.0),
@@ -943,6 +941,7 @@ def test_flashinfer_xqa_single_token_decode_preserves_cudagraph_padding(monkeypa
         q_len_per_req=1,
     )
     attn_metadata = flashinfer_backend.FlashInferMetadata(
+        kv_cache_layout=KVCacheLayout.LBHNC,
         num_actual_tokens=2,
         slot_mapping=torch.empty(0, dtype=torch.int64),
         q_data_type_prefill=torch.bfloat16,

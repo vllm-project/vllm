@@ -170,22 +170,23 @@ def test_block_tables_skip_custom_slot_mapping_groups():
 
 @pytest.mark.parametrize("cp_rank", range(4))
 def test_dcp_slot_mapping_with_smaller_kernel_blocks(cp_rank: int):
-    """DCP interleave is expressed in logical-block token coordinates."""
+    """Only sharded groups use DCP interleave in logical-block coordinates."""
     device = torch.device("cuda")
     block_tables = BlockTables(
-        block_sizes=[128],
+        block_sizes=[128, 128],
         max_num_reqs=1,
         max_num_batched_tokens=1024,
-        max_num_blocks_per_group=[2],
+        max_num_blocks_per_group=[2, 8],
         device=device,
-        kernel_block_sizes=[64],
+        kernel_block_sizes=[64, 64],
+        dcp_sharded=[True, False],
         cp_size=4,
         cp_rank=cp_rank,
         cp_interleave=128,
     )
     block_tables.append_block_ids(
         req_index=0,
-        new_block_ids=([5, 9],),
+        new_block_ids=([5, 9], list(range(10, 18))),
         overwrite=True,
     )
     block_tables.apply_staged_writes()
@@ -198,7 +199,7 @@ def test_dcp_slot_mapping_with_smaller_kernel_blocks(cp_rank: int):
         query_start_loc,
         positions,
         num_tokens_padded=1024,
-    )[0]
+    )
 
     expected = torch.full((1024,), -1, dtype=torch.int64, device=device)
     first_start = cp_rank * 128
@@ -209,7 +210,8 @@ def test_dcp_slot_mapping_with_smaller_kernel_blocks(cp_rank: int):
     expected[second_start : second_start + 128] = torch.arange(
         9 * 128, 10 * 128, dtype=torch.int64, device=device
     )
-    assert torch.equal(actual, expected)
+    assert torch.equal(actual[0], expected)
+    assert torch.equal(actual[1], positions + 10 * 128)
 
 
 def test_v1_block_table_move_row_clears_vacated_row():

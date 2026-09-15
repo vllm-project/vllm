@@ -1518,19 +1518,138 @@ def test_project_kv_cache_groups_to_worker():
     assert set(proj_spec.kv_cache_specs.keys()) == {"layer1", "layer3"}
 
 
-def test_dcp_world_size_for_kv_cache_spec_shards_full_attention_only():
-    dcp = 8
-    full = FullAttentionSpec(
-        block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+@pytest.mark.parametrize("sliding_window", [None, 256])
+@pytest.mark.parametrize("disable_hybrid", [False, True])
+@pytest.mark.parametrize("pcp_size", [1, 4])
+def test_dcp_target_allocates_replicated_draft_independently(
+    monkeypatch, sliding_window, disable_hybrid, pcp_size
+):
+    """A draft must retain all positions even when the target shards them."""
+    from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
+
+    monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
+    config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    config.parallel_config.decode_context_parallel_size = 4
+    config.parallel_config.prefill_context_parallel_size = pcp_size
+    config.scheduler_config.disable_hybrid_kv_cache_manager = disable_hybrid
+    config.cache_config.block_size = 16
+    config.cache_config.kv_cache_layout = None
+    draft_args = dict(
+        block_size=16,
+        num_kv_heads=8,
+        head_size=64,
+        dtype=torch.bfloat16,
+        dcp_sharded=False,
     )
-    mla = new_mla_spec()
-    mamba = new_mamba_spec()
-    uniform_mla = UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs={"layer": mla})
-    assert kv_cache_utils.dcp_world_size_for_kv_cache_spec(full, dcp) == dcp
-    assert kv_cache_utils.dcp_world_size_for_kv_cache_spec(mla, dcp) == dcp
-    assert kv_cache_utils.dcp_world_size_for_kv_cache_spec(uniform_mla, dcp) == dcp
-    assert kv_cache_utils.dcp_world_size_for_kv_cache_spec(mamba, dcp) == 1
-    assert kv_cache_utils.dcp_world_size_for_kv_cache_spec(full, 1) == 1
+    draft = (
+        FullAttentionSpec(**draft_args)
+        if sliding_window is None
+        else SlidingWindowSpec(**draft_args, sliding_window=sliding_window)
+    )
+    specs = {"target": new_mla_spec(), "draft": draft}
+    layout = resolve_kv_cache_layout(config, [["LBHNC", "BLHNC"]], specs.values())
+    assert layout == KVCacheLayout.BLHNC
+    groups = get_kv_cache_groups(config, specs)
+    assert [group.layer_names for group in groups] == [["target"], ["draft"]]
+    widths = [g.kv_cache_spec.max_num_blocks_per_req(config, 1024) for g in groups]
+    assert widths == [16, 64]
+
+    cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
+        config, groups, available_memory=16 * 1024 * 1024
+    )
+    scheduler_config = generate_scheduler_kv_cache_config([cache_config])
+    assert get_max_concurrency_for_kv_cache_config(config, cache_config) > 0
+    assert get_max_concurrency_for_kv_cache_config(config, cache_config) == (
+        get_max_concurrency_for_kv_cache_config(config, scheduler_config)
+    )
+    manager = KVCacheManager(
+        scheduler_config,
+        max_model_len=1024,
+        hash_block_size=16,
+        scheduler_block_size=64,
+        dcp_world_size=4,
+        pcp_world_size=pcp_size,
+        enable_caching=True,
+    )
+    assert manager.coordinator.group_block_sizes == (64, 16)
+    request = make_request("replicated-draft", [1] * 65, block_size=16, hash_fn=sha256)
+    blocks = manager.allocate_slots(request, 65)
+    assert blocks is not None
+    assert [len(group) for group in blocks.blocks] == [2, 5]
+    manager.cache_blocks(request, 64)
+    cached_request = make_request(
+        "cached-draft", [1] * 65, block_size=16, hash_fn=sha256
+    )
+    cached_blocks, num_cached, _ = manager.get_computed_blocks(cached_request)
+    assert num_cached == 64
+    assert [len(group) for group in cached_blocks.blocks] == [1, 4]
+
+
+@pytest.mark.parametrize("use_mla", [False, True])
+def test_full_attention_merge_preserves_replicated_cache_geometry(use_mla):
+    config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    config.parallel_config.decode_context_parallel_size = 4
+    draft = replace(
+        new_mla_spec() if use_mla else new_kv_cache_spec(),
+        block_size=16,
+        dcp_sharded=False,
+    )
+    merged = type(draft).merge([draft, draft])
+    wrapped = UniformTypeKVCacheSpecs.from_specs({"draft": merged})
+    assert wrapped is not None and not wrapped.dcp_sharded
+    assert merged.max_num_blocks_per_req(config, 1024) == 64
+    assert merged.max_memory_usage_bytes(config) == 64 * draft.page_size_bytes
+    assert kv_cache_utils.resolve_dcp_kv_block_size(merged, 4) == 16
+    with pytest.raises(AssertionError):
+        type(draft).merge([draft, replace(draft, dcp_sharded=True)])
+
+
+@pytest.mark.parametrize("with_draft", [False, True])
+def test_sparse_mla_preserves_physical_row_addressing(with_draft):
+    from vllm.v1.attention.backends.mla.sparse_utils import flat_kv_row_view
+    from vllm.v1.worker.utils import allocate_kv_cache
+
+    config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    config.cache_config.kv_cache_layout = "BLHNC"
+    config.parallel_config.decode_context_parallel_size = 4
+    common = dict(block_size=64, num_kv_heads=1, dtype=torch.uint8)
+    specs = {
+        "target": MLAAttentionSpec(
+            **common,
+            head_size=576,
+            state_content_bytes=656,
+            cache_dtype_str="fp8_ds_mla",
+            is_index_group_leader=True,
+        ),
+        "indexer": MLAAttentionSpec(
+            **common,
+            head_size=132,
+            cache_role=SparseCacheRole.INDEXER,
+        ),
+        "draft": SlidingWindowSpec(
+            block_size=64,
+            num_kv_heads=64,
+            head_size=64,
+            dtype=torch.bfloat16,
+            sliding_window=2048,
+            dcp_sharded=False,
+        ),
+    }
+    if not with_draft:
+        del specs["draft"]
+    groups = get_kv_cache_groups(config, specs)
+    cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
+        config, groups, available_memory=8 * 1024 * 1024
+    )
+    caches = allocate_kv_cache(
+        cache_config, torch.device("cpu"), KVCacheLayout.BLHNC, [64] * len(groups)
+    )
+    for name in ("target", "indexer"):
+        cache = caches[name].squeeze(1)
+        rows, stride_rows = flat_kv_row_view(cache, 64)
+        cache[1, 0].fill_(7)
+        torch.testing.assert_close(rows[stride_rows], cache[1, 0])
+        assert torch.all(rows[stride_rows] == 7)
 
 
 @pytest.mark.parametrize(

@@ -103,11 +103,9 @@ class SingleTypeKVCacheManager(ABC):
         # managers have been validated by the coordinator.
         self.cache_hit_alignment_tokens = scheduler_block_size
         # The block size for this manager; used for actual block allocation.
-        self.block_size = kv_cache_spec.block_size
-        self.dcp_world_size = dcp_world_size
-        self.pcp_world_size = pcp_world_size
-        if dcp_world_size > 1:
-            self.block_size *= dcp_world_size
+        self.dcp_world_size = dcp_world_size if kv_cache_spec.dcp_sharded else 1
+        self.pcp_world_size = pcp_world_size if kv_cache_spec.dcp_sharded else 1
+        self.block_size = kv_cache_spec.block_size * self.dcp_world_size
         self.kv_cache_spec = kv_cache_spec
         self.block_pool = block_pool
         self.enable_caching = enable_caching
@@ -1454,10 +1452,6 @@ class MambaManager(SingleTypeKVCacheManager):
         self, kv_cache_spec: MambaSpec, block_pool: BlockPool, **kwargs
     ) -> None:
         super().__init__(kv_cache_spec, block_pool, **kwargs)
-        # Mamba layers use TP instead of DCP, so each rank holds the full
-        # recurrent state. Undo the DCP/PCP block_size scaling that the base
-        # class applies for attention groups whose KV cache is partitioned.
-        self.block_size = kv_cache_spec.block_size
         self.mamba_cache_mode = kv_cache_spec.mamba_cache_mode
         self.num_speculative_blocks: int = kv_cache_spec.num_speculative_blocks
         self.has_prefill_checkpoint_blocks = (

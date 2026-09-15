@@ -76,14 +76,22 @@ def test_validate_config_rejects_full_graph_for_prefills():
         )
 
 
-def test_validate_config_rejects_dcp_for_dspark():
-    """The replicated DSpark draft shares the target's DCP-sharded KV cache group,
-    whose blocks cannot hold the draft's unsharded KV."""
+@pytest.mark.parametrize("draft_uses_mla", [False, True])
+def test_validate_config_dcp_for_dspark(draft_uses_mla):
     config = _make_config(CUDAGraphMode.NONE)
     config.parallel_config.decode_context_parallel_size = 2
-    config.speculative_config = SimpleNamespace(use_dspark=lambda: True)
-    with pytest.raises(NotImplementedError, match="requires DCP=1"):
-        PCPManager.validate_config(config, supports_mm_inputs=False)
+    config.model_config.hf_text_config.index_topk = 1
+    config.speculative_config = SimpleNamespace(
+        use_dspark=lambda: True,
+        draft_model_config=SimpleNamespace(use_mla=draft_uses_mla),
+    )
+    if draft_uses_mla:
+        with pytest.raises(
+            NotImplementedError, match="MLA DSpark draft requires DCP=1"
+        ):
+            PCPManager.validate_config(config, supports_mm_inputs=False)
+        return
+    PCPManager.validate_config(config, supports_mm_inputs=False)
 
 
 def test_replicated_decode_piecewise_graph_padding(monkeypatch):

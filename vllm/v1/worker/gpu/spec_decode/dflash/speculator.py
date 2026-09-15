@@ -37,11 +37,19 @@ class DFlashSpeculator(DraftModelSpeculator):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         parallel_config = vllm_config.parallel_config
-        if parallel_config.prefill_context_parallel_size > 1:
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        replicated_kv = not speculative_config.draft_model_config.use_mla
+        if parallel_config.prefill_context_parallel_size > 1 or (
+            replicated_kv and parallel_config.decode_context_parallel_size > 1
+        ):
             vllm_config = copy.copy(vllm_config)
             vllm_config.parallel_config = replace(
                 parallel_config,
                 prefill_context_parallel_size=1,
+                decode_context_parallel_size=(
+                    1 if replicated_kv else parallel_config.decode_context_parallel_size
+                ),
             )
         super().__init__(vllm_config, device)
 
