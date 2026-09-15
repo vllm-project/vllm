@@ -25,7 +25,11 @@ import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import (
+    CacheConfig,
+    ModelConfig,
+    VllmConfig,
+)
 from vllm.config.parallel import ParallelConfig
 from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
 from vllm.distributed.communication_op import tensor_model_parallel_all_gather
@@ -38,6 +42,7 @@ from vllm.model_executor.layers.fused_moe import (
     activation_without_mul,
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -118,7 +123,7 @@ class NemotronHMLP(nn.Module):
 
     def forward(self, x: torch.Tensor):
         x, _ = self.up_proj(x)
-        x = self.act_fn(x)
+        x = maybe_fused_act_quant(self.act_fn, x, self.down_proj)
         x, _ = self.down_proj(x)
         return x
 
