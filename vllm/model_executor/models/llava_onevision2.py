@@ -134,7 +134,7 @@ def _load_ov2_processor(
     # nested load fall back to an interactive stdin prompt that hangs in
     # non-interactive CI. Instead, assemble the processor here with
     # trust_remote_code threaded through every component explicitly.
-    path = convert_model_repo_to_path(model)
+    path = convert_model_repo_to_path(model, revision=revision)
     revision = revision or "main"
 
     resolve_trust_remote_code(
