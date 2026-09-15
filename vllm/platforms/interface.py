@@ -1078,20 +1078,29 @@ class Platform:
 
     @classmethod
     def check_and_update_eplb_config(cls, parallel_config: "ParallelConfig") -> None:
-        """Choose and validate the platform's EPLB communicator."""
+        """Choose and validate the platform's EPLB communicator.
+
+        Overrides can set a platform-specific backend, then call ``super()``.
+        """
         eplb_config = parallel_config.eplb_config
-        if eplb_config.communicator is not None:
-            return
+        if eplb_config.communicator is None:
+            # Preserve the existing NIXL preference and elastic/static fallbacks.
+            from vllm.distributed.nixl_utils import is_nixl_available
 
-        # Preserve the existing NIXL preference and elastic/static fallbacks.
-        from vllm.distributed.nixl_utils import is_nixl_available
+            if is_nixl_available():
+                eplb_config.communicator = "nixl"
+            elif parallel_config.enable_elastic_ep:
+                eplb_config.communicator = "pynccl"
+            else:
+                eplb_config.communicator = "torch_gloo"
 
-        if is_nixl_available():
-            eplb_config.communicator = "nixl"
-        elif parallel_config.enable_elastic_ep:
-            eplb_config.communicator = "pynccl"
-        else:
-            eplb_config.communicator = "torch_gloo"
+        if eplb_config.communicator not in (
+            "torch_nccl",
+            "torch_gloo",
+            "nixl",
+            "pynccl",
+        ):
+            raise ValueError(f"Unknown EPLB communicator: {eplb_config.communicator}")
 
         if eplb_config.use_async and eplb_config.communicator in (
             "torch_nccl",
