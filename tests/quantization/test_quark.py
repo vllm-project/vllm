@@ -909,6 +909,84 @@ def test_quant_method_dispatch_target(case):
     assert method_cls is (QuarkLinearMethod if is_linear else case.dispatch_cls)
 
 
+def test_quant_method_dispatch_mxfp8_2d_block(default_vllm_config):
+    """A 32x32 per-block e8m0 FP8 linear routes to ModelOpt's MXFP8 method.
+
+    Shape taken from DeepSeek-V4.1-Flash-MXFP4, which is mixed precision:
+    MXFP4 globally for the experts, per-layer 2-D block MXFP8 for attention.
+    """
+    from vllm.model_executor.layers.quantization.modelopt import ModelOptLinearMethod
+
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    mxfp8_spec = {
+        "weight": {
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_block",
+            "block_size": [32, 32],
+            "symmetric": True,
+            "is_dynamic": False,
+            "scale_type": "float8_e8m0fnu",
+        },
+        "input_tensors": {
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_group",
+            "group_size": 32,
+            "symmetric": True,
+            "is_dynamic": True,
+        },
+    }
+    config = QuarkConfig(
+        {
+            "global_quant_config": {
+                "weight": {
+                    "dtype": "fp4",
+                    "qscheme": "per_group",
+                    "group_size": 32,
+                    "scale_format": "e8m0",
+                    "is_dynamic": False,
+                },
+                "input_tensors": {
+                    "dtype": "fp4",
+                    "qscheme": "per_group",
+                    "group_size": 32,
+                    "scale_format": "e8m0",
+                    "is_dynamic": True,
+                },
+            },
+            "layer_type_quant_config": {},
+            "layer_quant_config": {"layers.0.attn.wkv": mxfp8_spec},
+            "exclude": [],
+        }
+    )
+
+    class TestLinear(LinearBase):
+        def __init__(self):
+            torch.nn.Module.__init__(self)
+
+    method = config.get_quant_method(TestLinear(), "layers.0.attn.wkv")
+    assert isinstance(method, ModelOptLinearMethod)
+    assert method.ctx.scale_block_size == (32, 32)
+
+    # Experts still fall through to the global MXFP4 spec.
+    assert (
+        config.get_quant_method_target("layers.0.ffn.experts", RoutedExperts)[2]
+        is not ModelOptLinearMethod
+    )
+
+    # 128x128 per-block FP8 (DeepSeek V4) keeps its existing Quark scheme.
+    v4_spec = {
+        "weight": {**mxfp8_spec["weight"], "block_size": [128, 128]},
+        "input_tensors": {**mxfp8_spec["input_tensors"], "group_size": 128},
+    }
+    v4_config = _make_qtensor_config(v4_spec["weight"], v4_spec["input_tensors"])
+    assert v4_config.get_quant_method_target("linear", LinearBase)[2] is (
+        QuarkLinearMethod
+    )
+    linear = TestLinear()
+    assert isinstance(v4_config.get_quant_method(linear, "linear"), QuarkLinearMethod)
+    assert isinstance(linear.scheme, QuarkW8A8Fp8PerBlock)
+
+
 @pytest.mark.parametrize(
     ("weight", "input_tensors"),
     [
