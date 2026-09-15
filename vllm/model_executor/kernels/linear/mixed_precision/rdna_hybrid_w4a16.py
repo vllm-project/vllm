@@ -86,6 +86,7 @@ def _triton_w4a16_skinny_fmt_kernel(
     K8,  # K // 8
     num_groups,  # K // group_size
     stride_bn,  # b_ptr row stride; >= K8, the rows may be padded
+    stride_am,  # a_ptr row stride in elements; >= K, rows may be padded
     # Quantization parameters
     group_size,
     ZP_BIAS: tl.constexpr,
@@ -130,7 +131,7 @@ def _triton_w4a16_skinny_fmt_kernel(
         offs_k = k_start * BLOCK_K + tl.arange(0, BLOCK_K)
         mask_k = offs_k < K
 
-        a_ptrs = a_ptr + offs_m[:, None] * K + offs_k[None, :]
+        a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k[None, :]
         mask_a = (offs_m[:, None] < M) & mask_k[None, :]
         a = tl.load(a_ptrs, mask=mask_a, other=0.0)
 
@@ -213,9 +214,7 @@ def triton_w4a16_skinny_fmt_gemm(
     Returns:
         Output matrix [M, N], same dtype as a.
     """
-    assert a.is_contiguous(), "Activation matrix must be contiguous"
-    # b_q may be a row-padded view (stride(0) > K//8) when the gfx11 weight
-    # row-stride padding is active, so only the K axis must be dense.
+    assert a.stride(1) == 1, "Activation rows must be contiguous"
     assert b_q.stride(1) == 1, "Weight rows must be contiguous"
     assert scales.is_contiguous(), "Scales must be contiguous"
 
@@ -224,6 +223,7 @@ def triton_w4a16_skinny_fmt_gemm(
     K8 = K // 8
     num_groups = K // group_size
     stride_bn = b_q.stride(0)
+    stride_am = a.stride(0)
 
     assert b_q.shape == (N, K8), f"b_q shape mismatch: {b_q.shape} vs ({N}, {K8})"
     assert scales.shape == (N, num_groups), (
@@ -306,14 +306,7 @@ def triton_w4a16_skinny_fmt_gemm(
                 BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 64, 128, 32, 4
         else:
             if K >= 2 * N:  # tall K (e.g. down_proj)
-                # BLOCK_N=512 gathers 512 rows of B per K-step, so it is very
-                # sensitive to the row stride: it is the best tile on a dense
-                # weight but 1.5x slower than the next-best one on a
-                # cliff-padded weight (see pack_skinny_int4). Pick by layout.
-                if stride_bn == K8:
-                    BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 128, 512, 32, 16
-                else:
-                    BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 128, 64, 64, 8
+                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 128, 512, 32, 16
             else:
                 BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 128, 64, 64, 8
     else:
@@ -345,6 +338,7 @@ def triton_w4a16_skinny_fmt_gemm(
         K8,
         num_groups,
         stride_bn,
+        stride_am,
         group_size=group_size,
         ZP_BIAS=zp_bias,
         HAS_ZP=has_zp,
@@ -382,21 +376,21 @@ def pack_int4_exllama_shuffle(w_uint4: torch.Tensor) -> torch.Tensor:
     )
 
 
-# gfx11 packed-weight row stride: a stride that is a multiple of 2048 bytes
-# (i.e. K % 4096 == 0) collides somewhere between L2 and DRAM and gives up as
-# much as a fifth of the achievable weight-read bandwidth. Nudging the stride
-# one cache line off that multiple recovers it.
-_STRIDE_CLIFF_BYTES = 2048
+# gfx11 row strides alias in the vector caches when they land on a power-of-two
+# multiple.
+_STRIDE_CLIFF_BYTES = 1024  # packed weight row, K/2 B
+_ACT_CLIFF_BYTES = 2048  # activation row, K*2 B
 _STRIDE_PAD_BYTES = 128  # one cache line
 
 
 def _cliff_pad_bytes(row_bytes: int) -> int:
     """Bytes to add to a packed weight row stride to move it off the cliff.
 
-    Only strides that are a multiple of 2048 B are moved, and only by one
-    cache line. Padding is not free: it costs ``pad / row_bytes`` of weight
-    memory, which on an APU comes straight out of KV-cache space, and
-    measurements show it is a slight loss on strides that are off the cliff.
+    Only strides that are a multiple of ``_STRIDE_CLIFF_BYTES`` are moved, and
+    only by one cache line. Padding is not free: it costs ``pad / row_bytes`` of
+    weight memory, which on an APU comes straight out of KV-cache space, and
+    measurements show it is a real loss on strides that are already off the
+    cliff (-14% at M=1 on a 4864 B row).
     """
     if row_bytes % _STRIDE_CLIFF_BYTES:
         return 0
@@ -413,7 +407,7 @@ def pack_skinny_int4(unpacked: torch.Tensor) -> torch.Tensor:
     shuffled = pack_int4_exllama_shuffle(unpacked)
     n_rows, k8 = shuffled.shape
     pad_int32 = _cliff_pad_bytes(k8 * 4) // 4
-    if not (pad_int32 and _on_gfx1151() and shuffled.device.type == "cuda"):
+    if not (pad_int32 and _on_gfx1151()):
         return shuffled.contiguous().view(torch.int8)
     padded = torch.empty(
         (n_rows, k8 + pad_int32), dtype=torch.int32, device=shuffled.device
@@ -427,6 +421,29 @@ def pack_skinny_int4(unpacked: torch.Tensor) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 # Hybrid dispatch logic
 # ---------------------------------------------------------------------------
+
+
+def _pad_activation_rows(x_2d: torch.Tensor) -> torch.Tensor:
+    """Copy ``x_2d`` into a row-padded buffer when its row stride is on the cliff.
+
+    The packed weight is padded once at load time, but activations are produced
+    fresh every step, so this materialises a padded copy. Only the Triton
+    prefill path calls it: the skinny decode kernel derives the activation row
+    stride from K, and at M <= 5 the row stride cannot alias anything anyway.
+    """
+    row_bytes = x_2d.shape[1] * x_2d.element_size()
+    on_cliff = _ACT_CLIFF_BYTES and row_bytes % _ACT_CLIFF_BYTES == 0
+    if not (on_cliff and _on_gfx1151()):
+        return x_2d
+    pad_elems = _STRIDE_PAD_BYTES // x_2d.element_size()
+    buf = torch.empty(
+        (x_2d.shape[0], x_2d.shape[1] + pad_elems),
+        dtype=x_2d.dtype,
+        device=x_2d.device,
+    )
+    padded = buf[:, : x_2d.shape[1]]
+    padded.copy_(x_2d)
+    return padded
 
 
 def _rdna_hybrid_w4a16_apply_impl(
@@ -466,7 +483,7 @@ def _rdna_hybrid_w4a16_apply_impl(
     )
     with ctx:
         output = triton_w4a16_skinny_fmt_gemm(
-            a=x_2d,
+            a=_pad_activation_rows(x_2d),
             b_q=w_q.view(torch.int32),
             scales=w_s,
             group_size=group_size,
@@ -506,10 +523,6 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
     HIP skinny kernel reads it directly; the triton kernel reinterprets the
     same buffer as int32 [N, K//8] via a view, so there is no dual weight
     storage.
-
-    On gfx11 the weight rows may be padded (see ``pack_skinny_int4``), so
-    both kernels read the weight row stride off the tensor rather than
-    deriving it from K.
     """
 
     SUPPORTED_QUANT_TYPES = [

@@ -638,9 +638,6 @@ static int mindiv_int4(int N, int div1, int div2) {
 //   If provided, kernel dequants as (nibble - zp_raw) * scale (asymmetric).
 //   If absent, kernel dequants as (nibble - 8) * scale (symmetric uint4b8).
 // group_size: 32, 64, or 128
-//
-// in_a rows may be padded, i.e. in_a.stride(0) may exceed K/2; the stride is
-// read off the tensor and passed to the kernel.
 
 torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
                               const at::Tensor& in_scale,
