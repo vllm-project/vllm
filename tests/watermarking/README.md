@@ -26,7 +26,8 @@ exactly, yet they and `p_value_ratio` are compared with a relative tolerance of
 1e-9 (`GOLDEN_FLOAT_RTOL`): the detector reaches them via `log1p`, `exp` and
 `gammaincc`, which differ by a unit in the last place between libm builds.
 Everything else is exact: tokens, counts, booleans, configuration, resolved
-state, trace.
+state, trace. Fixture-quality guards run in both pytest and the regeneration
+script before it writes the file.
 
 ## Fixture
 
@@ -36,6 +37,9 @@ sets one. `REPETITIVE_FIXTURE` makes contexts repeat during generation, and its
 bias is chosen against a rule: every repetitive row changes at least 8 tokens
 under `key ^ 1`, makes at least one deduplication skip that is not a
 partial-context skip, and detects at no more than half its threshold.
+`MIDDLE_FIXTURE` has paired candidates with generation and detection
+deduplication enabled and disabled; the pair must produce different tokens and
+different detector scored-token counts.
 
 Routing between key A and key B uses a frozen 64-value low-discrepancy sequence,
 so alpha 0.1 sends about 10% of positions to key B. No value in it sits within

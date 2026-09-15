@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from tests.watermarking.golden_candidates import (
+    DEDUPLICATION_TWINS,
     DETECTOR_FACTORIES,
     GOLDEN_FLOAT_RTOL,
     MAX_HISTORY_TWINS,
@@ -27,6 +28,7 @@ from tests.watermarking.golden_candidates import (
     load_goldens,
     read_goldens,
     routing_boundary,
+    validate_golden_guards,
 )
 from vllm.config.watermarking import WatermarkConfig
 
@@ -62,11 +64,22 @@ def test_goldens_cover_every_candidate(
 
     twin_ids = {
         candidate_id
-        for pairs in (MAX_HISTORY_TWINS, PROMPT_TWINS, SKIP_PARTIAL_TWINS)
+        for pairs in (
+            MAX_HISTORY_TWINS,
+            PROMPT_TWINS,
+            SKIP_PARTIAL_TWINS,
+            DEDUPLICATION_TWINS,
+        )
         for pair in pairs
         for candidate_id in pair
     }
     assert twin_ids <= candidate_ids
+
+
+def test_golden_fixture_guards(
+    goldens: dict[str, GoldenCandidatePayload],
+):
+    validate_golden_guards(goldens)
 
 
 def test_resolved_records_every_watermark_config_field():
