@@ -668,9 +668,11 @@ class KimiK3KDAAttentionBackend(GDNAttentionBackend):
 
     @classmethod
     def supports_device_cpu_query_lens_mismatch(cls) -> bool:
-        # Unlike the generic SSM opt-out, K3 KDA plans spec decode from the DEVICE
-        # offsets: build derives spec_query_start_loc from query_start_loc.diff(),
-        # and RecoverSSM commits min(num_accepted[device], query_len) with
-        # spec_query_len only an upper-bound window. Adaptive's on-device trimming is
-        # therefore a case the existing kernels already handle.
+        # Unlike the generic SSM opt-out, a pure spec-decode batch reads its plan
+        # from the DEVICE offsets: build slices spec_query_start_loc out of the
+        # device query_start_loc by a request count trimming does not change, and
+        # pairs it with device num_accepted_tokens. The mixed spec/non-spec branch,
+        # however, still partitions tokens by CPU totals (num_query_tokens as the
+        # repeat_interleave output_size, num_non_spec_tokens as the split), so it
+        # assumes those totals match the device offsets.
         return True
