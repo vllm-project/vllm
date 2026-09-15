@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from tests.v1.attention.test_attention_backends import BATCH_SPECS
+from tests.v1.attention.dense.test_attention_backends import BATCH_SPECS
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
