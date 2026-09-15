@@ -35,6 +35,8 @@ class PEFTHelper:
     use_rslora: bool = field(default=False)
     # True to use Weight-Decomposed Low-Rank Adaptation (DoRA, see: https://arxiv.org/abs/2402.09353)
     use_dora: bool = field(default=False)
+    trainable_token_indices: list[int] | dict[str, list[int]] | None = None
+    ensure_weight_tying: bool = False
     # Extra vllm field, start with 'vllm_' to avoid conflict
     vllm_lora_scaling_factor: float = field(default=1.0)
     vllm_max_position_embeddings: int | None = field(default=False)
@@ -53,11 +55,37 @@ class PEFTHelper:
     def __post_init__(self):
         if self.r <= 0:
             raise ValueError(f"LoRA rank `r` must be a positive integer, got {self.r}.")
+        self._validate_trainable_token_indices()
         if self.use_rslora:
             logger.info_once("Loading LoRA weights trained with rsLoRA.")
             self.vllm_lora_scaling_factor = self.lora_alpha / math.sqrt(self.r)
         else:
             self.vllm_lora_scaling_factor = self.lora_alpha / self.r
+
+    def _validate_trainable_token_indices(self) -> None:
+        indices = self.trainable_token_indices
+        if type(self.ensure_weight_tying) is not bool:
+            raise ValueError("ensure_weight_tying must be a boolean.")
+        if indices is None:
+            return
+        if isinstance(indices, dict) and (
+            not indices or any(not isinstance(key, str) or not key for key in indices)
+        ):
+            raise ValueError("trainable_token_indices must have nonempty module names.")
+        token_lists = indices.values() if isinstance(indices, dict) else [indices]
+        for token_ids in token_lists:
+            if (
+                not isinstance(token_ids, list)
+                or not token_ids
+                or any(
+                    type(token_id) is not int or token_id < 0 for token_id in token_ids
+                )
+                or len(set(token_ids)) != len(token_ids)
+            ):
+                raise ValueError(
+                    "trainable_token_indices must contain nonempty lists of unique "
+                    "nonnegative integer token IDs."
+                )
 
     @classmethod
     def from_dict(cls, config_dict: dict) -> "PEFTHelper":
@@ -128,5 +156,20 @@ class PEFTHelper:
             )
         if self.bias != "none":
             error_msg.append("Adapter bias is not supported.")
+        if self.trainable_token_indices is not None:
+            token_lists = (
+                self.trainable_token_indices.values()
+                if isinstance(self.trainable_token_indices, dict)
+                else [self.trainable_token_indices]
+            )
+            num_tokens = max(len(indices) for indices in token_lists)
+            if num_tokens > lora_config.max_lora_trainable_tokens:
+                error_msg.append(
+                    f"Adapter requires {num_tokens} trainable tokens per module, "
+                    "exceeding max_lora_trainable_tokens="
+                    f"{lora_config.max_lora_trainable_tokens}. Set "
+                    f"--max-lora-trainable-tokens to at least {num_tokens} to enable "
+                    "selected-token weights."
+                )
         if error_msg:
             raise ValueError(f"{' '.join(error_msg)}")

@@ -156,6 +156,9 @@ class WorkerLoRAManager:
             # adapter manager can route 3D-format checkpoints through the
             # 3D->2D conversion when running under the universal 2D wrapper.
             lora.is_3d_lora_weight = lora_request.is_3d_lora_weight
+            # Validate model-specific token rows before the worker evicts or
+            # replaces any existing adapter in its cache.
+            self._adapter_manager._prepare_trainable_tokens(lora)
 
         except FileNotFoundError as e:
             # FileNotFoundError should be raised if both

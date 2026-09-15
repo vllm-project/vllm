@@ -8,12 +8,14 @@ import safetensors
 import torch
 
 from vllm.logger import init_logger
-from vllm.lora.lora_weights import LoRALayerWeights
+from vllm.lora.lora_weights import LoRALayerWeights, TrainableTokensWeights
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.utils import (
     get_lora_id,
     is_base_embedding_weights,
+    is_trainable_tokens_weights,
     parse_fine_tuned_lora_name,
+    parse_trainable_tokens_name,
 )
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models.utils import WeightsMapper
@@ -66,6 +68,9 @@ class LoRAModel:
         rank: int,
         loras: dict[str, LoRALayerWeights],
         is_3d_lora_weight: bool = False,
+        trainable_tokens: dict[str, TrainableTokensWeights] | None = None,
+        ensure_weight_tying: bool = False,
+        trainable_token_indices: list[int] | dict[str, list[int]] | None = None,
     ) -> None:
         """
         Args:
@@ -76,6 +81,9 @@ class LoRAModel:
                 fused (gate_up_proj / down_proj) layout. Propagated from the
                 originating LoRARequest. Only consulted by the LoRA model
                 manager when enable_mixed_moe_lora_format is on.
+            trainable_tokens: Module name to absolute selected-token rows.
+            ensure_weight_tying: Whether PEFT requires tied adapter weights.
+            trainable_token_indices: Declared token targets, with mapped module names.
 
         """
         self.id = lora_model_id
@@ -86,6 +94,9 @@ class LoRAModel:
         self.rank = rank
         self.loras: dict[str, LoRALayerWeights] = loras
         self.is_3d_lora_weight = is_3d_lora_weight
+        self.trainable_tokens = trainable_tokens if trainable_tokens is not None else {}
+        self.ensure_weight_tying = ensure_weight_tying
+        self.trainable_token_indices = trainable_token_indices
 
     def clone(self, lora_model_id: int) -> "LoRAModel":
         """Return a copy of the object with different ids.
@@ -96,6 +107,9 @@ class LoRAModel:
             rank=self.rank,
             loras=self.loras.copy(),
             is_3d_lora_weight=self.is_3d_lora_weight,
+            trainable_tokens=self.trainable_tokens.copy(),
+            ensure_weight_tying=self.ensure_weight_tying,
+            trainable_token_indices=self.trainable_token_indices,
         )
 
     def get_lora(self, module_name: str) -> LoRALayerWeights | None:
@@ -113,6 +127,44 @@ class LoRAModel:
                 return True
         return False
 
+    @staticmethod
+    def _get_trainable_token_indices(
+        tensor_name: str,
+        peft_helper: PEFTHelper,
+        weights_mapper: WeightsMapper | None,
+    ) -> list[int]:
+        configured = peft_helper.trainable_token_indices
+        if configured is None:
+            raise ValueError(
+                f"{tensor_name} requires trainable_token_indices "
+                "in adapter_config.json."
+            )
+        if isinstance(configured, list):
+            return configured
+        raw_module = parse_trainable_tokens_name(tensor_name)
+        module_name = parse_trainable_tokens_name(tensor_name, weights_mapper)
+        matches: list[list[int]] = []
+        for key, indices in configured.items():
+            key = key.removeprefix("base_model.model.")
+            if raw_module == key or raw_module.endswith("." + key):
+                matches.append(indices)
+                continue
+            if weights_mapper is not None:
+                mapped_key = weights_mapper._map_name(
+                    key + ".token_adapter.trainable_tokens_delta"
+                )
+                if mapped_key is None:
+                    continue
+                key = parse_trainable_tokens_name(mapped_key)
+            if module_name == key or module_name.endswith("." + key):
+                matches.append(indices)
+        if len(matches) != 1:
+            raise ValueError(
+                f"Expected exactly one trainable_token_indices entry for "
+                f"{module_name}, found {len(matches)}. Use unambiguous module names."
+            )
+        return matches[0]
+
     @classmethod
     def from_lora_tensors(
         cls,
@@ -128,11 +180,53 @@ class LoRAModel:
         """Create a LoRAModel from a dictionary of tensors."""
         pin_memory = str(device) == "cpu" and PIN_MEMORY
         loras: dict[str, LoRALayerWeights] = {}
+        trainable_tokens: dict[str, TrainableTokensWeights] = {}
         for tensor_name, tensor in tensors.items():
             if is_base_embedding_weights(tensor_name):
                 continue
             # Skip modules based on model-defined prefixes (e.g., MTP layers)
             if skip_prefixes and cls._should_skip_module(tensor_name, skip_prefixes):
+                continue
+            if is_trainable_tokens_weights(tensor_name):
+                module_name = parse_trainable_tokens_name(tensor_name, weights_mapper)
+                token_indices = cls._get_trainable_token_indices(
+                    tensor_name, peft_helper, weights_mapper
+                )
+                if (
+                    tensor.ndim != 2
+                    or tensor.shape[0] != len(token_indices)
+                    or tensor.shape[1] == 0
+                    or not tensor.is_floating_point()
+                ):
+                    raise ValueError(
+                        f"{tensor_name} must be a floating-point matrix with "
+                        f"{len(token_indices)} rows and a nonzero embedding dimension."
+                    )
+                if (
+                    model_vocab_size is not None
+                    and max(token_indices) >= model_vocab_size
+                ):
+                    raise ValueError(
+                        f"Trainable token IDs for {module_name} exceed the base model "
+                        f"vocabulary size ({model_vocab_size}). Resize the base model "
+                        "embeddings before loading the adapter."
+                    )
+                if module_name in trainable_tokens:
+                    raise ValueError(
+                        f"Duplicate trainable token weights for {module_name}."
+                    )
+                # Despite PEFT's name, these are absolute rows, not LoRA deltas.
+                # Preserve checkpoint precision until the runtime layer casts them.
+                weights = tensor.to(device=device)
+                indices_tensor = torch.tensor(
+                    token_indices, dtype=torch.long, device=device
+                )
+                if pin_memory:
+                    weights = weights.pin_memory()
+                    indices_tensor = indices_tensor.pin_memory()
+                trainable_tokens[module_name] = TrainableTokensWeights(
+                    token_indices=indices_tensor, weights=weights
+                )
                 continue
             module_name, is_lora_a = parse_fine_tuned_lora_name(
                 tensor_name, weights_mapper
@@ -161,7 +255,41 @@ class LoRAModel:
                 if pin_memory:
                     loras[module_name].lora_b = loras[module_name].lora_b.pin_memory()
 
-        return cls(lora_model_id, peft_helper.r, loras)
+        configured_tokens = peft_helper.trainable_token_indices
+        if configured_tokens is not None and not trainable_tokens:
+            raise ValueError(
+                "trainable_token_indices is configured but the checkpoint contains "
+                "no trainable token weights."
+            )
+        if isinstance(configured_tokens, dict):
+            configured_tokens = {
+                parse_trainable_tokens_name(
+                    key + ".token_adapter.trainable_tokens_delta", weights_mapper
+                ): indices
+                for key, indices in configured_tokens.items()
+            }
+        if (
+            isinstance(peft_helper.trainable_token_indices, list)
+            and len(trainable_tokens) > 1
+        ):
+            raise ValueError(
+                "A list of trainable_token_indices targets only the input embedding "
+                "module. Use a dictionary for multiple independently trained modules."
+            )
+        overlapping_modules = loras.keys() & trainable_tokens.keys()
+        if overlapping_modules:
+            raise ValueError(
+                "LoRA and trainable token weights cannot target the same module: "
+                f"{sorted(overlapping_modules)}."
+            )
+        return cls(
+            lora_model_id,
+            peft_helper.r,
+            loras,
+            trainable_tokens=trainable_tokens,
+            ensure_weight_tying=peft_helper.ensure_weight_tying,
+            trainable_token_indices=configured_tokens,
+        )
 
     @classmethod
     def from_local_checkpoint(
@@ -222,7 +350,14 @@ class LoRAModel:
                     lora_module, skip_prefixes
                 ):
                     continue
-                module_name, _ = parse_fine_tuned_lora_name(lora_module, weights_mapper)
+                if is_trainable_tokens_weights(lora_module):
+                    module_name = parse_trainable_tokens_name(
+                        lora_module, weights_mapper
+                    )
+                else:
+                    module_name, _ = parse_fine_tuned_lora_name(
+                        lora_module, weights_mapper
+                    )
                 # Case for expert lora weights
                 if ".experts" in module_name:
                     expert_idx = module_name.find(".experts")

@@ -10,6 +10,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.lora.ops.trainable_tokens import TrainableTokensBuffer, replace_token_logits
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.platforms import current_platform
@@ -110,6 +111,20 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             dtype=lora_config.lora_dtype,
             device=self.device,
         )
+        self.trainable_tokens = (
+            TrainableTokensBuffer(
+                max_loras,
+                lora_config.max_lora_trainable_tokens,
+                self.hidden_size,
+                self.dtype
+                if self.dtype
+                in (torch.float16, torch.bfloat16, torch.float32, torch.float64)
+                else lora_config.lora_dtype,
+                self.device,
+            )
+            if lora_config.max_lora_trainable_tokens
+            else None
+        )
 
         if self.sharded_to_full_mapping is not None:
             self.sharded_to_full_mapping_gpu = torch.tensor(
@@ -117,6 +132,19 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             )
         else:
             self.sharded_to_full_mapping_gpu = None
+
+    def reset_trainable_tokens(self, index: int) -> None:
+        if self.trainable_tokens is not None:
+            self.trainable_tokens.reset(index)
+
+    def set_trainable_tokens(
+        self, index: int, token_indices: torch.Tensor, weights: torch.Tensor
+    ) -> None:
+        if self.trainable_tokens is None:
+            raise ValueError(
+                "Set max_lora_trainable_tokens to enable trainable tokens."
+            )
+        self.trainable_tokens.set(index, token_indices, weights)
 
     def reset_sharded_to_full_mapping(self) -> None:
         """Restore the TP logits mapping after its GPU memory is reused."""
@@ -178,6 +206,11 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
 
         # Gather logits for TP
         logits = self.base_layer._gather_logits(logits)
+        trainable_token_bias = None
+        if self.trainable_tokens is not None and embedding_bias is not None:
+            trainable_token_bias = self.base_layer._gather_logits(
+                embedding_bias.unsqueeze(0)
+            )
 
         if logits is None:
             return None
@@ -200,6 +233,10 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             # indices:  [0, 1, 2, 3, 4, 5,  6,  7]
             # token_id: [0, 1, 2, 3, 4, 5, -1, -1]
             logits = logits[:, self.sharded_to_full_mapping_gpu]
+            if trainable_token_bias is not None:
+                trainable_token_bias = trainable_token_bias[
+                    :, self.sharded_to_full_mapping_gpu
+                ]
 
         lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_logits(
             logits, hidden_states, self.lora_a_stacked, self.lora_b_stacked, 1.0
@@ -207,6 +244,18 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
 
         if not current_platform.can_update_inplace():
             logits = lora_output
+
+        if self.trainable_tokens is not None:
+            replace_token_logits(
+                logits,
+                hidden_states,
+                self.punica_wrapper._sampler_indices[: hidden_states.shape[0]],
+                self.trainable_tokens.token_ids,
+                self.trainable_tokens.weights,
+                trainable_token_bias.squeeze(0)
+                if trainable_token_bias is not None
+                else None,
+            )
 
         # Remove paddings in vocab (if any).
         logits = logits[:, : self.base_layer.vocab_size]

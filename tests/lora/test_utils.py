@@ -6,12 +6,17 @@ from typing import NamedTuple
 from unittest.mock import MagicMock, patch
 
 import pytest
+import safetensors.torch
+import torch
 from huggingface_hub.utils import HfHubHTTPError
 from torch import nn
 
+from vllm.lora.lora_model import LoRAModel
+from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.utils import (
     get_adapter_absolute_path,
     parse_fine_tuned_lora_name,
+    parse_trainable_tokens_name,
     replace_submodule,
 )
 from vllm.model_executor.models.utils import WeightsMapper
@@ -199,3 +204,138 @@ def test_get_adapter_absolute_path_huggingface_error(
         response=MagicMock(),
     )
     assert get_adapter_absolute_path(path) == path
+
+
+@pytest.mark.parametrize(
+    "config_indices,weights_mapper,expected_module",
+    [
+        ([3, 1], None, "model.embed_tokens"),
+        ({"embed_tokens": [3, 1]}, None, "model.embed_tokens"),
+        ({"model.embed_tokens": [3, 1]}, None, "model.embed_tokens"),
+        (
+            {"model.embed_tokens": [3, 1]},
+            WeightsMapper(orig_to_new_prefix={"model.": "language_model.model."}),
+            "language_model.model.embed_tokens",
+        ),
+    ],
+)
+def test_trainable_tokens_load_absolute_rows(
+    config_indices, weights_mapper, expected_module
+):
+    """Selected rows keep token order and precision independently of LoRA scaling."""
+    name = "base_model.model.model.embed_tokens.token_adapter.trainable_tokens_delta"
+    rows = torch.tensor([[1.125, -2.25], [3.5, 4.75]], dtype=torch.float32)
+    helper = PEFTHelper(
+        r=8,
+        lora_alpha=32,
+        target_modules=["q_proj"],
+        trainable_token_indices=config_indices,
+        ensure_weight_tying=True,
+    )
+    adapter = LoRAModel.from_lora_tensors(
+        1,
+        {name: rows, "base_model.model.model.q_proj.lora_A.weight": torch.ones(8, 2)},
+        helper,
+        device="cpu",
+        dtype=torch.float16,
+        model_vocab_size=8,
+        weights_mapper=weights_mapper,
+    )
+    selected = adapter.trainable_tokens[expected_module]
+    assert selected.token_indices.tolist() == [3, 1]
+    torch.testing.assert_close(selected.weights, rows)
+    assert selected.weights.dtype == torch.float32
+    assert len(adapter.loras) == 1
+    assert next(iter(adapter.loras.values())).lora_a.dtype == torch.float16
+    clone = adapter.clone(2)
+    assert clone.ensure_weight_tying
+    assert clone.trainable_tokens is not adapter.trainable_tokens
+    assert clone.trainable_tokens[expected_module].weights is selected.weights
+
+
+@pytest.mark.parametrize("extension", ["safetensors", "bin"])
+def test_trainable_tokens_local_checkpoint(tmp_path, extension):
+    """The real checkpoint module check accepts selected-token tensor keys."""
+    name = "base_model.model.model.embed_tokens.token_adapter.trainable_tokens_delta"
+    rows = torch.tensor([[1.0, -2.0]])
+    path = tmp_path / f"adapter_model.{extension}"
+    if extension == "safetensors":
+        safetensors.torch.save_file({name: rows}, path)
+    else:
+        torch.save({name: rows}, path)
+    helper = PEFTHelper(
+        r=8, lora_alpha=32, target_modules=["q_proj"], trainable_token_indices=[2]
+    )
+    adapter = LoRAModel.from_local_checkpoint(
+        str(tmp_path), {"embed_tokens"}, helper, device="cpu", model_vocab_size=4
+    )
+    torch.testing.assert_close(
+        adapter.trainable_tokens["model.embed_tokens"].weights, rows
+    )
+    with pytest.raises(ValueError, match="expected target modules"):
+        LoRAModel.from_local_checkpoint(
+            str(tmp_path), {"q_proj"}, helper, device="cpu", model_vocab_size=4
+        )
+
+
+@pytest.mark.parametrize(
+    "indices,rows,vocab_size,error",
+    [
+        (None, torch.ones(1, 2), 8, "requires trainable_token_indices"),
+        ({"lm_head": [1]}, torch.ones(1, 2), 8, "exactly one"),
+        (
+            {"embed_tokens": [1], "model.embed_tokens": [1]},
+            torch.ones(1, 2),
+            8,
+            "exactly one",
+        ),
+        ([1], torch.ones(2, 2), 8, "floating-point matrix"),
+        ([1], torch.ones(2), 8, "floating-point matrix"),
+        ([1], torch.ones(1, 2, dtype=torch.int64), 8, "floating-point matrix"),
+        ([8], torch.ones(1, 2), 8, "vocabulary size"),
+    ],
+)
+def test_trainable_tokens_reject_invalid_checkpoint(indices, rows, vocab_size, error):
+    helper = PEFTHelper(
+        r=8, lora_alpha=32, target_modules=["q_proj"], trainable_token_indices=indices
+    )
+    with pytest.raises(ValueError, match=error):
+        LoRAModel.from_lora_tensors(
+            1,
+            {"model.embed_tokens.token_adapter.trainable_tokens_delta": rows},
+            helper,
+            device="cpu",
+            model_vocab_size=vocab_size,
+        )
+
+
+@pytest.mark.parametrize("token_weights_first", [True, False])
+def test_trainable_tokens_reject_embedding_lora_overlap(token_weights_first):
+    helper = PEFTHelper(
+        r=8, lora_alpha=32, target_modules=["embed_tokens"], trainable_token_indices=[1]
+    )
+    entries = [
+        ("model.embed_tokens.token_adapter.trainable_tokens_delta", torch.ones(1, 2)),
+        ("model.embed_tokens.lora_embedding_A", torch.ones(8, 4)),
+    ]
+    if not token_weights_first:
+        entries.reverse()
+    with pytest.raises(ValueError, match="cannot target the same module"):
+        LoRAModel.from_lora_tensors(1, dict(entries), helper, device="cpu")
+
+
+def test_parse_trainable_tokens_name_dropped_by_mapper():
+    mapper = WeightsMapper(orig_to_new_prefix={"model.": None})
+    with pytest.raises(ValueError, match="cannot be None"):
+        parse_trainable_tokens_name(
+            "base_model.model.model.embed_tokens.token_adapter.trainable_tokens_delta",
+            mapper,
+        )
+
+
+def test_trainable_tokens_declared_without_saved_rows():
+    helper = PEFTHelper(
+        r=8, lora_alpha=16, target_modules=["q_proj"], trainable_token_indices=[1]
+    )
+    with pytest.raises(ValueError, match="no trainable token weights"):
+        LoRAModel.from_lora_tensors(1, {}, helper, device="cpu")

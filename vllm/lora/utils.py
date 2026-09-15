@@ -217,6 +217,30 @@ def is_base_embedding_weights(name: str) -> bool:
     return name.endswith(embedding_suffixes)
 
 
+_TRAINABLE_TOKENS_SUFFIX = ".token_adapter.trainable_tokens_delta"
+
+
+def is_trainable_tokens_weights(name: str) -> bool:
+    return name.endswith(_TRAINABLE_TOKENS_SUFFIX)
+
+
+def parse_trainable_tokens_name(
+    name: str, weights_mapper: "WeightsMapper | None" = None
+) -> str:
+    """Resolve a PEFT selected-token weight key to its runtime module name."""
+    if not is_trainable_tokens_weights(name):
+        raise ValueError(f"{name} is unsupported trainable token weight")
+    name = name.removeprefix("base_model.model.")
+    if weights_mapper is not None:
+        mapped_name = weights_mapper._map_name(name)
+        if mapped_name is None:
+            raise ValueError("Mapped trainable token weight name cannot be None.")
+        name = mapped_name
+    if not name.endswith(_TRAINABLE_TOKENS_SUFFIX):
+        raise ValueError(f"{name} is unsupported trainable token weight")
+    return name.removesuffix(_TRAINABLE_TOKENS_SUFFIX)
+
+
 def get_supported_lora_modules(model: nn.Module) -> list[str]:
     """
     In vLLM, all linear layers support LoRA.

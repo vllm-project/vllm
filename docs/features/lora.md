@@ -422,6 +422,41 @@ vllm serve ibm-granite/granite-speech-3.3-2b \
 
 Note: Default multimodal LoRAs are currently only available for `.generate` and chat completions.
 
+## Adapters with trainable tokens
+
+PEFT's `LoraConfig(trainable_token_indices=...)` can train selected token
+embeddings alongside ordinary LoRA layers. To load these compact adapters, reserve
+enough token rows for each adapter with `--max-lora-trainable-tokens`:
+
+```bash
+vllm serve /path/to/base-model \
+    --enable-lora \
+    --max-lora-rank 64 \
+    --max-lora-trainable-tokens 10 \
+    --lora-modules custom-tokens=/path/to/adapter
+```
+
+For offline inference, pass `max_lora_trainable_tokens=10` to `LLM` and use
+`LoRARequest` as usual. Set the capacity to at least the largest number of selected
+tokens in any one embedding module of the adapters you will serve. The default is
+zero, which disables token replacement and allocates no replacement buffers.
+
+The saved `trainable_tokens_delta` tensors contain **replacement weights**, not
+additive LoRA deltas. vLLM stores only the selected IDs and weight rows. Each
+request uses its own adapter's rows; requests without an adapter continue to use
+the base model. When the base model shares input embedding and output head weights,
+vLLM also applies the replacements to the output head, including when PEFT omits
+that tied tensor from the adapter checkpoint.
+
+The initial implementation supports models that expose their embedding and
+`lm_head` modules for LoRA, such as Llama. Token IDs must already fit within the
+base model's vocabulary; loading an adapter does not resize the model or replace
+the tokenizer. If you added tokens during training, serve the corresponding
+resized base checkpoint and tokenizer. Pipeline parallelism is not supported for
+trainable tokens. Ordinary LoRA and token replacement cannot target the same
+embedding or output head. When using `--lora-target-modules`, include the selected
+embedding and, for tied models, `lm_head` in addition to the ordinary LoRA targets.
+
 ## Using Tips
 
 ### Configuring `max_lora_rank`
