@@ -25,6 +25,7 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+    Fp8MoeBackend,
     select_fp8_moe_backend,
 )
 from vllm.model_executor.layers.linear import (
@@ -488,6 +489,9 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
             convert_to_fp8_moe_kernel_format,
             make_fp8_moe_kernel,
         )
+
+        if self.fp8_backend == Fp8MoeBackend.HUMMING:
+            self._stage_humming_quantized_weights(layer, w13, w2, w13_scale, w2_scale)
 
         # Shuffle weights to runtime format.
         w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
