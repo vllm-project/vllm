@@ -55,6 +55,49 @@ logger = init_logger(__name__)
 _SLIDING_ATTENTION = "sliding_attention"
 
 
+def _is_meta_tensor(t: torch.Tensor | None) -> bool:
+    return t is not None and t.device.type == "meta"
+
+
+def _resolve_tensor_device(*tensors: torch.Tensor | None) -> torch.device:
+    """Prefer a non-meta sibling device over hardcoded ``"cuda"``."""
+    for t in tensors:
+        if t is not None and t.device.type != "meta":
+            return t.device
+    if torch.cuda.is_available():
+        return torch.device("cuda", torch.cuda.current_device())
+    return torch.device("cpu")
+
+
+def _ensure_rope_cos_sin_cache(
+    rotary_emb: nn.Module, device: torch.device
+) -> torch.Tensor | None:
+    """Return a device-resident RoPE cache, recomputing if it is still on meta.
+
+    ``cos_sin_cache`` is a derived buffer, not a checkpoint parameter, so
+    ``load_weights`` will not materialize it. ``Tensor.to()`` cannot copy
+    storage out of meta; recompute on CPU and move, rather than
+    ``torch.empty``.
+    """
+    cache = getattr(rotary_emb, "cos_sin_cache", None)
+    if cache is None:
+        return None
+    if cache.device.type != "meta" and cache.device == device:
+        return cache
+    if cache.device.type == "meta":
+        compute = getattr(rotary_emb, "_compute_cos_sin_cache", None)
+        if compute is None:
+            raise RuntimeError(
+                "DFlash RoPE cos_sin_cache is on the meta device and "
+                f"{type(rotary_emb).__name__} cannot recompute it."
+            )
+        with torch.device("cpu"):
+            cache = compute()
+    cache = cache.to(device=device, dtype=cache.dtype)
+    rotary_emb.cos_sin_cache = cache
+    return cache
+
+
 def _dflash_layer_causal(config: Qwen3Config, layer_idx: int) -> bool:
     """Resolve explicit causality before falling back to legacy layer defaults."""
     is_causal = getattr(config, "is_causal", None)
@@ -465,23 +508,56 @@ class DFlashQwen3Model(nn.Module):
         self,
         layers_attn: list[nn.Module],
         has_bias: bool,
-    ) -> None:
-        self._hidden_norm_weight = self.hidden_norm.weight.data
+    ) -> bool:
+        """Stack KV / K-norm weights used by precompute_and_store_context_kv.
 
-        # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
+        Returns True if fused buffers were (re)built. Partial ``load_weights``
+        (e.g. IPC engine weight sync) can leave some draft attention params
+        on the meta device. Those are real qkv/k_norm weights, not unused
+        embeddings, so this method never materializes them with
+        ``torch.empty``. If CUDA buffers already exist, keep them; otherwise
+        raise rather than write garbage into the fused GEMM.
+        """
+        hidden_norm = self.hidden_norm.weight.data
         kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
-        self._fused_kv_weight = torch.cat(kv_weights, dim=0)
+        kv_biases = (
+            [a.qkv_proj.bias[a.q_size :] for a in layers_attn] if has_bias else []
+        )
+        k_norm_weights = [a.k_norm.weight.data for a in layers_attn]
+        needed = [hidden_norm, *kv_weights, *k_norm_weights, *kv_biases]
+        if any(_is_meta_tensor(t) for t in needed):
+            if hasattr(self, "_fused_kv_weight"):
+                logger.warning_once(
+                    "Skipping DFlash fused KV rebuild: some attention weights "
+                    "are still on the meta device after a partial "
+                    "load_weights (e.g. IPC weight sync). Keeping the "
+                    "previously built buffers."
+                )
+                return False
+            raise RuntimeError(
+                "DFlash fused KV build found attention weights on the meta "
+                "device and no previous CUDA buffers exist. This usually "
+                "means load_weights did not materialize draft qkv_proj/"
+                "k_norm (incomplete IPC payload or failed load). Refusing "
+                "to allocate empty fused weights."
+            )
+
+        device = _resolve_tensor_device(*needed)
+        self._hidden_norm_weight = hidden_norm.to(device)
+        self._fused_kv_weight = torch.cat([w.to(device) for w in kv_weights], dim=0)
         if has_bias:
-            kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
-            self._fused_kv_bias: torch.Tensor | None = torch.cat(kv_biases, dim=0)
+            self._fused_kv_bias: torch.Tensor | None = torch.cat(
+                [b.to(device) for b in kv_biases], dim=0
+            )
         else:
             self._fused_kv_bias = None
 
         # K-norm weights stacked into one contiguous [num_layers, head_dim]
         # tensor so the per-layer K-norm runs as a single grouped kernel.
         self._k_norm_weights = torch.stack(
-            [a.k_norm.weight.data for a in layers_attn], dim=0
+            [w.to(device) for w in k_norm_weights], dim=0
         ).contiguous()
+        return True
 
     def _build_fused_kv_buffers(self) -> None:
         """Build fused weight buffers for precompute_and_store_context_kv.
@@ -497,9 +573,17 @@ class DFlashQwen3Model(nn.Module):
 
         self._build_context_kv_buffers(layers_attn, has_bias)
 
-        # RoPE parameters
+        # RoPE cache is a derived buffer and may remain on meta after a
+        # parameter-only load_weights. Recompute it onto the worker device.
+        rope_device = (
+            self._fused_kv_weight.device
+            if hasattr(self, "_fused_kv_weight")
+            else _resolve_tensor_device()
+        )
         self._rope_head_size = attn0.rotary_emb.head_size
-        self._rope_cos_sin_cache = attn0.rotary_emb.cos_sin_cache
+        self._rope_cos_sin_cache = _ensure_rope_cos_sin_cache(
+            attn0.rotary_emb, rope_device
+        )
         self._rope_is_neox = attn0.rotary_emb.is_neox_style
         # Validation that RoPE params are the same across all layers
         for attn in layers_attn[1:]:
