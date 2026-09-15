@@ -89,10 +89,11 @@ class CPUWorker(Worker):
                 f"is less than desired CPU memory utilization "
                 f"({vllm_config.cache_config.gpu_memory_utilization}, "
                 f"{format_gib(self.requested_cpu_memory)} GiB). "
-                "On the CPU backend, `--cpu-memory-utilization` (alias "
+                "On the CPU backend, `--device-memory-utilization` (alias "
                 "`--gpu-memory-utilization`) controls the fraction of CPU "
-                "memory reserved. To resolve: decrease the utilization "
-                "(e.g. `--cpu-memory-utilization 0.5`) "
+                "memory reserved. To resolve: decrease "
+                "`--device-memory-utilization` "
+                "(e.g. `--device-memory-utilization 0.5`) "
                 "or reduce CPU memory used by other processes."
             )
 
