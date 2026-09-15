@@ -157,7 +157,9 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             )
             single_request = single_requests[i]
             sampling_params = single_request.to_sampling_params(
-                max_tokens, self.default_sampling_params
+                max_tokens,
+                self.default_sampling_params,
+                self.reasoning_effort_budgets,
             )
             self._log_inputs(
                 sub_request_id,
