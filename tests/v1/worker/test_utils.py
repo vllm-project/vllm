@@ -531,6 +531,52 @@ def test_hisparse_eager_mirror_records_transfer_without_page_copy():
     worker._enqueue_transfers.assert_not_called()
 
 
+@pytest.mark.parametrize("is_host_writer", [False, True])
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_hisparse_tail_restore_preserves_imported_rows(
+    monkeypatch, is_host_writer, device
+):
+    """Every TP rank restores its GPU page, including with eager host mirroring."""
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is required for the device copy check")
+    worker = _make_hisparse_worker()
+    worker.is_host_writer = is_host_writer
+    worker.kernel_block_size = 4
+    worker.host_caches = tuple(
+        torch.arange(24, dtype=torch.float32).reshape(12, 2) + layer * 100
+        for layer in range(2)
+    )
+    if device == "cuda":
+        worker.host_caches = tuple(cache.pin_memory() for cache in worker.host_caches)
+    worker.resident_caches = tuple(
+        torch.full((4, 4, 2), -1.0, device=device) for _ in range(2)
+    )
+    worker.cache_handles = [
+        SimpleNamespace(
+            runtime=SimpleNamespace(resident_source_index=i, eager_host_mirror=True)
+        )
+        for i in range(2)
+    ]
+    worker._record_transfer_completion = MagicMock()
+    stream = torch.cuda.current_stream() if device == "cuda" else MagicMock()
+    monkeypatch.setattr(hisparse_worker_module, "current_stream", lambda: stream)
+    transfer = SparseKVPageTransfer(7, 2, (1, 3), False, restore=True)
+
+    worker._restore_pages([transfer])
+
+    # Appending into unused capacity must preserve every imported prompt row.
+    for cache, host, block in zip(
+        worker.resident_caches, worker.host_caches, transfer.resident_block_ids
+    ):
+        assert torch.equal(cache[block].cpu(), host[8:12])
+        cache[block, 2:] = 999
+        assert torch.equal(cache[block, :2].cpu(), host[8:10])
+        assert torch.all(cache[0] == -1)
+    worker._record_transfer_completion.assert_called_once_with(
+        [transfer], stream=stream
+    )
+
+
 def test_hisparse_lazy_mirror_copies_transfer_pages():
     worker = _make_hisparse_worker()
     worker.cache_handles = [
