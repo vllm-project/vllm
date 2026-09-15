@@ -403,10 +403,9 @@ class DeepseekV4DecoderLayer(nn.Module):
         else:
             # The collapse already reads the post-mapped streams, so the mean
             # aux consumers want comes out of the same kernel.
-            residual, post_mix, res_mix, x, attn_pre = mhc_shifted_post_pre(
+            residual, post_mix, res_mix, x, attn_pre, aux = mhc_shifted_post_pre(
                 x,
                 residual,
-                pre_mix,
                 post_mix,
                 res_mix,
                 self.hc_attn_fn,
@@ -414,11 +413,16 @@ class DeepseekV4DecoderLayer(nn.Module):
                 self.hc_attn_base,
                 self.rms_norm_eps,
                 self.hc_eps,
+                self.hc_eps,
                 self.hc_post_alpha,
                 self.hc_sinkhorn_iters,
-                self.attn_norm.weight,
-                self.attn_norm.variance_epsilon,
+                pre_mix=pre_mix,
+                norm_weight=self.attn_norm.weight,
+                norm_eps=self.attn_norm.variance_epsilon,
+                capture_aux=capture_previous_aux,
             )
+            if capture_previous_aux:
+                previous_aux = aux
 
         if self.use_sequence_parallel:
             x = sp_all_gather(x)[: positions.shape[0]]
@@ -427,10 +431,9 @@ class DeepseekV4DecoderLayer(nn.Module):
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
 
-        residual, post_mix, res_mix, x, ffn_pre = mhc_shifted_post_pre(
+        residual, post_mix, res_mix, x, ffn_pre, _ = mhc_shifted_post_pre(
             x,
             residual,
-            attn_pre,
             post_mix,
             res_mix,
             self.hc_ffn_fn,
@@ -438,10 +441,12 @@ class DeepseekV4DecoderLayer(nn.Module):
             self.hc_ffn_base,
             self.rms_norm_eps,
             self.hc_eps,
+            self.hc_eps,
             self.hc_post_alpha,
             self.hc_sinkhorn_iters,
-            self.ffn_norm.weight,
-            self.ffn_norm.variance_epsilon,
+            pre_mix=attn_pre,
+            norm_weight=self.ffn_norm.weight,
+            norm_eps=self.ffn_norm.variance_epsilon,
         )
         x = self.ffn(x, input_ids)
         return x, residual, post_mix, res_mix, ffn_pre, previous_aux

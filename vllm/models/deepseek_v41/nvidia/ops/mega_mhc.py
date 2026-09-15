@@ -6,8 +6,7 @@ import functools
 import torch
 
 from vllm.model_executor.kernels.mhc.tilelang import (
-    mhc_post_tilelang,
-    mhc_pre_delayed_tilelang,
+    mhc_fused_post_pre_delayed_tilelang,
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
@@ -93,52 +92,65 @@ def mhc_shifted_post_pre_deep_gemm(
 def mhc_shifted_post_pre(
     x: torch.Tensor,
     residual: torch.Tensor,
-    previous_mix: torch.Tensor,
-    post_mix: torch.Tensor,
-    res_mix: torch.Tensor,
+    post_layer_mix: torch.Tensor,
+    comb_res_mix: torch.Tensor,
     fn: torch.Tensor,
-    scale: torch.Tensor,
-    base: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
     rms_eps: float,
-    hc_eps: float,
-    hc_post_alpha: float,
-    sinkhorn_iters: int,
-    norm_weight: torch.Tensor,
-    norm_eps: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Dispatch the DSV4.1 shifted mHC transition."""
-    if is_mega_mhc_supported(x.shape[1], residual.shape[1]):
-        return mhc_shifted_post_pre_deep_gemm(
+    hc_pre_eps: float,
+    hc_sinkhorn_eps: float,
+    hc_post_mult_value: float,
+    sinkhorn_repeat: int,
+    pre_mix: torch.Tensor | None = None,
+    norm_weight: torch.Tensor | None = None,
+    norm_eps: float = 1e-6,
+    capture_aux: bool = False,
+) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+]:
+    """Use Mega-mHC for carried mixing, retaining TileLang for aux capture."""
+    if (
+        pre_mix is not None
+        and norm_weight is not None
+        and not capture_aux
+        and x.shape[0] <= 1 << 20
+        and is_mega_mhc_supported(x.shape[1], residual.shape[1])
+    ):
+        outputs = mhc_shifted_post_pre_deep_gemm(
             x,
             residual,
-            previous_mix,
-            post_mix,
-            res_mix,
+            pre_mix,
+            post_layer_mix,
+            comb_res_mix,
             fn,
-            scale,
-            base,
+            hc_scale,
+            hc_base,
             rms_eps,
-            hc_eps,
-            hc_post_alpha,
-            hc_eps,
-            sinkhorn_iters,
+            hc_pre_eps,
+            hc_post_mult_value,
+            hc_sinkhorn_eps,
+            sinkhorn_repeat,
             norm_weight,
             norm_eps,
         )
+        return *outputs, x.new_empty(0, x.shape[1])
 
-    residual = mhc_post_tilelang(x, residual, post_mix, res_mix)
-    post_mix, res_mix, x, next_mix = mhc_pre_delayed_tilelang(
+    return mhc_fused_post_pre_delayed_tilelang(
+        x,
         residual,
+        post_layer_mix,
+        comb_res_mix,
         fn,
-        scale,
-        base,
+        hc_scale,
+        hc_base,
         rms_eps,
-        hc_eps,
-        hc_eps,
-        hc_post_alpha,
-        sinkhorn_iters,
-        pre_mix=previous_mix,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_mult_value,
+        sinkhorn_repeat,
+        pre_mix=pre_mix,
         norm_weight=norm_weight,
         norm_eps=norm_eps,
+        capture_aux=capture_aux,
     )
-    return residual, post_mix, res_mix, x, next_mix

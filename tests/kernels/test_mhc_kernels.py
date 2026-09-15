@@ -568,8 +568,11 @@ def test_mhc_pre_delayed_custom_op_supports_compile(carried):
     not current_platform.is_device_capability_family(100),
     reason="DeepGEMM Mega mHC requires SM100-family CUDA",
 )
-def test_deep_gemm_mega_mhc_correctness():
-    num_tokens, hidden_size, hc_mult = 17, 7168, 4
+@pytest.mark.parametrize("num_tokens", [0, 1, 17, 128, 1024])
+@pytest.mark.parametrize("hidden_size", [5120, 7168])
+def test_deep_gemm_mega_mhc_correctness(num_tokens, hidden_size):
+    set_random_seed(0)
+    hc_mult = 4
     if not is_mega_mhc_supported(hidden_size, 4):
         pytest.skip("DeepGEMM Mega mHC is not available")
 
@@ -587,7 +590,9 @@ def test_deep_gemm_mega_mhc_correctness():
         hidden_size, dtype=torch.bfloat16, device=DEVICE
     ).uniform_(0.9, 1.1)
 
-    expected_residual = mhc_post_tilelang(x, residual, post_mix, res_mix)
+    expected_residual = (
+        mhc_post_tilelang(x, residual, post_mix, res_mix) if num_tokens else residual
+    )
     (
         expected_post_mix,
         expected_res_mix,
@@ -607,13 +612,7 @@ def test_deep_gemm_mega_mhc_correctness():
         norm_weight=norm_weight,
         norm_eps=7e-6,
     )
-    (
-        actual_residual,
-        actual_post_mix,
-        actual_res_mix,
-        actual_y_bf16,
-        actual_previous_mix,
-    ) = mhc_shifted_post_pre_deep_gemm(
+    args = (
         x,
         residual,
         previous_mix,
@@ -630,14 +629,36 @@ def test_deep_gemm_mega_mhc_correctness():
         norm_weight,
         7e-6,
     )
-    torch.accelerator.synchronize()
-    torch.testing.assert_close(actual_residual, expected_residual, atol=1e-5, rtol=1e-2)
-    torch.testing.assert_close(actual_post_mix, expected_post_mix, atol=1e-6, rtol=1e-3)
-    torch.testing.assert_close(actual_res_mix, expected_res_mix, atol=1e-6, rtol=1e-3)
-    torch.testing.assert_close(actual_y_bf16, expected_y_bf16, atol=1e-5, rtol=1e-2)
-    torch.testing.assert_close(
-        actual_previous_mix, expected_previous_mix, atol=1e-6, rtol=1e-3
+    actual = mhc_shifted_post_pre_deep_gemm(*args)
+    expected = (
+        expected_residual,
+        expected_post_mix,
+        expected_res_mix,
+        expected_y_bf16,
+        expected_previous_mix,
     )
+    for i, (result, ref) in enumerate(zip(actual, expected, strict=True)):
+        # Match the existing mHC BF16 tolerance: post rounding differences
+        # can be amplified by cancellation in the carried collapse.
+        atol, rtol = (1.6e-2, 1e-2) if i in (0, 3) else (1e-6, 1e-3)
+        torch.testing.assert_close(result, ref, atol=atol, rtol=rtol)
+
+    if num_tokens:
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            # DeepGEMM initializes barriers per stream before capture.
+            mhc_shifted_post_pre_deep_gemm(*args)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=stream):
+                captured = mhc_shifted_post_pre_deep_gemm(*args)
+            for multiplier in (0.5, -1.0):
+                x.mul_(multiplier)
+                graph.replay()
+                eager = mhc_shifted_post_pre_deep_gemm(*args)
+                for result, ref in zip(captured, eager, strict=True):
+                    torch.testing.assert_close(result, ref, atol=0, rtol=0)
+        torch.cuda.current_stream().wait_stream(stream)
 
 
 def sinkhorn_normalize_ref(x: torch.Tensor, repeat: int, eps: float) -> torch.Tensor:
