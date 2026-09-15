@@ -1467,7 +1467,9 @@ class PixtralHFVisionModel(nn.Module):
 
         self.dtype = next(self.parameters()).dtype
         self.device = next(self.parameters()).device
-        self.patch_positional_embedding = PixtralVisionRotaryEmbedding(config, self.device)
+        self.patch_positional_embedding = PixtralVisionRotaryEmbedding(
+            config, self.device
+        )
 
     def forward(
         self,
