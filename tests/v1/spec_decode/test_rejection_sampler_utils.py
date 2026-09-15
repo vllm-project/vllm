@@ -199,6 +199,108 @@ def test_watermarked_recovery_uses_target_key():
     assert sampled[0, 0] == expected.token_ids[0]
 
 
+def test_repeated_draft_context_does_not_change_acceptance():
+    target_logits = torch.randn(64, device="cuda")
+    inputs = _build_rejection_sample_inputs(
+        target_logits,
+        target_logits,
+        num_speculative_steps=1,
+        temperature=1.0,
+        num_trials=1,
+    )
+    expected, expected_num_sampled = rejection_sample(**inputs, num_speculative_steps=1)
+
+    sampled, num_sampled = watermarked_rejection_sample(
+        **inputs,
+        num_speculative_steps=1,
+        contexts=torch.tensor([[10, 11], [11, 12]], device="cuda"),
+        watermarking=torch.tensor([True], device="cuda"),
+        watermarking_skip_mask=torch.tensor([True, False], device="cuda"),
+        watermarker=GumbelWatermarker(key=42, context_width=2),
+    )
+
+    torch.testing.assert_close(num_sampled, expected_num_sampled, rtol=0, atol=0)
+    torch.testing.assert_close(sampled[:, :1], expected[:, :1], rtol=0, atol=0)
+
+
+def test_repeated_recovery_context_uses_ordinary_residual_sample():
+    target_logits = torch.tensor([float("-inf"), 0.0, 1.0, 2.0], device="cuda")
+    draft_logits = torch.tensor([100.0, -100.0, -100.0, -100.0], device="cuda")
+    inputs = _build_rejection_sample_inputs(
+        target_logits,
+        draft_logits,
+        num_speculative_steps=1,
+        temperature=1.0,
+        num_trials=1,
+    )
+    inputs["draft_sampled"][1] = 0
+    expected, expected_num_sampled = rejection_sample(**inputs, num_speculative_steps=1)
+
+    sampled, num_sampled = watermarked_rejection_sample(
+        **inputs,
+        num_speculative_steps=1,
+        contexts=torch.tensor([[10, 11], [11, 0]], device="cuda"),
+        watermarking=torch.tensor([True], device="cuda"),
+        watermarking_skip_mask=torch.tensor([True, False], device="cuda"),
+        watermarker=GumbelWatermarker(key=42, context_width=2),
+    )
+
+    torch.testing.assert_close(num_sampled, expected_num_sampled, rtol=0, atol=0)
+    torch.testing.assert_close(sampled[:, :1], expected[:, :1], rtol=0, atol=0)
+
+
+def test_repeated_bonus_context_uses_ordinary_target_sample():
+    target_logits = torch.randn(64, device="cuda")
+    inputs = _build_rejection_sample_inputs(
+        target_logits,
+        target_logits,
+        num_speculative_steps=1,
+        temperature=1.0,
+        num_trials=1,
+    )
+    expected, expected_num_sampled = rejection_sample(**inputs, num_speculative_steps=1)
+
+    sampled, num_sampled = watermarked_rejection_sample(
+        **inputs,
+        num_speculative_steps=1,
+        contexts=torch.tensor([[10, 11], [11, 12]], device="cuda"),
+        watermarking=torch.tensor([True], device="cuda"),
+        watermarking_skip_mask=torch.tensor([False, True], device="cuda"),
+        watermarker=GumbelWatermarker(key=42, context_width=2),
+    )
+
+    torch.testing.assert_close(num_sampled, expected_num_sampled, rtol=0, atol=0)
+    torch.testing.assert_close(sampled[:, :2], expected[:, :2], rtol=0, atol=0)
+
+
+def test_repeated_context_does_not_change_unwatermarked_or_greedy_rows():
+    target_logits = torch.randn(64, device="cuda")
+    inputs = _build_rejection_sample_inputs(
+        target_logits,
+        target_logits,
+        num_speculative_steps=1,
+        temperature=1.0,
+        num_trials=2,
+    )
+    inputs["temperature"][1] = 0
+    expected, expected_num_sampled = rejection_sample(**inputs, num_speculative_steps=1)
+
+    sampled, num_sampled = watermarked_rejection_sample(
+        **inputs,
+        num_speculative_steps=1,
+        contexts=torch.tensor([[10, 11], [11, 12], [20, 21], [21, 22]], device="cuda"),
+        watermarking=torch.tensor([False, True], device="cuda"),
+        watermarking_skip_mask=torch.ones(4, dtype=torch.bool, device="cuda"),
+        watermarker=GumbelWatermarker(key=42, context_width=2),
+    )
+
+    torch.testing.assert_close(num_sampled, expected_num_sampled, rtol=0, atol=0)
+    for row, length in enumerate(num_sampled):
+        torch.testing.assert_close(
+            sampled[row, : int(length)], expected[row, : int(length)], rtol=0, atol=0
+        )
+
+
 def test_watermarked_recovery_supports_smaller_draft_vocabulary():
     target_logits = torch.tensor([float("-inf"), 0.0, 1.0, 2.0, 100.0], device="cuda")
     draft_logits = torch.tensor([100.0, -100.0, -100.0, -100.0], device="cuda")

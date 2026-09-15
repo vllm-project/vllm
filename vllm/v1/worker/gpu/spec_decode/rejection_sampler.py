@@ -157,11 +157,18 @@ class RejectionSampler:
         if self.watermark_key is None:
             return {}
         assert isinstance(self.sampler, GPUWatermarkSampler)
+        contexts = self.sampler._get_contexts(
+            expanded_idx_mapping, expanded_local_pos, draft_sampled
+        )
+        watermarking_skip_mask = None
+        if self.sampler.deduplicate_contexts != "none":
+            watermarking_skip_mask = self.sampler._get_repeated_contexts(
+                expanded_idx_mapping, contexts, expanded_local_pos
+            )
         return {
-            "contexts": self.sampler._get_contexts(
-                expanded_idx_mapping, expanded_local_pos, draft_sampled
-            ),
+            "contexts": contexts,
             "watermarking": self.sampler.watermarking.gpu,
+            "watermarking_skip_mask": watermarking_skip_mask,
             "watermark_key": self.watermark_key,
         }
 
