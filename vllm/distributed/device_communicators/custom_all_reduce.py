@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from contextlib import contextmanager
 from typing import cast
 
@@ -187,6 +188,21 @@ class CustomAllreduce:
                 "warning, specify disable_custom_all_reduce=True explicitly.",
                 world_size,
                 str(CustomAllreduce._SUPPORTED_WORLD_SIZES),
+            )
+            return
+
+        if any(
+            "expandable_segments:True" in os.environ.get(env_var, "")
+            for env_var in ("PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_HIP_ALLOC_CONF")
+        ):
+            # Expandable-segments (CUDA VMM) allocations cannot be exported
+            # via IPC, which custom allreduce needs to register the buffers
+            # captured into CUDA graphs (hipIpcGetMemHandle fails with
+            # 'invalid argument'). Fall back to the other allreduce backends.
+            logger.warning_once(
+                "Custom allreduce is disabled because "
+                "expandable_segments:True is set. To silence this warning, "
+                "specify disable_custom_all_reduce=True explicitly."
             )
             return
 
