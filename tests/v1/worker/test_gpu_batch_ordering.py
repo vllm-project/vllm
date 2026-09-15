@@ -65,6 +65,21 @@ def _make_runner(
     return runner
 
 
+class _ValuesForbiddenDict(dict[str, int]):
+    def values(self):
+        raise AssertionError("values() traversal should not be used")
+
+
+class _ValuesCountingDict(dict[str, int]):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.values_calls = 0
+
+    def values(self):
+        self.values_calls += 1
+        return super().values()
+
+
 def _uniform_token_count(
     req_states: dict[str, tuple[int, int]],
     query_len: int,
@@ -109,6 +124,95 @@ def test_adaptive_verification_sizes_only_batches_with_drafts():
         req_id: [1, 2] for req_id in decodes
     }
     state, uniform_tok_count = runner.gather_batch_req_state(scheduler_output, False)
+    assert state is not None
+    assert state.num_tokens == 12
+    assert uniform_tok_count is None
+
+
+def test_gather_uses_supplied_max_without_values_traversal():
+    req_states = {"d0": (16, 16), "d1": (16, 16)}
+    num_scheduled_tokens = _ValuesForbiddenDict({"d0": 8, "d1": 8})
+    scheduler_output = SimpleNamespace(
+        num_scheduled_tokens=num_scheduled_tokens,
+        total_num_scheduled_tokens=16,
+        scheduled_spec_decode_tokens={},
+    )
+
+    state, uniform_tok_count = _make_runner(req_states).gather_batch_req_state(
+        scheduler_output, False, max_query_len=8
+    )
+    assert state is not None
+    assert state.req_ids == ["d0", "d1"]
+    np.testing.assert_array_equal(state.num_scheduled_tokens, [8, 8])
+    assert uniform_tok_count == 8
+
+    dummy_output = SimpleNamespace(
+        num_scheduled_tokens=_ValuesForbiddenDict(
+            {f"_dummy_req_{i}": 8 for i in range(4)}
+        ),
+        total_num_scheduled_tokens=32,
+    )
+    state, uniform_tok_count = _make_runner({}).gather_batch_req_state(
+        dummy_output, True, max_query_len=8
+    )
+    assert state is None
+    assert uniform_tok_count == 8
+
+
+def test_gather_fallback_matches_supplied_max_for_heterogeneous_mixed_batch():
+    req_states = {"decode": (16, 16), "prefill": (8, 40), "tail": (16, 16)}
+    num_scheduled_tokens = {"decode": 2, "prefill": 5, "tail": 1}
+    fallback_tokens = _ValuesCountingDict(num_scheduled_tokens)
+    fallback_output = SimpleNamespace(
+        num_scheduled_tokens=fallback_tokens,
+        total_num_scheduled_tokens=8,
+        scheduled_spec_decode_tokens={},
+    )
+    supplied_output = SimpleNamespace(
+        num_scheduled_tokens=_ValuesForbiddenDict(num_scheduled_tokens),
+        total_num_scheduled_tokens=8,
+        scheduled_spec_decode_tokens={},
+    )
+
+    fallback_state, fallback_uniform = _make_runner(
+        req_states, decode_query_len=1
+    ).gather_batch_req_state(fallback_output, False)
+    supplied_state, supplied_uniform = _make_runner(
+        req_states, decode_query_len=1
+    ).gather_batch_req_state(supplied_output, False, max_query_len=5)
+
+    assert fallback_tokens.values_calls == 1
+    assert fallback_state is not None
+    assert supplied_state is not None
+    assert fallback_state.req_ids == supplied_state.req_ids
+    np.testing.assert_array_equal(
+        fallback_state.num_scheduled_tokens, supplied_state.num_scheduled_tokens
+    )
+    np.testing.assert_array_equal(
+        fallback_state.is_prefilling_np, supplied_state.is_prefilling_np
+    )
+    assert fallback_state.num_tokens == supplied_state.num_tokens
+    assert fallback_state.has_prefill == supplied_state.has_prefill
+    assert fallback_uniform == supplied_uniform
+    assert supplied_uniform is None
+
+
+def test_supplied_max_survives_adaptive_verification_num_token_rewrite():
+    decodes = {"d0": (16, 16), "d1": (16, 16)}
+    runner = _make_runner(decodes, decode_query_len=8)
+    runner.adaptive_verification = SimpleNamespace(
+        get_num_tokens=lambda _num_tokens_per_req, _draft_tokens: 12
+    )
+    scheduler_output = SimpleNamespace(
+        num_scheduled_tokens=_ValuesForbiddenDict({req_id: 8 for req_id in decodes}),
+        total_num_scheduled_tokens=16,
+        scheduled_spec_decode_tokens={req_id: [1, 2] for req_id in decodes},
+    )
+
+    state, uniform_tok_count = runner.gather_batch_req_state(
+        scheduler_output, False, max_query_len=8
+    )
+
     assert state is not None
     assert state.num_tokens == 12
     assert uniform_tok_count is None
