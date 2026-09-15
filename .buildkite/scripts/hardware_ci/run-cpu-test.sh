@@ -59,7 +59,7 @@ docker pull ubuntu:25.04 || true
 
 # building the docker image
 echo "--- :docker: Building Docker image"
-BUILD_RETRY_PATTERN='dial tcp|i/o timeout|failed to authorize|TLS handshake timeout|connection reset|PROTOCOL_ERROR|Could not resolve host|Temporary failure in name resolution|dns error: failed to lookup address information|client error \(Connect\)|error sending request for url|Failed to fetch:'
+BUILD_RETRY_PATTERN='dial tcp|i/o timeout|failed to authorize|TLS handshake timeout|connection reset|PROTOCOL_ERROR|Could not resolve host|Temporary failure in name resolution|dns error: failed to lookup address information|client error \(Connect\)|error sending request for url|Failed to fetch:|The read operation timed out|BrokenPipeError:.*Broken pipe|HTTP/[0-9.]+ stream [0-9]+ was not closed cleanly|fetch-pack: unexpected disconnect|fatal: early EOF|invalid index-pack output'
 BUILD_MAX_ATTEMPTS=4          # 1 initial + 3 retries
 BUILD_RETRY_WAITS=(10 20 40)  # seconds to wait before retry 1/2/3
 build_log="$(mktemp)"
@@ -83,8 +83,11 @@ rm -f "$build_log"
 
 # Run the image, setting --shm-size=4g for tensor parallel. Default to
 # HF_HUB_OFFLINE so a warm ~/.cache/huggingface doesn't hit the network;
-# retry once online if the cache is missing something.
-OFFLINE_RETRY_PATTERN='huggingface_hub\.errors\.(LocalEntryNotFoundError|OfflineModeIsEnabled)'
+# retry once online if the cache is missing something. vllm's get_config()
+# wraps the raw huggingface_hub offline-mode errors in a generic ValueError
+# (see transformers_utils/config.py), so match that message too or the
+# fallback never triggers for a config-lookup cache miss.
+OFFLINE_RETRY_PATTERN='huggingface_hub\.errors\.(LocalEntryNotFoundError|OfflineModeIsEnabled)|Invalid repository ID or local directory specified'
 run_test() {
     local hf_offline=$1
     docker run --rm --cpuset-cpus="$CORE_RANGE" --cpuset-mems="$NUMA_NODE" -v ~/.cache/huggingface:/root/.cache/huggingface --privileged=true -e HF_TOKEN -e VLLM_CPU_KVCACHE_SPACE=16 -e VLLM_CPU_CI_ENV=1 -e VLLM_CPU_SIM_MULTI_NUMA=1 -e VLLM_CPU_ATTN_SPLIT_KV=0 -e HF_HUB_OFFLINE="$hf_offline" -e HF_DATASETS_OFFLINE="$hf_offline" --shm-size=4g "$IMAGE_NAME" \
