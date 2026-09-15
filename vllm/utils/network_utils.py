@@ -31,18 +31,19 @@ def close_sockets(sockets: Sequence[zmq.Socket | zmq.asyncio.Socket]):
             sock.close(linger=0)
 
 
-def get_ip() -> str:
-    host_ip = envs.VLLM_HOST_IP
-    if "HOST_IP" in os.environ and "VLLM_HOST_IP" not in os.environ:
-        logger.warning(
-            "The environment variable HOST_IP is deprecated and ignored, as"
-            " it is often used by Docker and other software to"
-            " interact with the container's network stack. Please "
-            "use VLLM_HOST_IP instead to set the IP address for vLLM processes"
-            " to communicate with each other."
-        )
-    if host_ip:
-        return host_ip
+def get_ip(*, force: bool = False) -> str:
+    if not force:
+        host_ip = envs.VLLM_HOST_IP
+        if "HOST_IP" in os.environ and "VLLM_HOST_IP" not in os.environ:
+            logger.warning(
+                "The environment variable HOST_IP is deprecated and ignored, as"
+                " it is often used by Docker and other software to"
+                " interact with the container's network stack. Please "
+                "use VLLM_HOST_IP instead to set the IP address for vLLM processes"
+                " to communicate with each other."
+            )
+        if host_ip:
+            return host_ip
 
     # IP is not set, try to get it from the network interface
 
@@ -304,6 +305,14 @@ def make_zmq_path(scheme: str, host: str, port: int | None = None) -> str:
     if is_valid_ipv6_address(host):
         return f"{scheme}://[{host}]:{port}"
     return f"{scheme}://{host}:{port}"
+
+
+def replace_zmq_tcp_host(path: str, host: str) -> str:
+    """Replace the host of a TCP ZMQ endpoint, preserving its port."""
+    scheme, _, port = split_zmq_path(path)
+    if scheme != "tcp":
+        return path
+    return make_zmq_path(scheme, host, int(port))
 
 
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L783 # noqa: E501
