@@ -351,7 +351,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         # Base worker fields touched by start_load_kv / _get_new_notifs.
         w._recving_metadata = {}
         w._pending_recv_notifs = {}
-        w._failed_inflight_recvs = set()
+        w._recv_failures = set()
         w._recving_transfers = defaultdict(list)
         w._reqs_to_process = set()
         w._reqs_to_send = {}
@@ -877,6 +877,68 @@ class TestPushWriterNotifs:
         assert evicted == ["req-done"]
         assert w._push_writer_wake.is_set()
 
+    @staticmethod
+    def _pollable_worker() -> _StubWriterWorker:
+        """Stub worker with the extra base-worker state the real
+        ``get_transfer_results`` needs to poll ``_sending_transfers``."""
+        w = _StubWriterWorker.fresh()
+        w.transfer_topo = MagicMock()
+        w.nixl_wrapper = MagicMock()
+        w.xfer_stats = MagicMock()
+        w._log_failure = MagicMock()  # type: ignore[method-assign]
+        w._failed_recv_reqs = queue.Queue()
+        w._invalid_block_ids = queue.Queue()
+        w._pending_recv_notifs = {}
+        w._replicated_pcp_done_sending = set()
+        w.use_host_buffer = False
+        return w
+
+    def _make_sending_req(self, w: _StubWriterWorker) -> str:
+        request_id = "req-send-1"
+        w._sending_transfers[request_id] = [101, 102]
+        w._reqs_to_send[request_id] = time.perf_counter() + 60
+        w._reqs_to_process.add(request_id)
+        return request_id
+
+    def test_failed_push_send_is_not_reported_done_sending(self):
+        """A failed P-side WRITE must not surface as finished sending.
+
+        Reporting it would free P-side blocks as if the KV had been
+        delivered while D still waits for the data; the request must be
+        left to the lease / watchdog instead.
+        """
+        w = self._pollable_worker()
+        request_id = self._make_sending_req(w)
+        w.nixl_wrapper.check_xfer_state.side_effect = ["ERR", "DONE"]
+
+        results = w.get_transfer_results()
+
+        assert request_id not in results.finished_sending
+        # Lease tracking is preserved so the watchdog can reschedule.
+        assert request_id in w._reqs_to_send
+        assert request_id in w._reqs_to_process
+        # Both handles were still cleaned up.
+        assert request_id not in w._sending_transfers
+
+    def test_completed_push_send_waits_for_consumer_notif(self):
+        """P-side sends are completed by consumer notifs / lease expiry,
+        not by local WRITE-handle completion."""
+        w = self._pollable_worker()
+        request_id = self._make_sending_req(w)
+        w.nixl_wrapper.check_xfer_state.return_value = "DONE"
+
+        results = w.get_transfer_results()
+
+        assert request_id not in results.finished_sending
+        assert request_id in w._reqs_to_send
+        assert request_id not in w._sending_transfers
+
+        # The consumer notif is what completes the send.
+        w._pending_completion_notifs.put(f"{request_id}:1".encode())
+        results = w.get_transfer_results()
+        assert request_id in results.finished_sending
+        assert request_id not in w._reqs_to_send
+
 
 # ----------------------------------------------------------------- #
 #  Negative / error-path tests                                       #
@@ -1079,7 +1141,7 @@ class TestPushWriterNegative:
         # Wake set so the writer drains NIXL notifs even when idle.
         assert w._push_writer_wake.is_set()
 
-    def test_failed_push_transfer_finishes_sending(self):
+    def test_failed_push_transfer_does_not_evict_writer_state(self):
         w = _StubWriterWorker.fresh()
         w.nixl_wrapper = MagicMock()
         w.nixl_wrapper.check_xfer_state.return_value = "ERR"
@@ -1096,11 +1158,12 @@ class TestPushWriterNegative:
         ):
             results = w.get_transfer_results()
 
-        assert results.finished_sending == {"req-failed"}
+        assert results.finished_sending == set()
         assert results.finished_recving == set()
         assert "req-failed" not in w._sending_transfers
-        assert "req-failed" not in w._reqs_to_send
-        assert "req-failed" not in w._reqs_to_process
+        assert "req-failed" in w._reqs_to_send
+        assert "req-failed" in w._reqs_to_process
+        assert w._evict_finished_inbox.empty()
         w.nixl_wrapper.release_xfer_handle.assert_called_once_with(17)
 
     def test_get_new_notifs_unknown_request_is_logged_and_skipped(self, caplog):
