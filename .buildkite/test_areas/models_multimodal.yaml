@@ -75,16 +75,16 @@ steps:
     - |
       # One whole standard/ directory set per replica; no -m filter, every file
       # below standard/ is claimed by exactly one branch. Trailing comments are
-      # pytest minutes measured in validation build 89163.
+      # pytest minutes measured in validation build 89171.
       set -eu
       case "$$BUILDKITE_PARALLEL_JOB" in
-        0)  # 8.5m
+        0)  # 8.9m
           pytest -v -s models/multimodal/standard/vit_cudagraph --num-shards=3 --shard-id=0
           pytest -v -s models/multimodal/standard/audio
           ;;
-        1) pytest -v -s models/multimodal/standard/vit_cudagraph --num-shards=3 --shard-id=1 ;;  # 12.6m
-        2) pytest -v -s models/multimodal/standard/vit_cudagraph --num-shards=3 --shard-id=2 ;;  # 11.0m
-        3)  # 7.6m
+        1) pytest -v -s models/multimodal/standard/vit_cudagraph --num-shards=3 --shard-id=1 ;;  # 14.9m
+        2) pytest -v -s models/multimodal/standard/vit_cudagraph --num-shards=3 --shard-id=2 ;;  # 13.3m
+        3)  # 8.7m
           pytest -v -s models/multimodal/standard/interleaved models/multimodal/standard/mapping models/multimodal/standard/pooling
           pytest -v -s models/multimodal/standard/memory_leak
           cd ..
