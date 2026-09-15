@@ -3208,6 +3208,45 @@ def test_mla_with_incompatible_swa_uses_one_full_allocation_group(caplog_vllm):
     assert "attention compute is unchanged" in caplog_vllm.text
 
 
+def test_hidden_states_with_tp_scales_page_size():
+    """When TP shrinks KV pages below the hidden-state per-token cost,
+    get_kv_cache_groups must scale up target block sizes so that the
+    common page accommodates the unsharded hidden states."""
+    # Simulate TP=4 sharding a model with 8 KV heads → 2 per rank.
+    # KV page = block_size(16) * num_kv_heads(2) * head_size(64) * dtype(2)
+    #         = 16 * 2 * 64 * 2 = 4096 bytes.
+    kv_spec = new_kv_cache_spec(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=64,
+        dtype=torch.bfloat16,
+    )
+    # Hidden-state per-token cost = num_hidden_states(6) * hidden_size(512)
+    #   * dtype(2) = 6144 bytes, which exceeds the 4096-byte KV page.
+    hs_spec = HiddenStateCacheSpec(
+        block_size=16,
+        num_kv_heads=6,
+        head_size=512,
+        dtype=torch.bfloat16,
+    )
+    specs = {
+        "target.0.attn": kv_spec,
+        "target.1.attn": kv_spec,
+        "cache_only_layers.48": hs_spec,
+    }
+
+    groups = get_kv_cache_groups(_grouping_config(), specs)
+
+    # The hidden-state layer should be present and no assertion should fire.
+    all_layers = {name for g in groups for name in g.layer_names}
+    assert "cache_only_layers.48" in all_layers
+
+    # The target group block sizes must have been scaled up.
+    for g in groups:
+        if "cache_only_layers.48" not in g.layer_names:
+            assert g.kv_cache_spec.block_size > kv_spec.block_size
+
+
 def test_get_kv_cache_spec_kind_prefers_specific_attention_subclasses():
     assert get_kv_cache_spec_kind(new_mla_spec()) == KVCacheSpecKind.MLA_ATTENTION
 
@@ -4135,9 +4174,9 @@ def test_draft_group_not_annotated_without_spec_decode():
 
 
 def test_unidentifiable_draft_with_mamba_warns(caplog_vllm):
-    # No group carries the draft marker, so every consumer falls back to
-    # flagging all groups -- including Mamba ones, which then can never report
-    # a hit. That is silent today; it must at least be visible.
+    # No group carries the draft marker, so consumers fall back to
+    # conservative behavior that silently breaks reuse for Mamba groups.
+    # That must at least be visible.
     groups = get_kv_cache_groups(
         _spec_decode_grouping_config(), _hybrid_specs_with_draft(draft=False)
     )
@@ -4146,7 +4185,20 @@ def test_unidentifiable_draft_with_mamba_warns(caplog_vllm):
     assert "no KV cache group could be identified as the draft model's" in (
         caplog_vllm.text
     )
-    assert "Mamba groups" in caplog_vllm.text
+
+
+def test_unidentifiable_draft_without_mamba_does_not_warn(caplog_vllm):
+    # Pure-attention models degrade gracefully under the consumers'
+    # conservative fallback (a one-block hit drop at most), so the warning
+    # stays silent to avoid noise on every unannotated EAGLE deployment.
+    specs = {
+        "target.attn.0": new_mla_spec(block_size=64),
+        "target.attn.1": new_mla_spec(block_size=64),
+    }
+    groups = get_kv_cache_groups(_spec_decode_grouping_config(), specs)
+
+    assert not any(g.is_eagle_group for g in groups)
+    assert "could be identified as the draft model's" not in caplog_vllm.text
 
 
 def test_no_warning_when_draft_group_is_identified(caplog_vllm):

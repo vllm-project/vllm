@@ -31,6 +31,9 @@ from vllm.lora.layers import (
 )
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.punica_wrapper import get_punica_wrapper
+from vllm.model_executor.layers.fusion.quant_activation import (
+    get_input_quant_key,
+)
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -55,6 +58,13 @@ TOLERANCES = {
     torch.float32: (5e-3, 5e-3),
     torch.bfloat16: (3e-2, 2e-2),
 }
+
+
+def test_lora_linear_requires_unquantized_input() -> None:
+    layer = RowParallelLinearWithLoRA.__new__(RowParallelLinearWithLoRA)
+    layer._input_quant_key = object()
+    assert get_input_quant_key(layer) is None
+
 
 pytestmark = [
     pytest.mark.skipif(

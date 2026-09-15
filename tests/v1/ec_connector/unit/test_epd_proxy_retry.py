@@ -116,7 +116,9 @@ def test_a_decode_retry_does_not_inherit_the_previous_handles(proxy, monkeypatch
 
     first, _, _ = asyncio.run(proxy.prepare_for_decode(body, *args))
     reported = first["ec_transfer_params"]
-    assert [handle] == [value for key, value in reported.items() if key != "ec_items"]
+    assert {key: value for key, value in reported.items() if key != "ec_items"} == {
+        "encoder-side-hash": handle
+    }
     assert "ec_transfer_params" not in body
 
     # Attempt 2's encode reports nothing: decode must be told nothing.
@@ -154,10 +156,22 @@ def test_raw_media_keeps_encoder_transfer_identity(proxy, monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("prefill", [False, True])
+@pytest.mark.parametrize(
+    "request_options",
+    [
+        {},
+        {
+            "mm_processor_kwargs": {"max_pixels": 262144},
+            "media_io_kwargs": {"image": {"image_mode": "RGB"}},
+            "priority": -3,
+            "session_id": "session-123",
+        },
+    ],
+)
 async def test_http_roundtrip_preserves_payload_and_response_bytes(
-    proxy, monkeypatch, stream, prefill
+    proxy, monkeypatch, stream, prefill, request_options
 ):
-    """Exercise real HTTP hops, rewrite and a decode retry without model servers."""
+    """Preserve media and scheduling context across HTTP hops and retries."""
     seen: dict[str, list[dict]] = {"encode": [], "prefill": [], "decode": []}
     prefix = b'data: {"content":"'
     # Split a multibyte character at the old 1024-byte forwarding boundary.
@@ -174,10 +188,13 @@ async def test_http_roundtrip_preserves_payload_and_response_bytes(
         seen[stage].append(body)
         if stage == "encode":
             item = body["messages"][0]["content"][0]
+            mm_hash = item["uuid"]
+            if body.get("mm_processor_kwargs"):
+                mm_hash += "-processed"
             return web.json_response(
                 {
                     "ec_transfer_params": {
-                        item["uuid"]: {
+                        mm_hash: {
                             "metadata": {"image_grid_thw": [[1, 2, 2]]},
                             "peer_port": len(seen[stage]),
                         }
@@ -230,6 +247,7 @@ async def test_http_roundtrip_preserves_payload_and_response_bytes(
             "max_tokens": 32,
             "seed": 42,
             "structured_outputs": {"choice": ["A", "B"]},
+            **request_options,
         }
         await proxy.on_startup()
         try:
@@ -247,6 +265,15 @@ async def test_http_roundtrip_preserves_payload_and_response_bytes(
 
     assert len(seen["encode"]) == 4
     assert len(seen["decode"]) == 2
+    for requests in seen.values():
+        for forwarded in requests:
+            for key in (
+                "mm_processor_kwargs",
+                "media_io_kwargs",
+                "priority",
+                "session_id",
+            ):
+                assert forwarded.get(key) == body.get(key)
     final = seen["decode"][-1]
     for key in [
         "model",
@@ -265,7 +292,11 @@ async def test_http_roundtrip_preserves_payload_and_response_bytes(
             "image_embeds": {"image_grid_thw": [1, 2, 2]},
             "uuid": proxy.content_uuid(item),
         }
-    assert final["ec_transfer_params"][proxy.content_uuid(item)]["peer_port"] in (3, 4)
+    mm_hash = proxy.content_uuid(item)
+    if request_options:
+        mm_hash += "-processed"
+    assert set(final["ec_transfer_params"]) - {"ec_items"} == {mm_hash}
+    assert final["ec_transfer_params"][mm_hash]["peer_port"] in (3, 4)
     if prefill:
         assert final["kv_transfer_params"] == {"remote_block_ids": [2]}
 
