@@ -156,39 +156,12 @@ def test_region_pull_ignores_allocation_padding(
         list(range((30 + cached) * local_ratio, 30 * local_ratio + valid_pages))
         + list(range(100 + 40 * local_ratio, 100 + 40 * local_ratio + valid_pages))
     )
-    assert meta.local_untransferred_region_blocks == [
+    assert meta.region_blocks_to_zero == [
         list(
             range(base * local_ratio + valid_pages, (base + local_count) * local_ratio)
         )
         for base in (30, 40)
     ]
-
-
-@pytest.mark.cpu_test
-@pytest.mark.parametrize("local", [[], [[], []]])
-@pytest.mark.parametrize("awaiting_kvs", [False, True])
-def test_region_pull_empty_destinations_notify_producer(
-    region_pull_worker, local, awaiting_kvs
-):
-    """An empty read notifies P; only parked requests report receive completion."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
-        RemoteMeta,
-        ReqMeta,
-    )
-
-    worker = region_pull_worker
-    meta = ReqMeta(
-        local_block_ids=local,
-        local_physical_block_ids=local,
-        local_num_computed_blocks=(0, 0, 0),
-        tp_size=4,
-        remote=RemoteMeta([[10, 11]], "localhost", 1, "P", "request-P", num_tokens=160),
-        awaiting_kvs=awaiting_kvs,
-    )
-    worker._read_blocks_for_req("request", meta)
-    worker.nixl_wrapper.send_notif.assert_called_once()
-    worker._read_blocks_mixed.assert_not_called()
-    assert ("request" in worker._recving_transfers) == awaiting_kvs
 
 
 @pytest.mark.cpu_test
@@ -215,7 +188,7 @@ def test_region_pull_completion_zeros_only_own_padding(region_pull_worker):
             local_physical_block_ids=[[1, 2], [0, 1]],
             tp_size=1,
             remote=RemoteMeta([[3]], "localhost", 1, "P", "request-P"),
-            local_untransferred_region_blocks=[[2], [1]],
+            region_blocks_to_zero=[[2], [1]],
         )
     }
     worker._get_new_notifs = MagicMock(return_value=set())

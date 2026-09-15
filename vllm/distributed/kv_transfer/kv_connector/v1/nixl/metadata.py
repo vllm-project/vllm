@@ -250,8 +250,9 @@ class ReqMeta:
     # True only when the scheduler parked the request in WAITING_FOR_REMOTE_KVS
     # and expects it in finished_recving; notify-only recvs must not be reported.
     awaiting_kvs: bool = False
-    # Region-mapped pulls record allocation padding for receive-time zeroing.
-    local_untransferred_region_blocks: BlockIds | None = None
+    # Worker-only, per-region physical pages to zero after a successful pull.
+    # None selects group-based completion; empty lists mean no zeroing.
+    region_blocks_to_zero: BlockIds | None = None
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):

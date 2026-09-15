@@ -2609,7 +2609,7 @@ class NixlBaseConnectorWorker:
                 indices=indices,
             )
 
-    def _zero_untransferred_region_blocks(self, block_ids: BlockIds) -> None:
+    def _zero_region_blocks(self, block_ids: BlockIds) -> None:
         """Clear clipped physical pages in their owning region only."""
         if not any(block_ids):
             return
@@ -2700,12 +2700,10 @@ class NixlBaseConnectorWorker:
 
             direct_device_recving.add(req_id)
 
-            if meta.local_untransferred_region_blocks is not None:
+            if meta.region_blocks_to_zero is not None:
                 # P/D group positions differ. Use the actual region read plan,
                 # including any local allocation padding the read did not cover.
-                self._zero_untransferred_region_blocks(
-                    meta.local_untransferred_region_blocks
-                )
+                self._zero_region_blocks(meta.region_blocks_to_zero)
                 continue
 
             # Post processing for heteroblocksize/layout, and for blocks the
@@ -3114,8 +3112,7 @@ class NixlBaseConnectorWorker:
         """Pair an uncached decode suffix with the same prefill regions."""
         assert len(decode_block_ids) == len(prefill_block_ids)
         if not any(decode_block_ids):
-            empty_regions: list[list[int]] = [[] for _ in decode_block_ids]
-            return empty_regions, empty_regions.copy()
+            return [], prefill_block_ids
 
         if num_computed_blocks is not None:
             assert num_remote_blocks is not None
