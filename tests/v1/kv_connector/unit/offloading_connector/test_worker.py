@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Mapping
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -27,6 +29,7 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     GPULoadStoreSpec,
     LoadStoreSpec,
+    OffloadingConfigInfo,
     OffloadingManager,
     OffloadingSpec,
     OffloadingWorker,
@@ -181,6 +184,15 @@ class BareExternalOffloadingSpec(OffloadingSpec):
 
     def get_worker(self, kv_caches: CanonicalKVCaches) -> OffloadingWorker:
         raise NotImplementedError
+
+    @classmethod
+    def config_info_classes(
+        cls, extra_config: Mapping[str, Any]
+    ) -> tuple[tuple[str, type[OffloadingConfigInfo]], ...]:
+        return ()
+
+    def config_info(self) -> tuple[OffloadingConfigInfo, ...]:
+        return ()
 
 
 # ---------------------------------------------------------------------------

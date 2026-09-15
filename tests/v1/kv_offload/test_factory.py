@@ -2,13 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for native offloading specs and their factory."""
 
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
 from vllm.v1.kv_offload.base import (
+    KV_OFFLOAD_CONFIG_INFO,
     CanonicalKVCaches,
+    OffloadingConfigInfo,
+    OffloadingGaugeMetadata,
     OffloadingHistogramMetadata,
     OffloadingManager,
     OffloadingSpec,
@@ -21,6 +26,7 @@ from vllm.v1.kv_offload.config import (
     OffloadingModelConfig,
     OffloadingParallelConfig,
 )
+from vllm.v1.kv_offload.cpu.common import CPUCacheOffloadingInfo
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
@@ -42,6 +48,7 @@ def _make_offloading_config(
     groups: tuple[OffloadingGroupConfig, ...] | None = None,
     tokens_per_hash: int = 16,
     blocks_per_chunk: int = 1,
+    max_model_len: int = 4096,
     rank: int = 0,
     world_size: int = 1,
     tp_size: int | None = None,
@@ -70,7 +77,9 @@ def _make_offloading_config(
         enable_kv_cache_events=False,
         extra_config=normalized_extra_config,
         engine_id="test-engine",
-        model=OffloadingModelConfig(name="test-model", dtype="float16"),
+        model=OffloadingModelConfig(
+            name="test-model", dtype="float16", max_model_len=max_model_len
+        ),
         cache=OffloadingCacheConfig(
             tokens_per_hash=tokens_per_hash,
             blocks_per_chunk=blocks_per_chunk,
@@ -101,6 +110,15 @@ class SingleArgExternalOffloadingSpec(OffloadingSpec):
 
     def get_worker(self, kv_caches: CanonicalKVCaches) -> OffloadingWorker:
         raise NotImplementedError
+
+    @classmethod
+    def config_info_classes(
+        cls, extra_config: Mapping[str, Any]
+    ) -> tuple[tuple[str, type[OffloadingConfigInfo]], ...]:
+        return ()
+
+    def config_info(self) -> tuple[OffloadingConfigInfo, ...]:
+        return ()
 
 
 def test_pre_registered_specs_can_be_imported():
@@ -166,6 +184,141 @@ def test_cpu_spec_zero_worker_bytes_produces_empty_cache():
     assert spec.cpu_page_size_per_worker == 0
     assert spec.kv_bytes_per_chunk == 0
     assert spec.num_chunks == 0
+
+
+@pytest.mark.parametrize("blocks_per_chunk", [1, 2, 4])
+def test_cpu_spec_tier_info_converts_slots_to_tokens(blocks_per_chunk: int):
+    """One uncapped group makes the capacity the slot count in KV tokens.
+
+    A slot holds blocks_per_chunk blocks of tokens_per_block tokens each, so
+    dropping either factor understates the tier.
+    """
+    alignment = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    tokens_per_block = 8
+    spec = _create_spec(
+        cpu_bytes_to_use=alignment * 12,
+        worker_kv_bytes_per_block=alignment,
+        blocks_per_chunk=blocks_per_chunk,
+        groups=(OffloadingGroupConfig(tokens_per_block, ("layer",), 0),),
+    )
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.num_chunks == 12 // blocks_per_chunk
+    assert spec.tier_info.capacity_tokens_at_max_len == (
+        spec.num_chunks * blocks_per_chunk * tokens_per_block
+    )
+
+
+@pytest.mark.parametrize("world_size", [1, 2, 4])
+def test_cpu_spec_tier_info_capacity_accounts_for_tensor_parallel_copies(
+    world_size: int,
+):
+    """A slot holds every worker's copy of the block, so capacity divides by TP.
+
+    Without the num_copies factor a TP=4 tier would be reported at four times
+    the tokens it can hold.
+    """
+    alignment = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    tokens_per_block = 8
+    spec = _create_spec(
+        cpu_bytes_to_use=alignment * 12,
+        worker_kv_bytes_per_block=alignment,
+        world_size=world_size,
+        groups=(OffloadingGroupConfig(tokens_per_block, ("layer",), 0),),
+    )
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.num_chunks == 12 // world_size
+    assert (
+        spec.tier_info.capacity_tokens_at_max_len == spec.num_chunks * tokens_per_block
+    )
+
+
+def test_cpu_spec_tier_info_capacity_dedups_a_replicated_layout(monkeypatch):
+    """A replicated layout stores one copy, so capacity does not divide by TP.
+
+    Same TP=4 sizing as the test above, which yields 3 slots; deduplicating to a
+    single copy yields 12.
+    """
+    import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
+
+    monkeypatch.setattr(cpu_spec_module.current_platform, "is_cuda_alike", lambda: True)
+    alignment = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    tokens_per_block = 8
+    spec = _create_spec(
+        cpu_bytes_to_use=alignment * 12,
+        worker_kv_bytes_per_block=alignment,
+        world_size=4,
+        replicated_layout=True,
+        groups=(OffloadingGroupConfig(tokens_per_block, ("layer",), 0),),
+    )
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.num_chunks == 12
+    assert spec.tier_info.capacity_tokens_at_max_len == 12 * tokens_per_block
+
+
+def test_cpu_spec_tier_info_mirrors_spec_sizing():
+    """The exported facts are the spec's own, not a second derivation."""
+    alignment = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    spec = _create_spec(
+        cpu_bytes_to_use=alignment * 5,
+        worker_kv_bytes_per_block=alignment,
+        blocks_per_chunk=1,
+    )
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.tier_info.num_chunks == spec.num_chunks
+    assert spec.tier_info.blocks_per_chunk == spec.blocks_per_chunk
+    assert spec.tier_info.kv_bytes_per_chunk == spec.kv_bytes_per_chunk
+
+
+def test_cpu_spec_tier_info_zero_capacity_is_exact_not_unknown():
+    """A tier sized to nothing holds zero tokens; that is known, not unknown."""
+    spec = _create_spec(
+        worker_kv_bytes_per_block=0,
+        groups=(OffloadingGroupConfig(16, ("layer",), 0),),
+    )
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.num_chunks == 0
+    assert spec.tier_info.capacity_tokens_at_max_len == 0
+
+
+def test_cpu_spec_tier_info_capacity_shrinks_when_a_second_group_shares_slots():
+    """Two groups take two chunks for one request, so the capacity halves."""
+    one_group = _create_spec(groups=(OffloadingGroupConfig(16, ("full_layer",), 0),))
+    two_groups = _create_spec(
+        groups=(
+            OffloadingGroupConfig(16, ("full_layer",), 0),
+            OffloadingGroupConfig(16, ("swa_layer",), 1),
+        ),
+    )
+
+    assert isinstance(one_group, CPUOffloadingSpec)
+    assert isinstance(two_groups, CPUOffloadingSpec)
+    assert two_groups.num_chunks == one_group.num_chunks
+    assert two_groups.tier_info.capacity_tokens_at_max_len == (
+        one_group.tier_info.capacity_tokens_at_max_len // 2
+    )
+
+
+def test_cpu_spec_tier_info_no_token_capacity_without_a_kv_cache_group():
+    """A model with no KV cache has no group whose chunk size to apply."""
+    spec = _create_spec(groups=())
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.num_chunks > 0
+    assert spec.tier_info.capacity_tokens_at_max_len is None
+
+
+def test_cpu_spec_tier_info_no_token_capacity_without_max_model_len():
+    """The capacity holds at max_model_len, so an unknown length gives None."""
+    spec = _create_spec(max_model_len=0)
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.num_chunks > 0
+    assert spec.tier_info.capacity_tokens_at_max_len is None
 
 
 def test_tiering_spec_aligns_row_size():
@@ -592,3 +745,165 @@ def test_build_metric_definitions_returns_counter_at_threshold():
     metrics = spec_cls.build_metric_definitions(extra_config)
 
     assert CPUOffloadingMetrics.STORES_SKIPPED in metrics
+
+
+@dataclass(frozen=True)
+class _CPUConfigInfo(OffloadingConfigInfo):
+    chunks: int
+    policy: str
+
+    @classmethod
+    def help_text(cls) -> str:
+        return "chunks holds the capacity, policy holds the eviction policy."
+
+
+@dataclass(frozen=True)
+class _FsConfigInfo(OffloadingConfigInfo):
+    path: str
+
+    @classmethod
+    def help_text(cls) -> str:
+        return "path holds the mount point."
+
+
+class _ConfigInfoOffloadingSpec(OffloadingSpec):
+    """Test-only spec that declares three config sources, two with one name.
+
+    The constructor takes the reported facts directly, because these tests
+    exercise the info hooks alone and need no offloading config.
+    """
+
+    def __init__(self, infos: tuple[OffloadingConfigInfo, ...]):
+        self._infos = infos
+        self.extra_config: Mapping[str, Any] = {}
+
+    def get_manager(self) -> OffloadingManager:
+        raise NotImplementedError
+
+    def get_worker(self, kv_caches: CanonicalKVCaches) -> OffloadingWorker:
+        raise NotImplementedError
+
+    @classmethod
+    def config_info_classes(
+        cls, extra_config: Mapping[str, Any]
+    ) -> tuple[tuple[str, type[OffloadingConfigInfo]], ...]:
+        return (("cpu", _CPUConfigInfo), ("fs", _FsConfigInfo), ("fs", _FsConfigInfo))
+
+    def config_info(self) -> tuple[OffloadingConfigInfo, ...]:
+        return self._infos
+
+
+def test_info_metric_prefixes_every_label_with_the_source_index():
+    metadata = _ConfigInfoOffloadingSpec.build_info_metric_definition({})[
+        KV_OFFLOAD_CONFIG_INFO
+    ]
+
+    assert isinstance(metadata, OffloadingGaugeMetadata)
+    assert metadata.labelnames == ("cpu0_chunks", "cpu0_policy", "fs1_path", "fs2_path")
+
+
+def test_info_metric_help_holds_one_title_per_source_name():
+    metadata = _ConfigInfoOffloadingSpec.build_info_metric_definition({})[
+        KV_OFFLOAD_CONFIG_INFO
+    ]
+
+    assert metadata.documentation.count("cpu:") == 1
+    assert metadata.documentation.count("fs:") == 1
+
+
+def test_info_labelvalues_follow_the_declared_label_order():
+    spec = _ConfigInfoOffloadingSpec(
+        (
+            _CPUConfigInfo(chunks=8, policy="lru"),
+            _FsConfigInfo(path="/a"),
+            _FsConfigInfo(path="/b"),
+        )
+    )
+
+    assert spec.info_labelvalues() == ("8", "lru", "/a", "/b")
+
+
+def test_info_labelvalues_reject_a_source_that_reports_no_facts():
+    """A source owns its own placeholder, so a missing config info is a bug."""
+    spec = _ConfigInfoOffloadingSpec(
+        (None, _FsConfigInfo(path="/a"), _FsConfigInfo(path="/b"))  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(AssertionError, match="got NoneType"):
+        spec.info_labelvalues()
+
+
+def test_info_labelvalues_reject_a_source_count_mismatch():
+    spec = _ConfigInfoOffloadingSpec((_CPUConfigInfo(chunks=8, policy="lru"),))
+
+    with pytest.raises(AssertionError, match="declares 3 config info"):
+        spec.info_labelvalues()
+
+
+_CPU_INFO_LABELS = (
+    "cpu0_num_chunks",
+    "cpu0_blocks_per_chunk",
+    "cpu0_kv_bytes_per_chunk",
+    "cpu0_capacity_tokens_at_max_len",
+)
+
+
+def test_cpu_spec_declares_the_info_metric_with_the_cpu_cache_labels():
+    """The CPU cache is the spec's only config source, under the name 'cpu'.
+
+    The source name and its position set every label prefix, so a change here
+    renames the exported labels.
+    """
+    metadata = CPUOffloadingSpec.build_info_metric_definition({})[
+        KV_OFFLOAD_CONFIG_INFO
+    ]
+
+    assert isinstance(metadata, OffloadingGaugeMetadata)
+    assert metadata.labelnames == _CPU_INFO_LABELS
+    assert CPUCacheOffloadingInfo.help_text() in metadata.documentation
+
+
+def test_cpu_spec_info_labelvalues_follow_the_declared_label_order():
+    """The values bind to _CPU_INFO_LABELS by position, so the order matters.
+
+    The label names come from the class and the values from an instance, in two
+    separate walks. Nothing but this pairing catches the two drifting apart.
+    """
+    spec = _create_spec()
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.info_labelvalues() == (
+        str(spec.num_chunks),
+        str(spec.blocks_per_chunk),
+        str(spec.kv_bytes_per_chunk),
+        str(spec.tier_info.capacity_tokens_at_max_len),
+    )
+
+
+def test_cpu_spec_info_labelvalues_render_an_unknown_capacity_as_none():
+    """A label takes a string, so an unknown token capacity becomes 'None'.
+
+    The label must stay present, because Prometheus rejects a series that drops
+    one of the labels its metric declares.
+    """
+    spec = _create_spec(max_model_len=0)
+
+    assert isinstance(spec, CPUOffloadingSpec)
+    assert spec.tier_info.capacity_tokens_at_max_len is None
+    assert spec.info_labelvalues()[-1] == "None"
+
+
+def test_tiering_spec_inherits_the_cpu_cache_info_declaration():
+    """A tiering spec offloads to the same CPU cache, so it exports it too.
+
+    Both hooks come by inheritance, which an override in the tiering spec would
+    silently break.
+    """
+    metadata = TieringOffloadingSpec.build_info_metric_definition({})[
+        KV_OFFLOAD_CONFIG_INFO
+    ]
+    spec = _create_spec(spec_name="TieringOffloadingSpec")
+
+    assert isinstance(spec, TieringOffloadingSpec)
+    assert metadata.labelnames == _CPU_INFO_LABELS
+    assert spec.info_labelvalues() == spec.tier_info.as_labelvalues()
