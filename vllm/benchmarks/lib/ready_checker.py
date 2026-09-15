@@ -32,10 +32,8 @@ async def wait_for_endpoint(
         retry_interval: Time between retries in seconds (default: 5 seconds)
 
     Returns:
-        RequestFuncOutput: The successful response
-
-    Raises:
-        ValueError: If the endpoint doesn't become available within the timeout
+        RequestFuncOutput: The successful response, or the last failed response
+        if the endpoint doesn't become available within the timeout.
     """
     deadline = time.perf_counter() + timeout_seconds
     output = RequestFuncOutput(success=False)
@@ -59,8 +57,9 @@ async def wait_for_endpoint(
 
             # ping the endpoint using request_func
             try:
-                output = await request_func(
-                    request_func_input=test_input, session=session
+                output = await asyncio.wait_for(
+                    request_func(request_func_input=test_input, session=session),
+                    timeout=remaining,
                 )
                 if output.success:
                     pbar.close()
@@ -68,11 +67,17 @@ async def wait_for_endpoint(
                 else:
                     err_last_line = str(output.error).rstrip().rsplit("\n", 1)[-1]
                     logger.warning("Endpoint is not ready. Error='%s'", err_last_line)
+            except asyncio.TimeoutError:
+                if not output.error:
+                    output.error = (
+                        f"Endpoint readiness timed out after {timeout_seconds}s."
+                    )
+                break
             except aiohttp.ClientConnectorError:
                 pass
 
             # retry after a delay
-            sleep_duration = min(retry_interval, remaining)
+            sleep_duration = min(retry_interval, deadline - time.perf_counter())
             if sleep_duration > 0:
                 await asyncio.sleep(sleep_duration)
 
