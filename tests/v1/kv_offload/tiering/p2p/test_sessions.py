@@ -622,6 +622,121 @@ class TestClientFlows:
         assert session.poll().loads == []
         assert session._client.has_active_loads is False
 
+    def test_late_abort_ack_after_id_reuse_does_not_complete_new_load(self):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(
+            job_id=101, kv_request_id="req-k", keys=[b"k"], block_ids=[0]
+        )
+        _client_load(session, "req-k").submitted_at = (
+            time.monotonic() - _LOAD_TIMEOUT_S - 1.0
+        )
+        session.poll()
+        _client_load(session, "req-k").aborted_at = (
+            time.monotonic() - _ABORT_ACK_TIMEOUT_S - 1.0
+        )
+        assert session.poll().loads == [
+            LoadResult(job_id=101, kv_request_id="req-k", success=False)
+        ]
+        assert "req-k" not in session._client._requests
+
+        session.request_blocks(
+            job_id=202, kv_request_id="req-k", keys=[b"k2"], block_ids=[1]
+        )
+        assert conn._sent[-1][FetchMsg.ROUND_SEQ] == 1
+
+        conn.enqueue(
+            {
+                TYPE_KEY: AbortAckMsg.TYPE,
+                AbortAckMsg.ROUND_SEQ: 0,
+                AbortAckMsg.KV_REQUEST_ID: "req-k",
+            }
+        )
+        assert session.poll().loads == []
+        assert session._client.has_active_loads is True
+
+    def test_late_transfer_done_after_id_reuse_does_not_complete_new_load(self):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(
+            job_id=101, kv_request_id="req-k", keys=[b"k"], block_ids=[0]
+        )
+        _client_load(session, "req-k").submitted_at = (
+            time.monotonic() - _LOAD_TIMEOUT_S - 1.0
+        )
+        session.poll()
+        _client_load(session, "req-k").aborted_at = (
+            time.monotonic() - _ABORT_ACK_TIMEOUT_S - 1.0
+        )
+        assert session.poll().loads == [
+            LoadResult(job_id=101, kv_request_id="req-k", success=False)
+        ]
+
+        session.request_blocks(
+            job_id=202, kv_request_id="req-k", keys=[b"k2"], block_ids=[1]
+        )
+        conn.enqueue(
+            {
+                TYPE_KEY: TransferDoneMsg.TYPE,
+                TransferDoneMsg.ROUND_SEQ: 0,
+                TransferDoneMsg.KV_REQUEST_ID: "req-k",
+                TransferDoneMsg.SUCCESS: True,
+            }
+        )
+        assert session.poll().loads == []
+        assert session._client.has_active_loads is True
+
+        conn.enqueue(
+            {
+                TYPE_KEY: TransferDoneMsg.TYPE,
+                TransferDoneMsg.ROUND_SEQ: 1,
+                TransferDoneMsg.KV_REQUEST_ID: "req-k",
+                TransferDoneMsg.SUCCESS: True,
+            }
+        )
+        assert session.poll().loads == [
+            LoadResult(job_id=202, kv_request_id="req-k", success=True)
+        ]
+        assert session._client.has_active_loads is False
+
+    def test_completed_ids_keep_next_round_until_session_close(self):
+        """Idle prune must keep _next_round until close: dropping an id
+        would restart it at round 0 and let a delayed completion finish
+        a later load. One int per unique completed id is expected.
+        """
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        n = 1000
+        for i in range(n):
+            rid = f"req-{i}"
+            session.request_blocks(
+                job_id=i, kv_request_id=rid, keys=[b"k"], block_ids=[0]
+            )
+            conn.enqueue(
+                {
+                    TYPE_KEY: TransferDoneMsg.TYPE,
+                    TransferDoneMsg.ROUND_SEQ: 0,
+                    TransferDoneMsg.KV_REQUEST_ID: rid,
+                    TransferDoneMsg.SUCCESS: True,
+                }
+            )
+            assert session.poll().loads == [
+                LoadResult(job_id=i, kv_request_id=rid, success=True)
+            ]
+
+        assert session._client._requests == {}
+        assert session._client.has_active_loads is False
+        assert len(session._client._next_round) == n
+        assert session._client._next_round["req-0"] == 1
+
+        session.request_blocks(
+            job_id=n, kv_request_id="req-0", keys=[b"k2"], block_ids=[1]
+        )
+        assert conn._sent[-1][FetchMsg.ROUND_SEQ] == 1
+
+        session.close()
+        assert session._client._next_round == {}
+
     def test_active_loads_work_list_tracks_in_flight(self):
         """collect_results / has_active_loads use the _active_loads work-list,
         armed when a fetch is issued and discarded exactly when its load
