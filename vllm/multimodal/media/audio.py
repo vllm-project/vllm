@@ -75,6 +75,34 @@ _TORCHCODEC_UNAVAILABLE_MSG = (
 _DURATION_GUARD_MARGIN_S = 1.0
 
 
+def _check_audio_channel_limit(num_channels: int | None) -> None:
+    max_channels = envs.VLLM_MAX_AUDIO_CHANNELS
+    if (
+        num_channels is not None
+        and num_channels > 0
+        and max_channels > 0
+        and num_channels > max_channels
+    ):
+        raise ValueError(
+            f"Audio channel count {num_channels} exceeds the maximum of "
+            f"{max_channels}. Set VLLM_MAX_AUDIO_CHANNELS to increase "
+            "this limit."
+        )
+
+
+def _get_pyav_channel_count(audio_obj) -> int | None:
+    codec_context = getattr(audio_obj, "codec_context", None)
+    codec_channels = getattr(codec_context, "channels", None)
+    if codec_channels:
+        return int(codec_channels)
+
+    layout = getattr(audio_obj, "layout", None)
+    layout_channels = getattr(layout, "channels", None)
+    if layout_channels is not None:
+        return len(layout_channels)
+    return None
+
+
 def load_audio_pyav(
     path: BytesIO | Path | str,
     *,
@@ -114,6 +142,7 @@ def load_audio_pyav(
             raise ValueError("No audio stream found.")
         stream = container.streams.audio[0]
         stream.thread_type = "AUTO"
+        _check_audio_channel_limit(_get_pyav_channel_count(stream))
         native_sr = stream.rate
         sr = sr or native_sr
 
@@ -152,9 +181,11 @@ def load_audio_pyav(
         )
         try:
             for frame in container.decode(stream):
+                _check_audio_channel_limit(_get_pyav_channel_count(frame))
                 if needs_resampling:
                     assert resampler is not None
                     for out_frame in resampler.resample(frame):
+                        _check_audio_channel_limit(_get_pyav_channel_count(out_frame))
                         arr = out_frame.to_ndarray()
                         total_samples += arr.shape[-1]
                         total_decode_bytes += arr.nbytes
@@ -211,6 +242,7 @@ def load_audio_soundfile(
 ) -> tuple[np.ndarray, int]:
     """Load audio via soundfile"""
     with soundfile.SoundFile(path) as f:
+        _check_audio_channel_limit(f.channels)
         native_sr = f.samplerate
         if max_duration_s is not None:
             file_duration_s = f.frames / native_sr
