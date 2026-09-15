@@ -67,12 +67,46 @@ def test_an_explicit_backend_is_not_overridden(on_rocm):
     assert cfg.dcp_comm_backend == "ag_rs"
 
 
-def test_q_replicate_is_left_alone(on_rocm):
-    """GlmMoeDsa pairs a2a with q_replicate=True. That changes weight loading
-    and is a separate, unmeasured question, so K3 must not inherit it by
-    accident."""
-    assert _apply(ParallelConfig()).dcp_q_replicate is not True
+def test_q_replicate_resolves_to_false_not_none(on_rocm):
+    """set_dcp_defaults fills BOTH fields, so q_replicate is decided here.
 
+    It is resolved None -> False, not left as None. That is the value
+    MLAAttention already defaults to, so behaviour is unchanged -- but the hook
+    does make the decision, and saying it is "left alone" would be wrong.
+
+    What matters is that it is not True: GlmMoeDsa pairs a2a with
+    q_replicate=True, which changes weight loading and is an independent,
+    unmeasured question.
+    """
+    assert _apply(ParallelConfig()).dcp_q_replicate is False
+
+
+def test_an_explicit_q_replicate_survives(on_rocm):
+    """A user who asked for q_replicate=True keeps it."""
+    cfg = ParallelConfig()
+    cfg.dcp_q_replicate = True
+    assert _apply(cfg).dcp_q_replicate is True
+
+
+def test_pcp_keeps_the_upstream_default(on_rocm):
+    """a2a under PCP is unmeasured and #56677 pins ag_rs for a GLM PCP4+DCP4
+    config, so leave the default untouched rather than opt K3 users in."""
+    cfg = ParallelConfig()
+    cfg.prefill_context_parallel_size = 4
+    out = _apply(cfg)
+    assert out.dcp_comm_backend is None, (
+        "PCP is enabled, so the a2a default must not be applied -- it is "
+        "unmeasured there and upstream pinned ag_rs for that combination"
+    )
+    assert out.dcp_q_replicate is None
+
+
+def test_pcp_still_honours_an_explicit_a2a(on_rocm):
+    """Opting in under PCP is the user's call and must still work."""
+    cfg = ParallelConfig()
+    cfg.prefill_context_parallel_size = 4
+    cfg.dcp_comm_backend = "a2a"
+    assert _apply(cfg).dcp_comm_backend == "a2a"
 
 def test_hook_is_registered_for_both_k3_architectures():
     """The MTP draft shares the target's config class; if only the main model
