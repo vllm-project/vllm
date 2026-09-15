@@ -4,6 +4,92 @@ import pytest
 import torch
 
 
+@pytest.mark.parametrize(
+    ("kv_cache_dtype", "context_parallel"),
+    [("bfloat16", False), ("fp8_ds_mla", False), ("fp8_ds_mla", True)],
+)
+def test_sparse_flashmla_workspace_growth_releases_storage(
+    monkeypatch: pytest.MonkeyPatch,
+    kv_cache_dtype: str,
+    context_parallel: bool,
+):
+    """Attention must not keep views into a replaced shared workspace."""
+    from types import SimpleNamespace
+
+    from torch.multiprocessing.reductions import StorageWeakRef
+
+    import vllm.v1.attention.backends.mla.flashmla_sparse as flashmla
+    import vllm.v1.worker.workspace as workspace
+
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: 0)
+    monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: None)
+    manager = workspace.WorkspaceManager(torch.device("cpu"), num_lanes=2)
+    monkeypatch.setattr(workspace, "_manager", manager)
+    monkeypatch.setattr(
+        flashmla.SparseMLACommonImpl,
+        "__init__",
+        lambda self, *args, **kwargs: setattr(
+            self, "need_to_return_lse_for_decode", False
+        ),
+    )
+    monkeypatch.setattr(
+        flashmla.current_platform, "is_device_capability_family", lambda _: False
+    )
+    monkeypatch.setattr(flashmla, "get_prefill_workspace_size", lambda _: 40)
+    monkeypatch.setattr(
+        flashmla,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(
+            scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
+            model_config=SimpleNamespace(max_model_len=8),
+            parallel_config=SimpleNamespace(
+                prefill_context_parallel_size=2 if context_parallel else 1,
+                decode_context_parallel_size=2 if context_parallel else 1,
+            ),
+        ),
+    )
+    layer = flashmla.FlashMLASparseImpl(
+        num_heads=2,
+        head_size=8,
+        scale=1.0,
+        num_kv_heads=1,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype=kv_cache_dtype,
+        logits_soft_cap=None,
+        attn_type="decoder",
+        kv_sharing_target_layer_name=None,
+    )
+    old_storage = StorageWeakRef(layer.q_concat_buffer.untyped_storage())
+    (grown,) = manager.get_simultaneous(((32768,), torch.uint8))
+    assert old_storage.expired(), "Attention retains the obsolete workspace"
+
+    buffers = [layer.q_concat_buffer]
+    shapes: list[tuple[int, ...]] = [(4, 64 if kv_cache_dtype == "bfloat16" else 2, 8)]
+    if kv_cache_dtype == "fp8_ds_mla":
+        buffers.append(layer.prefill_bf16_workspace)
+        shapes.append((20 if context_parallel else 40, 8))
+    if context_parallel:
+        buffers.append(layer.gathered_kv_workspace)
+        shapes.append((40, 8))
+    for i, (buffer, shape) in enumerate(zip(buffers, shapes)):
+        assert tuple(buffer.shape) == shape
+        assert buffer.dtype == torch.bfloat16
+        assert buffer.untyped_storage().data_ptr() == grown.data_ptr()
+        buffer.fill_(i + 1)
+    for i, buffer in enumerate(buffers):
+        assert torch.all(buffer == i + 1), "Simultaneous buffers must not overlap"
+
+    manager.lock()
+    assert layer.q_concat_buffer.data_ptr() == buffers[0].data_ptr()
+    manager.unlock()
+    with workspace.use_workspace_lane(1):
+        (draft,) = manager.get_simultaneous(((32768,), torch.uint8))
+        assert layer.q_concat_buffer.untyped_storage().data_ptr() == draft.data_ptr()
+        assert draft.data_ptr() != grown.data_ptr()
+    assert layer.q_concat_buffer.untyped_storage().data_ptr() == grown.data_ptr()
+
+
 @pytest.mark.parametrize("sm120", [False, True])
 def test_deepseek_v4_c128a_adaptive_width_has_capture_stable_stride(
     monkeypatch: pytest.MonkeyPatch,
