@@ -8,9 +8,9 @@ if [ -z "${CUDA_VERSION:-}" ]; then
     exit 0
 fi
 
-# TODO: Use the PyPI wheel once KVCR is released.
+# TODO: Use the PyPI wheel once it is published.
 uv pip install --system \
-    "nvidia-kvcr @ git+https://github.com/ai-dynamo/kvcr.git@main"
+    "kvcr @ git+https://github.com/ai-dynamo/kvcr.git@v0.1.0"
 
 # Keep only the NIXL wheel matching the CI image's CUDA runtime.
 NIXL_VERSION=$(uv pip show --system nixl | sed -n 's/^Version: //p')
