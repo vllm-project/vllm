@@ -597,13 +597,20 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         return remapped
 
     def _project_kv(
-        self, kv_c_normed: torch.Tensor, k_pe: torch.Tensor
+        self,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_b_proj_lora: object | None = None,
+        token_lora_mapping: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
             -1,
             self.num_heads,
             self.qk_nope_head_dim + self.v_head_dim,
         )
+        apply_lora = getattr(kv_b_proj_lora, "apply_mla_kv_b_lora_linear", None)
+        if apply_lora is not None and token_lora_mapping is not None:
+            apply_lora(kv_c_normed, kv_nope, token_lora_mapping)
         k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         return self._concat_k_nope_k_pe(k_nope, k_pe), v
 
@@ -719,6 +726,8 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         q_lens: list[int],
         topk_per_req: list[torch.Tensor],
         dense_mask: torch.Tensor | None = None,
+        kv_b_proj_lora: object | None = None,
+        request_lora_mapping: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.dcp_world_size > 1:
             raise NotImplementedError(
@@ -749,7 +758,17 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
 
             chunk_kv_c = workspace[:toks, : self.kv_lora_rank]
             chunk_k_pe = workspace[:toks, self.kv_lora_rank :].unsqueeze(1)
-            k, v = self._project_kv(chunk_kv_c, chunk_k_pe)
+            context_lora_mapping = None
+            if request_lora_mapping is not None:
+                context_lora_mapping = request_lora_mapping[chunk.request_slice][
+                    chunk.token_to_seq[:toks].long()
+                ]
+            k, v = self._project_kv(
+                chunk_kv_c,
+                chunk_k_pe,
+                kv_b_proj_lora,
+                context_lora_mapping,
+            )
             if dense_mask is not None:
                 chunk_mask: torch.Tensor | None = dense_mask[requests]
                 chunk_topk = topk_per_req[requests]
@@ -806,6 +825,8 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         k_scale: torch.Tensor,
         output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
+        kv_b_proj_lora: object | None = None,
+        token_lora_mapping: torch.Tensor | None = None,
     ) -> None:
         prefill_max_seq_len = attn_metadata.prefill_max_seq_len  # type: ignore[attr-defined]
         topk_tokens = attn_metadata.topk_tokens  # type: ignore[attr-defined]
@@ -821,6 +842,8 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
                 k_scale,
                 output,
                 output_scale,
+                kv_b_proj_lora,
+                token_lora_mapping,
             )
 
         assert output_scale is None
@@ -837,7 +860,12 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         ]
         topk_per_req = self._slice_topk_per_req(topk_all, q_lens)
 
-        k, v = self._project_kv(kv_c_normed, k_pe)
+        k, v = self._project_kv(
+            kv_c_normed,
+            k_pe,
+            kv_b_proj_lora,
+            token_lora_mapping,
+        )
         chunked_context = prefill_metadata.chunked_context
         if chunked_context is None:
             attn_out = self._run_masked_mha(
@@ -887,6 +915,11 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             ),
             topk_mask_workspace=prefill_metadata.topk_mask_workspace,
         )
+        request_lora_mapping = None
+        if token_lora_mapping is not None:
+            request_lora_mapping = token_lora_mapping[
+                prefill_metadata.query_start_loc[:-1].long()
+            ]
         context_output, context_lse = self._compute_context_mha(
             q=q,
             kv_c_and_k_pe_cache=kv_c_and_k_pe_cache,
@@ -895,6 +928,8 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             q_lens=q_lens,
             topk_per_req=topk_per_req,
             dense_mask=dense_mask,
+            kv_b_proj_lora=kv_b_proj_lora,
+            request_lora_mapping=request_lora_mapping,
         )
         merge_attn_states(
             output=output.view(-1, self.num_heads, self.v_head_dim),

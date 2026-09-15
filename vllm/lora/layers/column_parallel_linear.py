@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from typing import Any, cast
+
 import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
@@ -156,6 +158,61 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
 
         output_bias = self.base_layer.bias if self.base_layer.skip_bias_add else None
         return output, output_bias
+
+    def apply_mla_kv_b_lora_linear(
+        self,
+        input_: torch.Tensor,
+        output: torch.Tensor,
+        token_lora_mapping: torch.Tensor,
+    ) -> None:
+        from vllm.lora.ops.triton_ops.mla_kv_b_lora import mla_kv_b_lora_linear
+
+        mla_kv_b_lora_linear(
+            input_,
+            self.lora_a_stacked[0],
+            self.lora_b_stacked[0],
+            output,
+            token_lora_mapping,
+            cast(Any, self.punica_wrapper).token_mapping_meta.no_lora_flag_cpu,
+        )
+
+    def apply_mla_kv_b_lora_q(
+        self,
+        q_nope: torch.Tensor,
+        output: torch.Tensor,
+        token_lora_mapping: torch.Tensor,
+        v_head_dim: int,
+    ) -> None:
+        from vllm.lora.ops.triton_ops.mla_kv_b_lora import mla_kv_b_lora_q
+
+        mla_kv_b_lora_q(
+            q_nope,
+            self.lora_a_stacked[0],
+            self.lora_b_stacked[0],
+            output,
+            token_lora_mapping,
+            cast(Any, self.punica_wrapper).token_mapping_meta.no_lora_flag_cpu,
+            v_head_dim,
+        )
+
+    def apply_mla_kv_b_lora_v(
+        self,
+        latent_output: torch.Tensor,
+        output: torch.Tensor,
+        token_lora_mapping: torch.Tensor,
+        qk_nope_head_dim: int,
+    ) -> None:
+        from vllm.lora.ops.triton_ops.mla_kv_b_lora import mla_kv_b_lora_v
+
+        mla_kv_b_lora_v(
+            latent_output,
+            self.lora_a_stacked[0],
+            self.lora_b_stacked[0],
+            output,
+            token_lora_mapping,
+            cast(Any, self.punica_wrapper).token_mapping_meta.no_lora_flag_cpu,
+            qk_nope_head_dim,
+        )
 
     @classmethod
     @_not_fully_sharded_can_replace

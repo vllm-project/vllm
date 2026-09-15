@@ -571,10 +571,16 @@ class Dots3NoteTritonMLAImpl(TritonMLAImpl):
         k_scale: torch.Tensor,
         output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
+        kv_b_proj_lora: object | None = None,
+        token_lora_mapping: torch.Tensor | None = None,
     ) -> None:
         prefill = attn_metadata.prefill
         sliding = getattr(prefill, "sliding_window", None)
-        if prefill is None or sliding is None:
+        if (
+            prefill is None
+            or sliding is None
+            or (kv_b_proj_lora is not None and token_lora_mapping is not None)
+        ):
             return super().forward_mha(
                 q,
                 kv_c_normed,
@@ -584,6 +590,8 @@ class Dots3NoteTritonMLAImpl(TritonMLAImpl):
                 k_scale,
                 output,
                 output_scale,
+                kv_b_proj_lora,
+                token_lora_mapping,
             )
         assert output_scale is None
         assert isinstance(prefill.prefill_backend, Dots3NoteFlashAttnPrefillBackend)
@@ -721,6 +729,8 @@ class Dots3NotePaddedSparseImpl(FlashAttnMLASparseImpl):
         k_scale: torch.Tensor,
         output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
+        kv_b_proj_lora: object | None = None,
+        token_lora_mapping: torch.Tensor | None = None,
     ) -> None:
         super().forward_mha(
             q,
@@ -731,6 +741,8 @@ class Dots3NotePaddedSparseImpl(FlashAttnMLASparseImpl):
             k_scale,
             output,
             output_scale,
+            kv_b_proj_lora,
+            token_lora_mapping,
         )
 
     def forward_mqa(

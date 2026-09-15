@@ -1118,6 +1118,8 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         k_scale: torch.Tensor,
         output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
+        kv_b_proj_lora: object | None = None,
+        token_lora_mapping: torch.Tensor | None = None,
     ) -> None:
         """Dispatch prefill to the FP8 ASM kernel when available.
 
@@ -1131,7 +1133,8 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         with ``isinstance`` before reading the AITER-specific FP8 fields.
         """
         if (
-            not self._fp8_prefill_enabled
+            (kv_b_proj_lora is not None and token_lora_mapping is not None)
+            or not self._fp8_prefill_enabled
             or not isinstance(attn_metadata, AiterMLAMetadata)
             or attn_metadata.fp8_prefill_qo_indptr is None
         ):
@@ -1144,6 +1147,8 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 k_scale,
                 output,
                 output_scale,
+                kv_b_proj_lora,
+                token_lora_mapping,
             )
 
         assert attn_metadata.prefill is not None
@@ -1160,6 +1165,8 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 k_scale,
                 output,
                 output_scale,
+                kv_b_proj_lora,
+                token_lora_mapping,
             )
 
         assert output_scale is None, (
