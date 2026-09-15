@@ -217,15 +217,14 @@ class DSparkDeepseekV4Model(nn.Module):
                 residual,
             )
         hidden_states = mhc_post_tilelang(hidden_states, residual, post_mix, res_mix)
-        if self.use_sequence_parallel:
-            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
-            pre_mix = sp_all_gather(pre_mix)[:full_num_tokens]
         # Collapse the hc copies with the pre-mix from the last layer's FFN
         # mixes — the mix the reference forward_head applies (hc_pre with the
         # last block's ffn pre-mix). Return the PRE-norm head hidden;
         # compute_logits applies self.norm.
         assert pre_mix is not None
         hidden_states = hc_collapse_triton(hidden_states, pre_mix)
+        if self.use_sequence_parallel:
+            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
         return hidden_states
 
 

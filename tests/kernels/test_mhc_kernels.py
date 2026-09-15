@@ -147,6 +147,27 @@ def test_v41_dspark_head_collapses_with_last_ffn_mix(num_tokens, monkeypatch):
     )
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.parametrize("num_tokens", [1, 7, 32])
+@pytest.mark.parametrize("tp_size", [4, 8])
+def test_hc_collapse_before_gather_is_bitwise_equal(num_tokens, tp_size):
+    """Simulate SP on one GPU, including padding and ranks without valid tokens."""
+    set_random_seed(0)
+    padded_tokens = num_tokens + (-num_tokens) % tp_size
+    streams = torch.randn(padded_tokens, 4, 5120, dtype=torch.bfloat16, device=DEVICE)
+    pre_mix = torch.rand(padded_tokens, 4, device=DEVICE)
+    stream_shards = streams.chunk(tp_size)
+    mix_shards = pre_mix.chunk(tp_size)
+    before = hc_collapse_triton(
+        torch.cat(stream_shards)[:num_tokens], torch.cat(mix_shards)[:num_tokens]
+    )
+    after = torch.cat(
+        [hc_collapse_triton(x, pre) for x, pre in zip(stream_shards, mix_shards)]
+    )[:num_tokens]
+    assert after.shape == (num_tokens, 5120)
+    torch.testing.assert_close(after, before, atol=0, rtol=0)
+
+
 @pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
 @pytest.mark.parametrize(
     "num_tokens,sinkhorn_repeat,norm_eps",
