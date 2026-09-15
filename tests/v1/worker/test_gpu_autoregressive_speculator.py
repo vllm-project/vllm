@@ -309,7 +309,7 @@ def test_run_model_unpacks_tuple_return_for_mtp(monkeypatch):
         4,
         attn_metadata=None,
         slot_mappings=None,
-        num_tokens_across_dp=None,
+        dp_sync=None,
         cudagraph_runtime_mode=CUDAGraphMode.NONE,
     )
 
@@ -325,12 +325,46 @@ def test_run_model_reuses_tensor_return_for_mtp(monkeypatch):
         4,
         attn_metadata=None,
         slot_mappings=None,
-        num_tokens_across_dp=None,
+        dp_sync=None,
         cudagraph_runtime_mode=CUDAGraphMode.NONE,
     )
 
     assert actual_logits_hidden is hidden
     assert actual_feedback_hidden is hidden
+
+
+@pytest.mark.parametrize(
+    ("pcp_size", "enable_expert_parallel", "expected_moe_counts"),
+    [(1, True, None), (2, False, None), (2, True, [5, 5, 5, 5])],
+)
+def test_capture_forward_fn_passes_dp_sync(
+    monkeypatch, pcp_size, enable_expert_parallel, expected_moe_counts
+):
+    # SpeculatorCudaGraphManager.capture passes DP token counts as a tensor;
+    # the draft forwards take a DPSyncState.
+    speculator = _make_speculator(monkeypatch, torch.zeros(4, 3))
+    speculator.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=pcp_size,
+            enable_expert_parallel=enable_expert_parallel,
+        )
+    )
+    forward_fn = Mock()
+    capture_forward_fn = speculator._with_capture_dp_sync(forward_fn)
+
+    capture_forward_fn(3, 5, None, None, None, CUDAGraphMode.FULL)
+    assert forward_fn.call_args.args == (3, 5, None, None, None, CUDAGraphMode.FULL)
+
+    num_tokens_across_dp = torch.full((2,), 5, dtype=torch.int32)
+    capture_forward_fn(3, 5, None, None, num_tokens_across_dp, CUDAGraphMode.FULL)
+    dp_sync = forward_fn.call_args.args[4]
+    assert dp_sync.num_tokens_across_dp is num_tokens_across_dp
+    assert dp_sync.num_reqs == 3
+    assert not dp_sync.eager
+    if expected_moe_counts is None:
+        assert dp_sync.moe_non_sp_token_counts is None
+    else:
+        assert dp_sync.moe_non_sp_token_counts.tolist() == expected_moe_counts
 
 
 @pytest.mark.parametrize(
@@ -378,7 +412,7 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
         skip_attn=True,
         batch_desc=batch_desc,
         seq_lens_cpu_upper_bound=None,
-        num_tokens_across_dp=None,
+        dp_sync=None,
     )
 
     assert generate_draft.call_count == expected_eager_calls
