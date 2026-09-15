@@ -187,9 +187,74 @@ class QuarkConfig(QuantizationConfig):
 
         self.quant_config = quant_config_with_hf_to_vllm_mapper
 
+    def _mxfp8_block_linear_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> "QuantizeMethodBase | None":
+        """Linear method for FP8 weights carrying 2-D e8m0 block scales.
+
+        ``_is_fp8_w8a8`` only accepts 128x128 per-block FP8 (DeepSeek V4
+        geometry) and the MX matchers only accept 1-D per-group weights, so a
+        32x32 per-block e8m0 weight (DeepSeek V4.1) matches no scheme and
+        ``_get_scheme_cls_from_config`` raises. Such a weight is MXFP8 with a
+        2-D scale: one e8m0 value per ``block_size[0]`` weight rows instead of
+        MXFP8's usual one per row, which ``QuarkW8A8Mxfp8`` expands on load.
+
+        This is not routed through ``QuarkOCP_MX``: that scheme covers the
+        sub-byte packed MX formats (``packed_factor``, ``PackedvLLMParameter``)
+        and has no MXFP8 entry in ``_WEIGHT_QUANT_KEY_MAP``. MXFP8 is
+        unpacked, so it gets a sibling scheme over the shared
+        ``init_mxfp8_linear_kernel``.
+        """
+        if not isinstance(layer, LinearBase):
+            return None
+        if should_ignore_layer(
+            prefix,
+            ignore=cast(list[str], self.quant_config.get("exclude")),
+            fused_mapping=self.packed_modules_mapping,
+        ):
+            return None
+
+        config = self._find_matched_config(prefix, type(layer))
+        weight = self._unwrap_single_quant_config(config.get("weight"))
+        acts = self._unwrap_single_quant_config(config.get("input_tensors"))
+        if not isinstance(weight, dict) or not isinstance(acts, dict):
+            return None
+
+        block_size = list(weight.get("block_size") or [])
+        if not (
+            weight.get("dtype") == "fp8_e4m3"
+            and weight.get("qscheme") == "per_block"
+            and weight.get("symmetric") is True
+            and not weight.get("is_dynamic")
+            and weight.get("scale_type") == "float8_e8m0fnu"
+            and len(block_size) == 2
+            and block_size[1] == 32
+        ):
+            return None
+        if not (
+            acts.get("dtype") == "fp8_e4m3"
+            and acts.get("is_dynamic")
+            and acts.get("qscheme") == "per_group"
+            and acts.get("group_size") == block_size[1]
+        ):
+            return None
+
+        from .schemes import QuarkW8A8Mxfp8
+
+        logger.debug_once(
+            "Quark MXFP8: routing %s block=%s to QuarkW8A8Mxfp8",
+            prefix,
+            tuple(block_size),
+        )
+        layer.scheme = QuarkW8A8Mxfp8(scale_block_rows=block_size[0])
+        return QuarkLinearMethod(self)
+
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
+        mxfp8_method = self._mxfp8_block_linear_method(layer, prefix)
+        if mxfp8_method is not None:
+            return mxfp8_method
         weight_quant_key, activation_quant_key, method_cls = (
             self.get_quant_method_target(prefix, type(layer))
         )
