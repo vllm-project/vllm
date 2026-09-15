@@ -159,9 +159,10 @@ def bench_decode(s_q, device, topk_extra, extra_bytes, local_heads):
             0 if padded_heads == local_heads else padded_heads,
             1e-6,
             SWA_BLOCK,
-            False,
-            True,
-            True,
+            False,  # apply_q_norm
+            True,  # kv_mxfp8
+            False,  # apply_q_rope: the mega kernel rotates Q itself
+            True,  # is_q_interleaved
         )
         torch.ops._flashmla_C.fused_norm_rope_attn_rope_cast_decode(
             q_fused if padded_heads == local_heads else q_pad,

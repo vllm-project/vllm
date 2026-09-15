@@ -924,15 +924,16 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         chunk-interleaved layout, so the Q half of the launch is a zero-pad to
         ``padded_heads`` -- and nothing at all once the shard is that wide.
         """
-        fused_q_layout = self.accepts_unnormed_unroped_query
+        interleaved_q = self.accepts_unnormed_unroped_query
         if not isinstance(attn_metadata, dict):
             # Profile run: kernel doesn't fire; produce a padded tensor so
             # downstream FlashMLA gets the right shape.
             if self.n_local_heads >= self.padded_heads:
                 return q
-            if fused_q_layout:
-                # Padding heads interleave with the live ones in that layout,
-                # so no pad of `q` reproduces it -- and nothing reads it here.
+            if interleaved_q:
+                # Padding heads sit at the tail of every head-dim chunk in
+                # that layout, so no head-major pad of `q` reproduces it --
+                # and nothing reads it on a profile run.
                 return q.new_zeros((q.shape[0], self.padded_heads, q.shape[2]))
             return F.pad(
                 q,
@@ -957,14 +958,15 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         if cache_dtype == torch.uint8:
             # fp8_ds_mla UE8M0 paged path. Horizontally fused:
             #   Q side: GPT-J RoPE, zero-filling the padding head slots; the
-            #           kernel allocates and returns the padded q tensor. With
-            #           `fused_q_layout` it only zero-pads, and q_head_padded=0
-            #           drops the Q pass entirely when there is no padding.
+            #           kernel allocates and returns the padded q tensor. An
+            #           interleaved Q skips the RoPE its attention kernel owns
+            #           and keeps only the pad, which q_head_padded=0 drops
+            #           too once the shard is already padded_heads wide.
             #   KV side: GPT-J RoPE + UE8M0 FP8 quant + paged cache insert.
             swa_kv_cache_2d = swa_kv_cache.view(swa_kv_cache.shape[0], -1)
             pad_to = (
                 0
-                if fused_q_layout and self.n_local_heads == self.padded_heads
+                if interleaved_q and self.n_local_heads == self.padded_heads
                 else self.padded_heads
             )
             q_padded = torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
@@ -977,13 +979,14 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 pad_to,
                 self.eps,
                 swa_metadata.block_size,
-                False,
+                False,  # apply_q_norm: qr is normed before wq_b
                 self.kv_mxfp8,
-                fused_q_layout,
+                not interleaved_q,  # apply_q_rope
+                interleaved_q,  # is_q_interleaved
             )
             return q if pad_to == 0 else q_padded
 
-        assert not fused_q_layout, (
+        assert not interleaved_q, (
             "the chunk-interleaved Q layout only pairs with a packed KV record"
         )
         # Plain-row path: the [num_blocks, block_size, 512] cache stores the KV
