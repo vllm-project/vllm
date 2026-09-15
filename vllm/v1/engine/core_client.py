@@ -177,6 +177,11 @@ class EngineCoreClient(ABC):
     def add_request(self, request: EngineCoreRequest) -> None:
         raise NotImplementedError
 
+    @contextlib.contextmanager
+    def batch_add_requests(self):
+        """Batch synchronous request admission when the client supports it."""
+        yield
+
     def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
         raise NotImplementedError
 
@@ -886,6 +891,7 @@ class SyncMPClient(MPClient):
         )
 
         self.is_dp = self.vllm_config.parallel_config.data_parallel_size > 1
+        self._pending_add_batch: list[EngineCoreRequest] | None = None
         self.outputs_queue = queue.Queue[EngineCoreOutputs | Exception]()
 
         # Ensure that the outputs socket processing thread does not have
@@ -976,7 +982,32 @@ class SyncMPClient(MPClient):
     def add_request(self, request: EngineCoreRequest) -> None:
         if self.is_dp:
             self.engines_running = True
-        self._send_input(EngineCoreRequestType.ADD, request)
+        if self._pending_add_batch is not None:
+            self._pending_add_batch.append(request)
+        else:
+            self._send_input(EngineCoreRequestType.ADD, request)
+
+    @contextlib.contextmanager
+    def batch_add_requests(self):
+        """Send a synchronous offline request cohort as one engine message."""
+        if self.is_dp:
+            yield
+            return
+        assert self._pending_add_batch is None, "Nested request batches are unsupported"
+        self._pending_add_batch = []
+        try:
+            yield
+        except BaseException:
+            self._pending_add_batch = None
+            raise
+        else:
+            requests = self._pending_add_batch
+            self._pending_add_batch = None
+            assert requests is not None
+            if len(requests) == 1:
+                self._send_input(EngineCoreRequestType.ADD, requests[0])
+            elif requests:
+                self._send_input(EngineCoreRequestType.ADD_BATCH, requests)
 
     def abort_requests(self, request_ids: list[str]) -> None:
         if request_ids and not self.resources.engine_dead:

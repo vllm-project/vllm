@@ -1541,6 +1541,9 @@ class EngineCoreProc(EngineCore):
             if self._reject_add_in_shutdown(req):
                 return
             self.add_request(req, request_wave)
+        elif request_type == EngineCoreRequestType.ADD_BATCH:
+            for req in request:
+                self._handle_client_request(EngineCoreRequestType.ADD, req)
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
         elif request_type == EngineCoreRequestType.UTILITY:
@@ -1696,6 +1699,9 @@ class EngineCoreProc(EngineCore):
         add_request_decoder = MsgpackDecoder(
             EngineCoreRequest, oob_tensor_provider=self.tensor_ipc_receiver
         )
+        add_batch_decoder = MsgpackDecoder(
+            list[EngineCoreRequest], oob_tensor_provider=self.tensor_ipc_receiver
+        )
         generic_decoder = MsgpackDecoder(oob_tensor_provider=self.tensor_ipc_receiver)
 
         with ExitStack() as stack, zmq.Context() as ctx:
@@ -1765,6 +1771,18 @@ class EngineCoreProc(EngineCore):
                         except Exception:
                             self._handle_request_preproc_error(req)
                             continue
+                    elif request_type == EngineCoreRequestType.ADD_BATCH:
+                        request = []
+                        reqs: list[EngineCoreRequest] = add_batch_decoder.decode(
+                            data_frames
+                        )
+                        for req in reqs:
+                            try:
+                                request.append(self.preprocess_add_request(req))
+                            except MultiModalCacheMissError as e:
+                                self._handle_mm_cache_miss(req, e)
+                            except Exception:
+                                self._handle_request_preproc_error(req)
                     elif request_type == EngineCoreRequestType.UTILITY:
                         request = generic_decoder.decode(data_frames)
                         client_idx, call_id, method, args = request
