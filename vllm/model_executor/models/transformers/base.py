@@ -17,7 +17,7 @@
 """Transformers modeling backend base class."""
 
 import os
-from collections.abc import Callable, Hashable, Iterable
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from functools import cached_property
 from itertools import chain
@@ -76,6 +76,7 @@ from vllm.model_executor.models.transformers.utils import (
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    ShardId,
     WeightsMapper,
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
@@ -86,12 +87,6 @@ if TYPE_CHECKING:
     from transformers import PreTrainedModel
 
     from vllm.config import VllmConfig
-
-    class _SupportsLoRABase:
-        pass
-
-else:
-    _SupportsLoRABase = SupportsLoRA
 
 logger = init_logger(__name__)
 
@@ -111,18 +106,18 @@ class Base(
     nn.Module,
     VllmModel,
     SupportsQuant,
-    _SupportsLoRABase,
+    SupportsLoRA,
     SupportsPP,
     SupportsEagle,
     SupportsEagle3,
 ):
-    embedding_modules = ["embed_tokens"]  # TODO transformers will have a util to get it
+    hf_to_vllm_mapper: WeightsMapper
+
+    # TODO transformers will have a util to get these
+    embedding_modules = {"embed_tokens": "input_embeddings"}
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
-        if TYPE_CHECKING:
-            nn.Module.__init__(self)
-        else:
-            super().__init__()
+        nn.Module.__init__(self)
         logger.info("Using Transformers modeling backend.")
 
         self.vllm_config = vllm_config
@@ -314,10 +309,8 @@ class Base(
         - Checkpoints saved with no base model prefix
         - Any quantization config specific mappings
         """
-        self.hf_to_vllm_mapper = WeightsMapper()
-        orig_to_new_renaming = self.hf_to_vllm_mapper.orig_to_new_renaming
-        orig_to_new_regex = self.hf_to_vllm_mapper.orig_to_new_regex
-        assert isinstance(orig_to_new_regex, dict)
+        orig_to_new_renaming: list[WeightRenaming] = []
+        orig_to_new_regex: dict[re.Pattern, str | None] = {}
 
         for mapping in get_model_conversion_mapping(self.model):
             # Handle weights which have been renamed in Transformers
@@ -353,6 +346,11 @@ class Base(
         nested_lm_head_pattern = re.compile(r"^model\.(.+\.)*(lm_head.+)")
         orig_to_new_regex[nested_lm_head_pattern] = r"\2"
 
+        self.hf_to_vllm_mapper = WeightsMapper(
+            orig_to_new_renaming=orig_to_new_renaming,
+            orig_to_new_regex=orig_to_new_regex,
+        )
+
         # Apply mapping to quantization config if needed
         self._maybe_apply_model_mapping()
 
@@ -382,17 +380,13 @@ class Base(
             tip = get_feature_request_tip(
                 self.model_config.model, self.model_config.trust_remote_code
             )
-            model_cls = type(self.model)
-            module_cls = type(module)
-            assert isinstance(model_cls, Hashable)
-            assert isinstance(module_cls, Hashable)
             logger.warning_once(
                 "%s does not define a pipeline parallel plan. The Transformers "
                 "modeling backend will infer the split from the layers of %s in order "
                 "of declaration and keep parameter-free modules on every rank. This "
                 "may fail if the model's structure is non-standard. %s",
-                model_cls,
-                module_cls,
+                type(self.model).__name__,
+                type(module).__name__,
                 tip,
             )
 
@@ -485,14 +479,12 @@ class Base(
             tip = get_feature_request_tip(
                 self.model_config.model, self.model_config.trust_remote_code
             )
-            model_cls = type(self.model)
-            assert isinstance(model_cls, Hashable)
             logger.warning_once(
                 "%s does not define a tensor parallel plan. The Transformers modeling "
                 "backend will shard the model the best it can during graph fusion and "
                 "replicate the rest. This may be suboptimal or fail if the model does "
                 "not fuse cleanly. %s",
-                model_cls,
+                type(self.model).__name__,
                 tip,
             )
 
@@ -502,6 +494,8 @@ class Base(
         fusers = Fusers(self.model, self.vllm_config)
 
         vocab_embeddings = self._vocab_embeddings()
+
+        orig_to_new_stacked: dict[str, tuple[str, ShardId]] = {}
 
         def register_fusion(fuser: BaseFuser, prefix: str, module: nn.Module):
             """Register a fused layer's mappings just before it is built."""
@@ -520,11 +514,7 @@ class Base(
                     )
                 self.attention_fusers[index] = (prefix, fuser)
 
-            orig_to_new_stacked = fuser.orig_to_new_stacked(prefix)
-            mapper = self.hf_to_vllm_mapper
-            assert mapper is not None
-            assert isinstance(mapper.orig_to_new_stacked, dict)
-            mapper.orig_to_new_stacked.update(orig_to_new_stacked)
+            orig_to_new_stacked.update(fuser.orig_to_new_stacked(prefix))
 
             packed_modules_mapping = fuser.packed_modules_mapping
             self.packed_modules_mapping.update(packed_modules_mapping)
@@ -589,6 +579,8 @@ class Base(
 
         _recursive_replace(self.model, prefix="model")
 
+        self.hf_to_vllm_mapper |= WeightsMapper(orig_to_new_stacked=orig_to_new_stacked)
+
     def _create_attention_instances(self):
         """Create `Attention` instances to inform KV cache allocation."""
         text_config = self.text_config
@@ -616,7 +608,7 @@ class Base(
             if i not in self.attention_fusers:
                 layer = (
                     f"{i} ({layer_types[i]})"
-                    if layer_types is not None and i < len(layer_types)
+                    if layer_types and i < len(layer_types)
                     else str(i)
                 )
                 raise ValueError(

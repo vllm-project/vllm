@@ -41,29 +41,11 @@ from vllm.model_executor.models.transformers.fusers.moe import MoEBlockFuser
 from vllm.model_executor.models.utils import extract_layer_index, maybe_prefix
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, direct_register_custom_op
 
+from .base import Base
 from .utils import log_replacement, maybe_per_layer
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
-
-    from .base import Base
-
-    class _TransformersMoERunnerBase(nn.Module):
-        moe_config: FusedMoEConfig
-        layer_name: str
-
-        def __init__(self, *args: object, **kwargs: object) -> None:
-            super().__init__()
-
-    class _TransformersRoutedExpertsBase(nn.Module):
-        pass
-
-    _MoEMixinBase = Base
-else:
-    _TransformersMoERunnerBase = MoERunner
-    _TransformersRoutedExpertsBase = RoutedExperts
-    _MoEMixinBase = MixtureOfExperts
 
 logger = init_logger(__name__)
 
@@ -76,7 +58,7 @@ class TransformersMoEState:
 
 # --8<-- [start:transformers_fused_moe]
 @PluggableLayer.register("transformers_fused_moe")
-class TransformersMoERunner(_TransformersMoERunnerBase):
+class TransformersMoERunner(MoERunner):
     """Custom MoERunner for the Transformers modeling backend."""
 
     # --8<-- [end:transformers_fused_moe]
@@ -85,14 +67,15 @@ class TransformersMoERunner(_TransformersMoERunnerBase):
         self._moe_state = moe_state
         self._moe_state.is_sequence_parallel = self.moe_config.is_sequence_parallel
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         hidden_states: torch.Tensor,
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
         **kwargs: Any,
     ) -> torch.Tensor:
-        """In Transformers `experts.forward` will have this signature.
+        """In Transformers `experts.forward` will have this signature, which is why
+        it deliberately does not match `MoERunner.forward`.
 
         We discard any extra kwargs because we cannot use them here."""
         # Note: we need to forward through a custom op so the topk_ids
@@ -109,8 +92,6 @@ class TransformersMoERunner(_TransformersMoERunnerBase):
         hidden_states: torch.Tensor,
         topk_weights: torch.Tensor,
     ) -> torch.Tensor:
-        if TYPE_CHECKING:
-            return MoERunner.forward(self, hidden_states, topk_weights)
         return super().forward(hidden_states, topk_weights)
 
 
@@ -145,21 +126,21 @@ direct_register_custom_op(
 )
 
 
-class TransformersRoutedExperts(_TransformersRoutedExpertsBase):
+class TransformersRoutedExperts(RoutedExperts):
     def get_expert_mapping(
-        self, include_fused: bool = False
+        self,
+        ckpt_gate_proj_name: str | None = None,
+        ckpt_down_proj_name: str | None = None,
+        ckpt_up_proj_name: str | None = None,
+        include_fused: bool = False,
     ) -> list[tuple[str, str, int, str]]:
-        common_names = ("gate_proj", "down_proj", "up_proj")
-        if TYPE_CHECKING:
-            common_map = RoutedExperts.get_expert_mapping(
-                self, *common_names, include_fused
-            )
-            mixtral_map = RoutedExperts.get_expert_mapping(
-                self, "w1", "w2", "w3", include_fused
-            )
-        else:
-            common_map = super().get_expert_mapping(*common_names, include_fused)
-            mixtral_map = super().get_expert_mapping("w1", "w2", "w3", include_fused)
+        common_map = super().get_expert_mapping(
+            ckpt_gate_proj_name or "gate_proj",
+            ckpt_down_proj_name or "down_proj",
+            ckpt_up_proj_name or "up_proj",
+            include_fused,
+        )
+        mixtral_map = super().get_expert_mapping("w1", "w2", "w3", include_fused)
         if not include_fused:
             return common_map + mixtral_map
         common_fused, common_unfused = common_map[:3], common_map[3:]
@@ -167,20 +148,17 @@ class TransformersRoutedExperts(_TransformersRoutedExpertsBase):
         return common_fused + mixtral_fused + common_unfused + mixtral_unfused
 
 
-class MoEMixin(_MoEMixinBase):
+class MoEMixin(MixtureOfExperts, Base):
     mlp_layers: list[nn.Module]
-    moe_layers: list[MoERunner]
+    """MoE blocks whose experts were replaced, for the `MixtureOfExperts` methods."""
+
+    # Redeclared because `recursive_replace` assigns it below the first read
     num_local_physical_experts: int
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         self.check_version("5.0.0", "MoE models support")
         # Skip MixtureOfExperts.__init__ and call the next class in MRO
-        if TYPE_CHECKING:
-            super().__init__(vllm_config=vllm_config, prefix=prefix)
-        else:
-            super(MixtureOfExperts, self).__init__(
-                vllm_config=vllm_config, prefix=prefix
-            )
+        super(MixtureOfExperts, self).__init__(vllm_config=vllm_config, prefix=prefix)
 
     def update_physical_experts_metadata(
         self,
@@ -234,14 +212,9 @@ class MoEMixin(_MoEMixinBase):
         )
 
         # Dtype the router computes in, if it is not the activation dtype.
-        config_router_dtype_name: str | None = getattr(
-            text_config, "moe_router_dtype", None
-        )
-        config_router_dtype = (
-            STR_DTYPE_TO_TORCH_DTYPE.get(config_router_dtype_name)
-            if config_router_dtype_name is not None
-            else None
-        )
+        config_router_dtype = getattr(text_config, "moe_router_dtype", None)
+        if config_router_dtype is not None:
+            config_router_dtype = STR_DTYPE_TO_TORCH_DTYPE.get(config_router_dtype)
 
         # Grouped topk routing kwargs
         num_expert_group = getattr(text_config, "n_group", None)
@@ -266,7 +239,7 @@ class MoEMixin(_MoEMixinBase):
         # MixtureOfExperts mixin settings
         ep_size = get_ep_group().world_size
 
-        self.mlp_layers = []  # Used for MixtureOfExperts methods
+        self.mlp_layers = []
         self.moe_layers = []
         self.num_expert_groups = 1 if num_expert_group is None else num_expert_group
         self.num_logical_experts = num_experts
@@ -365,11 +338,10 @@ class MoEMixin(_MoEMixinBase):
                         if shared_experts is not None:
                             hf_shared = shared_experts.shared_experts
                             glu_fuser = get_fuser(hf_shared, GLUFuser)
-                            down_name = (
-                                glu_fuser.down_name if glu_fuser is not None else None
-                            )
-                            if down_name is not None:
-                                shared_down_projs.append((hf_shared, down_name))
+                            if glu_fuser is not None:
+                                down_name = glu_fuser.down_name
+                                if down_name is not None:
+                                    shared_down_projs.append((hf_shared, down_name))
                         # Prefer config, otherwise read it from fuser.
                         router_dtype = config_router_dtype or fuser.router_dtype
                         gate = fuser.gate(moe_block, prefix, router_dtype)

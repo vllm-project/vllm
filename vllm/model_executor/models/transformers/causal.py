@@ -27,27 +27,20 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.models.interfaces_base import VllmModelForTextGeneration
 from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix
 
+from .base import Base
+
 if TYPE_CHECKING:
     import torch
 
     from vllm.config import VllmConfig
 
-    from .base import Base
 
-    _CausalMixinBase = Base
-else:
-    _CausalMixinBase = VllmModelForTextGeneration
-
-
-class CausalMixin(_CausalMixinBase):
+class CausalMixin(VllmModelForTextGeneration, Base):
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         # Skip VllmModelForTextGeneration.__init__ and call the next class in MRO
-        if TYPE_CHECKING:
-            super().__init__(vllm_config=vllm_config, prefix=prefix)
-        else:
-            super(VllmModelForTextGeneration, self).__init__(
-                vllm_config=vllm_config, prefix=prefix
-            )
+        super(VllmModelForTextGeneration, self).__init__(
+            vllm_config=vllm_config, prefix=prefix
+        )
 
         tie_word_embeddings = self._get_tie_word_embeddings()
 
