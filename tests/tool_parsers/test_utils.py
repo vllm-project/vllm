@@ -14,6 +14,7 @@ from vllm.tool_parsers.utils import (
     escape_nested_quotes_in_strings,
     extract_types_from_schema,
     get_parameter_value,
+    get_properties,
     handle_single_tool,
     make_valid_python,
     normalize_leading_zero_ints,
@@ -204,6 +205,17 @@ class TestCoerceToSchemaType:
         def test_list_alias(self):
             assert coerce_to_schema_type("[1]", "list") == [1]
 
+        def test_array_not_accepted_as_object(self):
+            """`[1,2]` parses as JSON but `object` means a map, not any value."""
+            assert coerce_to_schema_type("[1,2]", "object") == "[1,2]"
+
+        def test_object_not_accepted_as_array(self):
+            assert coerce_to_schema_type('{"a": 1}', "array") == '{"a": 1}'
+
+        def test_declared_alternative_used_when_parse_mistypes(self):
+            """A rejected object parse must leave the declared string in play."""
+            assert coerce_to_schema_type("[1,2]", ["object", "string"]) == "[1,2]"
+
     class TestMultiType:
         def test_null_takes_priority_over_string(self):
             assert coerce_to_schema_type("null", ["string", "null"]) is None
@@ -227,6 +239,10 @@ class TestCoerceToSchemaType:
 
         def test_unrecognized_type_falls_back_to_json(self):
             assert coerce_to_schema_type("42", "interval") == 42
+
+        def test_declared_type_blocks_json_guess(self):
+            """A real declared type rules the guess out; only unknown names keep it."""
+            assert coerce_to_schema_type('{"a": 1}', "integer") == '{"a": 1}'
 
 
 class TestExtractTypesFromSchema:
@@ -272,6 +288,17 @@ class TestExtractTypesFromSchema:
         result = set(extract_types_from_schema(schema))
         assert result == {"array", "object"}
 
+    def test_const_infers_type(self):
+        """Without this, the ["string"] fallback stringifies a correct value."""
+        assert extract_types_from_schema({"const": 3}) == ["integer"]
+
+    def test_const_string_infers_string(self):
+        assert extract_types_from_schema({"const": "a"}) == ["string"]
+
+    def test_const_combined_with_declared_type(self):
+        schema = {"type": "number", "const": 3}
+        assert set(extract_types_from_schema(schema)) == {"number", "integer"}
+
     def test_none_schema_defaults_to_string(self):
         assert extract_types_from_schema(None) == ["string"]
 
@@ -290,6 +317,44 @@ class TestExtractTypesFromSchema:
         }
         result = set(extract_types_from_schema(schema))
         assert result == {"integer", "null", "string"}
+
+
+class TestGetProperties:
+    def test_direct_properties(self):
+        schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+        assert get_properties(schema) == {"a": {"type": "string"}}
+
+    @pytest.mark.parametrize("keyword", ["allOf", "anyOf", "oneOf"])
+    def test_properties_inside_combinator(self, keyword):
+        """Schema generators spell composed models this way; a flat
+        ``.get("properties")`` reads {} and skips coercion entirely."""
+        schema = {
+            "type": "object",
+            keyword: [{"properties": {"a": {"type": "string"}}}],
+        }
+        assert get_properties(schema) == {"a": {"type": "string"}}
+
+    def test_direct_properties_win_over_combinator(self):
+        schema = {
+            "properties": {"a": {"type": "string"}},
+            "allOf": [{"properties": {"b": {"type": "integer"}}}],
+        }
+        assert get_properties(schema) == {"a": {"type": "string"}}
+
+    def test_first_branch_with_properties_wins(self):
+        schema = {
+            "anyOf": [{"type": "null"}, {"properties": {"a": {"type": "string"}}}]
+        }
+        assert get_properties(schema) == {"a": {"type": "string"}}
+
+    def test_deeper_nesting_left_alone(self):
+        """One level only -- this runs on every streaming delta."""
+        schema = {"allOf": [{"allOf": [{"properties": {"a": {"type": "string"}}}]}]}
+        assert get_properties(schema) == {}
+
+    @pytest.mark.parametrize("schema", [None, "string", {}, {"type": "object"}])
+    def test_missing_properties_returns_empty(self, schema):
+        assert get_properties(schema) == {}
 
 
 def _value_of(expr: str):

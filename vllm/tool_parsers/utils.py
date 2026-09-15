@@ -280,13 +280,13 @@ def find_tool_properties(
         if isinstance(tool, (FunctionTool, NamespaceTool)):
             for name, params in iter_response_function_tool_info(tool):
                 if name == tool_name:
-                    return (params or {}).get("properties", {})
+                    return get_properties(params)
             continue
         if not _is_function_tool(tool):
             continue
         name, params = _extract_tool_info(tool)
         if name == tool_name:
-            return (params or {}).get("properties", {})
+            return get_properties(params)
     return {}
 
 
@@ -1004,11 +1004,62 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
     return candidate, added_text
 
 
+def get_properties(schema: Any) -> dict[str, Any]:
+    """
+    Find the 'properties' field in JSON schema
+
+    IMPORTANT(arpera):
+    JSON schema may have some fields called combinators:
+    'allOf', 'anyOf', 'oneOf'
+    Each combinator can encapsulate 'properties' field itself
+    or any combinator, so the structure is recursive in general.
+    This is hot path because this function runs on every streaming.
+    So, we check only ONE level!
+    If you need to have support of deeper schemas then
+    discuss it first with tool calling codeowners.
+    """
+    if not isinstance(schema, dict):
+        return {}
+
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        return properties
+
+    for keyword in ("allOf", "anyOf", "oneOf"):
+        branches = schema.get(keyword)
+        if not isinstance(branches, list):
+            continue
+        for branch in branches:
+            if isinstance(branch, dict) and isinstance(branch.get("properties"), dict):
+                return branch["properties"]
+
+    return {}
+
+
+def _json_type_name(value: Any) -> str | None:
+    """JSON Schema type name of a concrete value, or None if unrepresentable."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return None
+
+
 def extract_types_from_schema(schema: Any) -> list[str]:
     """Extract all possible type strings from a JSON Schema definition.
 
-    Handles ``type`` (string or list), ``enum`` value inference, and
-    recursive ``anyOf``/``oneOf``/``allOf``.  Returns ``["string"]``
+    Handles ``type`` (string or list), ``enum``/``const`` value inference,
+    and recursive ``anyOf``/``oneOf``/``allOf``.  Returns ``["string"]``
     when no type information can be determined.
     """
     if schema is None or not isinstance(schema, dict):
@@ -1027,20 +1078,11 @@ def extract_types_from_schema(schema: Any) -> list[str]:
 
     if "enum" in schema and isinstance(schema["enum"], list) and schema["enum"]:
         for value in schema["enum"]:
-            if value is None:
-                types.add("null")
-            elif isinstance(value, bool):
-                types.add("boolean")
-            elif isinstance(value, int):
-                types.add("integer")
-            elif isinstance(value, float):
-                types.add("number")
-            elif isinstance(value, str):
-                types.add("string")
-            elif isinstance(value, list):
-                types.add("array")
-            elif isinstance(value, dict):
-                types.add("object")
+            if (name := _json_type_name(value)) is not None:
+                types.add(name)
+
+    if "const" in schema and (name := _json_type_name(schema["const"])) is not None:
+        types.add(name)
 
     for choice_field in ("anyOf", "oneOf", "allOf"):
         if choice_field in schema and isinstance(schema[choice_field], list):
@@ -1077,6 +1119,19 @@ _TYPE_ALIASES: dict[str, str] = {
 }
 
 
+# Coercion order: a value that fits several declared types takes the first.
+_TYPE_PRIORITY = (
+    "null",
+    "integer",
+    "number",
+    "boolean",
+    "object",
+    "array",
+    "string",
+)
+_JSON_SCHEMA_TYPES = frozenset(_TYPE_PRIORITY)
+
+
 def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
     """Best-effort coercion of a raw string value to a JSON Schema type.
 
@@ -1096,18 +1151,7 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
         _TYPE_ALIASES.get(key, key) for t in schema_type for key in [t.strip().lower()]
     }
 
-    # Priority: null > integer > number > boolean > object > array > string
-    type_priority = [
-        "null",
-        "integer",
-        "number",
-        "boolean",
-        "object",
-        "array",
-        "string",
-    ]
-
-    for candidate_type in type_priority:
+    for candidate_type in _TYPE_PRIORITY:
         if candidate_type not in normalized_types:
             continue
 
@@ -1146,7 +1190,14 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
                 parsed = json.loads(value)
             except (json.JSONDecodeError, ValueError, TypeError):
                 continue
-            if _is_json_finite(parsed):
+            # Note(arpera):
+            # Here is corner case:
+            # We need to check explicitly that @parsed is actually
+            # the same type as @candidate_type because
+            # we must reject such a case:
+            # @parsed == [1,2] and @candidate_type == "object"
+            expected = dict if candidate_type == "object" else list
+            if isinstance(parsed, expected) and _is_json_finite(parsed):
                 return parsed
             # Non-finite floats (e.g. "[1e999]" -> [inf]) cannot be
             # serialized back to valid JSON; preserve the raw string.
@@ -1160,6 +1211,12 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
     # inf/nan inside a parsed list/dict) which json.dumps would render as
     # invalid JSON (Infinity/NaN). Preserve the raw string instead.
     if not _is_json_finite(parsed):
+        return value
+    # Note(arpera):
+    # If no type can be accepted then return it as it is, do NOT try to guess here
+    # Names outside the JSON Schema set constrain nothing, so they keep guessing.
+    declared = normalized_types & _JSON_SCHEMA_TYPES
+    if declared and _json_type_name(parsed) not in declared:
         return value
     return parsed
 

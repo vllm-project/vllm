@@ -32,6 +32,7 @@ from vllm.tool_parsers.utils import (
     extract_types_from_schema,
     find_tool_name,
     find_tool_properties,
+    get_properties,
 )
 
 if TYPE_CHECKING:
@@ -246,24 +247,28 @@ class ParserEngine(Parser):
 
         Returns ``(coerced_value, changed)``.
         """
+        changed = False
+
         if isinstance(value, str):
             types = extract_types_from_schema(schema)
             coerced = coerce_to_schema_type(value, types)
-            if coerced is not value:
-                return coerced, True
-            return value, False
+            if coerced is value:
+                return value, False
+            # Fall through: a decoded container still needs its own fields
+            # coerced, since the model serialised them as strings too.
+            value = coerced
+            changed = True
 
         if isinstance(value, dict):
-            nested_props = schema.get("properties")
-            if isinstance(nested_props, dict):
-                _, changed = ParserEngine._coerce_dict(value, nested_props)
-                return value, changed
-            return value, False
+            props = get_properties(schema)
+            if props:
+                _, props_changed = ParserEngine._coerce_dict(value, props)
+                changed |= props_changed
+            return value, changed
 
         if isinstance(value, list):
             items_schema = schema.get("items")
             if isinstance(items_schema, dict):
-                changed = False
                 for i, item in enumerate(value):
                     coerced, item_changed = ParserEngine._coerce_value(
                         item, items_schema
@@ -271,8 +276,10 @@ class ParserEngine(Parser):
                     if item_changed:
                         value[i] = coerced
                         changed = True
-                return value, changed
-            return value, False
+            return value, changed
+
+        if changed:
+            return value, True
 
         types = extract_types_from_schema(schema)
         as_str = json.dumps(value, ensure_ascii=False)
