@@ -71,6 +71,11 @@ class RequestQueue(ABC):
         """Iterate over the queue according to the policy."""
         pass
 
+    @abstractmethod
+    def iter_unordered(self) -> Iterator[Request]:
+        """Iterate over the queue in arbitrary order without copying it."""
+        pass
+
 
 class FCFSRequestQueue(deque[Request], RequestQueue):
     """A first-come-first-served queue that supports deque operations."""
@@ -126,6 +131,10 @@ class FCFSRequestQueue(deque[Request], RequestQueue):
     def __iter__(self) -> Iterator[Request]:
         """Iterate over the queue according to FCFS policy."""
         return super().__iter__()
+
+    def iter_unordered(self) -> Iterator[Request]:
+        """Iterate over the queue in FCFS order, which is already copy-free."""
+        return iter(self)
 
 
 class PriorityRequestQueue(RequestQueue):
@@ -196,6 +205,10 @@ class PriorityRequestQueue(RequestQueue):
         heap_copy = self._heap[:]
         while heap_copy:
             yield heapq.heappop(heap_copy)
+
+    def iter_unordered(self) -> Iterator[Request]:
+        """Iterate over the heap in storage order, without copying or sorting."""
+        return iter(self._heap)
 
 
 def create_request_queue(policy: SchedulingPolicy) -> RequestQueue:
