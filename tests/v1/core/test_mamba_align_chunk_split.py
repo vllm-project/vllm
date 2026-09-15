@@ -132,6 +132,7 @@ def _split(
     partial_hit: bool = False,
     num_prefill_checkpoint_blocks: int = 0,
     max_num_scheduled_tokens: int = 16384,
+    checkpoint_alignment: int = 16,
 ) -> int:
     """Call the real `Scheduler._mamba_block_aligned_split` on a stub self."""
     if use_eagle_block_drop is None:
@@ -148,36 +149,40 @@ def _split(
         hash_block_size=ATTN_BLOCK_SIZE,
         mamba_has_prefill_checkpoint_blocks=(num_prefill_checkpoint_blocks > 0),
         mamba_prefill_checkpoint_alignment=(
-            16 if num_prefill_checkpoint_blocks > 0 else None
+            checkpoint_alignment if num_prefill_checkpoint_blocks > 0 else None
         ),
     )
     return Scheduler._mamba_block_aligned_split(stub, request, num_new_tokens)
 
 
 @pytest.mark.parametrize(
-    ("prompt_len", "num_new_tokens", "use_eagle", "expected"),
+    ("prompt_len", "num_new_tokens", "use_eagle", "expected", "expected_triton"),
     [
-        (2002, 2002, False, 2002),
-        (3602, 2000, False, MAMBA_BLOCK_SIZE),
-        (3602, 3602, True, 3602),
-        (2002, 2002, True, 2002),
-        (3602, 512, True, 0),
-        (3602, 1700, True, MAMBA_BLOCK_SIZE),
+        (2002, 2002, False, 2002, MAMBA_BLOCK_SIZE),
+        (3602, 2000, False, MAMBA_BLOCK_SIZE, MAMBA_BLOCK_SIZE),
+        (3602, 3602, True, 3602, 3602),
+        (2002, 2002, True, 2002, 2002),
+        (3602, 512, True, 0, 0),
+        (3602, 1700, True, MAMBA_BLOCK_SIZE, MAMBA_BLOCK_SIZE),
     ],
 )
+@pytest.mark.parametrize("checkpoint_alignment", [16, 64])
 def test_internal_checkpoint_split(
-    prompt_len: int, num_new_tokens: int, use_eagle: bool, expected: int
+    prompt_len: int,
+    num_new_tokens: int,
+    use_eagle: bool,
+    expected: int,
+    expected_triton: int,
+    checkpoint_alignment: int,
 ) -> None:
     (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
-    assert (
-        _split(
-            request,
-            num_new_tokens,
-            use_eagle=use_eagle,
-            num_prefill_checkpoint_blocks=1,
-        )
-        == expected
-    )
+    assert _split(
+        request,
+        num_new_tokens,
+        use_eagle=use_eagle,
+        num_prefill_checkpoint_blocks=1,
+        checkpoint_alignment=checkpoint_alignment,
+    ) == (expected_triton if checkpoint_alignment == 64 else expected)
 
 
 def test_partial_checkpoint_resume_stops_at_mamba_block_boundary() -> None:

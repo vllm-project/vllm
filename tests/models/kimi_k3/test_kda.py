@@ -352,6 +352,81 @@ def test_chunk_kda_fused_gate_cumsum_matches_unfused(
     assert_close("ht", old_ht, new_ht, 1e-3, err_atol=1e-3)
 
 
+@pytest.mark.parametrize("head_dim", [64, 128, 256])
+@pytest.mark.parametrize("lower_bound", [-5.0, None])
+@torch.inference_mode()
+def test_triton_prefill_checkpoint_resume(head_dim, lower_bound):
+    """Export FP32 chunk boundaries and resume without changing outputs."""
+    torch.manual_seed(123)
+    lengths = [193, 129, 65, 97, 1]
+    offsets = [128, 64, 65, 0, -1]
+    H, D = 2, head_dim
+    T = sum(lengths)
+    q, k, v, raw_g = [
+        torch.randn(1, T, H, D, dtype=torch.bfloat16, device=DEVICE) for _ in range(4)
+    ]
+    raw_beta = torch.randn(1, T, H, device=DEVICE)
+    A_log = torch.randn(H, device=DEVICE) * 0.1
+    bias = torch.randn(H * D, device=DEVICE) * 0.1
+    initial = torch.randn(len(lengths), H, D, D, device=DEVICE)
+    cu = torch.tensor([0, *lengths], dtype=torch.int32, device=DEVICE).cumsum(
+        0, dtype=torch.int32
+    )
+    checkpoints = torch.full_like(initial, float("nan"))
+
+    def run(start, end, state, cu_seqlens, **kwargs):
+        return chunk_kda_with_fused_gate(
+            q=q[:, start:end],
+            k=k[:, start:end],
+            v=v[:, start:end].clone(),
+            raw_g=raw_g[:, start:end],
+            raw_beta=raw_beta[:, start:end],
+            A_log=A_log,
+            g_bias=bias,
+            lower_bound=lower_bound,
+            initial_state=state,
+            output_final_state=True,
+            use_qk_l2norm_in_kernel=True,
+            cu_seqlens=cu_seqlens,
+            **kwargs,
+        )
+
+    expected_out, expected_final = run(0, T, initial, cu)
+    out, final = run(
+        0,
+        T,
+        initial,
+        cu,
+        checkpoint_state=checkpoints,
+        checkpoint_offsets=torch.tensor(offsets, dtype=torch.int32, device=DEVICE),
+    )
+    torch.testing.assert_close(out, expected_out, rtol=0, atol=0)
+    torch.testing.assert_close(final, expected_final, rtol=0, atol=0)
+    start = 0
+    for seq, (length, offset) in enumerate(zip(lengths, offsets)):
+        if offset > 0:
+            _, prefix_final = run(start, start + offset, initial[seq : seq + 1], None)
+            torch.testing.assert_close(
+                checkpoints[seq : seq + 1], prefix_final, rtol=1e-5, atol=1e-5
+            )
+            if offset < length:
+                resumed, resumed_final = run(
+                    start + offset, start + length, checkpoints[seq : seq + 1], None
+                )
+                torch.testing.assert_close(
+                    resumed,
+                    out[:, start + offset : start + length],
+                    rtol=1e-2,
+                    atol=1e-2,
+                )
+                torch.testing.assert_close(
+                    resumed_final, final[seq : seq + 1], rtol=1e-4, atol=1e-4
+                )
+        else:
+            assert checkpoints[seq].isnan().all()
+        start += length
+
+
 @pytest.mark.parametrize("num_seqs", [1, 8, 32])
 @pytest.mark.parametrize("lower_bound", [-5.0, None])
 @pytest.mark.parametrize("state_indices_stride", [1, 8])

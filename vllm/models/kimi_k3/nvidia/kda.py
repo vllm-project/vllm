@@ -48,6 +48,7 @@ from vllm.models.kimi_k3.nvidia.kda_metadata import (
 )
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
+from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import (
@@ -802,9 +803,15 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         assert isinstance(spec, MambaSpec)
         return replace(
             spec,
-            num_prefill_checkpoint_blocks=int(self.kda_prefill_backend == "flashkda"),
+            num_prefill_checkpoint_blocks=int(
+                self.kda_prefill_backend in ("flashkda", "triton")
+            ),
             prefill_checkpoint_alignment=(
-                16 if self.kda_prefill_backend == "flashkda" else None
+                FLA_CHUNK_SIZE
+                if self.kda_prefill_backend == "triton"
+                else 16
+                if self.kda_prefill_backend == "flashkda"
+                else None
             ),
         )
 
@@ -1134,6 +1141,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     non_spec_state_indices_tensor,
                     has_initial_state,
                 )
+                checkpoint_state = None
                 if self.kda_prefill_backend == "flashkda":
                     assert self.gate_lower_bound is not None
                     assert self._flashkda_buffer_specs is not None
@@ -1173,40 +1181,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         )
                         core_attn_out_non_spec = flashkda_out
                         last_recurrent_state = final_state
-                        state_len = conv_state.shape[-1]
-                        width = mixed_qkv_ns.shape[-1]
-                        recurrent_row_size = checkpoint_state[0].numel()
-                        block_size = 256
-                        _store_cache_checkpoints_kernel[
-                            (
-                                checkpoint_offsets.numel(),
-                                triton.cdiv(
-                                    max(width * state_len, recurrent_row_size),
-                                    block_size,
-                                ),
-                            )
-                        ](
-                            mixed_qkv_ns,
-                            conv_state,
-                            checkpoint_state,
-                            recurrent_state,
-                            non_spec_query_start_loc,
-                            checkpoint_offsets,
-                            checkpoint.state_indices,
-                            mixed_qkv_ns.stride(0),
-                            mixed_qkv_ns.stride(1),
-                            conv_state.stride(0),
-                            conv_state.stride(1),
-                            conv_state.stride(2),
-                            checkpoint_state.stride(0),
-                            recurrent_state.stride(0),
-                            checkpoint_offsets.stride(0),
-                            state_len,
-                            width,
-                            recurrent_row_size,
-                            NULL_BLOCK_ID,
-                            block_size,
-                        )
                     else:
                         (
                             core_attn_out_non_spec,
@@ -1258,6 +1232,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         seq_order=m.flashinfer_prefill_seq_order,
                     )
                 else:
+                    checkpoint_state = (
+                        torch.empty_like(initial_state, dtype=torch.float32)
+                        if checkpoint is not None
+                        else None
+                    )
                     (
                         core_attn_out_non_spec,
                         last_recurrent_state,
@@ -1275,6 +1254,49 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         use_qk_l2norm_in_kernel=True,
                         cu_seqlens=non_spec_query_start_loc,
                         out=non_spec_out,
+                        checkpoint_state=checkpoint_state,
+                        checkpoint_offsets=(
+                            checkpoint.checkpoint_offsets
+                            if checkpoint is not None
+                            else None
+                        ),
+                    )
+                if checkpoint is not None:
+                    assert checkpoint_state is not None
+                    checkpoint_offsets = checkpoint.checkpoint_offsets
+                    state_len = conv_state.shape[-1]
+                    width = mixed_qkv_ns.shape[-1]
+                    recurrent_row_size = checkpoint_state[0].numel()
+                    block_size = 256
+                    _store_cache_checkpoints_kernel[
+                        (
+                            checkpoint_offsets.numel(),
+                            triton.cdiv(
+                                max(width * state_len, recurrent_row_size),
+                                block_size,
+                            ),
+                        )
+                    ](
+                        mixed_qkv_ns,
+                        conv_state,
+                        checkpoint_state,
+                        recurrent_state,
+                        non_spec_query_start_loc,
+                        checkpoint_offsets,
+                        checkpoint.state_indices,
+                        mixed_qkv_ns.stride(0),
+                        mixed_qkv_ns.stride(1),
+                        conv_state.stride(0),
+                        conv_state.stride(1),
+                        conv_state.stride(2),
+                        checkpoint_state.stride(0),
+                        recurrent_state.stride(0),
+                        checkpoint_offsets.stride(0),
+                        state_len,
+                        width,
+                        recurrent_row_size,
+                        NULL_BLOCK_ID,
+                        block_size,
                     )
                 recurrent_state[non_spec_state_indices_tensor] = (
                     last_recurrent_state.to(recurrent_state.dtype)

@@ -98,6 +98,7 @@ def _make_builder(
     prefix_match_unit: int | None = None,
     use_eagle: bool = False,
     disable_eagle_block_drop: bool = False,
+    checkpoint_alignment: int = 16,
 ) -> AttentionMetadataBuilder:
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
@@ -129,7 +130,7 @@ def _make_builder(
             num_speculative_blocks=(0 if use_recoverssm else num_speculative_tokens),
             num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
             prefill_checkpoint_alignment=(
-                16 if num_prefill_checkpoint_blocks > 0 else None
+                checkpoint_alignment if num_prefill_checkpoint_blocks > 0 else None
             ),
         ),
         layer_names=["layer.0"],
@@ -320,13 +321,26 @@ def test_internal_checkpoint_metadata_targets_last_aligned_boundary():
 
 
 @pytest.mark.parametrize(
-    ("disable_eagle_block_drop", "prefix_match_unit", "expected_offset"),
-    [(False, 16, 80), (True, 16, 96), (False, 8, None)],
+    (
+        "disable_eagle_block_drop",
+        "prefix_match_unit",
+        "checkpoint_alignment",
+        "expected_offset",
+    ),
+    [
+        (False, 16, 16, 80),
+        (True, 16, 16, 96),
+        (False, 8, 16, None),
+        (False, 16, 64, None),
+        (True, 16, 64, None),
+        (True, 64, 64, 64),
+    ],
 )
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
     disable_eagle_block_drop: bool,
     prefix_match_unit: int,
+    checkpoint_alignment: int,
     expected_offset: int | None,
 ) -> None:
     device = torch.device("cuda")
@@ -348,6 +362,7 @@ def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
         prefix_match_unit=prefix_match_unit,
         use_eagle=True,
         disable_eagle_block_drop=disable_eagle_block_drop,
+        checkpoint_alignment=checkpoint_alignment,
         device=device,
     )
     assert isinstance(builder, KimiK3KDAMetadataBuilder)
