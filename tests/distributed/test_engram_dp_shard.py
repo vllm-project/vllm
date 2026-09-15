@@ -367,6 +367,7 @@ def _check_table(
                     layer_hash_index=0,
                     use_sequence_parallel=sequence_parallel,
                     prefix="model.layers.0.engram",
+                    prefetch_stream=torch.cuda.Stream() if cpu_offload else None,
                 )
             layer = engram.embed_tokens
             if multithread:

@@ -732,7 +732,7 @@ def test_engram_lookup_matches_torch(cpu_offload, background, num_tokens):
 def test_engram_constructor_honors_offload(
     monkeypatch, backend, cpu_offload, shared_stream
 ):
-    """Default offload uses pinned storage and a side stream; False uses HBM."""
+    """Offload requires the supplied stream; HBM lookup runs on the main stream."""
     from vllm.config import EngramConfig
 
     config = SimpleNamespace(hidden_size=16, hc_mult=1, rms_norm_eps=1e-6)
@@ -765,6 +765,10 @@ def test_engram_constructor_honors_offload(
     kwargs = {"prefetch_stream": stream} if backend == "nvidia" else {}
     with torch.device("cuda"):
         cls = Engram if backend == "nvidia" else CommonEngram
+        if offloaded and stream is None:
+            with pytest.raises(AssertionError, match="caller-provided prefetch stream"):
+                cls(config, None, layout, 0, False, "engram", **kwargs)
+            return
         module = cls(config, None, layout, 0, False, "engram", **kwargs)
     if offloaded and shared_stream:
         assert module._prefetch_stream is stream

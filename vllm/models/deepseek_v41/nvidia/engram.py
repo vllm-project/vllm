@@ -363,7 +363,7 @@ class Engram(BaseEngram):
         use_sequence_parallel: bool,
         prefix: str,
         *,
-        prefetch_stream: torch.cuda.Stream | None = None,
+        prefetch_stream: torch.cuda.Stream | None,
     ) -> None:
         self._prefetch_stream = prefetch_stream
         super().__init__(
@@ -391,10 +391,9 @@ class Engram(BaseEngram):
     def _init_staging(self, max_tokens: int, head_dim: int) -> None:
         super()._init_staging(max_tokens * self.embed_tokens.dp_size, head_dim)
         if self.embed_tokens.cpu_offload:
-            if self._prefetch_stream is None:
-                self._prefetch_stream = torch.cuda.Stream(
-                    device=self.staged_rows.device
-                )
+            assert self._prefetch_stream is not None, (
+                "CPU-offloaded Engram requires a caller-provided prefetch stream"
+            )
             self._prefetch_done = torch.cuda.Event()
         else:
             self._prefetch_stream = None
