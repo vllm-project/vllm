@@ -15,6 +15,7 @@ from vllm.platforms import current_platform
 from ....utils import large_gpu_mark
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import TokensTextLogprobsPromptLogprobs, check_logprobs_close
+from vllm.platforms.rocm import on_gfx950
 
 # Models that require embedding scaling for prompt_embeds test
 EMBED_SCALING_MODELS = {
