@@ -647,6 +647,14 @@ class MoRIIOConnectorScheduler:
         # For chunked prefill, we perform layer-wise access within the final chunk.
         # TODO: Perform transfer at end chunk.
         self._reqs_need_pending_save: dict[ReqId, tuple[Request, BlockIds]] = {}
+        # WRITE-mode consumer watchdog (ROCm/mori#655): per-request deadline
+        # and block ids, plus the failed set to ship to the worker.
+        self._write_recv_deadline: dict[ReqId, float] = {}
+        self._write_recv_block_ids: dict[ReqId, list[int]] = {}
+        self._write_load_failed_block_ids: list[int] = []
+        self._write_recv_timeout = float(
+            os.environ.get("VLLM_MORIIO_WRITE_TIMEOUT_S", "540")
+        )
 
         if self.is_producer:
             set_role(ROLE.PRODUCER)
@@ -1148,6 +1156,19 @@ class MoRIIOConnectorScheduler:
                     block_notify_list = (
                         blocks.get_block_ids()[0] if num_external_tokens > 0 else []
                     )
+                    # Arm the WRITE-consumer watchdog (ROCm/mori#655): if the
+                    # producer's write_done never arrives, reclaim these blocks
+                    # instead of wedging in WAITING_FOR_REMOTE_KVS.
+                    if (
+                        block_notify_list
+                        and request.request_id not in self._write_recv_deadline
+                    ):
+                        self._write_recv_deadline[request.request_id] = (
+                            time.monotonic() + self._write_recv_timeout
+                        )
+                        self._write_recv_block_ids[request.request_id] = list(
+                            block_notify_list
+                        )
 
                     # Wide-EP multi-pod: a pod binds notify sockets only for
                     # its LOCAL ranks, so the port offset must use the per-pod
@@ -1271,7 +1292,41 @@ class MoRIIOConnectorScheduler:
         self._reqs_need_save.clear()
         self._reqs_need_send = {}
 
+        self._reap_stale_write_recvs()
+        if self._write_load_failed_block_ids:
+            meta.write_load_failed_block_ids = self._write_load_failed_block_ids
+            self._write_load_failed_block_ids = []
+
         return meta
+
+    def _reap_stale_write_recvs(self) -> None:
+        """Time out WRITE-consumer requests whose write_done never arrived."""
+        if not self._write_recv_deadline:
+            return
+        now = time.monotonic()
+        expired = [
+            req_id
+            for req_id, deadline in self._write_recv_deadline.items()
+            if now >= deadline
+        ]
+        for req_id in expired:
+            self._write_recv_deadline.pop(req_id, None)
+            block_ids = self._write_recv_block_ids.pop(req_id, [])
+            self._write_load_failed_block_ids.extend(block_ids)
+            logger.error(
+                "WRITE-mode KV recv TIMED OUT for req %s after %.0fs "
+                "(VLLM_MORIIO_WRITE_TIMEOUT_S); producer write_done never "
+                "arrived. Reclaiming %d block(s) and failing the request "
+                "instead of wedging in WAITING_FOR_REMOTE_KVS.",
+                req_id,
+                self._write_recv_timeout,
+                len(block_ids),
+            )
+
+    def clear_write_recv_watchdog(self, req_id) -> None:
+        """Drop watchdog state for a request that completed normally."""
+        self._write_recv_deadline.pop(req_id, None)
+        self._write_recv_block_ids.pop(req_id, None)
 
     def shutdown(self):
         for path, sock in self.paths.items():
@@ -1351,6 +1406,7 @@ class MoRIIOConnectorScheduler:
         """
         request_id = request.request_id
         params = request.kv_transfer_params
+        self.clear_write_recv_watchdog(request_id)
         # Consumer: can unmap transfer_id<->request_id immediately since done_recving
         #   has fired at this point (i.e. KV has been transferred)
         # Producer: must keep the mapping until we get notification that blocks can
@@ -1618,6 +1674,9 @@ class MoRIIOConnectorWorker:
         # Completions that arrived before transfer_id_to_request_id was populated.
         # Retried each step until the mapping is established.
         self._unmatched_write_completions: set[str] = set()
+        # WRITE-mode consumer blocks the scheduler timed out; drained by
+        # get_block_ids_with_load_errors each step (ROCm/mori#655).
+        self._write_load_failed_block_ids: set[int] = set()
         # Producer-side READ-mode ACK fan-in. When decode TP is larger than
         # prefill TP, multiple decode ranks can read from one prefill rank and
         # notify the same transfer_id. Blocks are reusable only after all ACKs.
@@ -2701,6 +2760,14 @@ class MoRIIOConnectorWorker:
                 exc_info=True,
             )
 
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """Drain WRITE-consumer blocks the scheduler timed out."""
+        if not self._write_load_failed_block_ids:
+            return set()
+        failed = self._write_load_failed_block_ids
+        self._write_load_failed_block_ids = set()
+        return failed
+
     def _pop_done_transfers(self) -> set[str]:
         done_req_ids: set[str] = set()
         _xfer_timeout = self.moriio_config.recv_abort_timeout
@@ -3056,6 +3123,10 @@ class MoRIIOConnectorWorker:
         """Start loading by triggering non-blocking moriio_xfer.
         We check for these trnxs to complete in each step().
         """
+        if getattr(metadata, "write_load_failed_block_ids", None):
+            self._write_load_failed_block_ids.update(
+                metadata.write_load_failed_block_ids
+            )
         self.transfer_id_to_request_id = metadata.transfer_id_to_request_id
         if self.is_producer:
             live_transfer_ids = set(self.transfer_id_to_request_id)
