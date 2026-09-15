@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -11,6 +13,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
 )
+from vllm.model_executor.layers.fused_moe.router import fused_topk_bias_router
 from vllm.model_executor.layers.fused_moe.router.dsv4_topk import dsv4_topk
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
@@ -278,6 +281,45 @@ def test_dsv4_fast_topk(
         atol=2e-5,
         rtol=2e-5,
     )
+
+
+def test_dsv4_fast_topk_falls_back_for_draft_model(monkeypatch: pytest.MonkeyPatch):
+    expected = (torch.tensor([[1.0]]), torch.tensor([[0]], dtype=torch.int32))
+    monkeypatch.setattr(
+        fused_topk_bias_router,
+        "_get_padding_mask",
+        lambda _: torch.tensor([False, True]),
+    )
+    monkeypatch.setattr(
+        fused_topk_bias_router, "is_forward_context_available", lambda: True
+    )
+    monkeypatch.setattr(
+        fused_topk_bias_router,
+        "get_forward_context",
+        lambda: SimpleNamespace(force_generic_moe_router=True),
+    )
+    monkeypatch.setattr(fused_topk_bias_router, "can_use_dsv4_topk", lambda *args: True)
+    monkeypatch.setattr(
+        fused_topk_bias_router,
+        "dsv4_topk",
+        lambda *args, **kwargs: pytest.fail("padding must bypass dsv4_topk"),
+    )
+    monkeypatch.setattr(
+        fused_topk_bias_router,
+        "vllm_topk_softplus_sqrt",
+        lambda *args, **kwargs: expected,
+    )
+
+    actual = fused_topk_bias_router.fused_topk_bias(
+        hidden_states=torch.empty(2, 1),
+        gating_output=torch.empty(2, 256),
+        scoring_func="sqrtsoftplus",
+        e_score_correction_bias=torch.empty(256),
+        topk=6,
+        renormalize=True,
+    )
+
+    assert actual is expected
 
 
 @pytest.mark.skipif(
