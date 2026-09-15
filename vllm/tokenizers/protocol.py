@@ -11,6 +11,15 @@ if TYPE_CHECKING:
 
 
 class TokenizerLike(Protocol):
+    # Whether ``apply_chat_template`` accepts ``role: system`` messages at any
+    # position of the conversation, not only as the leading message, and still
+    # emits the generation prompt when the conversation ends with one. Encoder
+    # based tokenizers (no jinja chat template) set this so that API adapters
+    # can keep mid-conversation system messages in place instead of merging
+    # them into the leading system block, which breaks prefix caching for
+    # clients that append a system reminder on every turn.
+    supports_inline_system_messages: bool = False
+
     @classmethod
     def from_pretrained(
         cls,

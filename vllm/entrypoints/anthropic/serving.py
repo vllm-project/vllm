@@ -48,6 +48,7 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.tokenizers.protocol import TokenizerLike
 
 logger = logging.getLogger(__name__)
 
@@ -137,18 +138,30 @@ class AnthropicServingMessages(OpenAIServingChat):
             "length": "max_tokens",
             "tool_calls": "tool_use",
         }
-        self._merge_inline_system = self._detect_merge_inline_system(chat_template)
+        self._merge_inline_system = self._detect_merge_inline_system(
+            chat_template, getattr(self.renderer, "tokenizer", None)
+        )
 
     @staticmethod
-    def _detect_merge_inline_system(chat_template: str | None) -> bool:
+    def _detect_merge_inline_system(
+        chat_template: str | None,
+        tokenizer: TokenizerLike | None = None,
+    ) -> bool:
         """Auto-detect whether the chat template requires system-first ordering.
 
         Renders a [system, user, system, user] conversation against the
         template; if it raises (e.g. Qwen's ``loop.first`` guard), the
         model needs inline system messages merged into the leading block.
+
+        Without a jinja template the tokenizer decides: encoder based
+        tokenizers that render ``role: system`` at any position declare
+        ``supports_inline_system_messages`` (e.g. DeepSeek V4), so their
+        inline system messages stay in place and the prompt prefix of earlier
+        turns is unchanged. Any other tokenizer keeps the conservative merge.
         """
         if not chat_template:
-            return True
+            supported = getattr(tokenizer, "supports_inline_system_messages", False)
+            return supported is not True
         try:
             env = jinja2.sandbox.ImmutableSandboxedEnvironment(
                 trim_blocks=True,
