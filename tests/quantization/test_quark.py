@@ -890,12 +890,12 @@ def test_quant_method_dispatch_target(case):
 
 
 def test_quant_method_dispatch_mxfp8_2d_block(default_vllm_config):
-    """A 32x32 per-block e8m0 FP8 linear routes to ModelOpt's MXFP8 method.
+    """A 32x32 per-block e8m0 FP8 linear routes to the Quark MXFP8 scheme.
 
     Shape taken from DeepSeek-V4.1-Flash-MXFP4, which is mixed precision:
     MXFP4 globally for the experts, per-layer 2-D block MXFP8 for attention.
     """
-    from vllm.model_executor.layers.quantization.modelopt import ModelOptLinearMethod
+    from vllm.model_executor.layers.quantization.quark.schemes import QuarkW8A8Mxfp8
 
     default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
     mxfp8_spec = {
@@ -943,14 +943,17 @@ def test_quant_method_dispatch_mxfp8_2d_block(default_vllm_config):
         def __init__(self):
             torch.nn.Module.__init__(self)
 
-    method = config.get_quant_method(TestLinear(), "layers.0.attn.wkv")
-    assert isinstance(method, ModelOptLinearMethod)
-    assert method.ctx.scale_block_size == (32, 32)
+    linear = TestLinear()
+    method = config.get_quant_method(linear, "layers.0.attn.wkv")
+    assert isinstance(method, QuarkLinearMethod)
+    assert isinstance(linear.scheme, QuarkW8A8Mxfp8)
+    # Each checkpoint scale row covers 32 weight rows and is expanded on load.
+    assert linear.scheme.scale_block_rows == 32
 
     # Experts still fall through to the global MXFP4 spec.
     assert (
         config.get_quant_method_target("layers.0.ffn.experts", RoutedExperts)[2]
-        is not ModelOptLinearMethod
+        is not QuarkLinearMethod
     )
 
     # 128x128 per-block FP8 (DeepSeek V4) keeps its existing Quark scheme.

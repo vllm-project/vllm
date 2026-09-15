@@ -63,8 +63,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8StaticTensorAsym,
     kInt8StaticTensorSym,
     kMxfp4Static,
-    kMxfp8Dynamic,
-    kMxfp8Static,
     kNvfp4Dynamic,
     kNvfp4Static,
 )
@@ -197,10 +195,15 @@ class QuarkConfig(QuantizationConfig):
         ``_is_fp8_w8a8`` only accepts 128x128 per-block FP8 (DeepSeek V4
         geometry) and the MX matchers only accept 1-D per-group weights, so a
         32x32 per-block e8m0 weight (DeepSeek V4.1) matches no scheme and
-        ``_get_scheme_cls_from_config`` raises. Such a weight is MXFP8 in a
-        2-D wrapper: ModelOpt's MXFP8 method already reads this layout, with
-        its scale loader expanding each block row via
-        ``CkptCtx.scale_block_size``.
+        ``_get_scheme_cls_from_config`` raises. Such a weight is MXFP8 with a
+        2-D scale: one e8m0 value per ``block_size[0]`` weight rows instead of
+        MXFP8's usual one per row, which ``QuarkW8A8Mxfp8`` expands on load.
+
+        This is not routed through ``QuarkOCP_MX``: that scheme covers the
+        sub-byte packed MX formats (``packed_factor``, ``PackedvLLMParameter``)
+        and has no MXFP8 entry in ``_WEIGHT_QUANT_KEY_MAP``. MXFP8 is
+        unpacked, so it gets a sibling scheme over the shared
+        ``init_mxfp8_linear_kernel``.
         """
         if not isinstance(layer, LinearBase):
             return None
@@ -236,21 +239,15 @@ class QuarkConfig(QuantizationConfig):
         ):
             return None
 
-        from vllm.config.quantization import QuantSpec
-        from vllm.model_executor.layers.quantization.modelopt import (
-            CkptCtx,
-            ModelOptLinearMethod,
-        )
+        from .schemes import QuarkW8A8Mxfp8
 
         logger.debug_once(
-            "Quark MXFP8: routing %s block=%s to ModelOptLinearMethod",
+            "Quark MXFP8: routing %s block=%s to QuarkW8A8Mxfp8",
             prefix,
             tuple(block_size),
         )
-        return ModelOptLinearMethod(
-            QuantSpec(weight=kMxfp8Static, activation=kMxfp8Dynamic),
-            CkptCtx(scale_block_size=(block_size[0], block_size[1])),
-        )
+        layer.scheme = QuarkW8A8Mxfp8(scale_block_rows=block_size[0])
+        return QuarkLinearMethod(self)
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
