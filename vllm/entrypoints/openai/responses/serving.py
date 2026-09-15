@@ -87,7 +87,11 @@ from vllm.renderers.online_renderer import (
     ResponsesPreviousMessages,
     ResponsesRenderResult,
 )
-from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.sampling_params import (
+    RequestOutputKind,
+    SamplingParams,
+    StructuredOutputsParams,
+)
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
 from vllm.utils.collection_utils import as_list
@@ -485,6 +489,10 @@ class OpenAIServingResponses(GenerateBaseServing):
                             )
                         ),
                     )
+            # Phase timing needs each observable engine output batch even when
+            # the client requested a non-streaming response.
+            if self.enable_per_request_metrics and not request.stream:
+                sampling_params.output_kind = RequestOutputKind.DELTA
             generator = self._generate_with_builtin_tools(
                 request_id=request.request_id,
                 engine_input=engine_input,
@@ -652,6 +660,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             async for res in generator:
                 context.request_metrics = res.metrics
                 context.append_output(res)
+                context.record_request_phase_metrics(res)
                 # NOTE(woosuk): The stop condition is handled by the engine.
                 yield context
 
@@ -733,8 +742,27 @@ class OpenAIServingResponses(GenerateBaseServing):
         async with AsyncExitStack() as exit_stack:
             try:
                 await self._initialize_tool_sessions(request, context, exit_stack)
-                async for _ in result_generator:
-                    pass
+                async for current_context in result_generator:
+                    if (
+                        self.enable_per_request_metrics
+                        and not request.stream
+                        and isinstance(current_context, SimpleContext)
+                        and current_context.response_parser is not None
+                        and current_context.last_output is not None
+                    ):
+                        current_output = current_context.last_output.outputs[0]
+                        current_context.response_parser.parse_delta(
+                            delta_text=current_output.text,
+                            delta_token_ids=as_list(current_output.token_ids),
+                            request=request,
+                            prompt_token_ids=(
+                                current_context.last_output.prompt_token_ids
+                            ),
+                            finished=current_output.finish_reason is not None,
+                        )
+                        current_context.record_request_phase_metrics(
+                            current_context.last_output
+                        )
             except asyncio.CancelledError:
                 return self.create_error_response("Client disconnected")
 
@@ -811,6 +839,8 @@ class OpenAIServingResponses(GenerateBaseServing):
                 tokenizer,
                 parser=context.response_parser,
             )
+            # SimpleContext parses its output here for non-streaming requests.
+            context.record_request_phase_metrics(final_res)
 
             if request.enable_response_messages:
                 input_messages = context.input_messages
@@ -871,6 +901,11 @@ class OpenAIServingResponses(GenerateBaseServing):
             per_request_metrics = build_per_request_timing_metrics(
                 context.request_metrics, num_generated_tokens
             )
+            (
+                per_request_metrics.reasoning,
+                per_request_metrics.content,
+                per_request_metrics.unclassified_token_count,
+            ) = context.build_request_phase_metrics()
         response = ResponsesResponse.from_request(
             request,
             sampling_params,
@@ -1224,6 +1259,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                     prompt_token_ids=ctx.last_output.prompt_token_ids,
                     finished=output.finish_reason is not None,
                 )
+                ctx.record_request_phase_metrics(ctx.last_output)
             else:
                 delta_message = DeltaMessage(content=output.text)
 

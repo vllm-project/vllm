@@ -132,6 +132,55 @@ model-generation turns, such as built-in tool-call workflows, because the
 response retains timing data for only one generation turn while token usage is
 accumulated across all turns.
 
+## Reasoning and Content Phase Metrics
+
+For Responses and Chat Completions requests whose configured parser supports
+token-phase classification, the `metrics` object also includes reasoning and
+final-content metrics:
+
+```json
+{
+  "metrics": {
+    "reasoning": {
+      "token_count": 36,
+      "time_to_first_token_ms": 108.22,
+      "generation_time_ms": 160.0,
+      "mean_itl_ms": 4.57,
+      "tokens_per_second": 218.75
+    },
+    "content": {
+      "token_count": 20,
+      "time_to_first_token_ms": 268.22,
+      "generation_time_ms": 210.0,
+      "mean_itl_ms": 11.05,
+      "tokens_per_second": 90.5
+    },
+    "unclassified_token_count": 2
+  }
+}
+```
+
+Both phase TTFT values use the request's scheduled time as their common origin.
+For each phase, generation time is the elapsed time between its first and last
+observed token batches. Mean ITL is that interval divided by `token_count - 1`,
+and throughput is its reciprocal. The latter two values are `null` for phases
+with fewer than two tokens or a zero-length measured interval. If a phase has
+zero tokens, its object is present with `token_count: 0` and `null` timing
+fields. If the parser cannot classify phases reliably, the phase objects and
+`unclassified_token_count` are `null`.
+
+Token timing has engine output-batch resolution. When one output batch contains
+multiple tokens, including tokens on both sides of a reasoning/content
+boundary, those tokens share a timestamp; vLLM does not infer per-token timing
+within the batch. Consequently, phase mean ITL and throughput are `null` if a
+phase receives a multi-token batch. Multiple segments of the same phase are
+aggregated, so their generation interval includes time between segments. Tokens
+classified as tool or control output are reported by
+`unclassified_token_count` and are not silently counted as final content.
+Reasoning-token usage remains available in
+`usage.output_tokens_details.reasoning_tokens` for Responses and
+`usage.completion_tokens_details.reasoning_tokens` for Chat Completions.
+
 ## Relationship to Prometheus Metrics
 
 The `metrics` response field provides per-request values for a single request.

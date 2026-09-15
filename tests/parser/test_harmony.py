@@ -815,6 +815,31 @@ class TestProcessChunk:
             (s.channel, s.recipient, s.delta) for s in result.segments if s.delta
         ] == [("final", None, "Hello")]
 
+    def test_count_reasoning_tokens_after_reparse(self, harmony_parser, chat_request):
+        token_ids = get_model_output_tokens(
+            [assistant("Thinking", "analysis"), assistant("Done", "final")]
+        )
+
+        phase_counts = harmony_parser.process_chunk(token_ids)
+        harmony_parser.flush()
+        assert phase_counts.reasoning_token_count > 0
+        assert (
+            harmony_parser.count_reasoning_tokens(token_ids)
+            == phase_counts.reasoning_token_count
+        )
+
+        # The non-streaming metrics path first consumes deltas for timing and
+        # then parses the complete output to build the response.
+        harmony_parser.parse(
+            get_encoding().decode_utf8(token_ids),
+            chat_request,
+            model_output_token_ids=token_ids,
+        )
+        assert (
+            harmony_parser.count_reasoning_tokens(token_ids)
+            == phase_counts.reasoning_token_count
+        )
+
     def test_constrained_output_segment_recipient_normalized(self, harmony_parser):
         result = harmony_parser.process_chunk(
             encode_output(

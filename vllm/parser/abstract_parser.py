@@ -20,6 +20,7 @@ from vllm.entrypoints.generate.base.protocol import (
     ExtractedToolCallInformation,
     FunctionCall,
     FunctionDefinition,
+    TokenPhaseCounts,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
@@ -396,6 +397,12 @@ class Parser:
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
         """Return the number of reasoning tokens in generated token IDs."""
         return 0
+
+    def classify_token_phases(
+        self, token_ids: Sequence[int]
+    ) -> TokenPhaseCounts | None:
+        """Classify generated tokens, or return ``None`` if unsupported."""
+        return None
 
 
 class DelegatingParser(Parser):
@@ -982,6 +989,33 @@ class DelegatingParser(Parser):
         if self._reasoning_parser is None:
             return 0
         return self._reasoning_parser.count_reasoning_tokens(token_ids)
+
+    def classify_token_phases(
+        self, token_ids: Sequence[int]
+    ) -> TokenPhaseCounts | None:
+        reasoning_parser = self._reasoning_parser
+        if reasoning_parser is None:
+            if self._tool_parser is None:
+                return TokenPhaseCounts(0, len(token_ids), 0)
+            return None
+        if self._tool_parser is not None:
+            return None
+        phase_counts = reasoning_parser.classify_token_phases(token_ids)
+        if phase_counts is not None:
+            return phase_counts
+        if (
+            type(reasoning_parser).count_reasoning_tokens
+            is ReasoningParser.count_reasoning_tokens
+        ):
+            return None
+
+        reasoning = reasoning_parser.count_reasoning_tokens(token_ids)
+        content = len(reasoning_parser.extract_content_ids(list(token_ids)))
+        return TokenPhaseCounts(
+            reasoning=reasoning,
+            content=content,
+            unclassified=max(0, len(token_ids) - reasoning - content),
+        )
 
     def _flush_engine_parsers(
         self, delta_message: DeltaMessage | None

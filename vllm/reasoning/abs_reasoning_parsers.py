@@ -14,7 +14,7 @@ from vllm.utils.import_utils import import_plugin
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
-    from vllm.entrypoints.generate.base.protocol import DeltaMessage
+    from vllm.entrypoints.generate.base.protocol import DeltaMessage, TokenPhaseCounts
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
     from vllm.tokenizers import TokenizerLike
@@ -141,6 +141,12 @@ class ReasoningParser:
 
         # By default, assume the parser cannot detect reasoning spans.
         return 0
+
+    def classify_token_phases(
+        self, token_ids: Sequence[int]
+    ) -> "TokenPhaseCounts | None":
+        """Classify reasoning and content tokens, if supported."""
+        return None
 
     @abstractmethod
     def extract_reasoning(

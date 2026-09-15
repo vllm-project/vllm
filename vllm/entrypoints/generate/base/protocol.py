@@ -4,6 +4,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import json
+from dataclasses import dataclass
 from typing import Annotated, Any, Literal, TypeAlias
 
 import regex as re
@@ -74,12 +75,32 @@ class SpeculativeDecodingMetrics(OpenAIBaseModel):
     per_step_drafted: list[int] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class TokenPhaseCounts:
+    """Cumulative parser-classified generated-token counts."""
+
+    reasoning: int
+    content: int
+    unclassified: int
+
+
+class PerRequestPhaseMetrics(OpenAIBaseModel):
+    token_count: int
+    time_to_first_token_ms: float | None = None
+    generation_time_ms: float | None = None
+    mean_itl_ms: float | None = None
+    tokens_per_second: float | None = None
+
+
 class PerRequestMetrics(OpenAIBaseModel):
     time_to_first_token_ms: float | None = None
     generation_time_ms: float | None = None
     queue_time_ms: float | None = None
     mean_itl_ms: float | None = None
     tokens_per_second: float | None = None
+    reasoning: PerRequestPhaseMetrics | None = None
+    content: PerRequestPhaseMetrics | None = None
+    unclassified_token_count: int | None = None
     # Experimental, subject to change.
     speculative_decoding: SpeculativeDecodingMetrics | None = None
 

@@ -20,6 +20,7 @@ from vllm.entrypoints.generate.base.protocol import (
     DeltaToolCall,
     ExtractedToolCallInformation,
     FunctionCall,
+    TokenPhaseCounts,
     ToolCall,
 )
 from vllm.logger import init_logger
@@ -685,6 +686,17 @@ class ParserEngine(Parser):
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
         """Return reasoning tokens observed by the parser engine so far."""
         return self._engine.reasoning_token_count
+
+    def classify_token_phases(
+        self, token_ids: Sequence[int]
+    ) -> TokenPhaseCounts | None:
+        reasoning = self._engine.reasoning_token_count
+        content = self._engine.content_token_count
+        return TokenPhaseCounts(
+            reasoning=reasoning,
+            content=content,
+            unclassified=max(0, len(token_ids) - reasoning - content),
+        )
 
     # ── Single-pass parse helper ────────────────────────────────────────
 
