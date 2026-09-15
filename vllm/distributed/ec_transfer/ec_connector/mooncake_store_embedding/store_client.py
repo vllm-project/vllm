@@ -161,6 +161,7 @@ class MooncakeEmbeddingStoreClient:
         self.replicate_config = replicate_config
         self._read_buffer_bytes = read_buffer_bytes
         self._read_buffer: torch.Tensor | None = None
+        self._put_header: ctypes.Array[ctypes.c_char] | None = None
 
     def _check_healthy(self) -> None:
         if self._poisoned:
@@ -231,6 +232,13 @@ class MooncakeEmbeddingStoreClient:
                 self._poison([self._read_buffer])
                 raise
             self._read_buffer = None
+        if self._put_header is not None:
+            try:
+                self._unregister_buffer(ctypes.addressof(self._put_header))
+            except BaseException:
+                self._poison([self._put_header])
+                raise
+            self._put_header = None
         ret = self.store.close()
         if ret != 0:
             raise EmbeddingStoreError(
@@ -377,12 +385,20 @@ class MooncakeEmbeddingStoreClient:
         if not tensor.is_contiguous():
             raise EmbeddingStoreOperationError("embedding tensor must be contiguous")
         metadata = _encode_mooncake_tensor_metadata(tensor)
-        header = (ctypes.c_ubyte * len(metadata)).from_buffer_copy(metadata)
-        header_ptr = ctypes.addressof(header)
+        # The single publisher reuses this header only after PUT completion.
+        if self._put_header is None:
+            header = ctypes.create_string_buffer(len(metadata))
+            ret = self.store.register_buffer(ctypes.addressof(header), len(metadata))
+            if ret != 0:
+                raise EmbeddingStoreOperationError(
+                    f"Failed to register embedding header: {ret}"
+                )
+            self._put_header = header
+        header_ptr = ctypes.addressof(self._put_header)
+        ctypes.memmove(header_ptr, metadata, len(metadata))
         data_size = tensor.numel() * tensor.element_size()
         buffers = [
             (tensor, tensor.data_ptr(), data_size),
-            (header, header_ptr, len(metadata)),
         ]
         with self._registered_io(buffers) as confirm:
             [result] = self.store.batch_put_from_multi_buffers(

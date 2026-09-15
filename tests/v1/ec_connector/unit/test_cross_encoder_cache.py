@@ -130,26 +130,34 @@ def backend():
     yield instance
     # Some tests deliberately poison I/O; always stop the Python executor.
     instance._executor.shutdown(wait=True)
-    if (
-        not instance.store_client._poisoned
-        and instance.store_client._read_buffer is not None
+    if not instance.store_client._poisoned and (
+        instance.store_client._read_buffer is not None
+        or instance.store_client._put_header is not None
     ):
         instance.store_client.close()
 
 
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
-def test_tensor_round_trip(backend, dtype):
-    tensor = torch.arange(6, dtype=dtype).reshape(2, 3)
-    client = backend.store_client
-    key = make_embedding_key(KEY, "a")
-    client.put_tensor(key, tensor)
-    expected = TensorSpec(tuple(tensor.shape), str(dtype), tensor.nbytes)
-    with torch.device("meta"):
-        loaded = client.load_tensors({key: expected}, "cpu")[key]
-    assert client._read_buffer.device.type == "cpu"
-    assert loaded.dtype == dtype and torch.equal(loaded, tensor)
-    assert len(client.store.objects[key]) == 24 + tensor.nbytes
-    assert len(client.store.registered) == 1
+def test_tensor_round_trip(backend):
+    client, native = backend.store_client, backend.store_client.store
+    native.register_buffer = MagicMock(wraps=native.register_buffer)
+    header_ptr = None
+    for index, dtype in enumerate((torch.float16, torch.bfloat16, torch.float32)):
+        tensor = torch.arange(6, dtype=dtype).reshape(index + 1, -1)
+        key = make_embedding_key(KEY, str(dtype))
+        client.put_tensor(key, tensor)
+        pointer = ctypes.addressof(client._put_header)
+        header_ptr = header_ptr or pointer
+        assert pointer == header_ptr
+        expected = TensorSpec(tuple(tensor.shape), str(dtype), tensor.nbytes)
+        with torch.device("meta"):
+            loaded = client.load_tensors({key: expected}, "cpu")[key]
+        assert client._read_buffer.device.type == "cpu"
+        assert loaded.dtype == dtype and torch.equal(loaded, tensor)
+        assert len(native.objects[key]) == 24 + tensor.nbytes
+    assert (
+        sum(c.args[0] == header_ptr for c in native.register_buffer.call_args_list) == 1
+    )
+    assert len(native.registered) == 2
 
 
 @pytest.mark.parametrize("capacity", [80, 120])
@@ -175,7 +183,7 @@ def test_batch_reads_reuse_registration_without_aliasing_outputs(backend, capaci
     native.register_buffer.assert_called_once()
     native.unregister_buffer.assert_not_called()
     client.close()
-    native.unregister_buffer.assert_called_once()
+    assert native.unregister_buffer.call_count == 2
     assert not native.registered
 
 
@@ -188,6 +196,9 @@ def test_unloadable_inputs_do_not_allocate_staging(backend, mode):
     native.register_buffer = MagicMock(wraps=native.register_buffer)
     assert not backend.resolve_inputs({"a": SPEC}, {}, "cpu")
     assert client._read_buffer is None
+    if mode == "miss":
+        assert client._put_header is None
+        client.close()
     native.register_buffer.assert_not_called()
 
 
@@ -473,13 +484,14 @@ def test_incompatible_output_is_a_miss(backend, mismatch):
     )
     assert backend.resolve_inputs({"valid": SPEC}, outputs, "cpu") == {"valid"}
     assert torch.equal(outputs["valid"], tensor)
-    assert len(backend.store_client.store.registered) == 1
+    assert len(backend.store_client.store.registered) == 2
 
 
 def test_partial_registration_rejection_releases_publication(backend):
-    """Rejecting the header must undo the prior tensor registration."""
+    """A rejected header registration must not prevent a later publication."""
     native = backend.store_client.store
     register = native.register_buffer
+    put = native.batch_put_from_multi_buffers
     native.register_buffer = lambda addr, size: (
         -500 if size == 24 else register(addr, size)
     )
@@ -499,26 +511,38 @@ def test_partial_registration_rejection_releases_publication(backend):
     assert backend._pending_bytes == 0
     gc.collect()
     assert storage_owner() is None  # The failed Future is still alive.
+    assert backend.store_client._put_header is None
+    native.register_buffer = register
+    native.batch_put_from_multi_buffers = put
+    backend.store_client.put_tensor("retry", torch.ones(2, 2))
+    assert len(native.registered) == 1
 
 
 @pytest.mark.parametrize(
-    "operation", ["read-unregister", "put", "rejected-put", "unregister"]
+    "operation",
+    ["read-unregister", "header-unregister", "put", "rejected-put", "unregister"],
 )
 def test_native_io_owners(backend, operation):
     """Uncertain I/O retains owners; completed rejection frees them even via Future."""
     native, client = backend.store_client.store, backend.store_client
+    put = native.batch_put_from_multi_buffers
     backend.max_pending_bytes = SPEC.nbytes
     tensor = torch.ones(2, 2)
     owner = weakref.ref(tensor)
     rejected = operation == "rejected-put"
-    if operation == "read-unregister":
+    if operation in ("read-unregister", "header-unregister"):
         key = make_embedding_key(KEY, "a")
         client.put_tensor(key, tensor)
-        client.load_tensors({key: SPEC}, "cpu")
+        if operation == "read-unregister":
+            client.load_tensors({key: SPEC}, "cpu")
         native.unregister_buffer = MagicMock(return_value=-500)
         with pytest.raises(store_client.EmbeddingStoreError, match="unregister"):
             client.close()
-        owner = weakref.ref(client._read_buffer)
+        owner = weakref.ref(
+            client._read_buffer
+            if operation == "read-unregister"
+            else client._put_header
+        )
     else:
         if operation == "unregister":
             native.unregister_buffer = MagicMock(return_value=-500)
@@ -541,9 +565,17 @@ def test_native_io_owners(backend, operation):
         del tensor
         gc.collect()
         assert caller_owner() is None
-        assert backend._pending_bytes == 0 and not native.registered
+        assert backend._pending_bytes == 0 and len(native.registered) == 1
+        header = client._put_header
+        native.batch_put_from_multi_buffers = put
+        client.put_tensor("retry", torch.ones(1, 4))
+        assert client._put_header is header
     else:
         assert owner() is not None and native.registered
+        header = bytes(client._put_header)
+        with pytest.raises(store_client.EmbeddingStoreError, match="unconfirmed"):
+            client.put_tensor("retry", torch.ones(1, 4))
+        assert bytes(client._put_header) == header
         with pytest.raises(store_client.EmbeddingStoreError, match="unconfirmed"):
             client.close()
 
@@ -639,11 +671,6 @@ def test_completion_race_preserves_failure_and_reclaims_other_items(
 def test_readiness_and_shutdown_do_not_block_p2p_completion(backend):
     ready, waiting, entered = [threading.Event() for _ in range(3)]
 
-    class ReadyEvent:
-        def synchronize(self):
-            waiting.set()
-            assert ready.wait(5)
-
     original = backend._executor.shutdown
 
     def closing(*args, **kwargs):
@@ -658,6 +685,15 @@ def test_readiness_and_shutdown_do_not_block_p2p_completion(backend):
         return 0
 
     native.close = MagicMock(side_effect=close_store)
+    put = native.batch_put_from_multi_buffers
+
+    def waiting_put(*args):
+        waiting.set()
+        assert ready.wait(5)
+        assert backend.store_client._put_header is not None and native.registered
+        return put(*args)
+
+    native.batch_put_from_multi_buffers = waiting_put
     connector = make_worker(backend)
     connector.bind_connector_metadata(
         ECMooncakeConnectorMetadata(store_candidates={"a": SPEC})
@@ -665,7 +701,7 @@ def test_readiness_and_shutdown_do_not_block_p2p_completion(backend):
     cache: dict[str, torch.Tensor] = {}
     with (
         patch.object(
-            store_backend, "_record_tensor_ready_event", return_value=ReadyEvent()
+            store_backend, "_record_tensor_ready_event", return_value=MagicMock()
         ),
         patch.object(backend._executor, "shutdown", side_effect=closing),
         ThreadPoolExecutor(max_workers=1) as closer,
