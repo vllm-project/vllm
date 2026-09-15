@@ -235,16 +235,20 @@ def _insert_context_kv(
     slot_mapping: torch.Tensor,
 ) -> None:
     """Insert normalized context KV without constructing an unused query."""
+    # The bound cache already is [num_blocks, block_size, bytes_per_token], so
+    # the record width needs no per-layer attribute -- one whose name the
+    # attention layer is free to change (kv_bytes_per_token has to become
+    # swa_bytes_per_token once the sliding-window and compressed records can
+    # differ). block_size stays the layer's, so the op's size(1) check still
+    # cross-checks the two rather than restating the tensor.
     cache = attn.swa_cache_layer.kv_cache
-    block_size = attn.swa_cache_layer.block_size
-    row_size = attn.kv_bytes_per_token if cache.dtype == torch.uint8 else attn.head_dim
     torch.ops._C.fused_deepseek_v4_kv_rope_insert(
         kv,
-        cache.view(-1, block_size, row_size),
+        cache,
         slot_mapping,
         positions,
         attn.rotary_emb.cos_sin_cache,
-        block_size,
+        attn.swa_cache_layer.block_size,
         attn._flashinfer_fp8_kv_scale if cache.dtype == torch.float8_e4m3fn else None,
         attn.kv_mxfp8,
     )

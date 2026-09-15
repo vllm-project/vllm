@@ -657,7 +657,12 @@ static void launchFusedDeepseekV4Templated(
   config.attrs = attrs;
   config.numAttrs = (sm_version >= 90) ? 1 : 0;
 
-  if (num_tokens_full < NUM_TOKEN_CUTOFF) {
+  // The reduced grid pays off by iterating a token's Q heads inside one CTA.
+  // With zero query heads there is nothing to iterate, so one warp per block
+  // would do all the work and the other seven idle; keep the warp-per-slot
+  // grid instead. Only reachable above NUM_TOKEN_CUTOFF tokens in a single
+  // insert, where it is worth ~2x.
+  if (kNumHeadsQPadded == 0 || num_tokens_full < NUM_TOKEN_CUTOFF) {
     cudaLaunchKernelEx(&config,
                        fusedDeepseekV4QNormRopeKVRopeQuantInsertKernel<
                            scalar_t_in, kNumHeadsQPadded, APPLY_Q_NORM>,

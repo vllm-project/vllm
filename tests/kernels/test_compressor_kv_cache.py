@@ -78,11 +78,11 @@ def test_dspark_context_kv_matches_query_insert(
     slots = torch.randperm(num_blocks * block_size, device="cuda")[:num_tokens]
     slots[::5] = -1
     scale = torch.tensor([0.7], device="cuda")
+    # Only what _insert_context_kv actually reads: the record width comes off
+    # the cache tensor, so no per-record width attribute is stubbed here.
     attn = SimpleNamespace(
         swa_cache_layer=SimpleNamespace(kv_cache=cache, block_size=block_size),
-        head_dim=512,
         kv_mxfp8=kv_mxfp8,
-        kv_bytes_per_token=row_size,
         rotary_emb=SimpleNamespace(cos_sin_cache=cos_sin),
         _flashinfer_fp8_kv_scale=scale,
     )
