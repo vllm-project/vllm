@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import queue
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import torch
 
+from vllm import PoolingParams
 from vllm.config import DeviceConfig, VllmConfig
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -14,7 +16,9 @@ from vllm.multimodal.inputs import (
 )
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.engine import FinishReason
+from vllm.v1.engine import EngineCoreRequest, EngineCoreRequestType, FinishReason
+from vllm.v1.engine.core import EngineCore, EngineCoreProc
+from vllm.v1.engine.core_client import InprocClient
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -48,14 +52,25 @@ class DummyRequest(Request):
         )
 
 
-def create_scheduler() -> Scheduler:
+class DummyPoolingRequest(Request):
+    def __init__(self, request_id: str, prompt_token_ids: list[int]):
+        super().__init__(
+            request_id=request_id,
+            prompt_token_ids=prompt_token_ids,
+            sampling_params=None,
+            pooling_params=PoolingParams(task="embed"),
+            resumable=False,
+        )
+
+
+def create_scheduler(max_model_len: int = 1024) -> Scheduler:
     vllm_config = VllmConfig(device_config=DeviceConfig("cpu"))
     vllm_config.model_config = MagicMock()
     vllm_config.model_config.skip_tokenizer_init = True
     vllm_config.model_config.is_multimodal_model = False
     vllm_config.model_config.is_encoder_decoder = False
     vllm_config.model_config.is_diffusion = False
-    vllm_config.model_config.max_model_len = 1024
+    vllm_config.model_config.max_model_len = max_model_len
     vllm_config.model_config.enable_return_routed_experts = False
     vllm_config.cache_config = MagicMock()
     vllm_config.cache_config.num_gpu_blocks = 1000
@@ -275,6 +290,465 @@ class TestStreamingScheduler(unittest.TestCase):
         _ = scheduler.schedule()
 
         assert session.status == RequestStatus.RUNNING
+
+    def test_resumed_session_over_max_model_len_is_length_capped(self):
+        scheduler = create_scheduler(max_model_len=8)
+        session = DummyRequest(
+            request_id="session",
+            prompt_token_ids=[0, 1, 2, 3],
+        )
+        scheduler.add_request(session)
+        session.append_output_token_ids([4, 5])
+        session.num_computed_tokens = 5
+        session.status = RequestStatus.WAITING_FOR_STREAMING_REQ
+        scheduler.num_waiting_for_streaming_input += 1
+        original_tokens = list(session.all_token_ids)
+        original_output_tokens = list(session.output_token_ids)
+
+        finished_reqs = scheduler.add_request(
+            DummyRequest(
+                request_id="session",
+                prompt_token_ids=[6, 7, 8, 9],
+            )
+        )
+
+        assert finished_reqs == [(session.request_id, session.client_index)]
+        assert session.status == RequestStatus.FINISHED_LENGTH_CAPPED
+        assert session.request_id not in scheduler.requests
+        assert list(session.all_token_ids) == original_tokens
+        assert list(session.output_token_ids) == original_output_tokens
+
+    def test_resumed_session_below_max_model_len_continues(self):
+        scheduler = create_scheduler(max_model_len=8)
+        session = DummyRequest(
+            request_id="session",
+            prompt_token_ids=[0, 1, 2, 3],
+        )
+        scheduler.add_request(session)
+        session.append_output_token_ids([4, 5])
+        session.num_computed_tokens = 5
+        session.status = RequestStatus.WAITING_FOR_STREAMING_REQ
+        scheduler.num_waiting_for_streaming_input += 1
+
+        scheduler.add_request(
+            DummyRequest(
+                request_id="session",
+                prompt_token_ids=[6, 7],
+            )
+        )
+
+        assert session.status == RequestStatus.WAITING
+        assert session.prompt_token_ids == [0, 1, 2, 3, 4, 6, 7]
+        output = scheduler.schedule()
+        assert output.num_scheduled_tokens[session.request_id] == 2
+
+    def test_direct_overcap_resume_returns_length_capped_request(self):
+        scheduler = create_scheduler(max_model_len=8)
+        session = DummyRequest(
+            request_id="session",
+            prompt_token_ids=[0, 1, 2, 3],
+        )
+        scheduler.add_request(session)
+        session.append_output_token_ids([4, 5])
+        session.num_computed_tokens = 5
+        session.status = RequestStatus.WAITING_FOR_STREAMING_REQ
+        scheduler.num_waiting_for_streaming_input += 1
+        engine_core = MagicMock(spec=EngineCore)
+        engine_core.scheduler = scheduler
+
+        finished_reqs = EngineCore.add_request(
+            engine_core,
+            DummyRequest(
+                request_id="session",
+                prompt_token_ids=[6, 7, 8, 9],
+            ),
+        )
+
+        assert finished_reqs == [(session.request_id, session.client_index)]
+
+    def test_direct_overcap_resume_emits_terminal_length_output(self):
+        scheduler = create_scheduler(max_model_len=8)
+        session = DummyRequest(
+            request_id="session",
+            prompt_token_ids=[0, 1, 2, 3],
+        )
+        scheduler.add_request(session)
+        session.append_output_token_ids([4, 5])
+        session.num_computed_tokens = 5
+        session.status = RequestStatus.WAITING_FOR_STREAMING_REQ
+        scheduler.num_waiting_for_streaming_input += 1
+        engine_core = MagicMock(spec=EngineCoreProc)
+        engine_core.scheduler = scheduler
+        engine_core.output_queue = queue.Queue()
+        engine_core._send_finished_outputs = (
+            EngineCoreProc._send_finished_outputs.__get__(engine_core, EngineCoreProc)
+        )
+        engine_core._send_finish_outputs_to_client = (
+            EngineCoreProc._send_finish_outputs_to_client.__get__(
+                engine_core, EngineCoreProc
+            )
+        )
+
+        EngineCoreProc.add_request(
+            engine_core,
+            DummyRequest(
+                request_id="session",
+                prompt_token_ids=[6, 7, 8, 9],
+            ),
+        )
+
+        client_index, engine_outputs = engine_core.output_queue.get_nowait()
+
+        assert client_index == session.client_index
+        assert engine_outputs.finished_requests == {session.request_id}
+        assert engine_outputs.outputs[0].finish_reason == FinishReason.LENGTH
+
+    def test_inproc_client_buffers_direct_overcap_terminal_output(self):
+        scheduler = create_scheduler(max_model_len=8)
+        session = DummyRequest(
+            request_id="session",
+            prompt_token_ids=[0, 1, 2, 3],
+        )
+        scheduler.add_request(session)
+        session.append_output_token_ids([4, 5])
+        session.num_computed_tokens = 5
+        session.status = RequestStatus.WAITING_FOR_STREAMING_REQ
+        scheduler.num_waiting_for_streaming_input += 1
+        resumed_request = DummyRequest(
+            request_id="session",
+            prompt_token_ids=[6, 7, 8, 9],
+        )
+        engine_core = MagicMock(spec=EngineCore)
+        engine_core.scheduler = scheduler
+        engine_core.preprocess_add_request.return_value = (resumed_request, 0)
+        engine_core.add_request = EngineCore.add_request.__get__(
+            engine_core, EngineCore
+        )
+        engine_core.step_fn = MagicMock(return_value=({}, False))
+
+        with patch("vllm.v1.engine.core_client.EngineCore", return_value=engine_core):
+            client = InprocClient()
+
+        client.add_request(
+            EngineCoreRequest(
+                request_id="session",
+                prompt_token_ids=[6, 7, 8, 9],
+                mm_features=None,
+                sampling_params=SamplingParams(max_tokens=16),
+                pooling_params=None,
+                arrival_time=0.0,
+                lora_request=None,
+                cache_salt=None,
+                data_parallel_rank=None,
+                resumable=True,
+            )
+        )
+        outputs = client.get_output()
+
+        assert outputs.finished_requests == {session.request_id}
+        assert outputs.outputs[0].finish_reason == FinishReason.LENGTH
+        engine_core.step_fn.assert_not_called()
+
+    def test_inproc_client_stays_live_for_buffered_overcap_cleanup(self):
+        scheduler = create_scheduler(max_model_len=8)
+        session = DummyRequest(
+            request_id="session",
+            prompt_token_ids=[0, 1, 2, 3],
+        )
+        scheduler.add_request(session)
+        session.append_output_token_ids([4, 5])
+        session.num_computed_tokens = 5
+        session.status = RequestStatus.WAITING_FOR_STREAMING_REQ
+        scheduler.num_waiting_for_streaming_input += 1
+        resumed_request = DummyRequest(
+            request_id="session",
+            prompt_token_ids=[6, 7, 8, 9],
+        )
+        engine_core = MagicMock(spec=EngineCore)
+        engine_core.scheduler = scheduler
+        engine_core.preprocess_add_request.return_value = (resumed_request, 0)
+        engine_core.add_request = EngineCore.add_request.__get__(
+            engine_core, EngineCore
+        )
+
+        def step_fn():
+            scheduler.schedule()
+            return {}, False
+
+        engine_core.step_fn = MagicMock(side_effect=step_fn)
+
+        with patch("vllm.v1.engine.core_client.EngineCore", return_value=engine_core):
+            client = InprocClient()
+
+        client.add_request(
+            EngineCoreRequest(
+                request_id="session",
+                prompt_token_ids=[6, 7, 8, 9],
+                mm_features=None,
+                sampling_params=SamplingParams(max_tokens=16),
+                pooling_params=None,
+                arrival_time=0.0,
+                lora_request=None,
+                cache_salt=None,
+                data_parallel_rank=None,
+                resumable=True,
+            )
+        )
+        client.get_output()
+
+        engine_core.step_fn.assert_not_called()
+        assert scheduler.has_finished_requests()
+        assert client.dp_engines_running()
+
+        client.get_output()
+
+        engine_core.step_fn.assert_called_once_with()
+        assert not scheduler.has_finished_requests()
+        assert not client.dp_engines_running()
+
+    def test_direct_overcap_resume_drops_already_queued_same_id_chunk(self):
+        scheduler = create_scheduler(max_model_len=8)
+        scheduler.kv_cache_manager.allocate_slots = MagicMock(
+            wraps=scheduler.kv_cache_manager.allocate_slots
+        )
+        session = DummyRequest(
+            request_id="session",
+            prompt_token_ids=[0, 1, 2, 3],
+        )
+        scheduler.add_request(session)
+        session.append_output_token_ids([4, 5])
+        session.num_computed_tokens = 5
+        session.status = RequestStatus.WAITING_FOR_STREAMING_REQ
+        scheduler.num_waiting_for_streaming_input += 1
+        engine_core = MagicMock(spec=EngineCoreProc)
+        engine_core.scheduler = scheduler
+        engine_core.input_queue = queue.Queue()
+        engine_core.output_queue = queue.Queue()
+        engine_core.has_work.return_value = True
+        engine_core._reject_add_in_shutdown.return_value = False
+        engine_core.add_request = EngineCoreProc.add_request.__get__(
+            engine_core, EngineCoreProc
+        )
+        engine_core._handle_client_request = (
+            EngineCoreProc._handle_client_request.__get__(engine_core, EngineCoreProc)
+        )
+        engine_core._send_finished_outputs = (
+            EngineCoreProc._send_finished_outputs.__get__(engine_core, EngineCoreProc)
+        )
+        engine_core._send_finish_outputs_to_client = (
+            EngineCoreProc._send_finish_outputs_to_client.__get__(
+                engine_core, EngineCoreProc
+            )
+        )
+
+        engine_core.input_queue.put_nowait(
+            (
+                EngineCoreRequestType.ADD,
+                (
+                    DummyRequest(
+                        request_id="session",
+                        prompt_token_ids=[6, 7, 8, 9],
+                    ),
+                    0,
+                ),
+            )
+        )
+        engine_core.input_queue.put_nowait(
+            (
+                EngineCoreRequestType.ADD,
+                (
+                    DummyRequest(
+                        request_id="session",
+                        prompt_token_ids=[10],
+                    ),
+                    0,
+                ),
+            )
+        )
+
+        EngineCoreProc._process_input_queue(engine_core)
+        scheduler_output = scheduler.schedule()
+
+        assert session.request_id not in scheduler.requests
+        assert session.request_id not in scheduler_output.num_scheduled_tokens
+        assert not scheduler_output.scheduled_new_reqs
+        scheduler.kv_cache_manager.allocate_slots.assert_not_called()
+
+    def test_abort_ack_allows_reuse_of_terminal_streaming_request_id(self):
+        scheduler = create_scheduler(max_model_len=8)
+        session = DummyRequest(
+            request_id="session",
+            prompt_token_ids=[0, 1, 2, 3],
+        )
+        scheduler.add_request(session)
+        session.append_output_token_ids([4, 5])
+        session.num_computed_tokens = 5
+        session.status = RequestStatus.WAITING_FOR_STREAMING_REQ
+        scheduler.num_waiting_for_streaming_input += 1
+        engine_core = MagicMock(spec=EngineCore)
+        engine_core.scheduler = scheduler
+
+        EngineCore.add_request(
+            engine_core,
+            DummyRequest(
+                request_id="session",
+                prompt_token_ids=[6, 7, 8, 9],
+            ),
+        )
+
+        assert session.request_id in scheduler.terminal_streaming_req_ids
+
+        EngineCore.abort_requests(engine_core, [session.request_id])
+
+        assert session.request_id not in scheduler.terminal_streaming_req_ids
+
+        replacement = DummyRequest(
+            request_id="session",
+            prompt_token_ids=[10],
+        )
+        EngineCore.add_request(engine_core, replacement)
+
+        assert scheduler.requests[session.request_id] is replacement
+        assert replacement.status == RequestStatus.WAITING
+
+    def test_schedule_time_overcap_session_emits_terminal_length_output(self):
+        scheduler = create_scheduler(max_model_len=8)
+        session = DummyRequest(
+            request_id="session",
+            prompt_token_ids=list(range(9)),
+        )
+        scheduler.add_request(session)
+
+        scheduler_output = scheduler.schedule()
+        engine_outputs = scheduler.update_from_output(
+            scheduler_output,
+            ModelRunnerOutput(req_ids=[], req_id_to_index={}),
+        )[session.client_index]
+
+        assert session.request_id in scheduler.terminal_streaming_req_ids
+        assert engine_outputs.finished_requests == {session.request_id}
+        assert engine_outputs.outputs[0].request_id == session.request_id
+        assert engine_outputs.outputs[0].finish_reason == FinishReason.LENGTH
+
+    def test_schedule_time_overcap_session_drops_same_id_until_abort_ack(self):
+        scheduler = create_scheduler(max_model_len=8)
+        session = DummyRequest(
+            request_id="session",
+            prompt_token_ids=list(range(9)),
+        )
+        scheduler.add_request(session)
+        scheduler.schedule()
+
+        scheduler.add_request(
+            DummyRequest(
+                request_id="session",
+                prompt_token_ids=[10],
+            )
+        )
+
+        assert session.request_id in scheduler.terminal_streaming_req_ids
+        assert session.request_id not in scheduler.requests
+
+        engine_core = MagicMock(spec=EngineCore)
+        engine_core.scheduler = scheduler
+        EngineCore.abort_requests(engine_core, [session.request_id])
+
+        replacement = DummyRequest(
+            request_id="session",
+            prompt_token_ids=[11],
+        )
+        EngineCore.add_request(engine_core, replacement)
+
+        assert session.request_id not in scheduler.terminal_streaming_req_ids
+        assert scheduler.requests[session.request_id] is replacement
+        assert replacement.status == RequestStatus.WAITING
+
+    def test_queued_overcap_session_reports_length_finish_reason(self):
+        scheduler = create_scheduler(max_model_len=8)
+        session = DummyRequest(
+            request_id="session",
+            prompt_token_ids=[0, 1, 2, 3],
+        )
+        scheduler.add_request(session)
+        scheduler_output = scheduler.schedule()
+        scheduler.add_request(
+            DummyRequest(
+                request_id="session",
+                prompt_token_ids=[6, 7, 8, 9],
+            )
+        )
+        model_output = ModelRunnerOutput(
+            req_ids=[session.request_id],
+            req_id_to_index={session.request_id: 0},
+            sampled_token_ids=[[STOP_TOKEN]],
+            logprobs=None,
+            prompt_logprobs_dict={session.request_id: None},
+            pooler_output=[],
+        )
+
+        engine_outputs = scheduler.update_from_output(scheduler_output, model_output)[
+            session.client_index
+        ]
+        engine_output = engine_outputs.outputs[0]
+
+        assert engine_output.finish_reason == FinishReason.LENGTH
+        assert engine_outputs.finished_requests == {session.request_id}
+        assert session.status == RequestStatus.FINISHED_LENGTH_CAPPED
+
+    def test_pooling_request_at_max_model_len_still_schedules(self):
+        scheduler = create_scheduler(max_model_len=8)
+        request = DummyPoolingRequest(
+            request_id="pooling",
+            prompt_token_ids=list(range(8)),
+        )
+        scheduler.add_request(request)
+
+        output = scheduler.schedule()
+
+        assert output.num_scheduled_tokens[request.request_id] == 8
+        assert request.status == RequestStatus.RUNNING
+
+    def test_overcap_waiting_session_does_not_allocate_slots(self):
+        scheduler = create_scheduler(max_model_len=8)
+        overcap = DummyRequest(
+            request_id="overcap",
+            prompt_token_ids=list(range(9)),
+        )
+        tail = DummyRequest(
+            request_id="tail",
+            prompt_token_ids=[10],
+        )
+        scheduler.add_request(overcap)
+        scheduler.add_request(tail)
+
+        output = scheduler.schedule()
+
+        assert output.finished_req_ids == {overcap.request_id}
+        assert overcap.status == RequestStatus.FINISHED_LENGTH_CAPPED
+        assert overcap.request_id not in output.num_scheduled_tokens
+        assert [request.req_id for request in output.scheduled_new_reqs] == [
+            tail.request_id
+        ]
+
+    def test_overcap_async_kv_waiting_session_does_not_allocate_slots(self):
+        scheduler = create_scheduler(max_model_len=8)
+        scheduler.connector = MagicMock()
+        scheduler.connector.get_num_new_matched_tokens.return_value = (1, True)
+        scheduler.connector.request_finished.return_value = (False, None)
+        scheduler.kv_cache_manager.allocate_slots = MagicMock(
+            wraps=scheduler.kv_cache_manager.allocate_slots
+        )
+        overcap = DummyRequest(
+            request_id="overcap",
+            prompt_token_ids=list(range(9)),
+        )
+        scheduler.add_request(overcap)
+
+        output = scheduler.schedule()
+
+        assert output.finished_req_ids == {overcap.request_id}
+        assert overcap.status == RequestStatus.FINISHED_LENGTH_CAPPED
+        scheduler.kv_cache_manager.allocate_slots.assert_not_called()
 
     def test_update_request_as_session_with_output_tokens(self):
         scheduler = create_scheduler()
