@@ -8,7 +8,7 @@ mod structural_tag;
 
 /// Tool parser for DeepSeek V4.1's spaced DSML tags.
 ///
-/// Arguments are emitted only after a full `invoke` block is parsed.
+/// Stable argument fragments are emitted incrementally while the `invoke` block is parsed.
 pub struct DeepSeekV41ToolParser(DeepSeekDsmlToolParser);
 
 impl ToolParser for DeepSeekV41ToolParser {
