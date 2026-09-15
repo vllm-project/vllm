@@ -209,6 +209,15 @@ class APIServerProcessManager:
         self.processes: list[BaseProcess] = []
         self._address_pipes: list[connection.Connection] = []
 
+        admission_counters = None
+        if num_servers > 1 and getattr(args, "max_num_queued_reqs", None) is not None:
+            from vllm.v1.engine.admission_control import SharedAdmissionStats
+
+            admission_counters = spawn_context.RawArray(
+                "q",
+                SharedAdmissionStats.num_counters(num_servers),
+            )
+
         for i, in_addr, out_addr in zip(
             range(num_servers), input_addresses, output_addresses
         ):
@@ -218,6 +227,8 @@ class APIServerProcessManager:
                 "client_count": num_servers,
                 "client_index": i,
             }
+            if admission_counters is not None:
+                client_config["mp_admission_counters"] = admission_counters
             if stats_update_address is not None:
                 client_config["stats_update_address"] = stats_update_address
             if tensor_queue is not None:
