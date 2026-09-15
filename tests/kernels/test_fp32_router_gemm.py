@@ -134,11 +134,14 @@ def _assert_topk_routing_consistency(out, ref):
     or not current_platform.is_device_capability((12, 0)),
     reason="GateLinear SM120 integration requires exact capability (12, 0)",
 )
-@pytest.mark.parametrize("hidden_dim,num_experts", SHAPES)
+@pytest.mark.parametrize("hidden_dim,num_experts", [(6144, 128)])
 @pytest.mark.parametrize("num_tokens", [0, 1, 16, 17, 32, 33, 64])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("layout", ["contiguous", "strided_input", "strided_weight"])
 @torch.inference_mode()
-def test_sm120_gate_linear(dist_init, num_tokens, hidden_dim, num_experts, dtype):
+def test_sm120_gate_linear(
+    dist_init, num_tokens, hidden_dim, num_experts, dtype, layout
+):
     """Preserve logits and expert selection across the FP32/BF16 batch limits."""
     torch.manual_seed(42)
     with torch.device("cuda"):
@@ -149,7 +152,15 @@ def test_sm120_gate_linear(dist_init, num_tokens, hidden_dim, num_experts, dtype
             out_dtype=torch.float32,
         )
         gate.weight.normal_()
-        x = torch.randn(num_tokens, hidden_dim, dtype=dtype)
+        if layout == "strided_weight":
+            gate.weight.data = gate.weight.t().contiguous().t()
+        x = torch.randn(
+            num_tokens,
+            hidden_dim * (2 if layout == "strided_input" else 1),
+            dtype=dtype,
+        )
+        if layout == "strided_input":
+            x = x[:, ::2]
 
     assert gate.allow_fp32_router_gemm
     assert not gate.allow_bf16x3_router_gemm
@@ -161,6 +172,58 @@ def test_sm120_gate_linear(dist_init, num_tokens, hidden_dim, num_experts, dtype
     assert out.shape == (num_tokens, num_experts)
     torch.testing.assert_close(out, ref.float(), atol=ATOL_FP32, rtol=0)
     _assert_topk_routing_consistency(out, ref)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda()
+    or not current_platform.is_device_capability((12, 0)),
+    reason="GateLinear SM120 graph replay requires exact capability (12, 0)",
+)
+@pytest.mark.parametrize("hidden_dim,num_experts", [(6144, 128)])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("out_dtype", [torch.float32, torch.bfloat16])
+@torch.inference_mode()
+def test_sm120_gate_linear_compiled_graph_replay(
+    dist_init, hidden_dim, num_experts, dtype, out_dtype
+):
+    """Replay updated operands across both native/fallback batch boundaries."""
+    torch.manual_seed(42)
+    with torch.device("cuda"):
+        gate = GateLinear(
+            hidden_dim,
+            num_experts,
+            params_dtype=torch.float32,
+            out_dtype=out_dtype,
+        )
+        gate.weight.normal_()
+    compiled_gate = torch.compile(gate, dynamic=True, fullgraph=True)
+    warmup_stream = torch.cuda.Stream()
+    for num_tokens in (1, 16, 17, 32, 33, 64, 33, 32, 17, 16, 1):
+        x = torch.randn(num_tokens, hidden_dim, dtype=dtype, device="cuda")
+        warmup_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(warmup_stream):
+            for _ in range(3):
+                compiled_gate(x)
+        torch.cuda.current_stream().wait_stream(warmup_stream)
+        torch.accelerator.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output, bias = compiled_gate(x)
+        for _ in range(3):
+            x.normal_()
+            gate.weight.normal_()
+            graph.replay()
+            torch.accelerator.synchronize()
+            reference = (x.double() @ gate.weight.double().t()).float()
+            assert bias is None
+            assert output.dtype == out_dtype
+            if out_dtype == torch.float32:
+                torch.testing.assert_close(output, reference, atol=ATOL_FP32, rtol=0)
+                _assert_topk_routing_consistency(output, reference)
+            else:
+                torch.testing.assert_close(
+                    output.float(), reference, atol=ATOL_FP32, rtol=4e-3
+                )
 
 
 def test_zero_tokens_returns_empty():
