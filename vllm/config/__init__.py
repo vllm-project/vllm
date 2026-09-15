@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm.config.attention import AttentionConfig
+from vllm.config.attention import AttentionConfig, HiSparseConfig
 from vllm.config.cache import CacheConfig
 from vllm.config.compilation import (
     CompilationConfig,
@@ -13,6 +13,7 @@ from vllm.config.device import DeviceConfig
 from vllm.config.diffusion import DiffusionConfig
 from vllm.config.ec_manager_config import EncoderCacheManagerConfig
 from vllm.config.ec_transfer import ECTransferConfig
+from vllm.config.engram import EngramConfig
 from vllm.config.fault_tolerance import FaultToleranceConfig
 from vllm.config.kernel import KernelConfig
 from vllm.config.kv_events import KVEventsConfig
@@ -59,6 +60,7 @@ from vllm.config.vllm import (
     get_layers_from_vllm_config,
     set_current_vllm_config,
 )
+from vllm.config.watermarking import WatermarkConfig
 from vllm.config.weight_transfer import WeightTransferConfig
 
 # __all__ should only contain classes and functions.
@@ -66,6 +68,7 @@ from vllm.config.weight_transfer import WeightTransferConfig
 __all__ = [
     # From vllm.config.attention
     "AttentionConfig",
+    "HiSparseConfig",
     # From vllm.config.cache
     "CacheConfig",
     # From vllm.config.compilation
@@ -81,6 +84,8 @@ __all__ = [
     "EncoderCacheManagerConfig",
     # From vllm.config.ec_transfer
     "ECTransferConfig",
+    # From vllm.config.engram
+    "EngramConfig",
     # From vllm.config.kernel
     "KernelConfig",
     # From vllm.config.kv_events
@@ -143,4 +148,5 @@ __all__ = [
     "set_current_vllm_config",
     "get_layers_from_vllm_config",
     "WeightTransferConfig",
+    "WatermarkConfig",
 ]

@@ -324,8 +324,8 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
         decode_req_idx_cpu = decode_mask_cpu.nonzero(as_tuple=True)[0]
         prefill_req_idx_cpu = prefill_mask_cpu.nonzero(as_tuple=True)[0]
         non_spec_req_idx_cpu = torch.cat((decode_req_idx_cpu, prefill_req_idx_cpu))
-        spec_req_idx = spec_req_idx_cpu.to(query_start_loc.device)
-        non_spec_req_idx = non_spec_req_idx_cpu.to(query_start_loc.device)
+        spec_req_idx = async_tensor_h2d(spec_req_idx_cpu, device=query_start_loc.device)
+        non_spec_req_idx: torch.Tensor | None = None
 
         if num_decodes == 0 and num_prefills == 0:
             # Pure speculative-decode batch: all real tokens are spec tokens.
@@ -348,6 +348,12 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
             # stable sort, so tokens of each request stay contiguous and in
             # request order. This yields spec tokens first, then the non-spec
             # [decode, prefill] tokens.
+            non_spec_req_idx = async_tensor_h2d(
+                non_spec_req_idx_cpu, device=query_start_loc.device
+            )
+            decode_req_idx = async_tensor_h2d(
+                decode_req_idx_cpu, device=query_start_loc.device
+            )
             req_group = torch.full(
                 (m.num_reqs,),
                 2,
@@ -355,7 +361,7 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
                 device=query_start_loc.device,
             )
             req_group[spec_req_idx] = 0
-            req_group[decode_req_idx_cpu.to(query_start_loc.device)] = 1
+            req_group[decode_req_idx] = 1
             token_group = torch.repeat_interleave(req_group, query_lens)
             token_perm = torch.argsort(token_group, stable=True)
             spec_token_indx = token_perm[:num_spec_decode_tokens]
@@ -391,9 +397,7 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
         assert num_accepted_tokens is not None
         # Accepted-token counts must follow the same request order as the
         # speculative state indices.
-        num_accepted_tokens = num_accepted_tokens[
-            spec_req_idx_cpu.to(num_accepted_tokens.device)
-        ]
+        num_accepted_tokens = num_accepted_tokens[spec_req_idx]
 
         # Compute the conv-state slots for the non-spec decode/prefill split,
         # plus the initial-state masks and Triton causal_conv1d metadata.
@@ -410,9 +414,8 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
         state_indices_tensor_d = None
         if num_decodes > 0 or num_prefills > 0:
             num_computed_tokens = m.compute_num_computed_tokens()
-            if non_spec_req_idx_cpu is not None:
-                non_spec_req_idx = non_spec_req_idx_cpu.to(num_computed_tokens.device)
-                num_computed_tokens = num_computed_tokens[non_spec_req_idx]
+            assert non_spec_req_idx is not None
+            num_computed_tokens = num_computed_tokens[non_spec_req_idx]
 
             state_indices_tensor_d = state_indices_tensor[:num_decodes]
             state_indices_tensor_p = state_indices_tensor[
@@ -543,7 +546,9 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
 
         if self.use_spec_decode:
             num_accepted_tokens = torch.diff(m.query_start_loc)
-            num_decode_draft_tokens_cpu = (num_accepted_tokens - 1).cpu()
+
+            num_decode_draft_tokens_cpu = torch.diff(m.query_start_loc_cpu).sub_(1)
+            assert num_decode_draft_tokens_cpu.shape == num_accepted_tokens.shape
             return self.build(
                 0,
                 m,
