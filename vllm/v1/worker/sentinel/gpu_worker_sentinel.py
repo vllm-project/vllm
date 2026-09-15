@@ -14,6 +14,7 @@ from vllm.distributed import (
     stateless_destroy_torch_distributed_process_group,
     stateless_init_torch_distributed_process_group,
 )
+from vllm.distributed.eplb.eplb_state import _commit_eplb_maps
 from vllm.distributed.utils import (
     allocate_group_ports,
     fetch_group_ports,
@@ -24,10 +25,8 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_ma
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
 from vllm.v1.serial_utils import run_method
 from vllm.v1.worker.sentinel.eplb_redistribute import (
-    check_redundancy_sufficient,
     compute_dead_ep_ranks,
     mark_dead_expert_slots_inplace,
-    rebuild_logical_expert_maps,
     rebuild_model_expert_maps,
     redistribute_expert_placement,
     reload_experts_from_disk,
@@ -118,10 +117,11 @@ class WorkerSentinel:
             # clean_buffers wiped the mask; replay masks for the cumulative dead set.
             tp_size = self.worker.parallel_config.tensor_parallel_size
             pcp_size = self.worker.parallel_config.prefill_context_parallel_size
+            all2all_manager = get_ep_all2all_manager()
             for ep_rank in compute_dead_ep_ranks(
                 params["dead_dp_ranks"], tp_size, pcp_size
             ):
-                get_ep_all2all_manager().update_mask(ep_rank, masked=True)
+                all2all_manager.update_mask(ep_rank, masked=True)
 
             if (
                 self.worker.parallel_config.enable_eplb
@@ -153,15 +153,6 @@ class WorkerSentinel:
         pcp_size = self.worker.parallel_config.prefill_context_parallel_size
         dead_dp_ranks = ft_request.params["dead_dp_ranks"]
         dead_ep_ranks = compute_dead_ep_ranks(dead_dp_ranks, tp_size, pcp_size)
-        eplb_model_state = self._eplb_model_state()
-        ep_world_size = get_ep_group().world_size
-
-        check_redundancy_sufficient(
-            eplb_model_state.logical_replica_count.shape[1],
-            eplb_model_state.physical_to_logical_map.shape[1] // ep_world_size,
-            ep_world_size,
-            dead_ep_ranks,
-        )
         # Suppress EPLB async rebalancing before retry so it skips the EPLB
         # group reinit; placement is fixed by the redistribution below.
         model_runner.eep_eplb_suppressed = True
@@ -223,9 +214,7 @@ class WorkerSentinel:
         eplb_model_state = self._eplb_model_state()
 
         p2l = eplb_model_state.physical_to_logical_map
-        l2p = eplb_model_state.logical_to_physical_map
-        lrc = eplb_model_state.logical_replica_count
-        num_logical = lrc.shape[1]
+        num_logical = eplb_model_state.logical_replica_count.shape[1]
         ep_world_size = get_ep_group().world_size
         num_local_experts = p2l.shape[1] // ep_world_size
 
@@ -233,8 +222,9 @@ class WorkerSentinel:
         reassignments = redistribute_expert_placement(
             p2l, num_logical, num_local_experts
         )
-        rebuild_logical_expert_maps(p2l, l2p, lrc)
-        rebuild_model_expert_maps(model_runner.model, p2l)
+        # p2l was updated in place; the commit derives l2p/lrc from it.
+        _commit_eplb_maps(eplb_model_state, p2l.cpu())
+        rebuild_model_expert_maps(model_runner.model, p2l, num_local_experts)
 
         if reassignments:
             reload_experts_from_disk(

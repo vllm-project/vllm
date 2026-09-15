@@ -59,9 +59,6 @@ def sync_cudagraph_and_dp_padding(
     """
     Coordinates the batch descriptor and DP padding across all ranks.
 
-    `parallel_config` is only needed to decide whether to microbatch, so callers
-    that never do (`allow_ubatching=False`) can leave it out.
-
     Returns (synced_batch_desc, sync). `sync` is None when no rank has work.
     """
     assert dp_size > 1, "DP size must be greater than 1"
