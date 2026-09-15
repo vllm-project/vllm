@@ -1107,13 +1107,15 @@ void fused_deepseek_v4_kv_rope_insert(
   // Zero query heads schedules only the existing KV branch, preserving its
   // RoPE rounding and quantization without allocating any query tensors.
   if (packed) {
-    // Q_FUSED_LAYOUT=false: with zero query heads no Q slot is scheduled, so
-    // the layout parameter picks addressing that is never exercised here.
-    vllm::deepseek_v4_fused_ops::launchFusedDeepseekV4Templated<scalar_t, 0, false,
-                                                                false>(
+    // With zero query heads no Q slot is scheduled, so neither Q knob is
+    // reachable: Q_INTERLEAVED picks addressing nothing uses, and apply_q_rope
+    // gates a branch only a Q slot takes (KV is rotated unconditionally).
+    vllm::deepseek_v4_fused_ops::launchFusedDeepseekV4Templated<scalar_t, 0,
+                                                                false, false>(
         nullptr, nullptr, input, cache, slots, positions, cos_sin, 0.0f,
         num_tokens, num_tokens, 0, static_cast<int>(cache_block_size),
-        static_cast<int>(k_cache.stride(0)), kv_mxfp8, stream);
+        static_cast<int>(k_cache.stride(0)), kv_mxfp8, /*apply_q_rope=*/true,
+        stream);
   } else if (fp8) {
     vllm::deepseek_v4_fused_ops::launchFullCacheKernel<scalar_t, false, true>(
         nullptr, nullptr, 0, 0, input, cache, slots, positions, cos_sin,
