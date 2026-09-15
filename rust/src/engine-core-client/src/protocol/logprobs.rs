@@ -14,6 +14,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use self::wire::*;
 use crate::error::{Error, Result, bail_ext_value_decode};
+use crate::protocol::dtype::{NumpyDtype, TensorDtype};
 use crate::protocol::tensor::{WireArrayData, WireNdArray};
 
 /// One token candidate and its logprob metadata for a single sequence position.
@@ -205,17 +206,17 @@ impl WireLogprobs {
 
         Ok(Self {
             logprob_token_ids: WireNdArray {
-                dtype: "<i8".to_string(),
+                dtype: NumpyDtype::little(TensorDtype::I64),
                 shape: vec![rows, cols],
                 data: WireArrayData::RawView(token_ids.into()),
             },
             logprobs: WireNdArray {
-                dtype: "<f4".to_string(),
+                dtype: NumpyDtype::little(TensorDtype::F32),
                 shape: vec![rows, cols],
                 data: WireArrayData::RawView(logprobs.into()),
             },
             token_ranks: WireNdArray {
-                dtype: "<i8".to_string(),
+                dtype: NumpyDtype::little(TensorDtype::I64),
                 shape: vec![rows],
                 data: WireArrayData::RawView(token_ranks.into()),
             },

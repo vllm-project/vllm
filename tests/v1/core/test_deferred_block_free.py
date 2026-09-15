@@ -48,13 +48,17 @@ def _make_model_runner_output(
     )
 
 
-def _create_deferring_scheduler():
+def _create_deferring_scheduler(scheduling_policy="fcfs"):
     """Async scheduler with deferred block freeing forced on.
 
     The production gate additionally requires a PD KV-consumer connector;
     the mechanism itself is independent of it.
     """
-    scheduler = create_scheduler(model=MODEL, async_scheduling=True)
+    scheduler = create_scheduler(
+        model=MODEL,
+        async_scheduling=True,
+        scheduling_policy=scheduling_policy,
+    )
     scheduler.defer_block_free = True
     return scheduler
 
@@ -77,6 +81,24 @@ def _setup_request_with_inflight_step(scheduler, max_tokens: int = 5):
     out1 = scheduler.schedule()
     assert out1.num_scheduled_tokens[request.request_id] == 1
     return request, out0, out1
+
+
+def _fail_one_allocation(scheduler, call_number: int):
+    real_allocate = scheduler.kv_cache_manager.allocate_slots
+    calls = 0
+
+    def allocate(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == call_number:
+            return None
+        return real_allocate(*args, **kwargs)
+
+    return patch.object(
+        scheduler.kv_cache_manager,
+        "allocate_slots",
+        side_effect=allocate,
+    )
 
 
 def test_gate_enabled_for_async_consumer():
@@ -222,6 +244,54 @@ def test_preempt_defers_free_and_clears_bookkeeping():
     scheduler.update_from_output(out1, _make_model_runner_output(out1))
     assert not scheduler.deferred_frees
     assert pool.get_num_free_blocks() == num_free_initially
+
+
+@pytest.mark.parametrize(
+    ("policy", "failed_call"),
+    [
+        ("fcfs", 1),
+        ("priority", 2),
+    ],
+)
+def test_allocation_retry_waits_for_fence_then_succeeds(policy, failed_call):
+    scheduler = _create_deferring_scheduler(policy)
+    requests = create_requests(
+        num_requests=3,
+        num_tokens=NUM_PROMPT_TOKENS,
+        max_tokens=10,
+        stop_token_ids=[STOP_TOKEN_ID],
+    )
+    for request in requests:
+        scheduler.add_request(request)
+    out0 = scheduler.schedule()
+    out1 = scheduler.schedule()
+
+    worst, trigger, tail = requests
+    worst.priority, trigger.priority, tail.priority = 9, 0, 1
+
+    with _fail_one_allocation(scheduler, failed_call) as allocate:
+        blocked = scheduler.schedule()
+    assert allocate.call_count == failed_call
+    assert not blocked.preempted_req_ids
+    retry_trigger = requests[failed_call - 1]
+    assert retry_trigger.request_id not in blocked.num_scheduled_tokens
+
+    for output in (out0, out1, blocked):
+        if output.total_num_scheduled_tokens:
+            scheduler.update_from_output(
+                output,
+                _make_model_runner_output(output),
+            )
+
+    expected_victim = worst if policy == "priority" else tail
+    with _fail_one_allocation(scheduler, failed_call) as allocate:
+        resumed = scheduler.schedule()
+
+    assert allocate.call_count > failed_call
+    assert expected_victim.request_id in resumed.preempted_req_ids
+    assert retry_trigger.request_id in resumed.num_scheduled_tokens
+    if policy == "priority":
+        assert tail.request_id in resumed.num_scheduled_tokens
 
 
 def test_multiple_deferred_frees_drain_in_order():

@@ -78,6 +78,17 @@ def _remap_ignored_layers(
     return remapped
 
 
+def _remap_quantized_layers(
+    quantized_layers: dict[str, dict],
+    mtp_start_layer_idx: int,
+) -> dict[str, dict]:
+    """Map checkpoint MTP layer indices to standalone draft indices."""
+    return {
+        _remap_ignored_layers([name], mtp_start_layer_idx)[0]: layer_info
+        for name, layer_info in quantized_layers.items()
+    }
+
+
 def _remap_mtp_weight_name(name: str) -> str | None:
     """Map Qwen4Exp checkpoint paths into the standalone draft model."""
 
@@ -135,6 +146,13 @@ def _make_draft_vllm_config(
                 draft_quant_config,
                 "exclude_modules",
                 _remap_ignored_layers(exclude_modules, mtp_start_layer_idx),
+            )
+        quantized_layers = getattr(draft_quant_config, "quantized_layers", None)
+        if quantized_layers:
+            setattr(  # noqa: B010
+                draft_quant_config,
+                "quantized_layers",
+                _remap_quantized_layers(quantized_layers, mtp_start_layer_idx),
             )
 
     draft_vllm_config = replace(

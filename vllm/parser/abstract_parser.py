@@ -197,6 +197,8 @@ class Parser:
         Used by structured engines like `xgrammar` to check if the
         reasoning content ends in the model output.
 
+        Must be a pure function of the input_ids.
+
         Args:
             input_ids: The token IDs of the model output.
 
@@ -210,6 +212,8 @@ class Parser:
         """
         Check if the reasoning content ends during a decode step.
 
+        Must be a pure function of the input_ids and delta_ids.
+
         Args:
             input_ids: The entire model output token IDs.
             delta_ids: The last few computed tokens at the current decode step.
@@ -218,6 +222,21 @@ class Parser:
             True if the reasoning content ends in the delta_ids.
         """
         return self.is_reasoning_end(input_ids)
+
+    def find_reasoning_end_offset(self, token_ids: Sequence[int]) -> int | None:
+        """
+        Locate the token that ends reasoning within one window of tokens.
+
+        Args:
+            token_ids: The tokens to examine.
+
+        Returns:
+            The offset within ``token_ids`` of the last reasoning token, or
+            ``len(token_ids)`` when reasoning does not end in this window. Parsers
+            that cannot answer from a window alone always return ``None``; callers
+            fall back to :meth:`is_reasoning_end_streaming`.
+        """
+        return None
 
     @abstractmethod
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:

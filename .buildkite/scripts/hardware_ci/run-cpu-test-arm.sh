@@ -112,7 +112,9 @@ print_packages
 export CONTAINER_NAME
 export -f kernel_tests model_tests serving_tests
 case "$SHARD_ID" in
-  0) timeout 30m bash -c kernel_tests ;;
+  # The kernel shard contains several large parametrized suites and can exceed
+  # 30 minutes on otherwise healthy Arm runners.
+  0) timeout 60m bash -c kernel_tests ;;
   1) timeout 30m bash -c model_tests ;;
   2) timeout 30m bash -c serving_tests ;;
 esac

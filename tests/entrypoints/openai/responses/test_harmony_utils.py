@@ -16,6 +16,7 @@ from vllm.entrypoints.openai.responses.harmony import (
     harmony_to_response_output,
     response_previous_input_to_harmony,
 )
+from vllm.exceptions import VLLMValidationError
 
 
 class TestResponsePreviousInputToHarmony:
@@ -91,6 +92,16 @@ class TestResponsePreviousInputToHarmony:
         assert messages[0].author.role == Role.TOOL
         assert messages[0].author.name == "functions.empty_tool"
         assert messages[0].content[0].text == ""
+
+    def test_chat_message_without_role_raises_validation_error(self):
+        """A chat-format message missing the 'role' key is invalid input."""
+        chat_msg = {"content": "hello, no role here"}
+
+        with pytest.raises(
+            VLLMValidationError, match="Message has no 'role' key"
+        ) as exc_info:
+            response_previous_input_to_harmony(chat_msg)
+        assert exc_info.value.parameter == "input"
 
 
 class TestHarmonyToResponseOutput:
@@ -261,6 +272,23 @@ class TestHarmonyToResponseOutput:
         assert output_items[0].status == "completed"
         assert output_items[0].action.type == "search"
         assert output_items[0].action.query == "cursor:weather in San Francisco"
+
+    def test_browser_find_recipient_uses_responses_action_type(self):
+        """browser.find must use the Responses API find_in_page action type."""
+        message = (
+            Message.from_role_and_content(
+                Role.ASSISTANT, '{"pattern": "vLLM", "cursor": 42}'
+            )
+            .with_channel("analysis")
+            .with_recipient("browser.find")
+        )
+
+        output_items = harmony_to_response_output(message, frozenset())
+
+        assert len(output_items) == 1
+        assert isinstance(output_items[0], ResponseFunctionWebSearch)
+        assert output_items[0].action.type == "find_in_page"
+        assert output_items[0].action.pattern == "vLLM"
 
     def test_commentary_with_empty_content_and_no_recipient(self):
         """Test edge case: empty commentary with recipient=None."""

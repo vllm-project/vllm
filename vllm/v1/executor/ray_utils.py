@@ -176,9 +176,6 @@ try:
                     output = output.get_output()
             return output
 
-        def override_env_vars(self, vars: dict[str, str]):
-            os.environ.update(vars)
-
         def _is_intermediate_tensors(self, output) -> bool:
             return isinstance(output, IntermediateTensors)
 
@@ -663,29 +660,3 @@ def initialize_ray_cluster(
     )
     # Set the placement group in the parallel config
     parallel_config.placement_group = current_placement_group
-
-
-def get_num_tpu_nodes() -> int:
-    from ray._private.accelerators import TPUAcceleratorManager
-
-    cluster_resources = ray.cluster_resources()
-    total_tpus = int(cluster_resources["TPU"])
-    tpus_per_node = TPUAcceleratorManager.get_current_node_num_accelerators()
-    assert total_tpus % tpus_per_node == 0
-    return total_tpus // tpus_per_node
-
-
-def get_num_nodes_in_placement_group() -> int:
-    pg_table = ray.util.placement_group_table()
-    current_pg = ray.util.get_current_placement_group()
-    num_nodes = 0
-
-    if current_pg:
-        nodes_in_pg = set()
-        for pg_key, pg in pg_table.items():
-            if pg_key == current_pg.id.hex():
-                for _, node in pg["bundles_to_node_id"].items():
-                    nodes_in_pg.add(node)
-        num_nodes = len(nodes_in_pg)
-
-    return num_nodes

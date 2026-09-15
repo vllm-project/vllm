@@ -322,6 +322,7 @@ def _ple_conv_kernel(
     state_ptr,
     w_ptr,
     residual_ptr,
+    outer_residual_ptr,
     state_idx_ptr,
     qsl_ptr,
     num_acc_ptr,
@@ -330,6 +331,7 @@ def _ple_conv_kernel(
     has_token_map,
     num_reqs,
     bs_iters,
+    state_idx_stride,
     state_bs,
     state_ws,
     state_cs,
@@ -386,7 +388,7 @@ def _ple_conv_kernel(
         else:
             slot_off = tl.full([], 0, tl.int32)
 
-    sid = tl.load(state_idx_ptr + r).to(tl.int64)
+    sid = tl.load(state_idx_ptr + r * state_idx_stride).to(tl.int64)
     state_ok = sid != NULL_STATE_ID
     sid_safe = tl.where(state_ok, sid, 0)
     if HAS_INIT:
@@ -441,11 +443,21 @@ def _ple_conv_kernel(
         mask=c_mask,
         other=0.0,
     )
+    # Preserve the original eager operation boundaries: short convolution is
+    # first accumulated into the BF16/FP16 PLE output, then the outer residual
+    # is added to that rounded value.
+    ple_output = (residual + conv_output).to(residual_ptr.dtype.element_ty)
+    outer_residual = tl.load(
+        outer_residual_ptr + output_t * C + c_offs,
+        mask=c_mask,
+        other=0.0,
+    )
+    ple_output = outer_residual.to(tl.float32) + ple_output.to(tl.float32)
     if launch_pdl:
         tl.extra.cuda.gdc_launch_dependents()
     tl.store(
         residual_ptr + output_t * C + c_offs,
-        residual + conv_output,
+        ple_output,
         mask=c_mask,
     )
 
@@ -484,6 +496,7 @@ def _ple_conv_writeback_kernel(
     has_init_ptr,
     token_idx_ptr,
     has_token_map,
+    state_idx_stride,
     state_bs,
     state_ws,
     state_cs,
@@ -501,7 +514,7 @@ def _ple_conv_writeback_kernel(
     c_offs = pid_c * BLOCK_C + tl.arange(0, BLOCK_C)
     c_mask = c_offs < C
 
-    sid = tl.load(state_idx_ptr + r).to(tl.int64)
+    sid = tl.load(state_idx_ptr + r * state_idx_stride).to(tl.int64)
     state_ok = sid != NULL_STATE_ID
     if not state_ok:
         return
@@ -562,6 +575,7 @@ def ple_conv(
     conv_state: torch.Tensor,
     conv_weights: torch.Tensor,
     state_indices: torch.Tensor,
+    outer_residual: torch.Tensor,
     *,
     mode: Literal["decode", "spec", "prefill"],
     dilation: int,
@@ -571,7 +585,7 @@ def ple_conv(
     spec_query_len: int = 1,
     token_indices: torch.Tensor | None = None,
 ) -> None:
-    """Add short-convolution output to ``residual`` and update its state."""
+    """Add short convolution and the outer residual; update state."""
     BLOCK_C = 512
     kernel_spec_query_len = spec_query_len if mode == "spec" else 1
     T, C = inputs.shape
@@ -612,6 +626,8 @@ def ple_conv(
 
     num_warps = 4 if mode == "prefill" else 8
     launch_pdl = current_platform.is_arch_support_pdl()
+    # Pure-prefill indices can be a strided block-table column view.
+    state_idx_stride = state_indices.stride(0)
 
     # Constexpr flags eliminate accesses to optional None arguments. Without a
     # token map, state_indices is an unused but device-resident placeholder.
@@ -620,6 +636,7 @@ def ple_conv(
         conv_state,
         conv_weights,
         residual,
+        outer_residual,
         state_indices,
         query_start_loc,
         num_accepted_tokens,
@@ -628,6 +645,7 @@ def ple_conv(
         token_indices is not None,
         num_reqs,
         binary_search_iters,
+        state_idx_stride,
         state_bs,
         state_ws,
         state_cs,
@@ -654,6 +672,7 @@ def ple_conv(
             has_initial_states,
             token_indices if token_indices is not None else state_indices,
             token_indices is not None,
+            state_idx_stride,
             state_bs,
             state_ws,
             state_cs,

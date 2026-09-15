@@ -21,6 +21,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -377,10 +378,11 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         with torch.cuda.stream(copy_stream):
             # Move the CPU slot_mapping to GPU on the copy stream so the
             # implicit H2D inside fancy indexing doesn't sync the default
-            # stream.
-            slot_mapping_gpu = slot_mapping.to(
-                device=self._kv_cache.device, non_blocking=True
-            )
+            # stream. Deliberate bulk transfer in this reference connector.
+            with gpu_sync_allowed():
+                slot_mapping_gpu = slot_mapping.to(
+                    device=self._kv_cache.device, non_blocking=True
+                )
             hidden_states_gpu = extract_from_kv_cache(
                 self._kv_cache, slot_mapping_gpu, num_tokens
             )

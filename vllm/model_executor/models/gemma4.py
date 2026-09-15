@@ -413,18 +413,41 @@ class Gemma4Attention(nn.Module):
         # Q/K norms with learnable weights handle scaling implicitly.
         self.scaling = 1.0
 
-        # QKVParallelLinear handles GQA correctly for all layer types.
-        # k_eq_v layers load K weights into both K and V slots via
-        # _weight_iterator remapping — no structural difference needed.
-        self.qkv_proj = QKVParallelLinear(
-            hidden_size,
-            self.head_dim,
-            self.total_num_heads,
-            self.total_num_kv_heads,
-            bias=config.attention_bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj",
+        layer_idx = extract_layer_index(prefix)
+        num_kv_shared_layers = getattr(config, "num_kv_shared_layers", 0)
+        first_kv_shared_layer_idx = config.num_hidden_layers - num_kv_shared_layers
+        self.is_kv_shared_layer = (
+            num_kv_shared_layers > 0 and layer_idx >= first_kv_shared_layer_idx
         )
+
+        if self.is_kv_shared_layer:
+            # K/V come from the target layer's cache, so like HF this layer
+            # only has q_proj (and no k_norm/v_norm).
+            self.q_proj = ColumnParallelLinear(
+                hidden_size,
+                self.total_num_heads * self.head_dim,
+                bias=config.attention_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.q_proj",
+            )
+        else:
+            # QKVParallelLinear handles GQA correctly for all layer types.
+            # k_eq_v layers load K weights into both K and V slots via
+            # _weight_iterator remapping — no structural difference needed.
+            self.qkv_proj = QKVParallelLinear(
+                hidden_size,
+                self.head_dim,
+                self.total_num_heads,
+                self.total_num_kv_heads,
+                bias=config.attention_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkv_proj",
+            )
+            self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+            # V norm: no learnable scale (pure normalization only)
+            self.v_norm = RMSNorm(
+                self.head_dim, eps=config.rms_norm_eps, has_weight=False
+            )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
@@ -433,14 +456,10 @@ class Gemma4Attention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        # Q/K norms: output = norm(x) * weight (learnable per-head scale)
+        # Q norm: output = norm(x) * weight (learnable per-head scale)
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        # V norm: no learnable scale (pure normalization only)
-        self.v_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, has_weight=False)
 
         # Determine layer type and sliding window
-        layer_idx = extract_layer_index(prefix)
         layer_type = config.layer_types[layer_idx]
         self.is_sliding = layer_type == "sliding_attention"
         sliding_window = config.sliding_window if self.is_sliding else None
@@ -466,30 +485,25 @@ class Gemma4Attention(nn.Module):
         # KV sharing: layers in the last `num_kv_shared_layers` share KV
         # cache with earlier layers of the same type.
         kv_sharing_target_layer_name = None
-        self.is_kv_shared_layer = False
-        num_kv_shared_layers = getattr(config, "num_kv_shared_layers", 0)
-        if num_kv_shared_layers > 0:
-            first_kv_shared_layer_idx = config.num_hidden_layers - num_kv_shared_layers
-            if layer_idx >= first_kv_shared_layer_idx:
-                self.is_kv_shared_layer = True
-                # Find the last non-shared layer of the same attention type
-                prev_layers = config.layer_types[:first_kv_shared_layer_idx]
-                current_layer_type = config.layer_types[layer_idx]
-                kv_shared_layer_index = (
-                    len(prev_layers) - 1 - prev_layers[::-1].index(current_layer_type)
-                )
-                if kv_shared_layer_index >= 0:
-                    if ".layers." in prefix:
-                        param_name_before_layers = prefix.split(".layers.")[0]
-                    else:
-                        raise ValueError(
-                            "Unexpected prefix format for Gemma4Attention: "
-                            f"'{prefix}'. Expected to contain '.layers.'."
-                        )
-                    kv_sharing_target_layer_name = (
-                        f"{param_name_before_layers}.layers."
-                        f"{kv_shared_layer_index}.self_attn.attn"
+        if self.is_kv_shared_layer:
+            # Find the last non-shared layer of the same attention type
+            prev_layers = config.layer_types[:first_kv_shared_layer_idx]
+            current_layer_type = config.layer_types[layer_idx]
+            kv_shared_layer_index = (
+                len(prev_layers) - 1 - prev_layers[::-1].index(current_layer_type)
+            )
+            if kv_shared_layer_index >= 0:
+                if ".layers." in prefix:
+                    param_name_before_layers = prefix.split(".layers.")[0]
+                else:
+                    raise ValueError(
+                        "Unexpected prefix format for Gemma4Attention: "
+                        f"'{prefix}'. Expected to contain '.layers.'."
                     )
+                kv_sharing_target_layer_name = (
+                    f"{param_name_before_layers}.layers."
+                    f"{kv_shared_layer_index}.self_attn.attn"
+                )
 
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -524,19 +538,24 @@ class Gemma4Attention(nn.Module):
         hidden_states: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-        # Unified QKV path (works for both k_eq_v and standard layers).
-        # For k_eq_v, K weights are loaded into both K and V slots of
-        # qkv_proj, so V == K automatically.
-        qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        if self.is_kv_shared_layer:
+            # Shared KV: only Q is projected; K/V come from the target layer.
+            q, _ = self.q_proj(hidden_states)
+            q = q.unflatten(-1, (self.num_heads, self.head_dim))
+            q = self.q_norm(q)
+            q = q.flatten(-2, -1)
+            q, _ = self.rotary_emb(positions, q, None)
+            attn_output = self.attn(q, None, None)
+        else:
+            # For k_eq_v, K weights are loaded into both K and V slots of
+            # qkv_proj, so V == K automatically.
+            qkv, _ = self.qkv_proj(hidden_states)
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        # Q norm (always applied)
-        q = q.unflatten(-1, (self.num_heads, self.head_dim))
-        q = self.q_norm(q)
-        q = q.flatten(-2, -1)
+            q = q.unflatten(-1, (self.num_heads, self.head_dim))
+            q = self.q_norm(q)
+            q = q.flatten(-2, -1)
 
-        if not self.is_kv_shared_layer:
-            # Non-shared: apply K norm + RoPE, V norm
             k = k.unflatten(-1, (self.num_kv_heads, self.head_dim))
             k = self.k_norm(k)
             k = k.flatten(-2, -1)
@@ -545,11 +564,8 @@ class Gemma4Attention(nn.Module):
             v = v.unflatten(-1, (self.num_kv_heads, self.head_dim))
             v = self.v_norm(v)
             v = v.flatten(-2, -1)
-        else:
-            # Shared: only apply RoPE to Q
-            q = self.rotary_emb(positions, q, k)[0]
+            attn_output = self.attn(q, k, v)
 
-        attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
 
         return output
@@ -1438,9 +1454,9 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                 if shard_name not in name:
                     continue
                 stacked_name = name.replace(shard_name, param_name)
-                # k_eq_v layers use separate q_proj/k_proj instead of
-                # packed qkv_proj. If the stacked param doesn't exist,
-                # skip this mapping and fall through to direct load.
+                # KV-shared layers have a plain q_proj instead of a packed
+                # qkv_proj: fall through to the direct load, which also
+                # skips the redundant K/V tensors original checkpoints ship.
                 if stacked_name not in params_dict:
                     continue
                 if is_pp_missing_parameter(stacked_name, self):
@@ -1534,9 +1550,8 @@ class Gemma4ForCausalLM(
             ".moe.experts.down_proj": ".moe.down_proj",
         },
     )
-    # Note: qkv_proj packing applies to non-k_eq_v layers (sliding
-    # attention and full attention without k_eq_v). k_eq_v layers use
-    # separate q_proj + k_proj without packing.
+    # KV-shared layers only have q_proj, so qkv_proj packing applies to
+    # the other layers.
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",

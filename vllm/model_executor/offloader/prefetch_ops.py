@@ -33,14 +33,6 @@ def _wait_prefetch_impl(
     get_offloader()._wait_for_layer(layer_idx)
 
 
-def _wait_prefetch_fake(
-    input_tensor: torch.Tensor,
-    layer_idx: int,
-) -> None:
-    """Fake implementation for torch.compile tracing."""
-    return
-
-
 # --- start_prefetch op ---
 
 
@@ -61,14 +53,6 @@ def _start_prefetch_impl(
     get_offloader()._start_prefetch(layer_idx)
 
 
-def _start_prefetch_fake(
-    output_tensor: torch.Tensor,
-    layer_idx: int,
-) -> None:
-    """Fake implementation for torch.compile tracing."""
-    return
-
-
 def register_prefetch_offloader_ops() -> None:
     """Register custom ops for prefetch offloader.
 
@@ -79,14 +63,12 @@ def register_prefetch_offloader_ops() -> None:
         op_name="wait_prefetch",
         op_func=_wait_prefetch_impl,
         mutates_args=["input_tensor"],
-        fake_impl=_wait_prefetch_fake,
     )
 
     direct_register_custom_op(
         op_name="start_prefetch",
         op_func=_start_prefetch_impl,
         mutates_args=["output_tensor"],
-        fake_impl=_start_prefetch_fake,
     )
 
 

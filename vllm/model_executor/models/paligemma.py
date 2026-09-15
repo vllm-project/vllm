@@ -14,6 +14,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import (
@@ -181,6 +182,7 @@ class PaliGemmaMultiModalProcessor(BaseMultiModalProcessor[PaliGemmaProcessingIn
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
             else:
+                assert isinstance(images, ImageProcessorItems)
                 image_size = images.get_image_size(item_idx)
                 num_image_tokens = self.info.get_num_image_tokens(
                     image_width=image_size.width,
@@ -197,11 +199,13 @@ class PaliGemmaMultiModalProcessor(BaseMultiModalProcessor[PaliGemmaProcessingIn
         # Paligemma 1 and 2 have different tokenizer.add_bos_token
         # Insert <image>*n + <bos> after <bos> for Paligemma 1
         # Insert <image>*n + <bos> for Paligemma 2
+        add_bos_token = getattr(tokenizer, "add_bos_token", None)
+        assert isinstance(add_bos_token, bool)
         return [
             PromptInsertion(
                 modality="image",
                 target=PromptIndexTargets.prefix(
-                    [bos_token_id] if tokenizer.add_bos_token else []
+                    [bos_token_id] if add_bos_token else []
                 ),
                 insertion=get_insertion,
             )
@@ -398,8 +402,12 @@ class PaliGemmaForConditionalGeneration(
             tower_model="vision_tower",
         )
 
-    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
-        return num_image_tokens
-
-    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
-        return num_vision_tokens
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
+        return num_mm_embeds, num_mm_embeds

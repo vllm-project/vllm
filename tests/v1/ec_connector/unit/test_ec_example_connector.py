@@ -477,6 +477,89 @@ class TestCacheLoading:
         # Cache should remain empty
         assert len(encoder_cache) == 0
 
+    def test_start_load_caches_pins_device_to_current_rank(
+        self, mock_vllm_config_producer, mock_vllm_config_consumer
+    ):
+        """Load must pin to the selected device under tensor parallelism."""
+        # Produce a real cache file so the load path has something to open.
+        producer = ECExampleConnector(
+            vllm_config=mock_vllm_config_producer,
+            role=ECConnectorRole.WORKER,
+        )
+        mm_hash = "rank_pinning_hash"
+        producer.save_caches({mm_hash: torch.zeros(4, 8)}, mm_hash)
+
+        consumer = ECExampleConnector(
+            vllm_config=mock_vllm_config_consumer,
+            role=ECConnectorRole.WORKER,
+        )
+        metadata = ECExampleConnectorMetadata()
+        metadata.add_mm_data(MMMeta.make_meta(mm_hash, 100))
+        consumer.bind_connector_metadata(metadata)
+
+        mock_platform = Mock()
+        mock_platform.device_type = "cuda"
+        mock_platform.is_cuda_alike.return_value = True
+        mock_platform.current_device.return_value = 2
+
+        # Simulate running on TP rank 2 without requiring a multi-GPU host.
+        captured: dict = {}
+
+        def fake_load_file(filename, device):
+            captured["device"] = device
+            return {"ec_cache": torch.zeros(4, 8)}
+
+        with (
+            patch("vllm.platforms.current_platform", mock_platform),
+            patch("safetensors.torch.load_file", side_effect=fake_load_file),
+        ):
+            encoder_cache: dict[str, torch.Tensor] = {}
+            consumer.start_load_caches(encoder_cache=encoder_cache)
+
+        assert captured["device"] == "cuda:2", (
+            f"Expected device='cuda:2' (pinned to current rank), "
+            f"got {captured['device']!r}. A bare 'cuda' string makes "
+            "safetensors load onto cuda:0, which breaks non-rank-0 TP workers."
+        )
+
+    def test_start_load_caches_non_cuda_platform_uses_device_type(
+        self, mock_vllm_config_producer, mock_vllm_config_consumer
+    ):
+        """Non-CUDA platforms pass `device_type` through unchanged (no rank suffix)."""
+        producer = ECExampleConnector(
+            vllm_config=mock_vllm_config_producer,
+            role=ECConnectorRole.WORKER,
+        )
+        mm_hash = "cpu_device_hash"
+        producer.save_caches({mm_hash: torch.zeros(2, 4)}, mm_hash)
+
+        consumer = ECExampleConnector(
+            vllm_config=mock_vllm_config_consumer,
+            role=ECConnectorRole.WORKER,
+        )
+        metadata = ECExampleConnectorMetadata()
+        metadata.add_mm_data(MMMeta.make_meta(mm_hash, 100))
+        consumer.bind_connector_metadata(metadata)
+
+        mock_platform = Mock()
+        mock_platform.device_type = "cpu"
+        mock_platform.is_cuda_alike.return_value = False
+
+        captured: dict = {}
+
+        def fake_load_file(filename, device):
+            captured["device"] = device
+            return {"ec_cache": torch.zeros(2, 4)}
+
+        with (
+            patch("vllm.platforms.current_platform", mock_platform),
+            patch("safetensors.torch.load_file", side_effect=fake_load_file),
+        ):
+            encoder_cache: dict[str, torch.Tensor] = {}
+            consumer.start_load_caches(encoder_cache=encoder_cache)
+
+        assert captured["device"] == "cpu"
+
 
 class TestFilenameGeneration:
     """Test filename and path generation."""

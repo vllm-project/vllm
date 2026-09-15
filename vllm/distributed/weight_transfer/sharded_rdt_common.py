@@ -77,6 +77,16 @@ def check_ray_rdt_version() -> None:
         )
 
 
+def register_nixl_memory(tensor: torch.Tensor) -> None:
+    """Register a tensor with Ray using the platform's NIXL package."""
+    from vllm.distributed.nixl_utils import alias_nixl_for_ray
+
+    alias_nixl_for_ray()
+    from ray.experimental import register_nixl_memory as ray_register_nixl_memory
+
+    ray_register_nixl_memory(tensor)
+
+
 def assign_producer_indices(
     num_producers: int, num_consumers: int, consumer_idx: int
 ) -> list[int]:

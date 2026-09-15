@@ -69,6 +69,7 @@ from vllm.transformers_utils.processors.isaac import (
     get_image_size_for_max_num_patches,
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 
 from .vision import is_vit_use_data_parallel
 
@@ -970,9 +971,14 @@ class IsaacForConditionalGeneration(
         device = next(self.language_model.parameters()).device
         dtype = self.vision_embedding.linear_fc1.weight.dtype
         pixel_values = pixel_values.to(device=device, dtype=dtype)
-        spatial_grids = image_grid_thw[:, 1:3].to(
-            device, dtype=torch.int32, non_blocking=True
-        )
+        # The [:, 1:3] column slice isn't densely laid out, so stage it with a
+        # single copy straight into pinned memory to keep the H2D non-blocking.
+        spatial_grids_cpu = torch.empty(
+            (image_grid_thw.shape[0], 2),
+            dtype=image_grid_thw.dtype,
+            pin_memory=PIN_MEMORY,
+        ).copy_(image_grid_thw[:, 1:3])
+        spatial_grids = async_tensor_h2d(spatial_grids_cpu, device, dtype=torch.int32)
 
         vision_embeddings = self.vision_embedding((pixel_values, spatial_grids))
         merge_size = self.config.vision_config.pixel_shuffle_scale_factor

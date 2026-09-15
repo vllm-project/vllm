@@ -10,6 +10,7 @@ import numpy as np
 import torch
 
 import vllm.envs as envs
+from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -31,6 +32,16 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.input_batch import InputBatch
     from vllm.v1.worker.gpu.states import RequestState
     from vllm.v1.worker.utils import AttentionGroup
+
+
+def resolve_adaptive_cudagraph_mode(
+    mode: CUDAGraphMode, *, piecewise_capture_available: bool
+) -> CUDAGraphMode:
+    """Select a separate decode route for variable-length verification."""
+    assert mode.has_full_cudagraphs()
+    if mode == CUDAGraphMode.FULL_DECODE_ONLY or not piecewise_capture_available:
+        return CUDAGraphMode.FULL_DECODE_ONLY
+    return CUDAGraphMode.FULL_AND_PIECEWISE
 
 
 def _assign_draft_token_budget(

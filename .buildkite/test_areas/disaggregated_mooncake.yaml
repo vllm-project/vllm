@@ -19,3 +19,57 @@ steps:
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - bash v1/kv_connector/mooncake_integration/config_sweep_accuracy_test.sh
+
+- label: ":nvidia: (L4) Mooncake EC TCP E2E"
+  key: mooncake-ec-tcp-e2e-2-gpus
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace"
+  device: l4
+  num_devices: 2
+  source_file_dependencies:
+    - vllm/distributed/ec_transfer/
+    - vllm/config/ec_transfer.py
+    - vllm/config/multimodal.py
+    - vllm/config/vllm.py
+    - vllm/multimodal/
+    - vllm/v1/core/encoder_cache_manager.py
+    - vllm/v1/core/sched/
+    - vllm/v1/engine/
+    - vllm/v1/worker/ec_connector_model_runner_mixin.py
+    - vllm/v1/worker/gpu_model_runner.py
+    - vllm/v1/worker/gpu_worker.py
+    - vllm/v1/worker/gpu/ec_connector.py
+    - vllm/v1/worker/gpu/model_runner.py
+    - vllm/v1/worker/gpu/mm/
+    - examples/disaggregated/disaggregated_encoder/
+    - tests/v1/ec_connector/
+    - requirements/kv_connectors.txt
+  env:
+    PYTHON_BIN: "/vllm-workspace/.venv/bin/python"
+    PYTHONUNBUFFERED: "1"
+    VLLM_HOST_IP: "127.0.0.1"
+    VLLM_USE_V2_MODEL_RUNNER: "1"
+    MOONCAKE_EC_PROTOCOL: "tcp"
+    USE_MM_PROMPTS: "1"
+    SKIP_BASELINE: "0"
+    CONCURRENCY: "3"
+    REPEAT: "2"
+    LOG_PATH: "/tmp/mooncake-ec-e2e"
+    BASELINE_FILE: "/tmp/mooncake-ec-e2e/baseline.json"
+  commands:
+    - uv venv --system-site-packages --python 3.12 .venv
+    - |
+      uv pip install --python .venv/bin/python "$(.venv/bin/python - <<'PY'
+      from pathlib import Path
+      import torch
+
+      requirement = next(
+          line for line in Path("requirements/kv_connectors.txt").read_text().splitlines()
+          if line.startswith("mooncake-transfer-engine ")
+      )
+      if torch.version.cuda.split(".")[0] == "13":
+          requirement = requirement.replace("mooncake-transfer-engine", "mooncake-transfer-engine-cuda13")
+      print(requirement)
+      PY
+      )"
+    - bash tests/v1/ec_connector/integration/run_epd_mooncake_ec_full_pipeline.sh

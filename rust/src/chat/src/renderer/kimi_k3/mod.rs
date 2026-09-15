@@ -30,9 +30,12 @@ impl KimiK3ChatRenderer {
 impl ChatRenderer for KimiK3ChatRenderer {
     fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
         request.validate()?;
+        let (token_ids, media_order) =
+            encoding::render_request_with_media_order(request, self.tokenizer.as_ref())?;
 
         Ok(RenderedPrompt {
-            prompt: Prompt::TokenIds(encoding::render_request(request, self.tokenizer.as_ref())?),
+            prompt: Prompt::TokenIds(token_ids),
+            media_order: Some(media_order),
             effective_template_kwargs: request_template_kwargs(request),
         })
     }

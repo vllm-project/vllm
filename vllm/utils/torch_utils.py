@@ -88,6 +88,13 @@ def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
     return kv_cache_dtype.endswith("per_token_head")
 
 
+def is_meta_module(module: torch.nn.Module) -> bool:
+    """Return True if module contains any meta parameters or buffers."""
+    return any(p.is_meta for p in module.parameters()) or any(
+        b.is_meta for b in module.buffers()
+    )
+
+
 def is_strictly_contiguous(t: torch.Tensor) -> bool:
     """
     Check if tensor is contiguous AND has no degenerate strides.
@@ -497,15 +504,6 @@ def get_kv_cache_quant_algo_string(quant_cfg: dict[str, Any]) -> str | None:
     return None
 
 
-def get_kv_cache_quant_algo_dtype(quant_cfg: dict[str, Any]) -> torch.dtype | None:
-    """Get the KV cache quantization algorithm dtype from the quantization config."""
-    kv_algo_str = get_kv_cache_quant_algo_string(quant_cfg)
-    if kv_algo_str is not None and kv_algo_str != "auto":
-        # Only convert if we have a valid dtype string (not "auto" fallback)
-        return STR_DTYPE_TO_TORCH_DTYPE[kv_algo_str]
-    return None
-
-
 def resolve_kv_cache_dtype_string(
     kv_cache_dtype: str, model_config: ModelConfig
 ) -> str:
@@ -818,8 +816,11 @@ def current_stream() -> torch.cuda.Stream:
         # https://github.com/pytorch/pytorch/blob/42ad9edfb754743fdae3276ade43de000beb4f60/aten/src/ATen/cuda/CUDAGraph.cpp#L77
         # for more details. Therefore, we create a dedicated stream per process.
         if current_platform.is_rocm() or current_platform.is_cuda():
+            # Ensure new stream is ordered w.r.t. replaced stream's work.
+            new_stream = torch.cuda.Stream()
+            new_stream.wait_stream(torch.cuda.current_stream())
             # torch.cuda.set_stream here is the alias of _pathed_set_stream
-            torch.cuda.set_stream(torch.cuda.Stream())
+            torch.cuda.set_stream(new_stream)
         elif current_platform.is_cpu():
             _current_stream_tls.value = _StreamPlaceholder()
         else:

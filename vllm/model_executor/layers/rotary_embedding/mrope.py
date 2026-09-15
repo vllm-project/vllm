@@ -252,21 +252,28 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         # YaRN parameters.
         *,
         scaling_factor: float | None = None,
-        extrapolation_factor: float = 1,
-        attn_factor: float = 1,
         beta_fast: int = 32,
         beta_slow: int = 1,
+        mscale: float | None = None,
+        mscale_all_dim: float | None = None,
+        attention_factor: float | None = None,
         truncate: bool = True,
     ) -> None:
         self.scaling_factor = scaling_factor
-        self.extrapolation_factor = extrapolation_factor
-        self.attn_factor = attn_factor
         self.beta_fast = beta_fast
         self.beta_slow = beta_slow
         self.truncate = truncate
         if self.scaling_factor is not None:
             # Get n-d magnitude scaling corrected for interpolation
-            self.mscale = float(yarn_get_mscale(self.scaling_factor) * attn_factor)
+            if attention_factor is not None:
+                self.mscale = float(attention_factor)
+            elif mscale and mscale_all_dim:
+                self.mscale = float(
+                    yarn_get_mscale(self.scaling_factor, mscale)
+                    / yarn_get_mscale(self.scaling_factor, mscale_all_dim)
+                )
+            else:
+                self.mscale = float(yarn_get_mscale(self.scaling_factor))
         else:
             self.mscale = 1.0
 

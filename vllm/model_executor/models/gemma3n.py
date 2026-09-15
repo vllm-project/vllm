@@ -307,15 +307,36 @@ class Gemma3nAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
 
-        self.qkv_proj = QKVParallelLinear(
-            hidden_size,
-            self.head_dim,
-            self.total_num_heads,
-            self.total_num_kv_heads,
-            bias=config.attention_bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj",
+        layer_idx = extract_layer_index(prefix)
+        first_kv_shared_layer_idx = (
+            config.num_hidden_layers - config.num_kv_shared_layers
         )
+        self.is_kv_shared_layer = layer_idx >= first_kv_shared_layer_idx
+
+        if self.is_kv_shared_layer:
+            # K/V come from the target layer's cache, so like HF this layer
+            # only has q_proj (and no k_norm/v_norm).
+            self.q_proj = ColumnParallelLinear(
+                hidden_size,
+                self.total_num_heads * self.head_dim,
+                bias=config.attention_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.q_proj",
+            )
+        else:
+            self.qkv_proj = QKVParallelLinear(
+                hidden_size,
+                self.head_dim,
+                self.total_num_heads,
+                self.total_num_kv_heads,
+                bias=config.attention_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkv_proj",
+            )
+            self.k_norm = RMSNorm(hidden_size=self.head_dim, eps=config.rms_norm_eps)
+            self.v_norm = RMSNorm(
+                hidden_size=self.head_dim, eps=config.rms_norm_eps, has_weight=False
+            )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
@@ -324,12 +345,7 @@ class Gemma3nAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
         self.q_norm = RMSNorm(hidden_size=self.head_dim, eps=config.rms_norm_eps)
-        self.k_norm = RMSNorm(hidden_size=self.head_dim, eps=config.rms_norm_eps)
-        self.v_norm = RMSNorm(
-            hidden_size=self.head_dim, eps=config.rms_norm_eps, has_weight=False
-        )
 
-        layer_idx = extract_layer_index(prefix)
         layer_type = config.layer_types[layer_idx]
         is_sliding = layer_type == "sliding_attention"
         self.sliding_window = config.sliding_window if is_sliding else None
@@ -346,13 +362,8 @@ class Gemma3nAttention(nn.Module):
             if is_sliding:
                 rope_parameters["rope_theta"] = config.rope_local_base_freq
 
-        first_kv_shared_layer_idx = (
-            config.num_hidden_layers - config.num_kv_shared_layers
-        )
-        self.is_kv_shared = layer_idx >= first_kv_shared_layer_idx
-
         kv_sharing_target_layer_name = None
-        if self.is_kv_shared:
+        if self.is_kv_shared_layer:
             # Last full attention layer is 1 before sharing
             # Last sliding attention layer is 2 before sharing
             offset = 2 if self.sliding_window is not None else 1
@@ -405,21 +416,30 @@ class Gemma3nAttention(nn.Module):
         hidden_states: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        if self.is_kv_shared_layer:
+            # Shared KV: only Q is projected; K/V come from the target layer.
+            q, _ = self.q_proj(hidden_states)
+            q = q.unflatten(-1, (self.num_heads, self.head_dim))
+            q = self.q_norm(q)
+            q = q.flatten(-2, -1)
+            q, _ = self.rotary_emb(positions, q, None)
+            attn_output = self.attn(q, None, None)
+        else:
+            qkv, _ = self.qkv_proj(hidden_states)
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        q = q.unflatten(-1, (self.num_heads, self.head_dim))
-        q = self.q_norm(q)
-        q = q.flatten(-2, -1)
-        k = k.unflatten(-1, (self.num_kv_heads, self.head_dim))
-        k = self.k_norm(k)
-        k = k.flatten(-2, -1)
-        v = v.unflatten(-1, (self.num_kv_heads, self.head_dim))
-        v = self.v_norm(v)
-        v = v.flatten(-2, -1)
+            q = q.unflatten(-1, (self.num_heads, self.head_dim))
+            q = self.q_norm(q)
+            q = q.flatten(-2, -1)
+            k = k.unflatten(-1, (self.num_kv_heads, self.head_dim))
+            k = self.k_norm(k)
+            k = k.flatten(-2, -1)
+            v = v.unflatten(-1, (self.num_kv_heads, self.head_dim))
+            v = self.v_norm(v)
+            v = v.flatten(-2, -1)
 
-        q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v)
+            q, k = self.rotary_emb(positions, q, k)
+            attn_output = self.attn(q, k, v)
 
         output, _ = self.o_proj(attn_output)
         return output
@@ -795,6 +815,28 @@ class Gemma3nCrossDecoder(nn.Module):
         return hidden_states
 
 
+def _kv_sharing_weights_mapper(config: Gemma3nTextConfig) -> WeightsMapper:
+    """KV-shared layers only have q_proj, so qkv_proj packing applies to the
+    other layers. Original checkpoints still ship K/V tensors for the shared
+    layers (fine-tuned ones omit them); those are dropped."""
+    first_kv_shared_layer_idx = config.num_hidden_layers - config.num_kv_shared_layers
+    return WeightsMapper(
+        orig_to_new_substr={
+            f"layers.{i}.self_attn.{name}.": None
+            for i in range(first_kv_shared_layer_idx, config.num_hidden_layers)
+            for name in ("k_proj", "v_proj", "k_norm")
+        },
+        orig_to_new_stacked={
+            f"layers.{i}.self_attn.{shard}_proj.": (
+                f"layers.{i}.self_attn.qkv_proj.",
+                shard,
+            )
+            for i in range(first_kv_shared_layer_idx)
+            for shard in ("q", "k", "v")
+        },
+    )
+
+
 # This disables torch.compile if --kv-sharing-fast-prefill passed
 @support_torch_compile(
     enable_if=lambda vllm_config: not vllm_config.cache_config.kv_sharing_fast_prefill
@@ -811,9 +853,6 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
             "altup_projections.": "self_decoder.altup_projections.",
         },
         orig_to_new_stacked={
-            ".q_proj": (".qkv_proj", "q"),
-            ".k_proj": (".qkv_proj", "k"),
-            ".v_proj": (".qkv_proj", "v"),
             ".gate_proj": (".gate_up_proj", 0),
             ".up_proj": (".gate_up_proj", 1),
         },
@@ -826,6 +865,9 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
+        self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | _kv_sharing_weights_mapper(
+            config
+        )
 
         self.altup_unembed_projections = nn.ModuleList(
             [

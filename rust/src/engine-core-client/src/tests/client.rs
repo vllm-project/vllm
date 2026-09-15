@@ -22,8 +22,8 @@ use zeromq::{DealerSocket, PushSocket, SocketOptions, SubSocket, XPubSocket, Zmq
 use crate::protocol::handshake::{EngineCoreReadyResponse, HandshakeInitMessage, ReadyMessage};
 use crate::protocol::logprobs::MaybeWireLogprobs;
 use crate::protocol::multimodal::{
-    MmFeatureSpec, MmField, MmFieldElem, MmFlatField, MmKwargValue, MmSlice, PlaceholderRange,
-    SliceSpec,
+    MmFeatureSpec, MmField, MmFieldElem, MmFlatField, MmKwargValue, MmModality, MmSlice,
+    PlaceholderRange, SliceSpec,
 };
 use crate::protocol::output::{
     DpControlMessage, DpControlOutput, EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs,
@@ -151,6 +151,7 @@ fn sample_request_with_id(request_id: &str) -> EngineCoreRequest {
         prompt_token_ids: Some(vec![11, 22]),
         sampling_params: Some(EngineCoreSamplingParams {
             temperature: 0.8,
+            watermarking: false,
             top_p: 0.9,
             top_k: 8,
             max_tokens: 32,
@@ -191,7 +192,7 @@ fn sample_multimodal_request() -> EngineCoreRequest {
                     }),
                 },
             )])),
-            modality: "image".to_string(),
+            modality: MmModality::Image,
             identifier: "mm-cache-key".to_string(),
             mm_position: PlaceholderRange {
                 offset: 1,
@@ -2662,6 +2663,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
         sampling,
         EngineCoreSamplingParams {
             temperature: 1.0,
+            watermarking: true,
             top_p: 1.0,
             top_k: 0,
             seed: None,
