@@ -4,6 +4,9 @@
 
 from unittest.mock import MagicMock
 
+import pytest
+
+from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.kv_offload.base import OffloadingSpec, make_offload_key
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
@@ -93,7 +96,7 @@ def test_get_file_name_full_structure():
     path = fm.get_file_name(key)
 
     expected_path = (
-        "/tmp/cache/test-model_de3bba26cf36_r3/000/10_g2/0001020304050607.bin"
+        "/tmp/cache/test-model_7009c7b2fce1_r3/000/10_g2/0001020304050607.bin"
     )
     assert path == expected_path
 
@@ -120,6 +123,7 @@ def test_get_run_config_fields():
         "pcp_size": 2,
         "dcp_size": 2,
         "dtype": "bfloat16",
+        "kv_cache_layout": "LBNHC",
         "kv_cache_groups": [
             {
                 "tokens_per_block": 64,
@@ -223,6 +227,29 @@ def test_canonical_layout_changes_storage_namespace():
     assert "canonical_format" not in direct.fields
     assert canonical.fields["canonical_format"] == "v1-nhd"
     assert direct.base_path != canonical.base_path
+
+
+def test_direct_layout_separates_persistent_namespaces():
+    mappers = {
+        layout: make_mapper_from_offloading_spec(kv_cache_layout=layout.name)
+        for layout in KVCacheLayout
+    }
+    assert len({fm.base_path for fm in mappers.values()}) == len(KVCacheLayout)
+    for layout, fm in mappers.items():
+        assert fm.fields["kv_cache_layout"] == layout.name
+
+
+def test_direct_layout_requires_resolved_layout():
+    with pytest.raises(ValueError, match="KV cache layout has not been resolved"):
+        make_mapper_from_offloading_spec(kv_cache_layout=None)
+
+
+def test_canonical_namespace_does_not_repeat_the_layout():
+    fm = make_mapper_from_offloading_spec(
+        canonical_layout=True, kv_cache_layout="LBNHC"
+    )
+    assert fm.fields["canonical_format"] == "v1-nhd"
+    assert "kv_cache_layout" not in fm.fields
 
 
 # ---------------------------------------------------------------------------
