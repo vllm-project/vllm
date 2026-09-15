@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
+
 import dataclasses
 from importlib.util import find_spec
 from typing import TYPE_CHECKING, Any, cast
@@ -17,7 +19,7 @@ from vllm.config import (
 )
 
 if TYPE_CHECKING:
-    from vllm.v1.spec_decode.vocab_mapping import VocabMapping
+    from vllm.v1.spec_decode.slem import SlemMapper
 
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.parallel_state import get_pp_group
@@ -137,7 +139,10 @@ class SpecDecodeBaseProposer:
         self.use_heterogeneous_vocab: bool = (
             self.speculative_config.use_heterogeneous_vocab
         )
-        self.vocab_mapping: VocabMapping | None = None
+        self.heterogeneous_vocab_method: str = (
+            self.speculative_config.heterogeneous_vocab_method
+        )
+        self.slem_mapper: SlemMapper | None = None
 
         self.max_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
@@ -443,13 +448,8 @@ class SpecDecodeBaseProposer:
         """Greedy-sample draft tokens from hidden states."""
         if self.use_local_argmax_reduction:
             return self.model.get_top_tokens(hidden_states)
-        if self.use_heterogeneous_vocab:
-            logits = self.model.compute_logits(hidden_states)
-            assert self.vocab_mapping is not None
-            logits = self.vocab_mapping.constrain_draft_logits(logits)
-            draft_token_ids = logits.argmax(dim=-1)
-            return self.vocab_mapping.map_draft_to_target_ids(draft_token_ids)
-        return self.model.compute_logits(hidden_states).argmax(dim=-1)
+        logits = self.model.compute_logits(hidden_states)
+        return logits.argmax(dim=-1)
 
     def _sample_from_logits(
         self,
@@ -487,13 +487,13 @@ class SpecDecodeBaseProposer:
         if not self._enable_probabilistic_draft_probs or sampling_metadata.all_greedy:
             return self._greedy_sample(hidden_states), None
         logits = self.model.compute_logits(hidden_states)
-        if self.use_heterogeneous_vocab:
+        if self.use_heterogeneous_vocab and self.heterogeneous_vocab_method == "tli":
             assert self.vocab_mapping is not None
             logits = self.vocab_mapping.constrain_draft_logits(logits)
         draft_token_ids, draft_probs = self._sample_from_logits(
             logits, sampling_metadata
         )
-        if self.use_heterogeneous_vocab:
+        if self.use_heterogeneous_vocab and self.heterogeneous_vocab_method == "tli":
             assert self.vocab_mapping is not None
             draft_token_ids = self.vocab_mapping.map_draft_to_target_ids(
                 draft_token_ids
@@ -638,7 +638,14 @@ class SpecDecodeBaseProposer:
                 self._last_draft_probs = draft_probs.view(
                     -1, self.num_speculative_tokens, draft_probs.shape[-1]
                 ).contiguous()
-            return draft_token_ids.view(-1, self.num_speculative_tokens)
+            result = draft_token_ids.view(-1, self.num_speculative_tokens)
+            if (
+                self.use_heterogeneous_vocab
+                and self.heterogeneous_vocab_method == "slem"
+            ):
+                assert self.slem_mapper is not None
+                result = self.slem_mapper.map_draft_to_target_ids(result)
+            return result
 
         if self.uses_mrope:
             positions = self.mrope_positions[:, token_indices_to_sample]
@@ -695,11 +702,6 @@ class SpecDecodeBaseProposer:
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
             input_ids = draft_token_ids_list[-1].int()
-
-            if self.use_heterogeneous_vocab:
-                # Map target token IDs to draft vocab space (TLI algorithm)
-                assert self.vocab_mapping is not None
-                input_ids = self.vocab_mapping.map_target_to_draft_ids(input_ids)
 
             if not self.constant_draft_positions:
                 positions = self._update_positions_dependent_metadata(
@@ -775,6 +777,12 @@ class SpecDecodeBaseProposer:
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
         if draft_probs_list is not None:
             self._last_draft_probs = torch.stack(draft_probs_list, dim=1).contiguous()
+
+        # SLEM: map draft tokens to target vocab at the end (not per-step)
+        if self.use_heterogeneous_vocab and self.heterogeneous_vocab_method == "slem":
+            assert self.slem_mapper is not None
+            draft_token_ids = self.slem_mapper.map_draft_to_target_ids(draft_token_ids)
+
         return draft_token_ids
 
     def _update_positions_dependent_metadata(
@@ -828,13 +836,13 @@ class SpecDecodeBaseProposer:
         cad: CommonAttentionMetadata,
         num_rejected_tokens_gpu: torch.Tensor | None,
     ) -> tuple[int, torch.Tensor, CommonAttentionMetadata]:
-        # Map target token IDs to draft vocab space (TLI algorithm)
-        if self.use_heterogeneous_vocab:
-            assert self.vocab_mapping is not None
-            target_token_ids = self.vocab_mapping.map_target_to_draft_ids(
+        # Map target token IDs to draft vocab space for heterogeneous vocab
+        if self.use_heterogeneous_vocab and self.heterogeneous_vocab_method == "slem":
+            assert self.slem_mapper is not None
+            target_token_ids = self.slem_mapper.map_target_to_draft_ids(
                 target_token_ids
             )
-            next_token_ids = self.vocab_mapping.map_target_to_draft_ids(next_token_ids)
+            next_token_ids = self.slem_mapper.map_target_to_draft_ids(next_token_ids)
         if not self.needs_extra_input_slots:
             # Default EAGLE pathway: no reshaping of input tensors needed.
             # Simply rotate the input ids and leave the positions unchanged,
