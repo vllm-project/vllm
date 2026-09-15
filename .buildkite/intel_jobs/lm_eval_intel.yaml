@@ -26,3 +26,26 @@ steps:
       'uv pip install "gpt-oss[eval]==0.0.5" &&
       cd tests &&
       pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-xpu.txt'
+
+- label: "XPU GSM8K Eval"
+  key: xpu-gsm8k-eval
+  timeout_in_minutes: 120
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 4+
+    mem: 96+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/
+    - tests/evals/gsm8k/
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-xpu.txt'
