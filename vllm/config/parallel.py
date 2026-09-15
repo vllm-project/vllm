@@ -52,6 +52,7 @@ All2AllBackend = Literal[
     "flashinfer_all2allv",  # temporary alias for flashinfer_nvlink_two_sided
     "flashinfer_nvlink_two_sided",
     "flashinfer_nvlink_one_sided",
+    "flashinfer_cft_counted_write",
 ]
 
 
@@ -204,7 +205,11 @@ class ParallelConfig:
     - "mori_low_latency": MoRI EP with InterNodeV1LL for multi-node
     - "nixl_ep": Use nixl-ep kernels
     - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels
-    - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl"""
+    - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl
+    - "flashinfer_cft_counted_write": Use flashinfer CFT counted-write MoE
+      all-to-all kernels. Requires sm_100+ (Blackwell), CUDA 13.4+, and a
+      compatible NVLink fabric environment. Automatically falls back to the
+      one-sided path when prerequisites are not met."""
 
     max_parallel_loading_workers: int | None = Field(default=None, ge=1)
     """Maximum number of parallel loading workers when loading model
@@ -720,6 +725,7 @@ class ParallelConfig:
                 "deepep_high_throughput",
                 "deepep_low_latency",
                 "flashinfer_nvlink_one_sided",
+                "flashinfer_cft_counted_write",
                 "mori_high_throughput",
                 "mori_low_latency",
                 "nixl_ep",

@@ -25,6 +25,9 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     make_moe_prepare_and_finalize_naive_dp_ep,
     make_moe_prepare_and_finalize_no_dp_ep,
 )
+from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_cft_counted_write import (  # noqa: E501
+    FlashInferCFTCountedWritePrepareAndFinalize,
+)
 from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_one_sided import (  # noqa: E501
     FlashInferNVLinkOneSidedPrepareAndFinalize,
 )
@@ -332,6 +335,24 @@ def maybe_make_prepare_finalize(
             moe.hidden_dim, quant_config
         )
         prepare_finalize = FlashInferNVLinkOneSidedPrepareAndFinalize(
+            max_num_tokens=max_num_tokens,
+            top_k=moe.experts_per_token,
+            num_experts=moe.num_experts,
+            hidden_size=moe.hidden_dim,
+            num_dispatchers=all2all_manager.world_size,
+            x_bytes_per_token=dispatch_layout.x_bytes_per_token,
+            x_sf_bytes_per_token=dispatch_layout.x_sf_bytes_per_token,
+        )
+
+    elif moe.use_fi_cft_counted_write_kernels:
+        assert quant_config is not None
+        max_num_tokens = (
+            get_current_vllm_config().scheduler_config.max_num_batched_tokens
+        )
+        dispatch_layout = flashinfer_one_sided_dispatch_layout(
+            moe.hidden_dim, quant_config
+        )
+        prepare_finalize = FlashInferCFTCountedWritePrepareAndFinalize(
             max_num_tokens=max_num_tokens,
             top_k=moe.experts_per_token,
             num_experts=moe.num_experts,
