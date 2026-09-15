@@ -1907,6 +1907,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 **connector_kwargs, attn_metadata=attn_metadata
             )
             model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
+            self.kv_connector.finish_forward()
         else:
             # For piecewise and eager mode, just call model().
             batch_descriptor = BatchDescriptor(
@@ -1947,7 +1948,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     # Eager (NONE): call the raw model directly.
                     model_output = self.model(**model_inputs)
 
-        self.kv_connector.finish_forward()
+                self.kv_connector.finish_forward()
 
         if self.is_last_pp_rank:
             if self.use_aux_hidden_state_outputs:

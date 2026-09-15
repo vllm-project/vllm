@@ -76,8 +76,7 @@ class ActiveKVConnector(KVConnector):
         if scheduler_output.has_sync_kv_loads:
             # Sync loads need to run before this step's forward.
             self._start_load_kv()
-        # Otherwise start the async load after forward to keep submission
-        # off the critical path.
+        # Otherwise defer submission until finish_forward.
 
     def _start_load_kv(self) -> None:
         load_kwargs = self._pending_load_kwargs
@@ -91,8 +90,15 @@ class ActiveKVConnector(KVConnector):
                 self.kv_connector.start_load_kv(get_forward_context(), **load_kwargs)
 
     def finish_forward(self) -> None:
-        if not self._disabled:
-            self.kv_connector.finish_forward()
+        if self._disabled:
+            return
+
+        self.kv_connector.finish_forward()
+        # Submit deferred loads while the forward context is still active,
+        # before sampling and draft execution. Save finalization stays in
+        # post_forward so it can include the draft model's KV saves.
+        if self._pending_load_kwargs is not None:
+            self._start_load_kv()
 
     def reset_capture_state(self) -> None:
         self.kv_connector.reset_capture_state()
@@ -102,9 +108,6 @@ class ActiveKVConnector(KVConnector):
     ) -> KVConnectorOutput | None:
         if self._disabled:
             return None
-
-        if self._pending_load_kwargs is not None:
-            self._start_load_kv()
 
         output = KVConnectorOutput()
         if wait_for_save:
