@@ -615,7 +615,12 @@ class MiMoVisionTransformer(nn.Module):
         window_index_1d_col = self.get_window_index_1d(grid_thw, col=True).to(
             device=x.device
         )
-        reverse_window_index_1d_col = torch.argsort(window_index_1d_col)
+        reverse_window_index_1d_col = torch.empty_like(window_index_1d_col)
+        reverse_window_index_1d_col[window_index_1d_col] = torch.arange(
+            window_index_1d_col.numel(),
+            device=window_index_1d_col.device,
+            dtype=window_index_1d_col.dtype,
+        )
 
         # Col-based rotary embeddings (reordered at spatial_merge_unit granularity).
         # apply_index reorders groups of spatial_merge_unit tokens, just like x.
