@@ -13,6 +13,7 @@ mkdir -p "$LOG_PATH"
 ENCODE_PORT="${ENCODE_PORT:-19534}"
 PREFILL_DECODE_PORT="${PREFILL_DECODE_PORT:-19535}"
 PROXY_PORT="${PROXY_PORT:-10001}"
+PROXY_REGISTRY_PORT="${PROXY_REGISTRY_PORT:-10002}"
 
 GPU_E="${GPU_E:-0}"
 GPU_PD="${GPU_PD:-1}"
@@ -101,6 +102,22 @@ echo "make ec cache folder"
 mkdir -p "$EC_SHARED_STORAGE_PATH"
 
 ###############################################################################
+# Proxy
+#
+# Starts first and empty: every worker below registers itself once it is
+# serving, so nothing here has to name them.
+###############################################################################
+python "${GIT_ROOT}/examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py" \
+    --host "0.0.0.0" \
+    --port "$PROXY_PORT" \
+    --registry-address "tcp://127.0.0.1:$PROXY_REGISTRY_PORT" \
+    >"${PROXY_LOG}" 2>&1 &
+
+PIDS+=($!)
+
+wait_for_server "$PROXY_PORT"
+
+###############################################################################
 # Encoder worker
 ###############################################################################
 env "$DEVICE_AFFINITY_ENV=$GPU_E" vllm serve "$MODEL" \
@@ -116,7 +133,8 @@ env "$DEVICE_AFFINITY_ENV=$GPU_E" vllm serve "$MODEL" \
         "ec_connector": "ECExampleConnector",
         "ec_role": "ec_producer",
         "ec_connector_extra_config": {
-            "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"
+            "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'",
+            "proxy_registry_addr": "tcp://127.0.0.1:'"$PROXY_REGISTRY_PORT"'"
         }
     }' \
     >"${ENC_LOG}" 2>&1 &
@@ -129,6 +147,7 @@ PIDS+=($!)
 env "$DEVICE_AFFINITY_ENV=$GPU_PD" vllm serve "$MODEL" \
     --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION_PD" \
     --port "$PREFILL_DECODE_PORT" \
+    --enable-mm-embeds \
     --enforce-eager \
     --enable-request-id-headers \
     --max-num-seqs "$MAX_NUM_SEQS" \
@@ -138,7 +157,8 @@ env "$DEVICE_AFFINITY_ENV=$GPU_PD" vllm serve "$MODEL" \
         "ec_connector": "ECExampleConnector",
         "ec_role": "ec_consumer",
         "ec_connector_extra_config": {
-            "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"
+            "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'",
+            "proxy_registry_addr": "tcp://127.0.0.1:'"$PROXY_REGISTRY_PORT"'"
         }
     }' \
     >"${PD_LOG}" 2>&1 &
@@ -149,20 +169,6 @@ PIDS+=($!)
 wait_for_server "$ENCODE_PORT"
 wait_for_server "$PREFILL_DECODE_PORT"
 
-###############################################################################
-# Proxy
-###############################################################################
-python disagg_epd_proxy.py \
-    --host "0.0.0.0" \
-    --port "$PROXY_PORT" \
-    --encode-servers-urls "http://localhost:$ENCODE_PORT" \
-    --prefill-servers-urls "disable" \
-    --decode-servers-urls "http://localhost:$PREFILL_DECODE_PORT" \
-    >"${PROXY_LOG}" 2>&1 &
-
-PIDS+=($!)
-
-wait_for_server "$PROXY_PORT"
 echo "All services are up!"
 
 ###############################################################################

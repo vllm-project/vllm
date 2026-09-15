@@ -14,6 +14,7 @@ ENCODE_PORT="${ENCODE_PORT:-19534}"
 PREFILL_PORT="${PREFILL_PORT:-19535}"
 DECODE_PORT="${DECODE_PORT:-19536}"
 PROXY_PORT="${PROXY_PORT:-10001}"
+PROXY_REGISTRY_PORT="${PROXY_REGISTRY_PORT:-10002}"
 
 GPU_E="${GPU_E:-2}"
 GPU_P="${GPU_P:-2}"
@@ -108,6 +109,22 @@ echo "make ec cache folder"
 mkdir -p "$EC_SHARED_STORAGE_PATH"
 
 ###############################################################################
+# Proxy
+#
+# E and P register dynamically; D is configured statically.
+###############################################################################
+python "${GIT_ROOT}/examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py" \
+    --host "0.0.0.0" \
+    --port "$PROXY_PORT" \
+    --registry-address "tcp://127.0.0.1:$PROXY_REGISTRY_PORT" \
+    --decode-servers-urls "http://127.0.0.1:$DECODE_PORT" \
+    >"${PROXY_LOG}" 2>&1 &
+
+PIDS+=($!)
+
+wait_for_server "$PROXY_PORT"
+
+###############################################################################
 # Encoder worker
 ###############################################################################
 env "$DEVICE_AFFINITY_ENV=$GPU_E" vllm serve "$MODEL" \
@@ -123,7 +140,8 @@ env "$DEVICE_AFFINITY_ENV=$GPU_E" vllm serve "$MODEL" \
         "ec_connector": "ECExampleConnector",
         "ec_role": "ec_producer",
         "ec_connector_extra_config": {
-            "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"
+            "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'",
+            "proxy_registry_addr": "tcp://127.0.0.1:'"$PROXY_REGISTRY_PORT"'"
         }
     }' \
     >"${ENC_LOG}" 2>&1 &
@@ -139,6 +157,7 @@ VLLM_NIXL_SIDE_CHANNEL_PORT=5559 \
 vllm serve "$MODEL" \
     --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION_P" \
     --port "$PREFILL_PORT" \
+    --enable-mm-embeds \
     --enforce-eager \
     --enable-request-id-headers \
     --max-num-seqs "$MAX_NUM_SEQS" \
@@ -148,7 +167,8 @@ vllm serve "$MODEL" \
         "ec_connector": "ECExampleConnector",
         "ec_role": "ec_consumer",
         "ec_connector_extra_config": {
-            "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"
+            "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'",
+            "proxy_registry_addr": "tcp://127.0.0.1:'"$PROXY_REGISTRY_PORT"'"
         }
     }' \
     --kv-transfer-config '{
@@ -161,6 +181,10 @@ PIDS+=($!)
 
 ###############################################################################
 # Decode worker
+#
+# No EC role: this worker moves no embeddings. It carries an EC config only
+# so it can announce itself, which is what tells the proxy where to send the
+# request once prefill is done.
 ###############################################################################
 env "$DEVICE_AFFINITY_ENV=$GPU_D" \
 UCX_NET_DEVICES=all \
@@ -168,6 +192,7 @@ VLLM_NIXL_SIDE_CHANNEL_PORT=6000 \
 vllm serve "$MODEL" \
     --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION_D" \
     --port "$DECODE_PORT" \
+    --enable-mm-embeds \
     --enforce-eager \
     --enable-request-id-headers \
     --max-num-seqs "$MAX_NUM_SEQS" \
@@ -186,20 +211,6 @@ wait_for_server "$ENCODE_PORT"
 wait_for_server "$PREFILL_PORT"
 wait_for_server "$DECODE_PORT"
 
-###############################################################################
-# Proxy
-###############################################################################
-python disagg_epd_proxy.py \
-    --host "0.0.0.0" \
-    --port "$PROXY_PORT" \
-    --encode-servers-urls "http://localhost:$ENCODE_PORT" \
-    --prefill-servers-urls "http://localhost:$PREFILL_PORT" \
-    --decode-servers-urls "http://localhost:$DECODE_PORT" \
-    >"${PROXY_LOG}" 2>&1 &
-
-PIDS+=($!)
-
-wait_for_server "$PROXY_PORT"
 echo "All services are up!"
 
 ###############################################################################
