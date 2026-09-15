@@ -370,7 +370,11 @@ class DPCoordinatorProc:
                     # We received a message from one of the engines.
 
                     buffer = output_back.recv()
-                    outputs: EngineCoreOutputs = decoder.decode(buffer)
+                    try:
+                        outputs: EngineCoreOutputs = decoder.decode(buffer)
+                    except Exception:
+                        logger.error("coordinator get invalid message.")
+                        continue
 
                     assert not outputs.outputs
                     assert outputs.utility_output is None
