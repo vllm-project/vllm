@@ -31,6 +31,7 @@ from vllm.lora.layers import (
 )
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.punica_wrapper import get_punica_wrapper
+from vllm.lora.punica_wrapper.punica_cpu import PunicaWrapperCPU
 from vllm.model_executor.layers.fusion.quant_activation import (
     get_input_quant_key,
 )
@@ -1822,3 +1823,50 @@ def test_replicated_lora_preserves_base_forward_for_subclasses(
     merged_result = merged_layer(torch.cat(inputs))[0]
 
     torch.testing.assert_close(lora_result, merged_result, rtol=rtol, atol=atol)
+
+
+@pytest.mark.parametrize("projection", ["linear", "q", "v"])
+@pytest.mark.parametrize("no_lora", [False, True])
+def test_mla_kv_b_cpu_wrapper_applies_routed_corrections(
+    monkeypatch, projection, no_lora
+):
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: True)
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: False)
+    layer = ColumnParallelLinearWithLoRA.__new__(ColumnParallelLinearWithLoRA)
+    torch.nn.Module.__init__(layer)
+    layer.punica_wrapper = PunicaWrapperCPU(3, 3, "cpu")
+    layer.punica_wrapper.no_lora = no_lora
+    layer.lora_a_stacked = (
+        torch.arange(16, device="cpu").float().reshape(2, 1, 2, 4) / 32,
+    )
+    layer.lora_b_stacked = (
+        torch.arange(40, device="cpu").float().reshape(2, 1, 10, 2) / 64,
+    )
+    mapping = torch.tensor([-1, 0, 1], device="cpu")
+    if no_lora:
+        mapping.fill_(-1)
+    if projection == "linear":
+        inputs = torch.arange(12, device="cpu").float().reshape(3, 4) / 20
+        output = torch.ones(3, 2, 5, device="cpu")
+    elif projection == "q":
+        inputs = torch.arange(18, device="cpu").float().reshape(3, 2, 3) / 20
+        output = torch.ones(3, 2, 4, device="cpu")
+    else:
+        inputs = torch.arange(24, device="cpu").float().reshape(3, 2, 4) / 20
+        output = torch.ones(3, 2, 2, device="cpu")
+    expected = output.clone()
+    for token, adapter in enumerate(mapping.tolist()):
+        if adapter < 0:
+            continue
+        weight = (
+            layer.lora_b_stacked[0][adapter, 0] @ layer.lora_a_stacked[0][adapter, 0]
+        ).reshape(2, 5, 4)
+        if projection == "linear":
+            expected[token] += torch.einsum("k,hdk->hd", inputs[token], weight)
+        elif projection == "q":
+            expected[token] += torch.einsum("hd,hdk->hk", inputs[token], weight[:, :3])
+        else:
+            expected[token] += torch.einsum("hk,hdk->hd", inputs[token], weight[:, 3:])
+    args = () if projection == "linear" else (2 if projection == "q" else 3,)
+    getattr(layer, f"apply_mla_kv_b_lora_{projection}")(inputs, output, mapping, *args)
+    torch.testing.assert_close(output, expected)

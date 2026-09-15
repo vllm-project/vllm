@@ -1024,6 +1024,8 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         k_scale: torch.Tensor,
         output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
+        kv_b_proj_lora: object | None = None,
+        token_lora_mapping: torch.Tensor | None = None,
     ) -> None:
         """MHA-style prefill forward pass."""
         raise NotImplementedError
