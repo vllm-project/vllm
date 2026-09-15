@@ -2687,6 +2687,48 @@ def test_cache_blocks(hash_fn):
     assert blocks[0].block_hash is not None
 
 
+@pytest.mark.parametrize("block_size", [4, 16])
+@pytest.mark.parametrize("enable_events", [False, True])
+def test_cache_blocks_only_reads_current_chunk_hashes(block_size, enable_events):
+    """Chunk registration must not materialize the remaining prompt's hashes."""
+    num_hash_reads = 0
+
+    class CountedHashes(list):
+        def __getitem__(self, index):
+            nonlocal num_hash_reads
+            result = super().__getitem__(index)
+            num_hash_reads += len(result) if isinstance(index, slice) else 1
+            return result
+
+    req = make_request("0", list(range(128)), 4, sha256)
+    hashes = req.block_hashes
+    req.block_hashes = CountedHashes(hashes)
+    pool = BlockPool(
+        num_gpu_blocks=5,
+        enable_caching=True,
+        hash_block_size=4,
+        enable_kv_cache_events=enable_events,
+    )
+    blocks = pool.get_new_blocks(4)
+    for start in (0, 2):
+        num_hash_reads = 0
+        pool.cache_full_blocks(
+            request=req,
+            blocks=blocks,
+            num_cached_blocks=start,
+            num_full_blocks=start + 2,
+            block_size=block_size,
+            kv_cache_group_id=0,
+        )
+        # Two new hashes, plus at most one parent hash for the KV event.
+        assert num_hash_reads <= 3
+        for i in range(start, start + 2):
+            expected_hash = hashes[(i + 1) * (block_size // 4) - 1]
+            assert blocks[i].block_hash == make_block_hash_with_group_id(
+                expected_hash, 0
+            )
+
+
 def test_cache_blocks_multi_group():
     """
     This tests that blocks are cached correctly for different kv cache groups.
