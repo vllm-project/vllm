@@ -238,6 +238,7 @@ def kernel_unified_attention(
     BLOCK_M: tl.constexpr,
     NUM_SEGMENTS_PER_SEQ: tl.constexpr,
     USE_FP8: tl.constexpr,
+    BLOCK_TABLE_NUM_COLS: tl.constexpr,
     # Toggles 2D vs 3D layout.  The 2D path runs the full sequence in one
     # tile loop and writes to ``output_ptr``.  The 3D path scopes the loop
     # to ``[segm_idx, segm_idx+1) × tiles_per_segment`` and writes
@@ -426,8 +427,11 @@ def kernel_unified_attention(
         seq_offset = j * TILE_SIZE + offs_t
         tile_mask = seq_offset < max_seq_prefix_len
 
+        _logical_block_idx = seq_offset // BLOCK_SIZE
         physical_block_idx = tl.load(
-            block_tables_ptr + block_table_offset + seq_offset // BLOCK_SIZE
+            block_tables_ptr + block_table_offset + _logical_block_idx,
+            mask=tile_mask & (_logical_block_idx < BLOCK_TABLE_NUM_COLS),
+            other=0,
         ).to(tl.int64)
 
         if USE_TD:
@@ -436,8 +440,11 @@ def kernel_unified_attention(
             # from the static_assert above), so load the block index as
             # a scalar instead of a broadcast reduction.
             offset_in_block = (j * TILE_SIZE) % BLOCK_SIZE
+            _td_logical_block = (j * TILE_SIZE) // BLOCK_SIZE
             physical_block_scalar = tl.load(
-                block_tables_ptr + block_table_offset + (j * TILE_SIZE) // BLOCK_SIZE
+                block_tables_ptr + block_table_offset + _td_logical_block,
+                mask=_td_logical_block < BLOCK_TABLE_NUM_COLS,
+                other=0,
             ).to(tl.int64)
             # K : (HEAD_SIZE, TILE_SIZE)
             K_load = _load_kv_tile_td(
@@ -1102,6 +1109,7 @@ def unified_attention(
         value_cache_ptr=v,
         sink_ptr=sinks,
         block_tables_ptr=block_table,
+        BLOCK_TABLE_NUM_COLS=block_table.shape[1],
         seq_lens_ptr=seqused_k,
         alibi_slopes_ptr=alibi_slopes,
         qq_bias_ptr=qq_bias,
