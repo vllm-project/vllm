@@ -17,6 +17,8 @@ where::
     bias = -image_mean / image_std
 """
 
+from typing import Any
+
 import torch
 from torch import nn
 
@@ -128,7 +130,7 @@ if HAS_TRITON:
                     eviction_policy="evict_first",
                 )
 
-    def fused_input_norm_kernel(
+    def fused_input_norm_triton(
         inputs: torch.Tensor,
         outputs: torch.Tensor,
         weight: torch.Tensor,
@@ -137,7 +139,7 @@ if HAS_TRITON:
         block_l: int | None = None,
         num_warps: int | None = None,
     ):
-        """Fused per-channel affine transform for normalisation with broadcast along the L axis.
+        """Fused per-channel affine transform for normalisation.
 
         Computes ``y = (x * weight[c] + bias[c]).to(y.dtype)`` in a single pass.
         Equivalent to::
@@ -283,7 +285,7 @@ class FusedInputNorm(nn.Module):
         assert rescale_factor != 0.0, "rescale_factor must be non-zero"
 
         self.channel = channel
-        self._dtype = dtype
+        self._compute_dtype = dtype
 
         # Model construction can set the accelerator as PyTorch's default
         # device. Determine whether the normalisation is an identity on CPU
@@ -303,22 +305,12 @@ class FusedInputNorm(nn.Module):
         )
 
         if not self.is_identity:
-            # Reuse the CPU-side tensors computed above; the default device is
-            # picked up implicitly by the subsequent ``to(dtype)`` (no-op for
-            # dtype) followed by buffer registration, which keeps the tensors
-            # on the default device when the module is later moved by the
-            # caller.
             self.register_buffer("weight", weight_cpu.to(dtype=dtype))
             self.register_buffer("bias", bias_cpu.to(dtype=dtype))
         else:
             self.register_buffer("weight", None)
             self.register_buffer("bias", None)
 
-        # Non-fp32 compute dtypes lose precision because weight/bias are
-        # stored and applied at the reduced precision. Warn once per process
-        # so callers see a clear recommendation without log spam. Skip the
-        # warning when the transform degenerates to identity (no compute
-        # happens on that path anyway).
         if not self.is_identity and dtype != torch.float32:
             logger.warning_once(
                 "FusedInputNorm is initialized with compute dtype=%s, which "
@@ -331,15 +323,9 @@ class FusedInputNorm(nn.Module):
             )
 
     @property
-    def dtype(self) -> torch.dtype:
-        # ``weight`` is None on the identity path, so fall back to the dtype
-        # captured at construction time.
-        return self.weight.dtype if self.weight is not None else self._dtype
-
-    @property
     def compute_dtype(self) -> torch.dtype:
         """The dtype used for internal computation (may differ from output)."""
-        return self._dtype
+        return self._compute_dtype
 
     @classmethod
     def identity(
@@ -353,24 +339,32 @@ class FusedInputNorm(nn.Module):
             dtype=dtype,
         )
 
-    @classmethod
-    def from_model_config(cls, model_config: "ModelConfig") -> nn.Module:
-        mm_config = getattr(model_config, "multimodal_config", None)
-        if not getattr(mm_config, "mm_device_do_normalize", False):
-            return cls.identity()
+    @staticmethod
+    def _load_norm_params(
+        model_config: "ModelConfig",
+    ) -> tuple[bool, bool, list[float], list[float], float]:
+        """Load ``(do_rescale, do_normalize, image_mean, image_std,
+        rescale_factor)`` from the processor config, falling back to the image
+        processor object.
 
+        Returns concrete, non-``None`` values: ``image_mean`` / ``image_std``
+        are ``list[float]`` and ``rescale_factor`` is ``float``. Explicit
+        per-variable narrowing is used rather than ``assert None not in [...]``
+        because mypy cannot narrow individual variables from a container-level
+        ``in`` check.
+        """
         model = model_config.model
         revision = model_config.revision
 
-        # Try to read parameters from the processor config
+        # Try to read parameters from the processor config.
         config = get_processor_config(model, revision=revision)
-        do_rescale = config.get("do_rescale", None)
-        do_normalize = config.get("do_normalize", None)
-        image_mean = config.get("image_mean", None)
-        image_std = config.get("image_std", None)
-        rescale_factor = config.get("rescale_factor", None)
+        do_rescale: Any = config.get("do_rescale", None)
+        do_normalize: Any = config.get("do_normalize", None)
+        image_mean: Any = config.get("image_mean", None)
+        image_std: Any = config.get("image_std", None)
+        rescale_factor: Any = config.get("rescale_factor", None)
 
-        # Fallback to the image_processor object if any parameter is missing
+        # Fallback to the image_processor object if any parameter is missing.
         if None in [
             do_rescale,
             do_normalize,
@@ -391,28 +385,47 @@ class FusedInputNorm(nn.Module):
             if rescale_factor is None:
                 rescale_factor = getattr(image_processor, "rescale_factor", None)
 
-        # Apply defaults based on flags
+        # Apply defaults based on flags.
         if not do_rescale:
             rescale_factor = 1.0
         if not do_normalize:
             image_mean = [0.0, 0.0, 0.0]
             image_std = [1.0, 1.0, 1.0]
 
-        # Ensure all required parameters are resolved
-        assert None not in [
-            do_rescale,
-            do_normalize,
-            image_mean,
-            image_std,
-            rescale_factor,
-        ], "Some normalisation parameters are still None after resolution."
+        # Explicit per-variable narrowing: mypy cannot narrow ``Any | None``
+        # via ``assert None not in [...]``, but it *can* narrow each variable
+        # through a direct ``is not None`` assertion.
+        assert rescale_factor is not None, (
+            "rescale_factor is still None after resolution."
+        )
+        assert image_mean is not None, "image_mean is still None after resolution."
+        assert image_std is not None, "image_std is still None after resolution."
 
-        # If no processing is needed, return an identity module
+        # Normalize to concrete types so the return type is exactly as
+        # declared (``Any`` is not assignable to ``list[float]`` / ``float``
+        # without a cast or a value-level construction).
+        return (
+            bool(do_rescale),
+            bool(do_normalize),
+            [float(v) for v in image_mean],
+            [float(v) for v in image_std],
+            float(rescale_factor),
+        )
+
+    @classmethod
+    def from_model_config(cls, model_config: "ModelConfig") -> nn.Module:
+        mm_config = getattr(model_config, "multimodal_config", None)
+        if not getattr(mm_config, "mm_device_do_normalize", False):
+            return cls.identity()
+
+        do_rescale, do_normalize, image_mean, image_std, rescale_factor = (
+            cls._load_norm_params(model_config)
+        )
+
+        # If no processing is needed, return an identity module.
         if not do_rescale and not do_normalize:
             return cls.identity()
 
-        # Infer the channel dimension from the resolved parameters so that
-        # non-RGB inputs are handled correctly.
         channel = len(image_mean)
         assert len(image_std) == channel, (
             f"image_mean and image_std have different lengths: "
@@ -439,42 +452,30 @@ class FusedInputNorm(nn.Module):
             grid_thw: Input tensor of shape ``(patches, size)`` where
                 ``size == channel * patch_size``.
             visual_dtype: Desired output dtype.
-            out: Optional preallocated output buffer of shape ``(patches,
-                size)`` and dtype ``visual_dtype``. When provided, it is
-                written in-place and returned (no allocation). Useful for
-                steady-state inference loops where the caller can reuse a
-                buffer across calls.
+            out: Optional preallocated output buffer. Must be contiguous, on
+                the same device as ``grid_thw``, with dtype ``visual_dtype``
+                and shape ``(N_out, size)`` where ``N_out >= patches``. Only
+                the leading ``patches`` rows are written; the returned tensor
+                is a view restricted to that region. Useful for steady-state
+                inference loops where the caller can reuse a buffer sized for
+                the maximum batch across calls.
 
         Returns:
-            The transformed tensor (either ``out`` when supplied, or a freshly
-            allocated tensor of dtype ``visual_dtype``).
+            The transformed tensor of shape ``(patches, size)`` and dtype
+            ``visual_dtype`` (a view into ``out`` when supplied, or a freshly
+            allocated tensor).
         """
-        # ---- identity shortcut -------------------------------------------
-        if self.is_identity:
-            if out is not None:
-                assert out.shape == grid_thw.shape, (
-                    f"out.shape={tuple(out.shape)} != grid_thw.shape="
-                    f"{tuple(grid_thw.shape)}"
-                )
-                assert out.dtype == visual_dtype, (
-                    f"out.dtype={out.dtype} != visual_dtype={visual_dtype}"
-                )
-                out.copy_(grid_thw)
-                return out
-            return grid_thw.to(visual_dtype)
-
         assert grid_thw.ndim == 2
         patches, size = grid_thw.shape
-        assert size % self.channel == 0, (
-            f"size={size} is not divisible by channel={self.channel}"
-        )
-        patch_size = size // self.channel
 
-        # ---- output buffer validation ------------------------------------
+        # ---- output buffer: always materialize an ``out_view`` ------------
         if out is not None:
-            assert out.shape == grid_thw.shape, (
-                f"out.shape={tuple(out.shape)} != grid_thw.shape="
-                f"{tuple(grid_thw.shape)}"
+            assert out.dim() == 2, f"out must be 2D, got {out.dim()}D"
+            assert out.shape[0] >= patches, (
+                f"out.shape[0]={out.shape[0]} < grid_thw.shape[0]={patches}"
+            )
+            assert out.shape[1] == size, (
+                f"out.shape[1]={out.shape[1]} != grid_thw.shape[1]={size}"
             )
             assert out.dtype == visual_dtype, (
                 f"out.dtype={out.dtype} != visual_dtype={visual_dtype}"
@@ -483,30 +484,23 @@ class FusedInputNorm(nn.Module):
             assert out.device == grid_thw.device, (
                 f"out.device={out.device} != grid_thw.device={grid_thw.device}"
             )
-
-        # ---- XPU fused custom kernel -------------------------------------
-        # On XPU, fuse the whole rescale + normalise into a single custom
-        # kernel. The eager path below materializes an fp32 intermediate and
-        # then casts back, which adds device-side compute that cancels the
-        # bandwidth saving of transferring uint8 pixel_values. The fused
-        # kernel reads uint8 directly and writes ``visual_dtype`` in one pass.
-        if (
-            current_platform.is_xpu()
-            and grid_thw.dtype == torch.uint8
-            and self.weight.dtype == torch.float32
-        ):
-            result = torch.ops.vllm.xpu_fused_input_norm(
-                grid_thw, self.weight, self.bias, visual_dtype
+            out_view = out[:patches]
+        else:
+            out_view = torch.empty(
+                (patches, size), dtype=visual_dtype, device=grid_thw.device
             )
-            if out is not None:
-                out.copy_(result)
-                return out
-            return result
+
+        # ---- identity shortcut -------------------------------------------
+        if self.is_identity:
+            out_view.copy_(grid_thw)
+            return out_view
+
+        assert size % self.channel == 0, (
+            f"size={size} is not divisible by channel={self.channel}"
+        )
+        patch_size = size // self.channel
 
         # ---- Triton fast path --------------------------------------------
-        # Fuse the per-channel affine transform into a single pass over the
-        # input, avoiding the intermediate fp32 materialization of the eager
-        # path below.
         if (
             HAS_TRITON
             and grid_thw.dtype in _SUPPORTED_INPUTS
@@ -519,42 +513,39 @@ class FusedInputNorm(nn.Module):
             # requires contiguous inputs.
             x = grid_thw if grid_thw.is_contiguous() else grid_thw.contiguous()
             x3 = x.view(patches, self.channel, patch_size)
+            y3 = out_view.view(patches, self.channel, patch_size)
 
-            if out is not None:
-                y3 = out.view(patches, self.channel, patch_size)
-            else:
-                y3 = torch.empty_like(x3, dtype=visual_dtype)
-
-            fused_input_norm_kernel(
+            fused_input_norm_triton(
                 x3,
                 y3,
                 self.weight,
                 self.bias,
-                compute_dtype=self._dtype,
+                compute_dtype=self._compute_dtype,
             )
-            # `out` (2D) and `y3.view(...)` are the same storage; return the
-            # caller-supplied tensor when we were given one so the aliasing
-            # contract is explicit.
-            return out if out is not None else y3.view(patches, size)
+            return out_view
+
+        # ---- XPU fused custom kernel -------------------------------------
+        # On XPU, fuse the whole rescale + normalise into a single custom
+        # kernel. The eager path below materializes an fp32 intermediate and
+        # then casts back, which adds device-side compute that cancels the
+        # bandwidth saving of transferring uint8 pixel_values. The fused
+        # kernel reads uint8 directly and writes ``visual_dtype`` in one pass.
+        if (
+            current_platform.is_xpu()
+            and grid_thw.dtype == torch.uint8
+            and self.weight.dtype == torch.float32
+        ):
+            out_view.copy_(
+                torch.ops.vllm.xpu_fused_input_norm(
+                    grid_thw, self.weight, self.bias, visual_dtype
+                )
+            )
+            return out_view
 
         # ---- Fallback eager path -----------------------------------------
-        # Applies the per-channel affine transform directly instead of via
-        # F.batch_norm. batch_norm dispatches to cuDNN, whose batch-norm
-        # kernels cap the batch dimension near the CUDA grid limit (~65535);
-        # here that dimension is the number of patches, which grows unbounded
-        # with image resolution and batch size and overflows the cap on large
-        # image-heavy requests (CUDNN_STATUS_INTERNAL_ERROR). The plain
-        # broadcasted multiply-add is numerically identical and has no such
-        # limit.
         x = grid_thw.to(self.dtype).view(patches, self.channel, patch_size)
         x = x * self.weight.view(1, self.channel, 1) + self.bias.view(
             1, self.channel, 1
         )
-        result = x.view(patches, size)
-        if result.dtype != visual_dtype:
-            result = result.to(visual_dtype)
-
-        if out is not None:
-            out.copy_(result)
-            return out
-        return result
+        out_view.copy_(x.view(patches, size))
+        return out_view

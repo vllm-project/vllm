@@ -8,7 +8,7 @@ import torch
 
 from vllm.model_executor.layers.fusion.mm_input_norm import (
     FusedInputNorm,
-    fused_input_norm_kernel,
+    fused_input_norm_triton,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
@@ -272,6 +272,109 @@ class TestFusedInputNormShapes:
 
 
 # ===========================================================================
+# Input handling: non-contiguous inputs
+# ===========================================================================
+@requires_accelerator
+class TestFusedInputNormInputHandling:
+    """The wrapper must transparently handle non-contiguous inputs.
+
+    ``forward`` materializes a contiguous copy internally when the input is
+    not contiguous, because the Triton kernel and the trailing ``.view(...)``
+    both require contiguous storage.
+    """
+
+    def test_non_contiguous_input_matches_reference(self):
+        """A non-contiguous input (e.g. a strided slice) must produce the
+        same result as its contiguous copy."""
+        channel = 3
+        patch_size = 32
+        patches = 8
+
+        set_random_seed(0)
+        # Build a 3D tensor and take a strided 2D slice along the last dim so
+        # the resulting 2D view has non-trivial strides on both axes.
+        base = torch.randint(
+            0,
+            256,
+            (patches, channel * patch_size, 2),
+            dtype=torch.float32,
+            device=_DEVICE,
+        )
+        non_contig = base[..., 0]
+        assert not non_contig.is_contiguous()
+
+        norm = FusedInputNorm(
+            image_mean=_RGB_MEAN,
+            image_std=_RGB_STD,
+            rescale_factor=_RGB_RESCALE,
+            channel=channel,
+        ).to(_DEVICE)
+
+        out = norm(non_contig, visual_dtype=torch.float32)
+
+        # Reference is computed on the contiguous copy of the same values.
+        expected = _reference_input_norm(
+            non_contig.contiguous(),
+            _RGB_MEAN,
+            _RGB_STD,
+            _RGB_RESCALE,
+            channel,
+            torch.float32,
+        )
+        torch.testing.assert_close(out, expected)
+
+    def test_non_contiguous_input_with_out_buffer(self):
+        """A non-contiguous input combined with an ``out=`` buffer (also
+        possibly oversized) must still write only the leading rows."""
+        channel = 3
+        patch_size = 16
+        patches = 4
+        extra_rows = 3
+
+        set_random_seed(0)
+        base = torch.randint(
+            0,
+            256,
+            (patches, channel * patch_size, 2),
+            dtype=torch.float32,
+            device=_DEVICE,
+        )
+        non_contig = base[..., 0]
+        assert not non_contig.is_contiguous()
+
+        norm = FusedInputNorm(
+            image_mean=_RGB_MEAN,
+            image_std=_RGB_STD,
+            rescale_factor=_RGB_RESCALE,
+            channel=channel,
+        ).to(_DEVICE)
+
+        out = torch.full(
+            (patches + extra_rows, channel * patch_size),
+            123.0,
+            dtype=torch.float32,
+            device=_DEVICE,
+        )
+        returned = norm(non_contig, visual_dtype=torch.float32, out=out)
+
+        assert returned.data_ptr() == out.data_ptr()
+        assert returned.shape == (patches, channel * patch_size)
+
+        expected = _reference_input_norm(
+            non_contig.contiguous(),
+            _RGB_MEAN,
+            _RGB_STD,
+            _RGB_RESCALE,
+            channel,
+            torch.float32,
+        )
+        torch.testing.assert_close(returned, expected)
+
+        # The untouched tail must still be the sentinel value.
+        assert torch.all(out[patches:] == 123.0)
+
+
+# ===========================================================================
 # Preallocated out= buffer
 # ===========================================================================
 @requires_accelerator
@@ -280,8 +383,8 @@ class TestFusedInputNormOutBuffer:
 
     def test_reuse(self):
         """Passing a preallocated `out` buffer must write in-place and return
-        the same tensor object, with results identical to the allocating
-        path."""
+        a tensor aliasing the same storage (the leading ``patches`` rows),
+        with results identical to the allocating path."""
         channel = 3
         patch_size = 32
 
@@ -307,9 +410,83 @@ class TestFusedInputNormOutBuffer:
         sentinel = out.data_ptr()
         returned = norm(pixel_values, visual_dtype=torch.float32, out=out)
 
-        assert returned is out
-        assert out.data_ptr() == sentinel, "out must be written in place"
+        # ``forward`` returns ``out[:patches]``, a view that aliases the same
+        # storage. It is *not* the same Python object as ``out``, so compare
+        # by data pointer + shape rather than identity.
+        assert returned.data_ptr() == sentinel, "out must be written in place"
+        assert returned.shape == pixel_values.shape
         torch.testing.assert_close(out, fresh)
+        torch.testing.assert_close(returned, fresh)
+
+    def test_oversized_out_buffer(self):
+        """``out`` may be larger than the input along dim 0 (``N``). Only the
+        leading ``patches`` rows are written; the returned tensor is a view
+        into that region and the trailing rows are untouched.
+
+        This is the core contract introduced by allowing the caller to reuse
+        a buffer sized for the maximum batch across calls.
+        """
+        channel = 3
+        patch_size = 32
+        patches = 8
+        extra_rows = 5
+
+        set_random_seed(0)
+        pixel_values = torch.randint(
+            0,
+            256,
+            (patches, channel * patch_size),
+            dtype=torch.float32,
+            device=_DEVICE,
+        )
+
+        norm = FusedInputNorm(
+            image_mean=_RGB_MEAN,
+            image_std=_RGB_STD,
+            rescale_factor=_RGB_RESCALE,
+            channel=channel,
+        ).to(_DEVICE)
+
+        out = torch.full(
+            (patches + extra_rows, channel * patch_size),
+            123.0,
+            dtype=torch.float32,
+            device=_DEVICE,
+        )
+        returned = norm(pixel_values, visual_dtype=torch.float32, out=out)
+
+        # The returned tensor aliases the leading rows of ``out`` and has the
+        # shape of the input, not of the buffer.
+        assert returned.data_ptr() == out.data_ptr()
+        assert returned.shape == (patches, channel * patch_size)
+
+        expected = _reference_input_norm(
+            pixel_values,
+            _RGB_MEAN,
+            _RGB_STD,
+            _RGB_RESCALE,
+            channel,
+            torch.float32,
+        )
+        torch.testing.assert_close(returned, expected)
+
+        # Only the leading ``patches`` rows were written; the tail keeps the
+        # sentinel value.
+        assert torch.all(out[patches:] == 123.0)
+
+    def test_identity_oversized_out_buffer(self):
+        """The identity fast path must honor an oversized ``out`` buffer as
+        well, writing only the leading rows and returning a view into them."""
+        norm = FusedInputNorm.identity().to(_DEVICE)
+        x = torch.randn(4, 3 * 8, dtype=torch.float32, device=_DEVICE)
+
+        out = torch.full((10, 3 * 8), 7.0, dtype=torch.bfloat16, device=_DEVICE)
+        returned = norm(x, visual_dtype=torch.bfloat16, out=out)
+
+        assert returned.data_ptr() == out.data_ptr()
+        assert returned.shape == (4, 3 * 8)
+        torch.testing.assert_close(returned, x.to(torch.bfloat16))
+        assert torch.all(out[4:] == 7.0)
 
     def test_validation(self):
         """`out` with a wrong shape / dtype must be rejected."""
@@ -342,8 +519,14 @@ class TestFusedInputNormOutBuffer:
         norm = FusedInputNorm.identity().to(_DEVICE)
         x = torch.randn(4, 3 * 8, dtype=torch.float32, device=_DEVICE)
         out = torch.empty_like(x, dtype=torch.bfloat16)
+        sentinel = out.data_ptr()
+
         returned = norm(x, visual_dtype=torch.bfloat16, out=out)
-        assert returned is out
+
+        # Returned tensor aliases ``out`` (view), not the same object.
+        assert returned.data_ptr() == sentinel
+        assert returned.shape == x.shape
+        torch.testing.assert_close(returned, x.to(torch.bfloat16))
         torch.testing.assert_close(out, x.to(torch.bfloat16))
 
 
@@ -370,7 +553,7 @@ class TestFusedInputNormKernel:
         b = torch.randn(C, dtype=torch.float32, device=_DEVICE)
 
         out = torch.empty_like(x)
-        fused_input_norm_kernel(
+        fused_input_norm_triton(
             x, out, w, b, compute_dtype=torch.float32, block_l=block_l
         )
 
@@ -392,7 +575,7 @@ class TestFusedInputNormKernel:
             dtype=torch.float32,
             device=_DEVICE,
         )
-        fused_input_norm_kernel(x, out, w, b, compute_dtype=torch.float32)
+        fused_input_norm_triton(x, out, w, b, compute_dtype=torch.float32)
 
         expected = x * w.view(1, C, 1) + b.view(1, C, 1)
         torch.testing.assert_close(out[:N, :C, :L], expected)
@@ -410,7 +593,7 @@ class TestFusedInputNormKernel:
         b = torch.randn(C, dtype=torch.float32, device=_DEVICE)
 
         with pytest.raises(AssertionError):
-            fused_input_norm_kernel(x, out, w, b, compute_dtype=torch.float16)
+            fused_input_norm_triton(x, out, w, b, compute_dtype=torch.float16)
 
 
 # ===========================================================================
