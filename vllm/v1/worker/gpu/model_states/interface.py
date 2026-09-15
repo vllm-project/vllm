@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import Any, ClassVar, cast
 
 import torch
@@ -145,6 +146,9 @@ class ModelState(ABC):
         """Hook run on real batches before the forward pass (after block tables
         are gathered). Used by mamba "align" prefix caching to pre-copy state
         across block boundaries. No-op by default."""
+        return None
+
+    def defer_postprocess_state(self) -> Callable[[], None] | None:
         return None
 
     def postprocess_state(
