@@ -98,6 +98,20 @@ def test_eager_attn_res_entrypoint_materializes_deferred_output(
 
 
 @pytest.mark.cpu_test
+def test_deferred_boundary_is_limited_to_low_token_shapes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(kimi_linear.envs, "VLLM_KIMI_K3_DEFER_ATTN_RES_MLP", True)
+    monkeypatch.setattr(
+        kimi_linear.envs,
+        "VLLM_KIMI_K3_DEFER_ATTN_RES_MLP_MAX_TOKENS",
+        16,
+    )
+    assert kimi_linear._should_defer_attn_res_mlp(torch.empty(16, 2))
+    assert not kimi_linear._should_defer_attn_res_mlp(torch.empty(17, 2))
+
+
+@pytest.mark.cpu_test
 def test_model_preserves_tapped_state_and_folds_final_pending_delta(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -117,6 +131,11 @@ def test_model_preserves_tapped_state_and_folds_final_pending_delta(
         lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
     )
     monkeypatch.setattr(kimi_linear.envs, "VLLM_KIMI_K3_DEFER_ATTN_RES_MLP", True)
+    monkeypatch.setattr(
+        kimi_linear.envs,
+        "VLLM_KIMI_K3_DEFER_ATTN_RES_MLP_MAX_TOKENS",
+        16,
+    )
 
     aux_layers = {1}
     captured: list[torch.Tensor] = []

@@ -164,6 +164,14 @@ def _apply_attn_res(
     )
 
 
+def _should_defer_attn_res_mlp(hidden_states: torch.Tensor) -> bool:
+    """Limit the boundary fusion to the low-token decode shapes it targets."""
+    return (
+        envs.VLLM_KIMI_K3_DEFER_ATTN_RES_MLP
+        and hidden_states.shape[0] <= envs.VLLM_KIMI_K3_DEFER_ATTN_RES_MLP_MAX_TOKENS
+    )
+
+
 class KimiMoE(nn.Module):
     def __init__(
         self,
@@ -840,12 +848,13 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             block_residual[:, : residual.size(1), :].copy_(residual)
         residual = block_residual
 
+        defer_attn_res_mlp = _should_defer_attn_res_mlp(hidden_states)
         pending_mlp_out = None
         for layer_idx, layer in enumerate(
             self.layers[self.start_layer : self.end_layer],
             start=self.start_layer,
         ):
-            if envs.VLLM_KIMI_K3_DEFER_ATTN_RES_MLP:
+            if defer_attn_res_mlp:
                 hidden_states, pending_mlp_out, residual = (
                     layer.forward_attn_residual_deferred(
                         positions=positions,

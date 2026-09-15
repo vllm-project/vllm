@@ -913,6 +913,7 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
                     name
                     for name, value in vars(speculator).items()
                     if isinstance(value, CudaGraphManager)
+                    or getattr(value, "is_speculator_graph_manager", False)
                 ]
             manager._max_full_descs_to_capture = _FULL_GRAPH_PROFILING_SAMPLES
             mem_samples: list[int] = []
@@ -940,6 +941,9 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
             # initialize_kv_cache re-creates them. Their profiling graphs
             # release the throwaway pool here rather than after the real init.
             for name in spec_manager_names:
+                manager_to_clear = getattr(speculator, name, None)
+                if clear := getattr(manager_to_clear, "clear", None):
+                    clear()
                 setattr(speculator, name, None)
             # Drop local references before teardown detaches the runner's
             # manager and flushes the allocator.

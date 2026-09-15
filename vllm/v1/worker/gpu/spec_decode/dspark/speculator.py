@@ -27,10 +27,15 @@ from typing import Any
 
 import torch
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import (
+    BoundedContextCudaGraph,
+)
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
 
@@ -112,6 +117,31 @@ class DSparkSpeculator(DFlashSpeculator):
             # is available.
             self.use_acceptance_estimator = False
         return model
+
+    def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        """Create graph managers for the currently allocated KV-cache lifetime."""
+        super().init_cudagraph_manager(cudagraph_mode)
+        self.context_cudagraph_manager = None
+        context_cg_limit = min(
+            max(0, envs.VLLM_KIMI_K3_DSPARK_CONTEXT_CG_MAX_TOKENS),
+            self.max_num_tokens,
+        )
+        context_cg_tokens = self.num_speculative_steps + 1
+        if (
+            0 < context_cg_tokens <= context_cg_limit
+            and current_platform.is_rocm()
+            and getattr(self.model, "supports_bounded_context_cudagraph", False)
+        ):
+            self.context_cudagraph_manager = BoundedContextCudaGraph(
+                self.device,
+                self.dtype,
+                self.model.context_cudagraph_input_size,
+                context_cg_tokens,
+            )
+            logger.info(
+                "Kimi-K3 DSpark context precompute graphs enabled for 1..%d tokens",
+                context_cg_tokens,
+            )
 
     def _sample_logits(
         self,

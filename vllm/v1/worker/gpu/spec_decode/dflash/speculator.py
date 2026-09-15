@@ -23,7 +23,10 @@ from vllm.v1.worker.gpu.cp_utils import cp_local_slot
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManager
+from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import (
+    BoundedContextCudaGraph,
+    DFlashCudaGraphManager,
+)
 from vllm.v1.worker.gpu.spec_decode.dflash.utils import load_dflash_model
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import get_parallel_drafting_token_id
@@ -107,6 +110,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         ).repeat(self.max_num_reqs)
 
         self.query_cudagraph_manager: DFlashCudaGraphManager | None = None
+        self.context_cudagraph_manager: BoundedContextCudaGraph | None = None
         self.draft_kv_cache_group_id: int = -1
 
     @property
@@ -162,6 +166,10 @@ class DFlashSpeculator(DraftModelSpeculator):
             causal=self._group_causal,
             progress_bar_desc=f"Capturing {self._speculator_name.lower()} CUDA graphs",
         )
+        if self.context_cudagraph_manager is not None:
+            self.context_cudagraph_manager.capture(
+                self.model.store_projected_context_kv
+            )
 
     def load_draft_model(
         self,
@@ -420,11 +428,48 @@ class DFlashSpeculator(DraftModelSpeculator):
             ]
         else:
             context_slots = self._context_slot_mappings[0][:num_target_tokens]
-        self.model.precompute_and_store_context_kv(
-            self.hidden_states[:num_target_tokens],
-            self.context_positions[:num_target_tokens],
-            context_slots,
+        context_states = self.hidden_states[:num_target_tokens]
+        context_positions = self.context_positions[:num_target_tokens]
+        has_prefill = getattr(input_batch, "has_prefill", None)
+        if has_prefill is None:
+            # Compatibility with packaged V2 runners predating has_prefill.
+            has_prefill = bool(input_batch.is_prefilling_np.any())
+        fixed_single_decode = (
+            num_reqs == 1
+            and not has_prefill
+            and not dummy_run
+            and not is_profile
+            and num_target_tokens == int(input_batch.num_scheduled_tokens.sum())
         )
+        projected_context = None
+        if self.context_cudagraph_manager is not None and fixed_single_decode:
+            # AITER's GEMM path is not safe to capture independently of the
+            # model graph. Project eagerly, then graph only the norm/RoPE/cache
+            # tail that consumes this stable-width tensor.
+            projected_context = self.model.project_context_kv(context_states)
+        replayed_context_graph = (
+            projected_context is not None
+            and self.context_cudagraph_manager is not None
+            and self.context_cudagraph_manager.replay(
+                projected_context,
+                context_positions,
+                context_slots,
+                eligible=fixed_single_decode,
+            )
+        )
+        if not replayed_context_graph:
+            if projected_context is None:
+                self.model.precompute_and_store_context_kv(
+                    context_states,
+                    context_positions,
+                    context_slots,
+                )
+            else:
+                self.model.store_projected_context_kv(
+                    projected_context,
+                    context_positions,
+                    context_slots,
+                )
 
         batch_sync, num_batch_tokens = (
             self._build_uniform_batch_dp_sync(dp_sync, num_reqs, self.num_query_per_req)

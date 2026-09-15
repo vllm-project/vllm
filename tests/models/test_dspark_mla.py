@@ -13,11 +13,142 @@ from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.model_executor.models.registry import ModelRegistry
 from vllm.models.kimi_k3.nvidia import dspark_mla
 from vllm.models.kimi_k3.nvidia.dspark_mla import K3DSparkForCausalLM, K3DSparkModel
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import BoundedContextCudaGraph
 
 
 def test_dspark_mla_uses_compile_free_model_entrypoint():
     assert ModelRegistry._try_load_model_cls("K3DSparkModel") is K3DSparkForCausalLM
     assert not issubclass(K3DSparkModel, TorchCompileWithNoGuardsWrapper)
+
+
+@pytest.mark.cpu_test
+def test_bounded_context_cudagraph_replay_pads_inert_slots():
+    manager = BoundedContextCudaGraph(
+        torch.device("cpu"), torch.float32, hidden_size=2, max_num_tokens=2
+    )
+
+    class FakeGraph:
+        replay_count = 0
+
+        def replay(self):
+            self.replay_count += 1
+
+    graph = FakeGraph()
+    manager.graphs[2] = graph  # type: ignore[assignment]
+    states = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+    positions = torch.tensor([5, 6])
+    slots = torch.tensor([9, PAD_SLOT_ID])
+
+    assert manager.replay(states, positions, [slots, slots], eligible=True)
+    assert graph.replay_count == 1
+    assert manager.replay_count == 1
+    assert manager.fallback_count == 0
+    torch.testing.assert_close(manager.context_states[:2], states)
+    torch.testing.assert_close(manager.context_positions[:2], positions)
+    assert manager.context_slot_mapping.tolist() == [9, PAD_SLOT_ID]
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("eligible", "num_tokens", "slot_mapping"),
+    [
+        (False, 2, torch.tensor([1, 2])),
+        (True, 5, torch.tensor([1, 2, 3, 4, 5])),
+        (True, 2, [torch.tensor([1, 2]), torch.tensor([1, 2])]),
+        (True, 2, None),
+    ],
+)
+def test_bounded_context_cudagraph_falls_back(eligible, num_tokens, slot_mapping):
+    manager = BoundedContextCudaGraph(
+        torch.device("cpu"), torch.float32, hidden_size=2, max_num_tokens=4
+    )
+    graph = SimpleNamespace(
+        replay=lambda: pytest.fail("ineligible input must not replay")
+    )
+    manager.graphs = {  # type: ignore[assignment]
+        num_tokens: graph for num_tokens in range(1, manager.max_num_tokens + 1)
+    }
+
+    assert not manager.replay(
+        torch.zeros(num_tokens, 2),
+        torch.arange(num_tokens),
+        slot_mapping,
+        eligible=eligible,
+    )
+    assert manager.replay_count == 0
+    assert manager.fallback_count == 1
+
+
+@pytest.mark.cpu_test
+def test_bounded_context_cudagraph_clear_drops_pool_ownership():
+    manager = BoundedContextCudaGraph(
+        torch.device("cpu"), torch.float32, hidden_size=2, max_num_tokens=1
+    )
+    manager.graphs[1] = SimpleNamespace(replay=lambda: None)  # type: ignore[assignment]
+    manager.graph_pools[1] = (1, 2)
+    manager.replay_count = 3
+    manager.fallback_count = 4
+
+    manager.clear()
+
+    assert manager.graphs == {}
+    assert manager.graph_pools == {}
+    assert manager.replay_count == 0
+    assert manager.fallback_count == 0
+
+
+@pytest.mark.cpu_test
+def test_context_cache_pointer_array_tracks_reallocation():
+    owner = SimpleNamespace()
+    layers = [
+        SimpleNamespace(kv_cache=torch.empty(2, 3, 4)),
+        SimpleNamespace(kv_cache=torch.empty(2, 3, 4)),
+    ]
+    first = dspark_mla.K3DSparkModel._get_context_kv_cache_ptrs(owner, layers)
+    first_values = first.tolist()
+
+    layers[0].kv_cache = torch.empty(4, 3, 4)
+    second = dspark_mla.K3DSparkModel._get_context_kv_cache_ptrs(owner, layers)
+
+    assert second is not first
+    assert second.tolist() == [layer.kv_cache.data_ptr() for layer in layers]
+    assert second.tolist() != first_values
+
+
+@pytest.mark.cpu_test
+def test_context_cache_layout_rechecks_after_reallocation():
+    owner = SimpleNamespace()
+    layers = [
+        SimpleNamespace(kv_cache=torch.empty(2, 3, 4)),
+        SimpleNamespace(kv_cache=torch.empty(2, 3, 4)),
+    ]
+    assert dspark_mla.K3DSparkModel._has_uniform_block_layout(owner, layers)
+
+    layers[1].kv_cache = torch.empty(2, 5, 4)
+    assert not dspark_mla.K3DSparkModel._has_uniform_block_layout(owner, layers)
+
+
+@pytest.mark.cpu_test
+def test_context_precompute_split_reuses_eager_projection():
+    states = torch.randn(3, 4)
+    projected = torch.randn(3, 6)
+    positions = torch.arange(3)
+    slots = torch.arange(3)
+    calls: list[tuple[torch.Tensor, ...]] = []
+    owner = SimpleNamespace(
+        project_context_kv=lambda actual: calls.append((actual,)) or projected,
+        store_projected_context_kv=lambda *args: calls.append(args),
+    )
+
+    dspark_mla.K3DSparkModel._precompute_fused_context_kv(
+        owner, states, positions, slots
+    )
+
+    assert calls[0][0] is states
+    assert calls[1][0] is projected
+    assert calls[1][1] is positions
+    assert calls[1][2] is slots
 
 
 @pytest.mark.parametrize(

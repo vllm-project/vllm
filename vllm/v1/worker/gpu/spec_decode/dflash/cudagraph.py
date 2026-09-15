@@ -5,6 +5,10 @@ from collections.abc import Callable, Mapping
 import torch
 
 from vllm.config.compilation import CUDAGraphMode
+from vllm.logger import init_logger
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import current_stream
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
@@ -19,6 +23,162 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 )
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.utils import AttentionGroup
+
+logger = init_logger(__name__)
+
+
+class BoundedContextCudaGraph:
+    """Small fixed-shape context-KV graph family with eager fallback."""
+
+    is_speculator_graph_manager = True
+
+    def __init__(
+        self,
+        device: torch.device,
+        dtype: torch.dtype,
+        hidden_size: int,
+        max_num_tokens: int,
+    ) -> None:
+        self.max_num_tokens = max_num_tokens
+        self.context_states = torch.zeros(
+            max_num_tokens, hidden_size, dtype=dtype, device=device
+        )
+        self.device = self.context_states.device
+        self.context_positions = torch.zeros(
+            max_num_tokens, dtype=torch.int64, device=device
+        )
+        self.context_slot_mapping = torch.full(
+            (max_num_tokens,),
+            PAD_SLOT_ID,
+            dtype=torch.int64,
+            device=device,
+        )
+        self.graphs: dict[int, torch.cuda.CUDAGraph] = {}
+        # Different token-count graphs replay in arbitrary order. They cannot
+        # share a private pool: PyTorch only permits shared-pool graphs when
+        # replay order always matches capture order.
+        self.graph_pools: dict[int, tuple[int, int]] = {}
+        self.capture_stream: torch.cuda.Stream | None = None
+        self.replay_count = 0
+        self.fallback_count = 0
+
+    def clear(self) -> None:
+        """Release graphs captured against a temporary or superseded KV cache."""
+        self.graphs.clear()
+        self.graph_pools.clear()
+        self.capture_stream = None
+        self.replay_count = 0
+        self.fallback_count = 0
+
+    @staticmethod
+    def _shared_slot_mapping(
+        context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | None,
+    ) -> torch.Tensor | None:
+        """Canonicalize one shared slot row without synchronizing the GPU."""
+        if isinstance(context_slot_mapping, torch.Tensor):
+            return context_slot_mapping
+        if not context_slot_mapping or any(
+            slot_mapping is None for slot_mapping in context_slot_mapping
+        ):
+            return None
+        slot_mappings = [
+            slot_mapping
+            for slot_mapping in context_slot_mapping
+            if slot_mapping is not None
+        ]
+        first = slot_mappings[0]
+        if all(
+            slot_mapping.data_ptr() == first.data_ptr()
+            and slot_mapping.shape == first.shape
+            and slot_mapping.stride() == first.stride()
+            for slot_mapping in slot_mappings[1:]
+        ):
+            return first
+        return None
+
+    @torch.inference_mode()
+    def capture(
+        self,
+        forward_fn: Callable[[torch.Tensor, torch.Tensor, torch.Tensor], None],
+    ) -> None:
+        """Warm up and capture every context shape up to the configured bound."""
+        self.clear()
+        self.context_slot_mapping.fill_(PAD_SLOT_ID)
+        for num_tokens in range(1, self.max_num_tokens + 1):
+            logger.info("Warming DSpark context graph shape %d", num_tokens)
+            forward_fn(
+                self.context_states[:num_tokens],
+                self.context_positions[:num_tokens],
+                self.context_slot_mapping[:num_tokens],
+            )
+            torch.accelerator.synchronize()
+        # This projection/cache sequence has no collectives. Using vLLM's
+        # distributed graph_capture context here would open a second AITER
+        # collective-capture lifecycle after the query graph and overwrite its
+        # registered graph-address state. A dedicated plain HIP stream avoids
+        # touching that global collective registry.
+        source_stream = torch.cuda.current_stream(self.device)
+        capture_stream = torch.cuda.Stream(device=self.device)
+        self.capture_stream = capture_stream
+        capture_stream.wait_stream(source_stream)
+        with torch.cuda.stream(capture_stream):
+            for num_tokens in range(1, self.max_num_tokens + 1):
+                logger.info("Capturing DSpark context graph shape %d", num_tokens)
+                graph = torch.cuda.CUDAGraph()
+                graph_pool = current_platform.graph_pool_handle()
+                with torch.cuda.graph(
+                    graph,
+                    pool=graph_pool,
+                    stream=current_stream(),
+                ):
+                    forward_fn(
+                        self.context_states[:num_tokens],
+                        self.context_positions[:num_tokens],
+                        self.context_slot_mapping[:num_tokens],
+                    )
+                self.graphs[num_tokens] = graph
+                self.graph_pools[num_tokens] = graph_pool
+                torch.accelerator.synchronize()
+        source_stream.wait_stream(capture_stream)
+
+    @torch.inference_mode()
+    def replay(
+        self,
+        context_states: torch.Tensor,
+        context_positions: torch.Tensor,
+        context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | None,
+        *,
+        eligible: bool,
+    ) -> bool:
+        """Replay a captured shape when inputs satisfy the bounded contract."""
+        num_tokens = context_states.shape[0]
+        shared_slot_mapping = self._shared_slot_mapping(context_slot_mapping)
+        if (
+            not eligible
+            or num_tokens not in self.graphs
+            or shared_slot_mapping is None
+            or context_states.ndim != 2
+            or context_positions.shape != (num_tokens,)
+            or shared_slot_mapping.shape != (num_tokens,)
+            or context_states.shape[1:] != self.context_states.shape[1:]
+            or context_states.dtype != self.context_states.dtype
+            or context_states.device != self.device
+            or context_positions.dtype != torch.int64
+            or context_positions.device != self.device
+            or shared_slot_mapping.dtype != torch.int64
+            or shared_slot_mapping.device != self.device
+        ):
+            self.fallback_count += 1
+            return False
+
+        self.context_states[:num_tokens].copy_(context_states)
+        self.context_positions[:num_tokens].copy_(context_positions)
+        self.context_slot_mapping[:num_tokens].copy_(shared_slot_mapping)
+        self.graphs[num_tokens].replay()
+        self.replay_count += 1
+        if self.replay_count == 1:
+            logger.info("Replayed first DSpark context graph at %d tokens", num_tokens)
+        return True
 
 
 def _prepare_dflash_inputs_to_capture(
