@@ -7,7 +7,7 @@ This guide will help you quickly get started with vLLM to perform:
 
 ## Prerequisites
 
-- OS: Linux
+- OS: Linux (Windows is not officially supported)
 - Python: 3.10 -- 3.13
 
 !!! note
