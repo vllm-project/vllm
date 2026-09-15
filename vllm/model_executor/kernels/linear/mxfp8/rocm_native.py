@@ -4,9 +4,9 @@
 
 Consumes the FP8 E4M3 weights + E8M0 block scales directly (no dequant-to-BF16);
 activations are MXFP8-quantized per token. Uses the CDNA4 hardware microscaling
-matrix cores. Falls back (via the kernel selector) to the BF16
-``EmulationMxfp8LinearKernel`` on archs without native MX or for shapes with
-``K % 128 != 0``.
+matrix cores. ``dot_scaled`` tiles K by 128; a weight whose K is not a multiple
+of that is dequantized to BF16 once at load and served by a plain linear
+instead, since ``can_implement`` does not filter on K.
 """
 
 import torch
@@ -194,6 +194,9 @@ def _select_cfg(M, N, K):
     return (128, 128, 256, 8, 2) if K % 256 == 0 else (128, 256, 128, 8, 3)
 
 
+_DOT_SCALED_K_ALIGN = 128
+
+
 class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
     """Native CDNA4 (gfx950) MXFP8 linear via Triton ``tl.dot_scaled``."""
 
@@ -219,6 +222,8 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
         N, K = weight.shape
         scale_k = K // MXFP8_BLOCK_SIZE
         weight_scale = layer.weight_scale.data[:N, :scale_k].contiguous()
+        if K % _DOT_SCALED_K_ALIGN != 0:
+            weight = dequant_mxfp8_to_bf16(weight.contiguous(), weight_scale)
         layer.weight = Parameter(weight.contiguous(), requires_grad=False)
         layer.weight_scale = Parameter(weight_scale, requires_grad=False)
 
@@ -235,10 +240,13 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
             )
         out_shape = (*x.shape[:-1], layer.weight.shape[0])
         x2d = x.reshape(-1, x.shape[-1])
-        if x2d.shape[-1] % 128 == 0:
+        if layer.weight.element_size() >= 2:
+            out = torch.nn.functional.linear(x2d, layer.weight.to(x.dtype))
+        elif x2d.shape[-1] % _DOT_SCALED_K_ALIGN == 0:
             out = _mxfp8_dot_scaled_linear(x2d, layer.weight, layer.weight_scale)
         else:
-            # dot_scaled tiling needs K % 128 == 0; dequantize fallback otherwise.
+            # process_weights_after_loading dequantizes these weights once, so
+            # this runs only if it did not; dot_scaled would be invalid here.
             w_bf16 = dequant_mxfp8_to_bf16(layer.weight, layer.weight_scale)
             out = torch.nn.functional.linear(x2d, w_bf16).to(x.dtype)
         out = out.reshape(out_shape)
