@@ -1545,6 +1545,8 @@ class SpeculativeConfig:
                     )
                 )
 
+                # Use the final draft config, after any architecture overrides,
+                # so EP agrees with ModelConfig's expert-count validation.
                 self.draft_parallel_config = (
                     SpeculativeConfig.create_draft_parallel_config(
                         self.target_parallel_config,
@@ -1749,7 +1751,7 @@ class SpeculativeConfig:
     ) -> ParallelConfig:
         """Create a parallel config for use by the draft worker.
 
-        This is mostly a copy of the target parallel config, except the tp_size.
+        Use the draft TP size and inherit EP only when the draft config has experts.
         """
         draft_parallel_config = ParallelConfig(
             pipeline_parallel_size=1,
