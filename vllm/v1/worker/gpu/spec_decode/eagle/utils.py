@@ -54,9 +54,14 @@ def maybe_share_target_embed(
         return
 
     if target_embed is None:
-        if hasattr(draft_inner, "embed_tokens") and not getattr(
-            draft_model, "has_own_embed_tokens", False
-        ):
+        # A drafter whose checkpoint ships the embedding can load its own copy
+        # on this stage (e.g. DeepSeek-V4/Kimi-K3 DSpark under PP, where the
+        # target's table lives on the first stage while the drafter runs on
+        # the last). Anything else would run on an uninitialized table.
+        loads_own = getattr(draft_model, "has_own_embed_tokens", False) or getattr(
+            draft_model, "loads_own_embed_under_pp", False
+        )
+        if draft_embed is None or not loads_own:
             raise RuntimeError(
                 f"{type(draft_model).__name__} needs the target input embedding, "
                 "but it is unavailable on this PP stage"
