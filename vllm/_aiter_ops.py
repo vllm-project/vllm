@@ -1676,6 +1676,75 @@ def _rocm_aiter_fp8_attn_fake(
     )
 
 
+def _mhc_delayed_pre_tail(
+    gemm_out: torch.Tensor,
+    sqrsum: torch.Tensor,
+    residual: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    pre_mix: torch.Tensor | None,
+    rms_eps: float,
+    hc_pre_eps: float,
+    hc_sinkhorn_eps: float,
+    hc_post_mult_value: float,
+    sinkhorn_repeat: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Finish a delayed mHC pre once AITER has produced the projection.
+
+    Shared by the plain and the post-fused entry points, which differ only in
+    which kernel computes ``gemm_out`` / ``sqrsum`` and the residual they
+    project. ``mhc_pre_big_fuse`` also writes a collapse against its own
+    pre-mix, which the delayed formulation cannot use and so discards.
+    Returns ``(post_mix, comb_mix, layer_input, next_pre_mix)``.
+    """
+    from aiter.ops.mhc import mhc_pre_big_fuse
+
+    num_tokens, hc_mult, hidden_size = residual.shape
+    device = residual.device
+    with torch.device(device):
+        post_mix = torch.empty(
+            num_tokens, hc_mult, 1, dtype=torch.float32, device=device
+        )
+        comb_mix = torch.empty(
+            num_tokens, hc_mult, hc_mult, dtype=torch.float32, device=device
+        )
+        unused_collapse = torch.empty(
+            num_tokens, hidden_size, dtype=torch.bfloat16, device=device
+        )
+        mhc_pre_big_fuse(
+            post_mix,
+            comb_mix,
+            unused_collapse,
+            gemm_out,
+            sqrsum,
+            hc_scale,
+            hc_base,
+            residual,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_mult_value,
+            sinkhorn_repeat,
+        )
+
+    next_pre_mix = torch.ops.vllm.mhc_pre_mix_triton(
+        gemm_out,
+        sqrsum,
+        hc_scale,
+        hc_base,
+        hc_mult,
+        hc_mult * hidden_size,
+        rms_eps,
+        hc_pre_eps,
+    )
+    if pre_mix is None:
+        # Model entry selects residual stream zero.
+        layer_input = residual[:, 0]
+    else:
+        layer_input = torch.ops.vllm.hc_collapse_triton(residual, pre_mix)
+    return post_mix, comb_mix, layer_input, next_pre_mix
+
+
 # Global flag to ensure ops are registered only once
 _OPS_REGISTERED = False
 
@@ -3611,6 +3680,10 @@ class rocm_aiter_ops:
         hc_post_mult_value: float,
         sinkhorn_repeat: int,
         pre_mix: torch.Tensor | None = None,
+        sublayer_out: torch.Tensor | None = None,
+        post_layer_mix: torch.Tensor | None = None,
+        comb_res_mix: torch.Tensor | None = None,
+        residual_out: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """mHC pre using the pre-mix carried from the previous sublayer.
 
@@ -3625,6 +3698,15 @@ class rocm_aiter_ops:
         that redundant store is the price of not having a native delayed
         kernel, and is small next to the ~140 launches it replaces.
 
+        Passing ``sublayer_out`` / ``post_layer_mix`` / ``comb_res_mix``
+        also applies the preceding post block. AITER then projects the new
+        residual in the same kernel that computes it
+        (``mhc_fused_post_pre_gemm_sqrsum``), which saves one launch; every
+        later stage is identical either way. That new residual is written to
+        ``residual_out``, which the caller must supply in that case; it is an
+        output buffer rather than a return value so the op never has to hand
+        back one of its own inputs on the unfused path.
+
         Returns:
             post_mix: shape (..., hc_mult, 1), dtype torch.float32
             comb_mix: shape (..., hc_mult, hc_mult), dtype torch.float32
@@ -3632,8 +3714,9 @@ class rocm_aiter_ops:
             next_pre_mix: shape (..., hc_mult), dtype torch.float32
         """
         from aiter.ops.mhc import (
+            get_mhc_fused_post_pre_config,
             get_mhc_pre_splitk,
-            mhc_pre_big_fuse,
+            mhc_fused_post_pre_gemm_sqrsum,
             mhc_pre_gemm_sqrsum,
         )
 
@@ -3666,9 +3749,16 @@ class rocm_aiter_ops:
 
         pre_mix_flat = None if pre_mix is None else pre_mix.view(-1, hc_mult)
 
+        fuse_post = sublayer_out is not None
         # AITER's Python wrappers allocate without explicit device arguments.
         with torch.device(device):
-            splitk, tile_k = get_mhc_pre_splitk(num_tokens, hc_hidden_size)
+            if fuse_post:
+                # Keyed on the per-stream K, i.e. hidden_size, not hc_mult * it.
+                splitk, tile_m, tile_n, tile_k = get_mhc_fused_post_pre_config(
+                    num_tokens, hidden_size
+                )
+            else:
+                splitk, tile_k = get_mhc_pre_splitk(num_tokens, hc_hidden_size)
             # AITER pads the GEMM output to a multiple of 32 columns.
             gemm_pad = torch.empty(
                 splitk,
@@ -3679,49 +3769,45 @@ class rocm_aiter_ops:
             )
             gemm_out = gemm_pad[:, :, :hc_mult3]
             sqrsum = torch.empty(splitk, num_tokens, dtype=torch.float32, device=device)
-            mhc_pre_gemm_sqrsum(gemm_out, sqrsum, residual_flat, fn, tile_k, 0)
+            if fuse_post:
+                # Restated for the type checker, which cannot narrow the
+                # optional arguments through the fuse_post flag.
+                assert sublayer_out is not None
+                assert post_layer_mix is not None and comb_res_mix is not None
+                assert residual_out is not None
+                projected = residual_out.view(-1, hc_mult, hidden_size)
+                mhc_fused_post_pre_gemm_sqrsum(
+                    gemm_out,
+                    sqrsum,
+                    projected,
+                    sublayer_out.view(-1, hidden_size),
+                    residual_flat,
+                    # The kernel wants the post mix squeezed to (tokens, hc_mult).
+                    post_layer_mix.view(-1, hc_mult, 1).squeeze(-1),
+                    comb_res_mix.view(-1, hc_mult, hc_mult),
+                    fn,
+                    tile_m,
+                    tile_n,
+                    tile_k,
+                    0,
+                )
+            else:
+                projected = residual_flat
+                mhc_pre_gemm_sqrsum(gemm_out, sqrsum, projected, fn, tile_k, 0)
 
-            post_mix = torch.empty(
-                num_tokens, hc_mult, 1, dtype=torch.float32, device=device
-            )
-            comb_mix = torch.empty(
-                num_tokens, hc_mult, hc_mult, dtype=torch.float32, device=device
-            )
-            unused_collapse = torch.empty(
-                num_tokens, hidden_size, dtype=torch.bfloat16, device=device
-            )
-            mhc_pre_big_fuse(
-                post_mix,
-                comb_mix,
-                unused_collapse,
-                gemm_out,
-                sqrsum,
-                hc_scale,
-                hc_base,
-                residual_flat,
-                rms_eps,
-                hc_pre_eps,
-                hc_sinkhorn_eps,
-                hc_post_mult_value,
-                sinkhorn_repeat,
-            )
-
-        next_pre_mix = torch.ops.vllm.mhc_pre_mix_triton(
+        post_mix, comb_mix, layer_input, next_pre_mix = _mhc_delayed_pre_tail(
             gemm_out,
             sqrsum,
+            projected,
             hc_scale,
             hc_base,
-            hc_mult,
-            hc_hidden_size,
+            pre_mix_flat,
             rms_eps,
             hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_mult_value,
+            sinkhorn_repeat,
         )
-
-        if pre_mix_flat is None:
-            # Model entry selects residual stream zero.
-            layer_input = residual_flat[:, 0]
-        else:
-            layer_input = torch.ops.vllm.hc_collapse_triton(residual_flat, pre_mix_flat)
 
         return (
             post_mix.view(*outer_shape, hc_mult, 1),
@@ -3729,6 +3815,21 @@ class rocm_aiter_ops:
             layer_input.view(*outer_shape, hidden_size),
             next_pre_mix.view(*outer_shape, hc_mult),
         )
+
+    @staticmethod
+    def mhc_fused_post_pre_delayed_prefers_unfused(num_tokens: int) -> bool:
+        """True when AITER's own heuristic favours separate post and pre.
+
+        Mirrors the ``fused_m_upper_bound`` table in ``aiter.ops.mhc``: the
+        fused GEMM wins for decode-sized batches and loses for large ones.
+        """
+        from aiter.jit.utils.chip_info import get_gfx_runtime
+
+        return num_tokens >= {
+            "gfx950": 1024,
+            "gfx942": 128,
+            "gfx1250": 1024,
+        }.get(get_gfx_runtime(), 1024)
 
     @staticmethod
     def hc_head(
