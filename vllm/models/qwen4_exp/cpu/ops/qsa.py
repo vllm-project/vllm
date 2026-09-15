@@ -8,11 +8,9 @@ import math
 
 import torch
 
-from vllm.triton_utils import (
-    has_active_triton_cpu_backend,
-    tl,
-    triton,
-)
+from vllm.triton_utils import tl, triton
+
+from ..runtime import has_active_triton_cpu_backend
 
 _MAX_GRID_AXIS = 65_535
 

@@ -6,13 +6,11 @@ import sys
 import types
 from unittest import mock
 
-import pytest
-
 from vllm.triton_utils import importing as triton_importing
 from vllm.triton_utils.importing import TritonLanguagePlaceholder, TritonPlaceholder
 
 
-def _has_triton_for_backends(cpu_build: bool = False, **drivers: bool) -> bool:
+def _has_triton_for_backends(**drivers: bool) -> bool:
     """Re-evaluate ``HAS_TRITON`` against a synthetic ``triton.backends`` map.
 
     ``drivers`` maps backend name to whether its driver reports itself active.
@@ -32,19 +30,10 @@ def _has_triton_for_backends(cpu_build: bool = False, **drivers: bool) -> bool:
     triton_mod.__dict__["backends"] = backends_mod
 
     patched_modules = {"triton": triton_mod, "triton.backends": backends_mod}
-
-    def vllm_version(package: str) -> str:
-        assert package == "vllm"
-        return "0.0.0+cpu" if cpu_build else "0.0.0"
-
     try:
         with (
             mock.patch.dict(sys.modules, patched_modules),
             mock.patch.dict("os.environ", {}, clear=True),
-            mock.patch(
-                "importlib.metadata.version",
-                side_effect=vllm_version,
-            ),
         ):
             return importlib.reload(triton_importing).HAS_TRITON
     finally:
@@ -121,65 +110,22 @@ def test_triton_placeholder_language_from_parent():
     assert isinstance(lang, TritonLanguagePlaceholder)
 
 
-@pytest.mark.parametrize(
-    ("cpu_build", "drivers", "expected"),
-    [
-        pytest.param(False, {"amd": True, "cpu": True}, True, id="gpu-plus-cpu"),
-        pytest.param(False, {"amd": True}, True, id="single-gpu"),
-        pytest.param(
-            False,
-            {"amd": True, "nvidia": True},
-            False,
-            id="multiple-gpus",
-        ),
-        pytest.param(False, {"cpu": True}, False, id="non-cpu-build"),
-        pytest.param(True, {"cpu": True}, True, id="cpu-build"),
-    ],
-)
-def test_triton_backend_selection(
-    cpu_build: bool, drivers: dict[str, bool], expected: bool
-) -> None:
-    assert _has_triton_for_backends(cpu_build=cpu_build, **drivers) is expected
+def test_cpu_backend_does_not_disable_triton():
+    # The cpu backend's driver is always active, so counting it alongside a GPU
+    # backend used to yield 2 active drivers and disable Triton entirely.
+    assert _has_triton_for_backends(amd=True, cpu=True) is True
 
 
-@pytest.mark.parametrize(
-    ("backend", "expected"),
-    [
-        pytest.param("cpu", True, id="cpu"),
-        pytest.param("cuda", False, id="cuda"),
-    ],
-)
-def test_active_triton_cpu_backend(backend: str, expected: bool) -> None:
-    target = types.SimpleNamespace(backend=backend)
-    driver = types.SimpleNamespace(
-        active=types.SimpleNamespace(get_current_target=lambda: target)
-    )
-    runtime = types.ModuleType("triton.runtime")
-    runtime.__dict__["driver"] = driver
-
-    with (
-        mock.patch.object(triton_importing, "HAS_TRITON", True),
-        mock.patch.dict(sys.modules, {"triton.runtime": runtime}),
-    ):
-        assert triton_importing.has_active_triton_cpu_backend() is expected
+def test_single_gpu_backend_keeps_triton():
+    assert _has_triton_for_backends(amd=True) is True
 
 
-def test_unavailable_triton_cpu_backend_fails_closed():
-    with mock.patch.object(triton_importing, "HAS_TRITON", False):
-        assert not triton_importing.has_active_triton_cpu_backend()
+def test_multiple_active_gpu_backends_disable_triton():
+    assert _has_triton_for_backends(amd=True, nvidia=True) is False
 
-    driver = types.SimpleNamespace(
-        active=types.SimpleNamespace(
-            get_current_target=mock.Mock(side_effect=RuntimeError("no active driver"))
-        )
-    )
-    runtime = types.ModuleType("triton.runtime")
-    runtime.__dict__["driver"] = driver
-    with (
-        mock.patch.object(triton_importing, "HAS_TRITON", True),
-        mock.patch.dict(sys.modules, {"triton.runtime": runtime}),
-    ):
-        assert not triton_importing.has_active_triton_cpu_backend()
+
+def test_cpu_backend_alone_disables_triton():
+    assert _has_triton_for_backends(cpu=True) is False
 
 
 def test_no_triton_fallback():

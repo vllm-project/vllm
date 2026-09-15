@@ -15,8 +15,8 @@ from vllm.models.qwen4_exp.cpu.ops.qsa import (
     qsa_sparse_paged_attention,
     qsa_store_cache_rows,
 )
+from vllm.models.qwen4_exp.cpu.runtime import has_active_triton_cpu_backend
 from vllm.platforms import current_platform
-from vllm.triton_utils import has_active_triton_cpu_backend
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cpu(),

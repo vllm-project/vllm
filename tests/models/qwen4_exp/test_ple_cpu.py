@@ -2,20 +2,24 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
 from torch import nn
 
+from vllm.models.qwen4_exp.cpu.model_state import Qwen4ExpModelState
 from vllm.models.qwen4_exp.cpu.ngram_embedding import (
     Qwen4ExpNGramEmbedding,
     Qwen4ExpPLEFp8EmbeddingMethod,
 )
 from vllm.models.qwen4_exp.cpu.ops.ple import ple_gate
 from vllm.models.qwen4_exp.cpu.ple_layer import Qwen4ExpPLELayer
+from vllm.models.qwen4_exp.cpu.runtime import has_active_triton_cpu_backend
 from vllm.platforms import current_platform
-from vllm.triton_utils import has_active_triton_cpu_backend
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
 from .test_ple import (
     _ConvBatchCase,
@@ -32,6 +36,90 @@ requires_triton_cpu = pytest.mark.skipif(
     not has_active_triton_cpu_backend(),
     reason="Qwen4Exp PLE kernels require an active Triton-CPU backend",
 )
+
+
+def test_cpu_model_state_returns_active_ngram_views() -> None:
+    model_state = object.__new__(Qwen4ExpModelState)
+    model_state.uses_ngram_embedding = True
+    model_state.ngram_context_len = 3
+    model_state.ngram_eos_token_id = 99
+    model_state.ngram_context = torch.empty((8, 3), dtype=torch.int32)
+    model_state.ngram_context_offsets = torch.arange(-3, 0, dtype=torch.int64)
+    model_state.ple_query_start_loc = torch.empty(9, dtype=torch.int32)
+
+    input_batch = SimpleNamespace(
+        num_reqs=2,
+        num_reqs_after_padding=3,
+        idx_mapping=torch.tensor([1, 0]),
+        query_start_loc=torch.tensor([0, 2, 3, 3], dtype=torch.int32),
+    )
+    req_states = SimpleNamespace(
+        num_computed_tokens=SimpleNamespace(gpu=torch.tensor([3, 1])),
+        all_token_ids=SimpleNamespace(
+            gpu=torch.tensor([[1, 2, 3, 4], [20, 21, 22, 23]], dtype=torch.int32)
+        ),
+    )
+
+    with patch.object(MambaHybridModelState, "prepare_inputs", return_value={}):
+        model_inputs = model_state.prepare_inputs(input_batch, req_states)
+
+    torch.testing.assert_close(
+        model_inputs["query_start_loc"],
+        torch.tensor([0, 2, 3, 3], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        model_inputs["ngram_context"],
+        torch.tensor(
+            [[99, 99, 20], [1, 2, 3], [99, 99, 99]],
+            dtype=torch.int32,
+        ),
+    )
+
+    query_start_loc = model_inputs["query_start_loc"]
+    ngram_context = model_inputs["ngram_context"]
+    input_batch.num_reqs = 1
+    input_batch.num_reqs_after_padding = 1
+    input_batch.idx_mapping = torch.tensor([0])
+    input_batch.query_start_loc = torch.tensor([0, 3], dtype=torch.int32)
+
+    with patch.object(MambaHybridModelState, "prepare_inputs", return_value={}):
+        model_inputs = model_state.prepare_inputs(input_batch, req_states)
+
+    torch.testing.assert_close(
+        model_inputs["query_start_loc"],
+        torch.tensor([0, 3], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        model_inputs["ngram_context"],
+        torch.tensor([[1, 2, 3]], dtype=torch.int32),
+    )
+    assert model_inputs["query_start_loc"].data_ptr() == query_start_loc.data_ptr()
+    assert model_inputs["ngram_context"].data_ptr() == ngram_context.data_ptr()
+
+
+def test_cpu_model_state_returns_active_dummy_ngram_views() -> None:
+    model_state = object.__new__(Qwen4ExpModelState)
+    model_state.uses_ngram_embedding = True
+    model_state.ngram_eos_token_id = 99
+    model_state.ngram_context = torch.empty((8, 3), dtype=torch.int32)
+    model_state.ple_query_start_loc = torch.empty(9, dtype=torch.int32)
+
+    with patch.object(MambaHybridModelState, "prepare_dummy_inputs", return_value={}):
+        first = model_state.prepare_dummy_inputs(num_reqs=3, num_tokens=4)
+        query_start_loc_ptr = first["query_start_loc"].data_ptr()
+        ngram_context_ptr = first["ngram_context"].data_ptr()
+        second = model_state.prepare_dummy_inputs(num_reqs=3, num_tokens=4)
+
+    torch.testing.assert_close(
+        second["query_start_loc"],
+        torch.tensor([0, 1, 2, 4], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        second["ngram_context"],
+        torch.full((3, 3), 99, dtype=torch.int32),
+    )
+    assert second["query_start_loc"].data_ptr() == query_start_loc_ptr
+    assert second["ngram_context"].data_ptr() == ngram_context_ptr
 
 
 def test_cpu_ple_fp8_dequantizes_only_selected_rows() -> None:

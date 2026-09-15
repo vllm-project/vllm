@@ -6,13 +6,11 @@ from typing import Literal
 
 import torch
 
-from vllm.triton_utils import (
-    has_active_triton_cpu_backend,
-    tl,
-    triton,
-)
+from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+
+from ..runtime import has_active_triton_cpu_backend
 
 
 def _require_cpu_triton(*tensors: torch.Tensor) -> None:

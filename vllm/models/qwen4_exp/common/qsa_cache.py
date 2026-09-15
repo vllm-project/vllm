@@ -636,6 +636,11 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
         else:
             self.compress_ratio = 1
         self.storage_block_size = kv_cache_spec.num_states
+        self._build_qsa_metadata = (
+            build_qsa_metadata_triton
+            if HAS_TRITON and device.type == "cuda"
+            else _build_qsa_metadata_torch
+        )
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.token_to_req_buffer = torch.empty(
             max_tokens, dtype=torch.int32, device=device
@@ -701,21 +706,21 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
                 num_tokens + (self.compress_ratio - 1) * num_requests
             ) // self.compress_ratio
             k_work_metadata = self.k_work_metadata_buffer[:max_num_work]
-        token_to_req, logical_positions, visible_blocks, slot_mapping = (
-            build_qsa_metadata(
-                common_attn_metadata,
-                self.token_to_req_buffer,
-                self.logical_positions_buffer,
-                self.visible_blocks_buffer,
-                self.slot_mapping_buffer,
-                storage_block_size=self.storage_block_size,
-                compress_ratio=self.compress_ratio,
-                circular_buffer_size=(
-                    self.kv_cache_spec.block_size if self.is_circular_buffer else 0
-                ),
-                k_work_metadata_buffer=k_work_metadata if build_k_work else None,
-                request_capacity=request_capacity,
-            )
+        token_to_req, logical_positions, visible_blocks, slot_mapping = getattr(
+            self, "_build_qsa_metadata", build_qsa_metadata
+        )(
+            common_attn_metadata,
+            self.token_to_req_buffer,
+            self.logical_positions_buffer,
+            self.visible_blocks_buffer,
+            self.slot_mapping_buffer,
+            storage_block_size=self.storage_block_size,
+            compress_ratio=self.compress_ratio,
+            circular_buffer_size=(
+                self.kv_cache_spec.block_size if self.is_circular_buffer else 0
+            ),
+            k_work_metadata_buffer=k_work_metadata if build_k_work else None,
+            request_capacity=request_capacity,
         )
         return QSAForwardMetadata(
             block_table=common_attn_metadata.block_table_tensor,

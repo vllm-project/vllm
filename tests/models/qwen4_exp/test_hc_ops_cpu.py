@@ -4,18 +4,18 @@
 import pytest
 import torch
 
-from vllm.models.qwen4_exp.nvidia.ops.hc import (
+from vllm.models.qwen4_exp.cpu.ops.hc import (
     grouped_gemma_rmsnorm,
     hc_combine,
     hc_combine_norm,
     hc_gate_mix,
 )
+from vllm.models.qwen4_exp.cpu.runtime import has_active_triton_cpu_backend
 from vllm.platforms import current_platform
-from vllm.triton_utils import HAS_TRITON
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda() or not HAS_TRITON,
-    reason="HC kernels require CUDA and Triton",
+    not current_platform.is_cpu() or not has_active_triton_cpu_backend(),
+    reason="CPU HC kernels require an active Triton-CPU backend",
 )
 
 HC = 4
@@ -26,8 +26,8 @@ EPS = 1e-6
 
 def test_grouped_gemma_rmsnorm() -> None:
     torch.manual_seed(0)
-    x = torch.randn(2, HYPER_HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
-    weight = torch.randn(HYPER_HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
+    x = torch.randn(2, HYPER_HIDDEN_SIZE, dtype=torch.bfloat16)
+    weight = torch.randn(HYPER_HIDDEN_SIZE, dtype=torch.bfloat16)
 
     actual = grouped_gemma_rmsnorm(x, weight, EPS, HC)
 
@@ -40,8 +40,8 @@ def test_grouped_gemma_rmsnorm() -> None:
 
 def test_hc_gate_mix() -> None:
     torch.manual_seed(0)
-    x = torch.randn(2, HYPER_HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
-    gate = torch.randn(2, HYPER_HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
+    x = torch.randn(2, HYPER_HIDDEN_SIZE, dtype=torch.bfloat16)
+    gate = torch.randn(2, HYPER_HIDDEN_SIZE, dtype=torch.bfloat16)
 
     actual = hc_gate_mix(x, gate, HC)
     expected = (
@@ -54,9 +54,9 @@ def test_hc_gate_mix() -> None:
 
 def test_hc_combine() -> None:
     torch.manual_seed(0)
-    block_output = torch.randn(2, HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
-    residual = torch.randn(2, HYPER_HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
-    injection = torch.randn(2, HC, dtype=torch.bfloat16, device="cuda")
+    block_output = torch.randn(2, HIDDEN_SIZE, dtype=torch.bfloat16)
+    residual = torch.randn(2, HYPER_HIDDEN_SIZE, dtype=torch.bfloat16)
+    injection = torch.randn(2, HC, dtype=torch.bfloat16)
 
     actual = hc_combine(residual, block_output, injection, HC)
     injection_weight = 2.0 * torch.sigmoid(injection.float() / HC)
@@ -70,8 +70,8 @@ def test_hc_combine() -> None:
 
 def test_hc_combine_unit_injection() -> None:
     torch.manual_seed(0)
-    block_output = torch.randn(2, HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
-    residual = torch.randn(2, HYPER_HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
+    block_output = torch.randn(2, HIDDEN_SIZE, dtype=torch.bfloat16)
+    residual = torch.randn(2, HYPER_HIDDEN_SIZE, dtype=torch.bfloat16)
 
     actual = hc_combine(residual, block_output, None, HC)
     expected = residual.unflatten(-1, (HC, HIDDEN_SIZE))
@@ -82,10 +82,10 @@ def test_hc_combine_unit_injection() -> None:
 
 def test_hc_combine_norm() -> None:
     torch.manual_seed(0)
-    block_output = torch.randn(2, HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
-    residual = torch.randn(2, HYPER_HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
-    injection = torch.randn(2, HC, dtype=torch.bfloat16, device="cuda")
-    weight = torch.randn(HYPER_HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
+    block_output = torch.randn(2, HIDDEN_SIZE, dtype=torch.bfloat16)
+    residual = torch.randn(2, HYPER_HIDDEN_SIZE, dtype=torch.bfloat16)
+    injection = torch.randn(2, HC, dtype=torch.bfloat16)
+    weight = torch.randn(HYPER_HIDDEN_SIZE, dtype=torch.bfloat16)
 
     actual, actual_norm = hc_combine_norm(
         residual, block_output, injection, weight, EPS, HC
@@ -109,13 +109,9 @@ def test_hc_combine_norm() -> None:
 @pytest.mark.parametrize("num_tokens", [1, 17, 2048])
 def test_hc_combine_norm_unit_injection(num_tokens: int) -> None:
     torch.manual_seed(0)
-    embedding = torch.randn(
-        num_tokens, HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda"
-    )
-    hidden = torch.randn(
-        num_tokens, HC, HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda"
-    )
-    weight = torch.randn(HYPER_HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
+    embedding = torch.randn(num_tokens, HIDDEN_SIZE, dtype=torch.bfloat16)
+    hidden = torch.randn(num_tokens, HC, HIDDEN_SIZE, dtype=torch.bfloat16)
+    weight = torch.randn(HYPER_HIDDEN_SIZE, dtype=torch.bfloat16)
 
     actual, actual_norm = hc_combine_norm(
         hidden.flatten(1), embedding, None, weight, EPS, HC

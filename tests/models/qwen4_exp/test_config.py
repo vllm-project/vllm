@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import sys
 from importlib import import_module
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -18,8 +17,8 @@ from vllm.models.qwen4_exp.config import (
     Qwen4ExpConfig,
     Qwen4ExpTextConfig,
 )
+from vllm.models.qwen4_exp.nvidia.model_state import Qwen4ExpModelState
 from vllm.platforms import current_platform
-from vllm.platforms.interface import CpuArchEnum
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
 from ...utils import spawn_new_process_for_each_test
@@ -170,144 +169,8 @@ def test_qwen4_exp_rejects_pipeline_parallel_only_with_ple(ple_layer_ids) -> Non
             Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(vllm_config)
 
 
-@pytest.mark.parametrize(
-    ("restriction", "error", "message"),
-    [
-        ("architecture", NotImplementedError, "x86-64"),
-        ("tensor_parallel", NotImplementedError, "tensor_parallel_size=1"),
-        ("speculative", NotImplementedError, "speculative decoding"),
-        ("lora", NotImplementedError, "LoRA"),
-        ("multimodal", NotImplementedError, "text-only"),
-        ("model_runner", ValueError, "Model Runner V2"),
-        ("eager", ValueError, "compiled model execution"),
-        ("triton", ValueError, "active CPU backend"),
-    ],
-)
-def test_qwen4_exp_cpu_rejects_unsupported_runtime(
-    restriction: str,
-    error: type[Exception],
-    message: str,
-) -> None:
-    vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            hf_text_config=_text_config(),
-            hf_config=_text_config(),
-            multimodal_config=SimpleNamespace(language_model_only=True),
-            enforce_eager=restriction == "eager",
-        ),
-        parallel_config=SimpleNamespace(
-            pipeline_parallel_size=1,
-            tensor_parallel_size=1,
-            enable_dbo=False,
-            ubatch_size=1,
-        ),
-        speculative_config=None,
-        lora_config=None,
-        use_v2_model_runner=restriction != "model_runner",
-    )
-    cpu_arch = CpuArchEnum.X86
-    if restriction == "architecture":
-        cpu_arch = CpuArchEnum.ARM
-    elif restriction == "tensor_parallel":
-        vllm_config.parallel_config.tensor_parallel_size = 2
-    elif restriction == "speculative":
-        vllm_config.speculative_config = SimpleNamespace()
-    elif restriction == "lora":
-        vllm_config.lora_config = SimpleNamespace()
-    elif restriction == "multimodal":
-        vllm_config.model_config.multimodal_config.language_model_only = False
-
-    with (
-        patch.object(
-            Qwen3_5ForConditionalGenerationConfig,
-            "verify_and_update_config",
-        ),
-        patch.object(current_platform, "is_cpu", return_value=True),
-        patch.object(
-            current_platform,
-            "get_cpu_architecture",
-            return_value=cpu_arch,
-        ),
-        patch(
-            "vllm.triton_utils.has_active_triton_cpu_backend",
-            return_value=restriction != "triton",
-        ),
-        pytest.raises(error, match=message),
-    ):
-        Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(vllm_config)
-
-
-def test_qwen4_exp_cpu_accepts_supported_runtime() -> None:
-    vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            hf_text_config=_text_config(),
-            hf_config=_text_config(),
-            multimodal_config=SimpleNamespace(language_model_only=True),
-            enforce_eager=False,
-        ),
-        parallel_config=SimpleNamespace(
-            pipeline_parallel_size=1,
-            tensor_parallel_size=1,
-            enable_dbo=False,
-            ubatch_size=1,
-        ),
-        speculative_config=None,
-        lora_config=None,
-        use_v2_model_runner=True,
-    )
-
-    with (
-        patch.object(
-            Qwen3_5ForConditionalGenerationConfig,
-            "verify_and_update_config",
-        ),
-        patch.object(current_platform, "is_cpu", return_value=True),
-        patch.object(
-            current_platform,
-            "get_cpu_architecture",
-            return_value=CpuArchEnum.X86,
-        ),
-        patch(
-            "vllm.triton_utils.has_active_triton_cpu_backend",
-            return_value=True,
-        ),
-    ):
-        Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(vllm_config)
-
-
-@spawn_new_process_for_each_test
-def test_qwen4_exp_cpu_dispatch_does_not_load_vendor_backends() -> None:
-    with (
-        patch.object(current_platform, "is_cpu", return_value=True),
-        patch.object(current_platform, "is_xpu", return_value=False),
-        patch.object(current_platform, "is_tpu", return_value=False),
-    ):
-        package = import_module("vllm.models.qwen4_exp")
-        causal_cls = package.Qwen4ExpForCausalLM
-        conditional_cls = package.Qwen4ExpForConditionalGeneration
-
-    assert causal_cls.__module__ == "vllm.models.qwen4_exp.cpu.model"
-    assert conditional_cls.__module__ == "vllm.models.qwen4_exp.cpu.model"
-    assert not any(
-        name.startswith(("vllm.models.qwen4_exp.amd", "vllm.models.qwen4_exp.nvidia"))
-        for name in sys.modules
-    )
-
-
-@pytest.mark.parametrize(
-    ("backend", "returns_full_capacity"),
-    [
-        pytest.param("cpu", False, id="cpu-active-request-views"),
-        pytest.param("nvidia", True, id="nvidia-fixed-capacity-buffers"),
-    ],
-)
-def test_qwen4_exp_model_state_prepares_ngram_context(
-    backend: str, returns_full_capacity: bool
-) -> None:
-    model_state_cls = import_module(
-        f"vllm.models.qwen4_exp.{backend}.model_state"
-    ).Qwen4ExpModelState
-    model_state = object.__new__(model_state_cls)
+def test_qwen4_exp_model_state_prepares_ngram_context() -> None:
+    model_state = object.__new__(Qwen4ExpModelState)
     model_state.uses_ngram_embedding = True
     model_state.ngram_context_len = 3
     model_state.ngram_eos_token_id = 99
@@ -334,15 +197,11 @@ def test_qwen4_exp_model_state_prepares_ngram_context(
     expected_query_start_loc = torch.full((9,), 3, dtype=torch.int32)
     expected_query_start_loc[0] = 0
     expected_query_start_loc[1] = 2
-    if not returns_full_capacity:
-        expected_query_start_loc = expected_query_start_loc[:4]
     torch.testing.assert_close(
         model_inputs["query_start_loc"], expected_query_start_loc
     )
     expected_context = torch.full((8, 3), 99, dtype=torch.int32)
     expected_context[:2] = torch.tensor([[99, 99, 20], [1, 2, 3]])
-    if not returns_full_capacity:
-        expected_context = expected_context[:3]
     torch.testing.assert_close(model_inputs["ngram_context"], expected_context)
 
     # Retain the views to detect reallocations as the request layout changes.
@@ -357,34 +216,18 @@ def test_qwen4_exp_model_state_prepares_ngram_context(
 
     expected_query_start_loc.fill_(3)
     expected_query_start_loc[0] = 0
-    if not returns_full_capacity:
-        expected_query_start_loc = expected_query_start_loc[:2]
     torch.testing.assert_close(
         model_inputs["query_start_loc"], expected_query_start_loc
     )
     expected_context.fill_(99)
     expected_context[0] = torch.tensor([1, 2, 3])
-    if not returns_full_capacity:
-        expected_context = expected_context[:1]
     torch.testing.assert_close(model_inputs["ngram_context"], expected_context)
     assert model_inputs["query_start_loc"].data_ptr() == query_start_loc.data_ptr()
     assert model_inputs["ngram_context"].data_ptr() == ngram_context.data_ptr()
 
 
-@pytest.mark.parametrize(
-    ("backend", "returns_full_capacity"),
-    [
-        pytest.param("cpu", False, id="cpu-active-request-views"),
-        pytest.param("nvidia", True, id="nvidia-fixed-capacity-buffers"),
-    ],
-)
-def test_qwen4_exp_model_state_prepares_stable_dummy_ngram_inputs(
-    backend: str, returns_full_capacity: bool
-) -> None:
-    model_state_cls = import_module(
-        f"vllm.models.qwen4_exp.{backend}.model_state"
-    ).Qwen4ExpModelState
-    model_state = object.__new__(model_state_cls)
+def test_qwen4_exp_model_state_prepares_stable_dummy_ngram_inputs() -> None:
+    model_state = object.__new__(Qwen4ExpModelState)
     model_state.uses_ngram_embedding = True
     model_state.ngram_eos_token_id = 99
     model_state.ngram_context = torch.empty((8, 3), dtype=torch.int32)
@@ -399,12 +242,9 @@ def test_qwen4_exp_model_state_prepares_stable_dummy_ngram_inputs(
 
     expected_query_start_loc = torch.full((9,), 4, dtype=torch.int32)
     expected_query_start_loc[:4] = torch.tensor([0, 1, 2, 4], dtype=torch.int32)
-    if not returns_full_capacity:
-        expected_query_start_loc = expected_query_start_loc[:4]
     torch.testing.assert_close(second["query_start_loc"], expected_query_start_loc)
-    expected_context = torch.full((8, 3), 99, dtype=torch.int32)
-    if not returns_full_capacity:
-        expected_context = expected_context[:3]
-    torch.testing.assert_close(second["ngram_context"], expected_context)
+    torch.testing.assert_close(
+        second["ngram_context"], torch.full((8, 3), 99, dtype=torch.int32)
+    )
     assert second["query_start_loc"].data_ptr() == query_start_loc_ptr
     assert second["ngram_context"].data_ptr() == ngram_context_ptr
