@@ -3674,7 +3674,6 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     )
     request.structured_output_request = Mock()
     request.structured_output_request.grammar = Mock(spec=StructuredOutputGrammar)
-    request.structured_output_request.grammar.accept_tokens.return_value = False
     request.status = RequestStatus.RUNNING
     request.num_computed_tokens = request.num_tokens
 
@@ -3682,10 +3681,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.connector = None
     scheduler.ec_connector = None
     scheduler.structured_output_manager = Mock()
-    scheduler.structured_output_manager.should_advance.return_value = True
-    scheduler.structured_output_manager.trim_reasoning_for_advance.side_effect = (
-        lambda request, new_token_ids: new_token_ids
-    )
+    scheduler.structured_output_manager.accept_tokens.return_value = False
     scheduler.requests = {request.request_id: request}
     scheduler.running = [request]
     scheduler.waiting = Mock()
@@ -3734,8 +3730,8 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     )
     engine_core_outputs = scheduler.update_from_output(output, model_runner_output)
 
-    request.structured_output_request.grammar.accept_tokens.assert_called_once_with(
-        request.request_id, [123]
+    scheduler.structured_output_manager.accept_tokens.assert_called_once_with(
+        request, [123]
     )
     assert request.resumable is False
     assert request.status == RequestStatus.FINISHED_ERROR
@@ -6573,16 +6569,15 @@ def _decode_ready_request(scheduler):
     return request
 
 
-def test_update_draft_token_ids_strips_ngram_padding(monkeypatch):
-    """ngram_gpu pads unfilled draft slots with -1; update_draft_token_ids must
+def test_update_draft_token_ids_strips_ngram_padding():
+    """ngram_gpu pads unfilled draft slots with -1; manager validation must
     strip them before grammar.validate_tokens (which otherwise raises)."""
     scheduler = create_scheduler(num_speculative_tokens=4)
     request = _decode_ready_request(scheduler)
 
     grammar = _RecordingGrammar()
-    request.structured_output_request = SimpleNamespace(grammar=grammar)
-    monkeypatch.setattr(
-        scheduler.structured_output_manager, "should_advance", lambda req: True
+    request.structured_output_request = SimpleNamespace(
+        grammar=grammar, reasoning_ended=True
     )
 
     scheduler.update_draft_token_ids(
@@ -6593,16 +6588,15 @@ def test_update_draft_token_ids_strips_ngram_padding(monkeypatch):
     assert request.spec_token_ids == [10, 11]
 
 
-def test_update_draft_token_ids_in_output_strips_padding(monkeypatch):
+def test_update_draft_token_ids_in_output_strips_padding():
     """Same guard on the output path; the -1 pad-back for the rejected count
-    is preserved (only the input to validate_tokens is stripped)."""
+    is preserved (only the input to manager validation is stripped)."""
     scheduler = create_scheduler(num_speculative_tokens=4)
     request = _decode_ready_request(scheduler)
 
     grammar = _RecordingGrammar()
-    request.structured_output_request = SimpleNamespace(grammar=grammar)
-    monkeypatch.setattr(
-        scheduler.structured_output_manager, "should_advance", lambda req: True
+    request.structured_output_request = SimpleNamespace(
+        grammar=grammar, reasoning_ended=True
     )
 
     scheduler_output = SimpleNamespace(
