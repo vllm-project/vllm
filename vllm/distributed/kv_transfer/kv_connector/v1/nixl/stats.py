@@ -23,7 +23,28 @@ if TYPE_CHECKING:
 
 @dataclass
 class NixlKVConnectorStats(KVConnectorStats):
-    """Container for transfer performance metrics"""
+    """Container for transfer performance metrics.
+
+    This class collects per-transfer telemetry from NIXL KV cache transfers
+    and provides aggregation/reduction methods for logging.
+
+    IMPORTANT: All metrics are **aggregated across all TP ranks** before
+    summary statistics are computed. This means:
+    - "Num successful transfers" is the total count across all ranks,
+      not per-rank.
+    - "Avg MB per transfer" is the average over all individual rank-level
+      transfers, not the total bytes moved for a single KV cache transfer
+      operation.
+    - "Throughput (MB/s)" is `total_MB_all_ranks / total_time_all_ranks` —
+      effectively an average per-rank throughput over the combined pool of
+      observations, not the aggregate system throughput.
+    - Percentiles (P90) are computed over the combined distribution of
+      all ranks' transfer times.
+
+    This aggregation behavior is a deliberate design choice (fire-and-forget
+    from workers) and matches how `aggregate()` concatenates lists via
+    `list.extend()` and `reduce()` computes statistics over the combined pool.
+    """
 
     def __post_init__(self):
         if not self.data:
@@ -84,6 +105,15 @@ class NixlKVConnectorStats(KVConnectorStats):
         return self
 
     def reduce(self) -> dict[str, int | float]:
+        """Reduce collected observations to summary statistics for logging.
+
+        All computations are performed over the **combined pool of observations
+        from all TP ranks** (see class docstring for aggregation semantics).
+        The returned dict keys match the CLI log line:
+        "Num successful transfers", "Avg xfer time (ms)", "P90 xfer time (ms)",
+        "Avg post time (ms)", "P90 post time (ms)", "Avg MB per transfer",
+        "Throughput (MB/s)", "Avg number of descriptors".
+        """
         # Compute compact representative stats suitable for CLI logging
         if self.num_successful_transfers == 0:
             # CLI logging only reports successful transfers stats. If all requests in
