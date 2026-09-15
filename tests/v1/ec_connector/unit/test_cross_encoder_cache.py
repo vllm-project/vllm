@@ -189,7 +189,19 @@ def test_unloadable_inputs_do_not_allocate_staging(backend, mode):
     native.register_buffer.assert_not_called()
 
 
-@pytest.mark.parametrize("results", [[40, -800], [40], [40, True], [[40], [40]], None])
+def test_staging_stays_on_cpu_with_non_cpu_default_device(backend):
+    client = backend.store_client
+    tensor = torch.ones(2, 2)
+    client.put_tensor("a", tensor)
+    with torch.device("meta"):
+        loaded = client.load_tensors({"a": SPEC}, "cpu")
+    assert client._read_buffer.device.type == "cpu"
+    assert torch.equal(loaded["a"], tensor)
+
+
+@pytest.mark.parametrize(
+    "results", [[40, -800], [40], [40, True], [[40], [40]], None, [40, 41]]
+)
 def test_unsafe_batch_result_retains_whole_staging(backend, results):
     client, native = backend.store_client, backend.store_client.store
     native.batch_get_into = MagicMock(return_value=results)
@@ -204,7 +216,7 @@ def test_unsafe_batch_result_retains_whole_staging(backend, results):
     assert client._read_buffer is client._unsafe_owners[0]
 
 
-@pytest.mark.parametrize("failure", ["allocation", "completion"])
+@pytest.mark.parametrize("failure", ["allocation", "copy", "record", "completion"])
 def test_copy_failure_preserves_staging_lifetime(backend, failure):
     """Emulate CUDA allocation/event boundaries without requiring a GPU."""
     client = backend.store_client
@@ -214,7 +226,10 @@ def test_copy_failure_preserves_staging_lifetime(backend, failure):
     targets: list[torch.Tensor] = []
     copies: list[torch.Tensor] = []
     ready = MagicMock()
-    ready.synchronize.side_effect = RuntimeError("copy failure")
+    if failure == "record":
+        ready.record.side_effect = RuntimeError("record failure")
+    elif failure == "completion":
+        ready.synchronize.side_effect = RuntimeError("copy failure")
 
     def allocate_on_cpu(*args, **kwargs):
         is_target = kwargs.get("device") == torch.device("cuda")
@@ -227,6 +242,8 @@ def test_copy_failure_preserves_staging_lifetime(backend, failure):
         return tensor
 
     def record_copy(target, source, **kwargs):
+        if copies and failure == "copy":
+            raise RuntimeError("copy failure")
         copies.append(target)
         return copy(target, source, **kwargs)
 
@@ -241,7 +258,10 @@ def test_copy_failure_preserves_staging_lifetime(backend, failure):
     if failure == "allocation":
         assert not copies and not client._poisoned
     else:
-        assert len(copies) == 2 and client._poisoned
+        assert len(copies) == (1 if failure == "copy" else 2)
+        assert client._poisoned
+        assert any(owner is client._read_buffer for owner in client._unsafe_owners)
+        assert any(owner is ready for owner in client._unsafe_owners)
         assert all(
             any(owner is target for owner in client._unsafe_owners)
             for target in targets

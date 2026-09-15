@@ -132,13 +132,14 @@ class EmbeddingStoreOperationError(EmbeddingStoreError):
     """A rejected or completed operation that permits normal Encoder fallback."""
 
 
-def _batch_get_completed_safely(results: Any, expected_count: int) -> bool:
+def _batch_get_completed_safely(results: Any, capacities: list[int]) -> bool:
     return (
         isinstance(results, list)
-        and len(results) == expected_count
+        and len(results) == len(capacities)
         and all(
-            type(result) is int and (result >= 0 or result in _SAFE_GET_REJECTIONS)
-            for result in results
+            type(result) is int
+            and (0 <= result <= capacity or result in _SAFE_GET_REJECTIONS)
+            for result, capacity in zip(results, capacities, strict=True)
         )
     )
 
@@ -288,6 +289,7 @@ class MooncakeEmbeddingStoreClient:
             buffer = torch.empty(
                 self._read_buffer_bytes,
                 dtype=torch.uint8,
+                device="cpu",
                 pin_memory=device.type == "cuda",
             )
             ret = self.store.register_buffer(buffer.data_ptr(), buffer.nbytes)
@@ -310,7 +312,7 @@ class MooncakeEmbeddingStoreClient:
             results = self.store.batch_get_into(
                 list(expected), [base + offset for offset in offsets], sizes
             )
-            if not _batch_get_completed_safely(results, len(expected)):
+            if not _batch_get_completed_safely(results, sizes):
                 raise EmbeddingStoreError("Unsafe batch GET results")
         except BaseException as error:
             self._poison([buffer])
