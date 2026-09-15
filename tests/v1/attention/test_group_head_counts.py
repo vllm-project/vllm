@@ -14,6 +14,10 @@ from vllm.v1.attention.backends.cpu_attn import (
     CPUAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadataBuilder
+from vllm.v1.attention.backends.triton_attn import (
+    MIN_LAUNCH_GRID_SIZE_2D,
+    TritonAttentionMetadataBuilder,
+)
 
 requires_cpu = pytest.mark.skipif(
     not current_platform.is_cpu(), reason="CPU attention backend"
@@ -128,3 +132,42 @@ def test_flash_attention_geometry_comes_from_the_group():
     assert builder.num_heads_q == 16
     assert builder.num_heads_kv == 2
     assert builder.headdim == 64
+
+
+def test_triton_split_kv_threshold_comes_from_the_group():
+    """The 2D/3D decode threshold must use the group's own KV head count.
+
+    The 2D launch grid is ``(num_q_blocks, num_heads_kv)`` with the group's
+    head count; deriving the threshold from the model-wide count instead
+    denies split-KV decode to full-attention groups with fewer KV heads than
+    the model-wide value (e.g. Gemma4 with ``attention_k_eq_v``).
+    """
+    layers = {f"layer_{i}": SimpleNamespace(num_heads=16) for i in range(2)}
+    vllm_config = MagicMock()
+    vllm_config.model_config.get_num_attention_heads.return_value = MODEL_WIDE_NUM_HEADS
+    vllm_config.model_config.get_num_kv_heads.return_value = NUM_KV_HEADS
+    vllm_config.model_config.get_head_size.return_value = 128
+    vllm_config.model_config.rswa_window = None
+    kv_cache_spec = SimpleNamespace(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=128,
+        dtype=torch.bfloat16,
+    )
+
+    with patch(
+        "vllm.v1.attention.backends.utils.get_layers_from_vllm_config",
+        return_value=layers,
+    ):
+        builder = TritonAttentionMetadataBuilder(
+            kv_cache_spec=kv_cache_spec,
+            layer_names=list(layers),
+            vllm_config=vllm_config,
+            device=torch.device("cpu"),
+        )
+
+    assert builder.num_heads_kv == 2
+    assert builder.seq_threshold_3D == MIN_LAUNCH_GRID_SIZE_2D // 2
+    assert builder.softmax_segm_output.shape[0] == builder.seq_threshold_3D
+    assert builder.softmax_segm_max.shape[0] == builder.seq_threshold_3D
+    assert builder.softmax_segm_expsum.shape[0] == builder.seq_threshold_3D
