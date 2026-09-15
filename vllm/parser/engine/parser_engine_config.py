@@ -87,6 +87,11 @@ class ParserEngineConfig:
     # Special tokens exempt from auto-drop but not state-machine terminals.
     preserve_tokens: frozenset[str] = field(default_factory=frozenset)
 
+    # Structural markup terminals that carry no text of their own. A stray one
+    # that reaches a content state with no matching transition is dropped
+    # instead of echoed back to the client (see ``_on_terminal``).
+    absorb_terminals: frozenset[str] = field(default_factory=frozenset)
+
     # Special tokens delimiting conversation turns in the prompt only
     # considers reasoning markers after the last boundary token.
     turn_boundary_tokens: frozenset[str] = field(default_factory=frozenset)
