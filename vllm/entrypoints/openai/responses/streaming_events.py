@@ -61,8 +61,8 @@ from openai.types.responses.response_reasoning_item import (
 from openai.types.responses.tool import Tool
 from openai_harmony import Message as HarmonyMessage
 
+from vllm.entrypoints.generate.base.protocol import DeltaMessage, DeltaToolCall
 from vllm.entrypoints.mcp.tool_server import ToolServer
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage, DeltaToolCall
 from vllm.entrypoints.openai.parser.harmony_utils import (
     extract_function_from_recipient,
     is_function_recipient,
@@ -667,7 +667,7 @@ def emit_browser_tool_events(
         )
     elif function_name == "find":
         action = response_function_web_search.ActionFind(
-            type="find",
+            type="find_in_page",
             pattern=parsed_args["pattern"],
             # TODO: translate to url
             url=f"cursor:{parsed_args.get('cursor', '')}",

@@ -12,6 +12,7 @@ from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import AsyncMultiModalItemTracker
+from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
     clamp_prompt_logprobs,
@@ -21,21 +22,19 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProbs,
     ChatCompletionLogProbsContent,
 )
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.engine.protocol import (
     ErrorResponse,
-    GenerationError,
     PromptTokenUsageInfo,
-    RequestResponseMetadata,
     UsageInfo,
 )
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.exceptions import GenerationError
 from vllm.inputs import EngineInput, TokensPrompt, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.multimodal.inputs import (
-    MultiModalKwargsItem,
     MultiModalKwargsItems,
     PlaceholderRange,
 )
@@ -45,7 +44,7 @@ from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
 
-from .mm_serde import decode_mm_kwargs_item
+from .mm_features import mm_kwargs_from_features
 from .protocol import (
     GenerateRequest,
     GenerateResponse,
@@ -110,11 +109,7 @@ class ServingTokens(GenerateBaseServing):
             logger.error("Error with model %s", error_check_ret)
             return error_check_ret
 
-        # If the engine is dead, raise the engine's DEAD_ERROR.
-        # This is required for the streaming case, where we return a
-        # success status before we actually start generating text :).
-        if self.engine_client.errored:
-            raise self.engine_client.dead_error
+        self._preflight()
 
         lora_request = None
         lora_request = self._maybe_get_adapters(request, supports_default_mm_loras=True)
@@ -181,17 +176,9 @@ class ServingTokens(GenerateBaseServing):
                 for modality, ranges in features.mm_placeholders.items()
             }
 
-            # Deserialize tensor data when present; None → cache hit.
-            mm_kwargs: dict[str, list[MultiModalKwargsItem | None]] = {}
-            if features.kwargs_data is not None:
-                for modality, items in features.kwargs_data.items():
-                    mm_kwargs[modality] = [
-                        decode_mm_kwargs_item(item) if item is not None else None
-                        for item in items
-                    ]
-            else:
-                for modality, hashes in features.mm_hashes.items():
-                    mm_kwargs[modality] = [None] * len(hashes)
+            # Deserialize full tensor data and optional metadata-only data.
+            # Metadata-only items are valid when ec_transfer_params is set.
+            mm_kwargs = mm_kwargs_from_features(features)
 
             engine_input = mm_input(
                 prompt_token_ids=request.token_ids,
