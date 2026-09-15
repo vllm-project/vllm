@@ -62,6 +62,7 @@ fn build_request(request_id: String, max_tokens: u32) -> GenerateRequest {
         session_id: None,
         reasoning_parser_kwargs: None,
         lora_request: None,
+        resumable: false,
     }
 }
 
