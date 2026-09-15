@@ -1329,14 +1329,14 @@ class VllmConfig:
             self.kv_transfer_config is not None
             and self.kv_transfer_config.has_connector("NixlConnector")
         ):
-            assert self.parallel_config.prefill_context_parallel_size == 1, (
-                "NIXL does not support prefill context parallelism."
-            )
             dcp_size = self.parallel_config.decode_context_parallel_size
-            tp_size = self.parallel_config.tensor_parallel_size
-            assert dcp_size in (1, tp_size), (
+            transfer_tp_size = max(
+                self.parallel_config.tensor_parallel_size,
+                self.parallel_config.prefill_context_parallel_size,
+            )
+            assert dcp_size in (1, transfer_tp_size), (
                 f"decode_context_parallel_size={dcp_size} must be 1 or equal "
-                f"to tensor_parallel_size={tp_size} when using NixlConnector."
+                f"to the NIXL transfer parallel size={transfer_tp_size}."
             )
             if self.model_config is not None:
                 assert self.model_config.use_mla or dcp_size == 1, (
@@ -1550,18 +1550,6 @@ class VllmConfig:
             )
             self.compilation_config.mode = CompilationMode.NONE
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-
-        if self.profiler_config.profiler == "proton":
-            if not current_platform.is_cuda():
-                raise ValueError(
-                    "The Proton profiler currently supports NVIDIA CUDA only"
-                )
-            if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
-                raise ValueError(
-                    "The Proton profiler requires CUDA graphs to be disabled. "
-                    "Use --enforce-eager or set "
-                    "--compilation-config.cudagraph_mode=none."
-                )
 
         if os.environ.get("TORCH_COMPILE_DISABLE") == "1":
             logger.warning_once(
@@ -1860,6 +1848,7 @@ class VllmConfig:
         else:
             self._validate_v1_model_runner()
 
+        self._validate_profiler_config()
         self._validate_batch_sharded_sampling()
         self._validate_adaptive_verification()
 
@@ -2840,16 +2829,16 @@ class VllmConfig:
             unsupported.append("pipeline parallelism with external_launcher")
 
         if speculative_config is not None:
-            # TODO: ngram / ngram_gpu are not supported by the v2 model runner yet
-            if speculative_config.method in ("ngram", "ngram_gpu"):
-                unsupported.append("ngram/ngram_gpu speculative decoding")
-            elif speculative_config.method not in (
-                "eagle",
-                "eagle3",
-                "mtp",
-                "dflash",
-                "dspark",
-                "extract_hidden_states",
+            if speculative_config.method in (
+                # https://github.com/vllm-project/vllm/pull/40704
+                "ngram",
+                "ngram_gpu",
+                # https://github.com/vllm-project/vllm/pull/43091
+                "draft_model",
+                "suffix",
+                "medusa",
+                "mlp_speculator",
+                "custom_class",
             ):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
 
@@ -3034,12 +3023,51 @@ class VllmConfig:
             unsupported.append("dual batch overlap with multimodal models")
         if model_config is not None and model_config.is_hybrid:
             unsupported.append("dual batch overlap with hybrid models")
-        if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
-            unsupported.append("dual batch overlap with CUDA graphs")
+        if self.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
+            # DBO captures FULL graphs only.
+            unsupported.append("dual batch overlap with PIECEWISE CUDA graphs")
         if self.is_mm_encoder_only:
             unsupported.append("dual batch overlap with encoder only models")
 
         return unsupported
+
+    def _validate_profiler_config(self) -> None:
+        if self.profiler_config.profiler != "proton":
+            return
+
+        from vllm.platforms import current_platform
+
+        if not current_platform.is_cuda():
+            raise ValueError("The Proton profiler currently supports NVIDIA CUDA only")
+        if (
+            self.profiler_config.proton_graph_attribution
+            and not self.use_v2_model_runner
+        ):
+            raise ValueError(
+                "Proton CUDA graph attribution requires the V2 model runner."
+            )
+
+        has_cuda_graphs = (
+            self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            or (
+                self.compilation_config.cudagraph_mm_encoder
+                and not (self.model_config and self.model_config.enforce_eager)
+            )
+        )
+        if not has_cuda_graphs:
+            return
+        mode = self.profiler_config.proton_mode
+        if mode and mode.split(":", 1)[0].lower() == "pcsampling":
+            raise ValueError(
+                "Proton PC sampling requires CUDA graphs to be disabled. "
+                "Use --enforce-eager."
+            )
+        if not self.profiler_config.proton_graph_attribution:
+            raise ValueError(
+                "Proton profiling with CUDA graphs requires "
+                "proton_graph_attribution=True to capture replayed kernels. "
+                "Enable attribution or use --enforce-eager."
+            )
 
     def _validate_v2_model_runner(self) -> None:
         """Check for features not yet supported by the V2 model runner."""

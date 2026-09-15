@@ -82,6 +82,9 @@ def mhc_pre_delayed_overlap(
         norm_weight,
         pre_mix if pre_mix is not None else post,
         next_pre,
+        # Stand-in for the aux buffer the fused epilogue writes: split modes
+        # never enable write_aux, so it is only there to fill the signature.
+        layer_input,
     )
     fields = dict(
         hidden_size=hidden,
