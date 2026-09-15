@@ -24,7 +24,11 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Literal
 
+import torch
+
+import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.utils.mem_constants import GiB_bytes
 
 if TYPE_CHECKING:
     from vllm.config.model import ModelConfig
@@ -32,6 +36,32 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 SleepModeState = Literal["RUNNING", "SUSPENDED", "RESUMING"]
+
+
+def _release_host_memory() -> None:
+    """Return the cached pinned host memory to the OS.
+
+    ``wake_up`` frees the CPU backup tensors, but PyTorch's host caching
+    allocator keeps their pinned blocks so the next ``sleep`` can reuse them
+    without pinning again. That is the right default for a process that
+    sleeps and wakes repeatedly; when several engines share one GPU and take
+    turns sleeping, it leaves every engine holding a weight-sized block of
+    host RAM while awake.
+    """
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_cuda_alike():
+        torch.accelerator.empty_host_cache()
+        logger.info("Released cached pinned host memory after wake-up.")
+        return
+
+    before = torch.cuda.host_memory_stats().get("allocated_bytes.current", 0)
+    torch.accelerator.empty_host_cache()
+    after = torch.cuda.host_memory_stats().get("allocated_bytes.current", 0)
+    logger.info(
+        "Released %.2f GiB of pinned host memory after wake-up.",
+        (before - after) / GiB_bytes,
+    )
 
 
 class SleepModeBackend(ABC):
@@ -117,10 +147,15 @@ class CuMemBackend(SleepModeBackend):
     are allocated outside the allocator pool).
     """
 
+    def __init__(self) -> None:
+        super().__init__()
+        self._weights_on_host = False
+
     def suspend(self, level: int = 1) -> None:
         from vllm.device_allocator import get_mem_allocator_instance
 
         self._state = "SUSPENDED"
+        self._weights_on_host = level == 1
         allocator = get_mem_allocator_instance()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
 
@@ -130,6 +165,10 @@ class CuMemBackend(SleepModeBackend):
         self._state = "RESUMING"
         allocator = get_mem_allocator_instance()
         allocator.wake_up(tags)
+        if self._weights_on_host and (tags is None or "weights" in tags):
+            self._weights_on_host = False
+            if envs.VLLM_SLEEP_MODE_RELEASE_HOST_MEMORY:
+                _release_host_memory()
         self._state = "RUNNING"
 
     @classmethod
