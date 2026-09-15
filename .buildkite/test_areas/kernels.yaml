@@ -234,6 +234,7 @@ steps:
   - csrc/quantization/cutlass_w8a8/moe/
   - csrc/moe/
   - tests/kernels/moe
+  - tests/kernels/expert_pool
   - vllm/model_executor/layers/fused_moe/
   - vllm/distributed/device_communicators/
   - vllm/envs.py
@@ -241,6 +242,7 @@ steps:
   commands:
     - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
     - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    - pytest -v -s kernels/expert_pool --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 5
   mirror:
     amd:
@@ -252,6 +254,7 @@ steps:
       - csrc/quantization/cutlass_w8a8/moe/
       - csrc/moe/
       - tests/kernels/moe
+      - tests/kernels/expert_pool
       - vllm/model_executor/layers/fused_moe/
       - vllm/distributed/device_communicators/
       - vllm/envs.py

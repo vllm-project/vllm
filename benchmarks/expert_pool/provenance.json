@@ -1,0 +1,18 @@
+{
+  "measured_integration_commit": "7dedc6d8d9b178b60f6a5b32f03d677145982441",
+  "pool_pr": 48,
+  "pool_runtime_commit": "5fbc240ba5ddec82a10362340ac77339a1c24017",
+  "historical_files_sha256": {
+    "benchmark.py": "2a66a48731eb8a4c6930ed1f6c3becd7b2397a6585b6d6e4fffd196dc3a8a1e8",
+    "pair.json": "3d4e64ecde61dd943d431a90b6b2bf6c32e89e7f1a3901cc7fb9b41a0856926a",
+    "run.sh": "5cf9c93ab6c1ecaec8cbad8d7f30f7ec23ebefe4662cb6cf894d165f7803fb39"
+  },
+  "changes_from_historical_runner": [
+    "Removed unused FreeToken text-prompt option and cache-verification hooks.",
+    "Removed optional same-server measured repeats; always sends warmup then measure once.",
+    "Removed client-host nvidia-smi and proc snapshots; capacity monitoring remains external.",
+    "Defaults to the adjacent unchanged pair.json and removes the internal engine label.",
+    "Preserves vLLM request fields, SSE parsing, decode formula, error persistence, and exclusive output creation.",
+    "Rejects malformed completion counts and non-finite computed rates; valid-response arithmetic is unchanged."
+  ]
+}
