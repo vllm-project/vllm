@@ -1,18 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Shared fixtures and helpers for the RL lifecycle test suite.
-
-All test modules under this directory import from here to avoid duplication.
-
-RFC: https://github.com/vllm-project/vllm/issues/45585
-PR:  https://github.com/vllm-project/vllm/pull/45586
-"""
+"""Shared HTTP helpers; coverage ownership is documented in __init__.py."""
 
 import contextlib
 import json
 import os
-import socket
 import subprocess
 import sys
 import threading
@@ -67,96 +59,70 @@ _DUMMY_ARGS = [
 # ---------------------------------------------------------------------------
 # Server harness
 # ---------------------------------------------------------------------------
-
-
-def _warm_up(url: str) -> None:
-    """Put one request through the engine before tests start timing things.
-
-    /health turns green before any request has travelled the request path, and
-    that first pass costs seconds on a loaded machine.
-    """
-    response = gen(url, max_tokens=4, timeout=120)
-    assert ok(response), f"warm-up generation failed: {response}"
-
-
-def _free_port() -> int:
-    """Return a currently unused localhost port."""
-    with socket.socket() as sock:
-        sock.bind(("localhost", 0))
-        return int(sock.getsockname()[1])
-
-
 @contextmanager
 def server(
     extra_args=None,
-    port: int = 8770,
+    port: int | None = None,
     timeout: float = 180.0,
     dummy_weights: bool = False,
+    *,
     model: str | None = None,
+    env_dict: dict[str, str] | None = None,
+    enable_sleep_mode: bool = True,
+    enforce_eager: bool = True,
+    weight_transfer_config: dict | None = None,
 ):
-    """Launch a vLLM server with the dev router; yield its base URL.
+    """Yield a dev-server URL using the repository's process/port lifecycle.
 
     Args:
-        extra_args:      Additional CLI flags appended after the base args.
-        port:            HTTP port to bind (caller is responsible for uniqueness).
-        timeout:         Seconds to wait for /health before giving up.
-        dummy_weights:   If True, use --load-format dummy (fast, no real weights).
-        model:           Checkpoint to serve; defaults to MODEL_NAME.
+        extra_args: Additional vLLM CLI options.
+        port: Optional explicit port; otherwise allocate an available port.
+        timeout: Server startup timeout in seconds.
+        dummy_weights: Skip checkpoint loading for protocol-only tests.
+        model: Model to load; defaults to VLLM_TEST_MODEL.
+        env_dict: Environment overrides passed only to the server.
+        enable_sleep_mode: Allocate weights/cache through the sleep backend.
+        enforce_eager: Disable graphs unless the scenario explicitly tests them.
+        weight_transfer_config: Optional serialized transfer-backend config.
     """
-    env = {**os.environ, "VLLM_SERVER_DEV_MODE": "1"}
-    base = _DUMMY_ARGS if dummy_weights else _BASE_ARGS
-    cmd = [
-        sys.executable,
-        "-m",
-        "vllm.entrypoints.openai.api_server",
-        "--model",
-        model or MODEL_NAME,
-        "--port",
-        str(port),
-        "--served-model-name",
-        "m",
-        *(base + (extra_args or [])),
+    from tests.utils import RemoteOpenAIServer
+
+    args = [
+        arg
+        for arg in (_DUMMY_ARGS if dummy_weights else _BASE_ARGS)
+        if arg not in ("--enable-sleep-mode", "--enforce-eager")
     ]
-    proc = subprocess.Popen(
-        cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
-    )
-    url = f"http://localhost:{port}"
-    try:
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            if proc.poll() is not None:
-                err = (
-                    proc.stderr.read(4000).decode(errors="replace")
-                    if proc.stderr
-                    else ""
-                )
-                raise RuntimeError(f"vllm server exited during startup:\n{err}")
-            with contextlib.suppress(Exception):
-                if requests.get(f"{url}/health", timeout=3).status_code == 200:
-                    break
-            time.sleep(1)
-        else:
-            proc.terminate()
-            raise RuntimeError("vllm server did not start in time")
-        _warm_up(url)
-        yield url
-    finally:
-        proc.terminate()
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            proc.wait(timeout=10)
-        if proc.poll() is None:
-            proc.kill()
+    if enable_sleep_mode:
+        args.append("--enable-sleep-mode")
+    if enforce_eager:
+        args.append("--enforce-eager")
+    args += ["--served-model-name", "m", *(extra_args or [])]
+    if port is not None:
+        args += ["--port", str(port)]
+    if weight_transfer_config is not None:
+        args += ["--weight-transfer-config", json.dumps(weight_transfer_config)]
+    with RemoteOpenAIServer(
+        model or MODEL_NAME,
+        args,
+        auto_port=port is None,
+        seed=None if "--seed" in args else 0,
+        env_dict={"VLLM_SERVER_DEV_MODE": "1", **(env_dict or {})},
+        max_wait_seconds=timeout,
+    ) as remote:
+        if not dummy_weights:
+            assert ok(gen(remote.url_root, max_tokens=4, timeout=120)), (
+                "warm-up generation failed"
+            )
+        yield remote.url_root
 
 
 @contextmanager
 def reusable_server(**kwargs):
-    """Run a server on a free port and clean the parent after shutdown.
+    """Reuse one server and clean the parent only after server shutdown.
 
-    A module- or class-scoped server outlives function-scoped cleanup, so
-    callers mark their module with pytest.mark.skip_global_cleanup and let
-    this helper release the distributed environment once the server is gone.
+    Callers use pytest.mark.skip_global_cleanup so function-scoped cleanup
+    does not run while this longer-lived server still owns GPU resources.
     """
-    kwargs.setdefault("port", _free_port())
     try:
         with server(**kwargs) as url:
             yield url
