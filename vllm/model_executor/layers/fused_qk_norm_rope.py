@@ -14,7 +14,9 @@ from vllm.triton_utils import tl, triton
 
 
 @triton.jit
-def _fused_qk_rmsnorm_rope_gate_kernel(
+def fused_qk_rmsnorm_rope_gate_head(
+    token,
+    head,
     q_gate_ptr,
     k_ptr,
     q_out_ptr,
@@ -33,7 +35,6 @@ def _fused_qk_rmsnorm_rope_gate_kernel(
     positions_stride_m,
     positions_stride_t,
     num_q_heads: tl.constexpr,
-    num_kv_heads: tl.constexpr,
     head_dim: tl.constexpr,
     rotary_dim: tl.constexpr,
     half_rotary: tl.constexpr,
@@ -46,20 +47,46 @@ def _fused_qk_rmsnorm_rope_gate_kernel(
     HAS_MROPE: tl.constexpr,
     MROPE_SECTION_H: tl.constexpr,
     MROPE_SECTION_W: tl.constexpr,
+    K_TO_PAGED_CACHE: tl.constexpr = False,
+    k_slots_ptr=None,
+    k_out_stride_block=0,
+    k_out_stride_head=0,
+    v_ptr=None,
+    v_stride_t=0,
+    PAGE_SIZE: tl.constexpr = 1,
 ):
-    token = tl.program_id(0)
-    head = tl.program_id(1)
+    """Normalize, rotate and store one (token, head) of Q or K.
+
+    Q programs also copy the gate. With ``K_TO_PAGED_CACHE`` the K programs
+    write into a paged ``[blocks, PAGE_SIZE, kv_heads, 2 * head_dim]`` cache
+    row selected by ``k_slots_ptr[token]`` (negative slots are skipped) and
+    copy the matching V row next to it, so a caller can fuse the KV-cache
+    insert into its own launch.
+    """
     is_k = head >= num_q_heads
     local_head = tl.where(is_k, head - num_q_heads, head)
 
     if is_k:
         in_base = k_ptr + token * k_stride_t + local_head * head_dim
         w_ptr = k_weight_ptr
-        out_base = k_out_ptr + token * k_out_stride_t + local_head * head_dim
+        if K_TO_PAGED_CACHE:
+            slot = tl.load(k_slots_ptr + token)
+            valid_out = slot >= 0
+            safe_slot = tl.maximum(slot, 0).to(tl.int64)
+            out_base = (
+                k_out_ptr
+                + (safe_slot // PAGE_SIZE) * k_out_stride_block
+                + (safe_slot % PAGE_SIZE) * k_out_stride_t
+                + local_head * k_out_stride_head
+            )
+        else:
+            out_base = k_out_ptr + token * k_out_stride_t + local_head * head_dim
     else:
         in_base = q_gate_ptr + token * q_gate_stride_t + local_head * 2 * head_dim
         w_ptr = q_weight_ptr
         out_base = q_out_ptr + token * q_out_stride_t + local_head * head_dim
+        if K_TO_PAGED_CACHE:
+            valid_out = True
 
     # --- RMSNorm: variance over the full head_dim ---
     head_offs = tl.arange(0, HEAD_BLOCK)
@@ -76,6 +103,8 @@ def _fused_qk_rmsnorm_rope_gate_kernel(
     # The rotary head [0, rotary_dim) will be overwritten by the RoPE store below.
     if HAS_PASS:
         pass_mask = head_mask & (head_offs >= rotary_dim)
+        if K_TO_PAGED_CACHE:
+            pass_mask = pass_mask & valid_out
         tl.store(out_base + head_offs, x_norm, mask=pass_mask)
 
     # --- Partial RoPE on the first rotary_dim elements ---
@@ -124,8 +153,11 @@ def _fused_qk_rmsnorm_rope_gate_kernel(
 
     o1 = x_rot1 * cos - x_rot2 * sin
     o2 = x_rot2 * cos + x_rot1 * sin
-    tl.store(out_base + rot_offs, o1, mask=rot_mask)
-    tl.store(out_base + half_rotary + rot_offs, o2, mask=rot_mask)
+    rot_store_mask = rot_mask
+    if K_TO_PAGED_CACHE:
+        rot_store_mask = rot_mask & valid_out
+    tl.store(out_base + rot_offs, o1, mask=rot_store_mask)
+    tl.store(out_base + half_rotary + rot_offs, o2, mask=rot_store_mask)
 
     # --- Gate copy (q heads only, verbatim) ---
     if not is_k:
@@ -133,6 +165,83 @@ def _fused_qk_rmsnorm_rope_gate_kernel(
         gate_out_base = gate_out_ptr + token * gate_out_stride_t + local_head * head_dim
         g = tl.load(gate_in_base + head_offs, mask=head_mask, other=0.0)
         tl.store(gate_out_base + head_offs, g, mask=head_mask)
+
+    # --- V copy next to K in the paged cache row (k heads only) ---
+    if K_TO_PAGED_CACHE:
+        v_mask = head_mask & valid_out & is_k
+        v_base = v_ptr + token * v_stride_t + local_head * head_dim
+        v = tl.load(v_base + head_offs, mask=v_mask, other=0.0)
+        tl.store(out_base + head_dim + head_offs, v, mask=v_mask)
+
+
+@triton.jit
+def _fused_qk_rmsnorm_rope_gate_kernel(
+    q_gate_ptr,
+    k_ptr,
+    q_out_ptr,
+    k_out_ptr,
+    gate_out_ptr,
+    q_weight_ptr,
+    k_weight_ptr,
+    cos_sin_cache_ptr,
+    positions_ptr,
+    q_gate_stride_t,
+    k_stride_t,
+    q_out_stride_t,
+    k_out_stride_t,
+    gate_out_stride_t,
+    cache_stride_p,
+    positions_stride_m,
+    positions_stride_t,
+    num_q_heads: tl.constexpr,
+    num_kv_heads: tl.constexpr,
+    head_dim: tl.constexpr,
+    rotary_dim: tl.constexpr,
+    half_rotary: tl.constexpr,
+    eps: tl.constexpr,
+    norm_beta: tl.constexpr,
+    INPUT_DTYPE: tl.constexpr,
+    HEAD_BLOCK: tl.constexpr,
+    ROT_HALF_BLOCK: tl.constexpr,
+    HAS_PASS: tl.constexpr,
+    HAS_MROPE: tl.constexpr,
+    MROPE_SECTION_H: tl.constexpr,
+    MROPE_SECTION_W: tl.constexpr,
+):
+    fused_qk_rmsnorm_rope_gate_head(
+        tl.program_id(0),
+        tl.program_id(1),
+        q_gate_ptr,
+        k_ptr,
+        q_out_ptr,
+        k_out_ptr,
+        gate_out_ptr,
+        q_weight_ptr,
+        k_weight_ptr,
+        cos_sin_cache_ptr,
+        positions_ptr,
+        q_gate_stride_t,
+        k_stride_t,
+        q_out_stride_t,
+        k_out_stride_t,
+        gate_out_stride_t,
+        cache_stride_p,
+        positions_stride_m,
+        positions_stride_t,
+        num_q_heads,
+        head_dim,
+        rotary_dim,
+        half_rotary,
+        eps,
+        norm_beta,
+        INPUT_DTYPE,
+        HEAD_BLOCK,
+        ROT_HALF_BLOCK,
+        HAS_PASS,
+        HAS_MROPE,
+        MROPE_SECTION_H,
+        MROPE_SECTION_W,
+    )
 
 
 def fused_qk_rmsnorm_rope_gate(
