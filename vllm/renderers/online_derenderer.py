@@ -158,16 +158,13 @@ class OnlineDerenderer:
                 message = ChatMessage(role="assistant", content=decoded_text)
 
             # Match the non-streaming chat completion finish-reason policy.
-            is_finish_reason_tool_calls = auto_tools_called or (
+            finish_reason = choice.finish_reason or "stop"
+            if auto_tools_called or (
                 chat_request is not None
                 and chat_request.tool_choice == "required"
                 and choice.finish_reason == "stop"
-            )
-            finish_reason = (
-                "tool_calls"
-                if is_finish_reason_tool_calls
-                else choice.finish_reason or "stop"
-            )
+            ):
+                finish_reason = "tool_calls"
 
             choices.append(
                 ChatCompletionResponseChoice(
