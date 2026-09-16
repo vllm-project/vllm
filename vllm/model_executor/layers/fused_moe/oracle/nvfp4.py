@@ -537,7 +537,7 @@ def make_nvfp4_moe_quant_config(
             gemm1_clamp_limit=swiglu_limit,
         )
     elif backend == NvFp4MoeBackend.MARLIN or (
-        backend == NvFp4MoeBackend.B12X and use_a16
+        backend in (NvFp4MoeBackend.B12X, NvFp4MoeBackend.FLASHINFER_B12X) and use_a16
     ):
         return nvfp4_w4a16_moe_quant_config(
             g1_alphas=w13_scale_2,
