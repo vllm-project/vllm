@@ -77,8 +77,8 @@ def test_deepseek_v41_mxfp8_scale_loading(
         MergedColumnParallelLinear,
         RowParallelLinear,
     )
-    from vllm.models.deepseek_v4_1 import quant_config as quant_module
-    from vllm.models.deepseek_v4_1.nvidia import model as model_module
+    from vllm.models.deepseek_v41 import quant_config as quant_module
+    from vllm.models.deepseek_v41.nvidia import model as model_module
 
     default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
     quant_config = quant_module.DeepseekV4FP8Config(
@@ -214,8 +214,8 @@ def test_deepseek_v41_vl_mapper_routes_linear_scales(
     """The VL wrapper must map ``.scale`` keys to the parameter the linear
     quant method registers, as the text model does. A hardcoded
     ``weight_scale_inv`` raised KeyError for native MXFP8 checkpoints."""
-    from vllm.models.deepseek_v4_1.nvidia import model as model_module
-    from vllm.models.deepseek_v4_1.nvidia import vl_model as vl_module
+    from vllm.models.deepseek_v41.nvidia import model as model_module
+    from vllm.models.deepseek_v41.nvidia import vl_model as vl_module
 
     vllm_config = SimpleNamespace(
         quant_config=SimpleNamespace(weight_block_size=weight_block_size)
@@ -318,8 +318,8 @@ def test_mxfp8_bmm_loads_and_projects_grouped_weights(
         compute_fp8_einsum_recipe,
         deep_gemm_fp8_o_proj,
     )
-    from vllm.models.deepseek_v4_1.nvidia.model import DeepseekV4Model
-    from vllm.models.deepseek_v4_1.quant_config import DeepseekV4FP8Config
+    from vllm.models.deepseek_v41.nvidia.model import DeepseekV4Model
+    from vllm.models.deepseek_v41.quant_config import DeepseekV4FP8Config
     from vllm.utils.deep_gemm import is_deep_gemm_supported
 
     if not is_deep_gemm_supported() or not current_platform.is_device_capability_family(

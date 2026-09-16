@@ -104,6 +104,41 @@ impl StructuredOutputsParams {
             backend: StructuredOutputBackend::default(),
         }
     }
+
+    pub fn validate(&self) -> Result<()> {
+        match &self.constraint {
+            StructuredOutputConstraint::Grammar(grammar) if grammar.trim().is_empty() => {
+                Err(Error::InvalidStructuredOutputsParams {
+                    message: "structured_outputs.grammar cannot be an empty string".to_string(),
+                })
+            }
+            StructuredOutputConstraint::Json(Value::String(value)) => {
+                if value.trim().is_empty() {
+                    return Err(Error::InvalidStructuredOutputsParams {
+                        message: "structured_outputs.json cannot be an empty string".to_string(),
+                    });
+                }
+                serde_json::from_str::<Value>(value).map_err(|_| {
+                    Error::InvalidStructuredOutputsParams {
+                        message: "Invalid JSON grammar specification.".to_string(),
+                    }
+                })?;
+                Ok(())
+            }
+            StructuredOutputConstraint::Choice(choice) if choice.is_empty() => {
+                Err(Error::InvalidStructuredOutputsParams {
+                    message: "structured_outputs.choice cannot be empty".to_string(),
+                })
+            }
+            StructuredOutputConstraint::StructuralTag(tag) if tag.trim().is_empty() => {
+                Err(Error::InvalidStructuredOutputsParams {
+                    message: "structured_outputs.structural_tag cannot be an empty string"
+                        .to_string(),
+                })
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 /// Wire-compatible structured-output payload used by Python engine-core.
@@ -176,7 +211,7 @@ impl TryFrom<WireStructuredOutputsParams> for StructuredOutputsParams {
         }
         insert_constraint!("structural_tag", raw.structural_tag.map(StructuralTag));
 
-        Ok(Self {
+        let params = Self {
             constraint: constraint.map(|(_, c)| c).ok_or_else(|| {
                 Error::InvalidStructuredOutputsParams {
                     message: "missing structured output constraint".to_string(),
@@ -188,7 +223,9 @@ impl TryFrom<WireStructuredOutputsParams> for StructuredOutputsParams {
                 whitespace_pattern: raw.whitespace_pattern,
             },
             backend: raw.backend,
-        })
+        };
+        params.validate()?;
+        Ok(params)
     }
 }
 
@@ -287,6 +324,55 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("json_object must be true"));
+    }
+
+    #[test]
+    fn structured_outputs_rejects_empty_json_string() {
+        let error = serde_json::from_value::<StructuredOutputsParams>(serde_json::json!({
+            "json": "  ",
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("json cannot be an empty string"));
+    }
+
+    #[test]
+    fn validate_rejects_empty_grammar_from_constructor() {
+        let error = StructuredOutputsParams::grammar("  ").validate().unwrap_err();
+        assert!(error.to_string().contains("grammar cannot be an empty string"));
+    }
+
+    #[test]
+    fn validate_rejects_empty_json_string_from_constructor() {
+        let error = StructuredOutputsParams::json(Value::String("  ".to_string()))
+            .validate()
+            .unwrap_err();
+        assert!(error.to_string().contains("json cannot be an empty string"));
+    }
+
+    #[test]
+    fn validate_rejects_malformed_json_string() {
+        let error = StructuredOutputsParams::json(Value::String("not json".to_string()))
+            .validate()
+            .unwrap_err();
+        assert!(error.to_string().contains("Invalid JSON grammar specification."));
+    }
+
+    #[test]
+    fn validate_rejects_empty_choice() {
+        let error = StructuredOutputsParams::choice(vec![]).validate().unwrap_err();
+        assert!(error.to_string().contains("choice cannot be empty"));
+    }
+
+    #[test]
+    fn validate_rejects_empty_structural_tag() {
+        let error = StructuredOutputsParams::structural_tag("\n\t").validate().unwrap_err();
+        assert!(error.to_string().contains("structural_tag cannot be an empty string"));
+    }
+
+    #[test]
+    fn validate_accepts_non_empty_grammar() {
+        assert!(StructuredOutputsParams::grammar("root ::= \"a\"").validate().is_ok());
     }
 
     #[test]
