@@ -72,7 +72,8 @@ _sync_filter_head: tuple | None = None
 
 def _sync_warning_hook(message, category, filename, lineno, file=None, line=None):
     """Turn torch's sync warning into an error, but only on a thread that is
-    being checked and is outside any allow region."""
+    being checked and is outside any allow region.
+    """
     if _TORCH_SYNC_WARNING in str(message):
         mode = _checking.get()
         if mode is None or _allow_depth.get():
@@ -225,6 +226,16 @@ _torch_to = torch.Tensor.to
 _torch_cuda = torch.Tensor.cuda
 _torch_copy_ = torch.Tensor.copy_
 
+
+# Once ``Tensor.to`` is replaced below, Dynamo sees the saved C++ descriptor
+# through this module global instead of as a recognized tensor method. Put the
+# descriptor behind a weak-referenceable Python callable so ``allow_in_graph``
+# can admit it and the downstream compiler can lower the original operation.
+@torch.compiler.allow_in_graph
+def _torch_to_in_graph(self, *args, **kwargs):
+    return _torch_to(self, *args, **kwargs)
+
+
 # torch's own parser for `Tensor.to`'s overloaded signature, returning
 # (device, dtype, non_blocking, memory_format) (also used by torch._dynamo).
 _parse_to = getattr(torch._C._nn, "_parse_to", None)
@@ -232,7 +243,7 @@ _parse_to = getattr(torch._C._nn, "_parse_to", None)
 
 def _active_check_mode() -> str | None:
     """The mode the calling thread is being checked in, if any."""
-    if not _sync_check_enabled or _allow_depth.get() or torch.compiler.is_compiling():
+    if not _sync_check_enabled or torch.compiler.is_compiling() or _allow_depth.get():
         return None
     return _checking.get()
 
@@ -241,7 +252,8 @@ def _is_dense(t: torch.Tensor) -> bool:
     """Whether `t`'s elements fill a contiguous storage range, possibly
     permuted (e.g. a transposed matrix). Such layouts can be copied with
     pitched cudaMemcpy2D/3DAsync directly from/to pinned memory, whereas
-    gapped layouts (e.g. strided slices) stage through a pageable temp."""
+    gapped layouts (e.g. strided slices) stage through a pageable temp.
+    """
     if t.is_contiguous():
         # The common case, answered by a memoized TensorImpl flag.
         return True
@@ -296,7 +308,7 @@ def _checked_to(self, *args, **kwargs):
         else:
             if non_blocking and (reason := _cpu_copy_stall_reason(self, device)):
                 _report_implicit_sync("to", "H2D", reason, mode)
-    return _torch_to(self, *args, **kwargs)
+    return _torch_to_in_graph(self, *args, **kwargs)
 
 
 def _checked_cuda(self, *args, **kwargs):

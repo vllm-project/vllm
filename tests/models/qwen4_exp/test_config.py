@@ -144,7 +144,8 @@ def test_qwen4_exp_mtp_override_sets_draft_config(
 def test_qwen4_exp_rejects_pipeline_parallel_only_with_ple(ple_layer_ids) -> None:
     """PLE needs raw input_ids, which non-first pipeline ranks never see. The
     rest of the architecture is PP-capable, so the refusal must be conditional
-    -- and must land before the engine spends time loading weights."""
+    -- and must land before the engine spends time loading weights.
+    """
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(
             hf_text_config=_text_config(ple_layer_ids=ple_layer_ids),

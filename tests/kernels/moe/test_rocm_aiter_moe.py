@@ -249,7 +249,8 @@ def _make_topk_ids(
     device: str = "cuda",
 ) -> torch.Tensor:
     """Generate distinct expert IDs per token with the same top-k shape as
-    production routing."""
+    production routing.
+    """
     router_logits = torch.randn(num_tokens, num_experts, device=device)
     _, topk_ids = torch.topk(torch.softmax(router_logits, dim=-1), k=topk, dim=-1)
     return topk_ids.to(torch.int32)
@@ -443,7 +444,8 @@ def test_aiter_fused_moe_custom_op_registered():
 
 def test_aiter_asm_moe_tkw1_custom_op_registered():
     """The tkw1 custom op should stay registered for FP8 apply-router-weight
-    paths."""
+    paths.
+    """
     _assert_aiter_supported()
     import vllm._aiter_ops as aiter_ops  # noqa: F401
 
@@ -453,7 +455,8 @@ def test_aiter_asm_moe_tkw1_custom_op_registered():
 
 def test_aiter_fused_moe_fake_tensor_support():
     """The fused-MoE op should preserve fake-tensor compatibility for
-    torch.compile-style tracing."""
+    torch.compile-style tracing.
+    """
     _assert_aiter_supported()
     import vllm._aiter_ops  # noqa: F401
 
@@ -516,7 +519,8 @@ def test_aiter_moe_enablement_follows_env(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """The fused-MoE gate should depend only on the main AITER toggle and the
-    MoE-specific toggle."""
+    MoE-specific toggle.
+    """
     from vllm._aiter_ops import rocm_aiter_ops
 
     _assert_aiter_supported()
@@ -547,7 +551,8 @@ def test_aiter_moe_shared_experts_enablement_follows_env(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Shared-expert fusion should only be enabled when the fused-MoE path is
-    enabled too."""
+    enabled too.
+    """
     from vllm._aiter_ops import rocm_aiter_ops
 
     _assert_aiter_supported()
@@ -563,6 +568,74 @@ def test_aiter_moe_shared_experts_enablement_follows_env(
         rocm_aiter_ops.refresh_env_variables()
 
         assert rocm_aiter_ops.is_fusion_moe_shared_experts_enabled() is expected
+
+
+def test_aiter_moe_situv2_syncs_aiter_a4w4_env(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """SiTUv2 MoE should route to AITER a4w4 and clear legacy a8w4 overrides."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    _assert_aiter_supported()
+
+    with monkeypatch.context() as mp:
+        mp.delenv("AITER_SITUV2_A8W4", raising=False)
+        mp.delenv("AITER_SITUV2_A4W4", raising=False)
+        mp.setenv("VLLM_ROCM_USE_AITER", "1")
+        mp.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+        mp.setenv("VLLM_ROCM_USE_AITER_MOE_SITUV2", "1")
+        _reload_envs()
+        rocm_aiter_ops.refresh_env_variables()
+
+        import os
+
+        assert os.environ.get("AITER_SITUV2_A4W4") == "1"
+        assert "AITER_SITUV2_A8W4" not in os.environ
+
+
+def test_aiter_moe_situv2_legacy_a8w4_alias_enables_a4w4(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Deprecated VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4 still enables SiTUv2 a4w4."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    _assert_aiter_supported()
+
+    with monkeypatch.context() as mp:
+        mp.delenv("AITER_SITUV2_A8W4", raising=False)
+        mp.delenv("AITER_SITUV2_A4W4", raising=False)
+        mp.delenv("VLLM_ROCM_USE_AITER_MOE_SITUV2", raising=False)
+        mp.setenv("VLLM_ROCM_USE_AITER", "1")
+        mp.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+        mp.setenv("VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4", "1")
+        _reload_envs()
+        rocm_aiter_ops.refresh_env_variables()
+
+        import os
+
+        assert os.environ.get("AITER_SITUV2_A4W4") == "1"
+        assert "AITER_SITUV2_A8W4" not in os.environ
+
+
+def test_aiter_moe_situv2_clears_aiter_env_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    _assert_aiter_supported()
+
+    with monkeypatch.context() as mp:
+        mp.setenv("AITER_SITUV2_A4W4", "1")
+        mp.setenv("VLLM_ROCM_USE_AITER", "1")
+        mp.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+        mp.delenv("VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4", raising=False)
+        mp.setenv("VLLM_ROCM_USE_AITER_MOE_SITUV2", "0")
+        _reload_envs()
+        rocm_aiter_ops.refresh_env_variables()
+
+        import os
+
+        assert "AITER_SITUV2_A4W4" not in os.environ
 
 
 @pytest.mark.parametrize("moe_padding", [True, False])
@@ -620,7 +693,8 @@ def test_aiter_mxfp4_quant_scheme_support_matches_gfx950():
 @pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
 def test_aiter_fused_moe_mi350_mxfp4_w4a16_accuracy():
     """The gfx950 AITER MXFP4 W4A16 MoE path should match the dequantized
-    MXFP4 reference."""
+    MXFP4 reference.
+    """
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
         rocm_aiter_fused_experts,
@@ -669,7 +743,8 @@ def test_aiter_fused_moe_mi350_mxfp4_w4a16_accuracy():
 @pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
 def test_aiter_fused_moe_mi350_mxfp4_w4a16_determinism():
     """The gfx950 AITER MXFP4 W4A16 MoE path should stay bitwise
-    deterministic."""
+    deterministic.
+    """
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
         rocm_aiter_fused_experts,
@@ -762,7 +837,8 @@ def test_aiter_fused_moe_bf16_accuracy(
     intermediate_dim: int,
 ):
     """The ROCm AITER fused-MoE BF16 path should match the float32 reference
-    on representative shapes."""
+    on representative shapes.
+    """
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
         ActivationMethod,
         QuantMethod,
@@ -807,7 +883,8 @@ def test_aiter_fused_moe_bf16_accuracy(
 
 def test_aiter_fused_moe_gelu_accuracy():
     """The GELU activation variant should stay aligned with the float32
-    reference."""
+    reference.
+    """
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
         ActivationMethod,
         QuantMethod,
@@ -852,7 +929,8 @@ def test_aiter_fused_moe_gelu_accuracy():
 
 def test_aiter_fused_moe_determinism():
     """The BF16 fused-MoE kernel should stay bitwise deterministic for the
-    same inputs."""
+    same inputs.
+    """
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
         ActivationMethod,
         QuantMethod,
@@ -1007,7 +1085,8 @@ def test_aiter_fused_moe_mi3xx_bf16_accuracy():
 )
 def test_aiter_fused_moe_mi3xx_fp8_accuracy():
     """The MI3xx FP8 per-tensor MoE path should stay within the measured FP8
-    error budget."""
+    error budget.
+    """
     from tests.kernels.moe.utils import make_test_weights
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (

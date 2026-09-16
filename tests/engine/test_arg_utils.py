@@ -254,10 +254,13 @@ def test_get_type_hints(type_hint, expected):
     assert get_type_hints(type_hint) == expected
 
 
-def test_get_kwargs():
-    kwargs = get_kwargs(DummyConfig)
-    print(kwargs)
+@pytest.fixture
+def dummy_config_kwargs():
+    return get_kwargs(DummyConfig)
 
+
+def test_get_kwargs(dummy_config_kwargs):
+    kwargs = dummy_config_kwargs
     # bools should not have their type set
     assert kwargs["regular_bool"].get("type") is None
     assert kwargs["optional_bool"].get("type") is None
@@ -267,7 +270,7 @@ def test_get_kwargs():
     assert kwargs["optional_bool_or_str"]["const"] is True
     assert "action" not in kwargs["optional_bool_or_str"]
     # optional literals should have None as a choice
-    assert kwargs["optional_literal"]["choices"] == ["x", "y", "None"]
+    assert kwargs["optional_literal"]["choices"] == ["x", "y", None]
     # tuples should have the correct nargs
     assert kwargs["tuple_n"]["nargs"] == "+"
     assert kwargs["tuple_2"]["nargs"] == 2
@@ -291,6 +294,22 @@ def test_get_kwargs():
     assert json_tip in kwargs["json_tip"]["help"]
     # nested config should construct the nested config
     assert kwargs["nested_config"]["type"]('{"field": 2}') == NestedConfig(2)  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (["--optional-literal", "None"], None),
+        (["--optional-literal", ""], None),
+        (["--optional-literal", "x"], "x"),
+    ],
+)
+def test_optional_handling(args, expected, dummy_config_kwargs):
+    parser = FlexibleArgumentParser()
+    parser.add_argument("--optional-literal", **dummy_config_kwargs["optional_literal"])
+
+    assert parser.parse_args(args).optional_literal is expected
+    assert "None" in parser.format_help()
 
 
 def test_jit_monitor_verbose_arg():
@@ -375,8 +394,7 @@ def test_media_io_kwargs_parser(arg, expected):
     ],
 )
 def test_optimization_level(args, expected):
-    """
-    Test space-separated optimization levels (-O 1, -O 2, -O 3) map to
+    """Test space-separated optimization levels (-O 1, -O 2, -O 3) map to
     optimization_level.
     """
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
@@ -395,9 +413,7 @@ def test_optimization_level(args, expected):
     ],
 )
 def test_mode_parser(args, expected):
-    """
-    Test compilation config modes (-cc.mode=int) map to compilation_config.
-    """
+    """Test compilation config modes (-cc.mode=int) map to compilation_config."""
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     parsed_args = parser.parse_args(args)
     assert parsed_args.compilation_config.mode == expected
@@ -554,7 +570,8 @@ def test_attention_config():
 def test_multi_node_world_size_includes_pcp(monkeypatch):
     """PCP expands the process world size, so the --nnodes divisibility check
     must include it. Without this, TP=1/PCP=2 over 2 nodes computes a world
-    size of 1 and the launch is rejected before the engine starts."""
+    size of 1 and the launch is rejected before the engine starts.
+    """
     import vllm.config.vllm
 
     # PCP requires the V2 model runner, which is gated on Triton.
@@ -780,7 +797,8 @@ def test_expand_json_human_readable_numbers(input_json, expected_json):
 )
 def test_cloud_storage_uri_skips_get_model_path(uri, monkeypatch):
     """Cloud storage URIs should not be passed to get_model_path()
-    when HF_HUB_OFFLINE=1, as they are not valid HF repo IDs."""
+    when HF_HUB_OFFLINE=1, as they are not valid HF repo IDs.
+    """
     import huggingface_hub
 
     monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", True)
@@ -792,7 +810,8 @@ def test_cloud_storage_uri_skips_get_model_path(uri, monkeypatch):
 
 def test_cloud_storage_tokenizer_skips_get_model_path(monkeypatch):
     """Cloud storage tokenizer URI should not be passed to
-    get_model_path() when HF_HUB_OFFLINE=1."""
+    get_model_path() when HF_HUB_OFFLINE=1.
+    """
     import huggingface_hub
 
     monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", True)
@@ -954,7 +973,8 @@ class TestDpDeviceIdSharding:
     def test_dp_supervisor_device_ids_stay_env_relative(self):
         """Regression test: the DP supervisor must pass env-relative indices,
         not physical IDs, because each child re-resolves --device-ids
-        against its inherited device-control env var."""
+        against its inherited device-control env var.
+        """
         import argparse
 
         from vllm.entrypoints.launchers.dp_supervisor import _build_device_ids
@@ -981,7 +1001,8 @@ class TestDpDeviceIdSharding:
 
     def test_dp_rank_shards_user_assigned_gpu_ids(self):
         """get_physical_gpu_ids_for_local_dp_rank slices the user-provided
-        --device-ids list instead of recomputing from the env var."""
+        --device-ids list instead of recomputing from the env var.
+        """
         from vllm.platforms import current_platform
         from vllm.v1.engine.utils import get_physical_gpu_ids_for_local_dp_rank
 

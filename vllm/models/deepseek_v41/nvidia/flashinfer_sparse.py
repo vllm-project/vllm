@@ -54,7 +54,8 @@ def _get_flashinfer_dsv4_workspace(device: torch.device) -> torch.Tensor:
 def _packed_block_span(pool: torch.Tensor) -> int:
     """Per-block stride of ``pool`` in tokens (``stride(0)//stride(-2)``): ==
     block_size for unpacked KV, larger when packed (#44577). Raises if not
-    token-aligned."""
+    token-aligned.
+    """
     block_stride = pool.stride(0)
     token_stride = pool.stride(-2)
     if block_stride % token_stride != 0:
@@ -201,7 +202,8 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
         return _pad_to_supported_q_heads(num_heads)
 
-    def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+    def _o_proj(self, attn_out: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        o = attn_out[:, : self.n_local_heads, :]
         return deep_gemm_fp8_o_proj(
             o,
             positions,
@@ -562,7 +564,8 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
         return _pad_to_supported_q_heads(num_heads)
 
-    def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+    def _o_proj(self, attn_out: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        o = attn_out[:, : self.n_local_heads, :]
         return deep_gemm_fp8_o_proj(
             o,
             positions,
