@@ -1369,6 +1369,9 @@ class EngineCoreProc(EngineCore):
             )
             init_message = scale_up_message.engine_metadata
             num_redundant_experts = scale_up_message.num_redundant_experts
+            parallel_config.elastic_ep_max_dp_size = (
+                scale_up_message.elastic_ep_max_dp_size
+            )
         else:
             init_message = msgspec.msgpack.decode(
                 init_bytes, type=EngineHandshakeMetadata
