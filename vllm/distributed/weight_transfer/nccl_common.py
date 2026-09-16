@@ -17,6 +17,13 @@ import torch
 if TYPE_CHECKING:
     from vllm.config.parallel import ParallelConfig
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+    from vllm.distributed.weight_transfer.torch_dist_transport import (
+        TorchDistTransport,
+    )
+
+    # What the engines hold: PyNccl on CUDA/ROCm, the `torch.distributed`
+    # transport on accelerators that have no NCCL.
+    WeightTransferCommunicator = PyNcclCommunicator | TorchDistTransport
 
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     NCCL_UNIQUE_ID_BYTES,
@@ -157,16 +164,30 @@ def stateless_init_process_group(
     rank: int,
     world_size: int,
     device,
-) -> "PyNcclCommunicator":
+) -> "WeightTransferCommunicator":
     """
     vLLM provides `StatelessProcessGroup` to create a process group
     without considering the global process group in torch.distributed.
     It is recommended to create `StatelessProcessGroup`, and then initialize
     the data-plane communication (NCCL) between external (train processes)
     and vLLM workers.
+
+    Off CUDA/ROCm there is no NCCL to initialize, so the same broadcasts go over
+    the platform's own collective backend instead; see `torch_dist_transport`.
     """
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
     from vllm.distributed.utils import StatelessProcessGroup
+
+    if not current_platform.is_cuda_alike():
+        # No `libnccl` here, so `PyNcclCommunicator` would no-op every
+        # collective. Same broadcasts, over the platform's own transport.
+        from vllm.distributed.weight_transfer.torch_dist_transport import (
+            TorchDistTransport,
+        )
+
+        return TorchDistTransport.create(
+            master_address, master_port, rank, world_size, device
+        )
 
     pg = StatelessProcessGroup.create(
         host=master_address, port=master_port, rank=rank, world_size=world_size
@@ -179,13 +200,21 @@ def uid_init_process_group(
     rank: int,
     world_size: int,
     device,
-) -> "PyNcclCommunicator":
+) -> "WeightTransferCommunicator":
     """Join the NCCL group from pre-shared ``ncclUniqueId`` bytes.
 
     The torch-free rendezvous alternative to `stateless_init_process_group`: no
     TCPStore, and therefore no barrier -- every rank must enter concurrently.
     """
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+
+    if not current_platform.is_cuda_alike():
+        raise NotImplementedError(
+            "The unique-id rendezvous is an ncclUniqueId minted by "
+            f"ncclGetUniqueId, which {current_platform.device_name} has no NCCL "
+            "to interpret. Use the master_address/master_port rendezvous, which "
+            "runs over this platform's own collective backend."
+        )
 
     return _require_usable_communicator(
         PyNcclCommunicator.from_unique_id_bytes(
@@ -200,7 +229,7 @@ def uid_init_process_group(
 def worker_init_process_group(
     init_info: NCCLWeightTransferInitInfo,
     parallel_config: "ParallelConfig",
-) -> "PyNcclCommunicator":
+) -> "WeightTransferCommunicator":
     """Create the trainer<->worker NCCL group on an inference worker.
 
     Computes a unique rank for this worker across all data-parallel groups and
@@ -239,7 +268,7 @@ def worker_init_process_group(
 
 def trainer_init(
     init_info: NCCLRendezvous | dict,
-) -> "PyNcclCommunicator":
+) -> "WeightTransferCommunicator":
     """
     Initialize NCCL process group for trainer-side weight transfer.
 
