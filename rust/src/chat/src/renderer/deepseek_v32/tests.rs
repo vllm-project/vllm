@@ -365,3 +365,16 @@ fn trailing_system_turn_renders_before_the_assistant_transition() {
     expect!["<｜begin▁of▁sentence｜><｜User｜>HiReminder: be brief.<｜Assistant｜><think>"]
         .assert_eq(&rendered);
 }
+
+#[test]
+fn folded_trailing_system_turn_omits_generation_prompt_when_disabled() {
+    let mut request = thinking_request(vec![
+        ChatMessage::user("Hi"),
+        ChatMessage::system("Reminder: be brief."),
+    ]);
+    request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
+
+    let rendered = render_request(&request);
+
+    expect!["<｜begin▁of▁sentence｜><｜User｜>HiReminder: be brief."].assert_eq(&rendered);
+}
