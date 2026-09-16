@@ -2,11 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import random
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import pytest
 
-from vllm import LLM
+from vllm import LLM, PoolingParams
+from vllm.inputs import tokens_input
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric, Vector
 
 if TYPE_CHECKING:
@@ -16,6 +20,99 @@ else:
 
 MODEL = "facebook/opt-125m"
 DTYPE = "half"
+
+
+def _pooling_request(request_id: str) -> EngineCoreRequest:
+    return EngineCoreRequest(
+        request_id=request_id,
+        prompt_token_ids=[1, 2],
+        mm_features=None,
+        sampling_params=None,
+        pooling_params=PoolingParams(),
+        arrival_time=0.0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+    )
+
+
+def _mock_llm_engine() -> LLMEngine:
+    engine = object.__new__(LLMEngine)
+    engine.input_processor = MagicMock()
+    engine.output_processor = MagicMock()
+    engine.engine_core = MagicMock()
+    engine.model_config = MagicMock()
+    engine._supported_tasks = ("embed",)
+    return engine
+
+
+def test_add_requests_prepares_every_request_before_registration(monkeypatch):
+    engine = _mock_llm_engine()
+    engine.input_processor.process_inputs.side_effect = [
+        _pooling_request("internal-0"),
+        RuntimeError("invalid request"),
+    ]
+    monkeypatch.setattr(
+        "vllm.v1.engine.llm_engine.extract_prompt_components",
+        lambda *_args: (None, None, None),
+    )
+
+    with pytest.raises(RuntimeError, match="invalid request"):
+        engine.add_requests(
+            [
+                ("0", tokens_input([1]), PoolingParams(), None, 0),
+                ("1", tokens_input([2]), PoolingParams(), None, 0),
+            ]
+        )
+
+    engine.output_processor.add_request.assert_not_called()
+    engine.engine_core.add_requests.assert_not_called()
+
+
+def test_add_requests_rolls_back_registered_output_state(monkeypatch):
+    engine = _mock_llm_engine()
+    requests = [_pooling_request("internal-0"), _pooling_request("internal-1")]
+    engine.input_processor.process_inputs.side_effect = requests
+    engine.output_processor.add_request.side_effect = [
+        None,
+        RuntimeError("registration failed"),
+    ]
+    engine.output_processor.abort_requests.return_value = ["internal-0"]
+    monkeypatch.setattr(
+        "vllm.v1.engine.llm_engine.extract_prompt_components",
+        lambda *_args: (None, None, None),
+    )
+
+    with pytest.raises(RuntimeError, match="registration failed"):
+        engine.add_requests(
+            [
+                ("0", tokens_input([1]), PoolingParams(), None, 0),
+                ("1", tokens_input([2]), PoolingParams(), None, 0),
+            ]
+        )
+
+    engine.output_processor.abort_requests.assert_called_once_with(
+        ["internal-0", "internal-1"], internal=True
+    )
+    engine.engine_core.add_requests.assert_not_called()
+    engine.engine_core.abort_requests.assert_not_called()
+
+
+def test_single_request_submission_is_unchanged(monkeypatch):
+    engine = _mock_llm_engine()
+    request = _pooling_request("internal-0")
+    engine.input_processor.process_inputs.return_value = request
+    monkeypatch.setattr(
+        "vllm.v1.engine.llm_engine.extract_prompt_components",
+        lambda *_args: (None, None, None),
+    )
+
+    request_id = engine.add_request("0", tokens_input([1]), PoolingParams())
+
+    assert request_id == request.request_id
+    engine.output_processor.add_request.assert_called_once_with(request, None, None, 0)
+    engine.engine_core.add_request.assert_called_once_with(request)
+    engine.engine_core.add_requests.assert_not_called()
 
 
 def _vllm_model(
