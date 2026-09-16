@@ -268,7 +268,11 @@ def _get_tuned_matmul_arch_family(capability: DeviceCapability | None) -> str | 
     if capability.major == 10:
         return "blackwell"
     if capability.major == 9:
-        return "hopper_nvl"
+        # These configs were tuned on H100 NVL; they regress on H100 SXM.
+        # Fall back to defaults for non-NVL SM90 variants.
+        device_name = torch.cuda.get_device_name() if torch.cuda.is_available() else ""
+        if "NVL" in device_name:
+            return "hopper_nvl"
     if capability.major == 8 and capability.minor == 9:
         return "ada"
     return None
