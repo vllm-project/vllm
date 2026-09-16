@@ -73,8 +73,6 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        if vllm_config.parallel_config.tensor_parallel_size != 1:
-            raise NotImplementedError("CPU Qwen4Exp PLE currently supports TP=1 only")
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config

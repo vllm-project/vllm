@@ -4,6 +4,7 @@
 
 from collections.abc import Iterable
 from itertools import islice
+from math import lcm
 
 import torch
 from torch import nn
@@ -80,6 +81,116 @@ from ..config import Qwen4ExpConfig
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .ple_layer import Qwen4ExpPLELayer
 from .qsa import Qwen4ExpQSAAttention
+
+
+def _get_padded_moe_intermediate_size(
+    quant_config: QuantizationConfig | None,
+    intermediate_size: int,
+    tp_size: int,
+) -> int:
+    """Pad serialized block-FP8 experts to whole blocks on every TP rank."""
+    if (
+        quant_config is None
+        or quant_config.get_name() != "fp8"
+        or not getattr(quant_config, "is_checkpoint_fp8_serialized", False)
+    ):
+        return intermediate_size
+    block_size = getattr(quant_config, "weight_block_size", None)
+    if block_size is None:
+        return intermediate_size
+
+    block_n, block_k = (int(size) for size in block_size)
+    alignment = tp_size * lcm(block_n, block_k)
+    return (intermediate_size + alignment - 1) // alignment * alignment
+
+
+def _pad_moe_checkpoint_tensor(
+    name: str,
+    loaded_weight: torch.Tensor,
+    intermediate_size: int,
+    padded_intermediate_size: int,
+    block_size: list[int],
+) -> torch.Tensor:
+    if padded_intermediate_size == intermediate_size or ".mlp.experts." not in name:
+        return loaded_weight
+
+    if ".down_proj." in name:
+        if name.endswith(".bias"):
+            return loaded_weight
+        dim = 1
+        block = int(block_size[1])
+        logical_shards = 1
+    elif any(
+        projection in name
+        for projection in (".gate_proj.", ".up_proj.", ".gate_up_proj.")
+    ):
+        dim = 0
+        block = int(block_size[0])
+        logical_shards = 2 if ".gate_up_proj." in name else 1
+    else:
+        return loaded_weight
+
+    if name.endswith((".weight_scale", ".weight_scale_inv")):
+        source_size = (intermediate_size + block - 1) // block
+        target_size = (padded_intermediate_size + block - 1) // block
+    elif name.endswith((".weight", ".bias")):
+        source_size = intermediate_size
+        target_size = padded_intermediate_size
+    else:
+        return loaded_weight
+
+    current_size = loaded_weight.shape[dim]
+    if current_size % logical_shards:
+        raise ValueError(
+            f"Cannot split {name} dimension {current_size} into "
+            f"{logical_shards} logical shards."
+        )
+    current_shard_size = current_size // logical_shards
+    if current_shard_size == target_size:
+        return loaded_weight
+    if current_shard_size != source_size:
+        raise ValueError(
+            f"Cannot pad {name}: expected each logical intermediate dimension "
+            f"to be {source_size}, but got {current_shard_size}."
+        )
+
+    padded_shards: list[torch.Tensor] = []
+    for shard in loaded_weight.split(current_shard_size, dim=dim):
+        pad_shape = list(shard.shape)
+        pad_shape[dim] = target_size - current_shard_size
+        padded_shards.extend((shard, shard.new_zeros(pad_shape)))
+    return torch.cat(padded_shards, dim=dim)
+
+
+def _pad_moe_checkpoint_weights(
+    weights: Iterable[tuple[str, torch.Tensor]],
+    vllm_config: VllmConfig,
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """Zero-pad Qwen4Exp routed-expert weights before TP sharding."""
+    quant_config = vllm_config.quant_config
+    config = vllm_config.model_config.hf_text_config
+    intermediate_size = config.moe_intermediate_size
+    padded_intermediate_size = _get_padded_moe_intermediate_size(
+        quant_config,
+        intermediate_size,
+        vllm_config.parallel_config.tensor_parallel_size,
+    )
+    block_size = getattr(quant_config, "weight_block_size", None)
+    if padded_intermediate_size == intermediate_size or block_size is None:
+        yield from weights
+        return
+
+    for name, loaded_weight in weights:
+        yield (
+            name,
+            _pad_moe_checkpoint_tensor(
+                name,
+                loaded_weight,
+                intermediate_size,
+                padded_intermediate_size,
+                block_size,
+            ),
+        )
 
 
 def without_modelopt_fp4(
@@ -171,8 +282,24 @@ class Qwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock):
             raise NotImplementedError(
                 "Qwen4Exp HC does not support sequence-parallel MoE"
             )
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
         config = vllm_config.model_config.hf_text_config
+        intermediate_size = config.moe_intermediate_size
+        tp_size = parallel_config.tensor_parallel_size
+        padded_intermediate_size = _get_padded_moe_intermediate_size(
+            vllm_config.quant_config,
+            intermediate_size,
+            tp_size,
+        )
+        config.moe_intermediate_size = padded_intermediate_size
+        try:
+            super().__init__(vllm_config=vllm_config, prefix=prefix)
+        finally:
+            config.moe_intermediate_size = intermediate_size
+        self.original_intermediate_size_per_partition = intermediate_size // tp_size
+        if padded_intermediate_size != intermediate_size:
+            self.experts.moe_config.intermediate_size_per_partition_unpadded = (
+                self.original_intermediate_size_per_partition
+            )
         self.n_shared_experts = int(config.shared_expert_intermediate_size > 0)
 
 
@@ -400,6 +527,7 @@ class Qwen4ExpModel(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
+        self.vllm_config = vllm_config
         config: Qwen4ExpTextConfig = vllm_config.model_config.hf_text_config
         self.config = config
         self.num_redundant_experts = (
@@ -538,6 +666,7 @@ class Qwen4ExpModel(nn.Module):
         return sample_hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        weights = _pad_moe_checkpoint_weights(weights, self.vllm_config)
         weights = (
             (
                 _remap_qsa_cache_scale_name(name, self._qsa_layer_ids),
@@ -796,6 +925,7 @@ class Qwen4ExpForCausalLM(
         return positions.unsqueeze(0).expand(3, -1), 0
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        weights = _pad_moe_checkpoint_weights(weights, self.vllm_config)
         mapper = self.hf_to_vllm_mapper | WeightsMapper(
             orig_to_new_substr={"mtp.": None}
         )
@@ -842,6 +972,7 @@ class Qwen4ExpForConditionalGeneration(
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model") -> None:
         nn.Module.__init__(self)
+        self.vllm_config = vllm_config
         config: Qwen4ExpConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
@@ -987,6 +1118,7 @@ class Qwen4ExpForConditionalGeneration(
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        weights = _pad_moe_checkpoint_weights(weights, self.vllm_config)
         mapper = self.hf_to_vllm_mapper | WeightsMapper(
             orig_to_new_substr={"mtp.": None},
             orig_to_new_prefix={"visual.": None} if self.language_model_only else {},
