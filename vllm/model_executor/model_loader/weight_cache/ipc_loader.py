@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """IPC model loader: maps post-quantized weights from a local weight cache
-daemon via CUDA IPC instead of loading from disk."""
+daemon via device IPC (CUDA/ROCm) or, on platforms with no device IPC handle,
+by shipping them by value, instead of reloading from disk."""
 
 import dataclasses
 import socket
@@ -34,6 +35,7 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     get_current_device_uuid,
     get_socket_path,
     recv_msg,
+    recv_tensor_into,
     send_msg,
     verify_socket_owner,
 )
@@ -48,14 +50,17 @@ _STATE_TIMEOUT_S = 300.0
 
 
 class IpcModelLoader(BaseModelLoader):
-    """Loads a model by mapping the weight cache daemon's tensors via CUDA IPC.
+    """Loads a model by mapping the weight cache daemon's tensors via device
+    IPC where available, or by copying them otherwise.
 
     The model is initialized on the meta device and every parameter/buffer is
     replaced by the daemon's post-quantized tensor, so
-    process_weights_after_loading is skipped entirely. In "zero_copy" mode the
-    engine shares the daemon's GPU memory; in "copy" mode the tensors are
-    cloned into engine-owned memory and the daemon is asked to release its
-    cache afterwards.
+    process_weights_after_loading is skipped entirely. On CUDA/ROCm,
+    "zero_copy" mode (default) shares the daemon's GPU memory directly;
+    "copy" mode clones the tensors into engine-owned memory and asks the
+    daemon to release its cache afterwards. On platforms with no device IPC
+    handle, every tensor is shipped by value and copied into the engine's
+    own memory regardless of ``mode``.
 
     Extra config keys (via --model-loader-extra-config):
 
@@ -68,9 +73,9 @@ class IpcModelLoader(BaseModelLoader):
     - connect_timeout_s: socket connect timeout (default: 5.0).
     - state_timeout_s: timeout for the weight-transfer request (default: 300.0).
 
-    Note: in zero-copy mode the weights live in the daemon's CUDA IPC
-    allocations, so sleep mode (CuMemAllocator weight offloading) must not be
-    used with this loader.
+    Note: in zero-copy mode on CUDA/ROCm the weights live in the daemon's
+    device IPC allocations, so sleep mode (CuMemAllocator weight offloading)
+    must not be used with this loader.
     """
 
     def __init__(self, load_config: LoadConfig):
@@ -178,6 +183,7 @@ class IpcModelLoader(BaseModelLoader):
             if target_device.index is not None
             else torch.accelerator.current_device_index()
         )
+        device = torch.device(target_device.type, device_index)
         with set_default_torch_dtype(model_config.dtype):
             with torch.device("meta"):
                 model = initialize_model(
@@ -195,9 +201,7 @@ class IpcModelLoader(BaseModelLoader):
             # dropped rather than filled with uninitialized memory.
             with weights_already_processed():
                 process_weights_after_loading(model, model_config, target_device)
-            _materialize_remaining_meta_tensors(
-                model, torch.device(target_device.type, device_index)
-            )
+            _materialize_remaining_meta_tensors(model, device)
         if self.mode == "copy":
             self._send_release()
         logger.info(
@@ -244,7 +248,10 @@ class IpcModelLoader(BaseModelLoader):
 
         for name, entry in entries.items():
             tensor = entry.rebuild(device_index)
-            if self.mode == "copy":
+            # entry.rebuild() already returns an engine-owned tensor when
+            # there is no device IPC handle to share, so the copy-mode clone
+            # below only matters for a real IPC mapping.
+            if self.mode == "copy" and entry.ipc_args is not None:
                 tensor = tensor.clone()
             _register(name, tensor, entry.kind == "param")
 
@@ -278,17 +285,30 @@ class IpcModelLoader(BaseModelLoader):
         with self._connect(self.state_timeout_s) as conn:
             send_msg(conn, {"cmd": "get_state", "cache_config": cache_config})
             response = recv_msg(conn)
-        status = response.get("status")
-        if status == "mismatch":
-            raise CacheConfigMismatchError(
-                f"WeightCacheKey mismatch on fields: {response.get('fields')}"
-            )
-        if status != "ok":
-            raise WeightCacheUnavailableError(
-                f"Weight cache daemon error: {response.get('message')}"
-            )
-        self._check_gpu_uuid(response.get("gpu_uuid"))
-        return response["entries"], response.get("aliases", {})
+            status = response.get("status")
+            if status == "mismatch":
+                raise CacheConfigMismatchError(
+                    f"WeightCacheKey mismatch on fields: {response.get('fields')}"
+                )
+            if status != "ok":
+                raise WeightCacheUnavailableError(
+                    f"Weight cache daemon error: {response.get('message')}"
+                )
+            self._check_gpu_uuid(response.get("gpu_uuid"))
+            entries: dict[str, TensorEntry] = response["entries"]
+            # Streamed entries carry shape/dtype metadata only; their raw
+            # bytes follow on this same connection, in entries order, and
+            # are read straight into a pinned buffer so the receive and the
+            # host-memory pinning happen in one step.
+            for entry in entries.values():
+                if entry.stream_shape is None:
+                    continue
+                buffer = torch.empty(
+                    entry.stream_shape, dtype=entry.stream_dtype, pin_memory=True
+                )
+                recv_tensor_into(conn, buffer)
+                entry.cpu_tensor = buffer
+        return entries, response.get("aliases", {})
 
     def _connect(self, timeout: float) -> socket.socket:
         socket_path = self._resolve_socket_path()
