@@ -22,7 +22,10 @@ from cutlass.utils import get_smem_capacity_in_bytes
 
 from vllm.cute_utils import _tcgen05, mbarrier, simple_tma_copy, to_cta0_smem
 from vllm.distributed import get_tp_group
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
+
+logger = init_logger(__name__)
 
 
 @dsl_user_op
@@ -777,6 +780,13 @@ class GemmRsAr:
             and w.dtype == torch.bfloat16
             and w.device == self.device
             and w.is_contiguous()
+        )
+
+    def warn_incompatible_projection(self) -> None:
+        logger.warning_once(
+            "Some projections are incompatible with GEMM-RS/AR; using the "
+            "unfused path instead.",
+            scope="global",
         )
 
     def should_run(self, x: torch.Tensor) -> bool:

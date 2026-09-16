@@ -99,6 +99,8 @@ class RequestFuncOutput:
     prompt_len: int = 0
     error: str = ""
     start_time: float = 0.0
+    # Time spent awaiting the benchmark client concurrency semaphore.
+    client_queue_time: float = 0.0
     input_audio_duration: float = 0.0  # in seconds
     num_input_sequences: int = 1
 
@@ -233,8 +235,7 @@ async def async_request_openai_completions(
                                 # First token
                                 if not first_chunk_received:
                                     first_chunk_received = True
-                                    ttft = time.perf_counter() - st
-                                    output.ttft = ttft
+                                    output.ttft = timestamp - st
 
                                 # Decoding phase
                                 else:
@@ -374,13 +375,13 @@ async def async_request_openai_chat_completions(
     output.prompt_len = request_func_input.prompt_len
 
     generated_text = ""
-    ttft = 0.0
     st = time.perf_counter()
     output.start_time = st
     most_recent_timestamp = st
     try:
         async with session.post(url=api_url, json=payload, headers=headers) as response:
             if response.status == 200:
+                first_chunk_received = False
                 handler = StreamedResponseHandler()
                 async for chunk_bytes in response.content.iter_any():
                     chunk_bytes = chunk_bytes.strip()
@@ -404,24 +405,32 @@ async def async_request_openai_chat_completions(
                             if choices := data.get("choices"):
                                 content = choices[0]["delta"].get("content")
                                 # First token
-                                if ttft == 0.0:
-                                    ttft = timestamp - st
-                                    output.ttft = ttft
+                                if not first_chunk_received:
+                                    first_chunk_received = True
+                                    output.ttft = timestamp - st
 
                                 # Decoding phase
                                 else:
                                     output.itl.append(timestamp - most_recent_timestamp)
 
                                 generated_text += content or ""
+                                # Only token chunks advance the request end;
+                                # the trailing usage chunk carries no token.
+                                most_recent_timestamp = timestamp
                             elif usage := data.get("usage"):
                                 output.output_tokens = usage.get("completion_tokens")
                                 if (pt := usage.get("prompt_tokens")) is not None:
                                     output.prompt_len = pt
 
-                            most_recent_timestamp = timestamp
-
                 output.generated_text = generated_text
-                output.success = True
+                if first_chunk_received:
+                    output.success = True
+                else:
+                    output.success = False
+                    output.error = (
+                        "Never received a valid chunk to calculate TTFT."
+                        "This response will be marked as failed!"
+                    )
                 output.latency = most_recent_timestamp - st
             else:
                 output.error = response.reason or ""
@@ -492,7 +501,6 @@ async def async_request_openai_audio(
         output.input_audio_duration = input_audio_duration
 
         generated_text = ""
-        ttft = 0.0
         st = time.perf_counter()
         output.start_time = st
         most_recent_timestamp = st
@@ -501,6 +509,7 @@ async def async_request_openai_audio(
                 url=api_url, data=form, headers=headers
             ) as response:
                 if response.status == 200:
+                    first_chunk_received = False
                     handler = StreamedResponseHandler()
 
                     async for chunk_bytes in response.content.iter_any():
@@ -520,9 +529,9 @@ async def async_request_openai_audio(
                                 if choices := data.get("choices"):
                                     content = choices[0]["delta"].get("content")
                                     # First token
-                                    if ttft == 0.0:
-                                        ttft = timestamp - st
-                                        output.ttft = ttft
+                                    if not first_chunk_received:
+                                        first_chunk_received = True
+                                        output.ttft = timestamp - st
 
                                     # Decoding phase
                                     else:
@@ -531,15 +540,24 @@ async def async_request_openai_audio(
                                         )
 
                                     generated_text += content or ""
+                                    # Only token chunks advance the request
+                                    # end; the trailing usage chunk carries no
+                                    # token.
+                                    most_recent_timestamp = timestamp
                                 elif usage := data.get("usage"):
                                     output.output_tokens = usage.get(
                                         "completion_tokens"
                                     )
 
-                                most_recent_timestamp = timestamp
-
                     output.generated_text = generated_text
-                    output.success = True
+                    if first_chunk_received:
+                        output.success = True
+                    else:
+                        output.success = False
+                        output.error = (
+                            "Never received a valid chunk to calculate TTFT."
+                            "This response will be marked as failed!"
+                        )
                     output.latency = most_recent_timestamp - st
                 else:
                     output.error = response.reason or ""
@@ -588,6 +606,7 @@ async def _run_pooling_request(
     headers: dict[str, Any],
     pbar: tqdm | None = None,
     num_input_sequences: int = 1,
+    prompt_len: int = 0,
 ) -> RequestFuncOutput:
     output = RequestFuncOutput(num_input_sequences=num_input_sequences)
     st = time.perf_counter()
@@ -595,11 +614,19 @@ async def _run_pooling_request(
     try:
         async with session.post(url=api_url, headers=headers, json=payload) as response:
             if response.status == 200:
+                encoding_format = payload.get("encoding_format", "float")
+                if encoding_format in ("bytes", "bytes_only"):
+                    async for _ in response.content.iter_any():
+                        pass
+                else:
+                    await response.read()
                 output.ttft = output.latency = time.perf_counter() - st
 
-                if payload.get("encoding_format", "float") == "bytes":
+                if encoding_format == "bytes":
                     metadata = json.loads(response.headers["metadata"])
                     usage = metadata.get("usage", {})
+                elif encoding_format == "bytes_only":
+                    usage = {"prompt_tokens": prompt_len}
                 else:
                     data = await response.json()
                     usage = data.get("usage", {})
@@ -654,6 +681,7 @@ async def async_request_openai_embeddings(
         headers=headers,
         pbar=pbar,
         num_input_sequences=_get_num_input_sequences(request_func_input.prompt),
+        prompt_len=request_func_input.prompt_len,
     )
 
 
@@ -691,6 +719,7 @@ async def async_request_vllm_rerank(
         headers=headers,
         pbar=pbar,
         num_input_sequences=len(request_func_input.prompt) - 1,
+        prompt_len=request_func_input.prompt_len,
     )
 
 
@@ -725,6 +754,7 @@ async def async_request_openai_embeddings_chat(
         payload=payload,
         headers=headers,
         pbar=pbar,
+        prompt_len=request_func_input.prompt_len,
     )
 
 
@@ -829,6 +859,7 @@ async def async_request_infinity_embeddings(
         headers=headers,
         pbar=pbar,
         num_input_sequences=_get_num_input_sequences(request_func_input.prompt),
+        prompt_len=request_func_input.prompt_len,
     )
 
 
@@ -878,6 +909,7 @@ async def async_request_vllm_pooling(
         headers=headers,
         pbar=pbar,
         num_input_sequences=_get_num_input_sequences(request_func_input.prompt),
+        prompt_len=request_func_input.prompt_len,
     )
 
 
