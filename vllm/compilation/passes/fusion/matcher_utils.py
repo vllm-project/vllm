@@ -80,7 +80,7 @@ class MatcherCustomOp(ABC):
         return torch.empty(*args, dtype=torch.float32, device=self.device, **kwargs)
 
     def inputs(self) -> list[torch.Tensor]:
-        """Utility for inputs to the pattern"""
+        """Utility for inputs to the pattern."""
         raise NotImplementedError
 
 

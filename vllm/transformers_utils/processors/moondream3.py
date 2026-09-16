@@ -67,8 +67,7 @@ def select_tiling(
 
 
 class Moondream3Processor(ProcessorMixin):
-    """
-    Constructs a Moondream3 processor which handles image preprocessing
+    """Constructs a Moondream3 processor which handles image preprocessing
     and tokenization for the Moondream3 multimodal model.
 
     Args:
@@ -78,6 +77,7 @@ class Moondream3Processor(ProcessorMixin):
         max_crops: Maximum number of crops per image.
         overlap_margin: Margin for overlapping crops in patches.
         patch_size: Size of each patch.
+
     """
 
     attributes = ["tokenizer"]
@@ -189,8 +189,7 @@ class Moondream3Processor(ProcessorMixin):
         pretrained_model_name_or_path,
         **kwargs,
     ):
-        """
-        Load the processor, using a separate tokenizer repo.
+        """Load the processor, using a separate tokenizer repo.
 
         The moondream3 model uses a custom tokenizer from 'moondream/starmie-v1'
         instead of having tokenizer files in the model repo.
@@ -294,8 +293,7 @@ class Moondream3Processor(ProcessorMixin):
         | list[PreTokenizedInput] = None,
         **kwargs: Unpack[Moondream3ProcessorKwargs],
     ) -> BatchFeature:
-        """
-        Process images and text for Moondream3 model.
+        """Process images and text for Moondream3 model.
 
         Args:
             images: Input images (PIL Image, numpy array, or list thereof).
@@ -304,6 +302,7 @@ class Moondream3Processor(ProcessorMixin):
 
         Returns:
             BatchFeature with processed inputs.
+
         """
         output_kwargs = self._merge_kwargs(
             Moondream3ProcessorKwargs,
@@ -428,8 +427,7 @@ class Moondream3Processor(ProcessorMixin):
         convert_to_rgb: bool = True,
         return_tensors: str = "pt",
     ) -> tuple[torch.Tensor, tuple[int, int]]:
-        """
-        Preprocess an image using overlap-and-resize cropping strategy.
+        """Preprocess an image using overlap-and-resize cropping strategy.
 
         Args:
             image: Input PIL image, numpy array, or torch tensor.
@@ -442,6 +440,7 @@ class Moondream3Processor(ProcessorMixin):
 
         Returns:
             Tuple of (pixel_values tensor, tiling tuple).
+
         """
         image = self._to_pil_image(image)
         if convert_to_rgb:

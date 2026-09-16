@@ -147,11 +147,10 @@ def _ensure_moss_audio_placeholder_tokens(tokenizer: object) -> None:
 
 
 class MossAudioAudioInputs(TensorSchema):
-    """
-    Dimensions:
-        - b: Batch size
-        - nmb: Number of mel bins
-        - t: Time frames
+    """Dimensions:
+    - b: Batch size
+    - nmb: Number of mel bins
+    - t: Time frames
     """
 
     audio_data: Annotated[torch.Tensor, TensorShape("b", "nmb", "t")]
@@ -1091,6 +1090,7 @@ class MossAudioProcessor:
             -> audio_data has shape [1, mel_dim, max_time]
             -> mel_dim is the number of mel filter-bank bins, 128 by default
             -> audio_data_seqlens stores the unpadded mel length
+
         """
         del kwargs
 
@@ -1356,32 +1356,17 @@ class MossAudioDummyInputsBuilder(BaseDummyInputsBuilder[MossAudioProcessingInfo
 
 
 class MossAudioMultiModalProcessor(BaseMultiModalProcessor[MossAudioProcessingInfo]):
-    def _apply_hf_processor_main(
+    def _call_hf_processor(
         self,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
-        )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
-
-        if not mm_data:
-            return BatchFeature(dict(passthrough_data))
-
-        mm_data = dict(mm_data)
-        audios = mm_data.pop("audios", [])
-        if audios:
-            mm_data["audio"] = audios
-        hf_processor_mm_kwargs = dict(hf_processor_mm_kwargs)
-        processor_kwargs = _filter_moss_audio_processor_config(hf_processor_mm_kwargs)
-        processed_data = self.info.ctx.call_hf_processor(
+        processor_kwargs = _filter_moss_audio_processor_config(dict(hf_kwargs))
+        return self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**processor_kwargs),
-            mm_data,
+            hf_data,
             {},
         )
-        processed_data.update(passthrough_data)
-        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -1723,6 +1708,7 @@ class MossAudioModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             audio_data=[2, 128, 1200], audio_data_seqlens=[800, 1200]
             -> returns (audio0_embeds, audio1_embeds), split by token length
             -> DeepStack packs each item as [main, layer0, ...] on dim -1
+
         """
         audio_data = audio_input["audio_data"]
         audio_data_seqlens = audio_input["audio_data_seqlens"]

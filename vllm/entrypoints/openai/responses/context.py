@@ -141,9 +141,7 @@ class ConversationContext(ABC):
 def _create_json_parse_error_messages(
     last_msg: Message, e: json.JSONDecodeError
 ) -> list[Message]:
-    """
-    Creates an error message when json parse failed.
-    """
+    """Creates an error message when json parse failed."""
     error_msg = (
         f"Error parsing tool arguments as JSON: {str(e)}. "
         "Please ensure the tool call arguments are valid JSON and try again."
@@ -161,7 +159,7 @@ def _create_json_parse_error_messages(
 
 
 class SimpleContext(ConversationContext):
-    """This is a context that cannot handle MCP tool calls"""
+    """This is a context that cannot handle MCP tool calls."""
 
     def __init__(
         self,
@@ -474,8 +472,7 @@ class ParsableContext(ConversationContext):
     async def call_container_tool(
         self, tool_session: Union["ClientSession", Tool], last_msg: Message
     ) -> list[Message]:
-        """
-        Call container tool. Expect this to be run in a stateful docker
+        """Call container tool. Expect this to be run in a stateful docker
         with command line terminal.
         The official container tool would at least
         expect the following format:
@@ -583,7 +580,7 @@ class ParsableContext(ConversationContext):
                 exit_stack.push_async_exit(self.cleanup_session)
 
     async def cleanup_session(self, *args, **kwargs) -> None:
-        """Can be used as coro to used in __aexit__"""
+        """Can be used as coro to used in __aexit__."""
 
         async def cleanup_tool_session(tool_session):
             if not isinstance(tool_session, Tool):
@@ -693,6 +690,7 @@ class HarmonyContext(ConversationContext):
 
         Args:
             output: The RequestOutput containing prompt token information
+
         """
         if output.prompt_token_ids is not None:
             this_turn_input_tokens = len(output.prompt_token_ids)
@@ -757,6 +755,7 @@ class HarmonyContext(ConversationContext):
 
         Returns:
             int: Number of output tokens processed in this call
+
         """
         updated_output_token_count = 0
         if output.outputs:
@@ -884,8 +883,7 @@ class HarmonyContext(ConversationContext):
     async def call_container_tool(
         self, tool_session: Union["ClientSession", Tool], last_msg: Message
     ) -> list[Message]:
-        """
-        Call container tool. Expect this to be run in a stateful docker
+        """Call container tool. Expect this to be run in a stateful docker
         with command line terminal.
         The official container tool would at least
         expect the following format:
@@ -925,7 +923,7 @@ class HarmonyContext(ConversationContext):
         ]
 
     async def cleanup_session(self, *args, **kwargs) -> None:
-        """Can be used as coro to used in __aexit__"""
+        """Can be used as coro to used in __aexit__."""
 
         async def cleanup_tool_session(tool_session):
             if not isinstance(tool_session, Tool):
