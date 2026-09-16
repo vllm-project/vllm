@@ -1139,6 +1139,14 @@ class SamplingParams(
                 "diffusion_read_only must be a boolean (or 0/1).",
                 parameter="extra_args",
             )
+        if read_only:
+            # One canvas is the whole output. Cap max_tokens so the scheduler
+            # ends the request on it, and ignore EOS so a noise draw that lands
+            # an end-of-turn token in the canvas cannot cut it short.
+            if diffusion_config is not None:
+                canvas_length = diffusion_config.canvas_length
+                self.max_tokens = min(self.max_tokens or canvas_length, canvas_length)
+            self.ignore_eos = True
 
     def _validate_structured_outputs(
         self,

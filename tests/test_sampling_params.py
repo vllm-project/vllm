@@ -97,6 +97,17 @@ def test_diffusion_seed_canvas_must_fill_the_canvas():
     _verify_diffusion(params)
 
 
+@pytest.mark.parametrize("max_tokens, expected", [(100, 8), (5, 5), (None, 8)])
+@pytest.mark.parametrize("flag", [True, 1])
+def test_diffusion_read_only_ends_after_one_canvas(max_tokens, expected, flag):
+    params = SamplingParams(
+        max_tokens=max_tokens, extra_args={"diffusion_read_only": flag}
+    )
+    _verify_diffusion(params, canvas_length=8)
+    assert params.max_tokens == expected
+    assert params.ignore_eos
+
+
 def test_diffusion_accepts_extra_args():
     params = SamplingParams(
         extra_args={
