@@ -165,6 +165,7 @@ class IndexerQMxFp4Kernel(VllmCuTeDSLJitKernel["IndexerQMxFp4Kernel.CompileKey"]
         rope_dim: int
         num_heads: int
         cos_sin_dtype: type[cutlass.Numeric]
+        weights_out_dtype: type[cutlass.Numeric]
         coarsen: int
 
     @staticmethod
@@ -177,6 +178,7 @@ class IndexerQMxFp4Kernel(VllmCuTeDSLJitKernel["IndexerQMxFp4Kernel.CompileKey"]
         # process multiple heads at the same time to armotize RoPE load costs
         coarsen = compile_key.coarsen
         tb_size = IndexerQMxFp4Kernel.tb_size
+        weights_out_dtype = compile_key.weights_out_dtype
         assert num_heads % coarsen == 0
 
         # later we will use 32B load = 16 BF16 elems
@@ -287,7 +289,7 @@ class IndexerQMxFp4Kernel(VllmCuTeDSLJitKernel["IndexerQMxFp4Kernel.CompileKey"]
                 weight_head_id = global_tid % num_heads
                 weights_out[weight_token_id, weight_head_id] = (
                     weights[weight_token_id, weight_head_id].to(Float32) * scale
-                )
+                ).to(weights_out_dtype)
 
         @cute.jit
         def host_entrypoint(
@@ -320,11 +322,13 @@ class IndexerQMxFp4Kernel(VllmCuTeDSLJitKernel["IndexerQMxFp4Kernel.CompileKey"]
         self,
         *,
         cos_sin_dtype: type[cutlass.Numeric],
+        weights_out_dtype: type[cutlass.Numeric],
         **compile_key_fields: int,
     ) -> CompileKey:
         return self.CompileKey(
             **compile_key_fields,
             cos_sin_dtype=cos_sin_dtype,
+            weights_out_dtype=weights_out_dtype,
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
@@ -340,11 +344,17 @@ class IndexerQMxFp4Kernel(VllmCuTeDSLJitKernel["IndexerQMxFp4Kernel.CompileKey"]
         if num_heads <= 0 or head_dim <= 0 or rope_dim <= 0:
             return []
 
+        # The DeepSeek V4.1 sparse-logits indexer takes bf16 weights; the
+        # dense scoring kernels take fp32.
+        weights_out_dtypes: tuple[type[cutlass.Numeric], ...] = (Float32,)
+        if vllm_config.attention_config.indexer_sparse_logits:
+            weights_out_dtypes = (Float32, BFloat16)
         return self._trace_dispatch(self.dispatch)(
             head_dim=head_dim,
             rope_dim=rope_dim,
             num_heads=num_heads,
             cos_sin_dtype=Float32,
+            weights_out_dtype=weights_out_dtypes,
             coarsen=(1, 4),
         )
 
@@ -380,7 +390,9 @@ class IndexerQMxFp4Kernel(VllmCuTeDSLJitKernel["IndexerQMxFp4Kernel.CompileKey"]
             divisibility=4,
         )
         weights_out = make_fake_tensor(
-            Float32, (num_tokens, compile_key.num_heads), divisibility=4
+            compile_key.weights_out_dtype,
+            (num_tokens, compile_key.num_heads),
+            divisibility=4,
         )
         return (
             positions,
@@ -413,6 +425,7 @@ class IndexerQMxFp4Kernel(VllmCuTeDSLJitKernel["IndexerQMxFp4Kernel.CompileKey"]
             rope_dim=cos_sin_cache.shape[-1],
             num_heads=num_heads,
             cos_sin_dtype=torch_to_cute_dtype(cos_sin_cache.dtype),
+            weights_out_dtype=torch_to_cute_dtype(weights_out.dtype),
             coarsen=1 if num_tokens < 512 else 4,
         )
         launch_args = (
