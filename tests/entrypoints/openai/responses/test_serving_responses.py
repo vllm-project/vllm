@@ -18,6 +18,9 @@ from openai.types.responses import (
     ResponseTextConfig,
     ResponseTextDeltaEvent,
 )
+from openai.types.responses import (
+    ResponseUsage as OpenAIResponseUsage,
+)
 from openai.types.responses.response_format_text_json_schema_config import (
     ResponseFormatTextJSONSchemaConfig,
 )
@@ -975,6 +978,7 @@ async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
         outputs=[completion],
         finished=True,
         num_cached_tokens=0,
+        num_cache_creation_tokens=3,
     )
     context.append_output(req_output)
 
@@ -995,6 +999,9 @@ async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
     )
 
     assert response.usage.output_tokens_details.reasoning_tokens == 1
+    assert response.usage.input_tokens_details.cache_write_tokens == 3
+
+    OpenAIResponseUsage.model_validate(response.usage.model_dump(mode="json"))
 
 
 class TestExtractAllowedToolsFromMcpRequests:
