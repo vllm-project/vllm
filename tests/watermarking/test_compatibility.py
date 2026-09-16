@@ -287,7 +287,7 @@ def test_direct_async_engine_greedy_request_warns_and_disables_watermarking(
     assert "subsequent greedy requests will use ordinary greedy sampling" in (
         caplog_vllm.text
     )
-    assert not request.sampling_params.watermarking
+    assert request.sampling_params.watermarking is False
 
 
 def test_shared_sampling_params_are_not_rewritten_by_admission(reset_warning_once):
