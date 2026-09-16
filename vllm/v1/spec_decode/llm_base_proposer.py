@@ -255,7 +255,6 @@ class SpecDecodeBaseProposer:
         self.backup_next_token_ids = CpuGpuBuffer(
             self.max_batch_size,
             dtype=torch.int32,
-            pin_memory=PIN_MEMORY,
             device=device,
             with_numpy=True,
         )

@@ -116,6 +116,24 @@ steps:
       commands:
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8-and-mixed.txt
 
+- label: ":nvidia: (B200) LM Eval HiSparse Nightly"
+  key: lm-eval-hisparse-nightly-4xb200
+  timeout_in_minutes: 60
+  device: b200-k8s
+  num_devices: 4
+  optional: true
+  source_file_dependencies:
+  - .buildkite/test_areas/lm_eval.yaml
+  - tests/evals/gsm8k/
+  - vllm/v1/hisparse/
+  - vllm/distributed/kv_transfer/kv_connector/v1/hisparse/
+  - vllm/v1/attention/backends/mla/
+  - vllm/model_executor/layers/attention/sparse_mla_attention.py
+  - vllm/v1/worker/gpu/
+  - csrc/libtorch_stable/hisparse_kernels.cu
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-hisparse.txt
+
 - label: ":nvidia: (B200) LM Eval PCP"
   key: lm-eval-pcp-4xb200
   timeout_in_minutes: 360

@@ -137,9 +137,10 @@ class CpuGpuBuffer:
             self.np = self.cpu.numpy()
 
     def copy_to_gpu(self, n: int | None = None) -> torch.Tensor:
-        if n is None:
-            return self.gpu.copy_(self.cpu, non_blocking=True)
-        return self.gpu[:n].copy_(self.cpu[:n], non_blocking=True)
+        cpu, gpu = self.cpu, self.gpu
+        if n is not None:
+            cpu, gpu = cpu[:n], gpu[:n]
+        return gpu.copy_(cpu.pin_memory() if PIN_MEMORY else cpu, non_blocking=True)
 
     def copy_to_cpu(self, n: int | None = None) -> torch.Tensor:
         """NOTE: Because this method is non-blocking, explicit synchronization
