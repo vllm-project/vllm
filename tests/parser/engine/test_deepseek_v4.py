@@ -334,7 +334,8 @@ class TestMissingToolCallsWrapper:
     ):
         """Text after a tool block is dropped whether or not the closing
         wrapper is present, so a missing ``</｜DSML｜tool_calls>`` does not
-        change what the client sees."""
+        change what the client sees.
+        """
         text = "pre\n" + self._ORPHAN
         if trailing_end:
             text += DSML_TOOL_END
@@ -574,7 +575,7 @@ class TestImplicitReasoningEnd:
         # the text lexer.
         assert thinking_parser.reasoning_end_token_ids == {_THINK_END_ID}
         assert thinking_parser.find_reasoning_end_offset([7, _THINK_END_ID, 8]) == 1
-        assert thinking_parser.find_reasoning_end_offset([7, 8]) is None
+        assert thinking_parser.find_reasoning_end_offset([7, 8]) == 2
 
     def test_streaming_reasoning_implicit_end(self, thinking_parser):
         chunks = [
@@ -915,7 +916,8 @@ class TestParallelUnwrapping:
 
 class TestStreamingWrapperConsistency:
     """Streamed arg deltas must stay consistent with final extraction
-    when wrapper params like 'arguments' are unwrapped."""
+    when wrapper params like 'arguments' are unwrapped.
+    """
 
     def test_streaming_wrapper_unwrap_consistency(self, mock_tokenizer, mock_request):
         tool = _make_tool("get_weather", {"location": {"type": "string"}})
@@ -1196,7 +1198,8 @@ class TestDelegatingParserLargeDelta:
     )
     def test_eos_not_leaked_when_reasoning_never_ends(self, chunk_size):
         """EOS must not leak into reasoning_content when the model never
-        emits </think> (generation ends while still in REASONING state)."""
+        emits </think> (generation ends while still in REASONING state).
+        """
         eos_text = "<｜end▁of▁sentence｜>"
         eos_id = 128801
         vocab = {
@@ -1285,7 +1288,8 @@ class TestMalformedDsmlNoise:
         self, mock_tokenizer, mock_request, wrapper
     ):
         """Like the real wrapper, a corrupted one inside ``<think>`` closes
-        the reasoning block and starts the tool call."""
+        the reasoning block and starts the tool call.
+        """
         text = f"thinking{wrapper}\n{self._INNER}"
         parser = self._parser(mock_tokenizer, thinking=True)
         reasoning, content = parser.extract_reasoning(text, mock_request)
@@ -1329,7 +1333,8 @@ class TestMalformedDsmlNoise:
         prose mention of the real wrapper: the opener starts a tool block and
         the rest of the message is dropped. That is pre-existing behavior of
         ``<｜DSML｜tool_calls>``; the variants must not differ from it either
-        way."""
+        way.
+        """
         template = "The opener looks like {} and then params follow. Done."
         text = template.format(wrapper)
         reference = template.format(DSML_TOOL_START)
@@ -1353,7 +1358,8 @@ class TestMalformedDsmlNoise:
     @pytest.mark.parametrize("chunk_size", [1, 3, None], ids=lambda c: f"chunk={c}")
     def test_delegating_parser_corrupted_wrapper(self, wrapper, chunk_size):
         """The serving-layer shape: reasoning and tool adapters on separate
-        engines, with the corrupted opener arriving as plain text."""
+        engines, with the corrupted opener arriving as plain text.
+        """
         tokens = _dsv4_tokens(
             reasoning="Checking the weather.",
             tool_name="get_weather",

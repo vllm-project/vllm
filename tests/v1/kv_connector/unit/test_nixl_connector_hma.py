@@ -3,6 +3,8 @@
 """Unit tests for NixlConnectorScheduler with HMA and Mamba N-1 prefill."""
 
 import gc
+import queue
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import msgspec
@@ -37,6 +39,173 @@ from .utils import (
     make_kv_cache_config,
     make_nixl_scheduler,
 )
+
+
+@pytest.fixture
+def region_pull_worker():
+    """Real page mapping and descriptors, with only the transport mocked."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import TPMapping
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker.engine_id = "D"
+    worker.tp_rank = 0
+    worker.block_size = 64
+    worker._physical_blocks_per_logical_kv_block = 1
+    worker.enable_permute_local_kv = False
+    worker.enable_heterogeneous_attn_post_process = False
+    worker._engine_last_active = {}
+    worker._bidirectional_kv_xfer_enabled = False
+    worker._recving_transfers = {}
+    worker.use_mla, worker._has_mamba = True, False
+    worker.dcp_size = 1
+    spec = MLAAttentionSpec(
+        block_size=64, num_kv_heads=1, head_size=8, dtype=torch.bfloat16
+    )
+    worker.kv_cache_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["resident"], spec, enable_kv_transfer=False),
+            KVCacheGroupSpec(["host"], spec),
+            KVCacheGroupSpec(["indexer"], spec),
+        ],
+    )
+    worker._group_spec_types = (MLAAttentionSpec, MLAAttentionSpec)
+    worker.region_group_ids = [0, 1]
+    worker.dst_region_group_ids = {"P": [0, 0]}
+    worker.num_regions = 2
+    worker.block_len_per_layer = [1024, 1024]
+    worker.transfer_topo = MagicMock()
+    worker.transfer_topo.tp_ratio.return_value = 1
+    worker.transfer_topo.block_size_ratio.return_value = 1
+    worker.transfer_topo.get_engine_info.return_value = SimpleNamespace(
+        remote_tp_size=4,
+        remote_dcp_size=1,
+        remote_block_size=64,
+        remote_physical_blocks_per_logical=2,
+    )
+    worker.tp_mappings = {"P": TPMapping(((0,), (0,)), (0,), {0: 0}, 0)}
+    worker._mixed_mem_types = True
+    worker.src_xfer_handles_by_block_size = {64: 1}
+    worker._dram_src_handles_by_block_size = {64: 2}
+    worker.dst_xfer_side_handles = {"P": {0: 3}}
+    worker.dst_num_blocks = {"P": 100, "D": 100}
+    worker.dst_region_num_blocks = {"P": [100, 100], "D": [100, 100]}
+    worker._remote_agents = {"P": {(0, 0): "P-rank0"}}
+    worker._read_blocks_mixed = MagicMock()
+    worker.nixl_wrapper = MagicMock()
+    return worker
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("local_ratio,remote_ratio", [(1, 2), (2, 1), (2, 2)])
+@pytest.mark.parametrize("num_tokens", [160, 224])
+@pytest.mark.parametrize("cached", [0, 1])
+def test_region_pull_ignores_allocation_padding(
+    region_pull_worker, local_ratio, remote_ratio, num_tokens, cached
+):
+    """Padded capacity must not shift either the host or indexer token range."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlConnectorMetadata,
+    )
+    from vllm.utils.math_utils import cdiv
+
+    worker = region_pull_worker
+    worker._physical_blocks_per_logical_kv_block = local_ratio
+    worker.transfer_topo.get_engine_info.return_value = SimpleNamespace(
+        remote_tp_size=4,
+        remote_dcp_size=1,
+        remote_block_size=64,
+        remote_physical_blocks_per_logical=remote_ratio,
+    )
+    local_count = cdiv(num_tokens, 64 * local_ratio)
+    remote_count = cdiv(num_tokens, 64 * remote_ratio)
+    # The host has a cached prefix, while the indexer still needs the full range.
+    local = [
+        list(range(30 + cached, 30 + local_count)),
+        list(range(40, 40 + local_count)),
+    ]
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id="request",
+        local_block_ids=local,
+        local_num_computed_blocks=(0, cached, 0),
+        awaiting_kvs=True,
+        kv_transfer_params={
+            "remote_engine_id": "P",
+            "remote_request_id": "request-P",
+            "remote_host": "localhost",
+            "remote_port": 1,
+            "remote_num_tokens": num_tokens,
+            "remote_block_ids": [list(range(10, 10 + remote_count))],
+        },
+    )
+    meta = metadata.reqs_to_recv["request"]
+    meta.local_physical_block_ids = worker._logical_to_kernel_block_ids(
+        local, local_ratio
+    )
+    worker._read_blocks_for_req("request", meta)
+    read = worker._read_blocks_mixed.call_args.kwargs
+    valid_pages = cdiv(num_tokens, 64)
+    source_start = 10 * remote_ratio
+    assert read["remote_block_descs_ids"].tolist() == (
+        list(range(source_start + cached * local_ratio, source_start + valid_pages))
+        + list(range(100 + source_start, 100 + source_start + valid_pages))
+    )
+    assert read["local_block_descs_ids"].tolist() == (
+        list(range((30 + cached) * local_ratio, 30 * local_ratio + valid_pages))
+        + list(range(100 + 40 * local_ratio, 100 + 40 * local_ratio + valid_pages))
+    )
+    assert meta.region_blocks_to_zero == [
+        list(
+            range(base * local_ratio + valid_pages, (base + local_count) * local_ratio)
+        )
+        for base in (30, 40)
+    ]
+
+
+@pytest.mark.cpu_test
+def test_region_pull_completion_zeros_only_own_padding(region_pull_worker):
+    """Completion must preserve neighboring layers and already imported pages."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        RemoteMeta,
+        ReqMeta,
+    )
+
+    worker = region_pull_worker
+    # Two strided layer regions in one backing, with nonzero layer offsets.
+    backing = torch.full((4, 3, 8), 7, dtype=torch.uint8)
+    caches = {"host": backing[:, 1], "indexer": backing[:, 2]}
+    worker.device_kv_caches = caches
+    worker.region_names = list(caches)
+    worker.kv_caches_base_addr = {"D": {0: [c.data_ptr() for c in caches.values()]}}
+    worker.region_num_blocks = [4, 4]
+    worker.block_len_per_layer = [8, 8]
+    worker.block_stride_per_layer = [24, 24]
+    worker._recving_metadata = {
+        "request": ReqMeta(
+            local_block_ids=[[1, 2], [0, 1]],
+            local_physical_block_ids=[[1, 2], [0, 1]],
+            tp_size=1,
+            remote=RemoteMeta([[3]], "localhost", 1, "P", "request-P"),
+            region_blocks_to_zero=[[2], [1]],
+        )
+    }
+    worker._get_new_notifs = MagicMock(return_value=set())
+    worker._pop_done_transfers = MagicMock(return_value=({"request"}, set()))
+    worker._replicated_pcp_done_sending = set()
+    worker._failed_recv_reqs = queue.Queue()
+    worker._recv_failures = set()
+    worker._send_pending_recv_notifs = MagicMock()
+    worker._sync_device_after_direct_recv = MagicMock()
+    worker.use_host_buffer = False
+    worker._reqs_to_send = {}
+    result = worker.get_transfer_results()
+    expected = torch.full_like(backing, 7)
+    expected[2, 1] = 0
+    expected[1, 2] = 0
+    assert torch.equal(backing, expected)
+    assert result.finished_recving == {"request"}
 
 
 @pytest.mark.cpu_test
@@ -112,7 +281,8 @@ def test_update_state_after_alloc_tracks_cached_blocks_per_group():
     """Hybrid SWA+FA requests can have different prefix-cache-hit counts per
     KV cache group. Each group's count must be tracked independently rather
     than collapsed to a single scalar, or DCP read-phase alignment
-    (local_num_computed_blocks) would misalign one of the groups."""
+    (local_num_computed_blocks) would misalign one of the groups.
+    """
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler import (
         NixlPullConnectorScheduler,
     )
@@ -149,8 +319,50 @@ def test_update_state_after_alloc_tracks_cached_blocks_per_group():
 
     scheduler.update_state_after_alloc(request, blocks, num_external_tokens=2)
 
-    _, _, local_num_computed_blocks = scheduler._reqs_need_recv[request.request_id]
+    _, _, local_num_computed_blocks, awaiting_kvs = scheduler._reqs_need_recv[
+        request.request_id
+    ]
     assert local_num_computed_blocks == (2, 1)
+    # There are external tokens to pull, so the scheduler parks the request and
+    # is waiting to see it in finished_recving.
+    assert awaiting_kvs is True
+
+
+@pytest.mark.cpu_test
+def test_full_local_hit_is_not_awaited_by_the_scheduler():
+    """A recv with num_external_tokens == 0 must not be flagged as awaited.
+
+    The request keeps running -- there is nothing to pull, only a notification
+    owed to the producer -- so the worker must not report it in
+    finished_recving. Doing so trips `assert RequestStatus.is_finished` in
+    _update_from_kv_xfer_finished, which only tolerates a finished recv for a
+    request that is parked or already done.
+    """
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler import (
+        NixlPullConnectorScheduler,
+    )
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.core.kv_cache_utils import KVCacheBlock
+
+    scheduler = object.__new__(NixlPullConnectorScheduler)
+    scheduler._reqs_in_batch = set()
+    scheduler._reqs_need_save = {}
+    scheduler._reqs_need_recv = {}
+    scheduler.use_host_buffer = False
+    scheduler.is_bidirectional_kv_xfer_enabled = False
+    scheduler._is_hma_required = False
+    scheduler.kv_cache_config = MagicMock(
+        select_transfer_block_ids=lambda block_ids: block_ids
+    )
+
+    blocks = KVCacheBlocks(blocks=([KVCacheBlock(block_id=0, _block_hash=object())],))
+    request = create_request(do_remote_prefill=True)
+
+    scheduler.update_state_after_alloc(request, blocks, num_external_tokens=0)
+
+    _, local_block_ids, _, awaiting_kvs = scheduler._reqs_need_recv[request.request_id]
+    assert not local_block_ids  # full local hit: nothing to pull
+    assert awaiting_kvs is False
 
 
 @pytest.mark.cpu_test
@@ -230,7 +442,8 @@ def test_apply_dcp_prefix_caching_matches_global_logical_positions(
     """_apply_dcp_prefix_caching must operate on logical block IDs (DCP
     interleaves at logical-block granularity) and always return equal-length
     local/remote slices, so a later, unconditional _apply_prefix_caching
-    trim is a guaranteed no-op rather than double-processing the read."""
+    trim is a guaranteed no-op rather than double-processing the read.
+    """
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
@@ -629,7 +842,8 @@ def test_apply_prefix_caching_ssm_prefix_cache_hit(
 def test_apply_prefix_caching_ssm_unpairable_slots_rejected():
     """Local SSM slots can only exceed the remote ones by the position D
     recomputes itself. A larger excess means the lists aren't
-    position-aligned: fail loudly rather than transfer into wrong slots."""
+    position-aligned: fail loudly rather than transfer into wrong slots.
+    """
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
@@ -819,8 +1033,7 @@ def test_fewer_blocks_with_hma(monkeypatch, model_name, sw_size):
 
 @pytest.mark.cpu_test
 def test_nixl_metadata_hma_block_ids_structure():
-    """
-    Test that NixlConnectorMetadata correctly stores block IDs for multiple
+    """Test that NixlConnectorMetadata correctly stores block IDs for multiple
     KV cache groups when HMA is enabled.
     """
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
@@ -877,6 +1090,7 @@ def _make_mock_worker_for_desc_ids(
     worker = MagicMock(spec=NixlConnectorWorker)
     worker.num_regions = num_regions
     worker._uses_region_group_mapping = False
+    worker._transfer_layer_group_ids = ()
     worker._has_mamba = has_mamba
     worker._group_spec_types = group_spec_types
     worker.block_len_per_layer = block_len_per_layer or [100]
@@ -945,7 +1159,8 @@ def test_nixl_region_sort_preserves_pipeline_layer_order():
 @pytest.mark.cpu_test
 def test_get_block_descs_ids_hybrid_ssm():
     """Test _compute_desc_ids uses per-group strides for hybrid
-    FA+SSM when ratio=1 (no kernel block size mismatch)."""
+    FA+SSM when ratio=1 (no kernel block size mismatch).
+    """
     from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
     worker = _make_mock_worker_for_desc_ids(
@@ -1029,7 +1244,8 @@ def test_get_block_descs_ids_uses_per_region_pool_capacity():
 @pytest.mark.cpu_test
 def test_get_block_descs_ids_kernel_block_mismatch():
     """Test _compute_desc_ids uses different strides for FA
-    (kernel blocks) vs SSM (logical blocks) when ratio > 1."""
+    (kernel blocks) vs SSM (logical blocks) when ratio > 1.
+    """
     from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
     ratio = 4
@@ -1060,7 +1276,8 @@ def test_get_block_descs_ids_kernel_block_mismatch():
 def test_get_block_descs_ids_hetero_block_size_hybrid():
     """With a block-size ratio, FA desc ids are ratio-expanded while SSM
     desc ids keep the unexpanded logical stride (state blocks are never
-    sub-split)."""
+    sub-split).
+    """
     from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
     worker = _make_mock_worker_for_desc_ids(
@@ -1099,7 +1316,8 @@ def _bind_worker_method(worker, name):
 @pytest.mark.cpu_test
 def test_map_block_ids_for_block_size_ratio_hybrid():
     """Attention groups expand to remote granularity and clip to the remote
-    coverage; mamba state blocks pass through 1:1."""
+    coverage; mamba state blocks pass through 1:1.
+    """
     from unittest.mock import MagicMock
 
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
@@ -1130,7 +1348,8 @@ def test_map_block_ids_for_block_size_ratio_hybrid():
 @pytest.mark.cpu_test
 def test_post_process_zeroes_untransferred_tail():
     """The untransferred sub-blocks of the last local block are zeroed on
-    receive; mamba state caches are untouched by the attention permute."""
+    receive; mamba state caches are untouched by the attention permute.
+    """
     from unittest.mock import MagicMock
 
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
@@ -1173,7 +1392,8 @@ def test_post_process_zeroes_untransferred_tail():
 @pytest.mark.cpu_test
 def test_nixl_metadata_hybrid_ssm_block_ids():
     """Test NixlConnectorMetadata correctly stores block IDs for FA + SSM
-    groups with different block counts (kernel mismatch active)."""
+    groups with different block counts (kernel mismatch active).
+    """
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
         NixlConnectorMetadata,
     )
@@ -1254,7 +1474,8 @@ def _make_fake_kv_cache_manager():
 @pytest.mark.cpu_test
 def test_zeroing_block_ids_cover_only_loaded_attention_blocks():
     """Only zero-recorded (attention) groups contribute, sliced to the
-    externally-loaded token range; Mamba state blocks are never zeroed."""
+    externally-loaded token range; Mamba state blocks are never zeroed.
+    """
     manager = _make_fake_kv_cache_manager()
 
     # Tokens [0, 16) are locally cached; the load covers tokens [16, 56).
@@ -1282,7 +1503,8 @@ def test_scheduler_filters_connector_loaded_blocks_from_zeroing():
 @pytest.mark.cpu_test
 def test_failed_load_rezeroes_unwritten_skipped_blocks():
     """A failed async load leaves zeroing-skipped blocks unwritten beyond
-    the valid prefix; they must be zeroed before local recompute."""
+    the valid prefix; they must be zeroed before local recompute.
+    """
     from unittest.mock import MagicMock
 
     from vllm.v1.core.sched.scheduler import Scheduler
@@ -1742,7 +1964,8 @@ def test_logical_to_kernel_block_ids_with_remote_ratio(
 def test_exchange_clipped_blocks_ssm_single_state():
     """In single-state cache modes, SSM lists are reduced to the running
     state slot: speculative scratch slots, null placeholders and the previous
-    step's state carry nothing. Attention groups pass through untouched."""
+    step's state carry nothing. Attention groups pass through untouched.
+    """
     sched = make_nixl_scheduler(has_mamba=True, is_hma_required=True)
     sched.blocks_per_sw = [0, 0]
     sched._ssm_spec_blocks = [None, 2]
@@ -1769,7 +1992,8 @@ def test_exchange_clipped_blocks_ssm_single_state():
 @pytest.mark.cpu_test
 def test_exchange_clipped_blocks_ssm_positional_states():
     """In "all" mode every position holds a state, so only the speculative
-    slots go; placeholders stay to keep the list position-indexed."""
+    slots go; placeholders stay to keep the list position-indexed.
+    """
     sched = make_nixl_scheduler(has_mamba=True, is_hma_required=True)
     sched.blocks_per_sw = [0, 0]
     sched._ssm_spec_blocks = [None, 2]
@@ -1786,7 +2010,8 @@ def _make_hybrid_mla_kv_cache_config(num_blocks: int = 4):
     """KimiLinear-shaped config: one MLA group and two KDA (GDN-typed
     MambaSpec) groups whose layers share the same HMA tensors, with a
     mamba-aligned unified page and an MLA kernel block smaller than the
-    logical block."""
+    logical block.
+    """
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
     from vllm.v1.kv_cache_interface import (
         KVCacheConfig,
@@ -1926,7 +2151,8 @@ def test_register_kv_caches_hybrid_mla_dual_purpose_regions():
     """Hybrid MLA+KDA registration: HMA tensors shared by both layer types
     must be flagged as MLA regions even when a KDA layer registers them
     first, expose TP-independent kernel-granularity block lens, and build
-    FA + mamba descriptors for every region."""
+    FA + mamba descriptors for every region.
+    """
     from unittest.mock import MagicMock
 
     from vllm.config import set_current_vllm_config
@@ -2027,7 +2253,8 @@ def test_register_kv_caches_hybrid_mla_dual_purpose_regions():
 def test_push_write_hybrid_mla_replicates_attention():
     """Hybrid MLA+SSM push with P_TP < D_TP: attention blocks must be
     written to every covered D rank (replicated MLA latent) while SSM state
-    is written per-rank through the split handles."""
+    is written per-rank through the split handles.
+    """
     import threading
     from collections import defaultdict
     from unittest.mock import MagicMock

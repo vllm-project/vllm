@@ -583,10 +583,11 @@ def _rocm_aiter_mla_decode_fwd_impl(
     reduce_indptr: torch.Tensor | None = None,
     reduce_final_map: torch.Tensor | None = None,
     reduce_partial_map: torch.Tensor | None = None,
+    causal: bool = True,
 ) -> None:
     from aiter.mla import mla_decode_fwd
 
-    kwargs: dict[str, float | torch.Tensor | None] = {
+    kwargs: dict[str, float | torch.Tensor | None | bool] = {
         "sm_scale": sm_scale,
         "logit_cap": logit_cap,
     }
@@ -595,6 +596,8 @@ def _rocm_aiter_mla_decode_fwd_impl(
     if _check_aiter_mla_fp8_support():
         kwargs["q_scale"] = q_scale
         kwargs["kv_scale"] = kv_scale
+
+    kwargs["causal"] = causal
 
     if work_meta_data is not None:
         assert work_indptr is not None, (
@@ -1676,8 +1679,101 @@ def _rocm_aiter_fp8_attn_fake(
     )
 
 
+def _mhc_delayed_pre_tail(
+    gemm_out: torch.Tensor,
+    sqrsum: torch.Tensor,
+    residual: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    pre_mix: torch.Tensor | None,
+    rms_eps: float,
+    hc_pre_eps: float,
+    hc_sinkhorn_eps: float,
+    hc_post_mult_value: float,
+    sinkhorn_repeat: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Finish a delayed mHC pre once AITER has produced the projection.
+
+    Shared by the plain and the post-fused entry points, which differ only in
+    which kernel computes ``gemm_out`` / ``sqrsum`` and the residual they
+    project. ``mhc_pre_big_fuse`` also writes a collapse against its own
+    pre-mix, which the delayed formulation cannot use and so discards.
+    Returns ``(post_mix, comb_mix, layer_input, next_pre_mix)``.
+    """
+    from aiter.ops.mhc import mhc_pre_big_fuse
+
+    num_tokens, hc_mult, hidden_size = residual.shape
+    device = residual.device
+    with torch.device(device):
+        post_mix = torch.empty(
+            num_tokens, hc_mult, 1, dtype=torch.float32, device=device
+        )
+        comb_mix = torch.empty(
+            num_tokens, hc_mult, hc_mult, dtype=torch.float32, device=device
+        )
+        unused_collapse = torch.empty(
+            num_tokens, hidden_size, dtype=torch.bfloat16, device=device
+        )
+        mhc_pre_big_fuse(
+            post_mix,
+            comb_mix,
+            unused_collapse,
+            gemm_out,
+            sqrsum,
+            hc_scale,
+            hc_base,
+            residual,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_mult_value,
+            sinkhorn_repeat,
+        )
+
+    next_pre_mix = torch.ops.vllm.mhc_pre_mix_triton(
+        gemm_out,
+        sqrsum,
+        hc_scale,
+        hc_base,
+        hc_mult,
+        hc_mult * hidden_size,
+        rms_eps,
+        hc_pre_eps,
+    )
+    if pre_mix is None:
+        # Model entry selects residual stream zero.
+        layer_input = residual[:, 0]
+    else:
+        layer_input = torch.ops.vllm.hc_collapse_triton(residual, pre_mix)
+    return post_mix, comb_mix, layer_input, next_pre_mix
+
+
 # Global flag to ensure ops are registered only once
 _OPS_REGISTERED = False
+
+
+def _sync_aiter_situv2_moe_env() -> None:
+    """Mirror the SiTUv2 MoE toggle into AITER's a4w4 dispatch env.
+
+    AITER selects afp8 vs afp4 activation kernels via AITER_SITUV2_A8W4 /
+    AITER_SITUV2_A4W4 (see ROCm/aiter fused_moe.py, A8W4 checked first).
+    When VLLM_ROCM_USE_AITER_MOE_SITUV2 is enabled we route to a4w4
+    (afp4_wfp4_fp4 kernels) and clear any legacy AITER_SITUV2_A8W4 override.
+
+    Requires AITER with ROCm/aiter#4463 (first tagged in v0.1.20): a4w4
+    dispatch plus kimik3_a4w4_{un,}tuned_fmoe.csv. Older AITER still runs
+    afp4 FlyDSL but falls back to heuristic configs, which is not the
+    tuned a4w4 path this recipe is meant to use.
+    """
+    import os
+
+    import vllm.envs as envs
+
+    if envs.VLLM_ROCM_USE_AITER_MOE_SITUV2:
+        os.environ["AITER_SITUV2_A4W4"] = "1"
+        os.environ.pop("AITER_SITUV2_A8W4", None)
+    else:
+        os.environ.pop("AITER_SITUV2_A4W4", None)
 
 
 class rocm_aiter_ops:
@@ -1702,7 +1798,7 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_FP8BMM: Controls FP8 batched matrix multiply.
         VLLM_ROCM_USE_AITER_TRITON_ROPE: Controls Triton rotary embeddings.
         VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: Controls shared expert fusion.
-        VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4: Controls a8w4 SiTU fused MoE variant.
+        VLLM_ROCM_USE_AITER_MOE_SITUV2: Controls SiTUv2 FlyDSL MoE (a4w4).
         VLLM_ROCM_USE_AITER_TRITON_GEMM: Controls Triton unquantized GEMM.
 
     Note:
@@ -1739,6 +1835,7 @@ class rocm_aiter_ops:
         - MLA decode: mla_decode_fwd
         - Quantization: per_tensor_quant, per_token_quant, group_fp8_quant
         - Triton ops: triton_rotary_embed, triton_fp8_bmm, triton_gemm_a8w8_blockscale
+
     """
 
     _MOE_DISPATCH_POLICY: int | None = None
@@ -1769,7 +1866,7 @@ class rocm_aiter_ops:
     # TODO: Consolidate under VLLM_ROCM_USE_AITER_ROPE
     _TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
-    _MOE_SITUV2_A8W4 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4
+    _MOE_SITUV2 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2
     # TODO: Consolidate under _LINEAR_ENABLED
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
     # Lazily probed: whether aiter.topk_softmax supports the
@@ -1778,8 +1875,7 @@ class rocm_aiter_ops:
 
     @classmethod
     def refresh_env_variables(cls):
-        """
-        Since the environment variables are assigned when the module is imported,
+        """Since the environment variables are assigned when the module is imported,
         This is a helper function to reload all the env variables from
         the environment variables.
         for example, after monkey patching the env variables in the unit test,
@@ -1798,13 +1894,13 @@ class rocm_aiter_ops:
         cls._LINEAR_HIPBMM_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM
         cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
-        cls._MOE_SITUV2_A8W4 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4
+        cls._MOE_SITUV2 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2
+        _sync_aiter_situv2_moe_env()
         cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
 
     @staticmethod
     def get_aiter_activation_type(activation_str: str) -> "ActivationType | None":
-        """
-        Given an activation type as a string, returns the corresponding aiter ActivationType enum.
+        """Given an activation type as a string, returns the corresponding aiter ActivationType enum.
         Supported activation types: "no", "none", "silu", "gelu", "swiglu".
         Returns None if the mapping fails.
 
@@ -1813,6 +1909,7 @@ class rocm_aiter_ops:
 
         Returns:
             Aiter ActivationType enum value, or None if not found.
+
         """
         # Import only locally, since aiter may not always be available.
         try:
@@ -1836,8 +1933,7 @@ class rocm_aiter_ops:
 
     @staticmethod
     def get_aiter_quant_type(quant_type_str: str) -> "QuantType | None":
-        """
-        Given a quantization type as a string, returns the corresponding aiter QuantType enum.
+        """Given a quantization type as a string, returns the corresponding aiter QuantType enum.
         Supported quantization types: "no", "per_tensor", "per_token", "per_1x32", "per_1x128", "per_128x128".
         Returns None if the mapping fails.
 
@@ -1846,6 +1942,7 @@ class rocm_aiter_ops:
 
         Returns:
             Aiter QuantType enum value, or None if not found.
+
         """
         try:
             from aiter import QuantType
@@ -1877,7 +1974,8 @@ class rocm_aiter_ops:
         enabled aiter. Only aiter's Triton kernels exist on gfx12 (no CK build),
         so this deliberately stays off the gfx9/CK `@if_aiter_supported` umbrella
         and gates only the Triton paths rdna4 uses. The gfx12 analog of
-        `is_enabled()`."""
+        `is_enabled()`.
+        """
         if not current_platform.is_rocm() or not IS_AITER_FOUND:
             return False
         from vllm.platforms.rocm import on_rdna4
@@ -1911,10 +2009,10 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
-    def is_fused_moe_situv2_a8w4_enabled(cls) -> bool:
-        # _MOE_SITUV2_A8W4 is a variant of aiter fused moe, so aiter
+    def is_fused_moe_situv2_enabled(cls) -> bool:
+        # _MOE_SITUV2 is a variant of aiter fused moe, so aiter
         # fused moe must be enabled as well.
-        return cls.is_fused_moe_enabled() and cls._MOE_SITUV2_A8W4
+        return cls.is_fused_moe_enabled() and cls._MOE_SITUV2
 
     @classmethod
     @if_aiter_supported
@@ -1966,6 +2064,26 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_mla_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._MLA_ENABLED
+
+    @classmethod
+    @if_aiter_supported
+    def mla_decode_supports_non_causal(cls) -> bool:
+        """Whether installed aiter.mla.mla_decode_fwd accepts `causal`.
+
+        Added in aiter v0.1.20. A missing argument is a hard error rather
+        than a boolean the caller can use to pick another MLA backend.
+        """
+        import inspect
+
+        from aiter.mla import mla_decode_fwd
+
+        if "causal" not in inspect.signature(mla_decode_fwd).parameters:
+            raise RuntimeError(
+                "ROCM_AITER_MLA requires aiter.mla.mla_decode_fwd(..., causal=). "
+                "The installed aiter is causal-only; upgrade aiter rather than "
+                "falling back to another MLA backend."
+            )
+        return True
 
     @classmethod
     @if_aiter_supported
@@ -2789,6 +2907,7 @@ class rocm_aiter_ops:
         reduce_indptr: torch.Tensor | None = None,
         reduce_final_map: torch.Tensor | None = None,
         reduce_partial_map: torch.Tensor | None = None,
+        causal: bool = True,
     ):
         torch.ops.vllm.rocm_aiter_mla_decode_fwd(
             q,
@@ -2809,6 +2928,7 @@ class rocm_aiter_ops:
             reduce_indptr=reduce_indptr,
             reduce_final_map=reduce_final_map,
             reduce_partial_map=reduce_partial_map,
+            causal=causal,
         )
 
     @staticmethod
@@ -3238,8 +3358,7 @@ class rocm_aiter_ops:
         nLane: int,
         gate_up: bool,
     ) -> "torch.Tensor":
-        """
-        Shuffles the weight tensor into (A16W4) layout for AITER kernels.
+        """Shuffles the weight tensor into (A16W4) layout for AITER kernels.
 
         Args:
             tensor: The input weight tensor to be shuffled.
@@ -3248,6 +3367,7 @@ class rocm_aiter_ops:
 
         Returns:
             torch.Tensor: The shuffled tensor.
+
         """
         from aiter.ops.shuffle import shuffle_weight_a16w4
 
@@ -3259,8 +3379,7 @@ class rocm_aiter_ops:
         num_experts: int,
         gate_up: bool,
     ) -> "torch.Tensor":
-        """
-        Shuffles the scale tensor into (A16W4) layout for AITER kernels.
+        """Shuffles the scale tensor into (A16W4) layout for AITER kernels.
 
         Args:
             tensor: The input scale tensor to be shuffled.
@@ -3269,6 +3388,7 @@ class rocm_aiter_ops:
 
         Returns:
             torch.Tensor: The shuffled scale tensor.
+
         """
         from aiter.ops.shuffle import shuffle_scale_a16w4
 
@@ -3285,8 +3405,7 @@ class rocm_aiter_ops:
     def shuffle_weights(
         *tensors: torch.Tensor, layout: tuple[int, int] = (16, 16)
     ) -> tuple[torch.Tensor, ...]:
-        """
-        Applies shuffle_weight function from AITER to each
+        """Applies shuffle_weight function from AITER to each
         input tensor and returns them.
 
         Rearranges (shuffles) the input tensor/s
@@ -3299,6 +3418,7 @@ class rocm_aiter_ops:
 
         Returns:
         A Tuple of shuffled tensors.
+
         """
         from aiter.ops.shuffle import shuffle_weight
 
@@ -3348,8 +3468,7 @@ class rocm_aiter_ops:
         out: torch.Tensor | None = None,
         sink_ptr: torch.Tensor | None = None,
     ):
-        """
-        Flash attention with variable length sequences.
+        """Flash attention with variable length sequences.
 
         This function is NOT wrapped with @is_aiter_supported decorator
         to allow explicit backend selection via attention_config to work
@@ -3418,8 +3537,7 @@ class rocm_aiter_ops:
         V_QScale: torch.Tensor,
         out_: torch.Tensor,
     ):
-        """
-        Paged attention forward pass using assembly kernel.
+        """Paged attention forward pass using assembly kernel.
 
         This function is NOT wrapped with @is_aiter_supported decorator
         to allow explicit backend selection via attention_config to work
@@ -3461,8 +3579,7 @@ class rocm_aiter_ops:
         out_: torch.Tensor,
         kv_cache_dtype: str,
     ):
-        """
-        Paged attention common function.
+        """Paged attention common function.
 
         This function is NOT wrapped with @is_aiter_supported decorator
         to allow explicit backend selection via attention_config to work
@@ -3506,8 +3623,7 @@ class rocm_aiter_ops:
         norm_weight: torch.Tensor | None = None,
         norm_eps: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Forward pass for mHC pre block.
+        """Forward pass for mHC pre block.
 
         Args:
             residual: shape (..., hc_mult, hidden_size), dtype torch.bfloat16
@@ -3526,6 +3642,7 @@ class rocm_aiter_ops:
             post_mix: shape (..., hc_mult), dtype torch.float32
             comb_mix: shape (..., hc_mult, hc_mult), dtype torch.float32
             layer_input: shape (..., hidden_size), dtype torch.bfloat16
+
         """
         from aiter.ops.mhc import mhc_pre
 
@@ -3611,8 +3728,12 @@ class rocm_aiter_ops:
         hc_post_mult_value: float,
         sinkhorn_repeat: int,
         pre_mix: torch.Tensor | None = None,
+        sublayer_out: torch.Tensor | None = None,
+        post_layer_mix: torch.Tensor | None = None,
+        comb_res_mix: torch.Tensor | None = None,
+        residual_out: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """mHC pre using the pre-mix carried from the previous sublayer.
+        """MHC pre using the pre-mix carried from the previous sublayer.
 
         Same gates as :meth:`mhc_pre`, but the stream collapse applies the
         caller's ``pre_mix`` instead of the one computed here, and the one
@@ -3625,15 +3746,26 @@ class rocm_aiter_ops:
         that redundant store is the price of not having a native delayed
         kernel, and is small next to the ~140 launches it replaces.
 
+        Passing ``sublayer_out`` / ``post_layer_mix`` / ``comb_res_mix``
+        also applies the preceding post block. AITER then projects the new
+        residual in the same kernel that computes it
+        (``mhc_fused_post_pre_gemm_sqrsum``), which saves one launch; every
+        later stage is identical either way. That new residual is written to
+        ``residual_out``, which the caller must supply in that case; it is an
+        output buffer rather than a return value so the op never has to hand
+        back one of its own inputs on the unfused path.
+
         Returns:
             post_mix: shape (..., hc_mult, 1), dtype torch.float32
             comb_mix: shape (..., hc_mult, hc_mult), dtype torch.float32
             layer_input: shape (..., hidden_size), dtype torch.bfloat16
             next_pre_mix: shape (..., hc_mult), dtype torch.float32
+
         """
         from aiter.ops.mhc import (
+            get_mhc_fused_post_pre_config,
             get_mhc_pre_splitk,
-            mhc_pre_big_fuse,
+            mhc_fused_post_pre_gemm_sqrsum,
             mhc_pre_gemm_sqrsum,
         )
 
@@ -3666,9 +3798,16 @@ class rocm_aiter_ops:
 
         pre_mix_flat = None if pre_mix is None else pre_mix.view(-1, hc_mult)
 
+        fuse_post = sublayer_out is not None
         # AITER's Python wrappers allocate without explicit device arguments.
         with torch.device(device):
-            splitk, tile_k = get_mhc_pre_splitk(num_tokens, hc_hidden_size)
+            if fuse_post:
+                # Keyed on the per-stream K, i.e. hidden_size, not hc_mult * it.
+                splitk, tile_m, tile_n, tile_k = get_mhc_fused_post_pre_config(
+                    num_tokens, hidden_size
+                )
+            else:
+                splitk, tile_k = get_mhc_pre_splitk(num_tokens, hc_hidden_size)
             # AITER pads the GEMM output to a multiple of 32 columns.
             gemm_pad = torch.empty(
                 splitk,
@@ -3679,49 +3818,45 @@ class rocm_aiter_ops:
             )
             gemm_out = gemm_pad[:, :, :hc_mult3]
             sqrsum = torch.empty(splitk, num_tokens, dtype=torch.float32, device=device)
-            mhc_pre_gemm_sqrsum(gemm_out, sqrsum, residual_flat, fn, tile_k, 0)
+            if fuse_post:
+                # Restated for the type checker, which cannot narrow the
+                # optional arguments through the fuse_post flag.
+                assert sublayer_out is not None
+                assert post_layer_mix is not None and comb_res_mix is not None
+                assert residual_out is not None
+                projected = residual_out.view(-1, hc_mult, hidden_size)
+                mhc_fused_post_pre_gemm_sqrsum(
+                    gemm_out,
+                    sqrsum,
+                    projected,
+                    sublayer_out.view(-1, hidden_size),
+                    residual_flat,
+                    # The kernel wants the post mix squeezed to (tokens, hc_mult).
+                    post_layer_mix.view(-1, hc_mult, 1).squeeze(-1),
+                    comb_res_mix.view(-1, hc_mult, hc_mult),
+                    fn,
+                    tile_m,
+                    tile_n,
+                    tile_k,
+                    0,
+                )
+            else:
+                projected = residual_flat
+                mhc_pre_gemm_sqrsum(gemm_out, sqrsum, projected, fn, tile_k, 0)
 
-            post_mix = torch.empty(
-                num_tokens, hc_mult, 1, dtype=torch.float32, device=device
-            )
-            comb_mix = torch.empty(
-                num_tokens, hc_mult, hc_mult, dtype=torch.float32, device=device
-            )
-            unused_collapse = torch.empty(
-                num_tokens, hidden_size, dtype=torch.bfloat16, device=device
-            )
-            mhc_pre_big_fuse(
-                post_mix,
-                comb_mix,
-                unused_collapse,
-                gemm_out,
-                sqrsum,
-                hc_scale,
-                hc_base,
-                residual_flat,
-                rms_eps,
-                hc_pre_eps,
-                hc_sinkhorn_eps,
-                hc_post_mult_value,
-                sinkhorn_repeat,
-            )
-
-        next_pre_mix = torch.ops.vllm.mhc_pre_mix_triton(
+        post_mix, comb_mix, layer_input, next_pre_mix = _mhc_delayed_pre_tail(
             gemm_out,
             sqrsum,
+            projected,
             hc_scale,
             hc_base,
-            hc_mult,
-            hc_hidden_size,
+            pre_mix_flat,
             rms_eps,
             hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_mult_value,
+            sinkhorn_repeat,
         )
-
-        if pre_mix_flat is None:
-            # Model entry selects residual stream zero.
-            layer_input = residual_flat[:, 0]
-        else:
-            layer_input = torch.ops.vllm.hc_collapse_triton(residual_flat, pre_mix_flat)
 
         return (
             post_mix.view(*outer_shape, hc_mult, 1),
@@ -3729,6 +3864,21 @@ class rocm_aiter_ops:
             layer_input.view(*outer_shape, hidden_size),
             next_pre_mix.view(*outer_shape, hc_mult),
         )
+
+    @staticmethod
+    def mhc_fused_post_pre_delayed_prefers_unfused(num_tokens: int) -> bool:
+        """True when AITER's own heuristic favours separate post and pre.
+
+        Mirrors the ``fused_m_upper_bound`` table in ``aiter.ops.mhc``: the
+        fused GEMM wins for decode-sized batches and loses for large ones.
+        """
+        from aiter.jit.utils.chip_info import get_gfx_runtime
+
+        return num_tokens >= {
+            "gfx950": 1024,
+            "gfx942": 128,
+            "gfx1250": 1024,
+        }.get(get_gfx_runtime(), 1024)
 
     @staticmethod
     def hc_head(
@@ -3903,3 +4053,4 @@ class rocm_aiter_ops:
 
 
 rocm_aiter_ops.register_ops_once()
+_sync_aiter_situv2_moe_env()

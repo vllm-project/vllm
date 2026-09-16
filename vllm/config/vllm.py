@@ -27,7 +27,7 @@ from vllm.triton_utils import HAS_TRITON
 from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
 
-from .attention import AttentionConfig
+from .attention import AttentionConfig, HiSparseConfig
 from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
@@ -153,8 +153,8 @@ IS_DENSE = False
 
 def enable_norm_fusion(cfg: "VllmConfig") -> bool:
     """Enable if either RMS norm or quant FP8 custom op is active;
-    otherwise Inductor handles fusion."""
-
+    otherwise Inductor handles fusion.
+    """
     return (
         cfg.compilation_config.is_custom_op_enabled("rms_norm")
         or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
@@ -163,8 +163,7 @@ def enable_norm_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_act_fusion(cfg: "VllmConfig") -> bool:
-    """
-    Enable if either SiLU+Mul or quant FP8 custom op is active;
+    """Enable if either SiLU+Mul or quant FP8 custom op is active;
     otherwise Inductor handles fusion.
     Also enable for FP4 models as FP4 quant is always custom so Inductor cannot fuse it.
     """
@@ -220,7 +219,6 @@ def enable_rope_kvcache_fusion(cfg: "VllmConfig") -> bool:
 
 def enable_rope_kvcache_mla_fusion(cfg: "VllmConfig") -> bool:
     """Enable if use_inductor_graph_partition is enabled."""
-
     return (
         cfg.compilation_config.use_inductor_graph_partition
         or not cfg.compilation_config.splitting_ops_contain_kv_cache_update()
@@ -229,7 +227,6 @@ def enable_rope_kvcache_mla_fusion(cfg: "VllmConfig") -> bool:
 
 def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
     """Enable if using AITER RMSNorm and hidden size is 2880 i.e. gpt-oss."""
-
     return (
         cfg.kernel_config.ir_op_priority.fused_add_rms_norm[0] == "aiter"
         and cfg.model_config is not None
@@ -460,8 +457,7 @@ class VllmConfig:
     """
 
     def compute_hash(self, include_version: bool = True) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
+        """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
 
@@ -473,6 +469,7 @@ class VllmConfig:
 
         Args:
             include_version: Include the vLLM version in the hash.
+
         """
         factors: list[Any] = []
 
@@ -651,6 +648,29 @@ class VllmConfig:
         return 0
 
     @property
+    def num_prefill_lookahead_tokens(self) -> int:
+        """Prefill tokens past the computed range that the drafter reads.
+
+        Mid-prefill the drafter consumes tokens the target model has not been
+        scheduled for yet, so every component that has to keep them available
+        must apply this margin: the scheduler, which never ends a chunk within
+        it and shifts encoder scheduling by it, and the KV cache manager, which
+        treats the trailing `this - 1` tokens as re-prefillable rather than
+        finalized. Consumers must read this property rather than re-deriving
+        their own per-method lookahead, so those components cannot drift apart.
+        """
+        speculative_config = self.speculative_config
+        if speculative_config is None or not speculative_config.use_eagle():
+            return 0
+        if speculative_config.use_multi_module_mtp():
+            # Each MTP module reads one token further ahead than the one before
+            # it, so the chain needs num_speculative_tokens of runway at a
+            # chunked-prefill boundary.
+            return self.num_speculative_tokens
+        # Eagle-family drafters read only the immediate next token.
+        return 1
+
+    @property
     def uniform_decode_query_len(self) -> int:
         """Query length of every request in a uniform decode batch.
 
@@ -724,7 +744,8 @@ class VllmConfig:
 
     def _is_dflash2_draft(self) -> bool:
         """Whether the DFlash draft is a DFlash2 one, by the architecture the
-        speculator selects on (v1/worker/gpu/spec_decode/__init__.py)."""
+        speculator selects on (v1/worker/gpu/spec_decode/__init__.py).
+        """
         spec = self.speculative_config
         if spec is None or spec.method != "dflash":
             return False
@@ -775,8 +796,7 @@ class VllmConfig:
 
     @property
     def needs_dp_coordinator(self) -> bool:
-        """
-        Determine if the DPCoordinator process is needed.
+        """Determine if the DPCoordinator process is needed.
 
         The DPCoordinator is needed in two cases:
         1. For MoE models with DP > 1: to handle wave coordination
@@ -786,8 +806,8 @@ class VllmConfig:
 
         Returns:
             True if DPCoordinator process is needed, False otherwise.
-        """
 
+        """
         # For non-MoE models, only need coordinator in internal/hybrid LB mode
         # (for stats collection).
         return self.parallel_config.data_parallel_size > 1 and (
@@ -797,8 +817,7 @@ class VllmConfig:
         )
 
     def enable_trace_function_call_for_thread(self) -> None:
-        """
-        Set up function tracing for the current thread,
+        """Set up function tracing for the current thread,
         if enabled via the `VLLM_TRACE_FUNCTION` environment variable.
         """
         if envs.VLLM_TRACE_FUNCTION:
@@ -932,6 +951,7 @@ class VllmConfig:
             config_obj: Configuration object to update.
             key: Attribute name.
             value: Default value (static or callable).
+
         """
         if getattr(config_obj, key) is None:
             # Some config values are known before initialization and are
@@ -953,6 +973,7 @@ class VllmConfig:
 
         Args:
             defaults: Dictionary of default values to apply.
+
         """
 
         def apply_recursive(config_obj: Any, config_defaults: dict[str, Any]) -> None:
@@ -1253,7 +1274,6 @@ class VllmConfig:
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
-
         # To give each torch profile run a unique instance name.
         self.instance_id = f"{time.time_ns()}"
 
@@ -1551,18 +1571,6 @@ class VllmConfig:
             self.compilation_config.mode = CompilationMode.NONE
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
-        if self.profiler_config.profiler == "proton":
-            if not current_platform.is_cuda():
-                raise ValueError(
-                    "The Proton profiler currently supports NVIDIA CUDA only"
-                )
-            if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
-                raise ValueError(
-                    "The Proton profiler requires CUDA graphs to be disabled. "
-                    "Use --enforce-eager or set "
-                    "--compilation-config.cudagraph_mode=none."
-                )
-
         if os.environ.get("TORCH_COMPILE_DISABLE") == "1":
             logger.warning_once(
                 "TORCH_COMPILE_DISABLE is set, disabling torch.compile. "
@@ -1641,6 +1649,13 @@ class VllmConfig:
 
         self._maybe_disable_dynamic_sd_for_data_parallel()
         self._maybe_override_dynamic_sd_cudagraph_mode()
+
+        if (
+            self.attention_config.hisparse_config is None
+            and self.kv_transfer_config is not None
+            and self.kv_transfer_config.has_connector("HiSparseConnector")
+        ):
+            self.attention_config.hisparse_config = HiSparseConfig()
 
         if self.attention_config.hisparse_config is not None:
             if not current_platform.is_cuda():
@@ -1860,6 +1875,7 @@ class VllmConfig:
         else:
             self._validate_v1_model_runner()
 
+        self._validate_profiler_config()
         self._validate_batch_sharded_sampling()
         self._validate_adaptive_verification()
 
@@ -2114,8 +2130,7 @@ class VllmConfig:
         ]
 
     def _set_max_num_scheduled_tokens(self):
-        """
-        In most cases, the scheduler may schedule a batch with as many tokens as the
+        """In most cases, the scheduler may schedule a batch with as many tokens as the
         worker is configured to handle.
         """
         if self.speculative_config is not None:
@@ -2153,8 +2168,7 @@ class VllmConfig:
                 )
 
     def _set_cudagraph_sizes(self):
-        """
-        vLLM defines the default candidate list of batch sizes for CUDA graph
+        """VLLM defines the default candidate list of batch sizes for CUDA graph
         capture as:
 
         ```python
@@ -2200,8 +2214,8 @@ class VllmConfig:
             padded CUDA graph will be used.
             - If batch size > largest `cudagraph_capture_sizes`, cudagraph will
             not be used.
-        """
 
+        """
         if (
             self.model_config is not None
             and not self.model_config.enforce_eager
@@ -2422,9 +2436,7 @@ class VllmConfig:
         self.compilation_config.post_init_cudagraph_sizes()
 
     def _set_compile_ranges(self):
-        """
-        Set the compile ranges for the compilation config.
-        """
+        """Set the compile ranges for the compilation config."""
         compilation_config = self.compilation_config
         computed_compile_ranges_endpoints = []
 
@@ -2840,16 +2852,16 @@ class VllmConfig:
             unsupported.append("pipeline parallelism with external_launcher")
 
         if speculative_config is not None:
-            # TODO: ngram / ngram_gpu are not supported by the v2 model runner yet
-            if speculative_config.method in ("ngram", "ngram_gpu"):
-                unsupported.append("ngram/ngram_gpu speculative decoding")
-            elif speculative_config.method not in (
-                "eagle",
-                "eagle3",
-                "mtp",
-                "dflash",
-                "dspark",
-                "extract_hidden_states",
+            if speculative_config.method in (
+                # https://github.com/vllm-project/vllm/pull/40704
+                "ngram",
+                "ngram_gpu",
+                # https://github.com/vllm-project/vllm/pull/43091
+                "draft_model",
+                "suffix",
+                "medusa",
+                "mlp_speculator",
+                "custom_class",
             ):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
 
@@ -3041,6 +3053,44 @@ class VllmConfig:
             unsupported.append("dual batch overlap with encoder only models")
 
         return unsupported
+
+    def _validate_profiler_config(self) -> None:
+        if self.profiler_config.profiler != "proton":
+            return
+
+        from vllm.platforms import current_platform
+
+        if not current_platform.is_cuda():
+            raise ValueError("The Proton profiler currently supports NVIDIA CUDA only")
+        if (
+            self.profiler_config.proton_graph_attribution
+            and not self.use_v2_model_runner
+        ):
+            raise ValueError(
+                "Proton CUDA graph attribution requires the V2 model runner."
+            )
+
+        has_cuda_graphs = (
+            self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            or (
+                self.compilation_config.cudagraph_mm_encoder
+                and not (self.model_config and self.model_config.enforce_eager)
+            )
+        )
+        if not has_cuda_graphs:
+            return
+        mode = self.profiler_config.proton_mode
+        if mode and mode.split(":", 1)[0].lower() == "pcsampling":
+            raise ValueError(
+                "Proton PC sampling requires CUDA graphs to be disabled. "
+                "Use --enforce-eager."
+            )
+        if not self.profiler_config.proton_graph_attribution:
+            raise ValueError(
+                "Proton profiling with CUDA graphs requires "
+                "proton_graph_attribution=True to capture replayed kernels. "
+                "Enable attribution or use --enforce-eager."
+            )
 
     def _validate_v2_model_runner(self) -> None:
         """Check for features not yet supported by the V2 model runner."""
@@ -3253,8 +3303,7 @@ _current_prefix: str | None = None
 def set_current_vllm_config(
     vllm_config: VllmConfig, check_compile=False, prefix: str | None = None
 ):
-    """
-    Temporarily set the current vLLM config.
+    """Temporarily set the current vLLM config.
     Used during model initialization.
     We save the current vLLM config in a global variable,
     so that all modules can access it, e.g. custom ops
@@ -3335,15 +3384,14 @@ def get_layers_from_vllm_config(
     layer_type: type[T],
     layer_names: Iterable[str] | None = None,
 ) -> dict[str, T]:
-    """
-    Get layers from the vLLM config.
+    """Get layers from the vLLM config.
 
     Args:
         vllm_config: The vLLM config.
         layer_type: The type of the layer to get.
         layer_names: The names of the layers to get. If None, return all layers.
-    """
 
+    """
     forward_context = vllm_config.compilation_config.static_forward_context
     if layer_names is None:
         layer_names = forward_context.keys()

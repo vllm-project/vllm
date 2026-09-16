@@ -64,6 +64,9 @@ from vllm.models.deepseek_v4.nvidia.model import (
     make_deepseek_v4_expert_params_mapping,
 )
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
+from vllm.models.deepseek_v41.nvidia.flash_mla_mega_attn import (
+    DeepseekV4MegaAttnAttention,
+)
 from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
     DeepseekV4FlashInferMLAAttention,
     DeepseekV4FlashInferSM120Attention,
@@ -78,6 +81,7 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 from ..common.engram import EngramLayout, NgramHashState
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
 from .engram import Engram, gather_engram_hashes
+from .ops.mega_mhc import mhc_shifted_post_pre
 
 if typing.TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
@@ -118,8 +122,9 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
 
     The generic CUDA backend selector does not instantiate DSv4 layers directly,
     so map generic sparse-MLA choices to the DSv4-specialized attention class.
-    Without an explicit backend, SM12 defaults to FlashInfer while the other
-    CUDA arches keep the FlashMLA path.
+    Without an explicit backend: SM12 takes FlashInfer, SM100 takes mega
+    attention where the topology allows it, and everything else keeps the
+    FlashMLA path.
     """
     backend = vllm_config.attention_config.backend
     device_capability = current_platform.get_device_capability()
@@ -139,6 +144,8 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
         if device_capability is not None and device_capability.major == 12:
             return DeepseekV4FlashInferSM120Attention
         return DeepseekV4FlashInferMLAAttention
+    if backend is AttentionBackendEnum.FLASHMLA_MEGA_ATTN_DSV41:
+        return DeepseekV4MegaAttnAttention
     if backend in (
         AttentionBackendEnum.FLASHMLA_SPARSE,
         AttentionBackendEnum.FLASHMLA_SPARSE_DSV4,
@@ -148,6 +155,14 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
 
     if device_capability is not None and device_capability.major == 12:
         return DeepseekV4FlashInferSM120Attention
+    # Mega attention is the SM100 default: it fuses Q RoPE, sparse attention,
+    # the output's inverse RoPE and its FP8 cast into one launch, and brings
+    # the 288 B NVFP4 compressed record -- the format the reference
+    # implementation itself stores. It declines topologies it cannot serve
+    # (non-SM100, TP that leaves fewer than WV_GROUP_SIZE heads per wo_a
+    # group, a build without the kernel), which then fall through to FlashMLA.
+    if DeepseekV4MegaAttnAttention.is_available_for(vllm_config):
+        return DeepseekV4MegaAttnAttention
     return DeepseekV4FlashMLAAttention
 
 
@@ -214,17 +229,45 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.hc_eps = config.hc_eps
         self.hc_post_alpha = 2.0
         if vllm_config.kernel_config.enable_jit_warmup and current_platform.is_cuda():
+            from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+                mhc_fused_post_pre_splits,
+            )
             from vllm.model_executor.kernels.mhc.warmup import MHC_PRE_NORM_KERNEL
 
             max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
             if self.use_sequence_parallel:
                 tp_size = vllm_config.parallel_config.tensor_parallel_size
                 max_tokens = (max_tokens + tp_size - 1) // tp_size
-            for input_size, use_pre_mix in (
-                (self.hidden_size, False),
-                (self.hc_mult * self.hidden_size, False),
-                (self.hc_mult * self.hidden_size, True),
-            ):
+            # The epilogue compiles per projection width and per pre-mix mode.
+            # The first layer projects the broadcast embedding, so it reads one
+            # hidden_size-wide row and selects stream zero; every later sublayer
+            # projects the full hc stream, and collapses it with the pre-mix the
+            # previous sublayer carried in. Those later shapes also arrive
+            # through the fused post + pre-norm GEMM, which picks split-k
+            # factors the token sweep below never produces.
+            broadcast_embedding = {
+                "rms_numel": self.hidden_size,
+                "use_pre_mix_in": False,
+                "extra_splits": (),
+            }
+            hc_stream = {
+                "rms_numel": self.hc_mult * self.hidden_size,
+                "extra_splits": mhc_fused_post_pre_splits(
+                    self.hidden_size, self.hc_mult
+                ),
+            }
+            variants = [
+                broadcast_embedding,
+                {**hc_stream, "use_pre_mix_in": False},
+                {**hc_stream, "use_pre_mix_in": True},
+            ]
+            if vllm_config.speculative_config is not None:
+                # Draft setups read aux hidden states out of the same collapse,
+                # which is its own specialization of the kernel.
+                variants.append(
+                    {**hc_stream, "use_pre_mix_in": True, "write_aux": True}
+                )
+            for variant in variants:
                 MHC_PRE_NORM_KERNEL.register_warmup(
                     max_tokens=max_tokens,
                     hidden_size=self.hidden_size,
@@ -235,8 +278,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                     sinkhorn_repeat=self.hc_sinkhorn_iters,
                     norm_eps=self.rms_norm_eps,
                     hc_mult=self.hc_mult,
-                    use_pre_mix_in=use_pre_mix,
-                    rms_numel=input_size,
+                    **variant,
                 )
         mix_hc = (2 + self.hc_mult) * self.hc_mult
         hc_dim = self.hc_mult * self.hidden_size
@@ -295,7 +337,17 @@ class DeepseekV4DecoderLayer(nn.Module):
         residual: torch.Tensor | None = None,
         engram_hashes: torch.Tensor | None = None,
         engram_mask: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        *,
+        capture_previous_aux: bool = False,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+    ]:
+        previous_aux: torch.Tensor | None = None
         # The reference collapses each sublayer's input with the *previous*
         # sublayer's pre-mix: attention uses the pre-mix carried in (identity
         # for the first layer), the FFN uses this layer's attention pre-mix.
@@ -335,17 +387,19 @@ class DeepseekV4DecoderLayer(nn.Module):
                     norm_weight=self.attn_norm.weight,
                     norm_eps=self.attn_norm.variance_epsilon,
                 )
-        else:
-            residual = mhc_post_tilelang(x, residual, post_mix, res_mix)
-            if self.engram is not None and engram_hashes is not None:
-                # Engram injection happens between the previous sublayer's
-                # post and this block's pre, on the full hc stream, so the
-                # mix coefficients see the injected stream.
-                residual = self.engram(
-                    residual,
-                    engram_hashes[:, self.engram.layer_hash_index],
-                    engram_mask,
-                )
+        elif self.engram is not None and engram_hashes is not None:
+            # Engram injection happens between the previous sublayer's post
+            # and this block's pre, on the full hc stream, so the mix
+            # coefficients see the injected stream. The injection also keeps
+            # the post out of the pre-norm GEMM's fused prologue.
+            previous_post = mhc_post_tilelang(x, residual, post_mix, res_mix)
+            if capture_previous_aux:
+                previous_aux = previous_post.mean(dim=1)
+            residual = self.engram(
+                previous_post,
+                engram_hashes[:, self.engram.layer_hash_index],
+                engram_mask,
+            )
             post_mix, res_mix, x, attn_pre = mhc_pre_delayed_tilelang(
                 residual,
                 self.hc_attn_fn,
@@ -360,6 +414,29 @@ class DeepseekV4DecoderLayer(nn.Module):
                 norm_weight=self.attn_norm.weight,
                 norm_eps=self.attn_norm.variance_epsilon,
             )
+        else:
+            # The collapse already reads the post-mapped streams, so the mean
+            # aux consumers want comes out of the same kernel.
+            residual, post_mix, res_mix, x, attn_pre, aux = mhc_shifted_post_pre(
+                x,
+                residual,
+                post_mix,
+                res_mix,
+                self.hc_attn_fn,
+                self.hc_attn_scale,
+                self.hc_attn_base,
+                self.rms_norm_eps,
+                self.hc_eps,
+                self.hc_eps,
+                self.hc_post_alpha,
+                self.hc_sinkhorn_iters,
+                pre_mix=pre_mix,
+                norm_weight=self.attn_norm.weight,
+                norm_eps=self.attn_norm.variance_epsilon,
+                capture_aux=capture_previous_aux,
+            )
+            if capture_previous_aux:
+                previous_aux = aux
 
         if self.use_sequence_parallel:
             x = sp_all_gather(x)[: positions.shape[0]]
@@ -368,9 +445,11 @@ class DeepseekV4DecoderLayer(nn.Module):
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
 
-        residual = mhc_post_tilelang(x, residual, post_mix, res_mix)
-        post_mix, res_mix, x, ffn_pre = mhc_pre_delayed_tilelang(
+        residual, post_mix, res_mix, x, ffn_pre, _ = mhc_shifted_post_pre(
+            x,
             residual,
+            post_mix,
+            res_mix,
             self.hc_ffn_fn,
             self.hc_ffn_scale,
             self.hc_ffn_base,
@@ -384,7 +463,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             norm_eps=self.ffn_norm.variance_epsilon,
         )
         x = self.ffn(x, input_ids)
-        return x, residual, post_mix, res_mix, ffn_pre
+        return x, residual, post_mix, res_mix, ffn_pre, previous_aux
 
 
 class DeepseekV4Model(nn.Module, EagleModelMixin):
@@ -631,13 +710,14 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         if not get_pp_group().is_first_rank:
             assert intermediate_tensors is not None
             pre_mix = intermediate_tensors["pre_mix"]
-        aux_hidden_states: list[torch.Tensor] = []
-        final_aux_recon: torch.Tensor | None = None  # avoid duplicate mhc_post call
+        # Every layer's post runs inside the next layer's fused pre, so aux
+        # hidden states are read back from there instead of recomputed.
+        aux_hidden_by_layer: dict[int, torch.Tensor] = {}
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
-            hidden_states, residual, post_mix, res_mix, pre_mix = layer(
+            hidden_states, residual, post_mix, res_mix, pre_mix, previous_aux = layer(
                 hidden_states,
                 positions,
                 input_ids,
@@ -647,25 +727,29 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 residual,
                 engram_hashes,
                 engram_mask,
+                capture_previous_aux=idx in self.aux_hidden_state_layers,
             )
-            if idx + 1 in self.aux_hidden_state_layers:
-                # Reconstruct the aux hidden state for draft models
-                aux_recon = mhc_post_tilelang(
-                    hidden_states, residual, post_mix, res_mix
-                )
-                aux_hidden_state = aux_recon.mean(dim=1)
+            if previous_aux is not None:
+                # idx is the one-based id of the layer whose post this is.
                 if self.use_sequence_parallel:
-                    aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
-                aux_hidden_states.append(aux_hidden_state)
-                final_aux_recon = aux_recon
+                    previous_aux = sp_all_gather(previous_aux)[:full_num_tokens]
+                aux_hidden_by_layer[idx] = previous_aux
         if layer is not None:
-            # Reuse if the last layer was captured as an aux hidden state
+            # The last layer has no successor to fold its post into.
+            hidden_states = mhc_post_tilelang(
+                hidden_states, residual, post_mix, res_mix
+            )
             if self.end_layer in self.aux_hidden_state_layers:
-                hidden_states = final_aux_recon
-            else:
-                hidden_states = mhc_post_tilelang(
-                    hidden_states, residual, post_mix, res_mix
-                )
+                final_aux = hidden_states.mean(dim=1)
+                if self.use_sequence_parallel:
+                    final_aux = sp_all_gather(final_aux)[:full_num_tokens]
+                aux_hidden_by_layer[self.end_layer] = final_aux
+
+        aux_hidden_states = [
+            aux_hidden_by_layer[layer_id]
+            for layer_id in self.aux_hidden_state_layers
+            if layer_id in aux_hidden_by_layer
+        ]
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -865,6 +949,17 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
     def finalize_mega_moe_weights(self) -> None:
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             layer.ffn.finalize_mega_moe_weights()
+
+    def finalize_mega_attn_weights(self) -> None:
+        """Permute wq_b / wo_a into FlashMLA's mega-attention layouts.
+
+        A no-op for every other attention layer, and idempotent, so a second
+        post-load pass cannot permute twice.
+        """
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
+            finalize = getattr(layer.attn, "finalize_loaded_weights", None)
+            if finalize is not None:
+                finalize()
 
     def finalize_mhc_broadcast_weights(self) -> None:
         if not get_pp_group().is_first_rank or self.start_layer >= self.end_layer:
@@ -1084,7 +1179,8 @@ class DeepseekV41LLMForCausalLM(
     @property
     def token_lookback_depth(self) -> int:
         """Tokens before a chunk start the engram hash needs; the model runner
-        passes them as `lookback_token_ids`."""
+        passes them as `lookback_token_ids`.
+        """
         engram_hash = self.model.engram_hash
         return engram_hash.lookback_depth if engram_hash is not None else 0
 
@@ -1108,7 +1204,8 @@ class DeepseekV41LLMForCausalLM(
     def get_mtp_target_hidden_states(self) -> torch.Tensor | None:
         """Pre-collapse residual stream buffer (max_num_batched_tokens,
         hc_mult * hidden_size) for the MTP draft model. Populated by
-        forward(); valid after each target step."""
+        forward(); valid after each target step.
+        """
         return getattr(self.model, "_mtp_hidden_buffer", None)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -1120,6 +1217,7 @@ class DeepseekV41LLMForCausalLM(
     def process_weights_after_loading(self) -> None:
         self.model.finalize_mega_moe_weights()
         self.model.finalize_mhc_broadcast_weights()
+        self.model.finalize_mega_attn_weights()
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()

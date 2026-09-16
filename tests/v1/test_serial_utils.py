@@ -44,7 +44,6 @@ class MyType:
 
 def test_encode_decode(monkeypatch: pytest.MonkeyPatch):
     """Test encode/decode loop with zero-copy tensors."""
-
     with monkeypatch.context() as m:
         m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
@@ -251,7 +250,6 @@ def test_custom_class_serialization_allowed_with_pickle(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Test that serializing a custom class succeeds when allow_pickle=True."""
-
     with monkeypatch.context() as m:
         m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
         encoder = MsgpackEncoder()
@@ -429,7 +427,8 @@ def _logprobs_outputs(num_reqs: int, num_prompt_tokens: int):
     """An EngineCoreOutputs carrying prompt logprobs, as the engine core sends
     it: many requests, each with per-token tensors small enough that pyzmq
     copies their frames, while the accumulated payload frame is large enough
-    that pyzmq sends it zero-copy."""
+    that pyzmq sends it zero-copy.
+    """
     from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
     from vllm.v1.outputs import LogprobsTensors
 

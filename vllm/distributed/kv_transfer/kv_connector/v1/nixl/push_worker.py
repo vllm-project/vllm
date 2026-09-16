@@ -83,6 +83,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     # Distinguishes push from pull in the NIXL compatibility hash.
     _TRANSFER_MODE: str = "push"
 
+    _supports_pp_hma = True
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -313,7 +315,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         executes on the writer; the handshake runs on the background executor
         and the request is re-queued onto ``_reg_send_inbox`` once it
         completes (at which point ``_ensure_handshake`` returns ``None`` and we
-        send directly)."""
+        send directly).
+        """
         remote_pp_size = reg_data.get("remote_pp_size", 1)
         fut = self._ensure_handshake(
             reg_data["remote_engine_id"],
@@ -341,7 +344,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 self._log_failure(
                     failure_type="push_reg_handshake_failed", req_id=rid, error=e
                 )
-                self._handle_failed_transfer(rid, None)
+                self._failed_recv_reqs.put(rid)
                 return
             # Re-queue for the writer to send now that the handshake is done.
             self._reg_send_inbox.put((rid, rd))
@@ -363,7 +366,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 engine_id,
                 req_id,
             )
-            self._handle_failed_transfer(req_id, None)
+            self._failed_recv_reqs.put(req_id)
             return
         for rank, agent_name in agents.items():
             try:
@@ -505,7 +508,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         ``BlockIds`` is canonically a tuple of per-group lists, but some
         registration payloads collapse a single-group case to a flat
         list. Re-wrap that case so downstream group-aware helpers see a
-        consistent shape."""
+        consistent shape.
+        """
         if block_ids and not isinstance(block_ids[0], (list, tuple)):
             return (list(block_ids),)
         return block_ids
@@ -530,7 +534,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         local_region_groups = self.region_group_ids
         remote_region_groups = self.dst_region_group_ids[engine_id]
         groups_differ = local_region_groups != remote_region_groups
-        if groups_differ:
+        if groups_differ and not self._transfer_layer_group_ids:
             raise NotImplementedError(
                 "NixlPushConnector does not support different producer and "
                 "consumer cache-group layouts"
@@ -722,9 +726,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             # don't have a ``_recving_metadata`` entry to invalidate, so
             # we just release the handle and let the engine reschedule
             # via the lease / watchdog.
-            if handle is not None:
-                self.nixl_wrapper.release_xfer_handle(handle)
-            self.xfer_stats.record_failed_transfer()
+            if not self._handle_failed_transfer(request_id, handle):
+                return handle
             return None
 
     # --- Notification handling on engine main thread ------------------ #
@@ -803,7 +806,16 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # ``_pop_done_transfers`` mutates ``_sending_transfers``; the
         # writer thread also appends to it, so guard the pop.
         with self._sending_transfers_lock:
-            done_pushing = self._pop_done_transfers(self._sending_transfers)
+            done_pushing, failed_pushing = self._pop_done_transfers(
+                self._sending_transfers
+            )
+        # A failed send must never be reported as done: its blocks
+        # are freed via the lease / watchdog instead.
+        done_pushing = {
+            req_id
+            for req_id in done_pushing - failed_pushing
+            if req_id in self._recving_metadata
+        }
         for req_id in done_pushing:
             self._reqs_to_send.pop(req_id, None)
             self._reqs_to_process.discard(req_id)

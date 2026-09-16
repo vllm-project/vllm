@@ -244,7 +244,8 @@ class RocmAttentionBackend(AttentionBackend):
     @classmethod
     def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
         """K and V as two head groups so the native HIP kernels address each side
-        as one contiguous region (x-packed interior applied in split_kv_cache)."""
+        as one contiguous region (x-packed interior applied in split_kv_cache).
+        """
         if spec.state_content_bytes is not None:
             return spec
         assert spec.head_size == spec.head_size_v, (
@@ -344,6 +345,7 @@ class RocmAttentionImpl(AttentionImpl):
             output: shape = [num_encoder_tokens, num_heads, head_size]
             attn_metadata: Encoder attention metadata
             layer: The attention layer
+
         """
         # For encoder attention, process FP8 quantization if needed
         if is_quantized_kv_cache(self.kv_cache_dtype):
@@ -390,14 +392,21 @@ class RocmAttentionImpl(AttentionImpl):
         """Forward pass with FlashAttention.
 
         Args:
+            layer: The attention layer, providing the q/k/v quantization scales.
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: logical [num_blocks, 2, block_size, num_kv_heads *
                 head_size] under LHBNC (physically K/V-group-first)
             attn_metadata: Metadata for attention.
+            output: Tensor that the attention result is written into.
+            output_scale: Scale for fused output quantization.
+            output_block_scale: Block scale for fused output quantization;
+                not supported by this backend.
+
         Returns:
             shape = [num_tokens, num_heads * head_size]
+
         """
         if output_block_scale is not None:
             raise NotImplementedError(

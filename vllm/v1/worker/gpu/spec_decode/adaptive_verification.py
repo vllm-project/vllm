@@ -14,6 +14,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu.async_utils import StepTimingSample, stream
@@ -21,7 +22,6 @@ from vllm.v1.worker.gpu.attn_utils import (
     get_attn_cg_support,
     get_query_lens_mismatch_unsupported_backend,
 )
-from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 
 logger = init_logger(__name__)
 _PROFILE_REPLAYS = 5
@@ -88,9 +88,14 @@ def build_cost_tables_from_curves(
     """Build cost tables: graph-padded below the capture limit, smooth above.
 
     Args:
+        draft_curve: (size, cost) samples for the draft model.
+        verify_curve: (size, cost) samples for the verify model.
+        max_num_reqs: Largest request count to build a table for.
+        max_batch_tokens: Largest token count to build a table for.
         cudagraph_limit: Largest cudagraph-captured size. At or below it,
             execution pads up to the next captured size, so cost is a step
             function. Above it there is no padding, so cost is continuous.
+
     """
 
     def build_table(limit: int, curve: list[tuple[int, float]]) -> np.ndarray:
@@ -185,7 +190,8 @@ class AdaptiveVerificationManager:
         """Dummy-run kwargs whose step timings seed the cost tables.
 
         Run these inside StepTimingCollector.collect(), then hand the block's
-        timings to set_initial_cost_curves."""
+        timings to set_initial_cost_curves.
+        """
         max_num_tokens = self.req_states.max_num_batched_tokens
         size = self._cudagraph_limit = capture_sizes[-1] if capture_sizes else 0
         # Also profile beyond the capture limit: real steps run there
@@ -255,7 +261,8 @@ class AdaptiveVerificationManager:
         input_batch: "InputBatch",
     ) -> None:
         """Publish this step's raw confidences for the ranking kernel and start
-        copying them to the CPU, where a later step's budget reads them."""
+        copying them to the CPU, where a later step's budget reads them.
+        """
         num_reqs = input_batch.num_reqs
         ready_idx = self._stale_idx ^ 1
         with gpu_sync_allowed():
@@ -413,7 +420,7 @@ class AdaptiveVerificationManager:
         if draft_budget == 0:
             capacities.zero_()
         else:
-            async_copy_to_gpu(scheduled_drafts, out=capacities)
+            async_tensor_h2d(scheduled_drafts, out=capacities)
             if draft_budget < int(scheduled_drafts.sum()):
                 _assign_draft_token_budget_compiled(
                     self._confidence_probs,
@@ -424,10 +431,7 @@ class AdaptiveVerificationManager:
                 )
 
         num_non_draft_tokens_gpu = self._num_non_draft_tokens[:num_reqs]
-        async_copy_to_gpu(
-            num_non_draft_tokens,
-            out=num_non_draft_tokens_gpu,
-        )
+        async_tensor_h2d(num_non_draft_tokens, out=num_non_draft_tokens_gpu)
         self._cu_num_logits[:1].zero_()
         torch.cumsum(
             capacities + self.num_bonus_tokens,

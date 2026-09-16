@@ -91,7 +91,8 @@ def load_stat_logger_plugin_factories() -> list[StatLoggerFactory]:
 
 class AggregateStatLoggerBase(StatLoggerBase):
     """Abstract base class for loggers that
-    aggregate across multiple DP engines."""
+    aggregate across multiple DP engines.
+    """
 
     @abstractmethod
     def __init__(self, vllm_config: VllmConfig, engine_indexes: list[int]): ...
@@ -101,6 +102,8 @@ class LoggingStatLogger(StatLoggerBase):
     def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
         self.engine_index = engine_index
         self.vllm_config = vllm_config
+        device_type = vllm_config.device_config.device_type
+        self.kv_cache_device = "GPU" if device_type == "cuda" else device_type.upper()
         self._reset(time.monotonic())
 
         self.last_scheduler_stats = SchedulerStats()
@@ -184,7 +187,7 @@ class LoggingStatLogger(StatLoggerBase):
             "%sIteration(%d): %d context requests, %d context tokens, "
             "%d generation requests, %d generation tokens, "
             "iteration elapsed time: %.2f ms%s, "
-            "GPU KV cache usage: %.1f%%%s",
+            "%s KV cache usage: %.1f%%%s",
             self._log_prefix_for_engine(engine_idx),
             details.iteration_index,
             details.num_ctx_requests,
@@ -193,6 +196,7 @@ class LoggingStatLogger(StatLoggerBase):
             details.num_generation_tokens,
             details.elapsed_ms,
             " (dummy)" if details.is_dummy else "",
+            self.kv_cache_device,
             scheduler_stats.kv_cache_usage * 100,
             encoder_msg,
         )
@@ -287,12 +291,13 @@ class LoggingStatLogger(StatLoggerBase):
 
         log_parts.extend(
             [
-                "GPU KV cache usage: %.1f%%",
+                "%s KV cache usage: %.1f%%",
                 "Prefix cache hit rate: %.1f%%",
             ]
         )
         log_args.extend(
             [
+                self.kv_cache_device,
                 self.last_scheduler_stats.kv_cache_usage * 100,
                 self.prefix_caching_metrics.hit_rate * 100,
             ]
@@ -1198,16 +1203,15 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
 
 class StatLoggerManager:
-    """
-    StatLoggerManager:
-        Logging happens at the level of the EngineCore (per scheduler).
-         * DP: >1 EngineCore per AsyncLLM - loggers for each EngineCore.
-         * With Local Logger, just make N copies for N EngineCores.
-         * With Prometheus, we need a single logger with N "labels"
+    """StatLoggerManager:
+    Logging happens at the level of the EngineCore (per scheduler).
+     * DP: >1 EngineCore per AsyncLLM - loggers for each EngineCore.
+     * With Local Logger, just make N copies for N EngineCores.
+     * With Prometheus, we need a single logger with N "labels"
 
-        This class abstracts away this implementation detail from
-        the AsyncLLM, allowing the AsyncLLM to just call .record()
-        and .log() to a simple interface.
+    This class abstracts away this implementation detail from
+    the AsyncLLM, allowing the AsyncLLM to just call .record()
+    and .log() to a simple interface.
     """
 
     def __init__(

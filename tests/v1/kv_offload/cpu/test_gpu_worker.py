@@ -52,7 +52,8 @@ def test_rocm_cpu_to_gpu_uses_dma(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.skipif(not gpu_worker.HAS_TRITON, reason="Requires Triton")
 def test_unpinned_cpu_to_gpu_uses_dma(monkeypatch: pytest.MonkeyPatch) -> None:
     """The Triton load path dereferences CPU pointers on the GPU, so pageable
-    host memory takes the DMA path even for pages where Triton would win."""
+    host memory takes the DMA path even for pages where Triton would win.
+    """
     monkeypatch.setattr(gpu_worker.current_platform, "is_xpu", lambda: False)
     monkeypatch.setattr(gpu_worker.current_platform, "is_rocm", lambda: False)
 

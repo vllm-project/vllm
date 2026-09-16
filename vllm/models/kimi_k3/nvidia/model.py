@@ -339,6 +339,7 @@ class KimiRoutedOutputTransform(nn.Module):
             residual: Optional tensor of the up-projection's output shape to
                 accumulate into. It is consumed in the GEMM's beta-add
                 epilogue, so adding it costs no extra kernel.
+
         """
         if self.norm is not None:
             hidden_states = self.norm(hidden_states)
@@ -532,8 +533,10 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
             symm_buffer,
             activation_clamp=activation_clamp,
             activation=self.activation,
-            situ_beta=self.activation_beta,
-            situ_linear_beta=self.activation_linear_beta,
+            # DeepGEMM names the SiTU gate tanh scale `activation_alpha` and the
+            # linear/up tanh scale `activation_beta`; beta=0 leaves up untouched.
+            activation_alpha=self.activation_beta or 1.0,
+            activation_beta=self.activation_linear_beta or 0.0,
             fast_math=fast_math,
         )
         return y
@@ -794,6 +797,7 @@ class KimiMoE(nn.Module):
             ``router_output`` holds the grouped top-k weights and ``topk_ids``
             the selected experts; otherwise ``router_output`` holds the raw gate
             logits and ``topk_ids`` is ``None``.
+
         """
 
         def _router(

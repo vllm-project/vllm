@@ -12,6 +12,7 @@ mid-decode (silent corruption of an unrelated request).
 """
 
 from collections import defaultdict
+from threading import Event, Lock
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -23,7 +24,8 @@ from .utils import create_vllm_config
 
 class _RecordingNixl:
     """Minimal NIXL wrapper stand-in that records descriptor lists and
-    prepared transfers so tests can resolve desc ids to byte ranges."""
+    prepared transfers so tests can resolve desc ids to byte ranges.
+    """
 
     def __init__(self, *args, **kwargs):
         self.dlists: dict[int, np.ndarray] = {}
@@ -112,6 +114,7 @@ def test_local_descriptors_follow_each_region_pool_capacity():
     worker.block_len_per_layer = [16, 16]
     worker.block_stride_per_layer = [16, 16]
     worker.region_num_blocks = [2, 3]
+    worker._transfer_layer_region_indices = ()
 
     descriptors = worker._build_fa_local([100, 1000], block_size_ratio=1)
 
@@ -119,13 +122,17 @@ def test_local_descriptors_follow_each_region_pool_capacity():
 
 
 @pytest.mark.cpu_test
-def test_overlaid_transfer_groups_share_region_geometry():
+@pytest.mark.parametrize("push_pp", [False, True])
+def test_overlaid_transfer_groups_share_region_geometry(push_pp):
     """Groups overlaid on one allocation share its transfer region."""
     import msgspec
 
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
         NixlAgentMetadata,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
+        NixlPushConnectorWorker,
     )
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
@@ -153,7 +160,14 @@ def test_overlaid_transfer_groups_share_region_geometry():
     }
     groups = [KVCacheGroupSpec([layer_name], spec) for layer_name in caches]
 
-    worker = object.__new__(NixlConnectorWorker)
+    worker_cls = NixlPushConnectorWorker if push_pp else NixlConnectorWorker
+    worker = object.__new__(worker_cls)
+    if push_pp:
+        worker._push_writer_stop = Event()
+        worker._push_writer_wake = Event()
+        worker._push_writer_thread = MagicMock()
+        worker._sending_transfers_lock = Lock()
+        worker._sending_transfers = defaultdict(list)
     worker.tp_rank = 0
     worker.world_size = 1
     worker.transfer_tp_rank = 0
@@ -198,6 +212,9 @@ def test_overlaid_transfer_groups_share_region_geometry():
     worker._desc_is_dram_by_block_size = {}
     worker._desc_pos_by_block_size = {}
     worker._dram_src_handles_by_block_size = {}
+    worker._transfer_layer_names = ()
+    worker._transfer_layer_region_indices = ()
+    worker._transfer_layer_group_ids = ()
     worker._region_is_mla = []
     worker.block_len_per_layer = []
     worker.block_stride_per_layer = []
@@ -205,7 +222,8 @@ def test_overlaid_transfer_groups_share_region_geometry():
     worker.use_host_buffer = False
     worker.host_xfer_buffers = {}
     worker.device_kv_caches = {}
-    worker.pp_size = 1
+    worker.pp_size = 2 if push_pp else 1
+    worker._is_hma_required = True
     worker.dcp_size = 1
     worker.pcp_size = 1
     worker.kv_buffer_device = "cuda"
@@ -240,7 +258,13 @@ def test_overlaid_transfer_groups_share_region_geometry():
     expected_addrs = [
         backing.data_ptr() + block * block_stride for block in range(num_blocks)
     ]
-    assert worker.src_blocks_data[:, 0].tolist() == expected_addrs
+    num_desc_regions = 2 if push_pp else 1
+    assert worker.src_blocks_data[:, 0].tolist() == expected_addrs * num_desc_regions
+    assert worker.num_descs == num_blocks * num_desc_regions
+    assert (
+        worker.dst_region_num_blocks[worker.engine_id]
+        == [num_blocks] * num_desc_regions
+    )
 
     metadata = msgspec.msgpack.decode(
         worker.xfer_handshake_metadata.agent_metadata_bytes,
@@ -248,6 +272,7 @@ def test_overlaid_transfer_groups_share_region_geometry():
     )
     assert metadata.region_group_ids == [-1]
     assert metadata.region_num_blocks == [num_blocks]
+    assert metadata.region_members == ([["layer.0", "layer.1"]] if push_pp else [])
     assert worker._block_ids_by_region(([0], [2]), worker.region_group_ids) == [[0, 2]]
 
 
@@ -569,7 +594,8 @@ def _register_remote_agents(worker, metadata, tp_size):
 
 def _owned_byte_ranges(worker, group_logical_ids):
     """Byte ranges owned by a request: for each HMA region tensor, every
-    logical block id of every group maps to one unified page."""
+    logical block id of every group maps to one unified page.
+    """
     unified_page = worker._test_unified_page
     bases = [t.data_ptr() for t in worker._test_tensors]
     owned = []
@@ -607,7 +633,8 @@ def test_hetero_ppl_multi_read_writes_stay_within_request_blocks():
     (kernel 4, ppl=3) vs remote (P, TP2) logical blocks of 8 tokens (ppl=2),
     equal kernel pages, tp_ratio=-2 multi-read with replicated MLA and
     TP-sharded KDA state. Every local descriptor of the request's reads must
-    stay within its own blocks."""
+    stay within its own blocks.
+    """
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
         NixlConnectorMetadata,
     )
@@ -674,7 +701,8 @@ def _resolve(
     """Resolve a desc id to (region, kind, token_start) where kind is 'attn'
     (desc-page sized, sub-block-aligned, in the request's attention blocks)
     or 'mamba'. token_start is the request-relative token offset, so local
-    and remote are comparable even when their kernel blocks differ in size."""
+    and remote are comparable even when their kernel blocks differ in size.
+    """
     addr, length, _ = (int(x) for x in desc_arr[int(idx)])
     for region, base in enumerate(bases):
         off = addr - base
@@ -868,7 +896,8 @@ def _run_hetero_case(
 def test_hetero_ppl_token_alignment_sweep(local_block, remote_block, num_tokens):
     """Sweep prompt lengths across block-boundary residues for several
     hetero-ppl geometries; assert neighbor-safety, token alignment, and
-    coverage of every transferred kernel block."""
+    coverage of every transferred kernel block.
+    """
     _run_hetero_case(
         local_block, kernel=4, remote_block=remote_block, num_tokens=num_tokens
     )
@@ -887,7 +916,8 @@ def test_hetero_ppl_with_block_size_ratio(num_tokens):
     2). The transfer is clipped at remote sub-block granularity by the
     pairing and front-trimmed by _apply_prefix_caching, so the
     untransferred tail can span both a partial block and whole blocks —
-    the case each of the two former zeroing paths handled only half of."""
+    the case each of the two former zeroing paths handled only half of.
+    """
     _run_hetero_case(
         local_block=24,
         kernel=8,
@@ -936,7 +966,8 @@ def test_mla_hybrid_large_ppl_geometry(num_tokens):
     """KimiLinear-scale MLA-hybrid geometry (TP8 prefill -> TP1 decode):
     decode (local) logical block 5760 / kernel 64 (ppl=90), prefill
     (remote) logical block 768 (ppl=12), tp_ratio=-8 multi-read with
-    replicated MLA and 8-way TP-sharded KDA state."""
+    replicated MLA and 8-way TP-sharded KDA state.
+    """
     _run_hetero_case(
         local_block=5760,
         kernel=64,
@@ -950,7 +981,8 @@ def test_mla_hybrid_large_ppl_geometry(num_tokens):
 def test_mismatched_mla_kernel_page_rejected_for_mla_hybrid():
     """The MLA per-token page is TP-independent, so kernel block lengths
     differing by anything other than the block-size ratio must fail the
-    handshake loudly rather than transfer at mismatched geometry."""
+    handshake loudly rather than transfer at mismatched geometry.
+    """
     worker = _make_mla_hybrid_worker(
         local_block_size=12, kernel_block_size=4, num_logical_blocks=8
     )
@@ -1134,7 +1166,8 @@ def test_csa_linear_registration_discovers_shared_regions():
 def test_csa_linear_scratch_descs_follow_the_pages_they_overlay():
     """The scratch ring is addressed by the regions it actually registered in,
     not by inferring that it must sit on the MLA pages: overlaying the main KV
-    pages instead moves its descriptors with it."""
+    pages instead moves its descriptors with it.
+    """
     worker = _make_csa_linear_ple_worker(scratch_aliases="main_kv")
 
     # Same MLA regions as before, but the ring now lives in the non-MLA ones.
@@ -1268,7 +1301,8 @@ def test_csa_linear_remote_ple_is_copied_whole():
 
 def _make_ring_worker():
     """Paged MLA group plus a per-layer ring group, no Mamba: the shape of a
-    model whose sliding-window KV lives in per-request rings."""
+    model whose sliding-window KV lives in per-request rings.
+    """
     from unittest.mock import MagicMock
 
     from vllm.config import set_current_vllm_config

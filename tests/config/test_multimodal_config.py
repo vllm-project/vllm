@@ -42,7 +42,8 @@ def test_mm_encoder_attn_backend_hash_updates():
 
 def test_language_model_only_does_not_affect_mm_hash():
     """language_model_only does not affect the ViT computation graph,
-    so it should not change the multimodal config hash."""
+    so it should not change the multimodal config hash.
+    """
     base_hash = MultiModalConfig().compute_hash()
     lm_only_hash = MultiModalConfig(language_model_only=True).compute_hash()
     assert base_hash == lm_only_hash
@@ -50,7 +51,8 @@ def test_language_model_only_does_not_affect_mm_hash():
 
 def test_language_model_only_affects_model_hash():
     """language_model_only affects the LM computation graph,
-    so it should change the model config hash."""
+    so it should change the model config hash.
+    """
     model = "llava-hf/llava-1.5-7b-hf"
     base_hash = ModelConfig(model).compute_hash()
     lm_only_hash = ModelConfig(model, language_model_only=True).compute_hash()
@@ -386,7 +388,8 @@ def _resolve_mm_video_decode_device(
     torchcodec_available: bool = True,
 ) -> dict:
     """Run processor-device then video-decode-device resolution and report
-    the resulting video media IO kwargs."""
+    the resulting video media IO kwargs.
+    """
     mm_config = MultiModalConfig(
         mm_processor_kwargs={} if device is None else {"device": device},
         mm_tensor_ipc=mm_tensor_ipc,  # type: ignore[arg-type]
@@ -416,7 +419,8 @@ def _resolve_mm_video_decode_device(
 
 def test_auto_video_decode_uses_nvdec_on_encoder_instance():
     """The processor runs on the accelerator there, so decoded frames should
-    stay on-device too."""
+    stay on-device too.
+    """
     assert _resolve_mm_video_decode_device(ec_role="ec_producer") == {
         "backend": "torchcodec",
         "device": "cuda",
@@ -428,7 +432,8 @@ def test_auto_video_decode_stays_on_cpu_off_encoder_instance(
     ec_role: ECRole | None,
 ):
     """The processor stays on CPU off encode-only instances, so video
-    decoding should too."""
+    decoding should too.
+    """
     assert _resolve_mm_video_decode_device(ec_role=ec_role) == {}
 
 

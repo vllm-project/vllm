@@ -70,8 +70,7 @@ def user_writes_to_node(user: fx.Node, node: fx.Node) -> bool:
 
 
 class UnsafeCloneEliminationPass(VllmInductorPass):
-    """
-    This pass removes clone nodes that are no longer needed after vLLM IR lowering.
+    """This pass removes clone nodes that are no longer needed after vLLM IR lowering.
     It uses donated_input_ids to eliminate clones of donated graph inputs, preserving
     contents of non-donated graph inputs.
 

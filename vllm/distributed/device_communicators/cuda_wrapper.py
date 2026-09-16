@@ -201,7 +201,8 @@ class CudaRTLibrary:
 
     def cudaHostRegister(self, ptr: int, size: int, flags: int = 0) -> int:
         """Return the raw error code instead of raising, since callers can
-        fall back to pageable memory. Drain a failure with cudaGetLastError."""
+        fall back to pageable memory. Drain a failure with cudaGetLastError.
+        """
         return self.funcs["cudaHostRegister"](ctypes.c_void_p(ptr), size, flags)
 
     def cudaHostUnregister(self, ptr: int) -> int:
