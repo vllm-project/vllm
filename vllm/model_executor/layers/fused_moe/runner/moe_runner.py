@@ -283,24 +283,11 @@ class MoERunner(MoERunnerInterface):
         self._shared_experts: SharedExperts | None = None
         if shared_experts is not None:
             can_overlap = lambda: self._quant_method.mk_can_overlap_shared_experts
-            # When unquantized, shared expert inputs alias the hidden states,
-            # which can lead to race condition in multi-stream mode. Quantized
-            # routed experts copy the input into a fresh buffer first, breaking
-            # the alias, so overlap is safe. Only observed on ROCm.
-            routed_input_is_quantized = lambda: (
-                self.routed_experts.quant_method.moe_quant_config is not None
-                and self.routed_experts.quant_method.moe_quant_config.quant_dtype
-                is not None
-            )
-            is_multistream_safe = lambda: (
-                not current_platform.is_rocm() or routed_input_is_quantized()
-            )
             self._shared_experts = SharedExperts(
                 shared_experts,
                 moe_config=moe_config,
                 enable_dbo=enable_dbo,
                 mk_can_overlap_shared_experts=can_overlap,
-                is_multistream_safe=is_multistream_safe,
             )
 
         # Needed for string -> MoERunner layer lookup in custom ops.
@@ -470,9 +457,18 @@ class MoERunner(MoERunnerInterface):
         Latent MoE output transforms may contain non-linear ops, e.g. RMSNorm.
         TP partial routed outputs must be summed in latent space before such
         transforms are applied.
+
+        A transform that commutes with the TP sum is exempt: if
+        ``sum_r T(x_r) == T(sum_r x_r)``, applying the transform to the local
+        partial output and letting the existing late all-reduce sum the
+        combined result is equivalent, and costs one collective instead of two.
+        Such a transform opts out by setting ``reduce_commutative = True``.
+        The default is False, so transforms that do not declare themselves
+        keep being reduced early.
         """
         if (
             self.routed_output_transform is not None
+            and not getattr(self.routed_output_transform, "reduce_commutative", False)
             and not self.moe_config.is_sequence_parallel
             and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1)
             and not fused_output_is_reduced

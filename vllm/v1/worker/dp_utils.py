@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 
 import torch
 import torch.distributed as dist
@@ -17,6 +18,22 @@ from vllm.v1.worker.ubatch_utils import (
 )
 
 logger = init_logger(__name__)
+
+_skip_dp_coordination = ContextVar("skip_dp_coordination", default=False)
+
+
+@contextmanager
+def skip_dp_coordination():
+    """Run without coordinating DP metadata with other DP ranks."""
+    token = _skip_dp_coordination.set(True)
+    try:
+        yield
+    finally:
+        _skip_dp_coordination.reset(token)
+
+
+def should_skip_dp_coordination() -> bool:
+    return _skip_dp_coordination.get()
 
 
 def _get_device_and_group(parallel_config: ParallelConfig):
@@ -222,6 +239,19 @@ def coordinate_batch_across_dp(
 
     if num_tokens_padded is None:
         num_tokens_padded = num_tokens_unpadded
+
+    if should_skip_dp_coordination():
+        should_ubatch = should_attempt_ubatching and not is_last_ubatch_empty(
+            num_tokens_unpadded,
+            num_tokens_padded,
+            parallel_config.num_ubatches,
+        )
+        num_tokens_after_padding = torch.full(
+            (parallel_config.data_parallel_size,),
+            num_tokens_padded,
+            dtype=torch.int32,
+        )
+        return should_ubatch, num_tokens_after_padding, cudagraph_mode
 
     (should_ubatch, num_tokens_after_padding, synced_cudagraph_mode) = (
         _synchronize_dp_ranks(

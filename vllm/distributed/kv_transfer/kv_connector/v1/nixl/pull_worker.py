@@ -17,6 +17,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
     ReadSpec,
+    _is_attention_spec,
 )
 from vllm.logger import init_logger
 
@@ -79,7 +80,12 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         while not self._ready_requests.empty():
             self._read_blocks_for_req(*self._ready_requests.get_nowait())
 
-        if self.pcp_rank > 0:
+        if self.pcp_rank > 0 and not self.pcp_dcp_sharded:
+            # Replicated-KV PCP: only PCP rank 0 serves the KV, so this rank
+            # has nothing to send. Report the requests as sent right away so
+            # the scheduler-side aggregation (world_size workers, and any
+            # sibling connector inside a MultiConnector) still completes.
+            self._replicated_pcp_done_sending.update(metadata.reqs_to_send)
             return
 
         # Keep around the requests that have been part of a batch. This is
@@ -143,7 +149,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 engine_id,
             )
             self.xfer_stats.record_kv_expired_req()
-            self._handle_failed_transfer(req_id, None)
+            self._handle_failed_transfer(req_id, None, self._recv_failures)
             return
 
         if any(len(group) > 0 for group in meta.local_block_ids):
@@ -160,11 +166,10 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
 
         dcp_active = self.dcp_size > 1 or remote_info.remote_dcp_size > 1
         local_block_ids = meta.local_physical_block_ids
-        local_region_groups = getattr(self, "region_group_ids", [])
-        remote_region_groups = getattr(self, "dst_region_group_ids", {}).get(
-            engine_id, local_region_groups
-        )
-        if local_region_groups != remote_region_groups:
+        remote_region_groups = self.dst_region_group_ids[engine_id]
+        local_region_groups = self.region_group_ids or remote_region_groups
+        groups_differ = local_region_groups != remote_region_groups
+        if groups_differ:
             if not self.use_mla or self._has_mamba:
                 raise NotImplementedError(
                     "Different NIXL cache-group layouts are only supported for "
@@ -208,7 +213,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     local_ids = group_ids(meta.local_block_ids, rank)
                     remote_ids = group_ids(remote_logical_block_ids, rank)
                     for g in range(num_groups):
-                        if not local_ids[g]:
+                        if not local_ids[g] or not _is_attention_spec(
+                            self._group_spec_types[g]
+                        ):
                             continue
                         local_ids[g], remote_ids[g] = self._apply_dcp_prefix_caching(
                             local_ids[g],
@@ -284,6 +291,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 spec.remote_rank
             ]
 
+            # Once a read routes the request to failure reporting, the
+            # scheduler may free and reuse its blocks, so no sibling READs
+            # may be posted (and P must not be notified).
             if not self._read_blocks(
                 read_spec=spec,
                 request_id=req_id,
@@ -293,6 +303,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 local_dram_handle=local_dram_handle,
                 remote_xfer_side_handle=remote_xfer_side_handle,
                 expected_consumers=plan.local_consumers,
+                awaiting_kvs=meta.awaiting_kvs,
             ):
                 return
 
@@ -317,10 +328,15 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         local_dram_handle: int | None,
         remote_xfer_side_handle: int,
         expected_consumers: int,
+        awaiting_kvs: bool,
     ) -> bool:
         """
         Post a READ point-to-point xfer request from a single local worker to
         a single remote worker.
+
+        Returns True when the read was posted (or was unnecessary), False
+        when the request was routed to failure reporting — the caller must
+        not post further transfers for it.
         """
         assert self.transfer_topo is not None
         remote_rank = read_spec.remote_rank
@@ -373,6 +389,11 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     remote_agent_name=agent_name,
                 )
                 self.xfer_stats.record_failed_notification()
+            # Report even on notification failure: the KV is already local, and
+            # an unreported parked request would hold its blocks forever.
+            # Notify-only recvs must stay unreported (scheduler asserts).
+            if awaiting_kvs:
+                self._recving_transfers.setdefault(request_id, [])
             return True
 
         if read_spec.block_ids_by_region:
@@ -408,11 +429,11 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             dst_num_blocks=self.dst_num_blocks[dst_engine_id],
             block_size_ratio=None,
             physical_blocks_per_logical=remote_info.remote_physical_blocks_per_logical,
-            region_num_blocks=self.dst_region_num_blocks[dst_engine_id],
+            region_num_blocks=(self.dst_region_num_blocks.get(dst_engine_id) or None),
             region_group_ids=(
                 list(range(self.num_regions))
                 if read_spec.block_ids_by_region
-                else self.dst_region_group_ids[dst_engine_id]
+                else (self.dst_region_group_ids.get(dst_engine_id) or None)
             ),
             uses_region_group_mapping=(
                 self.num_regions > 1
@@ -425,11 +446,11 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             dst_num_blocks=self.dst_num_blocks[self.engine_id],
             block_size_ratio=block_size_ratio,
             physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
-            region_num_blocks=self.dst_region_num_blocks[self.engine_id],
+            region_num_blocks=(self.dst_region_num_blocks.get(self.engine_id) or None),
             region_group_ids=(
                 list(range(self.num_regions))
                 if read_spec.block_ids_by_region
-                else self.region_group_ids
+                else (self.region_group_ids or None)
             ),
             uses_region_group_mapping=(
                 self.num_regions > 1
@@ -472,16 +493,19 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             self._recving_transfers[request_id].append(handle)
             return True
         except Exception as e:
-            # mark all (logical) blocks for this request as invalid
             self._log_failure(
                 failure_type="transfer_setup_failed",
                 req_id=request_id,
-                msg="Marking blocks as invalid",
+                msg="Deferring failure reporting until outstanding transfers finish",
                 error=e,
                 dst_engine_id=dst_engine_id,
                 remote_rank=remote_rank,
             )
-            self._handle_failed_transfer(request_id, handle)
+            if not self._handle_failed_transfer(
+                request_id, handle, self._recv_failures
+            ):
+                assert handle is not None
+                self._recving_transfers[request_id].append(handle)
             return False
 
     def _read_blocks_mixed(
@@ -523,18 +547,20 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     )
         except Exception:
             for handle in handles:
-                self.nixl_wrapper.release_xfer_handle(handle)
+                if not self._try_release_xfer_handle(request_id, handle):
+                    self._recving_transfers[request_id].append(handle)
             raise
 
         self._pending_recv_notifs.setdefault(request_id, []).append(
             (notif_agent, notif_id)
         )
-        for index, handle in enumerate(handles):
+        for i, handle in enumerate(handles):
             try:
                 self.nixl_wrapper.transfer(handle)
             except Exception:
-                for unstarted in handles[index:]:
-                    self.nixl_wrapper.release_xfer_handle(unstarted)
+                for unstarted in handles[i:]:
+                    if not self._try_release_xfer_handle(request_id, unstarted):
+                        self._recving_transfers[request_id].append(unstarted)
                 raise
             self._recving_transfers[request_id].append(handle)
 
