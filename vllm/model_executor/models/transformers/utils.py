@@ -201,8 +201,7 @@ def attrsetter(attr: str) -> Callable[[object, object], None]:
 
 class _UninitializedEmbedding(nn.Embedding):
     """Make `__init__` inert, so that `VocabParallelEmbedding.__init__`'
-    call to `super().__init__` does not invoke `nn.Embedding.__init__`.
-    """
+    call to `super().__init__` does not invoke `nn.Embedding.__init__`."""
 
     def __init__(self):
         pass
@@ -210,8 +209,7 @@ class _UninitializedEmbedding(nn.Embedding):
 
 class _VocabParallelEmbeddingBase(VocabParallelEmbedding, _UninitializedEmbedding):
     """Orders `VocabParallelEmbedding` ahead of `nn.Embedding` in the MRO, so that
-    `super().forward(...)` in an `nn.Embedding` subclass reaches vLLM's embedding.
-    """
+    `super().forward(...)` in an `nn.Embedding` subclass reaches vLLM's embedding."""
 
 
 @lru_cache

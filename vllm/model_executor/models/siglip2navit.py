@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Implementation of SiglipVisionModel intended to be only used
-within a vision language model.
-"""
+within a vision language model."""
 
 from collections.abc import Iterable
 

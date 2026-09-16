@@ -114,8 +114,7 @@ logger = init_logger(__name__)
 def _text_config(config):
     """MuseGlimmer checkpoints may nest the text config under ``text_config``
     (multimodal ``MuseGlimmerConfig``) or expose it directly
-    (``MuseGlimmerTextConfig``).
-    """
+    (``MuseGlimmerTextConfig``)."""
     return getattr(config, "text_config", config)
 
 
@@ -275,16 +274,18 @@ class MuseGlimmerMultiModalProcessor(
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        mm_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+            mm_items, hf_kwargs
         )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        if not mm_data:
+            return self._finalize_hf_mm_data(mm_data, hf_kwargs, passthrough_data)
 
         prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
 
-        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        processor = self.info.get_hf_processor(**hf_kwargs)
         tokenizer = processor.tokenizer
         config = self.info.get_hf_config()
         images = mm_data.get("images", ())
@@ -371,8 +372,9 @@ class MuseGlimmerMultiModalProcessor(
                 video_feature_sizes=torch.tensor(video_sizes),
             )
         processed_data = BatchFeature(data=data, tensor_type=None)
-        processed_data.update(passthrough_data)
-        return processed_data
+        return self._finalize_hf_mm_data(
+            mm_data, hf_kwargs, passthrough_data, processed_data
+        )
 
     def _get_mm_fields_config(
         self,
@@ -486,8 +488,7 @@ class MuseGlimmerMultiModalProcessor(
 def _muse_glimmer_use_qk_norm(config) -> bool:
     """Whether QK-norm is applied. MuseGlimmer ALWAYS applies QK-norm; the modular HF
     ``text_config`` schema simply omits ``use_qk_norm`` (reads as ``None``).
-    Treat a missing/None flag as True — only an explicit ``False`` disables it.
-    """
+    Treat a missing/None flag as True — only an explicit ``False`` disables it."""
     val = getattr(config, "use_qk_norm", None)
     return True if val is None else bool(val)
 
@@ -495,8 +496,7 @@ def _muse_glimmer_use_qk_norm(config) -> bool:
 def _muse_glimmer_use_attn_output_gate(config) -> bool:
     """Whether the per-head sigmoid attention output gate is applied. MuseGlimmer ALWAYS
     applies it; the modular HF ``text_config`` omits ``use_attn_output_gate``
-    (reads as ``None``). Missing/None -> True; only explicit ``False`` disables.
-    """
+    (reads as ``None``). Missing/None -> True; only explicit ``False`` disables."""
     val = getattr(config, "use_attn_output_gate", None)
     return True if val is None else bool(val)
 

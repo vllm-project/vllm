@@ -91,8 +91,7 @@ def load_stat_logger_plugin_factories() -> list[StatLoggerFactory]:
 
 class AggregateStatLoggerBase(StatLoggerBase):
     """Abstract base class for loggers that
-    aggregate across multiple DP engines.
-    """
+    aggregate across multiple DP engines."""
 
     @abstractmethod
     def __init__(self, vllm_config: VllmConfig, engine_indexes: list[int]): ...

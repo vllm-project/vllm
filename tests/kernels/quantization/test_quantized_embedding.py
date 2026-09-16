@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the Triton dequant-gather kernel used by
-``CompressedTensorsEmbeddingWNA16Int`` (quantized embedding lookup).
-"""
+``CompressedTensorsEmbeddingWNA16Int`` (quantized embedding lookup)."""
 
 import pytest
 import torch

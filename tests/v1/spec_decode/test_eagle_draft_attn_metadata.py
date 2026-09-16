@@ -105,8 +105,7 @@ def test_build_draft_attn_metadata_sets_seq_lens_cpu_upper_bound():
     """The fix: every per-step ``CommonAttentionMetadata`` carries a non-None
     ``seq_lens_cpu_upper_bound`` derived from the target-side upper bound plus
     the current draft-step offset. Padded entries are zeroed (matching the
-    main model runner's convention).
-    """
+    main model runner's convention)."""
     fake = _make_fake_speculator()
     base = torch.tensor([100, 200, 300, 0], dtype=torch.int32)
 
@@ -127,8 +126,7 @@ def test_build_draft_attn_metadata_sets_seq_lens_cpu_upper_bound():
 
 def test_build_draft_attn_metadata_zeroes_padded_upper_bound_tail():
     """The padded tail of the upper-bound tensor is zeroed, so it stays a
-    valid tensor of length ``num_reqs_padded`` regardless of padding.
-    """
+    valid tensor of length ``num_reqs_padded`` regardless of padding."""
     fake = _make_fake_speculator()
     base = torch.zeros(2, dtype=torch.int32)
 
@@ -143,8 +141,7 @@ def test_build_draft_attn_metadata_zeroes_padded_upper_bound_tail():
 
 def test_build_draft_attn_metadata_clamps_to_max_model_len():
     """The per-request upper bound (target bound + step) is clamped to the
-    model length so it never exceeds the allocated KV range.
-    """
+    model length so it never exceeds the allocated KV range."""
     fake = _make_fake_speculator(max_model_len=1024)
     base = torch.tensor([1023, 500], dtype=torch.int32)
 

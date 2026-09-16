@@ -308,8 +308,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
 
     def _poll_active_transfers(self) -> None:
         """Poll all in-flight transfers once; move newly-completed (success or
-        failure) into ``_pending_results`` and release their NIXL handles.
-        """
+        failure) into ``_pending_results`` and release their NIXL handles."""
         for job_id, entry in list(self._transfers.items()):
             try:
                 state = self._agent.check_xfer_state(entry.xfer_handle)
@@ -364,8 +363,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
 
     def get_finished_jobs(self) -> Iterable[JobResult]:
         """Poll transfers; a failed promotion marks its cached verdicts False
-        here (scheduler thread).
-        """
+        here (scheduler thread)."""
         self._poll_active_transfers()
         results = self._pending_results
         self._pending_results = []

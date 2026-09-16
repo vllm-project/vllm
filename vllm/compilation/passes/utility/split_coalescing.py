@@ -30,8 +30,7 @@ logger = init_logger(__name__)
 
 class SplitCoalescingPass(VllmInductorPass):
     """Replace duplicate ``split_with_sizes`` nodes with a single canonical
-    node when they share the same input tensor and split sizes.
-    """
+    node when they share the same input tensor and split sizes."""
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:

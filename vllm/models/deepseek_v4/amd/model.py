@@ -71,10 +71,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
-from vllm.models.deepseek_v4.amd.rocm import (
-    DeepseekV4ROCMAiterMLAAttention,
-    weight_already_preshuffled,
-)
+from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950
 from vllm.sequence import IntermediateTensors
@@ -152,13 +149,11 @@ class DeepseekV4MLP(nn.Module):
             return
         if ws.dtype == torch.float8_e8m0fnu:
             ws = _upcast_e8m0_to_fp32(ws).contiguous()
-        # Skip if the linear's kernel already shuffled it.
-        if not weight_already_preshuffled(self.gate_up_proj):
-            replace_parameter(
-                self.gate_up_proj,
-                "weight",
-                rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
-            )
+        replace_parameter(
+            self.gate_up_proj,
+            "weight",
+            rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
+        )
         self._gateup_scale = ws
 
     def forward(self, x):
@@ -1425,8 +1420,7 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     def get_mtp_target_hidden_states(self) -> torch.Tensor | None:
         """Pre-hc_head residual stream buffer (max_num_batched_tokens,
         hc_mult * hidden_size) for the MTP draft model. Populated by
-        forward(); valid after each target step.
-        """
+        forward(); valid after each target step."""
         return getattr(self.model, "_mtp_hidden_buffer", None)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
