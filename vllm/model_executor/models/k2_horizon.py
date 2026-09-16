@@ -161,7 +161,6 @@ def fused_mova_impl(
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     use_int4_w4a16: bool = False,
-    ocp_mx_scheme: str | None = None,
     per_channel_quant: bool = False,
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
@@ -171,12 +170,6 @@ def fused_mova_impl(
     block_shape: list[int] | None = None,
     w1_bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    if ocp_mx_scheme is not None:
-        raise NotImplementedError(
-            f"Using ocp_mx_scheme={ocp_mx_scheme} in functional fused_experts call is "
-            "deprecated. Please use OCP_MXQuantizationEmulationTritonExperts."
-        )
-
     # Check constraints.
     if use_int4_w4a16:
         assert hidden_states.size(1) // 2 == w1.size(2), "Hidden size mismatch"

@@ -35,6 +35,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_BLOCK_SIZE
+from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp4Static
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.utils import rocm_unquantized_gemm
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -84,6 +85,19 @@ def _get_weight_loader(param: torch.Tensor) -> Callable[..., object]:
     if not callable(weight_loader):
         raise TypeError("weight_loader must be callable")
     return weight_loader
+
+
+def _uses_mxfp4_expert_weights(quant_method: object) -> bool:
+    from vllm.model_executor.layers.quantization.quark.quark_moe import (
+        QuarkOCP_MX_MoEMethod,
+    )
+
+    if isinstance(quant_method, QuarkOCP_MX_MoEMethod):
+        return quant_method.weight_quant_key == kMxfp4Static
+    return hasattr(quant_method, "weight_dtype") and quant_method.weight_dtype in {
+        "gpt_oss_mxfp4",
+        "mxfp4",
+    }
 
 
 class OAIAttention(nn.Module):
@@ -336,15 +350,11 @@ class GptOssRoutedExperts(RoutedExperts):
             return False if return_success else None
 
         expert_data = param.data[expert_id]
-        weight_dtype = getattr(self.quant_method, "weight_dtype", "")
         quant_method_name = self.quant_method.__class__.__name__
 
         if weight_name.endswith("_bias"):
             self._load_expert_bias(expert_data, loaded_weight, shard_id)
-        elif weight_dtype in (
-            "gpt_oss_mxfp4",
-            "mxfp4",
-        ) or quant_method_name in (
+        elif _uses_mxfp4_expert_weights(self.quant_method) or quant_method_name in (
             "CompressedTensorsW4A4Nvfp4MoEMethod",
             "Nvfp4OnlineMoEMethod",
         ):
@@ -773,33 +783,9 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 pcp_rank=get_pcp_group().rank_in_group,
             )
 
-        def _is_mxfp4(weight_dtype: str | None) -> bool:
-            """Return True for any MXFP4 weight-dtype variant.
-
-            Covers "gpt_oss_mxfp4" (GptOssMxfp4MoEMethod) and "mxfp4"
-            (QuarkMoEMethod with fp4 weights) and any future variants.
-            """
-            return weight_dtype is not None and "mxfp4" in weight_dtype
-
-        def _get_moe_weight_dtype(layer_id: int = 0) -> str | None:
-            """Helper function to get MoE quantization weight dtype.
-
-            Args:
-                layer_id: Layer index to check (default 0, as all layers should
-                        have the same quantization method)
-
-            Returns:
-                Weight dtype string (e.g., "mxfp4", "fp8") or None if not available
-            """
-            if hasattr(self.layers[layer_id].mlp.experts._quant_method, "weight_dtype"):
-                return self.layers[layer_id].mlp.experts._quant_method.weight_dtype
-            return None
-
         intermediate_size = self.config.intermediate_size
 
-        moe_weight_dtype = _get_moe_weight_dtype(layer_id=0)
-
-        if _is_mxfp4(moe_weight_dtype):
+        if _uses_mxfp4_expert_weights(self.layers[0].mlp.experts._quant_method):
             # MXFP4 requires OCP_MX_BLOCK_SIZE alignment
             intermediate_size_block = intermediate_size // OCP_MX_BLOCK_SIZE
             per_rank_intermediate_size_block = cdiv(intermediate_size_block, tp_size)
@@ -814,12 +800,17 @@ class GptOssModel(nn.Module, EagleModelMixin):
         tp_rank_end = min((tp_rank + 1) * per_rank_intermediate_size, intermediate_size)
         expert_params_mapping = self.get_expert_mapping()
         # Streamed per-expert reload is intentionally unsupported for Quark.
+        from vllm.model_executor.layers.quantization.quark.quark_moe import (
+            QuarkMoEMethod,
+            QuarkW8A8Fp8MoEMethod,
+        )
+
         for name, loaded_weight in weights:
             if is_pp_missing_parameter(name, self):
                 continue
 
             layer_id, expert_id, fused_name = None, None, None
-            moe_quant_method = None
+            weight_quant_key = None
             if "experts" in name:
                 parts = name.split(".")
                 ids = [s for s in parts if s.isdigit()]
@@ -852,7 +843,9 @@ class GptOssModel(nn.Module, EagleModelMixin):
                     ".mlp.experts.", ".mlp.experts.routed_experts."
                 )
 
-                moe_quant_method = _get_moe_weight_dtype(layer_id=layer_id)
+                quant_method = self.layers[layer_id].mlp.experts._quant_method
+                assert isinstance(quant_method, QuarkMoEMethod)
+                weight_quant_key = quant_method.weight_quant_key
 
             if (
                 all(key in name for key in ["input_scale", "mlp.experts"])
@@ -866,7 +859,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 continue
 
             # Unified handler for mxfp4 weights and scales
-            elif _is_mxfp4(moe_quant_method) and any(
+            elif weight_quant_key == kMxfp4Static and any(
                 name.endswith(suffix)
                 for suffix in [
                     ".w13_weight_scale",
@@ -950,7 +943,11 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 loaded_params.add(fused_name)
                 continue
 
-            elif name.endswith(".w13_weight") and moe_quant_method == "fp8":
+            elif (
+                name.endswith(".w13_weight")
+                and weight_quant_key
+                in QuarkW8A8Fp8MoEMethod.supported_weight_quant_keys
+            ):
                 if use_ep:
                     narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
                 else:
@@ -974,7 +971,11 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 loaded_params.add(fused_name)
                 continue
 
-            elif name.endswith(".w13_weight_scale") and moe_quant_method == "fp8":
+            elif (
+                name.endswith(".w13_weight_scale")
+                and weight_quant_key
+                in QuarkW8A8Fp8MoEMethod.supported_weight_quant_keys
+            ):
                 assert fused_name is not None
                 param = params_dict[fused_name]
 
@@ -997,7 +998,11 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 loaded_params.add(fused_name)
                 continue
 
-            elif name.endswith(".w13_input_scale") and moe_quant_method == "fp8":
+            elif (
+                name.endswith(".w13_input_scale")
+                and weight_quant_key
+                in QuarkW8A8Fp8MoEMethod.supported_weight_quant_keys
+            ):
                 assert fused_name is not None
                 param = params_dict[fused_name]
 
@@ -1009,7 +1014,11 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 loaded_params.add(fused_name)
                 continue
 
-            elif name.endswith(".w2_weight") and moe_quant_method == "fp8":
+            elif (
+                name.endswith(".w2_weight")
+                and weight_quant_key
+                in QuarkW8A8Fp8MoEMethod.supported_weight_quant_keys
+            ):
                 if use_ep:
                     narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
                 else:
@@ -1029,7 +1038,11 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 loaded_params.add(fused_name)
                 continue
 
-            elif name.endswith(".w2_weight_scale") and moe_quant_method == "fp8":
+            elif (
+                name.endswith(".w2_weight_scale")
+                and weight_quant_key
+                in QuarkW8A8Fp8MoEMethod.supported_weight_quant_keys
+            ):
                 assert fused_name is not None
                 param = params_dict[fused_name]
 
