@@ -345,8 +345,7 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
 
 def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
     """Available backends in priority order, BF16-act variant before
-    activation-quantized variant within each vendor family.
-    """
+    activation-quantized variant within each vendor family."""
     _AVAILABLE_BACKENDS = [
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
@@ -425,8 +424,7 @@ def _resolve_activation_key(
     model_activation_key: QuantKey | None,
 ) -> QuantKey | None:
     """Combine the model-supplied activation key with the user override.
-    Raises on conflict (both set and disagreeing).
-    """
+    Raises on conflict (both set and disagreeing)."""
     user_override = _user_moe_activation_override()
     if user_override is None:
         return model_activation_key
@@ -476,8 +474,7 @@ def _filter_by_activation(
 ) -> list[Mxfp4MoeBackend]:
     """Pick variants matching ``requested_activation_key``; without one,
     prefer BF16 if the list has any, else keep the list as-is so explicit
-    non-BF16 picks (e.g. the ``_afp8`` aliases) still land.
-    """
+    non-BF16 picks (e.g. the ``_afp8`` aliases) still land."""
     if requested_activation_key is not None:
         return [
             b

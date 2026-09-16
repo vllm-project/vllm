@@ -229,8 +229,7 @@ def test_request_stream_interval_raises_but_not_below_engine_default(
 ):
     """A per-request stream_interval can raise the interval above the engine
     default but not below it (values under the default clamp up), without
-    altering the generated text.
-    """
+    altering the generated text."""
     engine_stream_interval = 5
     # Request 0 (below the default) clamps up to 5; request 1 raises it to 10.
     request_stream_intervals = [1, 10]

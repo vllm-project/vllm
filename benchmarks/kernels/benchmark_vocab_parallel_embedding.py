@@ -97,8 +97,7 @@ def graph_replay(fn):
 
 def calculate_diff(vocab_size, hidden_size, tp_size, num_tokens):
     """The fused kernel must be bit-exact with the path it replaces, on every
-    rank of the shard.
-    """
+    rank of the shard."""
     dtype = torch.bfloat16
     for tp_rank in range(tp_size):
         input_ids, weight, shard_indices = make_inputs(

@@ -245,8 +245,7 @@ def marlin_padded_nk(size_n: int, size_k: int, group_size: int = -1) -> tuple[in
 
 def marlin_repacked_nk(qweight: torch.Tensor, num_bits: int) -> tuple[int, int]:
     """Recover the (size_n, size_k) a Marlin weight was repacked with
-    (including any tile padding) from its packed shape.
-    """
+    (including any tile padding) from its packed shape."""
     pack_factor = 32 // num_bits
     size_k = qweight.size(0) * GPTQ_MARLIN_TILE
     size_n = qweight.size(1) * pack_factor // GPTQ_MARLIN_TILE
@@ -257,8 +256,7 @@ def marlin_pad_qweight(
     qweight: torch.Tensor, size_n: int, size_k: int, padded_n: int, padded_k: int
 ) -> torch.Tensor:
     """Zero-pad a GPTQ-layout packed weight (size_k / pack, size_n) for
-    gptq_marlin_repack.
-    """
+    gptq_marlin_repack."""
     if (padded_n, padded_k) == (size_n, size_k):
         return qweight
     pack_factor = size_k // qweight.size(0)
@@ -276,8 +274,7 @@ def marlin_pad_scales(
     group_size: int,
 ) -> torch.Tensor:
     """Zero-pad weight scales (num_groups, size_n); call before
-    marlin_permute_scales and pass the padded extents to it.
-    """
+    marlin_permute_scales and pass the padded extents to it."""
     if (padded_n, padded_k) == (size_n, size_k):
         return scales
     pad_rows = padded_k // group_size - scales.size(0) if group_size > 0 else 0

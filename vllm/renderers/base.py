@@ -377,8 +377,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
     async def clear_mm_cache_async(self) -> None:
         """Serialize clear_mm_cache through the multimodal executor to avoid
-        races with concurrent process_inputs on the mm_processor_cache.
-        """
+        races with concurrent process_inputs on the mm_processor_cache."""
         await self._clear_mm_cache_async()
 
     def shutdown(self) -> None:

@@ -2,8 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 """Tests that FusedRMSNormGated decomposes correctly under torch.compile,
-matching the eager triton kernel output.
-"""
+matching the eager triton kernel output."""
 
 import pytest
 import torch

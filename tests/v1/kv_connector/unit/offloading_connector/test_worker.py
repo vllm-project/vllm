@@ -80,8 +80,7 @@ def _allocate_kv_caches(
 
 def _single_rank_vllm_config(total_kv_heads: int):
     """A one-rank (TP=1) parallel config, as canonical mappings are derived
-    from it.
-    """
+    from it."""
     vllm_config = MagicMock()
     parallel_config = vllm_config.parallel_config
     parallel_config.tensor_parallel_size = 1

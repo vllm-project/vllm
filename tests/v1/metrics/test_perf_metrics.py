@@ -1241,8 +1241,7 @@ def test_mla_per_gpu_with_pipeline_parallelism():
 
 def test_mla_model_metrics_excludes_standard_attention():
     """Test that ModelMetrics uses MLAAttentionMetrics, not AttentionMetrics,
-    for DeepSeek MLA models.
-    """
+    for DeepSeek MLA models."""
     hf_config = DeepseekV3Config(
         hidden_size=7168,
         num_attention_heads=128,

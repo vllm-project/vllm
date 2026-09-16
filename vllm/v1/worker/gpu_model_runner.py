@@ -481,8 +481,7 @@ class AsyncGPUPoolingModelRunnerOutput(AsyncModelRunnerOutput):
 
 class ExecuteModelState(NamedTuple):
     """Ephemeral cached state transferred between execute_model() and
-    sample_tokens(), after execute_model() returns None.
-    """
+    sample_tokens(), after execute_model() returns None."""
 
     scheduler_output: "SchedulerOutput"
     logits: torch.Tensor
@@ -1072,8 +1071,7 @@ class GPUModelRunner(
         first scheduled token (column j is position start - 1 - j); -1 where
         the position is before the prompt or already past it. Generated
         positions are left to the model: under async scheduling the CPU token
-        table holds placeholders for them.
-        """
+        table holds placeholders for them."""
         buf = self.lookback_token_ids
         assert buf is not None
         buf.np.fill(-1)
@@ -3206,8 +3204,7 @@ class GPUModelRunner(
 
     def _get_encoder_output_from_cache(self, mm_hash: str) -> torch.Tensor | None:
         """Return a cached encoder output for multimodal
-        embedding gather.
-        """
+        embedding gather."""
         return self.encoder_cache.get(mm_hash, None)
 
     def _gather_mm_embeddings(
@@ -4179,8 +4176,7 @@ class GPUModelRunner(
 
         This is true when `discard_request_mask` is set for every scheduled
         request (e.g., for chunked prefill requests that are not the last
-        prefill chunk).
-        """
+        prefill chunk)."""
         num_reqs = self.input_batch.num_reqs
         return bool(self.discard_request_mask.np[:num_reqs].all())
 
@@ -6573,8 +6569,7 @@ class GPUModelRunner(
 
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
-        memory is reclaimable when running in the same process.
-        """
+        memory is reclaimable when running in the same process."""
         from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
         from vllm.v1.worker.workspace import reset_workspace_manager
 
