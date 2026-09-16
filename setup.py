@@ -593,7 +593,7 @@ class precompiled_wheel_utils:
         """Auto-detect CUDA variant from torch, nvidia-smi, or env default."""
 
         # Map CUDA major version to hosted wheel variants on wheels.vllm.ai
-        supported = {12: "cu129", 13: "cu130"}
+        supported = {12: "cu129", 13: "cu132"}
 
         # Respect explicitly set VLLM_MAIN_CUDA_VERSION
         if envs.is_set("VLLM_MAIN_CUDA_VERSION"):
