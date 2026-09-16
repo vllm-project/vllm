@@ -82,15 +82,26 @@ class InputProcessor:
         return self.renderer.get_tokenizer()
 
     def resolve_watermarking(self, params: SamplingParams | BeamSearchParams) -> bool:
-        params.watermarking = self.vllm_config._check_supports_watermarking(params)
-        return params.watermarking
+        """Resolve the tri-state `watermarking` against the engine config.
+
+        `params` is not mutated: it may be shared across prompts, requests and
+        even engines by the caller, and the tri-state must stay inheritable.
+        Callers that own a private copy assign the returned value to it.
+        """
+        return self.vllm_config._check_supports_watermarking(params)
 
     def _validate_params(
         self,
         params: SamplingParams | PoolingParams,
         supported_tasks: tuple[SupportedTask, ...],
-    ) -> None:
-        """Raise `ValueError` if SamplingParams or PoolingParams is not valid."""
+    ) -> bool | None:
+        """Raise `ValueError` if SamplingParams or PoolingParams is not valid.
+
+        Returns the resolved `watermarking` value for `SamplingParams` (`None`
+        for `PoolingParams`). The caller applies it to its private copy of the
+        params so that a caller-owned params object is never mutated.
+        """
+        watermarking: bool | None = None
         if isinstance(params, SamplingParams):
             supported_generation_tasks = [
                 task for task in supported_tasks if task in GENERATION_TASKS
@@ -104,7 +115,6 @@ class InputProcessor:
                 self.structured_outputs_config,
                 self.tokenizer,
             )
-            self.resolve_watermarking(params)
 
             if self.model_config.return_sampling_mask:
                 if params.temperature <= 0:
@@ -135,6 +145,9 @@ class InputProcessor:
                     "enabled. Start the engine with --enable-trace-replay "
                     "to use it."
                 )
+            # Resolved last so that feature gates above report the missing
+            # feature rather than its incompatibility with watermarking.
+            watermarking = self.resolve_watermarking(params)
         elif isinstance(params, PoolingParams):
             supported_pooling_tasks = [
                 task for task in supported_tasks if task in POOLING_TASKS
@@ -162,6 +175,8 @@ class InputProcessor:
                 f"params must be either SamplingParams or PoolingParams, "
                 f"but got {type(params).__name__}"
             )
+
+        return watermarking
 
     def _normalize_trace_replay_params(
         self, sampling_params: SamplingParams, prompt_len: int
@@ -298,7 +313,7 @@ class InputProcessor:
         resumable: bool = False,
         session_id: str | None = None,
     ) -> EngineCoreRequest:
-        self._validate_params(params, supported_tasks)
+        watermarking = self._validate_params(params, supported_tasks)
         self._validate_lora(lora_request)
 
         parallel_config = self.vllm_config.parallel_config
@@ -359,6 +374,9 @@ class InputProcessor:
         if isinstance(params, SamplingParams):
             # TODO: can we avoid cloning here in multiproc case?
             sampling_params = params.clone()
+            # Resolve on the request-local copy: `params` may be shared across
+            # prompts, requests and even engines by the caller.
+            sampling_params.watermarking = watermarking
             prompt_len = length_from_prompt_token_ids_or_embeds(
                 prompt_token_ids, prompt_embeds
             )

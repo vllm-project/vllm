@@ -258,7 +258,8 @@ class LLMEngine:
                 )
             request_params = request.params
             if isinstance(request_params, SamplingParams):
-                self.resolve_watermarking(request_params)
+                # This request object is owned by the engine from here on.
+                request_params.watermarking = self.resolve_watermarking(request_params)
         else:
             request = self.input_processor.process_inputs(
                 request_id,

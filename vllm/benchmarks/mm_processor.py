@@ -270,7 +270,8 @@ def benchmark_multimodal_processor(
         warmup_prompts = [req.prompt for req in warmup_requests]
         warmup_output_lens = [req.expected_output_len for req in warmup_requests]
         warmup_sampling_params = [
-            SamplingParams(max_tokens=output_len) for output_len in warmup_output_lens
+            SamplingParams(max_tokens=output_len, watermarking=False)
+            for output_len in warmup_output_lens
         ]
         llm.chat(
             warmup_prompts,
