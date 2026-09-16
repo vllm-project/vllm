@@ -380,6 +380,9 @@ class KVCacheManager:
                 hitting the prefix caching, excluding external tokens.
             new_computed_blocks: The cached blocks for the above new computed
                 tokens, grouped as a tuple by kv cache groups.
+                With delay_cache_blocks, these may belong to a shared async
+                load. The scheduler must wait for and publish that load before
+                allowing the request to run.
             num_lookahead_tokens: The number of speculative tokens to allocate.
                 This is used by spec decode proposers with kv-cache such
                 as eagle.
@@ -454,8 +457,16 @@ class KVCacheManager:
             A list of new allocated blocks.
         """
         # When loading KV data asynchronously, we may have zero new tokens to
-        # compute while still allocating slots for externally computed tokens.
-        if num_new_tokens == 0 and num_external_computed_tokens == 0:
+        # compute while allocating external tokens or attaching to a shared load.
+        if (
+            num_new_tokens == 0
+            and num_external_computed_tokens == 0
+            and not (
+                delay_cache_blocks
+                and num_new_computed_tokens > 0
+                and new_computed_blocks is not None
+            )
+        ):
             raise ValueError(
                 "num_new_tokens must be greater than 0 when there are no "
                 "external computed tokens"

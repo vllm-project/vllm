@@ -65,6 +65,14 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         self._canonical_layout = offloading_config.canonical_layout
         spec = OffloadingSpecFactory.create_spec(offloading_config)
 
+        from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+
+        self._shared_prefix_loads = (
+            type(spec) is CPUOffloadingSpec
+            and spec.cache_policy_module_path is None
+            and spec.eviction_policy in ("lru", "arc")
+        )
+
         self.connector_scheduler: OffloadingConnectorScheduler | None = None
         self.connector_worker: OffloadingConnectorWorker | None = None
         if role == KVConnectorRole.SCHEDULER:
@@ -75,6 +83,9 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
             self.connector_worker = OffloadingConnectorWorker(
                 spec, vllm_config, kv_cache_config
             )
+
+    def supports_shared_prefix_loads(self) -> bool:
+        return self._shared_prefix_loads
 
     def shutdown(self) -> None:
         if self.connector_worker is not None:

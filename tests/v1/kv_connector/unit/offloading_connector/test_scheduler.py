@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from tests.v1.kv_connector.unit.offloading_connector.test_config import (
+    _make_kv_cache_config,
     _make_mamba_hybrid_kv_cache_config,
     _make_vllm_config,
 )
@@ -15,7 +16,13 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     generate_store_output,
     to_keys,
 )
-from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
+from tests.v1.kv_connector.unit.utils import (
+    EOS_TOKEN_ID,
+    create_model_runner_output,
+    create_request,
+    create_scheduler,
+    create_vllm_config,
+)
 from vllm.config import KVEventsConfig
 from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
@@ -1079,6 +1086,68 @@ def test_on_request_finished_fires_after_final_block_store(
         if c in (("prepare_store", req_id), ("stored_after_finish", req_id))
     ]
     assert finished_idx > max(store_indices), calls
+
+
+@pytest.mark.parametrize("abort_owner", [False, True])
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_core_shares_cpu_offload_load_and_blocks(abort_owner, async_scheduling):
+    """The built-in CPU cache emits one load even when its owner is aborted."""
+    config = create_vllm_config(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"cpu_bytes_to_use": 1048576},
+    )
+    config.scheduler_config.async_scheduling = async_scheduling
+    scheduler = create_scheduler(
+        config, num_blocks=16, kv_cache_config=_make_kv_cache_config()
+    )
+    connector = scheduler.connector.connector_scheduler
+    owner, follower = [
+        create_request(num_tokens=48, common_prefix_len=32) for _ in range(2)
+    ]
+    for request in (owner, follower):
+        scheduler.add_request(request)
+    context = connector._req_status[owner.request_id].req_context
+    keys = [make_offload_key(h, 0) for h in owner.block_hashes[:2]]
+    connector.manager.prepare_store(keys, context)
+    connector.manager.complete_store(keys, context)
+
+    output = scheduler.schedule()
+    jobs = output.kv_connector_metadata.load_jobs
+    assert len(jobs) == 1
+    manager = scheduler.kv_cache_manager
+    assert manager.get_block_ids(owner.request_id) == manager.get_block_ids(
+        follower.request_id
+    )
+    blocks = list(manager.get_blocks(owner.request_id).blocks[0])
+    assert all(block.ref_cnt == 2 for block in blocks)
+    if abort_owner:
+        scheduler.finish_requests(owner.request_id, RequestStatus.FINISHED_ABORTED)
+
+    result = create_model_runner_output(reqs=[], finished_recving={owner.request_id})
+    result.kv_connector_output.kv_connector_worker_meta = OffloadingWorkerMetadata(
+        completed_jobs={job_id: 1 for job_id in jobs}
+    )
+    scheduler.update_from_output(output, result)
+    output = scheduler.schedule()
+    assert not output.kv_connector_metadata.load_jobs
+    assert output.num_scheduled_tokens[follower.request_id] == 16
+    assert manager.get_blocks(follower.request_id).blocks[0][:2] == blocks
+    assert all(job.is_store for job in connector._jobs.values())
+    assert not connector._chunks_being_loaded
+    result = create_model_runner_output(
+        reqs=[r for r in (owner, follower) if not r.is_finished()], use_eos=True
+    )
+    result.kv_connector_output = KVConnectorOutput(
+        kv_connector_worker_meta=OffloadingWorkerMetadata(
+            completed_jobs={job_id: 1 for job_id in connector._jobs}
+        )
+    )
+    scheduler.update_from_output(output, result)
+    scheduler.schedule()
+    assert not connector._req_status
+    assert not connector._jobs
+    assert all(block.ref_cnt == 0 for block in blocks)
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])

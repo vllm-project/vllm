@@ -4,7 +4,7 @@ import itertools
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
@@ -37,7 +37,7 @@ from vllm.v1.core.encoder_cache_manager import (
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -55,6 +55,7 @@ from vllm.v1.core.sched.request_queue import (
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
     KVCacheConfig,
     MambaSpec,
     get_mamba_prefill_checkpoint_position,
@@ -75,6 +76,15 @@ from vllm.v1.structured_output.utils import strip_speculative_padding
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class _SharedPrefixLoad:
+    owner: Request
+    num_tokens: int
+    blocks: KVCacheBlocks
+    followers: set[str] = field(default_factory=set)
+    failed: bool = False
 
 
 class Scheduler(SchedulerInterface):
@@ -297,6 +307,10 @@ class Scheduler(SchedulerInterface):
         if hash_block_size is None:
             hash_block_size = block_size
         self.hash_block_size = hash_block_size
+        self._shared_prefix_loads: dict[BlockHash, _SharedPrefixLoad] = {}
+        self._shared_load_owners: dict[str, BlockHash] = {}
+        self._shared_load_followers: dict[str, _SharedPrefixLoad] = {}
+        self._shared_load_recompute: set[str] = set()
         self.kv_cache_manager = KVCacheManager(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
@@ -411,6 +425,63 @@ class Scheduler(SchedulerInterface):
         # In-flight requests still prefilling (prefill chunks + in-progress
         # async KV loads). Their remaining-block reservation gates async loads.
         self._inflight_prefills: set[Request] = set()
+
+    def _can_share_prefix_load(self, request: Request) -> bool:
+        groups = self.kv_cache_config.kv_cache_groups
+        return (
+            self.connector is not None
+            and self.connector.supports_shared_prefix_loads() is True
+            and self.cache_config.enable_prefix_caching
+            and self.vllm_config.speculative_config is None
+            and self.hash_block_size == self.block_size
+            and self.parallel_config.decode_context_parallel_size == 1
+            and self.parallel_config.prefill_context_parallel_size == 1
+            and len(groups) == 1
+            and type(groups[0].kv_cache_spec) is FullAttentionSpec
+            and not self.is_encoder_decoder
+            and not request.has_encoder_inputs
+            and not request.skip_reading_prefix_cache
+            and request.request_id not in self._shared_load_recompute
+        )
+
+    def _find_shared_prefix_load(self, request: Request) -> _SharedPrefixLoad | None:
+        if not self._shared_prefix_loads or not self._can_share_prefix_load(request):
+            return None
+        for index in range(len(request.block_hashes) - 1, -1, -1):
+            block_hash = request.block_hashes[index]
+            entry = self._shared_prefix_loads.get(block_hash)
+            if (
+                entry is not None
+                and not entry.failed
+                and entry.num_tokens == (index + 1) * self.block_size
+                and entry.num_tokens < request.num_tokens
+            ):
+                return entry
+        return None
+
+    def _complete_shared_prefix_load(self, owner_id: str) -> None:
+        key = self._shared_load_owners.pop(owner_id, None)
+        if key is None:
+            return
+        entry = self._shared_prefix_loads.pop(key)
+        # Publish before freeing an aborted owner. Followers already hold their
+        # own references, so the normal block pool owns the remaining lifetime.
+        if not entry.failed:
+            self.kv_cache_manager.cache_blocks(entry.owner, entry.num_tokens)
+        participants = entry.followers | {owner_id}
+        for req_id in participants:
+            self._shared_load_followers.pop(req_id, None)
+            request = self.requests.get(req_id)
+            if request is None or request.is_finished():
+                continue
+            if entry.failed:
+                # Never recompute into shared failed blocks: all readers must
+                # detach before any request can write a replacement prefix.
+                self.kv_cache_manager.free(request)
+                request.num_computed_tokens = 0
+                self.failed_recving_kv_req_ids.discard(req_id)
+                self._shared_load_recompute.add(req_id)
+            self.finished_recving_kv_req_ids.add(req_id)
 
     def _mamba_block_aligned_split(
         self,
@@ -917,8 +988,56 @@ class Scheduler(SchedulerInterface):
                         hit_diverged,
                     ) = self._get_local_prefix_cache_hit(request)
 
+                    shared_load = self._find_shared_prefix_load(request)
+                    if (
+                        shared_load is not None
+                        and num_new_local_computed_tokens < shared_load.num_tokens
+                    ):
+                        attached = self.kv_cache_manager.allocate_slots(
+                            request,
+                            0,
+                            num_new_computed_tokens=shared_load.num_tokens,
+                            new_computed_blocks=shared_load.blocks,
+                            delay_cache_blocks=True,
+                            full_sequence_must_fit=self.scheduler_reserve_full_isl,
+                            reserved_blocks=self._inflight_prefill_reserved_blocks(),
+                            has_scheduled_reqs=bool(self.running),
+                        )
+                        if attached is None:
+                            break
+                        shared_load.followers.add(request_id)
+                        self._shared_load_followers[request_id] = shared_load
+                        request_queue.pop_request()
+                        request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+                        request.num_computed_tokens = shared_load.num_tokens
+                        step_skipped_waiting.prepend_request(request)
+                        self._inflight_prefills.add(request)
+                        shared_external_tokens = (
+                            shared_load.num_tokens - num_new_local_computed_tokens
+                        )
+                        self.kv_cache_manager.record_prefix_cache_stats(
+                            request, num_new_local_computed_tokens
+                        )
+                        if self.connector_prefix_cache_stats is not None:
+                            self.connector_prefix_cache_stats.record(
+                                num_tokens=request.num_tokens
+                                - num_new_local_computed_tokens,
+                                num_hits=shared_external_tokens,
+                                preempted=request.num_preemptions > 0,
+                            )
+                        if request.prefill_stats and request.num_preemptions <= 0:
+                            request.prefill_stats.set(
+                                num_prompt_tokens=request.num_prompt_tokens,
+                                num_local_cached_tokens=num_new_local_computed_tokens,
+                                num_external_cached_tokens=shared_external_tokens,
+                            )
+                        continue
+
                     # Get externally-cached tokens if using a KVConnector.
-                    if self.connector is not None:
+                    if (
+                        self.connector is not None
+                        and request_id not in self._shared_load_recompute
+                    ):
                         # Present a block-aligned local hit to the connector so
                         # a strictly longer remote hit can supersede a local
                         # sub-block tail without racing its copy-on-write.
@@ -1171,6 +1290,26 @@ class Scheduler(SchedulerInterface):
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
                     break
+
+                self._shared_load_recompute.discard(request_id)
+                if (
+                    load_kv_async
+                    and 0 < num_computed_tokens < request.num_tokens
+                    and num_computed_tokens % self.block_size == 0
+                    and num_computed_tokens
+                    <= len(request.block_hashes) * self.block_size
+                    and self._can_share_prefix_load(request)
+                ):
+                    key = request.block_hashes[
+                        num_computed_tokens // self.block_size - 1
+                    ]
+                    if key not in self._shared_prefix_loads:
+                        self._shared_prefix_loads[key] = _SharedPrefixLoad(
+                            request,
+                            num_computed_tokens,
+                            self.kv_cache_manager.get_blocks(request_id),
+                        )
+                        self._shared_load_owners[request_id] = key
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
@@ -2551,9 +2690,13 @@ class Scheduler(SchedulerInterface):
         # Second pass: set status and free requests
         for request in valid_requests:
             delay_free_blocks = False
+            shared_load = self._shared_load_followers.pop(request.request_id, None)
+            if shared_load is not None:
+                shared_load.followers.discard(request.request_id)
             if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                 delay_free_blocks = (
                     request.request_id not in self.finished_recving_kv_req_ids
+                    and shared_load is None
                 )
                 self.finished_recving_kv_req_ids.discard(request.request_id)
                 self.failed_recving_kv_req_ids.discard(request.request_id)
@@ -2582,6 +2725,7 @@ class Scheduler(SchedulerInterface):
 
         self.encoder_cache_manager.free(request)
         request_id = request.request_id
+        self._shared_load_recompute.discard(request_id)
         self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
@@ -2730,6 +2874,8 @@ class Scheduler(SchedulerInterface):
         return reset_successful
 
     def reset_connector_cache(self) -> bool:
+        if self._shared_prefix_loads:
+            return False
         if self.connector is None:
             # No connector attached -> nothing to reset, treat as success so
             # callers that unconditionally request a connector reset (e.g. as
@@ -3013,6 +3159,7 @@ class Scheduler(SchedulerInterface):
 
         # KV Connector:: update recv and send status from last step.
         for req_id in kv_connector_output.finished_recving or ():
+            self._complete_shared_prefix_load(req_id)
             logger.debug("Finished recving KV transfer for request %s", req_id)
             assert req_id in self.requests
             req = self.requests[req_id]
@@ -3085,13 +3232,13 @@ class Scheduler(SchedulerInterface):
 
                 is_affected = True
 
-                if block_id in marked_invalid_block_ids:
+                if evict_blocks and block_id in marked_invalid_block_ids:
                     # This invalid block is shared with a previous request
                     # and was already marked for recomputation.
                     # This means this request can still consider this block
                     # as computed when rescheduled.
-                    # Currently this only applies to sync loading; Async
-                    # loading does not yet support block sharing
+                    # Only sync loads can share recomputation. Async readers
+                    # must all detach from failed shared destinations first.
                     continue
 
                 marked_invalid_block_ids.add(block_id)
@@ -3118,8 +3265,7 @@ class Scheduler(SchedulerInterface):
                     # All invalid blocks of this request are shared with
                     # previous requests and will be recomputed by them.
                     # Revert to considering only cached tokens as computed.
-                    # Currently this only applies to sync loading; Async
-                    # loading does not yet support block sharing
+                    # Only sync loads can share this recomputation.
                     total_affected_tokens += (
                         request.num_computed_tokens - req_num_computed_tokens
                     )
@@ -3139,6 +3285,14 @@ class Scheduler(SchedulerInterface):
             Set of affected request IDs to skip in update_from_output main loop.
         """
         should_fail = not self.recompute_kv_load_failures
+
+        for entry in self._shared_prefix_loads.values():
+            if any(
+                block.block_id in invalid_block_ids
+                for group in entry.blocks.blocks
+                for block in group
+            ):
+                entry.failed = True
 
         # handle async KV loads (not cached yet, evict_blocks=False)
         async_load_reqs = (

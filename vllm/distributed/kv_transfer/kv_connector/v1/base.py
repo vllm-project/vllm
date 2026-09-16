@@ -436,6 +436,17 @@ class KVConnectorBase_V1(ABC):
     # Scheduler-side methods
     # ==============================
 
+    def supports_shared_prefix_loads(self) -> bool:
+        """Whether async loads may be shared using core prefix-cache hashes.
+
+        Opting in guarantees that external KV is exact, uses the same isolation
+        namespace as local prefix caching, and has no request-specific access
+        restrictions. A load must finish even if its initiating request aborts.
+        Followers will not issue a lookup or load; their normal request lifecycle
+        hooks still run. Unsupported connectors retain per-request allocation.
+        """
+        return False
+
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         """
         Bind the GPU block pool to the connector for per-GPU block status tracking.
