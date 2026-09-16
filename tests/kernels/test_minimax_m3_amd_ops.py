@@ -42,6 +42,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (  # noqa:
 from vllm.models.minimax_m3.amd.ops import (  # noqa: E402
     gemma_fused_add_rmsnorm,
     gemma_rmsnorm,
+    swiglu_oai_quantize_mxfp8,
     swiglu_oai_split,
 )
 from vllm.models.minimax_m3.amd.ops.gemma_rmsnorm import _num_warps  # noqa: E402
@@ -167,6 +168,25 @@ def test_swiglu_oai_split(m, inter, limit, dtype):
     assert _relerr(got, ref) < 5e-3
 
 
+@torch.inference_mode()
+def test_swiglu_oai_quantize_mxfp8_uses_e4m3_range_for_scale():
+    # Keep a small value in two MX blocks next to their maxima. The scale must
+    # use E4M3's finite range (448), otherwise that value underflows to zero.
+    # Keep the third block empty to cover the reference's finite tiny clamp.
+    m, inter = 3, 96
+    gate = torch.full((m, inter), 2.0, device=DEVICE, dtype=torch.float16)
+    up = torch.full((m, inter), 2**-10, device=DEVICE, dtype=torch.float16)
+    up[:, :64:32] = 1.0
+    up[:, 64:] = 0.0
+    gate_up = torch.cat((gate, up), dim=-1)
+
+    got_q, got_s = swiglu_oai_quantize_mxfp8(gate_up, alpha=0.0, beta=0.0, limit=None)
+    ref_q, ref_s = _mxfp8_e4m3_quantize_torch(up, is_sf_swizzled_layout=False)
+
+    assert torch.equal(got_s, ref_s)
+    assert torch.equal(got_q, ref_q)
+
+
 # --------------------------------------------------------------------------- #
 # Fused MXFP8 activation quant (Triton vs torch reference)
 # --------------------------------------------------------------------------- #
@@ -179,8 +199,8 @@ def test_mxfp8_quant_triton_matches_torch(shape, dtype):
     xq_t, s_t = _mxfp8_e4m3_quantize_torch(x, is_sf_swizzled_layout=False)
     xq_k, s_k = _mxfp8_e4m3_quantize_triton(x)
     assert s_k.shape == s_t.shape == (shape[0], shape[1] // 32)
-    # E8M0 block exponents share the floor(log2(amax))+127 algorithm; allow at
-    # most a 1-step difference at exact powers of two.
+    # Both paths use the E4M3-aware scale calculation; allow a 1-step
+    # difference at exact powers of two due to floating-point rounding.
     assert (s_k.int() - s_t.int()).abs().max().item() <= 1
     # Dequantized values agree to fp8 granularity.
     deq_t = dequant_mxfp8_to_bf16(xq_t, s_t)
@@ -383,7 +403,8 @@ def test_mxfp8_linear_emulation_bf16_at_load(
 ):
     """EmulationMxfp8LinearKernel load-time BF16 dequant (default) and the
     ``VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD=0`` per-step fallback must produce the
-    same result; the dtype-match (BF16/FP16 activations) must also hold."""
+    same result; the dtype-match (BF16/FP16 activations) must also hold.
+    """
     from vllm.model_executor.kernels.linear.mxfp8.emulation import (
         EmulationMxfp8LinearKernel,
     )
@@ -497,7 +518,8 @@ def test_mxfp8_rocm_native_unaligned_k_dequantizes_at_load(shape):
 # produced EP garbage).
 def _capture_expert_mask(expert_mask, *, global_num_experts):
     """Drive the real ``AiterMxfp8Experts.apply`` mask branch and capture the
-    ``expert_mask`` it forwards to ``rocm_aiter_ops.fused_moe``."""
+    ``expert_mask`` it forwards to ``rocm_aiter_ops.fused_moe``.
+    """
     from types import SimpleNamespace
     from unittest import mock
 
@@ -548,7 +570,8 @@ def _capture_expert_mask(expert_mask, *, global_num_experts):
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
 def test_aiter_mxfp8_apply_forwards_expert_mask_unchanged():
     """AiterMxfp8Experts.apply forwards the precomputed 0/1 mask to aiter as-is
-    (no re-derivation that would collapse an already-0/1 mask to all-ones)."""
+    (no re-derivation that would collapse an already-0/1 mask to all-ones).
+    """
     # 0/1 local-expert mask over global ids + trailing sentinel (rank owns 0..3).
     ep_mask = torch.tensor(
         [1, 1, 1, 1, 0, 0, 0, 0, 0], dtype=torch.int32, device=DEVICE
@@ -562,7 +585,8 @@ def test_aiter_mxfp8_apply_forwards_expert_mask_unchanged():
 def test_routed_experts_expert_map_delegates_to_kernel():
     """RoutedExperts.expert_map returns the 0/1 mask only for kernels that set
     ``consumes_expert_mask`` (AITER), and the canonical -1 map otherwise -- keyed
-    on the resolved kernel, not the global aiter switch."""
+    on the resolved kernel, not the global aiter switch.
+    """
     from types import SimpleNamespace
 
     from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts

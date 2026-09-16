@@ -77,8 +77,7 @@ EngineIdentity = bytes
 
 
 class EngineCoreClient(ABC):
-    """
-    EngineCoreClient: subclasses handle different methods for pushing
+    """EngineCoreClient: subclasses handle different methods for pushing
         and pulling from the EngineCore for asyncio / multiprocessing.
 
     Subclasses:
@@ -249,7 +248,8 @@ class EngineCoreClient(ABC):
 
     def dp_engines_running(self) -> bool:
         """Returns True if data parallel engines are collectively in a
-        running state."""
+        running state.
+        """
         raise NotImplementedError
 
     async def commit_elastic_ep(self) -> None:
@@ -331,8 +331,7 @@ class EngineCoreClient(ABC):
 
 
 class InprocClient(EngineCoreClient):
-    """
-    InprocClient: client for in-process EngineCore. Intended
+    """InprocClient: client for in-process EngineCore. Intended
     for use in LLMEngine for V0-style add_request() and step()
         EngineCore setup in this process (no busy loop).
 
@@ -447,7 +446,8 @@ class InprocClient(EngineCoreClient):
 @dataclass
 class BackgroundResources:
     """Used as a finalizer for clean shutdown, avoiding
-    circular reference back to the client object."""
+    circular reference back to the client object.
+    """
 
     ctx: zmq.Context
     # If CoreEngineProcManager, it manages local engines;
@@ -469,7 +469,6 @@ class BackgroundResources:
 
     def __call__(self):
         """Clean up background resources."""
-
         logger.debug_once("[shutdown] MPClient: background resource cleanup start")
         self.engine_dead = True
         if self.engine_manager is not None:
@@ -543,16 +542,15 @@ class ElasticScalingCache:
 
 
 class MPClient(EngineCoreClient):
-    """
-    MPClient: base client for multi-proc EngineCore.
-        EngineCore runs in a background process busy loop, getting
-        new EngineCoreRequests and returning EngineCoreOutputs
+    """MPClient: base client for multi-proc EngineCore.
+    EngineCore runs in a background process busy loop, getting
+    new EngineCoreRequests and returning EngineCoreOutputs
 
-        * pushes EngineCoreRequests via input_socket
-        * pulls EngineCoreOutputs via output_socket
+    * pushes EngineCoreRequests via input_socket
+    * pulls EngineCoreOutputs via output_socket
 
-        * AsyncMPClient subclass for AsyncLLM usage
-        * SyncMPClient subclass for LLM usage
+    * AsyncMPClient subclass for AsyncLLM usage
+    * SyncMPClient subclass for LLM usage
     """
 
     def __init__(
@@ -566,6 +564,7 @@ class MPClient(EngineCoreClient):
     ):
         self.vllm_config = vllm_config
         self._renderer: BaseRenderer | None = renderer
+        self._effective_attention_block_sizes: set[int | None] = set()
 
         # ZMQ setup.
         sync_ctx = zmq.Context(io_threads=2)
@@ -802,11 +801,23 @@ class MPClient(EngineCoreClient):
 
     def _apply_ready_response(self, payload: bytes) -> None:
         """Decode an EngineCoreReadyResponse and sync any post-initialization
-        config changes (e.g. auto-fitted max_model_len) back to the frontend."""
-        if not payload:
-            return
+        config changes (e.g. auto-fitted max_model_len) back to the frontend.
+        """
         vllm_config = self.vllm_config
-        response = msgspec.msgpack.decode(payload, type=EngineCoreReadyResponse)
+        response = (
+            msgspec.msgpack.decode(payload, type=EngineCoreReadyResponse)
+            if payload
+            else None
+        )
+        self._effective_attention_block_sizes.add(
+            response.effective_attention_block_size if response is not None else None
+        )
+        sizes = self._effective_attention_block_sizes
+        vllm_config.cache_config.effective_attention_block_size = (
+            next(iter(sizes)) if len(sizes) == 1 else None
+        )
+        if response is None:
+            return
         vllm_config.model_config.max_model_len = min(
             vllm_config.model_config.max_model_len, response.max_model_len
         )
@@ -1331,7 +1342,8 @@ class AsyncMPClient(MPClient):
 
 class DPAsyncMPClient(AsyncMPClient):
     """Asyncio-compatible client for multi-proc, multi-engine (data parallel)
-    EngineCore. Assumes external load-balancing by default."""
+    EngineCore. Assumes external load-balancing by default.
+    """
 
     def __init__(
         self,
@@ -1515,7 +1527,8 @@ class DPAsyncMPClient(AsyncMPClient):
 
 class DPLBAsyncMPClient(DPAsyncMPClient):
     """Asyncio-compatible client for multi-proc, multi-engine (data parallel)
-    EngineCore. Load-balances between multiple engine processes."""
+    EngineCore. Load-balances between multiple engine processes.
+    """
 
     def __init__(
         self,
@@ -1773,8 +1786,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self._prepared_elastic_ep = new_data_parallel_size, num_redundant_experts
 
     def _eep_wait_for_setup_switch_complete(self) -> asyncio.Future:
-        """
-        Wait for core engines to switch to the new setup.
+        """Wait for core engines to switch to the new setup.
 
         In eep_process_engine_core_notification(), a dummy UtilityOutput with
         EEP_NOTIFICATION_CALL_ID will be set when RECONFIGURE_FINISHED
@@ -1846,7 +1858,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         num_redundant_experts: int,
     ) -> None:
         """Prepare scale up by creating new engine cores and reconfiguring
-        existing ones."""
+        existing ones.
+        """
         self._setup_elastic_ep_reconfig_bootstrap()
 
         # Phase 1: Send reconfig messages to existing engines
@@ -1938,7 +1951,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
     async def _commit_scale_down_elastic_ep(self, new_data_parallel_size: int) -> None:
         """Scale down the data parallel size by shutting down and
-        reconfiguring existing engine cores."""
+        reconfiguring existing engine cores.
+        """
         cur_data_parallel_size = len(self.core_engines)
 
         self.eep_scaling_cache = ElasticScalingCache(

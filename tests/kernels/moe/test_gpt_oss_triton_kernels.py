@@ -377,7 +377,8 @@ def test_unit_shuffle():
 @pytest.mark.parametrize("n_experts,topk", [(32, 4), (128, 4)])
 def test_routing_data_from_sparse_topk_parity(n_tokens, n_experts, topk):
     """routing_data_from_sparse_topk must produce routing structures
-    identical to make_routing_data for the same topk result."""
+    identical to make_routing_data for the same topk result.
+    """
     from vllm.model_executor.layers.fused_moe.experts import (
         gpt_oss_triton_kernels_moe as gptoss_moe,
     )

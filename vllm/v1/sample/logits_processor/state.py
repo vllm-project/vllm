@@ -69,7 +69,8 @@ class BatchUpdateBuilder:
     @property
     def removed(self) -> list[RemovedRequest]:
         """Removed request indices sorted in
-        descending order"""
+        descending order
+        """
         self._ensure_removed_sorted()
         return self._removed
 
@@ -81,6 +82,7 @@ class BatchUpdateBuilder:
 
         Args:
           index: request index
+
         """
         if self._is_removed_sorted:
             raise RuntimeError(
@@ -93,14 +95,14 @@ class BatchUpdateBuilder:
         return bool(self._removed)
 
     def peek_removed(self) -> int | None:
-        """Return lowest removed request index"""
+        """Return lowest removed request index."""
         if self.has_removed():
             self._ensure_removed_sorted()
             return self._removed[-1]
         return None
 
     def pop_removed(self) -> int | None:
-        """Pop lowest removed request index"""
+        """Pop lowest removed request index."""
         if self.has_removed():
             self._ensure_removed_sorted()
             return self._removed.pop()
@@ -125,6 +127,7 @@ class BatchUpdateBuilder:
 
         Returns:
           Frozen logitsprocs batch update instance; `None` if no updates
+
         """
         # Reset removal-sorting logic
         self._is_removed_sorted = False

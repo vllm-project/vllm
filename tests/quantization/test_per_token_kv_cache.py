@@ -490,7 +490,8 @@ def test_per_token_head_negative_slot_skipped(qcfg: QuantConfig):
 )
 def test_process_weights_sets_placeholder_scales(kv_cache_dtype: str):
     """Per-token-head should set _k_scale=1.0, _v_scale=1.0
-    and delete checkpoint attrs."""
+    and delete checkpoint attrs.
+    """
     from vllm.model_executor.layers.quantization.kv_cache import (
         BaseKVCacheMethod,
     )

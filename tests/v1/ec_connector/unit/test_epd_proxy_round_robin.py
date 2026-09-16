@@ -43,7 +43,8 @@ def assign(proxy):
 
 def _drive(assign, e_urls, counts):
     """Feed a sequence of request item-counts through the cursor, as
-    fanout_encoder_primer does one request at a time."""
+    fanout_encoder_primer does one request at a time.
+    """
     cursor = 0
     all_urls = []
     for count in counts:

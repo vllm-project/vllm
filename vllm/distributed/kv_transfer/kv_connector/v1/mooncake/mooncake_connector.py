@@ -30,6 +30,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorTransferResults,
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
@@ -587,6 +588,13 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
 
+    def get_transfer_results(
+        self, finished_req_ids: set[str]
+    ) -> KVConnectorTransferResults:
+        """Get finished and failed sends/recvs from the worker."""
+        assert self.connector_worker is not None
+        return self.connector_worker.get_transfer_results()
+
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Get block IDs whose remote KV load failed."""
         assert self.connector_worker is not None
@@ -635,7 +643,7 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
 
 
 class MooncakeConnectorScheduler:
-    """Implementation of Scheduler side methods"""
+    """Implementation of Scheduler side methods."""
 
     def __init__(
         self,
@@ -710,7 +718,8 @@ class MooncakeConnectorScheduler:
 
     def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
         """D-side only. Returns N-1 for Mamba models since the decoder
-        always recomputes the last token and must start from h(N-1)."""
+        always recomputes the last token and must start from h(N-1).
+        """
         if self._has_mamba and num_prompt_tokens > 1:
             return num_prompt_tokens - 1
         return num_prompt_tokens
@@ -721,7 +730,8 @@ class MooncakeConnectorScheduler:
         derive h(N) correctly.
 
         Guarded by ``_p_side_truncated`` to avoid repeated truncation if the
-        request is preempted and rescheduled."""
+        request is preempted and rescheduled.
+        """
         params = request.kv_transfer_params
         if (
             params is not None
@@ -748,8 +758,7 @@ class MooncakeConnectorScheduler:
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
     ) -> tuple[int, bool]:
-        """
-        For remote prefill, pull all prompt blocks from remote
+        """For remote prefill, pull all prompt blocks from remote
         asynchronously relative to engine execution.
 
         Args:
@@ -761,8 +770,8 @@ class MooncakeConnectorScheduler:
               external KV cache beyond what is already computed.
             * true if the external KV cache tokens will be loaded
               asynchronously (between scheduler steps).
-        """
 
+        """
         params = request.kv_transfer_params
         logger.debug(
             "MooncakeConnector get_num_new_matched_tokens: "
@@ -873,11 +882,9 @@ class MooncakeConnectorScheduler:
         request: "Request",
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
-        """
-        Once a request is finished, determine whether request blocks
+        """Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
         """
-
         params = request.kv_transfer_params
         logger.debug(
             "MooncakeConnector request_finished, req_id=%s, request_status=%s, "
@@ -926,7 +933,7 @@ class MooncakeConnectorScheduler:
 
 
 class MooncakeConnectorWorker:
-    """Implementation of Worker side methods"""
+    """Implementation of Worker side methods."""
 
     def __init__(
         self,
@@ -1046,6 +1053,16 @@ class MooncakeConnectorWorker:
         self.finished_recving_reqs: set[ReqId] = set()
         # Written from the receiver loop, drained from the worker thread.
         self._invalid_block_ids: queue.Queue[set[int]] = queue.Queue()
+        self._is_hma_required = (
+            not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
+            and any(
+                not isinstance(g.kv_cache_spec, FullAttentionSpec)
+                for g in kv_cache_config.transfer_groups
+            )
+        )
+        # Block IDs are only unique within a group; with HMA the scheduler
+        # tracks a single merged group, so failures are reported per request.
+        self._failed_recv_reqs: queue.Queue[ReqId] = queue.Queue()
 
         self.xfer_stats = MooncakeKVConnectorStats()
 
@@ -1158,11 +1175,9 @@ class MooncakeConnectorWorker:
                 raise e
 
     async def _mooncake_sender_listener(self, ready_event: threading.Event):
-        """
-        Background thread that listens for Mooncake requests, dispatches them
+        """Background thread that listens for Mooncake requests, dispatches them
         to a thread pool, and sends acknowledgments upon completion.
         """
-
         sock = self.async_zmq_ctx.socket(zmq.ROUTER)
         self.side_channel_port = sock.bind_to_random_port(f"tcp://{self.hostname}")
         logger.debug(
@@ -1662,7 +1677,8 @@ class MooncakeConnectorWorker:
     def _bind_sender_thread_device(self) -> None:
         """ThreadPoolExecutor initializer — binds each pool thread to the
         correct CUDA device.  CUDA device selection is thread-local, so
-        without this, NVLink transfers fail for TP ranks > 0."""
+        without this, NVLink transfers fail for TP ranks > 0.
+        """
         current_platform.set_device(self.device_id)
 
     def _send_blocks(
@@ -1698,7 +1714,6 @@ class MooncakeConnectorWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in mooncake."""
-
         logger.info("Registering KV_Caches. use_mla: %s", self.use_mla)
 
         kv_data_ptrs: list[int] = []
@@ -1835,8 +1850,7 @@ class MooncakeConnectorWorker:
         return finished_sending_reqs
 
     def get_finished(self) -> tuple[set[str] | None, set[str] | None]:
-        """
-        Get requests that are done sending or recving on this specific worker.
+        """Get requests that are done sending or recving on this specific worker.
         The scheduler process (via the MultiprocExecutor) will use this output
         to track which workers are done.
         """
@@ -1866,9 +1880,32 @@ class MooncakeConnectorWorker:
 
         return finished_sending_reqs or None, finished_recving_reqs or None
 
+    def get_transfer_results(self) -> KVConnectorTransferResults:
+        """Get transfers that completed on this specific worker, including
+        requests whose remote KV load failed.
+
+        The scheduler process (via the MultiprocExecutor) will use this output
+        to track which workers are done.
+        """
+        finished_sending_reqs, finished_recving_reqs = self.get_finished()
+
+        failed_recving_reqs: set[ReqId] = set()
+        while True:
+            try:
+                failed_recving_reqs.add(self._failed_recv_reqs.get_nowait())
+            except queue.Empty:
+                break
+
+        return KVConnectorTransferResults(
+            finished_sending=set(finished_sending_reqs or ()),
+            finished_recving=set(finished_recving_reqs or ()),
+            failed_recving=failed_recving_reqs,
+        )
+
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         """Return transfer stats collected since the last call, or None
-        if nothing has been recorded in this interval."""
+        if nothing has been recorded in this interval.
+        """
         if self.xfer_stats.is_empty():
             return None
         return self.xfer_stats.clone_and_reset()
@@ -1959,7 +1996,10 @@ class MooncakeConnectorWorker:
                 # request is waiting on a load, and reporting one here would trip
                 # the scheduler's `assert req_id in self.requests`.
                 continue
-            self._invalid_block_ids.put(invalid)
+            if self._is_hma_required:
+                self._failed_recv_reqs.put(pull_meta.d_req_id)
+            else:
+                self._invalid_block_ids.put(invalid)
             self.finished_recving_reqs.add(pull_meta.d_req_id)
 
         if failed:
@@ -2277,8 +2317,7 @@ def should_launch_bootstrap_server(vllm_config: VllmConfig) -> bool:
 
 
 def get_mooncake_bootstrap_addr(vllm_config: VllmConfig) -> tuple[str, int]:
-    """
-    Returns the address of the Mooncake bootstrap server.
+    """Returns the address of the Mooncake bootstrap server.
     This is only used by prefillers to register workers.
     Decoders should get addr from kv_transfer_params.
     """

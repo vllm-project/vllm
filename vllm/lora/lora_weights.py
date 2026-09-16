@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence as GenericSequence
+from dataclasses import dataclass
 
 import torch
 import torch.types
@@ -162,7 +163,6 @@ class PackedLoRALayerWeights(LoRALayerWeights):
 
         If LoRA is None, it signifies that the submodule does not have a LoRA.
         """
-
         first_lora = next(lora for lora in loras if lora is not None)
         assert first_lora is not None
         rank = first_lora.rank
@@ -281,3 +281,17 @@ class PackedLoRALayerWeights(LoRALayerWeights):
     @property
     def is_packed(self) -> bool:
         return True
+
+
+@dataclass
+class LoRAFullModuleWeights:
+    """LoRA weights for classification layers."""
+
+    module_name: str
+    weight: torch.Tensor
+    bias: torch.Tensor | None = None
+
+    def pin_memory(self) -> None:
+        self.weight = self.weight.pin_memory()
+        if self.bias is not None:
+            self.bias = self.bias.pin_memory()

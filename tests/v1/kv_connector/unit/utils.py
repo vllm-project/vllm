@@ -155,7 +155,6 @@ def create_scheduler(
     vllm_config: VllmConfig,
     num_blocks: int = 10000,
     kv_cache_config: KVCacheConfig | None = None,
-    hash_block_size: int | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Initialize Scheduler For Testing."""
     block_size = vllm_config.cache_config.block_size
@@ -186,7 +185,6 @@ def create_scheduler(
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
         block_size=block_size,
-        hash_block_size=hash_block_size,
     )
 
 
@@ -263,7 +261,6 @@ def create_model_runner_output(
     kv_connector_worker_meta: KVConnectorWorkerMetadata | None = None,
 ) -> ModelRunnerOutput:
     """Make dummy model runner output for testing."""
-
     # Make request data.
     req_ids = [req.request_id for req in reqs]
     req_id_to_index = {req_id: idx for idx, req_id in enumerate(req_ids)}
@@ -521,6 +518,8 @@ def make_nixl_scheduler(
     Only sets the flags needed by the tests.  When *heartbeat=True* the
     scheduler-side heartbeat bookkeeping fields are also initialised.
     """
+    from types import SimpleNamespace
+
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
         NixlConnectorScheduler,
     )
@@ -532,6 +531,7 @@ def make_nixl_scheduler(
         block_size=16,
         mamba_enabled=has_mamba,
     )
+    sched.vllm_config = SimpleNamespace(num_prefill_lookahead_tokens=0)
 
     if heartbeat:
         sched._heartbeat_by_engine = {}
@@ -598,9 +598,11 @@ def make_nixl_push_scheduler(
         mamba_enabled=has_mamba,
     )
 
-    # vllm_config is consulted for parallel_config.tensor_parallel_size.
+    # vllm_config is consulted for parallel_config.tensor_parallel_size, and by
+    # `_prefill_backoff` on both the P and D prefill paths.
     vllm_config = MagicMock()
     vllm_config.parallel_config.tensor_parallel_size = 1
+    vllm_config.num_prefill_lookahead_tokens = 0
     sched.vllm_config = vllm_config
 
     # Push-specific state.
