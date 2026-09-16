@@ -31,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.utils import get_mm_features_in_window
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -1140,9 +1141,13 @@ class Scheduler(SchedulerInterface):
                 if load_kv_async:
                     # An async load holds its blocks for the whole transfer with
                     # no forward progress and isn't preemptible here. Admit it
-                    # only if it fits in (free - other in-flight reservations), to
-                    # avoid deadlock and predictable preemptions.
-                    reserved_blocks = self._inflight_prefill_reserved_blocks()
+                    # only if it fits in (free - other in-flight reservations)
+                    # plus its own promotion margin, to avoid deadlock and
+                    # predictable preemptions.
+                    reserved_blocks = (
+                        self._inflight_prefill_reserved_blocks()
+                        + self._promotion_margin_blocks()
+                    )
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
@@ -2897,11 +2902,26 @@ class Scheduler(SchedulerInterface):
             apply_admission_cap=True,
         )
 
+    def _promotion_margin_blocks(self) -> int:
+        """Blocks an async load needs on promotion but does not allocate now.
+
+        A load is allocated without lookahead slots (see
+        `limit_lookahead_tokens`) and `_request_remaining_blocks` does not count
+        them either, yet promotion pads the request to `1 + num_spec_tokens`
+        and asks `allocate_slots` for the lookahead margin on top. Reserving
+        that margin up front keeps a load from being admitted into a pool it
+        can never be promoted in, which would wedge the scheduler: a parked
+        load is not preemptible and nothing else is running to free a block.
+        """
+        return cdiv(self.num_spec_tokens + self.num_lookahead_tokens, self.block_size)
+
     def _inflight_prefill_reserved_blocks(self) -> int:
         """Num blocks in-flight prefills still need to finish (their reservation)."""
 
+        margin = self._promotion_margin_blocks()
         return sum(
-            self._request_remaining_blocks(req) for req in self._inflight_prefills
+            self._request_remaining_blocks(req) + margin
+            for req in self._inflight_prefills
         )
 
     def _update_waiting_for_remote_kv(self, request: Request) -> None:
