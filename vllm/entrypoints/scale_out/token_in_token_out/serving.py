@@ -358,6 +358,7 @@ class ServingTokens(GenerateBaseServing):
             model=model_name,
             choices=choices,
             usage=usage,
+            weight_version=final_res.weight_version,
             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
             kv_transfer_params=final_res.kv_transfer_params,
             ec_transfer_params=final_res.ec_transfer_params,
@@ -443,6 +444,7 @@ class ServingTokens(GenerateBaseServing):
 
                     chunk = GenerateStreamResponse(
                         request_id=request_id,
+                        weight_version=res.weight_version,
                         choices=[
                             GenerateResponseStreamChoice(
                                 index=i,
@@ -477,6 +479,7 @@ class ServingTokens(GenerateBaseServing):
             if include_usage:
                 final_chunk = GenerateStreamResponse(
                     request_id=request_id,
+                    weight_version=res.weight_version,
                     choices=[],
                     usage=final_usage_info,
                 )

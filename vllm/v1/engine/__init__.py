@@ -233,6 +233,9 @@ class EngineCoreOutput(
     # Appended last so `array_like` positional serialization stays compatible.
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
+    # Weight version bound when EngineCore admits this request.
+    weight_version: str | None = None
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None
