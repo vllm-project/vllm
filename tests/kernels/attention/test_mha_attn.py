@@ -27,6 +27,7 @@ from vllm.utils.torch_utils import (
     set_random_seed,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.ops.vit_attn_wrappers import encoder_graph_capture
 from vllm.v1.attention.selector import _cached_get_attn_backend
 
 
@@ -270,9 +271,11 @@ def test_mha_attn_graph_replay_keeps_padding_finite(default_vllm_config):
     ]
     cu_seqlens = torch.tensor([0, 256, 256], device="cuda", dtype=torch.int32)
     max_seqlen = torch.tensor(256, dtype=torch.int32, device="cpu")
-    attn(q, k, v, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+    with patch("torch.zeros_like", wraps=torch.zeros_like) as zero_output:
+        attn(q, k, v, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+        zero_output.assert_not_called()
     graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph, stream=stream):
+    with torch.cuda.graph(graph, stream=stream), encoder_graph_capture():
         output = attn(q, k, v, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
 
     output.fill_(float("nan"))
@@ -281,6 +284,10 @@ def test_mha_attn_graph_replay_keeps_padding_finite(default_vllm_config):
     assert output.isfinite().all()
     reference = ref_attention(q[:, :128], k[:, :128], v[:, :128], scale=64**-0.5)
     torch.testing.assert_close(output[:, :128], reference, atol=1e-2, rtol=1e-2)
+
+    with patch("torch.zeros_like", wraps=torch.zeros_like) as zero_output:
+        attn(q, k, v, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+        zero_output.assert_not_called()
 
 
 @pytest.mark.parametrize("var_seq_len", VAR_SEQ_LENS)

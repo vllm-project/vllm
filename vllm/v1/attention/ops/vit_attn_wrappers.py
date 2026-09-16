@@ -12,6 +12,9 @@ latencies by ~7% (see qwen2_5_vl for example usage)
 To use these ops, you must have a recent version of PyTorch installed (>= 2.4.0)
 """
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 
 import einops
@@ -22,6 +25,17 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import direct_register_custom_op
+
+_encoder_graph_capture = ContextVar("encoder_graph_capture", default=False)
+
+
+@contextmanager
+def encoder_graph_capture() -> Iterator[None]:
+    token = _encoder_graph_capture.set(True)
+    try:
+        yield
+    finally:
+        _encoder_graph_capture.reset(token)
 
 
 def flash_attn_maxseqlen_wrapper(
@@ -59,9 +73,10 @@ def flash_attn_maxseqlen_wrapper(
             max_seqlen = max_seqlen.item()
 
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
-    if current_platform.is_cuda():
-        # Varlen attention leaves padding unwritten. Graph-pool NaNs in those
-        # rows can propagate through later encoder blocks into valid tokens.
+    if current_platform.is_cuda() and _encoder_graph_capture.get():
+        # TODO: Remove this temporary padding-NaN workaround once the underlying
+        # cause is resolved: https://github.com/vllm-project/vllm/issues/57136.
+        # Capture the zeroing for every replay, without adding it to eager calls.
         kwargs["out"] = torch.zeros_like(q)
     output = flash_attn_varlen_func(
         q,
