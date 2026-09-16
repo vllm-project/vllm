@@ -24,7 +24,8 @@ from vllm import envs
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.generate.base.protocol import FunctionCall
+from vllm.entrypoints.generate.base.protocol import FunctionCall, TokenPhaseCounts
+from vllm.entrypoints.generate.base.serving import RequestPhaseMetricsTracker
 from vllm.entrypoints.mcp.tool import Tool
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.parser.harmony_utils import render_for_completion
@@ -41,11 +42,10 @@ from vllm.outputs import RequestOutput
 from vllm.parser.abstract_parser import Parser
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
+from vllm.v1.metrics.stats import RequestStateStats
 
 if TYPE_CHECKING:
     from mcp.client import ClientSession
-
-    from vllm.v1.metrics.stats import RequestStateStats
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +109,32 @@ class ConversationContext(ABC):
     # the stored engine timestamps cover only one turn, while token usage is
     # accumulated across all turns.
     request_metrics_cover_all_generation_turns: bool = True
+    _request_phase_metrics: RequestPhaseMetricsTracker | None = None
+
+    def record_request_phase_metrics(self, output: RequestOutput) -> None:
+        if not output.outputs:
+            return
+        if self._request_phase_metrics is None:
+            self._request_phase_metrics = RequestPhaseMetricsTracker()
+
+        parser = self.response_parser
+        counts: TokenPhaseCounts | None
+        if parser is None:
+            counts = TokenPhaseCounts(0, getattr(self, "num_output_tokens", 0), 0)
+        else:
+            token_ids = getattr(self, "_accumulated_token_ids", [])
+            counts = parser.classify_token_phases(token_ids)
+            if not isinstance(counts, TokenPhaseCounts):
+                counts = None
+        metrics = (
+            output.metrics if isinstance(output.metrics, RequestStateStats) else None
+        )
+        self._request_phase_metrics.update(metrics, counts)
+
+    def build_request_phase_metrics(self):
+        if self._request_phase_metrics is None:
+            return None, None, None
+        return self._request_phase_metrics.build()
 
     @abstractmethod
     def append_output(self, output: RequestOutput) -> None:
