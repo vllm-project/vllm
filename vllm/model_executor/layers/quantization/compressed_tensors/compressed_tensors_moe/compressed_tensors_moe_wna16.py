@@ -505,10 +505,12 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         if w2_bias is not None:
             replace_parameter(layer, "w2_bias", w2_bias)
 
-        # CPU fused_experts_cpu requires zero points even for symmetric quant.
+        # CPU fused_experts_cpu and the RDNA3 HIP kernel require zero points
+        # even for symmetric quant (the oracle synthesizes them).
         # EMULATION bakes ZP into the dequantized bf16 weights — ZP is None.
         if (
-            not self.symmetric or self.wna16_backend == WNA16MoEBackend.CPU
+            not self.symmetric
+            or self.wna16_backend in (WNA16MoEBackend.CPU, WNA16MoEBackend.RDNA3)
         ) and self.wna16_backend != WNA16MoEBackend.EMULATION:
             assert w13_qzeros is not None and w2_qzeros is not None
             replace_parameter(layer, "w13_weight_zero_point", w13_qzeros)
