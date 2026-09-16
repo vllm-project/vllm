@@ -177,7 +177,8 @@ def test_incremental_detokenization(
 def test_remote_prefill_cached_tokens_override(do_remote_prefill: bool):
     """P/D disaggregation: num_cached_tokens should report the P worker's
     cache hits (passed via kv_transfer_params) instead of the local count,
-    which sees the KVs pulled from the remote prefill as a ~100% hit."""
+    which sees the KVs pulled from the remote prefill as a ~100% hit.
+    """
     output_processor = OutputProcessor(tokenizer=None, log_stats=False)
 
     prompt_tokens = [1, 2, 3, 4, 5, 6, 7, 8]
