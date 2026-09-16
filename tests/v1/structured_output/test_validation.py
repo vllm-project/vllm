@@ -2,9 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Request-time validation of structured output requests."""
 
-import pytest
+import json
 
-from vllm.config import StructuredOutputsConfig
+import pytest
+from transformers import AutoTokenizer
+from xgrammar import Grammar
+from xgrammar.testing import _is_grammar_accept_string
+
+from vllm.config import ModelConfig, StructuredOutputsConfig
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.exceptions import VLLMClientError, VLLMValidationError
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 
@@ -24,6 +31,68 @@ JSON_SCHEMA = {
 class _StubModelConfig:
     def __init__(self, is_diffusion: bool):
         self.is_diffusion = is_diffusion
+
+
+@pytest.fixture(scope="module")
+def choice_request_context():
+    model = "openai-community/gpt2"
+    model_config = ModelConfig(
+        model=model,
+        dtype="float32",
+        max_model_len=64,
+        generation_config="vllm",
+    )
+    return model_config, AutoTokenizer.from_pretrained(model)
+
+
+@pytest.mark.parametrize(
+    "request_cls",
+    [CompletionRequest, ChatCompletionRequest],
+    ids=["completion", "chat"],
+)
+@pytest.mark.parametrize(
+    "choice",
+    [
+        pytest.param("yes", id="ascii"),
+        pytest.param("line1\nline2", id="newline"),
+        pytest.param("line1\rline2", id="carriage_return"),
+        pytest.param("left\x00right", id="nul"),
+        pytest.param("left\tright", id="tab"),
+        pytest.param('say "yes" \\ no', id="quote_and_backslash"),
+        pytest.param("你好", id="unicode"),
+        pytest.param("🙂", id="emoji"),
+    ],
+)
+def test_xgrammar_choice_request_preserves_literals(
+    choice_request_context, request_cls, choice
+):
+    model_config, tokenizer = choice_request_context
+    payload = {
+        "model": model_config.model,
+        "max_tokens": 8,
+        "structured_outputs": {"choice": [choice]},
+    }
+    if request_cls is CompletionRequest:
+        payload["prompt"] = "Reply with the exact option."
+    else:
+        payload["messages"] = [
+            {"role": "user", "content": "Reply with the exact option."}
+        ]
+    request = request_cls.model_validate_json(json.dumps(payload))
+    params = request.to_sampling_params(8, {})
+    assert params.structured_outputs.choice == [choice]
+
+    token_ids = tokenizer.encode(choice, add_special_tokens=False)
+    assert tokenizer.decode(token_ids, clean_up_tokenization_spaces=False) == choice
+
+    params.verify(
+        model_config, None, StructuredOutputsConfig(backend="xgrammar"), tokenizer
+    )
+    assert params.structured_outputs._backend == "xgrammar"
+    assert params.structured_outputs.choice is None
+    grammar = Grammar.from_ebnf(params.structured_outputs.grammar)
+    assert _is_grammar_accept_string(grammar, choice)
+    assert not _is_grammar_accept_string(grammar, choice + "!")
 
 
 def test_structured_outputs_rejected_for_diffusion_models():
