@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, delimited, eof, repeat, seq, terminated};
+use winnow::error::{ContextError, ErrMode, StrContext, StrContextValue};
 use winnow::prelude::*;
 use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until};
@@ -224,9 +225,16 @@ impl ToolParser for HyToolParser {
     }
 
     fn reset(&mut self) -> String {
+        let restore_tool_block_start =
+            matches!(self.mode, HyMode::ToolBlock { .. }) && self.emitted_tool_count == 0;
         self.mode = HyMode::Text;
         self.emitted_tool_count = 0;
-        std::mem::take(&mut self.buffer)
+        let buffer = std::mem::take(&mut self.buffer);
+        if restore_tool_block_start {
+            format!("{}{buffer}", self.markers.tool_calls_start)
+        } else {
+            buffer
+        }
     }
 }
 
@@ -307,10 +315,19 @@ fn tool_call_event(
     .parse_next(input)?;
     let mut body_input = body;
     let (name, params) = parse_tool_call_body(&mut body_input, markers, dialect)?;
+    let name = name.trim();
+    if name.is_empty() {
+        let mut error = ContextError::new();
+        error.push(StrContext::Label("HY function name"));
+        error.push(StrContext::Expected(StrContextValue::Description(
+            "non-empty function name",
+        )));
+        return Err(ErrMode::Cut(error));
+    }
     let raw_params = parse_tool_call_params(params, markers)?;
 
     Ok(HyEvent::ToolCall {
-        name: name.trim().to_string(),
+        name: name.to_string(),
         raw_params,
     })
 }
@@ -724,6 +741,18 @@ mod tests {
     }
 
     #[test]
+    fn hy_v3_whitespace_only_function_name_fails_fast() {
+        let mut parser = HyToolParser::new(&test_tools(), "", HyDialect::V3);
+        let error = parser
+            .parse_complete(
+                "<tool_calls><tool_call>  <tool_sep><arg_key>city</arg_key><arg_value>Beijing</arg_value></tool_call></tool_calls>",
+            )
+            .unwrap_err();
+
+        assert!(error.to_report_string().contains("non-empty function name"));
+    }
+
+    #[test]
     fn hy_v4_parse_complete_extracts_compact_calls_with_and_without_arguments() {
         let mut parser = HyToolParser::new(&test_tools(), "", HyDialect::V4);
         let output = parser
@@ -795,5 +824,17 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_report_string().starts_with("tool parser parsing failed:"));
+    }
+
+    #[test]
+    fn hy_v4_empty_function_name_fails_fast() {
+        let mut parser = HyToolParser::new(&test_tools(), "", HyDialect::V4);
+        let error = parser
+            .parse_complete(
+                "<tool_calls><tool_call><arg_key>city</arg_key><arg_value>Beijing</arg_value></tool_call></tool_calls>",
+            )
+            .unwrap_err();
+
+        assert!(error.to_report_string().contains("non-empty function name"));
     }
 }

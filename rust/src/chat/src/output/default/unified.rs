@@ -317,7 +317,9 @@ mod tests {
     use futures::{StreamExt as _, stream};
     use vllm_parser::reasoning::ReasoningError;
     use vllm_parser::tool::{Tool, ToolCallDelta};
-    use vllm_parser::unified::{Gemma4UnifiedParser, UnifiedParserError, UnifiedParserOutput};
+    use vllm_parser::unified::{
+        Gemma4UnifiedParser, HyV4UnifiedParser, UnifiedParserError, UnifiedParserOutput,
+    };
     use vllm_text::DecodedText;
     use vllm_tokenizer::test_utils::TestTokenizer;
     use vllm_tokenizer::{TokenAnchor, TokenAttribution};
@@ -926,6 +928,62 @@ mod tests {
                     kind: AssistantBlockKind::Text,
                     delta: "<|tool_call>call:write_file{content:<|\"|>hello world<|\"|>"
                         .to_string(),
+                    token_count: None,
+                },
+                AssistantEvent::Done {
+                    usage: done_usage(0),
+                    finish_reason: crate::FinishReason::Stop(None),
+                    kv_transfer_params: None,
+                    ec_transfer_params: None,
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn unified_stream_falls_back_for_hy_v4_empty_function_name() {
+        let tokenizer = [
+            "<think>",
+            "</think>",
+            "<tool_calls>",
+            "</tool_calls>",
+            "<tool_call>",
+            "</tool_call>",
+            "<arg_key>",
+            "</arg_key>",
+            "<arg_value>",
+            "</arg_value>",
+        ]
+        .into_iter()
+        .enumerate()
+        .fold(TestTokenizer::new(), |tokenizer, (index, token)| {
+            tokenizer.with_regular_token(token, 1000 + index as u32)
+        });
+        let tools = vec![Tool {
+            name: "get_weather".to_string(),
+            description: None,
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "city": { "type": "string" } }
+            }),
+            strict: None,
+        }];
+        let parser = HyV4UnifiedParser::new(&tools, Arc::new(tokenizer)).unwrap();
+        let raw = "<tool_calls><tool_call><arg_key>city</arg_key><arg_value>Beijing</arg_value></tool_call></tool_calls>";
+        let stream = stream::iter([finished_delta(raw)].into_iter().map(Ok));
+        let events = unified_event_stream(stream, Box::new(parser))
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<crate::Result<Vec<_>>>()
+            .unwrap();
+
+        assert_eq!(
+            events,
+            vec![
+                AssistantEvent::TextDelta {
+                    kind: AssistantBlockKind::Text,
+                    delta: raw.to_string(),
                     token_count: None,
                 },
                 AssistantEvent::Done {
