@@ -137,7 +137,7 @@ def test_unsupported_grammar_is_a_client_error(backend, structured_outputs):
 @pytest.mark.parametrize(
     "schema, expected_backend",
     [
-        # multipleOf is unsupported by xgrammar, patternProperties also by guidance.
+        # multipleOf is unsupported by xgrammar.
         (
             {
                 "type": "object",
@@ -145,8 +145,13 @@ def test_unsupported_grammar_is_a_client_error(backend, structured_outputs):
             },
             "guidance",
         ),
+        # patternProperties + properties is also unsupported by guidance.
         (
-            {"type": "object", "patternProperties": {"^a": {"type": "string"}}},
+            {
+                "type": "object",
+                "properties": {"a": {"type": "string"}},
+                "patternProperties": {"^a$": {"type": "string"}},
+            },
             "outlines",
         ),
     ],
