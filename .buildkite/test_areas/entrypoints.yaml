@@ -176,6 +176,18 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/speech_to_text
+  mirror:
+    amd:
+      label: ":amd: (MI355) Entrypoints Integration (Speech to Text)"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 50
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/
+      - tests/entrypoints/speech_to_text
 
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (Multimodal)"
   device: h200_35gb
@@ -210,6 +222,18 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/pooling
+  mirror:
+    amd:
+      label: ":amd: (MI355) Entrypoints Integration (Pooling)"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 55
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/
+      - tests/entrypoints/pooling
 
 - label: ":nvidia: (H200 MIG 18GB) OpenAI API Correctness"
   key: openai-api-correctness

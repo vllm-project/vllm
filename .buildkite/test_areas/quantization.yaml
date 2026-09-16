@@ -20,6 +20,31 @@ steps:
   # The SM90-only checkpoint currently contains a removed weight_chan_scale
   # parameter. It was not exercised by the previous L4 job.
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py -k 'not test_compressed_tensors_w4a8_fp8' --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  mirror:
+    amd:
+      label: ":amd: (MI355) Quantization Shard %N"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 80
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/
+      - vllm/model_executor/layers/quantization
+      - tests/quantization
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      - vllm/model_executor/layers/fused_moe/oracle/unquantized.py
+      - vllm/model_executor/layers/fused_moe/unquantized_fused_moe_method.py
+      - tests/rocm/test_moe_weight_replay.py
+      commands:
+      # Use the ROCm default instead of the NVIDIA runner override.
+      - unset VLLM_USE_V2_MODEL_RUNNER
+      - uv pip install --system torchao==0.17.0
+      - uv pip install --system conch-triton-kernels
+      - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+      - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s rocm/test_moe_weight_replay.py; fi
 
 - label: ":nvidia: (H200 MIG 35GB) Quantized Fusions"
   device: h200_35gb
@@ -63,3 +88,22 @@ steps:
   - tests/models/quantization
   commands:
     - pytest -v -s models/quantization
+  mirror:
+    amd:
+      label: ":amd: (MI355) Quantized Models"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 50
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/model_executor/layers/quantization
+      - tests/models/quantization
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      - vllm/model_executor/model_loader/
+      commands:
+      # Use the ROCm default instead of the NVIDIA runner override.
+      - unset VLLM_USE_V2_MODEL_RUNNER
+      - pytest -v -s models/quantization
