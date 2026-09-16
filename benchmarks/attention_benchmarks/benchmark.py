@@ -1323,6 +1323,9 @@ def main():
             "ncu_profile": args.ncu_profile,
             "warmup_ms": args.warmup_ms,
             "num_splits": args.num_splits,
+            "kv_lora_rank": args.kv_lora_rank,
+            "qk_nope_head_dim": args.qk_nope_head_dim,
+            "qk_rope_head_dim": args.qk_rope_head_dim,
         }
         all_results = run_parameter_sweep(
             backends, args.batch_specs, base_config_args, args.parameter_sweep, console
@@ -1357,6 +1360,9 @@ def main():
                             ncu_profile=args.ncu_profile,
                             warmup_ms=args.warmup_ms,
                             num_splits=args.num_splits,
+                            kv_lora_rank=getattr(args, "kv_lora_rank", None),
+                            qk_nope_head_dim=getattr(args, "qk_nope_head_dim", None),
+                            qk_rope_head_dim=getattr(args, "qk_rope_head_dim", None),
                         )
 
                         result = run_benchmark(config)
