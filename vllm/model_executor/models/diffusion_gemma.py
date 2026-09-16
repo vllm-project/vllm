@@ -386,6 +386,7 @@ def _compiled_sample_step(
     normalizer: torch.Tensor,
     history: torch.Tensor,  # [max_num_reqs, ST, CL]
     history_len_tensor: torch.Tensor,  # [max_num_reqs]
+    max_steps_tensor: torch.Tensor,  # [max_num_reqs] float, per-slot step cap
     # Output tensors (modified in-place)
     sampled: torch.Tensor,  # [num_reqs, CL]
     num_sampled: torch.Tensor,  # [num_reqs]
@@ -518,7 +519,7 @@ def _compiled_sample_step(
 
     step_after = step_tensor[decode_slots]
     converged = (stable & confident_tensor[decode_slots] & (new_hist_len >= ST)) | (
-        step_after >= max_denoising_steps
+        step_after.float() >= max_steps_tensor[decode_slots]
     )
     # Commit done → denoise next (False); denoise converged → commit next (True)
     is_encoder_phase[decode_slots] = torch.where(
@@ -623,6 +624,16 @@ class DiffusionGemmaRequestStates:
         # Per-slot confidence flag, set by the sampler each step.
         self.confident = torch.zeros(max_num_reqs, dtype=torch.bool, device=device)
 
+        # Per-slot denoising step cap (structured reads run 1). Defaults to the
+        # global max; the sampler's add_request lowers it from extra_args.
+        self.max_steps = torch.full(
+            (max_num_reqs,), float(max_denoising_steps), dtype=torch.float32, device=device
+        )
+        # Seeded initial canvases, by slot, applied when the prompt finishes.
+        self.seed_canvas: dict[int, list[int]] = {}
+        # Read-only slots finish on their converging step (no commit forward).
+        self.read_only = torch.zeros(max_num_reqs, dtype=torch.bool, device=device)
+
         # Per-slot self-conditioning soft embedding (probs @ embed_weight) from
         # the previous denoise step. Storing the [.., hidden] soft embed instead
         # of the full [.., vocab] distribution shrinks this buffer by
@@ -652,11 +663,15 @@ class DiffusionGemmaRequestStates:
         self.step[slot_idx].fill_(0)
         self.accepted_canvas_history_len[slot_idx].fill_(0)
         self.self_conditioning_embeds[slot_idx] = 0
+        self.max_steps[slot_idx].fill_(float(self.max_denoising_steps))
+        self.seed_canvas.pop(slot_idx, None)
+        self.read_only[slot_idx].fill_(False)
 
     def remove_request(self, slot_idx: int) -> None:
         self.is_encoder_phase[slot_idx].fill_(False)
         self.accepted_canvas_history_len[slot_idx].fill_(0)
         self.self_conditioning_embeds[slot_idx] = 0
+        self.seed_canvas.pop(slot_idx, None)
 
 
 class DiffusionGemmaModelState(ModelState):
@@ -1025,6 +1040,20 @@ class DiffusionSampler:
         self._pending_logprobs.pop(req_idx, None)
         self.sampling_states.add_request(req_idx, sampling_params)
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)
+        extra = getattr(sampling_params, "extra_args", None) or {}
+        states = self.diffusion_states
+        cap = extra.get("diffusion_max_steps")
+        if cap is not None:
+            states.max_steps[req_idx].fill_(float(max(1, min(int(cap), states.max_denoising_steps))))
+        canvas = extra.get("diffusion_seed_canvas")
+        if canvas is not None:
+            if len(canvas) != self.canvas_length:
+                raise ValueError(
+                    f"diffusion_seed_canvas must hold exactly {self.canvas_length} ids, got {len(canvas)}"
+                )
+            states.seed_canvas[req_idx] = [int(t) for t in canvas]
+        if extra.get("diffusion_read_only"):
+            states.read_only[req_idx].fill_(True)
 
     def apply_staged_writes(self) -> None:
         self.sampling_states.apply_staged_writes()
@@ -1066,6 +1095,12 @@ class DiffusionSampler:
             ps.astype(np.int64), device=states.is_encoder_phase.device
         )
         states.init_canvas(ps_gpu)
+        for slot in ps.tolist():
+            seed = states.seed_canvas.get(int(slot))
+            if seed is not None:
+                states.canvas[slot] = torch.tensor(
+                    seed, dtype=states.canvas.dtype, device=states.canvas.device
+                )
         self.req_states.draft_tokens[ps_gpu, : self.canvas_length] = states.canvas[
             ps_gpu
         ]
@@ -1258,6 +1293,7 @@ class DiffusionSampler:
                 self.normalizer,
                 states.accepted_canvas_history,
                 states.accepted_canvas_history_len,
+                states.max_steps,
                 # Output
                 sampled,
                 num_sampled,
@@ -1316,13 +1352,33 @@ class DiffusionSampler:
                             logits_mode=self.logits_mode,
                         )
 
+        # Read-only slots that converged this step: emit the argmax canvas now
+        # (as a commit would), keep them out of the encoder phase, and hand out
+        # their logprobs below. The request ends on these tokens.
+        emit_now: set[int] = set()
+        if num_decode > 0:
+            ro_mask = states.read_only[decode_slots] & states.is_encoder_phase[
+                decode_slots
+            ] & ~is_committing
+            if bool(ro_mask.any()):
+                ro_idx = decode_idx[ro_mask]
+                ro_slots = decode_slots[ro_mask]
+                sampled[ro_idx] = states.argmax_canvas[ro_slots].to(sampled.dtype)
+                num_sampled[ro_idx] = valid_canvas_len[ro_mask].to(num_sampled.dtype)
+                states.is_encoder_phase[ro_slots] = False
+                emit_now = set(ro_slots.tolist())
+
         # Commit steps: is_committing was True at entry. Reassemble previously
         # stashed logprobs and attach to SamplerOutput.
         logprobs_tensors = None
-        if want_logprobs and is_committing.any() and self._pending_logprobs:
+        if (
+            want_logprobs
+            and (emit_now or bool(is_committing.any()))
+            and self._pending_logprobs
+        ):
             committing_slots = set(
                 decode_slots_np[is_committing.cpu().numpy()].tolist()
-            )
+            ) | emit_now
             parts_ids, parts_lp, parts_ranks = [], [], []
             cu_gen: list[int] = []
             flat_offset = 0
