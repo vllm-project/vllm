@@ -155,7 +155,6 @@ def create_scheduler(
     vllm_config: VllmConfig,
     num_blocks: int = 10000,
     kv_cache_config: KVCacheConfig | None = None,
-    hash_block_size: int | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Initialize Scheduler For Testing."""
     block_size = vllm_config.cache_config.block_size
@@ -186,7 +185,6 @@ def create_scheduler(
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
         block_size=block_size,
-        hash_block_size=hash_block_size,
     )
 
 
@@ -263,7 +261,6 @@ def create_model_runner_output(
     kv_connector_worker_meta: KVConnectorWorkerMetadata | None = None,
 ) -> ModelRunnerOutput:
     """Make dummy model runner output for testing."""
-
     # Make request data.
     req_ids = [req.request_id for req in reqs]
     req_id_to_index = {req_id: idx for idx, req_id in enumerate(req_ids)}

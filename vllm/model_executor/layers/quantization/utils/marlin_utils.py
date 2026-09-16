@@ -397,8 +397,7 @@ def check_moe_marlin_supports_layer(
 
 
 def marlin_moe_intermediate_size(w1_packed: torch.Tensor, w2_packed: torch.Tensor):
-    """
-    Given Marlin packed weight matrices w1_packed, and w2_packed,
+    """Given Marlin packed weight matrices w1_packed, and w2_packed,
     return the MoE intermediate size N
     """
     marlin_tile_size = 16

@@ -728,7 +728,6 @@ def h_cutedsl(
     num_stages: int = 2,
 ) -> None:
     """Compute H/V_new with the same argument order as the CUDA wrapper."""
-
     _, H, K_dim = K.shape
     _, Hv, V_dim = V.shape
     h_dtype = {

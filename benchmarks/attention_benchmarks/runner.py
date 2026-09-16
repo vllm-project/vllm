@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Standard attention benchmark runner - shared utilities for non-MLA benchmarks.
+"""Standard attention benchmark runner - shared utilities for non-MLA benchmarks.
 
 This module provides helpers for running standard attention backends
 (FlashAttention, Triton, FlashInfer) with real vLLM integration.
@@ -57,8 +56,7 @@ from vllm.v1.kv_cache_interface import (
 
 
 def _get_backend_config(backend: str) -> dict:
-    """
-    Get backend configuration from AttentionBackendEnum.
+    """Get backend configuration from AttentionBackendEnum.
 
     Args:
         backend: Backend name matching AttentionBackendEnum exactly
@@ -66,6 +64,7 @@ def _get_backend_config(backend: str) -> dict:
 
     Returns:
         Dict with backend_class
+
     """
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -409,6 +408,7 @@ def _run_single_benchmark(
     Returns:
         (timing_stats, mem_stats) where timing_stats is a dict with
         mean/std/min/max in seconds per layer.
+
     """
     total_q = q_list[0].shape[0]
     v_dim = config.v_head_dim if config.v_head_dim is not None else config.head_dim
@@ -458,8 +458,7 @@ def _run_single_benchmark(
 
 
 def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
-    """
-    Run standard attention benchmark with real kernels.
+    """Run standard attention benchmark with real kernels.
 
     Supports: FLASH_ATTN, TRITON_ATTN, FLASHINFER
 
@@ -468,6 +467,7 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
 
     Returns:
         BenchmarkResult with timing and memory statistics
+
     """
     device = torch.device(config.device)
     torch.accelerator.set_device_index(device)
