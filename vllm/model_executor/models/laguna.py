@@ -516,7 +516,10 @@ class LagunaDecoderLayer(nn.Module):
             ),
         )
 
-        self.is_moe_layer = get_mlp_layer_types(config)[layer_idx] == "sparse"
+        self.is_moe_layer = (
+            get_mlp_layer_types(config)[layer_idx] == "sparse"
+            and config.num_experts > 0
+        )
 
         if self.is_moe_layer:
             self.mlp = LagunaMoE(
