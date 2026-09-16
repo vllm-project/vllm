@@ -659,9 +659,9 @@ class Dots3NoteTritonMLAImpl(TritonMLAImpl):
             )
             apply_lora = getattr(kv_b_proj_lora, "apply_mla_kv_b_lora_linear", None)
             if apply_lora is not None and request_lora_mapping is not None:
-                context_lora_mapping = request_lora_mapping[chunk.request_slice][
-                    chunk.token_to_seq[:toks].long()
-                ]
+                context_lora_mapping = request_lora_mapping[
+                    chunk.req_start : chunk.req_end
+                ][chunk.token_to_seq[:toks].long()]
                 apply_lora(kv_c, kv_nope, context_lora_mapping)
             if use_fp8_prefill:
                 kv_nope = kv_nope.to(prefill.q_data_type)
