@@ -545,6 +545,17 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 "in prefix caching instead."
             )
             swa_bounded_replay = False
+
+        # Determine block_size based on GPU architecture for SM120/121 support.
+        # Defaults to 32 if platform info is unavailable (e.g., non-GPU CI).
+        try:
+            is_sm120_or_sm121 = current_platform.is_device_capability_family(
+                120
+            ) or current_platform.is_device_capability_family(121)
+            swa_block_size = 64 if is_sm120_or_sm121 else 32
+        except (AttributeError, RuntimeError):
+            # Fallback for non-GPU environments or when platform is unavailable
+            swa_block_size = 32
         self.swa_cache_layer = DeepseekV4SWACache(
             head_dim=self.head_dim,
             window_size=self.window_size,
@@ -552,7 +563,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             prefix=f"{prefix}.swa_cache",
             cache_config=cache_config,
             backend_cls=self.swa_backend_cls,
-            block_size=32,
+            block_size=swa_block_size,
             packed_bytes_per_token=self.swa_bytes_per_token,
             packed_page_alignment=self.kv_page_alignment,
             bounded_replay=swa_bounded_replay,
@@ -1109,8 +1120,27 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # to the decode kernel's TMA stride; plain bf16 / per-tensor fp8 rows
         # use natural element-size pages.
         uses_fp8_ds_mla_layout = self.kv_cache_dtype in ("fp8_ds_mla", "nvfp4_ds_mla")
+        spec_block_size = vllm_config.cache_config.block_size * max(
+            1, self.compress_ratio
+        )
+        try:
+            is_sm120_or_sm121 = current_platform.is_device_capability_family(
+                120
+            ) or current_platform.is_device_capability_family(121)
+        except (AttributeError, RuntimeError):
+            is_sm120_or_sm121 = False
+
+        if is_sm120_or_sm121:
+            states_per_page = spec_block_size // max(1, self.compress_ratio)
+            if states_per_page != 64:
+                raise ValueError(
+                    f"SM120/SM121 requires 64 states per page for compressed-KV "
+                    f"spec, but got {states_per_page} (block_size={spec_block_size}, "
+                    f"compress_ratio={self.compress_ratio})."
+                )
+
         return MLAAttentionSpec(
-            block_size=vllm_config.cache_config.block_size,
+            block_size=spec_block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=torch.uint8 if uses_fp8_ds_mla_layout else self.kv_cache_torch_dtype,
@@ -1175,8 +1205,25 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
         page_alignment = (
             576 if uses_fp8_ds_mla_layout and not _use_v41_mxfp8_kv_record() else 512
         )
+        spec_block_size = self.cache_config.block_size * max(1, self.compress_ratio)
+        try:
+            is_sm120_or_sm121 = current_platform.is_device_capability_family(
+                120
+            ) or current_platform.is_device_capability_family(121)
+        except (AttributeError, RuntimeError):
+            is_sm120_or_sm121 = False
+
+        if is_sm120_or_sm121:
+            states_per_page = spec_block_size // max(1, self.compress_ratio)
+            if states_per_page != 64:
+                raise ValueError(
+                    f"SM120/SM121 requires 64 states per page for indexer "
+                    f"spec, but got {states_per_page} (block_size={spec_block_size}, "
+                    f"compress_ratio={self.compress_ratio})."
+                )
+
         return MLAAttentionSpec(
-            block_size=self.cache_config.block_size,
+            block_size=spec_block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
