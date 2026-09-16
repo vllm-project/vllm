@@ -401,7 +401,7 @@ class MooncakeEngramBackend:
                     config.table_vocab_sizes = list(layer.head_sizes)
                     config.row_bytes = layer.row_bytes
                     configs[layer.store_layer_id] = config
-                table = EngramStore(configs, store=store)
+                table = EngramStore(configs, store_client=store)
                 keys = [
                     key
                     for layer in self._ordered_layers()
