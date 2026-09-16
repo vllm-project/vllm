@@ -83,7 +83,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s models/language/generation -m hybrid_model -k not granite-4.0-tiny-preview --deselect="tests/models/language/generation/test_hybrid.py::test_mamba_cache_cg_padding[SD-20-ai21labs/Jamba-tiny-dev]" --deselect="tests/models/language/generation/test_hybrid.py::test_mamba_cache_cg_padding[SD-20-state-spaces/mamba-130m-hf]" --deselect="tests/models/language/generation/test_hybrid.py::test_chunked_prefill_with_parallel_sampling[DS-10-ai21labs/Jamba-tiny-dev]" --deselect="tests/models/language/generation/test_hybrid.py::test_mamba_cache_cg_padding[DS-20-state-spaces/mamba-130m-hf]" --deselect="tests/models/language/generation/test_hybrid.py::test_mamba_cache_cg_padding[DS-20-ai21labs/Jamba-tiny-dev]" --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
+    pytest -v -s models/language/generation -m hybrid_model -k not granite-4.0-tiny-preview --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
 - label: ':nvidia: (L4) Granite Language Model Compatibility'
   key: language-models-tests-granite-l4-compatibility
   device: intel_gpu
