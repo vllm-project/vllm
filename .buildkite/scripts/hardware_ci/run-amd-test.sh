@@ -34,6 +34,9 @@
 ###############################################################################
 set -o pipefail
 
+# shellcheck source=.buildkite/scripts/rocm/build-config.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../rocm/build-config.sh" || exit $?
+
 : "${BUILDKIT_PROGRESS:=plain}"
 : "${TERM:=xterm-256color}"
 : "${FORCE_COLOR:=1}"
@@ -106,6 +109,10 @@ clear_ci_orchestration_env() {
     VLLM_CI_REQUIRE_WORKSPACE_MOUNT \
     VLLM_TEST_COMMANDS \
     VLLM_CI_BRANCH \
+    CI_ROCM_DOCKERFILE_BASE \
+    CI_ROCM_DOCKERFILE \
+    ROCM_BASE_DOCKERFILE \
+    CI_BASE_DOCKERFILE \
     VLLM_CI_BASE_IMAGE \
     VLLM_CI_FALLBACK_IMAGE \
     VLLM_CI_DOCKER_DISABLED \
@@ -225,6 +232,9 @@ prepare_artifact_image() {
   metadata_file=$(find "${artifact_work_dir}" -name "ci-base-image.txt" -type f | head -1)
   if [[ -n "${metadata_file}" && -s "${metadata_file}" ]]; then
     base_image=$(tr -d '[:space:]' < "${metadata_file}")
+  elif using_custom_rocm_dockerfiles; then
+    echo "Custom ROCm ci_base metadata is missing; using the full CI image"
+    return 1
   fi
 
   echo "--- Preparing local ROCm test image"
