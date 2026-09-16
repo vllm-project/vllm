@@ -78,8 +78,8 @@ def backend_to_kernel_cls(
         )
 
         return [
-            PowerCPUExpertsInt8,
             ZenCPUExpertsInt8,
+            PowerCPUExpertsInt8,
             ArmCPUExpertsInt8,
             CPUExpertsInt8,
         ]
