@@ -25,10 +25,13 @@ use crate::protocol::tensor::{WireArrayData, WireNdArray};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TokenLogprob {
     pub token_id: u32,
+    /// Preserves the engine's value, including NaN and infinities.
     pub logprob: f32,
     /// The sampled/selected token uses its actual vocab rank. Remaining entries
     /// use 1-based top-k ranks matching the engine's returned candidate
     /// order.
+    /// A sampled/selected rank of 0 occurs when its logprob is NaN: the engine's
+    /// `(logprobs >= selected_logprob).sum(-1)` counts no matching values.
     pub rank: u32,
 }
 
@@ -53,28 +56,12 @@ impl PositionLogprobs {
                 logprobs.len()
             );
         }
-        // Rank 0 is not a protocol violation. The sampler computes the rank as
-        // `(logprobs >= sampled_logprob).sum(-1)`, which is 0 when the sampled
-        // logprob is NaN because every comparison against NaN is false. Corrupt
-        // logits are a per-request model-quality problem, so clamp to the
-        // lowest valid rank rather than failing this engine-core frame and, with
-        // it, every co-scheduled request.
-        let sampled_rank = sampled_rank.max(1);
-
         let mut entries = Vec::with_capacity(token_ids.len());
         for (index, (&token_id, &logprob)) in token_ids.iter().zip(logprobs.iter()).enumerate() {
             let rank = if index == 0 {
                 sampled_rank
             } else {
                 index as u32
-            };
-            // Map non-finite logprobs (from corrupt logits) to the same -9999.0
-            // sentinel the Python frontend uses, so the serving layer can still
-            // serialize the response.
-            let logprob = if logprob.is_finite() {
-                logprob
-            } else {
-                -9999.0
             };
             entries.push(TokenLogprob {
                 token_id,

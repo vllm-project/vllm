@@ -421,31 +421,6 @@ fn logprobs_value(ids: &[i64], probs: &[f32], ranks: &[i64]) -> Value {
 }
 
 #[test]
-fn clamps_zero_sampled_rank_to_one() {
-    // Rank 0 is legitimate engine output when the sampled logprob is NaN:
-    // `(logprobs >= sampled_logprob).sum(-1)` is 0 because every comparison
-    // against NaN is false. It must not fail the row.
-    let position = PositionLogprobs::from_decoded_row(&[1, 2], &[0.5, 0.25], 0).unwrap();
-    assert_eq!(
-        position,
-        PositionLogprobs {
-            entries: vec![
-                TokenLogprob {
-                    token_id: 1,
-                    logprob: 0.5,
-                    rank: 1,
-                },
-                TokenLogprob {
-                    token_id: 2,
-                    logprob: 0.25,
-                    rank: 1,
-                },
-            ],
-        }
-    );
-}
-
-#[test]
 fn zero_sampled_rank_does_not_fail_frame_mates() {
     // A batched EngineCoreOutputs frame where one request's row has rank 0
     // must still resolve; the other requests' logprobs stay intact.
@@ -455,15 +430,15 @@ fn zero_sampled_rank_does_not_fail_frame_mates() {
             Value::Array(vec![
                 Value::from("req-nan"),
                 Value::Array(vec![Value::from(7), Value::from(8)]),
-                logprobs_value(&[1, 2], &[f32::NAN, 0.25], &[0]),
-                Value::Nil,
+                logprobs_value(&[1, 2], &[f32::NAN, f32::NEG_INFINITY], &[0]),
+                logprobs_value(&[7, 8], &[f32::NAN, f32::NEG_INFINITY], &[0]),
                 Value::Nil,
                 Value::from(EngineCoreFinishReason::Length as u8),
             ]),
             Value::Array(vec![
                 Value::from("req-ok"),
                 Value::Array(vec![Value::from(9)]),
-                logprobs_value(&[3, 4], &[3.0, 4.0], &[7]),
+                logprobs_value(&[3, 4], &[-3.0, -0.5], &[7]),
                 Value::Nil,
                 Value::Nil,
                 Value::from(EngineCoreFinishReason::Length as u8),
@@ -476,56 +451,66 @@ fn zero_sampled_rank_does_not_fail_frame_mates() {
     ])))];
     let decoded = decode_engine_core_outputs(&frames).unwrap().into_request_batch().unwrap();
 
-    let bad = decoded.outputs[0].new_logprobs.clone().unwrap().into_direct().unwrap();
-    assert_eq!(
-        bad,
-        Logprobs {
-            positions: vec![PositionLogprobs {
-                entries: vec![
-                    TokenLogprob {
-                        token_id: 1,
-                        logprob: -9999.0,
-                        rank: 1,
-                    },
-                    TokenLogprob {
-                        token_id: 2,
-                        logprob: 0.25,
-                        rank: 1,
-                    },
-                ],
-            }],
-        }
-    );
-
-    let good = decoded.outputs[1].new_logprobs.clone().unwrap().into_direct().unwrap();
-    assert_eq!(
-        good,
-        Logprobs {
-            positions: vec![PositionLogprobs {
-                entries: vec![
-                    TokenLogprob {
-                        token_id: 3,
-                        logprob: 3.0,
-                        rank: 7,
-                    },
-                    TokenLogprob {
-                        token_id: 4,
-                        logprob: 4.0,
-                        rank: 1,
+    let bad = decoded.outputs[0].new_logprobs.as_ref().unwrap();
+    let prompt = decoded.outputs[0].new_prompt_logprobs_tensors.as_ref().unwrap();
+    let good = decoded.outputs[1].new_logprobs.as_ref().unwrap();
+    expect_test::expect![[r#"
+        (
+            Logprobs {
+                positions: [
+                    PositionLogprobs {
+                        entries: [
+                            TokenLogprob {
+                                token_id: 1,
+                                logprob: NaN,
+                                rank: 0,
+                            },
+                            TokenLogprob {
+                                token_id: 2,
+                                logprob: -inf,
+                                rank: 1,
+                            },
+                        ],
                     },
                 ],
-            }],
-        }
-    );
-}
-
-#[test]
-fn maps_non_finite_logprobs_to_sentinel() {
-    let position =
-        PositionLogprobs::from_decoded_row(&[1, 2, 3], &[f32::NAN, f32::INFINITY, -1.0], 5)
-            .unwrap();
-    assert_eq!(position.entries[0].logprob, -9999.0);
-    assert_eq!(position.entries[1].logprob, -9999.0);
-    assert_eq!(position.entries[2].logprob, -1.0);
-    assert_eq!(position.entries[0].rank, 5);
+            },
+            Logprobs {
+                positions: [
+                    PositionLogprobs {
+                        entries: [
+                            TokenLogprob {
+                                token_id: 7,
+                                logprob: NaN,
+                                rank: 0,
+                            },
+                            TokenLogprob {
+                                token_id: 8,
+                                logprob: -inf,
+                                rank: 1,
+                            },
+                        ],
+                    },
+                ],
+            },
+            Logprobs {
+                positions: [
+                    PositionLogprobs {
+                        entries: [
+                            TokenLogprob {
+                                token_id: 3,
+                                logprob: -3.0,
+                                rank: 7,
+                            },
+                            TokenLogprob {
+                                token_id: 4,
+                                logprob: -0.5,
+                                rank: 1,
+                            },
+                        ],
+                    },
+                ],
+            },
+        )
+    "#]]
+    .assert_debug_eq(&(&**bad, &**prompt, &**good));
 }
