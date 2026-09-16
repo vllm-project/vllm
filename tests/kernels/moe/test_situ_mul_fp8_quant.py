@@ -5,7 +5,7 @@ quant kernel (``situ_and_mul_quant``).
 
 Mirrors ``test_silu_mul_fp8_quant_deep_gemm.py`` in structure: build a reference
 activation + block-FP8 quant, drive random per-row scale magnitudes, exercise
-the masked (``valid_rows``) contiguous layout, and compare per valid row.
+the masked contiguous layout, and compare per valid row.
 
 The kernel computes SITU in fp32 and converts to fp8 with hardware rounding,
 which torch cannot reproduce bit-exactly. It is therefore validated against the
@@ -40,7 +40,7 @@ SITU_LINEAR_BETA = 25.0
 SITU_D = 3072
 GROUP_SIZE = 128
 
-# (num_tokens, valid_rows). valid_rows=None => all rows valid. 2048/4096 rows
+# (num_tokens, num_valid_tokens). None means all rows are valid. 2048/4096 rows
 # span multiple grid-stride waves of the persistent grid (GRID_DIM = 132*8).
 CASES = [
     (1, None),
@@ -111,7 +111,7 @@ def test_situ_and_mul_quant_pipelined(
         (num_tokens, d // GROUP_SIZE), -1.0, dtype=torch.float32, device=DEVICE
     )
     out_sentinel = out.clone()
-    valid_rows = (
+    num_valid_tokens = (
         None if valid is None else torch.tensor(valid, dtype=torch.int32, device=DEVICE)
     )
 
@@ -122,7 +122,7 @@ def test_situ_and_mul_quant_pipelined(
         beta=SITU_BETA,
         linear_beta=SITU_LINEAR_BETA,
         group_size=GROUP_SIZE,
-        valid_rows=valid_rows,
+        num_valid_tokens=num_valid_tokens,
     )
 
     # Padding contract: skipped rows keep their bytes; their scale becomes 1.0.
@@ -157,7 +157,7 @@ def test_situ_and_mul_quant_pipelined(
 @pytest.mark.parametrize("tokens,topk", [(300, 8), (1, 4), (256, 6)])
 @torch.inference_mode()
 def test_situ_and_mul_quant_topk_row_bound(tokens: int, topk: int) -> None:
-    """valid_rows is a token count; the kernel bounds rows at tokens*topk."""
+    """The kernel expands num_valid_tokens by topk to bound rows."""
     set_random_seed(7)
     d = SITU_D
     num_tokens = tokens * topk + 37  # padding tail past the valid rows
@@ -168,7 +168,7 @@ def test_situ_and_mul_quant_topk_row_bound(tokens: int, topk: int) -> None:
         (num_tokens, d // GROUP_SIZE), -1.0, dtype=torch.float32, device=DEVICE
     )
     out_sentinel = out.clone()
-    valid_rows = torch.tensor(tokens, dtype=torch.int32, device=DEVICE)
+    num_valid_tokens = torch.tensor(tokens, dtype=torch.int32, device=DEVICE)
 
     situ_and_mul_quant(
         out,
@@ -177,7 +177,7 @@ def test_situ_and_mul_quant_topk_row_bound(tokens: int, topk: int) -> None:
         beta=SITU_BETA,
         linear_beta=SITU_LINEAR_BETA,
         group_size=GROUP_SIZE,
-        valid_rows=valid_rows,
+        num_valid_tokens=num_valid_tokens,
         topk=topk,
     )
 
