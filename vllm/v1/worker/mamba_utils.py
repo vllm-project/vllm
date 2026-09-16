@@ -26,8 +26,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.utils import CpuGpuBuffer
-from vllm.v1.worker.gpu_input_batch import CachedRequestState
-from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
+from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 logger = init_logger(__name__)
 
@@ -1436,7 +1435,7 @@ def preprocess_mamba(
     kv_cache_config: KVCacheConfig,
     cache_config: CacheConfig,
     mamba_state_idx: dict[str, int],
-    input_batch: GPUInputBatch,
+    input_batch: InputBatch,
     requests: dict[str, CachedRequestState],
     forward_context: dict[str, Any],
     mamba_state_copy_funcs: MambaStateCopyFuncsByType,
@@ -1541,7 +1540,7 @@ def preprocess_mamba(
 def postprocess_mamba_all(
     scheduler_output: SchedulerOutput,
     kv_cache_config: KVCacheConfig,
-    input_batch: GPUInputBatch,
+    input_batch: InputBatch,
     requests: dict[str, CachedRequestState],
     mamba_state_idx: dict[str, int],
     num_spec_tokens: int,
@@ -1572,7 +1571,7 @@ def postprocess_mamba_all(
 
 def preprocess_mamba_all_specdec(
     scheduler_output: SchedulerOutput,
-    input_batch: GPUInputBatch,
+    input_batch: InputBatch,
     mamba_state_idx: dict[str, int],
     num_reqs: int,
     prev_last_scheduled_idx_buf: CpuGpuBuffer,
@@ -1591,7 +1590,7 @@ def postprocess_mamba_align_gpu(
     num_reqs: int,
     num_accepted_tokens_gpu: torch.Tensor,
     num_accepted_tokens_cpu_tensor: torch.Tensor,
-    input_batch: GPUInputBatch,
+    input_batch: InputBatch,
     kv_cache_config: KVCacheConfig,
     forward_context: dict[str, Any],
     mamba_state_copy_funcs: MambaStateCopyFuncsByType,
