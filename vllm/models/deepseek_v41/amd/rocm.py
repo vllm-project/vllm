@@ -636,7 +636,8 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             transpose_scale=False,
         )
 
-    def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+    def _o_proj(self, attn_out: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        o = attn_out[:, : self.n_local_heads, :]
         # ROCm BF16 reference wo_a path (inverse RoPE + einsum) + wo_b.
         z = rocm_inv_rope_einsum(
             self.rotary_emb,

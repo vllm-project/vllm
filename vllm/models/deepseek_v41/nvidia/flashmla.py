@@ -58,7 +58,8 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             self._o_proj_block_size
         )
 
-    def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+    def _o_proj(self, attn_out: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        o = attn_out[:, : self.n_local_heads, :]
         return deep_gemm_fp8_o_proj(
             o,
             positions,

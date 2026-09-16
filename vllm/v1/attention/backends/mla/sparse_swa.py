@@ -112,7 +112,10 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
         # fp8_ds_mla's UE8M0 paged layout rounds its page up to the decode
         # kernel's TMA stride; contiguous bf16/fp8 cache uses the natural
         # element-size page.
-        uses_fp8_ds_mla_layout = self.cache_config.cache_dtype == "fp8_ds_mla"
+        uses_fp8_ds_mla_layout = self.cache_config.cache_dtype in (
+            "fp8_ds_mla",
+            "nvfp4_ds_mla",
+        )
         return SlidingWindowMLASpec(
             block_size=self.block_size,
             num_kv_heads=1,
