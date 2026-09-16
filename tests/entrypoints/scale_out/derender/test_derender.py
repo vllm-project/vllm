@@ -3,11 +3,17 @@
 
 """Tests for the /derender endpoints (postprocessing counterpart to /render)."""
 
+from unittest.mock import Mock
+
 import httpx
 import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteLaunchRenderServer
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.engine.protocol import FunctionCall
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateResponse
+from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.tokenizers import get_tokenizer
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
@@ -706,6 +712,62 @@ _E2E_TOOLS = [
 ]
 
 
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    "tool_choice,has_calls,original,expected",
+    [
+        ("auto", True, "stop", "tool_calls"),
+        ("auto", True, "length", "tool_calls"),
+        ("auto", False, "stop", "stop"),
+        ("required", True, "stop", "tool_calls"),
+        ("required", False, "stop", "tool_calls"),
+        ("required", True, "length", "length"),
+        ("required", False, "length", "length"),
+        ("required", False, None, "stop"),
+        ("named", True, "stop", "stop"),
+        ("named", True, "length", "length"),
+        ("none", False, "stop", "stop"),
+        (None, True, "stop", "stop"),
+        (None, False, None, "stop"),
+    ],
+)
+async def test_derender_finish_reason_matches_chat_completion(
+    tool_choice, has_calls, original, expected
+):
+    """Preserve full chat completion policy, including empty required calls."""
+    if tool_choice == "named":
+        tool_choice = {"type": "function", "function": {"name": "get_weather"}}
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Weather in Paris?"}],
+        tools=_E2E_TOOLS,
+        tool_choice=tool_choice,
+    )
+    derenderer = OnlineDerenderer(
+        Mock(model=MODEL_NAME),
+        Mock(),
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+        enable_auto_tools=True,
+    )
+    calls = [FunctionCall(name="get_weather", arguments='{"city":"Paris"}')]
+    derenderer.parser = Mock(tool_parser_cls=Mock())
+    derenderer.parser.return_value.parse.return_value = (
+        None,
+        "",
+        calls if has_calls else [],
+    )
+    response = GenerateResponse.model_validate(
+        _make_generate_response([42], finish_reason=original)
+    )
+
+    choices = await derenderer.derender_chat(response, request)
+
+    assert choices[0].finish_reason == expected
+
+
 @pytest.fixture(scope="module")
 def parser_server():
     args = [
@@ -916,6 +978,7 @@ async def test_e2e_parsed_tool_call(parser_client, parser_tokenizer):
     choice = resp.json()["choices"][0]
     assert choice["message"]["tool_calls"]
     assert choice["message"]["tool_calls"][0]["function"]["name"] == "get_weather"
+    assert choice["finish_reason"] == "tool_calls"
 
 
 @pytest.mark.asyncio

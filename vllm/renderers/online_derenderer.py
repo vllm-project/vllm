@@ -89,6 +89,7 @@ class OnlineDerenderer:
                 if choice.logprobs is not None
                 else None
             )
+            auto_tools_called = False
 
             if self.parser is not None and chat_request is not None:
                 # Parser path: decode with special tokens preserved
@@ -138,13 +139,10 @@ class OnlineDerenderer:
                 auto_tools_called = (
                     bool(tc_items)
                     and bool(chat_request.tools)
-                    and (
-                        chat_request.tool_choice == "auto"
-                        or chat_request.tool_choice is None
-                    )
+                    and chat_request.tool_choice == "auto"
                     and self.enable_auto_tools
+                    and bool(self.parser.tool_parser_cls)
                 )
-                is_required_tool_choice = chat_request.tool_choice == "required"
 
                 message = ChatMessage(
                     role="assistant",
@@ -152,23 +150,24 @@ class OnlineDerenderer:
                     content=content,
                     tool_calls=tc_items,
                 )
-                finish_reason = (
-                    "tool_calls"
-                    if auto_tools_called
-                    or (
-                        is_required_tool_choice
-                        and bool(tc_items)
-                        and choice.finish_reason == "stop"
-                    )
-                    else choice.finish_reason
-                )
             else:
                 # No parser: plain detokenization.
                 decoded_text = tokenizer.decode(
                     choice.token_ids, skip_special_tokens=True
                 )
                 message = ChatMessage(role="assistant", content=decoded_text)
-                finish_reason = choice.finish_reason
+
+            # Match the non-streaming chat completion finish-reason policy.
+            is_finish_reason_tool_calls = auto_tools_called or (
+                chat_request is not None
+                and chat_request.tool_choice == "required"
+                and choice.finish_reason == "stop"
+            )
+            finish_reason = (
+                "tool_calls"
+                if is_finish_reason_tool_calls
+                else choice.finish_reason or "stop"
+            )
 
             choices.append(
                 ChatCompletionResponseChoice(
