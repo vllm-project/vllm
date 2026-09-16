@@ -127,6 +127,19 @@ def _test_request(
     )
 
 
+def _streaming_request(
+    tools: list[dict] | None = None,
+) -> ChatCompletionRequest:
+    """Request as the serving layer hands it to a streaming parser.
+
+    Special-token text only reaches the parser after ``adjust_request()``
+    cleared ``skip_special_tokens``; replays that feed that text must say so.
+    """
+    request = _test_request(tools=tools)
+    request.skip_special_tokens = False
+    return request
+
+
 DUMMY_TOOLS = [
     {
         "type": "function",
@@ -192,7 +205,7 @@ def replay_streaming(
     all_ids = [tid for tid, _ in tokens]
     all_texts = [text for _, text in tokens]
 
-    request = _test_request(tools=tools)
+    request = _streaming_request(tools=tools)
     first_prompt_ids = prompt_token_ids if prompt_token_ids is not None else []
 
     if holdback_chars <= 0:
@@ -283,7 +296,7 @@ def replay_with_text_holdback(
     ``replay_streaming`` (which keeps text and IDs aligned) does not.
     """
     results: list[DeltaMessage | None] = []
-    request = _test_request(tools=tools)
+    request = _streaming_request(tools=tools)
     first_prompt_ids = prompt_token_ids if prompt_token_ids is not None else []
 
     n = len(tokens)
