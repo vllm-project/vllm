@@ -1608,6 +1608,15 @@ def _get_kv_cache_bytes_per_block(
     ]
     if hot_page_sizes:
         bytes_per_block = round_up(bytes_per_block, math.lcm(*hot_page_sizes))
+    stride_alignments = [
+        spec.block_stride_alignment
+        for group in kv_cache_groups
+        for layer_name in group.layer_names
+        if isinstance(spec := _get_per_layer_spec(group, layer_name), MLAAttentionSpec)
+        and spec.block_stride_alignment
+    ]
+    if stride_alignments:
+        bytes_per_block = round_up(bytes_per_block, math.lcm(*stride_alignments))
     return bytes_per_block
 
 
@@ -2391,9 +2400,11 @@ def update_kv_cache_capacity(
     vllm_config.cache_config.kv_cache_size_tokens = num_tokens
     vllm_config.cache_config.kv_cache_max_concurrency = max_concurrency
     max_model_len = vllm_config.model_config.max_model_len
+    device_type = vllm_config.device_config.device_type
     logger.info_once(
-        "GPU KV cache size: %s tokens, "
+        "%s KV cache size: %s tokens, "
         "Maximum concurrency for %s tokens per request: %.2fx",
+        "GPU" if device_type == "cuda" else device_type.upper(),
         f"{num_tokens:,}",
         f"{max_model_len:,}",
         max_concurrency,
@@ -2667,12 +2678,7 @@ def get_kv_cache_configs(
 
     # When speculating with more than 1 speculative module (e.g. multi-layered MTP)
     # tag every SlidingWindowSpec with how many extra tokens to retain in the window.
-    extra_retained_tokens = (
-        vllm_config.speculative_config.num_speculative_tokens - 1
-        if vllm_config.speculative_config is not None
-        and vllm_config.speculative_config.use_multi_module_mtp()
-        else 0
-    )
+    extra_retained_tokens = max(0, vllm_config.num_prefill_lookahead_tokens - 1)
     for layer_name, layer_spec in merged_kv_cache_specs.items():
         if isinstance(layer_spec, SlidingWindowSpec):
             merged_kv_cache_specs[layer_name] = replace(

@@ -70,8 +70,7 @@ from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
-from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputManager
-from vllm.v1.structured_output.utils import strip_speculative_padding
+from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
@@ -263,13 +262,7 @@ class Scheduler(SchedulerInterface):
         self.use_eagle_block_drop = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
         self.num_lookahead_tokens = vllm_config.num_lookahead_tokens
-        # Positions past the computed tokens that the drafter reads mid-prefill.
-        # Eagle-family drafters read 1 ahead, but multi-module MTP reads
-        # num_spec_tokens ahead at chunked-prefill boundaries. Determines the
-        # encoder scheduling shift, the deferred encoder free, the KV cache
-        # manager's re-prefillable window (this minus 1), and how many tokens to
-        # reserve between a chunk boundary and the prefill end.
-        self.num_prefill_lookahead = 0
+        self.num_prefill_lookahead = vllm_config.num_prefill_lookahead_tokens
         self.dynamic_sd_lookup: list[int] | None = None
         if speculative_config is not None:
             if speculative_config.num_speculative_tokens_per_batch_size:
@@ -279,12 +272,6 @@ class Scheduler(SchedulerInterface):
                     vllm_num_speculative_tokens=self.num_spec_tokens,
                 )
             self.use_eagle = speculative_config.use_eagle()
-            if self.use_eagle:
-                self.num_prefill_lookahead = (
-                    self.num_spec_tokens
-                    if speculative_config.use_multi_module_mtp()
-                    else 1
-                )
             self.use_eagle_block_drop = speculative_config.use_eagle_block_drop()
             if self.use_eagle and not self.use_eagle_block_drop:
                 logger.warning(
@@ -2052,33 +2039,18 @@ class Scheduler(SchedulerInterface):
                 request.status = RequestStatus.FINISHED_STOPPED
                 stopped = True
 
-            if new_token_ids and self.structured_output_manager.should_advance(
-                request, new_token_ids=new_token_ids
+            if new_token_ids and not self.structured_output_manager.accept_tokens(
+                request, new_token_ids
             ):
-                struct_output_request = request.structured_output_request
-                assert struct_output_request is not None
-                grammar = struct_output_request.grammar
-                assert isinstance(grammar, StructuredOutputGrammar)
-                # new_token_ids can be a mixed block of reasoning content, then
-                # the reasoning end marker, then the start of the grammar content.
-                # Trim the reasoning content so the grammar only sees grammar content.
-                advance_token_ids = (
-                    self.structured_output_manager.trim_reasoning_for_advance(
-                        request, new_token_ids
-                    )
+                logger.error(
+                    "Unexpected: grammar rejected tokens %s for request %s. "
+                    "Terminating request.",
+                    new_token_ids,
+                    req_id,
                 )
-                if advance_token_ids and not grammar.accept_tokens(
-                    req_id, advance_token_ids
-                ):
-                    logger.error(
-                        "Unexpected: grammar rejected tokens %s for request %s. "
-                        "Terminating request.",
-                        advance_token_ids,
-                        req_id,
-                    )
-                    request.status = RequestStatus.FINISHED_ERROR
-                    request.resumable = False
-                    stopped = True
+                request.status = RequestStatus.FINISHED_ERROR
+                request.resumable = False
+                stopped = True
 
             routed_experts = None
             if (
@@ -2101,7 +2073,7 @@ class Scheduler(SchedulerInterface):
                         prompt_start = (
                             request.sampling_params.routed_experts_prompt_start
                         )
-                        assert prompt_start < request.num_prompt_tokens
+                        assert prompt_start <= request.num_prompt_tokens
                     else:
                         prompt_start = 0
                     routed_experts = self.routed_experts_mgr.get(
@@ -2434,11 +2406,9 @@ class Scheduler(SchedulerInterface):
                 continue
 
             # Add newly generated spec token ids to the request.
-            if self.structured_output_manager.should_advance(request):
-                metadata = request.structured_output_request
-                spec_token_ids = strip_speculative_padding(spec_token_ids)
-                spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)  # type: ignore[union-attr]
-            request.spec_token_ids = spec_token_ids
+            request.spec_token_ids = self.structured_output_manager.validate_tokens(
+                request, spec_token_ids
+            )
 
     def update_draft_token_ids_in_output(
         self, draft_token_ids: DraftTokenIds, scheduler_output: SchedulerOutput
@@ -2464,10 +2434,9 @@ class Scheduler(SchedulerInterface):
             # (needed for chunked prefill case for example).
             del spec_token_ids[orig_num_spec_tokens:]
             # Filter out spec tokens which do not adhere to the grammar.
-            if self.structured_output_manager.should_advance(request):
-                metadata = request.structured_output_request
-                spec_token_ids = strip_speculative_padding(spec_token_ids)
-                spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)  # type: ignore[union-attr]
+            spec_token_ids = self.structured_output_manager.validate_tokens(
+                request, spec_token_ids
+            )
             # Pad to original number of spec tokens.
             num_invalid_tokens = orig_num_spec_tokens - len(spec_token_ids)
             if num_invalid_tokens:
