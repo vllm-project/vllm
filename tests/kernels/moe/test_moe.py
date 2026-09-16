@@ -35,6 +35,7 @@ from vllm.model_executor.layers.fused_moe.activation import (
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
+    get_deepep_v2_max_num_tokens_per_rank,
     int4_w4a16_moe_quant_config,
     int8_w8a16_moe_quant_config,
 )
@@ -1384,7 +1385,7 @@ def test_humming_global_valid_shape_m(
     assert result == expected
 
 
-def test_humming_permute_scratch_is_keyed_by_runtime_topk(
+def test_humming_permute_scratch_is_keyed_by_runtime_shape(
     monkeypatch: pytest.MonkeyPatch,
 ):
     from types import SimpleNamespace
@@ -1392,25 +1393,84 @@ def test_humming_permute_scratch_is_keyed_by_runtime_topk(
 
     import vllm.model_executor.layers.fused_moe.experts.fused_humming_moe as humming
 
-    scratch_topk6 = Mock()
-    scratch_topk1 = Mock()
-    scratch_type = Mock(side_effect=[scratch_topk6, scratch_topk1])
+    scratch_topk6_bf16 = Mock()
+    scratch_topk1_bf16 = Mock()
+    scratch_topk6_fp8 = Mock()
+    scratch_type = Mock(
+        side_effect=[scratch_topk6_bf16, scratch_topk1_bf16, scratch_topk6_fp8]
+    )
     monkeypatch.setattr(humming, "moe_permute_unpermute_supported", lambda: True)
     monkeypatch.setattr(humming, "MoEPermuteScratch", scratch_type)
     moe_config = make_dummy_moe_config(max_num_tokens=512, experts_per_token=6)
     moe_config.moe_parallel_config.dp_size = 2
     experts = SimpleNamespace(_permute_scratch={}, moe_config=moe_config)
 
-    assert humming.HummingExpertsBase._get_permute_scratch(experts, 6) is scratch_topk6
-    assert humming.HummingExpertsBase._get_permute_scratch(experts, 1) is scratch_topk1
-    assert humming.HummingExpertsBase._get_permute_scratch(experts, 6) is scratch_topk6
+    assert (
+        humming.HummingExpertsBase._get_permute_scratch(experts, 6, torch.bfloat16)
+        is scratch_topk6_bf16
+    )
+    assert (
+        humming.HummingExpertsBase._get_permute_scratch(experts, 1, torch.bfloat16)
+        is scratch_topk1_bf16
+    )
+    assert (
+        humming.HummingExpertsBase._get_permute_scratch(experts, 6, torch.bfloat16)
+        is scratch_topk6_bf16
+    )
+    assert (
+        humming.HummingExpertsBase._get_permute_scratch(experts, 6, torch.float8_e4m3fn)
+        is scratch_topk6_fp8
+    )
 
-    assert scratch_type.call_count == 2
-    first_call, second_call = scratch_type.call_args_list
+    assert scratch_type.call_count == 3
+    first_call, second_call, third_call = scratch_type.call_args_list
     assert first_call.kwargs["max_num_tokens"] == 1024
     assert first_call.kwargs["topk"] == 6
+    assert first_call.kwargs["hidden_dtype"] == torch.bfloat16
     assert second_call.kwargs["max_num_tokens"] == 6144
     assert second_call.kwargs["topk"] == 1
+    assert second_call.kwargs["hidden_dtype"] == torch.bfloat16
+    assert third_call.kwargs["hidden_dtype"] == torch.float8_e4m3fn
+
+
+def test_humming_deepep_v2_scratch_accounts_for_sequence_parallelism(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    import vllm.model_executor.layers.fused_moe.experts.fused_humming_moe as humming
+
+    scratch_type = Mock()
+    monkeypatch.setattr(humming, "moe_permute_unpermute_supported", lambda: True)
+    monkeypatch.setattr(humming, "MoEPermuteScratch", scratch_type)
+    moe_config = make_dummy_moe_config(max_num_tokens=128, experts_per_token=6)
+    parallel_config = moe_config.moe_parallel_config
+    parallel_config.dp_size = 4
+    parallel_config.ep_size = 32
+    parallel_config.sp_size = 8
+    parallel_config.use_ep = True
+    parallel_config.all2all_backend = "deepep_v2"
+    experts = SimpleNamespace(_permute_scratch={}, moe_config=moe_config)
+
+    humming.HummingExpertsBase._get_permute_scratch(experts, 6, torch.bfloat16)
+    humming.HummingExpertsBase._get_permute_scratch(experts, 1, torch.bfloat16)
+
+    decode_call, expanded_call = scratch_type.call_args_list
+    assert decode_call.kwargs["max_num_tokens"] == 512
+    assert decode_call.kwargs["topk"] == 6
+    assert expanded_call.kwargs["max_num_tokens"] == 3072
+    assert expanded_call.kwargs["topk"] == 1
+
+
+@pytest.mark.parametrize(
+    ("max_num_tokens", "sp_size", "expected"),
+    [(128, 8, 16), (130, 8, 32), (128, 1, 128)],
+)
+def test_deepep_v2_rank_capacity_is_sequence_sharded_and_power_of_two(
+    max_num_tokens: int, sp_size: int, expected: int
+):
+    assert get_deepep_v2_max_num_tokens_per_rank(max_num_tokens, sp_size) == expected
 
 
 def test_humming_delegates_to_instance_activation():
@@ -1470,7 +1530,8 @@ def test_humming_grouped_apply_forwards_valid_prefix(
         num_experts=2,
         estimate_local_valid_shape_m=lambda _: 6,
         prepare_buffers=lambda *_: buffers,
-        _get_permute_scratch=lambda _: None,
+        _get_permute_scratch=lambda _topk, _dtype: None,
+        _uses_fused_situ_quant=lambda _: False,
         quantize_input=lambda _, *, inputs, input_scale=None, quanted_input: (
             inputs,
             input_scale,
@@ -1526,6 +1587,32 @@ def test_humming_grouped_apply_forwards_valid_prefix(
     assert call_kwargs["input"].shape == (6, 4)
     assert call_kwargs["output"].shape == (6, 2)
     torch.testing.assert_close(call_kwargs["valid_token_counts"], expected_counts)
+
+
+@pytest.mark.parametrize(
+    ("experts_cls", "expected"),
+    [
+        pytest.param("HummingIndexedExperts", True, id="indexed"),
+        pytest.param("HummingGroupedExperts", True, id="grouped-contiguous"),
+        pytest.param("BatchedHummingGroupedExperts", False, id="grouped-masked"),
+    ],
+)
+def test_humming_fused_situ_buffer_contract_by_layout(
+    monkeypatch: pytest.MonkeyPatch,
+    experts_cls: str,
+    expected: bool,
+):
+    import vllm.model_executor.layers.fused_moe.experts.fused_humming_moe as humming
+
+    cls = getattr(humming, experts_cls)
+    experts = object.__new__(cls)
+    monkeypatch.setattr(
+        humming.HummingExpertsBase,
+        "fused_situ_quant_enabled",
+        lambda *_: True,
+    )
+
+    assert experts._uses_fused_situ_quant(MoEActivation.SITU) is expected
 
 
 def test_batched_marlin_activation_uses_expert_token_counts(

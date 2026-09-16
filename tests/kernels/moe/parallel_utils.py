@@ -263,6 +263,7 @@ def make_deepep_v2_a2a(
         rank_expert_offset=pgi.rank * v2_args.num_local_experts,
         num_experts=v2_args.num_experts,
         num_topk=v2_args.num_topk,
+        sp_size=1,
         use_fp8_dispatch=v2_args.use_fp8_dispatch,
         use_cudagraph=use_cudagraph,
     )

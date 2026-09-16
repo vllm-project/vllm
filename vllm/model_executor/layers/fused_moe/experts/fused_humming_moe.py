@@ -176,7 +176,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
         )
-        self._permute_scratch: dict[int, MoEPermuteScratch] = {}
+        self._permute_scratch: dict[tuple[int, torch.dtype], MoEPermuteScratch] = {}
 
     def init_humming_moe(self):
         from vllm.utils.humming import get_heuristics_config
@@ -255,16 +255,22 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             **kwargs,
         )
 
-    def _get_permute_scratch(self, topk: int) -> MoEPermuteScratch | None:
+    def _get_permute_scratch(
+        self, topk: int, hidden_dtype: torch.dtype
+    ) -> MoEPermuteScratch | None:
         if not moe_permute_unpermute_supported():
             return None
 
-        scratch = self._permute_scratch.get(topk)
+        scratch_key = (topk, hidden_dtype)
+        scratch = self._permute_scratch.get(scratch_key)
         if scratch is None:
+            max_num_tokens = self.moe_config.max_num_tokens
+            dispatch_group_size = self.moe_config.dp_size
+            if self.moe_config.use_deepep_v2_kernels:
+                max_num_tokens = self.moe_config.deepep_v2_max_num_tokens_per_rank
+                dispatch_group_size = self.moe_config.ep_size
             max_expanded_rows = (
-                self.moe_config.max_num_tokens
-                * self.moe_config.dp_size
-                * self.moe_config.experts_per_token
+                max_num_tokens * dispatch_group_size * self.moe_config.experts_per_token
             )
             scratch = MoEPermuteScratch(
                 max_num_tokens=math.ceil(max_expanded_rows / topk),
@@ -273,9 +279,9 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
                 num_local_experts=self.moe_config.num_local_experts,
                 device=torch.device(self.moe_config.device),
                 hidden_size=self.moe_config.hidden_dim,
-                hidden_dtype=self.moe_config.in_dtype,
+                hidden_dtype=hidden_dtype,
             )
-            self._permute_scratch[topk] = scratch
+            self._permute_scratch[scratch_key] = scratch
         return scratch
 
     def get_global_valid_shape_m(self, topk_ids: torch.Tensor):
@@ -553,7 +559,11 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             #        flips the even/odd workspace 2-coloring below so
             #        gate_up_output and quanted_down_input land
             #        on DIFFERENT workspaces.
-            if self.fused_situ_quant_enabled(activation):
+            # Standard-layout implementations (indexed and grouped-contiguous)
+            # consume a contiguous valid-row prefix and implement the fused
+            # SITU+quant path. Batched/grouped-masked has per-expert padding,
+            # so it must retain activation_output for the unfused path.
+            if self._uses_fused_situ_quant(activation):
                 required_buffers.remove("activation_output")
 
         # batched moe use down_output as output
@@ -710,6 +720,10 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             )
             return False
         return True
+
+    def _uses_fused_situ_quant(self, activation: MoEActivation) -> bool:
+        """Keep workspace planning and execution on the same activation path."""
+        return not self.is_batched() and self.fused_situ_quant_enabled(activation)
 
     def fused_situ_quant(
         self,
@@ -884,7 +898,7 @@ class HummingIndexedExperts(HummingExpertsBase):
         ):
             valid_tokens = expert_tokens_meta.psum_recv_per_rank[-1:]
 
-        if self.fused_situ_quant_enabled(activation):
+        if self._uses_fused_situ_quant(activation):
             # Fused SITU + FP8 quant (per-token or block-FP8 group-128) straight
             # into the w2 input, skipping the bf16 activation_output round-trip.
             inputs, input_scale = self.fused_situ_quant(
@@ -994,7 +1008,7 @@ class HummingGroupedExperts(HummingExpertsBase):
             n_expert=global_num_experts,
             n_local_expert=self.num_experts,
             expert_map=expert_map,
-            scratch=self._get_permute_scratch(topk_ids.size(1)),
+            scratch=self._get_permute_scratch(topk_ids.size(1), hidden_states.dtype),
         )
 
         inputs, input_scale = self.quantize_input(
@@ -1016,22 +1030,29 @@ class HummingGroupedExperts(HummingExpertsBase):
             tuning_config=self.w13_tuning_config_str,
         )
 
-        self.apply_activation(
-            activation=activation,
-            input=buffers["gate_up_output"],
-            output=buffers["activation_output"],
-            valid_token_counts=(
-                expert_first_token_offset[-1:].to(torch.int32)
-                if expert_tokens_meta is None
-                else None
-            ),
-        )
+        valid_rows = expert_first_token_offset[-1:].to(torch.int32)
+        if self._uses_fused_situ_quant(activation):
+            # moe_permute has already expanded top-k routes and packed all
+            # local expert rows into one contiguous prefix.
+            inputs, input_scale = self.fused_situ_quant(
+                gate_up_output=buffers["gate_up_output"],
+                quanted_down_input=buffers["quanted_down_input"],
+                num_valid_tokens=valid_rows,
+                topk=1,
+            )
+        else:
+            self.apply_activation(
+                activation=activation,
+                input=buffers["gate_up_output"],
+                output=buffers["activation_output"],
+                valid_token_counts=(valid_rows if expert_tokens_meta is None else None),
+            )
 
-        inputs, input_scale = self.quantize_input(
-            "w2",
-            inputs=buffers["activation_output"],
-            quanted_input=buffers.get("quanted_down_input", None),
-        )
+            inputs, input_scale = self.quantize_input(
+                "w2",
+                inputs=buffers["activation_output"],
+                quanted_input=buffers.get("quanted_down_input", None),
+            )
 
         self.humming_forward(
             "w2",

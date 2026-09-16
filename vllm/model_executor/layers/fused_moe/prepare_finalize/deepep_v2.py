@@ -7,7 +7,10 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig,
+    get_deepep_v2_max_num_tokens_per_rank,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
     TopKWeightAndReduceDelegate,
@@ -112,6 +115,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         rank_expert_offset: int,
         num_experts: int,
         num_topk: int,
+        sp_size: int = 1,
         use_fp8_dispatch: bool = False,
         use_cudagraph: bool = False,
     ):
@@ -122,6 +126,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.rank_expert_offset = rank_expert_offset
         self.num_experts = num_experts
         self.num_topk = num_topk
+        self.sp_size = sp_size
         self.use_fp8_dispatch = use_fp8_dispatch
         self.use_cudagraph = use_cudagraph
 
@@ -181,10 +186,11 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         do_cpu_sync = not self.use_cudagraph
 
         # In do_expand=False mode, the recv buffer is the worst case
-        # R * num_max_tokens_per_rank. Defaulting to the buffer's init value
-        # (= max_num_batched_tokens) makes the experts process ~R*8192 rows even
-        # for a handful of decode tokens. Bound it to the actual DP-padded batch
-        # size (uniform across ranks): max(num_tokens_across_dp).
+        # R * num_max_tokens_per_rank. Using the buffer's maximum makes the
+        # experts process the full configured capacity even for a handful of
+        # decode tokens. Bound it to the actual DP-padded batch size on one
+        # sequence-parallel rank (uniform across ranks):
+        # ceil(max(num_tokens_across_dp) / sp_size).
         #
         # DeepEP JIT-compiles a separate dispatch kernel per distinct
         # num_max_tokens_per_rank, so feeding it the raw per-step size would make
@@ -198,9 +204,12 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             dp_meta = get_forward_context().dp_metadata
             if dp_meta is not None:
                 n = int(dp_meta.num_tokens_across_dp_cpu.max())
+                num_max_tokens_per_rank = get_deepep_v2_max_num_tokens_per_rank(
+                    n, self.sp_size
+                )
             else:
                 n = tokens.shape[0]
-            num_max_tokens_per_rank = 1 << max(n - 1, 0).bit_length()
+                num_max_tokens_per_rank = 1 << max(n - 1, 0).bit_length()
 
         (
             recv_x,
