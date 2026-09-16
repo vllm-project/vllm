@@ -124,9 +124,9 @@ steps:
   - pytest -s -v compile/passes --ignore compile/passes/distributed
   mirror:
     amd:
-      label: ':amd: (MI355) PyTorch Compilation Passes'
+      label: ':amd: (MI300) PyTorch Compilation Passes'
       dind: false
-      device: mi355_1
+      device: mi300_1
       timeout_in_minutes: 80
       working_dir: /vllm-workspace/tests
       depends_on:

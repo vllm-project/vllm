@@ -30,10 +30,10 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
 
-- label: ":amd: (MI355) LM Eval Small Models Harness"
+- label: ":amd: (MI300) LM Eval Small Models Harness"
   key: amd-lm-eval-small-models-harness
   dind: false
-  device: mi355_1
+  device: mi300_1
   timeout_in_minutes: 35
   depends_on:
   - image-build-amd
