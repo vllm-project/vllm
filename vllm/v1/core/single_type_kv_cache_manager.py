@@ -1796,10 +1796,10 @@ class MambaManager(SingleTypeKVCacheManager):
                     self._checkpoints.pop(request_id, None)
             if num_new_blocks > 0:
                 blocks_allocated = request_id in self._allocated_block_reqs
-                if not (checkpoint_block and blocks_allocated):
-                    num_new_blocks = 1 + int(has_partial_hit) + checkpoint_block
-                    if not blocks_allocated:
-                        num_new_blocks += self.num_speculative_blocks
+                physical_block_cap = 1 + int(has_partial_hit) + checkpoint_block
+                if not blocks_allocated or checkpoint_block:
+                    physical_block_cap += self.num_speculative_blocks
+                num_new_blocks = min(num_new_blocks, physical_block_cap)
 
             num_evictable_computed_blocks = self._get_num_evictable_blocks(
                 new_computed_blocks
@@ -2003,7 +2003,9 @@ class MambaManager(SingleTypeKVCacheManager):
         )
         num_cached_blocks_after = self.num_cached_block.get(request.request_id, 0)
         if self.mamba_cache_mode == "align":
-            partial_hash = self._cache_partial_tail_block(request, num_tokens)
+            partial_hash = self._cache_partial_tail_block(
+                request, num_tokens, retention_interval=retention_interval
+            )
             if partial_hash is not None:
                 self.cached_blocks_this_step.add(partial_hash)
         if num_cached_blocks_after > num_cached_blocks_before:
@@ -2038,6 +2040,7 @@ class MambaManager(SingleTypeKVCacheManager):
         self,
         request: Request,
         num_tokens: int,
+        retention_interval: int | None,
     ) -> BlockHashWithGroupId | None:
         hash_block_size = self.block_pool.hash_block_size
         # Re-key the reserved block at its exported checkpoint boundary.
@@ -2047,6 +2050,17 @@ class MambaManager(SingleTypeKVCacheManager):
             blocks = self.req_to_blocks[request.request_id]
             assert 0 <= checkpoint_idx < len(blocks)
             checkpoint_block = blocks[checkpoint_idx]
+            if (
+                retention_interval == 0
+                and num_tokens < request.num_prompt_tokens
+                and checkpoint_position != request.shared_prefix_boundary
+            ):
+                # retention_interval == 0 keeps this transient checkpoint
+                # request-local. The slot may carry a hash from this step's
+                # full-block pass; that must go too, since the checkpoint
+                # state is about to overwrite the block.
+                self.block_pool._maybe_evict_cached_block(checkpoint_block)
+                return None
             if checkpoint_block.block_hash_num_tokens == checkpoint_position:
                 return None
             return self.block_pool.cache_partial_block(
