@@ -261,8 +261,11 @@ def backend_to_kernel_cls(
         from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a16_moe import (
             AiterW4A16ExpertsMonolithic,
         )
+        from vllm.model_executor.layers.fused_moe.experts.moonmath_mxfp4_moe import (
+            MoonmathW4A16SituExperts,
+        )
 
-        return [AiterW4A16ExpertsMonolithic]
+        return [AiterW4A16ExpertsMonolithic, MoonmathW4A16SituExperts]
 
     elif backend == Mxfp4MoeBackend.AITER_MXFP4_FP8:
         from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a8_moe import (
@@ -769,9 +772,12 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
         intermediate_size = round_up(intermediate_size, 128)
         hidden_size = round_up(hidden_size, 128)
     elif current_platform.is_rocm():
-        if backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and (
-            activation == MoEActivation.SITU or activation == MoEActivation.SILU
-        ):
+        if backend in (
+            Mxfp4MoeBackend.AITER_MXFP4_BF16,
+            # gfx942 can only take the Triton path; without it K3's 384/partition
+            # intermediate takes the 256 round-up to 512 (+33% weights) and OOMs.
+            Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
+        ) and (activation == MoEActivation.SITU or activation == MoEActivation.SILU):
             # K3's AITER A16W4 SiTU kernel handles K3's native intermediate size
             # (moe_intermediate 3072; e.g. 384/partition at TP8). Align to 128 (a
             # no-op for K3's shapes) rather than the generic ROCm 256 round-up,

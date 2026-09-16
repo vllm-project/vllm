@@ -1821,6 +1821,72 @@ def test_mxfp4_emulation_rounds_up_to_block_size(
     assert rounded_intermediate % OCP_MX_BLOCK_SIZE == 0
 
 
+# Both AITER MXFP4 A16W4 backends serve K3's native intermediate size, so they
+# must align it the same way; gfx942 can only take the Triton one. The generic
+# ROCm 256 round-up inflates K3's 384/partition to 512 (+33% MoE weights), which
+# OOMs before any KV cache is allocated. The exemption is scoped to the SiTU and
+# SILU kernels, so every other activation must keep the 256 round-up.
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="AITER MXFP4 backends target ROCm")
+@pytest.mark.parametrize(
+    "backend_name,activation_name,expected",
+    [
+        ("AITER_MXFP4_BF16", "SITU", (3584, 384)),
+        ("AITER_MXFP4_BF16", "SILU", (3584, 384)),
+        ("AITER_TRITON_MXFP4_BF16", "SITU", (3584, 384)),
+        ("AITER_TRITON_MXFP4_BF16", "SILU", (3584, 384)),
+        ("AITER_TRITON_MXFP4_BF16", "SWIGLUOAI", (3584, 512)),
+    ],
+)
+def test_aiter_mxfp4_a16w4_alignment(
+    backend_name: str, activation_name: str, expected: tuple[int, int]
+):
+    """K3 at TP8: hidden 3584, intermediate 384/partition, both 128-aligned."""
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        mxfp4_round_up_hidden_size_and_intermediate_size,
+    )
+
+    assert (
+        mxfp4_round_up_hidden_size_and_intermediate_size(
+            getattr(Mxfp4MoeBackend, backend_name),
+            3584,
+            384,
+            getattr(MoEActivation, activation_name),
+        )
+        == expected
+    )
+
+
+# The moonmath kernels are an optional package. Without them there is no SiTU
+# a16w4 kernel at all, so the class must DECLINE the activation and let the
+# oracle fall through to AITER, rather than be selected and fail at weight load.
+@pytest.mark.parametrize("installed", [True, False])
+def test_aiter_w4a16_claims_situ_only_with_the_moonmath_kernels(
+    monkeypatch: pytest.MonkeyPatch, installed: bool
+):
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.experts import (
+        moonmath_mxfp4_moe as experts,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a16_moe import (
+        AiterW4A16ExpertsMonolithic,
+    )
+
+    monkeypatch.setattr(experts, "has_moonmath_amd", lambda: installed)
+
+    assert (
+        experts.MoonmathW4A16SituExperts._supports_activation(MoEActivation.SITU)
+        is installed
+    )
+    # The AITER class is untouched: it never claims SiTU, and still serves the
+    # activations it always did, so a fall-through is unaffected either way.
+    aiter_cls = AiterW4A16ExpertsMonolithic
+    assert not aiter_cls._supports_activation(MoEActivation.SITU)
+    assert aiter_cls._supports_activation(MoEActivation.SILU)
+    assert aiter_cls._supports_activation(MoEActivation.SWIGLUOAI)
+
+
 def test_select_mxfp4_moe_backend_raises_with_unsupported_reasons(
     monkeypatch: pytest.MonkeyPatch,
 ):

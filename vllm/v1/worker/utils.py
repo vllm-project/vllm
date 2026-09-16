@@ -37,6 +37,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
+    compute_layer_kv_cache_shape_bytes,
     create_kv_cache_views,
 )
 from vllm.v1.worker.block_table import get_block_table_width
@@ -455,6 +456,26 @@ def allocate_kv_cache(
     return kv_caches
 
 
+def _stores_dense_pages(
+    kv_cache_config: KVCacheConfig, kv_cache_group: KVCacheGroupSpec
+) -> bool:
+    """Whether every block of the group is one dense page, which splitting it
+    into kernel blocks requires (see ``create_kv_cache_views``)."""
+    spec = kv_cache_group.kv_cache_spec
+    for tensor in kv_cache_config.kv_cache_tensors:
+        layer_name = tensor.layers[0]
+        if layer_name not in kv_cache_group.layer_names:
+            continue
+        if isinstance(spec, UniformTypeKVCacheSpecs):
+            layer_spec = spec.kv_cache_specs[layer_name]
+        else:
+            layer_spec = spec
+        page = math.prod(compute_layer_kv_cache_shape_bytes(layer_spec, 1)[1:])
+        if tensor.block_stride != page:
+            return False
+    return True
+
+
 def prepare_kernel_block_sizes(
     kv_cache_config: KVCacheConfig, attn_groups: list[list[AttentionGroup]]
 ) -> list[int]:
@@ -490,6 +511,15 @@ def prepare_kernel_block_sizes(
             selected_kernel_size = select_common_block_size(
                 kv_manager_block_size, group_backends
             )
+            if (
+                selected_kernel_size != kv_manager_block_size
+                and not _stores_dense_pages(kv_cache_config, kv_cache_group)
+                and all(
+                    backend.supports_unsplit_block_size(kv_manager_block_size)
+                    for backend in group_backends
+                )
+            ):
+                selected_kernel_size = kv_manager_block_size
             kernel_block_sizes.append(selected_kernel_size)
         elif isinstance(kv_cache_spec, MambaSpec):
             # This is likely Mamba or other non-attention cache, no splitting.

@@ -451,13 +451,19 @@ def _get_backend_priorities(
     use_kv_connector: bool = False,
 ) -> list[AttentionBackendEnum]:
     from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+    from vllm.utils.import_utils import has_moonmath_amd
 
     if use_sparse:
         return [AttentionBackendEnum.ROCM_AITER_MLA_SPARSE]
 
     if use_mla:
         if rocm_aiter_ops.is_mla_enabled():
-            return [
+            # Moonmath serves only the decode and defers the rest to AITER,
+            # so it is offered first and falls back by itself.
+            moonmath = (
+                [AttentionBackendEnum.ROCM_MOONMATH_MLA] if has_moonmath_amd() else []
+            )
+            return moonmath + [
                 AttentionBackendEnum.ROCM_AITER_MLA,
                 AttentionBackendEnum.TRITON_MLA,
                 AttentionBackendEnum.ROCM_AITER_TRITON_MLA,

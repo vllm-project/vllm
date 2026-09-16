@@ -54,6 +54,7 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     )
     ROCM_ATTN = "vllm.v1.attention.backends.rocm_attn.RocmAttentionBackend"
     ROCM_AITER_MLA = "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"
+    ROCM_MOONMATH_MLA = "vllm.v1.attention.backends.mla.moonmath_mla.MoonmathMLABackend"
     ROCM_AITER_TRITON_MLA = (
         "vllm.v1.attention.backends.mla.aiter_triton_mla.AiterTritonMLABackend"
     )

@@ -871,6 +871,11 @@ class AiterFlashAttentionBackend(AttentionBackend):
         return [16, 32]
 
     @classmethod
+    def supports_unsplit_block_size(cls, block_size: int) -> bool:
+        # Pages the paged decode kernels cannot read go to unified_attention.
+        return not rocm_aiter_ops.is_shuffle_kv_cache_enabled() and block_size % 16 == 0
+
+    @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [64, 128, 256]
 
@@ -1453,12 +1458,16 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     return
 
                 # The ll4mi kernel in paged_attention_v1 requires
-                # HEAD_SIZE >= 16 * NWARPS (= 64 on ROCm with NWARPS=4).
+                # HEAD_SIZE >= 16 * NWARPS (= 64 on ROCm with NWARPS=4)
+                # and 16- or 32-token pages.
                 # For smaller head sizes or sliding window attention,
                 # fall back to the unified_attention triton kernel which
                 # handles both correctly.
                 _MIN_HEAD_SIZE_FOR_LL4MI = 64
-                use_unified_attention = self.head_size < _MIN_HEAD_SIZE_FOR_LL4MI
+                use_unified_attention = self.head_size < _MIN_HEAD_SIZE_FOR_LL4MI or (
+                    not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+                    and key_cache.shape[1] not in (16, 32)
+                )
 
                 if use_unified_attention:
                     k_descale, v_descale = self._get_kv_cache_descales(

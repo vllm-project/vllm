@@ -689,12 +689,15 @@ def test_aiter_fa_sliding_window_matches_reference():
 
 @pytest.mark.skipif(not on_mi3xx(), reason="MI300/MI350 ROCm only")
 @pytest.mark.parametrize(
-    "shuffle,sliding_window", [(False, None), (False, 16), (True, None)]
+    "shuffle,sliding_window,block_size",
+    # 64-token pages are served whole only when a block cannot be split; their
+    # single-token decode goes to unified_attention.
+    [(False, None, 16), (False, 16, 16), (True, None, 16), (False, None, 64)],
 )
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 @pytest.mark.parametrize("batch", ["prefill", "extend", "mixed"])
 def test_aiter_fa_shared_kv_matches_reference(
-    monkeypatch, shuffle, sliding_window, kv_cache_dtype, batch
+    monkeypatch, shuffle, sliding_window, block_size, kv_cache_dtype, batch
 ):
     """Shared layers read cached K/V for prefill and extend without modifying it."""
     from tests.v1.attention.utils import (
@@ -725,6 +728,7 @@ def test_aiter_fa_shared_kv_matches_reference(
         max_num_batched_tokens=1024,
     )
     config.cache_config.cache_dtype = kv_cache_dtype
+    config.cache_config.block_size = block_size
     num_heads = config.model_config.get_num_attention_heads(config.parallel_config)
     num_kv_heads = config.model_config.get_num_kv_heads(config.parallel_config)
     head_size = config.model_config.get_head_size()
@@ -758,18 +762,18 @@ def test_aiter_fa_shared_kv_matches_reference(
             torch.device("cuda"),
         )
         common = create_common_attn_metadata(
-            batch_spec, BLOCK_SIZE, torch.device("cuda"), max_block_idx=32
+            batch_spec, block_size, torch.device("cuda"), max_block_idx=32
         )
         cache_dtype = (
             current_platform.fp8_dtype() if kv_cache_dtype == "fp8" else torch.bfloat16
         )
         kv_cache = (
             torch.empty(
-                2, 32, BLOCK_SIZE, num_kv_heads * head_size, dtype=cache_dtype
+                2, 32, block_size, num_kv_heads * head_size, dtype=cache_dtype
             ).transpose(0, 1)
             if shuffle
             else torch.empty(
-                32, num_kv_heads, BLOCK_SIZE, 2 * head_size, dtype=cache_dtype
+                32, num_kv_heads, block_size, 2 * head_size, dtype=cache_dtype
             )
         )
         target.kv_cache = kv_cache
@@ -780,7 +784,7 @@ def test_aiter_fa_shared_kv_matches_reference(
             attn_layer._k_scale.fill_(k_scale)
             attn_layer._v_scale.fill_(v_scale)
         key = torch.randn(
-            32 * BLOCK_SIZE, num_kv_heads, head_size, dtype=torch.bfloat16
+            32 * block_size, num_kv_heads, head_size, dtype=torch.bfloat16
         )
         value = torch.randn_like(key)
         target.impl.do_kv_cache_update(
@@ -788,14 +792,14 @@ def test_aiter_fa_shared_kv_matches_reference(
             key,
             value,
             kv_cache,
-            torch.arange(32 * BLOCK_SIZE, dtype=torch.int64),
+            torch.arange(32 * block_size, dtype=torch.int64),
         )
         key_cache = ((key / k_scale).to(cache_dtype).to(key.dtype) * k_scale).reshape(
-            32, BLOCK_SIZE, num_kv_heads, head_size
+            32, block_size, num_kv_heads, head_size
         )
         value_cache = (
             (value / v_scale).to(cache_dtype).to(value.dtype) * v_scale
-        ).reshape(32, BLOCK_SIZE, num_kv_heads, head_size)
+        ).reshape(32, block_size, num_kv_heads, head_size)
         with torch.device("cpu"):
             metadata = builder.build(0, common)
         cache_before = kv_cache.view(torch.uint8).clone()

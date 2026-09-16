@@ -512,6 +512,11 @@ def has_nixl_ep() -> bool:
     return _has_module("nixl_ep")
 
 
+def has_moonmath_amd() -> bool:
+    """Whether the optional `moonmath_amd` CDNA3 kernel package is available."""
+    return _has_module("moonmath_amd")
+
+
 def is_numba_available() -> bool:
     """Whether the optional `numba` package is available."""
     return _has_module("numba")

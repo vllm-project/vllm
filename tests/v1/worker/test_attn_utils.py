@@ -37,6 +37,7 @@ from vllm.v1.worker.utils import (
     AttentionGroup,
     allocate_kv_cache,
     copy_kv_cache_blocks_inplace,
+    prepare_kernel_block_sizes,
 )
 
 
@@ -343,6 +344,49 @@ def test_reshape_padded_kv_cache_strides_by_padded_page():
     assert kv_cache[1].storage_offset() == spec.page_size_padded // elem_size
     # Within one block the (unpadded) content stays compact.
     assert kv_cache[0].is_contiguous()
+
+
+@pytest.mark.parametrize(
+    ("padded", "supports_unsplit", "expected"),
+    [(False, True, 16), (True, False, 16), (True, True, 64)],
+)
+def test_prepare_kernel_block_sizes_serves_unsplittable_block_whole(
+    padded: bool, supports_unsplit: bool, expected: int
+):
+    """A padded block cannot be split into kernel blocks, so a backend that can
+    read it whole gets it whole; dense blocks keep splitting as before."""
+
+    class Backend:
+        @staticmethod
+        def get_supported_kernel_block_sizes():
+            return [16]
+
+        @classmethod
+        def supports_unsplit_block_size(cls, block_size: int) -> bool:
+            return supports_unsplit
+
+    spec = FullAttentionSpec(
+        block_size=64,
+        num_kv_heads=1,
+        head_size=2,
+        dtype=torch.float32,
+        page_size_padded=1536 if padded else None,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=2 * spec.page_size_bytes,
+                layers=["layer.0"],
+                layer_stride=2 * spec.page_size_bytes,
+                block_stride=spec.page_size_bytes,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(["layer.0"], spec)],
+    )
+    attn_groups = [[SimpleNamespace(backend=Backend)]]
+
+    assert prepare_kernel_block_sizes(kv_cache_config, attn_groups) == [expected]
 
 
 @pytest.mark.parametrize(

@@ -72,6 +72,12 @@ class AttentionBackend(ABC):
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [MultipleOf(1)]
 
+    @classmethod
+    def supports_unsplit_block_size(cls, block_size: int) -> bool:
+        """Whether a manager block that cannot be split into supported kernel
+        blocks (its pages are not dense) can be served whole."""
+        return False
+
     @staticmethod
     @abstractmethod
     def get_name() -> str:
