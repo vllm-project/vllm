@@ -113,7 +113,11 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 else (self.max_model_len + self.compress_ratio - 1)
                 // self.compress_ratio
             )
-            M = N + self.window_size + self.max_num_batched_tokens
+            M = (
+                N
+                + max(self.window_size, self.max_image_tokens)
+                + self.max_num_batched_tokens
+            )
             if swa_only:
                 top_k = 0
             else:

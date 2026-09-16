@@ -682,7 +682,11 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 else (self.max_model_len + self.compress_ratio - 1)
                 // self.compress_ratio
             )
-            M = N + self.window_size + self.max_num_batched_tokens
+            M = (
+                N
+                + max(self.window_size, self.max_image_tokens)
+                + self.max_num_batched_tokens
+            )
             current_workspace_manager().get_simultaneous(
                 ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
             )
@@ -830,7 +834,11 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             top_k = 0
             N = 0
 
-        M = N + self.window_size + self.max_num_batched_tokens
+        M = (
+            N
+            + max(self.window_size, self.max_image_tokens)
+            + self.max_num_batched_tokens
+        )
         num_chunks = (num_prefills + self.PREFILL_CHUNK_SIZE - 1) // (
             self.PREFILL_CHUNK_SIZE
         )
