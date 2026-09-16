@@ -257,14 +257,25 @@ class TestWeightLoadingWithPaddedHiddenSize:
     """Integration-style tests that simulate padded weight loading."""
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-    def test_load_w2_chunks_noncontiguous_cpu_source_to_padded_cuda(self):
-        hidden = 1024
-        intermediate = 512
-        loaded_weight = torch.arange(
-            hidden * intermediate * 2, dtype=torch.float32
-        ).reshape(hidden, intermediate * 2)
-        tp_source = loaded_weight[:, intermediate:]
-        expert_data_full = torch.zeros(hidden + 8, intermediate + 8, device="cuda")
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+    @pytest.mark.parametrize("tp_rank", [0, 1])
+    def test_load_w2_chunks_noncontiguous_cpu_source_to_padded_cuda(
+        self, dtype, tp_rank
+    ):
+        hidden = 4096
+        intermediate = 1024
+        loaded_weight = (
+            torch.arange(hidden * intermediate * 2)
+            .remainder(251)
+            .to(dtype)
+            .reshape(hidden, intermediate * 2)
+        )
+        tp_source = loaded_weight[
+            :, intermediate * tp_rank : intermediate * (tp_rank + 1)
+        ]
+        expert_data_full = torch.zeros(
+            hidden + 8, intermediate + 8, device="cuda", dtype=dtype
+        )
         destination = expert_data_full[:hidden, :intermediate]
 
         assert not tp_source.is_contiguous()
@@ -275,12 +286,22 @@ class TestWeightLoadingWithPaddedHiddenSize:
         torch.nn.Module.__init__(experts)
         experts.moe_config = make_dummy_moe_config()
         experts.moe_config.moe_parallel_config.tp_size = 2
+
+        torch.accelerator.synchronize()
+        allocated_before = torch.accelerator.memory_allocated()
+        torch.accelerator.reset_peak_memory_stats()
         experts._load_w2(
             expert_data=expert_data_full,
             shard_dim=1,
             loaded_weight=loaded_weight,
-            tp_rank=1,
+            tp_rank=tp_rank,
         )
+        torch.accelerator.synchronize()
+        peak_extra = torch.accelerator.max_memory_allocated() - allocated_before
+
+        # A single copy into the strided CUDA view allocates a full-shard
+        # temporary. Correct values alone would not catch that regression.
+        assert peak_extra < tp_source.nbytes
 
         torch.testing.assert_close(destination.cpu(), tp_source)
         assert torch.count_nonzero(expert_data_full[hidden:, :]) == 0

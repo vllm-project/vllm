@@ -543,6 +543,9 @@ class RoutedExperts(PluggableLayer):
             and not expert_data.is_contiguous()
             and expert_data.ndim == 2
         ):
+            # A strided CPU-to-CUDA copy can allocate a full-shard CUDA
+            # temporary. Make the TP slice contiguous on CPU and copy rows
+            # in chunks to limit the temporary used for the padded view.
             loaded_weight = loaded_weight.contiguous()
             num_chunks = max(cdiv(loaded_weight.nbytes, 1 << 20), 1)
             for dst, src in zip(
