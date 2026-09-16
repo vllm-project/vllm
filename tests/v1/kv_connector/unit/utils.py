@@ -17,6 +17,7 @@ from vllm.config import (
     KVTransferConfig,
     ModelConfig,
     SchedulerConfig,
+    SpeculativeConfig,
     VllmConfig,
 )
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
@@ -106,6 +107,7 @@ def create_vllm_config(
     kv_connector_module_path: str | None = None,
     kv_role: str = "kv_consumer",
     disable_hybrid_kv_cache_manager: bool | None = None,
+    num_speculative_tokens: int | None = None,
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
     model_config = ModelConfig(
@@ -141,6 +143,11 @@ def create_vllm_config(
         kv_load_failure_policy=kv_load_failure_policy,
     )
     attention_config = AttentionConfig(backend=attention_backend)
+    speculative_config = (
+        SpeculativeConfig(model="ngram", num_speculative_tokens=num_speculative_tokens)
+        if num_speculative_tokens is not None
+        else None
+    )
     return VllmConfig(
         scheduler_config=scheduler_config,
         model_config=model_config,
@@ -148,6 +155,7 @@ def create_vllm_config(
         kv_transfer_config=kv_transfer_config,
         device_config=DeviceConfig("cpu"),
         attention_config=attention_config,
+        speculative_config=speculative_config,
     )
 
 

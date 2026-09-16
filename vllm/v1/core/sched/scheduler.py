@@ -31,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.utils import get_mm_features_in_window
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -1140,9 +1141,13 @@ class Scheduler(SchedulerInterface):
                 if load_kv_async:
                     # An async load holds its blocks for the whole transfer with
                     # no forward progress and isn't preemptible here. Admit it
-                    # only if it fits in (free - other in-flight reservations), to
-                    # avoid deadlock and predictable preemptions.
-                    reserved_blocks = self._inflight_prefill_reserved_blocks()
+                    # only if it fits in (free - other in-flight reservations)
+                    # plus its own spec decode step blocks, to avoid deadlock and
+                    # predictable preemptions.
+                    reserved_blocks = (
+                        self._inflight_prefill_reserved_blocks()
+                        + self._spec_decode_step_blocks()
+                    )
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
@@ -2892,9 +2897,9 @@ class Scheduler(SchedulerInterface):
         return delay_free or partial_tail_delay, kv_xfer_params
 
     def _request_remaining_blocks(self, request: Request) -> int:
-        """Blocks `request` still needs to allocate to hold its full sequence."""
+        """Blocks `request` still needs to hold its full sequence and be promoted."""
         full_num_tokens = min(request.num_tokens, self.max_model_len)
-        return self.kv_cache_manager.coordinator.get_num_blocks_to_allocate(
+        num_blocks = self.kv_cache_manager.coordinator.get_num_blocks_to_allocate(
             request_id=request.request_id,
             num_tokens=full_num_tokens,
             new_computed_blocks=self.kv_cache_manager.empty_kv_cache_blocks.blocks,
@@ -2903,6 +2908,20 @@ class Scheduler(SchedulerInterface):
             num_local_computed_tokens=request.num_computed_tokens,
             num_tokens_main_model=full_num_tokens,
             apply_admission_cap=True,
+        )
+        return num_blocks + self._spec_decode_step_blocks()
+
+    def _spec_decode_step_blocks(self) -> int:
+        """Number of blocks for the extra KV slots a spec decode step needs.
+
+        When using async kv load, scheduler must reserve enough blocks for
+        full sequence + the spec decode step, otherwise request cannot be
+        able to run after the async_load if we are out of kv blocks.
+        """
+        if not self.num_spec_tokens:
+            return 0
+        return cdiv(
+            1 + self.num_spec_tokens + self.num_lookahead_tokens, self.block_size
         )
 
     def _inflight_prefill_reserved_blocks(self) -> int:
