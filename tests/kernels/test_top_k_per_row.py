@@ -157,8 +157,7 @@ def compare_top_k_results(
     top_k: int,
     tolerance: float = 1e-5,
 ) -> bool:
-    """
-    Compare results from CUDA top_k_per_row with torch.topk.
+    """Compare results from CUDA top_k_per_row with torch.topk.
     Both results should be sorted and contain the same top-k elements.
     """
     num_rows = cuda_indices.shape[0]
@@ -213,8 +212,7 @@ def validate_topk_against_reference(
     top_k: int,
     kernel_name: str,
 ) -> None:
-    """
-    Validate CUDA top-k results against PyTorch reference implementation.
+    """Validate CUDA top-k results against PyTorch reference implementation.
 
     Args:
         logits: Input logits tensor
@@ -223,6 +221,7 @@ def validate_topk_against_reference(
         row_ends: Row end positions
         top_k: Number of top elements to select
         kernel_name: Name of the kernel being tested (for error messages)
+
     """
     num_rows = cuda_indices.shape[0]
     torch_indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
@@ -248,9 +247,7 @@ def test_top_k_per_row(
     top_k: int,
     clean_logits: bool,
 ) -> None:
-    """
-    Test top_k_per_row.
-    """
+    """Test top_k_per_row."""
     set_random_seed(0)
     torch.set_default_device("cuda:0")
 
@@ -298,9 +295,7 @@ def _run_top_k_per_row_decode_test(
     clean_logits: bool,
     data_generation: str,
 ) -> None:
-    """
-    Helper function to run top_k_per_row_decode test with given parameters.
-    """
+    """Helper function to run top_k_per_row_decode test with given parameters."""
     torch.set_default_device("cuda:0")
 
     # Create test data
@@ -365,9 +360,7 @@ def test_top_k_per_row_decode(
     clean_logits: bool,
     data_generation: str,
 ) -> None:
-    """
-    Test top_k_per_row with seq_lens tensor.
-    """
+    """Test top_k_per_row with seq_lens tensor."""
     set_random_seed(0)
     vocab_size = 20000
     _run_top_k_per_row_decode_test(
@@ -379,9 +372,7 @@ def test_top_k_per_row_decode(
 @pytest.mark.parametrize("clean_logits", [True, False])
 @torch.inference_mode()
 def test_top_k_per_row_decode_large_vocab_size(clean_logits: bool) -> None:
-    """
-    Test top_k_per_row_decode with large vocabulary size.
-    """
+    """Test top_k_per_row_decode with large vocabulary size."""
     set_random_seed(0)
     top_k = 2048
     batch_size = 2
@@ -886,8 +877,7 @@ def test_deepseek_workspace_topk(
     next_n: int,
     backend: str,
 ) -> None:
-    """
-    Test workspace top-k backends with varying sequence lengths and speculative
+    """Test workspace top-k backends with varying sequence lengths and speculative
     decoding.
     Supports speculative decoding with next_n > 1.
     """
@@ -932,6 +922,106 @@ def test_deepseek_workspace_topk(
     )
 
 
+@pytest.mark.skipif(not _has_device_capability(80), reason="Requires SM80+")
+@pytest.mark.parametrize("rows", [65, 128])
+@pytest.mark.parametrize("top_k", [512, 1024, 2048])
+@pytest.mark.parametrize(
+    "distribution", ["random", "10LSBits", "ascending", "constant", "sampled_peaks"]
+)
+@torch.inference_mode()
+def test_persistent_topk_sampled_graph(
+    rows: int, top_k: int, distribution: str
+) -> None:
+    """Sampling and both fallbacks preserve exact values across graph replays."""
+    if torch.cuda.get_device_properties(0).shared_memory_per_block_optin < 144 * 1024:
+        pytest.skip("Sampled top-k requires at least 144 KiB of shared memory")
+    set_random_seed(42)
+    min_sampled_length = 98304 if top_k == 512 else 65536
+    width = min_sampled_length + 3
+    lengths = torch.full((rows,), width, dtype=torch.int32, device="cuda")
+    logits = create_random_logits(
+        torch.zeros_like(lengths),
+        lengths,
+        torch.float32,
+        42,
+        False,
+        "10LSBits" if distribution == "10LSBits" else "random",
+    )
+    if distribution == "ascending":
+        logits.copy_(torch.arange(width, device="cuda", dtype=torch.float32))
+    elif distribution == "constant":
+        logits.fill_(1.0)
+    elif distribution == "sampled_peaks":
+        # A biased sample leaves fewer than k survivors and must fall back.
+        logits.zero_()
+        sample = torch.arange(4096, device="cuda")
+        positions = (sample // 32) * (width // 128) + sample % 32
+        logits[:, positions] = 1 + sample.float() / 4096
+    original = logits.clone()
+    indices = torch.empty((rows, top_k), dtype=torch.int32, device="cuda")
+    workspace = torch.empty(RADIX_TOPK_WORKSPACE_SIZE, dtype=torch.uint8, device="cuda")
+
+    def run() -> None:
+        torch.ops._C.persistent_topk(
+            logits,
+            lengths.view(-1, 4 if rows == 128 else 1),
+            indices,
+            workspace,
+            top_k,
+            width,
+        )
+
+    run()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    positions = torch.arange(width, device="cuda")
+    slots = torch.arange(top_k, device="cuda")
+    for step in range(3):
+        bounds = torch.tensor(
+            [
+                -1,
+                0,
+                1,
+                top_k - 1,
+                top_k,
+                32769,
+                min_sampled_length - 1,
+                min_sampled_length,
+                width,
+                width + 17,
+            ],
+            dtype=torch.int32,
+            device="cuda",
+        )
+        lengths.copy_(
+            bounds[(torch.arange(rows, device="cuda") + step) % bounds.numel()]
+        )
+        logits.copy_(original if step != 1 else original.flip(1))
+        logits.masked_fill_(positions[None] >= lengths[:, None], float("nan"))
+        indices.fill_(-2)
+        graph.replay()
+        valid = slots[None] < lengths.clamp(max=top_k)[:, None]
+        assert torch.all(indices[~valid] == -1)
+        assert torch.all(((indices >= 0) & (indices < lengths[:, None])) == valid)
+        ordered_indices = indices.sort(dim=1).values
+        assert torch.all(
+            (ordered_indices[:, 1:] != ordered_indices[:, :-1])
+            | (ordered_indices[:, 1:] == -1)
+        )
+        selected = logits.gather(1, indices.clamp_min(0).long())
+        selected.masked_fill_(~valid, -float("inf"))
+        expected = logits.masked_fill(
+            positions[None] >= lengths[:, None], -float("inf")
+        )
+        torch.testing.assert_close(
+            selected.sort(dim=1, descending=True).values,
+            expected.topk(top_k, dim=1).values,
+            atol=0,
+            rtol=0,
+        )
+
+
 def run_large_context_topk_test(
     batch_size: int,
     seq_lens: list[int],
@@ -940,8 +1030,7 @@ def run_large_context_topk_test(
     seed: int = 42,
     backend: str = "cooperative_topk",
 ) -> None:
-    """
-    Helper to run a top-k backend test with given parameters.
+    """Helper to run a top-k backend test with given parameters.
 
     Args:
         batch_size: Number of rows/sequences
@@ -950,6 +1039,7 @@ def run_large_context_topk_test(
         data_type: Type of test data to generate
         seed: Random seed for reproducibility
         backend: Top-k backend to test
+
     """
     torch.set_default_device("cuda:0")
     set_random_seed(seed)
@@ -1174,8 +1264,7 @@ def test_cooperative_topk_cs2(top_k: int) -> None:
 @pytest.mark.parametrize("backend", WORKSPACE_TOPK_BACKENDS)
 @torch.inference_mode()
 def test_workspace_topk_correctness(test_config: dict, backend: str) -> None:
-    """
-    Comprehensive correctness tests covering:
+    """Comprehensive correctness tests covering:
     - Sequence length edge cases (trivial, boundary, varied)
     - Very small sequences (< 100 elements)
     - Mixed sequence lengths in same batch
@@ -1239,8 +1328,7 @@ def test_workspace_topk_correctness(test_config: dict, backend: str) -> None:
 @pytest.mark.parametrize("backend", WORKSPACE_TOPK_BACKENDS)
 @torch.inference_mode()
 def test_workspace_topk_algorithm_paths(test_config: dict, backend: str) -> None:
-    """
-    Test different algorithm execution paths (capped at 163840 for DeepSeek V3.2):
+    """Test different algorithm execution paths (capped at 163840 for DeepSeek V3.2):
     - Batch size scalability (1, 4, 32, 256)
     - Single-CTA vs Multi-CTA execution
     - Extreme configurations (large batch, max context length)
@@ -1257,8 +1345,7 @@ def test_workspace_topk_algorithm_paths(test_config: dict, backend: str) -> None
 @pytest.mark.parametrize("backend", WORKSPACE_TOPK_BACKENDS)
 @torch.inference_mode()
 def test_workspace_topk_stress(backend: str) -> None:
-    """
-    Stress test with random configurations to catch edge cases.
+    """Stress test with random configurations to catch edge cases.
     Capped at 163840 (DeepSeek V3.2 max context) for realistic testing.
     """
     torch.set_default_device("cuda:0")
@@ -1405,8 +1492,7 @@ def test_cooperative_topk_512_tie_workspace_is_per_row() -> None:
 @pytest.mark.parametrize("backend", WORKSPACE_TOPK_BACKENDS)
 @torch.inference_mode()
 def test_workspace_topk(test_config: dict, top_k: int, backend: str) -> None:
-    """
-    Tests specific to workspace top-k backends:
+    """Tests specific to workspace top-k backends:
     - Mixed medium/large rows in the same batch (dynamic per-row dispatch)
     - Boundary around LARGE_THRESHOLD (32K)
     - Trivial + medium + large rows in a single batch
@@ -1467,8 +1553,7 @@ def test_persistent_topk_reused_group_after_short_row() -> None:
 @pytest.mark.parametrize("backend", WORKSPACE_TOPK_BACKENDS)
 @torch.inference_mode()
 def test_workspace_topk_padded_stride(top_k: int, backend: str) -> None:
-    """
-    Test workspace top-k backends with padded logits (large stride, small seq_len)
+    """Test workspace top-k backends with padded logits (large stride, small seq_len)
     to simulate the e2e CUDAGraph scenario where fp8_paged_mqa_logits
     returns [B, max_model_len] with max_model_len=163840.
     """
