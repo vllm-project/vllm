@@ -34,6 +34,7 @@ async def build_and_serve_renderer(
     log_config = get_uvicorn_log_config(args)
     if log_config is not None:
         uvicorn_kwargs["log_config"] = log_config
+    uvicorn_kwargs.setdefault("http", args.http)
 
     app = build_app(args, ("render",))
     await init_render_app_state(vllm_config, app.state, args)

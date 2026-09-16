@@ -84,6 +84,7 @@ def _make_unit_args(**overrides) -> argparse.Namespace:
         "tensor_parallel_size": 1,
         "pipeline_parallel_size": 1,
         "uvicorn_log_level": "info",
+        "http": "auto",
         "shutdown_timeout": 5.0,
         "disable_uvicorn_access_log": False,
         "disable_access_log_for_endpoints": None,
@@ -122,6 +123,7 @@ def _make_args(**overrides) -> argparse.Namespace:
         tensor_parallel_size=1,
         pipeline_parallel_size=1,
         uvicorn_log_level="warning",
+        http="auto",
         shutdown_timeout=0.0,
         disable_uvicorn_access_log=False,
         disable_access_log_for_endpoints=None,
@@ -446,7 +448,7 @@ async def test_start_server_no_log_config_when_no_filter(monkeypatch):
 
     monkeypatch.setattr(dp_sup, "NoSignalServer", FakeServer)
 
-    args = _make_unit_args(host="127.0.0.1")
+    args = _make_unit_args(host="127.0.0.1", http="h11")
     supervisor = DPSupervisor(args)
     await supervisor._start_server()
 
@@ -454,6 +456,7 @@ async def test_start_server_no_log_config_when_no_filter(monkeypatch):
     config = captured_config[0]
     assert config.log_config == uvicorn.Config(app=None).log_config
     assert config.access_log is True
+    assert config.http == "h11"
 
 
 # ---------------------------------------------------------------------------

@@ -335,6 +335,7 @@ class DPSupervisor:
             host=host,
             port=self.supervisor_port,
             log_level=self.args.uvicorn_log_level,
+            http=self.args.http,
             access_log=not self.args.disable_uvicorn_access_log,
             ssl_keyfile=self.args.ssl_keyfile,
             ssl_certfile=self.args.ssl_certfile,
