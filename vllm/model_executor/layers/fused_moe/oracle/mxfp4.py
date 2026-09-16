@@ -757,18 +757,31 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
         intermediate_size = round_up(intermediate_size, 128)
         hidden_size = round_up(hidden_size, 128)
     elif current_platform.is_rocm():
-        if backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and (
-            activation == MoEActivation.SITU or activation == MoEActivation.SILU
-        ):
-            # K3's AITER A16W4 SiTU kernel handles K3's native intermediate size
-            # (moe_intermediate 3072; e.g. 384/partition at TP8). Align to 128 (a
-            # no-op for K3's shapes) rather than the generic ROCm 256 round-up,
-            # which would inflate weights and OOM.
-            intermediate_size = round_up(intermediate_size, 128)
-            hidden_size = round_up(hidden_size, 128)
-        else:
-            intermediate_size = round_up(intermediate_size, 256)
-            hidden_size = round_up(hidden_size, 256)
+        from vllm.platforms.rocm import get_cdna_version
+
+        is_situ_or_silu = activation in (
+            MoEActivation.SITU,
+            MoEActivation.SILU,
+        )
+
+        # K3's AITER A16W4 SiTU kernel handles K3's native intermediate size
+        # (moe_intermediate 3072; e.g. 384/partition at TP8). Align to 128
+        # rather than the generic ROCm 256 round-up, which would inflate
+        # weights and OOM.
+        aiter_uses_128 = backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
+
+        # matmul_ogs uses block_k=128 for MXFP4 on pre-CDNA4 GPUs.
+        # CDNA4's F16xMXFP4 configuration uses block_k=256.
+        triton_uses_128 = (
+            backend == Mxfp4MoeBackend.TRITON_UNFUSED and get_cdna_version() != 4
+        )
+
+        alignment = (
+            128 if is_situ_or_silu and (aiter_uses_128 or triton_uses_128) else 256
+        )
+
+        intermediate_size = round_up(intermediate_size, alignment)
+        hidden_size = round_up(hidden_size, alignment)
     elif backend == Mxfp4MoeBackend.CPU:
         # CPU AMX kernel uses BLOCK_N=32, align to 32
         intermediate_size = round_up(intermediate_size, 32)
