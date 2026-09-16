@@ -381,7 +381,6 @@ class KVCacheManager:
         full_sequence_must_fit: bool = False,
         reserved_blocks: int = 0,
         has_scheduled_reqs: bool = True,
-        allow_hisparse_host_import: bool = False,
     ) -> KVCacheBlocks | None:
         """Add slots for a request with new tokens to append.
 
@@ -414,8 +413,6 @@ class KVCacheManager:
                 blocks an already in-flight (prefilling) sequence is relying on.
             has_scheduled_reqs: Whether any requests are already scheduled to run
                 this step, controls whether watermark is applied.
-            allow_hisparse_host_import: Whether HiSparse may fall back to host
-                landing when device-resident blocks are unavailable.
 
         Blocks layout:
         ```
@@ -510,9 +507,6 @@ class KVCacheManager:
         ):
             watermark_blocks = self.watermark_blocks
 
-        hisparse_host_import = (
-            request.hisparse_host_import or not request.hisparse_gpu_import
-        )
         if full_sequence_must_fit:
             # First check and fail if the full request sequence won't fit.
             full_num_tokens = min(request.num_tokens, self.max_model_len)
@@ -526,28 +520,10 @@ class KVCacheManager:
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_tokens_main_model=full_num_tokens,
                 apply_admission_cap=True,
-                hisparse_host_import=hisparse_host_import,
+                available_blocks=self.block_pool.get_num_free_blocks()
+                - watermark_blocks,
             )
             required_blocks = num_blocks_to_allocate + watermark_blocks
-            if (
-                required_blocks > self.block_pool.get_num_free_blocks()
-                and allow_hisparse_host_import
-                and num_external_computed_tokens > 0
-                and not hisparse_host_import
-            ):
-                hisparse_host_import = request.hisparse_host_import = True
-                num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
-                    request_id=request.request_id,
-                    num_tokens=full_num_tokens,
-                    new_computed_blocks=new_computed_block_list,
-                    num_encoder_tokens=num_encoder_tokens,
-                    total_computed_tokens=total_computed_tokens,
-                    num_local_computed_tokens=num_local_computed_tokens,
-                    num_tokens_main_model=full_num_tokens,
-                    apply_admission_cap=True,
-                    hisparse_host_import=True,
-                )
-                required_blocks = num_blocks_to_allocate + watermark_blocks
             if required_blocks > self.block_pool.get_num_free_blocks():
                 return None
 
@@ -580,31 +556,15 @@ class KVCacheManager:
             + num_external_computed_tokens,
             num_local_computed_tokens=num_local_computed_tokens,
             num_tokens_main_model=num_tokens_main_model,
-            hisparse_host_import=hisparse_host_import,
+            available_blocks=self.block_pool.get_num_free_blocks()
+            - reserved_blocks
+            - watermark_blocks,
         )
 
         # Keep `reserved_blocks` free for other in-flight sequences, and an
         # additional watermark of headroom for waiting/preempted admissions.
         available_blocks = self.block_pool.get_num_free_blocks() - reserved_blocks
         required_blocks = num_blocks_to_allocate + watermark_blocks
-        if (
-            required_blocks > available_blocks
-            and allow_hisparse_host_import
-            and num_external_computed_tokens > 0
-            and not hisparse_host_import
-        ):
-            hisparse_host_import = request.hisparse_host_import = True
-            num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
-                request_id=request.request_id,
-                num_tokens=num_tokens_need_slot,
-                new_computed_blocks=new_computed_block_list,
-                num_encoder_tokens=num_encoder_tokens,
-                total_computed_tokens=total_computed_tokens,
-                num_local_computed_tokens=num_local_computed_tokens,
-                num_tokens_main_model=num_tokens_main_model,
-                hisparse_host_import=True,
-            )
-            required_blocks = num_blocks_to_allocate + watermark_blocks
         if required_blocks > available_blocks:
             # Cannot allocate new blocks
             return None
@@ -620,14 +580,8 @@ class KVCacheManager:
                 new_computed_blocks=new_computed_block_list,
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_external_computed_tokens=num_external_computed_tokens,
-                hisparse_host_import=hisparse_host_import,
             )
 
-        if num_external_computed_tokens > 0:
-            request.hisparse_host_import = hisparse_host_import
-        request.hisparse_host_import_pending = (
-            num_external_computed_tokens > 0 and hisparse_host_import
-        )
         new_blocks = self.coordinator.allocate_new_blocks(
             request.request_id,
             num_tokens_need_slot,

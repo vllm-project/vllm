@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import msgspec
+import numpy as np
 import pytest
 import torch
 
@@ -507,7 +508,7 @@ def test_logical_to_kernel_block_ids_with_hma():
     "done_recving,expected_syncs",
     [
         (True, False, True, False, False, {"req"}, 1),
-        (False, True, False, True, False, {"req"}, 1),
+        (False, True, False, True, False, {"req"}, 0),
         (False, False, False, False, False, {"req"}, 0),
         (False, False, True, False, False, {"req"}, 0),
         (True, False, True, False, True, {"req"}, 0),
@@ -1602,7 +1603,6 @@ def test_failed_load_rezeroes_unwritten_skipped_blocks():
     request = MagicMock()
     request.request_id = "req-1"
     request.num_computed_tokens = 48  # Truncated at the first invalid block.
-    request.hisparse_host_import_pending = True
 
     scheduler._update_waiting_for_remote_kv(request)
 
@@ -2205,6 +2205,60 @@ def test_hisparse_host_registration_handoff(shared, num_chunks, fail_unregister)
 
 
 @pytest.mark.cpu_test
+@pytest.mark.parametrize("remote_ratio", [1, 2])
+def test_hisparse_maps_host_and_device_reads_without_submitting(remote_ratio):
+    from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.nixl import (
+        HiSparseNixlDestination,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import ReadSpec
+
+    worker = _make_mock_worker_for_desc_ids(2, False, (MLAAttentionSpec,))
+    worker.nixl_wrapper = MagicMock()
+    worker.engine_id = "decode"
+    worker.region_group_ids = [0, 1]
+    worker.region_num_blocks = [4, 4]
+    worker.dst_region_group_ids = {"prefill": [0, 0]}
+    worker.dst_region_num_blocks = {"prefill": [8, 8]}
+    worker.dst_num_blocks = {"prefill": 8, "decode": 4}
+    worker._physical_blocks_per_logical_kv_block = 1
+    worker.kv_cache_config = make_kv_cache_config(block_size=16)
+    worker.transfer_topo = MagicMock()
+    worker.transfer_topo.block_size_ratio.return_value = 1
+    worker.transfer_topo.get_engine_info.return_value = SimpleNamespace(
+        remote_block_size=16, remote_physical_blocks_per_logical=remote_ratio
+    )
+    worker.src_xfer_handles_by_block_size = {16: 20}
+    worker._block_ids_by_region = NixlConnectorWorker._block_ids_by_region
+    worker._apply_prefix_caching_by_region = (
+        NixlConnectorWorker._apply_prefix_caching_by_region
+    )
+    worker._logical_to_kernel_block_ids = (
+        NixlConnectorWorker._logical_to_kernel_block_ids.__get__(worker)
+    )
+    destination = HiSparseNixlDestination(
+        SimpleNamespace(hisparse_host_num_blocks=6), MagicMock()
+    )
+    destination.host_regions = [None, (1000, 16)]
+    destination._descriptor_offsets = [None, 0]
+    destination._xfer_handle = 10
+    local = list(range(2 * remote_ratio))
+
+    reads = destination.prepare_reads(
+        worker, ReadSpec(0, (local, []), ([2, 3],)), local, "prefill"
+    )
+
+    host, device = reads
+    assert (host[0], device[0]) == (10, 20)
+    np.testing.assert_array_equal(host[1], local)
+    np.testing.assert_array_equal(device[1], local)
+    remote = np.arange(2 * remote_ratio, 4 * remote_ratio)
+    np.testing.assert_array_equal(host[2], 8 + remote)
+    np.testing.assert_array_equal(device[2], remote)
+    worker.nixl_wrapper.make_prepped_xfer.assert_not_called()
+    worker.nixl_wrapper.transfer.assert_not_called()
+
+
+@pytest.mark.cpu_test
 @pytest.mark.parametrize("kernel_block_size", [16, 8])
 def test_nixl_keeps_device_block_count_with_hisparse_host_pool(kernel_block_size):
     host_num_blocks = 4
@@ -2328,7 +2382,7 @@ def test_hisparse_host_import_keeps_host_blocks_out_of_gpu_regions():
         ],
     )
     request = create_request(do_remote_prefill=True)
-    request.hisparse_host_import = True
+    scheduler.hisparse = MagicMock()
     assert request.kv_transfer_params is not None
     request.kv_transfer_params["remote_block_ids"] = ([1, 2],)
     blocks = MagicMock()

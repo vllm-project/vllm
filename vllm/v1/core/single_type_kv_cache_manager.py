@@ -2264,9 +2264,10 @@ class HiSparseSourceManager(FullAttentionManager):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
-        *,
-        host_import: bool = True,
     ) -> int:
+        host_import = self.coordinator is None or self.coordinator.imports_to_host(
+            request_id
+        )
         if (
             host_import and total_computed_tokens > num_local_computed_tokens
         ) or self._has_partial_local_hit(
@@ -2310,9 +2311,10 @@ class HiSparseSourceManager(FullAttentionManager):
         request_id: str,
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
-        *,
-        host_import: bool = True,
     ) -> None:
+        host_import = self.coordinator is None or self.coordinator.imports_to_host(
+            request_id
+        )
         if num_external_computed_tokens <= 0 or not host_import:
             return
         # The connector writes these pages; only a successful receive makes
@@ -2334,9 +2336,6 @@ class HiSparseSourceManager(FullAttentionManager):
         replay_boundaries: Sequence[int],
     ) -> None:
         assert self.coordinator is not None
-        if request.hisparse_host_import_pending:
-            self.coordinator.complete_host_import(request.request_id, num_tokens)
-            request.hisparse_host_import_pending = False
         self.coordinator.publish_when_ready(
             request,
             num_tokens,
@@ -2428,9 +2427,10 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
-        *,
-        host_import: bool = True,
     ) -> int:
+        host_import = self.coordinator is None or self.coordinator.imports_to_host(
+            request_id
+        )
         assert not new_computed_blocks
         # A hot region is needed to read host-backed history: an external
         # import, a new request resuming a host prefix, or one already asked
@@ -2467,9 +2467,10 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
         request_id: str,
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
-        *,
-        host_import: bool = True,
     ) -> None:
+        host_import = self.coordinator is None or self.coordinator.imports_to_host(
+            request_id
+        )
         if host_import:
             self.require_hot(request_id)
 
@@ -2505,9 +2506,10 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
-        *,
-        host_import: bool = True,
     ) -> int:
+        host_import = self.coordinator is None or self.coordinator.imports_to_host(
+            request_id
+        )
         del num_tokens_main_model
         assert not new_computed_blocks
         if host_import and total_computed_tokens > num_local_computed_tokens:
@@ -2530,10 +2532,11 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         request_id: str,
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
-        *,
-        host_import: bool = True,
     ) -> None:
         """Represent imported host history with null resident pages."""
+        host_import = self.coordinator is None or self.coordinator.imports_to_host(
+            request_id
+        )
         assert num_external_computed_tokens > 0
         if not host_import:
             super().allocate_external_computed_blocks(

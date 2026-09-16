@@ -41,6 +41,7 @@ from vllm.v1.kv_cache_interface import (
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.hisparse.coordinator import HiSparseCoordinator
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.outputs import KVConnectorOutput
     from vllm.v1.request import Request
@@ -116,6 +117,7 @@ class NixlBaseConnectorScheduler:
             ReqId, tuple[Request, BlockIds, tuple[int, ...], bool]
         ] = {}
         self._hisparse_host_blocks_to_recv: dict[ReqId, list[int]] = {}
+        self.hisparse: HiSparseCoordinator | None = None
         self._reqs_need_save: dict[ReqId, Request] = {}
         # Reqs to send and their expiration time
         self._reqs_need_send: dict[ReqId, float] = {}

@@ -2992,9 +2992,7 @@ class NixlBaseConnectorWorker:
 
     def _sync_device_after_direct_recv(self, done_recving: set[str]) -> None:
         """Make direct NIXL writes visible before model execution."""
-        requires_sync = (current_platform.is_rocm() and self._has_mamba) or (
-            current_platform.is_cuda() and self._hisparse_destination is not None
-        )
+        requires_sync = current_platform.is_rocm() and self._has_mamba
         if self.use_host_buffer or not done_recving or not requires_sync:
             return
 

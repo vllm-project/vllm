@@ -17,8 +17,7 @@ if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
         NixlBaseConnectorWorker,
     )
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import ReqMeta
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import TPMapping
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import ReadSpec
     from vllm.v1.hisparse.runtime import HiSparseRuntime
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
@@ -163,33 +162,25 @@ class HiSparseNixlDestination:
             worker.nixl_wrapper.release_dlist_handle(self._xfer_handle)
             self._xfer_handle = None
 
-    def read_host_blocks(
+    def prepare_reads(
         self,
         worker: NixlBaseConnectorWorker,
-        request_id: str,
-        meta: ReqMeta,
-        plan: TPMapping,
-        remote_region_groups: list[int],
-    ) -> None:
-        """Read sparse regions to host and device-only regions to GPU."""
-        assert meta.remote is not None and worker.transfer_topo is not None
-        if worker._has_mamba or not worker.use_mla:
-            raise NotImplementedError("HiSparse host imports require a pure MLA model")
-        if len(plan.all_source_ranks) != 1:
-            raise NotImplementedError(
-                "HiSparse host imports require replicated NIXL regions"
-            )
-
-        engine_id = meta.remote.engine_id
-        remote_rank = plan.all_source_ranks[0]
+        read_spec: ReadSpec,
+        host_blocks: list[int],
+        engine_id: str,
+    ) -> list[tuple[int, np.ndarray, np.ndarray]]:
+        """Map local host/device destinations without submitting transfers."""
+        assert worker.transfer_topo is not None
+        remote_info = worker.transfer_topo.get_engine_info(engine_id)
+        remote_blocks = worker._logical_to_kernel_block_ids(
+            read_spec.remote_block_ids, remote_info.remote_physical_blocks_per_logical
+        )
         remote_by_region = worker._block_ids_by_region(
-            meta.remote.block_ids, remote_region_groups
+            remote_blocks, worker.dst_region_group_ids[engine_id]
         )
         device_by_region = worker._block_ids_by_region(
-            meta.local_physical_block_ids, worker.region_group_ids
+            read_spec.local_block_ids, worker.region_group_ids
         )
-        host_blocks = meta.hisparse_host_block_ids
-        assert host_blocks is not None
         local_by_region = [
             list(host_blocks) if host_region is not None else list(device_blocks)
             for host_region, device_blocks in zip(
@@ -202,7 +193,6 @@ class HiSparseNixlDestination:
         local_by_region = [list(blocks) for blocks in trimmed_local]
         remote_by_region = [list(blocks) for blocks in trimmed_remote]
 
-        remote_info = worker.transfer_topo.get_engine_info(engine_id)
         remote_ids = worker._compute_desc_ids(
             block_ids=remote_by_region,
             dst_num_blocks=worker.dst_num_blocks[engine_id],
@@ -256,7 +246,7 @@ class HiSparseNixlDestination:
         local_device_handle = worker.src_xfer_handles_by_block_size[
             remote_info.remote_block_size
         ]
-        transfer_specs = [
+        return [
             (
                 self._xfer_handle,
                 np.asarray(host_local_ids, dtype=np.int64),
@@ -268,48 +258,6 @@ class HiSparseNixlDestination:
                 np.asarray(device_remote_ids, dtype=np.int64),
             ),
         ]
-
-        notif_id = f"{meta.remote.request_id}:{plan.local_consumers}".encode()
-        agents = worker._remote_agents[engine_id]
-        if worker.transfer_topo.tp_ratio(meta.tp_size) < 0:
-            pending_notifs = [(agent, notif_id) for agent in agents.values()]
-        else:
-            pending_notifs = [(agents[(0, remote_rank)], notif_id)]
-        worker._pending_recv_notifs.setdefault(request_id, []).extend(pending_notifs)
-
-        handles: list[int] = []
-        try:
-            remote_handle = worker.dst_xfer_side_handles[engine_id][remote_rank]
-            for local_handle, local_ids, selected_remote_ids in transfer_specs:
-                if not len(local_ids):
-                    continue
-                handles.append(
-                    worker.nixl_wrapper.make_prepped_xfer(
-                        "READ",
-                        local_handle,
-                        local_ids,
-                        remote_handle,
-                        selected_remote_ids,
-                    )
-                )
-            worker._recving_transfers.setdefault(request_id, [])
-            for handle in handles:
-                worker.nixl_wrapper.transfer(handle)
-                worker._recving_transfers[request_id].append(handle)
-        except Exception as error:
-            started = set(worker._recving_transfers.get(request_id, ()))
-            for handle in handles:
-                if handle not in started:
-                    worker.nixl_wrapper.release_xfer_handle(handle)
-            worker._log_failure(
-                failure_type="transfer_setup_failed",
-                req_id=request_id,
-                msg="HiSparse host import setup failed",
-                error=error,
-                dst_engine_id=engine_id,
-                remote_rank=remote_rank,
-            )
-            worker._handle_failed_transfer(request_id, None)
 
 
 def make_hisparse_nixl_destination(

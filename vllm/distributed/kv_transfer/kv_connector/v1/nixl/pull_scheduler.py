@@ -49,7 +49,8 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
               asynchronously (between scheduler steps).
 
         """
-        request.hisparse_gpu_import = True
+        if self.hisparse is not None:
+            self.hisparse.prepare_gpu_import(request.request_id)
         params = request.kv_transfer_params
         logger.debug(
             "NIXLConnector get_num_new_matched_tokens: "
@@ -153,7 +154,9 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                         if num_external_tokens > 0
                         else ()
                     )
-                    if request.hisparse_host_import:
+                    if self.hisparse is not None and self.hisparse.imports_to_host(
+                        request.request_id
+                    ):
                         source_group_ids = [
                             group_id
                             for group_id, group in enumerate(
