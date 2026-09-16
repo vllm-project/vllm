@@ -93,13 +93,13 @@ class ResolveOutputs:
     """Per-step outputs. Entries the kernel does not write keep their poison."""
 
     hot_indices: np.ndarray
-    attention_indices: np.ndarray | None = None
-    miss_mask: np.ndarray | None = None
-    resolved_global_indices: np.ndarray | None = None
-    valid_counts: np.ndarray | None = None
-    swap_host_physical_rows: np.ndarray | None = None
-    swap_device_physical_rows: np.ndarray | None = None
-    swap_counts: np.ndarray | None = None
+    attention_indices: np.ndarray
+    miss_mask: np.ndarray
+    resolved_global_indices: np.ndarray
+    valid_counts: np.ndarray
+    swap_host_physical_rows: np.ndarray
+    swap_device_physical_rows: np.ndarray
+    swap_counts: np.ndarray
 
 
 @dataclass
@@ -129,13 +129,12 @@ def _store_hot_index(
     attention_block_stride: int,
 ) -> None:
     out.hot_indices[row, col] = physical_row
-    if out.attention_indices is not None:
-        out.attention_indices[row, col] = (
-            -1
-            if physical_row < 0
-            else (physical_row // hot_block_size) * attention_block_stride
-            + physical_row % hot_block_size
-        )
+    out.attention_indices[row, col] = (
+        -1
+        if physical_row < 0
+        else (physical_row // hot_block_size) * attention_block_stride
+        + physical_row % hot_block_size
+    )
 
 
 def _physical_hot_row(
@@ -183,12 +182,9 @@ def ref_resolve_residency(
                     cfg.hot_block_size,
                     cfg.attention_block_stride,
                 )
-                if out.resolved_global_indices is not None:
-                    out.resolved_global_indices[batch_row, i] = -1
-            if out.valid_counts is not None:
-                out.valid_counts[batch_row] = 0
-            if out.swap_counts is not None:
-                out.swap_counts[batch_row] = 0
+                out.resolved_global_indices[batch_row, i] = -1
+            out.valid_counts[batch_row] = 0
+            out.swap_counts[batch_row] = 0
             continue
 
         row_dgi = state.device_global_indices[state_row]
@@ -207,6 +203,8 @@ def ref_resolve_residency(
             resident_row = -1
 
             if cfg.source_block_table is not None:
+                # The op rejects one without the other (hisparse_kernels.cu:906).
+                assert cfg.request_ids is not None
                 req = int(cfg.request_ids[batch_row])
                 src_block = (
                     token_index // cfg.source_block_size if token_index >= 0 else -1
@@ -251,12 +249,10 @@ def ref_resolve_residency(
                 g = -1
 
             resolved_g[i] = g
-            if out.resolved_global_indices is not None:
-                out.resolved_global_indices[batch_row, i] = g
+            out.resolved_global_indices[batch_row, i] = g
             if resident_row >= 0 or g >= 0:
                 valid_count += 1
-            if out.miss_mask is not None:
-                out.miss_mask[batch_row, i] = 0
+            out.miss_mask[batch_row, i] = 0
 
             if resident_row >= 0:
                 _store_hot_index(
@@ -283,13 +279,11 @@ def ref_resolve_residency(
             else:
                 pending[g] = i
 
-        if out.valid_counts is not None:
-            out.valid_counts[batch_row] = valid_count
+        out.valid_counts[batch_row] = valid_count
 
         # Fully resident rows never consult or rewrite the hot LRU.
         if resolved_count == top_k:
-            if out.swap_counts is not None:
-                out.swap_counts[batch_row] = 0
+            out.swap_counts[batch_row] = 0
             continue
 
         # --- Phase 2: scan hot slots in LRU order, classify and compact ------
@@ -340,9 +334,8 @@ def ref_resolve_residency(
                     cfg.hot_block_size,
                     cfg.attention_block_stride,
                 )
-                if out.swap_host_physical_rows is not None:
-                    out.swap_host_physical_rows[batch_row, compact] = g
-                    out.swap_device_physical_rows[batch_row, compact] = -1
+                out.swap_host_physical_rows[batch_row, compact] = g
+                out.swap_device_physical_rows[batch_row, compact] = -1
                 continue
             physical_row = _physical_hot_row(
                 cfg.hot_block_table, request_row, cfg.hot_block_size, evict_slot
@@ -355,16 +348,13 @@ def ref_resolve_residency(
                 cfg.hot_block_size,
                 cfg.attention_block_stride,
             )
-            if out.swap_host_physical_rows is not None:
-                out.swap_host_physical_rows[batch_row, compact] = g
-                out.swap_device_physical_rows[batch_row, compact] = physical_row
-            if out.miss_mask is not None:
-                out.miss_mask[batch_row, i] = 1
+            out.swap_host_physical_rows[batch_row, compact] = g
+            out.swap_device_physical_rows[batch_row, compact] = physical_row
+            out.miss_mask[batch_row, i] = 1
             row_dgi[evict_slot] = g
 
         total_misses = len(misses)
-        if out.swap_counts is not None:
-            out.swap_counts[batch_row] = total_misses
+        out.swap_counts[batch_row] = total_misses
 
         # --- Phase 4: rewrite the LRU order ---------------------------------
         # stale evictables (oldest first) | freshly filled misses | hits at MRU
@@ -680,7 +670,7 @@ def run_device_resolve(case: ResolveCase, state: ResolveState) -> ResolveOutputs
         cfg.resident_block_size,
         cfg.resident_null_block,
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Write the mutated long-lived state back so the caller can keep stepping.
     state.device_global_indices[:] = d_dgi.cpu().numpy()
@@ -1154,7 +1144,7 @@ def test_gather_plan_matches_reference(
         d_attn,
         hot_block_size,
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     np.testing.assert_array_equal(
         d_hot.cpu().numpy().reshape(-1),
@@ -1209,7 +1199,7 @@ def test_gather_compact_matches_reference(requires_hisparse_ops, top_k: int) -> 
         torch.from_numpy(miss_hot).to(DEVICE),
         torch.from_numpy(miss_counts).to(DEVICE),
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     np.testing.assert_array_equal(
         d_hot.cpu().numpy().reshape(-1),
@@ -1247,7 +1237,7 @@ def test_invalidate_written_slots_matches_reference(
         torch.from_numpy(req_id_per_token).to(DEVICE),
         torch.from_numpy(written_slots).to(DEVICE),
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     np.testing.assert_array_equal(
         d_dgi.cpu().numpy(),

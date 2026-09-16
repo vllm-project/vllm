@@ -40,6 +40,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
 )
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     GLOBAL_TOPK_MASK_MAX_BYTES,
+    SharedTopkIndicesBuffer,
     SparseMLACommonImpl,
     SparseMLAPrefillMetadata,
     _is_masked_mha_available,
@@ -49,12 +50,6 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
 )
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.platforms import current_platform
-from vllm.model_executor.layers.attention.mla_attention import (
-    _canonicalize_sparse_mla_kv_cache_dtype,
-)
-from vllm.model_executor.layers.attention.sparse_mla_attention import (
-    SharedTopkIndicesBuffer,
-)
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.attention.backends.mla import index_group as index_group_module
