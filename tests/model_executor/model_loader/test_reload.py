@@ -350,8 +350,7 @@ def test_marlin_post_load_preserves_runtime_tensor_addresses(monkeypatch, dist_i
 @pytest.mark.parametrize("variant", ["fp8", "mxfp8", "nvfp4"])
 def test_marlin_prepare_layer_preserves_workspace_address(monkeypatch, variant):
     """The Marlin fallback prepare_* functions rerun on weight reload and must
-    reuse the workspace storage whose address captured CUDA graphs hold.
-    """
+    reuse the workspace storage whose address captured CUDA graphs hold."""
     from vllm import _custom_ops as ops
     from vllm.model_executor.layers.quantization.utils import (
         marlin_utils,
@@ -429,8 +428,7 @@ def test_marlin_prepare_layer_preserves_workspace_address(monkeypatch, variant):
 
 def test_marlin_make_workspace_new_rejects_incompatible_existing(monkeypatch):
     """An incompatible existing workspace means the address captured by CUDA
-    graphs is already unusable; allocating a replacement would hide that.
-    """
+    graphs is already unusable; allocating a replacement would hide that."""
     from vllm.model_executor.layers.quantization.utils import marlin_utils
 
     monkeypatch.setattr(marlin_utils, "num_compute_units", lambda _: 4)
@@ -611,8 +609,7 @@ class _RecordingQuantMethod(QuantizeMethodBase):
 class _LateBiasLayer(torch.nn.Module):
     """Mimics an online-quantized linear: `weight` is created on meta by
     `create_weights()`, which wraps the loaders, and the linear base registers
-    `bias` afterwards.
-    """
+    `bias` afterwards."""
 
     def __init__(self, quant_method):
         super().__init__()

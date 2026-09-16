@@ -1821,8 +1821,7 @@ def get_required(obj: object, attr: str):
 
 def getattr_from_list(obj: object, attrs: list[str], default: object = None):
     """Try to get the first attr that exists in the object
-    from a list of attrs. Otherwise return None.
-    """
+    from a list of attrs. Otherwise return None."""
     for attr in attrs:
         if hasattr(obj, attr):
             return getattr(obj, attr)

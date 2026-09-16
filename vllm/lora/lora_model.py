@@ -90,8 +90,7 @@ class LoRAModel:
     def clone(self, lora_model_id: int) -> "LoRAModel":
         """Return a copy of the object with different ids.
 
-        Will share the underlying tensors.
-        """
+        Will share the underlying tensors."""
         return self.__class__(
             lora_model_id,
             rank=self.rank,

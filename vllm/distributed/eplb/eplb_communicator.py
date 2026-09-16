@@ -84,8 +84,7 @@ class EplbCommunicator(ABC):
     @property
     def needs_profile_buffer_reservation(self) -> bool:
         """Whether the profile path must run a dummy collective operation to reserve
-        communication buffers.
-        """
+        communication buffers."""
         return True
 
     def set_stream(self, cuda_stream: torch.cuda.Stream | None) -> None:
@@ -443,8 +442,7 @@ class NixlEplbCommunicator(EplbCommunicator):
 
     def _exchange_remote_send_meta(self) -> None:
         """Exchange per-layer per-tensor metadata so receivers can compute
-        remote RDMA addresses at transfer time.
-        """
+        remote RDMA addresses at transfer time."""
         local_meta: dict[tuple[int, int], tuple[int, int, int]] = {}
         for layer_idx, layer_tensors in enumerate(self._all_expert_weights):
             for t_idx, t in enumerate(layer_tensors):

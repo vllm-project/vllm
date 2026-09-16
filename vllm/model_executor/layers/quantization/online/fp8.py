@@ -118,8 +118,7 @@ def _is_tp_sharded(layer: Module, *, reduces_output_dim: bool = True) -> bool:
 
 class OnlineLinearBase(LinearMethodBase):
     """Shared base for online FP8 linear methods. Loads fp16/bf16 checkpoint
-    weights onto meta device and materializes them just-in-time.
-    """
+    weights onto meta device and materializes them just-in-time."""
 
     uses_meta_device: bool = True
 
@@ -163,8 +162,7 @@ class OnlineLinearBase(LinearMethodBase):
 
 class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
     """Online tensorwise FP8 linear quantization.
-    Loads fp16/bf16 weights and quantizes them per-tensor during loading.
-    """
+    Loads fp16/bf16 weights and quantizes them per-tensor during loading."""
 
     def __init__(self):
         super().__init__()
@@ -265,8 +263,7 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
 
 class Fp8PerBlockOnlineLinearMethod(OnlineLinearBase):
     """Online blockwise FP8 linear quantization.
-    Loads fp16/bf16 weights and quantizes them per-block during loading.
-    """
+    Loads fp16/bf16 weights and quantizes them per-block during loading."""
 
     def __init__(self):
         super().__init__()
@@ -440,8 +437,7 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
 
 class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
     """Shared base for online FP8 MoE methods. Loads fp16/bf16 checkpoint
-    weights onto meta device and materializes them just-in-time.
-    """
+    weights onto meta device and materializes them just-in-time."""
 
     # Declared here for mypy; actual values are set in __init__.
     fp8_backend: "Fp8MoeBackend"
@@ -562,8 +558,7 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
 
 class Fp8PerTensorOnlineMoEMethod(_Fp8OnlineMoEBase):
     """Online tensorwise FP8 MoE quantization.
-    Loads fp16/bf16 weights and quantizes them per-tensor during loading.
-    """
+    Loads fp16/bf16 weights and quantizes them per-tensor during loading."""
 
     def __init__(
         self,
@@ -620,8 +615,7 @@ class Fp8PerTensorOnlineMoEMethod(_Fp8OnlineMoEBase):
 
 class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
     """Online blockwise FP8 MoE quantization.
-    Loads fp16/bf16 weights and quantizes them per-block during loading.
-    """
+    Loads fp16/bf16 weights and quantizes them per-block during loading."""
 
     def __init__(
         self,
