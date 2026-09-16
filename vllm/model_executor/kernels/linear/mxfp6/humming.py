@@ -10,10 +10,7 @@ from vllm.model_executor.layers.quantization.utils.humming import (
     prepare_humming_linear_layer_config,
     quant_key_to_input_schema,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    kMxfp6E2M3Static,
-    kMxfp6E3M2Static,
-)
+from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp6E2M3Static
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_humming
 
@@ -40,9 +37,10 @@ class HummingMxFp6LinearKernel(MxFp6LinearKernel):
 
     @classmethod
     def can_implement(cls, config: MxFp6LinearLayerConfig) -> tuple[bool, str | None]:
-        if config.weight_quant_key not in (kMxfp6E2M3Static, kMxfp6E3M2Static):
-            return False, "only supports MXFP6 E2M3 or E3M2 weights"
-
+        try:
+            quant_key_to_input_schema(config.activation_quant_key)
+        except ValueError as error:
+            return False, str(error)
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -76,6 +74,8 @@ class HummingMxFp6LinearKernel(MxFp6LinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # bias is accessed in apply_humming_linear via getattr(layer, "bias", None),
+        # so we don't need to pass bias here.
         return apply_humming_linear(
             layer,
             x,

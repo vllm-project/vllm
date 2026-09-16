@@ -306,7 +306,6 @@ def check_and_fallback_input_schema(
             humming_dtypes.float8e3m4,
         ),
         humming_dtypes.int4: (
-            humming_dtypes.float4e0m3,
             humming_dtypes.int8,
             humming_dtypes.float8e4m3,
             humming_dtypes.float8e3m4,
@@ -320,9 +319,9 @@ def check_and_fallback_input_schema(
         input_schema.a_dtype = humming_dtypes.float8e4m3
     a_dtype = input_schema.a_dtype
     input_bits = a_dtype.num_bits if a_dtype is not None else 16
+    weight_group_size = weight_schema.weight_scale_group_size
     input_group_size = input_schema.input_scale_group_size
     input_scale_dtype = input_schema.input_scale_dtype
-    input_quant_mode = input_schema.input_quant_mode
 
     def is_deprecated(dtype: "humming_dtypes.DataType | None") -> bool:
         is_int4_deprecated = dtype == humming_dtypes.int4 and sm_version >= 90
@@ -346,19 +345,11 @@ def check_and_fallback_input_schema(
                 and input_scale_dtype == humming_dtypes.float8e8m0
                 and sm_version >= 120
             )
-            if input_bits == 8 and input_group_size >= 0 and not is_mxfp8:
-                # Prefer tokenwise fp8/int8 when the weight pairing allows it.
-                new_quant_mode = InputQuantizationMode.DynamicToken
-                if input_quant_mode == InputQuantizationMode.StaticTensor:
-                    new_quant_mode = InputQuantizationMode.StaticTensor
-                candidate = HummingInputSchema(
-                    a_dtype=a_dtype,
-                    input_scale_group_size=0,
-                    input_scale_dtype=humming_dtypes.float32,
-                    input_quant_mode=new_quant_mode,
-                )
-                if candidate.is_compatible_with(weight_schema, param_dtype):
-                    return candidate
+            is_groupwise = input_group_size > 0 or weight_group_size > 0
+            if input_bits == 8 and is_groupwise and not is_mxfp8:
+                # prefer wna16 for groupwise weight or groupwise input
+                return HummingInputSchema()
+
             return input_schema
 
     if allow_fallback:

@@ -79,6 +79,8 @@ class HummingNvFp4LinearKernel(NvFp4LinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # bias is accessed in apply_humming_linear via getattr(layer, "bias", None),
+        # so we don't need to pass bias here.
         return apply_humming_linear(
             layer,
             x,
