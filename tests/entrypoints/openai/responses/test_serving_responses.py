@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -41,6 +41,7 @@ from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.responses.context import (
     ConversationContext,
     HarmonyContext,
+    ParsableContext,
     SimpleContext,
 )
 from vllm.entrypoints.openai.responses.protocol import (
@@ -550,6 +551,87 @@ def test_responses_render_result_rejects_non_single_prompt(engine_inputs):
 
 class TestInitializeToolSessions:
     """Test class for _initialize_tool_sessions method"""
+
+    @pytest.fixture(params=[ParsableContext, HarmonyContext])
+    def tool_context(self, request):
+        context = request.param.__new__(request.param)
+        context.available_tools = ["browser", "python"]
+        context._tool_sessions = {}
+        context.called_tools = set()
+        return context
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("available_tools", "called_tools"),
+        [
+            ([], []),
+            (["browser"], ["browser"]),
+            (["browser", "python"], []),
+            (["browser", "python"], ["browser"]),
+            (["browser", "python"], ["python"]),
+            (["browser", "python"], ["browser", "python"]),
+        ],
+        ids=["empty", "single", "unused", "first", "last", "both"],
+    )
+    async def test_mcp_sessions_cleaned_once_before_close(
+        self, tool_context, available_tools, called_tools
+    ):
+        events = []
+        sessions = {}
+
+        @asynccontextmanager
+        async def new_session(name, *_args):
+            session = MagicMock()
+            session.call_tool = AsyncMock(
+                side_effect=lambda *_: events.append(("cleanup", name))
+            )
+            sessions[name] = session
+            try:
+                yield session
+            finally:
+                events.append(("close", name))
+
+        tool_server = MagicMock(spec=ToolServer)
+        tool_server.new_session.side_effect = new_session
+        tool_context.available_tools = available_tools
+        async with AsyncExitStack() as stack:
+            await tool_context.init_tool_sessions(tool_server, stack, "req", {})
+            # Reinitializing existing sessions must not duplicate cleanup either.
+            await tool_context.init_tool_sessions(tool_server, stack, "req", {})
+            tool_context.called_tools.update(called_tools)
+
+        for name, session in sessions.items():
+            if name in called_tools:
+                session.call_tool.assert_awaited_once_with("cleanup_session", {})
+                assert events.index(("cleanup", name)) < events.index(("close", name))
+            else:
+                session.call_tool.assert_not_awaited()
+        assert [name for event, name in events if event == "close"] == list(
+            reversed(available_tools)
+        )
+
+    @pytest.mark.asyncio
+    async def test_mcp_partial_initialization_closes_opened_session(self, tool_context):
+        closed = []
+        session = MagicMock(call_tool=AsyncMock())
+
+        @asynccontextmanager
+        async def new_session(name, *_args):
+            if name == "python":
+                raise RuntimeError("session initialization failed")
+            try:
+                yield session
+            finally:
+                closed.append(name)
+
+        tool_server = MagicMock(spec=ToolServer)
+        tool_server.new_session.side_effect = new_session
+        with pytest.raises(RuntimeError, match="session initialization failed"):
+            async with AsyncExitStack() as stack:
+                await tool_context.init_tool_sessions(tool_server, stack, "req", {})
+
+        assert closed == ["browser"]
+        session.call_tool.assert_not_awaited()
 
     @pytest_asyncio.fixture
     async def serving_responses_instance(self):
