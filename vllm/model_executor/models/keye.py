@@ -345,8 +345,7 @@ def apply_rotary_pos_emb_flashatt(
 
 class KeyeSiglipAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You
-    Need' paper.
-    """
+    Need' paper."""
 
     def __init__(
         self,

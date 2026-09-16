@@ -1055,8 +1055,7 @@ CONV_EQUIV_SEQ_LENS = [[1], [7], [64], [65], [1, 2, 3], [63, 64, 65], [128, 129]
 
 def _conv_fp32_oracle(x, weight, bias, seq_lens, activation="silu"):
     """High-precision conv reference: everything in float32, no bf16 rounding.
-    x: [total_tokens, dim] (no initial state). Returns [total_tokens, dim].
-    """
+    x: [total_tokens, dim] (no initial state). Returns [total_tokens, dim]."""
     xf = x.float()
     wf = weight.float().unsqueeze(1)
     bf = bias.float()
@@ -1165,8 +1164,7 @@ def test_conv_cpp_no_worse_than_torch_vs_fp32(seq_lens):
 def test_conv_cpp_vnni_packed_matches_torch(seq_lens):
     """The exact runtime prefill sequence (VNNI-packed weight + SD-layout
     conv_state view + is_vnni=True) must match the torch fallback. Validates
-    the packing + layout handoff on any AVX-512BF16 CPU.
-    """
+    the packing + layout handoff on any AVX-512BF16 CPU."""
     x, weight, bias = _conv_inputs(sum(seq_lens))
     out_torch, _ = _run_prefill_torch(x, weight, bias, seq_lens)
     out_vnni, _ = _run_prefill_cpp(x, weight, bias, seq_lens, is_vnni=True)
@@ -1180,8 +1178,7 @@ def test_conv_cpp_vnni_packed_matches_torch(seq_lens):
 @torch.inference_mode()
 def test_conv_update_cpp_matches_torch(batch):
     """Decode conv: causal_conv1d_update_cpu matches causal_conv1d_update_torch,
-    including the in-place conv_state update (the next-step handoff).
-    """
+    including the in-place conv_state update (the next-step handoff)."""
     from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
         causal_conv1d_update_torch,
     )

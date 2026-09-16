@@ -1344,8 +1344,7 @@ def test_thinking_budget_invalid_budget_rejected(invalid_budget):
 
 def test_thinking_budget_long_thinking_section_end_marker_found_at_correct_index():
     """Test thinking budget enforced for a long thinking run,
-    then a natural end marker.
-    """
+    then a natural end marker."""
     h = ThinkingBudgetStateHolder(
         MockReasoningConfig(), 8, 0, torch.device("cpu"), False
     )

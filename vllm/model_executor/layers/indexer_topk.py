@@ -163,8 +163,7 @@ class SparseIndexerTopk(torch.nn.Module):
     ) -> str:
         """Resolve the decode top-k implementation from the configured
         backend ("auto" = the pre-existing chain, or a validated explicit
-        value).
-        """
+        value)."""
         if self._backend == "auto":
             return self._resolve_auto(logits, topk_tokens, num_rows)
 
@@ -211,8 +210,7 @@ class SparseIndexerTopk(torch.nn.Module):
         self, logits: torch.Tensor, topk_tokens: int, num_rows: int
     ) -> str:
         """The pre-existing priority chain: cooperative -> persistent ->
-        per_row. deep_select/flashinfer/torch are opt-in only.
-        """
+        per_row. deep_select/flashinfer/torch are opt-in only."""
         if not self._cooperative_constraints(logits, topk_tokens, num_rows):
             return "cooperative"
         if self._is_cuda and topk_tokens in (512, 1024, 2048):
@@ -274,8 +272,7 @@ class SparseIndexerTopk(torch.nn.Module):
         max_seq_len: int,
     ) -> None:
         """Run the resolved decode top-k implementation, writing into
-        topk_indices (int32, -1 fill for rows shorter than topk_tokens).
-        """
+        topk_indices (int32, -1 fill for rows shorter than topk_tokens)."""
         backend = self.resolve_backend(logits, topk_tokens, logits.shape[0])
         if backend == "deep_select":
             row_ends = self._row_ends(seq_lens, next_n, logits.shape[0])

@@ -210,8 +210,7 @@ class LamportWorkspace:
     @property
     def workspace(self) -> torch.Tensor:
         """Device tensor (int64) that can be passed to the kernel
-        as ``void** workspace``.
-        """
+        as ``void** workspace``."""
         return self._workspace
 
     # ------------------------------------------------------------------

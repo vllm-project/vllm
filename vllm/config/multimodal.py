@@ -524,8 +524,7 @@ class MultiModalConfig:
 
     def get_video_pruning_spec(self) -> tuple[VideoPruningMethod, float] | None:
         """Return `(method, rate)` when video pruning is enabled, else None.
-        `rate` is the fraction of video tokens to prune.
-        """
+        `rate` is the fraction of video tokens to prune."""
         if self.video_pruning_rate is not None and self.video_pruning_rate > 0:
             return (self.video_pruning_method, float(self.video_pruning_rate))
         return None

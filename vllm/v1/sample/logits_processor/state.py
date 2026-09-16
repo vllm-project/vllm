@@ -69,8 +69,7 @@ class BatchUpdateBuilder:
     @property
     def removed(self) -> list[RemovedRequest]:
         """Removed request indices sorted in
-        descending order
-        """
+        descending order"""
         self._ensure_removed_sorted()
         return self._removed
 

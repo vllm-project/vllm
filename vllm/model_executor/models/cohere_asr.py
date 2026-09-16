@@ -667,8 +667,7 @@ class ConvSubsampling(nn.Module):
         repeat_num: int = 1,
     ) -> torch.Tensor:
         """Calculates the output length of a Tensor passed
-        through a convolution or max pooling layer
-        """
+        through a convolution or max pooling layer"""
         add_pad: float = all_paddings - kernel_size
         one: float = 1.0
         for i in range(repeat_num):

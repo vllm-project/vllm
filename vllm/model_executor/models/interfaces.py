@@ -892,8 +892,7 @@ def has_inner_state(
 @runtime_checkable
 class IsAttentionFree(Protocol):
     """The interface required for all models like Mamba that lack attention,
-    but do have state whose size is constant wrt the number of tokens.
-    """
+    but do have state whose size is constant wrt the number of tokens."""
 
     is_attention_free: ClassVar[Literal[True]] = True
     """
@@ -921,8 +920,7 @@ def is_attention_free(
 class IsHybrid(Protocol):
     """The interface required for all models like Jamba that have both
     attention and mamba blocks, indicates that
-    hf_config has 'layers_block_type'
-    """
+    hf_config has 'layers_block_type'"""
 
     is_hybrid: ClassVar[Literal[True]] = True
     """
@@ -1338,8 +1336,7 @@ class SupportsTranscription(Protocol):
     ) -> "PromptType":
         """Get the prompt for the ASR model.
         The model has control over the construction, as long as it
-        returns a valid PromptType.
-        """
+        returns a valid PromptType."""
         ...
 
     @classmethod
@@ -1631,8 +1628,7 @@ class EagleModelMixin:
 @runtime_checkable
 class SupportsEagle(SupportsEagleBase, Protocol):
     """The interface required for models that support
-    EAGLE-1 and EAGLE-2 speculative decoding.
-    """
+    EAGLE-1 and EAGLE-2 speculative decoding."""
 
     supports_eagle: ClassVar[Literal[True]] = True
     """
@@ -1662,8 +1658,7 @@ def supports_eagle(
 @runtime_checkable
 class SupportsEagle3(SupportsEagleBase, Protocol):
     """The interface required for models that support
-    EAGLE-3 speculative decoding.
-    """
+    EAGLE-3 speculative decoding."""
 
     supports_eagle3: ClassVar[Literal[True]] = True
     """

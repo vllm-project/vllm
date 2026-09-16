@@ -171,8 +171,7 @@ def test_glm5_flashinfer_masked_mha_routing(
 def test_concat_k_nope_k_pe_matches_torch_cat(qk_rope_head_dim):
     """The K concat used by the MLA prefill context loop must equal torch.cat of
     k_nope with the broadcast k_pe; with no RoPE part it returns k_nope itself
-    instead of allocating and copying.
-    """
+    instead of allocating and copying."""
     torch.manual_seed(0)
     num_tokens, num_heads, qk_nope_head_dim = 5, 4, 256
     k_nope = torch.randn(num_tokens, num_heads, qk_nope_head_dim, dtype=torch.bfloat16)

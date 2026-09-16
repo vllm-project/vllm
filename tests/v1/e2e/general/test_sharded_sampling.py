@@ -7,8 +7,7 @@ slightly different kernel/collective states (measured: same-state boots are
 bitwise identical across the two modes; cross-state boots differ by up to
 ~0.25 logprob and can flip a near-tie token). A real sharding bug — rows
 routed to the wrong request, misaligned gathers — produces many-nats
-divergence and scrambled top-k sets, far outside these bounds.
-"""
+divergence and scrambled top-k sets, far outside these bounds."""
 
 import pytest
 
@@ -107,8 +106,7 @@ def _assert_logprob_dicts_close(ref_lps, out_lps, what: str) -> None:
 @multi_gpu_test(num_gpus=2)
 def test_sharded_sampling_outputs_match(monkeypatch: pytest.MonkeyPatch):
     """Generation, logprobs, and prompt logprobs match between batch-sharded
-    sampling and the replicated fallback, up to measured boot-state noise.
-    """
+    sampling and the replicated fallback, up to measured boot-state noise."""
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     # Required for the collective_rpc mode check below.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
