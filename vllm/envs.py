@@ -533,6 +533,14 @@ def get_vllm_port() -> int | None:
         raise ValueError(f"VLLM_PORT '{port}' must be a valid integer") from err
 
 
+def _generate_shm_name() -> str:
+    import pybase64
+
+    # Fit macOS's 30-character limit without truncating the UUID.
+    encoded_uuid = pybase64.urlsafe_b64encode(uuid.uuid4().bytes).decode("ascii")
+    return "vllm_mm_" + encoded_uuid.rstrip("=")
+
+
 def get_env_or_set_default(
     env_name: str,
     default_factory: Callable[[], str],
@@ -1935,7 +1943,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # if not explicitly set.
     "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME": get_env_or_set_default(
         "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
-        lambda: f"VLLM_OBJECT_STORAGE_SHM_BUFFER_{uuid.uuid4().hex}",
+        _generate_shm_name,
     ),
     # The size in MB of the buffers (NVL and RDMA) used by DeepEP
     "VLLM_DEEPEP_BUFFER_SIZE_MB": lambda: int(

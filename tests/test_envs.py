@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from multiprocessing import shared_memory
 from unittest.mock import patch
 
 import pytest
@@ -16,6 +17,41 @@ from vllm.envs import (
     environment_variables,
 )
 from vllm.exceptions import VLLMValidationError
+
+
+def test_object_storage_shm_default_name():
+    """The default name must support creating and attaching on macOS too."""
+    env_name = "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME"
+    get_name = environment_variables[env_name]
+    with patch.dict(os.environ):
+        os.environ.pop(env_name, None)
+        name = get_name()
+        assert len(name.encode("ascii")) <= 30
+        assert os.environ[env_name] == get_name() == name
+
+        writer = shared_memory.SharedMemory(name=name, create=True, size=1)
+        try:
+            assert writer.buf is not None
+            writer.buf[0] = 42
+            reader = shared_memory.SharedMemory(name=get_name())
+            try:
+                assert reader.buf is not None
+                assert reader.buf[0] == 42
+            finally:
+                reader.close()
+        finally:
+            writer.close()
+            writer.unlink()
+
+        os.environ.pop(env_name)
+        assert get_name() != name
+
+
+def test_object_storage_shm_name_override(monkeypatch: pytest.MonkeyPatch):
+    env_name = "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME"
+    name = "custom_object_storage_shared_memory_buffer"
+    monkeypatch.setenv(env_name, name)
+    assert environment_variables[env_name]() == name
 
 
 def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
