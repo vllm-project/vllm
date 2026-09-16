@@ -525,10 +525,10 @@ class ParallelConfig:
             )
 
         if self.enable_eplb:
-            if not current_platform.is_cuda_alike():
+            if not current_platform.supports_eplb():
                 raise ValueError(
-                    "Expert parallelism load balancing is only supported on "
-                    "CUDA devices or ROCm devices now."
+                    "Expert parallelism load balancing is not supported "
+                    "on this platform."
                 )
             if not self.enable_expert_parallel:
                 raise ValueError("enable_expert_parallel must be True to use EPLB.")
@@ -1023,22 +1023,8 @@ class ParallelConfig:
                 "backend is mp, uni or external_launcher."
             )
 
-        if self.enable_eplb and self.eplb_config.communicator is None:
-            # Prefer NIXL when available: zero-copy RDMA reads, compatible
-            # with both async EPLB and elastic EP.
-            # Fallbacks: pynccl for elastic EP (stateless groups need it),
-            # torch_gloo for static EP.  torch_nccl is avoided because NCCL
-            # is incompatible with async EPLB (multi-stream conflicts) and
-            # batched isend/irecv hangs under high load.
-            # See https://github.com/pytorch/pytorch/issues/174288
-            from vllm.distributed.nixl_utils import is_nixl_available
-
-            if is_nixl_available():
-                self.eplb_config.communicator = "nixl"
-            elif self.enable_elastic_ep:
-                self.eplb_config.communicator = "pynccl"
-            else:
-                self.eplb_config.communicator = "torch_gloo"
+        if self.enable_eplb:
+            current_platform.check_and_update_eplb_config(self)
 
     @property
     def use_ray(self) -> bool:

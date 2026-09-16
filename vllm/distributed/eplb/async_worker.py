@@ -51,21 +51,23 @@ def run_rebalance_experts(
     physical_to_logical_map_cpu: torch.Tensor,
     cuda_stream: torch.cuda.Stream,
 ) -> torch.Tensor:
-    assert model_state.eplb_stats is not None
-    eplb_stats = model_state.eplb_stats
+    from .eplb_state import EplbRebalanceContext, EplbTopology
 
-    # Move the global expert load window to CPU for computation.
+    assert model_state.eplb_stats is not None
+    stats = model_state.eplb_stats
     with torch.cuda.stream(cuda_stream):
-        global_expert_load_window = eplb_stats.global_expert_load_window.cpu()
-    # Compute new expert mappings for the model
-    new_physical_to_logical_map = eplb_state.policy.rebalance_experts(
-        global_expert_load_window,
-        eplb_stats.num_replicas,
-        eplb_stats.num_groups,
-        eplb_stats.num_nodes,
-        eplb_stats.num_gpus,
-        physical_to_logical_map_cpu,
+        load_window_cpu = stats.global_expert_load_window.cpu()
+    context = EplbRebalanceContext(
+        load_window_cpu=load_window_cpu,
+        physical_to_logical_map_cpu=physical_to_logical_map_cpu,
+        topology=EplbTopology(
+            num_groups=stats.num_groups,
+            num_nodes=stats.num_nodes,
+            num_ranks=stats.num_gpus,
+        ),
+        num_replicas=stats.num_replicas,
     )
+    new_physical_to_logical_map = eplb_state.plan_rebalance(context)
     assert new_physical_to_logical_map.device == torch.device("cpu")
 
     return new_physical_to_logical_map

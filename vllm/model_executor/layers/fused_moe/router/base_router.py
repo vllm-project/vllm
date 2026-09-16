@@ -153,7 +153,9 @@ else:
         record_enabled: torch.Tensor,
         num_unpadded_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return topk_ids
+        raise RuntimeError(
+            "EPLB mapping requires a device-specific map_and_record hook"
+        )
 
 
 class BaseRouter(FusedMoERouter):
@@ -209,15 +211,18 @@ class BaseRouter(FusedMoERouter):
             assert eplb_state.logical_replica_count is not None
             assert eplb_state.should_record_tensor is not None
             assert eplb_state.num_unpadded_tokens_tensors is not None
+            num_unpadded_tokens = eplb_state.num_unpadded_tokens_tensors[
+                dbo_current_ubatch_id()
+            ]
+            if eplb_state.map_and_record is not None:
+                return eplb_state.map_and_record(topk_ids, num_unpadded_tokens)
             return eplb_map_to_physical_and_record(
                 topk_ids=topk_ids,
                 logical_to_physical_map=eplb_state.logical_to_physical_map,
                 logical_replica_count=eplb_state.logical_replica_count,
                 expert_load_view=eplb_state.expert_load_view,
                 record_enabled=eplb_state.should_record_tensor,
-                num_unpadded_tokens=eplb_state.num_unpadded_tokens_tensors[
-                    dbo_current_ubatch_id()
-                ],
+                num_unpadded_tokens=num_unpadded_tokens,
             )
         return topk_ids
 
