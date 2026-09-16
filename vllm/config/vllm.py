@@ -27,7 +27,7 @@ from vllm.triton_utils import HAS_TRITON
 from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
 
-from .attention import AttentionConfig
+from .attention import AttentionConfig, HiSparseConfig
 from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
@@ -649,6 +649,29 @@ class VllmConfig:
             # num_speculative_tokens lookahead slots.
             return self.num_speculative_tokens
         return 0
+
+    @property
+    def num_prefill_lookahead_tokens(self) -> int:
+        """Prefill tokens past the computed range that the drafter reads.
+
+        Mid-prefill the drafter consumes tokens the target model has not been
+        scheduled for yet, so every component that has to keep them available
+        must apply this margin: the scheduler, which never ends a chunk within
+        it and shifts encoder scheduling by it, and the KV cache manager, which
+        treats the trailing `this - 1` tokens as re-prefillable rather than
+        finalized. Consumers must read this property rather than re-deriving
+        their own per-method lookahead, so those components cannot drift apart.
+        """
+        speculative_config = self.speculative_config
+        if speculative_config is None or not speculative_config.use_eagle():
+            return 0
+        if speculative_config.use_multi_module_mtp():
+            # Each MTP module reads one token further ahead than the one before
+            # it, so the chain needs num_speculative_tokens of runway at a
+            # chunked-prefill boundary.
+            return self.num_speculative_tokens
+        # Eagle-family drafters read only the immediate next token.
+        return 1
 
     @property
     def uniform_decode_query_len(self) -> int:
@@ -1551,18 +1574,6 @@ class VllmConfig:
             self.compilation_config.mode = CompilationMode.NONE
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
-        if self.profiler_config.profiler == "proton":
-            if not current_platform.is_cuda():
-                raise ValueError(
-                    "The Proton profiler currently supports NVIDIA CUDA only"
-                )
-            if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
-                raise ValueError(
-                    "The Proton profiler requires CUDA graphs to be disabled. "
-                    "Use --enforce-eager or set "
-                    "--compilation-config.cudagraph_mode=none."
-                )
-
         if os.environ.get("TORCH_COMPILE_DISABLE") == "1":
             logger.warning_once(
                 "TORCH_COMPILE_DISABLE is set, disabling torch.compile. "
@@ -1641,6 +1652,13 @@ class VllmConfig:
 
         self._maybe_disable_dynamic_sd_for_data_parallel()
         self._maybe_override_dynamic_sd_cudagraph_mode()
+
+        if (
+            self.attention_config.hisparse_config is None
+            and self.kv_transfer_config is not None
+            and self.kv_transfer_config.has_connector("HiSparseConnector")
+        ):
+            self.attention_config.hisparse_config = HiSparseConfig()
 
         if self.attention_config.hisparse_config is not None:
             if not current_platform.is_cuda():
@@ -1860,6 +1878,7 @@ class VllmConfig:
         else:
             self._validate_v1_model_runner()
 
+        self._validate_profiler_config()
         self._validate_batch_sharded_sampling()
         self._validate_adaptive_verification()
 
@@ -2840,16 +2859,16 @@ class VllmConfig:
             unsupported.append("pipeline parallelism with external_launcher")
 
         if speculative_config is not None:
-            # TODO: ngram / ngram_gpu are not supported by the v2 model runner yet
-            if speculative_config.method in ("ngram", "ngram_gpu"):
-                unsupported.append("ngram/ngram_gpu speculative decoding")
-            elif speculative_config.method not in (
-                "eagle",
-                "eagle3",
-                "mtp",
-                "dflash",
-                "dspark",
-                "extract_hidden_states",
+            if speculative_config.method in (
+                # https://github.com/vllm-project/vllm/pull/40704
+                "ngram",
+                "ngram_gpu",
+                # https://github.com/vllm-project/vllm/pull/43091
+                "draft_model",
+                "suffix",
+                "medusa",
+                "mlp_speculator",
+                "custom_class",
             ):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
 
@@ -3041,6 +3060,44 @@ class VllmConfig:
             unsupported.append("dual batch overlap with encoder only models")
 
         return unsupported
+
+    def _validate_profiler_config(self) -> None:
+        if self.profiler_config.profiler != "proton":
+            return
+
+        from vllm.platforms import current_platform
+
+        if not current_platform.is_cuda():
+            raise ValueError("The Proton profiler currently supports NVIDIA CUDA only")
+        if (
+            self.profiler_config.proton_graph_attribution
+            and not self.use_v2_model_runner
+        ):
+            raise ValueError(
+                "Proton CUDA graph attribution requires the V2 model runner."
+            )
+
+        has_cuda_graphs = (
+            self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            or (
+                self.compilation_config.cudagraph_mm_encoder
+                and not (self.model_config and self.model_config.enforce_eager)
+            )
+        )
+        if not has_cuda_graphs:
+            return
+        mode = self.profiler_config.proton_mode
+        if mode and mode.split(":", 1)[0].lower() == "pcsampling":
+            raise ValueError(
+                "Proton PC sampling requires CUDA graphs to be disabled. "
+                "Use --enforce-eager."
+            )
+        if not self.profiler_config.proton_graph_attribution:
+            raise ValueError(
+                "Proton profiling with CUDA graphs requires "
+                "proton_graph_attribution=True to capture replayed kernels. "
+                "Enable attribution or use --enforce-eager."
+            )
 
     def _validate_v2_model_runner(self) -> None:
         """Check for features not yet supported by the V2 model runner."""
