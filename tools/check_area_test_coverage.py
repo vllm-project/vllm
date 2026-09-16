@@ -8,15 +8,18 @@ optionally plus the lane YAMLs that also run the area, such as
 
 1. Coverage: every ``test_*.py`` under the area's test tree is inside a
    directory that some job command runs WHOLE (``pytest <dir>`` with no
-   filter flags). An unclaimed file is reported with its path and the
-   nearest job whose target would need to claim it.
+   filter flags), or is itself the whole target of a single-file job
+   (``pytest <file>`` with no filter flags — e.g. the L4 granite
+   compatibility job, whose file IS the job boundary). An unclaimed file is
+   reported with its path and the nearest job whose target would need to
+   claim it.
 2. Partition filters: no job command carries a ``-k`` expression, a
-   per-file target inside the area tree, a partitioning ``-m`` expression,
-   or pytest-shard flags (``--num-shards``/``--shard-id``) combined with any
-   of those filters — anything that divides one directory between sibling
-   jobs on the same lane. Shard flags on an otherwise whole-directory
-   command are accepted: they split one job across its own ``parallelism:``
-   instances, not between sibling jobs.
+   FILTERED per-file target inside the area tree, a partitioning ``-m``
+   expression, or pytest-shard flags (``--num-shards``/``--shard-id``)
+   combined with any of those filters — anything that divides one directory
+   or file between sibling jobs on the same lane. Shard flags on an
+   otherwise whole-directory command are accepted: they split one job across
+   its own ``parallelism:`` instances, not between sibling jobs.
 
 Lane-filter exception: a lane-capability marker expression (a single marker
 from ``LANE_FILTER_MARKERS``, e.g. the CPU lane's recursive ``-m cpu_model``)
@@ -101,7 +104,18 @@ class PytestCommand:
         """
         return (
             bool(self.dir_targets)
-            and not self.file_targets
+            and (not self.file_targets or self.is_whole_file)
+            and self.m_expr is None
+            and self.k_expr is None
+        )
+
+    @property
+    def is_whole_file(self) -> bool:
+        """True if file targets run whole, optionally alongside directories."""
+        return (
+            bool(self.file_targets)
+            and not self.sharded
+            and all("::" not in target for target in self.file_targets)
             and self.m_expr is None
             and self.k_expr is None
         )
@@ -113,7 +127,7 @@ def _normalize_target(token: str, tree_rel: str) -> str | None:
     Commands in test-area YAMLs run from ``tests/`` (e.g. ``models/language``)
     while hardware YAMLs run from the repo root (e.g. ``tests/models/...``).
     """
-    token = token.split("::")[0].rstrip("/")
+    token = token.rstrip("/")
     if token.startswith("tests/"):
         token = token[len("tests/") :]
     if token == tree_rel or token.startswith(tree_rel + "/"):
@@ -129,7 +143,7 @@ def find_pytest_invocations(command: str) -> list[str]:
     text (``# ...`` before the invocation on the same line) is skipped.
     """
     invocations = []
-    for line in command.splitlines():
+    for line in command.replace("\\\n", " ").splitlines():
         start = 0
         while True:
             idx = line.find("pytest", start)
@@ -226,10 +240,13 @@ def check_coverage(
     tree_rel = tests_root.relative_to(tests_dir).as_posix()
     commands = load_commands(yaml_paths, tree_rel)
     whole_dirs = {t for c in commands if c.is_whole_dir for t in c.dir_targets}
+    whole_files = {t for c in commands if c.is_whole_file for t in c.file_targets}
     all_files = _test_files_under(tests_root)
 
     def covered(path: Path) -> bool:
         rel = path.parent.relative_to(tests_dir).as_posix()
+        if path.relative_to(tests_dir).as_posix() in whole_files:
+            return True
         return any(rel == d or rel.startswith(d + "/") for d in whole_dirs)
 
     violations: list[str] = []
@@ -247,7 +264,7 @@ def check_coverage(
         where = f"{cmd.step} [{cmd.lane}]"
         problems = []
         in_tree_files = cmd.file_targets
-        if in_tree_files:
+        if in_tree_files and not cmd.is_whole_file:
             problems.append(f"per-file target(s): {', '.join(in_tree_files)}")
         if cmd.k_expr is not None:
             problems.append(f"-k expression: {cmd.k_expr!r}")

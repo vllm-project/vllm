@@ -60,12 +60,14 @@ def test_partition_filters_detected(tmp_path):
         tmp_path,
         [
             # -k expression and shard flags (env-var style)
-            "pytest -v -s models/language/generation "
-            "-k 'not granite-4.0-tiny-preview' "
-            "--num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT "
-            "--shard-id=$$BUILDKITE_PARALLEL_JOB",
+            (
+                "pytest -v -s models/language/generation "
+                "-k 'not granite-4.0-tiny-preview' "
+                "--num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT "
+                "--shard-id=$$BUILDKITE_PARALLEL_JOB"
+            ),
             # per-file target inside the tree
-            "pytest -v -s models/language/generation/hybrid/test_a.py",
+            "pytest -v -s models/language/generation/hybrid/test_a.py -k test_x",
             # compound -m partition (splits by test content, not hardware)
             "pytest -v -s models/language -m 'core_model and slow_test'",
             # single marker that is not a lane-capability marker
@@ -160,3 +162,15 @@ def test_parse_invocation_handles_env_var_shard_flags_and_quotes():
     assert cmd.k_expr == "not granite-4.0-tiny-preview"
     assert cmd.sharded
     assert not cmd.is_whole_dir
+
+
+def test_mixed_whole_units_reject_partial_file_selection(tmp_path):
+    tree = _make_tree(tmp_path, "test_single.py", "group/test_a.py", "group/test_b.py")
+    command = "pytest models/language/test_single.py models/language/group"
+    assert check_coverage(tree, [_write_yaml(tmp_path, [command])])[0] == []
+    for partial in (
+        command + " --num-shards=2 --shard-id=0",
+        command.replace("test_single.py", "test_single.py::test_x"),
+        command + " -k test_x",
+    ):
+        assert check_coverage(tree, [_write_yaml(tmp_path, [partial])])[0]
