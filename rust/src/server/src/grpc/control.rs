@@ -50,6 +50,7 @@ impl ControlServiceImpl {
             data_parallel_rank: ready.data_parallel_rank,
             decode_context_parallel_size: ready.decode_context_parallel_size,
             world_size: ready.world_size,
+            data_parallel_size_local: self.client().engine_count() as u32,
         }
     }
 
