@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for SpeculativeConfig.compose_draft_hf_overrides.
+"""Tests for draft config overrides used by SpeculativeConfig.
 
 Callable ``hf_overrides`` on the target model config (e.g. the
 ``dummy_hf_overrides`` shrink used by ``tests/models/test_initialization.py``)
@@ -12,10 +12,12 @@ when the target itself is shrunk — which is what kept spec-decode archs like
 """
 
 import functools
+from unittest.mock import MagicMock, patch
 
 import pytest
 from transformers import PretrainedConfig
 
+from vllm.config.parallel import ParallelConfig
 from vllm.config.speculative import SpeculativeConfig
 
 
@@ -32,7 +34,8 @@ def _make_hf_config(**kwargs) -> PretrainedConfig:
 @pytest.mark.cpu_test
 def test_dict_overrides_are_not_forwarded_to_draft():
     """Dict overrides are target-specific key patches; the draft must get
-    only the architecture-mapping override."""
+    only the architecture-mapping override.
+    """
     composed = SpeculativeConfig.compose_draft_hf_overrides(
         {"max_position_embeddings": 1234}
     )
@@ -48,7 +51,8 @@ def test_none_overrides_fall_back_to_arch_mapping():
 @pytest.mark.cpu_test
 def test_callable_overrides_reach_the_draft_config():
     """A callable override (config-to-config transform) composes with the
-    architecture-mapping override and is applied to the draft config."""
+    architecture-mapping override and is applied to the draft config.
+    """
 
     def shrink(hf_config: PretrainedConfig) -> PretrainedConfig:
         hf_config.num_hidden_layers = 1
@@ -65,7 +69,8 @@ def test_callable_overrides_reach_the_draft_config():
 @pytest.mark.cpu_test
 def test_arch_mapping_applies_before_callable_override():
     """The static arch-mapping override runs first, so the user callable
-    observes (and may adjust) the post-mapping config."""
+    observes (and may adjust) the post-mapping config.
+    """
     seen_architectures: list[str] = []
 
     def record(hf_config: PretrainedConfig) -> PretrainedConfig:
@@ -86,7 +91,7 @@ def test_arch_mapping_applies_before_callable_override():
 
 
 @pytest.mark.cpu_test
-def test_inkling_override_exposes_only_first_mtp_depth():
+def test_inkling_override_exposes_all_mtp_depths():
     text_config = _make_hf_config(
         architectures=["InklingForCausalLM"],
         model_type="inkling_model",
@@ -107,7 +112,9 @@ def test_inkling_override_exposes_only_first_mtp_depth():
     assert out is text_config
     assert out.model_type == "inkling_mtp"
     assert out.architectures == ["InklingMTPModel"]
-    assert out.n_predict == 1
+    # Multi-module MTP: every checkpoint depth is exposed (module i drafts
+    # speculative token i), no longer clamped to the first depth.
+    assert out.n_predict == 8
     assert out.num_nextn_predict_layers == 8
     assert out.chain_hidden_post_norm is False
     assert out.local_layer_ids == [0, 2, 4]
@@ -124,7 +131,8 @@ def test_composed_override_is_picklable():
     the composed override must be picklable. A nested local closure is not
     (it raised ``Can't get local object`` on DFlashDraftModel); a
     ``functools.partial`` over a module-referenceable static method is.
-    Guard against regressing to a closure."""
+    Guard against regressing to a closure.
+    """
     composed = SpeculativeConfig.compose_draft_hf_overrides(_module_level_shrink)
 
     assert isinstance(composed, functools.partial)
@@ -132,3 +140,52 @@ def test_composed_override_is_picklable():
 
     out = composed(_make_hf_config())
     assert out.num_hidden_layers == 1
+
+
+def _make_mtp_speculative_config(
+    override: bool | None,
+    checkpoint_value: bool,
+) -> SpeculativeConfig:
+    draft_hf_config = _make_hf_config(
+        architectures=["Qwen4ExpMTP"],
+        model_type="qwen4_exp_mtp",
+        n_predict=1,
+        index_share_for_mtp_iteration=checkpoint_value,
+    )
+    draft_model_config = MagicMock(
+        model="draft",
+        hf_config=draft_hf_config,
+        architectures=draft_hf_config.architectures,
+        max_model_len=128,
+    )
+    target_model_config = MagicMock(
+        model="target",
+        max_model_len=128,
+        quantization=None,
+        hf_overrides={},
+    )
+
+    with patch("vllm.config.speculative.ModelConfig", return_value=draft_model_config):
+        return SpeculativeConfig(
+            model="draft",
+            method="mtp",
+            num_speculative_tokens=1,
+            index_share_for_mtp_iteration=override,
+            target_model_config=target_model_config,
+            target_parallel_config=ParallelConfig(),
+        )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("override", "checkpoint_value", "expected"),
+    [(None, True, True), (False, True, False), (True, False, True)],
+)
+def test_mtp_index_share_override(
+    override: bool | None, checkpoint_value: bool, expected: bool
+):
+    speculative_config = _make_mtp_speculative_config(override, checkpoint_value)
+    assert (
+        speculative_config.draft_model_config.hf_config.index_share_for_mtp_iteration
+        is expected
+    )

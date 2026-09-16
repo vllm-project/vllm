@@ -8,6 +8,8 @@ forwarding chain. Endpoint-level coverage lives in
 ``tests/entrypoints/scale_out/render/test_render.py``.
 """
 
+import asyncio
+
 import pytest
 
 from vllm.renderers.params import TokenizeParams
@@ -24,7 +26,8 @@ def fast_tokenizer():
 def _make_base_renderer_with(tokenizer):
     """Build a minimal BaseRenderer subclass that exposes the tokenizer so we
     can call ``_tokenize_prompt`` directly. BaseRenderer is abstract because of
-    ``render_messages``; we just need a stub."""
+    ``render_messages``; we just need a stub.
+    """
     from vllm.renderers.base import BaseRenderer
 
     class _StubRenderer(BaseRenderer):
@@ -52,6 +55,21 @@ def _make_base_renderer_with(tokenizer):
     return _StubRenderer(tokenizer)
 
 
+class _OffsetTokenizer:
+    """Small deterministic fast tokenizer for pre-tokenization tests."""
+
+    is_fast = True
+    max_chars_per_token = 1
+    truncation_side = "right"
+    pad_token_id = 0
+
+    def __call__(self, text, **kwargs):
+        return {
+            "input_ids": list(range(len(text))),
+            "offset_mapping": [(i, i + 1) for i in range(len(text))],
+        }
+
+
 class TestTokenizePromptOffsets:
     def test_fast_tokenizer_with_flag_returns_offsets(self, fast_tokenizer):
         renderer = _make_base_renderer_with(fast_tokenizer)
@@ -74,7 +92,8 @@ class TestTokenizePromptOffsets:
     def test_base_renderer_without_override_yields_no_offsets(self, fast_tokenizer):
         """A renderer that does not override ``_can_produce_offsets`` never
         emits offsets, even with a fast tokenizer and the flag set. This locks
-        in the base-default-False / subclass-override design."""
+        in the base-default-False / subclass-override design.
+        """
         from vllm.renderers.base import BaseRenderer
 
         class _BareRenderer(BaseRenderer):
@@ -108,7 +127,8 @@ class TestTokenizePromptOffsets:
 
     def test_slow_tokenizer_with_flag_no_offsets(self, fast_tokenizer):
         """Force is_fast=False to simulate a Slow tokenizer: the flag is set
-        but offsets must not be returned because it cannot produce them."""
+        but offsets must not be returned because it cannot produce them.
+        """
         from unittest.mock import PropertyMock, patch
 
         renderer = _make_base_renderer_with(fast_tokenizer)
@@ -127,7 +147,8 @@ class TestTokenizePromptOffsets:
     @pytest.mark.parametrize("mm_key", ["multi_modal_data", "multi_modal_uuids"])
     def test_multimodal_with_flag_no_offsets(self, fast_tokenizer, mm_key):
         """Offsets index the text prompt, which is meaningless once multimodal
-        data is interleaved, so they are suppressed when MM inputs are present."""
+        data is interleaved, so they are suppressed when MM inputs are present.
+        """
         renderer = _make_base_renderer_with(fast_tokenizer)
         params = TokenizeParams(max_total_tokens=None, return_token_offsets=True)
         prompt = {"prompt": "Hello.", mm_key: {"image": ["x"]}}
@@ -139,7 +160,8 @@ class TestTokenizePromptOffsets:
     @pytest.mark.asyncio
     async def test_tokenize_prompt_async_returns_offsets(self, fast_tokenizer):
         """The async path offloads the sync tokenizer; it must yield the same
-        offsets as the sync path."""
+        offsets as the sync path.
+        """
         renderer = _make_base_renderer_with(fast_tokenizer)
         params = TokenizeParams(max_total_tokens=None, return_token_offsets=True)
 
@@ -197,3 +219,86 @@ class TestProcessTokensForwardsOffsets:
         engine_input = renderer._process_tokens(tokens_prompt)
 
         assert "prompt_token_offsets" not in engine_input
+
+
+class TestTruncationKeepsOffsetsAligned:
+    """``prompt_token_offsets`` runs parallel to ``prompt_token_ids``, and both
+    ``TokensPrompt`` and the render API's ``GenerateRequest`` document that the
+    two have equal length. Only ``prompt_token_ids`` was being truncated.
+    """
+
+    @pytest.mark.parametrize("side", ["left", "right"])
+    def test_explicit_truncation_side_truncates_offsets(self, fast_tokenizer, side):
+        renderer = _make_base_renderer_with(fast_tokenizer)
+        text = "The quick brown fox jumps over the lazy dog."
+        keep = 4
+
+        untruncated = renderer._tokenize_prompt(
+            {"prompt": text},
+            TokenizeParams(max_total_tokens=1024, return_token_offsets=True),
+        )
+        full_offsets = untruncated["prompt_token_offsets"]
+        assert len(full_offsets) > keep
+
+        # An explicit truncation_side disables tokenizer-level truncation (see
+        # get_encode_kwargs), so the tokenizer returns the whole sequence and
+        # truncation happens in apply_post_tokenization.
+        params = TokenizeParams(
+            max_total_tokens=1024,
+            return_token_offsets=True,
+            truncate_prompt_tokens=keep,
+            truncation_side=side,
+        )
+        result = params.apply_post_tokenization(
+            fast_tokenizer, renderer._tokenize_prompt({"prompt": text}, params)
+        )
+
+        offsets = result["prompt_token_offsets"]
+        assert len(result["prompt_token_ids"]) == keep
+        assert len(offsets) == keep
+
+        # Equal length is not enough: the surviving offsets must be the ones
+        # belonging to the surviving tokens.
+        expected = full_offsets[-keep:] if side == "left" else full_offsets[:keep]
+        assert offsets == expected
+
+    @pytest.mark.parametrize(
+        ("side", "expected_offsets"),
+        [
+            ("left", [(36, 37), (37, 38), (38, 39), (39, 40)]),
+            ("right", [(0, 1), (1, 2), (2, 3), (3, 4)]),
+        ],
+    )
+    def test_text_pretrim_preserves_source_offsets(self, side, expected_offsets):
+        renderer = _make_base_renderer_with(_OffsetTokenizer())
+        text = "0123456789" * 4
+        params = TokenizeParams(
+            max_total_tokens=16,
+            return_token_offsets=True,
+            truncate_prompt_tokens=4,
+            truncation_side=side,
+            add_special_tokens=False,
+        )
+
+        result = renderer.tokenize_prompt({"prompt": text}, params)
+
+        assert result["prompt_token_offsets"] == expected_offsets
+
+    def test_async_left_text_pretrim_preserves_source_offsets(self):
+        renderer = _make_base_renderer_with(_OffsetTokenizer())
+        text = "0123456789" * 4
+        params = TokenizeParams(
+            max_total_tokens=16,
+            return_token_offsets=True,
+            truncate_prompt_tokens=4,
+            truncation_side="left",
+        )
+
+        result = asyncio.run(renderer.tokenize_prompt_async({"prompt": text}, params))
+
+        assert result["prompt_token_offsets"] == [
+            (36, 37),
+            (37, 38),
+            (38, 39),
+            (39, 40),
+        ]

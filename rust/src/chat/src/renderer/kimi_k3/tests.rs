@@ -17,7 +17,9 @@ use super::KimiK3ChatRenderer;
 use crate::ChatRenderer;
 use crate::renderer::kimi_k3::encoding::{CLOSE, END_OF_MSG, IMAGE_PLACEHOLDER, OPEN, SEP};
 use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
-use crate::request::{ChatContentPart, ChatMessage, GenerationPromptMode, ReasoningEffort};
+use crate::request::{
+    ChatContentPart, ChatMessage, ChatTool, GenerationPromptMode, ReasoningEffort,
+};
 use crate::{AssistantContentBlock, AssistantToolCall};
 
 const OPEN_ID: u32 = 256;
@@ -88,6 +90,81 @@ fn golden_controls_thinking_off() {
 #[test]
 fn golden_dynamic_system_tool_declare() {
     assert_golden("dynamic_system_tool_declare");
+}
+
+#[test]
+fn golden_dynamic_only_tool_declare() {
+    assert_golden("dynamic_only_tool_declare");
+}
+
+#[test]
+fn tool_declare_omits_absent_fields_and_preserves_parameter_nulls() {
+    let mut request = crate::request::ChatRequest::for_test();
+    let tools = vec![ChatTool {
+        name: "lookup".to_string(),
+        description: None,
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": ["integer", "null"],
+                    "default": null
+                }
+            }
+        }),
+        strict: None,
+    }];
+    request.tool_context =
+        crate::request::ResolvedToolContext::new(&request.messages, tools, None, true)
+            .expect("tool context should resolve");
+
+    let rendered = render_request(&request);
+
+    assert!(rendered.contains(
+        r#"[{"function":{"name":"lookup","parameters":{"properties":{"limit":{"default":null,"type":["integer","null"]}},"type":"object"}},"type":"function"}]"#
+    ));
+    assert!(!rendered.contains(r#""description":"#));
+    assert!(!rendered.contains(r#""strict":"#));
+}
+
+#[test]
+fn tool_declare_preserves_present_optional_fields() {
+    let mut request = crate::request::ChatRequest::for_test();
+    let tools = vec![ChatTool {
+        name: "lookup".to_string(),
+        description: Some("Look up a record".to_string()),
+        parameters: json!({"type": "object"}),
+        strict: Some(false),
+    }];
+    request.tool_context =
+        crate::request::ResolvedToolContext::new(&request.messages, tools, None, true)
+            .expect("tool context should resolve");
+
+    let rendered = render_request(&request);
+
+    assert!(rendered.contains(
+        r#"[{"function":{"description":"Look up a record","name":"lookup","parameters":{"type":"object"},"strict":false},"type":"function"}]"#
+    ));
+}
+
+#[test]
+fn malformed_tool_arguments_render_as_raw_text() {
+    let malformed = "  {\"city\":\"Beijing\"  ";
+    let mut request = crate::request::ChatRequest::for_test();
+    request.messages = vec![ChatMessage::assistant_blocks(vec![
+        AssistantContentBlock::ToolCall(AssistantToolCall {
+            id: "call-1".to_string(),
+            name: "weather".to_string(),
+            arguments: malformed.to_string(),
+        }),
+    ])];
+    request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
+
+    let rendered = render_request(&request);
+
+    assert!(rendered.contains(&format!(
+        "<|open|>json type=\"object\"<|sep|>{malformed}<|close|>json<|sep|>"
+    )));
 }
 
 #[test]
@@ -208,6 +285,65 @@ fn partial_tool_results_keep_assistant_call_position() {
 }
 
 #[test]
+fn media_order_follows_reordered_tool_results() {
+    let mut request = crate::request::ChatRequest::for_test();
+    request.messages = vec![
+        ChatMessage::assistant_blocks(vec![
+            AssistantContentBlock::ToolCall(AssistantToolCall {
+                id: "call-a".to_string(),
+                name: "tool-a".to_string(),
+                arguments: "{}".to_string(),
+            }),
+            AssistantContentBlock::ToolCall(AssistantToolCall {
+                id: "call-b".to_string(),
+                name: "tool-b".to_string(),
+                arguments: "{}".to_string(),
+            }),
+        ]),
+        ChatMessage::tool_response(
+            vec![ChatContentPart::text("result-b"), image_part("image-b")],
+            "call-b",
+        ),
+        ChatMessage::tool_response(
+            vec![ChatContentPart::text("result-a"), image_part("image-a")],
+            "call-a",
+        ),
+    ];
+    request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
+    let renderer = KimiK3ChatRenderer::new(Arc::new(test_tokenizer()));
+
+    let rendered = renderer.render(&request).unwrap();
+    let media_order = rendered.media_order.unwrap();
+    let Prompt::TokenIds(token_ids) = rendered.prompt else {
+        panic!("kimi k3 renderer should return token IDs")
+    };
+    let prompt = test_tokenizer().decode(&token_ids, false).unwrap();
+
+    assert!(prompt.find("result-a").unwrap() < prompt.find("result-b").unwrap());
+    expect![[r#"
+        [
+            MediaPartSource {
+                message_index: 2,
+                content_part_index: 1,
+            },
+            MediaPartSource {
+                message_index: 1,
+                content_part_index: 1,
+            },
+        ]
+    "#]]
+    .assert_debug_eq(&media_order);
+}
+
+fn image_part(uuid: &str) -> ChatContentPart {
+    ChatContentPart::ImageUrl {
+        image_url: format!("data:image/png;base64,{uuid}"),
+        detail: None,
+        uuid: Some(uuid.to_string()),
+    }
+}
+
+#[test]
 fn defaults_thinking_effort_to_max() {
     let rendered = render_request(&crate::request::ChatRequest::for_test());
 
@@ -253,15 +389,43 @@ fn native_k3_kwargs_take_precedence() {
 #[test]
 fn standard_none_disables_thinking() {
     let mut request = crate::request::ChatRequest::for_test();
-    request.chat_options.template_kwargs.extend([
-        ("enable_thinking".to_string(), json!(false)),
-        ("reasoning_effort".to_string(), json!("none")),
-    ]);
+    request
+        .chat_options
+        .template_kwargs
+        .insert("reasoning_effort".to_string(), json!("none"));
 
     let rendered = render_request(&request);
 
     assert!(!rendered.contains("type=\"thinking-effort\""));
     assert!(rendered.ends_with("<|open|>response<|sep|>"));
+}
+
+#[test]
+fn native_thinking_true_overrides_standard_none() {
+    let mut request = crate::request::ChatRequest::for_test();
+    request.chat_options.template_kwargs.extend([
+        ("thinking".to_string(), json!(true)),
+        ("reasoning_effort".to_string(), json!("none")),
+    ]);
+
+    let rendered = render_request(&request);
+
+    assert!(rendered.contains("thinking_effort=max"));
+    assert!(rendered.ends_with("<|open|>think<|sep|>"));
+}
+
+#[test]
+fn enable_thinking_true_overrides_standard_none() {
+    let mut request = crate::request::ChatRequest::for_test();
+    request.chat_options.template_kwargs.extend([
+        ("enable_thinking".to_string(), json!(true)),
+        ("reasoning_effort".to_string(), json!("none")),
+    ]);
+
+    let rendered = render_request(&request);
+
+    assert!(rendered.contains("thinking_effort=max"));
+    assert!(rendered.ends_with("<|open|>think<|sep|>"));
 }
 
 #[test]

@@ -33,6 +33,7 @@ from vllm.model_executor.model_loader.mtp_validation import (
     is_mtp_completeness_check_enabled,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.interfaces import SupportsMultiModalEmbeddings
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.sequence import IntermediateTensors
 
@@ -165,7 +166,8 @@ class InklingMultiTokenPredictor(nn.Module):
     ) -> torch.Tensor:
         """Draft-prefill embedding: fused gather + backbone embed_norm, then
         the target's tower embeddings scattered in unnormed (the backbone
-        convention — MM embeds are merged after embed_norm)."""
+        convention — MM embeds are merged after embed_norm).
+        """
         norm = self.backbone_embed_norm
         embeds = embed_rmsnorm(
             input_ids,
@@ -194,7 +196,8 @@ class InklingMultiTokenPredictor(nn.Module):
         """The depth layer's [rmsnorm(hidden) | embed_norm(embed)] input in one
         launch: embedding row gather + the backbone embed_norm + the depth
         embed_norm chain on one side, hidden_norm on the other, written
-        straight into the cat buffer."""
+        straight into the cat buffer.
+        """
         hidden_w = layer.hidden_norm.weight
         embed_w = layer.embed_norm.weight
         eps = layer.hidden_norm.variance_epsilon
@@ -242,7 +245,7 @@ class InklingMultiTokenPredictor(nn.Module):
         return hidden
 
 
-class InklingMTP(nn.Module):
+class InklingMTP(nn.Module, SupportsMultiModalEmbeddings):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None
@@ -326,7 +329,8 @@ class InklingMTP(nn.Module):
         """Greedy draft tokens via rank-local argmax + tiny (value, index)
         reduction — no full-vocab logits all-gather. The muP divisor is a
         positive scalar, so the argmax is invariant and the scaling is
-        skipped entirely."""
+        skipped entirely.
+        """
         return self.logits_processor.get_top_tokens(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

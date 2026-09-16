@@ -13,10 +13,11 @@ from vllm.utils.deep_gemm import _ceil_to_ue8m0, is_deep_gemm_e8m0_used
 from vllm.utils.math_utils import round_up
 
 FP8_DTYPE = current_platform.fp8_dtype()
+DEVICE = current_platform.device_type
 
 
 def as_float32_tensor(x: float | torch.Tensor) -> torch.Tensor:
-    return torch.as_tensor(x, dtype=torch.float32, device="cuda")
+    return torch.as_tensor(x, dtype=torch.float32, device=DEVICE)
 
 
 def ref_dynamic_per_token_quant(
@@ -158,7 +159,8 @@ def native_per_token_group_quant_fp8(
     x, group_size, eps=1e-10, dtype=torch.float8_e4m3fn
 ):
     """Function to perform per-token-group quantization on an input tensor
-    `x` using native torch."""
+    `x` using native torch.
+    """
     assert x.shape[-1] % group_size == 0, (
         "the last dimension of `x` must be divisible by `group_size`"
     )

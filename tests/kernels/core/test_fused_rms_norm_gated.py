@@ -2,15 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 """Tests that FusedRMSNormGated decomposes correctly under torch.compile,
-matching the eager triton kernel output."""
+matching the eager triton kernel output.
+"""
 
 import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.fused_norm_gate import (
     FusedRMSNormGated,
 )
 from vllm.utils.torch_utils import set_random_seed
+
+DEVICE = "xpu:0" if current_platform.is_xpu() else "cuda:0"
 
 DTYPES = [torch.bfloat16]
 HIDDEN_SIZES = [128, 512]
@@ -39,7 +43,7 @@ def test_compiled_vs_eager(
     """forward_native decomposition matches forward_cuda triton kernel."""
     torch._dynamo.reset()
     set_random_seed(seed)
-    device = torch.device("cuda:0")
+    device = torch.device(DEVICE)
 
     module = FusedRMSNormGated(
         hidden_size,
@@ -88,7 +92,7 @@ def test_compiled_vs_eager_multidim(
     """forward_native decomposition handles multi-dimensional inputs."""
     torch._dynamo.reset()
     set_random_seed(seed)
-    device = torch.device("cuda:0")
+    device = torch.device(DEVICE)
     head_dim = shape[-1]
 
     module = FusedRMSNormGated(

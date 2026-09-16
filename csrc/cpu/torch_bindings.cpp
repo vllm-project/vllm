@@ -58,26 +58,26 @@ std::vector<torch::Tensor> shm_recv_tensor_list(int64_t handle, int64_t src);
 
 // SGL CPU kernels
 
-at::Tensor weight_packed_linear(at::Tensor& mat1, at::Tensor& mat2,
-                                const std::optional<at::Tensor>& bias,
-                                bool is_vnni);
+void weight_packed_linear(at::Tensor& out, const at::Tensor& mat1,
+                          const at::Tensor& mat2,
+                          const std::optional<at::Tensor>& bias, bool is_vnni);
 
 at::Tensor convert_weight_packed(at::Tensor& weight);
 
 at::Tensor convert_scale_packed(at::Tensor& scale);
 
-at::Tensor fused_experts_cpu(
-    at::Tensor& hidden_states, at::Tensor& w1, at::Tensor& w2,
-    at::Tensor& topk_weights, at::Tensor& topk_ids, bool inplace,
-    int64_t moe_comp_method, const std::optional<at::Tensor>& w1_scale,
-    const std::optional<at::Tensor>& w2_scale,
-    const std::optional<at::Tensor>& w1_zero,
-    const std::optional<at::Tensor>& w2_zero,
-    const std::optional<std::vector<int64_t>> block_size,
-    const std::optional<at::Tensor>& w1_bias,
-    const std::optional<at::Tensor>& w2_bias,
-    const std::optional<double>& alpha, const std::optional<double>& limit,
-    bool is_vnni);
+void fused_experts_cpu(at::Tensor& out, at::Tensor& hidden_states,
+                       at::Tensor& w1, at::Tensor& w2, at::Tensor& topk_weights,
+                       at::Tensor& topk_ids, int64_t moe_comp_method,
+                       const std::optional<at::Tensor>& w1_scale,
+                       const std::optional<at::Tensor>& w2_scale,
+                       const std::optional<at::Tensor>& w1_zero,
+                       const std::optional<at::Tensor>& w2_zero,
+                       const std::optional<std::vector<int64_t>> block_size,
+                       const std::optional<at::Tensor>& w1_bias,
+                       const std::optional<at::Tensor>& w2_bias,
+                       const std::optional<double>& alpha,
+                       const std::optional<double>& limit, bool is_vnni);
 
 at::Tensor int8_scaled_mm_with_quant(at::Tensor& mat1, at::Tensor& mat2,
                                      at::Tensor& scales2,
@@ -90,6 +90,132 @@ at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2,
                              std::vector<int64_t> block_size,
                              const std::optional<at::Tensor>& bias,
                              at::ScalarType out_dtype, bool is_vnni);
+
+// Adapted from sglang: MLA CPU kernels (AMX-only)
+void decode_attention_cpu(at::Tensor& query, at::Tensor& k_buffer,
+                          at::Tensor& v_buffer, at::Tensor& output,
+                          const std::optional<at::Tensor>& key,
+                          const std::optional<at::Tensor>& value,
+                          const std::optional<at::Tensor>& loc,
+                          at::Tensor& attn_logits, at::Tensor& req_to_token,
+                          at::Tensor& req_pool_indices, at::Tensor& seq_lens,
+                          double sm_scale, double logit_cap, bool is_cross_attn,
+                          int64_t sliding_window_size,
+                          std::optional<at::Tensor> encoder_lens,
+                          std::optional<at::Tensor> sinks);
+
+void extend_attention_cpu(
+    at::Tensor& q_extend, const std::optional<at::Tensor>& k_extend,
+    const std::optional<at::Tensor>& v_extend, at::Tensor& o_extend,
+    at::Tensor& k_buffer, at::Tensor& v_buffer, at::Tensor& req_to_token,
+    at::Tensor& req_pool_indices, at::Tensor& seq_lens,
+    at::Tensor& extend_seq_lens, at::Tensor& extend_start_loc,
+    int64_t max_len_extend, double sm_scale, double logit_cap,
+    bool is_cross_attn, int64_t sliding_window_size,
+    std::optional<at::Tensor> encoder_lens, std::optional<at::Tensor> sinks,
+    std::optional<at::Tensor> tree_mask);
+
+void bmm_cpu(at::Tensor& out, at::Tensor& mat1, at::Tensor& mat2, bool is_vnni,
+             const std::optional<at::Tensor>& scale);
+
+// vLLM-native: CPU cache-write op for MLA's single-latent-buffer KV cache
+// (the CUDA-only `concat_and_cache_mla` has no CPU dispatch).
+void concat_and_cache_mla_cpu(const at::Tensor& kv_c_normed,
+                              const at::Tensor& k_pe, at::Tensor& kv_cache,
+                              const at::Tensor& slot_mapping);
+
+// Adapted from sglang: DeepSeek-V4 mHC gating kernels
+std::tuple<at::Tensor, at::Tensor, at::Tensor> hc_pre_fused_cpu(
+    at::Tensor& x, at::Tensor& hc_fn, at::Tensor& hc_scale, at::Tensor& hc_base,
+    int64_t hc_mult, int64_t sinkhorn_iters, double rms_eps, double hc_eps);
+
+at::Tensor hc_post_fused_cpu(at::Tensor& x, at::Tensor& residual,
+                             at::Tensor& post, at::Tensor& comb);
+
+at::Tensor hc_head_fused_cpu(at::Tensor& x, at::Tensor& hc_fn,
+                             at::Tensor& hc_scale, at::Tensor& hc_base,
+                             double hc_eps, double norm_eps);
+
+// Adapted from sglang: DeepSeek-V4 fp8_ds_mla cache-write kernel
+at::Tensor fused_qnorm_rope_kv_insert_cpu(at::Tensor& q, at::Tensor& kv,
+                                          at::Tensor& positions,
+                                          at::Tensor& swa_kv_cache_2d,
+                                          at::Tensor& slot_mapping,
+                                          at::Tensor& cos_sin_cache,
+                                          int64_t q_head_padded, double eps,
+                                          int64_t cache_block_size);
+
+// vLLM-native: DeepSeek-V4 sparse MQA attention kernel for the fp8_ds_mla
+// cache layout (SWA window + optional compressed top-k index sets).
+void flash_mla_with_kvcache_cpu(
+    at::Tensor& out, at::Tensor& q, at::Tensor& window_cache_2d,
+    at::Tensor& window_slots, int64_t window_block_size,
+    at::Tensor& compressed_cache_2d, at::Tensor& compressed_slots,
+    int64_t compressed_block_size, at::Tensor& attn_sink, double scale);
+
+// Adapted from sglang: DeepSeek-V4 compressor state-cache write + fused
+// compress+RMSNorm+quant+RoPE+store kernels.
+void save_partial_states_cpu(at::Tensor& kv, at::Tensor& score, at::Tensor& ape,
+                             at::Tensor& positions, at::Tensor& state_cache,
+                             at::Tensor& slot_mapping);
+
+void compress_norm_rope_store_cpu(
+    at::Tensor& state_cache, at::Tensor& gather_slots, at::Tensor& positions,
+    at::Tensor& kv_slot_mapping, at::Tensor& rms_norm_weight,
+    double rms_norm_eps, at::Tensor& cos_sin_cache, at::Tensor& kv_cache_2d,
+    int64_t kv_cache_block_size, int64_t compress_ratio);
+
+// head_dim=128 indexer-compressor variant of the above (single fp8 quant
+// block + raw fp32 scale -- matches the paged indexer K-cache layout
+// fp8_paged_mqa_logits_cpu/topk_transform_512_cpu read).
+void compress_norm_rope_store_indexer_cpu(
+    at::Tensor& state_cache, at::Tensor& gather_slots, at::Tensor& positions,
+    at::Tensor& kv_slot_mapping, at::Tensor& rms_norm_weight,
+    double rms_norm_eps, at::Tensor& cos_sin_cache, at::Tensor& kv_cache_2d,
+    int64_t kv_cache_block_size, int64_t compress_ratio);
+
+// Adapted from sglang: DeepSeek-V4 sparse indexer paged MQA-logits +
+// top-512 transform kernels (DECODE path -- reads the paged K-cache
+// directly via `page_table`, whole batch in one call).
+at::Tensor fp8_paged_mqa_logits_cpu(at::Tensor& q_fp8, at::Tensor& kvcache_fp8,
+                                    at::Tensor& weight, at::Tensor& seq_lens,
+                                    at::Tensor& page_table, int64_t block_size,
+                                    int64_t max_seq_len);
+
+void topk_transform_512_cpu(at::Tensor& scores, at::Tensor& seq_lens,
+                            at::Tensor& page_tables,
+                            at::Tensor& out_page_indices, int64_t page_size,
+                            const std::optional<at::Tensor>& out_raw_indices);
+
+// Adapted from sglang: DeepSeek-V4 MoE routing kernels (flat biased top-k and
+// hash-routed-layer top-k).
+std::tuple<at::Tensor, at::Tensor> biased_topk_cpu(
+    at::Tensor& hidden_states, at::Tensor& gating_output,
+    at::Tensor& correction_bias, int64_t topk, bool renormalize,
+    std::string scoring_func, int64_t num_fused_shared_experts,
+    std::optional<double> routed_scaling_factor,
+    bool apply_routed_scaling_factor_on_output);
+
+std::tuple<at::Tensor, at::Tensor> hash_topk_cpu(
+    at::Tensor& gating_output, at::Tensor& tid2eid, int64_t topk,
+    std::string scoring_func, int64_t num_fused_shared_experts,
+    int64_t num_experts, double routed_scaling_factor);
+
+// vLLM-native: DeepSeek-V4 sparse indexer Q-side RoPE + FP8 quant kernel
+// (fp8 path only; MXFP4 stays on triton-cpu).
+void fused_indexer_q_rope_quant_cpu(at::Tensor& positions, at::Tensor& index_q,
+                                    at::Tensor& index_q_cos_sin_cache,
+                                    at::Tensor& index_q_fp8,
+                                    at::Tensor& index_weights,
+                                    double index_weights_softmax_scale,
+                                    double index_weights_head_scale,
+                                    at::Tensor& index_weights_out);
+
+// vLLM-native: inverse GPT-J RoPE for DeepSeek-V4 CPU attention's `_o_proj`
+// output de-rotation.
+at::Tensor inverse_gptj_rope_o_proj_cpu(at::Tensor& o, at::Tensor& positions,
+                                        at::Tensor& cos_sin_cache,
+                                        int64_t rope_dim);
 
 // Adapted from sglang: INT4 W4A8 kernels
 std::tuple<at::Tensor, at::Tensor, at::Tensor> convert_weight_packed_scale_zp(
@@ -193,7 +319,6 @@ void placeholder_op() { TORCH_CHECK(false, "Unimplemented"); }
 void cpu_gemm_wna16(const torch::Tensor& input, const torch::Tensor& q_weight,
                     torch::Tensor& output, const torch::Tensor& scales,
                     const std::optional<torch::Tensor>& zeros,
-                    const std::optional<torch::Tensor>& g_idx,
                     const std::optional<torch::Tensor>& bias,
                     const int64_t pack_factor, const std::string& isa_hint);
 
@@ -474,21 +599,22 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // sgl-kernels
 #if defined(__AVX512BF16__) && defined(__AVX512F__) && defined(__AVX512VNNI__)
   ops.def(
-      "weight_packed_linear(Tensor(a0!) mat1, Tensor(a1!) mat2, Tensor(a2!)? "
-      "bias, bool is_vnni) -> Tensor");
+      "weight_packed_linear(Tensor(a0!) out, Tensor(a1) mat1, Tensor(a2) mat2, "
+      "Tensor(a3)? "
+      "bias, bool is_vnni) -> ()");
   ops.impl("weight_packed_linear", torch::kCPU, &weight_packed_linear);
   ops.def("convert_weight_packed(Tensor! weight) -> Tensor");
   ops.impl("convert_weight_packed", torch::kCPU, &convert_weight_packed);
   ops.def("convert_scale_packed(Tensor! scale) -> Tensor");
   ops.impl("convert_scale_packed", torch::kCPU, &convert_scale_packed);
   ops.def(
-      "fused_experts_cpu(Tensor hidden_states, Tensor w1, Tensor w2, Tensor "
-      "topk_weights, Tensor topk_ids, bool "
-      "inplace, int moe_comp_method, Tensor? w1_scale, Tensor? w2_scale, "
+      "fused_experts_cpu(Tensor(a0!) out, Tensor hidden_states, Tensor w1, "
+      "Tensor w2, Tensor topk_weights, Tensor topk_ids, "
+      "int moe_comp_method, Tensor? w1_scale, Tensor? w2_scale, "
       "Tensor? w1_zero, Tensor? w2_zero, int[]? block_size, "
       "Tensor? w1_bias, Tensor? w2_bias, float? alpha, float? limit, "
       "bool is_vnni) -> "
-      "Tensor");
+      "()");
   ops.impl("fused_experts_cpu", torch::kCPU, &fused_experts_cpu);
   ops.def(
       "int8_scaled_mm_with_quant(Tensor mat1, Tensor mat2, Tensor scales2, "
@@ -521,6 +647,139 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "pad_slot_id, "
       "bool is_vnni) -> Tensor");
   ops.impl("causal_conv1d_update_cpu", torch::kCPU, &causal_conv1d_update_cpu);
+
+  // Adapted from sglang: MLA CPU kernels (AMX-only, DeepSeek V2/V3/R1)
+  ops.def(
+      "decode_attention_cpu(Tensor query, Tensor k_buffer, Tensor v_buffer, "
+      "Tensor(a!) output, Tensor? key, Tensor? value, Tensor? loc, Tensor "
+      "attn_logits, Tensor req_to_token, Tensor req_pool_indices, Tensor "
+      "seq_lens, float sm_scale, float logit_cap, bool is_cross_attn, int "
+      "sliding_window_size, Tensor? encoder_lens, Tensor? sinks) -> ()");
+  ops.impl("decode_attention_cpu", torch::kCPU, &decode_attention_cpu);
+
+  ops.def(
+      "extend_attention_cpu(Tensor q_extend, Tensor? k_extend, Tensor? "
+      "v_extend, Tensor(a!) o_extend, Tensor k_buffer, Tensor v_buffer, "
+      "Tensor req_to_token, Tensor req_pool_indices, Tensor seq_lens, Tensor "
+      "extend_seq_lens, Tensor extend_start_loc, int max_len_extend, float "
+      "sm_scale, float logit_cap, bool is_cross_attn, int "
+      "sliding_window_size, Tensor? encoder_lens, Tensor? sinks, Tensor? "
+      "tree_mask=None) -> ()");
+  ops.impl("extend_attention_cpu", torch::kCPU, &extend_attention_cpu);
+
+  ops.def(
+      "bmm_cpu(Tensor(a!) out, Tensor mat1, Tensor mat2, bool is_vnni, "
+      "Tensor? scale) -> ()");
+  ops.impl("bmm_cpu", torch::kCPU, &bmm_cpu);
+
+  ops.def(
+      "concat_and_cache_mla_cpu(Tensor kv_c_normed, Tensor k_pe, "
+      "Tensor(a!) kv_cache, Tensor slot_mapping) -> ()");
+  ops.impl("concat_and_cache_mla_cpu", torch::kCPU, &concat_and_cache_mla_cpu);
+
+  // Adapted from sglang: DeepSeek-V4 mHC gating kernels
+  ops.def(
+      "hc_pre_fused_cpu(Tensor x, Tensor hc_fn, Tensor hc_scale, "
+      "Tensor hc_base, int hc_mult, int sinkhorn_iters, float rms_eps, "
+      "float hc_eps) -> (Tensor, Tensor, Tensor)");
+  ops.impl("hc_pre_fused_cpu", torch::kCPU, &hc_pre_fused_cpu);
+
+  ops.def(
+      "hc_post_fused_cpu(Tensor x, Tensor residual, Tensor post, "
+      "Tensor comb) -> Tensor");
+  ops.impl("hc_post_fused_cpu", torch::kCPU, &hc_post_fused_cpu);
+
+  ops.def(
+      "hc_head_fused_cpu(Tensor x, Tensor hc_fn, Tensor "
+      "hc_scale, Tensor hc_base, float hc_eps, float norm_eps) -> "
+      "Tensor");
+  ops.impl("hc_head_fused_cpu", torch::kCPU, &hc_head_fused_cpu);
+
+  // Adapted from sglang: DeepSeek-V4 fp8_ds_mla cache-write kernel
+  ops.def(
+      "fused_qnorm_rope_kv_insert_cpu(Tensor q, Tensor kv, Tensor positions, "
+      "Tensor(a!) swa_kv_cache_2d, Tensor slot_mapping, Tensor "
+      "cos_sin_cache, int q_head_padded, float eps, int cache_block_size) "
+      "-> Tensor");
+  ops.impl("fused_qnorm_rope_kv_insert_cpu", torch::kCPU,
+           &fused_qnorm_rope_kv_insert_cpu);
+
+  // vLLM-native: DeepSeek-V4 sparse MQA attention kernel
+  ops.def(
+      "flash_mla_with_kvcache_cpu(Tensor(a!) out, Tensor q, Tensor "
+      "window_cache_2d, Tensor window_slots, int window_block_size, Tensor "
+      "compressed_cache_2d, Tensor compressed_slots, int "
+      "compressed_block_size, Tensor attn_sink, float scale) -> ()");
+  ops.impl("flash_mla_with_kvcache_cpu", torch::kCPU,
+           &flash_mla_with_kvcache_cpu);
+
+  // Adapted from sglang: DeepSeek-V4 compressor kernels
+  ops.def(
+      "save_partial_states_cpu(Tensor kv, Tensor score, Tensor ape, "
+      "Tensor positions, Tensor(a!) state_cache, Tensor slot_mapping) "
+      "-> ()");
+  ops.impl("save_partial_states_cpu", torch::kCPU, &save_partial_states_cpu);
+
+  ops.def(
+      "compress_norm_rope_store_cpu(Tensor state_cache, Tensor "
+      "gather_slots, Tensor positions, Tensor kv_slot_mapping, Tensor "
+      "rms_norm_weight, float rms_norm_eps, Tensor cos_sin_cache, "
+      "Tensor(a!) kv_cache_2d, int kv_cache_block_size, int compress_ratio) "
+      "-> ()");
+  ops.impl("compress_norm_rope_store_cpu", torch::kCPU,
+           &compress_norm_rope_store_cpu);
+
+  ops.def(
+      "compress_norm_rope_store_indexer_cpu(Tensor state_cache, Tensor "
+      "gather_slots, Tensor positions, Tensor kv_slot_mapping, Tensor "
+      "rms_norm_weight, float rms_norm_eps, Tensor cos_sin_cache, "
+      "Tensor(a!) kv_cache_2d, int kv_cache_block_size, int compress_ratio) "
+      "-> ()");
+  ops.impl("compress_norm_rope_store_indexer_cpu", torch::kCPU,
+           &compress_norm_rope_store_indexer_cpu);
+
+  // Adapted from sglang: DeepSeek-V4 sparse indexer paged MQA-logits kernel
+  // (DECODE path)
+  ops.def(
+      "fp8_paged_mqa_logits_cpu(Tensor q_fp8, Tensor kvcache_fp8, Tensor "
+      "weight, Tensor seq_lens, Tensor page_table, int block_size, int "
+      "max_seq_len) -> Tensor");
+  ops.impl("fp8_paged_mqa_logits_cpu", torch::kCPU, &fp8_paged_mqa_logits_cpu);
+
+  ops.def(
+      "topk_transform_512_cpu(Tensor scores, Tensor seq_lens, Tensor "
+      "page_tables, Tensor(a!) out_page_indices, int page_size, Tensor(b!)? "
+      "out_raw_indices) -> ()");
+  ops.impl("topk_transform_512_cpu", torch::kCPU, &topk_transform_512_cpu);
+
+  ops.def(
+      "fused_indexer_q_rope_quant_cpu(Tensor positions, Tensor index_q, "
+      "Tensor index_q_cos_sin_cache, Tensor(a!) index_q_fp8, Tensor "
+      "index_weights, float index_weights_softmax_scale, float "
+      "index_weights_head_scale, Tensor(b!) index_weights_out) -> ()");
+  ops.impl("fused_indexer_q_rope_quant_cpu", torch::kCPU,
+           &fused_indexer_q_rope_quant_cpu);
+
+  // Adapted from sglang: DeepSeek-V4 MoE routing kernels
+  ops.def(
+      "biased_topk_cpu(Tensor hidden_states, Tensor gating_output, Tensor "
+      "correction_bias, int topk, bool renormalize, str scoring_func, int "
+      "num_fused_shared_experts, float? routed_scaling_factor, bool "
+      "apply_routed_scaling_factor_on_output) -> (Tensor, Tensor)");
+  ops.impl("biased_topk_cpu", torch::kCPU, &biased_topk_cpu);
+
+  ops.def(
+      "hash_topk_cpu(Tensor gating_output, Tensor tid2eid, int topk, str "
+      "scoring_func, int num_fused_shared_experts, int num_experts, float "
+      "routed_scaling_factor) -> (Tensor, Tensor)");
+  ops.impl("hash_topk_cpu", torch::kCPU, &hash_topk_cpu);
+
+  // vLLM-native: inverse GPT-J RoPE for _o_proj's output de-rotation
+  ops.def(
+      "inverse_gptj_rope_o_proj_cpu(Tensor o, Tensor positions, Tensor "
+      "cos_sin_cache, int rope_dim) -> Tensor");
+  ops.impl("inverse_gptj_rope_o_proj_cpu", torch::kCPU,
+           &inverse_gptj_rope_o_proj_cpu);
 #endif
 
 #if (defined(__AVX512BF16__) && defined(__AVX512F__) && \
@@ -605,16 +864,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("dynamic_per_token_scaled_fp8_quant() -> ()", placeholder_op);
 
   // WNA16
-#if defined(__AVX512F__) || defined(__riscv_v)
+#if defined(__AVX512F__) || defined(__riscv_v) || defined(__s390x__)
   ops.def(
       "cpu_gemm_wna16(Tensor input, Tensor q_weight, Tensor(a2!) output, "
-      "Tensor scales, Tensor? zeros, Tensor? g_idx, Tensor? bias, SymInt "
+      "Tensor scales, Tensor? zeros, Tensor? bias, SymInt "
       "pack_factor, str isa_hint) -> ()");
   ops.impl("cpu_gemm_wna16", torch::kCPU, &cpu_gemm_wna16);
 #endif
 
   // fused moe
-#if defined(__AVX512F__) || (defined(ARM_BF16_SUPPORT) && !defined(__APPLE__))
   ops.def(
       "prepack_moe_weight(Tensor weight, Tensor(a1!) packed_weight, str isa) "
       "-> ()");
@@ -625,8 +883,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "bool skip_weighted, "
       "str act, str isa) -> ()");
   ops.impl("cpu_fused_moe", torch::kCPU, &cpu_fused_moe);
-#endif  // #if defined(__AVX512F__) || (defined(ARM_BF16_SUPPORT) &&
-        // !defined(__APPLE__))
 #if defined(ARM_I8MM_SUPPORT) && defined(ARM_BF16_SUPPORT) && \
     !defined(__APPLE__)
   ops.def(

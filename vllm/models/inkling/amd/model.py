@@ -72,7 +72,8 @@ def _sconv_add_norm(
 
     ROCm uses the portable collective path. The Lamport P2P implementation in
     the NVIDIA model relies on CUDA GDC and CUDA-specific symmetric-memory
-    publication semantics which cannot be linked into a gfx950 HSACO."""
+    publication semantics which cannot be linked into a gfx950 HSACO.
+    """
     norm_w = norm.weight if norm is not None else None
     eps = norm.variance_epsilon if norm is not None else 0.0
 
@@ -656,8 +657,9 @@ def _load_inkling_weights(
 
             yield name, weight
 
-    loader = AutoWeightsLoader(module, skip_prefixes=["model.mtp."])
-    loaded |= loader.load_weights(_iter_loadable_weights())
+    mapper = WeightsMapper(orig_to_new_prefix={"model.mtp.": None})
+    loader = AutoWeightsLoader(module)
+    loaded |= loader.load_weights(_iter_loadable_weights(), mapper=mapper)
 
     # Post-load MoE fixups (default input scales, zeroed EP-padding experts).
     for moe_name, moe in moe_modules.items():

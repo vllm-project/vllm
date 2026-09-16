@@ -5,12 +5,10 @@ import math
 import random
 import time
 from collections.abc import Callable
-from contextlib import nullcontext
 
 import pytest
 import torch
 import torch.nn.functional as F
-from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, set_random_seed
@@ -18,6 +16,8 @@ from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode,
 )
 from vllm.v1.attention.ops.prefix_prefill import context_attention_fwd
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 NUM_HEADS = [64]
 NUM_QUERIES_PER_KV = [1, 64]
@@ -895,21 +895,15 @@ def test_contexted_kv_attention_alibi(
             query_len, seq_len, alibi_slopes, device, dtype
         )
 
-        # Compute attention. On ROCm we force use of the Math SDPA backend rather than
-        # the Flash or Mem-Efficient backends for increased numerical accuracy
-        if current_platform.is_rocm():
-            sdpa_context = sdpa_kernel(SDPBackend.MATH)
-        else:
-            sdpa_context = nullcontext()
-        with sdpa_context:
-            out = F.scaled_dot_product_attention(
-                q_sdpa,
-                k_sdpa,
-                v_sdpa,
-                attn_mask=alibi_mask,
-                dropout_p=0.0,
-                scale=scale,
-            )
+        # Compute attention
+        out = F.scaled_dot_product_attention(
+            q_sdpa,
+            k_sdpa,
+            v_sdpa,
+            attn_mask=alibi_mask,
+            dropout_p=0.0,
+            scale=scale,
+        )
 
         # Reshape output back to [query_len, num_heads, head_size]
         out = out.view(num_heads, query_len, head_size).permute(1, 0, 2)
@@ -987,29 +981,39 @@ def test_contexted_kv_attention_alibi_f32(
     )
 
 
-@pytest.mark.parametrize("head_size", [128])
+# Hybrid mamba + full-attention models get a non-power-of-2 attention page.
+NONSTANDARD_BLOCK_SIZE_SHAPES = [
+    (64, 1, 128, 544),
+    (8, 4, 256, 1040),
+    (8, 4, 256, 1056),
+]
+
+
+@pytest.mark.parametrize(
+    "num_heads,num_queries_per_kv,head_size,block_size", NONSTANDARD_BLOCK_SIZE_SHAPES
+)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("op", OPS)
 @torch.inference_mode()
 def test_qwen3_nonstandard_block_size(
+    num_heads: int,
+    num_queries_per_kv: int,
     head_size: int,
+    block_size: int,
     dtype: torch.dtype,
     device: str,
     op: Callable,
 ) -> None:
-    """
-    A separate test function specifically added
-    for Qwen3-Next-80B (Block Size 544).
-    """
+    """Non-power-of-2 pages must match, even when a tile straddles a page."""
     if not current_platform.is_rocm():
-        pytest.skip("544 block size optimization is only for ROCm.")
+        pytest.skip("Non-power-of-2 block sizes are only exercised on ROCm CI.")
 
     test_contexted_kv_attention(
-        num_heads=64,
-        num_queries_per_kv=1,
+        num_heads=num_heads,
+        num_queries_per_kv=num_queries_per_kv,
         head_size=head_size,
-        block_size=544,
+        block_size=block_size,
         sliding_window=0,
         dtype=dtype,
         kv_cache_dtype="auto",

@@ -15,15 +15,15 @@ from vllm.entrypoints.chat_utils import (
     get_tool_call_id_type,
     make_tool_call_id,
 )
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionNamedToolChoiceParam,
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
     FunctionCall,
     FunctionDefinition,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedToolChoiceParam,
+    ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
@@ -84,8 +84,7 @@ class StreamState:
 
 
 class Parser:
-    """
-    Abstract Parser class that unifies ReasoningParser and ToolParser into
+    """Abstract Parser class that unifies ReasoningParser and ToolParser into
     a single interface for parsing model output.
 
     This class provides a unified way to handle both reasoning extraction
@@ -122,7 +121,7 @@ class Parser:
         self._tool_parser: ToolParser | None = None
         if self.__class__.reasoning_parser_cls is not None:
             self._reasoning_parser = self.__class__.reasoning_parser_cls(
-                tokenizer, *args, **kwargs
+                tokenizer, *args, model_config=model_config, **kwargs
             )
         if self.__class__.tool_parser_cls is not None:
             self._tool_parser = self.__class__.tool_parser_cls(tokenizer, tools)
@@ -131,6 +130,17 @@ class Parser:
             self._reasoning_parser is None
             or self._reasoning_parser.engine_based_streaming
         ) and (self._tool_parser is None or self._tool_parser.engine_based_streaming)
+        if (
+            self._reasoning_parser is None
+            and self._tool_parser is not None
+            and hasattr(self._tool_parser, "skip_reasoning_parsing")
+        ):
+            # With no reasoning parser configured, reasoning markup is
+            # plain content: an engine-based tool parser should pass it
+            # through verbatim where its grammar allows, not consume or
+            # reclassify it. The engine ignores the flag for markers
+            # shared with non-reasoning structure.
+            self._tool_parser.skip_reasoning_parsing = True
         self._stream_state = StreamState(
             tool_call_id_type=(
                 get_tool_call_id_type(model_config)
@@ -180,24 +190,27 @@ class Parser:
 
     @abstractmethod
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        """
-        Check if the reasoning content ends in the input_ids.
+        """Check if the reasoning content ends in the input_ids.
 
         Used by structured engines like `xgrammar` to check if the
         reasoning content ends in the model output.
+
+        Must be a pure function of the input_ids.
 
         Args:
             input_ids: The token IDs of the model output.
 
         Returns:
             True if the reasoning content ends in the input_ids.
+
         """
 
     def is_reasoning_end_streaming(
         self, input_ids: list[int], delta_ids: list[int]
     ) -> bool:
-        """
-        Check if the reasoning content ends during a decode step.
+        """Check if the reasoning content ends during a decode step.
+
+        Must be a pure function of the input_ids and delta_ids.
 
         Args:
             input_ids: The entire model output token IDs.
@@ -205,13 +218,28 @@ class Parser:
 
         Returns:
             True if the reasoning content ends in the delta_ids.
+
         """
         return self.is_reasoning_end(input_ids)
 
+    def find_reasoning_end_offset(self, token_ids: Sequence[int]) -> int | None:
+        """Locate the token that ends reasoning within one window of tokens.
+
+        Args:
+            token_ids: The tokens to examine.
+
+        Returns:
+            The offset within ``token_ids`` of the last reasoning token, or
+            ``len(token_ids)`` when reasoning does not end in this window. Parsers
+            that cannot answer from a window alone always return ``None``; callers
+            fall back to :meth:`is_reasoning_end_streaming`.
+
+        """
+        return None
+
     @abstractmethod
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
-        """
-        Extract content token IDs from the input_ids.
+        """Extract content token IDs from the input_ids.
 
         This extracts the non-reasoning content (e.g., everything after
         the </think> tag).
@@ -221,6 +249,7 @@ class Parser:
 
         Returns:
             The extracted content token IDs.
+
         """
 
     @abstractmethod
@@ -229,8 +258,7 @@ class Parser:
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> tuple[str | None, str | None]:
-        """
-        Extract reasoning content from a complete model-generated string.
+        """Extract reasoning content from a complete model-generated string.
 
         Used for non-streaming responses where we have the entire model
         response available before sending to the client.
@@ -241,6 +269,7 @@ class Parser:
 
         Returns:
             A tuple of (reasoning, response_content).
+
         """
 
     @abstractmethod
@@ -253,8 +282,7 @@ class Parser:
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
-        """
-        Extract reasoning content from a streaming delta message.
+        """Extract reasoning content from a streaming delta message.
 
         Args:
             previous_text: Text from all previous tokens.
@@ -266,6 +294,7 @@ class Parser:
 
         Returns:
             A DeltaMessage with reasoning and/or content fields, or None.
+
         """
 
     # ========== Tool Parser Methods ==========
@@ -273,8 +302,7 @@ class Parser:
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
-        """
-        Adjust the request parameters for tool calling.
+        """Adjust the request parameters for tool calling.
 
         Can be overridden by subclasses to modify request parameters
         (e.g., setting structured output schemas for tool calling).
@@ -284,6 +312,7 @@ class Parser:
 
         Returns:
             The adjusted request.
+
         """
         return request
 
@@ -293,8 +322,7 @@ class Parser:
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> ExtractedToolCallInformation:
-        """
-        Extract tool calls from a complete model-generated string.
+        """Extract tool calls from a complete model-generated string.
 
         Used for non-streaming responses.
 
@@ -304,6 +332,7 @@ class Parser:
 
         Returns:
             ExtractedToolCallInformation containing the tool calls.
+
         """
 
     @abstractmethod
@@ -317,8 +346,7 @@ class Parser:
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> DeltaMessage | None:
-        """
-        Extract tool calls from a streaming delta message.
+        """Extract tool calls from a streaming delta message.
 
         Args:
             previous_text: Text from all previous tokens.
@@ -331,6 +359,7 @@ class Parser:
 
         Returns:
             A DeltaMessage with tool_calls field, or None.
+
         """
 
     @abstractmethod
@@ -351,6 +380,7 @@ class Parser:
 
         Returns:
             A tuple of (reasoning, content, tool_calls).
+
         """
 
     @abstractmethod
@@ -367,10 +397,13 @@ class Parser:
         tool call extraction via internal stream state.
         """
 
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        """Return the number of reasoning tokens in generated token IDs."""
+        return 0
+
 
 class DelegatingParser(Parser):
-    """
-    A Parser implementation that delegates to separate ReasoningParser and
+    """A Parser implementation that delegates to separate ReasoningParser and
     ToolParser instances.
 
     This is the recommended base class for creating model-specific parsers
@@ -504,6 +537,14 @@ class DelegatingParser(Parser):
                     or (isinstance(content, str) and not content.strip())
                 ):
                     return [], None
+                # No complete tool calls: for engine-based parsers, return
+                # the tool parser's content, which drops incomplete
+                # tool-call markup (e.g. a <tool_call> opener truncated by
+                # max_tokens or a stop string), so the non-streaming path
+                # matches streaming. Legacy parsers keep their existing
+                # behavior of returning the raw content.
+                if self._engine_based and tool_call_info is not None:
+                    return None, tool_call_info.content or None
                 return None, content
 
         return tool_calls, content
@@ -938,6 +979,12 @@ class DelegatingParser(Parser):
                 delta_message = None
 
         return delta_message
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        """Count reasoning tokens through the configured reasoning parser."""
+        if self._reasoning_parser is None:
+            return 0
+        return self._reasoning_parser.count_reasoning_tokens(token_ids)
 
     def _flush_engine_parsers(
         self, delta_message: DeltaMessage | None

@@ -48,7 +48,8 @@ def test_without_spec_decoding(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Test consistency of combos of async scheduling, preemption,
-    uni/multiproc executor, prefill chunking."""
+    uni/multiproc executor, prefill chunking.
+    """
     struct_outputs = StructuredOutputsParams(json=sample_json_schema)
     test_sampling_params: list[dict[str, Any]] = [
         dict(),
@@ -111,7 +112,6 @@ def test_with_eagle3_spec_decoding(sample_json_schema, monkeypatch: pytest.Monke
     preemption, executor, async scheduling, prefill chunking,
     spec decoding model length.
     """
-
     spec_config = {
         "method": "eagle3",
         "num_speculative_tokens": 2,
@@ -171,7 +171,6 @@ def test_with_ngram_gpu_spec_decoding(monkeypatch: pytest.MonkeyPatch):
     - Async scheduling enabled (as in production)
     - Different executors and chunking settings
     """
-
     # Variant with larger speculation window
     ngram_gpu_config = {
         "method": "ngram_gpu",
@@ -206,8 +205,8 @@ def run_tests(
     test_sampling_params: list[dict[str, Any]],
 ):
     """Test consistency of combos of async scheduling, preemption,
-    uni/multiproc executor with spec decoding."""
-
+    uni/multiproc executor with spec decoding.
+    """
     # Flex attention supports float32.
     attention_config = {"backend": "FLEX_ATTENTION"}
 
@@ -332,11 +331,12 @@ def run_test(
 ):
     spec_decoding = spec_config is not None
     cache_arg: dict[str, Any] = (
-        # Force preemptions: with 32 blocks the cache holds at most a single
-        # max-length request, so the ~34 concurrent prompts contend and trigger
-        # preemption. (Prompts here are << max_model_len, so dropping
-        # max_model_len from 4096 to 512 doesn't change generation behavior.)
-        dict(num_gpu_blocks_override=32, max_model_len=512)
+        # Force preemptions: with 33 blocks (one is the reserved null block)
+        # the cache holds at most a single max-length request, so the ~34
+        # concurrent prompts contend and trigger preemption. (Prompts here are
+        # << max_model_len, so dropping max_model_len from 4096 to 512 doesn't
+        # change generation behavior.)
+        dict(num_gpu_blocks_override=33, max_model_len=512)
         if test_preemption
         else dict(gpu_memory_utilization=0.9, max_model_len=4096)
     )

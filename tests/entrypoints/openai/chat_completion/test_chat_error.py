@@ -13,11 +13,10 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.scale_out.render.serving import ServingRender
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.online_renderer import OnlineRenderer
@@ -122,7 +121,7 @@ def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
 
 @pytest.mark.asyncio
 async def test_chat_error_non_stream():
-    """test finish_reason='error' returns 500 InternalServerError (non-streaming)"""
+    """Test finish_reason='error' returns 500 InternalServerError (non-streaming)."""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
@@ -247,7 +246,7 @@ async def test_renderer_only_chat_request_skips_mm_cache():
 
 @pytest.mark.asyncio
 async def test_chat_error_stream():
-    """test finish_reason='error' returns 500 InternalServerError (streaming)"""
+    """Test finish_reason='error' returns 500 InternalServerError (streaming)."""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
@@ -466,7 +465,8 @@ def test_system_message_warns_on_video(video_content):
 def test_json_schema_response_format_missing_schema():
     """When response_format type is 'json_schema' but the json_schema field
     is not provided, request construction should raise a validation error
-    so the API returns 400 instead of 500."""
+    so the API returns 400 instead of 500.
+    """
     with pytest.raises(Exception, match="json_schema.*must be provided"):
         ChatCompletionRequest(
             model=MODEL_NAME,
@@ -520,7 +520,8 @@ def test_structured_outputs_structural_tag_invalid(structural_tag):
 @pytest.mark.parametrize("field_name", ["prompt_logprobs", "top_logprobs"])
 def test_non_numeric_logprobs_rejected(field_name):
     """A non-numeric logprobs value must be a clean 400 validation error, not a
-    TypeError from the mode='before' comparison (which surfaces as HTTP 500)."""
+    TypeError from the mode='before' comparison (which surfaces as HTTP 500).
+    """
     with pytest.raises(VLLMValidationError, match=f"`{field_name}` must be an integer"):
         ChatCompletionRequest(
             model=MODEL_NAME,

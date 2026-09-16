@@ -490,14 +490,14 @@ def test_per_token_head_negative_slot_skipped(qcfg: QuantConfig):
 )
 def test_process_weights_sets_placeholder_scales(kv_cache_dtype: str):
     """Per-token-head should set _k_scale=1.0, _v_scale=1.0
-    and delete checkpoint attrs."""
+    and delete checkpoint attrs.
+    """
     from vllm.model_executor.layers.quantization.kv_cache import (
         BaseKVCacheMethod,
     )
 
     layer = MagicMock()
     layer.kv_cache_dtype = kv_cache_dtype
-    layer.calculate_kv_scales = False
     layer.k_scale = torch.nn.Parameter(torch.tensor(-1.0), requires_grad=False)
     layer.v_scale = torch.nn.Parameter(torch.tensor(-1.0), requires_grad=False)
     layer.q_scale = torch.nn.Parameter(torch.tensor(-1.0), requires_grad=False)

@@ -83,7 +83,7 @@ def _discover_parsers() -> list[_ParserInfo]:
             raise RuntimeError(
                 f"{obj.__name__} config missing 'TOOL_END' in token_id_terminals"
             )
-        all_vals = set(cfg.terminals.values()) | set(cfg.token_id_terminals.values())
+        all_vals = cfg.terminal_literals | set(cfg.token_id_terminals.values())
         found.append(
             _ParserInfo(
                 parser_cls=obj,
@@ -91,12 +91,13 @@ def _discover_parsers() -> list[_ParserInfo]:
                 samples=build_samples(cfg.name),
                 terminals=sorted(v for v in all_vals if len(v) > 1),
                 tool_end=tool_end,
-                think_end=cfg.terminals.get("THINK_END", ""),
+                think_end=cfg.terminal_literal("THINK_END") or "",
                 tool_start=(
-                    cfg.terminals["TOOL_SECTION_START"]
+                    cfg.terminal_literal("TOOL_SECTION_START")
                     if (ParserState.CONTENT, "TOOL_SECTION_START") in cfg.transitions
-                    else cfg.terminals.get("TOOL_START", "")
-                ),
+                    else cfg.terminal_literal("TOOL_START")
+                )
+                or "",
             )
         )
     if missing_builders:
@@ -439,7 +440,8 @@ class TestToolCallFilteringReplay:
 )
 class TestToolCallFilteringNonStreaming:
     """Non-streaming parse() with tool_choice='none' must suppress tool
-    calls and not leak special tokens into content."""
+    calls and not leak special tokens into content.
+    """
 
     def test_parse(self, parser_cls, sample, think_end, tool_start):
         tokenizer = make_mock_tokenizer(sample)
@@ -482,7 +484,8 @@ _WS_TOOL_SAMPLES = [(t[0], t[1]) for t in _TOOL_CALL_SAMPLES if "whitespace" in 
 )
 class TestToolChoiceNoneStreamingParity:
     """Streaming and non-streaming must return the same content
-    when tool_choice='none' suppresses tool calls."""
+    when tool_choice='none' suppresses tool calls.
+    """
 
     def test_content_matches(self, parser_cls, sample):
         tokenizer = make_mock_tokenizer(sample)
@@ -540,7 +543,8 @@ def _inject_drop_tokens(sample):
 
 class TestDropTokenReplay:
     """Verify unconfigured special tokens are silently dropped across
-    all parsers and chunk sizes."""
+    all parsers and chunk sizes.
+    """
 
     @pytest.mark.parametrize(
         "parser_info",
@@ -597,7 +601,8 @@ class TestDropTokenNonStreaming:
 
 class TestAdapterReferences:
     """Verify make_adapters sets reasoning/tool parser class refs on parser engine
-    parser classes so the serving layer finds them and calls adjust_request."""
+    parser classes so the serving layer finds them and calls adjust_request.
+    """
 
     @pytest.mark.parametrize(
         "parser_name",

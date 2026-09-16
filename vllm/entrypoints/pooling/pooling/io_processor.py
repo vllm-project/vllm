@@ -24,6 +24,18 @@ from .protocol import IOProcessorRequest, IOProcessorResponse
 logger = init_logger(__name__)
 
 
+class UnsupportedCombinedTaskIOProcessor(PoolingIOProcessor):
+    name = "embed&token_classify"
+
+    def create_pooling_params(self, request):
+        raise ValueError(
+            "The 'embed&token_classify' pooling task is only available "
+            "through an IO processor plugin. Send a plugin request with "
+            "a 'data' field, "
+            "or select a concrete task with --pooler-config.task."
+        )
+
+
 class PluginWithoutIOProcessorPlugins(PoolingIOProcessor):
     # Some models, such as Terratorch (tests/models/test_terratorch.py),
     # use plugin tasks in the pooler but do not use IO Processor plugins.
@@ -32,7 +44,8 @@ class PluginWithoutIOProcessorPlugins(PoolingIOProcessor):
 
 class PluginWithIOProcessorPlugins(PoolingIOProcessor):
     """IO Processor plugins are a feature that allows pre- and post-processing
-    of the model input and output for pooling models."""
+    of the model input and output for pooling models.
+    """
 
     name = "plugin"
 

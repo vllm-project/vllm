@@ -47,7 +47,8 @@ from .utils import (
 
 class ArceeMLP(nn.Module):
     """Feed-forward layer for Arcee using ReLU^2 activation
-    (no gating as in LLaMA)."""
+    (no gating as in LLaMA).
+    """
 
     def __init__(
         self,
@@ -95,7 +96,8 @@ class ArceeMLP(nn.Module):
 
 class ArceeDecoderLayer(nn.Module):
     """Transformer decoder block for Arcee, with self-attention and
-    ReLU^2 MLP."""
+    ReLU^2 MLP.
+    """
 
     def __init__(
         self,
@@ -175,7 +177,8 @@ class ArceeDecoderLayer(nn.Module):
 @support_torch_compile
 class ArceeModel(nn.Module, EagleModelMixin):
     """The transformer model backbone for Arcee (embedding layer + stacked
-    decoder blocks + final norm)."""
+    decoder blocks + final norm).
+    """
 
     def __init__(
         self,
@@ -277,7 +280,8 @@ class ArceeForCausalLM(
     nn.Module, SupportsLoRA, SupportsPP, SupportsEagle, SupportsEagle3
 ):
     """Arcee Model for causal language modeling, integrated with vLLM
-    runtime."""
+    runtime.
+    """
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
@@ -285,7 +289,10 @@ class ArceeForCausalLM(
             ".q_proj": (".qkv_proj", "q"),
             ".k_proj": (".qkv_proj", "k"),
             ".v_proj": (".qkv_proj", "v"),
-        }
+        },
+        orig_to_new_substr={
+            "gate_proj": None,
+        },
     )
     # Map fused module names to their submodule components
     # (for quantization and LoRA)
@@ -355,12 +362,9 @@ class ArceeForCausalLM(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load weights into the model (delegates to inner model and handles
-        tied embeddings)."""
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-            skip_substrs=["gate_proj"],
-        )
+        tied embeddings).
+        """
+        loader = AutoWeightsLoader(self)
         # AutoWeightLoader handles weight name remapping, including fusing
         # separate q_proj, k_proj, v_proj into qkv_proj
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

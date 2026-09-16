@@ -37,8 +37,8 @@ _GPU_SKIP = _gpu_skip_reason()
 
 pytestmark = [
     pytest.mark.skipif(
-        os.environ.get("VLLM_USE_V2_MODEL_RUNNER", "0") != "1",
-        reason="VLLM_USE_V2_MODEL_RUNNER=1 required",
+        os.environ.get("VLLM_USE_V2_MODEL_RUNNER", "1") == "0",
+        reason="V2 model runner disabled via VLLM_USE_V2_MODEL_RUNNER=0",
     ),
     pytest.mark.skipif(_GPU_SKIP is not None, reason=_GPU_SKIP or ""),
 ]
@@ -82,7 +82,8 @@ async def _generate(engine: AsyncLLM, prompt: str, max_tokens: int) -> int:
 @pytest.mark.parametrize("async_scheduling", [True, False])
 async def test_pp_dp_v2_low_concurrency(async_scheduling: bool):
     """A single in-flight request at a time, repeated, to exercise the
-    PP slot ring under empty batches between decodes."""
+    PP slot ring under empty batches between decodes.
+    """
     with ExitStack() as after:
         engine = AsyncLLM.from_engine_args(_engine_args(async_scheduling))
         after.callback(engine.shutdown)
@@ -96,7 +97,8 @@ async def test_pp_dp_v2_low_concurrency(async_scheduling: bool):
 @pytest.mark.parametrize("async_scheduling", [True, False])
 async def test_pp_dp_v2_mid_concurrency(async_scheduling: bool):
     """64 concurrent requests, staggered, to exercise the steady-state
-    DP all-reduce + PP slot-ring path."""
+    DP all-reduce + PP slot-ring path.
+    """
     with ExitStack() as after:
         engine = AsyncLLM.from_engine_args(_engine_args(async_scheduling))
         after.callback(engine.shutdown)
@@ -112,8 +114,8 @@ async def test_pp_dp_v2_mid_concurrency(async_scheduling: bool):
 @pytest.mark.asyncio
 async def test_pp_dp_v2_abort_mid_decode():
     """Cancel half the in-flight requests mid-stream and confirm the
-    engine survives the abort storm."""
-
+    engine survives the abort storm.
+    """
     with ExitStack() as after:
         engine = AsyncLLM.from_engine_args(_engine_args(async_scheduling=True))
         after.callback(engine.shutdown)
@@ -153,8 +155,8 @@ async def test_pp_dp_v2_abort_mid_decode():
 @pytest.mark.asyncio
 async def test_pp_dp_v2_pause_resume():
     """Pause an engine with a request in flight, then resume and confirm
-    new requests still work."""
-
+    new requests still work.
+    """
     with ExitStack() as after:
         engine = AsyncLLM.from_engine_args(_engine_args(async_scheduling=True))
         after.callback(engine.shutdown)

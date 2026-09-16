@@ -64,6 +64,13 @@ def tensor2base64(x: torch.Tensor) -> str:
     return pybase64.b64encode(binary_data).decode("utf-8")
 
 
+def numpy2base64(array: np.ndarray) -> str:
+    """Encode a NumPy array using its `.npy` representation."""
+    with io.BytesIO() as buffer:
+        np.save(buffer, array, allow_pickle=False)
+        return pybase64.b64encode(buffer.getbuffer()).decode("ascii")
+
+
 def tensor2binary(
     tensor: torch.Tensor,
     embed_dtype: "EmbedDType | MmMetadataDType",

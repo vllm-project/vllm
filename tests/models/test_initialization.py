@@ -8,6 +8,7 @@ import pytest
 
 from vllm import LLM
 from vllm.utils.mem_constants import GiB_bytes
+from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core.kv_cache_utils import (
     generate_scheduler_kv_cache_config,
     get_kv_cache_configs,
@@ -38,7 +39,7 @@ MINIMAL_MODEL_ARCH_LIST = [
     "InternVLChatModel",
     "InternLM2ForRewardModel",
     "TransformersMultiModalForCausalLM",
-    "PrithviGeoSpatialMAE",
+    "Terratorch",
     "UltravoxModel",
     "DeepSeekMTPModel",
     "XLMRobertaModel",
@@ -63,7 +64,6 @@ def can_initialize(
     The spawn process causes the _initialize_kv_caches_v1 function below to
     become ineffective.
     """
-
     model_info = EXAMPLE_MODELS.get_hf_info(model_arch)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(
@@ -82,6 +82,12 @@ def can_initialize(
     # Avoid calling model.forward()
     def _initialize_kv_caches_v1(self, vllm_config):
         kv_cache_specs = self.model_executor.get_kv_cache_specs()
+        layout = resolve_kv_cache_layout(
+            vllm_config,
+            self.model_executor.get_supported_kv_cache_layouts(),
+            [spec for worker_specs in kv_cache_specs for spec in worker_specs.values()],
+        )
+        self.model_executor.set_kv_cache_layout(layout.name)
         kv_cache_configs = get_kv_cache_configs(
             vllm_config,
             kv_cache_specs,
@@ -104,7 +110,7 @@ def can_initialize(
             "which is not configured in test environment"
         )
 
-    if model_arch in ("PrithviGeoSpatialMAE", "Terratorch"):
+    if model_arch == "Terratorch":
         import importlib.util
 
         if importlib.util.find_spec("terratorch") is None:
@@ -125,11 +131,17 @@ def can_initialize(
                 f"capability {capability.major}.{capability.minor}"
             )
 
+    if model_arch == "DeepseekV4ForConditionalGeneration":
+        from vllm.platforms import current_platform
+
+        if not (current_platform.is_cuda() or current_platform.is_rocm()):
+            pytest.skip("Deepseek V4 vision is only supported on CUDA and ROCm")
+
     with (
         patch.object(V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_v1),
         monkeypatch.context() as m,
     ):
-        if requires_spawn_multiprocessing():
+        if requires_spawn_multiprocessing() or model_arch == "Glm5NextForCausalLM":
             # The EngineCore subprocess re-imports the class and does not
             # inherit the KV-cache patch above, so it OOMs. Run in-process
             # so the patch applies.
@@ -186,17 +198,23 @@ def can_initialize(
 
 @pytest.mark.parametrize("model_arch", MINIMAL_MODEL_ARCH_LIST)
 def test_can_initialize_small_subset(model_arch: str, monkeypatch: pytest.MonkeyPatch):
-    """Test initializing small subset of supported models"""
+    """Test initializing small subset of supported models."""
     can_initialize(model_arch, monkeypatch, HF_EXAMPLE_MODELS)
 
 
 @pytest.mark.parametrize("model_arch", OTHER_MODEL_ARCH_LIST)
 def test_can_initialize_large_subset(model_arch: str, monkeypatch: pytest.MonkeyPatch):
-    """Test initializing large subset of supported models
+    """Test initializing large subset of supported models.
 
     This test covers the complement of the tests covered in the "small subset"
     test.
     """
+    if model_arch in ("HYV4ForCausalLM", "HYV4MTPModel"):
+        from vllm.platforms import current_platform
+
+        if current_platform.is_rocm():
+            pytest.skip("HY V4 ROCm initialization requires #54405")
+
     can_initialize(model_arch, monkeypatch, HF_EXAMPLE_MODELS)
 
 

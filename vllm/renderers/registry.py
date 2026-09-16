@@ -20,8 +20,10 @@ logger = init_logger(__name__)
 
 
 _VLLM_RENDERERS = {
+    "cohere": ("cohere", "CohereRenderer"),
     "deepseek_v32": ("deepseek_v32", "DeepseekV32Renderer"),
     "deepseek_v4": ("deepseek_v4", "DeepseekV4Renderer"),
+    "deepseek_v41": ("deepseek_v4", "DeepseekV4Renderer"),
     "hf": ("hf", "HfRenderer"),
     "kimi_audio": ("hf", "HfRenderer"),
     "kimi_k3": ("kimi_k3", "KimiK3Renderer"),

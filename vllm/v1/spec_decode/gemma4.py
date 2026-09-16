@@ -17,6 +17,7 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config, replace
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.utils.torch_utils import current_stream
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -117,6 +118,7 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
         """Capture CUDA graphs for centroids get_top_tokens at key sizes."""
         masked_emb = self.model.masked_embedding
         lm_head_weight = self.model._get_full_lm_head_weight()
+        capture_stream = current_stream()
 
         for size in [1, 2, 4, 8, 16, 32, 64]:
             static_input = torch.zeros(
@@ -130,7 +132,7 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
             torch.accelerator.synchronize()
 
             g = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(g):
+            with torch.cuda.graph(g, stream=capture_stream):
                 static_output = masked_emb.get_top_tokens(
                     static_input,
                     lm_head_weight,
@@ -219,7 +221,8 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
     def validate_same_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:
         """Draft layers span multiple KV cache groups (sliding + full
         attention with different head dimensions), so skip the base
-        class single-group assertion."""
+        class single-group assertion.
+        """
 
     def initialize_attn_backend(
         self,
@@ -227,7 +230,8 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
         kernel_block_sizes: list[int] | None = None,
     ) -> None:
         """Create separate AttentionGroup objects per KV cache spec
-        so that each head-dim variant gets its own metadata builder."""
+        so that each head-dim variant gets its own metadata builder.
+        """
         all_attn_layers = get_layers_from_vllm_config(
             self.vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]

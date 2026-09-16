@@ -33,7 +33,8 @@ def _mamba_align(block_size=32):
 def _make_coord(groups, hash_block_size, use_eagle=False, retention_interval=None):
     """Construct a coordinator using the natural LCM of group block sizes as
     the scheduler block size — mirrors ``resolve_kv_cache_block_sizes`` for
-    the test fixtures."""
+    the test fixtures.
+    """
     block_sizes = [g.kv_cache_spec.block_size for g in groups]
     scheduler_block_size = lcm(*block_sizes)
     return MooncakeStoreCoordinator(
@@ -143,7 +144,8 @@ def test_coordinator_single_full_attention_no_hits():
 
 def test_coordinator_single_swa_tautological_pool_masks_pre_window():
     """SWA tautological-pool: hit_length spans full prefix, mask is
-    tail-window only."""
+    tail-window only.
+    """
     groups = [KVCacheGroupSpec(["L0"], _swa(block_size=16, sliding_window=32))]
     coord = _make_coord(groups, hash_block_size=16)
     hs = _hashes(4)  # 4 chunks * 16 tokens
@@ -190,7 +192,8 @@ def test_coordinator_hybrid_hole_in_full_clips_both():
 
 def test_coordinator_group_block_size_double_hash():
     """Group block_size=32 over hash_block_size=16 hashes: adjacent
-    hashes merge before pool lookup."""
+    hashes merge before pool lookup.
+    """
     groups = [
         KVCacheGroupSpec(["L0"], _full(16)),
         KVCacheGroupSpec(["L1"], _full(32)),
@@ -214,7 +217,8 @@ def test_coordinator_group_block_size_double_hash():
 def test_coordinator_fine_grained_partial_tail_hit():
     """K3 shape: FA + mamba-align, block_size=32 over hash_block_size=16. When
     both groups have the sub-block boundary hash, the reconciled hit lands on
-    the hash boundary (48), not the block boundary (32)."""
+    the hash boundary (48), not the block boundary (32).
+    """
     groups = [
         KVCacheGroupSpec(["L0"], _full(32)),
         KVCacheGroupSpec(["L1"], _mamba_align(32)),
@@ -234,7 +238,8 @@ def test_coordinator_fine_grained_partial_tail_hit():
 
 def test_coordinator_fine_grained_clips_when_one_group_missing_tail():
     """If only one group has the sub-block boundary, min-convergence clips the
-    reconciled hit back to the block boundary (32)."""
+    reconciled hit back to the block boundary (32).
+    """
     groups = [
         KVCacheGroupSpec(["L0"], _full(32)),
         KVCacheGroupSpec(["L1"], _mamba_align(32)),
@@ -275,7 +280,8 @@ def test_store_mask_swa_only_window_around_each_lcm_boundary():
     """Hybrid full-attn(block=32) + SWA(block=8, sw=8). lcm=32. With
     aligned=64 the SWA group should mark exactly the blocks ending at 32
     and 64 (i.e. blocks 3 and 7 at block_size=8); the rest can never
-    participate in any future hit."""
+    participate in any future hit.
+    """
     full = _full(32)
     swa = _swa(block_size=8, sliding_window=8)
     groups = [KVCacheGroupSpec(["L0"], full), KVCacheGroupSpec(["L1"], swa)]
@@ -287,9 +293,42 @@ def test_store_mask_swa_only_window_around_each_lcm_boundary():
     assert masks[1] == [False, False, False, True, False, False, False, True]
 
 
+def test_store_mask_swa_does_not_double_scale_under_dcp():
+    """The coordinator receives DCP-resolved specs (worker.py applies
+    resolve_dcp_kv_cache_spec) and indexes chunks in that already-scaled block
+    size. So dcp_world_size must NOT further scale reachable_block_mask; the
+    mask must be identical for any dcp_world_size given the same specs.
+
+    Regression: previously the coordinator forwarded its dcp_world_size, which
+    double-scaled the SWA block size and produced a wrong mask when dcp > 1.
+    """
+    full = _full(32)
+    swa = _swa(block_size=8, sliding_window=8)
+    groups = [KVCacheGroupSpec(["L0"], full), KVCacheGroupSpec(["L1"], swa)]
+    scheduler_block_size = lcm(32, 8)
+
+    def make(dcp_world_size):
+        return MooncakeStoreCoordinator(
+            groups,
+            scheduler_block_size=scheduler_block_size,
+            hash_block_size=8,
+            dcp_world_size=dcp_world_size,
+        )
+
+    mask_dcp1 = make(1).store_mask(64)
+    mask_dcp2 = make(2).store_mask(64)
+
+    # dcp must not change the mask; both match the correct single-block-size
+    # result (chunks ending at 32 and 64 -> blocks 3 and 7).
+    expected = [False, False, False, True, False, False, False, True]
+    assert mask_dcp1[1] == expected
+    assert mask_dcp2[1] == expected
+
+
 def test_store_mask_swa_wider_window_covers_more_blocks_per_lcm():
     """Same hybrid layout but sliding_window=16 (= 2 SWA blocks). Each lcm
-    boundary should now span two SWA tail blocks."""
+    boundary should now span two SWA tail blocks.
+    """
     full = _full(32)
     swa = _swa(block_size=8, sliding_window=16)
     groups = [KVCacheGroupSpec(["L0"], full), KVCacheGroupSpec(["L1"], swa)]
@@ -319,7 +358,8 @@ def test_store_mask_dsv4_5_groups_full_mla_plus_4_swa():
     """DSV4-shaped: full-MLA(B=256) + 4 SWA groups with B in {64, 64, 4, 8}
     and varied sliding windows. lcm=256, hash_block_size=4. Two lcm segments
     (aligned_len=512). Validates that the tile-once strategy produces the
-    expected per-segment tail-window pattern, repeated."""
+    expected per-segment tail-window pattern, repeated.
+    """
     full_mla = _full(block_size=256)
     swa_64_sw128 = _swa(block_size=64, sliding_window=128)
     swa_64_sw512 = _swa(block_size=64, sliding_window=512)
@@ -353,7 +393,8 @@ def test_store_mask_dsv4_5_groups_full_mla_plus_4_swa():
 
 def test_store_mask_fast_path_all_block_sizes_equal_lcm():
     """When every non-full-attn group already aligns to lcm_block_size, the
-    fast path returns all-True without invoking find_longest_cache_hit."""
+    fast path returns all-True without invoking find_longest_cache_hit.
+    """
     full = _full(block_size=64)
     swa = _swa(block_size=64, sliding_window=128)
     groups = [KVCacheGroupSpec(["L0"], full), KVCacheGroupSpec(["L1"], swa)]
@@ -366,7 +407,8 @@ def test_store_mask_fast_path_all_block_sizes_equal_lcm():
 
 def test_store_mask_fast_path_single_attention_group():
     """Two groups sharing the same SWA spec collapse to one attention group;
-    no lcm filter applies, every chunk is True."""
+    no lcm filter applies, every chunk is True.
+    """
     swa = _swa(block_size=16, sliding_window=32)
     groups = [KVCacheGroupSpec(["L0"], swa), KVCacheGroupSpec(["L1"], swa)]
     coord = _make_coord(groups, hash_block_size=16)
@@ -380,7 +422,8 @@ def test_store_mask_fast_path_single_attention_group():
 
 def _retention_groups():
     """Hybrid full-attn(block=32) + SWA(block=8, sw=8); lcm=32. The SWA group
-    densely keeps one tail block per 32-token boundary."""
+    densely keeps one tail block per 32-token boundary.
+    """
     full = _full(32)
     swa = _swa(block_size=8, sliding_window=8)
     return [KVCacheGroupSpec(["L0"], full), KVCacheGroupSpec(["L1"], swa)]
@@ -388,7 +431,8 @@ def _retention_groups():
 
 def test_store_mask_dense_default_matches_every_lcm_boundary():
     """retention_interval=None (default) keeps the SWA tail at every lcm
-    boundary: tokens 32/64/96/128 -> chunks 3/7/11/15."""
+    boundary: tokens 32/64/96/128 -> chunks 3/7/11/15.
+    """
     coord = _make_coord(_retention_groups(), hash_block_size=8)
     masks = coord.store_mask(128)
     assert masks[0] is None
@@ -398,7 +442,8 @@ def test_store_mask_dense_default_matches_every_lcm_boundary():
 def test_store_mask_retention_interval_sparsifies_swa_tails():
     """retention_interval=64 keeps an SWA tail once per 64-token segment
     (chunks 7 and 15) instead of every 32 tokens, dropping the mid-segment
-    boundaries at 32 and 96."""
+    boundaries at 32 and 96.
+    """
     coord = _make_coord(_retention_groups(), hash_block_size=8, retention_interval=64)
     masks = coord.store_mask(128)
     assert masks[0] is None  # full attn unaffected
@@ -407,7 +452,8 @@ def test_store_mask_retention_interval_sparsifies_swa_tails():
 
 def test_store_mask_retention_interval_zero_keeps_only_replay_boundary():
     """retention_interval=0 drops all segment tails; only the latest replay
-    boundary (capped at num_prompt-1, aligned down to lcm) is retained."""
+    boundary (capped at num_prompt-1, aligned down to lcm) is retained.
+    """
     coord = _make_coord(_retention_groups(), hash_block_size=8, retention_interval=0)
     # No replay info -> nothing reachable for the SWA group.
     assert coord.store_mask(128)[1] == [False] * 16
@@ -418,7 +464,8 @@ def test_store_mask_retention_interval_zero_keeps_only_replay_boundary():
 
 def test_store_mask_retention_interval_keeps_segment_and_replay_tails():
     """Sparse segment tails (interval=64 -> chunks 7,15) plus the replay
-    boundary tail (num_prompt=100 -> chunk 11) coexist."""
+    boundary tail (num_prompt=100 -> chunk 11) coexist.
+    """
     coord = _make_coord(_retention_groups(), hash_block_size=8, retention_interval=64)
     masks = coord.store_mask(128, num_prompt_tokens=100)
     assert masks[1] == [i in (7, 11, 15) for i in range(16)]
@@ -451,12 +498,35 @@ def test_store_mask_retention_prefix_stable_as_aligned_length_grows():
     assert longer[: len(shorter)] == shorter
 
 
+def test_store_mask_excludes_mamba_groups_lookup_unaffected():
+    """Align-mode mamba block tables are not append-only (interior states are
+    nulled/freed; speculative blocks relocate), so the positional normal save
+    must never cover mamba chunks — regardless of retention. Lookups still
+    probe mamba boundaries: their keys come from the pinned snapshot/CoW
+    hand-off path instead.
+    """
+    groups = [
+        KVCacheGroupSpec(["L0"], _full(16)),
+        KVCacheGroupSpec(["L1"], _mamba_align(16)),
+    ]
+    coord = _make_coord(groups, hash_block_size=16)
+    masks = coord.store_mask(64)
+    assert masks[0] is None  # full attn stays dense
+    assert masks[1] == [False] * 4
+
+    coord = _make_coord(groups, hash_block_size=16, retention_interval=32)
+    assert coord.store_mask(64)[1] == [False] * 4
+
+    assert coord.lookup_mask(64)[1] is None
+
+
 # ----- Eagle / MTP interaction with load_mask -----
 
 
 def test_lookup_with_eagle_pops_last_full_attention_block():
     """Sanity: with use_eagle, find_longest_cache_hit drops the last block.
-    Pairs with the load_mask test below to lock the round-trip contract."""
+    Pairs with the load_mask test below to lock the round-trip contract.
+    """
     groups = [KVCacheGroupSpec(["L0"], _full(16))]
     coord = _make_coord(groups, hash_block_size=16, use_eagle=True)
     hs = _hashes(4)
@@ -497,7 +567,8 @@ def test_load_mask_with_eagle_does_not_double_prune_full_attention():
 def test_load_mask_with_eagle_hybrid_full_plus_swa():
     """Hybrid (FullAttn + SWA) with eagle: load_mask must cover every chunk
     in [0, token_len) for the FullAttn group; SWA group keeps its
-    tail-window mask."""
+    tail-window mask.
+    """
     groups = [
         KVCacheGroupSpec(["L0"], _full(16)),
         KVCacheGroupSpec(["L1"], _swa(16, 32)),
@@ -567,3 +638,83 @@ def test_lookup_with_eagle_hybrid_full_plus_mamba_no_overrun():
     # FullAttn matches 4 blocks, eagle pops 1 -> 48 verified tokens. The
     # Mamba group must serve its state@48 snapshot, not peek to state@64.
     assert hit == 48
+
+
+def test_eagle_flag_propagates_to_all_merged_swa_groups():
+    """Regression for MTP x PD external-store 0% prefix hit.
+
+    DSV4 splits SWA layers into several KV cache groups sharing one spec, and
+    only the group containing the MTP layer is annotated ``is_eagle_group``.
+    The lookup merges equal-spec groups, applies the eagle drop to the merged
+    group, and requires each chunk hash to exist in EVERY member group — so
+    the save-side masks must eagle-shift every member, not just the annotated
+    one. Without propagation the non-annotated groups never store the eagle
+    proof-run chunks and every external lookup returns 0.
+    """
+    swa = _swa(block_size=16, sliding_window=32)
+    groups = [
+        KVCacheGroupSpec(["L0"], _full(64)),
+        KVCacheGroupSpec(["L1"], swa),
+        KVCacheGroupSpec(["L2"], swa, is_eagle_group=True),
+    ]
+    coord = _make_coord(groups, hash_block_size=16, use_eagle=True)
+    assert coord.eagle_group_ids == {1, 2}
+
+    # Save side: both SWA groups must produce identical (eagle-shifted) masks.
+    masks = coord.store_mask(128, num_prompt_tokens=130)
+    assert masks[1] == masks[2]
+
+    # Round trip: everything store_mask kept is in the store; the eagle
+    # lookup must then serve a non-zero hit (it was 0 before the fix).
+    hs = _hashes(128 // 16)
+    exists = set()
+    for g_idx, g in enumerate(groups):
+        ghashes = chunk_hashes_for_block_size(hs, 16, g.kv_cache_spec.block_size)
+        mask = masks[g_idx]
+        for i in range(128 // g.kv_cache_spec.block_size):
+            if mask is None or mask[i]:
+                exists.add((g_idx, bytes(ghashes[i])))
+    _masks, hit = coord.find_longest_cache_hit(
+        hs, max_length=128, cached_block_pool=ExternalCachedBlockPool(16, exists)
+    )
+    assert hit == 64
+
+
+def test_dsv4_five_group_eagle_store_lookup_round_trip():
+    """Cover the five KV groups observed with DeepSeek-V4-Flash + MTP.
+
+    The two 64-token SWA groups have identical specs, but only one owns the
+    EAGLE layer. Saving each group through its store mask must still leave a
+    prefix that the merged SWA lookup can consume.
+    """
+    swa_64_sw128 = _swa(block_size=64, sliding_window=128)
+    groups = [
+        KVCacheGroupSpec(["full_mla"], _full(block_size=256)),
+        KVCacheGroupSpec(["swa"], swa_64_sw128),
+        KVCacheGroupSpec(["mtp"], swa_64_sw128, is_eagle_group=True),
+        KVCacheGroupSpec(["c4_state"], _swa(block_size=4, sliding_window=8)),
+        KVCacheGroupSpec(["c128_state"], _swa(block_size=8, sliding_window=128)),
+    ]
+    coord = _make_coord(groups, hash_block_size=4, use_eagle=True)
+    token_len = 768
+    hashes = _hashes(token_len // coord.hash_block_size)
+
+    # Mirror MooncakeStoreWorker's aligned save: only keys selected by each
+    # group's store mask are visible to the external lookup.
+    exists: set[tuple[int, bytes]] = set()
+    store_masks = coord.store_mask(token_len)
+    for gid, (group, mask) in enumerate(zip(groups, store_masks, strict=True)):
+        group_hashes = coord.block_hashes_for_spec(hashes, group.kv_cache_spec)
+        for chunk_id, block_hash in enumerate(group_hashes):
+            if mask is None or mask[chunk_id]:
+                exists.add((gid, bytes(block_hash)))
+
+    _masks, hit = coord.find_longest_cache_hit(
+        hashes,
+        max_length=token_len,
+        cached_block_pool=ExternalCachedBlockPool(coord.hash_block_size, exists),
+    )
+
+    # The final 256-token segment has no lookahead block, so EAGLE falls back
+    # to the previous aligned boundary instead of consuming all 768 tokens.
+    assert hit == 512

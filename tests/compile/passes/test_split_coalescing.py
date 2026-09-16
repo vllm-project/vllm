@@ -15,7 +15,8 @@ DEVICE_TYPE = current_platform.device_type
 
 class SplitCoalescingModel(torch.nn.Module):
     """Model with 3 separate split_with_sizes calls on the same input,
-    simulating the B200+FP8 graph where CSE fails to merge them."""
+    simulating the B200+FP8 graph where CSE fails to merge them.
+    """
 
     def __init__(self, q_size: int, kv_size: int) -> None:
         super().__init__()

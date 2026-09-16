@@ -192,8 +192,3 @@ class DeepseekV4FP8Config(Fp8Config):
             # expert_dtype == "fp8": fall through to Fp8Config which
             # returns Fp8MoEMethod with block-wise float32 scales.
         return super().get_quant_method(layer, prefix)
-
-    def is_mxfp4_quant(self, prefix, layer):
-        if not isinstance(layer, RoutedExperts) or self.expert_dtype != "fp4":
-            return False
-        return self.moe_quant_algo != "NVFP4"

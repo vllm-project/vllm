@@ -185,6 +185,21 @@ class TestShouldSkipWeight:
             "model.layers.0.mlp.experts.200.gate_proj.weight", self.local_ids
         )
 
+    def test_local_packed_expert_not_skipped(self):
+        assert not should_skip_weight(
+            "model.layers.0.mlp.experts.10.gate_proj.weight_packed", self.local_ids
+        )
+
+    def test_remote_packed_expert_skipped(self):
+        assert should_skip_weight(
+            "model.layers.0.mlp.experts.200.gate_proj.weight_packed", self.local_ids
+        )
+
+    def test_remote_expert_scale_not_skipped(self):
+        assert not should_skip_weight(
+            "model.layers.0.mlp.experts.200.gate_proj.weight_scale", self.local_ids
+        )
+
     def test_boundary_expert(self):
         # Expert 47 is local (last one), 48 is not
         assert not should_skip_weight(
@@ -217,7 +232,8 @@ class TestShouldSkipWeight:
 
 class TestSafetensorsWeightsIteratorWithEpFilter:
     """Verify that EP filtering produces a strict subset of unfiltered loading
-    and that all expected dense + local expert weights are present."""
+    and that all expected dense + local expert weights are present.
+    """
 
     @pytest.fixture(scope="class")
     def gpt2_files(self):
@@ -247,7 +263,8 @@ class TestSafetensorsWeightsIteratorWithEpFilter:
 
     def test_empty_filter_skips_experts_only(self, gpt2_files):
         """GPT-2 has no expert weights, so even an empty local_expert_ids
-        set should return all weights (all are dense)."""
+        set should return all weights (all are dense).
+        """
         all_weights = dict(safetensors_weights_iterator(gpt2_files, False))
         filtered_weights = dict(
             safetensors_weights_iterator(gpt2_files, False, local_expert_ids=set())
@@ -258,7 +275,8 @@ class TestSafetensorsWeightsIteratorWithEpFilter:
 
 class TestEpFilterOnSyntheticMoeWeights:
     """Create synthetic safetensors files with expert-like naming and verify
-    that the filter correctly skips non-local experts."""
+    that the filter correctly skips non-local experts.
+    """
 
     @pytest.fixture
     def synthetic_moe_files(self, tmp_path):

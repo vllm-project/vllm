@@ -81,7 +81,8 @@ def test_transformers_audio_generation(
     under pytest can cause (possibly flaky) hangs, so they are grouped under
     the same config. Using VLLM_WORKER_MULTIPROC_METHOD=spawn avoids the
     deadlock and allows worker processes to terminate cleanly, and release
-    GPU memory between test runs until the issue is fixed."""
+    GPU memory between test runs until the issue is fixed.
+    """
     # TODO: Remove monkeypatch once
     # https://github.com/vllm-project/vllm/issues/17676 is fixed.
     disable_envs_cache()

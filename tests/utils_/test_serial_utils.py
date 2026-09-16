@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import io
+
+import numpy as np
+import pybase64
 import pytest
 import torch
 
@@ -12,11 +16,23 @@ from vllm.utils.serial_utils import (
     Endianness,
     MmMetadataDType,
     binary2tensor,
+    numpy2base64,
     tensor2binary,
 )
 
 FLOAT_EMBED_DTYPES = tuple(EMBED_DTYPES.keys())
 INTEGER_EMBED_DTYPES = tuple(MM_METADATA_DTYPES.keys())
+
+
+def test_numpy2base64_round_trip():
+    array = np.arange(24, dtype=np.uint8).reshape(2, 3, 4)
+
+    decoded = np.load(
+        io.BytesIO(pybase64.b64decode(numpy2base64(array))),
+        allow_pickle=False,
+    )
+
+    np.testing.assert_array_equal(decoded, array)
 
 
 def _build_integer_tensor(

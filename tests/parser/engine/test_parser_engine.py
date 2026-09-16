@@ -7,6 +7,7 @@ DeltaMessage / ExtractedToolCallInformation protocol.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -15,14 +16,14 @@ import pytest
 import regex as re
 
 from tests.parser.engine.conftest import make_mock_tokenizer
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-    ChatCompletionToolsParam,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaToolCall,
     FunctionDefinition,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionToolsParam,
 )
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.engine.adapters import make_adapters
@@ -33,6 +34,7 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
+from vllm.parser.parser_manager import ParserManager
 
 # ── Shared test configs ──────────────────────────────────────────────
 
@@ -129,6 +131,68 @@ def _make_engine(
         tools=tools,
         parser_engine_config=cfg,
     )
+
+
+# ── TestReasoningEndTokenIds ─────────────────────────────────────────
+
+
+def _with_reasoning_exits(
+    *exits: tuple[str, ParserState, tuple[EventType, ...]],
+) -> ParserEngineConfig:
+    """Combined config plus extra transitions out of REASONING."""
+    base = _combined_config()
+    transitions = dict(base.transitions)
+    for terminal, next_state, events in exits:
+        transitions[(ParserState.REASONING, terminal)] = Transition(next_state, events)
+    return dataclasses.replace(base, transitions=transitions)
+
+
+class TestReasoningEndTokenIds:
+    """ParserEngine derives the reasoning-end token set from its config."""
+
+    def test_every_reasoning_end_exit_contributes(self):
+        cfg = _with_reasoning_exits(
+            (
+                "TOOL_START",
+                ParserState.TOOL_ARGS,
+                (EventType.REASONING_END, EventType.TOOL_CALL_START),
+            ),
+        )
+        assert _make_engine(cfg).reasoning_end_token_ids == {201, 202}
+
+    def test_transition_staying_in_reasoning_is_ignored(self):
+        cfg = _with_reasoning_exits(("THINK_START", ParserState.REASONING, ()))
+        assert _make_engine(cfg).reasoning_end_token_ids == {201}
+
+    def test_unreported_exit_fails_closed(self):
+        cfg = _with_reasoning_exits(
+            ("TOOL_START", ParserState.TOOL_ARGS, (EventType.TOOL_CALL_START,)),
+        )
+        assert _make_engine(cfg).reasoning_end_token_ids == frozenset()
+
+    def test_unresolved_think_end_fails_closed(self):
+        vocab = {k: v for k, v in _VOCAB.items() if k != "</think>"}
+        assert _make_engine(vocab=vocab).reasoning_end_token_ids == frozenset()
+
+        text_only = dataclasses.replace(
+            _combined_config(), token_id_terminals={"THINK_START": "<think>"}
+        )
+        assert _make_engine(text_only).reasoning_end_token_ids == frozenset()
+
+    def test_config_without_reasoning_has_empty_set(self):
+        assert _make_engine(_hermes_config()).reasoning_end_token_ids == frozenset()
+
+    def test_find_reasoning_end_offset_returns_first_match(self):
+        engine = _make_engine()
+        assert engine.find_reasoning_end_offset([5, 201, 6, 201]) == 1
+        assert engine.find_reasoning_end_offset([5, 6]) == 2
+        assert engine.find_reasoning_end_offset([]) == 0
+        # Rejected-draft placeholders never match.
+        assert engine.find_reasoning_end_offset([-1, 201]) == 1
+
+    def test_find_reasoning_end_offset_with_empty_set_returns_none(self):
+        engine = _make_engine(_hermes_config())
+        assert engine.find_reasoning_end_offset([201]) is None
 
 
 # ── TestEventsToDelta ────────────────────────────────────────────────
@@ -259,7 +323,8 @@ class TestEventsToDelta:
 
     def test_multiple_arg_chunks_same_batch_coalesced(self):
         """Multiple events for the same tool in one batch must produce
-        at most one DeltaToolCall per index."""
+        at most one DeltaToolCall per index.
+        """
         engine = _make_engine()
         events = [
             SemanticEvent(EventType.TOOL_CALL_START, tool_index=0),
@@ -487,7 +552,8 @@ class TestPostToolContentDeferral:
     """Regression: content after TOOL_CALL_END in the same batch must not
     produce a mixed DeltaMessage(content=..., tool_calls=...) — that causes
     split_delta to reorder content before tool_calls, breaking the Responses
-    API state machine."""
+    API state machine.
+    """
 
     def test_text_after_tool_end_deferred(self):
         engine = _make_engine()
@@ -541,7 +607,8 @@ class TestPostToolContentDeferral:
         """Deferred content from batch N must not mix with arg-continuation
         tool events in batch N+1 — that creates a DeltaMessage with both
         content and nameless tool_calls, which crashes the Responses API
-        state machine (name=None → Pydantic ValidationError)."""
+        state machine (name=None → Pydantic ValidationError).
+        """
         engine = _make_engine()
         engine._content_has_nonws = True
 
@@ -770,7 +837,8 @@ class TestBuildExtractedResult:
 
 class TestEngineBasedPath:
     """Tests for the _engine_based accumulation behavior in
-    DelegatingParser.parse_delta."""
+    DelegatingParser.parse_delta.
+    """
 
     def test_engine_based_true_when_both_parsers_engine(self):
         r = SimpleNamespace(engine_based_streaming=True)
@@ -816,7 +884,8 @@ class TestEngineBasedPath:
 
 class TestParseTokenIdPassthrough:
     """parse() must forward model_output_token_ids to _single_pass_parse
-    so that token-ID-based strict terminal matching is active."""
+    so that token-ID-based strict terminal matching is active.
+    """
 
     def test_literal_tool_tag_in_content_preserved_with_token_ids(self, mock_request):
         engine = _make_engine(_hermes_config())
@@ -892,6 +961,135 @@ class _CombinedDelegating(DelegatingParser):
     tool_parser_cls = _CombinedToolAdapter
 
 
+def test_parser_manager_preserves_shared_engine_adapters(monkeypatch):
+    monkeypatch.setattr(
+        ParserManager,
+        "get_reasoning_parser",
+        classmethod(lambda cls, name: _CombinedReasoningAdapter),
+    )
+    monkeypatch.setattr(
+        ParserManager,
+        "get_tool_parser",
+        classmethod(lambda cls, name, enabled, model: _CombinedToolAdapter),
+    )
+
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="combined",
+        reasoning_parser_name="combined",
+        enable_auto_tools=True,
+    )
+
+    assert parser_cls is not None
+    assert issubclass(parser_cls, DelegatingParser)
+    parser = parser_cls(make_mock_tokenizer(_VOCAB))
+    assert parser.reasoning_parser is not None
+    assert parser.tool_parser is not None
+    assert parser.reasoning_parser._parser_engine_cls is _CombinedTestEngine
+    assert parser.tool_parser._parser_engine_cls is _CombinedTestEngine
+    request = _make_delegating_request()
+    token_ids = [ord("a"), ord("b"), 201, ord("c")]
+    reasoning, content, _ = parser.parse(
+        "ab</think>c",
+        request,
+        model_output_token_ids=token_ids,
+    )
+    assert reasoning == "ab"
+    assert content == "c"
+    assert parser.count_reasoning_tokens(token_ids) == 2
+
+
+def test_parser_manager_preserves_shared_engine_reasoning_wiring():
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="qwen3_xml",
+        reasoning_parser_name="qwen3",
+        enable_auto_tools=True,
+    )
+
+    assert parser_cls is not None
+    parser = parser_cls(
+        make_mock_tokenizer(_VOCAB),
+        chat_template_kwargs={"enable_thinking": False},
+    )
+    assert parser.reasoning_parser is not None
+    assert parser.reasoning_parser._parser_engine.thinking_enabled is False
+
+
+def test_parser_manager_preserves_reasoning_only_adapter(monkeypatch):
+    monkeypatch.setattr(
+        ParserManager,
+        "get_reasoning_parser",
+        classmethod(lambda cls, name: _CombinedReasoningAdapter),
+    )
+    monkeypatch.setattr(
+        ParserManager,
+        "get_tool_parser",
+        classmethod(lambda cls, name, enabled, model: None),
+    )
+
+    parser_cls = ParserManager.get_parser(reasoning_parser_name="combined")
+
+    assert parser_cls is not None
+    parser = parser_cls(make_mock_tokenizer(_VOCAB))
+    assert parser.reasoning_parser is not None
+    assert parser.tool_parser is None
+    reasoning, content, _ = parser.parse(
+        'ab</think><tool_call>{"name":"h","arguments":{}}</tool_call>',
+        _make_delegating_request(),
+        model_output_token_ids=[ord("a"), ord("b"), 201],
+    )
+    assert reasoning == "ab"
+    assert content == '<tool_call>{"name":"h","arguments":{}}</tool_call>'
+    assert parser.count_reasoning_tokens([ord("a"), ord("b"), 201]) == 2
+
+
+def test_parser_manager_preserves_tool_only_adapter(monkeypatch):
+    monkeypatch.setattr(
+        ParserManager,
+        "get_reasoning_parser",
+        classmethod(lambda cls, name: None),
+    )
+    monkeypatch.setattr(
+        ParserManager,
+        "get_tool_parser",
+        classmethod(lambda cls, name, enabled, model: _CombinedToolAdapter),
+    )
+
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="combined", enable_auto_tools=True
+    )
+
+    assert parser_cls is not None
+    parser = parser_cls(make_mock_tokenizer(_VOCAB))
+    assert parser.reasoning_parser is None
+    assert parser.tool_parser is not None
+    reasoning, content, tool_calls = parser.parse(
+        "<think>ab</think>c",
+        _make_delegating_request(),
+        model_output_token_ids=[200, ord("a"), ord("b"), 201, ord("c")],
+    )
+    assert reasoning is None
+    assert content == "<think>ab</think>c"
+    assert tool_calls == []
+
+
+def test_reasoning_adapter_counts_after_final_non_streaming_parse():
+    parser = _CombinedReasoningAdapter(make_mock_tokenizer(_VOCAB))
+    request = _make_delegating_request()
+    token_ids = [ord("a"), ord("b"), 201, ord("c")]
+
+    parser.extract_reasoning_streaming(
+        "",
+        "ab</think>c",
+        "ab</think>c",
+        [],
+        token_ids,
+        token_ids,
+    )
+    parser.extract_reasoning("ab</think>c", request)
+
+    assert parser.count_reasoning_tokens(token_ids) == 2
+
+
 def _make_delegating_request():
     req = MagicMock(spec=ChatCompletionRequest)
     req.tools = []
@@ -911,7 +1109,8 @@ class TestAdapterFinishOnStreamEnd:
 
     def test_lexer_buffer_flushed_on_finished(self):
         """Text buffered as a potential terminal prefix must be emitted
-        as content when the stream ends."""
+        as content when the stream ends.
+        """
         tokenizer = make_mock_tokenizer(_VOCAB)
         parser = _CombinedDelegating(tokenizer)
         request = _make_delegating_request()
@@ -929,7 +1128,8 @@ class TestAdapterFinishOnStreamEnd:
 
     def test_args_buffer_flushed_on_finished(self):
         """Pending arg buffer text must be emitted when stream ends
-        mid-tool-call (closing brace held back in buffer)."""
+        mid-tool-call (closing brace held back in buffer).
+        """
         tokenizer = make_mock_tokenizer(_VOCAB)
         parser = _CombinedDelegating(tokenizer)
         request = _make_delegating_request()
@@ -1075,12 +1275,98 @@ class TestReasoningOnlyEndTokenLeak:
         assert "Hi!" in d2.content
 
 
+class TestSkipToolSpanForwarding:
+    """Reasoning (skip_tool_parsing) pass: tool syntax is forwarded verbatim
+    for the tool pass, and the lexical passthrough flag never goes stale.
+
+    ``_combined_config`` defines ``</tool_call>`` only from ``TOOL_ARGS``; the
+    skip pass stays in ``CONTENT``, so the closer arrives with no current-state
+    transition. It must still be forwarded and must clear the span — otherwise
+    ``_in_skipped_tool_span`` stays True for the rest of the request. This is the
+    shape of every current engine grammar whose wrapper closer has no CONTENT
+    transition (qwen3, deepseek, glm47_moe, nemotron_v3).
+    """
+
+    _TOOL_VOCAB = {**_VOCAB, '{"a":1}': 300}
+    _TOOL_CALL = '<tool_call>{"a":1}</tool_call>'
+    _TOOL_IDS = [202, 300, 203]
+
+    def _skip_engine(self):
+        engine = _make_engine(
+            vocab=self._TOOL_VOCAB,
+            special_tokens=list(_VOCAB.keys()),
+        )
+        engine._engine.skip_tool_parsing = True
+        engine._engine.reset(initial_state=ParserState.CONTENT)
+        return engine
+
+    def test_tool_syntax_forwarded_and_span_cleared(self):
+        engine = self._skip_engine()
+        events = engine._engine.feed(self._TOOL_CALL, self._TOOL_IDS)
+        forwarded = "".join(e.value for e in events if e.type == EventType.TEXT_CHUNK)
+        assert forwarded == self._TOOL_CALL
+        assert engine._engine._in_skipped_tool_span is False
+
+    def test_span_not_stale_across_two_tool_calls(self):
+        engine = self._skip_engine()
+        engine._engine.feed(self._TOOL_CALL, self._TOOL_IDS)
+        assert engine._engine._in_skipped_tool_span is False
+        events = engine._engine.feed(self._TOOL_CALL, self._TOOL_IDS)
+        forwarded = "".join(e.value for e in events if e.type == EventType.TEXT_CHUNK)
+        assert forwarded == self._TOOL_CALL
+        assert engine._engine._in_skipped_tool_span is False
+
+    def test_content_after_transitionless_closer_observable(self):
+        """Observable lifecycle contract (not just the private flag): after a
+        tool closer with no CONTENT transition, a later *shared* block-ender
+        that also closes text blocks must be consumed, not leaked as content.
+
+        The config combines the two real patterns — a qwen3-style tool-only
+        closer with no CONTENT transition (``</a>``) and an inkling-style token
+        that closes both tool and text blocks (``</b>``). A stale span would
+        route the trailing ``</b>`` down the forward path and leak it.
+        """
+        ts, close_a, close_b = "<tc>", "</a>", "</b>"
+        cfg = ParserEngineConfig(
+            name="shared_closer_test",
+            terminals={"TOOL_START": ts, "CLOSE_A": close_a, "CLOSE_B": close_b},
+            transitions={
+                (ParserState.CONTENT, "TOOL_START"): Transition(
+                    ParserState.TOOL_ARGS, (EventType.TOOL_CALL_START,)
+                ),
+                (ParserState.TOOL_ARGS, "CLOSE_A"): Transition(
+                    ParserState.CONTENT, (EventType.TOOL_CALL_END,)
+                ),
+                (ParserState.TOOL_ARGS, "CLOSE_B"): Transition(
+                    ParserState.CONTENT, (EventType.TOOL_CALL_END,)
+                ),
+                (ParserState.CONTENT, "CLOSE_B"): Transition(ParserState.CONTENT, ()),
+            },
+            initial_state=ParserState.CONTENT,
+            content_events={
+                ParserState.CONTENT: EventType.TEXT_CHUNK,
+                ParserState.TOOL_ARGS: EventType.ARG_VALUE_CHUNK,
+            },
+        )
+        engine = _make_engine(config=cfg, vocab={ts: 210, close_a: 211, close_b: 212})
+        engine._engine.skip_tool_parsing = True
+        engine._engine.reset(initial_state=ParserState.CONTENT)
+
+        events = engine._engine.feed(f"{ts}args{close_a}text{close_b}", [])
+        content = "".join(e.value for e in events if e.type == EventType.TEXT_CHUNK)
+
+        assert content == f"{ts}args{close_a}text"
+        assert close_b not in content
+        assert engine._engine._in_skipped_tool_span is False
+
+
 # ── TestToolAdapterForwardsKwargs ──────────────────────────────────
 
 
 class TestToolAdapterForwardsKwargs:
     """ParserEngineToolAdapter.__init__ must forward **kwargs to the
-    parser engine class so chat_template_kwargs reach model parsers."""
+    parser engine class so chat_template_kwargs reach model parsers.
+    """
 
     @pytest.mark.parametrize(
         "enable_thinking,expected_state",
@@ -1110,7 +1396,8 @@ class TestToolAdapterForwardsKwargs:
 
 class TestExtractContentIdsNoEmptyReturn:
     """extract_content_ids must return input_ids (not []) when there is
-    no THINK_END token ID and _reasoning_ended is True."""
+    no THINK_END token ID and _reasoning_ended is True.
+    """
 
     _NO_THINK_CONFIG = ParserEngineConfig(name="no_think_end", token_id_terminals={})
 
@@ -1508,7 +1795,8 @@ class TestDropSpecialTokens:
 
     def test_drops_special_token_by_id_from_content(self):
         """A special token (not a configured terminal) is dropped when
-        it arrives as its actual token ID."""
+        it arrives as its actual token ID.
+        """
         config = ParserEngineConfig(
             name="drop_content_test",
             terminals={},
@@ -1543,7 +1831,8 @@ class TestDropSpecialTokens:
 
     def test_drops_via_text_fallback_when_no_token_ids(self):
         """When no token IDs are provided, text-based lexer catches
-        drop tokens as a fallback."""
+        drop tokens as a fallback.
+        """
         engine = _make_engine(
             vocab=_DROP_VOCAB,
             special_tokens=list(_DROP_VOCAB.keys()),
@@ -1556,7 +1845,8 @@ class TestDropSpecialTokens:
 
     def test_regular_tokens_spelling_special_survive(self):
         """Regular tokens that spell out a drop-token string survive
-        when token IDs prove they are not the special token."""
+        when token IDs prove they are not the special token.
+        """
         vocab = {**_DROP_VOCAB, "h": 72, "<": 73, "bos": 74, ">": 75, "w": 76}
         engine = _make_engine(
             vocab=vocab,
@@ -1572,7 +1862,8 @@ class TestDropSpecialTokens:
 
     def test_configured_terminal_not_treated_as_drop(self):
         """Tokens already in config.terminals (like <think>) are handled
-        by the state machine, not the drop mechanism."""
+        by the state machine, not the drop mechanism.
+        """
         engine = _make_engine(
             vocab=_DROP_VOCAB,
             special_tokens=list(_DROP_VOCAB.keys()),
@@ -1627,7 +1918,8 @@ class TestDropSpecialTokens:
     def test_drops_applied_with_skip_tool_parsing(self):
         """Drop tokens are always dropped, even with skip_tool_parsing.
         DROP_TERMINALs have no transitions by construction, so no parser
-        pass can use them."""
+        pass can use them.
+        """
         for initial_state in (ParserState.REASONING, ParserState.CONTENT):
             engine = _make_engine(
                 vocab=_DROP_VOCAB,
@@ -1643,7 +1935,8 @@ class TestDropSpecialTokens:
 
     def test_transitions_unaffected_by_drop_in_reasoning_with_skip_tool_parsing(self):
         """With skip_tool_parsing in REASONING state, drop tokens are
-        removed but configured terminals still fire their transitions."""
+        removed but configured terminals still fire their transitions.
+        """
         engine = _make_engine(
             vocab=_DROP_VOCAB,
             special_tokens=list(_DROP_VOCAB.keys()),
@@ -1679,7 +1972,8 @@ class TestDropSpecialTokens:
 
     def test_mixed_configured_and_drop_terminals(self):
         """Configured terminals trigger transitions while drop terminals
-        are silently removed in the same stream."""
+        are silently removed in the same stream.
+        """
         engine = _make_engine(
             vocab=_DROP_VOCAB,
             special_tokens=list(_DROP_VOCAB.keys()),
@@ -1694,3 +1988,207 @@ class TestDropSpecialTokens:
             e.value for e in events if e.type == EventType.REASONING_CHUNK
         )
         assert "<bos>" not in reasoning_text
+
+
+# ── TestTruncatedToolOpenerStreamParity ──────────────────────────────
+
+
+class TestTruncatedToolOpenerStreamParity:
+    """Regression tests for #47137: when generation terminates inside a
+    ``<tool_call>`` opener that has not been promoted to a tool call
+    (via ``max_tokens`` or a ``stop`` string), the non-streaming path
+    must drop the incomplete markup, matching the streaming path.
+    """
+
+    _QWEN3_VOCAB = {
+        "<tool_call>": 100,
+        "</tool_call>": 101,
+    }
+
+    def _make_parser(self):
+        from vllm.parser.parser_manager import ParserManager
+
+        parser_cls = ParserManager.get_parser(
+            tool_parser_name="qwen3_coder",
+            enable_auto_tools=True,
+        )
+        tokenizer = make_mock_tokenizer(self._QWEN3_VOCAB)
+        return parser_cls(tokenizer, [])
+
+    def _stream_content(self, request, chunks: list[str]) -> str:
+        parser = self._make_parser()
+        content = ""
+        for i, chunk in enumerate(chunks):
+            delta_token_ids = [
+                tid for text, tid in self._QWEN3_VOCAB.items() if text in chunk
+            ]
+            delta = parser.parse_delta(
+                chunk,
+                delta_token_ids,
+                request,
+                prompt_token_ids=[1],
+                finished=(i == len(chunks) - 1),
+            )
+            if delta and delta.content:
+                content += delta.content
+        return content
+
+    @pytest.mark.parametrize(
+        "chunks",
+        [
+            ["<tool_call>"],
+            ["<tool_call>", "\n"],
+            ["<tool_call>", "\n", "<"],
+            ["<tool_call>", "\n", "<function"],
+        ],
+    )
+    def test_truncated_opener_dropped_in_both_paths(self, mock_request, chunks):
+        """A cutoff inside the opener yields no content and no tool calls
+        in both the non-streaming and streaming paths.
+        """
+        text = "".join(chunks)
+
+        _, content, tool_calls = self._make_parser().parse(
+            text, mock_request, enable_auto_tools=True
+        )
+        streamed = self._stream_content(mock_request, chunks)
+
+        assert not tool_calls
+        assert (content or "") == streamed == ""
+
+    def test_content_before_truncated_opener_preserved(self, mock_request):
+        """Only the incomplete markup is dropped; content generated before
+        the opener is returned identically by both paths.
+        """
+        chunks = ["Checking the weather. ", "<tool_call>", "\n", "<function"]
+        text = "".join(chunks)
+
+        _, content, tool_calls = self._make_parser().parse(
+            text, mock_request, enable_auto_tools=True
+        )
+        streamed = self._stream_content(mock_request, chunks)
+
+        assert not tool_calls
+        assert content == streamed == "Checking the weather. "
+
+    def test_content_around_unpromoted_tool_block_stays_ordered(self, mock_request):
+        """Text surrounding a complete-but-unparsable tool block keeps its
+        original order in the non-streaming path, matching streaming.
+        """
+        chunks = ["A ", "<tool_call>", "garbage", "</tool_call>", " B"]
+        text = "".join(chunks)
+
+        _, content, tool_calls = self._make_parser().parse(
+            text, mock_request, enable_auto_tools=True
+        )
+        streamed = self._stream_content(mock_request, chunks)
+
+        assert not tool_calls
+        assert content == streamed == "A  B"
+
+    def test_complete_tool_call_still_promoted(self, mock_request):
+        """Sanity check: a complete tool call still parses in the
+        non-streaming path after the truncation fix.
+        """
+        text = (
+            "<tool_call>\n"
+            "<function=get_weather>\n"
+            "<parameter=city>Tokyo</parameter>\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+        _, content, tool_calls = self._make_parser().parse(
+            text, mock_request, enable_auto_tools=True
+        )
+        assert tool_calls is not None and len(tool_calls) == 1
+        assert tool_calls[0].name == "get_weather"
+        assert not content
+
+
+class TestThinkMarkupWithoutReasoningParser:
+    """With no reasoning parser configured, reasoning markup is plain
+    content: engine-backed tool parsers must return it verbatim in both
+    the non-streaming and streaming paths, not consume the markers or
+    reclassify the block as reasoning and drop it.
+    """
+
+    _VOCAB = {
+        "<think>": 90,
+        "</think>": 91,
+        "<tool_call>": 100,
+        "</tool_call>": 101,
+    }
+
+    # Two distinct failure modes are covered: qwen3_coder consumed a
+    # stray </think> marker in CONTENT state (unbalanced markup),
+    # deepseek_v4 re-entered REASONING on <think> and dropped the block
+    # from non-streaming content entirely.
+    _PARSERS = ["qwen3_coder", "deepseek_v4"]
+
+    def _make_parser(self, tool_parser_name):
+        from vllm.parser.parser_manager import ParserManager
+
+        parser_cls = ParserManager.get_parser(
+            tool_parser_name=tool_parser_name,
+            enable_auto_tools=True,
+        )
+        tokenizer = make_mock_tokenizer(self._VOCAB)
+        return parser_cls(tokenizer, [])
+
+    def _stream(self, tool_parser_name, request, chunks):
+        parser = self._make_parser(tool_parser_name)
+        content, reasoning = "", ""
+        for i, chunk in enumerate(chunks):
+            delta_token_ids = [
+                tid for text, tid in self._VOCAB.items() if text in chunk
+            ]
+            delta = parser.parse_delta(
+                chunk,
+                delta_token_ids,
+                request,
+                prompt_token_ids=[1],
+                finished=(i == len(chunks) - 1),
+            )
+            if delta and delta.content:
+                content += delta.content
+            if delta and delta.reasoning:
+                reasoning += delta.reasoning
+        return content, reasoning
+
+    @pytest.mark.parametrize("tool_parser_name", _PARSERS)
+    def test_think_block_passes_through_both_paths(
+        self, mock_request, tool_parser_name
+    ):
+        chunks = ["<think>", "reasoning here", "</think>", "the answer"]
+        text = "".join(chunks)
+
+        reasoning, content, tool_calls = self._make_parser(tool_parser_name).parse(
+            text, mock_request, enable_auto_tools=True
+        )
+        streamed_content, streamed_reasoning = self._stream(
+            tool_parser_name, mock_request, chunks
+        )
+
+        assert not tool_calls
+        assert reasoning is None
+        assert streamed_reasoning == ""
+        assert content == streamed_content == text
+
+    def test_think_block_preserved_alongside_tool_call(self, mock_request):
+        """The tools-called branch also returns the tool parser's content;
+        a think block preceding a promoted tool call must survive in it.
+        """
+        think = "<think>plan</think>"
+        text = think + (
+            "<tool_call>\n"
+            "<function=get_weather>\n"
+            "<parameter=city>Tokyo</parameter>\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+        _, content, tool_calls = self._make_parser("qwen3_coder").parse(
+            text, mock_request, enable_auto_tools=True
+        )
+        assert tool_calls is not None and len(tool_calls) == 1
+        assert tool_calls[0].name == "get_weather"
+        assert content == think

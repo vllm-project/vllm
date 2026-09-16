@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
 from vllm.distributed.kv_events import (
@@ -31,8 +31,7 @@ logger = init_logger(__name__)
 
 
 class BlockHashToBlockMap:
-    """
-    Cache of blocks that are used for prefix caching. It caches blocks
+    """Cache of blocks that are used for prefix caching. It caches blocks
     from hash directly to a block or multiple blocks
     (i.e. {block_hash: KVCacheBlocks})
     - Mostly block_hash maps to a single KVCacheBlock, and KVCacheBlocks
@@ -59,9 +58,7 @@ class BlockHashToBlockMap:
         ] = {}
 
     def get_one_block(self, key: BlockHashWithGroupId) -> KVCacheBlock | None:
-        """
-        Gets any block with the given block hash key.
-        """
+        """Gets any block with the given block hash key."""
         blocks = self._cache.get(key)
         if blocks is not None:
             if isinstance(blocks, KVCacheBlock):
@@ -72,9 +69,7 @@ class BlockHashToBlockMap:
         return None
 
     def contain(self, key: BlockHashWithGroupId, block_id: int) -> bool:
-        """
-        Checks whether the key maps to the given block ID.
-        """
+        """Checks whether the key maps to the given block ID."""
         blocks = self._cache.get(key)
         if blocks is None:
             return False
@@ -86,9 +81,7 @@ class BlockHashToBlockMap:
         return False
 
     def insert(self, key: BlockHashWithGroupId, block: KVCacheBlock) -> None:
-        """
-        Inserts the KVCacheBlock to the cache
-        """
+        """Inserts the KVCacheBlock to the cache"""
         blocks = self._cache.get(key)
         if blocks is None:
             # When key is not found, attach a single block to the key
@@ -104,9 +97,7 @@ class BlockHashToBlockMap:
             self._unexpected_blocks_type(blocks)
 
     def pop(self, key: BlockHashWithGroupId, block_id: int) -> KVCacheBlock | None:
-        """
-        Checks if block_hash exists and pop block_id from the cache
-        """
+        """Checks if block_hash exists and pop block_id from the cache"""
         blocks = self._cache.pop(key, None)
         if blocks is None:
             # block_hash not found in the cache
@@ -157,6 +148,8 @@ class BlockPool:
             actual block size can be a multiple of hash_block_size.
         enable_kv_cache_events: Whether to enable kv cache events.
         metrics_collector: Optional metrics collector for tracking block residency.
+        medium: Storage medium reported in KV cache events.
+
     """
 
     def __init__(
@@ -166,14 +159,16 @@ class BlockPool:
         hash_block_size: int,
         enable_kv_cache_events: bool = False,
         metrics_collector: KVCacheMetricsCollector | None = None,
+        medium: str = MEDIUM_GPU,
     ):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
+        self.medium = medium
         self.enable_caching = enable_caching
         self.hash_block_size = hash_block_size
         # All kv-cache blocks.
         self.blocks: list[KVCacheBlock] = [
-            KVCacheBlock(idx) for idx in range(num_gpu_blocks)
+            KVCacheBlock(idx, pool=self) for idx in range(num_gpu_blocks)
         ]
         # Free block queue that constructs and manipulates a doubly linked
         # list of free blocks (including eviction candidates when caching is
@@ -194,6 +189,9 @@ class BlockPool:
         self.kv_event_queue: list[KVCacheEvent] = []
 
         self.metrics_collector = metrics_collector
+        # Callbacks for blocks released with ``unpin_blocks`` whose contents
+        # are still being read until the pool reuses them.
+        self._reuse_watchers: dict[int, Callable[[KVCacheBlock], None]] = {}
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -208,6 +206,7 @@ class BlockPool:
 
         Returns:
             The cached blocks if exists, or None.
+
         """
         cached_blocks = []
         for group_id in kv_cache_group_ids:
@@ -255,6 +254,7 @@ class BlockPool:
                 consults a subset of blocks (e.g. SWA tail-window), so blocks
                 that can never serve a hit stay out of the prefix-cache hash
                 map.
+
         """
         if num_cached_blocks >= num_full_blocks:
             return
@@ -364,10 +364,11 @@ class BlockPool:
             token_ids=request.all_token_ids[start_token_idx:end_token_idx],
             block_size=block_size,
             lora_id=request.lora_request.adapter_id if request.lora_request else None,
-            medium=MEDIUM_GPU,
+            medium=self.medium,
             lora_name=request.lora_request.name if request.lora_request else None,
             extra_keys=extra_keys_list if extra_keys_list else None,
             group_idx=kv_cache_group_id,
+            session_id=request.session_id,
         )
 
     def emit_cached_block_events(
@@ -388,6 +389,7 @@ class BlockPool:
             num_cached_blocks: Number of blocks that were cache hits.
             block_size: Number of tokens per block.
             kv_cache_group_id: The KV cache group ID.
+
         """
         if not self.enable_kv_cache_events or num_cached_blocks == 0:
             return
@@ -449,6 +451,7 @@ class BlockPool:
         num_tokens: int,
         kv_cache_group_id: int,
         block_size: int,
+        replace_existing_hashes: bool = False,
     ) -> BlockHashWithGroupId | None:
         """Register a partial prefix-cache entry for an existing block.
 
@@ -476,17 +479,22 @@ class BlockPool:
                 entry hash itself is always the prefix-chain hash at
                 ``num_tokens``; ``block_size`` is used to assert that the
                 entry is partial within the owning cache block.
+            replace_existing_hashes: Whether the block contents were replaced
+                and all existing cache entries must be removed before the new
+                entry is registered.
 
         Returns:
             The hash key with group ID if a partial entry can be registered;
             otherwise ``None`` for null blocks.
+
         """
         if block.is_null:
             return None
 
-        assert block_size > self.hash_block_size
         assert block_size % self.hash_block_size == 0
-        assert num_tokens % block_size != 0
+        assert replace_existing_hashes or (
+            block_size > self.hash_block_size and num_tokens % block_size != 0
+        )
         block_hash = self._get_partial_block_hash(request, num_tokens)
         num_hash_blocks = num_tokens // self.hash_block_size
         block_hash_with_group_id = make_block_hash_with_group_id(
@@ -497,7 +505,11 @@ class BlockPool:
                 block_hash_with_group_id, block.block_id
             )
         )
-        if (
+        if replace_existing_hashes:
+            removed_hashes = self._remove_cached_block_hashes(block)
+            self._emit_block_removed_events(removed_hashes)
+            already_cached = False
+        elif (
             not already_cached
             and block.block_hash is not None
             and block.block_hash_num_tokens is not None
@@ -533,12 +545,13 @@ class BlockPool:
                     lora_id=request.lora_request.adapter_id
                     if request.lora_request
                     else None,
-                    medium=MEDIUM_GPU,
+                    medium=self.medium,
                     lora_name=request.lora_request.name
                     if request.lora_request
                     else None,
                     extra_keys=[extra_keys],
                     group_idx=kv_cache_group_id,
+                    session_id=request.session_id,
                 )
             )
         return block_hash_with_group_id
@@ -599,7 +612,7 @@ class BlockPool:
             self.kv_event_queue.append(
                 BlockRemoved(
                     block_hashes=[maybe_convert_block_hash(get_block_hash(block_hash))],
-                    medium=MEDIUM_GPU,
+                    medium=self.medium,
                     group_idx=get_group_id(block_hash),
                 )
             )
@@ -654,11 +667,15 @@ class BlockPool:
 
         Returns:
             A list of new block.
+
         """
         if num_blocks > self.get_num_free_blocks():
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
         ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
+
+        if self._reuse_watchers:
+            self._notify_reuse(ret)
 
         # In order to only iterate the list once, we duplicated code a bit
         if self.enable_caching:
@@ -676,9 +693,35 @@ class BlockPool:
                     self.metrics_collector.on_block_allocated(block)
         return ret
 
-    def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
+    def _notify_reuse(self, blocks: Iterable[KVCacheBlock]) -> None:
+        for block in blocks:
+            watcher = self._reuse_watchers.pop(block.block_id, None)
+            if watcher is not None:
+                watcher(block)
+
+    def unpin_blocks(
+        self,
+        blocks: Iterable[KVCacheBlock],
+        on_reuse: Callable[[KVCacheBlock], None],
+    ) -> None:
+        """Release references to blocks that stay readable until reused.
+
+        The blocks become last-resort eviction candidates regardless of prefix
+        caching: they join the tail of the free queue and count as free.
+        ``on_reuse`` fires when ``get_new_blocks`` hands a block out (or the
+        cache is reset), so the caller can stop reading it.
         """
-        If a block is cached in `cached_block_hash_to_block`, we reset its hash
+        released: list[KVCacheBlock] = []
+        for block in blocks:
+            assert block.ref_cnt > 0 and not block.is_null
+            block.ref_cnt -= 1
+            self._reuse_watchers[block.block_id] = on_reuse
+            if block.ref_cnt == 0:
+                released.append(block)
+        self.free_block_queue.append_n(released)
+
+    def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
+        """If a block is cached in `cached_block_hash_to_block`, we reset its hash
         metadata and evict it from the cache.
 
         Args:
@@ -686,6 +729,7 @@ class BlockPool:
 
         Returns:
             True if the block is evicted, False otherwise.
+
         """
         # Clean up metrics tracking first to prevent leaks
         if self.metrics_collector:
@@ -706,6 +750,7 @@ class BlockPool:
 
         Args:
             blocks: A list of blocks to touch.
+
         """
         for block in blocks:
             # ref_cnt=0 means this block is in the free list (i.e. eviction
@@ -716,6 +761,10 @@ class BlockPool:
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)
 
+    def is_block_writable(self, block: KVCacheBlock) -> bool:
+        """Return whether a block can be mutated by its sole owner."""
+        return not block.is_null and block.ref_cnt == 1 and block.block_hash is None
+
     def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
         """Free a list of blocks. The blocks should be ordered by their
         eviction priority, where the first block will be evicted first.
@@ -723,26 +772,34 @@ class BlockPool:
         Args:
             ordered_blocks: A list of blocks to free ordered by their eviction
                 priority.
+
         """
         # Identify blocks with hash (LRU cache) and without it (never match APC)
-        blocks_with_hash = []
-        blocks_without_hash = []
+        blocks_to_evict_last = []
+        blocks_to_evict_first = []
+        other_pools: dict[BlockPool, list[KVCacheBlock]] = {}
         for block in ordered_blocks:
+            if block.pool is not None and block.pool is not self:
+                other_pools.setdefault(block.pool, []).append(block)
+                continue
             block.ref_cnt -= 1
             if block.ref_cnt == 0 and not block.is_null:
-                # When caching is disabled we always append for better
-                # GPU cache locality from reusing recently used blocks
-                if block.block_hash is None and self.enable_caching:
-                    blocks_without_hash.append(block)
+                if block.block_hash is None or not self.enable_caching:
+                    # LIFO reuse of non-cached blocks for better GPU locality.
+                    blocks_to_evict_first.append(block)
                 else:
-                    blocks_with_hash.append(block)
+                    # FIFO reuse of cached blocks for LRU eviction behavior.
+                    blocks_to_evict_last.append(block)
 
-        # Blocks without hash get evicted first - prepend them last to the tail
-        self.free_block_queue.prepend_n(blocks_without_hash)
-        self.free_block_queue.append_n(blocks_with_hash)
+        # Blocks to reuse first are prepended to the front of the free queue.
+        self.free_block_queue.prepend_n(blocks_to_evict_first)
+        # Blocks to reuse last are appended to the end of the free queue.
+        self.free_block_queue.append_n(blocks_to_evict_last)
+        for pool, blocks in other_pools.items():
+            pool.free_blocks(blocks)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
-        """evict blocks from the prefix cache by their block IDs.
+        """Evict blocks from the prefix cache by their block IDs.
 
         only evicts blocks that are currently cached (have a hash). blocks
         with ref_cnt > 0 are not freed from the block pool, only evicted
@@ -750,6 +807,7 @@ class BlockPool:
 
         Args:
             block_ids: Set of block IDs to evict from cache.
+
         """
         for block_id in block_ids:
             assert block_id < len(self.blocks), (
@@ -768,6 +826,7 @@ class BlockPool:
         Returns:
             bool: True if the prefix cache is successfully reset,
             False otherwise.
+
         """
         num_used_blocks = self.num_gpu_blocks - self.get_num_free_blocks()
         if num_used_blocks != 1:  # The null block is always marked as used
@@ -781,6 +840,10 @@ class BlockPool:
         # Remove all hashes so that no new blocks will hit.
         self.cached_block_hash_to_block = BlockHashToBlockMap()
         self.cached_block_hashes_by_block.clear()
+        if self._reuse_watchers:
+            self._notify_reuse(
+                [self.blocks[block_id] for block_id in list(self._reuse_watchers)]
+            )
 
         # Remove all hashes from all blocks.
         for block in self.blocks:
@@ -801,6 +864,7 @@ class BlockPool:
 
         Returns:
             The number of free blocks.
+
         """
         return self.free_block_queue.num_free_blocks
 
@@ -809,8 +873,8 @@ class BlockPool:
 
         Returns:
             The KV cache usage (between 0.0 and 1.0).
-        """
 
+        """
         # Subtract 1 to account for null block.
         total_gpu_blocks = self.num_gpu_blocks - 1
         if not total_gpu_blocks:
@@ -822,6 +886,7 @@ class BlockPool:
 
         Returns:
             A list of KV cache events.
+
         """
         if not self.enable_kv_cache_events:
             return []

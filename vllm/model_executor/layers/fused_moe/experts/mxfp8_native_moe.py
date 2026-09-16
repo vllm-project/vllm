@@ -34,7 +34,8 @@ from vllm.triton_utils import tl, triton
 
 def _select_cfg(M, N, K, block_m):
     """Pick the launch config from host constants only (M=num_valid_tokens, N, K,
-    block_m) — graph-capture safe (no GPU-scalar branch)."""
+    block_m) — graph-capture safe (no GPU-scalar branch).
+    """
     # Per-regime winners (measured, isolated cuda-event A/B on gfx950, GPU 3):
     #   BLOCK_K=256 (fewer K-iters + bigger MX scale-load coalesced with the dot),
     #   num_stages=2 (software-pipeline overlaps the E8M0 scale-load with the scaled
@@ -362,9 +363,7 @@ class Mxfp8NativeTritonExperts(Mxfp8TritonExpertsBase):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
-        # `self.gemm1_alpha` and `self.gemm1_beta`` are set by `TritonExperts.__init__`.
-        limit = self.quant_config.gemm1_clamp_limit
-        limit = None if limit is None else float(limit)
+        activation_config = self.activation_config
         out = fused_moe_mxfp8_native(
             hidden_states,
             w1,
@@ -373,9 +372,9 @@ class Mxfp8NativeTritonExperts(Mxfp8TritonExpertsBase):
             self.w2_scale_val,
             topk_weights,
             topk_ids,
-            alpha=self.gemm1_alpha,
-            beta=self.gemm1_beta,
-            limit=limit,
+            alpha=activation_config.alpha,
+            beta=activation_config.beta,
+            limit=activation_config.clamp_limit,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
         )

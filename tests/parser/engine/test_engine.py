@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the streaming parser engine core pipeline."""
 
+from dataclasses import replace
 from unittest.mock import MagicMock
 
 import pytest
@@ -67,6 +68,16 @@ def _think_config() -> ParserEngineConfig:
                 ParserState.CONTENT,
                 (EventType.REASONING_END,),
             ),
+        },
+    )
+
+
+def _token_think_config() -> ParserEngineConfig:
+    return replace(
+        _think_config(),
+        token_id_terminals={
+            "THINK_START": "<think>",
+            "THINK_END": "</think>",
         },
     )
 
@@ -264,7 +275,8 @@ class TestStreaming:
 
     def test_unmatched_close_brace_does_not_poison_depth(self):
         """A stray } in malformed JSON must not kill streaming for
-        all subsequent content."""
+        all subsequent content.
+        """
         engine = StreamingParserEngine(_hermes_config(), tokenizer=None)
         engine.feed("<tool_call>", [])
 
@@ -280,7 +292,8 @@ class TestStreaming:
 
     def test_json_args_no_premature_close_brace(self):
         """Closing braces of the top-level JSON shouldn't be streamed
-        until confirmed by the end tag."""
+        until confirmed by the end tag.
+        """
         engine = StreamingParserEngine(_hermes_config(), tokenizer=None)
 
         engine.feed("<tool_call>", [])
@@ -335,7 +348,8 @@ class TestLexerBufferFlush:
 
     def test_buffered_prefix_emitted_in_current_state(self):
         """Text buffered by the lexer (e.g. '<') must be emitted as
-        REASONING_CHUNK before THINK_END transitions to CONTENT."""
+        REASONING_CHUNK before THINK_END transitions to CONTENT.
+        """
         engine = StreamingParserEngine(_think_config(), _make_think_tokenizer())
 
         events = engine.feed("<think>", [_START_ID])
@@ -373,11 +387,13 @@ class TestLexerBufferFlush:
 
 class TestTokenIdFiltering:
     """When token IDs are available, lex-matched terminals that also
-    have token_id_terminal entries should be demoted to content."""
+    have token_id_terminal entries should be demoted to content.
+    """
 
     def test_lex_matched_terminal_demoted_after_token_ids_seen(self):
         """After receiving token IDs, text that matches a token-ID
-        terminal should be treated as content, not trigger a transition."""
+        terminal should be treated as content, not trigger a transition.
+        """
         engine = StreamingParserEngine(_hermes_config(), _make_hermes_tokenizer())
 
         # First feed with a non-special token ID to set _ever_had_token_ids
@@ -398,7 +414,8 @@ class TestTokenIdFiltering:
 
     def test_scanner_matched_terminal_bypasses_filter(self):
         """PreLexedTerminals from the scanner bypass the filter and
-        still trigger state transitions."""
+        still trigger state transitions.
+        """
         engine = StreamingParserEngine(_hermes_config(), _make_hermes_tokenizer())
 
         events = engine.feed("<tool_call>", [_TOOL_START_ID])
@@ -411,7 +428,8 @@ class TestTokenIdFiltering:
 
     def test_no_filtering_without_token_ids(self):
         """When no token IDs are ever provided (non-streaming),
-        text matching still triggers transitions."""
+        text matching still triggers transitions.
+        """
         engine = StreamingParserEngine(_hermes_config(), _make_hermes_tokenizer())
 
         events = engine.feed('<tool_call>{"name": "f"}</tool_call>', [])
@@ -423,7 +441,8 @@ class TestTokenIdFiltering:
 
     def test_mixed_text_then_real_tool_call(self):
         """Text mentioning tool syntax followed by a real special-token
-        tool call."""
+        tool call.
+        """
         engine = StreamingParserEngine(_hermes_config(), _make_hermes_tokenizer())
 
         events1 = engine.feed("Mention <tool_call> in text. ", [1, 2, 3, 4])
@@ -441,9 +460,50 @@ class TestTokenIdFiltering:
         assert sum(1 for e in all_events if e.type == EventType.TOOL_CALL_END) == 1
 
 
+class TestReasoningTokenCounts:
+    def test_counts_reasoning_and_excludes_boundaries_and_content(self):
+        engine = StreamingParserEngine(_token_think_config(), _make_think_tokenizer())
+
+        events = engine.feed(
+            "<think>tok1tok2</think>tok3",
+            [_START_ID, 1, 2, _END_ID, 3],
+        )
+        events.extend(engine.finish())
+
+        reasoning = [e for e in events if e.type == EventType.REASONING_CHUNK]
+        assert "".join(e.value for e in reasoning) == "tok1tok2"
+        assert sum(e.token_count for e in reasoning) == 2
+        assert engine.reasoning_token_count == 2
+
+    def test_counts_tokens_after_final_deferred_start_terminal(self):
+        engine = StreamingParserEngine(_token_think_config(), _make_think_tokenizer())
+
+        assert engine.feed("", [_START_ID, 1, 2]) == []
+        events = engine.feed("<think>tok1tok2", [])
+
+        reasoning = [e for e in events if e.type == EventType.REASONING_CHUNK]
+        assert "".join(e.value for e in reasoning) == "tok1tok2"
+        assert sum(e.token_count for e in reasoning) == 2
+        assert engine.reasoning_token_count == 2
+
+    def test_deferred_reasoning_tokens_stay_before_next_end_terminal(self):
+        engine = StreamingParserEngine(_token_think_config(), _make_think_tokenizer())
+
+        assert engine.feed("", [_START_ID, 1, 2]) == []
+        events = engine.feed("<think>tok1tok2</think>tok3", [_END_ID, 3])
+
+        assert (
+            sum(e.token_count for e in events if e.type == EventType.REASONING_CHUNK)
+            == 2
+        )
+        assert sum(e.token_count for e in events if e.type == EventType.TEXT_CHUNK) == 1
+        assert engine.reasoning_token_count == 2
+
+
 def _func_prefix_config() -> ParserEngineConfig:
     """Config mixing token-ID terminals (TOOL_START/END) with
-    text-only terminals (FUNC_PREFIX) and fallback transitions."""
+    text-only terminals (FUNC_PREFIX) and fallback transitions.
+    """
     return ParserEngineConfig(
         name="func_prefix_test",
         terminals={
@@ -512,11 +572,13 @@ def _make_func_prefix_tokenizer():
 
 class TestTextOnlyFallbackFiltering:
     """When token IDs are available, transitions marked
-    skip_in_token_id_mode should be skipped."""
+    skip_in_token_id_mode should be skipped.
+    """
 
     def test_func_prefix_in_prose_demoted_in_strict_mode(self):
         """<function=get_time> in prose should NOT trigger a tool call
-        when strict mode is active."""
+        when strict mode is active.
+        """
         engine = StreamingParserEngine(
             _func_prefix_config(), _make_func_prefix_tokenizer()
         )
@@ -533,7 +595,8 @@ class TestTextOnlyFallbackFiltering:
 
     def test_normal_flow_after_tool_start_still_works(self):
         """TOOL_START (special token) -> FUNC_PREFIX (text) should
-        still parse a tool call normally in strict mode."""
+        still parse a tool call normally in strict mode.
+        """
         engine = StreamingParserEngine(
             _func_prefix_config(), _make_func_prefix_tokenizer()
         )
@@ -553,7 +616,8 @@ class TestTextOnlyFallbackFiltering:
 
     def test_fallback_fires_without_token_ids(self):
         """When no token IDs are provided, fallback transitions should
-        still fire normally."""
+        still fire normally.
+        """
         engine = StreamingParserEngine(
             _func_prefix_config(), _make_func_prefix_tokenizer()
         )
@@ -567,7 +631,8 @@ class TestTextOnlyFallbackFiltering:
 
     def test_tool_between_fallback_blocked_in_strict_mode(self):
         """The (TOOL_BETWEEN, FUNC_PREFIX) fallback should also be
-        blocked in strict mode."""
+        blocked in strict mode.
+        """
         engine = StreamingParserEngine(
             _func_prefix_config(), _make_func_prefix_tokenizer()
         )
@@ -597,7 +662,8 @@ class TestNoUnusedTokenizerAttr:
 class TestArgsResetOnReentry:
     """When leaving TOOL_ARGS and later re-entering (e.g. two tool
     calls), the entering-TOOL_ARGS block resets args tracking.  The
-    redundant reset on exit was removed."""
+    redundant reset on exit was removed.
+    """
 
     @staticmethod
     def _multi_tool_config() -> ParserEngineConfig:
@@ -672,7 +738,8 @@ class TestArgsResetOnReentry:
 
 class TestToolPreambleFinish:
     """finish() in TOOL_PREAMBLE state emits TOOL_CALL_END when a tool
-    call was started (tool_index >= 0), but not when tool_index is -1."""
+    call was started (tool_index >= 0), but not when tool_index is -1.
+    """
 
     @staticmethod
     def _preamble_with_tool_call_start_config() -> ParserEngineConfig:
@@ -731,7 +798,8 @@ class TestToolPreambleFinish:
 
 class TestRegexTerminalInfraRemoved:
     """TerminalDef.priority, LexerShape.regex_terminals, and the regex
-    matching loop were removed."""
+    matching loop were removed.
+    """
 
     def test_terminal_def_no_priority(self):
         import regex as re
@@ -756,7 +824,8 @@ class TestRegexTerminalInfraRemoved:
 
 class TestMultiCharTerminalInArgs:
     """Regression: multi-char terminals falling through in TOOL_ARGS
-    must be fed char-by-char via _feed_args_text, not _feed_args_char."""
+    must be fed char-by-char via _feed_args_text, not _feed_args_char.
+    """
 
     @staticmethod
     def _newline_config() -> ParserEngineConfig:
@@ -844,3 +913,120 @@ class TestSkipToolParsing:
         engine.skip_tool_parsing = True
         engine.reset()
         assert engine.skip_tool_parsing is True
+
+
+def _message_header_config(reasoning_end: bool) -> ParserEngineConfig:
+    """MESSAGE_HEADER-based grammar whose tool opener optionally carries
+    REASONING_END, mirroring the two shapes a transition table can take.
+    """
+    return ParserEngineConfig(
+        name=f"message_header_test_{reasoning_end}",
+        initial_state=ParserState.MESSAGE_HEADER,
+        terminals={"HEADER_END": "<|header_end|>", "TOOL_START": "<tool_call>"},
+        transitions={
+            (ParserState.MESSAGE_HEADER, "HEADER_END"): Transition(
+                ParserState.CONTENT,
+                (EventType.TEXT_CHUNK,),
+            ),
+            (ParserState.MESSAGE_HEADER, "TOOL_START"): Transition(
+                ParserState.TOOL_ARGS,
+                (EventType.REASONING_END, EventType.TOOL_CALL_START)
+                if reasoning_end
+                else (EventType.TOOL_CALL_START,),
+            ),
+        },
+    )
+
+
+class TestSkipToolParsingFromMessageHeader:
+    """Leaving MESSAGE_HEADER through the skip_tool_parsing gate must honour
+    the transition's REASONING_END.
+
+    The reasoning pass hands off to the tool pass only once it has seen a
+    REASONING_END, so swallowing it under the header passthrough strands the
+    whole tool block in content. Tables carrying no REASONING_END keep the
+    plain passthrough.
+    """
+
+    @staticmethod
+    def _skip_events(reasoning_end: bool):
+        engine = StreamingParserEngine(
+            _message_header_config(reasoning_end), tokenizer=None
+        )
+        engine.skip_tool_parsing = True
+        return engine, engine.parse_complete("name<tool_call>{}")
+
+    def test_reasoning_end_precedes_forwarded_tool_syntax(self):
+        engine, events = self._skip_events(reasoning_end=True)
+        assert [e.type for e in events[:2]] == [
+            EventType.REASONING_END,
+            EventType.TEXT_CHUNK,
+        ]
+        assert events[1].value == "<tool_call>"
+        assert engine._message_header_buffer == ""
+
+    def test_passthrough_only_when_transition_omits_reasoning_end(self):
+        engine, events = self._skip_events(reasoning_end=False)
+        types = [e.type for e in events]
+        assert EventType.REASONING_END not in types
+        assert types[0] == EventType.TEXT_CHUNK
+        assert events[0].value == "<tool_call>"
+        assert engine._message_header_buffer == ""
+
+
+# ── Terminals with several spellings ──────────────────────────────────
+
+
+def _alias_config() -> ParserEngineConfig:
+    """``TOOL_START`` has a canonical spelling and one corrupted alias."""
+    return ParserEngineConfig(
+        name="alias_test",
+        terminals={"TOOL_START": ("<tc>", "<tcx>"), "TOOL_END": "</tc>"},
+        transitions={
+            (ParserState.CONTENT, "TOOL_START"): Transition(
+                ParserState.TOOL_ARGS,
+                (EventType.TOOL_CALL_START,),
+            ),
+            (ParserState.TOOL_ARGS, "TOOL_END"): Transition(
+                ParserState.CONTENT,
+                (EventType.TOOL_CALL_END,),
+            ),
+        },
+        content_events={
+            ParserState.CONTENT: EventType.TEXT_CHUNK,
+            ParserState.TOOL_ARGS: EventType.ARG_VALUE_CHUNK,
+        },
+        tool_args_json=False,
+    )
+
+
+class TestTerminalAliases:
+    def test_terminal_defs_expand_every_spelling(self):
+        defs = terminals_from_literals({"A": ("x", "y"), "B": "z"})
+        assert [(d.name, d.literal) for d in defs] == [
+            ("A", "x"),
+            ("A", "y"),
+            ("B", "z"),
+        ]
+
+    def test_terminal_literal_is_canonical_spelling(self):
+        cfg = _alias_config()
+        assert cfg.terminal_literal("TOOL_START") == "<tc>"
+        assert cfg.terminal_literal("TOOL_END") == "</tc>"
+        assert cfg.terminal_literal("MISSING") is None
+        assert cfg.terminal_literals == {"<tc>", "<tcx>", "</tc>"}
+
+    @pytest.mark.parametrize("spelling", ["<tc>", "<tcx>"])
+    @pytest.mark.parametrize("char_by_char", [False, True])
+    def test_every_spelling_shares_transitions(self, spelling, char_by_char):
+        engine = StreamingParserEngine(_alias_config(), None)
+        text = f"{spelling}a</tc>"
+        events = []
+        for chunk in list(text) if char_by_char else [text]:
+            events.extend(engine.feed(chunk, []))
+        events.extend(engine.finish())
+        assert [e.type for e in events] == [
+            EventType.TOOL_CALL_START,
+            EventType.ARG_VALUE_CHUNK,
+            EventType.TOOL_CALL_END,
+        ]

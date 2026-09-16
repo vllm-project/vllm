@@ -17,6 +17,7 @@ import torch
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
+    KVCacheLayout,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
@@ -26,6 +27,22 @@ from vllm.v1.kv_offload.base import CanonicalPageMapping, CopyRun
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+
+# Version of the canonical byte format; bump on any layout change
+CANONICAL_FORMAT_VERSION = 1
+
+
+def canonical_format_id(kv_cache_layout: str) -> str:
+    """Identity of the canonical byte format, for namespacing persisted KV.
+    Canonical pages keep the worker's KV layout family, so the id couples the
+    format version with that family; consumers must match it exactly. The family
+    keeps its historical NHD/HND spelling so ids stay stable for KV persisted
+    before the layout enum existed.
+    """
+    layout = KVCacheLayout[kv_cache_layout]
+    legacy = {KVCacheLayout.LBNHC: "nhd", KVCacheLayout.LBHNC: "hnd"}
+    family = legacy.get(layout, layout.name.lower())
+    return f"v{CANONICAL_FORMAT_VERSION}-{family}"
 
 
 @dataclass(frozen=True)
@@ -105,7 +122,8 @@ def _interleave_cp_tokens(
     ctx: _RankContext,
 ) -> tuple[CopyRun, ...]:
     """Place each region's num_tokens rows at their canonical token positions,
-    one run per chunk of interleaved tokens."""
+    one run per chunk of interleaved tokens.
+    """
     runs: list[CopyRun] = []
     for region in regions:
         if ctx.cp_size == 1:
@@ -240,7 +258,8 @@ def _attention_byte_regions(
     cp_size: int,
 ) -> list[ByteRegion] | None:
     """Byte regions of an attention page, given this rank's head shard.
-    None when the physical layout is not recognized (fail closed)."""
+    None when the physical layout is not recognized (fail closed).
+    """
     bs, heads, head_size = spec.block_size, spec.num_kv_heads, spec.head_size
     if tuple(kv_cache.shape) == (num_blocks, heads, bs, 2 * head_size):
         return _packed_kv_regions(kv_cache, spec, head_shard, num_head_shards, cp_size)
@@ -266,7 +285,7 @@ def _layer_mapping(
     if isinstance(spec, MLAAttentionSpec):
         # TP-replicated latent; CP shards its tokens across the DCP groups
         if (
-            spec.compress_ratio != 1
+            spec.tokens_per_state != 1
             or page % bs
             or ctx.tp_size % ctx.dcp_size
             or spec.kv_quant_mode.is_per_token_head
@@ -354,7 +373,8 @@ def _is_exact_partition(intervals: list[tuple[int, int]], size: int) -> bool:
 
 def _verify_tiling(layer_name: str, per_rank: list[CanonicalPageMapping]) -> None:
     """Whichever ranks a block elects as writers must tile the canonical page
-    exactly once, and each rank's runs must cover exactly its local page."""
+    exactly once, and each rank's runs must cover exactly its local page.
+    """
     size = per_rank[0].canonical_page_size_bytes
     num_writers = per_rank[0].num_writers
     for mapping in per_rank:

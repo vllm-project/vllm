@@ -14,9 +14,25 @@ from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import HAS_TRITON
 
 if HAS_TRITON:
-    from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+    from vllm.v1.sample.ops.topk_topp_triton import (
+        _topk_topp,
+        _topp_split_mask,
+        _topp_split_stats,
+        _topp_split_step,
+        apply_top_k_top_p_triton,
+    )
 
 logger = init_logger(__name__)
+
+
+def register_top_k_top_p_warmups() -> None:
+    """Register every native accelerator sampling kernel used at runtime."""
+    if HAS_TRITON and not current_platform.is_cpu():
+        _topk_topp.register_warmup()
+        if current_platform.is_cuda_alike():
+            _topp_split_stats.register_warmup()
+            _topp_split_step.register_warmup()
+            _topp_split_mask.register_warmup()
 
 
 def _skip_aiter_sampler_on_gfx1250() -> bool:
@@ -112,8 +128,7 @@ def flashinfer_sampler_supported() -> bool:
 
 
 class TopKTopPSampler(nn.Module):
-    """
-    Module that performs optional top-k and top-p filtering followed by
+    """Module that performs optional top-k and top-p filtering followed by
     weighted random sampling of logits.
 
     Implementations may update the logits tensor in-place.
@@ -165,6 +180,9 @@ class TopKTopPSampler(nn.Module):
         else:
             self.forward = self.forward_native
 
+        # Every accelerator backend can fall back to native sampling at runtime.
+        register_top_k_top_p_warmups()
+
     def forward_native(
         self,
         logits: torch.Tensor,
@@ -172,8 +190,7 @@ class TopKTopPSampler(nn.Module):
         k: torch.Tensor | None,
         p: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """
-        PyTorch-native implementation of top-k and top-p sampling.
+        """PyTorch-native implementation of top-k and top-p sampling.
 
         The logits tensor may be updated in-place.
         """
@@ -225,8 +242,7 @@ class TopKTopPSampler(nn.Module):
         k: torch.Tensor | None,
         p: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """
-        PyTorch-native implementation of top-k and top-p sampling for CPU.
+        """PyTorch-native implementation of top-k and top-p sampling for CPU.
 
         The logits tensor may be updated in-place.
         """
@@ -237,7 +253,7 @@ class TopKTopPSampler(nn.Module):
         elif self.logprobs_mode == "processed_logprobs":
             logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
 
-        if len(generators) != logits.shape[0] and not self.use_fp64_gumbel:
+        if not generators and not self.use_fp64_gumbel:
             return compiled_random_sample(logits), logits_to_return
 
         probs = logits.softmax(dim=-1, dtype=torch.float32)
@@ -375,7 +391,7 @@ class TopKTopPSampler(nn.Module):
 
 # Note: this is a workaround for
 # https://github.com/pytorch/pytorch/pull/151218
-@torch.compile(dynamic=True)
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def compiled_random_sample(logits: torch.Tensor) -> torch.Tensor:
     probs = logits.softmax(dim=-1, dtype=torch.float32)
     q = torch.empty_like(probs)
@@ -389,16 +405,11 @@ def apply_top_k_top_p(
     if p is None and k is None:
         return logits
 
-    if current_platform.is_cpu():
-        if HAS_TRITON:
-            return apply_top_k_top_p_triton(logits, k, p)
-        return apply_top_k_top_p_pytorch(logits, k, p, allow_cpu_sync=True)
-
-    if HAS_TRITON and logits.shape[0] >= 8:
+    if HAS_TRITON:
         return apply_top_k_top_p_triton(logits, k, p)
 
-    # Use pytorch sort implementation for small batch sizes.
-    return apply_top_k_top_p_pytorch(logits, k, p)
+    is_cpu = current_platform.is_cpu()
+    return apply_top_k_top_p_pytorch(logits, k, p, allow_cpu_sync=is_cpu)
 
 
 def apply_top_k_top_p_pytorch(
@@ -446,8 +457,7 @@ def apply_top_k_top_p_pytorch(
 
 
 def apply_top_k_only(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
-    """
-    Apply top-k mask to the logits.
+    """Apply top-k mask to the logits.
 
     This implementation doesn't involve sorting the entire vocab.
     Note however that it involves a GPU->CPU sync which can be detrimental for
@@ -550,7 +560,4 @@ def flashinfer_sample(
 
 
 def _to_tensor_scalar_tuple(x):
-    if isinstance(x, torch.Tensor):
-        return (x, 0)
-    else:
-        return (None, x)
+    return (x, 0) if isinstance(x, torch.Tensor) else (None, x)
