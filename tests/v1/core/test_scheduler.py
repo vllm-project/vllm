@@ -63,6 +63,62 @@ from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 pytestmark = pytest.mark.cpu_test
 
 
+@pytest.mark.parametrize(
+    "payload", ["valid", "missing", "nonfinite", "wrong_size", "abort"]
+)
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_inline_hidden_state_arrives_with_token_and_releases_request(
+    payload, async_scheduling
+):
+    """One worker step completes extraction; other requests and aborts stay ordinary."""
+    scheduler = create_scheduler(async_scheduling=async_scheduling)
+    model_config = scheduler.vllm_config.model_config
+    normal, inline = create_requests(num_requests=2, max_tokens=1)
+    inline.kv_transfer_params = {"return_inline": True}
+    inline.client_index = 7
+    for request in (normal, inline):
+        scheduler.add_request(request)
+    step = scheduler.schedule()
+    vector = [0.5] * scheduler.vllm_config.model_config.get_hidden_size()
+    if payload == "nonfinite":
+        vector[0] = float("nan")
+    elif payload == "wrong_size":
+        vector.pop()
+    elif payload == "abort":
+        aborted = scheduler.finish_requests(
+            inline.request_id, RequestStatus.FINISHED_ABORTED
+        )
+        assert aborted == [inline]
+    result = scheduler.update_from_output(
+        step,
+        ModelRunnerOutput(
+            req_ids=[normal.request_id, inline.request_id],
+            req_id_to_index={normal.request_id: 0, inline.request_id: 1},
+            sampled_token_ids=[[42], [43]],
+            hidden_states=None if payload == "missing" else {inline.request_id: vector},
+        ),
+    )
+    assert result[0].outputs[0].kv_transfer_params is None
+    if payload == "abort":
+        assert not result.get(7) or not result[7].outputs
+    else:
+        (output,) = result[7].outputs
+        if payload == "valid":
+            assert output.new_token_ids == [43]
+            assert output.finish_reason == FinishReason.LENGTH
+            assert output.kv_transfer_params == {
+                "hidden_states": vector,
+                "token_position": inline.num_prompt_tokens - 1,
+                "layer_id": model_config.hf_text_config.num_hidden_layers,
+                "representation": "post_final_norm",
+            }
+        else:
+            assert output.finish_reason == FinishReason.ERROR
+            assert output.new_token_ids == []
+            assert output.kv_transfer_params is None
+    assert not scheduler.requests
+
+
 def test_make_scheduled_encoder_input_stats_output_embeddings():
     scheduler = create_scheduler()
     mm_features = [

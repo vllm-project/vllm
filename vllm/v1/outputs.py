@@ -318,6 +318,19 @@ class ECConnectorOutput:
         )
 
 
+class HiddenStatesTensors(NamedTuple):
+    req_ids: list[str]
+    hidden_states: torch.Tensor
+
+    def to_cpu_nonblocking(self) -> "HiddenStatesTensors":
+        return HiddenStatesTensors(
+            self.req_ids, self.hidden_states.to("cpu", non_blocking=True)
+        )
+
+    def tolists(self) -> dict[str, list[float]]:
+        return dict(zip(self.req_ids, self.hidden_states.tolist()))
+
+
 # ModelRunnerOutput is serialized and sent to the scheduler process.
 # This is expensive for torch.Tensor so prefer to use list instead.
 @dataclass
@@ -348,6 +361,9 @@ class ModelRunnerOutput:
 
     # [num_reqs, hidden_size]
     pooler_output: list[torch.Tensor | None] | None = None
+
+    # Opted-in final prompt rows, copied to CPU with this step's sampled tokens.
+    hidden_states: dict[str, list[float]] | None = None
 
     kv_connector_output: KVConnectorOutput | None = None
 

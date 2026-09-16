@@ -377,6 +377,37 @@ mod tests {
     use crate::protocol::{decode_msgpack, encode_msgpack};
 
     #[test]
+    fn inline_hidden_state_json_roundtrip() {
+        let output = EngineCoreOutput {
+            request_id: "inline".to_string(),
+            kv_transfer_params: Some(serde_json::json!({
+                "hidden_states": [1.25, -0.5, 0.0],
+                "token_position": 17,
+                "layer_id": 32,
+                "representation": "post_final_norm",
+            })),
+            ..Default::default()
+        };
+        let encoded = encode_msgpack(&output).unwrap();
+        let decoded: EngineCoreOutput = decode_msgpack(&encoded).unwrap();
+        expect_test::expect![[r#"
+            Some(
+                Object {
+                    "hidden_states": Array [
+                        Number(1.25),
+                        Number(-0.5),
+                        Number(0.0),
+                    ],
+                    "token_position": Number(17),
+                    "layer_id": Number(32),
+                    "representation": String("post_final_norm"),
+                },
+            )
+        "#]]
+        .assert_debug_eq(&decoded.kv_transfer_params);
+    }
+
+    #[test]
     fn engine_core_outputs_roundtrip_finished_fields() {
         let outputs = WireEngineCoreOutputs {
             outputs: vec![EngineCoreOutput {

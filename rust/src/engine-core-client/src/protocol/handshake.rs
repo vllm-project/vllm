@@ -104,6 +104,9 @@ pub struct EngineCoreReadyResponse {
     /// Whether the engine has a speculative draft model that can be updated.
     #[serde(default)]
     pub supports_draft_weight_updates: bool,
+    /// Whether this engine can return the final prompt hidden state.
+    #[serde(default)]
+    pub supports_inline_hidden_states: bool,
 }
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup

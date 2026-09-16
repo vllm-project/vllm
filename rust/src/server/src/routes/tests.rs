@@ -7386,3 +7386,82 @@ async fn profile_routes_are_hidden_when_profiling_is_disabled() {
 
     engine_task.abort_and_join().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn inline_hidden_states_follow_engine_capability_and_reach_http_responses() {
+    for supported in [false, true] {
+        for endpoint in ["/v1/completions", "/v1/chat/completions"] {
+            let mut ready = default_ready_response();
+            ready.supports_inline_hidden_states = supported;
+            let payload = json!({
+                "hidden_states": [0.25, -0.5], "token_position": 4,
+                "layer_id": 2, "representation": "post_final_norm",
+            });
+            let expected = payload.clone();
+            let (state, engine_task) = test_admin_state_with_ready_and_engine_script(
+                ready,
+                move |dealer, push| boxed_test_future(async move {
+                    for inline in if supported { vec![true, false] } else { vec![false] } {
+                        let add = recv_engine_message(dealer).await;
+                        let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).expect("decode request");
+                        let params = request.sampling_params.as_ref().unwrap();
+                        assert_eq!(params.extra_args.as_ref().unwrap()["kv_transfer_params"]["return_inline"], inline);
+                        let mut output = request_output(&request.request_id, vec![b'x' as u32], Some(EngineCoreFinishReason::Length));
+                        output.kv_transfer_params = inline.then(|| payload.clone());
+                        send_outputs(push, RequestBatchOutputs { outputs: vec![output], ..Default::default() }.into()).await;
+                    }
+                }),
+            ).await;
+            let mut app = build_router(state);
+            // Invalid requests must not reach the engine or prevent the next valid request.
+            for (inline, max_tokens, status) in [
+                (true, 2, StatusCode::BAD_REQUEST),
+                (
+                    true,
+                    1,
+                    if supported {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::BAD_REQUEST
+                    },
+                ),
+                (false, 32, StatusCode::OK),
+            ] {
+                let body = json!({
+                    "model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": "hello",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "max_tokens": max_tokens, "kv_transfer_params": {"return_inline": inline},
+                });
+                let response = app
+                    .call(
+                        Request::builder()
+                            .method("POST")
+                            .uri(endpoint)
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.to_string()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let actual_status = response.status();
+                let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                let actual: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(actual_status, status, "{actual}");
+                if status == StatusCode::OK {
+                    assert_eq!(
+                        actual["kv_transfer_params"],
+                        if inline {
+                            expected.clone()
+                        } else {
+                            serde_json::Value::Null
+                        }
+                    );
+                } else {
+                    assert!(actual["error"]["message"].as_str().unwrap().contains("return_inline"));
+                }
+            }
+            engine_task.await.expect("mock engine task");
+        }
+    }
+}

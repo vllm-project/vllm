@@ -15,7 +15,12 @@ from pydantic import BeforeValidator
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
-from vllm.config import ModelConfig, SpeculativeConfig, StructuredOutputsConfig
+from vllm.config import (
+    ModelConfig,
+    SpeculativeConfig,
+    StructuredOutputsConfig,
+    VllmConfig,
+)
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
@@ -30,6 +35,25 @@ _MAX_TEMP = 1e-2
 MAX_LOGPROB_TOKEN_IDS = 128
 """Upper bound on `SamplingParams.logprob_token_ids` list length. Must match
 the per-request row width allocated by the sampler's `LogprobTokenIdsState`."""
+
+
+def supports_inline_hidden_states(config: VllmConfig) -> bool:
+    """Whether this engine can return the final prompt row during generation."""
+    parallel = config.parallel_config
+    model = config.model_config
+    return (
+        config.speculative_config is None
+        and config.kv_transfer_config is None
+        and parallel.pipeline_parallel_size == 1
+        and parallel.prefill_context_parallel_size == 1
+        and parallel.decode_context_parallel_size == 1
+        and model.runner_type == "generate"
+        and model.model_impl in ("auto", "vllm")
+        and model.hf_text_config.model_type
+        in ("qwen2", "qwen3_5_text", "qwen3_5_moe_text")
+        and config.device_config.device_type in ("cpu", "cuda")
+        and config.use_v2_model_runner
+    )
 
 
 def _verify_num_sequences(value: int, parameter_name: str) -> None:
@@ -550,6 +574,7 @@ class SamplingParams(
         _verify_num_sequences(self.n, "n")
         if self.extra_args:
             self._verify_extra_args()
+        self.validate_inline_output()
         if not -2.0 <= self.presence_penalty <= 2.0:
             raise VLLMValidationError(
                 f"presence_penalty must be in [-2, 2], got {self.presence_penalty}."
@@ -680,6 +705,24 @@ class SamplingParams(
                     pending.extend(value.values())
                 else:
                     pending.extend(value)
+
+    def validate_inline_output(self) -> bool:
+        """Validate the bounded inline KV payload before requests fan out."""
+        kv_params = (self.extra_args or {}).get("kv_transfer_params") or {}
+        if not isinstance(kv_params, dict):
+            raise VLLMValidationError("kv_transfer_params must be a dictionary")
+        inline = kv_params.get("return_inline", False)
+        if not isinstance(inline, bool):
+            raise VLLMValidationError("return_inline must be a boolean")
+        if not inline:
+            return False
+        if self.max_tokens != 1 or self.n != 1:
+            raise VLLMValidationError("return_inline requires max_tokens=1 and n=1")
+        if kv_params.get("include_output_tokens") or "hidden_states_path" in kv_params:
+            raise VLLMValidationError(
+                "return_inline conflicts with include_output_tokens/hidden_states_path"
+            )
+        return True
 
     def _verify_greedy_sampling(self) -> None:
         if self.n > 1:

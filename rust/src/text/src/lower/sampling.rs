@@ -6,6 +6,8 @@ use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 
 #[derive(Debug, Error, PartialEq)]
 pub enum SamplingParamsError {
+    #[error("return_inline requires max_tokens=1")]
+    InlineOutputMaxTokens,
     #[error("{parameter} must be a finite number, got {value}")]
     NotFinite { parameter: &'static str, value: f32 },
     #[error("{parameter} must be in {expected}, got {value}")]
@@ -59,6 +61,16 @@ fn validate_repetition_penalty(value: f32) -> Result<(), SamplingParamsError> {
 pub(crate) fn validate_resolved_sampling_params(
     params: &EngineCoreSamplingParams,
 ) -> Result<(), SamplingParamsError> {
+    if params.max_tokens != 1
+        && params
+            .extra_args
+            .as_ref()
+            .and_then(|args| args.get("kv_transfer_params"))
+            .and_then(|params| params.get("return_inline"))
+            == Some(&serde_json::Value::Bool(true))
+    {
+        return Err(SamplingParamsError::InlineOutputMaxTokens);
+    }
     validate_temperature(params.temperature)?;
     validate_top_p(params.top_p)?;
     validate_min_p(params.min_p)?;
@@ -89,4 +101,31 @@ fn validate_closed_range(
         value,
         expected,
     })
+}
+
+#[cfg(test)]
+mod inline_tests {
+    use super::*;
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    #[test]
+    fn inline_hidden_states_require_one_resolved_output_token() {
+        for inline in [true, false] {
+            for max_tokens in [1, 32] {
+                let params = EngineCoreSamplingParams {
+                    max_tokens,
+                    extra_args: Some(HashMap::from([(
+                        "kv_transfer_params".into(),
+                        json!({"return_inline": inline}),
+                    )])),
+                    ..EngineCoreSamplingParams::for_test()
+                };
+                assert_eq!(
+                    validate_resolved_sampling_params(&params).is_ok(),
+                    !inline || max_tokens == 1
+                );
+            }
+        }
+    }
 }

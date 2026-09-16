@@ -71,3 +71,84 @@ def test_extra_args_preserves_custom_objects_and_shared_containers():
     params = SamplingParams(extra_args=extra_args)
     assert params.extra_args["first"][0] is custom
     assert params.extra_args["first"] is params.extra_args["second"]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"max_tokens": 2},
+        {"n": 2},
+        {"max_tokens": None},
+    ],
+)
+def test_inline_hidden_states_rejects_generation_fanout(overrides):
+    with pytest.raises(VLLMValidationError, match="return_inline requires"):
+        SamplingParams(
+            **({"max_tokens": 1} | overrides),
+            extra_args={
+                "kv_transfer_params": {"return_inline": True},
+            },
+        )
+
+
+@pytest.mark.parametrize("inline", [None, False])
+def test_ordinary_generation_on_extraction_server_keeps_token_budget(inline):
+    params = SamplingParams(
+        max_tokens=128,
+        n=2,
+        extra_args={
+            "kv_transfer_params": {} if inline is None else {"return_inline": inline},
+        },
+    )
+    assert not params.validate_inline_output()
+    assert params.max_tokens == 128
+    assert params.n == 2
+
+
+@pytest.mark.parametrize(
+    "section,field,value,supported",
+    [
+        ("model_config", "model_impl", "vllm", True),
+        ("model_config", "model_impl", "transformers", False),
+        ("model_config", "runner_type", "pooling", False),
+        ("hf_text_config", "model_type", "llama", False),
+        ("hf_text_config", "model_type", "qwen3_5_moe_text", True),
+        ("device_config", "device_type", "cuda", True),
+        ("device_config", "device_type", "xpu", False),
+        ("parallel_config", "pipeline_parallel_size", 2, False),
+        ("parallel_config", "prefill_context_parallel_size", 2, False),
+        ("parallel_config", "decode_context_parallel_size", 2, False),
+        (None, "use_v2_model_runner", False, False),
+        (None, "use_v2_model_runner", True, True),
+        (None, "speculative_config", object(), False),
+        (None, "kv_transfer_config", object(), False),
+    ],
+)
+def test_inline_hidden_states_engine_capability(section, field, value, supported):
+    """Both frontends must agree on which engines can extract the prompt row."""
+    from types import SimpleNamespace
+
+    from vllm.sampling_params import supports_inline_hidden_states
+
+    text_config = SimpleNamespace(model_type="qwen3_5_text")
+    config = SimpleNamespace(
+        use_v2_model_runner=True,
+        speculative_config=None,
+        kv_transfer_config=None,
+        model_config=SimpleNamespace(
+            runner_type="generate", model_impl="auto", hf_text_config=text_config
+        ),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+        ),
+        device_config=SimpleNamespace(device_type="cpu"),
+    )
+    target = (
+        text_config
+        if section == "hf_text_config"
+        else (getattr(config, section) if section else config)
+    )
+    setattr(target, field, value)
+    assert supports_inline_hidden_states(config) is supported

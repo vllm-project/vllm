@@ -423,6 +423,7 @@ class EngineCoreReadyResponse:
     weight_transfer_backend: str | None = None
     enable_sleep_mode: bool = False
     supports_draft_weight_updates: bool = False
+    supports_inline_hidden_states: bool = False
 
 
 ready_response = EngineCoreReadyResponse(

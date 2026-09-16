@@ -33,6 +33,36 @@ _CACHE_SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
 _MAX_CACHE_SALT_LENGTH = 128
 
 
+def validate_inline_kv_request(data: dict[str, Any], *, supported: bool = True) -> None:
+    """Reject HTTP shapes that cannot carry one terminal KV payload."""
+    if not isinstance(data, dict):
+        return
+    kv_params = data.get("kv_transfer_params") or {}
+    if not isinstance(kv_params, dict):
+        raise VLLMValidationError("kv_transfer_params must be a dictionary")
+    inline = kv_params.get("return_inline", False)
+    if not isinstance(inline, bool):
+        raise VLLMValidationError("return_inline must be a boolean")
+    if not inline:
+        return
+    if not supported:
+        raise VLLMValidationError("return_inline is not supported by this endpoint")
+    if (
+        data.get("stream")
+        or data.get("use_beam_search")
+        or data.get("n") not in (None, 1)
+    ):
+        raise VLLMValidationError(
+            "return_inline requires non-streaming sampling with n=1 (no beam search)"
+        )
+    prompt = data.get("prompt")
+    embeds = data.get("prompt_embeds")
+    if (
+        isinstance(prompt, list) and len(prompt) > 1 and not isinstance(prompt[0], int)
+    ) or (isinstance(embeds, list) and len(embeds) > 1):
+        raise VLLMValidationError("return_inline requires a single prompt")
+
+
 def validate_cache_salt(cache_salt: object) -> None:
     """Validate cache salts before they reach downstream cache backends."""
     if cache_salt is None:
