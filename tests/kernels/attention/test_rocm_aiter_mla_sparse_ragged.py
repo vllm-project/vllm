@@ -7,7 +7,7 @@ HiSparse's residency resolver returns a dense ``[tokens, topk]`` tensor padded
 with ``-1``; the AITER sparse decode kernel consumes a ragged index list plus a
 ``paged_kv_indptr``. ``compact_topk_to_ragged_triton`` bridges the two. It is
 the one piece of genuinely new logic in the ROCm HiSparse wiring and a silent
-mis-flatten reads the wrong KV rows without crashing, so it gets its own
+a wrong flattening reads the wrong KV rows without crashing, so it gets its own
 reference comparison.
 """
 

@@ -19,8 +19,9 @@ bad import.
 """
 
 import ast
-import re
 from pathlib import Path
+
+import regex as re
 
 import vllm
 
