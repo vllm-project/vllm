@@ -638,6 +638,18 @@ class KVConnectorBase_V1(ABC):
         # scheduler alive (e.g. extend has_unfinished_requests).
         return False
 
+    def poll_pending_work(self) -> None:
+        """Advance scheduler-side work while the engine waits on a model step.
+
+        The engine core calls this at a bounded interval between scheduling
+        iterations, never concurrently with any other scheduler-side method,
+        so a connector that services peers from the scheduler side (control
+        messages, transfer completions) is not limited to one service window
+        per step. Implementations must not touch scheduler state and must
+        return promptly when there is nothing to do.
+        """
+        return
+
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
         """
