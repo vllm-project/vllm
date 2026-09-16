@@ -300,8 +300,10 @@ def test_deepseek_v4_mega_moe_weight_loader_uses_ep_expert_ownership():
 
 
 @pytest.mark.parametrize("intermediate_size", [512, 2304])
-def test_deepseek_v4_mega_moe_padding_preserves_weights(monkeypatch, intermediate_size):
-    """Pad gate/up separately and zero every added down-projection column."""
+def test_deepseek_v4_mega_moe_preserves_checkpoint_dimensions(
+    monkeypatch, intermediate_size
+):
+    """Keep native widths so V4.1 routed and shared experts can fuse."""
     experts = DeepseekV4MegaMoEExperts(
         SimpleNamespace(
             scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
@@ -333,29 +335,15 @@ def test_deepseek_v4_mega_moe_padding_preserves_weights(monkeypatch, intermediat
     )
 
     experts.finalize_weights()
-    padded_size = experts.intermediate_size
-    assert padded_size == (intermediate_size + 511) // 512 * 512
-    for actual, original in zip(experts._transformed_l1_weights, originals[:2]):
+    assert experts.intermediate_size == intermediate_size
+    transformed = (*experts._transformed_l1_weights, *experts._transformed_l2_weights)
+    for actual, original in zip(transformed, originals):
         expected = (
             original
             if actual.dtype == torch.int8
-            else (experts._ue8m0_uint8_to_float(original))
+            else experts._ue8m0_uint8_to_float(original)
         )
-        actual = actual.view(expected.dtype).unflatten(1, (2, padded_size))
-        assert torch.equal(
-            actual[:, :, :intermediate_size],
-            expected.unflatten(1, (2, intermediate_size)),
-        )
-        assert torch.count_nonzero(actual[:, :, intermediate_size:]) == 0
-    for actual, original in zip(experts._transformed_l2_weights, originals[2:]):
-        expected = (
-            original
-            if actual.dtype == torch.int8
-            else (experts._ue8m0_uint8_to_float(original))
-        )
-        actual = actual.view(expected.dtype)
-        assert torch.equal(actual[..., : original.shape[-1]], expected)
-        assert torch.count_nonzero(actual[..., original.shape[-1] :]) == 0
+        assert torch.equal(actual.view(expected.dtype), expected)
 
     transformed_l1 = experts._transformed_l1_weights
     experts.finalize_weights()
@@ -363,20 +351,19 @@ def test_deepseek_v4_mega_moe_padding_preserves_weights(monkeypatch, intermediat
 
 
 @pytest.mark.parametrize(
-    "hidden_size,intermediate_size,block_size,fused,mxfp8",
+    "hidden_size,intermediate_size,block_size,mxfp8",
     [
-        pytest.param(128, 512, 128, True, False, id="aligned-block128"),
-        pytest.param(128, 512, 128, True, True, id="aligned-block128-mxfp8"),
-        pytest.param(5120, 2304, 32, True, False, id="deepseek-v41-flash"),
-        pytest.param(128, 2304, 128, True, False, id="padded-block128"),
-        pytest.param(5120, 2304, 32, True, True, id="deepseek-v41-flash-mxfp8"),
-        pytest.param(128, 2304, 128, False, False, id="padded-packed-scale-fallback"),
+        pytest.param(128, 512, 128, False, id="aligned-block128"),
+        pytest.param(128, 512, 128, True, id="aligned-block128-mxfp8"),
+        pytest.param(5120, 2304, 32, False, id="deepseek-v41-flash"),
+        pytest.param(128, 2304, 128, False, id="native-block128"),
+        pytest.param(5120, 2304, 32, True, id="deepseek-v41-flash-mxfp8"),
     ],
 )
 def test_deepseek_v4_mega_moe_finalizes_native_shared_expert_weights(
-    monkeypatch, hidden_size, intermediate_size, block_size, fused, mxfp8
+    monkeypatch, hidden_size, intermediate_size, block_size, mxfp8
 ):
-    """Shared fusion preserves checkpoint channels and zeros padded channels."""
+    """Shared fusion preserves checkpoint weights and scales at native widths."""
 
     class FakeDeepGemm:
         transformed_dims: list[tuple[int, int]] = []
@@ -476,12 +463,6 @@ def test_deepseek_v4_mega_moe_finalizes_native_shared_expert_weights(
     originals = []
     for linear in (shared_experts.gate_up_proj, shared_experts.down_proj):
         scale = linear.weight_scale if mxfp8 else linear.weight_scale_inv
-        if not fused:
-            # Already packed scales cannot be padded as checkpoint UE8M0 bytes.
-            linear.weight_scale_inv = scale_parameter(
-                linear.weight.shape[0], linear.weight.shape[1] // 128
-            )
-            continue
         scale.data.view(torch.uint8).random_(124, 130)
         block_m, block_k = linear.weight_block_size
         scale_1x32 = (
@@ -493,70 +474,34 @@ def test_deepseek_v4_mega_moe_finalizes_native_shared_expert_weights(
     monkeypatch.setattr("vllm.utils.deep_gemm._import_deep_gemm", lambda: FakeDeepGemm)
 
     original_gate_up_ptr = shared_experts.gate_up_proj.weight.data_ptr()
-    original_down_ptr = shared_experts.down_proj.weight.data_ptr()
     experts.finalize_weights(shared_experts)
 
-    assert experts.has_fused_shared_experts is fused
-    if not fused:
-        assert experts.intermediate_size == 2560
-        assert FakeDeepGemm.transformed_dims == [(3, 3)]
-        assert experts.num_shared_experts == 0
-        assert shared_experts.gate_up_proj.weight.data_ptr() == original_gate_up_ptr
-        assert shared_experts.down_proj.weight.data_ptr() == original_down_ptr
-        assert shared_experts.gate_up_proj.weight.shape == (
-            2 * intermediate_size,
-            hidden_size,
-        )
-        assert shared_experts.down_proj.weight.shape == (hidden_size, intermediate_size)
-        return
-
+    assert experts.has_fused_shared_experts
+    assert experts.intermediate_size == intermediate_size
     assert FakeDeepGemm.transformed_dims == [(3, 3), (2, 2)]
-    padded_size = experts.intermediate_size
     assert FakeDeepGemm.scale_inputs[-2:] == [
-        (1, 2 * padded_size, hidden_size // 32),
-        (1, hidden_size, padded_size // 32),
+        (1, 2 * intermediate_size, hidden_size // 32),
+        (1, hidden_size, intermediate_size // 32),
     ]
-    for actual, original, fill in (
+    for transformed, actual_scale, (weight, scale) in zip(
         (
-            experts._transformed_shared_l1_weights[0].view(torch.uint8),
-            originals[0][0],
-            0,
+            experts._transformed_shared_l1_weights,
+            experts._transformed_shared_l2_weights,
         ),
-        (FakeDeepGemm.scale_values[-2][0], originals[0][1], 1),
+        FakeDeepGemm.scale_values[-2:],
+        originals,
     ):
-        actual = actual.unflatten(0, (2, padded_size))
-        assert torch.equal(
-            actual[:, :intermediate_size], original.unflatten(0, (2, intermediate_size))
-        )
-        assert torch.all(actual[:, intermediate_size:] == fill)
-    for actual, original, fill in (
-        (
-            experts._transformed_shared_l2_weights[0].view(torch.uint8),
-            originals[1][0],
-            0,
-        ),
-        (FakeDeepGemm.scale_values[-1][0], originals[1][1], 1),
-    ):
-        assert torch.equal(actual[:, : original.shape[1]], original)
-        assert torch.all(actual[:, original.shape[1] :] == fill)
-    if padded_size != intermediate_size:
-        # Generic linear post-load hooks still receive checkpoint-shaped weights.
-        for linear, (weight, _) in zip(
-            (shared_experts.gate_up_proj, shared_experts.down_proj), originals
-        ):
-            assert torch.equal(linear.weight.view(torch.uint8), weight)
-        assert shared_experts.gate_up_proj.weight.data_ptr() == original_gate_up_ptr
-        assert shared_experts.down_proj.weight.data_ptr() == original_down_ptr
-    else:
-        assert shared_experts.gate_up_proj.weight.data_ptr() != original_gate_up_ptr
-        assert (
-            experts._transformed_shared_l1_weights[0].data_ptr()
-            == shared_experts.gate_up_proj.weight.data_ptr()
-        )
-        assert (
-            experts._transformed_shared_l2_weights[0].data_ptr()
-            == shared_experts.down_proj.weight.data_ptr()
-        )
+        assert torch.equal(transformed[0].view(torch.uint8), weight)
+        assert torch.equal(actual_scale[0], scale)
+    assert shared_experts.gate_up_proj.weight.data_ptr() != original_gate_up_ptr
+    assert (
+        experts._transformed_shared_l1_weights[0].data_ptr()
+        == shared_experts.gate_up_proj.weight.data_ptr()
+    )
+    assert (
+        experts._transformed_shared_l2_weights[0].data_ptr()
+        == shared_experts.down_proj.weight.data_ptr()
+    )
 
     transformed_l1 = experts._transformed_shared_l1_weights
     experts.finalize_weights(shared_experts)
