@@ -45,7 +45,13 @@ def audio_to_pcm16_base64(audio_path: str) -> str:
     return base64.b64encode(pcm16.tobytes()).decode("utf-8")
 
 
-async def realtime_transcribe(audio_path: str, host: str, port: int, model: str):
+async def realtime_transcribe(
+    audio_path: str,
+    host: str,
+    port: int,
+    model: str,
+    segment_timestamps: bool = False,
+):
     """
     Connect to the Realtime API and transcribe an audio file.
     """
@@ -60,8 +66,21 @@ async def realtime_transcribe(audio_path: str, host: str, port: int, model: str)
             print(f"Unexpected response: {response}")
             return
 
-        # Validate model
-        await ws.send(json.dumps({"type": "session.update", "model": model}))
+        # Validate model, and opt in to segment timestamps if asked
+        session_update = {"type": "session.update", "model": model}
+        if segment_timestamps:
+            session_update["timestamp_granularities"] = ["segment"]
+        await ws.send(json.dumps(session_update))
+
+        # The server echoes the configuration that took effect, so a request
+        # the model cannot honour is never silently dropped.
+        response = json.loads(await ws.recv())
+        if response["type"] == "error":
+            print(f"Session update rejected: {response['error']}")
+            return
+        if segment_timestamps and not response.get("timestamp_granularities"):
+            print("Server did not enable segment timestamps.")
+            return
 
         # Signal ready to start
         await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
@@ -99,6 +118,10 @@ async def realtime_transcribe(audio_path: str, host: str, port: int, model: str)
                 print(response["delta"], end="", flush=True)
             elif response["type"] == "transcription.done":
                 print(f"\n\nFinal transcription: {response['text']}")
+                for segment in response.get("segments") or []:
+                    # End times only: the model marks where a group of audio
+                    # ends, not where it starts.
+                    print(f"  ends at {segment['end']:>7.2f}s  {segment['text']!r}")
                 if response.get("usage"):
                     print(f"Usage: {response['usage']}")
                 break
@@ -115,7 +138,11 @@ def main(args):
         audio_path = str(AudioAsset("mary_had_lamb").get_local_path())
         print(f"No audio path provided, using default: {audio_path}")
 
-    asyncio.run(realtime_transcribe(audio_path, args.host, args.port, args.model))
+    asyncio.run(
+        realtime_transcribe(
+            audio_path, args.host, args.port, args.model, args.segment_timestamps
+        )
+    )
 
 
 if __name__ == "__main__":
@@ -133,6 +160,11 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="Path to the audio file to transcribe.",
+    )
+    parser.add_argument(
+        "--segment-timestamps",
+        action="store_true",
+        help="Ask the server for the end time of each transcribed segment.",
     )
     parser.add_argument(
         "--host",
