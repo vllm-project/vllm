@@ -694,14 +694,43 @@ def test_check_shm_free_space_raises_when_insufficient(tmp_path):
 
 
 def test_check_shm_free_space_passes_when_sufficient(tmp_path):
-    with mock.patch.object(
-        shm_broadcast.shutil, "disk_usage", return_value=_fake_disk_usage(512 << 20)
+    with (
+        mock.patch.object(
+            shm_broadcast.shutil,
+            "disk_usage",
+            return_value=_fake_disk_usage(512 << 20),
+        ),
+        mock.patch.object(shm_broadcast, "check_cgroup_memory_available"),
     ):
         check_shm_free_space(240 << 20, shm_path=str(tmp_path))
 
 
 def test_check_shm_free_space_skipped_when_path_missing(tmp_path):
-    check_shm_free_space(1 << 60, shm_path=str(tmp_path / "does-not-exist"))
+    with mock.patch.object(shm_broadcast, "check_cgroup_memory_available"):
+        check_shm_free_space(1 << 60, shm_path=str(tmp_path / "does-not-exist"))
+
+
+def test_check_shm_free_space_checks_cgroup(tmp_path):
+    with (
+        mock.patch.object(
+            shm_broadcast.shutil,
+            "disk_usage",
+            return_value=_fake_disk_usage(512 << 20),
+        ),
+        mock.patch.object(
+            shm_broadcast, "check_cgroup_memory_available"
+        ) as check_cgroup,
+    ):
+        check_shm_free_space(
+            240 << 20,
+            shm_path=str(tmp_path),
+            allocation_name="SHM mmap",
+        )
+
+    check_cgroup.assert_called_once_with(
+        240 << 20,
+        "SHM mmap",
+    )
 
 
 def test_shm_ring_buffer_creation_checks_free_space():
