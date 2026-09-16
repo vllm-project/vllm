@@ -2100,7 +2100,7 @@ def test_aiter_consolidated_qknorm_real_packed_shuffle(skip_index_branch, fp8_in
         skip_index_branch=skip_index_branch,
         **kwargs,
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     assert torch.isfinite(q_out).all()
     assert torch.count_nonzero(q_out) > 0
