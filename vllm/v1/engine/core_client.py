@@ -566,6 +566,7 @@ class MPClient(EngineCoreClient):
     ):
         self.vllm_config = vllm_config
         self._renderer: BaseRenderer | None = renderer
+        self._effective_attention_block_sizes: set[int | None] = set()
 
         # ZMQ setup.
         sync_ctx = zmq.Context(io_threads=2)
@@ -803,10 +804,21 @@ class MPClient(EngineCoreClient):
     def _apply_ready_response(self, payload: bytes) -> None:
         """Decode an EngineCoreReadyResponse and sync any post-initialization
         config changes (e.g. auto-fitted max_model_len) back to the frontend."""
-        if not payload:
-            return
         vllm_config = self.vllm_config
-        response = msgspec.msgpack.decode(payload, type=EngineCoreReadyResponse)
+        response = (
+            msgspec.msgpack.decode(payload, type=EngineCoreReadyResponse)
+            if payload
+            else None
+        )
+        self._effective_attention_block_sizes.add(
+            response.effective_attention_block_size if response is not None else None
+        )
+        sizes = self._effective_attention_block_sizes
+        vllm_config.cache_config.effective_attention_block_size = (
+            next(iter(sizes)) if len(sizes) == 1 else None
+        )
+        if response is None:
+            return
         vllm_config.model_config.max_model_len = min(
             vllm_config.model_config.max_model_len, response.max_model_len
         )
@@ -1711,6 +1723,12 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             "Only ray DP backend supports scaling elastic EP"
         )
         parallel_config = self.vllm_config.parallel_config
+        if new_data_parallel_size > parallel_config.elastic_ep_max_dp_size:
+            raise ValueError(
+                f"Cannot scale to data_parallel_size {new_data_parallel_size}; "
+                "--elastic-ep-max-dp-size is "
+                f"{parallel_config.elastic_ep_max_dp_size}."
+            )
         num_experts = self.vllm_config.model_config.get_num_experts()
         num_physical_experts = (
             num_experts + parallel_config.eplb_config.num_redundant_experts
