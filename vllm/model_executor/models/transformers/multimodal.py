@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 import transformers
 from packaging.version import Version
+from transformers.utils.generic import ModelOutput
 
 from vllm.compilation.decorators import should_torch_compile_mm_encoder
 from vllm.config.multimodal import AudioDummyOptions
@@ -1215,8 +1216,8 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         # from `self.get_image_features`
         if isinstance(features, tuple):
             return features[0]
-        if isinstance(features, dict):
-            return features.pooler_output  # type: ignore[attr-defined]
+        if isinstance(features, ModelOutput):
+            return features.pooler_output
         return features
 
     def embed_multimodal(self, **kwargs) -> MultiModalEmbeddings:
