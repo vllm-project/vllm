@@ -27,24 +27,21 @@ steps:
     # init) fails fast with a traceback instead of running until the global
     # build timeout. The `thread` method also handles hangs inside C/CUDA
     # calls that the signal method cannot interrupt.
-    # Every branch runs whole directories, so the area needs no -m filter and
-    # every test file is provably claimed by exactly one shard. Trailing
-    # comments are pytest minutes measured in validation build 89006, which
-    # ran the slow_test cases (reload/ and sleep_mode/) for the first time.
+    # Each branch runs whole coverage units without partition filters.
     - |
       case "$$BUILDKITE_PARALLEL_JOB" in
         0)
-          pytest -v -s model_executor/model_loader/tensorizer_loader --timeout=900 --timeout-method=thread   # 14.6m
-          pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py --timeout=900 --timeout-method=thread  # 2.9m
+          pytest -v -s model_executor/model_loader/tensorizer_loader --timeout=900 --timeout-method=thread
+          pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py --timeout=900 --timeout-method=thread
           ;;
         1)
-          pytest -v -s model_executor/model_loader/sharded_state model_executor/model_loader/weights model_executor/model_loader/registry --timeout=900 --timeout-method=thread  # 12.7m
+          pytest -v -s model_executor/model_loader/test_sharded_state_loader.py model_executor/model_loader/weights model_executor/model_loader/registry --timeout=900 --timeout-method=thread
           ;;
         2)
-          pytest -v -s model_executor/model_loader/reload --timeout=900 --timeout-method=thread  # 18.6m
+          pytest -v -s model_executor/model_loader/test_reload.py --timeout=900 --timeout-method=thread
           ;;
         3)
-          pytest -v -s model_executor/layers model_executor/mrope model_executor/kernels model_executor/utils model_executor/models model_executor/custom_ops model_executor/warmup model_executor/quantization model_executor/moe model_executor/offloader model_executor/sleep_mode model_executor/model_loader/params model_executor/model_loader/fastsafetensors_loader model_executor/model_loader/instanttensor_loader model_executor/model_loader/runai_streamer_loader --timeout=900 --timeout-method=thread  # 17.0m
+          pytest -v -s model_executor/layers model_executor/mrope model_executor/kernels model_executor/utils model_executor/models model_executor/custom_ops model_executor/warmup model_executor/quantization model_executor/test_routed_experts_capture.py model_executor/offloader model_executor/test_sleep_mode_tensor_ownership.py model_executor/model_loader/test_model_load_with_params.py model_executor/model_loader/fastsafetensors_loader model_executor/model_loader/instanttensor_loader model_executor/model_loader/runai_streamer_loader --timeout=900 --timeout-method=thread
           ;;
         *) exit 2 ;;
       esac
