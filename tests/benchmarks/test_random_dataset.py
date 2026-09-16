@@ -8,6 +8,7 @@ import pytest
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from vllm.benchmarks.datasets import (
+    PrefixRepetitionRandomDataset,
     RandomDataset,
     RandomMultiModalDataset,
     SampleRequest,
@@ -482,3 +483,22 @@ def test_random_mm_video_deterministic_sampling(
     fa = [_mm_fingerprint_sample(s) for s in a]
     fb = [_mm_fingerprint_sample(s) for s in b]
     assert fa == fb
+
+
+@pytest.mark.parametrize(
+    "num_requests,num_prefixes", [(10, 3), (11, 3), (12, 3), (7, 1)]
+)
+def test_prefix_repetition_keeps_every_requested_prompt(
+    hf_tokenizer: PreTrainedTokenizerBase, num_requests: int, num_prefixes: int
+) -> None:
+    dataset = PrefixRepetitionRandomDataset(random_seed=0, disable_shuffle=True)
+    samples = dataset.sample(
+        tokenizer=hf_tokenizer,
+        num_requests=num_requests,
+        num_prefixes=num_prefixes,
+        prefix_len=8,
+        suffix_len=8,
+        output_len=4,
+    )
+    assert len(samples) == num_requests
+    assert all(sample.expected_output_len == 4 for sample in samples)
