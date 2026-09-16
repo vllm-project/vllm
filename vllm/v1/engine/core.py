@@ -85,7 +85,7 @@ from vllm.v1.fault_tolerance.engine_core_sentinel import (
     EngineCoreSentinel,
     fault_tolerant_wrapper,
 )
-from vllm.v1.kv_cache_interface import KVCacheConfig, get_kv_cache_spec_kind
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -440,25 +440,6 @@ class EngineCore:
             config_fields,
             supported_pooling_tasks,
         )
-
-    def get_kv_cache_group_metadata(self) -> list[dict[str, int | str | None]]:
-        """Return msgspec-serializable metadata for scheduler KV cache groups."""
-        kv_cache_config = getattr(self.scheduler, "kv_cache_config", None)
-        if kv_cache_config is None:
-            return []
-
-        metadata: list[dict[str, int | str | None]] = []
-        for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
-            spec = group.kv_cache_spec
-            metadata.append(
-                {
-                    "group_idx": group_idx,
-                    "kind": get_kv_cache_spec_kind(spec).value,
-                    "block_size": spec.block_size,
-                    "sliding_window": getattr(spec, "sliding_window", None),
-                }
-            )
-        return metadata
 
     def add_request(self, request: Request, request_wave: int = 0):
         """Add request to the scheduler.
@@ -2471,13 +2452,10 @@ class EngineCoreActorMixin:
     def _set_visible_devices(self, vllm_config: VllmConfig, local_dp_rank: int):
         from vllm.platforms import current_platform
 
-        if current_platform.is_xpu():
-            pass
-        else:
-            device_control_env_var = current_platform.device_control_env_var
-            self._set_assigned_physical_gpu_ids(
-                vllm_config, local_dp_rank, device_control_env_var
-            )
+        device_control_env_var = current_platform.device_control_env_var
+        self._set_assigned_physical_gpu_ids(
+            vllm_config, local_dp_rank, device_control_env_var
+        )
 
     def _set_assigned_physical_gpu_ids(
         self,

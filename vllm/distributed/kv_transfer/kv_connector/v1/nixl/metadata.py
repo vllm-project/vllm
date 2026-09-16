@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Metadata dataclasses and helpers for the NIXL connector."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from vllm.config import VllmConfig
@@ -46,8 +46,10 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   8: Add dcp_size and pcp_size to NixlAgentMetadata
 #   9: Add block_strides
 #  10: Add dense virtual transfer pages for compressed MLA caches
+#  11: Add per-region transfer geometry and memory types to NixlAgentMetadata
+#  12: Add per-region member names for PP push
 #
-NIXL_CONNECTOR_VERSION: int = 10
+NIXL_CONNECTOR_VERSION: int = 12
 
 
 @dataclass
@@ -64,8 +66,14 @@ class NixlAgentMetadata:
     ssm_sizes: tuple[int, int]
     attn_backend_name: str
     physical_blocks_per_logical_kv_block: int
+    region_num_blocks: list[int] | None = None
+    region_group_ids: list[int] | None = None
+    region_names: list[str] | None = None
+    region_mem_types: list[str] | None = None
     dcp_size: int = 1
     pcp_size: int = 1
+    # Layer names sharing each advertised region, in region order.
+    region_members: list[list[str]] = field(default_factory=list)
 
 
 @dataclass
@@ -241,6 +249,9 @@ class ReqMeta:
     remote_block_size: int | None = None
     # Remote producer pipeline-parallel size (push mode, D side).
     pp_size: int = 1
+    # True only when the scheduler parked the request in WAITING_FOR_REMOTE_KVS
+    # and expects it in finished_recving; notify-only recvs must not be reported.
+    awaiting_kvs: bool = False
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):
@@ -270,6 +281,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         local_block_ids: BlockIds,
         kv_transfer_params: dict[str, Any],
         local_num_computed_blocks: tuple[int, ...] = (),
+        awaiting_kvs: bool = False,
     ) -> ReqMeta:
         return ReqMeta(
             local_block_ids=local_block_ids,
@@ -280,6 +292,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             remote_block_size=kv_transfer_params.get("remote_block_size"),
             pp_size=kv_transfer_params.get("pp_size", 1),
             local_num_computed_blocks=local_num_computed_blocks,
+            awaiting_kvs=awaiting_kvs,
         )
 
     def add_new_req_to_save(
@@ -298,9 +311,13 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         local_block_ids: BlockIds,
         kv_transfer_params: dict[str, Any],
         local_num_computed_blocks: tuple[int, ...] = (),
+        awaiting_kvs: bool = False,
     ):
         req = self._add_new_req(
-            local_block_ids, kv_transfer_params, local_num_computed_blocks
+            local_block_ids,
+            kv_transfer_params,
+            local_num_computed_blocks,
+            awaiting_kvs,
         )
         req.remote = RemoteMeta(
             block_ids=kv_transfer_params["remote_block_ids"],
