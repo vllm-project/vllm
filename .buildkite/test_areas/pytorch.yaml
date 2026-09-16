@@ -158,25 +158,25 @@ steps:
   commands:
   # Run smoke tests under fullgraph directory, except test_full_cudagraph.py
   # as it is a heavy test that is covered in other steps.
-  # Run each directory in a separate pytest process to avoid
+  # Run each file in a separate pytest process to avoid
   # https://github.com/vllm-project/vllm/issues/28965.
   - |
     set -eu
     case "$$BUILDKITE_PARALLEL_JOB" in
       0)
-        pytest -s -v compile/fullgraph/granite                                      # 16m
+        pytest -s -v compile/fullgraph/test_basic_correctness_granite.py
         ;;
       1)
-        pytest -s -v compile/fullgraph/full_graph                                   # 16m
+        pytest -s -v compile/fullgraph/test_full_graph.py
         ;;
       2)
-        pytest -s -v compile/fullgraph/bge_multilingual_gemma2                      # 18m
+        pytest -s -v compile/fullgraph/test_basic_correctness_bge_multilingual_gemma2.py
         ;;
       3)
-        pytest -s -v compile/fullgraph/multimodal_compile                           # 8m combined
-        pytest -s -v compile/fullgraph/multiple_graphs
-        pytest -s -v compile/fullgraph/simple
-        pytest -s -v compile/fullgraph/toy_llama
+        pytest -s -v compile/fullgraph/test_multimodal_compile.py
+        pytest -s -v compile/fullgraph/test_multiple_graphs.py
+        pytest -s -v compile/fullgraph/test_simple.py
+        pytest -s -v compile/fullgraph/test_toy_llama.py
         ;;
       *) exit 2 ;;
     esac
@@ -225,7 +225,7 @@ steps:
   - vllm/v1/
   - tests/compile
   commands:
-  - pytest -s -v compile/fullgraph/full_cudagraph
+  - pytest -s -v compile/fullgraph/test_full_cudagraph.py
 
 - label: ":nvidia: (H200 MIG 18GB) PyTorch Nightly Dependency Override Check"
   key: pytorch-nightly-dependency-override-check
