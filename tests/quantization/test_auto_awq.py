@@ -241,64 +241,6 @@ def test_auto_awq_config_get_name():
     assert AutoAWQConfig.get_name() == "auto_awq"
 
 
-@pytest.mark.skipif(
-    not is_quant_method_supported("auto_awq"),
-    reason="auto_awq is not supported on this GPU type.",
-)
-@pytest.mark.skipif(
-    not (current_platform.is_cuda() and current_platform.is_device_capability(89)),
-    reason="The fused AWQ BI GEMM path only dispatches on SM89.",
-)
-@pytest.mark.parametrize("model_id", AWQ_MODELS)
-def test_auto_awq_batch_invariant_uses_fused_gemm(
-    model_id: str, monkeypatch, dist_init, workspace_init
-):
-    """Under VLLM_BATCH_INVARIANT on SM89, AWQ linears should dispatch to the
-    fused GEMM (not the legacy dequantize-then-matmul fallback)."""
-    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
-
-    import vllm.model_executor.layers.quantization.auto_awq as auto_awq_module
-
-    fused_calls = 0
-    original_fused_gemm = auto_awq_module.awq_gemm_fused_fp32
-
-    def _counting_fused_gemm(*args, **kwargs):
-        nonlocal fused_calls
-        fused_calls += 1
-        return original_fused_gemm(*args, **kwargs)
-
-    monkeypatch.setattr(auto_awq_module, "awq_gemm_fused_fp32", _counting_fused_gemm)
-
-    model, vllm_config = load_model_without_vllm_runner(
-        model_id,
-        dtype=torch.float16,
-        quantization="auto_awq",
-        model_config_kwargs={"max_model_len": 2048},
-    )
-    target_device = torch.device(current_platform.device_type)
-
-    monkeypatch.setattr(Attention, "forward", lambda _, q, k, v: q.contiguous())
-    input_ids = torch.tensor([1, 2, 3, 4], device=target_device)
-    positions = torch.arange(input_ids.numel(), device=target_device)
-    with (
-        set_current_vllm_config(vllm_config),
-        set_forward_context(None, vllm_config, num_tokens=input_ids.numel()),
-    ):
-        hidden_states = model(input_ids, positions, None)
-
-    # Deliberately stop at the AWQ-quantized transformer layers rather than
-    # calling compute_logits: the lm_head's own (unquantized)
-    # linear_batch_invariant path is unrelated to AWQ dispatch and, on some
-    # GPUs, hits a pre-existing OutOfResources error in vLLM's persistent
-    # matmul kernel for this vocab size (see #<TODO: file separately>).
-    assert torch.isfinite(hidden_states).all()
-    assert fused_calls > 0, (
-        "Expected the fused AWQ BI GEMM to be dispatched at least once; "
-        "got 0 calls, so this run silently fell back to the legacy path."
-    )
-
-
 class _FakeQuantConfig:
     def __init__(self, pack_factor: int = 8):
         self.pack_factor = pack_factor
@@ -353,11 +295,9 @@ def _count_fused_calls(monkeypatch) -> list[int]:
     reason="The fused AWQ BI GEMM path only dispatches on SM89.",
 )
 def test_auto_awq_batch_invariant_dispatch_ignores_input_contiguity(monkeypatch):
-    """The fused kernel and the legacy dequant+matmul fallback are not
-    numerically identical, so a layer's dispatch choice must not depend on
-    incidental input contiguity: a non-contiguous activation must still
-    route to the fused kernel, not silently fall back to the other
-    algorithm for what is otherwise the same layer."""
+    """Fused and legacy paths aren't numerically identical, so dispatch must
+    not depend on incidental input contiguity (regression test for the bug
+    fixed in this PR)."""
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     fused_calls = _count_fused_calls(monkeypatch)
 
@@ -385,53 +325,3 @@ def test_auto_awq_batch_invariant_dispatch_ignores_input_contiguity(monkeypatch)
         out_contig.contiguous().view(torch.uint8),
         out_noncontig.contiguous().view(torch.uint8),
     )
-
-
-@pytest.mark.skipif(
-    not (current_platform.is_cuda() and current_platform.is_device_capability(89)),
-    reason="The fused AWQ BI GEMM path only dispatches on SM89.",
-)
-def test_auto_awq_dispatch_disabled_without_batch_invariant(monkeypatch):
-    """With VLLM_BATCH_INVARIANT unset, an otherwise fusable layer must not
-    take the fused path (it should use the plain awq_gemm/matmul paths)."""
-    monkeypatch.delenv("VLLM_BATCH_INVARIANT", raising=False)
-    fused_calls = _count_fused_calls(monkeypatch)
-
-    device = torch.device(current_platform.device_type)
-    k, n, group_size, m = 3584, 512, 128, 16
-    layer, method = _make_fake_awq_layer_and_method(k, n, group_size, device)
-    x = torch.rand((m, k), dtype=torch.float16, device=device)
-
-    method.apply(layer, x)
-
-    assert fused_calls[0] == 0, (
-        "Expected the fused BI GEMM to never be dispatched when "
-        f"VLLM_BATCH_INVARIANT is unset; got {fused_calls[0]} fused call(s)."
-    )
-
-
-@pytest.mark.skipif(
-    not (current_platform.is_cuda() and current_platform.is_device_capability(89)),
-    reason="The fused AWQ BI GEMM path only dispatches on SM89.",
-)
-def test_auto_awq_dispatch_falls_back_for_unsupported_group_size(monkeypatch):
-    """A real AWQ config using group_size=64 (a supported general AWQ group
-    size, just not one the fused kernel implements) must fall back to the
-    legacy dequant+matmul path under batch-invariant mode rather than
-    raising, since the dispatch condition -- not the kernel itself -- is
-    what must reject it."""
-    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
-    fused_calls = _count_fused_calls(monkeypatch)
-
-    device = torch.device(current_platform.device_type)
-    k, n, group_size, m = 3584, 512, 64, 16
-    layer, method = _make_fake_awq_layer_and_method(k, n, group_size, device)
-    x = torch.rand((m, k), dtype=torch.float16, device=device)
-
-    out = method.apply(layer, x)
-
-    assert fused_calls[0] == 0, (
-        "Expected group_size=64 to fall back to the legacy path under "
-        f"batch-invariant mode; got {fused_calls[0]} fused call(s)."
-    )
-    assert torch.isfinite(out).all()

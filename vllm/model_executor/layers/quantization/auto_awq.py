@@ -927,11 +927,8 @@ class AutoAWQLinearMethod(BaseAWQLinearMethod):
             and qweight.shape[0] == scales.shape[0] * 128
         )
         if use_fused_bi_gemm:
-            # Fused vs. legacy dequant+matmul are not numerically identical
-            # (different reduction order/accumulation), so dispatch must not
-            # depend on incidental input contiguity: a non-contiguous
-            # reshaped_x must still take the fused path, not silently fall
-            # back to the other algorithm for the same layer.
+            # Fused and legacy paths aren't numerically identical, so
+            # dispatch must not depend on incidental input contiguity.
             out = awq_gemm_fused_fp32(reshaped_x.contiguous(), qweight, scales, qzeros)
         elif FP16_MATMUL_HEURISTIC_CONDITION or envs.VLLM_BATCH_INVARIANT:
             out = ops.awq_dequantize(qweight, scales, qzeros, 0, 0, 0)
