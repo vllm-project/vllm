@@ -1418,7 +1418,9 @@ class Scheduler(SchedulerInterface):
         # Snapshot before async scheduling adds this step's placeholders. A
         # nonfinal prefill cannot contribute the current target-sample token.
         zero_next_draft_req_ids: set[str] = set()
-        uno_tail_debug = [] if schedule_start is not None else None
+        uno_tail_debug: list[dict[str, object]] | None = (
+            [] if schedule_start is not None else None
+        )
         if self.use_uno:
             for req_id, num_tokens in num_scheduled_tokens.items():
                 request = self.requests[req_id]

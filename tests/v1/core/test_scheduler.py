@@ -3,6 +3,7 @@
 import dataclasses
 from concurrent.futures import Future
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import numpy as np
@@ -1533,7 +1534,7 @@ def uno_scheduler_factory(tmp_path, monkeypatch):
     )
 
     def create(**kwargs):
-        options = dict(
+        options: dict[str, Any] = dict(
             model=str(tmp_path),
             skip_tokenizer_init=True,
             use_v2_model_runner=True,

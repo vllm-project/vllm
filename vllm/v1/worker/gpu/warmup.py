@@ -186,7 +186,9 @@ def preserve_rng_state(device: torch.device | None) -> Iterator[None]:
     device_index = None
     if device is not None and device.type == "cuda" and torch.cuda.is_available():
         device_index = (
-            torch.cuda.current_device() if device.index is None else device.index
+            torch.accelerator.current_device_index()
+            if device.index is None
+            else device.index
         )
         cuda_state = torch.cuda.get_rng_state(device_index)
     try:

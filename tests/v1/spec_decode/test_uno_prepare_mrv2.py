@@ -364,12 +364,10 @@ def test_uno_prepare_specialization_ignores_dynamic_target_view_lengths(
     # pointer alignment and storage offset.
     warmup_num_sampled = torch.empty(num_reqs, dtype=torch.int32, device=device)
     warmup_num_rejected = torch.empty(num_reqs, dtype=torch.int32, device=device)
-    served_num_sampled = torch.empty(num_reqs + 1, dtype=torch.int32, device=device)[
+    served_num_sampled = torch.empty(num_reqs + 1, dtype=torch.int32, device=device)[1:]
+    served_num_rejected = torch.empty(num_reqs + 1, dtype=torch.int32, device=device)[
         1:
     ]
-    served_num_rejected = torch.empty(
-        num_reqs + 1, dtype=torch.int32, device=device
-    )[1:]
     assert warmup_num_sampled.storage_offset() == 0
     assert served_num_sampled.storage_offset() == 1
 
@@ -410,8 +408,9 @@ def test_uno_prepare_specialization_ignores_dynamic_target_view_lengths(
     assert "TARGET_POSITION_CAP" not in dict(warmup_specialization)
     import vllm.v1.worker.gpu.spec_decode.uno_prepare as uno_prepare
 
-    assert 'do_not_specialize_on_alignment=["num_sampled_ptr", "num_rejected_ptr"]' in inspect.getsource(
-        uno_prepare
+    assert (
+        'do_not_specialize_on_alignment=["num_sampled_ptr", "num_rejected_ptr"]'
+        in inspect.getsource(uno_prepare)
     )
 
 

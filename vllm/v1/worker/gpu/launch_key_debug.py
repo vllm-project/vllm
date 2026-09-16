@@ -79,7 +79,7 @@ def _canonical_json(value: Mapping[str, Any]) -> str:
 
 def _object_fields(value: Any) -> Any:
     """Serialize both dict-backed and slots-backed Triton option objects."""
-    if is_dataclass(value):
+    if is_dataclass(value) and not isinstance(value, type):
         return _json_value(asdict(value))
     try:
         return _json_value(vars(value))

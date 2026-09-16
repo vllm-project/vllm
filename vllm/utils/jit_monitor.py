@@ -323,9 +323,7 @@ def _log_cutedsl_jit_compile(fn_name: str) -> None:
         event="JIT compilation",
         fn_name=fn_name,
         detail=(
-            "key=<unavailable>"
-            if _captured_compilations.get() is not None
-            else None
+            "key=<unavailable>" if _captured_compilations.get() is not None else None
         ),
     )
 

@@ -16,6 +16,7 @@ the captured draft forward, so the live step must remain a launch argument.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -35,10 +36,9 @@ def _launch_key_debug_enabled() -> bool:
 
 
 _LAUNCH_KEY_DEBUG_ENABLED = _launch_key_debug_enabled()
+record_triton_launch: Callable[..., None] | None = None
 if _LAUNCH_KEY_DEBUG_ENABLED:
     from vllm.v1.worker.gpu.launch_key_debug import record_triton_launch
-else:
-    record_triton_launch = None
 
 
 # Keep this contract shared with the CPU launch-key test.  These arguments

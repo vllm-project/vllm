@@ -223,7 +223,7 @@ def test_graph_replay_refreshes_native_backend_without_rebuilding_metadata(
         ("replay", None)
     )
     proposer._copy_request_inputs = Mock()
-    proposer._build_draft_attn_metadata = Mock(return_value={"eager": object()})
+    proposer._build_uniform_attn_metadata = Mock(return_value={"eager": object()})
     proposer._generate_draft = Mock()
     proposer.set_lora_hook(lambda mapping: events.append(("lora", mapping)))
     fused_prepare = Mock()
@@ -243,14 +243,14 @@ def test_graph_replay_refreshes_native_backend_without_rebuilding_metadata(
     assert events[-1] == ("lora", None)
     if full_graph:
         assert events[1:3] == [("refresh", captured_attn), ("replay", None)]
-        proposer._build_draft_attn_metadata.assert_not_called()
+        proposer._build_uniform_attn_metadata.assert_not_called()
         slot_builder.assert_not_called()
         proposer._generate_draft.assert_not_called()
         assert proposer.num_graph_replays == 1
     else:
         group.update_draft_decode_metadata.assert_not_called()
         proposer.cudagraph_manager.run_fullgraph.assert_not_called()
-        proposer._build_draft_attn_metadata.assert_called_once()
+        proposer._build_uniform_attn_metadata.assert_called_once()
         slot_builder.assert_called_once()
         proposer._generate_draft.assert_called_once()
         assert proposer.draft_max_seq_len == 32
@@ -298,23 +298,23 @@ def test_eager_draft_attn_metadata_keeps_k_row_physical_capacity(monkeypatch):
     captured: dict = {}
 
     def fake_build(
+        batch_desc,
         num_reqs,
-        num_reqs_padded,
-        num_tokens_padded,
+        num_query_per_req,
         seq_lens_cpu_upper_bound,
         step,
         **kwargs,
     ):
         captured.update(
+            batch_desc=batch_desc,
             num_reqs=num_reqs,
-            num_reqs_padded=num_reqs_padded,
-            num_tokens_padded=num_tokens_padded,
+            num_query_per_req=num_query_per_req,
             step=step,
             **kwargs,
         )
         return {"eager": object()}
 
-    proposer._build_draft_attn_metadata = fake_build
+    proposer._build_uniform_attn_metadata = fake_build
     proposer.set_lora_hook(lambda mapping: None)
     monkeypatch.setattr(f"{module}.prepare_uno_inputs_fused", Mock())
     monkeypatch.setattr(f"{module}.build_slot_mappings_by_layer", Mock(return_value={}))
@@ -327,10 +327,37 @@ def test_eager_draft_attn_metadata_keeps_k_row_physical_capacity(monkeypatch):
     proposer.propose(
         batch, {}, {}, tensor, None, tensor, tensor, tensor, tensor, tensor, tensor
     )
-    assert captured["num_tokens_padded"] == count
-    assert captured["num_reqs_padded"] == n
+    assert captured["batch_desc"] is desc
+    assert captured["num_reqs"] == n
     assert captured["step"] == k
     assert captured["num_query_per_req"] == k
+
+
+def test_every_uno_metadata_helper_call_resolves_on_the_proposer():
+    """Eager drafting must resolve every metadata builder it calls.
+
+    The eager branch once called a helper that the shared speculator base class
+    no longer defined, so a batch without a captured draft graph failed on its
+    first proposal instead of drafting eagerly. A rename in the base class must
+    not silently break the call site again.
+    """
+    import ast
+    from pathlib import Path
+
+    from vllm.v1.worker.gpu.spec_decode import uno as uno_module
+
+    source = Path(inspect.getfile(uno_module)).read_text(encoding="utf-8")
+    referenced = {
+        node.attr
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+        and node.attr.startswith("_build_")
+    }
+    assert referenced
+    missing = sorted(name for name in referenced if not hasattr(UnoSpeculator, name))
+    assert missing == []
 
 
 def _cpu_uno_proposer(
@@ -398,7 +425,7 @@ def _cpu_uno_proposer(
     )
     proposer.kv_cache_config = Mock()
     proposer._copy_request_inputs = Mock()
-    proposer._build_draft_attn_metadata = Mock(return_value={"eager": object()})
+    proposer._build_uniform_attn_metadata = Mock(return_value={"eager": object()})
     proposer._generate_draft = Mock()
     proposer.set_lora_hook(lambda mapping: None)
     proposer.attn_groups = [[Mock()]]
@@ -856,7 +883,7 @@ def test_uno_warmup_shares_filter_keys_without_prefill_verification(
         num_sm=82,
         use_flashinfer=use_flashinfer,
     )
-    covered = set()
+    covered: set[tuple[object, ...]] = set()
     observed_modes = set()
     for call in plan.sampler_warmups:
         if call.sampler_branch == "native_verification":
@@ -915,7 +942,7 @@ def test_uno_warmup_filter_calls_add_uncovered_keys_across_sampler_branches(
         num_sm=82,
         use_flashinfer=False,
     )
-    covered = set()
+    covered: set[tuple[object, ...]] = set()
     observed_modes = set()
     for call in plan.sampler_warmups:
         if not call.kernel_keys:
@@ -1268,6 +1295,7 @@ def test_uno_warmup_executes_native_verification_s4(
     class LaunchRecorder:
         def __init__(self, name):
             self.name = name
+            self.arg_names: tuple[str, ...] = ()
 
         def __getitem__(self, grid):
             def launch(*args, **kwargs):
@@ -1778,27 +1806,22 @@ def test_uno_mode_branch_matches_production_sampler(
     )
     subject.apply_sampling_params = lambda logits, *_args, **_kwargs: logits
     calls: list[str] = []
-    monkeypatch.setattr(
-        sampler_module,
-        "flashinfer_sample",
-        lambda logits, _top_k, _top_p: (
-            calls.append("flashinfer")
-            or torch.zeros(logits.shape[0], dtype=torch.int64)
-        ),
-    )
-    monkeypatch.setattr(
-        sampler_module,
-        "apply_top_k_top_p",
-        lambda logits, _top_k, _top_p: calls.append("triton_filter") or logits,
-    )
-    monkeypatch.setattr(
-        sampler_module,
-        "gumbel_sample",
-        lambda logits, *_args, **_kwargs: (
-            calls.append("triton_sample")
-            or torch.zeros(logits.shape[0], dtype=torch.int64)
-        ),
-    )
+
+    def record_flashinfer(logits, _top_k, _top_p):
+        calls.append("flashinfer")
+        return torch.zeros(logits.shape[0], dtype=torch.int64)
+
+    def record_filter(logits, _top_k, _top_p):
+        calls.append("triton_filter")
+        return logits
+
+    def record_gumbel(logits, *_args, **_kwargs):
+        calls.append("triton_sample")
+        return torch.zeros(logits.shape[0], dtype=torch.int64)
+
+    monkeypatch.setattr(sampler_module, "flashinfer_sample", record_flashinfer)
+    monkeypatch.setattr(sampler_module, "apply_top_k_top_p", record_filter)
+    monkeypatch.setattr(sampler_module, "gumbel_sample", record_gumbel)
 
     subject.sample(
         torch.ones((len(params), 4)),
@@ -2292,7 +2315,7 @@ def test_uno_startup_jit_self_check_proves_flashinfer_branches(monkeypatch):
     )
     monkeypatch.setattr(jit_monitor, "_active", True)
     monkeypatch.setattr(warmup.torch.accelerator, "synchronize", lambda: None)
-    observed_launches = {}
+    observed_launches: dict[str, int] = {}
 
     @contextmanager
     def recorded_sampler_launches():

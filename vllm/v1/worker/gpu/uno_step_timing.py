@@ -88,8 +88,8 @@ class UnoStepTimingTrace:
             self._completion_event.record()
             # These are allocator counters, deliberately distinct from the
             # device-level residency sampled with nvidia-smi by the harness.
-            self._allocated_bytes = torch.cuda.memory_allocated()
-            self._reserved_bytes = torch.cuda.memory_reserved()
+            self._allocated_bytes = torch.accelerator.memory_allocated()
+            self._reserved_bytes = torch.accelerator.memory_reserved()
 
     def payload(self) -> dict[str, object]:
         gpu_ms = {

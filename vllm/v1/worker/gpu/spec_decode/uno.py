@@ -944,13 +944,12 @@ class UnoSpeculator(DraftModelSpeculator):
                     int(input_batch.seq_lens_cpu_upper_bound[:n].max()) + self.k,
                     self.max_model_len,
                 )
-                draft_attn = self._build_draft_attn_metadata(
+                draft_attn = self._build_uniform_attn_metadata(
+                    desc,
                     n,
-                    desc.num_reqs or n,
-                    desc.num_tokens,
+                    self.k,
                     input_batch.seq_lens_cpu_upper_bound,
                     step=self.k,
-                    num_query_per_req=self.k,
                 )
                 slots = build_slot_mappings_by_layer(
                     self.block_tables.slot_mappings[:, : desc.num_tokens],
