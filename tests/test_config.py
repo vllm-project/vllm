@@ -3518,3 +3518,33 @@ def test_revision_resolved_when_weights_match_model(mock_resolve):
     assert isinstance(config.revision, ResolvedRevision)
     assert config.revision.resolved == REVISION
     mock_resolve.assert_any_call(model, None, config.hf_token)
+
+
+def test_nested_rope_validation_patch_preserves_flat_rope():
+    from transformers import PretrainedConfig
+    from vllm.transformers_utils.config import (
+        _patch_hf_transformers_nested_rope_validation,
+    )
+
+    orig_validate = PretrainedConfig.validate_rope
+    try:
+        _patch_hf_transformers_nested_rope_validation()
+        config = PretrainedConfig()
+        flat_params = {
+            "rope_type": "linear",
+            "factor": 8.0,
+            "rope_theta": 500000.0,
+        }
+        config.rope_parameters = flat_params.copy()
+        config.validate_rope()
+        assert config.rope_parameters == flat_params
+
+        nested_params = {
+            "full_attention": {"rope_type": "default"},
+            "factor": 8.0,
+        }
+        config.rope_parameters = nested_params.copy()
+        config.validate_rope()
+        assert config.rope_parameters == {"full_attention": {"rope_type": "default"}}
+    finally:
+        PretrainedConfig.validate_rope = orig_validate
