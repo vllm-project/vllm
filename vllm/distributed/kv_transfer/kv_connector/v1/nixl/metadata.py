@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Metadata dataclasses and helpers for the NIXL connector."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from vllm.config import VllmConfig
@@ -47,8 +47,9 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   9: Add block_strides
 #  10: Add dense virtual transfer pages for compressed MLA caches
 #  11: Add per-region transfer geometry and memory types to NixlAgentMetadata
+#  12: Add per-region member names for PP push
 #
-NIXL_CONNECTOR_VERSION: int = 11
+NIXL_CONNECTOR_VERSION: int = 12
 
 
 @dataclass
@@ -71,6 +72,8 @@ class NixlAgentMetadata:
     region_mem_types: list[str] | None = None
     dcp_size: int = 1
     pcp_size: int = 1
+    # Layer names sharing each advertised region, in region order.
+    region_members: list[list[str]] = field(default_factory=list)
 
 
 @dataclass
