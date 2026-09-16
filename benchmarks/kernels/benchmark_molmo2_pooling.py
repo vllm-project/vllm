@@ -8,8 +8,7 @@ from collections.abc import Callable
 import torch
 from tabulate import tabulate
 
-from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.model_executor.layers.molmo2_pooling import Molmo2PoolingPreparation
+from vllm.model_executor.models.molmo2 import _prepare_molmo2_pooling
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 SHAPES = {
@@ -50,6 +49,37 @@ def assert_outputs_close(
             )
 
 
+def upstream_native(
+    image_features: torch.Tensor,
+    token_pooling: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    batch_size, _, _, dim = image_features.shape
+    valid = token_pooling >= 0
+    batch_idx = torch.arange(
+        batch_size,
+        dtype=torch.long,
+        device=token_pooling.device,
+    )
+    batch_idx = torch.tile(
+        batch_idx.view(batch_size, 1, 1),
+        [1, token_pooling.shape[1], token_pooling.shape[2]],
+    )
+    to_pool = image_features.reshape(batch_size, -1, dim)[
+        batch_idx, torch.clamp(token_pooling, min=0)
+    ]
+    to_pool = to_pool * valid.to(image_features.dtype)[..., None]
+    to_pool = to_pool.reshape(-1, token_pooling.shape[-1], dim)
+
+    denom = valid.reshape(-1, valid.shape[-1]).float().sum(-1).clamp_min(1)
+    query = to_pool.sum(-2, keepdim=True) / denom[:, None, None].to(to_pool.dtype)
+    return (
+        to_pool,
+        query,
+        valid.reshape(-1, 1, 1, valid.shape[-1]),
+        valid.any(-1),
+    )
+
+
 def make_inputs(
     batch_size: int,
     groups: int,
@@ -88,25 +118,28 @@ def benchmark_case(
     trials: int,
 ) -> tuple[float, float, float, float]:
     image_features, token_pooling = make_inputs(batch_size, groups, pool_size, dtype)
-    with set_current_vllm_config(VllmConfig()):
-        op = Molmo2PoolingPreparation(masked_average=True)
+    baseline = lambda: upstream_native(image_features, token_pooling)
+    optimized = lambda: _prepare_molmo2_pooling(
+        image_features,
+        token_pooling,
+        masked_average=True,
+    )
+    assert_outputs_close(optimized(), baseline())
 
-    native = lambda: op.forward_native(image_features, token_pooling)
-    fused = lambda: op(image_features, token_pooling)
-    assert_outputs_close(fused(), native())
-
-    timings: dict[str, list[float]] = {"native": [], "fused": []}
-    functions = {"native": native, "fused": fused}
+    timings: dict[str, list[float]] = {"upstream": [], "optimized": []}
+    functions = {"upstream": baseline, "optimized": optimized}
     for trial in range(trials):
-        order = ("native", "fused") if trial % 2 == 0 else ("fused", "native")
+        order = (
+            ("upstream", "optimized") if trial % 2 == 0 else ("optimized", "upstream")
+        )
         for name in order:
             timings[name].append(time_cuda(functions[name], warmup, repeats))
 
     return (
-        statistics.median(timings["native"]),
-        interquartile_range(timings["native"]),
-        statistics.median(timings["fused"]),
-        interquartile_range(timings["fused"]),
+        statistics.median(timings["upstream"]),
+        interquartile_range(timings["upstream"]),
+        statistics.median(timings["optimized"]),
+        interquartile_range(timings["optimized"]),
     )
 
 
@@ -117,14 +150,16 @@ def main(args) -> None:
         for kind, (pool_size, group_sizes) in SHAPES.items():
             for batch_size in args.batch_sizes:
                 for groups in group_sizes:
-                    native_us, native_iqr, fused_us, fused_iqr = benchmark_case(
-                        batch_size,
-                        groups,
-                        pool_size,
-                        dtype,
-                        args.warmup,
-                        args.repeats,
-                        args.trials,
+                    upstream_us, upstream_iqr, optimized_us, optimized_iqr = (
+                        benchmark_case(
+                            batch_size,
+                            groups,
+                            pool_size,
+                            dtype,
+                            args.warmup,
+                            args.repeats,
+                            args.trials,
+                        )
                     )
                     rows.append(
                         [
@@ -133,11 +168,11 @@ def main(args) -> None:
                             batch_size,
                             groups,
                             pool_size,
-                            native_us,
-                            native_iqr,
-                            fused_us,
-                            fused_iqr,
-                            native_us / fused_us,
+                            upstream_us,
+                            upstream_iqr,
+                            optimized_us,
+                            optimized_iqr,
+                            upstream_us / optimized_us,
                         ]
                     )
                     gc.collect()
@@ -153,10 +188,10 @@ def main(args) -> None:
                 "batch",
                 "groups",
                 "K",
-                "native (us)",
-                "native IQR",
-                "fused (us)",
-                "fused IQR",
+                "upstream (us)",
+                "upstream IQR",
+                "optimized (us)",
+                "optimized IQR",
                 "speedup",
             ],
             floatfmt=("", "", "d", "d", "d", ".2f", ".2f", ".2f", ".2f", ".2f"),
