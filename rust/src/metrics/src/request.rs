@@ -21,6 +21,9 @@ const REQUEST_LATENCY_BUCKETS: [f64; 21] = [
     480.0, 960.0, 1920.0, 7680.0,
 ];
 const REQUEST_PARAMS_N_BUCKETS: [f64; 5] = [1.0, 2.0, 5.0, 10.0, 20.0];
+const ITERATION_TOKENS_BUCKETS: [f64; 13] = [
+    1.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0, 16384.0,
+];
 
 fn build_1_2_5_buckets(max_value: u32) -> Vec<f64> {
     let mut buckets = Vec::new();
@@ -66,6 +69,10 @@ fn request_params_n_histogram() -> Histogram {
     Histogram::new(REQUEST_PARAMS_N_BUCKETS.iter().copied())
 }
 
+fn iteration_tokens_histogram() -> Histogram {
+    Histogram::new(ITERATION_TOKENS_BUCKETS.iter().copied())
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct FinishedReasonLabels {
     pub model_name: String,
@@ -83,19 +90,18 @@ pub struct PromptTokenSourceLabels {
 pub(crate) type FinishedReasonCounterFamily = Family<FinishedReasonLabels, U64Counter>;
 pub(crate) type PromptTokenSourceCounterFamily = Family<PromptTokenSourceLabels, U64Counter>;
 
-/// Request-lifecycle Prometheus families exported from the `llm` layer.
+/// Request and output-batch Prometheus families.
 pub struct RequestMetrics {
+    /// Computed prompt and generated tokens per nonempty engine output batch,
+    /// recorded by the engine-core client for requests tracked by this frontend.
+    pub iteration_tokens_total: HistogramFamily,
+
     // Request-derived counters.
     pub num_preemptions: Family<EngineLabels, U64Counter>,
     pub prompt_tokens: Family<EngineLabels, U64Counter>,
     pub prompt_tokens_by_source: PromptTokenSourceCounterFamily,
     pub prompt_tokens_cached: Family<EngineLabels, U64Counter>,
     pub generation_tokens: Family<EngineLabels, U64Counter>,
-
-    // We intentionally don't support iteration-level histograms for now, since it seems to make
-    // more sense if the engine maintains these metrics and frontend simply forwards.
-    //
-    // pub iteration_tokens_total: HistogramFamily,
 
     // Request lifecycle counters and histograms.
     pub request_success: FinishedReasonCounterFamily,
@@ -118,6 +124,14 @@ pub struct RequestMetrics {
 impl RequestMetrics {
     /// Register the request-oriented metric families into the shared registry.
     pub(crate) fn register(registry: &mut Registry) -> Self {
+        let iteration_tokens_total =
+            Family::new_with_constructor(iteration_tokens_histogram as fn() -> Histogram);
+        registry.register(
+            "vllm:iteration_tokens_total",
+            "Histogram of computed prompt and generated tokens per nonempty engine output batch.",
+            iteration_tokens_total.clone(),
+        );
+
         // Request-derived counters.
         let num_preemptions = Family::default();
         registry.register(
@@ -276,6 +290,7 @@ impl RequestMetrics {
         );
 
         Self {
+            iteration_tokens_total,
             num_preemptions,
             prompt_tokens,
             prompt_tokens_by_source,
