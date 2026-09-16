@@ -12,7 +12,7 @@ import warnings
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
 from io import BytesIO
-from typing import Annotated, Literal, TypeAlias, TypedDict
+from typing import Annotated, Literal, TypeAlias, TypedDict, cast
 
 import torch
 import torch.nn as nn
@@ -1399,7 +1399,8 @@ class NemotronH_Nano_VL_V2(
         # of them than max_num_batched_tokens.
         # Embed them with the base weights -
         # the LoRA delta is undefined for tokens with no mapping entry.
-        embed_tokens = self.get_language_model().model.embed_tokens
+        language_model = cast(NemotronHForCausalLM, self.get_language_model())
+        embed_tokens = language_model.model.embed_tokens
         if isinstance(embed_tokens, BaseLayerWithLoRA):
             embed_tokens = embed_tokens.base_layer
         text_embeddings = embed_tokens(repl_token_ids)
