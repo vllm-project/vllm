@@ -780,9 +780,7 @@ class DeepCLIPVisionEmbeddings(CLIPVisionEmbeddings):
         self, pixel_values: torch.Tensor, patch_embeds: torch.Tensor | None = None
     ) -> torch.Tensor:
         batch_size = pixel_values.shape[0]
-        if patch_embeds is not None:
-            patch_embeds = patch_embeds
-        else:
+        if patch_embeds is None:
             patch_embeds = self.patch_embedding(pixel_values)
         patch_embeds = patch_embeds.flatten(2).transpose(1, 2)
 
