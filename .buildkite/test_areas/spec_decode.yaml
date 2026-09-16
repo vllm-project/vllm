@@ -100,8 +100,9 @@ steps:
 
 - label: ":nvidia: (H200 MIG 35GB) Spec Decode Speculators + MTP"
   key: spec-decode-speculators-mtp
-  timeout_in_minutes: 50
+  timeout_in_minutes: 30
   device: h200_35gb
+  parallelism: 4
   source_file_dependencies:
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/spec_decode/
@@ -109,14 +110,21 @@ steps:
     - vllm/transformers_utils/configs/speculators/
     - tests/v1/e2e/spec_decode/
   commands:
-    - pytest -v -s v1/e2e/spec_decode/speculators/
-    - pytest -v -s v1/e2e/spec_decode/mtp/
+    # MTP correctness is one parametrized test split into per-model folders;
+    # durations below are per-case pytest times measured on this lane.
+    - |
+      case "$$BUILDKITE_PARALLEL_JOB" in
+        0) pytest -v -s v1/e2e/spec_decode/mtp/gemma4/ ;;                                       # 9.8m
+        1) pytest -v -s v1/e2e/spec_decode/speculators/ v1/e2e/spec_decode/mtp/qwen3_5/ ;;      # 7.9m + 4.0m
+        2) pytest -v -s v1/e2e/spec_decode/mtp/deepseek/ v1/e2e/spec_decode/mtp/mimo/ ;;        # 7.6m + 5.0m
+        3) pytest -v -s v1/e2e/spec_decode/mtp/rejected_placeholders/ ;;                        # 6.1m
+      esac
   mirror:
     amd:
       label: ":amd: (MI300) Spec Decode Speculators + MTP"
       dind: false
       device: mi300_1
-      timeout_in_minutes: 75
+      timeout_in_minutes: 40
       depends_on:
       - image-build-amd
       source_file_dependencies:
