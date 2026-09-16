@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import pytest
 from openai_harmony import (
     Message,
 )
 
 from vllm.entrypoints.openai.responses.protocol import (
+    ResponsesRequest,
     serialize_message,
     serialize_messages,
 )
+from vllm.exceptions import VLLMValidationError
 
 
 def test_serialize_message() -> None:
@@ -37,3 +40,13 @@ def test_serialize_messages() -> None:
     }
     msg = Message.from_dict(msg_value)
     assert serialize_messages([msg, dict_value]) == [msg_value, dict_value]
+
+
+def test_inline_hidden_states_rejected_by_responses():
+    with pytest.raises(VLLMValidationError, match="return_inline"):
+        ResponsesRequest(
+            model="test",
+            input="hello",
+            max_output_tokens=1,
+            kv_transfer_params={"return_inline": True},
+        )

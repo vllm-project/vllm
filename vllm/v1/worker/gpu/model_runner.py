@@ -74,6 +74,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.outputs import (
     DraftTokenIds,
     ECConnectorOutput,
+    HiddenStatesTensors,
     ModelRunnerOutput,
     RoutedExpertsTensors,
 )
@@ -301,6 +302,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.step_timing = StepTimingCollector()
 
         # General request states.
+        self._inline_req_ids: set[str] = set()
         self.req_states = RequestState(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
@@ -1066,6 +1068,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Call model_state.remove_request *before* req_states.remove_request
         # so the model_state can still look up the slot index.
         self.model_state.remove_request(req_id)
+        self._inline_req_ids.discard(req_id)
         req_idx = self.req_states.remove_request(req_id)
         if req_idx is None:
             return False
@@ -1121,6 +1124,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             prompt_len = new_req_data.prompt_len
             sampling_params = new_req_data.sampling_params
+            if sampling_params is not None and sampling_params.validate_inline_output():
+                self._inline_req_ids.add(req_id)
             self.req_states.add_request(
                 req_id=req_id,
                 prompt_len=prompt_len,
@@ -1984,6 +1989,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
         return None
 
+    def _get_prompt_hidden_states(
+        self, hidden_states: torch.Tensor, input_batch: InputBatch
+    ) -> HiddenStatesTensors | None:
+        if not self._inline_req_ids:
+            return None
+        rows = {}
+        for index, req_id in enumerate(input_batch.req_ids):
+            req_index = input_batch.idx_mapping_np[index]
+            if (
+                req_id in self._inline_req_ids
+                and input_batch.num_computed_tokens_np[index]
+                + input_batch.num_scheduled_tokens[index]
+                == self.req_states.prompt_len.np[req_index]
+            ):
+                rows[req_id] = int(input_batch.query_start_loc_np[index + 1]) - 1
+        if not rows:
+            return None
+        return HiddenStatesTensors(list(rows), hidden_states[list(rows.values())])
+
     @torch.inference_mode()
     @step_eplb_after()
     def sample_tokens(
@@ -2079,6 +2103,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             copy_stream=self.output_copy_stream,
             check_ep_fault=self.check_ep_fault,
             routed_experts=routed_experts,
+            hidden_states=self._get_prompt_hidden_states(hidden_states, input_batch),
         )
 
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None

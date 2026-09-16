@@ -24,7 +24,7 @@ from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer, renderer_from_config
 from vllm.renderers.inputs.preprocess import parse_model_prompt
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import SamplingParams, supports_inline_hidden_states
 from vllm.tasks import GENERATION_TASKS, POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
@@ -88,6 +88,15 @@ class InputProcessor:
     ) -> None:
         """Raise `ValueError` if SamplingParams or PoolingParams is not valid."""
         if isinstance(params, SamplingParams):
+            if params.validate_inline_output() and not supports_inline_hidden_states(
+                self.vllm_config
+            ):
+                raise VLLMValidationError(
+                    "return_inline requires Model Runner V2 with native Qwen2 or "
+                    "Qwen3.5 generation on CPU, CUDA, or ROCm, PP=1, "
+                    "no context parallelism, "
+                    "no speculative decoding, and no KV connector"
+                )
             supported_generation_tasks = [
                 task for task in supported_tasks if task in GENERATION_TASKS
             ]
@@ -294,6 +303,14 @@ class InputProcessor:
         session_id: str | None = None,
     ) -> EngineCoreRequest:
         self._validate_params(params, supported_tasks)
+        if (
+            resumable
+            and isinstance(params, SamplingParams)
+            and params.validate_inline_output()
+        ):
+            raise VLLMValidationError(
+                "return_inline does not support resumable requests"
+            )
         self._validate_lora(lora_request)
 
         parallel_config = self.vllm_config.parallel_config

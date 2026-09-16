@@ -559,3 +559,25 @@ def test_zero_copy_frames_survive_without_caller_side_references():
         assert torch.equal(decoded.prompt_embeds, expected)
         push.close(linger=0)
         pull.close(linger=0)
+
+
+def test_inline_hidden_state_json_payload_round_trip():
+    """The bounded vector uses the existing dictionary without tensor frames."""
+    from vllm.v1.engine import EngineCoreOutput, FinishReason
+
+    payload = {
+        "hidden_states": [1.25, -0.5, 0.0],
+        "token_position": 17,
+        "layer_id": 32,
+        "representation": "post_final_norm",
+    }
+    output = EngineCoreOutput(
+        request_id="inline",
+        new_token_ids=[42],
+        finish_reason=FinishReason.LENGTH,
+        kv_transfer_params=payload,
+    )
+    encoded = MsgpackEncoder().encode(output)
+    assert len(encoded) == 1
+    decoded = MsgpackDecoder(EngineCoreOutput).decode(encoded)
+    assert decoded.kv_transfer_params == payload
