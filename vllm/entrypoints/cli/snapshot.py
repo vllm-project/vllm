@@ -60,7 +60,10 @@ def validate_create_args(args: argparse.Namespace) -> None:
         )
     if args.logprobs_mode in {"raw_logits", "processed_logits"}:
         raise ValueError("snapshot canary requires a log-probability mode")
-    if getattr(args, "speculative_config", None) is not None:
+    if any(
+        getattr(args, name, None) is not None
+        for name in ("speculative_config", "spec_method", "spec_model", "spec_tokens")
+    ):
         raise ValueError("snapshot create does not support speculative decoding")
     if platform.system() != "Linux" or platform.machine() != "x86_64":
         raise ValueError("snapshot create requires Linux x86_64")

@@ -393,6 +393,9 @@ def test_snapshot_create_cli_accepts_only_pinned_compact_mode(
         ("model_tag", None, "immutable remote model"),
         ("logprobs_mode", "raw_logits", "log-probability mode"),
         ("speculative_config", {}, "does not support speculative decoding"),
+        ("spec_method", "ngram", "does not support speculative decoding"),
+        ("spec_model", "draft-model", "does not support speculative decoding"),
+        ("spec_tokens", 3, "does not support speculative decoding"),
     ],
 )
 def test_snapshot_create_rejects_invalid_config(
