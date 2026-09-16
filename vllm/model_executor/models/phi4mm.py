@@ -952,7 +952,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
-        hf_kwargs: Mapping[str, Any],
+        hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         tokenizer = self.info.get_tokenizer()
@@ -969,8 +969,8 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
                 tokenizer, audio_tokens[item_idx], add_special_tokens=False
             )
 
-        feature_extractor = self.info.get_feature_extractor(**hf_kwargs)
-        hf_processor = self.info.get_hf_processor(**hf_kwargs)
+        feature_extractor = self.info.get_feature_extractor(**hf_processor_mm_kwargs)
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
         def get_image_replacement_phi4mm(item_idx: int):
             images = mm_items.get_items(
