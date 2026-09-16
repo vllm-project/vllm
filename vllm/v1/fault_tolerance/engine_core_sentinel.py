@@ -43,6 +43,11 @@ logger = init_logger(__name__)
 
 FT_UTILITY_METHOD = "handle_fault_tolerance"
 
+# How long an engine waits for the other alive engines to check in for the
+# same recovery round. This covers orchestrator dispatch skew (the
+# apply POSTs are fired concurrently),.
+_ROUND_CHECKIN_TIMEOUT_SEC = 10
+
 
 class EngineCoreSentinel:
     """Manages fault tolerance state for a single engine core."""
@@ -58,7 +63,6 @@ class EngineCoreSentinel:
         self.resumed.set()
         self.status_type = EngineStatusType.HEALTHY
         self.fault_info: str | None = None
-        self._dp_reinit_epoch = 0
         self._initial_dp_size = parallel_config.data_parallel_size
         self._dead_dp_ranks: set[int] = set()
         self._recovery_store: TCPStore | None = None
@@ -208,6 +212,7 @@ class EngineCoreSentinel:
     def retry(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
         # Workers replay masks for the cumulative dead set.
         ft_request.params["dead_dp_ranks"] = sorted(self._dead_dp_ranks)
+        self._prepare_round(ft_request)
         self._recover_and_vote(ft_request, terminal=False)
         return self._mark_healthy(ft_request)
 
@@ -247,7 +252,8 @@ class EngineCoreSentinel:
 
         new_dead = self._dead_dp_ranks | newly_dead
         ft_request.params["dead_dp_ranks"] = sorted(new_dead)
-        self._recover_and_vote(ft_request, terminal=True, dead_ranks=new_dead)
+        self._prepare_round(ft_request, dead_ranks=new_dead)
+        self._recover_and_vote(ft_request, terminal=True)
         # Commit the dead set only after the full recovery succeeded.
         self._dead_dp_ranks = new_dead
         logger.info(
@@ -259,37 +265,14 @@ class EngineCoreSentinel:
         )
         return self._mark_healthy(ft_request)
 
-    def _rebuild_dp_store(
-        self,
-        host: str,
-        port: int,
-        is_master: bool,
-        num_clients: int,
-    ) -> None:
-        """Rebuild dp_store when the old store master was removed."""
-        timeout_seconds = self.parallel_config.cpu_distributed_timeout_seconds
-        if timeout_seconds is not None:
-            timeout = timedelta(seconds=timeout_seconds)
-        else:
-            timeout = _get_default_timeout(Backend.GLOO)
-        engine = cast("DPEngineCoreProc", self.engine)
-        engine.dp_store = TCPStore(
-            host,
-            port,
-            num_clients,
-            is_master=is_master,
-            timeout=timeout,
-        )
-
-    def _reinit_groups(
+    def _prepare_round(
         self, ft_request: FaultToleranceRequest, dead_ranks: set[int] | None = None
     ) -> None:
-        """Fill worker params and reinit the engine DP group (dp>1 only).
+        """Fill the round's coordination params.
 
-        For scale_down (dead_ranks given), the TCPStore is rebuilt first if
-        the store master was just removed.
+        The round's rendezvous keys are namespaced by request_id, so every
+        engine must carry the same one.
         """
-        engine = self.engine
         params = ft_request.params
         dead = self._dead_dp_ranks if dead_ranks is None else dead_ranks
         # The rebuilt gloo group contains only alive members; its internal
@@ -297,7 +280,7 @@ class EngineCoreSentinel:
         # the frozen original values.
         alive = sorted(set(range(self._initial_dp_size)) - dead)
         master_ip = self.parallel_config.data_parallel_master_ip
-        if dead_ranks is not None:
+        if self._initial_dp_size > 1 and dead_ranks is not None:
             # The lowest alive rank hosts the TCPStore master; rebuild the
             # store if that rank was just removed.
             alive_before = sorted(
@@ -314,9 +297,8 @@ class EngineCoreSentinel:
         params["dp_master_ip"] = master_ip
         params["dp_group_rank"] = alive.index(self.parallel_config.data_parallel_rank)
         params["dp_group_size"] = len(alive)
-        recovery_round = ft_request.request_id or str(self._dp_reinit_epoch)
+        recovery_round = ft_request.request_id
         params["recovery_round"] = recovery_round
-
         if self._initial_dp_size == 1:
             # dp=1 has no dp_store/dp_group; the engine still hosts the
             # recovery store for its own workers' TP group reinit.
@@ -325,12 +307,60 @@ class EngineCoreSentinel:
             )
             return
 
+        store = cast("DPEngineCoreProc", self.engine).dp_store
+        member_prefix = f"ft_round_member_{recovery_round}"
+        store.set(f"{member_prefix}_{params['dp_group_rank']}", b"1")
+        try:
+            store.wait(
+                [f"{member_prefix}_{r}" for r in range(len(alive))],
+                timedelta(seconds=_ROUND_CHECKIN_TIMEOUT_SEC),
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"[FT] Not all engines joined recovery round "
+                f"'{recovery_round}' within {_ROUND_CHECKIN_TIMEOUT_SEC}s; "
+                f"the same request_id must be sent to every engine."
+            ) from e
+
+    def _rebuild_dp_store(
+        self,
+        host: str,
+        port: int,
+        is_master: bool,
+        num_clients: int,
+    ) -> None:
+        """Rebuild dp_store when the old store master was removed."""
+        timeout_seconds = self.parallel_config.cpu_distributed_timeout_seconds
+        if timeout_seconds is not None:
+            timeout = timedelta(seconds=timeout_seconds)
+        else:
+            timeout = _get_default_timeout(Backend.GLOO)
+        engine = cast("DPEngineCoreProc", self.engine)
+
+        if hasattr(engine, "dp_store"):
+            del engine.dp_store
+        engine.dp_store = TCPStore(
+            host,
+            port,
+            num_clients,
+            is_master=is_master,
+            timeout=timeout,
+        )
+
+    def _reinit_groups(self, ft_request: FaultToleranceRequest) -> None:
+        """Reinit the engine DP group (dp>1) and host the recovery store."""
+        if self._initial_dp_size == 1:
+            return
+        engine = self.engine
+        params = ft_request.params
+        recovery_round = params["recovery_round"]
+        master_ip = params["dp_master_ip"]
         params["recovery_store_port"] = self._coordinate_recovery_store_port(
-            master_ip, recovery_round, is_master=(params["dp_group_rank"] == 0)
+            master_ip, recovery_round, is_master=params["dp_group_rank"] == 0
         )
         with set_current_vllm_config(engine.vllm_config):
             self._reinit_engine_groups(
-                params["dp_group_rank"], len(alive), recovery_round
+                params["dp_group_rank"], params["dp_group_size"], recovery_round
             )
         # Commit the master IP only after the group reinit succeeded, so a
         # failed recovery leaves a consistent state that can be retried.
@@ -340,7 +370,6 @@ class EngineCoreSentinel:
         self,
         ft_request: FaultToleranceRequest,
         terminal: bool,
-        dead_ranks: set[int] | None = None,
     ) -> None:
         """Reinit the engine groups, dispatch the command to workers, then
         all surviving engines vote one success bit over the rebuilt DP group
@@ -352,7 +381,7 @@ class EngineCoreSentinel:
 
         local_error: Exception | None = None
         try:
-            self._reinit_groups(ft_request, dead_ranks=dead_ranks)
+            self._reinit_groups(ft_request)
             engine.model_executor.collective_rpc(
                 "handle_ft_command", args=(ft_request,)
             )
@@ -393,7 +422,6 @@ class EngineCoreSentinel:
         """Reinit the engine DP group (dp>1). Worker group ports are
         coordinated by the workers themselves via the recovery store."""
         engine = cast("DPEngineCoreProc", self.engine)
-        self._dp_reinit_epoch += 1
 
         prefix_store = PrefixStore(f"ft_engine_dp_{recovery_round}", engine.dp_store)
         timeout_seconds = self.parallel_config.cpu_distributed_timeout_seconds
