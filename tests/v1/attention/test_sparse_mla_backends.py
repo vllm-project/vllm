@@ -22,16 +22,24 @@ from tests.v1.attention.utils import (
     create_vllm_config,
 )
 from vllm import _custom_ops as ops
-from vllm.config import HiSparseConfig, SpeculativeConfig, set_current_vllm_config
+from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+from vllm.config import (
+    CUDAGraphMode,
+    HiSparseConfig,
+    SpeculativeConfig,
+    set_current_vllm_config,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     HiSparseConnectorWorker,
 )
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention import mla_attention
 from vllm.model_executor.layers.attention.mla_attention import _use_masked_mha
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     GLOBAL_TOPK_MASK_MAX_BYTES,
     SparseMLACommonImpl,
     SparseMLAPrefillMetadata,
+    _is_masked_mha_available,
     _masked_mha_workspace_fits,
     _topk_mask_shape,
     _use_dense_mha_prefill,
@@ -896,6 +904,75 @@ def test_triton_convert_req_index_to_global_index_decode_only(
     torch.testing.assert_close(result, reference_result, rtol=0, atol=0)
 
 
+def test_index_group_convert_during_piecewise_capture():
+    """In piecewise cudagraph mode the indexer is captured while the convert
+    runs in the following eager break. The convert's side stream must not
+    wait on ``logical_topk_ready`` there: an event recorded inside a captured
+    segment is graph-local, and an eager wait on it raises
+    cudaErrorInvalidValue."""
+    device = torch.device(DEVICE_TYPE)
+    num_tokens, num_topk, num_requests, blocks_per_req, block_size = 8, 128, 4, 4, 16
+
+    logical_topk_indices = torch.randint(
+        0,
+        block_size * blocks_per_req,
+        (num_tokens, num_topk),
+        dtype=torch.int32,
+        device=device,
+    )
+    builder = SparseMLAIndexGroupBuilder(logical_topk_indices)
+    group, layer_index = builder.register_layer(is_index_producing_layer=True)
+    assert layer_index == 0 and group.has_indexer
+
+    req_id = torch.arange(num_tokens, dtype=torch.int32, device=device) % num_requests
+    block_table = torch.arange(
+        num_requests * blocks_per_req, dtype=torch.int32, device=device
+    ).view(num_requests, blocks_per_req)
+    attn_metadata = SimpleNamespace(
+        req_id_per_token=req_id, block_table=block_table, block_size=block_size
+    )
+    expected = triton_convert_req_index_to_global_index(
+        req_id,
+        block_table,
+        logical_topk_indices,
+        BLOCK_SIZE=block_size,
+        NUM_TOPK_TOKENS=num_topk,
+    )
+
+    vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B")
+    marker = torch.zeros(1, device=device)
+    capture_stream = torch.cuda.Stream(device=device)
+    # torch.cuda.stream routes through vLLM's patched torch.cuda.set_stream,
+    # so current_stream() tracks the capture stream as in production.
+    with (
+        torch.cuda.stream(capture_stream),
+        set_forward_context(
+            None, vllm_config, cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE
+        ),
+    ):
+        capture = BreakableCUDAGraphCapture()
+        with capture:
+            marker.add_(1)
+            # Record inside a captured segment, convert in the eager
+            # break — mirrors mla.py -> unified_mla_attention_with_output.
+            group.set_logical_topk_ready(layer_index)
+            capture.add_eager(
+                lambda: group.convert_logical_to_physical_topk(
+                    layer_index,
+                    logical_topk_indices,
+                    attn_metadata,
+                    block_stride_rows=None,
+                    return_valid_counts=False,
+                )
+            )
+            marker.add_(1)
+        capture.replay()
+        capture_stream.synchronize()
+
+    result = group.physical_topk_indices[:num_tokens]
+    torch.testing.assert_close(result, expected, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("block_size", [16])
 @pytest.mark.skipif(
     torch.cuda.get_device_capability() < (9, 0),
@@ -1080,6 +1157,7 @@ def test_flashmla_forward_bf16_kv_slices_req_id_to_mqa_tokens():
         _convert_logical_to_physical_topk=_convert_topk,
         index_group=None,
         index_group_index=0,
+        pcp_dcp_kv_gather=False,
     )
 
     out, _ = FlashMLASparseImpl._forward_bf16_kv(
@@ -1164,6 +1242,33 @@ def test_masked_mha_workspace_guards_long_routing_policy(
     )
 
 
+@pytest.mark.parametrize(
+    ("model_dims", "kv_cache_dtype", "fa_version", "expected"),
+    [
+        pytest.param((128, 512, 128, 64, 128), "auto", 4, True, id="deepseek_v32"),
+        pytest.param((64, 512, 192, 64, 256), "auto", 4, True, id="glm5"),
+        pytest.param((64, 512, 256, 0, 256), "auto", 4, True, id="glm53_flash_nope"),
+        pytest.param((64, 512, 256, 0, 256), "fp8", 4, False, id="quantized_kv"),
+        pytest.param((64, 512, 256, 0, 256), "auto", 3, False, id="no_fa4"),
+        pytest.param((64, 512, 256, 64, 256), "auto", 4, False, id="rope_320"),
+        pytest.param((128, 512, 256, 0, 256), "auto", 4, False, id="wrong_heads"),
+    ],
+)
+def test_is_masked_mha_available_model_dims(
+    monkeypatch, model_dims, kv_cache_dtype, fa_version, expected
+):
+    """The allow-list gates masked MHA per exact model geometry: the DeepSeek-V3.2,
+    GLM-5 and NoPE GLM-5.3-Flash layouts on an SM100-family GPU with FA4 and an
+    unquantized KV cache, nothing else."""
+    import vllm.model_executor.layers.attention.sparse_mla_attention as mod
+
+    monkeypatch.setattr(
+        mod.current_platform, "is_device_capability_family", lambda family: True
+    )
+    monkeypatch.setattr(mod, "get_flash_attn_version", lambda **kwargs: fa_version)
+    assert _is_masked_mha_available(*model_dims, kv_cache_dtype) is expected
+
+
 def test_masked_mha_workspace_fits_accounts_for_batch_and_context():
     """Request count and context chunk length are independent multipliers."""
     base = dict(batch_size=2, max_query_len=2048, max_context_chunk_seq_len=2048)
@@ -1197,6 +1302,7 @@ PREFILL_BATCH_SPECS = {
     [
         pytest.param(128, 128, 64, 128, id="deepseek_hd192_v128"),
         pytest.param(64, 192, 64, 256, id="glm5_hd256_v256"),
+        pytest.param(64, 256, 0, 256, id="glm53_flash_nope_hd256_v256"),
     ],
 )
 def test_sparse_backend_prefill_correctness(
@@ -3257,6 +3363,7 @@ def test_flashmla_fp8_metadata_excludes_zero_token_decode_padding(monkeypatch):
         device=torch.device(DEVICE_TYPE),
         dummy_block_table=torch.zeros(7, 1, device=DEVICE_TYPE),
         max_model_len_tensor=torch.zeros(7, device=DEVICE_TYPE),
+        pcp_dcp_kv_gather=False,
     )
     query_start_loc_cpu = torch.tensor([0, 110, 220, 330, 440, 550, 660, 660])
     common_metadata = SimpleNamespace(
@@ -3363,6 +3470,7 @@ def test_flashmla_fp8_paths_accept_decode_subset(monkeypatch, use_mixed_batch: b
         index_group=None,
         index_group_index=0,
         dcp_world_size=1,
+        pcp_dcp_kv_gather=False,
         need_to_return_lse_for_decode=False,
         _fp8_flash_mla_kernel=run_kernel,
         _convert_logical_to_physical_topk=(
