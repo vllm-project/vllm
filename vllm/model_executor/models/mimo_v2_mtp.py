@@ -255,7 +255,7 @@ class MiMoV2MTP(nn.Module):
         tp_rank = get_tensor_model_parallel_rank()
         tp_size = get_tensor_model_parallel_world_size()
 
-        stacked_params_mapping = [
+        stacked_params_mapping: list[tuple[str, str, str | int]] = [
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
             # Flash format: separate projections → fused qkv_proj
@@ -308,8 +308,11 @@ class MiMoV2MTP(nn.Module):
                 if name_rewritten not in params_dict:
                     continue
                 param = params_dict[name_rewritten]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight, shard_id)
+                weight_loader = getattr(param, "weight_loader", None)
+                if weight_loader is None:
+                    default_weight_loader(param, loaded_weight)
+                else:
+                    weight_loader(param, loaded_weight, shard_id)
                 loaded_params.add(name_rewritten)
                 stacked_matched = True
                 break
@@ -331,8 +334,10 @@ class MiMoV2MTP(nn.Module):
                     0, tp_rank * heads_per_rank, heads_per_rank
                 )
 
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
-            weight_loader(param, loaded_weight)
+            direct_weight_loader = getattr(
+                param, "weight_loader", default_weight_loader
+            )
+            direct_weight_loader(param, loaded_weight)
             loaded_params.add(name)
 
         return loaded_params

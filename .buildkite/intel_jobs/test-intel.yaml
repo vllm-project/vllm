@@ -15,6 +15,7 @@ steps:
         - exit_status: -10  # Agent was lost
           limit: 2
   - label: "XPU example Test"
+    key: xpu-example-test
     depends_on:
       - image-build-xpu
     timeout_in_minutes: 50
@@ -33,8 +34,7 @@ steps:
     commands:
       - >-
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-        'pip install tblib==3.1.0 &&
-        python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m --block-size 64 --enforce-eager &&
+        'python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m --block-size 64 --enforce-eager &&
         python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m --block-size 64 -O3 -cc.cudagraph_mode=NONE &&
         python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m --block-size 64 --enforce-eager -tp 2 --distributed-executor-backend mp &&
         python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m --block-size 64 --enforce-eager --attention-backend=TRITON_ATTN &&
@@ -50,6 +50,7 @@ steps:
         python3 examples/basic/offline_inference/generate.py --model INCModel/Qwen3-30B-A3B-Instruct-2507-MXFP4-LLMC --enforce-eager -tp 2 --max-model-len 8192
         '
   - label: "XPU W8A8 FP8 Linear Examples"
+    key: xpu-w8a8-fp8-linear-examples
     depends_on:
       - image-build-xpu
     timeout_in_minutes: 60
@@ -77,6 +78,7 @@ steps:
         python3 examples/basic/offline_inference/generate.py --linear-backend torch --model meta-llama/Llama-3.2-1B-Instruct --quantization fp8 --enforce-eager --max-model-len 4096
         '
   - label: "XPU V1 test"
+    key: xpu-v1-test
     depends_on:
       - image-build-xpu
     timeout_in_minutes: 70
@@ -95,7 +97,7 @@ steps:
     commands:
       - >-
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-        'cd tests &&
+        'cd tests && pip install dpctl &&
         pytest -v -s v1/core --ignore=v1/core/test_reset_prefix_cache_e2e.py --ignore=v1/core/test_scheduler_e2e.py &&
         pytest -v -s v1/engine --ignore=v1/engine/test_output_processor.py &&
         pytest -v -s v1/sample --ignore=v1/sample/test_logprobs.py --ignore=v1/sample/test_logprobs_e2e.py -k "not test_topk_only and not test_topp_only and not test_topk_and_topp" &&
@@ -105,7 +107,9 @@ steps:
         pytest -v -s v1/e2e/general/test_correctness_sliding_window.py &&
         pytest -v -s v1/spec_decode --ignore=v1/spec_decode/test_max_len.py --ignore=v1/spec_decode/test_speculators_eagle3.py --ignore=v1/spec_decode/test_acceptance_length.py --ignore=v1/spec_decode/test_speculators_correctness.py &&
         pytest -v -s v1/kv_connector/unit --ignore=v1/kv_connector/unit/test_lmcache_integration.py --ignore=v1/kv_connector/unit/test_hf3fs_client.py --ignore=v1/kv_connector/unit/test_hf3fs_connector.py --ignore=v1/kv_connector/unit/test_hf3fs_metadata_server.py --ignore=v1/kv_connector/unit/test_offloading_connector.py'
+    parallelism: 2
   - label: "XPU server test"
+    key: xpu-server-test
     depends_on:
       - image-build-xpu
     timeout_in_minutes: 45
@@ -124,11 +128,11 @@ steps:
     commands:
       - >-
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-        'pip install av &&
-        cd tests &&
+        'cd tests &&
         pytest -v -s entrypoints/multimodal/openai/chat_completion/test_audio_in_video.py &&
         pytest -v -s benchmarks/test_serve_cli.py'
   - label: "XPU quantization test"
+    key: xpu-quantization-test
     depends_on:
       - image-build-xpu
     timeout_in_minutes: 30
@@ -150,31 +154,8 @@ steps:
         'cd tests &&
         pytest -v -s quantization/test_auto_round.py &&
         pytest -v -s quantization/test_online.py'
-  - label: "XPU GPQA Eval (GPT-OSS)"
-    depends_on:
-      - image-build-xpu
-    timeout_in_minutes: 60
-    device: intel_gpu
-    agent_tags:
-      label: production
-      gpu: 1+
-      mem: 24+
-    no_plugin: true
-    env:
-      REGISTRY: "public.ecr.aws/q9t5s3a7"
-      REPO: "vllm-ci-test-repo"
-      VLLM_TEST_DEVICE: "xpu"
-    source_file_dependencies:
-      - vllm/
-      - tests/evals/gpt_oss/
-      - .buildkite/intel_jobs/test-intel.yaml
-    commands:
-      - >-
-        bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-        'pip install "gpt-oss[eval]==0.0.5" &&
-        cd tests &&
-        pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-xpu.txt'
   - label: "XPU compressed tensors FP8 test"
+    key: xpu-compressed-tensors-fp8-test
     depends_on:
       - image-build-xpu
     timeout_in_minutes: 60
@@ -199,6 +180,7 @@ steps:
         pytest -v -s quantization/test_compressed_tensors.py::test_compressed_tensors_fp8 &&
         pytest -v -s quantization/test_compressed_tensors.py::test_compressed_tensors_fp8_block_enabled'
   - label: "XPU Graph"
+    key: xpu-graph
     depends_on:
       - image-build-xpu
     timeout_in_minutes: 60

@@ -37,6 +37,7 @@ Key Classes
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable
 from typing import Any
 
@@ -256,7 +257,7 @@ class HelionKernelWrapper:
         self,
         raw_kernel_func: Callable,
         op_name: str,
-        fake_impl: Callable,
+        fake_impl: Callable | None,
         config_picker: ConfigPicker,
         mutates_args: list[str] | None = None,
         helion_settings: helion.Settings | None = None,
@@ -448,8 +449,12 @@ def register_kernel(
                 f"Use a different op_name or check for duplicate registrations."
             )
 
+        # A void-returning kernel that mutates its args needs no fake impl:
+        # PyTorch auto-generates a trivial one for mutable, no-return schemas.
+        returns_none = inspect.signature(kernel_func).return_annotation is None
+
         final_fake_impl = fake_impl
-        if final_fake_impl is None:
+        if final_fake_impl is None and not (mutates_args and returns_none):
             final_fake_impl = infer_fake_impl(kernel_func, helion_settings)
             logger.debug(
                 "Auto-generated fake_impl for Helion kernel '%s'",

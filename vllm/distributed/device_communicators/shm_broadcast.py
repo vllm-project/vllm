@@ -34,6 +34,7 @@ import vllm.envs as envs
 from vllm.distributed.utils import StatelessProcessGroup, sched_yield
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.cpu_resource_utils import check_cgroup_memory_available
 from vllm.utils.network_utils import (
     get_ip,
     get_open_zmq_inproc_path,
@@ -214,7 +215,7 @@ class SpinCondition:
                 logger.debug("Poller timed out")
 
     def notify(self):
-        """Notifies all readers to wake up."""
+        """Notifies all readers to wake up"""
         assert not self.is_reader, "Only writers can notify"
         self.local_notify_socket.send(b"\x00")
 
@@ -222,27 +223,38 @@ class SpinCondition:
 SHM_PATH = "/dev/shm"
 
 
-def check_shm_free_space(required_bytes: int, shm_path: str = SHM_PATH) -> None:
-    """Raise if ``shm_path`` cannot fit a ``required_bytes`` shared segment.
+def check_shm_free_space(
+    required_bytes: int,
+    shm_path: str = SHM_PATH,
+    *,
+    allocation_name: str = "shared-memory allocation",
+) -> None:
+    """Raise if SHM cannot fit a shared segment and log cgroup headroom.
 
     Args:
         required_bytes: Size of the shared-memory segment to be created.
-        shm_path: Mount point backing POSIX shared memory; skipped if absent.
+        shm_path: Mount point backing POSIX shared memory; its filesystem
+            check is skipped if absent.
+        allocation_name: Human-readable name used in errors and logs.
 
     Raises:
-        RuntimeError: If ``required_bytes`` exceeds the free space.
+        RuntimeError: If the SHM filesystem has insufficient space.
 
     """
-    if not os.path.isdir(shm_path):
-        return
-    free_bytes = shutil.disk_usage(shm_path).free
-    if required_bytes <= free_bytes:
-        return
-    mib = 1 << 20
-    raise RuntimeError(
-        f"Insufficient space in {shm_path}: {required_bytes / mib:.0f} MiB "
-        f"required, {free_bytes / mib:.0f} MiB free. Increase {shm_path} "
-        "(e.g. --shm-size or --ipc=host)."
+    if os.path.isdir(shm_path):
+        free_bytes = shutil.disk_usage(shm_path).free
+        if required_bytes > free_bytes:
+            mib = 1 << 20
+            raise RuntimeError(
+                f"Insufficient space in {shm_path} for {allocation_name}: "
+                f"{required_bytes / mib:.0f} MiB required, "
+                f"{free_bytes / mib:.0f} MiB free. Increase {shm_path} "
+                "(e.g. --shm-size or --ipc=host)."
+            )
+
+    check_cgroup_memory_available(
+        required_bytes,
+        allocation_name,
     )
 
 
@@ -822,7 +834,7 @@ class MessageQueue:
                 break
 
     def enqueue(self, obj, timeout: float | None = None):
-        """Write to message queue with optional timeout (in seconds)."""
+        """Write to message queue with optional timeout (in seconds)"""
         assert self._is_writer, "Only writers can enqueue"
         all_buffers: list[SizedBuffer] = [b""]
         total_bytes = 6  # 2 bytes for oob buffer count, 4 for main buffer size
@@ -885,7 +897,7 @@ class MessageQueue:
         timeout: float | None = None,
         indefinite: bool = False,
     ):
-        """Read from message queue with optional timeout (in seconds)."""
+        """Read from message queue with optional timeout (in seconds)"""
         if self._is_local_reader:
             with self.acquire_read(timeout, indefinite) as buf:
                 overflow = buf[0] == 1

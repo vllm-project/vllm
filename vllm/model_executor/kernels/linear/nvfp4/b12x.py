@@ -3,17 +3,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from typing import Any
-
 import torch
 
 from vllm._custom_ops import scaled_fp4_quant
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
-from vllm.utils.b12x import (
-    b12x_warmup_token_counts,
-)
+from vllm.utils.b12x import B12xWarmupUnit
 from vllm.utils.b12x import (
     get_b12x_blockscaled as _import_b12x_blockscaled,
 )
@@ -54,75 +49,6 @@ def _apply_b12x_nvfp4_linear(
     return output.view(*output_shape)
 
 
-def warmup_b12x_nvfp4_linear(
-    model: torch.nn.Module,
-    *,
-    max_tokens: int,
-    cudagraph_capture_sizes: Iterable[int] = (),
-    output_dtype: torch.dtype = torch.bfloat16,
-) -> int:
-    if not current_platform.is_cuda():
-        return 0
-    if not current_platform.is_device_capability_family(120):
-        return 0
-    if output_dtype not in (torch.bfloat16, torch.float16):
-        output_dtype = torch.bfloat16
-    layer_map: dict[tuple[Any, ...], torch.nn.Module] = {}
-    for layer in model.modules():
-        if not getattr(layer, "b12x_nvfp4_linear", False):
-            continue
-        weight = layer.weight
-        weight_scale = layer.weight_scale
-        n, packed_k = map(int, weight.shape)
-        signature = (
-            weight.device,
-            n,
-            packed_k * 2,
-            weight.dtype,
-            weight_scale.dtype,
-            output_dtype,
-        )
-        layer_map.setdefault(signature, layer)
-    if not layer_map:
-        return 0
-    if _import_b12x_blockscaled() is None:
-        return 0
-
-    token_counts = b12x_warmup_token_counts(
-        max_tokens=max_tokens,
-        cudagraph_capture_sizes=cudagraph_capture_sizes,
-    )
-    warmed = 0
-    last_device: torch.device | None = None
-
-    with torch.inference_mode():
-        for signature, layer in layer_map.items():
-            weight = layer.weight
-            weight_scale = layer.weight_scale
-            k = signature[2]
-            last_device = weight.device
-            for tokens in token_counts:
-                source = torch.zeros(
-                    (tokens, k),
-                    dtype=output_dtype,
-                    device=weight.device,
-                )
-                _apply_b12x_nvfp4_linear(
-                    source,
-                    weight,
-                    weight_scale,
-                    layer.input_global_scale_inv,
-                    layer.alpha,
-                    None,
-                )
-                warmed += 1
-
-        if warmed > 0 and last_device is not None and last_device.type == "cuda":
-            torch.accelerator.synchronize(last_device)
-
-    return warmed
-
-
 class B12xNvFp4LinearKernel(NvFp4LinearKernel):
     """ModelOpt NVFP4 linear through the native B12X SM120 dense GEMM."""
 
@@ -155,7 +81,46 @@ class B12xNvFp4LinearKernel(NvFp4LinearKernel):
             "weight_scale",
             intrinsics.swizzle_block_scale(layer.weight_scale.data),
         )
-        layer.b12x_nvfp4_linear = True
+        layer.b12x_warmup_provider = self
+
+    def get_b12x_warmup_unit(
+        self,
+        layer: torch.nn.Module,
+        token_counts: tuple[int, ...],
+        output_dtype: torch.dtype,
+    ) -> B12xWarmupUnit:
+        weight = layer.weight
+        weight_scale = layer.weight_scale
+        n, packed_k = map(int, weight.shape)
+        k = packed_k * 2
+
+        def compile() -> None:
+            for tokens in token_counts:
+                source = torch.zeros(
+                    (tokens, k), dtype=output_dtype, device=weight.device
+                )
+                _apply_b12x_nvfp4_linear(
+                    source,
+                    weight,
+                    weight_scale,
+                    layer.input_global_scale_inv,
+                    layer.alpha,
+                    None,
+                )
+
+        return B12xWarmupUnit(
+            name="NVFP4",
+            key=(
+                type(self),
+                weight.device,
+                n,
+                k,
+                weight.dtype,
+                weight_scale.dtype,
+                output_dtype,
+            ),
+            compile=compile,
+        )
 
     def apply_weights(
         self,
@@ -173,4 +138,4 @@ class B12xNvFp4LinearKernel(NvFp4LinearKernel):
         )
 
 
-__all__ = ["B12xNvFp4LinearKernel", "warmup_b12x_nvfp4_linear"]
+__all__ = ["B12xNvFp4LinearKernel"]

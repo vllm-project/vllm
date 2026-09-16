@@ -22,6 +22,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
     SharedExpertsOrder,
@@ -33,6 +34,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.worker.ubatching import (
     dbo_enabled,
     dbo_maybe_run_recv_hook,
@@ -95,15 +97,19 @@ class FusedMoEActivationFormat(Enum):
 class ExpertTokensMetadata:
     """Metadata regarding expert-token routing."""
 
-    expert_num_tokens: torch.Tensor
+    expert_num_tokens: torch.Tensor | None
     expert_num_tokens_cpu: torch.Tensor | None
+    psum_recv_per_rank: torch.Tensor | None = None
 
     @staticmethod
     def make_from_list(
         expert_num_tokens_list: list[int], device: str
     ) -> "ExpertTokensMetadata":
         expert_num_tokens_cpu = torch.tensor(
-            expert_num_tokens_list, device="cpu", dtype=torch.int32
+            expert_num_tokens_list,
+            device="cpu",
+            dtype=torch.int32,
+            pin_memory=PIN_MEMORY,
         )
         return ExpertTokensMetadata(
             expert_num_tokens=expert_num_tokens_cpu.to(device, non_blocking=True),
@@ -231,12 +237,6 @@ class FusedMoEPrepareAndFinalize(ABC):
         finalize_async.
         """
         return False
-
-    def on_commit(self) -> None:
-        """Runs after this prepare/finalize has been committed to the active
-        MoE kernel.
-        """
-        return
 
 
 # TODO: pass FusedMoEParallelConfig in as ctor parameter?
@@ -403,6 +403,9 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
     """An abstract base class for the [Quantize-Prepare] and [Finalize] steps
     described above for the monolithic case.
     """
+
+    def supports_deferred_moe_finalize(self) -> bool:
+        return False
 
     @abstractmethod
     def prepare(
@@ -856,6 +859,7 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         *,
         topk_ids: torch.Tensor | None = None,
         expert_map: torch.Tensor | None = None,
+        valid_token_counts: torch.Tensor | None = None,
     ) -> None:
         apply_moe_activation(
             activation,
@@ -864,6 +868,7 @@ class FusedMoEExpertsModular(FusedMoEExperts):
             activation_config=self.activation_config,
             topk_ids=topk_ids,
             expert_map=expert_map,
+            valid_token_counts=valid_token_counts,
         )
 
     @abstractmethod
@@ -905,22 +910,22 @@ class FusedMoEExpertsModular(FusedMoEExperts):
                 MoE layer.
             global_num_experts (int): The total number of experts in the global
                 expert space.
-            expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
-                from the global expert space to the local expert space of the expert
-                parallel shard.
+            expert_map (Optional[torch.Tensor]): A tensor mapping expert indices
+                from the global expert space to the local expert space of the
+                expert parallel shard.
             a1q_scale (Optional[torch.Tensor]): Optional quantized scale to be
-                used for a1.  Result of quantization from prepare/finalize and not
+                used for a1. Result of quantization from prepare/finalize and not
                 from the FusedMoEQuantConfig.
-            a2_scale (Optional[torch.Tensor]): Optional scale for the second MoE
-                gemm, taken from the FusedMoEQuantConfig.
+            a2_scale (Optional[torch.Tensor]): Optional quantized scale to be
+                used for the second gemm's activations.
             workspace13 (torch.Tensor): A scratch tensor used for gemm outputs
                 must be large enough to hold output of either MoE gemm.
             workspace2 (torch.Tensor): A scratch tensor used for the activation
                 function.
             expert_tokens_meta (Optional[ExpertTokensMetadata]): An optional
                 ExpertTokensMetadata object containing gpu/cpu tensors
-                as big as the number of local experts with the information about the
-                number of tokens assigned to each local expert.
+                as big as the number of local experts with the information about
+                the number of tokens assigned to each local expert.
             apply_router_weight_on_input: True if router weights are already
                 applied on the input. This is relevant if the implementation
                 chooses to do weight application.
@@ -1036,10 +1041,10 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
-    ) -> torch.Tensor:
-        """Same as `apply`, except it takes router_logits rather than
-        topk_ids and topk_weights. This is useful for kernels with a fused
-        router and fused_experts (e.g. FLASHINFER_TRTLLM).
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
+        """Same as ``FusedMoEExperts.apply``, except uses router_logits as opposed
+        to the topk_ids and topk_weights. This is useful for kernels
+        with fused router and fused_experts (e.g. FLASHINFER_TRTLLM).
         """
         raise NotImplementedError
 
@@ -1120,6 +1125,24 @@ class FusedMoEKernelModularImpl:
         # time we need cache3, we're done with cache1.
         # Reuse workspace13 for the output since there is only one chunk.
         max_shape_size = max(prod(workspace13_shape), prod(fused_out_shape))
+
+        if current_platform.is_cpu():
+            # Every CPU FusedMoEExpertsModular kernel reports zero-sized
+            # workspace13/workspace2 (it manages its own scratch space
+            # internally) and just needs the output buffer, so skip the
+            # workspace manager entirely here -- it's the one part of this
+            # call graph Dynamo can't trace (ContextVar-based lane lookup),
+            # and CPU never actually needs its cross-chunk memory reuse.
+            common_workspace = torch.empty(
+                (max_shape_size,), dtype=workspace_dtype, device=device
+            )
+            workspace2 = torch.empty(
+                workspace2_shape, dtype=workspace_dtype, device=device
+            )
+            workspace13 = _resize_cache(common_workspace, workspace13_shape)
+            fused_out = _resize_cache(common_workspace, fused_out_shape)
+            return workspace13, workspace2, fused_out
+
         common_workspace, workspace2 = current_workspace_manager().get_simultaneous(
             ((max_shape_size,), workspace_dtype),
             (workspace2_shape, workspace_dtype),
@@ -1334,7 +1357,7 @@ class FusedMoEKernelModularImpl:
             topk_weights: A map of row to expert weights.
             topk_ids: A map of row to expert id.
             apply_router_weight_on_input: True if the router weights were
-                already applied to the input.
+                already applied on the input.
             shared_experts: SharedExperts | None. The shared experts if any.
             shared_experts_input: Optional separate input for shared experts.
                 When latent MoE is used, hidden_states is the latent-projected
@@ -1409,26 +1432,26 @@ class FusedMoEKernelModularImpl:
             hidden_states: (torch.Tensor): The input tensor to the MoE layer.
             w1 (torch.Tensor): The first set of expert weights.
             w2 (torch.Tensor): The second set of expert weights.
-            topk_weights (torch.Tensor): The topk weights applied at the end
-                of the layer.
             topk_ids (torch.Tensor): A map of row to expert id.
-            activation (MoEActivation): The activation function to apply after the first
-                MoE layer.
+            topk_weights (torch.Tensor): The topk weights applied at the end of
+                the layer.
+            activation (MoEActivation): The activation function to apply after
+                the first MoE layer.
             global_num_experts (int): The total number of experts in the global
                 expert space.
-            expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
-                from the global expert space to the local expert space of the expert
-                parallel shard.
+            expert_map (Optional[torch.Tensor]): A tensor mapping expert indices
+                from the global expert space to the local expert space of the
+                expert parallel shard.
             apply_router_weight_on_input (bool): When true, the topk weights are
-                applied directly on the inputs. This is only applicable when topk is
-                1.
+                applied directly on the inputs. This is only applicable when
+                topk is 1.
             shared_experts: SharedExperts | None. The shared experts if any.
             shared_experts_input (Optional[torch.Tensor]): Optional separate
                 input for shared experts. For latent MoE, this is the original
                 hidden_states before latent projection.
 
         Returns:
-        - torch.Tensor: The output tensor after applying the MoE layer.
+            torch.Tensor: The output tensor after applying the MoE layer.
 
         """
         output = torch.empty_like(hidden_states)
@@ -1510,7 +1533,7 @@ class FusedMoEKernelMonolithicImpl:
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         """Same as forward(), except uses router_logits as opposed
         to the topk_ids and topk_weights. This is used for kernels
         that have fused router + experts (e.g. FLASHINFER_TRTLLM).
@@ -1539,9 +1562,14 @@ class FusedMoEKernelMonolithicImpl:
             topk_group=topk_group,
         )
 
-        output = self.prepare_finalize.finalize(fused_out)
-
-        return output
+        if isinstance(fused_out, UnfinalizedMoEOutput):
+            if not self.prepare_finalize.supports_deferred_moe_finalize():
+                raise RuntimeError(
+                    f"{type(self.prepare_finalize).__name__} cannot pass through "
+                    "a deferred MoE output."
+                )
+            return fused_out
+        return self.prepare_finalize.finalize(fused_out)
 
 
 @final
@@ -1622,6 +1650,12 @@ class FusedMoEKernel:
         """
         return self.prepare_finalize.output_is_reduced()
 
+    def supports_deferred_moe_finalize(self) -> bool:
+        return (
+            isinstance(self.prepare_finalize, FusedMoEPrepareAndFinalizeMonolithic)
+            and self.prepare_finalize.supports_deferred_moe_finalize()
+        )
+
     def apply_monolithic(
         self,
         hidden_states: torch.Tensor,
@@ -1637,7 +1671,7 @@ class FusedMoEKernel:
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert isinstance(self.impl, FusedMoEKernelMonolithicImpl)
         return self.impl.apply(
             hidden_states=hidden_states,

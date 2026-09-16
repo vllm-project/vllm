@@ -35,6 +35,7 @@ def create_chat_embeddings(
     encoding_format: Literal["base64", "float"] | NotGiven = NOT_GIVEN,
     continue_final_message: bool = False,
     add_special_tokens: bool = False,
+    padding: str | NotGiven = NOT_GIVEN,
 ) -> CreateEmbeddingResponse:
     """Convenience function for accessing vLLM's Chat Embeddings API,
     which is an extension of OpenAI's existing Embeddings API.
@@ -48,6 +49,7 @@ def create_chat_embeddings(
             "encoding_format": encoding_format,
             "continue_final_message": continue_final_message,
             "add_special_tokens": add_special_tokens,
+            "padding": padding,
         },
     )
 
@@ -280,6 +282,8 @@ def run_siglip(client: OpenAI, model: str):
 
     print("Image embedding output:", response.data[0].embedding)
 
+    # SigLIP is trained with padding to a fixed length and no attention mask, so
+    # text embeddings only line up with image embeddings when they are padded.
     response = create_chat_embeddings(
         client,
         messages=[
@@ -292,6 +296,7 @@ def run_siglip(client: OpenAI, model: str):
         ],
         model=model,
         encoding_format="float",
+        padding="max_length",
     )
 
     print("Text embedding output:", response.data[0].embedding)

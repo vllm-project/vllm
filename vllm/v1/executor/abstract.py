@@ -36,7 +36,7 @@ FailureCallback = Callable[[], None]
 
 
 class Executor(ABC):
-    """Abstract base class for vLLM executors.".
+    """Abstract base class for vLLM executors.
 
     An executor is responsible for executing the model on one device,
     or it can be a distributed executor that can execute the model on multiple devices.
@@ -149,6 +149,14 @@ class Executor(ABC):
 
     def get_kv_cache_specs(self) -> list[dict[str, KVCacheSpec]]:
         return self.collective_rpc("get_kv_cache_spec")
+
+    def get_supported_kv_cache_layouts(self) -> list[list[str]]:
+        """Layouts each worker's backends support, most preferred first."""
+        return self.collective_rpc("get_supported_kv_cache_layouts")
+
+    def set_kv_cache_layout(self, layout_name: str) -> None:
+        """Publish the resolved KV cache layout to the workers."""
+        self.collective_rpc("set_kv_cache_layout", args=(layout_name,))
 
     @overload
     def collective_rpc(

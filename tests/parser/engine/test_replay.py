@@ -83,7 +83,7 @@ def _discover_parsers() -> list[_ParserInfo]:
             raise RuntimeError(
                 f"{obj.__name__} config missing 'TOOL_END' in token_id_terminals"
             )
-        all_vals = set(cfg.terminals.values()) | set(cfg.token_id_terminals.values())
+        all_vals = cfg.terminal_literals | set(cfg.token_id_terminals.values())
         found.append(
             _ParserInfo(
                 parser_cls=obj,
@@ -91,12 +91,13 @@ def _discover_parsers() -> list[_ParserInfo]:
                 samples=build_samples(cfg.name),
                 terminals=sorted(v for v in all_vals if len(v) > 1),
                 tool_end=tool_end,
-                think_end=cfg.terminals.get("THINK_END", ""),
+                think_end=cfg.terminal_literal("THINK_END") or "",
                 tool_start=(
-                    cfg.terminals["TOOL_SECTION_START"]
+                    cfg.terminal_literal("TOOL_SECTION_START")
                     if (ParserState.CONTENT, "TOOL_SECTION_START") in cfg.transitions
-                    else cfg.terminals.get("TOOL_START", "")
-                ),
+                    else cfg.terminal_literal("TOOL_START")
+                )
+                or "",
             )
         )
     if missing_builders:

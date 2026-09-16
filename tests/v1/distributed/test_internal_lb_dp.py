@@ -185,6 +185,9 @@ class MultinodeInternalLBServerManager:
                         self.model_name,
                         sargs,
                         auto_port=False,
+                        max_wait_seconds=int(
+                            os.getenv("VLLM_ENGINE_READY_TIMEOUT_S", "480")
+                        ),
                         env_dict={
                             "VLLM_SERVER_DEV_MODE": "1",
                             current_platform.device_control_env_var: ",".join(

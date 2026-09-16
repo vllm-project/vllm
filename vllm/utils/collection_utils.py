@@ -5,6 +5,7 @@
 This is similar in concept to the `collections` module.
 """
 
+import math
 from collections import defaultdict
 from collections.abc import Callable, Generator, Hashable, Iterable, Mapping, Sequence
 from typing import Generic, Literal, TypeVar
@@ -64,6 +65,13 @@ def is_list_of(
         return all(isinstance(v, typ) for v in value)
 
     assert_never(check)
+
+
+def is_list_of_numbers(value: object) -> bool:
+    """Check every item is an int or finite float, excluding booleans."""
+    return isinstance(value, list) and all(
+        type(v) is int or (type(v) is float and math.isfinite(v)) for v in value
+    )
 
 
 @overload
