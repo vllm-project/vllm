@@ -131,7 +131,7 @@ SMOKE_CONFIGS = [
         id="dflash",
     ),
     pytest.param(
-        "Qwen/Qwen3.5-0.8B-Base",
+        "Qwen/Qwen3.5-0.8B",
         {
             "method": "mtp",
             "num_speculative_tokens": 3,
