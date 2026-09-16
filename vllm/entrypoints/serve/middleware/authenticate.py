@@ -14,7 +14,8 @@ GUARDED_PREFIX = ("/v1", "/v2", "/inference", "/cohere")
 class AuthenticationMiddleware:
     """
     Pure ASGI middleware that authenticates each request by checking
-    if the Authorization Bearer token exists and equals anyof "{api_key}".
+    if the Authorization Bearer token or Anthropic-compatible ``x-api-key``
+    header equals any of "{api_key}".
 
     Notes
     -----
@@ -27,22 +28,28 @@ class AuthenticationMiddleware:
         self.app = app
         self.api_tokens = [hashlib.sha256(t.encode("utf-8")).digest() for t in tokens]
 
-    def verify_token(self, headers: Headers) -> bool:
-        authorization_header_value = headers.get("Authorization")
-        if not authorization_header_value:
-            return False
-
-        scheme, _, param = authorization_header_value.partition(" ")
-        if scheme.lower() != "bearer":
-            return False
-
-        param_hash = hashlib.sha256(param.encode("utf-8")).digest()
-
+    def _token_matches(self, token: str) -> bool:
+        param_hash = hashlib.sha256(token.encode("utf-8")).digest()
         token_match = False
         for token_hash in self.api_tokens:
             token_match |= secrets.compare_digest(param_hash, token_hash)
-
         return token_match
+
+    def verify_token(self, headers: Headers) -> bool:
+        # OpenAI-compatible: Authorization: Bearer <token>
+        authorization_header_value = headers.get("Authorization")
+        if authorization_header_value:
+            scheme, _, param = authorization_header_value.partition(" ")
+            if scheme.lower() == "bearer" and self._token_matches(param):
+                return True
+
+        # Anthropic-compatible: x-api-key: <token>
+        # Used by Anthropic clients and proxies (e.g. LiteLLM) against /v1/messages.
+        api_key = headers.get("x-api-key")
+        if api_key and self._token_matches(api_key):
+            return True
+
+        return False
 
     def __call__(self, scope: Scope, receive: Receive, send: Send) -> Awaitable[None]:
         if (
