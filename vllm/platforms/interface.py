@@ -365,7 +365,7 @@ class Platform:
         try:
             import vllm._C  # noqa: F401
         except ImportError as e:
-            logger.warning_once("Failed to import from vllm._C: %r", e)
+            logger.warning_once("Failed to import from vllm._C: %s", repr(e))
         with contextlib.suppress(ImportError):
             import vllm._moe_C_stable_libtorch  # noqa: F401
 
@@ -1333,6 +1333,24 @@ class Platform:
         Does the current platform support PDL (Programmatic Dependent Launch)?
         """
         return False
+
+    @classmethod
+    def validate_environ(cls, hard_fail: bool) -> None:
+        """
+        Validate environment variables for the current platform.
+        """
+        from vllm import envs
+
+        for env in os.environ:
+            if env.startswith("VLLM_") and env not in envs.environment_variables:
+                if hard_fail:
+                    raise ValueError(
+                        f"Unknown vLLM environment variable detected: {env}"
+                    )
+                else:
+                    logger.warning(
+                        "Unknown vLLM environment variable detected: %s", env
+                    )
 
 
 class UnspecifiedPlatform(Platform):
