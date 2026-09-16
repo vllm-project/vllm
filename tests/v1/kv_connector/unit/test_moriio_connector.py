@@ -294,7 +294,6 @@ def create_vllm_config(
 
 def test_write_mode_saves_local_block_ids():
     """Write mode records local block ids in MoRIIOConnectorMetadata.reqs_to_save."""
-
     # Setup Scheduler and Request
     vllm_config = create_vllm_config(role="kv_producer")
     scheduler = create_scheduler(vllm_config)
@@ -405,7 +404,6 @@ def test_write_mode_with_chunked_prefill_saves_local_block_ids():
 
 def test_read_mode_loads_remote_block_ids():
     """Read mode loads remote block ids into local cache mapping."""
-
     # Setup Scheduler and Request
     vllm_config = create_vllm_config(role="kv_consumer", read_mode=True)
     scheduler = create_scheduler(vllm_config)
@@ -631,7 +629,6 @@ def test_register_kv_caches(mock_parallel_groups):
 )
 def test_moriio_handshake_returns_metadata(mock_parallel_groups):
     """MoRIIO handshake socket returns valid agent metadata over ZMQ."""
-
     ROLE = "kv_consumer"
     vllm_config = create_vllm_config(role=ROLE)
     # Create test kv cache tensors using KVCacheSpec layout
@@ -695,7 +692,8 @@ def test_moriio_handshake_returns_metadata(mock_parallel_groups):
 def test_resolve_host_ip_prefers_extra_config():
     """An explicit ``host_ip`` in kv_connector_extra_config overrides get_ip()
     (so an external router can advertise a routable/internal address); an
-    absent or empty value falls back to get_ip()."""
+    absent or empty value falls back to get_ip().
+    """
     assert resolve_host_ip({"host_ip": "10.0.0.7"}) == "10.0.0.7"
 
     fallback = get_ip()
@@ -749,7 +747,8 @@ def _read_scheduler(
 
 def test_hma_blocks_per_sw_two_groups():
     """A Full + SlidingWindow config runs with HMA and computes block budgets
-    correctly"""
+    correctly
+    """
     scheduler = _read_scheduler(_make_hybrid_kv_cache_config())
     assert scheduler._is_hma_required is True
     # cdiv(32, 16) + 1 == 3 for the sliding-window group, 0 for full attention.
@@ -767,7 +766,8 @@ def test_hma_blocks_per_sw_two_groups():
 def test_is_hma_required(swa_enabled, disable_hma, expected_is_hma):
     """_is_hma_required tracks both the KV cache groups and the
     --disable-hybrid-kv-cache-manager flag. When HMA is off,
-    get_exchange_clipped_blocks must be a no-op."""
+    get_exchange_clipped_blocks must be a no-op.
+    """
     config = (
         _make_hybrid_kv_cache_config() if swa_enabled else _make_test_kv_cache_config()
     )
@@ -780,7 +780,8 @@ def test_is_hma_required(swa_enabled, disable_hma, expected_is_hma):
 
 def test_non_sliding_window_hybrid_is_rejected():
     """A hybrid group that is not sliding-window (e.g. chunked-local
-    attention) must fail closed rather than be silently mistransferred."""
+    attention) must fail closed rather than be silently mistransferred.
+    """
     full_spec = FullAttentionSpec(
         block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16
     )
@@ -814,7 +815,8 @@ def test_non_sliding_window_hybrid_is_rejected():
 
 def test_token_count_basis_uses_full_attention_group():
     """Chunked-prefill token counting must use an unclipped full-attention
-    group (blocks_per_sw == 0), not a clipped sliding-window group."""
+    group (blocks_per_sw == 0), not a clipped sliding-window group.
+    """
     scheduler = _read_scheduler(_make_hybrid_kv_cache_config())
     # Group 0 is the full-attention group
     assert scheduler._full_attn_group_idx == 0
@@ -823,7 +825,8 @@ def test_token_count_basis_uses_full_attention_group():
 
 def test_get_exchange_clipped_blocks_clips_only_sw_group():
     """get_exchange_clipped_blocks keeps the full attn group intact and clips the
-    sliding-window group to its window tail."""
+    sliding-window group to its window tail.
+    """
     scheduler = _read_scheduler(_make_hybrid_kv_cache_config())
     full = [10, 11, 12, 13, 14]
     sw = [20, 21, 22, 23, 24]
@@ -834,7 +837,8 @@ def test_get_exchange_clipped_blocks_clips_only_sw_group():
 
 def test_metadata_hma_block_ids_preserved_per_group():
     """add_new_req stores per-group (BlockIds) block lists unchanged for both
-    read and write, so the hybrid group structure is retained."""
+    read and write, so the hybrid group structure is retained.
+    """
     metadata = MoRIIOConnectorMetadata()
 
     # Assume:

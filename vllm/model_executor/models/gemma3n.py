@@ -185,7 +185,7 @@ class Gemma3nAltUp(nn.Module):
 
 
 class Gemma3nLaurelBlock(nn.Module):
-    """Learned Augmented Residual Layer"""
+    """Learned Augmented Residual Layer."""
 
     def __init__(
         self,
@@ -593,9 +593,7 @@ class Gemma3nDecoderLayer(nn.Module):
     enable_if=lambda vllm_config: vllm_config.cache_config.kv_sharing_fast_prefill
 )
 class Gemma3nSelfDecoder(nn.Module):
-    """
-    Includes altup embedding and self decoder layers
-    """
+    """Includes altup embedding and self decoder layers."""
 
     def __init__(
         self,
@@ -776,9 +774,7 @@ class Gemma3nSelfDecoder(nn.Module):
     enable_if=lambda vllm_config: vllm_config.cache_config.kv_sharing_fast_prefill
 )
 class Gemma3nCrossDecoder(nn.Module):
-    """
-    Cross-decoder layers
-    """
+    """Cross-decoder layers."""
 
     def __init__(
         self,
@@ -818,7 +814,8 @@ class Gemma3nCrossDecoder(nn.Module):
 def _kv_sharing_weights_mapper(config: Gemma3nTextConfig) -> WeightsMapper:
     """KV-shared layers only have q_proj, so qkv_proj packing applies to the
     other layers. Original checkpoints still ship K/V tensors for the shared
-    layers (fine-tuned ones omit them); those are dropped."""
+    layers (fine-tuned ones omit them); those are dropped.
+    """
     first_kv_shared_layer_idx = config.num_hidden_layers - config.num_kv_shared_layers
     return WeightsMapper(
         orig_to_new_substr={

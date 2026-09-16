@@ -18,7 +18,8 @@ from vllm.model_executor.models.cohere_asr import CohereAsrForConditionalGenerat
 def test_get_num_audio_tokens_streaming_estimate(audio_duration_s, expected_tokens):
     """The duration-based estimate must convert ``window_stride`` (seconds) to a
     sample hop and divide by the encoder subsampling factor. Values are pinned to
-    concrete numbers so a rounding regression is actually caught."""
+    concrete numbers so a rounding regression is actually caught.
+    """
     model_config = SimpleNamespace(
         hf_config=SimpleNamespace(
             preprocessor={"window_stride": 0.01, "sample_rate": 16000},

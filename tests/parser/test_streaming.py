@@ -229,7 +229,8 @@ def _boundary_chunks(tokenizer, parser, end_token_id=None):
 
 def test_parse_delta_reasoning_not_dropped_on_boundary(tokenizer, request_obj):
     """Regression: reasoning must not be lost when a multi-token delta
-    spans the reasoning/tool-call boundary."""
+    spans the reasoning/tool-call boundary.
+    """
     parser = make_parser(tokenizer, reasoning=True, tool=True)
     chunks = _boundary_chunks(tokenizer, parser)
     results = stream_chunks(parser, tokenizer, chunks, request_obj)
@@ -247,7 +248,8 @@ def test_parse_delta_reasoning_not_dropped_on_boundary(tokenizer, request_obj):
 
 def test_parse_delta_reasoning_boundary_no_tool_parser(tokenizer, request_obj):
     """When no tool parser is active, boundary-spanning chunks must still
-    preserve reasoning and pass post-</think> text as content."""
+    preserve reasoning and pass post-</think> text as content.
+    """
     parser = make_parser(tokenizer, reasoning=True, tool=False)
     chunks = _boundary_chunks(tokenizer, parser)
     results = stream_chunks(parser, tokenizer, chunks, request_obj)
@@ -261,7 +263,8 @@ def test_parse_delta_reasoning_boundary_no_tool_parser(tokenizer, request_obj):
 
 def test_parse_delta_reasoning_only_no_think_leak(tokenizer, request_obj):
     """Regression: </think> must not leak into content when streaming
-    token-by-token with reasoning=True, tool=False."""
+    token-by-token with reasoning=True, tool=False.
+    """
     parser = make_parser(tokenizer, reasoning=True, tool=False)
     results = stream_text(
         parser, tokenizer, MODEL_OUTPUT, request_obj, prompt_token_ids=[]
@@ -303,7 +306,8 @@ def test_parse_delta_reasoning_only_thinking_disabled(tokenizer, request_obj):
 
 def test_parse_delta_finished_no_flush_without_tool_call_delta(tokenizer, request_obj):
     """When finished=True but the final parse_delta produces no
-    tool-call delta, unstreamed args are not flushed."""
+    tool-call delta, unstreamed args are not flushed.
+    """
     parser = make_parser(tokenizer, reasoning=False, tool=True)
 
     results = stream_text(
@@ -326,7 +330,8 @@ def test_parse_delta_finished_no_flush_without_tool_call_delta(tokenizer, reques
 
 def test_parse_delta_finished_no_extra_args_when_fully_streamed(tokenizer, request_obj):
     """When all args have been streamed, finished=True must not
-    produce extra or duplicate arguments."""
+    produce extra or duplicate arguments.
+    """
     parser = make_parser(tokenizer, reasoning=False, tool=True)
     results = stream_text(
         parser, tokenizer, MODEL_OUTPUT, request_obj, prompt_token_ids=[]
@@ -346,7 +351,8 @@ def test_parse_delta_finished_no_extra_args_when_fully_streamed(tokenizer, reque
 
 def test_parse_delta_finished_appends_remaining_args(tokenizer, request_obj):
     """When finished=True and the tool parser has unstreamed args,
-    parse_delta appends the remaining arguments to the tool-call delta."""
+    parse_delta appends the remaining arguments to the tool-call delta.
+    """
     parser = make_parser(tokenizer, reasoning=False, tool=True)
     token_ids = tokenizer.encode(MODEL_OUTPUT, add_special_tokens=False)
 
@@ -493,7 +499,8 @@ def test_engine_reasoning_hermes_tool_token_by_token(tokenizer, request_obj):
     """Qwen3 engine reasoning + Hermes tool parser, token-by-token.
 
     Sanity check that the mixed engine/non-engine configuration works
-    when tokens arrive one at a time (no deferred content)."""
+    when tokens arrive one at a time (no deferred content).
+    """
     parser = Qwen3ReasoningHermesToolParser(tokenizer)
 
     assert parser._reasoning_parser.engine_based_streaming is True
@@ -520,7 +527,8 @@ def test_engine_reasoning_hermes_tool_boundary(tokenizer, request_obj):
 
     When </think> and <tool_call> are in the same chunk with aligned
     text and token IDs, the engine processes both terminals and returns
-    the <tool_call> text as content."""
+    the <tool_call> text as content.
+    """
     parser = Qwen3ReasoningHermesToolParser(tokenizer)
     end_token_id = parser._reasoning_parser._parser_engine._reasoning_end_token_id
     chunks = _boundary_chunks(tokenizer, parser, end_token_id=end_token_id)
@@ -551,7 +559,8 @@ def test_engine_reasoning_hermes_tool_text_holdback(tokenizer, request_obj):
     Without the fix, finish_streaming() is never called at the
     reasoning->tool transition when _engine_based is False, so the '<'
     is lost and the Hermes parser sees 'tool_call>...' instead of
-    '<tool_call>...'."""
+    '<tool_call>...'.
+    """
     parser = Qwen3ReasoningHermesToolParser(tokenizer)
     vocab = tokenizer.get_vocab()
     think_end_id = vocab["</think>"]
@@ -642,7 +651,8 @@ def test_engine_reasoning_no_tool_batched_content_passthrough(tokenizer, request
     batched delta carries ``</think>`` plus the following content
     (as happens with stream_interval > 1).  The post-``</think>`` text
     must be emitted as content -- not dropped, not reclassified as
-    reasoning -- and the ``</think>`` marker must not leak either way."""
+    reasoning -- and the ``</think>`` marker must not leak either way.
+    """
     parser = Qwen3ReasoningNoToolParser(tokenizer)
     assert parser._reasoning_parser.engine_based_streaming is True
     assert parser._tool_parser is None
@@ -670,7 +680,8 @@ def _decode_stream_deltas(tokenizer, groups):
     This mirrors how vLLM's detokenizer feeds ``parse_delta`` in
     production: byte-level UTF-8 hold-back means a character whose bytes
     span multiple tokens is only surfaced once complete (a naive
-    per-token ``decode`` would instead emit U+FFFD replacement chars)."""
+    per-token ``decode`` would instead emit U+FFFD replacement chars).
+    """
     from tokenizers.decoders import DecodeStream
 
     stream = DecodeStream(skip_special_tokens=False)
@@ -702,7 +713,8 @@ def test_engine_reasoning_hermes_tool_multibyte_holdback(tokenizer, request_obj)
        ``DecodeStream``.  Its UTF-8 hold-back yields the correct
        character round-trip (a naive per-token decode would corrupt it),
        verifying the boundary stays byte-safe for multi-token
-       characters."""
+       characters.
+    """
     parser = Qwen3ReasoningHermesToolParser(tokenizer)
     vocab = tokenizer.get_vocab()
     think_end_id = vocab["</think>"]

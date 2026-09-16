@@ -33,7 +33,8 @@ NUM_TOKENS = 3
 
 class _StubGate(torch.nn.Module):
     """Router stand-in, so the test does not depend on platform-specific
-    ``ReplicatedLinear`` weight post-processing."""
+    ``ReplicatedLinear`` weight post-processing.
+    """
 
     def __init__(self, hidden_size: int, num_experts: int):
         super().__init__()

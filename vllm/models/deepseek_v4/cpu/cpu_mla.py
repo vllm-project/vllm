@@ -118,7 +118,8 @@ class DeepseekV4CPUSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
     ) -> dict[str, FlashMLASchedMeta | None]:
         """CPU never runs the FlashMLA tile-scheduler planner (that's a CUDA
         C++ decode-path concern) -- always return the all-``None`` sentinel
-        the shared base's own CPU branch returns."""
+        the shared base's own CPU branch returns.
+        """
         return {
             _LAYER_TYPE_SWAONLY: None,
             _LAYER_TYPE_C4A: None,

@@ -164,8 +164,7 @@ class Parser:
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
-        """
-        Adjust the request parameters for tool calling.
+        """Adjust the request parameters for tool calling.
 
         Can be overridden by subclasses to modify request parameters
         (e.g., setting structured output schemas for tool calling).
@@ -175,13 +174,13 @@ class Parser:
 
         Returns:
             The adjusted request.
+
         """
         return request
 
     @abstractmethod
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        """
-        Check if the reasoning content ends in the input_ids.
+        """Check if the reasoning content ends in the input_ids.
 
         Called with the rendered prompt to decide whether generation starts
         after reasoning. Must be a pure function of the input_ids.
@@ -191,6 +190,7 @@ class Parser:
 
         Returns:
             True if the reasoning content ends in the input_ids.
+
         """
 
     @abstractmethod
@@ -211,6 +211,7 @@ class Parser:
 
         Returns:
             A tuple of (reasoning, content, tool_calls).
+
         """
 
     @abstractmethod
@@ -233,8 +234,7 @@ class Parser:
 
 
 class DelegatingParser(Parser):
-    """
-    A Parser implementation that delegates to separate ReasoningParser and
+    """A Parser implementation that delegates to separate ReasoningParser and
     ToolParser instances.
 
     This is the recommended base class for creating model-specific parsers

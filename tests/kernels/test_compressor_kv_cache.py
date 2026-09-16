@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Round-trip tests for compressor → FP8 quant + KV cache insert → gather + dequant.
+"""Round-trip tests for compressor → FP8 quant + KV cache insert → gather + dequant.
 
 These tests cover:
   A) DeepseekV4 Attention: head_dim=512 (448 FP8 nope + 64 bf16 rope), quant_block=64
@@ -671,7 +670,8 @@ def test_v41_rope_insert_plain_row(compress_ratio: int, store_fp8: bool):
 def test_v41_compressor_metadata_maps_tokens_to_their_ring():
     """The ring group's generic slot mapping is disabled (all PAD), so the
     builder must map every real token to ``ring_block * capacity + pos %
-    capacity`` and keep padding tokens at PAD."""
+    capacity`` and keep padding tokens at PAD.
+    """
     from unittest.mock import MagicMock
 
     from vllm.models.deepseek_v41.compressor import CompressorMetadataBuilder
@@ -1096,8 +1096,8 @@ def test_get_c128_boundary(starts, query_start_loc, expected):
 @pytest.mark.parametrize("block_size", [16, 64])
 def test_deepseek_v4_attention_quant_cache_roundtrip(num_tokens: int, block_size: int):
     """compressed_kv → quantize_and_insert_k_cache → dequantize_and_gather_k_cache
-    → compare against original."""
-
+    → compare against original.
+    """
     HEAD_DIM = 512
     NOPE_DIM = 448
     HEAD_BYTES = 584  # 448 fp8 + 128 bf16 + 8 uint8 scale
@@ -1308,9 +1308,9 @@ def test_dequantize_and_gather_k_cache(
 @pytest.mark.parametrize("num_tokens", [1, 4, 8, 17])
 @pytest.mark.parametrize("block_size", [16, 64])
 def test_indexer_quant_cache_roundtrip(num_tokens: int, block_size: int):
-    """k → indexer_k_quant_and_cache → cp_gather_indexer_k_quant_cache
-    → manual dequant → compare against original."""
-
+    """K → indexer_k_quant_and_cache → cp_gather_indexer_k_quant_cache
+    → manual dequant → compare against original.
+    """
     HEAD_DIM = 128
     QUANT_BLOCK_SIZE = 128
     # cache_stride = head_dim + (head_dim * 4 / quant_block_size) = 128 + 4 = 132
@@ -1374,7 +1374,6 @@ def test_indexer_quant_cache_roundtrip(num_tokens: int, block_size: int):
 
 def test_indexer_gather_accepts_upper_bound_output():
     """Gather only exact cu_seq_lens even when dst is over-allocated."""
-
     head_dim = 128
     quant_block_size = 128
     cache_stride = head_dim + head_dim * 4 // quant_block_size
@@ -1474,7 +1473,6 @@ def test_indexer_gather_accepts_upper_bound_output():
 
 def test_deepseek_v4_quant_magnitude_range():
     """Test that quantization handles a range of magnitudes correctly."""
-
     HEAD_DIM = 512
     NOPE_DIM = 448
     HEAD_BYTES = 584
