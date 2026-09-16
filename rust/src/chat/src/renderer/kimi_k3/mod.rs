@@ -39,6 +39,8 @@ impl ChatRenderer for KimiK3ChatRenderer {
         request.validate()?;
         let reasoning = encoding::resolve_reasoning(request, &self.default_template_kwargs)?;
         let mut effective_template_kwargs = reasoning.template_kwargs(request);
+        // Export K3's native effort key from the resolved standard controls.
+        // Input `thinking_effort` is ignored; clear it when reasoning is disabled.
         if let Some(effort) = reasoning.effort() {
             effective_template_kwargs
                 .insert("thinking_effort".to_string(), serde_json::json!(effort));

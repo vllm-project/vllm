@@ -381,11 +381,7 @@ fn resolve_reasoning(control: ReasoningControl) -> Result<ReasoningControl> {
         }
     }
     Ok(ReasoningControl::Enabled {
-        effort: effort.map(|effort| {
-            EffortValue::Number(
-                serde_json::Number::from_f64(effort).expect("validated Inkling effort is finite"),
-            )
-        }),
+        effort: effort.map(EffortValue::try_from).transpose()?,
     })
 }
 

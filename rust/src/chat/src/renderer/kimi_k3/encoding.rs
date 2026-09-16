@@ -247,41 +247,22 @@ fn request_tools(request: &ChatRequest) -> &[ChatTool] {
     request.initial_tools()
 }
 
-/// Apply K3's native effort override in each source before inheriting defaults.
+/// Resolve standard reasoning controls and validate K3's supported effort grades.
 pub(super) fn resolve_reasoning(
     request: &ChatRequest,
     defaults: &HashMap<String, Value>,
 ) -> Result<ReasoningControl> {
-    fn with_native_effort(
-        control: ReasoningControl,
-        kwargs: &HashMap<String, Value>,
-    ) -> Result<ReasoningControl> {
-        // Disabled sources discard even malformed native overrides.
-        if matches!(control, ReasoningControl::Disabled) {
-            return Ok(control);
-        }
-        let effort = kwargs.get("thinking_effort").map(EffortValue::try_from).transpose()?;
-        Ok(control.with_effort(effort))
-    }
-
-    let reasoning = with_native_effort(
-        ReasoningControl::from_request(request)?,
-        &request.chat_options.template_kwargs,
-    )?
-    .fallback(with_native_effort(
-        ReasoningControl::from_template_kwargs(defaults)?,
-        defaults,
-    )?)
-    .fallback(ReasoningControl::enabled(DEFAULT_THINKING_EFFORT));
+    let reasoning = ReasoningControl::resolve(request, defaults)?
+        .fallback(ReasoningControl::enabled(DEFAULT_THINKING_EFFORT));
     if let Some(value) = reasoning.effort() {
         let effort = value.as_str().ok_or_else(|| {
             Error::InvalidReasoningEffort(format!(
-                "template kwarg `thinking_effort` must be a string, got {value}"
+                "Kimi K3 reasoning_effort must be a string, got {value}"
             ))
         })?;
         if !VALID_THINKING_EFFORTS.contains(&effort) {
             return Err(Error::InvalidReasoningEffort(format!(
-                "unsupported thinking_effort={effort:?}; supported values are `low`, `high`, and `max`"
+                "unsupported reasoning_effort={effort:?}; supported values are `low`, `high`, and `max`"
             )));
         }
     }

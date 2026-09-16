@@ -46,10 +46,6 @@ fn effort_enables_binary_thinking_and_none_disables_it() {
             rendered.effective_template_kwargs["enable_thinking"],
             enabled
         );
-        assert_eq!(
-            rendered.effective_template_kwargs.get("reasoning_effort").cloned(),
-            if enabled { None } else { Some(json!("none")) }
-        );
     }
 }
 

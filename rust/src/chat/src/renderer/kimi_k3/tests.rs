@@ -37,30 +37,37 @@ fn test_tokenizer() -> TestTokenizer {
 }
 
 #[test]
-fn native_effort_overrides_stay_within_their_request_or_deployment_source() {
+fn standard_effort_controls_prompt_and_exported_native_effort() {
     let tokenizer = Arc::new(test_tokenizer());
-    let renderer = KimiK3ChatRenderer::new(
-        tokenizer.clone(),
-        [("thinking_effort".to_string(), json!("max"))].into(),
-    );
-    for (kwargs, typed, effort) in [
-        (json!({}), Some(EffortValue::from("low")), "low"),
+    for (kwargs, typed, defaults, effort) in [
+        (json!({}), None, json!({}), "max"),
+        (
+            json!({}),
+            Some(EffortValue::from("low")),
+            json!({"reasoning_effort": "high"}),
+            "low",
+        ),
         (
             json!({"enable_thinking": true, "reasoning_effort": "none"}),
             None,
-            "max",
+            json!({"reasoning_effort": "low"}),
+            "low",
         ),
         (
-            json!({"thinking_effort": "high"}),
+            json!({}),
             Some(EffortValue::from("none")),
+            json!({"reasoning_effort": "low"}),
             "none",
         ),
         (
-            json!({"thinking": true, "thinking_effort": "high"}),
+            json!({"thinking": true}),
             Some(EffortValue::from("none")),
-            "high",
+            json!({}),
+            "max",
         ),
     ] {
+        let renderer =
+            KimiK3ChatRenderer::new(tokenizer.clone(), serde_json::from_value(defaults).unwrap());
         let mut request = crate::ChatRequest::for_test();
         request.chat_options.reasoning_effort = typed;
         request.chat_options.template_kwargs = serde_json::from_value(kwargs).unwrap();
@@ -84,39 +91,6 @@ fn native_effort_overrides_stay_within_their_request_or_deployment_source() {
             );
         } else {
             assert!(!rendered.effective_template_kwargs.contains_key("thinking_effort"));
-        }
-    }
-
-    // Each source parses its native override only while reasoning is active.
-    for value in [json!(true), json!(false), json!([]), json!({}), json!(null)] {
-        for disabled in [false, true] {
-            for deployment in [false, true] {
-                let mut source = std::collections::HashMap::from([(
-                    "thinking_effort".to_string(),
-                    value.clone(),
-                )]);
-                if disabled {
-                    source.insert("thinking".to_string(), json!(false));
-                }
-                let mut request = crate::ChatRequest::for_test();
-                let defaults = if deployment {
-                    source
-                } else {
-                    request.chat_options.template_kwargs = source;
-                    Default::default()
-                };
-                let result = KimiK3ChatRenderer::new(tokenizer.clone(), defaults).render(&request);
-                if disabled {
-                    let rendered = result.unwrap();
-                    assert_eq!(
-                        rendered.effective_template_kwargs["reasoning_effort"],
-                        "none"
-                    );
-                    assert!(!rendered.effective_template_kwargs.contains_key("thinking_effort"));
-                } else {
-                    assert!(result.unwrap_err().is_request_validation_error());
-                }
-            }
         }
     }
 }
@@ -154,7 +128,11 @@ fn kimi_k3_fixture_options() -> FixtureRequestOptions {
 
 fn assert_golden(name: &str) {
     let input_name = format!("{name}_input.json");
-    let request = fixture_chat_request(&fixture_path(&input_name), kimi_k3_fixture_options());
+    let mut request = fixture_chat_request(&fixture_path(&input_name), kimi_k3_fixture_options());
+    // Reference fixtures use encoder-native keys; Rust accepts standard effort input.
+    if let Some(effort) = request.chat_options.template_kwargs.remove("thinking_effort") {
+        request.chat_options.reasoning_effort = Some(EffortValue::try_from(effort).unwrap());
+    }
     let rendered = render_request(&request);
     expect_file![format!("fixtures/{name}_output.txt")].assert_eq(&rendered);
 }
@@ -458,19 +436,18 @@ fn translates_standard_thinking_kwargs() {
 }
 
 #[test]
-fn native_k3_kwargs_take_precedence() {
+fn thinking_alias_takes_precedence() {
     let mut request = crate::request::ChatRequest::for_test();
     request.chat_options.template_kwargs.extend([
         ("thinking".to_string(), json!(true)),
         ("enable_thinking".to_string(), json!(false)),
-        ("thinking_effort".to_string(), json!("low")),
         ("reasoning_effort".to_string(), json!("high")),
     ]);
 
     let rendered = render_request(&request);
 
-    assert!(rendered.contains("thinking_effort=low"));
-    assert!(!rendered.contains("thinking_effort=high"));
+    assert!(rendered.contains("thinking_effort=high"));
+    assert!(rendered.ends_with("<|open|>think<|sep|>"));
 }
 
 #[test]
@@ -527,12 +504,9 @@ fn typed_none_disables_thinking() {
 }
 
 #[test]
-fn rejects_removed_medium_thinking_effort() {
+fn rejects_unsupported_standard_reasoning_effort() {
     let mut request = crate::request::ChatRequest::for_test();
-    request
-        .chat_options
-        .template_kwargs
-        .insert("thinking_effort".to_string(), json!("medium"));
+    request.chat_options.reasoning_effort = Some(EffortValue::from("medium"));
 
     let error = KimiK3ChatRenderer::new(Arc::new(test_tokenizer()), Default::default())
         .render(&request)
@@ -540,7 +514,7 @@ fn rejects_removed_medium_thinking_effort() {
 
     expect![[r#"
         InvalidReasoningEffort(
-            "unsupported thinking_effort=\"medium\"; supported values are `low`, `high`, and `max`",
+            "unsupported reasoning_effort=\"medium\"; supported values are `low`, `high`, and `max`",
         )
     "#]]
     .assert_debug_eq(&error);

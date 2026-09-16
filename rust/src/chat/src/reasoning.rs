@@ -36,17 +36,28 @@ pub enum EffortValue {
     Number(Number),
 }
 
-impl TryFrom<&Value> for EffortValue {
+impl TryFrom<Value> for EffortValue {
     type Error = crate::error::Error;
 
-    fn try_from(value: &Value) -> Result<Self> {
+    fn try_from(value: Value) -> Result<Self> {
         match value {
-            Value::String(value) => Ok(Self::String(value.clone())),
-            Value::Number(value) => Ok(Self::Number(value.clone())),
+            Value::String(value) => Ok(Self::String(value)),
+            Value::Number(value) => Ok(Self::Number(value)),
             _ => Err(invalid_reasoning_control!(
                 "reasoning effort must be a string or number, got {value}"
             )),
         }
+    }
+}
+
+impl TryFrom<f64> for EffortValue {
+    type Error = crate::error::Error;
+
+    /// Construct a numeric effort, rejecting NaN and infinities.
+    fn try_from(value: f64) -> Result<Self> {
+        Number::from_f64(value).map(Self::Number).ok_or_else(|| {
+            invalid_reasoning_control!("reasoning effort must be finite, got {value}")
+        })
     }
 }
 
@@ -124,12 +135,19 @@ impl ReasoningControl {
                 })
             })
             .transpose()?;
-        // The typed request field wins over kwargs. A selected JSON null means
-        // omitted effort; keep raw JSON until the toggle decides whether it is used.
-        let effort = typed_effort
-            .map(|effort| json!(effort))
-            .or_else(|| kwargs.get("reasoning_effort").cloned())
-            .filter(|effort| !effort.is_null());
+
+        // The typed request field wins over kwargs. Parse kwargs only when used;
+        // disabled mode discards effort, and JSON null means omitted effort.
+        let effort = match (toggle, typed_effort) {
+            (Some(false), _) => None,
+            (_, Some(effort)) => Some(effort.clone()),
+            (_, None) => kwargs
+                .get("reasoning_effort")
+                .filter(|effort| !effort.is_null())
+                .cloned()
+                .map(EffortValue::try_from)
+                .transpose()?,
+        };
 
         match (toggle, effort) {
             // 1. Explicit false disables reasoning and discards any effort,
@@ -137,7 +155,7 @@ impl ReasoningControl {
             (Some(false), _) => Ok(Self::Disabled),
             // 2. `none` disables reasoning when the toggle is absent. Explicit true
             //    enables reasoning and leaves effort to enabled deployment/model defaults.
-            (toggle, Some(Value::String(effort))) if effort == "none" => {
+            (toggle, Some(EffortValue::String(effort))) if effort == "none" => {
                 Ok(if toggle == Some(true) {
                     Self::Enabled { effort: None }
                 } else {
@@ -147,11 +165,9 @@ impl ReasoningControl {
             // 3. Absent toggle and absent/null effort leave the entire decision
             //    to the next source in the fallback chain.
             (None, None) => Ok(Self::Default),
-            // 4. Explicit true or a concrete effort enables reasoning. Validate
-            //    supplied effort as string/number; missing effort inherits later.
-            (_, effort) => Ok(Self::Enabled {
-                effort: effort.as_ref().map(EffortValue::try_from).transpose()?,
-            }),
+            // 4. Explicit true or a concrete effort enables reasoning;
+            //    missing effort inherits later.
+            (_, effort) => Ok(Self::Enabled { effort }),
         }
     }
 
@@ -176,21 +192,6 @@ impl ReasoningControl {
             (Self::Default, defaults) => defaults,
             (Self::Enabled { effort: None }, Self::Enabled { effort }) => Self::Enabled { effort },
             (request, _) => request,
-        }
-    }
-
-    /// Apply a model-native effort override within one source, before fallback.
-    ///
-    /// Disabled mode discards the override. Otherwise a supplied override enables
-    /// reasoning and replaces this source's effort. The model adapter owns input
-    /// parsing, supported names, and numeric ranges.
-    pub(crate) fn with_effort(self, effort: Option<EffortValue>) -> Self {
-        match (self, effort) {
-            (Self::Disabled, _) => Self::Disabled,
-            (_, Some(effort)) => Self::Enabled {
-                effort: Some(effort),
-            },
-            (control, None) => control,
         }
     }
 
@@ -250,6 +251,13 @@ mod tests {
 
     fn kwargs(value: Value) -> HashMap<String, Value> {
         serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn numeric_effort_rejects_non_finite_values() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(EffortValue::try_from(value).unwrap_err().is_request_validation_error());
+        }
     }
 
     #[test]

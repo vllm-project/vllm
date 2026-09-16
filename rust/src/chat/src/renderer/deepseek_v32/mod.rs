@@ -33,12 +33,6 @@ impl ChatRenderer for DeepSeekV32ChatRenderer {
         request.validate()?;
         let reasoning = ReasoningControl::resolve(request, &self.default_template_kwargs)?
             .fallback(ReasoningControl::Disabled);
-        // V3.2 consumes effort as a binary thinking request.
-        let reasoning = if reasoning.is_enabled() {
-            ReasoningControl::Enabled { effort: None }
-        } else {
-            ReasoningControl::Disabled
-        };
 
         Ok(RenderedPrompt {
             prompt: Prompt::Text(encoding::render_request(request, &reasoning)?),
