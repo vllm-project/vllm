@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from typing import TYPE_CHECKING
+
 import torch
 from compressed_tensors import CompressionFormat
 from compressed_tensors.quantization import (
@@ -18,9 +20,72 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
     WNA16_SUPPORTED_BITS,
 )
+from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
+    should_ignore_layer,
+)
 from vllm.platforms import current_platform
 
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+        CompressedTensorsConfig,
+    )
+
 logger = init_logger(__name__)
+
+_MOE_PREFIX_ALIASES = ((".block_sparse_moe.experts", ".mlp.experts"),)
+_MOE_PROJECTIONS = (
+    ("gate_proj", "ckpt_gate_proj_name"),
+    ("up_proj", "ckpt_up_proj_name"),
+    ("down_proj", "ckpt_down_proj_name"),
+)
+
+
+def _get_moe_scheme_dicts(
+    quant_config: "CompressedTensorsConfig",
+    layer: torch.nn.Module,
+    layer_name: str,
+) -> list[dict | None]:
+    """Resolve each expert projection before falling back to its module class."""
+    prefixes = [layer_name]
+    for left, right in _MOE_PREFIX_ALIASES:
+        for source, target in ((left, right), (right, left)):
+            if source in layer_name:
+                prefixes.append(layer_name.replace(source, target))
+
+    schemes = []
+    for canonical_name, checkpoint_attr in _MOE_PROJECTIONS:
+        projection_names = [canonical_name]
+        checkpoint_name = getattr(layer, checkpoint_attr, canonical_name)
+        if checkpoint_name not in projection_names:
+            projection_names.append(checkpoint_name)
+        candidates = [
+            f"{prefix}.0.{projection_name}"
+            for prefix in prefixes
+            for projection_name in projection_names
+        ]
+
+        if any(
+            should_ignore_layer(
+                candidate,
+                ignore=quant_config.ignore,
+                fused_mapping=quant_config.packed_modules_mapping,
+            )
+            for candidate in candidates
+        ):
+            schemes.append(None)
+            continue
+
+        scheme = None
+        for candidate in candidates:
+            scheme = quant_config.get_scheme_dict(layer, candidate, match_module=False)
+            if scheme is not None:
+                break
+
+        if scheme is None:
+            scheme = quant_config.get_scheme_dict(layer, candidates[0])
+        schemes.append(scheme)
+
+    return schemes
 
 
 class CompressedTensorsMoEMethod(FusedMoEMethodBase):
@@ -33,14 +98,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         # RoutedExperts was made by combining multiple Linears so need to
         # make sure quantization config for Linear can target it
         quant_config._add_fused_moe_to_target_scheme_map()
-        unfused_names = [
-            layer_name + proj_name
-            for proj_name in [".0.gate_proj", ".0.up_proj", ".0.down_proj"]
-        ]
-        # TODO: refactor this to use expert_mapping and check all layer numbers
-        all_scheme_dicts = [
-            quant_config.get_scheme_dict(layer, name) for name in unfused_names
-        ]
+        all_scheme_dicts = _get_moe_scheme_dicts(quant_config, layer, layer_name)
         scheme_dict = all_scheme_dicts.pop()
 
         # multiple schemes found
