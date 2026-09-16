@@ -54,8 +54,7 @@ def _verify_expert_level_sorting(
     valid_length: int,
     total_tokens: int,
 ):
-    """
-    Verify that actual_sorted_ids follows the correct expert-level sorting.
+    """Verify that actual_sorted_ids follows the correct expert-level sorting.
     The kerne limplementation may or may not preserve original token order
     in topk_ids in the final sorted_ids however this does not impact quality.
     """
@@ -96,8 +95,7 @@ def torch_moe_align_block_size(
     expert_map: torch.Tensor | None = None,
     pad_sorted_ids: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Golden torch implementation of moe_align_block_size.
+    """Golden torch implementation of moe_align_block_size.
 
     This function aligns the token distribution across experts to be compatible
     with block size for matrix multiplication by sorting tokens by expert and
@@ -189,7 +187,7 @@ def torch_moe_align_block_size(
 def test_moe_align_block_size(
     m: int, topk: int, num_experts: int, block_size: int, pad_sorted_ids: bool
 ):
-    """Test moe_align_block_size without expert mapping"""
+    """Test moe_align_block_size without expert mapping."""
     topk_ids = torch.zeros((m, topk), device="cuda", dtype=torch.int32)
     for i in range(m):
         experts = torch.randperm(num_experts, device="cuda")[:topk]
@@ -254,7 +252,7 @@ def test_moe_align_block_size_with_expert_map(
     block_size: int,
     mask_inactive_experts: bool,
 ):
-    """Test moe_align_block_size with expert mapping (EP scenario)"""
+    """Test moe_align_block_size with expert mapping (EP scenario)."""
     expert_map = torch.full((num_experts,), -1, device="cuda", dtype=torch.int32)
     local_experts = list(range(0, num_experts, 2))
     for i, expert_id in enumerate(local_experts):
@@ -329,13 +327,15 @@ def test_moe_align_block_size_deterministic():
 
 @pytest.mark.parametrize("max_tokens_per_batch", [13, 16, 512])
 @pytest.mark.parametrize("num_experts", [8, 16, 32, 64])
-@pytest.mark.parametrize("block_size", [8, 16, 32, 64])
-@pytest.mark.parametrize("simulate_empty_batches", [False, True])
+@pytest.mark.parametrize("block_size", [8, 16, 32, 48, 64])
+@pytest.mark.parametrize(
+    "token_distribution", ["random", "alternating_empty", "skewed"]
+)
 def test_batched_moe_align_block_size(
     max_tokens_per_batch: int,
     num_experts: int,
     block_size: int,
-    simulate_empty_batches: bool,
+    token_distribution: str,
 ):
     def ref_outputs(
         expert_num_tokens: torch.Tensor,
@@ -384,15 +384,17 @@ def test_batched_moe_align_block_size(
     # Compute expert_num_tokens
     expert_num_tokens = torch.randint(
         low=0,
-        high=max_tokens_per_batch,
+        high=max_tokens_per_batch + 1,
         size=(num_experts,),
         device="cpu",
         dtype=torch.int32,
     )
-    if simulate_empty_batches:
-        # mark half the batches to have 0 tokens
-        zero_batches = torch.randperm(num_experts)[: num_experts // 2]
-        expert_num_tokens[zero_batches] = 0
+    if token_distribution == "alternating_empty":
+        expert_num_tokens[::2] = 0
+    elif token_distribution == "skewed":
+        expert_num_tokens.zero_()
+        expert_num_tokens[0] = max_tokens_per_batch
+        expert_num_tokens[-1] = 1
 
     # ref outputs
     ref_sorted_ids, ref_expert_ids, ref_num_tokens_post_pad = ref_outputs(

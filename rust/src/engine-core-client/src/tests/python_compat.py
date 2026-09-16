@@ -34,6 +34,7 @@ class FinishReason(IntEnum):
 # Mirror of real SamplingParams; omit_defaults makes fixtures match real maps.
 class EngineCoreSamplingParams(msgspec.Struct, dict=True, omit_defaults=True):
     temperature: float = 1.0
+    watermarking: bool = True
     top_p: float = 1.0
     top_k: int = 0
     seed: int | None = None
@@ -123,6 +124,7 @@ request = EngineCoreRequest(
     mm_features=None,
     sampling_params=EngineCoreSamplingParams(
         temperature=0.8,
+        watermarking=False,
         top_p=0.9,
         top_k=8,
         seed=None,
@@ -421,6 +423,7 @@ class EngineCoreReadyResponse:
     weight_transfer_backend: str | None = None
     enable_sleep_mode: bool = False
     supports_draft_weight_updates: bool = False
+    effective_attention_block_size: int | None = None
 
 
 ready_response = EngineCoreReadyResponse(
@@ -444,6 +447,7 @@ ready_response = EngineCoreReadyResponse(
     weight_transfer_backend="nccl",
     enable_sleep_mode=True,
     supports_draft_weight_updates=True,
+    effective_attention_block_size=64,
     kv_events_config=KVEventsConfig(
         enable_kv_cache_events=True,
         publisher="zmq",

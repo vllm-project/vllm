@@ -10,13 +10,13 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
+from vllm.config import ParallelConfig
 from vllm.multimodal.processing import InputProcessingContext
 
 
 # Helper function to print input IDs with coalesced audio/video tokens.
 def print_input_ids(input_ids):
-    """
-    Print input IDs, compressing consecutive special tokens.
+    """Print input IDs, compressing consecutive special tokens.
     - 151675: <|audio_pad|>
     - 151656: <|video_pad|>
     """
@@ -136,7 +136,6 @@ def test_qwen3_omni_get_updates_use_audio_in_video(
     mock_image_processor,
 ):
     """Test the get_updates_use_audio_in_video method directly."""
-
     from vllm.model_executor.models.qwen3_omni_moe_thinker import (
         Qwen3OmniMoeThinkerMultiModalProcessor,
         Qwen3OmniMoeThinkerProcessingInfo,
@@ -293,6 +292,25 @@ def test_qwen3_omni_text_model_collects_post_deepstack_aux_hidden_states():
     torch.testing.assert_close(aux_hidden_states[0], torch.tensor([[15.0]]))
 
 
+def _dspark_vocab_stub(input_vocab_size: int, draft_vocab_size: int):
+    """A Qwen3 DSpark model with only what `load_weights` reads."""
+    from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
+
+    model = Qwen3DSparkForCausalLM.__new__(Qwen3DSparkForCausalLM)
+    nn.Module.__init__(model)
+    object.__setattr__(
+        model,
+        "config",
+        SimpleNamespace(
+            vocab_size=input_vocab_size,
+            draft_vocab_size=draft_vocab_size,
+        ),
+    )
+    object.__setattr__(model, "target_vocab_size", 100)
+    object.__setattr__(model, "model", Mock(confidence_head=None))
+    return model
+
+
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
     ("input_vocab_size", "draft_vocab_size", "weights", "error"),
@@ -311,22 +329,23 @@ def test_qwen3_omni_text_model_collects_post_deepstack_aux_hidden_states():
 def test_qwen3_dspark_rejects_incomplete_vocab_weights(
     input_vocab_size, draft_vocab_size, weights, error
 ):
-    from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
-
-    model = Qwen3DSparkForCausalLM.__new__(Qwen3DSparkForCausalLM)
-    nn.Module.__init__(model)
-    object.__setattr__(
-        model,
-        "config",
-        SimpleNamespace(
-            vocab_size=input_vocab_size,
-            draft_vocab_size=draft_vocab_size,
-        ),
-    )
-    object.__setattr__(model, "target_vocab_size", 100)
+    model = _dspark_vocab_stub(input_vocab_size, draft_vocab_size)
 
     with pytest.raises(ValueError, match=error):
         model.load_weights(weights)
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("draft_vocab_size", [100, 101])
+def test_qwen3_dspark_accepts_draft_vocab_at_least_target(draft_vocab_size):
+    """A draft vocab >= the target's maps identically, so needs no lm_head/d2t.
+
+    Guards the padded case (draft > target): the draft's unembedding is padded
+    to its physical size, which is not a reduced vocabulary.
+    """
+    model = _dspark_vocab_stub(100, draft_vocab_size)
+
+    model.load_weights([])
 
 
 @pytest.mark.skip_global_cleanup
@@ -351,9 +370,10 @@ def test_dspark_shares_target_embedding_with_smaller_draft_vocabulary():
             attention_backend=None,
             kv_cache_dtype=None,
         ),
-        parallel_config=SimpleNamespace(tensor_parallel_size=1),
+        parallel_config=ParallelConfig(),
         attention_config=SimpleNamespace(backend=None),
         cache_config=SimpleNamespace(),
+        load_config=SimpleNamespace(),
         model_config=SimpleNamespace(get_vocab_size=Mock(return_value=100)),
     )
 
@@ -366,6 +386,10 @@ def test_dspark_shares_target_embedding_with_smaller_draft_vocabulary():
         patch.object(dspark_utils, "replace", side_effect=fake_replace),
         patch(
             "vllm.v1.worker.gpu.spec_decode.eagle.utils.get_pp_group",
+            return_value=SimpleNamespace(world_size=1),
+        ),
+        patch(
+            "vllm.v1.worker.gpu.spec_decode.utils.get_pp_group",
             return_value=SimpleNamespace(world_size=1),
         ),
         patch(

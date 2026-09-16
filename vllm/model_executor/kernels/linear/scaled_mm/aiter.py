@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from typing import ClassVar
+
 import torch
 
 from vllm import _custom_ops as ops
@@ -14,6 +16,8 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
+    QuantKey,
+    kFp8DynamicTokenSym,
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
@@ -69,8 +73,7 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """
-        `AiterInt8ScaledMMLinearKernel` implements a fused version of
+        """`AiterInt8ScaledMMLinearKernel` implements a fused version of
             `output = torch.mm((scale_a * a), (scale_b * b)).to(out_dtype)`
         where scale_a * a and scale_b * b are implemented using numpy-style
         broadcasting.
@@ -148,6 +151,12 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         except Exception:
             return False, "requires aiter library to be installed."
         return True, None
+
+    def input_quant_key(self) -> QuantKey | None:
+        # Does not call get_output_padding() - torch fallbacks
+        # resolve padding from compilation_config, which is unset in
+        # profile_run. This kernel does not pad activations.
+        return kFp8DynamicTokenSym
 
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
@@ -241,6 +250,11 @@ class AiterHipbMMPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
         return True, None
 
+    def input_quant_key(self) -> QuantKey | None:
+        # Same per-token FP8 consume path as
+        # AiterPreshuffledPerTokenFp8ScaledMMLinearKernel.
+        return kFp8DynamicTokenSym
+
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         is_ptpc = (
@@ -317,6 +331,9 @@ class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return AiterPreshuffledPerTokenFp8ScaledMMLinearKernel.is_supported(
             compute_capability
         )
+
+    def input_quant_key(self) -> QuantKey | None:
+        return kFp8DynamicTokenSym
 
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
@@ -462,6 +479,12 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
 class AiterPreshuffledFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     """Aiter FP8 block-scaled GEMM using a pre-shuffled (bpreshuffle) weight."""
 
+    # gemm_a8w8_blockscale_bpreshuffle reads the activation scale column-major.
+    wants_transposed_act_scale: ClassVar[bool] = True
+
+    # process_weights_after_loading shuffles layer.weight to layout (16, 16).
+    preshuffles_weight: ClassVar[bool] = True
+
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -519,8 +542,24 @@ class AiterPreshuffledFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
 
         return True, None
 
+    @staticmethod
+    def _reads_weight_directly(layer: torch.nn.Module) -> bool:
+        """True when something other than apply_weights consumes layer.weight.
+
+        Such a weight must stay in the plain layout: ``is_bmm`` marks a stack
+        of matrices (wo_a), ``skip_weight_relayout`` marks MLA's kv_b_proj.
+        Both are stamped after construction, so can_implement cannot see them.
+        """
+        return bool(
+            getattr(layer, "is_bmm", False)
+            or getattr(layer, "skip_weight_relayout", False)
+        )
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
+
+        if self._reads_weight_directly(layer):
+            return
 
         params = FP8BlockParams.from_layer(layer)
         if params.weight_scale_inv is not None:
@@ -565,11 +604,25 @@ class AiterPreshuffledFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             else params.weight_scale_inv
         )
 
+        # Left unshuffled above; kv_b_proj still reaches here from MLA's
+        # prefill-context path.
+        plain = self._reads_weight_directly(layer)
+
         x_2d = x.view(-1, x.shape[-1])
-        A, As = rocm_aiter_ops.group_fp8_quant(x_2d, transpose_scale=True)
-        output = rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
-            A, params.weight, As, Bs, output_dtype=self.config.out_dtype
-        )
+        A, As = rocm_aiter_ops.group_fp8_quant(x_2d, transpose_scale=not plain)
+        if plain:
+            output = rocm_aiter_ops.gemm_a8w8_blockscale(
+                A,
+                params.weight,
+                As,
+                Bs,
+                list(self.weight_group_shape),
+                output_dtype=self.config.out_dtype,
+            )
+        else:
+            output = rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
+                A, params.weight, As, Bs, output_dtype=self.config.out_dtype
+            )
         if bias is not None:
             output = output + bias
         return output.view(*x.shape[:-1], params.weight.shape[0])
@@ -581,7 +634,11 @@ class AiterPreshuffledFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         As: torch.Tensor,
         Bs: torch.Tensor,
     ) -> torch.Tensor:
-        raise NotImplementedError(
-            "AiterPreshuffledFp8BlockScaledMMKernel overrides apply_weights and "
-            "does not use apply_block_scaled_mm."
+        """Block-scaled GEMM for callers that pre-quantize their activations.
+
+        ``As`` must be column-major; a row-major one will not raise, it just
+        returns wrong numbers for M > 1.
+        """
+        return rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
+            A, B, As, Bs, output_dtype=self.config.out_dtype
         )
