@@ -642,6 +642,9 @@ class DeepSeekV32IndexerDecodeMetadata:
     decode_is_uniform: bool = True
     write_max_decode_len: int = 0
     indices: torch.Tensor | None = None
+    # Views into builder-owned storage, refreshed before each graph replay.
+    fp4_cta_info: torch.Tensor | None = None
+    fp4_total_ctas: int | None = None
 
 
 @dataclass
@@ -919,9 +922,31 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 f"(compress_ratio={self.compress_ratio})."
             )
 
+        if (
+            current_platform.is_rocm()
+            and self.indexer_uses_fp4
+            and (self.compress_ratio != 4 or self.kv_cache_spec.num_states != 64)
+        ):
+            raise ValueError("ROCm MXFP4 indexer requires C4 and 64-token pages")
+
+        self.fp4_cta_info_buffer: torch.Tensor | None = None
         if current_platform.is_rocm() and self.indexer_uses_fp4:
-            if self.compress_ratio != 4 or self.kv_cache_spec.num_states != 64:
-                raise ValueError("ROCm MXFP4 indexer requires C4 and 64-token pages")
+            compilation_config = self.vllm_config.compilation_config
+            max_decode_tokens = max(
+                scheduler_config.max_num_batched_tokens,
+                compilation_config.max_cudagraph_capture_size or 0,
+                max(compilation_config.cudagraph_capture_sizes or (), default=0),
+            )
+            # Stable storage shared by every indexer layer in this attention group.
+            # build() refreshes its contents before eager execution or graph replay.
+            self.fp4_cta_info_buffer = torch.empty(
+                (max(512, max_decode_tokens), 4),
+                dtype=torch.int32,
+                device=self.device,
+            )
+            self.fp4_max_seq_len = (
+                self.vllm_config.model_config.max_model_len // self.compress_ratio
+            )
 
         # Pre-allocate buffers for CUDA graph compatibility when
         if self.compress_ratio > 1:
@@ -1534,6 +1559,27 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 schedule_metadata = self.scheduler_metadata_buffer[: metadata.shape[0]]
                 schedule_metadata[:] = metadata
 
+            fp4_cta_info = None
+            fp4_total_ctas = None
+            if self.fp4_cta_info_buffer is not None and num_decode_tokens > 0:
+                from aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4 import (
+                    compute_varctx_schedule,
+                )
+
+                # FP4 flattens speculative rows before C4 length conversion, so
+                # AITER sees next_n=1 and one exact context bound per output row.
+                assert seq_lens.shape == (num_decode_tokens, 1)
+                parallel_unit_num = max(512, num_decode_tokens)
+                assert parallel_unit_num <= self.fp4_cta_info_buffer.shape[0]
+                _, fp4_cta_info, fp4_total_ctas = compute_varctx_schedule(
+                    seq_lens[:, 0],
+                    block_k=256,
+                    parallel_unit_num=parallel_unit_num,
+                    max_seq_len=self.fp4_max_seq_len,
+                    next_n=1,
+                    cta_info_out=self.fp4_cta_info_buffer[:parallel_unit_num],
+                )
+
             decode_metadata = DeepSeekV32IndexerDecodeMetadata(
                 block_table=block_table,
                 seq_lens=seq_lens,
@@ -1545,6 +1591,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 per_req_decode_lens=self.per_req_decode_lens_buffer[:num_decodes],
                 decode_is_uniform=write_is_uniform,
                 write_max_decode_len=max_decode_len,
+                fp4_cta_info=fp4_cta_info,
+                fp4_total_ctas=fp4_total_ctas,
             )
 
         attn_metadata = DeepseekV32IndexerMetadata(

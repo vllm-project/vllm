@@ -12,6 +12,59 @@ from vllm.config import AttentionConfig
 from vllm.v1.attention.backends.mla import indexer
 
 
+def test_rocm_fp4_decode_forwards_precomputed_schedule(monkeypatch):
+    import torch
+
+    from vllm.model_executor.layers import sparse_attn_indexer as sparse
+
+    scorer = Mock(return_value=torch.zeros((2, 64), dtype=torch.float32))
+    decode_module = ModuleType("aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4")
+    decode_module.flydsl_pa_mqa_logits_fp4 = scorer
+    prefill_module = ModuleType(
+        "aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4_prefill"
+    )
+    prefill_module.flydsl_pa_mqa_logits_fp4_prefill = Mock()
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4",
+        decode_module,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4_prefill",
+        prefill_module,
+    )
+    monkeypatch.setattr(sparse.ops, "top_k_per_row_decode", Mock())
+
+    cta_info = torch.zeros((512, 4), dtype=torch.int32)
+    decode = SimpleNamespace(
+        requires_padding=False,
+        seq_lens=torch.tensor([[64], [64]], dtype=torch.int32),
+        block_table=torch.zeros((2, 1), dtype=torch.int32),
+        fp4_cta_info=cta_info,
+        fp4_total_ctas=512,
+    )
+    metadata = SimpleNamespace(
+        num_prefills=0, num_decodes=2, num_decode_tokens=2, decode=decode
+    )
+    cache = torch.zeros((1, 64, 68), dtype=torch.uint8)
+
+    sparse._rocm_fp4_sparse_attn_indexer(
+        cache,
+        torch.zeros((2, 64, 64), dtype=torch.uint8),
+        torch.zeros((2, 1, 4, 16, 4), dtype=torch.uint8),
+        torch.zeros((2, 64), dtype=torch.float32),
+        128,
+        64,
+        8,
+        torch.empty((2, 8), dtype=torch.int32),
+        metadata,
+    )
+
+    assert scorer.call_args.kwargs["cta_info"] is cta_info
+    assert scorer.call_args.kwargs["total_ctas"] == 512
+
+
 def _config(dtype=None, *, dcp=1, pcp=1):
     attention = (
         AttentionConfig() if dtype is None else AttentionConfig(indexer_kv_dtype=dtype)

@@ -467,6 +467,8 @@ def _rocm_fp4_sparse_attn_indexer(
         assert decode.seq_lens.ndim == 2 and decode.seq_lens.shape[1] == 1
         rows = metadata.num_decode_tokens
         if rows:
+            assert decode.fp4_cta_info is not None
+            assert decode.fp4_total_ctas is not None
             logits = flydsl_pa_mqa_logits_fp4(
                 q_quant[:rows].unsqueeze(1),
                 q_scale[:rows].unsqueeze(1),
@@ -480,6 +482,8 @@ def _rocm_fp4_sparse_attn_indexer(
                 block_k=block_k,
                 kv_block_size=block_size,
                 parallel_unit_num=max(512, rows),
+                cta_info=decode.fp4_cta_info,
+                total_ctas=decode.fp4_total_ctas,
             )
             ops.top_k_per_row_decode(
                 logits,
