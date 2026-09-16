@@ -447,6 +447,7 @@ def _candidate(
     scheme: WatermarkingAlgorithm,
     key: int,
     *,
+    prf: WatermarkPRFName,
     detection_key: int | None = None,
     context_width: int = 4,
     generation_alpha: float = 0.1,
@@ -473,7 +474,7 @@ def _candidate(
             detection_deduplicate_contexts=detection_deduplicate_contexts,
             p_value_threshold=p_value_threshold,
         ),
-        prf="philox",
+        prf=prf,
         key=key,
         detection_key=key if detection_key is None else detection_key,
         fixture=fixture,
@@ -481,18 +482,20 @@ def _candidate(
 
 
 WATERMARKING_CANDIDATES = (
-    _candidate("gumbel-philox-key0-cw1", "gumbel", 0, context_width=1),
-    _candidate("gumbel-philox-key42-cw4", "gumbel", 42),
+    _candidate("gumbel-philox-key0-cw1", "gumbel", 0, prf="philox", context_width=1),
+    _candidate("gumbel-philox-key42-cw4", "gumbel", 42, prf="philox"),
     _candidate(
         "gumbel-philox-key42-cw4-wrong-key",
         "gumbel",
         42,
+        prf="philox",
         detection_key=43,
     ),
     _candidate(
         "gumbel-philox-key2p32-cw5-no-dedup",
         "gumbel",
         2**32,
+        prf="philox",
         context_width=5,
         generation_deduplicate_contexts="none",
         detection_deduplicate_contexts=False,
@@ -501,6 +504,7 @@ WATERMARKING_CANDIDATES = (
         "gumbel-philox-keymax-cw16-all",
         "gumbel",
         2**64 - 1,
+        prf="philox",
         context_width=16,
         generation_deduplicate_contexts="all",
     ),
@@ -508,12 +512,14 @@ WATERMARKING_CANDIDATES = (
         "gumbel-philox-key42-cw4-all",
         "gumbel",
         42,
+        prf="philox",
         generation_deduplicate_contexts="all",
     ),
     _candidate(
         "gumbel-philox-key42-cw4-all-prompt",
         "gumbel",
         42,
+        prf="philox",
         generation_deduplicate_contexts="all",
         fixture=PROMPT_FIXTURE,
     ),
@@ -521,6 +527,7 @@ WATERMARKING_CANDIDATES = (
         "gumbel-philox-key42-cw4-mid-history8",
         "gumbel",
         42,
+        prf="philox",
         generation_deduplicate_contexts_max_history=8,
         fixture=MIDDLE_FIXTURE,
     ),
@@ -528,6 +535,7 @@ WATERMARKING_CANDIDATES = (
         "gumbel-philox-key42-cw4-mid-history-none",
         "gumbel",
         42,
+        prf="philox",
         generation_deduplicate_contexts_max_history=None,
         fixture=MIDDLE_FIXTURE,
     ),
@@ -535,6 +543,7 @@ WATERMARKING_CANDIDATES = (
         "gumbel-philox-key42-cw4-mid-no-dedup",
         "gumbel",
         42,
+        prf="philox",
         generation_deduplicate_contexts="none",
         generation_deduplicate_contexts_max_history=None,
         detection_deduplicate_contexts=False,
@@ -544,6 +553,7 @@ WATERMARKING_CANDIDATES = (
         "gumbel-philox-key42-cw4-mid-all",
         "gumbel",
         42,
+        prf="philox",
         generation_deduplicate_contexts="all",
         generation_deduplicate_contexts_max_history=None,
         fixture=MIDDLE_FIXTURE,
@@ -552,6 +562,7 @@ WATERMARKING_CANDIDATES = (
         "gumbel-philox-key42-cw4-near-threshold",
         "gumbel",
         42,
+        prf="philox",
         p_value_threshold=0.0015,
         fixture=NEAR_THRESHOLD_FIXTURE,
     ),
@@ -559,6 +570,7 @@ WATERMARKING_CANDIDATES = (
         "gumbel-philox-repeated-cw1",
         "gumbel",
         42,
+        prf="philox",
         context_width=1,
         fixture=REPETITIVE_FIXTURE,
     ),
@@ -566,6 +578,7 @@ WATERMARKING_CANDIDATES = (
         "gumbel-philox-repeated-cw4-all",
         "gumbel",
         42,
+        prf="philox",
         generation_deduplicate_contexts="all",
         fixture=REPETITIVE_FIXTURE,
     ),
@@ -573,6 +586,7 @@ WATERMARKING_CANDIDATES = (
         "dual-key-gumbel-philox-key0-cw1-alpha0",
         "dual_key_gumbel",
         0,
+        prf="philox",
         context_width=1,
         generation_alpha=0.0,
     ),
@@ -580,11 +594,13 @@ WATERMARKING_CANDIDATES = (
         "dual-key-gumbel-philox-key0-cw4-alpha0.1",
         "dual_key_gumbel",
         0,
+        prf="philox",
     ),
     _candidate(
         "dual-key-gumbel-philox-key42-cw4-alpha-mismatch",
         "dual_key_gumbel",
         42,
+        prf="philox",
         generation_alpha=0.1,
         detection_alpha=0.2,
     ),
@@ -592,6 +608,7 @@ WATERMARKING_CANDIDATES = (
         "dual-key-gumbel-philox-key2p32-cw5-alpha0.5",
         "dual_key_gumbel",
         2**32,
+        prf="philox",
         context_width=5,
         generation_alpha=0.5,
     ),
@@ -599,6 +616,7 @@ WATERMARKING_CANDIDATES = (
         "dual-key-gumbel-philox-keymax-cw16-alpha1",
         "dual_key_gumbel",
         2**64 - 1,
+        prf="philox",
         context_width=16,
         generation_alpha=1.0,
     ),
@@ -606,12 +624,14 @@ WATERMARKING_CANDIDATES = (
         "dual-key-gumbel-philox-keymax-cw4-alpha0.4",
         "dual_key_gumbel",
         2**64 - 1,
+        prf="philox",
         generation_alpha=0.4,
     ),
     _candidate(
         "dual-key-gumbel-philox-key7-cw4-near-threshold",
         "dual_key_gumbel",
         7,
+        prf="philox",
         p_value_threshold=0.003,
         fixture=NEAR_THRESHOLD_FIXTURE,
     ),
@@ -619,6 +639,7 @@ WATERMARKING_CANDIDATES = (
         "dual-key-gumbel-philox-repeated-cw1",
         "dual_key_gumbel",
         42,
+        prf="philox",
         context_width=1,
         fixture=REPETITIVE_FIXTURE,
     ),
@@ -626,6 +647,7 @@ WATERMARKING_CANDIDATES = (
         "dual-key-gumbel-philox-repeated-cw4-all",
         "dual_key_gumbel",
         42,
+        prf="philox",
         generation_deduplicate_contexts="all",
         fixture=REPETITIVE_FIXTURE,
     ),
@@ -678,6 +700,18 @@ def validate_golden_guards(
     candidates_by_id = {
         candidate.id: candidate for candidate in WATERMARKING_CANDIDATES
     }
+    combinations = {
+        (candidate.scheme, candidate.prf) for candidate in WATERMARKING_CANDIDATES
+    }
+    expected_combinations = configured_algorithm_prf_combinations()
+    if combinations != expected_combinations:
+        missing_combinations = sorted(expected_combinations - combinations)
+        unexpected_combinations = sorted(combinations - expected_combinations)
+        raise GoldenGuardError(
+            "candidate scheme/PRF coverage mismatch: "
+            f"missing {missing_combinations}, unexpected {unexpected_combinations}"
+        )
+
     missing = sorted(set(candidates_by_id) - set(entries))
     if missing:
         raise GoldenGuardError(f"golden entries are missing candidates: {missing}")
@@ -1180,3 +1214,11 @@ def configured_algorithms() -> set[str]:
 
 def configured_prfs() -> set[str]:
     return set(get_args(WatermarkPRFName))
+
+
+def configured_algorithm_prf_combinations() -> set[tuple[str, str]]:
+    return {
+        (algorithm, prf)
+        for algorithm in configured_algorithms()
+        for prf in configured_prfs()
+    }
