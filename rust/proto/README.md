@@ -2,14 +2,13 @@
 
 This directory is the canonical source for vLLM's gRPC schema.
 
-The schema is published to `buf.build/vllm-project/vllm`:
+See [context parallel deployment](../../docs/serving/context_parallel_deployment.md)
+for effective attention block-size metadata in Python and `Control.GetServerInfo`.
 
-- A daily workflow publishes the latest Git `main` schema to the `nightly` label.
-- The workflow can be run manually to retry nightly publication.
-- Tags matching `v*` update the Buf `main` label and publish the corresponding release label.
-- Buf commits and generated SDK versions are immutable and can be pinned by consumers.
-
-Repository setup requires a `BUF_TOKEN` GitHub Actions secret with permission to create and push the public Buf module. Register the Prost and Tonic generated SDKs for the `main` and `nightly` labels once so subsequent pushes generate them automatically.
+Schema updates are no longer published to the Buf Schema Registry. Rust consumers
+should use `vllm-proto` from crates.io; consumers in other languages can generate
+bindings from the `.proto` files in this directory. Buf still builds and lints
+the schemas on pull requests, including on forks.
 
 ## Rust crate
 
@@ -38,8 +37,7 @@ On pull requests and releases, `cargo-semver-checks` compares the crate with its
 latest published version. Include any required version bump in the protocol
 change PR. This check becomes available after the first manual publication.
 
-1. Update the crate version and the `vllm-proto` workspace dependency together,
-   and update `rust/Cargo.lock`.
+1. Update the crate version in `rust/proto/Cargo.toml` and update `rust/Cargo.lock`.
 2. Run `cargo publish --manifest-path rust/proto/Cargo.toml --locked --dry-run`
    and the frontend gRPC tests. Record the tested vLLM releases or revisions in
    the release notes; matching crate versions alone do not establish runtime compatibility.
@@ -47,8 +45,7 @@ change PR. This check becomes available after the first manual publication.
    The `proto-crate.yml` workflow checks that the tag matches the crate version,
    verifies the package, and publishes it to crates.io.
 
-Use `proto-v*` tags so they do not trigger Buf's `v*` release workflow. There is
-no scheduled crate publication. Pull requests and manual workflow runs only
+There is no scheduled crate publication. Pull requests and manual workflow runs only
 verify packaging, including on forks. Retry a failed release by rerunning its
 tag workflow; crates.io versions cannot be overwritten.
 

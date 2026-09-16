@@ -89,6 +89,7 @@ def create_scheduler(
 
     Returns:
       {class}`Scheduler` instance
+
     """
     model_config = ModelConfig(
         model=model,

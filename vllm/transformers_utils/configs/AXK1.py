@@ -6,14 +6,14 @@ from transformers import PretrainedConfig
 
 
 class AXK1Config(PretrainedConfig):
-    r"""
-    This is the configuration class to store the configuration of a [`AXK1Model`].
+    r"""This is the configuration class to store the configuration of a [`AXK1Model`].
     It is used to instantiate an A.X model according to the specified arguments,
     defining the model architecture. Instantiating a configuration with the defaults
     will yield a similar configuration to that of the A.X K1.
     Configuration objects inherit from [`PretrainedConfig`] and can be used to control
     the model outputs. Read the documentation from [`PretrainedConfig`] for more
     information.
+
     Args:
         vocab_size (`int`, *optional*, defaults to 163840):
             Vocabulary size of the A.X K1 model. Defines the number of different
@@ -112,6 +112,7 @@ class AXK1Config(PretrainedConfig):
             layers during self-attention.
         attention_dropout (`float`, *optional*, defaults to 0.0):
             The dropout ratio for the attention probabilities.
+
     """
 
     model_type = "axk1"
