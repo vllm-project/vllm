@@ -15,7 +15,12 @@ from pydantic import BeforeValidator
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
-from vllm.config import ModelConfig, SpeculativeConfig, StructuredOutputsConfig
+from vllm.config import (
+    DiffusionConfig,
+    ModelConfig,
+    SpeculativeConfig,
+    StructuredOutputsConfig,
+)
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
@@ -818,6 +823,7 @@ class SamplingParams(
         speculative_config: SpeculativeConfig | None,
         structured_outputs_config: StructuredOutputsConfig | None,
         tokenizer: TokenizerLike | None,
+        diffusion_config: DiffusionConfig | None = None,
     ) -> None:
         self._validate_logprobs(model_config)
         self._validate_logit_bias(model_config)
@@ -826,7 +832,7 @@ class SamplingParams(
         self._validate_logits_processors(model_config)
         self._validate_allowed_token_ids(model_config)
         self._validate_spec_decode(speculative_config)
-        self._validate_diffusion(model_config)
+        self._validate_diffusion(model_config, diffusion_config)
         self._validate_structured_outputs(
             model_config, structured_outputs_config, tokenizer
         )
@@ -1045,7 +1051,11 @@ class SamplingParams(
                 "are not yet supported with speculative decoding."
             )
 
-    def _validate_diffusion(self, model_config: ModelConfig) -> None:
+    def _validate_diffusion(
+        self,
+        model_config: ModelConfig,
+        diffusion_config: DiffusionConfig | None = None,
+    ) -> None:
         if not model_config.is_diffusion:
             return
 
@@ -1065,6 +1075,69 @@ class SamplingParams(
                 "The temperature, min_p, seed, min_tokens, logit_bias, "
                 "bad_words, and allowed_token_ids sampling parameters "
                 "are not yet supported with diffusion models."
+            )
+        self._validate_diffusion_extra_args(model_config, diffusion_config)
+
+    def _validate_diffusion_extra_args(
+        self,
+        model_config: ModelConfig,
+        diffusion_config: DiffusionConfig | None,
+    ) -> None:
+        """Check the per-request diffusion fields carried in ``extra_args``.
+
+        ``diffusion_seed_canvas`` (list of token ids, one per canvas position)
+        replaces the random initial canvas once the prompt is prefilled,
+        ``diffusion_max_steps`` (int) caps the denoising steps per canvas, and
+        ``diffusion_read_only`` (bool) ends the request on the first canvas it
+        converges. The sampler consumes these on the GPU, where an id outside
+        the vocabulary is a device-side assert, so they are checked here.
+        """
+        extra = self.extra_args
+        if not extra:
+            return
+
+        seed = extra.get("diffusion_seed_canvas")
+        if seed is not None:
+            if not isinstance(seed, (list, tuple)) or not all(
+                isinstance(t, int) and not isinstance(t, bool) for t in seed
+            ):
+                raise VLLMValidationError(
+                    "diffusion_seed_canvas must be a list of token ids.",
+                    parameter="extra_args",
+                )
+            vocab_size = model_config.get_vocab_size()
+            if any(t < 0 or t >= vocab_size for t in seed):
+                raise VLLMValidationError(
+                    f"diffusion_seed_canvas ids must be in [0, {vocab_size}).",
+                    parameter="extra_args",
+                )
+            if (
+                diffusion_config is not None
+                and len(seed) != diffusion_config.canvas_length
+            ):
+                raise VLLMValidationError(
+                    "diffusion_seed_canvas must hold exactly "
+                    f"{diffusion_config.canvas_length} ids, got {len(seed)}.",
+                    parameter="extra_args",
+                )
+
+        cap = extra.get("diffusion_max_steps")
+        if cap is not None and (
+            not isinstance(cap, int) or isinstance(cap, bool) or cap < 1
+        ):
+            raise VLLMValidationError(
+                "diffusion_max_steps must be a positive integer.",
+                parameter="extra_args",
+            )
+
+        # The OpenAI server's vllm_xargs narrows JSON booleans to 0/1.
+        read_only = extra.get("diffusion_read_only")
+        if read_only is not None and (
+            not isinstance(read_only, (bool, int)) or read_only not in (0, 1)
+        ):
+            raise VLLMValidationError(
+                "diffusion_read_only must be a boolean (or 0/1).",
+                parameter="extra_args",
             )
 
     def _validate_structured_outputs(

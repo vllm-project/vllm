@@ -51,6 +51,63 @@ def test_non_diffusion_models_unaffected():
     params.verify(MockModelConfig(), None, None, None)
 
 
+@dataclass
+class MockDiffusionConfig:
+    canvas_length: int = 8
+
+
+def _verify_diffusion(params: SamplingParams, canvas_length: int | None = None):
+    diffusion_config = (
+        MockDiffusionConfig(canvas_length) if canvas_length is not None else None
+    )
+    params.verify(
+        MockModelConfig(is_diffusion=True),
+        None,
+        None,
+        None,
+        diffusion_config=diffusion_config,
+    )
+
+
+@pytest.mark.parametrize(
+    "extra_args, match",
+    [
+        ({"diffusion_seed_canvas": "abc"}, "list of token ids"),
+        ({"diffusion_seed_canvas": [1, 2.5]}, "list of token ids"),
+        ({"diffusion_seed_canvas": [1, True]}, "list of token ids"),
+        ({"diffusion_seed_canvas": [0, 1024]}, r"in \[0, 1024\)"),
+        ({"diffusion_seed_canvas": [0, -1]}, r"in \[0, 1024\)"),
+        ({"diffusion_max_steps": 0}, "positive integer"),
+        ({"diffusion_max_steps": "1"}, "positive integer"),
+        ({"diffusion_max_steps": True}, "positive integer"),
+        ({"diffusion_read_only": "yes"}, "boolean"),
+        ({"diffusion_read_only": 2}, "boolean"),
+    ],
+)
+def test_diffusion_rejects_bad_extra_args(extra_args: dict, match: str):
+    with pytest.raises(VLLMValidationError, match=match):
+        _verify_diffusion(SamplingParams(extra_args=extra_args))
+
+
+def test_diffusion_seed_canvas_must_fill_the_canvas():
+    params = SamplingParams(extra_args={"diffusion_seed_canvas": [0] * 7})
+    with pytest.raises(VLLMValidationError, match="exactly 8 ids, got 7"):
+        _verify_diffusion(params, canvas_length=8)
+    # Without the served diffusion config the canvas length is unknown.
+    _verify_diffusion(params)
+
+
+def test_diffusion_accepts_extra_args():
+    params = SamplingParams(
+        extra_args={
+            "diffusion_seed_canvas": list(range(8)),
+            "diffusion_max_steps": 1,
+            "diffusion_read_only": True,
+        }
+    )
+    _verify_diffusion(params, canvas_length=8)
+
+
 @pytest.mark.parametrize("value", [-(2**63) - 1, 2**64])
 def test_extra_args_rejects_nested_integer_overflow(value):
     """Reject extension values before they reach the engine transport."""

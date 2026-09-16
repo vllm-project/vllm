@@ -99,6 +99,7 @@ class InputProcessor:
                 self.speculative_config,
                 self.structured_outputs_config,
                 self.tokenizer,
+                diffusion_config=self.vllm_config.diffusion_config,
             )
 
             if self.model_config.return_sampling_mask:
