@@ -104,23 +104,18 @@ class PytestCommand:
         """
         return (
             bool(self.dir_targets)
-            and not self.file_targets
+            and (not self.file_targets or self.is_whole_file)
             and self.m_expr is None
             and self.k_expr is None
         )
 
     @property
     def is_whole_file(self) -> bool:
-        """True if the command runs only file targets with no filter.
-
-        A single-file job (e.g. the L4 granite compatibility job) claims its
-        file completely: the file is the target boundary and nothing inside
-        it is split. Shard flags are ignored for the same reason as in
-        ``is_whole_dir`` (parallel instances of one job).
-        """
+        """True if file targets run whole, optionally alongside directories."""
         return (
             bool(self.file_targets)
-            and not self.dir_targets
+            and not self.sharded
+            and all("::" not in target for target in self.file_targets)
             and self.m_expr is None
             and self.k_expr is None
         )
@@ -132,7 +127,7 @@ def _normalize_target(token: str, tree_rel: str) -> str | None:
     Commands in test-area YAMLs run from ``tests/`` (e.g. ``models/language``)
     while hardware YAMLs run from the repo root (e.g. ``tests/models/...``).
     """
-    token = token.split("::")[0].rstrip("/")
+    token = token.rstrip("/")
     if token.startswith("tests/"):
         token = token[len("tests/") :]
     if token == tree_rel or token.startswith(tree_rel + "/"):
@@ -148,7 +143,7 @@ def find_pytest_invocations(command: str) -> list[str]:
     text (``# ...`` before the invocation on the same line) is skipped.
     """
     invocations = []
-    for line in command.splitlines():
+    for line in command.replace("\\\n", " ").splitlines():
         start = 0
         while True:
             idx = line.find("pytest", start)

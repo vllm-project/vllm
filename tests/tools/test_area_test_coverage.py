@@ -60,14 +60,18 @@ def test_partition_filters_detected(tmp_path):
         tmp_path,
         [
             # -k expression and shard flags (env-var style)
-            "pytest -v -s models/language/generation "
-            "-k 'not granite-4.0-tiny-preview' "
-            "--num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT "
-            "--shard-id=$$BUILDKITE_PARALLEL_JOB",
+            (
+                "pytest -v -s models/language/generation "
+                "-k 'not granite-4.0-tiny-preview' "
+                "--num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT "
+                "--shard-id=$$BUILDKITE_PARALLEL_JOB"
+            ),
             # filtered per-file target inside the tree (splits one file's
             # cases off from the rest; an UNFILTERED single-file job is fine)
-            "pytest -v -s models/language/generation/hybrid/test_a.py "
-            "-k 'not granite-4.0-tiny-preview'",
+            (
+                "pytest -v -s models/language/generation/hybrid/test_a.py "
+                "-k 'not granite-4.0-tiny-preview'"
+            ),
             # compound -m partition (splits by test content, not hardware)
             "pytest -v -s models/language -m 'core_model and slow_test'",
             # single marker that is not a lane-capability marker
@@ -105,7 +109,7 @@ def test_cpu_recursive_command_accepted_as_lane_filter(tmp_path):
         tmp_path,
         "generation/hybrid/test_a.py",
         "generation/test_granite_4_hybrid.py",
-        "generation/core/test_c.py",
+        "generation/test_core.py",
         "pooling/test_p.py",
     )
 
@@ -118,7 +122,7 @@ def test_cpu_recursive_command_accepted_as_lane_filter(tmp_path):
 def test_pre_sharding_language_yaml_fails(tmp_path):
     # The pre-change language YAML partitions directories with -k, compound
     # -m expressions and shard flags: the guard must detect them.
-    tree = _make_tree(tmp_path, "generation/core/test_common.py")
+    tree = _make_tree(tmp_path, "generation/test_core.py")
 
     violations, _ = check_coverage(tree, [PRE_SHARDING_YAML])
 
@@ -134,7 +138,7 @@ def test_post_sharding_language_yaml_passes(tmp_path):
         tmp_path,
         "generation/hybrid/test_a.py",
         "generation/test_granite_4_hybrid.py",
-        "generation/core/test_c.py",
+        "generation/test_core.py",
         "pooling/test_p.py",
     )
 
@@ -144,8 +148,10 @@ def test_post_sharding_language_yaml_passes(tmp_path):
 
 
 def test_out_of_tree_commands_ignored(tmp_path):
-    tree = _make_tree(tmp_path, "generation/core/test_c.py")
-    yaml_path = _write_yaml(tmp_path, ["pytest -v -s models/language/generation/core"])
+    tree = _make_tree(tmp_path, "generation/test_core.py")
+    yaml_path = _write_yaml(
+        tmp_path, ["pytest -v -s models/language/generation/test_core.py"]
+    )
     # cpu_kernel command targets files outside the language tree entirely.
     violations, _ = check_coverage(tree, [yaml_path, CPU_LANE_YAML])
 
@@ -196,3 +202,15 @@ def test_real_language_yaml_passes():
     violations, _ = check_coverage(tree, yamls)
 
     assert violations == []
+
+
+def test_mixed_whole_units_reject_partial_file_selection(tmp_path):
+    tree = _make_tree(tmp_path, "test_single.py", "group/test_a.py", "group/test_b.py")
+    command = "pytest models/language/test_single.py models/language/group"
+    assert check_coverage(tree, [_write_yaml(tmp_path, [command])])[0] == []
+    for partial in (
+        command + " --num-shards=2 --shard-id=0",
+        command.replace("test_single.py", "test_single.py::test_x"),
+        command + " -k test_x",
+    ):
+        assert check_coverage(tree, [_write_yaml(tmp_path, [partial])])[0]

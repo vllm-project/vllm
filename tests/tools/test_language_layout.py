@@ -21,7 +21,7 @@ def test_shared_models_helper_is_never_collected(helper: Path):
     """Shared test bodies must not be collected as tests themselves.
 
     The ``_*_models.py`` modules hold the shared bodies of the split
-    ``test_models`` files under ``generation/core/``, ``core_slow/``,
+    ``test_models`` files under ``generation/test_core.py``, ``test_core_slow.py``,
     ``hybrid/`` and ``extended/``. Their leading
     underscore keeps them out of pytest's ``test_*.py`` collection; even
     when a helper is passed to pytest explicitly, it must yield zero

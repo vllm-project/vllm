@@ -16,12 +16,12 @@ steps:
 - label: "Language Models (Core)"
   key: language-models-tests-core
   commands:
-    - pytest -v -s models/language/generation/core
+    - pytest -v -s models/language/generation/test_core.py
   mirror:
     amd:
       label: "Language Models (Core, AMD)"
       commands:
-        - pytest -v -s models/language/generation/core
+        - pytest -v -s models/language/generation/test_core.py
 - label: "Language Models (Pooling)"
   key: language-models-tests-pooling
   commands:

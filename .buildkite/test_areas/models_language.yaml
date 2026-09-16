@@ -12,10 +12,10 @@ steps:
   - tests/models/language
   commands:
     - pip freeze | grep -E 'torch'
-    # The core/ directory is run whole. The pooling selection stays
+    # The core test file is run whole. The pooling selection stays
     # marker-based: pooling is out of the folder-sharding split scope and
     # cannot be one-job-per-directory under the 20-minute budget.
-    - pytest -v -s models/language/generation/core
+    - pytest -v -s models/language/generation/test_core.py
     - pytest -v -s models/language/pooling -m 'core_model and (not slow_test)'
   mirror:
     amd:
@@ -33,15 +33,15 @@ steps:
   source_file_dependencies:
   - vllm/model_executor/models/
   - tests/models/language/pooling/test_embedding.py
-  - tests/models/language/generation/core_slow/
+  - tests/models/language/generation/test_core_slow.py
   - tests/models/language/generation/_common_models.py
   - tests/models/language/pooling/test_classification.py
   commands:
     # Only run when model source is modified, or when specified test files
-    # are modified. core_slow/ is run whole; the pooling slow selection stays
+    # are modified. the core-slow test file is run whole; the pooling slow selection stays
     # marker-based (out of split scope, same as the Standard job).
     - pip freeze | grep -E 'torch'
-    - pytest -v -s models/language/generation/core_slow
+    - pytest -v -s models/language/generation/test_core_slow.py
     - pytest -v -s models/language/pooling -m 'core_model and slow_test'
   mirror:
     amd:
@@ -58,7 +58,7 @@ steps:
       - vllm/v1/attention/backends/
       - vllm/v1/attention/selector.py
       - tests/models/language/pooling/test_embedding.py
-      - tests/models/language/generation/core_slow/
+      - tests/models/language/generation/test_core_slow.py
       - tests/models/language/generation/_common_models.py
       - tests/models/language/pooling/test_classification.py
       - vllm/_aiter_ops.py
