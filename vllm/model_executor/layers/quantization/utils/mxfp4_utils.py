@@ -29,7 +29,8 @@ def should_use_cdna4_mx_scale_swizzle() -> bool:
 
 def weight_mx_scale(precision_config):
     """mxfp4 weight scale from a triton_kernels PrecisionConfig: 3.8 exposes it
-    as b_mx_scale, 3.5.1/3.6 as weight_scale."""
+    as b_mx_scale, 3.5.1/3.6 as weight_scale.
+    """
     if get_triton_kernels_version() == "3.8":
         return precision_config.b_mx_scale
     return precision_config.weight_scale

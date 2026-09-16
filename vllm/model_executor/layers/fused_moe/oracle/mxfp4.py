@@ -72,7 +72,8 @@ if triton_kernels_version is not None:
 
 def _mx_scale_kwargs(scale):
     """PrecisionConfig weight-scale kwargs: 3.8 uses b_mx_scale/b_microblock_size,
-    3.5.1/3.6 use weight_scale."""
+    3.5.1/3.6 use weight_scale.
+    """
     if triton_kernels_version == "3.8":
         return {"b_mx_scale": scale, "b_microblock_size": 32}
     return {"weight_scale": scale}
