@@ -334,9 +334,9 @@ def sparse_mqa_logits_prefill_chunk(
         k_scale: [total_kv] int32 packed UE8M0 K scales.
         weights: [rows, H] bf16 per-head weights; the sparse kernels take
             bf16 and do not fold the Q scale in.
-        cu_seqlen_ks: [rows] int32 per-token K range start in the packed
+        cu_seqlen_ks: [rows] int32 per-token K start bounds in the packed
             workspace.
-        cu_seqlen_ke: [rows] int32 per-token K range end in the packed
+        cu_seqlen_ke: [rows] int32 per-token K end bounds in the packed
             workspace.
         candidate_blocks: [rows, K] int32 request-local candidate block ids.
         candidate_block_size: Positions per candidate block.

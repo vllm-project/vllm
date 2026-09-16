@@ -1483,13 +1483,13 @@ def cutlass_w4a8_moe_mm(
         problem_sizes:
             Per-expert (M, N, K) GEMM sizes used by the grouped GEMM launcher.
         a_strides:
-            Row strides of the per-expert activation tensors.
+            Strides describing the memory layout of a_tensors.
         b_strides:
-            Row strides of the per-expert weight tensors.
+            Strides describing the memory layout of b_tensors.
         c_strides:
-            Row strides of the per-expert output tensors.
+            Strides describing the memory layout of out_tensors.
         group_scale_strides:
-            Row strides of the per-expert group scale tensors.
+            Strides describing the memory layout of b_group_scales.
         maybe_schedule:
             Optional override to choose a specific kernel or epilogue schedule.
 
