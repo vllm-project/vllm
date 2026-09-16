@@ -1054,9 +1054,9 @@ class MooncakeConnectorWorker:
         self.finished_recving_reqs: set[ReqId] = set()
         # Written from the receiver loop, drained from the worker thread.
         self._invalid_block_ids: queue.Queue[set[int]] = queue.Queue()
-        # Matches the scheduler's check in _report_failed_recv: block-level
-        # failure reporting is not supported with multiple KV cache groups.
         self._is_hma_required = len(kv_cache_config.kv_cache_groups) > 1
+        # Block IDs are only unique within a group, so with multiple groups
+        # load failures are reported per request instead.
         self._failed_recv_reqs: queue.Queue[ReqId] = queue.Queue()
 
         self.xfer_stats = MooncakeKVConnectorStats()

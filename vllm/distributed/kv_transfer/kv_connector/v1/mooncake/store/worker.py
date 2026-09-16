@@ -1575,8 +1575,6 @@ class MooncakeStoreWorker:
             and not self.can_put
         )
         self.cache_config = vllm_config.cache_config
-        # Matches the scheduler's check in _report_failed_recv: block-level
-        # failure reporting is not supported with multiple KV cache groups.
         self._is_hma_required = len(kv_cache_config.kv_cache_groups) > 1
         self.block_size, self.hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
