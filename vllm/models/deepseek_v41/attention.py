@@ -609,8 +609,12 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                     block_size=self.swa_cache_layer.block_size,
                 )
 
+            # Every backend that gathers a chunk's KV through
+            # combine_topk_swa_indices needs its Triton kernel warmed, mega
+            # attention included -- it calls it from _forward_prefill_mega.
             if self.backend_cls.get_name() in (
                 "FLASHMLA_SPARSE_DSV41",
+                "FLASHMLA_MEGA_ATTN_DSV41",
                 "ROCM_FLASHMLA_SPARSE_DSV4",
             ):
                 from vllm.models.deepseek_v41.common.ops.cache_utils import (

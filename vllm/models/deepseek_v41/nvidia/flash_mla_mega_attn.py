@@ -145,6 +145,30 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
 
     backend_cls = FlashMLAMegaAttnBackend
 
+    @classmethod
+    def is_available_for(cls, vllm_config: VllmConfig) -> bool:
+        """Whether this layer can serve the configured model on this device.
+
+        The kernel is SM100-only and wants ``WV_GROUP_SIZE`` heads per ``wo_a``
+        group, which stops holding once TP divides the head count far enough
+        (TP16 on a 64-head model leaves 4). ``__init__`` raises on both, so the
+        default-backend selector asks here first rather than turning an
+        unsupported topology into a startup crash.
+        """
+        if not is_flashmla_mega_attn_supported()[0]:
+            return False
+        config = vllm_config.model_config.hf_config
+        config = getattr(config, "text_config", config)
+        n_heads = getattr(config, "num_attention_heads", 0) or 0
+        n_groups = getattr(config, "o_groups", 0) or 0
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
+        if n_heads % tp_size or n_groups % tp_size:
+            return False
+        n_local_heads, n_local_groups = n_heads // tp_size, n_groups // tp_size
+        if not n_local_groups or n_local_heads % WV_GROUP_SIZE:
+            return False
+        return n_local_heads // n_local_groups == WV_GROUP_SIZE
+
     def __init__(self, vllm_config: VllmConfig, *args, **kwargs) -> None:
         super().__init__(vllm_config, *args, **kwargs)
         if self.n_local_heads % WV_GROUP_SIZE:
