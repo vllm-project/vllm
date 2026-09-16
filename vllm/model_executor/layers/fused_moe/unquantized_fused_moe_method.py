@@ -21,6 +21,7 @@ from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
     convert_to_unquantized_kernel_format,
+    expected_activation_format,
     make_unquantized_moe_kernel,
     select_unquantized_moe_backend,
 )
@@ -197,6 +198,26 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 f"Cannot switch unquantized MoE backend "
                 f"{self.unquantized_backend.value} -> {backend.value} in "
                 f"place: they do not share a weight layout."
+            )
+
+        # Checked before the dry_run return, for the same reason the fp8 helper
+        # does: a dry run that passed must not be followed by a rebuild that
+        # asserts. The oracle's LoRA branch returns TritonExperts whatever the
+        # activation format and its TPU/OOT branches return no class at all;
+        # either passes the layout check above and would then trip the
+        # kernel's activation-format assert inside the real rebuild.
+        if experts_cls is None:
+            raise ValueError(
+                f"Cannot rebuild the unquantized MoE kernel in place: the "
+                f"{backend.value} backend selects no experts class."
+            )
+        expected = expected_activation_format(self.moe)
+        if experts_cls.activation_format() != expected:
+            raise ValueError(
+                f"Cannot rebuild the unquantized MoE kernel in place: "
+                f"{experts_cls.__name__} takes the "
+                f"{experts_cls.activation_format().name} activation format but "
+                f"the current all2all backend hands it {expected.name}."
             )
 
         if dry_run:

@@ -626,7 +626,7 @@ def assert_same_fp8_weight_layout(old: Fp8MoeBackend, new: Fp8MoeBackend) -> Non
         f"format, and the auto choice for one role may have no batched "
         f"counterpart -- on Hopper with block-FP8 and EP, vLLM prefers "
         f"FLASHINFER_CUTLASS, which does convert layout. Pin moe_backend to "
-        f"deepgemm or triton so both roles use a layout-sharing pair."
+        f"deep_gemm or triton so both roles use a layout-sharing pair."
     )
 
 

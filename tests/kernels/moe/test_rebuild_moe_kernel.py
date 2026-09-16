@@ -73,7 +73,9 @@ def test_assert_same_fp8_weight_layout_matrix(old, new):
     # the refused switch and the way out of it.
     assert f"{old.value} -> {new.value}" in message
     assert "do not share a weight layout" in message
-    assert "Pin moe_backend" in message
+    # "deepgemm" is not a value --moe-backend accepts; the fix it names must
+    # be one the operator can type.
+    assert "Pin moe_backend to deep_gemm or triton" in message
 
 
 def _method(backend: Fp8MoeBackend) -> SimpleNamespace:
@@ -228,14 +230,21 @@ def test_allow_vllm_cutlass_is_forwarded_to_the_selection():
     assert select.call_args.kwargs["allow_vllm_cutlass"] is True
 
 
-def test_unquantized_rebuild_restores_the_fields_when_the_kernel_build_fails():
-    """The unquantized path assigns first, so it must restore on failure.
+_UNQUANTIZED_SELECT = (
+    "vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method"
+    ".select_unquantized_moe_backend"
+)
 
-    _init_moe_kernel reads the backend and experts class off self, which
-    forces the assignment before the call; a failure inside it has to put
-    the previous pair back or the method is left naming a kernel it never
-    built.
-    """
+
+def _experts_cls(name: str, activation_format):
+    """A stand-in experts class reporting one activation format."""
+    return type(
+        name, (), {"activation_format": staticmethod(lambda: activation_format)}
+    )
+
+
+def _unquantized_method(batched: bool):
+    """A stand-in unquantized method whose config wants one activation format."""
     from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
         UnquantizedMoeBackend,
     )
@@ -244,16 +253,85 @@ def test_unquantized_rebuild_restores_the_fields_when_the_kernel_build_fails():
     )
 
     method = object.__new__(UnquantizedFusedMoEMethod)
-    method.moe = Mock()
+    method.moe = SimpleNamespace(
+        moe_parallel_config=SimpleNamespace(use_batched_activation_format=batched),
+        moe_backend=None,
+    )
     method.unquantized_backend = UnquantizedMoeBackend.TRITON
     method.experts_cls = object
     method.moe_kernel = "outgoing"
+    return method
+
+
+def test_unquantized_dry_run_refuses_a_class_of_the_wrong_activation_format():
+    """The oracle's LoRA branch returns TritonExperts whatever the format.
+
+    Under a batched backend that class would pass the layout check (TRITON
+    is the incumbent) and then trip the kernel's activation-format assert
+    inside the real rebuild. The dry run has to refuse it first.
+    """
+    from vllm.model_executor.layers.fused_moe.modular_kernel import (
+        FusedMoEActivationFormat,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+        UnquantizedMoeBackend,
+    )
+
+    method = _unquantized_method(batched=True)
+    standard = _experts_cls("TritonExperts", FusedMoEActivationFormat.Standard)
 
     with (
         patch(
-            "vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method"
-            ".select_unquantized_moe_backend",
-            return_value=(UnquantizedMoeBackend.BATCHED_TRITON, type("New", (), {})),
+            _UNQUANTIZED_SELECT, return_value=(UnquantizedMoeBackend.TRITON, standard)
+        ),
+        pytest.raises(ValueError, match="Standard activation format"),
+    ):
+        method.rebuild_moe_kernel(Mock(), dry_run=True)
+
+    assert method.unquantized_backend is UnquantizedMoeBackend.TRITON
+    assert method.experts_cls is object
+
+
+def test_unquantized_dry_run_refuses_a_backend_with_no_experts_class():
+    """TPU and OOT select no class; the real rebuild would assert on None."""
+    from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+        UnquantizedMoeBackend,
+    )
+
+    method = _unquantized_method(batched=False)
+
+    with (
+        patch(_UNQUANTIZED_SELECT, return_value=(UnquantizedMoeBackend.TRITON, None)),
+        pytest.raises(ValueError, match="selects no experts class"),
+    ):
+        method.rebuild_moe_kernel(Mock(), dry_run=True)
+
+
+def test_unquantized_rebuild_restores_the_fields_when_the_kernel_build_fails():
+    """The unquantized path assigns first, so it must restore on failure.
+
+    _init_moe_kernel reads the backend and experts class off self, which
+    forces the assignment before the call; a failure inside it has to put
+    the previous pair back or the method is left naming a kernel it never
+    built.
+    """
+    from vllm.model_executor.layers.fused_moe.modular_kernel import (
+        FusedMoEActivationFormat,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+        UnquantizedMoeBackend,
+    )
+    from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+        UnquantizedFusedMoEMethod,
+    )
+
+    method = _unquantized_method(batched=True)
+    batched = _experts_cls("New", FusedMoEActivationFormat.BatchedExperts)
+
+    with (
+        patch(
+            _UNQUANTIZED_SELECT,
+            return_value=(UnquantizedMoeBackend.BATCHED_TRITON, batched),
         ),
         patch.object(
             UnquantizedFusedMoEMethod,
