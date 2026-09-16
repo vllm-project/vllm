@@ -15,7 +15,16 @@ from vllm.v1.attention.backends.mla import indexer
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV4IndexerBackend,
     DeepseekV32IndexerMetadataBuilder,
+    DeepseekV41IndexerBackend,
 )
+
+
+def _make_indexer_config(*, architecture: str, adaptive: bool):
+    return SimpleNamespace(
+        model_config=SimpleNamespace(architectures=[architecture]),
+        num_speculative_tokens=1,
+        speculative_config=SimpleNamespace(enable_adaptive_verification=adaptive),
+    )
 
 
 def _make_indexer_builder(*, adaptive: bool, capacity: int = 12):
@@ -59,16 +68,15 @@ def test_deepseek_v4_rocm_adaptive_builders_support_varlen_full_graphs():
 @pytest.mark.cpu_test
 def test_deepseek_v4_rocm_adaptive_indexer_support(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(indexer.current_platform, "is_rocm", lambda: True)
-    adaptive_config = SimpleNamespace(
-        num_speculative_tokens=1,
-        speculative_config=SimpleNamespace(enable_adaptive_verification=True),
+    adaptive_config = _make_indexer_config(
+        architecture="DeepseekV4ForCausalLM", adaptive=True
     )
-    fixed_config = SimpleNamespace(
-        num_speculative_tokens=1,
-        speculative_config=SimpleNamespace(enable_adaptive_verification=False),
+    fixed_config = _make_indexer_config(
+        architecture="DeepseekV4ForCausalLM", adaptive=False
     )
 
     assert DeepseekV4IndexerBackend.supports_device_cpu_query_lens_mismatch()
+    assert indexer._rocm_supports_flattened_device_query_lens(adaptive_config)
     assert (
         DeepseekV4IndexerBackend.get_builder_cls() is DeepseekV32IndexerMetadataBuilder
     )
@@ -86,6 +94,31 @@ def test_deepseek_v4_rocm_adaptive_indexer_support(monkeypatch: pytest.MonkeyPat
         )
         == AttentionCGSupport.UNIFORM_BATCH
     )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "architecture",
+    ["DeepseekV32ForCausalLM", "DeepseekV41ForCausalLM", "GlmMoeDsaForCausalLM"],
+)
+def test_rocm_adaptive_indexer_flattening_is_scoped_to_deepseek_v4(
+    monkeypatch: pytest.MonkeyPatch,
+    architecture: str,
+):
+    monkeypatch.setattr(indexer.current_platform, "is_rocm", lambda: True)
+    adaptive_config = _make_indexer_config(architecture=architecture, adaptive=True)
+
+    assert not indexer._rocm_supports_flattened_device_query_lens(adaptive_config)
+    assert not indexer._use_flattening(adaptive_config)
+    assert (
+        DeepseekV32IndexerMetadataBuilder.get_cudagraph_support(
+            adaptive_config, SimpleNamespace()
+        )
+        == AttentionCGSupport.UNIFORM_BATCH
+    )
+
+    if architecture == "DeepseekV41ForCausalLM":
+        assert not DeepseekV41IndexerBackend.supports_device_cpu_query_lens_mismatch()
 
 
 @pytest.mark.cpu_test
