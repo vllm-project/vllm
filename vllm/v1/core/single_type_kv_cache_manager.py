@@ -486,7 +486,7 @@ class SingleTypeKVCacheManager(ABC):
                 (including tokens that are already cached).
             retention_interval: Sparse local-checkpoint granularity. ``None``
                 keeps dense checkpointing; ``0`` keeps only the latest replay
-                boundary; a positive multiple of ``scheduler_block_size`` keeps
+                boundary; a positive multiple of ``cache_hit_alignment_tokens`` keeps
                 a tail once per that-sized segment. Only SWA acts on it.
             replay_boundaries: Positions a later request replaying this prompt
                 can resume at, from ``get_replay_boundaries``.

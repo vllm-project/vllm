@@ -69,7 +69,7 @@ def test_a_multiple_of_the_alignment_is_accepted(on_rocm):
 
 
 def test_coarser_scheduler_block_no_longer_forces_a_coarser_interval(on_rocm):
-    """The regression this fixes.
+    """Under DCP a hit lands every hash_block_size tokens.
 
     Under DCP=8 the full-attention group's scheduler_block_size is scaled to
     12288 while hits are still reported every hash_block_size = 1536. Checking
@@ -94,8 +94,6 @@ def _kv_cache_config():
     """A config with one sliding-window group, which is what makes a retention
     interval meaningful at all (the base validator rejects it outright for
     models with no sliding-window or Mamba group)."""
-    from types import SimpleNamespace
-
     import torch
 
     from vllm.v1.kv_cache_interface import SlidingWindowSpec
@@ -124,7 +122,7 @@ def test_the_base_validator_no_longer_checks_alignment_on_rocm(on_rocm):
 
 
 def test_the_two_coordinators_source_their_alignment_correctly():
-    """A regression guard with a scar behind it.
+    """The unitary coordinator has no _cache_hit_alignment_tokens.
 
     ``_cache_hit_alignment_tokens`` is a HybridKVCacheCoordinator property.
     Calling it on the unitary coordinator raises AttributeError at construction,
@@ -162,3 +160,125 @@ def test_off_rocm_the_deferred_check_is_inert(off_rocm):
     """The base validator has already decided; a second, different check here
     would double-validate with the wrong value."""
     _validate_retention_alignment(1536, alignment_tokens=12288)
+
+
+def _build_coordinator(
+    *,
+    enable_caching,
+    block_sizes,
+    hash_block_size,
+    scheduler_block_size,
+    dcp_world_size=8,
+    mamba_align_groups=(),
+):
+    """Build a coordinator through the real factory.
+
+    Reuses `new_kv_cache_spec` from test_kv_cache_utils. hash and scheduler
+    sizes are passed in rather than derived: DCP scales a full-attention
+    group's block but not a Mamba one, so the relationship differs per case and
+    the coordinators assert on it.
+    """
+    import torch
+
+    from tests.v1.core.test_kv_cache_utils import new_kv_cache_spec
+    from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
+    from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, MambaSpec
+
+    group_specs = []
+    for i, b in enumerate(block_sizes):
+        if i in mamba_align_groups:
+            spec = MambaSpec(
+                block_size=b,
+                shapes=((32,),),
+                dtypes=(torch.bfloat16,),
+                mamba_cache_mode="align",
+            )
+        else:
+            spec = new_kv_cache_spec(block_size=b)
+        group_specs.append(KVCacheGroupSpec([f"layer.{i}"], spec))
+
+    kv_cache_config = KVCacheConfig(
+        num_blocks=16, kv_cache_tensors=[], kv_cache_groups=group_specs
+    )
+    return get_kv_cache_coordinator(
+        kv_cache_config=kv_cache_config,
+        max_model_len=65536,
+        max_in_flight_tokens=65536,
+        use_eagle=False,
+        enable_caching=enable_caching,
+        enable_kv_cache_events=False,
+        dcp_world_size=dcp_world_size,
+        pcp_world_size=1,
+        scheduler_block_size=scheduler_block_size,
+        hash_block_size=hash_block_size,
+    )
+
+
+# The tests above drive `_validate_retention_alignment` directly, so deleting a
+# call site would not fail any of them. These pin the wiring instead: each
+# coordinator must reach the validator, with the alignment its own class is
+# responsible for.
+@pytest.mark.parametrize(
+    "enable_caching,block_sizes,mamba_align_groups,hash_block_size,scheduler_block_size",
+    [
+        # One full-attention group, DCP-scaled 1536 -> 12288, so both
+        # granularities are that scaled block.
+        (False, [1536], (), 12288, 12288),
+        (True, [1536], (), 12288, 12288),
+        # A Mamba "align" group turns on partial hash hits. DCP scales the
+        # full-attention block but not the Mamba one, so the two diverge:
+        # hash = gcd(1536, 12288) = 1536, scheduler = lcm = 12288. This is the
+        # configuration the PR exists for, and the only one where passing
+        # scheduler_block_size instead of the cache-hit alignment is wrong.
+        (True, [1536, 1536], (0,), 1536, 12288),
+    ],
+    ids=["no-prefix-cache", "unitary", "hybrid-partial-hash-hits"],
+)
+def test_every_coordinator_reaches_the_validator(
+    on_rocm,
+    monkeypatch,
+    enable_caching,
+    block_sizes,
+    mamba_align_groups,
+    hash_block_size,
+    scheduler_block_size,
+):
+    """Each coordinator must reach the validator with its own alignment.
+
+    Asserts against the alignment the coordinator itself resolved rather than a
+    literal: hybrid's value depends on whether partial hash hits are enabled,
+    and pinning a number here would test that config rather than the wiring.
+    """
+    import vllm.v1.core.kv_cache_coordinator as mod
+
+    seen: list[int] = []
+    monkeypatch.setattr(
+        mod,
+        "_validate_retention_alignment",
+        lambda interval, alignment_tokens: seen.append(alignment_tokens),
+    )
+
+    coordinator = _build_coordinator(
+        enable_caching=enable_caching,
+        block_sizes=block_sizes,
+        mamba_align_groups=mamba_align_groups,
+        hash_block_size=hash_block_size,
+        scheduler_block_size=scheduler_block_size,
+    )
+
+    assert seen, (
+        f"{type(coordinator).__name__} never called "
+        f"_validate_retention_alignment; the retention interval would go "
+        f"unvalidated"
+    )
+    # No getattr fallback: it would swallow an AttributeError raised *inside*
+    # the Hybrid property and silently compare against the scheduler size,
+    # which is exactly the wrong value the mutation would pass.
+    if enable_caching and len(block_sizes) > 1:
+        want = coordinator._cache_hit_alignment_tokens
+    else:
+        want = coordinator.scheduler_block_size
+    assert seen[-1] == want, (
+        f"{type(coordinator).__name__} validated against {seen[-1]}, but its "
+        f"own cache-hit alignment is {want}"
+    )

@@ -557,6 +557,17 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
             metrics_collector=metrics_collector,
             num_prefill_lookahead=num_prefill_lookahead,
         )
+
+        # With prefix caching off there are no cache hits to align to, so there
+        # is no finer granularity to defer to. Keep the historical
+        # scheduler_block_size check rather than skipping validation: the base
+        # validator now defers alignment, and silently accepting an interval
+        # that used to be rejected would be a behaviour change this PR does not
+        # intend.
+        _validate_retention_alignment(
+            self.retention_interval,
+            self.scheduler_block_size,
+        )
         self.num_single_type_manager = len(self.single_type_managers)
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:

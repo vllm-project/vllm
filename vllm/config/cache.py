@@ -150,7 +150,9 @@ class CacheConfig:
     checkpoints. ``0`` retains only semantic checkpoints, including the latest
     replay boundary and shared-prefix junctions. Positive values additionally
     retain periodic checkpoints at the specified interval, which must be a
-    multiple of the scheduler block size. ``None`` retains checkpoints densely.
+    multiple of the granularity a prefix-cache hit is reported at: the
+    scheduler block size normally, or the hash block size when fine-grained
+    partial-hash hits are enabled. ``None`` retains checkpoints densely.
     Applies only to sliding-window and Mamba cache groups."""
     kv_cache_dtype_skip_layers: list[str] = field(default_factory=list)
     """Layer patterns to skip KV cache quantization. Accepts layer indices
