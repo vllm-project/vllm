@@ -427,8 +427,11 @@ class RequestOffloadState:
                 None,
                 group_config.hashes_per_chunk,
             ):
-                group_state.offload_keys.append(
-                    make_offload_key(req_block_hash, group_config.group_idx)
+                key = make_offload_key(req_block_hash, group_config.group_idx)
+                group_state.offload_keys.append(key)
+                self.req_context.set_offload_key_position(
+                    key,
+                    len(group_state.offload_keys) * group_config.tokens_per_chunk,
                 )
 
     def update_block_id_groups(
@@ -742,37 +745,6 @@ class OffloadingConnectorScheduler:
                 )
         return None if defer_lookup or pending_in_window else consecutive_hits
 
-    def _touch(self, req_status: RequestOffloadState):
-        for group_config, group_state in zip(
-            self.config.kv_group_configs, req_status.group_states
-        ):
-            if group_config.sliding_window_size_in_chunks is None:
-                self.manager.touch(group_state.offload_keys, req_status.req_context)
-            else:
-                # Keep only chunks needed to hit the original request, plus
-                # decoded chunks.
-                chunks_to_skip = max(
-                    0,
-                    group_state.num_hit_chunks
-                    - group_config.sliding_window_size_in_chunks,
-                )
-                self.manager.touch(
-                    group_state.offload_keys[chunks_to_skip:],
-                    req_status.req_context,
-                )
-        if req_status.partial_tail_boundary is not None:
-            self.manager.touch(
-                tuple(
-                    self._make_boundary_key(
-                        req_status.req,
-                        group.group_idx,
-                        req_status.partial_tail_boundary,
-                    )
-                    for group in self.config.kv_group_configs
-                ),
-                req_status.req_context,
-            )
-
     def _lookup_complete_chunks(
         self,
         req_status: RequestOffloadState,
@@ -977,10 +949,16 @@ class OffloadingConnectorScheduler:
         return num_hit_tokens
 
     def _make_boundary_key(
-        self, request: Request, group_idx: int, boundary_tokens: int
+        self,
+        request: Request,
+        group_idx: int,
+        boundary_tokens: int,
+        req_context: ReqContext,
     ) -> OffloadKey:
         hash_idx = boundary_tokens // self.config.tokens_per_hash - 1
-        return make_offload_key(request.block_hashes[hash_idx], group_idx)
+        key = make_offload_key(request.block_hashes[hash_idx], group_idx)
+        req_context.set_offload_key_position(key, boundary_tokens)
+        return key
 
     def _lookup(
         self,
@@ -1015,7 +993,10 @@ class OffloadingConnectorScheduler:
             boundary_keys = []
             for group_config in self.config.kv_group_configs:
                 key = self._make_boundary_key(
-                    req_status.req, group_config.group_idx, boundary
+                    req_status.req,
+                    group_config.group_idx,
+                    boundary,
+                    req_status.req_context,
                 )
                 boundary_keys.append(key)
                 result = self.manager.lookup(key, req_status.req_context)
@@ -1108,8 +1089,6 @@ class OffloadingConnectorScheduler:
                 self._maybe_observe_lookup_async_delay(req_status)
         req_status.update_num_hit_chunks(num_computed_tokens + (num_hit_tokens or 0))
 
-        self._touch(req_status)
-
         return num_hit_tokens, bool(num_hit_tokens)
 
     def update_state_after_alloc(
@@ -1183,7 +1162,10 @@ class OffloadingConnectorScheduler:
                 if partial_tail_boundary is not None:
                     keys_to_load.append(
                         self._make_boundary_key(
-                            request, group_config.group_idx, partial_tail_boundary
+                            request,
+                            group_config.group_idx,
+                            partial_tail_boundary,
+                            req_status.req_context,
                         )
                     )
 
@@ -1307,7 +1289,9 @@ class OffloadingConnectorScheduler:
                 ):
                     continue
 
-                key = self._make_boundary_key(req, group_idx, boundary)
+                key = self._make_boundary_key(
+                    req, group_idx, boundary, req_status.req_context
+                )
                 store_output = self.manager.prepare_store([key], req_status.req_context)
                 if store_output is None:
                     self._connector_stats.increase_counter(
@@ -1402,7 +1386,9 @@ class OffloadingConnectorScheduler:
             ):
                 continue
             keys = [
-                self._make_boundary_key(req, group.group_idx, boundary)
+                self._make_boundary_key(
+                    req, group.group_idx, boundary, req_status.req_context
+                )
                 for group in self.config.kv_group_configs
             ]
             block_ids = [
@@ -1688,8 +1674,6 @@ class OffloadingConnectorScheduler:
             if not store_output.keys_to_store:
                 req_status.advance_stored_idx(num_offloadable_tokens)
                 continue
-
-            self._touch(req_status)
 
             keys_to_store = set(store_output.keys_to_store)
 
