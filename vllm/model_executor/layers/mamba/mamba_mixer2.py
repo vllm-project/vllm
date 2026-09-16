@@ -859,11 +859,11 @@ class MambaMixer2(MambaBase, PluggableLayer):
             if checkpoint_chunk_idx is not None:
                 # Raw pre-conv window ending at the checkpoint, written before
                 # the conv so the running-block write wins on any aliasing.
-                # The checkpoint is >= one hash block into the query, so the
-                # window cannot underflow.
+                # Full width, not conv_kernel - 1: spec decode widens conv
+                # state by num_spec, and a checkpoint must carry that history.
                 assert cu_chunk_seqlen_p is not None
                 ends = cu_chunk_seqlen_p[checkpoint_chunk_idx + 1]
-                window = torch.arange(1 - self.conv_kernel_size, 0, device=x.device)
+                window = torch.arange(-conv_state.shape[-1], 0, device=x.device)
                 conv_state[checkpoint_block_idx] = x[
                     :, ends.unsqueeze(1) + window
                 ].permute(1, 0, 2)

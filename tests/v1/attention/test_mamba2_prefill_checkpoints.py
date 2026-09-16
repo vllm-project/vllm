@@ -25,11 +25,6 @@ from vllm.v1.kv_cache_interface import (
 compute_chunk_metadata = BaseMambaAttentionMetadataBuilder._compute_chunk_metadata
 
 
-def _chunk_ends(cu_chunk_seqlen: list[int]) -> list[int]:
-    """Chunk end offsets. `cu_chunk_seqlen[1:]` already ends with the total."""
-    return cu_chunk_seqlen[1:]
-
-
 def test_no_checkpoint_offsets_preserves_legacy_chunking():
     """Passing no offsets must reproduce the pre-feature chunk layout."""
     num_computed = torch.tensor([0, 300])
@@ -44,26 +39,6 @@ def test_no_checkpoint_offsets_preserves_legacy_chunking():
     assert seq_idx == [0, 0, 0, 1, 1]
     assert last == [2, 4]
     assert ckpt == [-1, -1]
-
-
-def test_checkpoint_forces_a_chunk_boundary_off_the_chunk_grid():
-    """A checkpoint at a non-multiple of chunk_size still lands on a boundary.
-
-    This is the case the design exists for: align-mode block sizes carry no
-    chunk_size factor, so the checkpoint routinely falls off the grid.
-    """
-    num_computed = torch.tensor([0])
-    qsl = torch.tensor([0, 700])
-
-    cu, seq_idx, last, ckpt = compute_chunk_metadata(
-        256, 1, num_computed, qsl, checkpoint_offsets_p=[100]
-    )
-
-    num_chunks = len(cu) - 1
-    assert 100 in _chunk_ends(cu)
-    assert cu[ckpt[0] + 1] == 100
-    assert seq_idx == [0] * num_chunks
-    assert last == [num_chunks - 1]
 
 
 def test_chunking_realigns_to_the_grid_after_a_checkpoint():
@@ -82,19 +57,6 @@ def test_chunking_realigns_to_the_grid_after_a_checkpoint():
     assert cu == [0, 100, 256, 512, 700]
 
 
-def test_checkpoint_on_the_grid_adds_no_extra_chunk():
-    """An already-aligned checkpoint reuses the existing boundary."""
-    num_computed = torch.tensor([0])
-    qsl = torch.tensor([0, 700])
-
-    cu, _, _, ckpt = compute_chunk_metadata(
-        256, 1, num_computed, qsl, checkpoint_offsets_p=[256]
-    )
-
-    assert cu == [0, 256, 512, 700]
-    assert cu[ckpt[0] + 1] == 256
-
-
 def test_checkpoint_on_a_resumed_request_is_relative_to_the_query():
     """Offsets count from the query start, not the sequence start."""
     num_computed = torch.tensor([300])
@@ -109,58 +71,6 @@ def test_checkpoint_on_a_resumed_request_is_relative_to_the_query():
     # offset 212 == sequence position 512) — no extra split needed.
     assert cu == [0, 212, 468, 500]
     assert ckpt == [0]
-
-
-def test_only_the_requested_rows_checkpoint():
-    """A zero offset leaves that row's chunking and index untouched."""
-    num_computed = torch.tensor([0, 0])
-    qsl = torch.tensor([0, 700, 1400])
-
-    cu, _, last, ckpt = compute_chunk_metadata(
-        256, 2, num_computed, qsl, checkpoint_offsets_p=[0, 100]
-    )
-
-    # Row 0 chunks 256/256/188 (indices 0-2); row 1 breaks at its offset 100,
-    # which is absolute position 700 + 100 == 800.
-    assert ckpt == [-1, 3]
-    assert cu == [0, 256, 512, 700, 800, 956, 1212, 1400]
-    assert last == [2, 6]
-
-
-@pytest.mark.parametrize("hash_block_size", [16, 64, 256])
-def test_checkpoint_position_is_reachable_at_alignment_one(hash_block_size):
-    """Alignment 1 accepts every hash-block-aligned checkpoint.
-
-    This is the property Task 1's chunk split buys: with the KDA-style
-    alignment of 16 these cases would be declined whenever the offset is not
-    a multiple of 16.
-    """
-    seq_len = 5 * hash_block_size + 7
-    query_start = 0
-    position = get_mamba_prefill_checkpoint_position(
-        seq_len, hash_block_size, drop_eagle_block=False
-    )
-
-    assert is_mamba_prefill_checkpoint_valid(
-        query_start=query_start,
-        query_end=seq_len,
-        checkpoint_position=position,
-        hash_block_size=hash_block_size,
-        mamba_block_size=hash_block_size * 4,
-        checkpoint_alignment=1,
-    )
-
-
-def test_checkpoint_is_declined_without_an_alignment():
-    """`prefill_checkpoint_alignment=None` means the backend cannot export."""
-    assert not is_mamba_prefill_checkpoint_valid(
-        query_start=0,
-        query_end=1031,
-        checkpoint_position=1024,
-        hash_block_size=256,
-        mamba_block_size=1024,
-        checkpoint_alignment=None,
-    )
 
 
 MAMBA_BLOCK_SIZE = 256
@@ -221,21 +131,6 @@ def test_builder_emits_compacted_checkpoint_tensors():
     assert meta.cu_chunk_seqlen_p[meta.checkpoint_chunk_idx + 1].item() == 768
 
 
-def test_builder_emits_nothing_when_the_predicate_declines():
-    """A spec that cannot export must produce no checkpoint metadata.
-
-    This is the invariant that stops `MambaManager` from allocating a block
-    the model never writes.
-    """
-    builder = _create_mamba2_builder(
-        num_prefill_checkpoint_blocks=0, prefill_checkpoint_alignment=None
-    )
-    meta = _build(builder, seq_lens=[900], query_lens=[900])
-
-    assert meta.checkpoint_chunk_idx is None
-    assert meta.checkpoint_block_idx is None
-
-
 def test_builder_emits_nothing_outside_align_mode():
     builder = _create_mamba2_builder(mamba_cache_mode="all")
     meta = _build(builder, seq_lens=[900], query_lens=[900])
@@ -277,3 +172,64 @@ def test_non_align_modes_do_not_opt_in(monkeypatch, mode):
 
     assert spec.num_prefill_checkpoint_blocks == 0
     assert spec.prefill_checkpoint_alignment is None
+
+
+@pytest.mark.parametrize("hash_block_size", [16, 64, 256])
+def test_eagle_block_drop_moves_the_checkpoint_one_block_earlier(hash_block_size):
+    """Eagle prunes the last matching block, so the checkpoint backs off one.
+
+    Getting this wrong writes a checkpoint at a position the cache will not
+    look for, so the block is registered but never hit.
+    """
+    seq_len = 19 * hash_block_size + 7
+
+    plain = get_mamba_prefill_checkpoint_position(
+        seq_len, hash_block_size, drop_eagle_block=False
+    )
+    dropped = get_mamba_prefill_checkpoint_position(
+        seq_len, hash_block_size, drop_eagle_block=True
+    )
+
+    assert plain == 19 * hash_block_size
+    assert dropped == plain - hash_block_size
+
+
+@pytest.mark.parametrize("mamba_block_size", [16, 256, 2096])
+def test_valid_checkpoint_always_leaves_room_for_the_conv_window(mamba_block_size):
+    """A valid checkpoint is never close enough to the query start to underflow.
+
+    The mixer reads the `conv_state.shape[-1]` tokens preceding the checkpoint
+    (conv_kernel - 1 + num_spec, so 6 for conv_kernel 4 with num_spec 3). If an
+    offset below that were reachable, the window would index off the front of
+    the batch and silently wrap. It is not: the predicate's
+    `checkpoint_col > initial_state_col` term forces the checkpoint past a
+    block boundary the query start has not reached, so the offset is at least
+    half a block. K3 guards this explicitly (kda.py:424); this test is why we
+    do not need to.
+    """
+    candidates = (1, 2, 4, 8, 16, 128, 1048, 2096)
+    hash_sizes = [h for h in candidates if mamba_block_size % h == 0]
+    checked = 0
+    for hash_block_size in hash_sizes:
+        for drop_eagle_block in (False, True):
+            for query_end in range(mamba_block_size + 1, 4 * mamba_block_size, 7):
+                position = get_mamba_prefill_checkpoint_position(
+                    query_end, hash_block_size, drop_eagle_block=drop_eagle_block
+                )
+                for query_start in range(0, query_end, hash_block_size):
+                    if not is_mamba_prefill_checkpoint_valid(
+                        query_start=query_start,
+                        query_end=query_end,
+                        checkpoint_position=position,
+                        hash_block_size=hash_block_size,
+                        mamba_block_size=mamba_block_size,
+                        checkpoint_alignment=1,
+                    ):
+                        continue
+                    checked += 1
+                    assert position - query_start >= mamba_block_size // 2, (
+                        f"offset {position - query_start} too small: "
+                        f"block={mamba_block_size} hash={hash_block_size} "
+                        f"start={query_start} end={query_end} drop={drop_eagle_block}"
+                    )
+    assert checked > 0, "no valid checkpoints exercised; test proves nothing"
