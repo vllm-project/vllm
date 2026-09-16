@@ -49,6 +49,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (  # noqa:
 )
 
 _AITER_MOD = "vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe"
+_FLYDSL_MOD = "vllm.model_executor.layers.fused_moe.experts.flydsl_emulation_moe"
 
 
 def _config(ep_size: int = 1):
@@ -87,12 +88,17 @@ def _flydsl_installed(present: bool):
 
 
 def test_aiter_mxfp8_registered():
-    """The FlyDSL backend is auto-selectable and reachable via --moe-backend aiter."""
+    """The FlyDSL backend is auto-selectable and reachable via --moe-backend aiter.
+
+    AITER_MXFP8 is shared with the gfx942 BF16-emulation FlyDSL path, so the
+    kernel-class dispatch is platform-gated: mock gfx950 (native MX) to assert
+    the native AiterMxfp8Experts is chosen."""
     assert Fp8MoeBackend.AITER_MXFP8 in _SUPPORTED_BACKENDS
     assert _BACKEND_NAME_MAP["aiter"] is Fp8MoeBackend.AITER_MXFP8
-    assert _mxfp8_backend_to_kernel_cls(Fp8MoeBackend.AITER_MXFP8) == [
-        AiterMxfp8Experts
-    ]
+    with _gfx950():
+        assert _mxfp8_backend_to_kernel_cls(Fp8MoeBackend.AITER_MXFP8) == [
+            AiterMxfp8Experts
+        ]
 
 
 @pytest.mark.parametrize("ep_size", [1, 2])
@@ -161,9 +167,14 @@ def test_gfx950_picks_aiter():
 
 
 def test_gfx942_picks_emulation():
-    """flydsl unusable (e.g. gfx942, no FlyDSL support) -> native Triton
-    dot_scaled backend wins instead."""
-    with patch(f"{_AITER_MOD}.current_platform.supports_mx", return_value=False):
+    """No native MX and no flydsl runtime -> BF16 emulation wins.
+
+    On gfx942 AITER_MXFP8 resolves to the FlyDSL BF16-emulation experts, so the
+    flydsl runtime must be mocked away too for the backend to be skipped."""
+    with (
+        patch(f"{_AITER_MOD}.current_platform.supports_mx", return_value=False),
+        patch(f"{_FLYDSL_MOD}.is_flydsl_emulation_available", return_value=False),
+    ):
         backend, experts_cls = select_mxfp8_moe_backend(_config())
     assert backend is Fp8MoeBackend.EMULATION
     assert experts_cls is Mxfp8EmulationTritonExperts
