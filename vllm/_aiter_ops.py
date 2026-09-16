@@ -583,10 +583,11 @@ def _rocm_aiter_mla_decode_fwd_impl(
     reduce_indptr: torch.Tensor | None = None,
     reduce_final_map: torch.Tensor | None = None,
     reduce_partial_map: torch.Tensor | None = None,
+    causal: bool = True,
 ) -> None:
     from aiter.mla import mla_decode_fwd
 
-    kwargs: dict[str, float | torch.Tensor | None] = {
+    kwargs: dict[str, float | torch.Tensor | None | bool] = {
         "sm_scale": sm_scale,
         "logit_cap": logit_cap,
     }
@@ -595,6 +596,8 @@ def _rocm_aiter_mla_decode_fwd_impl(
     if _check_aiter_mla_fp8_support():
         kwargs["q_scale"] = q_scale
         kwargs["kv_scale"] = kv_scale
+
+    kwargs["causal"] = causal
 
     if work_meta_data is not None:
         assert work_indptr is not None, (
@@ -1749,6 +1752,30 @@ def _mhc_delayed_pre_tail(
 _OPS_REGISTERED = False
 
 
+def _sync_aiter_situv2_moe_env() -> None:
+    """Mirror the SiTUv2 MoE toggle into AITER's a4w4 dispatch env.
+
+    AITER selects afp8 vs afp4 activation kernels via AITER_SITUV2_A8W4 /
+    AITER_SITUV2_A4W4 (see ROCm/aiter fused_moe.py, A8W4 checked first).
+    When VLLM_ROCM_USE_AITER_MOE_SITUV2 is enabled we route to a4w4
+    (afp4_wfp4_fp4 kernels) and clear any legacy AITER_SITUV2_A8W4 override.
+
+    Requires AITER with ROCm/aiter#4463 (first tagged in v0.1.20): a4w4
+    dispatch plus kimik3_a4w4_{un,}tuned_fmoe.csv. Older AITER still runs
+    afp4 FlyDSL but falls back to heuristic configs, which is not the
+    tuned a4w4 path this recipe is meant to use.
+    """
+    import os
+
+    import vllm.envs as envs
+
+    if envs.VLLM_ROCM_USE_AITER_MOE_SITUV2:
+        os.environ["AITER_SITUV2_A4W4"] = "1"
+        os.environ.pop("AITER_SITUV2_A8W4", None)
+    else:
+        os.environ.pop("AITER_SITUV2_A4W4", None)
+
+
 class rocm_aiter_ops:
     """ROCm AITER operations wrapper for AMD GPU acceleration in vLLM.
 
@@ -1771,7 +1798,7 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_FP8BMM: Controls FP8 batched matrix multiply.
         VLLM_ROCM_USE_AITER_TRITON_ROPE: Controls Triton rotary embeddings.
         VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: Controls shared expert fusion.
-        VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4: Controls a8w4 SiTU fused MoE variant.
+        VLLM_ROCM_USE_AITER_MOE_SITUV2: Controls SiTUv2 FlyDSL MoE (a4w4).
         VLLM_ROCM_USE_AITER_TRITON_GEMM: Controls Triton unquantized GEMM.
 
     Note:
@@ -1838,7 +1865,7 @@ class rocm_aiter_ops:
     # TODO: Consolidate under VLLM_ROCM_USE_AITER_ROPE
     _TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
-    _MOE_SITUV2_A8W4 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4
+    _MOE_SITUV2 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2
     # TODO: Consolidate under _LINEAR_ENABLED
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
     # Lazily probed: whether aiter.topk_softmax supports the
@@ -1867,7 +1894,8 @@ class rocm_aiter_ops:
         cls._LINEAR_HIPBMM_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM
         cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
-        cls._MOE_SITUV2_A8W4 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4
+        cls._MOE_SITUV2 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2
+        _sync_aiter_situv2_moe_env()
         cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
 
     @staticmethod
@@ -1980,10 +2008,10 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
-    def is_fused_moe_situv2_a8w4_enabled(cls) -> bool:
-        # _MOE_SITUV2_A8W4 is a variant of aiter fused moe, so aiter
+    def is_fused_moe_situv2_enabled(cls) -> bool:
+        # _MOE_SITUV2 is a variant of aiter fused moe, so aiter
         # fused moe must be enabled as well.
-        return cls.is_fused_moe_enabled() and cls._MOE_SITUV2_A8W4
+        return cls.is_fused_moe_enabled() and cls._MOE_SITUV2
 
     @classmethod
     @if_aiter_supported
@@ -2035,6 +2063,26 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_mla_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._MLA_ENABLED
+
+    @classmethod
+    @if_aiter_supported
+    def mla_decode_supports_non_causal(cls) -> bool:
+        """Whether installed aiter.mla.mla_decode_fwd accepts `causal`.
+
+        Added in aiter v0.1.20. A missing argument is a hard error rather
+        than a boolean the caller can use to pick another MLA backend.
+        """
+        import inspect
+
+        from aiter.mla import mla_decode_fwd
+
+        if "causal" not in inspect.signature(mla_decode_fwd).parameters:
+            raise RuntimeError(
+                "ROCM_AITER_MLA requires aiter.mla.mla_decode_fwd(..., causal=). "
+                "The installed aiter is causal-only; upgrade aiter rather than "
+                "falling back to another MLA backend."
+            )
+        return True
 
     @classmethod
     @if_aiter_supported
@@ -2858,6 +2906,7 @@ class rocm_aiter_ops:
         reduce_indptr: torch.Tensor | None = None,
         reduce_final_map: torch.Tensor | None = None,
         reduce_partial_map: torch.Tensor | None = None,
+        causal: bool = True,
     ):
         torch.ops.vllm.rocm_aiter_mla_decode_fwd(
             q,
@@ -2878,6 +2927,7 @@ class rocm_aiter_ops:
             reduce_indptr=reduce_indptr,
             reduce_final_map=reduce_final_map,
             reduce_partial_map=reduce_partial_map,
+            causal=causal,
         )
 
     @staticmethod
@@ -4004,3 +4054,4 @@ class rocm_aiter_ops:
 
 
 rocm_aiter_ops.register_ops_once()
+_sync_aiter_situv2_moe_env()
