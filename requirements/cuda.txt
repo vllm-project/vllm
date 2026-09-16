@@ -4,6 +4,16 @@
 numba == 0.65.0 # Required for N-gram speculative decoding
 
 # Dependencies for NVIDIA GPUs
+#
+# The torch stack for cu132 is only on the test channel: the stable
+# https://download.pytorch.org/whl/cu132 index publishes no torchaudio 2.11.0,
+# so the resolver silently falls back to PyPI, which serves a cu130 build. That
+# mismatch aborts every CUDA job at import:
+#   RuntimeError: Detected that PyTorch and TorchAudio were compiled with
+#   different CUDA versions. PyTorch has CUDA version 13.2 whereas TorchAudio
+#   has CUDA version 13.0.
+# Drop this once cu132 torchaudio is on the stable index.
+--extra-index-url https://download.pytorch.org/whl/test/cu132
 torch==2.13.0
 torchaudio==2.11.0
 # These must be updated alongside torch
