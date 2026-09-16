@@ -444,22 +444,28 @@ def _hip_skinny_reference(
     scales_nkg: torch.Tensor,
     *,
     group_size: int,
-    zp_bias: int,
+    zp_nkg: torch.Tensor | None,
 ) -> torch.Tensor:
-    """Reference for symmetric HIP skinny: C = A @ (W - zp_bias) * S."""
+    """Reference for HIP skinny: C = A @ (W - zp) * S.
+
+    ``zp_nkg`` is [N, K//G] int32 raw zero points for the asymmetric case, or
+    None for symmetric uint4b8, where the kernel subtracts a constant 8.
+    """
     K = a_mk.shape[1]
     N = w_int4_nk.shape[0]
     num_groups = K // group_size
 
-    w_fp = (w_int4_nk.to(torch.float32) - zp_bias).view(N, num_groups, group_size)
+    w_g = w_int4_nk.to(torch.float32).view(N, num_groups, group_size)
+    zp = 8.0 if zp_nkg is None else zp_nkg.to(torch.float32).unsqueeze(-1)
     s = scales_nkg.to(torch.float32).unsqueeze(-1)
-    w_dequant = (w_fp * s).view(N, K)
+    w_dequant = ((w_g - zp) * s).view(N, K)
 
     return (a_mk.to(torch.float32) @ w_dequant.t()).to(a_mk.dtype)
 
 
 @pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("has_zp", [False, True])
 @pytest.mark.parametrize(
     "M,K,N,G",
     [
@@ -468,9 +474,17 @@ def _hip_skinny_reference(
         (1, 512, 256, 128),
         (2, 512, 256, 64),
         (3, 256, 512, 64),
+        # M is the kernel's batch dimension; 4 and 5 reach dispatch tuples that
+        # 1..3 never take, and 5 is MAX_SKINNY_BATCH_SIZE.
+        (4, 512, 256, 32),
+        (4, 256, 512, 64),
+        (5, 512, 256, 128),
+        (5, 256, 256, 32),
+        # N == 8 is exactly one packed zero-point word.
+        (1, 256, 8, 32),
     ],
 )
-def test_hip_skinny_wvSplitK_int4_g(dtype, M, K, N, G):
+def test_hip_skinny_wvSplitK_int4_g(dtype, M, K, N, G, has_zp):
     """Test HIP wvSplitK_int4_g kernel directly via _custom_ops."""
     import vllm._custom_ops as ops
     from vllm.utils.platform_utils import num_compute_units
@@ -487,10 +501,16 @@ def test_hip_skinny_wvSplitK_int4_g(dtype, M, K, N, G):
         dtype
     )
 
-    cu_count = num_compute_units()
-    out = ops.wvSplitK_int4_g(b_packed_i8, a, scales, cu_count, G)
+    zp_nkg = None
+    zp_packed = None
+    if has_zp:
+        zp_nkg = torch.randint(0, 16, (N, K // G), device=device, dtype=torch.int32)
+        zp_packed = _pack_zp_rows_for_kernel(zp_nkg)
 
-    ref = _hip_skinny_reference(a, w_int4_nk, scales, group_size=G, zp_bias=8)
+    cu_count = num_compute_units()
+    out = ops.wvSplitK_int4_g(b_packed_i8, a, scales, cu_count, G, zp_packed)
+
+    ref = _hip_skinny_reference(a, w_int4_nk, scales, group_size=G, zp_nkg=zp_nkg)
 
     torch.testing.assert_close(out, ref, rtol=1e-2, atol=5e-2)
 
@@ -533,7 +553,7 @@ def test_rdna_hybrid_w4a16_dispatch(dtype, M, K, N, G):
         a, b_packed_i8, scales, None, None, cu_count, G
     )
 
-    ref = _hip_skinny_reference(a, w_int4_nk, scales, group_size=G, zp_bias=8)
+    ref = _hip_skinny_reference(a, w_int4_nk, scales, group_size=G, zp_nkg=None)
 
     torch.testing.assert_close(out, ref, rtol=1e-2, atol=5e-2)
 
