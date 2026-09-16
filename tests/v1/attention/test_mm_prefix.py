@@ -15,8 +15,6 @@ auto-clearing those when ``mask_mod`` is set; leaving ``causal=True`` would
 short out the mask_mod on SM90 and clip bidirectional ranges on SM100.
 """
 
-from unittest.mock import MagicMock
-
 import numpy as np
 import pytest
 import torch
@@ -675,48 +673,6 @@ def test_composite_routes_queries_that_need_image_masking(
     assert requires_mm_prefix(common, unclamped_window=True) is unclamped_expected
 
 
-def test_composite_builder_propagates_block_stride_bytes():
-    from vllm.v1.attention.backend import AttentionMetadataBuilder
-    from vllm.v1.attention.backends.composite import (
-        create_composite_attention_backend,
-    )
-
-    class RecordingBuilder(AttentionMetadataBuilder):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-
-        def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
-            raise NotImplementedError
-
-    general_backend = MagicMock()
-    causal_backend = MagicMock()
-    for name, backend in (("general", general_backend), ("causal", causal_backend)):
-        backend.full_cls_name.return_value = (__name__, name)
-        backend.get_impl_cls.return_value = MagicMock
-        backend.get_builder_cls.return_value = RecordingBuilder
-        backend.forward_includes_kv_cache_update = False
-
-    routing_policy = MagicMock()
-    backend = create_composite_attention_backend(
-        general_backend,
-        causal_backend,
-        name="StridePropagationBackend",
-        backend_name="CUSTOM",
-        module=__name__,
-        routing_policy=routing_policy,
-    )
-    builder = backend.get_builder_cls()(
-        MagicMock(), ["layer"], MagicMock(), torch.device("cpu")
-    )
-
-    sentinel = 1_234_567
-    builder.set_block_stride_bytes(sentinel)
-
-    assert builder.block_stride_bytes == sentinel
-    assert builder.general_builder.block_stride_bytes == sentinel
-    assert builder.causal_builder.block_stride_bytes == sentinel
-
-
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA attention kernels")
 @pytest.mark.parametrize("head_size", [256, 512])
 @pytest.mark.parametrize(
@@ -850,6 +806,11 @@ def test_composite_shared_cache_across_image_and_causal_steps(
             layer.mm_prefix_clamp_sliding_window = True
         builder = backend.get_builder_cls()(spec, ["composite_test"], cfg, DEVICE)
         builder.set_block_stride_bytes(spec.page_size_bytes)
+        assert builder.block_stride_bytes == spec.page_size_bytes
+        assert all(
+            child.block_stride_bytes == spec.page_size_bytes
+            for child in builder._builders
+        )
         # Match production, where unwritten page tails are zero-initialized.
         cache = torch.zeros(
             num_blocks,
