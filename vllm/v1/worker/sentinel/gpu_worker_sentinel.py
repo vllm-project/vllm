@@ -85,6 +85,11 @@ class WorkerSentinel:
             )
         if worker.parallel_config.prefill_context_parallel_size > 1:
             raise ValueError("Fault tolerance does not support PCP yet.")
+        if not worker.vllm_config.use_v2_model_runner:
+            raise ValueError(
+                "Fault tolerance requires the v2 model runner "
+                "(VLLM_USE_V2_MODEL_RUNNER=1)."
+            )
 
     def handle_command(self, ft_request: FaultToleranceRequest):
         """Dispatch an FT command by instruction name."""
@@ -263,20 +268,6 @@ class WorkerSentinel:
     def _clean_worker_state(self):
         model_runner = self.worker.model_runner
         model_runner.execute_model_state = None
-        if self.worker.use_v2_model_runner:
-            runner = cast("GPUModelRunnerV2", model_runner)
-            for req_id in list(runner.req_states.req_id_to_index):
-                runner._remove_request(req_id)
-        else:
-            model_runner.kv_connector_output = None
-
-            input_batch = model_runner.input_batch
-            cached_req_ids = list(input_batch.req_id_to_index)
-            for req_id in cached_req_ids:
-                model_runner.requests.pop(req_id, None)
-                model_runner.num_prompt_logprobs.pop(req_id, None)
-                input_batch.remove_request(req_id)
-
-            input_batch.condense()
-            input_batch.refresh_metadata()
-            input_batch.req_prompt_embeds.clear()
+        runner = cast("GPUModelRunnerV2", model_runner)
+        for req_id in list(runner.req_states.req_id_to_index):
+            runner._remove_request(req_id)
