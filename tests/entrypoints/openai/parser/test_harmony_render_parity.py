@@ -43,7 +43,8 @@ def _system():
 
 class TestResponseInputToHarmonyRenderParity:
     """Each test drives the same conversation through both APIs and asserts
-    identical Harmony messages and rendered token sequences."""
+    identical Harmony messages and rendered token sequences.
+    """
 
     # -----------------------------------------------------------------------
     # Single-message cases
@@ -51,7 +52,8 @@ class TestResponseInputToHarmonyRenderParity:
 
     def test_developer_message(self):
         """Both APIs must render developer messages identically using
-        DeveloperContent (with the '# Instructions' header)."""
+        DeveloperContent (with the '# Instructions' header).
+        """
         chat_msgs = parse_chat_input_to_harmony_message(
             {"role": "developer", "content": "Be concise."}
         )
@@ -246,7 +248,8 @@ class TestResponseInputToHarmonyRenderParity:
     def test_reasoning_combined_with_function_call(self):
         """Chat API packs reasoning + tool_calls into one dict; responses API
         represents them as two separate items. Both must produce the same two
-        Harmony messages in the same order: analysis then commentary."""
+        Harmony messages in the same order: analysis then commentary.
+        """
         chat_msgs = parse_chat_input_to_harmony_message(
             {
                 "role": "assistant",
@@ -529,7 +532,8 @@ class TestResponseInputToHarmonyRenderParity:
     def test_completed_turns_drop_reasoning(self):
         """Validates that reasoning from completed turns is dropped, while
         reasoning from the current in-progress tool-call turn is preserved
-        in both chat completions and responses previous_input_messages."""
+        in both chat completions and responses previous_input_messages.
+        """
         first_turn_reasoning = "FIRST_TURN_REASONING"
         second_turn_reasoning = "SECOND_TURN_REASONING"
 

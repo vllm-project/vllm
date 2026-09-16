@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for FileSystemTierManager.
+"""Unit tests for FileSystemTierManager.
 
 These tests use real disk I/O to verify the filesystem tier implementation.
 The tier manager writes KV cache blocks to disk and reads them back, verifying
@@ -105,15 +104,15 @@ def key(n: int) -> OffloadKey:
 def make_job(
     job_id: int,
     keys: list[OffloadKey],
-    block_ids: list[int] | None = None,
+    chunk_ids: list[int] | None = None,
     is_promotion: bool = False,
 ) -> TransferJob:
-    if block_ids is None:
-        block_ids = list(range(len(keys)))
+    if chunk_ids is None:
+        chunk_ids = list(range(len(keys)))
     return TransferJob(
         job_id=job_id,
         keys=keys,
-        block_ids=np.array(block_ids, dtype=np.int64),
+        chunk_ids=np.array(chunk_ids, dtype=np.int64),
         is_promotion=is_promotion,
         req_context=_CTX,
     )
@@ -370,7 +369,8 @@ def test_shutdown_discards_pending_tasks(fs_tier):
 @pytest.mark.parametrize("use_c_ext", [True, False])
 def test_store_load_data_integrity(fs_tier, monkeypatch, use_c_ext, batch_size):
     """Data written by store must be exactly recovered by load, for batches
-    of any size -- including the empty batch."""
+    of any size -- including the empty batch.
+    """
     import vllm.v1.kv_offload.tiering.fs.io as io_mod
 
     if use_c_ext and not io_mod._HAS_FSIO_C:
@@ -382,11 +382,11 @@ def test_store_load_data_integrity(fs_tier, monkeypatch, use_c_ext, batch_size):
     tensor[:] = _page_aligned_rand_tensor(_NUM_BLOCKS, _BLOCK_ELEMENTS)
 
     keys = [key(i) for i in range(batch_size)]
-    store_block_ids = list(range(batch_size))
-    load_block_ids = list(range(_NUM_BLOCKS - batch_size, _NUM_BLOCKS))
+    store_chunk_ids = list(range(batch_size))
+    load_chunk_ids = list(range(_NUM_BLOCKS - batch_size, _NUM_BLOCKS))
     expected = tensor[:batch_size].clone()
 
-    tier.submit_store(make_job(1, keys, store_block_ids))
+    tier.submit_store(make_job(1, keys, store_chunk_ids))
     store_results = drain(tier)
     assert len(store_results) == 1
     assert store_results[0].success
@@ -396,15 +396,15 @@ def test_store_load_data_integrity(fs_tier, monkeypatch, use_c_ext, batch_size):
     tensor[:] = 0.0
 
     # Load into a range disjoint by index from the store ids, to also
-    # exercise loading a block into a different id than it was stored from.
-    tier.submit_load(make_job(2, keys, load_block_ids, is_promotion=True))
+    # exercise loading a chunk into a different id than it was stored from.
+    tier.submit_load(make_job(2, keys, load_chunk_ids, is_promotion=True))
     load_results = drain(tier)
     assert len(load_results) == 1
     assert load_results[0].success
 
-    for i, bid in enumerate(load_block_ids):
-        assert torch.allclose(tensor[bid], expected[i]), (
-            f"Block {bid} data mismatch after store+load"
+    for i, cid in enumerate(load_chunk_ids):
+        assert torch.allclose(tensor[cid], expected[i]), (
+            f"Chunk {cid} data mismatch after store+load"
         )
 
 
@@ -467,7 +467,8 @@ def test_wait_idle_blocks_until_tasks_complete():
 
 def test_batch_lookup_c_extension(tmp_path):
     """Validates batch_lookup_C: empty, single, all-existing, all-missing,
-    mixed ordering, and input type validation."""
+    mixed ordering, and input type validation.
+    """
     try:
         from vllm.fs_io_C import batch_lookup as batch_lookup_C
     except ImportError:
@@ -531,7 +532,8 @@ def test_batch_lookup_dispatch(fs_tier, monkeypatch, use_c_ext):
 @pytest.mark.parametrize("use_c_ext", [True, False])
 def test_out_of_bounds_block_id_smoke(fs_tier, monkeypatch, use_c_ext):
     """Smoke test: a block id beyond the primary tensor's block count must
-    fail the job, for both the C extension and the Python fallback."""
+    fail the job, for both the C extension and the Python fallback.
+    """
     import vllm.v1.kv_offload.tiering.fs.io as io_mod
 
     if use_c_ext and not io_mod._HAS_FSIO_C:
@@ -613,7 +615,8 @@ def test_batched_partial_load_failure_keeps_loaded_blocks(
     loaded before it (#50321). Corrupt the LAST block: the earlier blocks load
     fine, so the job reports successful_keys for them and marks only the failed
     tail a miss. The earlier keys stay HIT — including for the same request —
-    while the corrupt block stays a MISS (its file was removed)."""
+    while the corrupt block stays a MISS (its file was removed).
+    """
     import vllm.v1.kv_offload.tiering.fs.io as io_mod
 
     if use_c_ext and not io_mod._HAS_FSIO_C:
@@ -665,7 +668,8 @@ def test_batched_load_first_block_fails_marks_whole_batch(
 ):
     """When the FIRST block fails, nothing loaded before it: the job reports no
     successful_keys (None) and the whole batch is marked a miss for the
-    request."""
+    request.
+    """
     import vllm.v1.kv_offload.tiering.fs.io as io_mod
 
     if use_c_ext and not io_mod._HAS_FSIO_C:
@@ -696,7 +700,8 @@ def test_transient_load_failure_leaves_file(fs_tier, monkeypatch, use_c_ext):
     """A transient host error (here ELOOP on open) is NOT a short read: the job
     fails but the block file must survive untouched, on both the C and Python
     paths. Deleting on a transient error would turn a passing hiccup into
-    permanent data loss."""
+    permanent data loss.
+    """
     import vllm.v1.kv_offload.tiering.fs.io as io_mod
 
     if use_c_ext and not io_mod._HAS_FSIO_C:
@@ -800,7 +805,8 @@ def test_mixed_job_results_emit_event_only_for_successful_job(
     fs_tier_with_events, monkeypatch
 ):
     """With a failed and a successful store job in flight, exactly one event
-    is emitted and its keys belong to the successful job."""
+    is emitted and its keys belong to the successful job.
+    """
     import vllm.v1.kv_offload.tiering.fs.manager as mgr_mod
 
     tier = fs_tier_with_events
@@ -885,7 +891,8 @@ def test_events_require_global_kv_events_flag(tmp_path):
 
 def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
     """A GPU->CPU->fs cascade surfaces the tier-owned FS stored event via the
-    TieringOffloadingManager's aggregated take_events()."""
+    TieringOffloadingManager's aggregated take_events().
+    """
     from vllm.v1.kv_offload.tiering.manager import (
         CPUPrimaryTierOffloadingManager,
         TieringOffloadingManager,
@@ -895,7 +902,7 @@ def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
     view = memoryview(tensor.numpy())
     mock_region = MagicMock()
     mock_region.create_kv_memoryview.return_value = view
-    primary = CPUPrimaryTierOffloadingManager(num_blocks=4, mmap_region=mock_region)
+    primary = CPUPrimaryTierOffloadingManager(num_chunks=4, mmap_region=mock_region)
     tier = FileSystemTierManager(
         offloading_spec=_make_offloading_spec(enable_kv_cache_events=True),
         primary_kv_view=primary.get_kv_memoryview(),

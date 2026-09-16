@@ -174,7 +174,8 @@ _TOOL_CALL_SAMPLES = [
 )
 def test_delegating_parse_tool_choice_none(parser_cls, parser_name, sample):
     """Non-streaming parse() with tool_choice='none' via DelegatingParser
-    must not leak special tokens into content."""
+    must not leak special tokens into content.
+    """
     tokenizer = make_mock_tokenizer(sample)
     validated_tools = (
         _TOOLS_VALIDATOR.validate_python(sample.tools) if sample.tools else None
@@ -197,7 +198,7 @@ def test_delegating_parse_tool_choice_none(parser_cls, parser_name, sample):
     cfg = parser._tool_parser._parser_engine.parser_engine_config
     terminals = sorted(
         v
-        for v in set(cfg.terminals.values()) | set(cfg.token_id_terminals.values())
+        for v in cfg.terminal_literals | set(cfg.token_id_terminals.values())
         if len(v) > 1
     )
     assert_no_terminal_leakage(

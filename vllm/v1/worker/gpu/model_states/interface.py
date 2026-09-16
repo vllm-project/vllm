@@ -144,7 +144,8 @@ class ModelState(ABC):
     ) -> None:
         """Hook run on real batches before the forward pass (after block tables
         are gathered). Used by mamba "align" prefix caching to pre-copy state
-        across block boundaries. No-op by default."""
+        across block boundaries. No-op by default.
+        """
         return None
 
     def postprocess_state(
@@ -221,6 +222,7 @@ class ModelState(ABC):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
+        ubatch_idx: int = 0,
     ) -> dict[str, Any]:
         raise NotImplementedError
 

@@ -235,11 +235,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long, default_missing_value = "true", num_args = 0..=1)]
     pub hf_token: Option<Unsupported>,
 
-    /// If a dictionary, contains arguments to be forwarded to the Hugging Face
-    /// config. If a callable, it is called to update the HuggingFace config.
-    #[arg(long)]
-    pub hf_overrides: Option<Unsupported>,
-
     /// Overrides or sets generation config. e.g. `{"temperature": 0.5}`. If
     /// used with `--generation-config auto`, the override parameters will be
     /// merged with the default config from the model. If used with
@@ -353,13 +348,6 @@ pub struct EngineUnsupportedArgs {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Eq, Default, Args, Serialize, Deserialize)]
 pub struct ServerUnsupportedArgs {
-    /// LoRA modules configurations in either 'name=path' format or JSON format
-    /// or JSON list format. Example (old format): `'name=path'` Example (new
-    /// format): `{"name": "name", "path": "lora_path",
-    /// "base_model_name": "id"}`
-    #[arg(long)]
-    pub lora_modules: Option<Unsupported>,
-
     /// Whether to trust the chat template provided in the request. If False,
     /// the server will always use the chat template specified by
     /// `--chat-template` or the ones from tokenizer.

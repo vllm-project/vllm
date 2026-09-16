@@ -60,7 +60,8 @@ def dmel_embed_sum_norm(
     eps: float,
 ) -> torch.Tensor:
     """``rmsnorm(sum_b weight[b * VOCAB + idx[:, b]])`` in one launch (no
-    [T, NB, D] intermediate)."""
+    [T, NB, D] intermediate).
+    """
     T, nb = dmel_idx.shape
     D = weight.shape[1]
     assert weight.shape[0] % nb == 0
@@ -151,7 +152,8 @@ def rmsnorm_gelu(
 ) -> torch.Tensor:
     """Fused ``gelu(rmsnorm(x))`` (or plain rmsnorm); multiple rows per block
     when D is small. With ``fold``, x must be [N, T, H, W, D] and the output
-    comes back as ``fold_timespace_to_depth(result, *fold)``."""
+    comes back as ``fold_timespace_to_depth(result, *fold)``.
+    """
     D = x.shape[-1]
     flat = x.reshape(-1, D)
     assert flat.stride(1) == 1 and flat.stride(0) == D

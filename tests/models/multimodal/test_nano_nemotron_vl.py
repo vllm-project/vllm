@@ -5,13 +5,29 @@ from unittest.mock import patch
 
 import numpy as np
 import pytest
+import torch
 
 from vllm import envs
 from vllm.model_executor.models.nano_nemotron_vl import (
     NanoNemotronVLMultiModalProcessor,
     NemotronH_Nano_VL_V2,
 )
-from vllm.multimodal.parse import MultiModalDataItems, VideoProcessorItems
+from vllm.multimodal.parse import (
+    MultiModalDataItems,
+    MultiModalDataParser,
+    VideoProcessorItems,
+)
+
+
+@pytest.mark.parametrize("input_key", ["image_embeds", "video_embeds"])
+def test_precomputed_multimodal_embeddings(input_key: str):
+    model = object.__new__(NemotronH_Nano_VL_V2)
+    embeds = torch.randn(2, 4, 8)
+
+    outputs = model.embed_multimodal(**{input_key: embeds})
+
+    assert len(outputs) == len(embeds)
+    assert all(torch.equal(output, embed) for output, embed in zip(outputs, embeds))
 
 
 class _TextOnlyMultiModalConfig:
@@ -65,7 +81,8 @@ class _FakeTensor:
     """Sentinel stand-in for torch.Tensor in load_weights tests. Supports the
     .detach().clone() chain used by load_weights for buffered mm weights;
     both methods return self so identity (and the existing equality
-    assertions) are preserved through cloning."""
+    assertions) are preserved through cloning.
+    """
 
     def detach(self):
         return self
@@ -149,11 +166,15 @@ def _make_mm_items_with_video_bytes(
 
 def test_extract_audio_from_videos_passes_max_duration():
     """_extract_audio_from_videos must forward VLLM_MAX_AUDIO_DECODE_DURATION_S
-    to load_audio_pyav so decompression-bomb audio is rejected."""
+    to load_audio_pyav so decompression-bomb audio is rejected.
+    """
     dummy_audio = (np.zeros(16000, dtype=np.float32), 16000.0)
     mm_items = _make_mm_items_with_video_bytes(b"\x00" * 64)
 
     processor = object.__new__(NanoNemotronVLMultiModalProcessor)
+    processor.data_parser = MultiModalDataParser(
+        target_sr=dummy_audio[1], target_channels=1
+    )
 
     target = "vllm.model_executor.models.nano_nemotron_vl.load_audio_pyav"
     with patch(target, return_value=dummy_audio) as mock_load:
@@ -166,7 +187,8 @@ def test_extract_audio_from_videos_passes_max_duration():
 
 def test_extract_audio_from_videos_rejects_oversized_audio():
     """When load_audio_pyav raises due to duration limit the video is
-    marked as having no audio instead of crashing the server."""
+    marked as having no audio instead of crashing the server.
+    """
     mm_items = _make_mm_items_with_video_bytes(b"\x00" * 64)
 
     processor = object.__new__(NanoNemotronVLMultiModalProcessor)

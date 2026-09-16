@@ -15,7 +15,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Wrapper around `Terratorch` models"""
+"""Wrapper around `Terratorch` models."""
 
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
@@ -169,6 +169,9 @@ class TerratorchInputBuilder(BaseDummyInputsBuilder[TerratorchProcessingInfo]):
 
 
 class TerratorchMultiModalProcessor(BaseMultiModalProcessor[TerratorchProcessingInfo]):
+    # Terratorch models, including Prithvi, consume tokenizer-free inputs.
+    requires_tokenizer = False
+
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,

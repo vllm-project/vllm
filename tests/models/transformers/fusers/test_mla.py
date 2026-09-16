@@ -19,9 +19,8 @@ from vllm.model_executor.models.transformers.fx_utils import trace
 _FUSED_QKV_A_PROJ = MLAFuser.merged_name
 
 
-def _match(q_lora_rank: int | None) -> MLAFuser | None:
-    """Match a meta `DeepseekV2Attention` directly (bypassing the per-class
-    `get_fuser` cache, so both q_lora variants of the same class are seen)."""
+def _attention(q_lora_rank: int | None):
+    """A meta `DeepseekV2Attention` in the requested q_lora configuration."""
     pytest.importorskip("transformers.models.deepseek_v2.modeling_deepseek_v2")
     from transformers.models.deepseek_v2.configuration_deepseek_v2 import (
         DeepseekV2Config,
@@ -41,7 +40,14 @@ def _match(q_lora_rank: int | None) -> MLAFuser | None:
         num_hidden_layers=1,
     )
     with torch.device("meta"):
-        attn = DeepseekV2Attention(cfg, layer_idx=0)
+        return DeepseekV2Attention(cfg, layer_idx=0)
+
+
+def _match(q_lora_rank: int | None) -> MLAFuser | None:
+    """Match a meta `DeepseekV2Attention` directly (bypassing the per-class
+    `get_fuser` cache, so both q_lora variants of the same class are seen).
+    """
+    attn = _attention(q_lora_rank)
     return MLAFuser.match(trace(attn), attn)
 
 
@@ -76,7 +82,8 @@ def test_discovers_modules_with_q_lora():
 
 def test_q_lora_stacks_qkv_a_proj():
     """The MLA layer reads `q_a_proj` and `kv_a_proj_with_mqa` fused into one
-    down-projection, so both checkpoint weights must remap into it."""
+    down-projection, so both checkpoint weights must remap into it.
+    """
     fuser = _match(q_lora_rank=64)
     assert isinstance(fuser, MLAFuser)
     prefix = "model.layers.0.self_attn"
@@ -88,6 +95,24 @@ def test_q_lora_stacks_qkv_a_proj():
         f"{prefix}.q_a_proj": (merged, 0),
         f"{prefix}.kv_a_proj_with_mqa": (merged, 1),
     }
+
+
+@pytest.mark.parametrize("q_lora_rank", [64, None])
+def test_update_forward_rewrites_real_attention(q_lora_rank):
+    """The source rewrite must survive the input-stability check.
+
+    The q-LoRA path hoists the merged down-projection to a top-level statement
+    while its calls sit inside the `q_lora_rank` branches, so the region it
+    spans is wide; a check that over-approximates aliasing would silently refuse
+    here and cost the fusion rather than fail loudly.
+    """
+    fuser = _match(q_lora_rank)
+    assert isinstance(fuser, MLAFuser)
+    fuser.update_forward(_attention(q_lora_rank))
+    names = set(fuser.fused_forward.__code__.co_names)
+    if fuser.has_q_lora:
+        assert _FUSED_QKV_A_PROJ in names
+        assert not {"q_a_proj", "kv_a_proj_with_mqa"} & names
 
 
 class _Norm(nn.Module):
@@ -104,7 +129,8 @@ class _Norm(nn.Module):
 
 class RenamedMLA(nn.Module):
     """An MLA-shaped attention whose children have non-standard names, proving
-    discovery is by structure and not attribute name."""
+    discovery is by structure and not attribute name.
+    """
 
     def __init__(self):
         super().__init__()
@@ -131,7 +157,8 @@ class RenamedMLA(nn.Module):
 
 def test_discovers_modules_under_arbitrary_names():
     """Discovery is purely structural: `RenamedMLA` gives its children non-standard
-    names, and `match` still locates each projection by dataflow."""
+    names, and `match` still locates each projection by dataflow.
+    """
     with torch.device("meta"):
         module = RenamedMLA()
         fuser = MLAFuser.match(trace(module), module)
@@ -158,4 +185,4 @@ class GLU(nn.Module):
 
 def test_non_mla_is_not_matched():
     with torch.device("meta"):
-        assert not isinstance(get_fuser(GLU()), MLAFuser)
+        assert get_fuser(GLU(), MLAFuser) is None

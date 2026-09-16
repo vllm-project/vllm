@@ -50,7 +50,16 @@ SKINNY_GEMM_PASS_RATES = {
 }
 PRESHUFFLED_SHAPES = [
     (64, 4096, 8192),
-    (32, 8192, 8192),
+    # aiter 0.1.20 Triton preshuffled fp4 GEMM OOBs (GPU memory access fault ->
+    # SIGABRT, crashing the process) for (M=32, N=8192, K=8192) on gfx950, despite
+    # advertising the (N, K) as tuned. A hard GPU fault can't be xfail'd, so skip it
+    # until the aiter kernel is fixed (ROCm/aiter#4867).
+    pytest.param(
+        (32, 8192, 8192),
+        marks=pytest.mark.skip(
+            reason="aiter 0.1.20 preshuffled fp4 GEMM OOB (M32,N8192,K8192, gfx950)"
+        ),
+    ),
 ]
 
 
@@ -200,7 +209,8 @@ def test_rocm_aiter_fp4_enablement_follows_env_and_arch(
 @pytest.mark.parametrize("shape", LLAMA_SHAPES)
 def test_vllm_quant_dequant_mxfp4_matches_reference_on_large_shapes(shape, dtype):
     """The public vLLM MXFP4 QDQ helper should stay exact against the torch
-    reference even on larger Llama-like shapes."""
+    reference even on larger Llama-like shapes.
+    """
     from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
         quant_dequant_mxfp4,
     )
@@ -495,7 +505,7 @@ def test_aiter_fp4_gemm_a4w4_determinism():
     ],
 )
 def test_aiter_hardware_fp4_dynamic_quant_format(shape):
-    """aiter hardware FP4 dynamic quant produces correct output format.
+    """Aiter hardware FP4 dynamic quant produces correct output format.
 
     Tests gfx950 hardware-accelerated FP4 quantization (OCP MXFP4 E2M1).
     Parity with B200 scaled_fp4_quant: block_size=32, packed uint8 output.
@@ -628,3 +638,64 @@ def test_aiter_fp4_gemm_skinny_shapes(M, N, K):
         pass_rate=pass_rate,
         max_violation_factor=GEMM_MAX_VIOLATION_FACTOR,
     )
+
+
+@pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
+@pytest.mark.parametrize(
+    ("shape", "supported"),
+    [
+        ((2560, 80), True),  # shared_expert gate/up_proj (in=2560 -> sn=80)
+        ((1280, 80), True),  # gate/up_proj under TP=2 (out sharded)
+        ((2560, 8), True),  # minimal aligned columns
+        ((32, 8), True),  # minimal aligned rows and columns
+        ((2560, 20), False),  # shared_expert down_proj (in=640 -> sn=20)
+        ((2560, 10), False),  # down_proj under TP=2 (in 640->320 -> sn=10)
+        ((30, 8), False),  # rows not a multiple of 32
+    ],
+)
+def test_asm_fp4_scale_swizzle_supported_shape_rules(shape, supported):
+    """The ASM swizzle needs rows % 32 == 0 and columns % 8 == 0."""
+    from vllm.model_executor.kernels.linear.mxfp4.aiter import (
+        _asm_fp4_scale_swizzle_supported,
+    )
+
+    weight_scale = torch.empty(shape, dtype=torch.uint8, device="cpu")
+    assert _asm_fp4_scale_swizzle_supported(weight_scale) is supported
+
+
+@pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
+def test_asm_fp4_scale_swizzle_rejects_non_2d():
+    from vllm.model_executor.kernels.linear.mxfp4.aiter import (
+        _asm_fp4_scale_swizzle_supported,
+    )
+
+    assert not _asm_fp4_scale_swizzle_supported(
+        torch.empty(2560, dtype=torch.uint8, device="cpu")
+    )
+    assert not _asm_fp4_scale_swizzle_supported(
+        torch.empty(80, 2, 16, dtype=torch.uint8, device="cpu")
+    )
+
+
+@pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
+def test_aiter_mxfp4_process_weights_falls_back_to_triton_for_misaligned_scale():
+    """A misaligned weight_scale must disable ASM and take the Triton path."""
+    from torch.nn.parameter import Parameter
+
+    from vllm.model_executor.kernels.linear.mxfp4.aiter import AiterMxfp4LinearKernel
+
+    kernel = object.__new__(AiterMxfp4LinearKernel)
+    kernel.use_asm_gemm = True
+    kernel.out_dtype = torch.bfloat16
+
+    layer = torch.nn.Module()
+    layer.weight_scale = Parameter(
+        torch.zeros(2560, 10, dtype=torch.uint8, device="cpu"), requires_grad=False
+    )
+
+    kernel.process_weights_after_loading(layer)
+
+    assert kernel.use_asm_gemm is False
+    # Triton path stores the transposed, contiguous scale.
+    assert tuple(layer.weight_scale.shape) == (10, 2560)
+    assert layer.weight_scale.is_contiguous()

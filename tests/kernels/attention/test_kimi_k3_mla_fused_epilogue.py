@@ -73,7 +73,8 @@ def _strided_context_inputs(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """The real prefill-context layouts: ``k_nope``/``v`` as the two strided
     halves of one kv_b_proj output and ``k_pe`` as a column slice of the gather
-    workspace (left in the fp8 cache layout for a plain fp8 cache)."""
+    workspace (left in the fp8 cache layout for a plain fp8 cache).
+    """
     kv_nope = _randn(num_tokens, num_heads, 256, dtype=dtype)
     k_nope, v = kv_nope.split((128, 128), dim=-1)
     workspace = _randn(num_tokens, 576, dtype=dtype)
@@ -276,6 +277,29 @@ def test_decode_epilogue_preserves_nope_path() -> None:
     kv_c = _randn(_NUM_TOKENS, 512)
     k_pe = _randn(_NUM_TOKENS, 64)
     cache = torch.zeros(2, _BLOCK_SIZE, 576, device="cuda", dtype=_DTYPE)
+
+    q_actual = fused_mla_decode_q_concat_kv_cache_insert(
+        ql_nope, q_pe, kv_c, k_pe, cache, slots
+    )
+
+    torch.testing.assert_close(q_actual, torch.cat((ql_nope, q_pe), dim=-1))
+    torch.testing.assert_close(
+        _cache_rows(cache, slots), torch.cat((kv_c, k_pe), dim=-1)
+    )
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize("num_tokens", [64, 65])
+def test_decode_epilogue_row_split_boundary(num_tokens: int) -> None:
+    """Both sides of the M-based warps-per-row dispatch produce the same rows."""
+    torch.manual_seed(3)
+    num_blocks = (num_tokens + _BLOCK_SIZE - 1) // _BLOCK_SIZE
+    slots = torch.randperm(num_blocks * _BLOCK_SIZE, device="cuda")[:num_tokens].long()
+    ql_nope = _randn(num_tokens, _NUM_HEADS, 512)
+    q_pe = _randn(num_tokens, _NUM_HEADS, 64)
+    kv_c = _randn(num_tokens, 512)
+    k_pe = _randn(num_tokens, 64)
+    cache = torch.zeros(num_blocks, _BLOCK_SIZE, 576, device="cuda", dtype=_DTYPE)
 
     q_actual = fused_mla_decode_q_concat_kv_cache_insert(
         ql_nope, q_pe, kv_c, k_pe, cache, slots

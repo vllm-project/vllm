@@ -15,6 +15,7 @@ from openai.types.responses.response_reasoning_item import (
 from openai_harmony import DeveloperContent, Role
 
 from vllm.entrypoints.openai.responses.harmony import response_input_to_harmony
+from vllm.exceptions import VLLMValidationError
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -66,7 +67,8 @@ class TestResponseInputToHarmonyMessage:
 
     def test_system_message(self):
         """System messages carry developer instructions and must be rendered
-        as developer messages with DeveloperContent."""
+        as developer messages with DeveloperContent.
+        """
         msg = response_input_to_harmony(
             {"type": "message", "role": "system", "content": "Be helpful."},
             prev_responses=[],
@@ -88,7 +90,8 @@ class TestResponseInputToHarmonyMessage:
 
     def test_developer_message_gets_instructions_prefix(self):
         """Developer messages must use DeveloperContent which adds the
-        '# Instructions' header the model was trained on."""
+        '# Instructions' header the model was trained on.
+        """
         msg = response_input_to_harmony(
             {"type": "message", "role": "developer", "content": "Be concise."},
             prev_responses=[],
@@ -118,7 +121,8 @@ class TestResponseInputToHarmonyMessage:
 
     def test_developer_message_array_content_concatenated(self):
         """Array content in developer messages is flattened and rendered
-        via DeveloperContent with the '# Instructions' header."""
+        via DeveloperContent with the '# Instructions' header.
+        """
         msg = response_input_to_harmony(
             {
                 "type": "message",
@@ -209,7 +213,8 @@ class TestResponseInputToHarmonyMessage:
 
     def test_function_call_output_uses_most_recent_matching_call(self):
         """When multiple prev_responses share a call_id, the last one wins
-        because the search is reversed."""
+        because the search is reversed.
+        """
         earlier = ResponseFunctionToolCall(
             id="fc_old",
             call_id="call_test",
@@ -252,7 +257,9 @@ class TestResponseInputToHarmonyMessage:
         assert msg.author.name == "functions.get_weather"
 
     def test_function_call_output_raises_if_no_matching_call(self):
-        with pytest.raises(ValueError, match="No call message found for"):
+        with pytest.raises(
+            VLLMValidationError, match="No call message found for"
+        ) as exc_info:
             response_input_to_harmony(
                 {
                     "type": "function_call_output",
@@ -261,21 +268,26 @@ class TestResponseInputToHarmonyMessage:
                 },
                 prev_responses=[_PREV_CALL],
             )
+        assert exc_info.value.parameter == "input"
 
     def test_function_call_output_raises_on_empty_prev_responses(self):
-        with pytest.raises(ValueError, match="No call message found for"):
+        with pytest.raises(
+            VLLMValidationError, match="No call message found for"
+        ) as exc_info:
             response_input_to_harmony(
                 {"type": "function_call_output", "call_id": "call_test", "output": "x"},
                 prev_responses=[],
             )
+        assert exc_info.value.parameter == "input"
 
     # -----------------------------------------------------------------------
     # Error cases
     # -----------------------------------------------------------------------
 
-    def test_unknown_type_raises_value_error(self):
-        with pytest.raises(ValueError, match="Unknown input type"):
+    def test_unknown_type_raises_validation_error(self):
+        with pytest.raises(VLLMValidationError, match="Unknown input type") as exc_info:
             response_input_to_harmony(
                 {"type": "image_url", "url": "https://example.com/img.png"},
                 prev_responses=[],
             )
+        assert exc_info.value.parameter == "input"

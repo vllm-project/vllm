@@ -245,7 +245,8 @@ def marlin_padded_nk(size_n: int, size_k: int, group_size: int = -1) -> tuple[in
 
 def marlin_repacked_nk(qweight: torch.Tensor, num_bits: int) -> tuple[int, int]:
     """Recover the (size_n, size_k) a Marlin weight was repacked with
-    (including any tile padding) from its packed shape."""
+    (including any tile padding) from its packed shape.
+    """
     pack_factor = 32 // num_bits
     size_k = qweight.size(0) * GPTQ_MARLIN_TILE
     size_n = qweight.size(1) * pack_factor // GPTQ_MARLIN_TILE
@@ -256,7 +257,8 @@ def marlin_pad_qweight(
     qweight: torch.Tensor, size_n: int, size_k: int, padded_n: int, padded_k: int
 ) -> torch.Tensor:
     """Zero-pad a GPTQ-layout packed weight (size_k / pack, size_n) for
-    gptq_marlin_repack."""
+    gptq_marlin_repack.
+    """
     if (padded_n, padded_k) == (size_n, size_k):
         return qweight
     pack_factor = size_k // qweight.size(0)
@@ -274,7 +276,8 @@ def marlin_pad_scales(
     group_size: int,
 ) -> torch.Tensor:
     """Zero-pad weight scales (num_groups, size_n); call before
-    marlin_permute_scales and pass the padded extents to it."""
+    marlin_permute_scales and pass the padded extents to it.
+    """
     if (padded_n, padded_k) == (size_n, size_k):
         return scales
     pad_rows = padded_k // group_size - scales.size(0) if group_size > 0 else 0
@@ -359,11 +362,11 @@ def check_moe_marlin_supports_config(
 ) -> bool:
     """Whether the fused MoE Marlin kernel supports ``config``.
 
-    Callers without act-order may pass ``allow_tile_padding=True``: a
-    tile-misaligned intermediate size is then zero-padded to a valid thread
-    tile at weight prep (see marlin_moe_padded_intermediate), so only a group
-    straddling the padded boundary stays unsupported. hidden_size is the MoE
-    I/O extent and is never padded. Act-order keeps the strict shape.
+    With ``allow_tile_padding=True``, a tile-misaligned intermediate size is
+    zero-padded to a valid thread tile at weight prep (see
+    marlin_moe_padded_intermediate), so only a group straddling the padded
+    boundary stays unsupported. hidden_size is the MoE I/O extent and is never
+    padded.
     """
     if current_platform.is_rocm():
         return False
@@ -397,8 +400,7 @@ def check_moe_marlin_supports_layer(
 
 
 def marlin_moe_intermediate_size(w1_packed: torch.Tensor, w2_packed: torch.Tensor):
-    """
-    Given Marlin packed weight matrices w1_packed, and w2_packed,
+    """Given Marlin packed weight matrices w1_packed, and w2_packed,
     return the MoE intermediate size N
     """
     marlin_tile_size = 16
@@ -433,28 +435,15 @@ def marlin_make_workspace_new(
     return torch.zeros(size, dtype=torch.int, device=device, requires_grad=False)
 
 
-def marlin_is_k_full(act_order: bool, is_row_parallel: bool) -> bool:
-    return (not act_order) or (act_order and not is_row_parallel)
-
-
-def marlin_repeat_scales_on_all_ranks(
-    act_order: bool, group_size: int, is_row_parallel: bool
-) -> bool:
-    # Need to repeat scales on every rank if act_ordering or
-    # channelwise and RowParallelLinear
+def marlin_repeat_scales_on_all_ranks(group_size: int, is_row_parallel: bool) -> bool:
     is_channelwise = group_size == -1
-    return act_order or (is_channelwise and is_row_parallel)
+    return is_channelwise and is_row_parallel
 
 
-def marlin_make_empty_g_idx(device: torch.device) -> torch.Tensor:
+def marlin_make_empty(device: torch.device) -> torch.Tensor:
     return torch.nn.Parameter(
         torch.empty(0, dtype=torch.int, device=device), requires_grad=False
     )
-
-
-def marlin_sort_g_idx(g_idx: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    g_idx_sort_indices = torch.argsort(g_idx).to(torch.int)
-    return g_idx[g_idx_sort_indices], g_idx_sort_indices
 
 
 def get_scale_perms():
@@ -700,13 +689,10 @@ def apply_gptq_marlin_linear(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     weight_zp: torch.Tensor,
-    g_idx: torch.Tensor,
-    g_idx_sort_indices: torch.Tensor,
     workspace: torch.Tensor,
     wtype: ScalarType,
     output_size_per_partition: int,
     input_size_per_partition: int,
-    is_k_full: bool,
     input_global_scale: torch.Tensor | None = None,
     bias: torch.Tensor | None = None,
     use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT,
@@ -749,14 +735,11 @@ def apply_gptq_marlin_linear(
         a_scales,
         None,
         weight_zp,
-        g_idx,
-        g_idx_sort_indices,
         workspace,
         wtype,
         size_m=reshaped_x.shape[0],
         size_n=padded_n,
         size_k=padded_k,
-        is_k_full=is_k_full,
         use_atomic_add=use_atomic_add,
         use_fp32_reduce=use_fp32_reduce,
         is_zp_float=False,

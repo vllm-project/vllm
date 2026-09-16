@@ -25,6 +25,7 @@ from vllm.model_executor.kernels.linear import (
     MarlinNvFp4LinearKernel,
 )
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.modelopt import (
     LINEAR_ALGOS,
@@ -126,6 +127,23 @@ def test_modelopt_nvfp4_quantizes_parallel_lm_head():
     assert method.spec.activation is kNvfp4Dynamic
 
 
+def test_modelopt_mxfp8_preserves_per_row_checkpoint_scales(dist_init, monkeypatch):
+    """Standard MXFP8 checkpoints already have one scale row per weight row."""
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+
+    kernel = Mock()
+    kernel.input_quant_key.return_value = None
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.modelopt.init_mxfp8_linear_kernel",
+        lambda **kwargs: kernel,
+    )
+    config = ModelOptMxFp8Config.from_config({"quant_method": "mxfp8"})
+    linear = ReplicatedLinear(64, 64, bias=False, quant_config=config)
+    scales = torch.arange(128, dtype=torch.uint8).reshape(64, 2)
+    linear.weight_scale.weight_loader(linear.weight_scale, scales)
+    assert torch.equal(linear.weight_scale, scales)
+
+
 def test_modelopt_fp8_updates_weight_dims_after_transpose():
     """Humming reads weight.input_dim/output_dim. Swapping the
     ModelWeightParameter for a plain Parameter drops them, so the per-tensor
@@ -222,6 +240,37 @@ def test_modelopt_mixed_precision_dispatches_every_linear_algo(algo):
     )
 
     assert isinstance(method, ModelOptLinearMethod), (algo, type(method).__name__)
+
+
+@pytest.mark.parametrize("algo", ["FP8_PB_WO", "FP8_BLOCK_SCALES"])
+def test_modelopt_mixed_precision_dispatches_block_fp8_moe(algo):
+    config = ModelOptMixedPrecisionConfig.from_config(
+        {
+            "quantization": {
+                "quant_algo": "MIXED_PRECISION",
+                "quantized_layers": {
+                    "mtp.layers.48.mlp.experts": {
+                        "quant_algo": algo,
+                        "group_size": 128,
+                    }
+                },
+            }
+        }
+    )
+    layer = MagicMock(spec=RoutedExperts)
+    expected = object()
+
+    with patch(
+        "vllm.model_executor.layers.quantization.modelopt.Fp8MoEMethod",
+        return_value=expected,
+    ) as method_cls:
+        method = config.get_quant_method(layer, "mtp.layers.48.mlp.experts")
+
+    assert method is expected
+    fp8_config, called_layer = method_cls.call_args.args
+    assert called_layer is layer
+    assert fp8_config.weight_block_size == [128, 128]
+    assert fp8_config.activation_scheme == "dynamic"
 
 
 def test_modelopt_nvfp4_leaves_excluded_parallel_lm_head_unquantized():
@@ -538,7 +587,8 @@ def test_modelopt_fp8_pb_wo_checkpoint_setup(monkeypatch, dist_init, workspace_i
 def test_modelopt_nvfp4_config_dispatches_w4a4_method():
     """``quant_method="NVFP4"`` (W4A4) resolves to a
     ``(kNvfp4Static, kNvfp4Dynamic)`` QuantSpec under the generic
-    ``ModelOptLinearMethod``."""
+    ``ModelOptLinearMethod``.
+    """
     from vllm.model_executor.layers.linear import LinearBase
 
     config = ModelOptNvFp4Config(
@@ -587,7 +637,8 @@ def test_modelopt_linear_method_builder_registry_override(monkeypatch):
     """The bespoke-method escape hatch: a format registered in
     ``LINEAR_METHOD_BUILDERS`` routes that algo to its own method instead of the
     generic ``ModelOptLinearMethod``. This is how a format that cannot be a
-    ``(weight, activation)`` key pair plugs into dispatch."""
+    ``(weight, activation)`` key pair plugs into dispatch.
+    """
     from vllm.model_executor.layers.linear import LinearBase
     from vllm.model_executor.layers.quantization import modelopt as m
 
@@ -618,7 +669,8 @@ def test_modelopt_linear_method_builder_registry_override(monkeypatch):
 def test_modelopt_w4a16_respects_linear_backend(linear_backend, kernel_cls):
     """W4A16 (`activation=None`) kernel selection honors ``--linear-backend``:
     ``use_a16=True`` defaults to Marlin, but an explicit backend wins. The
-    generic method routes this through ``select_linear_kernel``."""
+    generic method routes this through ``select_linear_kernel``.
+    """
     from vllm.config.quantization import QuantSpec
     from vllm.model_executor.layers.quantization.modelopt import (
         RuntimeDtypes,
@@ -650,7 +702,9 @@ def test_modelopt_linear_exposes_humming_layer_attrs(dist_init, monkeypatch):
     from vllm.config.quantization import QuantSpec
     from vllm.model_executor.layers.quantization import modelopt as mo
 
-    monkeypatch.setattr(mo, "select_linear_kernel", lambda spec, layer, rt: Mock())
+    monkeypatch.setattr(
+        mo, "select_linear_kernel", lambda spec, layer, rt, **kwargs: Mock()
+    )
     monkeypatch.setattr(mo, "expose_input_quant_key", lambda layer, kernel: None)
 
     def build(layer):
@@ -829,7 +883,8 @@ def test_modelopt_fp8_pb_wo_hides_output_padding(monkeypatch):
     )
 
     kernel = Mock()
-    monkeypatch.setattr(mo, "select_linear_kernel", lambda spec, layer, rt: kernel)
+    init_fp8_linear_kernel = Mock(return_value=kernel)
+    monkeypatch.setattr(mo, "init_fp8_linear_kernel", init_fp8_linear_kernel)
     monkeypatch.setattr(mo, "expose_input_quant_key", lambda layer, k: None)
 
     method = ModelOptLinearMethod.__new__(ModelOptLinearMethod)
@@ -860,6 +915,7 @@ def test_modelopt_fp8_pb_wo_hides_output_padding(monkeypatch):
     # loaded at logical size; scale is cdiv(2624, 128) = 21 block rows
     assert layer.weight.shape == (2624, 128)
     assert layer.weight_scale.shape == (21, 1, 1, 1)
+    assert init_fp8_linear_kernel.call_args.kwargs["weight_shape"] == (2688, 128)
 
     layer.weight.data.fill_(1)
     method.process_weights_after_loading(layer)
@@ -885,7 +941,8 @@ def test_modelopt_fp8_pb_wo_hides_output_padding(monkeypatch):
 def test_modelopt_fp8_pb_wo_rejects_non_128_input():
     """Input width must still be a multiple of 128 (same as #53132, which only
     pads the output). A partial input block is refused loudly rather than
-    silently loading wrong scales."""
+    silently loading wrong scales.
+    """
     from vllm.model_executor.layers.quantization import modelopt as mo
     from vllm.model_executor.layers.quantization.utils.quant_utils import (
         kFp8Static128BlockSym,

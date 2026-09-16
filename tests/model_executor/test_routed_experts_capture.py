@@ -278,7 +278,7 @@ def test_routed_experts_capturer_single_dp_no_metadata():
 
 
 def test_routed_experts_capturer_dp_naive_concatenated_all_ranks():
-    """n == sum(num_tokens_dp): slice this rank's segment from concatenated topk."""
+    """N == sum(num_tokens_dp): slice this rank's segment from concatenated topk."""
     capturer = _capturer_with_buffer(dp_rank=1)
     num_tokens_dp = torch.tensor([2, 3], dtype=torch.int32)
     ctx = SimpleNamespace(
@@ -295,7 +295,7 @@ def test_routed_experts_capturer_dp_naive_concatenated_all_ranks():
 
 
 def test_routed_experts_capturer_dp_modular_local_tokens():
-    """n == token_num_per_dp: topk is already local to this DP rank."""
+    """N == token_num_per_dp: topk is already local to this DP rank."""
     capturer = _capturer_with_buffer(dp_rank=1)
     num_tokens_dp = torch.tensor([2, 3], dtype=torch.int32)
     ctx = SimpleNamespace(
@@ -326,7 +326,8 @@ def test_routed_experts_capturer_dp_unexpected_batch_raises():
 
 def test_routed_experts_attention_group_is_shared_and_fail_closed():
     """Both sides key routing data by this gid, so it must skip non-full-attention
-    groups rather than defaulting to 0, and fail closed when none exists."""
+    groups rather than defaulting to 0, and fail closed when none exists.
+    """
     common = dict(num_kv_heads=1, head_size=1, dtype=torch.float32)
     config = SimpleNamespace(
         kv_cache_groups=[
@@ -453,13 +454,17 @@ def test_v2_model_runner_accepts_routed_experts(monkeypatch):
             distributed_executor_backend=None,
             pipeline_parallel_size=1,
             enable_dbo=False,
+            use_ubatching=False,
             enable_elastic_ep=False,
         ),
         compilation_config=SimpleNamespace(
             mode=CompilationMode.NONE,
             pass_config=SimpleNamespace(enable_sp=False),
         ),
-        cache_config=SimpleNamespace(kv_sharing_fast_prefill=False),
+        cache_config=SimpleNamespace(
+            kv_sharing_fast_prefill=False,
+            mamba_cache_mode="none",
+        ),
         ec_transfer_config=None,
     )
 

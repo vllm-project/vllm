@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from openai.types.responses import ResponseFunctionWebSearch
+from openai_harmony import Message, Role
+
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -8,9 +11,33 @@ from vllm.entrypoints.generate.base.protocol import (
 )
 from vllm.entrypoints.openai.responses.streaming_events import (
     SimpleStreamingEventProcessor,
+    StreamingState,
     _StateType,
+    emit_browser_tool_events,
     split_delta,
 )
+
+
+def test_browser_find_uses_responses_action_type():
+    """Both streaming output items must use the Responses find action type."""
+    message = (
+        Message.from_role_and_content(
+            Role.ASSISTANT, '{"pattern": "vLLM", "cursor": 42}'
+        )
+        .with_channel("analysis")
+        .with_recipient("browser.find")
+    )
+
+    events = emit_browser_tool_events(message, StreamingState())
+
+    added, done = events[0], events[-1]
+    assert added.type == "response.output_item.added"
+    assert done.type == "response.output_item.done"
+    for event in (added, done):
+        assert isinstance(event.item, ResponseFunctionWebSearch)
+        assert event.item.action.type == "find_in_page"
+        assert event.item.action.pattern == "vLLM"
+        assert event.item.action.url == "cursor:42"
 
 
 def _make_tool_call(
@@ -97,7 +124,8 @@ class TestProcessorCompoundDeltas:
 
     def test_split_name_and_args_same_index(self):
         """Regression: parsers like KimiK2 emit name and args as separate
-        DeltaToolCalls at the same index within one DeltaMessage."""
+        DeltaToolCalls at the same index within one DeltaMessage.
+        """
         tc_name = _make_tool_call(0, name="get_weather")
         tc_args = _make_tool_call(0, arguments='{"city":"SF"}')
         delta = DeltaMessage(tool_calls=[tc_name, tc_args])
@@ -113,7 +141,8 @@ class TestProcessorCompoundDeltas:
 
     def test_reasoning_to_content_transition(self):
         """Regression: the old special case in emit_delta handled this;
-        now split_delta handles it generically."""
+        now split_delta handles it generically.
+        """
         processor = SimpleStreamingEventProcessor()
         _run_through_processor(processor, DeltaMessage(reasoning="think"))
         assert processor.state.current_state == _StateType.REASONING

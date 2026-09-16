@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-EPLB communicator implementations and factory.
-"""
+"""EPLB communicator implementations and factory."""
 
 import contextlib
 import time
@@ -34,6 +32,7 @@ from vllm.distributed.utils import is_weak_contiguous
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.torch_utils import PIN_MEMORY
 
 logger = init_logger(__name__)
 
@@ -85,7 +84,8 @@ class EplbCommunicator(ABC):
     @property
     def needs_profile_buffer_reservation(self) -> bool:
         """Whether the profile path must run a dummy collective operation to reserve
-        communication buffers."""
+        communication buffers.
+        """
         return True
 
     def set_stream(self, cuda_stream: torch.cuda.Stream | None) -> None:
@@ -204,7 +204,9 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
                         )
                     )
                     continue
-                cpu_tensor = torch.empty_like(tensor, device="cpu")
+                cpu_tensor = torch.empty_like(
+                    tensor, device="cpu", pin_memory=PIN_MEMORY
+                )
                 p2p_ops.append(
                     P2POp(
                         torch.distributed.irecv,
@@ -255,6 +257,7 @@ class NixlEplbCommunicator(EplbCommunicator):
             cpu_group: CPU process group for metadata exchange.
             all_expert_weights: Expert weight tensors for all MoE layers.
             expert_buffer: Pre-allocated receive buffer tensors.
+
         """
         assert all_expert_weights, (
             "NixlEplbCommunicator requires non-empty all_expert_weights."
@@ -440,7 +443,8 @@ class NixlEplbCommunicator(EplbCommunicator):
 
     def _exchange_remote_send_meta(self) -> None:
         """Exchange per-layer per-tensor metadata so receivers can compute
-        remote RDMA addresses at transfer time."""
+        remote RDMA addresses at transfer time.
+        """
         local_meta: dict[tuple[int, int], tuple[int, int, int]] = {}
         for layer_idx, layer_tensors in enumerate(self._all_expert_weights):
             for t_idx, t in enumerate(layer_tensors):
@@ -663,6 +667,7 @@ def create_eplb_communicator(
             zero-copy RDMA reads.
         expert_buffer: Pre-allocated receive buffer tensors (one per
             weight tensor in a single layer).
+
     """
     first_layer = expert_weights[0] if expert_weights else []
     tensor_device_type = first_layer[0].device.type if first_layer else "cpu"

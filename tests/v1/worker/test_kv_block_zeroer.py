@@ -54,6 +54,7 @@ def test_attention_blocks_are_zeroed(spec):
         static_forward_context={
             layer_name: SimpleNamespace(kv_cache=storage),
         },
+        num_blocks=4,
     )
 
     zeroer.zero_block_ids([1])
@@ -62,6 +63,56 @@ def test_attention_blocks_are_zeroed(spec):
     expected = torch.ones_like(storage)
     expected[1] = 0
     assert torch.equal(storage, expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_layers_in_one_group_may_use_different_kernel_pages_per_block():
+    """Derive kernel pages per block from each layer's allocation."""
+    device = torch.device("cuda")
+    num_blocks = 4
+    spec = SlidingWindowSpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.int32,
+        sliding_window=2,
+    )
+    # Two kernel pages per logical block.
+    wide = torch.ones((num_blocks * 2, 3), dtype=torch.int32, device=device)
+    # One kernel page per logical block, carved out of a larger allocation so
+    # an over-strided write lands in the guard region instead of faulting or
+    # silently hitting another tensor.
+    narrow_backing = torch.ones((num_blocks * 3, 5), dtype=torch.int32, device=device)
+    narrow = narrow_backing[:num_blocks]
+
+    zeroer = KVBlockZeroer(
+        device,
+        attn_groups_iter=[
+            AttentionGroup(
+                None,
+                ["wide", "narrow"],
+                spec,
+                0,
+            )
+        ],
+        kernel_block_sizes=[1],
+        static_forward_context={
+            "wide": SimpleNamespace(kv_cache=wide),
+            "narrow": SimpleNamespace(kv_cache=narrow),
+        },
+        num_blocks=num_blocks,
+    )
+
+    zeroer.zero_block_ids([num_blocks - 1])
+    torch.accelerator.synchronize()
+
+    expected_wide = torch.ones_like(wide)
+    expected_wide[2 * (num_blocks - 1) :] = 0
+    assert torch.equal(wide, expected_wide)
+
+    expected_narrow = torch.ones_like(narrow_backing)
+    expected_narrow[num_blocks - 1] = 0
+    assert torch.equal(narrow_backing, expected_narrow)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -207,6 +258,7 @@ def test_large_dsv4_launch_geometry(monkeypatch):
             name: SimpleNamespace(kv_cache=storage)
             for name, storage in storages.items()
         },
+        num_blocks=1,
     )
 
     assert zeroer._meta is not None
@@ -306,7 +358,8 @@ def test_warmup_respects_available_block_count():
 def test_zeroes_exactly_one_block_per_layer(layout: KVCacheLayout):
     """The zeroer must zero every byte of the target block in every layer and nothing
     outside it — per head-group region under LHBNC, and never past the target block's
-    tile under block-major layouts (no out-of-bounds writes, no clobbering)."""
+    tile under block-major layouts (no out-of-bounds writes, no clobbering).
+    """
     device = torch.device("cuda")
     num_blocks, num_layers = 4, 2
     spec = FullAttentionSpec(
@@ -332,6 +385,7 @@ def test_zeroes_exactly_one_block_per_layer(layout: KVCacheLayout):
         attn_groups_iter=iter(groups),
         kernel_block_sizes=[spec.block_size],
         static_forward_context=ctx,
+        num_blocks=num_blocks,
     )
     zeroer.zero_block_ids([2])
     torch.accelerator.synchronize()

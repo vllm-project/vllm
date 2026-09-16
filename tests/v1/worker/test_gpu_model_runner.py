@@ -73,16 +73,15 @@ DEVICE_TYPE = current_platform.device_type
 def _restore_default_dtype():
     """Several tests here set the process-wide default dtype to float16 and
     previously leaked it, corrupting later float-sensitive tests in the same
-    pytest process (torch.randn silently produced fp16)."""
+    pytest process (torch.randn silently produced fp16).
+    """
     old = torch.get_default_dtype()
     yield
     torch.set_default_dtype(old)
 
 
 def initialize_kv_cache(runner: GPUModelRunner):
-    """
-    Only perform necessary steps in GPUModelRunner.initialize_kv_cache()
-    """
+    """Only perform necessary steps in GPUModelRunner.initialize_kv_cache()."""
     attn_spec = FullAttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=runner.model_config.get_num_kv_heads(runner.parallel_config),
@@ -310,6 +309,10 @@ def test_select_common_block_size_uses_largest_shared_int():
 
     selected_size = select_common_block_size(256, [backend_a, backend_b])
     assert selected_size == 64
+
+
+def test_select_common_block_size_without_active_backends_uses_manager_size():
+    assert select_common_block_size(256, []) == 256
 
 
 def test_select_common_block_size_accepts_rocm_sparse_block_size_16(monkeypatch):
@@ -1189,14 +1192,12 @@ def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config):
     reason="Attention backend FLASHINFER is only supported on CUDA.",
 )
 def test_hybrid_attention_mamba_tensor_shapes():
-    """
-    The GPU model runner creates different views into the
+    """The GPU model runner creates different views into the
     KVCacheTensors for the attention and mamba layers
     (via _allocate_kv_caches). This test verifies
     that the views are compatible: writing a mamba block
     will not corrupt an attention block and vice versa
     """
-
     set_random_seed(42)
 
     update_environment_variables(
@@ -1453,7 +1454,8 @@ def test_v2_runner_snapshots_late_interleave_adjustment(monkeypatch):
 
 def test_hybrid_block_table_initialization():
     """Test hybrid block table with different kernel and kvcache_manager block
-    sizes."""
+    sizes.
+    """
     from vllm.v1.worker.block_table import BlockTable
 
     # Test configuration: kvcache_manager block size = 32,

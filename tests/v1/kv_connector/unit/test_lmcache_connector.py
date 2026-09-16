@@ -212,7 +212,8 @@ class TestUpdateConnectorOutput:
         self, mock_connector
     ):
         """Test that method returns early when kv_cache_events is not
-        LMCacheKVEvents."""
+        LMCacheKVEvents.
+        """
         # Create a mock object that is not LMCacheKVEvents
         fake_events = MagicMock()
         connector_output = KVConnectorOutput(kv_cache_events=fake_events)
@@ -675,8 +676,7 @@ class TestIntegrationScenarios:
             assert mock_connector._kv_cache_events is None
 
     def test_lmcache_kv_events_aggregation(self):
-        """
-        Test LMCacheKVEvents aggregation across TP ranks using
+        """Test LMCacheKVEvents aggregation across TP ranks using
         KVOutputAggregator (used by MultiprocExecutor).
         """
         from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator

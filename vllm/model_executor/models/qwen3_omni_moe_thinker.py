@@ -199,10 +199,9 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
         # Audio encoder uses 20 heads. Shard across TP when divisible
         # (e.g. TP=2/4); otherwise keep unreplicated (e.g. TP=8).
         tp_size = get_tensor_model_parallel_world_size()
-        self.disable_tp = self.num_heads % tp_size != 0
-        self.num_local_heads = (
-            self.num_heads if self.disable_tp else self.num_heads // tp_size
-        )
+        disable_tp = self.num_heads % tp_size != 0
+        effective_tp = 1 if disable_tp else tp_size
+        self.num_local_heads = self.num_heads // effective_tp
 
         if (self.head_dim * self.num_heads) != self.embed_dim:
             raise ValueError(
@@ -218,16 +217,16 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
             total_num_heads=self.num_heads,
             total_num_kv_heads=self.num_heads,
             bias=True,
+            disable_tp=disable_tp,
             prefix=f"{prefix}.qkv_proj",
-            disable_tp=self.disable_tp,
         )
 
         self.out_proj = RowParallelLinear(
             input_size=self.embed_dim,
             output_size=self.embed_dim,
             bias=True,
+            disable_tp=disable_tp,
             prefix=f"{prefix}.out_proj",
-            disable_tp=self.disable_tp,
         )
 
         self.attn = MMEncoderAttention(
@@ -278,16 +277,20 @@ class Qwen3OmniMoeAudioEncoderLayer(nn.Module):
         )
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
         self.activation_fn = _ACTIVATION_REGISTRY[config.activation_function]
+        tp_size = get_tensor_model_parallel_world_size()
+        disable_tp = config.encoder_attention_heads % tp_size != 0
         self.fc1 = ColumnParallelLinear(
             self.embed_dim,
             config.encoder_ffn_dim,
             bias=True,
+            disable_tp=disable_tp,
             prefix=f"{prefix}.fc1",
         )
         self.fc2 = RowParallelLinear(
             config.encoder_ffn_dim,
             self.embed_dim,
             bias=True,
+            disable_tp=disable_tp,
             prefix=f"{prefix}.fc2",
         )
         self.final_layer_norm = nn.LayerNorm(self.embed_dim)
@@ -298,11 +301,11 @@ class Qwen3OmniMoeAudioEncoderLayer(nn.Module):
         cu_seqlens: torch.Tensor,
         max_seqlen: torch.Tensor | None,
     ) -> torch.Tensor:
-        """
-        Args:
-            hidden_states: Input tensor of shape (seq_len, hidden_size)
-            cu_seqlens: Cumulative sequence lengths
-            max_seqlen: Maximum sequence length in the batch
+        """Args:
+        hidden_states: Input tensor of shape (seq_len, hidden_size)
+        cu_seqlens: Cumulative sequence lengths
+        max_seqlen: Maximum sequence length in the batch
+
         """
         residual = hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
@@ -1001,7 +1004,7 @@ class Qwen3Omni_VisionTransformer(nn.Module):
 
         # Move cu_seqlens to GPU; grid_thw may be on CPU during profile_run
         # and FA3 vit attention requires cu_seqlens on CUDA.
-        cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
+        cu_seqlens = async_tensor_h2d(cu_seqlens, self.device)
         hidden_states = hidden_states.unsqueeze(1)
         rotary_pos_emb_cos = rotary_pos_emb_cos.to(hidden_states.device)
         rotary_pos_emb_sin = rotary_pos_emb_sin.to(hidden_states.device)
@@ -1313,9 +1316,7 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
         mm_kwargs: MultiModalKwargsItems,
         mm_prompt_updates: MultiModalPromptUpdates,
     ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
-        """
-        Qwen3-Omni reimplements this function to handle `use_audio_in_video`.
-        """
+        """Qwen3-Omni reimplements this function to handle `use_audio_in_video`."""
         mm_item_counts = mm_items.get_all_counts()
         self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
 
@@ -1525,8 +1526,7 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
         placeholders: Mapping[str, list[PlaceholderFeaturesInfo]],
         mm_prompt_updates: MultiModalPromptUpdates,
     ) -> Mapping[str, list[PlaceholderFeaturesInfo]]:
-        """
-        Helper to derive audio placeholders from video placeholders when
+        """Helper to derive audio placeholders from video placeholders when
         use_audio_in_video=True.
         """
         if "video" not in placeholders:
@@ -1574,8 +1574,8 @@ class Qwen3OmniMoeConditionalGenerationMixin(Qwen2_5OmniConditionalGenerationMix
         input_features = audio_input["input_features"]
         # audio_feature_lengths is keep_on_cpu; the audio tower derives
         # device placement from feature_lens, so move it explicitly.
-        audio_feature_lengths = audio_input["audio_feature_lengths"].to(
-            input_features.device, non_blocking=True
+        audio_feature_lengths = async_tensor_h2d(
+            audio_input["audio_feature_lengths"], input_features.device
         )
 
         audio_output_lengths = _get_feat_extract_output_lengths(audio_feature_lengths)
@@ -1988,8 +1988,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
     def _get_audio_for_video_mapping(
         self, mm_features: list[MultiModalFeatureSpec]
     ) -> tuple[dict[int, int], set[int]]:
-        """
-        Map video offset -> paired audio_feature_length for use_audio_in_video.
+        """Map video offset -> paired audio_feature_length for use_audio_in_video.
 
         When use_audio_in_video=True, audio is interleaved within video.
         The pairing is based on feature order in mm_features.
@@ -1997,6 +1996,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         Returns:
             Tuple of (video_offset -> audio_feature_length mapping,
                       set of paired audio offsets to skip)
+
         """
         videos_with_audio = [
             f
@@ -2019,8 +2019,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
     def iter_mm_features(
         self, mm_features: list[MultiModalFeatureSpec]
     ) -> Iterator[tuple[int, str, dict[str, Any]]]:
-        """
-        Iterate over multimodal features sorted by position offset.
+        """Iterate over multimodal features sorted by position offset.
 
         Yields: (offset, modality, feature_data) where feature_data contains:
         - image: {"grid_t", "grid_h", "grid_w", "t_factor"}
@@ -2085,8 +2084,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
     def _compute_interleaved_positions(
         self, start_idx: int, data: dict[str, Any]
     ) -> tuple[np.ndarray, int]:
-        """
-        Compute positions for interleaved video+audio using Qwen3 token-by-token
+        """Compute positions for interleaved video+audio using Qwen3 token-by-token
         interleaving logic.
 
         Returns: (position_ids [3, N], total_token_count)
@@ -2150,9 +2148,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
 
     @classmethod
     def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
-        """
-        Construct a transcription/translation prompt for Qwen3-Omni.
-        """
+        """Construct a transcription/translation prompt for Qwen3-Omni."""
         audio = stt_params.audio
         stt_config = stt_params.stt_config
         model_config = stt_params.model_config
@@ -2312,9 +2308,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         return torch.from_numpy(llm_positions), mrope_position_delta
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models"""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="visual.merger",

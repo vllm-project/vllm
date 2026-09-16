@@ -118,7 +118,8 @@ def worker_init_payload(init_info: NCCLWeightTransferInitInfo) -> dict:
     """Serialize a worker init info for `init_weight_transfer_engine`, dropping
     the unset rendezvous field (the UID in TCP mode) so the wire payload carries
     only the mode actually in use. Shared by the dense and sparse trainer
-    engines so the two cannot drift."""
+    engines so the two cannot drift.
+    """
     return {key: value for key, value in asdict(init_info).items() if value is not None}
 
 
@@ -142,8 +143,7 @@ def stateless_init_process_group(
     world_size: int,
     device,
 ) -> "PyNcclCommunicator":
-    """
-    vLLM provides `StatelessProcessGroup` to create a process group
+    """VLLM provides `StatelessProcessGroup` to create a process group
     without considering the global process group in torch.distributed.
     It is recommended to create `StatelessProcessGroup`, and then initialize
     the data-plane communication (NCCL) between external (train processes)
@@ -222,8 +222,7 @@ def worker_init_process_group(
 def trainer_init(
     init_info: NCCLRendezvous | dict,
 ) -> "PyNcclCommunicator":
-    """
-    Initialize NCCL process group for trainer-side weight transfer.
+    """Initialize NCCL process group for trainer-side weight transfer.
 
     The trainer is always rank 0 in the process group. Uses the current
     CUDA device (torch.accelerator.current_device_index()).
@@ -237,6 +236,7 @@ def trainer_init(
 
     Returns:
         PyNcclCommunicator for weight transfer.
+
     """
     if isinstance(init_info, dict):
         master_address = init_info["master_address"]

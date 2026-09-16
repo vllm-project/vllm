@@ -123,7 +123,8 @@ def _check_writes_only_its_own_shard(
     device: torch.device, tp_size: int, rank: int
 ) -> None:
     """Two ranks that swapped both weight rows and write offsets still sum to
-    the right total, so inspect each slice before the final collective."""
+    the right total, so inspect each slice before the final collective.
+    """
     transform = _build_transform(device)
     runner = _tail_runner(transform, tp_size)
     group = get_tp_group().device_group

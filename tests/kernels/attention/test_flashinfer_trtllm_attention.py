@@ -117,7 +117,7 @@ def make_nvfp4_kv_cache(
 
     # Dequantize for the FA2 reference baseline.
     ref_k = dequant_nvfp4_kv_cache(
-        k_data, k_scales, kv_scale_val, head_size, block_size
+        k_data, k_scales, kv_scale_val, head_size, block_size, swizzled_scales=False
     ).to(torch.bfloat16)
     ref_v = dequant_nvfp4_kv_cache(
         v_data, v_scales, kv_scale_val, head_size, block_size
@@ -134,7 +134,8 @@ def make_quantized_kv_cache(
     head_size: int,
 ) -> tuple:
     """Quantize kv_cache based on dtype. Returns (kv_cache, kv_cache_sf,
-    kv_scale, ref_kv_cache, is_nvfp4_kv)."""
+    kv_scale, ref_kv_cache, is_nvfp4_kv).
+    """
     is_nvfp4_kv = kv_quant_dtype == FP4_DTYPE
     if is_nvfp4_kv:
         data, scales, kv_scale, ref = make_nvfp4_kv_cache(

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-DecodeBenchConnector: A KV Connector for decode instance performance testing.
+"""DecodeBenchConnector: A KV Connector for decode instance performance testing.
 
 This connector emulates a prefill-decode disaggregated setting by filling
 the KV cache with dummy values, allowing measurement of decoder performance
@@ -10,7 +9,7 @@ under larger input sequence lengths (ISL) in resource-limited environments.
 Usage:
     To use this connector for benchmarking, configure it in the kv_transfer_config:
 
-    Example:
+Example:
         vllm serve <model> --kv-transfer-config '{
             "kv_connector": "DecodeBenchConnector",
             "kv_role": "kv_both",
@@ -29,6 +28,7 @@ Usage:
         - fill_mean (float): Mean value for random normal fill (default: 0.015)
         - fill_std (float): Standard deviation for random fill (default: 0.0)
           Set to 0 for constant values, >0 for random sampling
+
 """
 
 from dataclasses import dataclass
@@ -80,8 +80,7 @@ class DecodeBenchConnectorMetadata(KVConnectorMetadata):
 
 
 class DecodeBenchConnector(KVConnectorBase_V1, SupportsHMA):
-    """
-    A KV Connector for decode instance performance testing.
+    """A KV Connector for decode instance performance testing.
 
     This connector fills the KV cache with dummy values to emulate a
     prefill-decode disaggregated setting, enabling performance testing of the
@@ -193,6 +192,7 @@ class DecodeBenchConnectorScheduler:
 
     def __init__(self, vllm_config: "VllmConfig", kv_cache_config: "KVCacheConfig"):
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
+        self.kv_cache_groups = kv_cache_config.kv_cache_groups
         self.group_block_sizes = tuple(
             resolve_dcp_kv_block_size(
                 group.kv_cache_spec,
@@ -201,7 +201,7 @@ class DecodeBenchConnectorScheduler:
                     dcp_world_size,
                 ),
             )
-            for group in kv_cache_config.kv_cache_groups
+            for group in self.kv_cache_groups
         )
 
         # Track which requests have already been filled
@@ -218,8 +218,7 @@ class DecodeBenchConnectorScheduler:
         request: "Request",
         num_computed_tokens: int,
     ) -> tuple[int, bool]:
-        """
-        For new requests, return the number of tokens that should be filled
+        """For new requests, return the number of tokens that should be filled
         with dummy KV cache values.
 
         Returns:
@@ -227,6 +226,7 @@ class DecodeBenchConnectorScheduler:
             - num_tokens_to_fill: number of uncomputed tokens minus 1
                 (we fill everything except the last token for decode)
             - is_async: False (synchronous filling)
+
         """
         req_id = request.request_id
 
@@ -250,8 +250,7 @@ class DecodeBenchConnectorScheduler:
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
-        """
-        Called after blocks are allocated. Store the block IDs so we can
+        """Called after blocks are allocated. Store the block IDs so we can
         fill them with dummy values.
 
         Supports both single- and multi-group KV cache configurations.
@@ -261,17 +260,56 @@ class DecodeBenchConnectorScheduler:
         if num_external_tokens == 0:
             return
 
-        # Get the block IDs that were allocated
-        # block_groups is a tuple of lists, one per KV cache group
-        block_groups = blocks.get_block_ids()
-
-        # Extract the blocks covering the external tokens from each group
-        block_ids_per_group = tuple(
-            group_blocks[: cdiv(num_external_tokens, group_block_size)]
-            for group_blocks, group_block_size in zip(
-                block_groups, self.group_block_sizes, strict=True
+        total_computed_tokens = request.num_tokens - 1
+        num_local_computed_tokens = total_computed_tokens - num_external_tokens
+        block_ids_per_group_list: list[list[int]] = []
+        for group_idx, (
+            group,
+            group_blocks,
+            group_block_size,
+        ) in enumerate(
+            zip(
+                self.kv_cache_groups,
+                blocks.blocks,
+                self.group_block_sizes,
+                strict=True,
             )
-        )
+        ):
+            is_circular_buffer = all(
+                isinstance(spec, CircularBufferSpec)
+                for spec in iter_layer_specs(group.kv_cache_spec)
+            )
+            if not is_circular_buffer:
+                num_computed_blocks = cdiv(total_computed_tokens, group_block_size)
+                external_block_start = num_local_computed_tokens // group_block_size
+                assert (
+                    0
+                    <= external_block_start
+                    <= num_computed_blocks
+                    <= len(group_blocks)
+                ), (
+                    "DecodeBenchConnector block range exceeds allocated blocks: "
+                    f"request={req_id}, group={group_idx}, "
+                    f"range=[{external_block_start}, {num_computed_blocks}), "
+                    f"allocated={len(group_blocks)}"
+                )
+                selected_blocks = group_blocks[external_block_start:num_computed_blocks]
+            else:
+                selected_blocks = group_blocks
+
+            block_ids = [
+                block.block_id for block in selected_blocks if not block.is_null
+            ]
+            if not block_ids:
+                logger.warning(
+                    "DecodeBenchConnector: No blocks selected for KV cache group "
+                    "%d with %d external tokens for request %s",
+                    group_idx,
+                    num_external_tokens,
+                    req_id,
+                )
+            block_ids_per_group_list.append(block_ids)
+        block_ids_per_group = tuple(block_ids_per_group_list)
 
         # Store the blocks to fill for all group. _pending_fills doesn't need cleanup
         # as it's cleared after build_connector_meta
@@ -286,7 +324,7 @@ class DecodeBenchConnectorScheduler:
             "DecodeBenchConnector: Selected %d total blocks across %d KV cache "
             "groups for request %s (per-group counts: %s)",
             sum(block_counts),
-            len(block_groups),
+            len(blocks.blocks),
             req_id,
             ", ".join(map(str, block_counts)),
         )
@@ -294,8 +332,7 @@ class DecodeBenchConnectorScheduler:
     def build_connector_meta(
         self, scheduler_output: "SchedulerOutput"
     ) -> KVConnectorMetadata:
-        """
-        Build metadata containing information about which blocks to fill
+        """Build metadata containing information about which blocks to fill
         with dummy KV values.
         """
         meta = DecodeBenchConnectorMetadata(reqs_to_fill=self._pending_fills.copy())
@@ -306,9 +343,7 @@ class DecodeBenchConnectorScheduler:
         return meta
 
     def request_finished(self, request: "Request"):
-        """
-        Called when a request has finished. Clean up any state.
-        """
+        """Called when a request has finished. Clean up any state."""
         self._filled_requests.discard(request.request_id)
 
 
@@ -349,8 +384,7 @@ class DecodeBenchConnectorWorker:
         )
 
     def start_fill_kv(self, metadata: DecodeBenchConnectorMetadata):
-        """
-        Fill the allocated KV cache blocks with dummy values.
+        """Fill the allocated KV cache blocks with dummy values.
 
         This simulates having a populated KV cache from a prefill phase,
         allowing decode performance testing with larger context sizes.
@@ -379,13 +413,13 @@ class DecodeBenchConnectorWorker:
             )
 
     def _fill_blocks(self, group_idx: int, block_ids: list[int], num_tokens: int):
-        """
-        Fill specified blocks with dummy values for a specific KV cache group.
+        """Fill specified blocks with dummy values for a specific KV cache group.
 
         Args:
             group_idx: The KV cache group index to fill
             block_ids: List of block IDs to fill in this group
             num_tokens: Total number of tokens to fill across these blocks
+
         """
         if not block_ids:
             return
@@ -461,6 +495,7 @@ class DecodeBenchConnectorWorker:
                 tensor's first dim are ignored.
             fill_mean: Mean value for the fill.
             fill_std: Standard deviation for the fill.
+
         """
         # Convert block_ids to tensor on device
         block_ids_tensor = torch.tensor(
@@ -511,6 +546,7 @@ class DecodeBenchConnectorWorker:
             kv_cache: A state tensor to fill in its entirety.
             fill_mean: Mean value for the fill.
             fill_std: Standard deviation for the fill.
+
         """
         if fill_std > 0:
             kv_cache.normal_(mean=fill_mean, std=fill_std)

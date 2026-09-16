@@ -36,6 +36,7 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.model_executor.models.transformers.fuser import get_fuser
+from vllm.model_executor.models.transformers.fusers.glu import GLUFuser
 from vllm.model_executor.models.transformers.fusers.moe import MoEBlockFuser
 from vllm.model_executor.models.utils import extract_layer_index, maybe_prefix
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, direct_register_custom_op
@@ -74,7 +75,8 @@ class TransformersMoERunner(MoERunner):
     ) -> torch.Tensor:
         """In Transformers `experts.forward` will have this signature.
 
-        We discard any extra kwargs because we cannot use them here."""
+        We discard any extra kwargs because we cannot use them here.
+        """
         # Note: we need to forward through a custom op so the topk_ids
         # can be transferred without interfering with cudagraphs.
         return torch.ops.vllm.transformers_moe_forward(
@@ -319,8 +321,8 @@ class MoEMixin(MixtureOfExperts):
                         # Store shared experts for later down projection adjustment
                         if shared_experts is not None:
                             hf_shared = shared_experts.shared_experts
-                            glu_fuser = get_fuser(hf_shared)
-                            down_name = getattr(glu_fuser, "down_name", None)
+                            glu_fuser = get_fuser(hf_shared, GLUFuser)
+                            down_name = glu_fuser and glu_fuser.down_name
                             if down_name is not None:
                                 shared_down_projs.append((hf_shared, down_name))
                         # Prefer config, otherwise read it from fuser.
@@ -366,7 +368,8 @@ class MoEMixin(MixtureOfExperts):
                             moe_state: TransformersMoEState,
                         ):
                             """Return `topk_weights` from `gating_output` and the
-                            `topk_ids` we stored in the layer earlier."""
+                            `topk_ids` we stored in the layer earlier.
+                            """
                             topk_weights = gating_output
                             topk_ids = moe_state.topk_ids
                             assert topk_ids is not None

@@ -10,6 +10,7 @@ Covers two things:
     + standalone static-FP8-quant path it replaces (GPU-only, SM100/SM110).
 """
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -99,9 +100,42 @@ def test_flash_attn_supports_quant_output_unknown_device():
         assert backend.supports_quant_output(kFp8StaticTensorSym) is False
 
 
+@pytest.mark.parametrize(
+    ("version", "enable_jit_warmup", "expected_calls"),
+    [(4, True, 1), (4, False, 0), (3, True, 0)],
+)
+def test_flash_attn_registers_warmup_only_for_fa4(
+    version: int,
+    enable_jit_warmup: bool,
+    expected_calls: int,
+):
+    vllm_config = SimpleNamespace(
+        kernel_config=SimpleNamespace(enable_jit_warmup=enable_jit_warmup)
+    )
+    with (
+        patch(f"{_FA_MODULE}.flash_attn_varlen_func"),
+        patch(f"{_FA_MODULE}.get_flash_attn_version", return_value=version),
+        patch(f"{_FA_MODULE}._FA4_MLA_PREFILL_KERNEL.register_warmup") as register,
+        patch(f"{_FA_MODULE}.current_platform") as platform,
+    ):
+        platform.get_device_capability.return_value = DeviceCapability(10, 0)
+        FlashAttnPrefillBackend(
+            num_heads=16,
+            scale=1.0,
+            kv_lora_rank=512,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+            vllm_config=vllm_config,
+        )
+
+    assert register.call_count == expected_calls
+
+
 def test_flash_attn_prefill_backend_signature_accepts_fused_kwargs():
     """run_prefill_new_tokens must accept out/output_scale so the direct
-    (non-**kwargs) call in forward_mha type- and runtime-checks."""
+    (non-**kwargs) call in forward_mha type- and runtime-checks.
+    """
     import inspect
 
     params = inspect.signature(
@@ -117,7 +151,8 @@ def test_flash_attn_prefill_backend_signature_accepts_fused_kwargs():
 
 def test_mla_impl_forward_mha_accepts_output_scale():
     """The abstract MLA impl forward_mha must carry output_scale so every
-    override (and the unconditional forward_impl call) stays compatible."""
+    override (and the unconditional forward_impl call) stays compatible.
+    """
     import inspect
 
     from vllm.v1.attention.backend import MLAAttentionImpl
@@ -144,7 +179,8 @@ _FUSED_FP8_SKIP = _fused_fp8_skip_reason()
 def test_fa4_fused_fp8_output_matches_post_quant(default_vllm_config):
     """FA4's fused FP8 write (output_scale, flash-attention#135) must match the
     bf16-attention + standalone static-FP8-quant path it replaces, since
-    production uses the same output_scale for both."""
+    production uses the same output_scale for both.
+    """
     from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
     from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
     from vllm.platforms import current_platform

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This file contains the command line arguments for the vLLM's online server.
+"""This file contains the command line arguments for the vLLM's online server.
 It is kept in a separate file for documentation purposes.
 """
 
@@ -47,7 +46,7 @@ class LoRAParserAction(argparse.Action):
             if item in [None, ""]:  # Skip if item is None or empty string
                 continue
             if "=" in item and "," not in item:  # Old format: name=path
-                name, path = item.split("=")
+                name, path = item.split("=", 1)
                 lora_list.append(LoRAModulePath(name, path))
             else:  # Assume JSON format
                 try:
@@ -180,6 +179,13 @@ class BaseFrontendArgs:
     """
     If set to True, only enable the Tokens In<>Out endpoint.
     This is intended for use in a Disaggregated Everything setup.
+    """
+    enable_scale_out: bool = False
+    """
+    If set to True, register the scale-out endpoints (`/render`, `/derender`,
+    and `/inference/v1/generate`) on `vllm serve`. Has no effect on
+    `vllm launch render` or `vllm serve --tokens-only`, which always register
+    their required endpoints regardless of this flag.
     """
     fingerprint_mode: Literal["full", "hash", "custom", "none"] = "full"
     """Controls the ``system_fingerprint`` field on responses.
@@ -368,6 +374,16 @@ class FrontendArgs(BaseFrontendArgs):
             del frontend_kwargs["disable_access_log_for_endpoints"]["nargs"]
 
         return frontend_kwargs
+
+
+def resolve_default_chat_template_kwargs(
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    """Resolve renderer defaults, including the dedicated Cohere format flag."""
+    kwargs = dict(args.default_chat_template_kwargs or {})
+    if getattr(args, "cohere_format", None):
+        kwargs.setdefault("cohere_format", args.cohere_format)
+    return kwargs
 
 
 def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:

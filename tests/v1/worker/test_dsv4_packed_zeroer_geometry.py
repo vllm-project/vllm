@@ -76,6 +76,7 @@ def test_packed_dsv4_zeroer_zeroes_only_each_layers_page():
         static_forward_context={
             f"layer.{i}": SimpleNamespace(kv_cache=views[i]) for i in range(NUM_LAYERS)
         },
+        num_blocks=NUM_BLOCKS,
     )
     seg_addrs, seg_block_strides, seg_page_sizes, _, _, n_segs = zeroer._meta
 
@@ -100,7 +101,8 @@ def test_packed_dsv4_zeroer_zeroes_only_each_layers_page():
 def test_overlaid_zeroer_dedups_segments_with_max_span():
     """Two groups overlay one allocation; the zeroer must emit one segment per distinct
     byte offset, spanning the widest overlaid page, so a newly allocated block is fully
-    zeroed no matter which group owns it."""
+    zeroed no matter which group owns it.
+    """
     from unittest.mock import MagicMock
 
     from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups
@@ -133,6 +135,7 @@ def test_overlaid_zeroer_dedups_segments_with_max_span():
     vllm_config.cache_config = CacheConfig()
     vllm_config.cache_config.num_gpu_blocks_override = None
     vllm_config.cache_config.kv_cache_layout = "BLHNC"
+    vllm_config.attention_config.hisparse_config = None
     config = get_kv_cache_config_from_groups(vllm_config, groups, 8 * 1024 * 1024)
     views = allocate_kv_cache(config, torch.device("cpu"), KVCacheLayout.BLHNC, None)
     buf_ptr = views["g1.big"].data_ptr()
@@ -153,6 +156,7 @@ def test_overlaid_zeroer_dedups_segments_with_max_span():
         static_forward_context={
             name: SimpleNamespace(kv_cache=views[name]) for name in views
         },
+        num_blocks=config.num_blocks,
     )
     seg_addrs, seg_block_strides, seg_page_sizes, _, _, n_segs = zeroer._meta
 

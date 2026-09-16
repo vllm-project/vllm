@@ -15,7 +15,8 @@ from vllm.v1.executor.ray_utils import WORKER_SPECIFIC_ENV_VARS
 
 class TestDefaultPrefixes:
     """Built-in prefixes (VLLM_, LMCACHE_, NCCL_, UCX_, HF_, HUGGING_FACE_)
-    should be forwarded without any extra configuration."""
+    should be forwarded without any extra configuration.
+    """
 
     @patch.dict(os.environ, {"LMCACHE_LOCAL_CPU": "True"}, clear=False)
     def test_lmcache_prefix(self):
@@ -53,7 +54,8 @@ class TestDefaultExtraVars:
 
     def test_pythonhashseed_in_result(self):
         """PYTHONHASHSEED should always be in the result set (as a name to
-        copy) regardless of whether it is actually set in os.environ."""
+        copy) regardless of whether it is actually set in os.environ.
+        """
         result = get_env_vars_to_copy()
         assert "PYTHONHASHSEED" in result
 
