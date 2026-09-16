@@ -282,6 +282,7 @@ def _sync_dp(
     uniform_token_count_per_rank: list[int] | None = None,
     allow_ubatching: bool = True,
     cudagraph_manager: Any = None,
+    pcp_size: int = 1,
 ) -> tuple[BatchExecutionDescriptor, dp_utils.DPSyncState | None]:
     """Run the DP handshake with the all-reduce stubbed out.
 
@@ -289,10 +290,14 @@ def _sync_dp(
     the cases below stand in for the collective rather than for the decision,
     and need no process group. Every rank asks for eager, which keeps the
     non-microbatched path off the cudagraph manager. This rank is rank 0.
+
+    With `pcp_size > 1` (and EP), the handshake runs over the MoE DP-PCP group
+    and `num_tokens_per_rank` is indexed by rank in that group.
     """
-    dp_size = len(num_tokens_per_rank)
-    uniform_token_counts = uniform_token_count_per_rank or [0] * dp_size
-    reduced = torch.zeros(6, dp_size, dtype=torch.int32)
+    sync_size = len(num_tokens_per_rank)
+    dp_size = sync_size // pcp_size
+    uniform_token_counts = uniform_token_count_per_rank or [0] * sync_size
+    reduced = torch.zeros(6, sync_size, dtype=torch.int32)
     reduced[0] = torch.tensor(num_tokens_per_rank, dtype=torch.int32)
     reduced[1] = CUDAGraphMode.NONE.value
     reduced[2] = torch.tensor(uniform_token_counts, dtype=torch.int32)
@@ -300,9 +305,11 @@ def _sync_dp(
     reduced[4] = int(allow_ubatching)
     reduced[5] = 8  # num_reqs
 
+    sync_group = SimpleNamespace(cpu_group=None, world_size=sync_size, rank_in_group=0)
     with (
         patch.object(dp_utils.dist, "all_reduce", lambda t, group: t.copy_(reduced)),
-        patch.object(dp_utils, "get_dp_group", lambda: SimpleNamespace(cpu_group=None)),
+        patch.object(dp_utils, "get_dp_group", lambda: sync_group),
+        patch.object(dp_utils, "get_moe_non_sp_group", lambda: sync_group),
     ):
         return dp_utils.sync_cudagraph_and_dp_padding(
             cudagraph_manager=cudagraph_manager,
@@ -316,6 +323,8 @@ def _sync_dp(
             uniform_token_count=uniform_token_counts[0] or None,
             dp_size=dp_size,
             dp_rank=0,
+            pcp_size=pcp_size,
+            enable_expert_parallel=pcp_size > 1,
             parallel_config=ParallelConfig(
                 enable_dbo=True,
                 dbo_decode_token_threshold=DECODE_THRESHOLD,
@@ -352,6 +361,22 @@ def test_microbatching_pads_all_ranks_to_the_largest():
     assert desc.num_tokens == 256
     assert dp_sync is not None
     assert dp_sync.num_tokens_across_dp.tolist() == [256, 256]
+
+
+def test_microbatching_under_pcp_agrees_across_pcp_coordinates():
+    """Under DP x PCP every rank in the MoE DP-PCP group must reach one answer.
+
+    Rank 0 (DP0, PCP0) sees DP counts [256, 256] at its own PCP coordinate, but
+    rank 1 (DP0, PCP1) is below the prefill threshold, so nobody microbatches.
+    """
+    assert _sync_dp([256, 100, 256, 256], pcp_size=2)[0].num_ubatches == 1
+
+    desc, dp_sync = _sync_dp([200, 256, 256, 256], pcp_size=2)
+    assert desc.num_ubatches == 2
+    assert dp_sync is not None
+    assert dp_sync.num_tokens_across_dp.tolist() == [256, 256]
+    assert dp_sync.moe_non_sp_token_counts is not None
+    assert dp_sync.moe_non_sp_token_counts.tolist() == [256, 256, 256, 256]
 
 
 def test_microbatching_survives_a_rank_that_cannot_fill_it():
