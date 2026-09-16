@@ -598,12 +598,14 @@ class MarkingStub(SupportsMultiModal, nn.Module):
     _pre_trained_model_classes = Base._pre_trained_model_classes
 
 
-def build_marked_model(image_limit: int, skip_tokenizer_init: bool = False):
+def build_marked_model(
+    image_limit: int, video_limit: int = 0, skip_tokenizer_init: bool = False
+):
     """Build the HF model inside the marking context and return it."""
     model_config = ModelConfig(
         model=MULTIMODAL_MODEL,
         model_impl="transformers",
-        limit_mm_per_prompt={"image": image_limit},
+        limit_mm_per_prompt={"image": image_limit, "video": video_limit},
     )
     # Set after construction: building the config itself needs the tokenizer
     model_config.skip_tokenizer_init = skip_tokenizer_init
@@ -617,11 +619,32 @@ def build_marked_model(image_limit: int, skip_tokenizer_init: bool = False):
     return stub.model
 
 
-@pytest.mark.parametrize(("image_limit", "skipped"), [(0, True), (4, False)])
-def test_tower_weights_skipped_when_modality_disabled(image_limit, skipped):
-    """`--limit-mm-per-prompt image=0` should drop the vision tower's weights."""
-    vision_tower = build_marked_model(image_limit).vision_tower
+@pytest.mark.parametrize(
+    ("image_limit", "video_limit", "skipped"),
+    [(0, 0, True), (4, 0, False), (0, 4, False)],
+)
+def test_tower_weights_skipped_when_modality_disabled(
+    image_limit, video_limit, skipped
+):
+    """Only `--limit-mm-per-prompt image=0,video=0` drops the tower they share."""
+    vision_tower = build_marked_model(image_limit, video_limit).vision_tower
     assert isinstance(vision_tower, StageMissingLayer) is skipped
+
+
+def test_torch_compile_allowed_with_nope_layers():
+    """A layer without RoPE has no rope parameters, which is not dynamic scaling."""
+    from vllm.model_executor.models.transformers.utils import can_enable_torch_compile
+
+    text_config = SimpleNamespace(
+        rope_parameters={
+            "sliding_attention": {"rope_type": "default"},
+            "full_attention": None,
+        }
+    )
+    hf_config = SimpleNamespace(get_text_config=lambda: text_config)
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=hf_config))
+
+    assert can_enable_torch_compile(vllm_config)
 
 
 def test_marking_skipped_without_tokenizer():

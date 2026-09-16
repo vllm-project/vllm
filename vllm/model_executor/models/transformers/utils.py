@@ -342,5 +342,7 @@ def can_enable_torch_compile(vllm_config: "VllmConfig") -> bool:
         # Nest rope_parameters if not nested already to simplify logic
         if not is_rope_parameters_nested(rope_parameters):
             rope_parameters = {"": rope_parameters}
-        return all(rp["rope_type"] != "dynamic" for rp in rope_parameters.values())
+        return all(
+            rp["rope_type"] != "dynamic" for rp in rope_parameters.values() if rp
+        )
     return True
