@@ -52,9 +52,15 @@ class BenchmarkSubcommand(CLISubcommand):
     name = "bench"
     help = "vLLM bench subcommand."
 
+    def __init__(self) -> None:
+        self.commands: dict[str, type[BenchmarkSubcommandBase]] = {}
+
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
         args.dispatch_function(args)
+
+    def post_parse(self, args: argparse.Namespace) -> None:
+        self.commands[args.bench_type]().post_parse(args)
 
     def validate(self, args: argparse.Namespace) -> None:
         pass
@@ -92,6 +98,7 @@ class BenchmarkSubcommand(CLISubcommand):
                 cmd_subparser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(
                     subcmd=f"{self.name} {cmd_cls.name}"
                 )
+                self.commands[cmd_cls.name] = cmd_cls
         return bench_parser
 
 

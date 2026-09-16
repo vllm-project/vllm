@@ -5,6 +5,7 @@ import inspect
 
 from vllm.benchmarks.mm_processor import add_cli_args, main
 from vllm.entrypoints.cli.benchmark.base import BenchmarkSubcommandBase
+from vllm.logger import configure_logging_from_args
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
@@ -63,6 +64,9 @@ class BenchmarkMMProcessorSubcommand(BenchmarkSubcommandBase):
         if cls.__doc__:
             parser.description = inspect.cleandoc(cls.__doc__)
         add_cli_args(parser)
+
+    def post_parse(self, args: argparse.Namespace) -> None:
+        configure_logging_from_args(args)
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:

@@ -19,6 +19,9 @@ class CLISubcommand:
     def cmd(args: argparse.Namespace) -> None:
         raise NotImplementedError("Subclasses should implement this method")
 
+    def post_parse(self, args: argparse.Namespace) -> None:
+        pass
+
     def validate(self, args: argparse.Namespace) -> None:
         # No validation by default
         pass
