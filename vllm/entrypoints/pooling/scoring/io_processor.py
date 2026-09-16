@@ -729,23 +729,16 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         renders: list[list[int]] = []
         try:
             for filler in ("0", "1 2 3 4"):
-                messages = [
-                    ConversationMessage(
-                        role=role,
-                        content=cast(Any, [{"type": "text", "text": filler}]),
-                    )
-                    for role in ("query", "document")
-                ]
-                text = safe_apply_chat_template(
-                    self.model_config,
-                    self.tokenizer,
-                    messages,
+                # Use the scoring path to preserve saved system prompts and
+                # generation settings when deriving the template tail.
+                _, prompt = self.get_score_prompt(
+                    filler,
+                    filler,
+                    {},
                     chat_template=chat_template,
-                    tools=None,
-                    tokenize=False,
-                    **template_kwargs,
+                    chat_template_kwargs=template_kwargs,
                 )
-                renders.append(self.tokenizer.encode(text, add_special_tokens=False))
+                renders.append(prompt["prompt_token_ids"])
         except Exception:
             logger.debug(
                 "Unable to derive the Sentence Transformers chat suffix.", exc_info=True

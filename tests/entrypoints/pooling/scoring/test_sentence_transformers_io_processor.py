@@ -383,6 +383,49 @@ def test_structured_truncation_matches_sentence_transformers(
     )
 
 
+@pytest.mark.parametrize(
+    "chat_template_kwargs", [None, {"add_generation_prompt": False}]
+)
+def test_logit_score_truncation_preserves_saved_template_settings(
+    monkeypatch, processor, st_transformer, chat_template_kwargs
+):
+    """Truncated LogitScore inputs retain the saved generation and system suffix."""
+    monkeypatch.setattr(scoring_utils, "MultiModalItemTracker", _MultiModalTracker)
+    template = (
+        _CHAT_TEMPLATE + "{% if messages[0]['role'] == 'system' %}[SEP]{% endif %}"
+        "{% if add_generation_prompt %}assistant:{% endif %}"
+    )
+    processor.tokenizer.chat_template = template
+    st_transformer.tokenizer.chat_template = template
+    st_transformer.processing_kwargs = {
+        "chat_template": {"add_generation_prompt": True}
+    }
+    processor.sentence_transformers_config = SimpleNamespace(
+        uses_message_format=True,
+        logit_score_config={"true_token_id": 7},
+        chat_template_kwargs={"add_generation_prompt": True},
+        model_config={"prompts": {"match": "match"}, "default_prompt_name": "match"},
+    )
+    pair = ("query", " ".join(["document"] * 10))
+    expected = st_transformer.preprocess(
+        [pair],
+        prompt="match",
+        processing_kwargs={
+            "text": {"max_length": 12},
+            "chat_template": chat_template_kwargs or {},
+        },
+    )
+
+    result = _render_pair(
+        processor,
+        pair,
+        {"truncate_prompt_tokens": 12},
+        chat_template_kwargs,
+    )
+
+    assert result["prompts"]["prompt_token_ids"] == expected["input_ids"][0].tolist()
+
+
 def test_suffix_restore_preserves_padding(monkeypatch, processor, st_transformer):
     monkeypatch.setattr(scoring_utils, "MultiModalItemTracker", _MultiModalTracker)
     pair = ("query", " ".join(["document"] * 10))

@@ -366,7 +366,11 @@ def _create_logit_score_cross_encoder(
     )
     export_path = path / "export"
     cross_encoder.save_pretrained(export_path)
-    pairs = [("query", "document"), ("query extra", "document extra extra")]
+    pairs = [
+        ("query", "document"),
+        ("query extra", "document extra extra"),
+        ("query", " ".join(["document"] * 70)),
+    ]
     if multimodal:
         from PIL import Image
 
