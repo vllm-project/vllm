@@ -74,6 +74,10 @@ def sync_cudagraph_and_dp_padding(
     else:
         dist.all_reduce(tensor, group=group)
 
+    # Full width, dead slots included: returned in DPSyncState, whose
+    # consumers index it by original dp_rank.
+    num_tokens_across_dp_full = tensor[0]
+
     if parallel_config.enable_fault_tolerance:
         # Per-step barrier over the TP cpu group: a faulted sibling stops
         # arriving, so survivors fail here on the host instead of leaving
@@ -82,14 +86,12 @@ def sync_cudagraph_and_dp_padding(
             dist.barrier(group=get_tp_group().cpu_group)
 
         if dead_dp_ranks := get_dp_group().dead_dp_ranks:
-            # A dead rank's column stays 0 after the SUM allreduce; rewrite
-            # it with aggregate-neutral values: INT32_MAX for the min-
-            # aggregated cg_mode row, and the row max for the uniform-token
-            # row.
-            dead_cols = sorted(dead_dp_ranks)
-            tensor[1, dead_cols] = torch.iinfo(torch.int32).max
-            tensor[2, dead_cols] = tensor[2].max()
+            # Drop the failed ranks' columns so the min / all(==1) agreements
+            # below only see ranks that are still running.
+            tensor = tensor[:, [r for r in range(dp_size) if r not in dead_dp_ranks]]
 
+    # With dead DP ranks (FT), the dead ranks' columns were dropped above:
+    # dim 1 (per-rank) of these rows covers live ranks only.
     num_tokens_across_dp = tensor[0]
     cg_mode_across_dp = tensor[1]
     uniform_token_counts_across_dp = tensor[2]
@@ -159,7 +161,7 @@ def sync_cudagraph_and_dp_padding(
                 num_reqs = ubatch_desc.num_reqs
             return ubatch_desc, DPSyncState(
                 num_tokens_across_dp=torch.full_like(
-                    num_tokens_across_dp, ubatch_num_tokens
+                    num_tokens_across_dp_full, ubatch_num_tokens
                 ),
                 uniform_token_count=synced_uniform_token_count,
                 eager=ubatch_desc.cg_mode == CUDAGraphMode.NONE,
@@ -178,7 +180,7 @@ def sync_cudagraph_and_dp_padding(
                 num_active_loras=desired_batch_desc.num_active_loras,
             ),
             DPSyncState(
-                num_tokens_across_dp=num_tokens_across_dp,
+                num_tokens_across_dp=num_tokens_across_dp_full,
                 uniform_token_count=synced_uniform_token_count,
                 eager=True,
                 num_reqs=int(num_reqs_across_dp.max()),
@@ -209,10 +211,10 @@ def sync_cudagraph_and_dp_padding(
     )
 
     # Update num_tokens_across_dp to reflect padded size.
-    num_tokens_across_dp[:] = synced_desc.num_tokens
+    num_tokens_across_dp_full[:] = synced_desc.num_tokens
 
     return synced_desc, DPSyncState(
-        num_tokens_across_dp=num_tokens_across_dp,
+        num_tokens_across_dp=num_tokens_across_dp_full,
         uniform_token_count=synced_uniform_token_count,
         eager=False,
         num_reqs=(
