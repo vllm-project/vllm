@@ -10,9 +10,11 @@ import numpy as np
 import torch
 
 import vllm.envs as envs
+from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu.async_utils import StepTimingSample, stream
@@ -20,7 +22,6 @@ from vllm.v1.worker.gpu.attn_utils import (
     get_attn_cg_support,
     get_query_lens_mismatch_unsupported_backend,
 )
-from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 
 logger = init_logger(__name__)
 _PROFILE_REPLAYS = 5
@@ -31,6 +32,16 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.input_batch import InputBatch
     from vllm.v1.worker.gpu.states import RequestState
     from vllm.v1.worker.utils import AttentionGroup
+
+
+def resolve_adaptive_cudagraph_mode(
+    mode: CUDAGraphMode, *, piecewise_capture_available: bool
+) -> CUDAGraphMode:
+    """Select a separate decode route for variable-length verification."""
+    assert mode.has_full_cudagraphs()
+    if mode == CUDAGraphMode.FULL_DECODE_ONLY or not piecewise_capture_available:
+        return CUDAGraphMode.FULL_DECODE_ONLY
+    return CUDAGraphMode.FULL_AND_PIECEWISE
 
 
 def _assign_draft_token_budget(
@@ -402,7 +413,7 @@ class AdaptiveVerificationManager:
         if draft_budget == 0:
             capacities.zero_()
         else:
-            async_copy_to_gpu(scheduled_drafts, out=capacities)
+            async_tensor_h2d(scheduled_drafts, out=capacities)
             if draft_budget < int(scheduled_drafts.sum()):
                 _assign_draft_token_budget_compiled(
                     self._confidence_probs,
@@ -413,10 +424,7 @@ class AdaptiveVerificationManager:
                 )
 
         num_non_draft_tokens_gpu = self._num_non_draft_tokens[:num_reqs]
-        async_copy_to_gpu(
-            num_non_draft_tokens,
-            out=num_non_draft_tokens_gpu,
-        )
+        async_tensor_h2d(num_non_draft_tokens, out=num_non_draft_tokens_gpu)
         self._cu_num_logits[:1].zero_()
         torch.cumsum(
             capacities + self.num_bonus_tokens,

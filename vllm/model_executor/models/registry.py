@@ -376,6 +376,10 @@ _MULTIMODAL_MODELS = {
         "vllm.models.deepseek_v4",
         "DeepseekV4ForConditionalGeneration",
     ),
+    "DeepseekV41ForCausalLM": (
+        "vllm.models.deepseek_v41",
+        "DeepseekV41ForCausalLM",
+    ),
     "Dots3NoteForCausalLM": (
         "vllm.models.dots3_note",
         "Dots3NoteForCausalLM",
@@ -640,6 +644,10 @@ _SPECULATIVE_DECODING_MODELS = {
     "MuseGlimmerAssistantModel": ("qwen3_dflash", "DFlashQwen3ForCausalLM"),
     "DFlashMuseGlimmerAssistantModel": ("qwen3_dflash", "DFlashQwen3ForCausalLM"),
     "DSparkDraftModel": ("vllm.models.deepseek_v4", "DSparkDeepseekV4ForCausalLM"),
+    "DSparkV41DraftModel": (
+        "vllm.models.deepseek_v41",
+        "DSparkDeepseekV4ForCausalLM",
+    ),
     "Qwen3DSparkModel": ("qwen3_dspark", "Qwen3DSparkForCausalLM"),
     "Qwen3OmniDSparkModel": ("qwen3_dspark", "Qwen3DSparkForCausalLM"),
     "K3DSparkModel": (
@@ -705,6 +713,7 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     "GPTBigCodeForCausalLM": ("transformers", "TransformersForCausalLM"),
     "HunYuanDenseV1ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "HunYuanMoEV1ForCausalLM": ("transformers", "TransformersMoEForCausalLM"),
+    "NanbeigeForCausalLM": ("transformers", "TransformersForCausalLM"),
     "OlmoForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Olmo2ForCausalLM": ("transformers", "TransformersForCausalLM"),
     "Olmo3ForCausalLM": ("transformers", "TransformersForCausalLM"),

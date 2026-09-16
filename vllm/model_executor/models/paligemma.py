@@ -14,6 +14,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import (
@@ -401,8 +402,12 @@ class PaliGemmaForConditionalGeneration(
             tower_model="vision_tower",
         )
 
-    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
-        return num_image_tokens
-
-    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
-        return num_vision_tokens
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
+        return num_mm_embeds, num_mm_embeds

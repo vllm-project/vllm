@@ -2465,13 +2465,20 @@ def _get_and_verify_max_len(
             # loading HF config
             rope_type = rp["rope_type"]
 
-            if rope_type not in ("su", "longrope", "llama3"):
+            # YaRN variants leave max_position_embeddings already scaled, as
+            # Transformers' _compute_yarn_parameters assumes, so `factor` must
+            # not be applied to it again.
+            if rope_type not in (
+                "su",
+                "longrope",
+                "llama3",
+                "yarn",
+                "deepseek_yarn",
+                "deepseek_llama_scaling",
+            ):
                 # NOTE: rope_type == "default" does not define factor https://github.com/huggingface/transformers/blob/v4.45.2/src/transformers/modeling_rope_utils.py
                 # NOTE: This assumes all layer types have the same scaling factor.
                 scaling_factor = rp.get("factor", scaling_factor)
-
-                if rope_type == "yarn":
-                    derived_max_model_len = rp["original_max_position_embeddings"]
         if scaling_factor is None:
             # Fallback the factor to 1.0 if a user assigned `null`
             logger.warning_once(

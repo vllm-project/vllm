@@ -18,12 +18,12 @@ from vllm.distributed import get_dcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup import (
     WarmupIntRange,
+    kernel_launcher,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
-    kernel_launcher,
     triton_scalar_specialization_rep,
 )
 from vllm.triton_utils import tl, triton
@@ -76,6 +76,13 @@ def mask_dcp_empty_shards_(
     if not _validate_dcp_empty_shard_args(seq_lens, query_start_loc):
         return
     assert seq_lens is not None and query_start_loc is not None
+
+    # A DCP rank can receive no local sequences during CUDA graph warmup even
+    # though the padded LSE buffer still has rows. In that case every row is an
+    # empty shard; avoid indexing the empty seq_lens tensor below.
+    if seq_lens.shape[0] == 0:
+        lse.fill_(float("-inf"))
+        return
 
     row_indices = torch.arange(
         lse.shape[0], device=lse.device, dtype=query_start_loc.dtype

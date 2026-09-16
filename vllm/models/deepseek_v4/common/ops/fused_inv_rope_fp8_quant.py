@@ -12,11 +12,11 @@ from typing import Any
 
 import torch
 
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
-    kernel_launcher,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton

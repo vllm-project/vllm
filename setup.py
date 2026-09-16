@@ -1015,6 +1015,7 @@ class precompiled_wheel_utils:
                             "vllm/_flashmla_extension_C.abi3.so",
                             "vllm/_flashkda_C.abi3.so",
                             "vllm/_sparse_flashmla_C.abi3.so",
+                            "vllm/_deepselect_C.abi3.so",
                             "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
                             "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
                             "vllm/cumem_allocator.abi3.so",
@@ -1381,6 +1382,9 @@ if _is_cuda():
         ext_modules.append(
             CMakeExtension(name="vllm._flashmla_extension_C", optional=True)
         )
+        # DeepSelect requires CUDA 12.9 or later (SM100a/SM103a only)
+        # Optional since it won't build on unsupported architectures
+        ext_modules.append(CMakeExtension(name="vllm._deepselect_C", optional=True))
     if USE_PRECOMPILED_EXTENSIONS or (
         CUDA_HOME and get_nvcc_cuda_version() >= Version("12.0")
     ):

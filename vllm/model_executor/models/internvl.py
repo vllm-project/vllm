@@ -29,6 +29,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     BatchedTensorInputs,
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import (
@@ -914,19 +915,20 @@ class InternVLChatModel(
             tower_model="vision_model",
         )
 
-    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
-        if num_image_tokens <= 0 or self.num_image_token <= 0:
-            return 0
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
+        if num_mm_embeds <= 0 or self.num_image_token <= 0:
+            return 0, 0
 
-        num_patches = num_image_tokens // self.num_image_token
-        return num_patches * (self.patch_tokens + 1)
-
-    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
-        if num_vision_tokens <= 0 or self.num_image_token <= 0:
-            return 0
-
-        num_patches = num_vision_tokens // (self.patch_tokens + 1)
-        return num_patches * self.num_image_token
+        num_patches = num_mm_embeds // self.num_image_token
+        tower_tokens = num_patches * (self.patch_tokens + 1)
+        return tower_tokens, num_patches * self.num_image_token
 
     # -- SupportsEncoderCudaGraph protocol methods --
 

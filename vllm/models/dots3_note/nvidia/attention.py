@@ -19,7 +19,11 @@ from vllm.model_executor.layers.attention.mla_attention import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.utils.torch_utils import (
+    PIN_MEMORY,
+    async_tensor_h2d,
+    is_quantized_kv_cache,
+)
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
@@ -231,8 +235,12 @@ def _build_sliding_window_metadata(
         query_lens = query_lens_cpu[req_start:req_end]
         kv_lens = kv_lens_cpu[req_start:req_end]
         num_reqs = req_end - req_start
-        cu_seq_lens_q_cpu = torch.zeros(num_reqs + 1, dtype=torch.int32)
-        cu_seq_lens_k_cpu = torch.zeros(num_reqs + 1, dtype=torch.int32)
+        cu_seq_lens_q_cpu = torch.zeros(
+            num_reqs + 1, dtype=torch.int32, pin_memory=PIN_MEMORY
+        )
+        cu_seq_lens_k_cpu = torch.zeros(
+            num_reqs + 1, dtype=torch.int32, pin_memory=PIN_MEMORY
+        )
         torch.cumsum(query_lens, 0, out=cu_seq_lens_q_cpu[1:])
         torch.cumsum(kv_lens, 0, out=cu_seq_lens_k_cpu[1:])
         token_to_seq_cpu = torch.repeat_interleave(
@@ -248,8 +256,8 @@ def _build_sliding_window_metadata(
                 query_end=query_end,
                 cu_seq_lens_q=cu_seq_lens_q_cpu.to(device, non_blocking=True),
                 cu_seq_lens_k=cu_seq_lens_k_cpu.to(device, non_blocking=True),
-                starts=starts_cpu[req_start:req_end].to(device, non_blocking=True),
-                token_to_seq=token_to_seq_cpu.to(device, non_blocking=True),
+                starts=async_tensor_h2d(starts_cpu[req_start:req_end], device),
+                token_to_seq=async_tensor_h2d(token_to_seq_cpu, device),
                 num_kv_tokens=num_kv_tokens,
                 max_seq_len_q=int(query_lens.max().item()),
                 max_seq_len_k=int(kv_lens.max().item()),
@@ -396,8 +404,8 @@ class Dots3NoteMLAMetadataBuilder(TritonMLAMetadataBuilder):
                 seq_lens = common_attn_metadata.seq_lens[
                     reqs_start + req_start : reqs_start + req_end
                 ]
-                query_lens = query_lens_cpu[req_start:req_end].to(
-                    self.device, non_blocking=True
+                query_lens = async_tensor_h2d(
+                    query_lens_cpu[req_start:req_end], self.device
                 )
                 kv_lens = torch.minimum(seq_lens, query_lens + self.sliding_window - 1)
                 chunk.cu_seq_lens_k.zero_()

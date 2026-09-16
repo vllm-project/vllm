@@ -34,8 +34,8 @@ pub use parser::{ParserSelection, validate_parser_overrides};
 pub use renderer::hf::ChatTemplateContentFormatOption;
 pub use renderer::{
     ChatRenderer, DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DeepSeekV41ChatRenderer,
-    DynChatRenderer, HarmonyChatRenderer, InklingChatRenderer, KimiK3ChatRenderer, RenderedPrompt,
-    RendererSelection,
+    DynChatRenderer, HarmonyChatRenderer, InklingChatRenderer, KimiK3ChatRenderer, MediaPartSource,
+    RenderedPrompt, RendererSelection,
 };
 pub use request::{
     ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool,
@@ -112,6 +112,10 @@ impl ChatRequestProcessor {
         request: &ChatRequest,
         rendered: RenderedPrompt,
     ) -> Result<(Prompt, Option<MmFeatures>)> {
+        let media_is_empty = match &rendered.media_order {
+            Some(media_order) => media_order.is_empty(),
+            None => !request.has_multimodal(),
+        };
         match self.model_dtype {
             Some(model_dtype) => {
                 multimodal::finalize_rendered_prompt(
@@ -122,7 +126,7 @@ impl ChatRequestProcessor {
                 )
                 .await
             }
-            None if !request.has_multimodal() => Ok((rendered.prompt, None)),
+            None if media_is_empty => Ok((rendered.prompt, None)),
             None => Err(Error::UnsupportedMultimodalRenderer),
         }
     }
@@ -130,7 +134,7 @@ impl ChatRequestProcessor {
     /// Prepare media for an already-tokenized request.
     async fn prepare_media(
         &self,
-        media: Vec<MediaContentPart>,
+        media: multimodal::MultimodalInput,
         token_ids: &mut Vec<u32>,
     ) -> Result<Option<MmFeatures>> {
         if media.is_empty() {
@@ -140,8 +144,15 @@ impl ChatRequestProcessor {
             .backend
             .multimodal_model_info()
             .ok_or(Error::UnsupportedMultimodalRenderer)?;
-        let model_dtype = self.model_dtype.ok_or(Error::UnsupportedMultimodalRenderer)?;
-        let features = info.prepare_multimodal(media, token_ids, model_dtype).await?;
+        let features = match media {
+            multimodal::MultimodalInput::Raw(parts) => {
+                let model_dtype = self.model_dtype.ok_or(Error::UnsupportedMultimodalRenderer)?;
+                info.prepare_multimodal(parts, token_ids, model_dtype).await?
+            }
+            multimodal::MultimodalInput::Preprocessed(features) => {
+                info.prepare_preprocessed(features, token_ids.len())?
+            }
+        };
         Ok(Some(features))
     }
 
@@ -286,12 +297,14 @@ impl ChatLlm {
     }
 
     /// Prepare media for an already-tokenized request.
+    /// Raw content is preprocessed; inline features are checked against model
+    /// capabilities, modality limits, and the final prompt positions.
     pub async fn prepare_media(
         &self,
-        media: Vec<MediaContentPart>,
+        media: impl Into<multimodal::MultimodalInput>,
         token_ids: &mut Vec<u32>,
     ) -> Result<Option<MmFeatures>> {
-        self.processor.prepare_media(media, token_ids).await
+        self.processor.prepare_media(media.into(), token_ids).await
     }
 
     /// Effective tool-call parser name for this model, if parsing is enabled.

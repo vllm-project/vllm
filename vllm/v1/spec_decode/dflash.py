@@ -13,7 +13,7 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 from vllm.v1.spec_decode.utils import (
-    copy_and_expand_dflash_inputs_kernel,
+    _copy_and_expand_dflash_inputs,
     next_power_of_2,
 )
 
@@ -79,6 +79,13 @@ class DFlashProposer(SpecDecodeBaseProposer):
         self.dflash_causal = not dflash_has_any_non_causal(
             self.draft_model_config.hf_config
         )
+        _copy_and_expand_dflash_inputs.register_warmup(
+            block_table_stride=(self.max_model_len + self.block_size - 1)
+            // self.block_size,
+            parallel_drafting_token_id=self.parallel_drafting_token_id,
+            block_size=self.block_size,
+            num_speculative_tokens=self.num_speculative_tokens,
+        )
 
     @override
     def _create_draft_vllm_config(self) -> VllmConfig:
@@ -137,11 +144,9 @@ class DFlashProposer(SpecDecodeBaseProposer):
         max_ctx_per_req = cad.max_query_len
         max_tokens_per_req = max_ctx_per_req + num_query_per_req
         BLOCK_SIZE = min(256, next_power_of_2(max_tokens_per_req))
-        num_blocks = (max_tokens_per_req + BLOCK_SIZE - 1) // BLOCK_SIZE
-        grid = (batch_size, num_blocks)
 
         has_num_rejected = num_rejected_tokens_gpu is not None
-        copy_and_expand_dflash_inputs_kernel[grid](
+        _copy_and_expand_dflash_inputs(
             # Inputs
             next_token_ids_ptr=next_token_ids,
             target_positions_ptr=target_positions,
@@ -166,8 +171,9 @@ class DFlashProposer(SpecDecodeBaseProposer):
             num_query_per_req=num_query_per_req,
             num_speculative_tokens=self.num_speculative_tokens,
             total_input_tokens=num_context,
-            BLOCK_SIZE=BLOCK_SIZE,
-            HAS_NUM_REJECTED=has_num_rejected,
+            max_tokens_per_req=max_tokens_per_req,
+            triton_block_size=BLOCK_SIZE,
+            has_num_rejected=has_num_rejected,
         )
 
         query_slot_mapping = self._slot_mapping_buffer[:num_query_total]
@@ -192,8 +198,6 @@ class DFlashProposer(SpecDecodeBaseProposer):
                 torch.from_numpy(self.token_arange_np[: batch_size + 1]).clone()
                 * num_query_per_req
             ),
-            _seq_lens_cpu=None,
-            _num_computed_tokens_cpu=None,
             seq_lens_cpu_upper_bound=new_seq_lens_cpu_upper_bound,
             num_reqs=cad.num_reqs,
             num_actual_tokens=num_query_total,

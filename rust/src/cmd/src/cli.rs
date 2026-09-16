@@ -110,6 +110,9 @@ pub enum BenchCommand {
 pub struct RenderArgs {
     /// Model identifier or local model directory containing tokenizer files.
     model: String,
+    /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
+    #[arg(long)]
+    revision: Option<String>,
     /// HTTP bind host.
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
@@ -157,6 +160,7 @@ impl RenderArgs {
 
         RenderConfig {
             model: self.model,
+            revision: self.revision,
             served_model_name: self.served_model_name,
             host: self.host,
             port: self.port,
@@ -194,6 +198,11 @@ pub struct SharedRuntimeArgs {
     /// Model identifier or local model directory used for backend loading and
     /// public model ID.
     pub model: String,
+
+    /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
+    #[arg(long)]
+    #[serde(default)]
+    pub revision: Option<String>,
 
     /// The source of generation-config sampling defaults. `"auto"` loads the
     /// model's defaults, while `"vllm"` uses vLLM's neutral defaults.
@@ -319,6 +328,15 @@ pub struct SharedRuntimeArgs {
     )]
     #[serde(default)]
     pub enable_request_id_headers: bool,
+
+    /// Register the scale-out `/inference/v1/generate` endpoint.
+    #[arg(
+        long,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default)]
+    pub enable_scale_out: bool,
 
     /// If provided, the server will require one of these keys to be presented
     /// in the Authorization header.
@@ -481,6 +499,7 @@ impl SharedRuntimeArgs {
                 None => CoordinatorMode::None,
             },
             model: self.model,
+            revision: self.revision,
             generation_config: self.generation_config,
             served_model_name: self.served_model_name,
             listener_mode: HttpListenerMode::InheritedFd { fd: listen_fd },
@@ -536,6 +555,7 @@ impl SharedRuntimeArgs {
             },
             coordinator_mode: CoordinatorMode::MaybeInProc,
             model: self.model,
+            revision: self.revision,
             generation_config: self.generation_config,
             served_model_name: self.served_model_name,
             listener_mode,
@@ -566,6 +586,7 @@ impl SharedRuntimeArgs {
             enable_log_requests: self.enable_log_requests,
             enable_prompt_tokens_details: self.enable_prompt_tokens_details,
             enable_request_id_headers: self.enable_request_id_headers,
+            enable_scale_out: self.enable_scale_out,
         }
     }
 
@@ -743,6 +764,7 @@ impl ServeArgs {
 
         self.managed_engine.clone().into_config(
             self.runtime.model.clone(),
+            self.runtime.revision.clone(),
             self.runtime.max_logprobs,
             profiler_config,
             reasoning_parser.as_deref(),
