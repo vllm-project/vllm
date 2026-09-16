@@ -18,6 +18,7 @@ from vllm.utils.cpu_resource_utils import (
     get_visible_memory_node,
 )
 from vllm.utils.mem_constants import GiB_bytes
+from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import CpuArchEnum, Platform, PlatformEnum
@@ -26,6 +27,10 @@ logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.v1.attention.backends.mla.prefill.base import (
+        MLAPrefillBackend,
+    )
+    from vllm.v1.attention.backends.mla.prefill.selector import MLAPrefillSelectorConfig
     from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     VllmConfig = None
@@ -172,6 +177,15 @@ class CpuPlatform(Platform):
         if selected_backend and selected_backend != AttentionBackendEnum.CPU_ATTN:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
         return AttentionBackendEnum.CPU_ATTN.get_path()
+
+    @classmethod
+    def get_mla_prefill_backend_cls(
+        cls,
+        mla_selector_config: "MLAPrefillSelectorConfig",
+    ) -> "type[MLAPrefillBackend]":
+        """Get the MLA prefill backend class of a device."""
+        logger.info_once("Using CPU SDPA MLA prefill backend.")
+        return MLAPrefillBackendEnum.CPU.get_class()
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
