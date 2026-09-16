@@ -560,3 +560,55 @@ def test_indexer_k_store_roundtrips_through_rocm_gather(block_size, compress_rat
     torch.testing.assert_close(
         k_scale[emitted], expected_scale[emitted], rtol=0, atol=0
     )
+
+
+@pytest.mark.parametrize("use_cutedsl", [False, True])
+@pytest.mark.skipif(
+    not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
+    ),
+    reason="MXFP4 indexer cache requires an SM100-family GPU",
+)
+@torch.inference_mode()
+def test_fused_indexer_q_rope_quant_writes_bf16_weights(use_cutedsl):
+    """The MXFP4 path can emit the per-head weights in bf16 (what DeepGEMM's
+    sparse MQA-logits kernels take) instead of fp32; the values are the fp32
+    result rounded once, so the scoring kernel needs no cast."""
+    if use_cutedsl and not has_cutedsl():
+        pytest.skip("cutedsl (cutlass) not installed")
+
+    device = "cuda"
+    torch.manual_seed(0)
+    num_tokens, n_head = 257, 32
+    q = torch.randn(num_tokens, n_head, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    positions = torch.randint(
+        0, MAX_POS, (num_tokens,), dtype=torch.int64, device=device
+    )
+    cos_sin_cache = torch.randn(MAX_POS, ROPE_DIM, dtype=torch.float32, device=device)
+    weights = torch.randn(num_tokens, n_head, dtype=torch.bfloat16, device=device)
+    softmax_scale, head_scale = HEAD_DIM**-0.5, 0.125  # pow2 head_scale, see above
+
+    _, weights_ref = _reference(
+        positions, q, cos_sin_cache, weights, softmax_scale, head_scale, n_head, True
+    )
+    cutedsl_patch = (
+        mock.patch(
+            "vllm.models.deepseek_v4.common.ops.fused_indexer_q.has_cutedsl",
+            return_value=False,
+        )
+        if not use_cutedsl
+        else contextlib.nullcontext()
+    )
+    with cutedsl_patch:
+        _, weights_fused = fused_indexer_q_rope_quant(
+            positions,
+            q.clone(),
+            cos_sin_cache,
+            weights,
+            softmax_scale,
+            head_scale,
+            use_fp4=True,
+            weights_out_dtype=torch.bfloat16,
+        )
+    assert weights_fused.dtype == torch.bfloat16
+    assert torch.equal(weights_fused, weights_ref.to(torch.bfloat16))
