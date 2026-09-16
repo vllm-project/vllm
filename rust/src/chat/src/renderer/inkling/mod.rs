@@ -405,7 +405,7 @@ fn resolve_reasoning_effort(value: Option<&EffortValue>) -> Option<f64> {
 
 fn resolve_special_token(tokenizer: &dyn Tokenizer, token: &str) -> Result<u32> {
     tokenizer.token_to_id(token).ok_or_else(|| {
-        Error::InvalidReasoningEffort(format!(
+        Error::ChatTemplate(format!(
             "Inkling tokenizer is missing special token `{token}`"
         ))
     })
@@ -426,7 +426,7 @@ fn tool_call_json(tool_call: &AssistantToolCall) -> Result<String> {
         Value::Object(Map::new())
     } else {
         serde_json::from_str(&tool_call.arguments).map_err(|error| {
-            Error::InvalidReasoningEffort(format!(
+            Error::ChatTemplate(format!(
                 "Inkling tool call arguments must decode to a JSON object: {error}"
             ))
         })?
