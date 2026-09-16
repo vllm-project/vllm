@@ -3,6 +3,7 @@
 """Unit tests for NixlConnectorScheduler with HMA and Mamba N-1 prefill."""
 
 import gc
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import msgspec
@@ -1913,6 +1914,70 @@ def _make_hybrid_mla_kv_cache_config(num_blocks: int = 4):
             KVCacheGroupSpec(["kda_b.0", "kda_b.1"], kda_spec),
         ],
     )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "shared,num_chunks,fail_unregister",
+    [(False, 1, False), (True, 1, False), (True, 2, False), (True, 2, True)],
+)
+def test_hisparse_host_registration_handoff(shared, num_chunks, fail_unregister):
+    """Release all CUDA chunks before NIXL registration, preserving cleanup on error."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.nixl import (
+        HiSparseNixlDestination,
+    )
+
+    pool = torch.empty(num_chunks * 16, dtype=torch.uint8)
+    base = pool.data_ptr()
+    registered = {base + i * 16 for i in range(num_chunks)}
+    region = (
+        SimpleNamespace(pinned_addresses=sorted(registered), is_pinned=True)
+        if shared
+        else None
+    )
+    runtimes = [
+        SimpleNamespace(
+            shared_host_region=region, host_pool_registration_owned_by_hisparse=True
+        )
+        for _ in range(2 if shared else 1)
+    ]
+    destination = HiSparseNixlDestination(
+        SimpleNamespace(hisparse_host_num_blocks=1), MagicMock()
+    )
+    destination._host_pools[base] = (pool, runtimes)
+    worker = MagicMock()
+
+    def unregister(address):
+        if fail_unregister and address == base:
+            return SimpleNamespace(value=1)
+        registered.remove(address)
+        return SimpleNamespace(value=0)
+
+    def register_memory(*args, **kwargs):
+        assert not registered, "NIXL registration overlaps a live CUDA registration"
+
+    worker.nixl_wrapper.register_memory.side_effect = register_memory
+    with (
+        patch("torch.accelerator.synchronize"),
+        patch("torch.cuda.cudart") as cudart,
+    ):
+        cudart.return_value.cudaHostUnregister.side_effect = unregister
+        if fail_unregister:
+            assert region is not None
+            with pytest.raises(RuntimeError, match="cudaHostUnregister failed"):
+                destination.prepare_host_descriptors(worker)
+            worker.nixl_wrapper.register_memory.assert_not_called()
+            assert registered == set(region.pinned_addresses) == {base}
+            assert region.is_pinned
+            assert all(r.host_pool_registration_owned_by_hisparse for r in runtimes)
+            return
+        destination.prepare_host_descriptors(worker)
+
+    worker.nixl_wrapper.register_memory.assert_called_once()
+    assert not any(r.host_pool_registration_owned_by_hisparse for r in runtimes)
+    if region is not None:
+        assert not region.pinned_addresses
+        assert not region.is_pinned
 
 
 @pytest.mark.cpu_test

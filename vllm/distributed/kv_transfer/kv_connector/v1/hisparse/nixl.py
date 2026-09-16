@@ -107,12 +107,26 @@ class HiSparseNixlDestination:
                 runtime.host_pool_registration_owned_by_hisparse for runtime in runtimes
             ):
                 raise RuntimeError("HiSparse host pool registration has no owner")
-            error = cudart.cudaHostUnregister(pool.data_ptr())
-            if error.value != 0:
-                raise RuntimeError(
-                    f"HiSparse cudaHostUnregister failed before NIXL registration: "
-                    f"{error}"
-                )
+            shared_region = runtimes[0].shared_host_region
+            if any(r.shared_host_region is not shared_region for r in runtimes):
+                raise RuntimeError("HiSparse host pool aliases use different regions")
+            addresses = (
+                shared_region.pinned_addresses
+                if shared_region is not None
+                else [pool.data_ptr()]
+            )
+            # Shared pools can have multiple CUDA registrations. Retain only
+            # live registrations for cleanup if an unregister fails midway.
+            while addresses:
+                error = cudart.cudaHostUnregister(addresses[-1])
+                if error.value != 0:
+                    raise RuntimeError(
+                        "HiSparse cudaHostUnregister failed before NIXL "
+                        f"registration: {error}"
+                    )
+                addresses.pop()
+            if shared_region is not None:
+                shared_region.is_pinned = False
             for runtime in runtimes:
                 runtime.host_pool_registration_owned_by_hisparse = False
 
