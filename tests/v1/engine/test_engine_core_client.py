@@ -249,8 +249,7 @@ def test_dplb_non_late_interaction_still_uses_lb():
 
 def test_dplb_burst_round_robins_despite_snapshot_rebinds():
     """A stats snapshot rebind wipes the optimistic lb_engines increments;
-    the exact in-flight floor must keep a burst spreading round-robin.
-    """
+    the exact in-flight floor must keep a burst spreading round-robin."""
     client = _make_dplb_client(num_engines=4)
 
     for _ in range(4):
@@ -325,8 +324,7 @@ async def test_dplb_scale_down_routes_after_stale_stats_snapshot():
 
 def test_dplb_snapshot_backpressure_overrides_inflight():
     """An engine reported heavily loaded by the coordinator is avoided even
-    when this client has routed nothing to it.
-    """
+    when this client has routed nothing to it."""
     client = _make_dplb_client(num_engines=2)
     client.lb_engines = [[5, 10, 0.0], [0, 0, 0.0]]
 
@@ -339,8 +337,7 @@ def test_dplb_snapshot_backpressure_overrides_inflight():
 
 def test_dplb_kv_pressure_amplifies_waiting_penalty():
     """A waiting queue on a KV-bound engine (slow drain) is penalized, while
-    the same queue with low KV usage is not (e.g. transient burst).
-    """
+    the same queue with low KV usage is not (e.g. transient burst)."""
     client = _make_dplb_client(num_engines=2)
     # Engine 0 has a smaller total but is KV-bound with a queue.
     client.lb_engines = [[5, 10, 1.0], [0, 20, 0.2]]

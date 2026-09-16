@@ -261,8 +261,7 @@ class MambaStateShapeCalculator:
     @classmethod
     def extra_groups_for_head_shards(cls, ngroups: int, tp_size: int):
         """Compute the increase in group numbers to account for
-        replication in order to accompany the head shards.
-        """
+        replication in order to accompany the head shards."""
         # in the case ngoups % tp_size == 0, this will be zero
         if ngroups % tp_size == 0:
             return 0

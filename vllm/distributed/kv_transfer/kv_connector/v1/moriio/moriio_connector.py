@@ -548,8 +548,7 @@ class MoRIIOConnectorScheduler:
         self, request_id: ReqId, transfer_id: TransferId | None = None
     ):
         """Unmap request_id/transfer_id. Uses transfer_id for lookup if
-        exact request_id match fails (handles input_processor mutation).
-        """
+        exact request_id match fails (handles input_processor mutation)."""
         if request_id in self.request_id_to_transfer_id:
             tid = self.request_id_to_transfer_id[request_id]
             del self.request_id_to_transfer_id[request_id]

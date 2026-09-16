@@ -511,8 +511,7 @@ def _compiled_sample_step(
     accept/renoise → convergence, all as vectorized PyTorch ops.
 
     Returns the temperature-scaled logits ``[num_decode, CL, vocab]`` so the
-    caller can compute logprobs outside the compiled region.
-    """
+    caller can compute logprobs outside the compiled region."""
     num_decode = decode_slots.shape[0]
     device = decode_slots.device
 

@@ -118,8 +118,7 @@ def worker_init_payload(init_info: NCCLWeightTransferInitInfo) -> dict:
     """Serialize a worker init info for `init_weight_transfer_engine`, dropping
     the unset rendezvous field (the UID in TCP mode) so the wire payload carries
     only the mode actually in use. Shared by the dense and sparse trainer
-    engines so the two cannot drift.
-    """
+    engines so the two cannot drift."""
     return {key: value for key, value in asdict(init_info).items() if value is not None}
 
 

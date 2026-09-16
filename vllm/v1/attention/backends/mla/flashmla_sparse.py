@@ -843,8 +843,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         prefill_meta: "FlashMLASparseMetadata.FP8SeparatePrefillDecode.Prefill",
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """All-gather this rank's upconverted KV shard so the chunk's rows attend
-        the whole context, and map their top-k onto the rank-major result.
-        """
+        the whole context, and map their top-k onto the rank-major result."""
         shard_rows = int(chunk.chunk_tot_seqlen)
         _, _, gathered_kv_workspace = current_workspace_manager().get_simultaneous(
             *self.workspace_specs
