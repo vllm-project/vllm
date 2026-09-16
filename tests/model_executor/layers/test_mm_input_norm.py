@@ -24,6 +24,7 @@ requires_accelerator = pytest.mark.skipif(
     reason="fused Triton kernel requires a CUDA/XPU accelerator",
 )
 requires_triton = pytest.mark.skipif(not HAS_TRITON, reason="requires Triton")
+requires_vllm_config = pytest.mark.usefixtures("default_vllm_config")
 
 
 def _reference_input_norm(
@@ -57,6 +58,7 @@ _RGB_RESCALE = 1.0 / 255.0
 # ===========================================================================
 # Module-level behavior
 # ===========================================================================
+@requires_vllm_config
 @requires_accelerator
 class TestFusedInputNormModule:
     @pytest.mark.parametrize("num_patches", [1, 37, 70000])
@@ -106,6 +108,7 @@ class TestFusedInputNormModule:
 # ===========================================================================
 # dtype coverage
 # ===========================================================================
+@requires_vllm_config
 @requires_accelerator
 class TestFusedInputNormDtypes:
     @pytest.mark.parametrize(
@@ -165,6 +168,7 @@ class TestFusedInputNormDtypes:
 # ===========================================================================
 # Shape / channel coverage
 # ===========================================================================
+@requires_vllm_config
 @requires_accelerator
 class TestFusedInputNormShapes:
     @pytest.mark.parametrize("channel", [1, 3, 4])
@@ -238,6 +242,7 @@ class TestFusedInputNormShapes:
 # ===========================================================================
 # Input handling: non-contiguous inputs
 # ===========================================================================
+@requires_vllm_config
 @requires_accelerator
 class TestFusedInputNormInputHandling:
     def test_non_contiguous_input_matches_reference(self):
@@ -324,6 +329,7 @@ class TestFusedInputNormInputHandling:
 # ===========================================================================
 # Preallocated out= buffer
 # ===========================================================================
+@requires_vllm_config
 @requires_accelerator
 class TestFusedInputNormOutBuffer:
     def test_reuse(self):
@@ -529,8 +535,7 @@ class TestFusedInputNormKernel:
         assert torch.all(out[N:] == 123.0)
 
     def test_rejects_channel_or_width_padded_output(self):
-        """The flat 1D kernel cannot address a buffer padded along C or L;
-        such buffers must be rejected rather than silently mis-written."""
+        """The flat 1D kernel cannot address a buffer padded along C or L."""
         N, C, L = 3, 3, 100
         x = torch.randn(N, C, L, dtype=torch.float32, device=_DEVICE)
         w = torch.randn(C, dtype=torch.float32, device=_DEVICE)
@@ -567,10 +572,9 @@ class TestFusedInputNormKernel:
 # ===========================================================================
 # Construction / configuration
 # ===========================================================================
+@requires_vllm_config
 class TestFusedInputNormConstruction:
-    """Identity detection and weight/bias buffer semantics at init time.
-    These do not touch the device-side kernel and run on CPU.
-    """
+    """Identity detection and weight/bias buffer semantics at init time."""
 
     def test_identity_from_identity_config(self):
         norm = FusedInputNorm(

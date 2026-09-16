@@ -67,7 +67,7 @@ The kernel takes raw pixel values (`uint8`), performs one fused multiply-add per
 - **CPU offload & 50% PCIe savings** — normalisation/rescaling leaves the CPU entirely; sending `uint8` (1 byte) instead of `bf16` (2 bytes) halves transfer volume.
 - **Single-pass fusion** — `y = x * weight[c] + bias[c]` in one kernel launch; input is read in its native dtype (`uint8`).
 - **float32 compute for free** — arithmetic runs in fp32 inside the kernel regardless of I/O dtypes. Accuracy matches fp32, with no extra bandwidth: intermediates stay in registers, and no global fp32 tensor is materialised.
-- **Preallocated output with batch-dim padding** — callers can pass a larger buffer; only the leading `N` rows are written, so buffers are reusable across calls. The `C` and `L` axes must match the input exactly: the kernel addresses the output as a contiguous `N * C * L` block, so width- or channel-padded buffers are rejected.
+- **Preallocated output with batch-dim padding** — callers can pass a larger buffer; only the leading `N` rows are written, so buffers are reusable across calls.
 
 #### Optimized Data Path for Fused Normalisation
 

@@ -8,6 +8,7 @@ from tests.conftest import ImageTestAssets
 from tests.model_executor.layers.test_mm_input_norm import (
     _DEVICE_TYPE,
     requires_accelerator,
+    requires_vllm_config,
 )
 from tests.models.utils import GenerateModelInfo, build_model_context
 from vllm.model_executor.layers.fusion.mm_input_norm import FusedInputNorm
@@ -46,6 +47,7 @@ def test_ppl(
 # This test is relatively slow and requires a GPU, so it has been moved here
 # from tests/model_executor/layers/test_mm_input_norm.py.
 # ===========================================================================
+@requires_vllm_config
 @requires_accelerator
 class TestMMDeviceDoNormalize:
     """Processor-level integration: FusedInputNorm must reproduce the

@@ -74,13 +74,8 @@ def _fused_input_norm_kernel(
     pid = tl.program_id(0)
     offs = pid.to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     mask = offs < numel
-
-    # Channel gather: different lanes within a program may straddle a
-    # channel boundary, so this is a per-lane gather rather than a scalar.
     c = (offs // L) % C
 
-    # Streaming load: read once, evict early to protect L2 from being
-    # thrashed by large one-shot image tensors.
     x = tl.load(
         x_ptr + offs,
         mask=mask,
