@@ -69,6 +69,25 @@ def _layer_type_for(compress_ratio: int) -> str:
     )
 
 
+def swa_max_image_tokens(vllm_config: VllmConfig) -> int:
+    """Width by which prefill SWA index rows widen for in-image visibility.
+
+    Only the DeepSeek-V4 vision config (``mm_prefix_clamp_sliding_window``)
+    widens rows from ``sliding_window`` to ``sliding_window + vision_max_n_token``;
+    V4.1 image tokens use the plain causal window and text-only checkpoints
+    never widen. A vision checkpoint served with ``--language-model-only`` also
+    keeps the plain window: no image can reach the model, and sizing every
+    prefill row (and the warmup keys) for images costs KV metadata for nothing.
+    """
+    hf_config = vllm_config.model_config.hf_config
+    if not getattr(hf_config, "mm_prefix_clamp_sliding_window", False):
+        return 0
+    mm_config = vllm_config.model_config.multimodal_config
+    if mm_config is not None and mm_config.language_model_only:
+        return 0
+    return int(getattr(hf_config, "vision_max_n_token", 0) or 0)
+
+
 class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
     def __init__(
         self,
@@ -458,11 +477,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         # mm_prefix_clamp_sliding_window exactly for these in-kernel-widened
         # ranges; V4.1 image tokens use the plain causal window, and text-only
         # models keep max_image_tokens == 0 everywhere.
-        self.max_image_tokens = (
-            getattr(hf_config, "vision_max_n_token", 0)
-            if getattr(hf_config, "mm_prefix_clamp_sliding_window", False)
-            else 0
-        )
+        self.max_image_tokens = swa_max_image_tokens(self.vllm_config)
         self.prefill_index_width = self.window_size + self.max_image_tokens
 
         # Detect which DeepseekV4 layer types this model uses so we only build a
