@@ -32,6 +32,7 @@ from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     DeltaToolCall,
     FunctionCall,
+    TokenPhaseCounts,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -116,6 +117,9 @@ class HarmonyParser(DelegatingParser):
 
         # For error recovery
         self._current_message_tokens: list[int] = []
+        self._reasoning_token_count = 0
+        self._content_token_count = 0
+        self._processed_token_count = 0
 
     @property
     def _harmony_parser(self) -> StreamableParser:
@@ -353,6 +357,10 @@ class HarmonyParser(DelegatingParser):
             ):
                 reasoning_token_count += 1
 
+            segment_type = _SegmentType.from_channel_and_recipient(channel, recipient)
+            if segment_type == _SegmentType.CONTENT and delta:
+                self._content_token_count += 1
+
             segments.append(
                 Segment(
                     channel=channel,
@@ -364,10 +372,50 @@ class HarmonyParser(DelegatingParser):
 
             # TODO: Optionally merge and suppress empty Segments
 
+        self._reasoning_token_count += reasoning_token_count
+        self._processed_token_count += len(token_ids)
         return ChunkResult(
             segments=segments,
             reasoning_token_count=reasoning_token_count,
         )
+
+    def classify_token_phases(
+        self, token_ids: Sequence[int]
+    ) -> TokenPhaseCounts | None:
+        return TokenPhaseCounts(
+            reasoning=self._reasoning_token_count,
+            content=self._content_token_count,
+            unclassified=max(
+                0,
+                self._processed_token_count
+                - self._reasoning_token_count
+                - self._content_token_count,
+            ),
+        )
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        """Return the reasoning count for a complete Harmony output.
+
+        In streaming paths, ``process_chunk`` has already classified exactly
+        these tokens, so reuse its incremental count. Some non-streaming
+        callers parse the complete output after collecting deltas; in that
+        case the parser state contains the same tokens twice, and the supplied
+        sequence must be classified independently.
+        """
+        if self._processed_token_count == len(token_ids):
+            return self._reasoning_token_count
+
+        parser = get_streamable_parser_for_assistant()
+        reasoning_token_count = 0
+        for token_id in token_ids:
+            parser.process(token_id)
+            channel = parser.current_channel
+            recipient = self._normalize_recipient(parser.current_recipient)
+            if channel == "analysis" or (
+                channel == "commentary" and recipient is not None
+            ):
+                reasoning_token_count += 1
+        return reasoning_token_count
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest

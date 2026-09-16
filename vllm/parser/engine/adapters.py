@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from vllm.entrypoints.generate.base.protocol import (
         DeltaMessage,
         ExtractedToolCallInformation,
+        TokenPhaseCounts,
     )
     from vllm.entrypoints.openai.chat_completion.protocol import (
         ChatCompletionRequest,
@@ -148,6 +149,34 @@ class ParserEngineReasoningAdapter(ReasoningParser):
             self.model_tokenizer.decode(token_ids), token_ids
         )
         return self._counting_parser_engine.count_reasoning_tokens(token_ids)
+
+    def classify_token_phases(
+        self, token_ids: Sequence[int]
+    ) -> TokenPhaseCounts | None:
+        if self._streaming_count_valid:
+            counts = self._parser_engine.classify_token_phases(token_ids)
+            if counts is None or not self._parser_engine.reasoning_ended:
+                return counts
+
+            # Once the outer delegating parser observes the reasoning boundary,
+            # it stops forwarding ordinary content to this reasoning adapter.
+            # Recover that trailing content from the complete token sequence.
+            from vllm.entrypoints.generate.base.protocol import TokenPhaseCounts
+
+            content = len(self._parser_engine.extract_content_ids(list(token_ids)))
+            return TokenPhaseCounts(
+                reasoning=counts.reasoning,
+                content=max(counts.content, content),
+                unclassified=max(
+                    0, len(token_ids) - counts.reasoning - max(counts.content, content)
+                ),
+            )
+        self.count_reasoning_tokens(token_ids)
+        if self._counting_parser_engine is None:
+            from vllm.entrypoints.generate.base.protocol import TokenPhaseCounts
+
+            return TokenPhaseCounts(0, 0, 0)
+        return self._counting_parser_engine.classify_token_phases(token_ids)
 
 
 class ParserEngineToolAdapter(ToolParser):

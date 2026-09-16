@@ -60,7 +60,11 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.generate.base.protocol import StopParam, validate_cache_salt
+from vllm.entrypoints.generate.base.protocol import (
+    PerRequestMetrics,
+    StopParam,
+    validate_cache_salt,
+)
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
@@ -687,6 +691,11 @@ class ResponsesResponse(OpenAIBaseModel):
     usage: ResponseUsage | None = None
     user: str | None = None
 
+    # vLLM-specific per-request metrics. Omitted unless enabled server-side.
+    metrics: PerRequestMetrics | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
     presence_penalty: float | None = Field(
         default=None,
         ge=-2.0,
@@ -755,6 +764,7 @@ class ResponsesResponse(OpenAIBaseModel):
         output: list[ResponseOutputItem],
         status: ResponseStatus,
         usage: ResponseUsage | None = None,
+        metrics: PerRequestMetrics | None = None,
         input_messages: ResponseInputOutputMessage | None = None,
         output_messages: ResponseInputOutputMessage | None = None,
         kv_transfer_params: dict[str, Any] | None = None,
@@ -798,6 +808,7 @@ class ResponsesResponse(OpenAIBaseModel):
             truncation=request.truncation,
             user=request.user,
             usage=usage,
+            metrics=metrics,
             kv_transfer_params=kv_transfer_params,
             ec_transfer_params=ec_transfer_params,
         )

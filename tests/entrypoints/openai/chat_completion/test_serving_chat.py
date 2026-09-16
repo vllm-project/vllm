@@ -23,6 +23,7 @@ from vllm.config import MultiModalConfig
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     RequestResponseMetadata,
+    TokenPhaseCounts,
 )
 from vllm.entrypoints.generate.base.serving import build_per_request_timing_metrics
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -54,7 +55,7 @@ from vllm.tokenizers import get_tokenizer
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.metrics.stats import RequestStateStats
+from vllm.v1.metrics.stats import RequestSpecDecodeMetrics, RequestStateStats
 
 GPT_OSS_MODEL_NAME = "openai/gpt-oss-20b"
 GPT_OSS_SPECULATOR_NAME = "RedHatAI/gpt-oss-20b-speculator.eagle3"
@@ -753,6 +754,11 @@ async def test_chat_per_request_metrics_follow_server_flag():
     )
     assert enabled_response.metrics is not None
     assert enabled_response.metrics.time_to_first_token_ms == pytest.approx(500.0)
+    assert enabled_response.metrics.reasoning is not None
+    assert enabled_response.metrics.reasoning.token_count == 0
+    assert enabled_response.metrics.content is not None
+    assert enabled_response.metrics.content.token_count == 2
+    assert enabled_response.metrics.unclassified_token_count == 0
 
 
 @pytest.mark.asyncio
@@ -777,6 +783,70 @@ async def test_chat_per_request_metrics_suppressed_for_n_greater_than_one():
 
 
 @pytest.mark.asyncio
+async def test_chat_nonstreaming_phase_metrics_use_engine_delta_timestamps():
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=True)
+    parser = MagicMock()
+    parser.parse_delta.return_value = DeltaMessage()
+    parser.parse.return_value = ("reasoning", "answer", None)
+    parser.count_reasoning_tokens.return_value = 2
+    parser.classify_token_phases.side_effect = [
+        TokenPhaseCounts(2, 0, 0),
+        TokenPhaseCounts(2, 1, 1),
+    ]
+
+    first = _make_metrics_request_output(
+        metrics=RequestStateStats(
+            queued_ts=1.0,
+            scheduled_ts=1.5,
+            first_token_ts=2.0,
+            last_token_ts=2.0,
+        ),
+        token_ids=(10, 20),
+    )
+    first.outputs[0].text = "reasoning"
+    first.outputs[0].finish_reason = None
+    first.finished = False
+    second = _make_metrics_request_output(
+        metrics=RequestStateStats(
+            queued_ts=1.0,
+            scheduled_ts=1.5,
+            first_token_ts=2.0,
+            last_token_ts=3.0,
+        ),
+        token_ids=(30, 40),
+    )
+    second.outputs[0].text = " answer"
+    spec_metrics = RequestSpecDecodeMetrics.new(num_spec_tokens=1)
+    spec_metrics.observe(num_draft_tokens=1, num_accepted=1)
+    second.outputs[0].spec_decode_metrics = spec_metrics
+
+    response = await serving.chat_completion_full_generator(
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "Test prompt"}],
+            max_tokens=10,
+            stream=False,
+        ),
+        _stream_request_outputs(first, second),
+        "chatcmpl-test-id",
+        "test-model",
+        conversation=[{"role": "user", "content": "Test"}],
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+        parser=parser,
+    )
+
+    assert response.metrics is not None
+    assert response.metrics.reasoning is not None
+    assert response.metrics.reasoning.time_to_first_token_ms == pytest.approx(500.0)
+    assert response.metrics.content is not None
+    assert response.metrics.content.time_to_first_token_ms == pytest.approx(1500.0)
+    assert response.metrics.speculative_decoding is not None
+    assert response.metrics.speculative_decoding.num_accepted_draft_tokens == 1
+    assert response.usage.completion_tokens == 4
+
+
+@pytest.mark.asyncio
 async def test_chat_streaming_metrics_ride_on_usage_chunk():
     serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=True)
     chunks = await _collect_metrics_stream_chunks(
@@ -793,6 +863,9 @@ async def test_chat_streaming_metrics_ride_on_usage_chunk():
     usage_chunks = [chunk for chunk in chunks if chunk.get("usage")]
     assert usage_chunks
     assert usage_chunks[-1]["metrics"]["time_to_first_token_ms"] == pytest.approx(500.0)
+    assert usage_chunks[-1]["metrics"]["reasoning"]["token_count"] == 0
+    assert usage_chunks[-1]["metrics"]["content"]["token_count"] == 2
+    assert usage_chunks[-1]["metrics"]["unclassified_token_count"] == 0
 
 
 @pytest.mark.asyncio

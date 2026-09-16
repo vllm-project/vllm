@@ -21,10 +21,12 @@ from vllm.entrypoints.generate.base.protocol import (
     FunctionCall,
     PerRequestMetrics,
     RequestResponseMetadata,
+    TokenPhaseCounts,
     ToolCall,
 )
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
+    RequestPhaseMetricsTracker,
     build_per_request_timing_metrics,
     build_spec_decoding_metrics,
     clamp_prompt_logprobs,
@@ -62,7 +64,7 @@ from vllm.outputs import RequestOutput
 from vllm.parser import ParserManager
 from vllm.parser.abstract_parser import Parser
 from vllm.renderers.online_renderer import OnlineRenderer
-from vllm.sampling_params import BeamSearchParams, SamplingParams
+from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
@@ -328,6 +330,12 @@ class OpenAIServingChat(GenerateBaseServing):
                     max_tokens,
                     self.default_sampling_params,
                 )
+                if (
+                    self.enable_per_request_metrics
+                    and not request.stream
+                    and (request.n or 1) == 1
+                ):
+                    sampling_params.output_kind = RequestOutputKind.DELTA
 
             self._log_inputs(
                 sub_request_id,
@@ -474,6 +482,7 @@ class OpenAIServingChat(GenerateBaseServing):
         num_cached_tokens = None
         num_cache_creation_tokens = None
         tools_streamed = [False] * num_choices
+        phase_metrics_tracker = RequestPhaseMetricsTracker()
 
         if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
             tool_choice_function_name = request.tool_choice.function.name
@@ -677,6 +686,20 @@ class OpenAIServingChat(GenerateBaseServing):
                             tuple(generated_token_ids[i])
                         )
 
+                    if num_choices == 1:
+                        phase_counts: TokenPhaseCounts | None
+                        if parser is None:
+                            phase_counts = TokenPhaseCounts(
+                                reasoning=0,
+                                content=previous_num_tokens[i],
+                                unclassified=0,
+                            )
+                        else:
+                            phase_counts = parser.classify_token_phases(
+                                generated_token_ids[i]
+                            )
+                        phase_metrics_tracker.update(res.metrics, phase_counts)
+
                     # if the message delta is None (e.g. because it was a
                     # "control token" for tool calls or the parser otherwise
                     # wasn't ready to send a token, then
@@ -848,6 +871,11 @@ class OpenAIServingChat(GenerateBaseServing):
                         stream_per_request_metrics = build_per_request_timing_metrics(
                             last_metrics, completion_tokens
                         )
+                        (
+                            stream_per_request_metrics.reasoning,
+                            stream_per_request_metrics.content,
+                            stream_per_request_metrics.unclassified_token_count,
+                        ) = phase_metrics_tracker.build()
                     spec_stats = build_spec_decoding_metrics(last_res)
                     if spec_stats is not None:
                         if stream_per_request_metrics is None:
@@ -923,10 +951,54 @@ class OpenAIServingChat(GenerateBaseServing):
     ) -> ErrorResponse | ChatCompletionResponse:
         created_time = int(time.time())
         final_res: RequestOutput | None = None
+        phase_metrics_tracker = RequestPhaseMetricsTracker()
+        phase_token_ids: list[int] = []
+        phase_content_token_count = 0
+        collect_phase_deltas = self.enable_per_request_metrics and (request.n or 1) == 1
 
         try:
             async for res in result_generator:
-                final_res = res
+                if collect_phase_deltas:
+                    for output in res.outputs:
+                        phase_delta_token_ids = as_list(output.token_ids)
+                        phase_content_token_count += len(phase_delta_token_ids)
+                        if parser is None:
+                            phase_counts: TokenPhaseCounts | None = TokenPhaseCounts(
+                                0, phase_content_token_count, 0
+                            )
+                        else:
+                            phase_token_ids.extend(phase_delta_token_ids)
+                            parser.parse_delta(
+                                delta_text=output.text,
+                                delta_token_ids=phase_delta_token_ids,
+                                request=request,
+                                prompt_token_ids=res.prompt_token_ids,
+                                finished=output.finish_reason is not None,
+                            )
+                            phase_counts = parser.classify_token_phases(phase_token_ids)
+                        phase_metrics_tracker.update(res.metrics, phase_counts)
+
+                if final_res is None:
+                    final_res = res
+                elif collect_phase_deltas:
+                    final_res.add(res, aggregate=True)
+                    final_res.metrics = res.metrics
+                    # DELTA outputs carry these request-wide values only on
+                    # their final chunk; RequestOutput.add merges token data
+                    # but intentionally does not copy these optional fields.
+                    outputs_by_index = {
+                        output.index: output for output in final_res.outputs
+                    }
+                    for output in res.outputs:
+                        aggregated = outputs_by_index[output.index]
+                        if output.routed_experts is not None:
+                            aggregated.routed_experts = output.routed_experts
+                        if output.sampling_mask is not None:
+                            aggregated.sampling_mask = output.sampling_mask
+                        if output.spec_decode_metrics is not None:
+                            aggregated.spec_decode_metrics = output.spec_decode_metrics
+                else:
+                    final_res = res
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
 
@@ -1151,6 +1223,11 @@ class OpenAIServingChat(GenerateBaseServing):
                 per_request_metrics = build_per_request_timing_metrics(
                     final_res.metrics, num_generated_tokens
                 )
+                (
+                    per_request_metrics.reasoning,
+                    per_request_metrics.content,
+                    per_request_metrics.unclassified_token_count,
+                ) = phase_metrics_tracker.build()
             spec_stats = build_spec_decoding_metrics(final_res)
             if spec_stats is not None:
                 if per_request_metrics is None:
