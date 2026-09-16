@@ -1073,6 +1073,16 @@ class _FakeData:
             "block_len": block_len,
         }
 
+    def add_remote_peer_async(
+        self, peer_id, agent_metadata, base_addr, num_blocks, block_len
+    ):
+        from concurrent.futures import Future
+
+        self.add_remote_peer(peer_id, agent_metadata, base_addr, num_blocks, block_len)
+        future: Future[None] = Future()
+        future.set_result(None)
+        return future
+
     def remove_remote_peer(self, peer_id: str) -> None:
         self._remote_peers.pop(peer_id, None)
 

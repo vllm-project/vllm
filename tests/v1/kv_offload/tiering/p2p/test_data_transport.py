@@ -324,7 +324,9 @@ class TestNixlAgentConfigSelection:
         ):
             NixlTransport("test:1", self._make_view(), backends=["MOONCAKE"])
 
-        config_fn.assert_called_once_with(backends=["MOONCAKE"], capture_telemetry=True)
+        config_fn.assert_called_once_with(
+            backends=["MOONCAKE"], capture_telemetry=True, sync_mode=None
+        )
         # num_threads must NOT be passed on the non-UCX branch.
         assert "num_threads" not in config_fn.call_args.kwargs
 
@@ -340,7 +342,9 @@ class TestNixlAgentConfigSelection:
         ):
             NixlTransport("test:1", self._make_view(), num_threads=8)
 
-        config_fn.assert_called_once_with(num_threads=8, capture_telemetry=True)
+        config_fn.assert_called_once_with(
+            num_threads=8, capture_telemetry=True, sync_mode=None
+        )
         assert "backends" not in config_fn.call_args.kwargs
 
     def test_default_backends_is_ucx_only(self):
@@ -356,4 +360,30 @@ class TestNixlAgentConfigSelection:
             NixlTransport("test:1", self._make_view())
 
         # Default num_threads=4, no backends kwarg.
-        config_fn.assert_called_once_with(num_threads=4, capture_telemetry=True)
+        config_fn.assert_called_once_with(
+            num_threads=4, capture_telemetry=True, sync_mode=None
+        )
+
+    def test_agent_runs_in_strict_thread_sync_when_available(self):
+        """With a NIXL that exposes the sync enum, the agent serializes its
+        API so peer registration may run on the worker thread."""
+        import sys
+        import types
+
+        fake_module = types.ModuleType("fake_nixl_api")
+        fake_module.nixl_thread_sync_t = types.SimpleNamespace(
+            NIXL_THREAD_SYNC_STRICT="strict"
+        )
+        config_fn = MagicMock(return_value=MagicMock(name="cfg"))
+        config_fn.__module__ = fake_module.__name__
+        agent_cls = MagicMock()
+        with (
+            patch.dict(sys.modules, {fake_module.__name__: fake_module}),
+            patch("vllm.v1.kv_offload.tiering.p2p.data.nixl._NixlAgent", agent_cls),
+            patch(
+                "vllm.v1.kv_offload.tiering.p2p.data.nixl._NixlAgentConfig", config_fn
+            ),
+        ):
+            NixlTransport("test:1", self._make_view())
+
+        assert config_fn.call_args.kwargs["sync_mode"] == "strict"

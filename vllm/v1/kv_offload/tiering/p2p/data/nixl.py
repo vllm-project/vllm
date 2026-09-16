@@ -6,8 +6,11 @@ NixlTransport: Data-plane transport for RDMA-based KV block transfers via NIXL.
 
 from __future__ import annotations
 
+import contextlib
 import itertools
+import sys
 from collections.abc import Iterable
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -22,6 +25,21 @@ from vllm.v1.kv_offload.tiering.p2p.data.base import (
 )
 
 logger = init_logger(__name__)
+
+
+def _strict_thread_sync() -> Any:
+    """The agent sync mode that serializes NIXL API calls across threads.
+
+    Registration runs on a worker thread while the engine thread submits
+    and polls transfers, so the agent must serialize its API. Returns None
+    when the installed NIXL exposes no sync-mode enum; the agent then keeps
+    its default and registration still runs on the worker.
+    """
+    module = sys.modules.get(getattr(_NixlAgentConfig, "__module__", ""))
+    enum = getattr(module, "nixl_thread_sync_t", None)
+    if enum is None:
+        return None
+    return enum.NIXL_THREAD_SYNC_STRICT
 
 # Shared sentinel returned by poll() in the steady state (no inflight, or
 # no transfer changed state since the last poll). Tuples make it immutable;
@@ -68,6 +86,12 @@ class NixlTransport(DataTransport):
         # transfer_id → _Inflight(peer_id, handle).
         self._inflight: dict[int, _Inflight] = {}
         self._next_id = itertools.count()
+        # peer_id → registration future while add_remote_peer_async runs
+        # on the worker thread; the agent runs in strict sync mode so the
+        # worker's registration calls and the caller's transfer calls may
+        # overlap.
+        self._registrations: dict[str, Future[None]] = {}
+        self._registration_executor: ThreadPoolExecutor | None = None
 
         self._init(view)
 
@@ -79,9 +103,14 @@ class NixlTransport(DataTransport):
         if _NixlAgent is None:
             return
 
+        sync_mode = _strict_thread_sync()
         non_ucx_backends = [b for b in self._backends if b != "UCX"]
         if non_ucx_backends:
-            cfg = _NixlAgentConfig(backends=self._backends, capture_telemetry=True)
+            cfg = _NixlAgentConfig(
+                backends=self._backends,
+                capture_telemetry=True,
+                sync_mode=sync_mode,
+            )
             logger.info(
                 "NixlTransport %s: NIXL backends=%s",
                 self._agent_name,
@@ -89,7 +118,9 @@ class NixlTransport(DataTransport):
             )
         else:
             cfg = _NixlAgentConfig(
-                num_threads=self._num_threads, capture_telemetry=True
+                num_threads=self._num_threads,
+                capture_telemetry=True,
+                sync_mode=sync_mode,
             )
             logger.info(
                 "NixlTransport %s: NIXL backends=[UCX] num_threads=%d",
@@ -137,7 +168,49 @@ class NixlTransport(DataTransport):
         self._peer_nixl_names[peer_id] = nixl_name
         self._remote_dlists[peer_id] = remote_dlist
 
+    def add_remote_peer_async(
+        self,
+        peer_id: str,
+        agent_metadata: bytes,
+        base_addr: int,
+        num_blocks: int,
+        block_len: int,
+    ) -> Future[None]:
+        """Run add_remote_peer() on the registration worker.
+
+        Loading the peer's agent metadata and preparing its descriptor list
+        scale with the peer's block count, so the caller must not hold a
+        scheduling iteration for them. Peers register one at a time in
+        arrival order.
+        """
+        if self._registration_executor is None:
+            self._registration_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="p2p-peer-registration"
+            )
+        future = self._registration_executor.submit(
+            self.add_remote_peer,
+            peer_id,
+            agent_metadata,
+            base_addr,
+            num_blocks,
+            block_len,
+        )
+        self._registrations[peer_id] = future
+        future.add_done_callback(
+            lambda f, peer_id=peer_id: self._registrations.pop(peer_id, None)
+        )
+        if future.done():
+            # Completed before it was recorded; the callback found nothing.
+            self._registrations.pop(peer_id, None)
+        return future
+
     def remove_remote_peer(self, peer_id: str) -> None:
+        pending = self._registrations.pop(peer_id, None)
+        if pending is not None:
+            # A registration still in flight would otherwise complete after
+            # the removal and leave the peer registered with the agent.
+            with contextlib.suppress(Exception):
+                pending.result()
         nixl_name = self._peer_nixl_names.pop(peer_id, None)
         dlist = self._remote_dlists.pop(peer_id, None)
         if self._agent is not None:
@@ -292,8 +365,11 @@ class NixlTransport(DataTransport):
             return
         self._release_handles([entry.handle for entry in self._inflight.values()])
         self._inflight.clear()
-        for peer_id in list(self._remote_dlists):
+        for peer_id in list(self._registrations) + list(self._remote_dlists):
             self.remove_remote_peer(peer_id)
+        if self._registration_executor is not None:
+            self._registration_executor.shutdown(wait=True)
+            self._registration_executor = None
         if self._local_dlist is not None:
             self._agent.release_dlist_handle(self._local_dlist)
             self._local_dlist = None

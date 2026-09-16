@@ -44,6 +44,8 @@ from vllm.v1.kv_offload.tiering.p2p.session.server import (
 )
 
 if TYPE_CHECKING:
+    from concurrent.futures import Future
+
     from vllm.v1.kv_offload.base import ReqContext
     from vllm.v1.kv_offload.tiering.base import JobId, ParentManager
     from vllm.v1.kv_offload.tiering.p2p.data import DataTransport
@@ -125,6 +127,10 @@ class P2PSession:
         self._send_ready = False  # True after the peer acked our ConnectMsg
         # Msgs waiting to be sent on connection establishment
         self._queued: list[dict] = []
+        # Registration of the peer's NIXL metadata, started by its ConnectMsg.
+        # ConnectAck goes out once it completes, so the peer never sends a
+        # fetch this side cannot serve yet.
+        self._pending_registration: Future[None] | None = None
 
         # Consecutive non-protocol dispatch errors. Reset on success.
         self._dispatch_error_count: int = 0
@@ -166,8 +172,13 @@ class P2PSession:
 
     @property
     def has_pending_work(self) -> bool:
-        """True while inbound loads or outbound transfers are outstanding."""
-        return self._client.has_active_loads or self._server.has_inflight_transfers
+        """True while inbound loads, outbound transfers, or a peer
+        registration are outstanding."""
+        return (
+            self._client.has_active_loads
+            or self._server.has_inflight_transfers
+            or self._pending_registration is not None
+        )
 
     # ------------------------------------------------------------------
     # Connection lifecycle
@@ -260,6 +271,7 @@ class P2PSession:
 
         for msg in self._conn.recv():
             self._on_message(msg)
+        self._maybe_finish_registration()
 
         loads = self._client.collect_results()
         stores = self._server.collect_results()
@@ -285,6 +297,7 @@ class P2PSession:
             ``parent.on_request_finished`` (the manager flushes these on
             its next ``serve_external_requests``).
         """
+        self._pending_registration = None
         client_result = self._client.close()
         failed_stores, failed_serves = self._server.close()
 
@@ -463,19 +476,36 @@ class P2PSession:
                     f"local={self._local_hash_seed!r}. Ensure PYTHONHASHSEED "
                     "(if set) matches on all P2P peers."
                 )
-            self._transport.add_remote_peer(
-                self.peer_id,
-                agent_metadata=msg[ConnectMsg.AGENT_METADATA],
-                base_addr=msg[ConnectMsg.BASE_ADDR],
-                num_blocks=msg[ConnectMsg.NUM_BLOCKS],
-                block_len=msg[ConnectMsg.BLOCK_LEN],
-            )
         except ValueError as exc:
             logger.error("P2PSession %s: rejecting peer connect: %s", self.peer_id, exc)
             if self._conn is not None:
                 self._conn.mark_dead()
             return
 
+        self._pending_registration = self._transport.add_remote_peer_async(
+            self.peer_id,
+            agent_metadata=msg[ConnectMsg.AGENT_METADATA],
+            base_addr=msg[ConnectMsg.BASE_ADDR],
+            num_blocks=msg[ConnectMsg.NUM_BLOCKS],
+            block_len=msg[ConnectMsg.BLOCK_LEN],
+        )
+
+    def _maybe_finish_registration(self) -> None:
+        """Send ConnectAck once the peer's registration has completed.
+
+        A failed registration rejects the peer the same way a ConnectMsg
+        validation failure does.
+        """
+        future = self._pending_registration
+        if future is None or not future.done():
+            return
+        self._pending_registration = None
+        exc = future.exception()
+        if exc is not None:
+            logger.error("P2PSession %s: rejecting peer connect: %s", self.peer_id, exc)
+            if self._conn is not None:
+                self._conn.mark_dead()
+            return
         if self._conn is not None:
             self._conn.send(
                 {
