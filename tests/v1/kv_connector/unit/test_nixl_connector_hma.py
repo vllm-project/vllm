@@ -54,6 +54,8 @@ def region_pull_worker():
     worker.enable_permute_local_kv = False
     worker.enable_heterogeneous_attn_post_process = False
     worker._engine_last_active = {}
+    worker._replaced_remote_engines = set()
+    worker._transfer_layer_group_ids = ()
     worker._bidirectional_kv_xfer_enabled = False
     worker._recving_transfers = {}
     worker.use_mla, worker._has_mamba = True, False
