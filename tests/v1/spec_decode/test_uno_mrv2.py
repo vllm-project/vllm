@@ -2538,6 +2538,7 @@ def _uno_sample_tokens_runner(monkeypatch, num_reqs=1):
     proposer = object.__new__(UnoSpeculator)
     proposer.supports_mm_inputs = False
     proposer.draft_token_confidence_probs = None
+    proposer.acceptance_estimator = None
 
     proposer._step = 7
 

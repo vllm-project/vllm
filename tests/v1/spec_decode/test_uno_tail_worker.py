@@ -101,7 +101,7 @@ def test_tail_worker_uses_scheduler_zero_draft_batch(monkeypatch):
         input_ids[: len(indices)] = sampled[indices, 0]
         return starts[1:].long() - 1
 
-    monkeypatch.setattr(model_runner, "async_copy_to_gpu", copy_to_cpu)
+    monkeypatch.setattr(model_runner, "async_tensor_h2d", copy_to_cpu)
     monkeypatch.setattr(model_runner, "prepare_pos_seq_lens", prepare_positions)
     monkeypatch.setattr(
         model_runner, "combine_sampled_and_draft_tokens", combine_tokens
