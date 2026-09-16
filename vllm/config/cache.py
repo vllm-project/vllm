@@ -108,7 +108,7 @@ class CacheConfig:
     not matter if you have another vLLM instance running on the same GPU. For
     example, if you have two vLLM instances running on the same GPU, you can
     set the GPU memory utilization to 0.5 for each instance. On non-GPU
-    backends, this value controls the corresponding device memory utilization.
+    installs, this value controls the corresponding device memory utilization.
     """
 
     @property
