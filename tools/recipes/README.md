@@ -19,9 +19,24 @@ flowchart LR
 ```
 
 The recipe is the baseline. Hardware and workload information can optionally
-refine the initial configuration. Sweep tuning is an optional validation step.
+refine the initial configuration. Sweep tuning is optional.
 
-## 1. vLLM Recipes Only
+## Getting Started
+
+Use `serve_with_recipe.sh` to generate the recipe configuration and start vLLM:
+
+```bash
+tools/recipes/serve_with_recipe.sh \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --hardware xeon6
+```
+
+For `xeon6`, hardware detection is enabled automatically. The sections below
+show the individual configuration and tuning steps.
+
+## Detailed Deployment Workflow
+
+### 1. vLLM Recipes Only
 
 Use the converter directly when the recipe already contains the deployment
 settings you need. This path requires only PyYAML; the vLLM Python package is
@@ -31,15 +46,7 @@ not required unless optional runtime tuning or sweep generation is requested.
 pip install pyyaml
 ```
 
-Choose whichever recipe-selection method fits the workflow:
-
-**Interactive discovery** — search models, then choose hardware and strategy:
-
-```bash
-python3 tools/recipes/recipe_json_to_vllm_config.py
-```
-
-**Non-interactive discovery** — provide model and hardware and use the
+For non-interactive discovery, provide the model and hardware and use the
 Recipes-recommended strategy:
 
 ```bash
@@ -48,7 +55,17 @@ python3 tools/recipes/recipe_json_to_vllm_config.py \
   --hardware xeon6
 ```
 
-**Direct JSON input** — use a Recipes JSON URL or a local JSON file:
+#### 1.1 Interactive Discovery
+
+Search models, then choose hardware and strategy interactively:
+
+```bash
+python3 tools/recipes/recipe_json_to_vllm_config.py
+```
+
+#### 1.2 Direct JSON Input
+
+Use a Recipes JSON URL or a local JSON file:
 
 ```bash
 python3 tools/recipes/recipe_json_to_vllm_config.py \
@@ -57,11 +74,10 @@ python3 tools/recipes/recipe_json_to_vllm_config.py \
 python3 tools/recipes/recipe_json_to_vllm_config.py recipe.json
 ```
 
-### 1.1 Test New or Modified Recipes from a Preview page
+#### 1.3 Test a Preview Recipe API
 
 A Recipes pull request can expose the same JSON API through its Vercel preview.
-Use that preview as the recipe source with `--api-base` to validate new or
-modified recipes before they are available at `https://recipes.vllm.ai`.
+Use `--api-base` to validate it before the recipe is available in production:
 
 ```bash
 PREVIEW=https://vllm-recipes-git-fork-intel-ai-tce-dockerin-f4c148-inferact-inc.vercel.app
@@ -72,19 +88,13 @@ python3 tools/recipes/recipe_json_to_vllm_config.py \
   --hardware xeon6
 ```
 
-Replace `PREVIEW` with the Vercel preview URL for the Recipes PR being tested.
-Preview URLs are temporary and intended for development and validation; the
-production Recipes API remains the default source.
+See [REFERENCE.md](REFERENCE.md) for recipe discovery, strategy selection,
+custom output files, and deployment scope.
 
-All paths generate `config.yml` and `env.sh`. See
-[REFERENCE.md](REFERENCE.md) for recipe discovery, strategy selection, direct
-JSON input, custom output files, and deployment scope.
+### 2. Hardware Information (Optional)
 
-## 2. Hardware Information (Optional)
-
-Add `--detect-hardware` when the target host's effective CPU/NUMA/memory
-resources should refine deployment-sensitive values such as
-`tensor-parallel-size` and `gpu-memory-utilization`.
+Add `--detect-hardware` when using the converter directly and the target host's
+effective CPU/NUMA/memory resources should refine deployment-sensitive values:
 
 ```bash
 python3 tools/recipes/recipe_json_to_vllm_config.py \
@@ -93,15 +103,13 @@ python3 tools/recipes/recipe_json_to_vllm_config.py \
   --detect-hardware
 ```
 
-Hardware detection is optional and uses vLLM CPU resource utilities only when
-requested. See [RUNTIME_TUNING.md](RUNTIME_TUNING.md#hardware-information).
+`serve_with_recipe.sh` enables this automatically for `xeon6`. See
+[RUNTIME_TUNING.md](RUNTIME_TUNING.md#hardware-information) for details.
 
-## 3. Workload Information (Optional)
+### 3. Workload Information (Optional)
 
-Workload hints calculate explicit scheduler seeds for optional benchmark
-tuning. The directly deployable `config.yml` keeps recipe-provided scheduler
-settings or lets vLLM resolve its defaults. Inputs include token lengths,
-concurrency, and optional latency or capacity objectives.
+Add workload hints when token lengths, concurrency, or latency objectives should
+seed optional benchmark tuning:
 
 ```bash
 python3 tools/recipes/recipe_json_to_vllm_config.py \
@@ -114,18 +122,13 @@ python3 tools/recipes/recipe_json_to_vllm_config.py \
   --tpot-sla-ms 100
 ```
 
-Hardware detection and workload information are independent optional inputs;
-they can also be supplied together. See
-[RUNTIME_TUNING.md](RUNTIME_TUNING.md#workload-information) for the supported
-inputs and how runtime parameters are calculated.
+See [RUNTIME_TUNING.md](RUNTIME_TUNING.md#workload-information) for supported
+inputs and runtime calculations.
 
-## 4. Sweep Tuning (Optional)
+### 4. Sweep Tuning (Optional)
 
-Use `--generate-sweep` to compare the workload-derived scheduler seed with
-vLLM's resolved defaults using `vllm bench sweep serve`. The sweep benchmarks
-nearby scheduler values and
-`recommend.py` produces one measured `recommended-config.yml` plus the
-selection evidence in `recommendation.json`.
+Use `--generate-full-sweep` for benchmark-backed tuning of TP/DP, concurrency,
+and scheduler settings:
 
 ```bash
 python3 tools/recipes/recipe_json_to_vllm_config.py \
@@ -135,36 +138,15 @@ python3 tools/recipes/recipe_json_to_vllm_config.py \
   --input-tokens 128 \
   --output-tokens 128 \
   --concurrency 32 \
-  --generate-sweep
+  --generate-full-sweep
 ```
 
-See [SWEEP_TUNING.md](SWEEP_TUNING.md) for the benchmark, recommendation, and
-vLLM CPU Docker-shell workflow.
+See [SWEEP_TUNING.md](SWEEP_TUNING.md) for targeted sweep modes, NUMA binding,
+failure handling, recommendations, reporting, and visualization.
 
-Each generated sweep package also contains a standalone `visualize.py` helper,
-`requirements.txt`, and `VISUALIZATION.md`. Run the helper only after the
-benchmark stages finish; it reads existing `summary.json` files and never runs
-or resumes a sweep.
+### 5. Start vLLM
 
-For end-to-end tuning, `--generate-full-sweep` runs
-`TP/DP -> max_concurrency -> scheduler`. `--generate-concurrency-sweep` can be
-used independently, and `--generate-scheduler-sweep` is the explicit
-scheduler-only name (`--generate-sweep` remains an alias).
-
-Xeon TP/DP sweeps temporarily enable explicit NUMA-aware OMP binding by
-default. Disable that workaround with `--no-tp-dp-numa-bind-workaround` after
-the vLLM CPU DP NUMA-binding fix is available.
-
-To tune only the parallel layout, use
-`--generate-parallel-layout-sweep`. Hardware detection supplies the effective
-NUMA-node count. The sweep generates every supported factor pair that uses all
-NUMA nodes and also includes the largest supported TP size that does not exceed
-the NUMA-node count, even if that candidate leaves some NUMA nodes idle. This
-mode stops after TP/DP selection; use `--generate-full-sweep` to continue with
-concurrency and scheduler tuning. Generated TP values are limited to the
-supported set `1, 2, 4, 8`.
-
-## Start vLLM
+When using the converter directly:
 
 ```bash
 source env.sh
