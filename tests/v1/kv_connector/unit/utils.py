@@ -519,6 +519,8 @@ def make_nixl_scheduler(
     Only sets the flags needed by the tests.  When *heartbeat=True* the
     scheduler-side heartbeat bookkeeping fields are also initialised.
     """
+    from types import SimpleNamespace
+
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
         NixlConnectorScheduler,
     )
@@ -530,6 +532,7 @@ def make_nixl_scheduler(
         block_size=16,
         mamba_enabled=has_mamba,
     )
+    sched.vllm_config = SimpleNamespace(num_prefill_lookahead_tokens=0)
 
     if heartbeat:
         sched._heartbeat_by_engine = {}
@@ -539,12 +542,14 @@ def make_nixl_scheduler(
         sched._heartbeat_interval = kv_lease_duration // 6
         # Fields touched by build_connector_meta / request_finished:
         sched._reqs_need_recv = {}
+        sched._hisparse_host_blocks_to_recv = {}
         sched._reqs_need_send = {}
         sched._reqs_in_batch = set()
         sched._reqs_not_processed = set()
         sched._reqs_need_save = {}
         sched.use_host_buffer = False
         sched.engine_id = "test-engine"
+        sched.transfer_tp_size = 1
         sched.side_channel_host = "localhost"
         sched.side_channel_port = 5555
         sched.blocks_per_sw = []
@@ -584,6 +589,7 @@ def make_nixl_push_scheduler(
     sched.decoder_kv_blocks_ttl = decoder_kv_blocks_ttl
     sched.use_host_buffer = False
     sched.engine_id = "decode-engine"
+    sched.transfer_tp_size = 1
     sched.side_channel_host = "127.0.0.1"
     sched.side_channel_port = 5600
     sched.is_bidirectional_kv_xfer_enabled = is_bidirectional_kv_xfer_enabled
@@ -593,9 +599,11 @@ def make_nixl_push_scheduler(
         mamba_enabled=has_mamba,
     )
 
-    # vllm_config is consulted for parallel_config.tensor_parallel_size.
+    # vllm_config is consulted for parallel_config.tensor_parallel_size, and by
+    # `_prefill_backoff` on both the P and D prefill paths.
     vllm_config = MagicMock()
     vllm_config.parallel_config.tensor_parallel_size = 1
+    vllm_config.num_prefill_lookahead_tokens = 0
     sched.vllm_config = vllm_config
 
     # Push-specific state.
