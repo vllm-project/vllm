@@ -12,7 +12,7 @@ import torch
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsMultiModal, supports_realtime
 from vllm.multimodal.encoder_budget import MultiModalBudget
-from vllm.multimodal.inputs import MultiModalKwargsItem
+from vllm.multimodal.inputs import BatchedTensorInputs, MultiModalKwargsItem
 from vllm.multimodal.utils import (
     get_mm_features_in_window,
     group_and_batch_mm_kwargs,
@@ -27,6 +27,7 @@ from vllm.v1.worker.utils import (
 
 if TYPE_CHECKING:
     from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
+    from vllm.v1.worker.gpu.mm.lora import MMEncoderLoraActivation
 
 logger = init_logger(__name__)
 
@@ -148,12 +149,15 @@ class EncoderRunner:
 
     @torch.inference_mode()
     def execute_mm_encoder(
-        self, mm_kwargs: list[tuple[str, MultiModalKwargsItem]]
+        self,
+        mm_kwargs: list[tuple[str, MultiModalKwargsItem]],
+        mm_lora_activation: "MMEncoderLoraActivation | None" = None,
     ) -> list[torch.Tensor]:
         encoder_outputs: list[torch.Tensor] = []
-        for modality, num_items, mm_kwargs_batch in group_and_batch_mm_kwargs(
-            mm_kwargs, device=self.device, pin_memory=PIN_MEMORY
-        ):
+
+        def execute_batch(
+            modality: str, num_items: int, mm_kwargs_batch: BatchedTensorInputs
+        ) -> None:
             cg_manager = self.cudagraph_manager
             cudagraph_output = (
                 cg_manager.execute(mm_kwargs_batch)
@@ -169,6 +173,22 @@ class EncoderRunner:
             )
             sanity_check_mm_encoder_outputs(batch_outputs, expected_num_items=num_items)
             encoder_outputs.extend(batch_outputs)
+
+        if mm_lora_activation is not None and mm_lora_activation.requires_per_item:
+            assert mm_lora_activation.num_items == len(mm_kwargs), (
+                "MM LoRA mapping items must match the multimodal encoder inputs"
+            )
+            for item_idx, mm_item in enumerate(mm_kwargs):
+                mm_lora_activation.activate((item_idx,))
+                for modality, num_items, mm_kwargs_batch in group_and_batch_mm_kwargs(
+                    [mm_item], device=self.device, pin_memory=PIN_MEMORY
+                ):
+                    execute_batch(modality, num_items, mm_kwargs_batch)
+        else:
+            for modality, num_items, mm_kwargs_batch in group_and_batch_mm_kwargs(
+                mm_kwargs, device=self.device, pin_memory=PIN_MEMORY
+            ):
+                execute_batch(modality, num_items, mm_kwargs_batch)
         return encoder_outputs
 
     @contextmanager
