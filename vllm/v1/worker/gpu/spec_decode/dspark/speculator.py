@@ -23,6 +23,7 @@ CUDA graphs (FULL, mirroring DFlash) cover the whole draft step: the parallel
 backbone forward AND the sequential Markov sampling.
 """
 
+import os
 from typing import Any
 
 import torch
@@ -79,7 +80,45 @@ class DSparkSpeculator(DFlashSpeculator):
             self.draft_model_config.hf_config, "dspark_draft_topk", None
         )
 
+        self.draft_token_confidence_probs = torch.empty_like(
+            self.draft_tokens, dtype=torch.float32
+        )
+        self.enable_adaptive_verification = (
+            self.speculative_config.enable_adaptive_verification
+            and not self.speculative_config.is_dspark_prefill_only()
+        )
+
+        fixed_graph_num_reqs = int(os.getenv("VLLM_DSPARK_FIXED_GRAPH_NUM_REQS", "0"))
+        if not 0 <= fixed_graph_num_reqs <= self.max_num_reqs:
+            raise ValueError(
+                "VLLM_DSPARK_FIXED_GRAPH_NUM_REQS must be between 0 and "
+                f"max_num_seqs ({self.max_num_reqs}), got {fixed_graph_num_reqs}."
+            )
+        self.fixed_graph_num_reqs = fixed_graph_num_reqs
+        if fixed_graph_num_reqs:
+            logger.warning(
+                "Fixing DSpark draft CUDA graph batches at %d requests (%d tokens).",
+                fixed_graph_num_reqs,
+                fixed_graph_num_reqs * self.num_query_per_req,
+            )
+
         self.use_confidence_head: bool = False
+
+    def _get_graph_dispatch_shape(
+        self, num_reqs: int, num_query_tokens: int
+    ) -> tuple[int, int]:
+        if not self.fixed_graph_num_reqs:
+            return num_reqs, num_query_tokens
+        if num_reqs > self.fixed_graph_num_reqs:
+            raise RuntimeError(
+                "DSpark draft batch has "
+                f"{num_reqs} requests, exceeding the fixed CUDA graph batch "
+                f"of {self.fixed_graph_num_reqs}."
+            )
+        return (
+            self.fixed_graph_num_reqs,
+            self.fixed_graph_num_reqs * self.num_query_per_req,
+        )
 
     def load_draft_model(
         self,

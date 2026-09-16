@@ -281,6 +281,136 @@ def test_dsv4_fast_topk(
 
 
 @pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="The DeepSeek V4 fast path is CUDA-only.",
+)
+def test_dsv4_fast_topk_padding_uint32_falls_back(monkeypatch: pytest.MonkeyPatch):
+    """Padded rows need the -1 sentinel, which uint32 cannot represent: the
+    router must skip the dsv4 fast path and still route the real rows."""
+    torch.manual_seed(0)
+    num_tokens = 17
+    num_experts = 256
+    hidden_states = torch.randn((num_tokens, 64), dtype=torch.float32, device="cuda")
+    gating_output = torch.randn(
+        (num_tokens, num_experts), dtype=torch.float32, device="cuda"
+    )
+    correction_bias = torch.randn(num_experts, dtype=torch.float32, device="cuda")
+    is_padding = torch.zeros(num_tokens, dtype=torch.bool, device="cuda")
+    is_padding[1::2] = True
+    gating_output[is_padding] = float("nan")
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.router."
+        "fused_topk_bias_router._get_padding_mask",
+        lambda _: is_padding,
+    )
+    # uint32 + padding would trip dsv4_topk's signed-indices assertion; the
+    # generic path must take over instead.
+    topk_weights, topk_ids = fused_topk_bias(
+        hidden_states=hidden_states,
+        gating_output=gating_output,
+        scoring_func="sqrtsoftplus",
+        e_score_correction_bias=correction_bias,
+        topk=6,
+        renormalize=True,
+        indices_type=torch.uint32,
+        routed_scaling_factor=1.5,
+    )
+
+    assert topk_ids.dtype == torch.uint32
+    topk_weights_ref, topk_ids_ref = _torch_topk_softplus_sqrt(
+        gating_output=gating_output[~is_padding],
+        topk=6,
+        renormalize=True,
+        routed_scaling_factor=1.5,
+        e_score_correction_bias=correction_bias,
+    )
+    # uint32 CUDA tensors do not support boolean-mask indexing; widen first.
+    torch.testing.assert_close(
+        topk_ids.to(torch.int64)[~is_padding],
+        topk_ids_ref.to(torch.int64),
+        atol=0,
+        rtol=0,
+    )
+    torch.testing.assert_close(
+        topk_weights[~is_padding], topk_weights_ref, atol=2e-5, rtol=2e-5
+    )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="The DeepSeek V4 fast path is CUDA-only.",
+)
+def test_dsv4_fast_topk_padding(monkeypatch: pytest.MonkeyPatch):
+    """Verify the DSV4 fast path removes graph-padding rows from routing."""
+    torch.manual_seed(0)
+    num_tokens = 17
+    num_experts = 256
+    hidden_states = torch.randn((num_tokens, 64), dtype=torch.float32, device="cuda")
+    gating_output = torch.randn(
+        (num_tokens, num_experts), dtype=torch.float32, device="cuda"
+    )
+    correction_bias = torch.randn(num_experts, dtype=torch.float32, device="cuda")
+    is_padding = torch.zeros(num_tokens, dtype=torch.bool, device="cuda")
+    is_padding[1::2] = True
+    gating_output[is_padding] = float("nan")
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.router."
+        "fused_topk_bias_router._get_padding_mask",
+        lambda _: is_padding,
+    )
+    topk_weights, topk_ids = fused_topk_bias(
+        hidden_states=hidden_states,
+        gating_output=gating_output,
+        scoring_func="sqrtsoftplus",
+        e_score_correction_bias=correction_bias,
+        topk=6,
+        renormalize=True,
+        routed_scaling_factor=1.5,
+    )
+
+    assert torch.equal(topk_ids[is_padding], torch.full_like(topk_ids[is_padding], -1))
+    assert torch.equal(
+        topk_weights[is_padding], torch.zeros_like(topk_weights[is_padding])
+    )
+
+    topk_weights_ref, topk_ids_ref = _torch_topk_softplus_sqrt(
+        gating_output=gating_output[~is_padding],
+        topk=6,
+        renormalize=True,
+        routed_scaling_factor=1.5,
+        e_score_correction_bias=correction_bias,
+    )
+    torch.testing.assert_close(topk_ids[~is_padding], topk_ids_ref, atol=0, rtol=0)
+    torch.testing.assert_close(
+        topk_weights[~is_padding], topk_weights_ref, atol=2e-5, rtol=2e-5
+    )
+
+    # The mask buffer is persistent under CUDA graph replay, but its contents
+    # change with every batch. Verify that the kernel reads those contents at
+    # runtime rather than specializing on the mask captured above.
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        graph_weights, graph_ids = dsv4_topk(
+            gating_output,
+            correction_bias,
+            torch.int32,
+            1.5,
+            is_padding=is_padding,
+        )
+
+    is_padding.logical_not_()
+    graph.replay()
+    assert torch.equal(
+        graph_ids[is_padding], torch.full_like(graph_ids[is_padding], -1)
+    )
+    assert torch.equal(
+        graph_weights[is_padding], torch.zeros_like(graph_weights[is_padding])
+    )
+
+
+@pytest.mark.skipif(
     not current_platform.is_cuda_alike(),
     reason="This test is skipped on non-CUDA platform.",
 )
