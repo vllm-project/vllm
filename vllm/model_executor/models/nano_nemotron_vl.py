@@ -1147,7 +1147,7 @@ class NemotronH_Nano_VL_V2(
         image_embeds = self.extract_feature_dynamic(
             image_input.pixel_values_flat, image_input.imgs_sizes
         )
-        num_tokens_per_image = image_input.num_tokens_per_image
+        num_tokens_per_image = tuple(map(int, image_input.num_tokens_per_image))
 
         if len(num_tokens_per_image) == 1:
             return (image_embeds.view(-1, self.config.text_config.hidden_size),)
