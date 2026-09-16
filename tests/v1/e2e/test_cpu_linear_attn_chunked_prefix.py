@@ -10,6 +10,8 @@ from tests.models.utils import check_logprobs_close
 from vllm import LLM, SamplingParams
 from vllm.platforms import current_platform
 
+pytestmark = pytest.mark.cpu_model
+
 if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
 

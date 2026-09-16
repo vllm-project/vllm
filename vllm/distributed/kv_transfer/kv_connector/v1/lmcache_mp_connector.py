@@ -702,9 +702,9 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
             - Applies to both sync- and async-loading requests.
             - Async loading: failed blocks may be reported in any forward pass
               up to and including the pass where the request ID is returned by
-              `get_finished()`. Even if failures occur, the request must still
-              be reported via `get_finished()`, and the failed block IDs must
-              appear here no later than that same pass.
+              `get_transfer_results()`. Even if failures occur, the request
+              must still be reported as finished receiving, and the failed
+              block IDs must appear here no later than that same pass.
             - Sync loading: failed blocks should be reported in the forward
               pass in which they are detected.
         """
@@ -835,8 +835,12 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
         if new_block_ids:
             tracker.append_block_ids(new_block_ids)
 
-        # Update the state of the tracker
-        condition = tracker.needs_retrieve()
+        # num_external_tokens > 0 means this connector is chosen for loading.
+        # When non-chosen (num_external_tokens == 0, e.g. in MultiConnector),
+        # force condition=False so the state goes to READY and all lookup locks
+        # are released — end_session does NOT release lookup locks, so without
+        # this they would leak until TTL expiry (10 minutes).
+        condition = tracker.needs_retrieve() and num_external_tokens > 0
         if tracker.state == LMCacheMPRequestState.PREFETCHING:
             # If need to retrieve, change to WAITING_FOR_LOAD
             # Otherwise, change to READY

@@ -11,7 +11,10 @@ from PIL import Image
 
 import vllm.envs as envs
 from vllm.utils.serial_utils import tensor2base64
-from vllm.utils.sparse_utils import check_sparse_tensor_invariants_threadsafe
+from vllm.utils.sparse_utils import (
+    check_sparse_tensor_invariants_threadsafe,
+    safe_to_dense,
+)
 
 from ..image import convert_image_mode, normalize_image, rgba_to_rgb
 from .base import MediaIO, MediaWithBytes
@@ -135,7 +138,7 @@ class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
         buffer = BytesIO(data)
         with check_sparse_tensor_invariants_threadsafe():
             tensor = torch.load(buffer, weights_only=True)
-            return tensor.to_dense()
+            return safe_to_dense(tensor, parameter="image_embeds")
 
     def _load_numpy(self, data: bytes) -> torch.Tensor:
         with BytesIO(data) as buffer:
@@ -156,7 +159,7 @@ class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
 
         with check_sparse_tensor_invariants_threadsafe():
             tensor = torch.load(filepath, weights_only=True)
-            return tensor.to_dense()
+            return safe_to_dense(tensor, parameter="image_embeds")
 
     def encode_base64(self, media: torch.Tensor) -> str:
         return tensor2base64(media)

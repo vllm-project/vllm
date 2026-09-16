@@ -667,7 +667,7 @@ def emit_browser_tool_events(
         )
     elif function_name == "find":
         action = response_function_web_search.ActionFind(
-            type="find",
+            type="find_in_page",
             pattern=parsed_args["pattern"],
             # TODO: translate to url
             url=f"cursor:{parsed_args.get('cursor', '')}",

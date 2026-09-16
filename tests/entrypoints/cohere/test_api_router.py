@@ -127,15 +127,19 @@ def _generate_request() -> GenerateRequest:
     )
 
 
-def _build_app(handler: _Handler | None) -> FastAPI:
+def _build_app(handler: _Handler | None, *, enable_scale_out: bool = True) -> FastAPI:
     app = FastAPI()
+    app.state.args = Namespace(enable_scale_out=enable_scale_out, tokens_only=False)
     attach_router(app)
     app.state.cohere_serving_chat_v2 = handler
     return app
 
 
-def _build_render_app(chat_handler, render_handler) -> FastAPI:
+def _build_render_app(
+    chat_handler, render_handler, *, enable_scale_out: bool = True
+) -> FastAPI:
     app = FastAPI()
+    app.state.args = Namespace(enable_scale_out=enable_scale_out, tokens_only=False)
     attach_router(app)
     app.state.cohere_serving_chat_v2 = chat_handler
     app.state.serving_render = render_handler
@@ -150,11 +154,13 @@ def _build_app_with_vllm_handlers(handler: _Handler | None) -> FastAPI:
     into the ``CohereError`` wire shape.
     """
     app = FastAPI()
-    attach_router(app)
-    app.state.cohere_serving_chat_v2 = handler
     # ``validation_exception_handler`` reads ``req.app.state.args``; the
     # real cli builds this via argparse.
-    app.state.args = Namespace(log_error_stack=False)
+    app.state.args = Namespace(
+        log_error_stack=False, enable_scale_out=True, tokens_only=False
+    )
+    attach_router(app)
+    app.state.cohere_serving_chat_v2 = handler
     app.exception_handler(RequestValidationError)(validation_exception_handler)
     app.exception_handler(HTTPException)(http_exception_handler)
     app.exception_handler(VLLMError)(vllm_error_handler)
@@ -401,12 +407,11 @@ class TestRenderEndpoint:
         paths = [getattr(r, "path", None) for r in app.routes]
         assert "/cohere/v2/chat/render" in paths
 
-    def test_route_not_registered_when_flag_unset(self, monkeypatch):
-        monkeypatch.delenv("VLLM_ENABLE_COHERE_API", raising=False)
-        app = FastAPI()
-        attach_router(app)
+    def test_route_not_registered_when_flag_unset(self):
+        app = _build_app(handler=None, enable_scale_out=False)
         paths = [getattr(r, "path", None) for r in app.routes]
         assert "/cohere/v2/chat/render" not in paths
+        assert "/cohere/v2/chat" in paths
 
     def test_returns_generate_request_json(self):
         render_handler = _RenderHandler(_generate_request())

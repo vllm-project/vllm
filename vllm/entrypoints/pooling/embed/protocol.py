@@ -236,7 +236,7 @@ class CohereEmbedRequest(BaseModel):
     embedding_types: list[CohereEmbeddingType] | None = None
     truncate: CohereTruncate = "END"
     max_tokens: int | None = None
-    priority: int = 0
+    priority: int = Field(default=0, ge=-(2**63), le=2**63 - 1)
 
     @model_validator(mode="after")
     def validate_input_fields(self):

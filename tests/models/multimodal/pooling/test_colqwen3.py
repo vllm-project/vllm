@@ -22,11 +22,6 @@ from vllm.entrypoints.pooling.scoring.typing import ScoreMultiModalParam
 
 from ....conftest import VllmRunner
 
-pytestmark = pytest.mark.skip(
-    reason="ColQwen3 model's weight tying is incompatible with "
-    "transformers v5 (missing all_tied_weights_keys)"
-)
-
 MODELS = [
     "TomoroAI/tomoro-colqwen3-embed-4b",
     "OpenSearch-AI/Ops-Colqwen3-4B",
@@ -50,7 +45,23 @@ TEXT_DOCUMENTS = [
 ]
 
 DTYPE = "half"
-GPU_MEMORY_UTILIZATION = 0.7
+# The Tomoro model needs room for its vision encoder and a 4096-token KV cache
+# on the 16 GiB devices used by the H200 MIG test lane.
+GPU_MEMORY_UTILIZATION = 0.8
+
+
+@pytest.fixture(scope="module", params=MODELS)
+def colqwen3_model(request, vllm_runner):
+    model = request.param
+    with vllm_runner(
+        model,
+        runner="pooling",
+        dtype=DTYPE,
+        max_model_len=4096,
+        enforce_eager=True,
+        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
+    ) as vllm_model:
+        yield model, vllm_model
 
 
 def _make_base64_image(
@@ -90,75 +101,51 @@ def _make_text_mm_param(text: str) -> ScoreMultiModalParam:
 
 
 def _run_token_embed_test(
-    vllm_runner: type[VllmRunner],
+    vllm_model: VllmRunner,
     model: str,
-    *,
-    dtype: str,
 ) -> None:
     """Verify per-token embedding shape and L2 normalization."""
-    with vllm_runner(
-        model,
-        runner="pooling",
-        dtype=dtype,
-        max_model_len=4096,
-        enforce_eager=True,
-        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
-    ) as vllm_model:
-        outputs = vllm_model.token_embed([TEXT_QUERIES[0]])
+    outputs = vllm_model.token_embed([TEXT_QUERIES[0]])
 
-        assert len(outputs) == 1
-        emb = torch.tensor(outputs[0])
-        # Token embeddings should be 2D: [num_tokens, embed_dim]
-        assert emb.dim() == 2
-        assert emb.shape[1] == EMBED_DIMS[model]
-        assert emb.shape[0] > 1
+    assert len(outputs) == 1
+    emb = torch.tensor(outputs[0])
+    # Token embeddings should be 2D: [num_tokens, embed_dim]
+    assert emb.dim() == 2
+    assert emb.shape[1] == EMBED_DIMS[model]
+    assert emb.shape[0] > 1
 
-        # Verify L2 normalization
-        norms = torch.norm(emb, p=2, dim=-1)
-        torch.testing.assert_close(
-            norms,
-            torch.ones_like(norms),
-            rtol=1e-2,
-            atol=1e-2,
-        )
+    # Verify L2 normalization
+    norms = torch.norm(emb, p=2, dim=-1)
+    torch.testing.assert_close(
+        norms,
+        torch.ones_like(norms),
+        rtol=1e-2,
+        atol=1e-2,
+    )
 
 
 def _run_late_interaction_test(
-    vllm_runner: type[VllmRunner],
-    model: str,
-    *,
-    dtype: str,
+    vllm_model: VllmRunner,
 ) -> None:
     """Verify MaxSim scoring matches manual computation."""
     from vllm.entrypoints.pooling.scoring.utils import compute_maxsim_score
 
-    with vllm_runner(
-        model,
-        runner="pooling",
-        dtype=dtype,
-        max_model_len=4096,
-        enforce_eager=True,
-        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
-    ) as vllm_model:
-        q_outputs = vllm_model.token_embed([TEXT_QUERIES[0]])
-        d_outputs = vllm_model.token_embed([TEXT_DOCUMENTS[0]])
+    q_outputs = vllm_model.token_embed([TEXT_QUERIES[0]])
+    d_outputs = vllm_model.token_embed([TEXT_DOCUMENTS[0]])
 
-        q_emb = torch.tensor(q_outputs[0])
-        d_emb = torch.tensor(d_outputs[0])
+    q_emb = torch.tensor(q_outputs[0])
+    d_emb = torch.tensor(d_outputs[0])
 
-        manual_score = compute_maxsim_score(q_emb, d_emb).item()
+    manual_score = compute_maxsim_score(q_emb, d_emb).item()
 
-        vllm_scores = vllm_model.score(TEXT_QUERIES[0], TEXT_DOCUMENTS[0])
+    vllm_scores = vllm_model.score(TEXT_QUERIES[0], TEXT_DOCUMENTS[0])
 
-        assert len(vllm_scores) == 1
-        assert vllm_scores[0] == pytest.approx(manual_score, rel=0.01)
+    assert len(vllm_scores) == 1
+    assert vllm_scores[0] == pytest.approx(manual_score, rel=0.01)
 
 
 def _run_relevance_test(
-    vllm_runner: type[VllmRunner],
-    model: str,
-    *,
-    dtype: str,
+    vllm_model: VllmRunner,
 ) -> None:
     """Verify that relevant documents score higher than irrelevant ones."""
     query = "What is machine learning?"
@@ -168,59 +155,33 @@ def _run_relevance_test(
         "Deep learning uses neural networks for complex tasks.",
     ]
 
-    with vllm_runner(
-        model,
-        runner="pooling",
-        dtype=dtype,
-        max_model_len=4096,
-        enforce_eager=True,
-        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
-    ) as vllm_model:
-        scores = vllm_model.score(query, documents)
+    scores = vllm_model.score(query, documents)
 
-        assert len(scores) == 3
-        assert scores[0] > scores[1], "ML doc should score higher than weather doc"
-        assert scores[2] > scores[1], "DL doc should score higher than weather doc"
+    assert len(scores) == 3
+    assert scores[0] > scores[1], "ML doc should score higher than weather doc"
+    assert scores[2] > scores[1], "DL doc should score higher than weather doc"
 
 
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", [DTYPE])
-def test_colqwen3_token_embed(
-    vllm_runner,
-    model: str,
-    dtype: str,
-) -> None:
-    _run_token_embed_test(vllm_runner, model, dtype=dtype)
+def test_colqwen3_token_embed(colqwen3_model) -> None:
+    model, vllm_model = colqwen3_model
+    _run_token_embed_test(vllm_model, model)
 
 
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", [DTYPE])
-def test_colqwen3_late_interaction_scoring(
-    vllm_runner,
-    model: str,
-    dtype: str,
-) -> None:
-    _run_late_interaction_test(vllm_runner, model, dtype=dtype)
+def test_colqwen3_late_interaction_scoring(colqwen3_model) -> None:
+    _, vllm_model = colqwen3_model
+    _run_late_interaction_test(vllm_model)
 
 
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", [DTYPE])
-def test_colqwen3_relevance_ordering(
-    vllm_runner,
-    model: str,
-    dtype: str,
-) -> None:
-    _run_relevance_test(vllm_runner, model, dtype=dtype)
+def test_colqwen3_relevance_ordering(colqwen3_model) -> None:
+    _, vllm_model = colqwen3_model
+    _run_relevance_test(vllm_model)
 
 
 # ── Multimodal scoring tests ────────────────────────────────
 
 
 def _run_multimodal_text_query_image_docs_test(
-    vllm_runner: type[VllmRunner],
-    model: str,
-    *,
-    dtype: str,
+    vllm_model: VllmRunner,
 ) -> None:
     """Score a text query against image documents via the multimodal path.
 
@@ -236,26 +197,15 @@ def _run_multimodal_text_query_image_docs_test(
         _make_image_mm_param(blue_image),
     ]
 
-    with vllm_runner(
-        model,
-        runner="pooling",
-        dtype=dtype,
-        max_model_len=4096,
-        enforce_eager=True,
-        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
-    ) as vllm_model:
-        scores = vllm_model.llm.score(query, image_docs)
+    scores = vllm_model.llm.score(query, image_docs)
 
-        assert len(scores) == 2
-        for s in scores:
-            assert isinstance(s.outputs.score, float)
+    assert len(scores) == 2
+    for s in scores:
+        assert isinstance(s.outputs.score, float)
 
 
 def _run_multimodal_mixed_docs_test(
-    vllm_runner: type[VllmRunner],
-    model: str,
-    *,
-    dtype: str,
+    vllm_model: VllmRunner,
 ) -> None:
     """Score a text query against a mix of text and image documents.
 
@@ -271,28 +221,17 @@ def _run_multimodal_mixed_docs_test(
         _make_image_mm_param(red_image),
     ]
 
-    with vllm_runner(
-        model,
-        runner="pooling",
-        dtype=dtype,
-        max_model_len=4096,
-        enforce_eager=True,
-        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
-    ) as vllm_model:
-        scores = vllm_model.llm.score(query, documents)
+    scores = vllm_model.llm.score(query, documents)
 
-        assert len(scores) == 2
-        for s in scores:
-            assert isinstance(s.outputs.score, float)
-        # Text document about France should score higher than a random image
-        assert scores[0].outputs.score > scores[1].outputs.score
+    assert len(scores) == 2
+    for s in scores:
+        assert isinstance(s.outputs.score, float)
+    # Text document about France should score higher than a random image
+    assert scores[0].outputs.score > scores[1].outputs.score
 
 
 def _run_multimodal_image_query_text_docs_test(
-    vllm_runner: type[VllmRunner],
-    model: str,
-    *,
-    dtype: str,
+    vllm_model: VllmRunner,
 ) -> None:
     """Score an image query against text documents.
 
@@ -307,46 +246,23 @@ def _run_multimodal_image_query_text_docs_test(
         "The weather forecast shows rain tomorrow.",
     ]
 
-    with vllm_runner(
-        model,
-        runner="pooling",
-        dtype=dtype,
-        max_model_len=4096,
-        enforce_eager=True,
-        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
-    ) as vllm_model:
-        scores = vllm_model.llm.score(image_query, documents)
+    scores = vllm_model.llm.score(image_query, documents)
 
-        assert len(scores) == 2
-        for s in scores:
-            assert isinstance(s.outputs.score, float)
+    assert len(scores) == 2
+    for s in scores:
+        assert isinstance(s.outputs.score, float)
 
 
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", [DTYPE])
-def test_colqwen3_multimodal_text_query_image_docs(
-    vllm_runner,
-    model: str,
-    dtype: str,
-) -> None:
-    _run_multimodal_text_query_image_docs_test(vllm_runner, model, dtype=dtype)
+def test_colqwen3_multimodal_text_query_image_docs(colqwen3_model) -> None:
+    _, vllm_model = colqwen3_model
+    _run_multimodal_text_query_image_docs_test(vllm_model)
 
 
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", [DTYPE])
-def test_colqwen3_multimodal_mixed_docs(
-    vllm_runner,
-    model: str,
-    dtype: str,
-) -> None:
-    _run_multimodal_mixed_docs_test(vllm_runner, model, dtype=dtype)
+def test_colqwen3_multimodal_mixed_docs(colqwen3_model) -> None:
+    _, vllm_model = colqwen3_model
+    _run_multimodal_mixed_docs_test(vllm_model)
 
 
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", [DTYPE])
-def test_colqwen3_multimodal_image_query_text_docs(
-    vllm_runner,
-    model: str,
-    dtype: str,
-) -> None:
-    _run_multimodal_image_query_text_docs_test(vllm_runner, model, dtype=dtype)
+def test_colqwen3_multimodal_image_query_text_docs(colqwen3_model) -> None:
+    _, vllm_model = colqwen3_model
+    _run_multimodal_image_query_text_docs_test(vllm_model)

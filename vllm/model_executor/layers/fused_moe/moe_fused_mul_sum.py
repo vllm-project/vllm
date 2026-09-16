@@ -58,7 +58,7 @@ def moe_fused_mul_sum_kernel(
             weights += (tl.load(w_row + n).to(tl.float32),)  # type: ignore[assignment]
 
     n_tiles: tl.constexpr = (hidden_size + BLOCK_K - 1) // BLOCK_K
-    a_row = inputs_ptr + pid_m * stride_m
+    a_row = inputs_ptr + pid_m.to(tl.int64) * stride_m
     out_row = outputs_ptr + pid_m * hidden_size
 
     for t in tl.range(0, n_tiles):

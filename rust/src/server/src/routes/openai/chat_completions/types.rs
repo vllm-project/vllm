@@ -116,6 +116,10 @@ pub struct ChatCompletionRequest {
     pub user: Option<String>,
 
     // -------- vLLM Sampling Parameters --------
+    /// Whether to apply the engine's configured watermark to this request.
+    #[serde(default = "default_true")]
+    pub watermarking: bool,
+
     /// Use beam search instead of sampling
     #[serde(default)]
     pub use_beam_search: bool,
@@ -282,6 +286,7 @@ impl Default for ChatCompletionRequest {
             include_reasoning: true,
             parallel_tool_calls: None,
             user: None,
+            watermarking: true,
             use_beam_search: false,
             top_k: None,
             min_p: None,

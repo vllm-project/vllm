@@ -3,7 +3,8 @@
 
 import itertools
 import math
-from collections.abc import Iterable, Mapping, Sequence
+import typing
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal
 
 import torch
@@ -17,6 +18,7 @@ from transformers.models.lfm2_vl.image_processing_lfm2_vl_fast import (
     find_closest_aspect_ratio,
     round_by_factor,
 )
+from typing_extensions import Buffer
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -33,6 +35,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
@@ -229,6 +232,13 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
             "max_image_tokens", image_processor.max_image_tokens
         )
         tile_size = mm_kwargs.get("tile_size", image_processor.tile_size)
+        assert isinstance(downsample_factor, int)
+        assert isinstance(encoder_patch_size, int)
+        assert isinstance(max_pixels_tolerance, int | float)
+        assert isinstance(min_tiles, int)
+        assert isinstance(max_tiles, int)
+        assert isinstance(max_image_tokens, int)
+        assert isinstance(tile_size, int)
 
         do_image_splitting = not min_tiles == max_tiles == 1
         is_image_large = self._is_image_too_large(
@@ -337,6 +347,9 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
             "encoder_patch_size", image_processor.encoder_patch_size
         )
         tile_size = mm_kwargs.get("tile_size", image_processor.tile_size)
+        assert isinstance(downsample_factor, int)
+        assert isinstance(encoder_patch_size, int)
+        assert isinstance(tile_size, int)
 
         thumbnail_height_patches = int(spatial_shapes[-1][0].item())
         thumbnail_width_patches = int(spatial_shapes[-1][1].item())
@@ -672,6 +685,7 @@ class Lfm2VLForConditionalGeneration(
         super().__init__()
         config: Lfm2VlConfig = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
+        assert multimodal_config is not None
         vision_config = config.vision_config
         quant_config = vllm_config.quant_config
 
@@ -915,6 +929,14 @@ class Lfm2VLForConditionalGeneration(
             "min_image_tokens",
             getattr(self.config, "min_image_tokens", None) or 64,
         )
+        if not isinstance(
+            value,
+            (str, Buffer, typing.SupportsInt, typing.SupportsIndex),
+        ):
+            raise TypeError(
+                "int() argument must be a string, a bytes-like object "
+                f"or a real number, not '{type(value).__name__}'"
+            )
         return max(1, int(value))
 
     def _get_lfm2vl_item_tile_slices(
@@ -1125,6 +1147,7 @@ class Lfm2VLForConditionalGeneration(
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
@@ -1262,12 +1285,13 @@ class Lfm2VLForConditionalGeneration(
             tower_model="vision_tower",
         )
 
-    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
         downsample_factor = self.config.downsample_factor
-
-        return num_image_tokens * downsample_factor**2
-
-    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
-        downsample_factor = self.config.downsample_factor
-
-        return num_vision_tokens // downsample_factor**2
+        return num_mm_embeds * downsample_factor**2, num_mm_embeds

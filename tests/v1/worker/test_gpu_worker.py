@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -152,3 +153,71 @@ def test_profiling_fallback_declines_off_rocm(rocm):
     result = _profile_result(consumed=-RELEASED_BY_OTHERS)
 
     assert maybe_rocm_profiling_fallback(result) is None
+
+
+class _OrderedHandle:
+    """Send handle that logs when it is waited."""
+
+    def __init__(self, log: list[str], name: str):
+        self.log = log
+        self.name = name
+
+    def is_completed(self) -> bool:
+        return True
+
+    def wait(self) -> None:
+        self.log.append(f"wait:{self.name}")
+
+
+def test_execute_model_waits_previous_pp_send_before_forward(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Previous device handles are waited before the forward pass; the
+    metadata handle is left to the GroupCoordinator's reaper."""
+    import torch
+
+    from vllm.sequence import IntermediateTensors
+
+    log: list[str] = []
+    previous_tensor_send = _OrderedHandle(log, "prev-tensor")
+    metadata_handle = _OrderedHandle(log, "meta")
+    tensor_handle = _OrderedHandle(log, "tensor")
+
+    def isend_tensor_dict(tensors, all_gather_group=None, all_gather_tensors=None):
+        log.append("isend")
+        return [metadata_handle, tensor_handle]
+
+    pp_group = SimpleNamespace(
+        is_first_rank=True,
+        is_last_rank=False,
+        isend_tensor_dict=isend_tensor_dict,
+    )
+    monkeypatch.setattr(gpu_worker, "get_pp_group", lambda: pp_group)
+    monkeypatch.setattr(gpu_worker, "get_tp_group", lambda: SimpleNamespace())
+
+    def run_model(scheduler_output, intermediate_tensors):
+        log.append("forward")
+        return IntermediateTensors({"hidden_states": torch.zeros(1)})
+
+    worker = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            compilation_config=SimpleNamespace(
+                pass_config=SimpleNamespace(enable_sp=False)
+            ),
+            parallel_config=SimpleNamespace(
+                pipeline_parallel_size=2, distributed_executor_backend="mp"
+            ),
+        ),
+        use_v2_model_runner=False,
+        model_runner=SimpleNamespace(execute_model=run_model),
+        annotate_profile=lambda scheduler_output: nullcontext(),
+        _pp_send_work=[previous_tensor_send],
+    )
+    scheduler_output = SimpleNamespace(
+        total_num_scheduled_tokens=4, num_scheduled_tokens={"r0": 4}
+    )
+
+    assert gpu_worker.Worker.execute_model(worker, scheduler_output) is None
+
+    assert log == ["wait:prev-tensor", "forward", "isend"]
+    assert worker._pp_send_work == [tensor_handle]

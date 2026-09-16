@@ -12,6 +12,7 @@ import torch
 
 from vllm.config import set_current_vllm_config
 from vllm.engine.arg_utils import EngineArgs
+from vllm.platforms import current_platform
 from vllm.utils.mem_utils import MemorySnapshot
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
 
@@ -66,8 +67,22 @@ def worker_process(
             model="facebook/opt-125m", tensor_parallel_size=2, load_format="dummy"
         ).create_engine_config()
 
+        # Select worker class and patch target based on platform
+        if current_platform.is_xpu():
+            from vllm.v1.worker.xpu_worker import XPUWorker
+
+            worker_cls = XPUWorker
+            init_patch_target = (
+                "vllm.v1.worker.xpu_worker.init_worker_distributed_environment"
+            )
+        else:
+            worker_cls = Worker
+            init_patch_target = (
+                "vllm.v1.worker.gpu_worker.init_worker_distributed_environment"
+            )
+
         # Create worker
-        worker = Worker(
+        worker = worker_cls(
             vllm_config=vllm_config,
             local_rank=rank,
             rank=rank,
@@ -81,7 +96,7 @@ def worker_process(
 
         # Apply minimal patches to track operation order
         init_patch = patch(
-            "vllm.v1.worker.gpu_worker.init_worker_distributed_environment",
+            init_patch_target,
             side_effect=make_operation_tracker(
                 "init_distributed", original_init_worker
             ),
@@ -93,7 +108,7 @@ def worker_process(
         )
         all_reduce_patch = patch(
             "torch.distributed.all_reduce",
-            side_effect=make_operation_tracker("nccl_all_reduce", original_all_reduce),
+            side_effect=make_operation_tracker("dist_all_reduce", original_all_reduce),
         )
 
         with (
@@ -182,13 +197,13 @@ def test_init_distributed_is_called_before_memory_snapshot():
 
         # Raises ValueError if the operation is not found
         init_distributed = rank_ops.index("init_distributed")
-        nccl_all_reduce = rank_ops.index("nccl_all_reduce")
+        dist_all_reduce = rank_ops.index("dist_all_reduce")
         memory_snapshot = rank_ops.index("memory_snapshot")
 
         # Verify order: init_distributed should happen before memory_snapshot
-        assert init_distributed < nccl_all_reduce < memory_snapshot, (
+        assert init_distributed < dist_all_reduce < memory_snapshot, (
             f"Rank {rank}: init_distributed (index {init_distributed}) "
-            f"must happen before nccl_all_reduce (index {nccl_all_reduce}) "
+            f"must happen before dist_all_reduce (index {dist_all_reduce}) "
             f"and memory_snapshot (index {memory_snapshot})"
         )
 

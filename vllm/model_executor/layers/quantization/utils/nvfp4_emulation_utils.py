@@ -7,10 +7,12 @@ import torch
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import direct_register_custom_op
 
 __all__ = [
     "break_fp4_bytes",
     "dequantize_to_dtype",
+    "nvfp4_gathered_bias",
     "ref_nvfp4_quant",
 ]
 
@@ -41,6 +43,230 @@ def _e2m1_inline(nibble):
     val = tl.where(magnitude == 1, 0.5, val)
 
     return tl.where(sign == 1, -val, val)
+
+
+@triton.jit
+def _nvfp4_gathered_bias_kernel(
+    markov_ptr,
+    packed_weight_ptr,
+    weight_scale_ptr,
+    global_scale_ptr,
+    values_ptr,
+    index_ptr,
+    logits_ptr,
+    stride_markov_b,
+    stride_markov_k,
+    stride_weight_v,
+    stride_weight_k,
+    stride_scale_v,
+    stride_scale_k,
+    stride_values_b,
+    stride_values_j,
+    stride_index_b,
+    stride_index_j,
+    stride_logits_b,
+    stride_logits_v,
+    alpha,
+    TOPK: tl.constexpr,
+    K: tl.constexpr,
+    NUM_BLOCKS: tl.constexpr,
+):
+    """Apply selected NVFP4 Markov-projection rows to dense logits.
+
+    BF16: ``weight[index] -> baddbmm_ -> scatter_``.
+    NVFP4: ``gather packed W2 row -> dequantize 16-element blocks -> dot with
+    Markov embedding -> add base value -> scatter corrected logit``.
+
+    The fused NVFP4 path is needed because packed weights cannot be indexed as
+    BF16 rows, while dequantizing the full vocabulary would defeat top-k.
+    """
+    candidate_id = tl.program_id(0)
+    request_id = candidate_id // TOPK
+    candidate = candidate_id - request_id * TOPK
+
+    vocab_id = tl.load(
+        index_ptr + request_id * stride_index_b + candidate * stride_index_j
+    ).to(tl.int64)
+
+    block_ids = tl.arange(0, NUM_BLOCKS)
+    byte_ids = tl.arange(0, 8)
+    block_mask = block_ids * 16 < K
+
+    packed_offsets = block_ids[:, None] * 8 + byte_ids[None, :]
+    packed = tl.load(
+        packed_weight_ptr
+        + vocab_id * stride_weight_v
+        + packed_offsets * stride_weight_k,
+        mask=block_mask[:, None],
+        other=0,
+    )
+    low = _e2m1_inline(packed & 0x0F)
+    high = _e2m1_inline((packed >> 4) & 0x0F)
+    decoded = tl.interleave(low, high)
+
+    raw_weight_scale = tl.load(
+        weight_scale_ptr + vocab_id * stride_scale_v + block_ids * stride_scale_k,
+        mask=block_mask,
+        other=0,
+    )
+    weight_scale = tl.cast(
+        raw_weight_scale,
+        tl.float8e4nv,
+        bitcast=True,
+    ).to(tl.float32)
+    global_scale = tl.load(global_scale_ptr).to(tl.float32)
+
+    element_ids = tl.arange(0, 16)
+    k_offsets = block_ids[:, None] * 16 + element_ids[None, :]
+    k_mask = k_offsets < K
+    markov = tl.load(
+        markov_ptr + request_id * stride_markov_b + k_offsets * stride_markov_k,
+        mask=k_mask,
+        other=0.0,
+    )
+
+    dequant_weight = (decoded * weight_scale[:, None] * global_scale).to(tl.bfloat16)
+    products = dequant_weight.to(tl.float32) * markov.to(tl.float32)
+    block_sums = tl.sum(products, axis=1)
+    dot = tl.sum(block_sums, axis=0)
+
+    base_value = tl.load(
+        values_ptr + request_id * stride_values_b + candidate * stride_values_j
+    ).to(tl.float32)
+    corrected = base_value + alpha * dot
+    tl.store(
+        logits_ptr + request_id * stride_logits_b + vocab_id * stride_logits_v,
+        corrected,
+    )
+
+
+def _nvfp4_gathered_bias_impl(
+    markov_embed: torch.Tensor,
+    packed_weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    global_scale: torch.Tensor,
+    values: torch.Tensor,
+    index: torch.Tensor,
+    logits: torch.Tensor,
+    alpha: float,
+) -> None:
+    if index.numel() == 0:
+        return
+
+    assert markov_embed.dtype == torch.bfloat16
+    assert values.dtype == torch.bfloat16
+    assert logits.dtype == torch.bfloat16
+    assert packed_weight.dtype == torch.uint8
+    assert weight_scale.dtype == torch.float8_e4m3fn
+    assert index.dtype == torch.int64
+    assert markov_embed.is_cuda
+    assert all(
+        tensor.device == markov_embed.device
+        for tensor in (
+            packed_weight,
+            weight_scale,
+            global_scale,
+            values,
+            index,
+            logits,
+        )
+    )
+    assert markov_embed.ndim == 2
+    assert packed_weight.ndim == 2
+    assert weight_scale.ndim == 2
+    assert values.ndim == 2
+    assert index.ndim == 2
+    assert logits.ndim == 2
+    assert global_scale.numel() == 1
+    assert values.shape == index.shape
+    assert logits.shape[0] == index.shape[0] == markov_embed.shape[0]
+
+    k = markov_embed.shape[-1]
+    if k % 16 != 0 or packed_weight.shape[-1] * 2 != k:
+        raise ValueError(
+            "nvfp4_gathered_bias requires k to be divisible by 16 and "
+            f"packed_weight width to equal k / 2; got k={k} and "
+            f"packed_weight width={packed_weight.shape[-1]}"
+        )
+    if weight_scale.shape[-1] != k // 16:
+        raise ValueError(
+            "nvfp4_gathered_bias only supports an NVFP4 group size of 16; "
+            f"got {weight_scale.shape[-1]} scale blocks for k={k}"
+        )
+
+    topk = index.shape[1]
+    num_blocks = triton.next_power_of_2(k // 16)
+    scale_bytes = weight_scale.view(torch.uint8)
+    _nvfp4_gathered_bias_kernel[(index.numel(),)](
+        markov_embed,
+        packed_weight,
+        scale_bytes,
+        global_scale,
+        values,
+        index,
+        logits,
+        markov_embed.stride(0),
+        markov_embed.stride(1),
+        packed_weight.stride(0),
+        packed_weight.stride(1),
+        scale_bytes.stride(0),
+        scale_bytes.stride(1),
+        values.stride(0),
+        values.stride(1),
+        index.stride(0),
+        index.stride(1),
+        logits.stride(0),
+        logits.stride(1),
+        alpha,
+        TOPK=topk,
+        K=k,
+        NUM_BLOCKS=num_blocks,
+        num_warps=4,
+        num_stages=2,
+    )
+
+
+def _nvfp4_gathered_bias_fake(
+    markov_embed: torch.Tensor,
+    packed_weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    global_scale: torch.Tensor,
+    values: torch.Tensor,
+    index: torch.Tensor,
+    logits: torch.Tensor,
+    alpha: float,
+) -> None:
+    return None
+
+
+direct_register_custom_op(
+    op_name="nvfp4_gathered_bias",
+    op_func=_nvfp4_gathered_bias_impl,
+    mutates_args=["logits"],
+    fake_impl=_nvfp4_gathered_bias_fake,
+)
+
+
+def nvfp4_gathered_bias(
+    markov_embed: torch.Tensor,
+    packed_weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    global_scale: torch.Tensor,
+    values: torch.Tensor,
+    index: torch.Tensor,
+    logits: torch.Tensor,
+    alpha: float,
+) -> None:
+    torch.ops.vllm.nvfp4_gathered_bias(
+        markov_embed,
+        packed_weight,
+        weight_scale,
+        global_scale,
+        values,
+        index,
+        logits,
+        alpha,
+    )
 
 
 @triton.jit
@@ -347,7 +573,7 @@ def dequantize_to_dtype(
     # Two fp4 values are packed into one uint8.
     assert tensor_fp4.dtype == torch.uint8
 
-    if not swizzle and current_platform.is_cuda_alike():
+    if not swizzle and tensor_fp4.is_cuda and current_platform.is_cuda_alike():
         return _triton_dequantize_nvfp4(
             tensor_fp4, tensor_sf, global_scale, dtype, block_size
         )

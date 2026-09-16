@@ -714,8 +714,8 @@ class CohereServingChatV2(OpenAIServingChat):
         # emits, so citation deltas already carry SDK-shape sources by
         # the time they reach the streaming loop. See
         # ``_build_position_to_source`` for the numbering rule and
-        # ``_melody_sources_to_vllm`` in the reasoning parser for the
-        # consumer.
+        # ``_melody_sources_to_vllm`` in ``vllm.parser.cohere_command`` for
+        # the consumer.
         position_to_source = cls._build_position_to_source(request)
         if position_to_source:
             kwargs.setdefault(POSITION_TO_SOURCE_KEY, position_to_source)
@@ -1109,12 +1109,11 @@ class CohereServingChatV2(OpenAIServingChat):
         *,
         parser: Parser | None,
     ) -> ChatMessage:
-        """Copy grounding citations off the reasoning parser onto the message.
+        """Copy grounding citations off the unified parser onto the message.
 
-        The Cohere reasoning parser
-        (:mod:`vllm.reasoning.cohere_command_reasoning_parser`) caches the
-        citations produced by its most recent unary ``extract_reasoning``
-        call on ``last_unary_citations``. We surface them here on
+        :class:`vllm.parser.cohere_command.CohereCommandParser` caches the
+        citations produced by its most recent unary ``parse`` call on
+        ``last_unary_citations``. We surface them here on
         :class:`CohereChatMessage` so downstream response conversion can
         pick them up without the base :class:`OpenAIServingChat` having to
         know about citations.
@@ -1128,11 +1127,7 @@ class CohereServingChatV2(OpenAIServingChat):
         # ``model_dump`` via the extras bucket, so the wire is correct
         # either way.
         message = cast(CohereChatMessage, message)
-        citations = getattr(
-            getattr(parser, "reasoning_parser", None),
-            "last_unary_citations",
-            None,
-        )
+        citations = getattr(parser, "last_unary_citations", None)
         if citations:
             message.citations = citations
         return message
@@ -1143,10 +1138,10 @@ class CohereServingChatV2(OpenAIServingChat):
         :class:`CohereChatMessage` carries a
         ``citations: list[vllm...Citation] | None`` field populated by
         :meth:`_finalize_response_message` (which reads it off the
-        reasoning parser's ``last_unary_citations`` cache). Sources are
+        unified parser's ``last_unary_citations`` cache). Sources are
         already fully resolved by the parser (see
         :func:`_melody_sources_to_vllm` in
-        :mod:`vllm.reasoning.cohere_command_reasoning_parser`) using
+        :mod:`vllm.parser.cohere_command`) using
         the position map forwarded via ``chat_template_kwargs``. This
         method's remaining job is:
 

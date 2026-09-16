@@ -253,11 +253,13 @@ __forceinline__ __device__ void load4_scales(const T* scales_row, int n,
 // ---------------------------------------------------------------------------
 
 template <typename T, int M_COUNT>
-__global__ void gemm_q4_kernel_rdna3(
-    const T* __restrict__ a, const uint32_t* __restrict__ b_q_weight,
-    const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
-    T* __restrict__ c, const int size_m, const int size_n, const int size_k,
-    const int groups, const int zero_offset, const int* __restrict__ b_q_perm) {
+__global__ void gemm_q4_kernel_rdna3(const T* __restrict__ a,
+                                     const uint32_t* __restrict__ b_q_weight,
+                                     const uint32_t* __restrict__ b_qzeros,
+                                     const T* __restrict__ b_scales,
+                                     T* __restrict__ c, const int size_m,
+                                     const int size_n, const int size_k,
+                                     const int groups, const int zero_offset) {
   const int t = threadIdx.x;
   const int offset_n = blockIdx.x * BLOCK_KN_SIZE * 4;
   const int offset_m = blockIdx.y * M_COUNT;
@@ -274,8 +276,8 @@ __global__ void gemm_q4_kernel_rdna3(
   constexpr int LDS_PAD = 8;
   __shared__ T block_a[M_COUNT][BLOCK_KN_SIZE + LDS_PAD];
 
-  // Stage A: each thread loads 1 K element per M row into LDS (with optional
-  // act-order permutation). THREADS_X == BLOCK_KN_SIZE so this is a 1:1 map.
+  // Stage A: each thread loads 1 K element per M row into LDS.
+  // THREADS_X == BLOCK_KN_SIZE so this is a 1:1 map.
   // For M_COUNT > 1 with size_m not a multiple of M_COUNT, slots past size_m
   // are zero-padded so the dot product contribution is 0 (we then skip the
   // atomic write for those rows below).
@@ -298,10 +300,7 @@ __global__ void gemm_q4_kernel_rdna3(
         T av;
         if (offset_m + m < size_m) {
           const T* a_row = a + (offset_m + m) * size_k;
-          if (b_q_perm)
-            av = a_row[b_q_perm[offset_k + t]];
-          else
-            av = a_row[offset_k + t];
+          av = a_row[offset_k + t];
         } else {
           av = tzero<T>();  // zero-pad invalid M rows
         }
@@ -313,14 +312,6 @@ __global__ void gemm_q4_kernel_rdna3(
     // return before __syncthreads() if any thread in the block participates in
     // the LDS load above — but here all THREADS_X (=256) threads always do,
     // regardless of whether their `n` is in bounds.
-    __syncthreads();
-  } else if (b_q_perm) {
-    // bf16 M=1 fast path skips LDS, but its global read below is sequential
-    // and cannot apply act-order. When a permutation is present, stage the
-    // single A row through LDS (as fp16 / M>1 do) so the read picks it up.
-    // b_q_perm is block-uniform, so the __syncthreads is non-divergent.
-    if (offset_k + t < end_k)
-      block_a[0][t] = a[offset_m * size_k + b_q_perm[offset_k + t]];
     __syncthreads();
   }
   if (n >= size_n) return;
@@ -452,14 +443,11 @@ __global__ void gemm_q4_kernel_rdna3(
         // fp32-aliased union. Storing as uint32 keeps the IR-level type
         // opaque so the inner v_dot2 cannot be folded to fp32 widening.
         //
-        // A is read direct from global (no LDS staging — see USE_LDS_A above),
-        // except under act-order, where it comes from the permuted LDS copy.
+        // A is read direct from global (no LDS staging — see USE_LDS_A above).
         pack4 a_pack;
         {
           const uint32_t* a_words =
-              b_q_perm
-                  ? reinterpret_cast<const uint32_t*>(&block_a[0][a_off])
-                  : reinterpret_cast<const uint32_t*>(a + offset_k + a_off);
+              reinterpret_cast<const uint32_t*>(a + offset_k + a_off);
           a_pack.u[0] = a_words[0];
           a_pack.u[1] = a_words[1];
           a_pack.u[2] = a_words[2];
@@ -623,8 +611,7 @@ __global__ void gemm_q4_kernel_rdna3(
 template <typename T, int M_COUNT>
 __global__ void gemm_q4_kernel_rdna3(const T*, const uint32_t*, const uint32_t*,
                                      const T*, T*, const int, const int,
-                                     const int, const int, const int,
-                                     const int*) {}
+                                     const int, const int, const int) {}
 
 #endif  // __HIP__RDNA3__ || !__HIP_DEVICE_COMPILE__
 
@@ -635,17 +622,17 @@ __global__ void gemm_q4_kernel_rdna3(const T*, const uint32_t*, const uint32_t*,
 template <typename T, int M_COUNT>
 void launch_gemm_q4_for_mcount(const T* a, const uint32_t* b_q_weight,
                                const uint32_t* b_qzeros, const T* b_scales,
-                               const int* b_q_perm, T* c, int size_m,
-                               int size_n, int size_k, int groups,
-                               int zero_offset, cudaStream_t stream) {
+                               T* c, int size_m, int size_n, int size_k,
+                               int groups, int zero_offset,
+                               cudaStream_t stream) {
   dim3 block(THREADS_X);
   dim3 grid((size_n + BLOCK_KN_SIZE * 4 - 1) / (BLOCK_KN_SIZE * 4),
             (size_m + M_COUNT - 1) / M_COUNT,
             (size_k + BLOCK_KN_SIZE - 1) / BLOCK_KN_SIZE);
 
-  gemm_q4_kernel_rdna3<T, M_COUNT><<<grid, block, 0, stream>>>(
-      a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
-      zero_offset, b_q_perm);
+  gemm_q4_kernel_rdna3<T, M_COUNT>
+      <<<grid, block, 0, stream>>>(a, b_q_weight, b_qzeros, b_scales, c, size_m,
+                                   size_n, size_k, groups, zero_offset);
 }
 
 // Dispatch to the largest M_COUNT template that doesn't waste more than
@@ -661,31 +648,30 @@ void launch_gemm_q4_for_mcount(const T* a, const uint32_t* b_q_weight,
 // only burn instructions on the last block, never affect correctness.
 template <typename T>
 void launch_gemm_q4(const T* a, const uint32_t* b_q_weight,
-                    const uint32_t* b_qzeros, const T* b_scales,
-                    const int* b_q_perm, T* c, int size_m, int size_n,
-                    int size_k, int groups, bool use_v2_format,
-                    cudaStream_t stream) {
+                    const uint32_t* b_qzeros, const T* b_scales, T* c,
+                    int size_m, int size_n, int size_k, int groups,
+                    bool use_v2_format, cudaStream_t stream) {
   const int zero_offset = use_v2_format ? 0 : 1;
 
   if (size_m == 1) {
-    launch_gemm_q4_for_mcount<T, 1>(a, b_q_weight, b_qzeros, b_scales, b_q_perm,
-                                    c, size_m, size_n, size_k, groups,
-                                    zero_offset, stream);
+    launch_gemm_q4_for_mcount<T, 1>(a, b_q_weight, b_qzeros, b_scales, c,
+                                    size_m, size_n, size_k, groups, zero_offset,
+                                    stream);
   } else if (size_m <= 3) {
-    launch_gemm_q4_for_mcount<T, 2>(a, b_q_weight, b_qzeros, b_scales, b_q_perm,
-                                    c, size_m, size_n, size_k, groups,
-                                    zero_offset, stream);
+    launch_gemm_q4_for_mcount<T, 2>(a, b_q_weight, b_qzeros, b_scales, c,
+                                    size_m, size_n, size_k, groups, zero_offset,
+                                    stream);
   } else if (size_m <= 7) {
-    launch_gemm_q4_for_mcount<T, 4>(a, b_q_weight, b_qzeros, b_scales, b_q_perm,
-                                    c, size_m, size_n, size_k, groups,
-                                    zero_offset, stream);
+    launch_gemm_q4_for_mcount<T, 4>(a, b_q_weight, b_qzeros, b_scales, c,
+                                    size_m, size_n, size_k, groups, zero_offset,
+                                    stream);
   } else {
     // M_COUNT=8 covers M up to 15 here; M >= 16 should ideally take the
     // WMMA path, but if it falls through we still produce correct output —
     // just leaving 3-5× of throughput on the table for prefill workloads.
-    launch_gemm_q4_for_mcount<T, 8>(a, b_q_weight, b_qzeros, b_scales, b_q_perm,
-                                    c, size_m, size_n, size_k, groups,
-                                    zero_offset, stream);
+    launch_gemm_q4_for_mcount<T, 8>(a, b_q_weight, b_qzeros, b_scales, c,
+                                    size_m, size_n, size_k, groups, zero_offset,
+                                    stream);
   }
 }
 
@@ -701,7 +687,6 @@ void launch_gemm_q4(const T* a, const uint32_t* b_q_weight,
 //   b_q_weight[K/8, N]          uint32 (already shuffled via gptq_shuffle)
 //   b_qzeros  [groups, N/8]     uint32 (packed 4-bit zeros)
 //   b_scales  [groups, N]       half or bfloat16
-//   b_g_idx   [K] or empty      int32 (act-order permutation; empty=identity)
 //   use_v2_format                bool   (true = GPTQv2, no +1 zero offset)
 //
 // Output:
@@ -709,17 +694,16 @@ void launch_gemm_q4(const T* a, const uint32_t* b_q_weight,
 
 torch::Tensor gptq_gemm_rdna3_wmma(torch::Tensor a, torch::Tensor b_q_weight,
                                    torch::Tensor b_qzeros,
-                                   torch::Tensor b_scales,
-                                   torch::Tensor b_g_idx, bool use_v2_format);
+                                   torch::Tensor b_scales, bool use_v2_format);
 
 torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
                               torch::Tensor b_qzeros, torch::Tensor b_scales,
-                              torch::Tensor b_g_idx, bool use_v2_format) {
+                              bool use_v2_format) {
   if (a.dim() == 2 && b_q_weight.dim() == 2 && a.size(1) % 16 == 0 &&
       b_q_weight.size(1) % 16 == 0 &&
       ((a.scalar_type() == torch::kBFloat16 && a.size(0) >= 16) ||
        (a.scalar_type() == torch::kHalf && a.size(0) >= 64))) {
-    return gptq_gemm_rdna3_wmma(a, b_q_weight, b_qzeros, b_scales, b_g_idx,
+    return gptq_gemm_rdna3_wmma(a, b_q_weight, b_qzeros, b_scales,
                                 use_v2_format);
   }
 
@@ -753,25 +737,18 @@ torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
   auto opts = torch::TensorOptions().dtype(a.dtype()).device(a.device());
   at::Tensor c = torch::zeros({size_m, size_n}, opts);
 
-  const int* g_idx_ptr = nullptr;
-  if (!b_g_idx.device().is_meta() && b_g_idx.numel() > 0) {
-    TORCH_CHECK(b_g_idx.scalar_type() == torch::kInt32,
-                "b_g_idx must be int32");
-    g_idx_ptr = (const int*)b_g_idx.data_ptr();
-  }
-
   if (a.scalar_type() == torch::kHalf) {
     vllm::gptq_rdna3::launch_gemm_q4<half>(
         (const half*)a.data_ptr(), (const uint32_t*)b_q_weight.data_ptr(),
         (const uint32_t*)b_qzeros.data_ptr(), (const half*)b_scales.data_ptr(),
-        g_idx_ptr, (half*)c.data_ptr(), size_m, size_n, size_k, groups,
-        use_v2_format, stream);
+        (half*)c.data_ptr(), size_m, size_n, size_k, groups, use_v2_format,
+        stream);
   } else {
     vllm::gptq_rdna3::launch_gemm_q4<vllm::gptq_rdna3::bf16_t>(
         (const vllm::gptq_rdna3::bf16_t*)a.data_ptr(),
         (const uint32_t*)b_q_weight.data_ptr(),
         (const uint32_t*)b_qzeros.data_ptr(),
-        (const vllm::gptq_rdna3::bf16_t*)b_scales.data_ptr(), g_idx_ptr,
+        (const vllm::gptq_rdna3::bf16_t*)b_scales.data_ptr(),
         (vllm::gptq_rdna3::bf16_t*)c.data_ptr(), size_m, size_n, size_k, groups,
         use_v2_format, stream);
   }

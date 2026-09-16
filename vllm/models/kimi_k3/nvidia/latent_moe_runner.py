@@ -132,7 +132,7 @@ class LatentMoERunner(MoERunner):
                     else 0
                 ),
                 dtype=norm.weight.dtype,
-                device=norm.weight.device,
+                device=current_platform.current_device(),
                 rms_eps=norm.variance_epsilon,
             )
             self._k3_latent_moe_tail_op = op

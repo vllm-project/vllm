@@ -30,7 +30,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
+    maybe_remap_moe_expert_param_name,
+)
 from vllm.sequence import IntermediateTensors
 
 from .granitemoe import GraniteMoeMoE
@@ -479,6 +482,9 @@ class GraniteMoeHybridModel(nn.Module):
                     continue
 
                 name_mapped = name.replace(weight_name, param_name)
+                name_mapped = maybe_remap_moe_expert_param_name(
+                    name_mapped, params_dict
+                )
 
                 # Skip layers on other devices.
                 if is_pp_missing_parameter(name_mapped, self):

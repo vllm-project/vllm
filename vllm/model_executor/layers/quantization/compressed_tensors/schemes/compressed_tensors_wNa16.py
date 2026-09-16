@@ -6,7 +6,6 @@ from collections.abc import Callable
 from fractions import Fraction
 
 import torch
-from compressed_tensors.quantization import ActivationOrdering
 
 from vllm.distributed.utils import verify_group_size_divides_partition
 from vllm.logger import init_logger
@@ -28,7 +27,6 @@ from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     PackedColumnParameter,
     PackedvLLMParameter,
-    RowvLLMParameter,
 )
 from vllm.scalar_type import scalar_types
 
@@ -57,7 +55,6 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         num_bits: int,
         group_size: int | None = None,
         symmetric: bool | None = True,
-        actorder: ActivationOrdering | None = None,
         layer_name: str | None = None,
     ):
         self.num_bits = num_bits
@@ -65,7 +62,6 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         self.strategy = strategy
         self.symmetric = symmetric
         self.group_size = -1 if group_size is None else group_size
-        self.has_g_idx = actorder == ActivationOrdering.GROUP
         self.layer_name = layer_name
 
         if self.group_size == -1 and self.strategy != "channel":
@@ -128,7 +124,6 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             act_type=params_dtype,
             group_size=self.group_size,
             zero_points=not self.symmetric,
-            has_g_idx=self.has_g_idx,
         )
 
         kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
@@ -146,7 +141,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         group_size = self.group_size if self.group_size != -1 else input_size
         row_parallel = input_size != input_size_per_partition
         partition_scales = not marlin_repeat_scales_on_all_ranks(
-            self.has_g_idx, self.group_size, row_parallel
+            self.group_size, row_parallel
         )
 
         scales_and_zp_size = input_size // group_size
@@ -226,24 +221,11 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         if not self.symmetric:
             layer.register_parameter("weight_zero_point", qzeros)
 
-        # group index (for activation reordering)
-        if self.has_g_idx:
-            weight_g_idx = RowvLLMParameter(
-                data=torch.empty(
-                    input_size_per_partition,
-                    dtype=torch.int32,
-                ),
-                input_dim=0,
-                weight_loader=weight_loader,
-            )
-            layer.register_parameter("weight_g_idx", weight_g_idx)
-
         self.kernel = kernel_type(
             mp_linear_kernel_config,
             w_q_param_name="weight_packed",
             w_s_param_name="weight_scale",
             w_zp_param_name="weight_zero_point",
-            w_gidx_param_name="weight_g_idx",
         )
 
     # Checkpoints are serialized in compressed-tensors format, which is

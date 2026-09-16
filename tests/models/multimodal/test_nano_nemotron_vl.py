@@ -5,13 +5,29 @@ from unittest.mock import patch
 
 import numpy as np
 import pytest
+import torch
 
 from vllm import envs
 from vllm.model_executor.models.nano_nemotron_vl import (
     NanoNemotronVLMultiModalProcessor,
     NemotronH_Nano_VL_V2,
 )
-from vllm.multimodal.parse import MultiModalDataItems, VideoProcessorItems
+from vllm.multimodal.parse import (
+    MultiModalDataItems,
+    MultiModalDataParser,
+    VideoProcessorItems,
+)
+
+
+@pytest.mark.parametrize("input_key", ["image_embeds", "video_embeds"])
+def test_precomputed_multimodal_embeddings(input_key: str):
+    model = object.__new__(NemotronH_Nano_VL_V2)
+    embeds = torch.randn(2, 4, 8)
+
+    outputs = model.embed_multimodal(**{input_key: embeds})
+
+    assert len(outputs) == len(embeds)
+    assert all(torch.equal(output, embed) for output, embed in zip(outputs, embeds))
 
 
 class _TextOnlyMultiModalConfig:
@@ -154,6 +170,9 @@ def test_extract_audio_from_videos_passes_max_duration():
     mm_items = _make_mm_items_with_video_bytes(b"\x00" * 64)
 
     processor = object.__new__(NanoNemotronVLMultiModalProcessor)
+    processor.data_parser = MultiModalDataParser(
+        target_sr=dummy_audio[1], target_channels=1
+    )
 
     target = "vllm.model_executor.models.nano_nemotron_vl.load_audio_pyav"
     with patch(target, return_value=dummy_audio) as mock_load:

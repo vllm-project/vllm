@@ -4,6 +4,7 @@ set -ex
 
 # Clean up old nightly builds from DockerHub, keeping only the last 14 builds
 # This script uses DockerHub API to list and delete old tags with specified prefix
+# Tags starting with "nightly-dev" are always excluded from deletion
 # Usage: cleanup-nightly-builds.sh [TAG_PREFIX] [REPO]
 # Example: cleanup-nightly-builds.sh "nightly-"
 # Example: cleanup-nightly-builds.sh "cu130-nightly-"
@@ -55,7 +56,8 @@ get_all_tags() {
         set -x
         
         # Get both last_updated timestamp and tag name, separated by |
-        local tags=$(echo "$response" | jq -r --arg prefix "$TAG_PREFIX" '.results[] | select(.name | startswith($prefix)) | "\(.last_updated)|\(.name)"')
+        # Exclude nightly-dev tags from cleanup
+        local tags=$(echo "$response" | jq -r --arg prefix "$TAG_PREFIX" '.results[] | select(.name | startswith($prefix)) | select(.name | startswith("nightly-dev") | not) | "\(.last_updated)|\(.name)"')
         
         if [ -z "$tags" ]; then
             break

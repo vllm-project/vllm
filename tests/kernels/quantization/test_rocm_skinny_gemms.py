@@ -53,6 +53,17 @@ OPTIONS_WVSPLITK_FP8 = [
 
 DTYPES = [torch.bfloat16, torch.float16]
 
+# kWvSlots in csrc/rocm/skinny_gemms.cu; beyond it streams take overflow
+# workspaces.
+WVSPLITKRC_SLOTS = 8
+
+# The CU count is the grid size. Production passes num_compute_units(); a small
+# value manufactures better concurrency for these tests.
+WVSPLITKRC_TEST_CU = 16
+
+# Gate spin, ~125 ms on gfx950 -- must outlast the host enqueue loop it gates.
+_GATE_CYCLES = 300_000_000
+
 # Specific (N, K, M) combinations for targeted testing
 NKM_FACTORS_LLMM1 = [
     # Small, medium, large cases
@@ -115,6 +126,15 @@ N_FACTORS_WVSPLITKRC = [
 K_FACTORS_WVSPLITKRC = [2880, 2880 + 8, 3072, 3072 + 8]
 # M tiles are 64 rows, +16 for a partial tile
 M_FACTORS_WVSPLITKRC = [128, 128 + 16, 256, 256 + 16, 640, 640 + 16]
+
+# (N, K, M) with more K-shards than the readback can stage in one LDS pass.
+# Spans both CHUNKK values and both N-tile counts.
+NKM_FACTORS_WVSPLITKRC_LARGE_K = [
+    (128, 6144, 128),
+    (96, 8192, 128),
+    (128, 12288, 128),
+    (32, 12288, 128),
+]
 
 NKM_FACTORS_WVSPLITK_FP8 = [
     # FP8-specific cases with K % 16 == 0
@@ -220,6 +240,83 @@ def test_rocm_wvsplitkrc_kernel(n, k, m, dtype, padded_a, bias_mode, xnorm, seed
         torch.testing.assert_close(out, ref_out, atol=atol, rtol=1e-8)
     else:
         torch.testing.assert_close(out, ref_out, atol=1e-3, rtol=1e-2)
+
+
+@pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITKRC_LARGE_K)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+@pytest.mark.skipif(not on_gfx950(), reason="only meant for gfx950")
+def test_rocm_wvsplitkrc_large_k(n, k, m, dtype, seed):
+    """K large enough that the split-K readback must stage LDS in batches."""
+    torch.manual_seed(seed)
+
+    xavier = math.sqrt(2 / k)
+    A = (torch.rand(n, k, dtype=dtype, device="cuda") * 2 - 1) * xavier
+    B = (torch.rand(m, k, dtype=dtype, device="cuda") * 2 - 1) * xavier
+
+    ref_out = torch.nn.functional.linear(A, B, None)
+    out = ops.wvSplitKrc(A, B, num_compute_units(), None)
+
+    torch.testing.assert_close(out, ref_out, atol=1e-3, rtol=1e-2)
+
+
+@pytest.mark.parametrize("n_streams", [WVSPLITKRC_SLOTS, WVSPLITKRC_SLOTS + 4])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+@pytest.mark.skipif(not on_gfx950(), reason="only meant for gfx950")
+def test_rocm_wvsplitkrc_multistream(n_streams, dtype, seed):
+    """Concurrent streams must not share a split-K workspace.
+
+    The workspace is cleared by protocol rather than per invocation, so sharing
+    one corrupts the reduction and returns wrong numbers rather than failing.
+    n_streams > WVSPLITKRC_SLOTS additionally exercises the overflow path.
+    """
+    torch.manual_seed(seed)
+
+    n, k, m = 16, 2048, 256
+    iters = 4
+    xavier = math.sqrt(2 / k)
+
+    B = torch.randn(m, k, dtype=dtype, device="cuda") * xavier
+    As = [
+        torch.randn(n, k, dtype=dtype, device="cuda") * xavier for _ in range(n_streams)
+    ]
+    refs = [torch.nn.functional.linear(A, B, None) for A in As]
+    torch.accelerator.synchronize()
+
+    streams = [torch.Stream() for _ in range(n_streams)]
+    outs: list[list[torch.Tensor]] = [[] for _ in range(n_streams)]
+    _release_together(streams)
+    # Round-robin the enqueues so kernels from different streams are in flight
+    # at the same time.
+    for _ in range(iters):
+        for i, s in enumerate(streams):
+            with torch.cuda.stream(s):
+                outs[i].append(ops.wvSplitKrc(As[i], B, WVSPLITKRC_TEST_CU, None))
+    for s in streams:
+        torch.accelerator.current_stream().wait_stream(s)
+    torch.accelerator.synchronize()
+
+    for i in range(n_streams):
+        for out in outs[i]:
+            torch.testing.assert_close(out, refs[i], atol=1e-3, rtol=1e-2)
+
+
+def _release_together(streams):
+    """Release every stream at once, once everything below is enqueued.
+
+    An event recorded on an idle stream is already complete, so waiting on it
+    gates nothing -- the spin, not the event, is what holds the streams.
+    """
+    blocker = torch.Stream()
+    with torch.cuda.stream(blocker):
+        torch.cuda._sleep(_GATE_CYCLES)
+        gate = torch.Event()
+        gate.record()
+    for s in streams:
+        s.wait_event(gate)
 
 
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_LLMM1)

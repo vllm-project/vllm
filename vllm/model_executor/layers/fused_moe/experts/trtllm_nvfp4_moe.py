@@ -20,10 +20,7 @@ from vllm.model_executor.layers.fused_moe.moe_output import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.utils import (
-    fi_moe_largest_bucket,
-    trtllm_moe_pack_topk_ids_weights,
-)
+from vllm.model_executor.layers.fused_moe.utils import fi_moe_largest_bucket
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
     has_flashinfer_situ_activation,
@@ -33,6 +30,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kNvfp4Static,
 )
+from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
@@ -152,8 +150,9 @@ class TrtLlmNvFp4ExpertsBase:
         return self.quant_config.g1_alphas * self.quant_config.a2_gscale
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
-        layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
+        if not is_weights_pre_processed():
+            layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
+            layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
         # Recompute g1_scale_c since g1_alphas was just fused in-place.
         # Register as a layer parameter so EPLB rearranges it alongside
         # other expert weights.
@@ -369,14 +368,11 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             )
         else:
             block_scale, per_token_scale = a1q_scale, None
-
-        # Pack topk ids and weights into format expected by the kernel.
-        packed_tensor = trtllm_moe_pack_topk_ids_weights(topk_ids, topk_weights)
         output1_scale_gate_scalar = self.quant_config.g1_alphas
 
         # Invoke kernel.
         flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
-            topk_ids=packed_tensor,
+            topk_ids=(topk_ids, topk_weights),
             routing_bias=None,
             hidden_states=hidden_states,
             hidden_states_scale=block_scale.view(torch.float8_e4m3fn).reshape(
@@ -433,6 +429,9 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         assert self._supports_activation(activation)
         # Per-token defers input quant to _invoke_kernel, so a1q_scale is None.
         assert a1q_scale is not None or self.per_token_activation
+
+        # DeepEP produces int64 indexes.
+        topk_ids = topk_ids.to(dtype=torch.int32)
 
         M = hidden_states.shape[0]
         chunk_size = self._get_chunk_size()

@@ -332,7 +332,7 @@ class VisionTransformer(nn.Module):
     ):
         super().__init__()
         scale = config.image_emb_dim**-0.5
-        self.patch_num = config.image_num_patch
+        self.patch_num: tuple[int, int] = config.image_num_patch
         self.class_embedding = nn.Parameter(torch.randn(config.image_emb_dim) * scale)
         self.num_prefix_tokens: int = NUM_PREFIX_TOKENS
         self.positional_embedding = nn.Parameter(
@@ -349,7 +349,7 @@ class VisionTransformer(nn.Module):
             config, quant_config, prefix=f"{prefix}.transformer"
         )
 
-    def add_pos_emb(self, x: torch.Tensor, patch_num: int) -> torch.Tensor:
+    def add_pos_emb(self, x: torch.Tensor, patch_num: tuple[int, int]) -> torch.Tensor:
         cls_emb = self.positional_embedding[0:1]
         pos_emb = self.positional_embedding[1:]
 
@@ -380,7 +380,7 @@ class VisionTransformer(nn.Module):
         return x
 
     def forward(
-        self, x: torch.Tensor, patch_num: int | None = None
+        self, x: torch.Tensor, patch_num: tuple[int, int] | None = None
     ) -> list[torch.Tensor]:
         """
         : param x: (batch_size, num_patch, n_pixels)
@@ -484,12 +484,15 @@ class MolmoAttention(nn.Module):
     def _apply_qk_norm(
         self, q: torch.Tensor, k: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert self.q_norm is not None
+        assert self.k_norm is not None
         if self.tp_size > 1:
             q = tensor_model_parallel_all_gather(q.contiguous())
             k = tensor_model_parallel_all_gather(k.contiguous())
         q = self.q_norm(q)
         k = self.k_norm(k)
         if self.tp_size > 1:
+            assert self.tp_rank is not None
             splitter = partial(split_tensor_along_last_dim, num_partitions=self.tp_size)
             q = splitter(q)[self.tp_rank]
             k = splitter(k)[self.tp_rank]
@@ -1345,7 +1348,7 @@ class MolmoForCausalLM(
                 vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
             )
 
-        self.img_patch_id = None
+        self.img_patch_id: int | None = None
 
         self.lm_head = ParallelLMHead(
             config.embedding_size or config.vocab_size,

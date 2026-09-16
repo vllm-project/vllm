@@ -35,10 +35,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.utils import (
-    _resize_cache,
-    swiglu_limit_func,
-)
+from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     INT4_DTYPE,
     INT8_DTYPE,
@@ -103,17 +100,18 @@ def _is_supported_wna16_weight_key(weight_key: QuantKey | None) -> bool:
     )
 
 
-def get_humming_moe_gemm_type() -> str:
+def get_humming_moe_gemm_type(moe_config: FusedMoEConfig | None = None) -> str:
     env_gemm_type: str | None = envs.VLLM_HUMMING_MOE_GEMM_TYPE
-    gemm_type = "indexed"
-    if env_gemm_type is not None:
+    if env_gemm_type is not None and env_gemm_type.lower() != "auto":
         env_gemm_type = env_gemm_type.lower()
-        if env_gemm_type == "indexed":
-            gemm_type = env_gemm_type
-        elif env_gemm_type in ["grouped_contiguous", "grouped"]:
+        if env_gemm_type == "grouped":
             gemm_type = "grouped_contiguous"
         else:
-            gemm_type = "indexed"
+            gemm_type = env_gemm_type
+    elif moe_config is not None and moe_config.moe_parallel_config.use_ep:
+        gemm_type = "grouped_contiguous"
+    else:
+        gemm_type = "indexed"
 
     logger.info_once(f"Using {gemm_type} gemm for humming moe")  # noqa
     return gemm_type
@@ -178,7 +176,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
         )
-        self._permute_scratch: MoEPermuteScratch | None = None
+        self._permute_scratch: dict[int, MoEPermuteScratch] = {}
 
     def init_humming_moe(self):
         from vllm.utils.humming import get_heuristics_config
@@ -257,26 +255,36 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             **kwargs,
         )
 
-    def _get_permute_scratch(self) -> MoEPermuteScratch | None:
-        if self._permute_scratch is None and moe_permute_unpermute_supported():
-            self._permute_scratch = MoEPermuteScratch(
-                max_num_tokens=self.moe_config.max_num_tokens,
-                topk=self.moe_config.experts_per_token,
+    def _get_permute_scratch(self, topk: int) -> MoEPermuteScratch | None:
+        if not moe_permute_unpermute_supported():
+            return None
+
+        scratch = self._permute_scratch.get(topk)
+        if scratch is None:
+            max_expanded_rows = (
+                self.moe_config.max_num_tokens
+                * self.moe_config.dp_size
+                * self.moe_config.experts_per_token
+            )
+            scratch = MoEPermuteScratch(
+                max_num_tokens=math.ceil(max_expanded_rows / topk),
+                topk=topk,
                 num_experts=self.moe_config.num_experts,
                 num_local_experts=self.moe_config.num_local_experts,
                 device=torch.device(self.moe_config.device),
                 hidden_size=self.moe_config.hidden_dim,
                 hidden_dtype=self.moe_config.in_dtype,
             )
-        return self._permute_scratch
+            self._permute_scratch[topk] = scratch
+        return scratch
 
     def get_global_valid_shape_m(self, topk_ids: torch.Tensor):
-        num_tokens = topk_ids.size(0)
         ctx = get_forward_context()
         if ctx.dp_metadata is not None:
             num_tokens = ctx.dp_metadata.num_tokens_across_dp_cpu.sum().item()
+            return num_tokens * self.moe_config.experts_per_token
 
-        return num_tokens * topk_ids.size(1)
+        return topk_ids.size(0) * topk_ids.size(1)
 
     def estimate_local_valid_shape_m(self, topk_ids: torch.Tensor):
         # estimate shape_m for kernel tuning
@@ -645,7 +653,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         if supported:
             assert hasattr(cls, "humming_gemm_type")
             gemm_type = cls.humming_gemm_type().value.lower()
-            preferred_gemm_type = get_humming_moe_gemm_type()
+            preferred_gemm_type = get_humming_moe_gemm_type(moe_config)
             supported = preferred_gemm_type.lower() == gemm_type
             if not supported:
                 reason = (
@@ -660,25 +668,16 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         activation: MoEActivation,
         output: torch.Tensor,
         input: torch.Tensor,
-        valid_rows: torch.Tensor | None = None,
+        valid_token_counts: torch.Tensor | None = None,
     ) -> None:
-        activation_config = self.activation_config
-        if (
-            activation == MoEActivation.SILU
-            and activation_config.clamp_limit is not None
-        ):
-            swiglu_limit_func(
-                output=output,
-                input=input,
-                swiglu_limit=activation_config.clamp_limit,
-            )
-        else:
-            self.activation(
-                activation=activation,
-                input=input,
-                output=output,
-                valid_rows=valid_rows,
-            )
+        activation_kwargs: dict[str, Any] = dict(
+            activation=activation,
+            input=input,
+            output=output,
+        )
+        if valid_token_counts is not None:
+            activation_kwargs["valid_token_counts"] = valid_token_counts
+        self.activation(**activation_kwargs)
 
     def fused_situ_quant_enabled(self, activation: MoEActivation) -> bool:
         """Whether the SITU activation + w2 quant can be fused into one kernel.
@@ -718,7 +717,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         self,
         gate_up_output: torch.Tensor,
         quanted_down_input: torch.Tensor,
-        valid_rows: torch.Tensor | None,
+        num_valid_tokens: torch.Tensor | None,
         topk: int = 1,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the fused SITU activation + FP8 quant for the w2 input.
@@ -750,7 +749,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             beta=cfg.activation_situ_beta,
             linear_beta=cfg.activation_situ_linear_beta,
             group_size=group_size,
-            valid_rows=valid_rows,
+            num_valid_tokens=num_valid_tokens,
             topk=topk,
         )
         return quanted_down_input, input_scale
@@ -878,8 +877,8 @@ class HummingIndexedExperts(HummingExpertsBase):
         )
 
         # psum[-1:] is the DeepEP valid *token* count as a zero-cost int32 view.
-        # situ (rows = tokens*topk) multiplies by topk on-device; mul_sum bounds
-        # on tokens, so both read this pointer directly -- no host cast/multiply.
+        # The fused path and mul_sum consume tokens directly. The unfused
+        # activation consumes the expanded row count (tokens * topk).
         valid_tokens = None
         topk = topk_ids.size(1)
         if (
@@ -894,21 +893,18 @@ class HummingIndexedExperts(HummingExpertsBase):
             inputs, input_scale = self.fused_situ_quant(
                 gate_up_output=buffers["gate_up_output"],
                 quanted_down_input=buffers["quanted_down_input"],
-                valid_rows=valid_tokens,
+                num_valid_tokens=valid_tokens,
                 topk=topk,
             )
         else:
-            # Fallback situ_and_mul takes int64 row counts (tokens*topk).
-            valid_rows = (
-                valid_tokens.to(torch.int64) * topk
-                if valid_tokens is not None
-                else None
+            valid_token_counts = (
+                valid_tokens * topk if valid_tokens is not None else None
             )
             self.apply_activation(
                 activation=activation,
                 input=buffers["gate_up_output"],
                 output=buffers["activation_output"],
-                valid_rows=valid_rows,
+                valid_token_counts=valid_token_counts,
             )
 
             inputs, input_scale = self.quantize_input(
@@ -1002,7 +998,7 @@ class HummingGroupedExperts(HummingExpertsBase):
             n_expert=global_num_experts,
             n_local_expert=self.num_experts,
             expert_map=expert_map,
-            scratch=self._get_permute_scratch(),
+            scratch=self._get_permute_scratch(topk_ids.size(1)),
         )
 
         inputs, input_scale = self.quantize_input(
@@ -1028,6 +1024,11 @@ class HummingGroupedExperts(HummingExpertsBase):
             activation=activation,
             input=buffers["gate_up_output"],
             output=buffers["activation_output"],
+            valid_token_counts=(
+                expert_first_token_offset[-1:].to(torch.int32)
+                if expert_tokens_meta is None
+                else None
+            ),
         )
 
         inputs, input_scale = self.quantize_input(

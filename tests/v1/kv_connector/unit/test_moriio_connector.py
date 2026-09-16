@@ -39,10 +39,12 @@ from vllm.utils.network_utils import (
     make_zmq_path,
 )
 from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    SlidingWindowSpec,
     compute_layer_kv_cache_shape_bytes,
 )
 
@@ -338,7 +340,7 @@ def test_write_mode_saves_local_block_ids():
     req_meta = kv_connector_metadata.reqs_to_save[request_id]
 
     for block_id, block in zip(
-        req_meta.local_block_ids,
+        req_meta.local_block_ids[0],
         scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks[
             request_id
         ],
@@ -393,7 +395,7 @@ def test_write_mode_with_chunked_prefill_saves_local_block_ids():
     req_meta = kv_connector_metadata.reqs_to_save[request_id]
 
     for block_id, block in zip(
-        req_meta.local_block_ids,
+        req_meta.local_block_ids[0],
         scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks[
             request_id
         ],
@@ -432,7 +434,7 @@ def test_read_mode_loads_remote_block_ids():
     ].req_to_blocks[request_id]
 
     # Set remote block ids to be fetched.
-    request.kv_transfer_params["remote_block_ids"] = block_list
+    request.kv_transfer_params["remote_block_ids"] = [block_list]
 
     # Remote Prefill, triggers MoRIIOConnectorMetadata.
 
@@ -457,7 +459,7 @@ def test_read_mode_loads_remote_block_ids():
     req_meta = kv_connector_metadata.reqs_to_recv[request_id]
 
     for block_id, block in zip(
-        req_meta.local_block_ids,
+        req_meta.local_block_ids[0],
         scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks[
             request_id
         ],
@@ -699,3 +701,225 @@ def test_resolve_host_ip_prefers_extra_config():
     fallback = get_ip()
     assert resolve_host_ip({}) == fallback
     assert resolve_host_ip({"host_ip": ""}) == fallback
+
+
+def _make_hybrid_kv_cache_config() -> KVCacheConfig:
+    """One full-attention group + one sliding-window group (Gemma-like)."""
+    full_spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16
+    )
+    sw_spec = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=64,
+        dtype=torch.float16,
+        sliding_window=32,
+    )
+    num_blocks = 2
+    page = full_spec.page_size_bytes
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=2 * num_blocks * page,
+                layers=["full0", "sw0"],
+                layer_stride=num_blocks * page,
+                block_stride=page,
+            )
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=["full0"], kv_cache_spec=full_spec),
+            KVCacheGroupSpec(layer_names=["sw0"], kv_cache_spec=sw_spec),
+        ],
+    )
+
+
+def _read_scheduler(
+    kv_cache_config: KVCacheConfig, disable_hma: bool = False
+) -> MoRIIOConnectorScheduler:
+    vllm_config = create_vllm_config(role="kv_producer", read_mode=True)
+    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = disable_hma
+    with set_current_vllm_config(vllm_config):
+        connector = MoRIIOConnector(
+            vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
+        )
+    assert connector.connector_scheduler is not None
+    return connector.connector_scheduler
+
+
+def test_hma_blocks_per_sw_two_groups():
+    """A Full + SlidingWindow config runs with HMA and computes block budgets
+    correctly"""
+    scheduler = _read_scheduler(_make_hybrid_kv_cache_config())
+    assert scheduler._is_hma_required is True
+    # cdiv(32, 16) + 1 == 3 for the sliding-window group, 0 for full attention.
+    assert scheduler.blocks_per_sw == [0, 3]
+
+
+@pytest.mark.parametrize(
+    "swa_enabled, disable_hma, expected_is_hma",
+    [
+        (True, False, True),  # sliding-window group present, HMA enabled
+        (True, True, False),  # sliding-window group present but HMA disabled
+        (False, False, False),  # full-attention only, HMA not needed
+    ],
+)
+def test_is_hma_required(swa_enabled, disable_hma, expected_is_hma):
+    """_is_hma_required tracks both the KV cache groups and the
+    --disable-hybrid-kv-cache-manager flag. When HMA is off,
+    get_exchange_clipped_blocks must be a no-op."""
+    config = (
+        _make_hybrid_kv_cache_config() if swa_enabled else _make_test_kv_cache_config()
+    )
+    scheduler = _read_scheduler(config, disable_hma=disable_hma)
+    assert scheduler._is_hma_required is expected_is_hma
+    if not expected_is_hma:
+        blocks = [[1, 2, 3, 4, 5]]
+        assert scheduler.get_exchange_clipped_blocks(blocks) == blocks
+
+
+def test_non_sliding_window_hybrid_is_rejected():
+    """A hybrid group that is not sliding-window (e.g. chunked-local
+    attention) must fail closed rather than be silently mistransferred."""
+    full_spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16
+    )
+    local_spec = ChunkedLocalAttentionSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=64,
+        dtype=torch.float16,
+        attention_chunk_size=32,
+    )
+    num_blocks = 2
+    page = full_spec.page_size_bytes
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=2 * num_blocks * page,
+                layers=["full0", "local0"],
+                layer_stride=num_blocks * page,
+                block_stride=page,
+            )
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=["full0"], kv_cache_spec=full_spec),
+            KVCacheGroupSpec(layer_names=["local0"], kv_cache_spec=local_spec),
+        ],
+    )
+    with pytest.raises(NotImplementedError, match="sliding-window hybrid"):
+        _read_scheduler(config)
+
+
+def test_token_count_basis_uses_full_attention_group():
+    """Chunked-prefill token counting must use an unclipped full-attention
+    group (blocks_per_sw == 0), not a clipped sliding-window group."""
+    scheduler = _read_scheduler(_make_hybrid_kv_cache_config())
+    # Group 0 is the full-attention group
+    assert scheduler._full_attn_group_idx == 0
+    assert scheduler._full_attn_block_size == 16
+
+
+def test_get_exchange_clipped_blocks_clips_only_sw_group():
+    """get_exchange_clipped_blocks keeps the full attn group intact and clips the
+    sliding-window group to its window tail."""
+    scheduler = _read_scheduler(_make_hybrid_kv_cache_config())
+    full = [10, 11, 12, 13, 14]
+    sw = [20, 21, 22, 23, 24]
+    clipped = scheduler.get_exchange_clipped_blocks([full, sw])
+    assert clipped[0] == full
+    assert clipped[1] == [22, 23, 24]
+
+
+def test_metadata_hma_block_ids_preserved_per_group():
+    """add_new_req stores per-group (BlockIds) block lists unchanged for both
+    read and write, so the hybrid group structure is retained."""
+    metadata = MoRIIOConnectorMetadata()
+
+    # Assume:
+    # - Full-attention group (6 blocks) +
+    # - sliding-window group already clipped to its window tail (3 blocks).
+    fa_blocks = [0, 1, 2, 3, 4, 5]
+    sw_blocks = [10, 11, 12]
+    local_block_ids = [fa_blocks, sw_blocks]
+    remote_block_ids = [[100, 101, 102, 103, 104, 105], [200, 201, 202]]
+
+    base_params = {
+        "remote_engine_id": "remote-engine",
+        "remote_host": "127.0.0.1",
+        "remote_handshake_port": 6301,
+        "remote_notify_port": 61005,
+        "remote_block_ids": remote_block_ids,
+    }
+
+    # Read mode: both local and remote ids stay per-group.
+    metadata.add_new_req(
+        request_id="recv-req",
+        local_block_ids=local_block_ids,
+        kv_transfer_params={**base_params, "transfer_id": "recv-req"},
+    )
+    recv_meta = metadata.reqs_to_recv["recv-req"]
+    assert recv_meta.local_block_ids == [fa_blocks, sw_blocks]
+    assert recv_meta.remote_block_ids == remote_block_ids
+
+    # Write mode: the decode peer allocates its own blocks, so #remote_block_ids may
+    # be empty, Local group structure is kept.
+    metadata.add_new_req(
+        request_id="save-req",
+        local_block_ids=local_block_ids,
+        kv_transfer_params={
+            **base_params,
+            "transfer_id": "save-req",
+            "remote_block_ids": [],
+        },
+        write_mode=True,
+    )
+    save_meta = metadata.reqs_to_save["save-req"]
+    assert save_meta.local_block_ids == [fa_blocks, sw_blocks]
+    assert save_meta.remote_block_ids == []
+
+
+def test_single_group_path_unchanged():
+    """A full attn config does not enable HMA and never clips blocks."""
+    scheduler = _read_scheduler(_make_test_kv_cache_config())
+    assert scheduler._is_hma_required is False
+    assert scheduler.blocks_per_sw == [0]
+    blocks = [[1, 2, 3, 4, 5]]
+    assert scheduler.get_exchange_clipped_blocks(blocks) == blocks
+
+
+def test_hybrid_write_mode_rejected():
+    """Hybrid KV cache groups are unsupported in WRITE mode and fail closed."""
+    vllm_config = create_vllm_config(role="kv_producer", read_mode=False)
+    with (
+        set_current_vllm_config(vllm_config),
+        pytest.raises(NotImplementedError),
+    ):
+        MoRIIOConnector(
+            vllm_config,
+            KVConnectorRole.SCHEDULER,
+            _make_hybrid_kv_cache_config(),
+        )
+
+
+def test_worker_layer_to_group_routing(mock_parallel_groups):
+    """The worker maps every layer to its KV cache group correctly."""
+    vllm_config = create_vllm_config(role="kv_consumer", read_mode=True)
+    # Building the worker directly bypasses MoRIIOConnector._set_port_defaults,
+    # so provide the ports manually.
+    vllm_config.kv_transfer_config.kv_connector_extra_config.update(
+        {
+            "http_port": 12346,
+            "handshake_port": 12347,
+            "notify_port": 12348,
+        }
+    )
+    with set_current_vllm_config(vllm_config):
+        worker = FakeMoRIIOConnectorWorker(
+            vllm_config,
+            "engine0",
+            hand_shake_latency=0,
+            kv_cache_config=_make_hybrid_kv_cache_config(),
+        )
+    assert worker.layer_to_group == {"full0": 0, "sw0": 1}

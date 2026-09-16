@@ -91,17 +91,17 @@ def _req_context(kv_params: dict | None = None) -> ReqContext:
 def _job_metadata(
     job_id: int,
     keys: list[bytes] | None = None,
-    block_ids: list[int] | None = None,
+    chunk_ids: list[int] | None = None,
     kv_params: dict | None = None,
 ) -> TransferJob:
     if keys is None:
         keys = [b"key1"]
-    if block_ids is None:
-        block_ids = list(range(len(keys)))
+    if chunk_ids is None:
+        chunk_ids = list(range(len(keys)))
     return TransferJob(
         job_id=job_id,
         keys=keys,
-        block_ids=np.array(block_ids),
+        chunk_ids=np.array(chunk_ids),
         is_promotion=False,
         req_context=_req_context(kv_params),
     )
@@ -117,6 +117,8 @@ def _make_manager() -> P2PSecondaryTierManager:
     mgr._sessions = {}
     mgr._kv_to_session = {}
     mgr._unbound_stores = {}
+    mgr._reaped_stores = {}
+    mgr._unbound_store_timeout_s = _UNBOUND_STORE_TIMEOUT_S
     mgr._failed_serve_ctxs = []
     return mgr
 
@@ -254,9 +256,9 @@ class TestLookup:
     "kv_params,expected",
     [
         (_remote_decoder_kv_params(), OffloadPolicy.REQUEST_LEVEL),
-        (None, OffloadPolicy.BLOCK_LEVEL),
-        (_remote_prefiller_kv_params(), OffloadPolicy.BLOCK_LEVEL),
-        ({"remote_decoder": {}}, OffloadPolicy.BLOCK_LEVEL),
+        (None, OffloadPolicy.CHUNK_LEVEL),
+        (_remote_prefiller_kv_params(), OffloadPolicy.CHUNK_LEVEL),
+        ({"remote_decoder": {}}, OffloadPolicy.CHUNK_LEVEL),
     ],
     ids=["producer", "plain", "consumer", "producer_no_id"],
 )
@@ -366,7 +368,7 @@ class TestSubmitStore:
         job = _job_metadata(
             job_id=1,
             keys=[b"k1", b"k2"],
-            block_ids=[3, 4],
+            chunk_ids=[3, 4],
             kv_params=_remote_decoder_kv_params(kv_request_id="req-1"),
         )
         mgr.submit_store(job)
@@ -397,7 +399,7 @@ class TestSubmitStore:
         job = _job_metadata(
             job_id=7,
             keys=[b"k1", b"k2"],
-            block_ids=[3, 4],
+            chunk_ids=[3, 4],
             kv_params=_remote_decoder_kv_params(kv_request_id="req-1"),
         )
         mgr.submit_store(job)
@@ -440,7 +442,7 @@ class TestSubmitLoad:
         """Empty key list succeeds immediately."""
         mgr = _make_manager()
         job = _job_metadata(
-            job_id=1, keys=[], block_ids=[], kv_params=_remote_prefiller_kv_params()
+            job_id=1, keys=[], chunk_ids=[], kv_params=_remote_prefiller_kv_params()
         )
         mgr.submit_load(job)
         assert mgr._finished_jobs == [JobResult(job_id=1, success=True)]
@@ -463,7 +465,7 @@ class TestSubmitLoad:
         job = _job_metadata(
             job_id=42,
             keys=[b"k1", b"k2"],
-            block_ids=[5, 6],
+            chunk_ids=[5, 6],
             kv_params=_remote_prefiller_kv_params(kv_request_id="req-42"),
         )
         mgr.submit_load(job)
@@ -759,9 +761,9 @@ class TestGetFinished:
         assert "req-fresh" in mgr._unbound_stores
 
     def test_unbound_store_reaped_after_timeout(self):
-        """Unbound stores past _UNBOUND_STORE_TIMEOUT_S surface as failed
-        and their kv_request_id lands in _failed_req_ids so a late
-        FetchMsg/lookup doesn't try to satisfy them."""
+        """Unbound stores past the reap deadline surface as failed and their
+        kv_request_id lands in _reaped_stores so a late FetchMsg is rejected
+        instead of parking demand nothing can satisfy."""
         from vllm.v1.kv_offload.tiering.p2p.manager import _UnboundStoreBatch
 
         mgr = self._make()
@@ -779,7 +781,7 @@ class TestGetFinished:
         # 2 baseline + 2 buffered stores
         assert JobResult(job_id=10, success=False) in results
         assert JobResult(job_id=11, success=False) in results
-        assert "req-stale" in mgr._failed_req_ids
+        assert "req-stale" in mgr._reaped_stores
 
     def test_submit_store_parks_unbound_batch(self):
         """submit_store on an unbound id appends a batch with a fresh
@@ -1155,7 +1157,7 @@ class TestBidirectionalManager:
             _job_metadata(
                 job_id=100,
                 keys=[b"a-block"],
-                block_ids=[0],
+                chunk_ids=[0],
                 kv_params=a_prefiller_params,
             )
         )
@@ -1163,7 +1165,7 @@ class TestBidirectionalManager:
             _job_metadata(
                 job_id=200,
                 keys=[b"b-block"],
-                block_ids=[0],
+                chunk_ids=[0],
                 kv_params=b_prefiller_params,
             )
         )
@@ -1173,7 +1175,7 @@ class TestBidirectionalManager:
             _job_metadata(
                 job_id=101,
                 keys=[b"b-block"],
-                block_ids=[0],
+                chunk_ids=[0],
                 kv_params=a_decoder_params,
             )
         )
@@ -1181,7 +1183,7 @@ class TestBidirectionalManager:
             _job_metadata(
                 job_id=201,
                 keys=[b"a-block"],
-                block_ids=[0],
+                chunk_ids=[0],
                 kv_params=b_decoder_params,
             )
         )
@@ -1203,6 +1205,75 @@ class TestBidirectionalManager:
         # B: load job 201 + store job 200
         assert 201 in b_ok, f"B loads succeeded: {b_ok}"
         assert 200 in b_ok, f"B stores succeeded: {b_ok}"
+
+    def test_late_fetch_after_reap_fails_immediately(self):
+        """A fetch for a reaped kv_request_id fails in one round trip.
+
+        The producer drops parked blocks once unbound_store_timeout_s
+        expires. A consumer whose fetch arrives after that must learn on the
+        next tick via TransferDoneMsg(success=False) — not stall for
+        _LOAD_TIMEOUT_S and then take the abort path.
+        """
+        from vllm.v1.kv_offload.tiering.p2p.session.client import _LOAD_TIMEOUT_S
+
+        mgr_a, mgr_b = _build_paired_managers()
+        kv_id = "req-late"
+
+        # Record every message type leaving the consumer, so the assertion
+        # below can prove no abort was ever needed.
+        sent_from_a: list[str] = []
+        drain = mgr_a._control._drain_outbound_to
+
+        def recording_drain(peer_local_id: str):
+            out = drain(peer_local_id)
+            sent_from_a.extend(msg.get("type") for _, msg in out)
+            return out
+
+        mgr_a._control._drain_outbound_to = recording_drain  # type: ignore[method-assign]
+
+        # Producer parks the blocks, then reaps them before any fetch lands.
+        mgr_b.submit_store(
+            _job_metadata(
+                job_id=200,
+                keys=[b"b-block"],
+                chunk_ids=[0],
+                kv_params={"remote_decoder": {"kv_request_id": kv_id}},
+            )
+        )
+        mgr_b._unbound_store_timeout_s = 0.0
+        reap_results = list(mgr_b.get_finished_jobs())
+        assert JobResult(job_id=200, success=False) in reap_results
+        assert kv_id in mgr_b._reaped_stores
+
+        # Consumer now asks for the blocks that no longer exist.
+        consumer_params = {
+            "remote_prefiller": {
+                "kv_request_id": kv_id,
+                "remote_host": "B",
+                "remote_port": 2,
+            },
+        }
+        mgr_a.on_new_request(_req_context(consumer_params))
+        mgr_a.submit_load(
+            _job_metadata(
+                job_id=101,
+                keys=[b"b-block"],
+                chunk_ids=[0],
+                kv_params=consumer_params,
+            )
+        )
+
+        started = time.monotonic()
+        all_a: list[JobResult] = []
+        for _ in range(8):
+            all_a.extend(list(mgr_a.get_finished_jobs()))
+            list(mgr_b.get_finished_jobs())
+        elapsed = time.monotonic() - started
+
+        assert JobResult(job_id=101, success=False) in all_a, all_a
+        assert kv_id in mgr_a._failed_req_ids
+        assert "abort_fetch" not in sent_from_a, sent_from_a
+        assert elapsed < _LOAD_TIMEOUT_S
 
 
 # ---------------------------------------------------------------------------
@@ -1573,7 +1644,7 @@ class TestConnectionDeathMidTransfer:
             _job_metadata(
                 job_id=900,
                 keys=[b"a-block"],
-                block_ids=[0],
+                chunk_ids=[0],
                 kv_params=a_prefiller_params,
             )
         )
@@ -1581,7 +1652,7 @@ class TestConnectionDeathMidTransfer:
             _job_metadata(
                 job_id=901,
                 keys=[b"b-block"],
-                block_ids=[0],
+                chunk_ids=[0],
                 kv_params=a_decoder_params,
             )
         )

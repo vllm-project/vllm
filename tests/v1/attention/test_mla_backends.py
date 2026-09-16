@@ -25,6 +25,7 @@ from vllm.config.vllm import set_current_vllm_config
 from vllm.model_executor.layers.attention import mla_attention as mla_attention_module
 from vllm.model_executor.layers.attention.mla_attention import (
     MLAAttention,
+    MLACommonBaseImpl,
     QueryLenSupport,
     _DecodeConcatQuantFP8,
     _use_masked_mha,
@@ -166,6 +167,25 @@ def test_glm5_flashinfer_masked_mha_routing(
     )
 
 
+@pytest.mark.parametrize("qk_rope_head_dim", [64, 0], ids=["rope", "nope"])
+def test_concat_k_nope_k_pe_matches_torch_cat(qk_rope_head_dim):
+    """The K concat used by the MLA prefill context loop must equal torch.cat of
+    k_nope with the broadcast k_pe; with no RoPE part it returns k_nope itself
+    instead of allocating and copying."""
+    torch.manual_seed(0)
+    num_tokens, num_heads, qk_nope_head_dim = 5, 4, 256
+    k_nope = torch.randn(num_tokens, num_heads, qk_nope_head_dim, dtype=torch.bfloat16)
+    k_pe = torch.randn(num_tokens, 1, qk_rope_head_dim, dtype=torch.bfloat16)
+    impl = SimpleNamespace(_use_flashinfer_concat_mla_k=False)
+
+    k = MLACommonBaseImpl._concat_k_nope_k_pe(impl, k_nope, k_pe)
+
+    expected = torch.cat([k_nope, k_pe.expand(-1, num_heads, -1)], dim=-1)
+    assert k.shape == (num_tokens, num_heads, qk_nope_head_dim + qk_rope_head_dim)
+    torch.testing.assert_close(k, expected, rtol=0, atol=0)
+    assert (k.data_ptr() == k_nope.data_ptr()) == (qk_rope_head_dim == 0)
+
+
 def test_masked_mha_routing_is_dimension_specific():
     assert _use_masked_mha(
         backend_name="FLASHMLA_SPARSE",
@@ -200,6 +220,7 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
     layer = SimpleNamespace(
         kv_cache_dtype=cache_dtype,
         head_size=576,
+        indexer=None,
         non_causal_multi_token_decode=False,
         sliding_window=None,
     )
@@ -505,7 +526,10 @@ def create_and_prepopulate_kv_cache(
     block_table = common_attn_metadata.block_table_tensor
     slot_mapping = common_attn_metadata.slot_mapping
 
-    fp8_attention = kv_cache_dtype and kv_cache_dtype.startswith("fp8")
+    use_nvfp4_ds_mla = kv_cache_dtype == "nvfp4_ds_mla"
+    fp8_attention = (
+        bool(kv_cache_dtype and kv_cache_dtype.startswith("fp8")) or use_nvfp4_ds_mla
+    )
     use_fp8_ds_mla = kv_cache_dtype == "fp8_ds_mla"
 
     if fp8_attention:
@@ -515,6 +539,14 @@ def create_and_prepopulate_kv_cache(
             # 4 * 4: 4 float32 scale values for 128-element tiles
             # 2 * rope_dim: 16-bit RoPE values
             kv_entry_size = kv_lora_rank + 4 * 4 + 2 * rope_dim
+        elif use_nvfp4_ds_mla:
+            kv_lora_rank = kv_c_contexts[0].shape[-1]
+            rope_dim = k_pe_contexts[0].shape[-1]
+            # e2m1-packed NoPE + unscaled e4m3 rope + per-16 e4m3 NoPE SFs,
+            # padded to 16B
+            kv_entry_size = (
+                cdiv(kv_lora_rank // 2 + rope_dim + kv_lora_rank // 16, 16) * 16
+            )
         else:
             kv_entry_size = head_size
 

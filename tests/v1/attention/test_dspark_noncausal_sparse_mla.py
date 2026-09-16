@@ -168,6 +168,7 @@ def _run_sparse_backend_vs_sdpa(
     )
     model_config = vllm_config.model_config
     model_config.hf_text_config = SimpleNamespace(
+        index_topk=topk_tokens,
         q_lora_rank=None,
         kv_lora_rank=kv_lora_rank,
         qk_nope_head_dim=qk_nope_head_dim,
@@ -175,6 +176,7 @@ def _run_sparse_backend_vs_sdpa(
         v_head_dim=v_head_dim,
         model_type="deepseek_v2",
     )
+    del model_config.hf_config.index_topk  # Composite configs only nest this field.
     model_config.dtype = dtype
     model_config.get_num_attention_heads = MethodType(
         lambda self, parallel_config: num_heads, model_config
@@ -287,7 +289,7 @@ def _run_sparse_backend_vs_sdpa(
     causal_reference = torch.cat(causal_reference_outputs, dim=0)
 
     vllm_config.cache_config.cache_dtype = kv_cache_dtype
-    vllm_config.model_config.hf_config.index_topk = topk_tokens
+    vllm_config.model_config.hf_text_config.index_topk = topk_tokens
 
     common_attn_metadata = create_common_attn_metadata(
         batch_spec, block_size, device, arange_block_indices=True

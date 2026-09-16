@@ -327,6 +327,13 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
                 qk_rope_head_dim=64,
                 v_head_dim=128,
             ),
+            # GLM5Next NoPE layout: qk_head_dim 256 + 0 and v_head_dim 256 run
+            # the same kernels as the (192, 64, 256) DeepSeek-V3.2 layout.
+            MLADimensions(
+                qk_nope_head_dim=256,
+                qk_rope_head_dim=0,
+                v_head_dim=256,
+            ),
         ]
 
     def __init__(
@@ -364,6 +371,12 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
             self.flash_attn_varlen_func = functools.partial(
                 flash_attn_varlen_func, fa_version=self.vllm_flash_attn_version
             )
+
+        if (
+            vllm_config.kernel_config.enable_jit_warmup
+            and self.vllm_flash_attn_version == 4
+        ):
+            _FA4_MLA_PREFILL_KERNEL.register_warmup()
 
         # Determine if we need to pad V
         # For MLA the v head dim is smaller than qk head dim so we pad out
@@ -422,7 +435,7 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         if envs.VLLM_BATCH_INVARIANT:
             kwargs["num_splits"] = 1
 
-        attn_out = FA4_MLA_PREFILL_KERNEL(
+        attn_out = _FA4_MLA_PREFILL_KERNEL(
             q=q,
             k=k,
             v=maybe_padded_v,
@@ -494,4 +507,4 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         )
 
 
-FA4_MLA_PREFILL_KERNEL = FA4MLAPrefillKernel()
+_FA4_MLA_PREFILL_KERNEL = FA4MLAPrefillKernel()

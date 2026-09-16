@@ -34,6 +34,7 @@ ARGS = [
     "hermes",
     "--reasoning-parser",
     "deepseek_r1",
+    "--enable-scale-out",
 ]
 
 TOOLS = [

@@ -120,15 +120,15 @@ uv pip install -r requirements/docs.txt
     (e.g., `mkdocs-awesome-nav` requires Python 3.10+)
 
 MkDocs comes with a built-in dev-server that lets you preview your documentation as you work on it.
-From the root of the repository, run:
+From the root of the repository, run the following. Note that by default, the dev-server will run on `127.0.0.1:8000`. Should you want to run the dev-server on a different port, use `-a` like this `mkdocs serve -a localhost:8090`.
 
 ```bash
 mkdocs serve                           # with API ref (~10 minutes)
 API_AUTONAV_EXCLUDE=vllm mkdocs serve  # API ref off (~15 seconds)
 ```
 
-Once you see `Serving on http://127.0.0.1:8000/` in the logs, the live preview is ready!
-Open <http://127.0.0.1:8000/> in your browser to see it.
+Once you see a `Serving on http://<address>:<port>/` line in the logs, the live preview is ready!
+Open that address in your browser to see it — `http://127.0.0.1:8000/` by default, or whichever host/port you passed to `-a`.
 
 For additional features and advanced configurations, refer to the:
 
@@ -315,6 +315,34 @@ review process:
   the `ready` label, the PR author can use `/ci run`, `/ci retry`, `/ci cancel`,
   or the corresponding `/amd-ci` variants. New commits do not start upstream
   CI automatically.
+- Before creating a Buildkite build, `/ci run` and `/amd-ci run`, including
+  `all` and `nightly`, check the requested PR commit against its target branch
+  in the upstream repository. Your branch must contain every commit currently
+  on that branch: **zero commits behind**. This also applies to PRs targeting
+  release branches or another PR's branch.
+- If the PR is behind, the bot reports the count without creating a new build.
+  Merge or rebase onto the latest target branch, then rerun the command. If the
+  target branch advances in the meantime, update your branch and try again.
+- To run CI on an outdated branch at your own risk, append `--allow-stale` to
+  any run command, for example `/ci run --allow-stale` or
+  `/amd-ci run all --allow-stale`. The same authorization requirements apply.
+  The bot reports the lag and warns that outdated CI configuration may cause
+  failures. Before merging, merge or rebase onto the latest target branch and
+  rerun CI without `--allow-stale` on the latest PR commit.
+- Retrying or cancelling builds does not check branch freshness.
+- These commands do not modify your branch or enforce merge requirements.
+  Direct Buildkite launches are outside this workflow. No additional token is
+  needed.
+
+Maintainers must configure required Buildkite status checks on the latest PR
+commit and enable GitHub's
+[Require branches to be up to date before merging](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches#require-status-checks-before-merging)
+protection on the relevant target branches to enforce the merge policy. Select
+statuses that confirm the required tests completed, using Buildkite as their
+expected source. An aggregate status that reports "passed and blocked" does not
+by itself guarantee those tests ran; verify the pipeline's required and optional
+blocked steps before choosing statuses or changing blocked-build reporting.
+The CI command workflow does not configure these repository or pipeline settings.
 
 ### Pull Request Limits and Escalation
 

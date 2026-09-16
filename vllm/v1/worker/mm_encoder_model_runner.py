@@ -67,8 +67,11 @@ class MMEncoderModelRunner(GPUModelRunner):
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return {}
 
-    def capture_model(self) -> int:
+    def capture_model(self, *, profile_only: bool = False) -> int:
         return 0
+
+    def needs_cudagraph_capture(self) -> bool:
+        return False
 
     def _dummy_run(
         self, *args: Any, **kwargs: Any

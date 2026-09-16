@@ -68,6 +68,10 @@ if envs.VLLM_LORA_ENABLE_DUAL_STREAM:
 
 
 class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
+    # The adapter branch consumes the original activation, independently of
+    # whether the wrapped base layer can consume a pre-quantized activation.
+    requires_unquantized_input = True
+
     def __init__(self, base_layer: LinearBase):
         super().__init__()
 

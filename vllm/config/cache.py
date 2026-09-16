@@ -8,7 +8,7 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import Field, field_validator, model_validator
 
-from vllm.config.utils import config, get_from_deprecated_env_if_set
+from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import (
     is_quantized_kv_cache,
@@ -45,6 +45,7 @@ CacheDType = Literal[
     "fp8_e5m2",
     "fp8_inc",
     "fp8_ds_mla",
+    "nvfp4_ds_mla",
     "turboquant_k8v4",
     "turboquant_4bit_nc",
     "turboquant_k3v4_nc",
@@ -55,15 +56,6 @@ CacheDType = Literal[
     "nvfp4",
     "nvfp4_4over6",
 ]
-
-
-def _get_prefix_cache_retention_interval() -> int | None:
-    env_value = get_from_deprecated_env_if_set(
-        "VLLM_PREFIX_CACHE_RETENTION_INTERVAL",
-        "v0.29",
-        "prefix_cache_retention_interval",
-    )
-    return 0 if env_value is None else int(env_value)
 
 
 MambaDType = Literal["auto", "float32", "float16", "bfloat16"]
@@ -153,9 +145,7 @@ class CacheConfig:
       security risk tolerance against the performance benefits before turning this on.
     - "xxhash_cbor" combines canonical CBOR serialization with xxHash for
       reproducible hashing. Requires the optional ``xxhash`` package."""
-    prefix_cache_retention_interval: int | None = Field(
-        default_factory=_get_prefix_cache_retention_interval, ge=0
-    )
+    prefix_cache_retention_interval: int | None = Field(default=0, ge=0)
     """Token interval between retained sliding-window and Mamba prefix-cache
     checkpoints. ``0`` retains only semantic checkpoints, including the latest
     replay boundary and shared-prefix junctions. Positive values additionally
@@ -194,16 +184,23 @@ class CacheConfig:
       when the token is at position i * block_size. This is the default when prefix
       caching is enabled.
     """
+    enable_mamba_fine_grained_prefix_cache: bool = False
+    """Also register a Mamba "align" checkpoint at the shared-prefix junction --
+    where an EAGLE/MTP sibling was observed to resume -- instead of only at the
+    prompt tail. Off by default; only takes effect with `mamba_cache_mode`
+    "align", EAGLE on the Mamba group, and a prefix match unit smaller than the
+    Mamba block size."""
     replayssm_buffer_len: int = Field(default=16, gt=0)
-    """ReplaySSM history buffer length B for standard Mamba2 decode. Kimi-K3
-    speculative decoding does not use B. Default 16."""
+    """ReplaySSM logical history length B for Mamba2. Triton uses B physical
+    rows and FlashInfer uses B+1. Kimi-K3 speculative decode does not use B.
+    Default 16."""
     use_replayssm: bool = False
     """Use the ReplaySSM Mamba2 decode kernel: cache recent SSM inputs and skip
     the per-step full-state store, writing the checkpoint back only on flush.
     Requires mamba_cache_mode 'none' or 'align' (prefix caching) and the Triton
-    mamba backend; standard (non-speculative) decode only. In align mode flushes
-    are most efficient when mamba_block_size is a multiple of replayssm_buffer_len,
-    but this is not required."""
+    or FlashInfer mamba backend; standard (non-speculative) decode only. In align
+    mode flushes are most efficient when mamba_block_size is a multiple of
+    replayssm_buffer_len, but this is not required."""
     use_kda_recoverssm: bool = field(default=False, init=False)
     """Whether Kimi-K3 KDA uses RecoverSSM speculative decode."""
 
@@ -226,7 +223,6 @@ class CacheConfig:
     some layers can skip tokens corresponding to prefill. This flag enables
     attention metadata for eligible layers to be overridden with metadata
     necessary for implementing this optimization in some models (e.g. Gemma3n)
-    NOTE: KV cache sharing is not supported for MRv2 (v2 model runner).
     """
 
     kv_cache_memory_bytes: int | None = None
@@ -272,6 +268,7 @@ class CacheConfig:
             "prefix_cache_retention_interval",
             # Prefix-caching implementation detail (doesn't affect compiled graph).
             "prefix_match_unit",
+            "enable_mamba_fine_grained_prefix_cache",
             "mamba_page_size_padded",
             "skip_page_size_padded",
             "user_specified_block_size",
@@ -320,6 +317,17 @@ class CacheConfig:
         if self.mamba_block_size is not None:
             self.user_specified_mamba_block_size = True
         return self
+
+    @field_validator("mamba_cache_mode", mode="after")
+    @classmethod
+    def _validate_mamba_cache_mode(cls, mode: MambaCacheMode) -> MambaCacheMode:
+        if mode == "all":
+            logger.warning_once(
+                "Mamba cache mode 'all' is deprecated and will be removed in an "
+                "upcoming release. If this is a problem, please open an issue "
+                "at https://github.com/vllm-project/vllm/issues."
+            )
+        return mode
 
     @field_validator("cache_dtype", mode="after")
     @classmethod

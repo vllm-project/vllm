@@ -123,6 +123,7 @@ def glm47_moe_config(thinking: bool = True) -> ParserEngineConfig:
     return ParserEngineConfig(
         name="glm47_moe",
         initial_state=ParserState.REASONING if thinking else ParserState.CONTENT,
+        wait_for_reasoning=thinking,
         terminals={
             **reasoning_terminals,
             "TOOL_START": TOOL_CALL_START,
@@ -205,11 +206,6 @@ class Glm47MoeParser(ParserEngine):
         if 0 <= idx < len(self._tool_slots):
             self._tool_slots[idx].name = self._tool_slots[idx].name.strip()
         super()._handle_tool_end(event, deltas)
-
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        if not self.thinking_enabled:
-            return True
-        return super().is_reasoning_end(input_ids)
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         if not self.thinking_enabled:

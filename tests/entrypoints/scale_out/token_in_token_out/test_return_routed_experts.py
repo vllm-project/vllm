@@ -34,6 +34,7 @@ def server():
         "--enable-return-routed-experts",
         "--hf-overrides",
         '{"sliding_window": null}',
+        "--enable-scale-out",
     ]
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server

@@ -532,17 +532,8 @@ def mamba_mixer(
     self.forward_impl(hidden_states=hidden_states, output=output)
 
 
-def mamba_mixer_fake(
-    hidden_states: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: LayerNameType,
-) -> None:
-    return
-
-
 direct_register_custom_op(
     op_name="mamba_mixer",
     op_func=mamba_mixer,
     mutates_args=["output"],
-    fake_impl=mamba_mixer_fake,
 )

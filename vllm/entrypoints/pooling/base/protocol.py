@@ -11,6 +11,7 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
+from vllm.entrypoints.generate.base.protocol import validate_cache_salt
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
@@ -95,6 +96,15 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
     )
     # --8<-- [end:pooling-common-extra-params]
 
+    @model_validator(mode="before")
+    @classmethod
+    def check_cache_salt_support(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        validate_cache_salt(data.get("cache_salt"))
+        return data
+
     def _build_pooling_tok_params(
         self,
         model_config: ModelConfig,
@@ -161,6 +171,8 @@ class FixedMaxLenTokenizeParamsMixin(PoolingTokenizeParamsMixin):
 
 
 class EmbeddingTokenizeParamsMixin(PoolingTokenizeParamsMixin):
+    padding: Literal["max_length", "do_not_pad"] | None
+
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         default_max_total_tokens = model_config.max_model_len
         max_total_tokens: int | None = default_max_total_tokens
@@ -169,18 +181,32 @@ class EmbeddingTokenizeParamsMixin(PoolingTokenizeParamsMixin):
         pooler_config = model_config.pooler_config
         if pooler_config is not None:
             if pooler_config.enable_chunked_processing:
-                max_total_tokens = None
+                max_total_tokens = pooler_config.max_embed_len
             else:
                 max_embed_len = pooler_config.max_embed_len or default_max_total_tokens
                 max_output_tokens = default_max_total_tokens - max_embed_len
 
-        return self._build_pooling_tok_params(
+        tok_params = self._build_pooling_tok_params(
             model_config,
             add_special_tokens=self.add_special_tokens,
             max_total_tokens=max_total_tokens,
             max_output_tokens=max_output_tokens,
             max_output_tokens_param="max_model_len - max_embed_len",
         )
+
+        if (
+            self.padding == "max_length"
+            and pooler_config is not None
+            and pooler_config.enable_chunked_processing
+        ):
+            max_padding_len = pooler_config.max_embed_len
+            if max_padding_len is None:
+                max_padding_len = default_max_total_tokens
+            return tok_params.with_kwargs(
+                pad_prompt_tokens=min(default_max_total_tokens, max_padding_len)
+            )
+
+        return tok_params
 
 
 class CompletionRequestMixin(OpenAIBaseModel):

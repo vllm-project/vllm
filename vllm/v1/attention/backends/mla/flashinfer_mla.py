@@ -210,6 +210,7 @@ class FlashInferMLABackend(MLACommonBackend):
 
 class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
     can_return_lse_for_decode: bool = True
+    supports_dcp: bool = True
     # DCP is the only path that consumes LSE. It uses monolithic CuTeDSL,
     # whose public LSE contract is natural-log.
     lse_base_on_e: bool = True

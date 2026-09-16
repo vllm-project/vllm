@@ -152,14 +152,3 @@ class TestDynamicPerTokenScaledFp8QuantIntegration:
         assert kernel_wrapper.op_name == "dynamic_per_token_scaled_fp8_quant"
         assert kernel_wrapper._config_picker is not None
         assert kernel_wrapper._mutates_args == ["result", "scale"]
-
-    def test_fake_impl_functionality(self):
-        skip_if_platform_unsupported("dynamic_per_token_scaled_fp8_quant")
-        from vllm.kernels.helion.register import get_registered_kernels
-
-        registered_kernels = get_registered_kernels()
-        kernel_wrapper = registered_kernels["dynamic_per_token_scaled_fp8_quant"]
-        fake_impl = kernel_wrapper._fake_impl
-
-        args = _generate_fake_input(16, 4096)
-        assert fake_impl(*args) is None

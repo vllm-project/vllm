@@ -791,6 +791,12 @@ async fn generate_records_request_metrics_in_prometheus_output() {
         "vllm:num_preemptions_total{{model_name=\"{model_name}\",engine=\"4\"}} 1"
     )));
     assert!(rendered.contains(&format!(
+        "vllm:request_num_preemptions_sum{{model_name=\"{model_name}\",engine=\"4\"}} 1.0"
+    )));
+    assert!(rendered.contains(&format!(
+        "vllm:request_num_preemptions_count{{model_name=\"{model_name}\",engine=\"4\"}} 1"
+    )));
+    assert!(rendered.contains(&format!(
         "vllm:time_to_first_token_seconds_count{{model_name=\"{model_name}\",engine=\"4\"}} 1"
     )));
     assert!(rendered.contains(&format!(
@@ -882,6 +888,12 @@ async fn dropping_stream_records_abort_terminal_request_metrics() {
     )));
     assert!(rendered.contains(&format!(
         "vllm:e2e_request_latency_seconds_count{{model_name=\"{model_name}\",engine=\"5\"}} 1"
+    )));
+    assert!(rendered.contains(&format!(
+        "vllm:request_num_preemptions_sum{{model_name=\"{model_name}\",engine=\"5\"}} 0.0"
+    )));
+    assert!(rendered.contains(&format!(
+        "vllm:request_num_preemptions_count{{model_name=\"{model_name}\",engine=\"5\"}} 1"
     )));
 
     llm.shutdown().await.unwrap();

@@ -193,6 +193,7 @@ def mistral_config(
     return ParserEngineConfig(
         name=name,
         initial_state=ParserState.CONTENT,
+        wait_for_reasoning=reasoning_encoding != "none",
         terminals={
             **reasoning_terminals,
             "TOOL_CALLS": _TOOL_CALLS,
@@ -890,24 +891,6 @@ class MistralParser(ParserEngine):
                 delta_to_be_parsed += c
 
         return (delta_to_be_parsed, "")
-
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        if self._reasoning_encoding == "none":
-            return True
-        if super().is_reasoning_end(input_ids):
-            return True
-        # [TOOL_CALLS] acts as an implicit reasoning-end marker
-        if self.bot_token_id is not None:
-            reasoning_start_id = self._reasoning_start_token_id
-            for i in range(len(input_ids) - 1, -1, -1):
-                if (
-                    reasoning_start_id is not None
-                    and input_ids[i] == reasoning_start_id
-                ):
-                    return False
-                if input_ids[i] == self.bot_token_id:
-                    return True
-        return False
 
     def extract_reasoning(
         self,

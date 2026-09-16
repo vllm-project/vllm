@@ -1,7 +1,7 @@
 # FP8 W8A8
 
 vLLM supports FP8 (8-bit floating point) weight and activation quantization using hardware acceleration on GPUs such as Nvidia H100 and AMD MI300x.
-Currently, only Hopper and Ada Lovelace GPUs are officially supported for W8A8.
+Ada Lovelace, Hopper, and Blackwell GPUs are supported for W8A8.
 Turing/Ampere GPUs are supported for W8A16 (weight-only FP8) utilizing Marlin kernels.
 Quantization of models with FP8 allows for a 2x reduction in model memory requirements and up to a 1.6x improvement in throughput with minimal impact on accuracy.
 
@@ -13,8 +13,26 @@ The FP8 types typically supported in hardware have two distinct representations,
 - **E5M2**: Consists of 1 sign bit, 5 exponent bits, and 2 bits of mantissa. It can store values up to +/-57344, +/- `inf`, and `nan`. The tradeoff for the increased dynamic range is lower precision of the stored values.
 
 !!! note
-    FP8 computation is supported on NVIDIA GPUs with compute capability >= 8.9 (Ada Lovelace, Hopper).
+    FP8 computation is supported on NVIDIA GPUs with compute capability >= 8.9 (Ada Lovelace, Hopper, Blackwell).
     FP8 models will run on compute capability >= 7.5 (Turing) as weight-only W8A16, utilizing FP8 Marlin.
+
+!!! note "GEMM kernel selection"
+    vLLM picks an FP8 GEMM kernel automatically at load time and logs a
+    `Selected <kernel> for <module>` line at startup. For block-quantized
+    checkpoints on CUDA it tries, in order: a FlashInfer/DeepGEMM hybrid
+    (Hopper only), DeepGEMM, CUTLASS, Marlin, Triton, Humming, then a
+    PyTorch fallback. GPUs without native FP8 support (e.g. Turing/Ampere)
+    land on weight-only (W8A16) Marlin.
+
+    If inference hangs with no error, try `VLLM_USE_DEEP_GEMM=0` or
+    `--linear-backend cutlass`.
+
+    `--linear-backend` only affects quantized linear layers; MoE experts
+    use the separate `--moe-backend`. An explicit backend that is not
+    supported on your hardware raises an error rather than falling back.
+    The full list is documented under
+    [`KernelConfig`](../../../cli/serve.md#kernelconfig) in the CLI
+    reference and shown by `vllm serve --help=KernelConfig`.
 
 ## Installation
 

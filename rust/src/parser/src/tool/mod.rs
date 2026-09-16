@@ -20,7 +20,7 @@ mod seed_oss;
 pub mod test_utils;
 use std::collections::{BTreeMap, btree_map};
 
-pub use deepseek_dsml::{DeepSeekV4ToolParser, DeepSeekV32ToolParser};
+pub use deepseek_dsml::{DeepSeekV4ToolParser, DeepSeekV32ToolParser, DeepSeekV41ToolParser};
 pub use deepseek_json::{DeepSeekV3ToolParser, DeepSeekV31ToolParser};
 pub use error::{Result, ToolParserError};
 pub use glm_xml::{Glm45MoeToolParser, Glm47MoeToolParser};

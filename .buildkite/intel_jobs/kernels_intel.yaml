@@ -3,6 +3,7 @@ depends_on:
   - image-build-xpu
 steps:
 - label: vLLM IR Tests
+  key: vllm-ir-tests
   timeout_in_minutes: 30
   device: intel_gpu
   agent_tags:

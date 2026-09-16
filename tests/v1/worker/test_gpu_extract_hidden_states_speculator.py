@@ -60,6 +60,7 @@ def test_propose_caches_hidden_states_and_returns_sampled_tokens(monkeypatch):
     layer_name = "cache_only_layers.2"
     speculator = object.__new__(ExtractHiddenStatesSpeculator)
     speculator.vllm_config = cast(Any, SimpleNamespace())
+    speculator.acceptance_estimator = None
     speculator.num_hidden_states = 2
     speculator.hidden_states = torch.zeros(4, 2, 3)
     speculator.draft_attn_layer_names = {layer_name}
@@ -111,6 +112,7 @@ def test_propose_caches_hidden_states_and_returns_sampled_tokens(monkeypatch):
 
 def test_propose_requires_aux_hidden_states():
     speculator = object.__new__(ExtractHiddenStatesSpeculator)
+    speculator.acceptance_estimator = None
     speculator.num_hidden_states = 2
     input_batch = cast(
         Any, SimpleNamespace(idx_mapping=torch.tensor([0], dtype=torch.int32))

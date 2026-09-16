@@ -70,6 +70,13 @@ class _MetaProxy(fx.Proxy):
     def __getattr__(self, k: str) -> "_MetaAttribute":
         return _MetaAttribute(self, k)
 
+    def __setitem__(self, key: object, value: object) -> None:
+        # Record `obj[key] = value` so tracing continues past in-place writes
+        # into containers (e.g. Gemma 4's `shared_kv_states[...] = ...`).
+        self.tracer.create_proxy(
+            "call_function", operator.setitem, (self, key, value), {}
+        )
+
 
 class _MetaAttribute(_MetaProxy, fx.proxy.Attribute):
     """Attribute proxy (e.g. `x.shape`) carrying its meta value.
@@ -312,41 +319,125 @@ def compile_forward(funcdef: ast.FunctionDef, fn: Callable) -> Callable:
     return namespace[funcdef.name]
 
 
+def self_call_and_refs(
+    funcdef: ast.FunctionDef, name: str
+) -> tuple[ast.Call, list[ast.Attribute]]:
+    """The unique `self.<name>(arg)` call, plus every other `self.<name>` reference.
+
+    Raises unless exactly one single-argument `self.<name>(arg)` call exists, so
+    one fx `call_module` node maps to one syntactic call site. The remaining
+    references (e.g. `is not None` guards) are returned for the caller to resolve.
+    """
+    uses = [
+        node
+        for node in ast.walk(funcdef)
+        if isinstance(node, ast.Attribute)
+        and node.attr == name
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    ]
+    calls = [
+        node
+        for node in ast.walk(funcdef)
+        if isinstance(node, ast.Call)
+        and any(node.func is use for use in uses)
+        and len(node.args) == 1
+        and not isinstance(node.args[0], ast.Starred)
+        and not node.keywords
+    ]
+    if len(calls) != 1:
+        raise ValueError(f"{name} is not called exactly once as self.{name}(arg)")
+    call = calls[0]
+    other_refs = [use for use in uses if use is not call.func]
+    return call, other_refs
+
+
 def single_self_call(funcdef: ast.FunctionDef, name: str) -> ast.Call:
     """The unique `self.<name>(arg)` call in `funcdef`.
 
     Raises unless `name` appears exactly once, as such a call, so the source
     rewrite agrees with the fx match.
     """
-    uses = [
-        node
-        for node in ast.walk(funcdef)
-        if isinstance(node, ast.Attribute) and node.attr == name
-    ]
-    if len(uses) != 1:
-        raise ValueError(f"{name} is referenced {len(uses)} times")
-    calls = [
-        node
-        for node in ast.walk(funcdef)
-        if isinstance(node, ast.Call)
-        and node.func is uses[0]
-        and len(node.args) == 1
-        and not isinstance(node.args[0], ast.Starred)
-        and not node.keywords
-    ]
-    if (
-        len(calls) != 1
-        or not isinstance(uses[0].value, ast.Name)
-        or uses[0].value.id != "self"
-    ):
-        raise ValueError(f"{name} is not a single-argument call on self")
-    return calls[0]
+    call, other_refs = self_call_and_refs(funcdef, name)
+    if other_refs:
+        raise ValueError(f"{name} is referenced {len(other_refs) + 1} times")
+    return call
 
 
-def innermost_block(
+def _is_none(node: ast.expr) -> bool:
+    return isinstance(node, ast.Constant) and node.value is None
+
+
+def _in_boolean_context(funcdef: ast.FunctionDef, ref: ast.expr) -> bool:
+    """Is `ref` used only for its truth value (a test, or a `not` operand)?
+
+    In these positions the object's identity never escapes, so a reference that
+    is always truthy can be replaced by `True`. `and`/`or` are excluded: they
+    yield an operand, so the module could escape (`x and self.<name>`)."""
+    for node in ast.walk(funcdef):
+        if (
+            isinstance(node, (ast.If, ast.IfExp, ast.While, ast.Assert))
+            and node.test is ref
+        ):
+            return True
+        if (
+            isinstance(node, ast.UnaryOp)
+            and isinstance(node.op, ast.Not)
+            and node.operand is ref
+        ):
+            return True
+    return False
+
+
+def bypass_existence_guard(
+    funcdef: ast.FunctionDef, ref: ast.Attribute, name: str
+) -> None:
+    """Fold a guard on `self.<name>`'s existence to its constant value.
+
+    The fuser deletes `self.<name>` and binds only instances where it exists as a
+    truthy `nn.Linear` (guaranteed by the match, the cache key, and `validate`),
+    so a guard testing its presence is a fusion invariant. Two forms are folded:
+
+    - an identity `None` check `self.<name> is None` -> `False`,
+      `self.<name> is not None` -> `True` (either operand order). `==`/`!=` are
+      *not* folded: `is_linear` accepts `nn.Linear` subclasses, which may override
+      `__eq__`/`__ne__`, so equality is not guaranteed to track identity.
+    - a bare truthiness test (`if self.<name>:`, `... if self.<name> else ...`,
+      `not self.<name>`): the reference itself to `True`.
+
+    Any other surviving reference escapes the projection's value, which no longer
+    exists after fusion, so refuse rather than change semantics."""
+    for node in ast.walk(funcdef):
+        # `self.<name> is (not) None`, either operand order.
+        if not (isinstance(node, ast.Compare) and len(node.ops) == 1):
+            continue
+        (op,), (right,) = node.ops, node.comparators
+        if not isinstance(op, (ast.Is, ast.IsNot)):
+            continue
+        if (ref is node.left and _is_none(right)) or (
+            ref is right and _is_none(node.left)
+        ):
+            value = isinstance(op, ast.IsNot)
+            replace_expr(funcdef, node, ast.copy_location(ast.Constant(value), node))
+            return
+    # A bare truthiness test (statement `if`, ternary, or `not`); an `nn.Linear`
+    # is always truthy, so the reference folds to `True`.
+    if _in_boolean_context(funcdef, ref):
+        replace_expr(funcdef, ref, ast.copy_location(ast.Constant(True), ref))
+        return
+    raise ValueError(f"{name} is referenced outside an existence guard")
+
+
+def block_chain(
     block: list[ast.stmt], node: ast.AST
-) -> tuple[list[ast.stmt], int] | None:
-    """The innermost statement list containing `node`, and the index within."""
+) -> list[tuple[list[ast.stmt], int]]:
+    """Path of (statement list, index) pairs from `block` down to `node`.
+
+    Each pair names a nested block and the index in it of the statement
+    containing `node`; the last pair is `node`'s innermost block. Empty if
+    `node` is not in `block`. The longest common prefix of several nodes' chains
+    is the innermost block that dominates them all.
+    """
     for index, stmt in enumerate(block):
         if not any(child is node for child in ast.walk(stmt)):
             continue
@@ -359,11 +450,225 @@ def innermost_block(
             if (
                 isinstance(child_block, list)
                 and child_block
-                and (found := innermost_block(child_block, node)) is not None
+                and (tail := block_chain(child_block, node))
             ):
-                return found
-        return block, index
+                return [(block, index), *tail]
+        return [(block, index)]
+    return []
+
+
+def _base_name(node: ast.expr) -> str | None:
+    """The root `Name` of an attribute/subscript chain (`a.b[c]` -> `a`)."""
+    while isinstance(node, (ast.Attribute, ast.Subscript)):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+
+def _rebound_names(region: list[ast.stmt]) -> set[str]:
+    """Names rebound outright within `region` (`x = ...`, `del x`).
+
+    These are `Name` nodes in a `Store`/`Del` context."""
+    return {
+        node.id
+        for stmt in region
+        for node in ast.walk(stmt)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del))
+    }
+
+
+def _inplace_target(node: ast.AST) -> str | None:
+    """Base name `node` mutates in place, if any.
+
+    A write through the name (`x[i] = ...`, `x.attr = ...`) or an in-place method
+    call (`x.mul_(...)`) leaves the base name in a `Load` context, so it is not a
+    plain `Name` store (see `_rebound_names`)."""
+    if isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(
+        node.ctx, (ast.Store, ast.Del)
+    ):
+        return _base_name(node)
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr.endswith("_")
+        and not node.func.attr.endswith("__")
+    ):
+        return _base_name(node.func.value)
     return None
+
+
+def _mutated_names(region: list[ast.stmt]) -> set[str]:
+    """Names mutated in place within `region` (see `_inplace_target`)."""
+    return {
+        base
+        for stmt in region
+        for node in ast.walk(stmt)
+        if (base := _inplace_target(node)) is not None
+    }
+
+
+def _call_name(call: ast.Call) -> str:
+    """The called function's own name, without its qualifier."""
+    if isinstance(call.func, ast.Attribute):
+        return call.func.attr
+    return call.func.id if isinstance(call.func, ast.Name) else ""
+
+
+def _arg_names(call: ast.Call) -> set[str]:
+    """Every name `call` reads through its arguments."""
+    reads = [*call.args, *(kw.value for kw in call.keywords)]
+    return {
+        node.id
+        for arg in reads
+        for node in ast.walk(arg)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+    }
+
+
+def _writes_through_args(call: ast.Call) -> bool:
+    """Does `call` write through an argument rather than return a new value?
+
+    Torch spells this three ways: an `out=` destination, `inplace=True`, and the
+    trailing-underscore convention (`torch.relu_(x)`). The underscore is checked
+    on the function's own name, so it catches the free-function form that
+    `_inplace_target` cannot (there the base name is the module, `torch`).
+    """
+    for keyword in call.keywords:
+        if keyword.arg == "out":
+            return True
+        if keyword.arg == "inplace" and not (
+            isinstance(keyword.value, ast.Constant) and keyword.value.value is False
+        ):
+            return True
+    name = _call_name(call)
+    return name.endswith("_") and not name.endswith("__")
+
+
+def written_names(region: list[ast.stmt]) -> set[str]:
+    """Names `region` may rebind or write through.
+
+    Beyond plain rebinding and writes through the name itself (`_rebound_names`,
+    `_mutated_names`), a call can write through an argument without naming it as
+    a target: `F.relu(x, inplace=True)`, `torch.add(x, y, out=x)`,
+    `torch.relu_(x)`. A statement-level call whose result is discarded is treated
+    the same way, since it can only be there for a side effect.
+    """
+    written = _rebound_names(region) | _mutated_names(region)
+    for stmt in region:
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+            written |= _arg_names(stmt.value)
+        for node in ast.walk(stmt):
+            if isinstance(node, ast.Call) and _writes_through_args(node):
+                written |= _arg_names(node)
+    return written
+
+
+_METADATA_ATTRS = frozenset(
+    {"shape", "dtype", "device", "ndim", "size", "dim", "numel", "item"}
+)
+
+
+def _aliasing_reads(node: ast.expr) -> set[str]:
+    """Names `node` reads in a way that could yield a view of them.
+
+    Metadata (`x.shape`, `x.size(0)`, `x.dtype`) is ints and tuples sharing no
+    storage with `x`, so reaching a name only through metadata cannot alias it.
+    Shape arithmetic is pervasive between projections, so propagating through it
+    would taint nearly every later name.
+    """
+    names: set[str] = set()
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, ast.Attribute) and current.attr in _METADATA_ATTRS:
+            continue
+        if (
+            isinstance(current, ast.Call)
+            and isinstance(current.func, ast.Attribute)
+            and current.func.attr in _METADATA_ATTRS
+        ):
+            stack.extend(current.args)
+            stack.extend(keyword.value for keyword in current.keywords)
+            continue
+        if isinstance(current, ast.Name) and isinstance(current.ctx, ast.Load):
+            names.add(current.id)
+        stack.extend(ast.iter_child_nodes(current))
+    return names
+
+
+def _returns_fresh(node: ast.expr, module: nn.Module) -> bool:
+    """Does evaluating `node` allocate, rather than return a view of its input?
+
+    A `nn.Linear` writes its output into new storage, so its result aliases
+    nothing that went in, and a chain of view ops on top of it aliases only that
+    fresh tensor. Walking the receiver chain down to a `self.<linear>(...)` call
+    therefore proves the value cannot alias the projection input. A literal
+    aliases nothing either, and a branch or sequence is fresh when every part is
+    -- which is how a guarded projection (`p(x) if p is not None else None`)
+    stays untracked. A call on an attribute that is missing or `None` cannot run
+    at all, so a branch selecting a different configuration is fresh too.
+    """
+    if isinstance(node, ast.Constant):
+        return True
+    if isinstance(node, ast.IfExp):
+        if isinstance(node.test, ast.Constant):
+            # A folded existence guard leaves the untaken branch as dead code.
+            taken = node.body if node.test.value else node.orelse
+            return _returns_fresh(taken, module)
+        return _returns_fresh(node.body, module) and _returns_fresh(node.orelse, module)
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return all(_returns_fresh(elt, module) for elt in node.elts)
+    while isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        func = node.func
+        if isinstance(func.value, ast.Name) and func.value.id == "self":
+            attribute = getattr(module, func.attr, None)
+            if attribute is None or isinstance(attribute, nn.Linear):
+                # A missing or `None` attribute cannot be called, so the branch
+                # selecting it never runs (`q_proj` on a q-LoRA layer).
+                return True
+            # Anything else can only return storage it was handed, so it is
+            # fresh exactly when its inputs are (`q_norm(q_proj(x))`).
+            return bool(node.args) and all(
+                _returns_fresh(arg, module) for arg in node.args
+            )
+        node = func.value
+    return False
+
+
+def aliasing_names(
+    funcdef: ast.FunctionDef, seed: set[str], module: nn.Module
+) -> set[str]:
+    """`seed` plus every name that may alias one of them.
+
+    A view shares storage with its base (`h = x.view(-1)`), so mutating `h`
+    mutates `x`; tracking only `seed` would miss that. Any assignment reading a
+    tracked name therefore taints its targets, transitively, unless its value is
+    freshly allocated (`_returns_fresh`).
+    """
+    names = set(seed)
+    assigns = [
+        node
+        for node in ast.walk(funcdef)
+        if isinstance(node, (ast.Assign, ast.AnnAssign))
+        and node.value is not None
+        and not _returns_fresh(node.value, module)
+    ]
+    changed = True
+    while changed:
+        changed = False
+        for node in assigns:
+            if not _aliasing_reads(node.value) & names:
+                continue
+            targets = getattr(node, "targets", None) or [node.target]
+            stores = {
+                child.id
+                for target in targets
+                for child in ast.walk(target)
+                if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store)
+            }
+            if stores - names:
+                names |= stores
+                changed = True
+    return names
 
 
 def replace_expr(module: ast.AST, old: ast.expr, new: ast.expr) -> None:

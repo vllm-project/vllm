@@ -7,15 +7,50 @@ Modeled after SharedOffloadRegion (vllm/v1/kv_offload/cpu/) but simplified
 for EC: flat shared layout, no multi-tensor cursor, no block_size_factor.
 """
 
+import errno
 import mmap
 import os
 import time
+from collections.abc import Callable
 
+import numpy as np
 import torch
 
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+# MADV_POPULATE_WRITE was added in Linux 5.14 (value 23).
+_MADV_POPULATE_WRITE = getattr(mmap, "MADV_POPULATE_WRITE", 23)
+
+
+def _madvise_populate_write(mmap_obj: mmap.mmap, offset: int, length: int) -> None:
+    mmap_obj.madvise(_MADV_POPULATE_WRITE, offset, length)
+
+
+def _fallback_populate_write(mmap_obj: mmap.mmap, offset: int, length: int) -> None:
+    # Touch one byte per page via a read-modify-write so existing bytes are
+    # preserved — a peer worker may have already written EC data into this
+    # shared mmap by the time we run on a kernel without MADV_POPULATE_WRITE.
+    arr = np.frombuffer(mmap_obj, dtype=np.uint8)
+    arr[offset : offset + length : mmap.PAGESIZE] |= 0
+
+
+def _get_populate_write_fn(
+    mmap_obj: mmap.mmap,
+) -> Callable[[mmap.mmap, int, int], None]:
+    """Select the pre-faulting method once for this mmap."""
+    try:
+        _madvise_populate_write(mmap_obj, 0, mmap.PAGESIZE)
+    except OSError as e:
+        if e.errno != errno.EINVAL:
+            raise
+        logger.warning(
+            "MADV_POPULATE_WRITE is not supported; falling back to per-page "
+            "writes for EC mmap pre-population. Startup may be slower."
+        )
+        return _fallback_populate_write
+    return _madvise_populate_write
 
 
 def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0):
@@ -93,8 +128,8 @@ class ECSharedRegion:
         )
 
         if self._is_creator:
-            _MADV_POPULATE_WRITE = getattr(mmap, "MADV_POPULATE_WRITE", 23)
-            self._mmap_obj.madvise(_MADV_POPULATE_WRITE, 0, total_size_bytes)
+            populate_write_fn = _get_populate_write_fn(self._mmap_obj)
+            populate_write_fn(self._mmap_obj, 0, total_size_bytes)
 
         # (num_blocks, block_size_bytes) int8 tensor over the mmap buffer.
         self.blocks: torch.Tensor = torch.frombuffer(

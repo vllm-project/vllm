@@ -113,6 +113,7 @@ class XPUPlatform(Platform):
     supported_quantization: list[str] = [
         "awq",
         "gptq",
+        "moe_wna16",
         "auto_awq",
         "auto_gptq",
         "inc",
@@ -490,7 +491,7 @@ class XPUPlatform(Platform):
         using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
         default = ["native"] if using_inductor else ["vllm_c", "native"]
 
-        return IrOpPriorityConfig.with_default(default)
+        return IrOpPriorityConfig.with_default(default, gelu_and_mul_sparse=["native"])
 
     @classmethod
     def device_count(cls) -> int:

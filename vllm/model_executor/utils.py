@@ -3,11 +3,34 @@
 """Utils for model executor."""
 
 import copy
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 
 import torch
 
 from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+_weights_pre_processed: ContextVar[bool] = ContextVar(
+    "weights_pre_processed", default=False
+)
+
+
+@contextmanager
+def weights_already_processed():
+    """Mark that weights are already in post-processed (runtime) format, so
+    ``process_weights_after_loading`` skips tensor transforms (used by the
+    weight cache IPC loader).
+    """
+    token = _weights_pre_processed.set(True)
+    try:
+        yield
+    finally:
+        _weights_pre_processed.reset(token)
+
+
+def is_weights_pre_processed() -> bool:
+    return _weights_pre_processed.get()
 
 
 def set_weight_attrs(

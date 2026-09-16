@@ -124,6 +124,20 @@ class FixFunctionalizationPass(VllmInductorPass):
                     5: "scale_out",
                 }
                 self.defunctionalize(graph, node, mutated_args)
+            elif (
+                hasattr(
+                    torch.ops.vllm,
+                    "flashinfer_fused_add_rms_norm_nvfp4_quant",
+                )
+                and at_target
+                == torch.ops.vllm.flashinfer_fused_add_rms_norm_nvfp4_quant.default
+            ):
+                mutated_args = {
+                    1: "result",
+                    2: "result_block_scale",
+                    3: "residual",
+                }
+                self.defunctionalize(graph, node, mutated_args)
             # For some reason we need to specify the args for both
             # silu_and_mul and silu_and_mul_quant. The kwargs
             # pathway gets the wrong answer.

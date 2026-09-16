@@ -17,6 +17,8 @@ following `quantization.quant_algo` values:
 - `FP8_PER_CHANNEL_PER_TOKEN`: per-channel weight scale and dynamic per-token activation quantization.
 - `FP8_PB_WO` (ModelOpt may emit `fp8_pb_wo`): block-scaled FP8 weight-only (typically 128×128 blocks).
 - `NVFP4`: ModelOpt NVFP4 checkpoints (use `quantization="modelopt_fp4"`).
+- `W4A16_NVFP4`: weight-only ModelOpt NVFP4 checkpoints with 16-bit
+  activations (use `quantization="modelopt_fp4"`).
 - `MXFP8`: ModelOpt MXFP8 checkpoints (use `quantization="modelopt_mxfp8"`).
 
 !!! note
@@ -28,10 +30,12 @@ following `quantization.quant_algo` values:
     workloads. Use `--linear-backend` to override the automatic selection
     (this replaces the deprecated `VLLM_NVFP4_GEMM_BACKEND` environment
     variable). Values relevant to NVFP4 include `cutlass`,
-    `flashinfer_cutlass`, `flashinfer_trtllm`, `flashinfer_cudnn`, and
-    `marlin`; the full list is documented under `KernelConfig` on the
+    `flashinfer_cutlass`, `flashinfer_cutedsl`, `flashinfer_trtllm`,
+    `flashinfer_cudnn`, and `marlin`; see `KernelConfig` on the
     [Engine Arguments](../../configuration/engine_args.md) page and shown by
-    `vllm serve --help=KernelConfig`.
+    `vllm serve --help=KernelConfig`. For `W4A16_NVFP4`, `auto` currently
+    selects Marlin. Models with BF16 activations can explicitly select the
+    FlashInfer CuTe-DSL backend with `--linear-backend flashinfer_cutedsl`.
 
 !!! note
     For models quantized to MXFP8 with BF16 activations on SM100-family GPUs,

@@ -172,6 +172,7 @@ class DefaultModelState(ModelState):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
+        ubatch_idx: int = 0,
     ) -> dict[str, Any]:
         if cudagraph_mode == CUDAGraphMode.FULL:
             # Use padded sizes - padding is handled by model_runner.prepare_attn.
@@ -219,10 +220,14 @@ class DefaultModelState(ModelState):
             kv_cache_config=kv_cache_config,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
+            dcp_local_seq_lens_cpu_upper_bound=input_batch.dcp_local_seq_lens_cpu_upper_bound,
             positions=input_batch.positions,
             is_prefilling=torch.from_numpy(input_batch.is_prefilling_np),
             mm_req_doc_ranges=req_doc_ranges,
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,
+            req_idx=input_batch.idx_mapping_np,
+            ubatch_idx=ubatch_idx,
+            fast_prefill=input_batch.fast_prefill,
         )
         return attn_metadata

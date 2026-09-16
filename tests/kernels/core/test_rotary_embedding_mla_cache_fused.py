@@ -17,6 +17,88 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 
+def assert_rope_close_rocm(
+    actual: torch.Tensor,
+    ref: torch.Tensor,
+    rope_input: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+    is_neox: bool,
+    *,
+    max_fail_fraction: float | None = None,
+    atol: float | None = None,
+    rtol: float | None = None,
+) -> None:
+    """assert_close for RoPE fused-vs-reference on ROCm, with a per-element
+    product-ULP allowance for catastrophic-cancellation elements.
+
+    The fused and reference kernels may contract the RoPE multiply-add into an
+    FMA with either product pre-rounded to the working dtype. The two valid
+    orderings differ by at most 2 ULPs of the product at that element, which
+    cancellation (x*cos ~= -y*sin) can amplify past the default tolerance.
+
+    Tier 1: |actual - ref| <= atol + rtol * |ref|  (default tolerance).
+    Tier 2: elements failing tier 1 must each satisfy
+    |actual_e - ref_e| <= 2 * eps * |product_e|, where product_e is the larger
+    of the two products combined at that element, and their fraction must be
+    <= max_fail_fraction (1e-4 for fp16; 1e-2 for bf16, whose coarser eps
+    puts 1-ULP divergences past the default tolerance far more often).
+    """
+    if atol is None:
+        atol = get_default_atol(ref)
+    if rtol is None:
+        rtol = get_default_rtol(ref)
+    if max_fail_fraction is None:
+        max_fail_fraction = 1e-2 if ref.dtype == torch.bfloat16 else 1e-4
+    eps = torch.finfo(ref.dtype).eps
+
+    # per-element product magnitude, in the (seq, heads, rot_dim) layout
+    seq_len, rot_dim = rope_input.shape[0], rope_input.shape[-1]
+    half = rot_dim // 2
+    inp = rope_input.reshape(seq_len, -1, rot_dim).to(torch.float32)
+    cs = cos_sin_cache[positions].to(torch.float32)  # (seq_len, 2*half)
+    cos = cs[:, :half].unsqueeze(1)  # broadcast over heads
+    sin = cs[:, half:].unsqueeze(1)
+    x, y = inp[..., :half], inp[..., half:]
+    if is_neox:
+        # out = [x*cos - y*sin, y*cos + x*sin]
+        prod = torch.cat(
+            [
+                torch.maximum((x * cos).abs(), (y * sin).abs()),
+                torch.maximum((y * cos).abs(), (x * sin).abs()),
+            ],
+            dim=-1,
+        )
+    else:
+        # out[2i] = x[2i]*cos[i] - x[2i+1]*sin[i], interleaved
+        xe, xo = inp[..., 0::2], inp[..., 1::2]
+        prod = torch.stack(
+            [
+                torch.maximum((xe * cos).abs(), (xo * sin).abs()),
+                torch.maximum((xo * cos).abs(), (xe * sin).abs()),
+            ],
+            dim=-1,
+        ).flatten(-2)
+    prod = prod.reshape(rope_input.shape)
+
+    diff = (actual.to(torch.float32) - ref.to(torch.float32)).abs()
+    tol = atol + rtol * ref.to(torch.float32).abs()
+    fail = diff > tol
+    n_fail = int(fail.sum())
+    if n_fail == 0:
+        return
+    assert n_fail <= max_fail_fraction * diff.numel(), (
+        f"{n_fail} elements beyond default tolerance "
+        f"({n_fail / diff.numel():.2%} > {max_fail_fraction:.2%}); "
+        f"max diff {diff.max().item()}"
+    )
+    excess = diff[fail] - 2 * eps * prod[fail]
+    assert (excess <= 0).all(), (
+        f"{int((excess > 0).sum())} cancellation elements exceed 2 product-ULPs; "
+        f"worst excess {excess.max().item()}"
+    )
+
+
 @pytest.fixture
 def default_vllm_config(monkeypatch):
     """Enable the AITER triton rope on ROCm for fp16-consistent numerics.
@@ -99,6 +181,8 @@ def test_concat_and_cache_mla_rope_fused(
 
     k_pe = torch.flatten(key[..., :qk_rope_head_dim], start_dim=1).to(device=device)
     kv_c = torch.flatten(key[..., qk_rope_head_dim:], start_dim=1).to(device=device)
+    k_pe_orig = k_pe.clone()
+    query_orig = query.clone()
 
     if current_platform.is_rocm():
         # We use forward_hip for the same numerics as the fused custom kernel on ROCm
@@ -181,12 +265,9 @@ def test_concat_and_cache_mla_rope_fused(
         kv_cache_scale,
     )
 
-    # On ROCm the AITER Triton rope diverges by ~1 ULP from the fused kernel,
-    # which the tight CUDA tolerances don't cover for the low-precision paths:
-    #  - bf16: up to ~1 bf16 ULP (0.0156-0.03125 at values ~2-3), so relax the
-    #    kv-cache atol (bounded ~0.02) and the query atol (~0.04).
-    #  - neox-style fp8: one e4m3 ULP (~12.5%), so relax rtol.
-    # Other paths use the CUDA defaults.
+    # On ROCm the AITER Triton rope diverges by up to 2 product-ULPs from the
+    # fused kernel, which the default tolerance misses at the rare
+    # catastrophic-cancellation elements. fp8 keeps its calibrated tolerance.
     rocm_neox = current_platform.is_rocm() and is_neox_style
     rocm_bf16 = current_platform.is_rocm() and dtype == torch.bfloat16
     if kv_cache_dtype == "fp8":
@@ -207,16 +288,40 @@ def test_concat_and_cache_mla_rope_fused(
             atol=0.004 if rocm_bf16 else 0.001,
             rtol=0.15 if rocm_neox or rocm_bf16 else 0.1,
         )
-    elif rocm_bf16:
-        torch.testing.assert_close(kv_cache, ref_kv_cache, atol=0.02, rtol=1e-3)
-    elif rocm_neox:
-        torch.testing.assert_close(kv_cache, ref_kv_cache, atol=1e-3, rtol=1e-3)
+    elif current_platform.is_rocm() and dtype in (torch.half, torch.bfloat16):
+        # gather the rope region of the cache back to token order
+        block_idx = slot_mapping // block_size
+        block_offset = slot_mapping % block_size
+        fused_k_rope = kv_cache[block_idx, block_offset, kv_lora_rank:]
+        ref_k_rope_gathered = ref_kv_cache[block_idx, block_offset, kv_lora_rank:]
+        assert_rope_close_rocm(
+            fused_k_rope,
+            ref_k_rope_gathered,
+            k_pe_orig,
+            rope.cos_sin_cache,
+            positions,
+            is_neox_style,
+        )
+        # the nope region is a byte-exact copy
+        torch.testing.assert_close(
+            kv_cache[..., :kv_lora_rank], ref_kv_cache[..., :kv_lora_rank]
+        )
     else:
         torch.testing.assert_close(kv_cache, ref_kv_cache)
 
-    torch.testing.assert_close(
-        query,
-        ref_q_pe,
-        atol=0.04 if rocm_bf16 else get_default_atol(query),
-        rtol=get_default_rtol(query),
-    )
+    if current_platform.is_rocm() and dtype in (torch.half, torch.bfloat16):
+        assert_rope_close_rocm(
+            query,
+            ref_q_pe,
+            query_orig,
+            rope.cos_sin_cache,
+            positions,
+            is_neox_style,
+        )
+    else:
+        torch.testing.assert_close(
+            query,
+            ref_q_pe,
+            atol=get_default_atol(query),
+            rtol=get_default_rtol(query),
+        )

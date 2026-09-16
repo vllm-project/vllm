@@ -30,7 +30,7 @@ def models_list(*, all: bool = True, keywords: list[str] | None = None):
         if is_quant_method_supported("gptq_marlin"):
             TEST_MODELS.append(
                 (
-                    "TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ",
+                    "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit",
                     {"quantization": "gptq_marlin"},
                 )
             )

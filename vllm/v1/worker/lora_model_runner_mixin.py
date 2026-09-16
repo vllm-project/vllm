@@ -6,7 +6,6 @@ Define LoRA functionality mixin for model runners.
 
 from collections.abc import Callable
 from contextlib import contextmanager
-from typing import TypeAlias
 
 import numpy as np
 import torch
@@ -19,10 +18,7 @@ from vllm.lora.layers import LoRAMapping, LoRAMappingType
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora
-from vllm.v1.worker.gpu_input_batch import InputBatch as GPUInputBatch
-from vllm.v1.worker.tpu_input_batch import InputBatch as TPUInputBatch
-
-InputBatch: TypeAlias = TPUInputBatch | GPUInputBatch
+from vllm.v1.worker.gpu_input_batch import InputBatch
 
 logger = init_logger(__name__)
 

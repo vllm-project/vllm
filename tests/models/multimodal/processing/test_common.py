@@ -92,6 +92,11 @@ _XPU_EXCLUDED_MODEL_IDS = {
     "thinkingmachines/Inkling-NVFP4",
 }
 
+_CPU_EXCLUDED_MODEL_IDS = {
+    # DeepSeek-V4 vision variant is only supported on NVIDIA GPUs for now.
+    "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp",
+}
+
 
 def _iter_model_ids_to_test(model_arch_list: AbstractSet[str]):
     for model_arch in model_arch_list:
@@ -110,6 +115,11 @@ def _get_model_ids_to_test(model_arch_list: AbstractSet[str]):
 
     if current_platform.is_xpu():
         for excluded_model_id in _XPU_EXCLUDED_MODEL_IDS:
+            while excluded_model_id in model_ids:
+                model_ids.remove(excluded_model_id)
+
+    if current_platform.is_cpu():
+        for excluded_model_id in _CPU_EXCLUDED_MODEL_IDS:
             while excluded_model_id in model_ids:
                 model_ids.remove(excluded_model_id)
 

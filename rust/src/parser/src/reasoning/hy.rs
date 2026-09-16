@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use vllm_tokenizer::DynTokenizer;
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 
-use super::{DelimitedReasoningParser, ReasoningDelta, ReasoningError, ReasoningParser, Result};
+use super::{
+    DelimitedReasoningParser, DelimitedReasoningParserBuilder, ReasoningDelta, ReasoningError,
+    ReasoningParser, Result,
+};
 
 /// Internal HY reasoning stage used by the unified HY parsers.
 pub(crate) struct HyReasoningParser {
@@ -14,12 +17,12 @@ impl HyReasoningParser {
     /// Create a HY reasoning parser for the tokenizer-specific marker suffix.
     pub(crate) fn new(tokenizer: DynTokenizer, suffix: &str) -> Result<Self> {
         Ok(Self {
-            inner: DelimitedReasoningParser::new(
+            inner: DelimitedReasoningParserBuilder::new(
                 tokenizer,
                 format!("<think{suffix}>"),
                 format!("</think{suffix}>"),
-                false,
-            )?,
+            )
+            .build()?,
         })
     }
 }
@@ -37,11 +40,10 @@ impl ReasoningParser for HyReasoningParser {
     }
 
     fn initialize(&mut self, prompt_token_ids: &[u32]) -> Result<()> {
-        self.inner.initialize(prompt_token_ids);
-        Ok(())
+        self.inner.initialize(prompt_token_ids)
     }
 
-    fn push(&mut self, delta: &str) -> Result<ReasoningDelta> {
+    fn push(&mut self, delta: DecodedText) -> Result<ReasoningDelta> {
         Ok(self.inner.push(delta))
     }
 

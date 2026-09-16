@@ -3,13 +3,136 @@
 
 """Tests for the /render endpoints that expose prompt preprocessing."""
 
+from http import HTTPStatus
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
 import httpx
 import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteLaunchRenderServer
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.scale_out.render.api_router import router
+from vllm.entrypoints.scale_out.render.serving import ServingRender
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.renderers.online_renderer import OnlineRenderer
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+
+
+def _build_responses_serving_render() -> ServingRender:
+    serving = ServingRender.__new__(ServingRender)
+    serving.model_config = SimpleNamespace(
+        max_model_len=100,
+        is_encoder_decoder=False,
+    )
+    serving.default_sampling_params = {}
+    serving.override_max_tokens = None
+    serving.tool_server = MagicMock()
+    serving.online_renderer = MagicMock()
+    serving.online_renderer.create_error_response = (
+        OnlineRenderer.create_error_response.__get__(serving.online_renderer)
+    )
+    serving.online_renderer.validate_chat_template = (
+        OnlineRenderer.validate_chat_template.__get__(serving.online_renderer)
+    )
+    serving.online_renderer.trust_request_chat_template = True
+    serving._check_model = AsyncMock(return_value=None)
+    return serving
+
+
+@pytest.mark.skip_global_cleanup
+def test_responses_render_route_is_registered():
+    assert any(route.path == "/v1/responses/render" for route in router.routes)
+
+
+@pytest.mark.skip_global_cleanup
+def test_responses_render_route_documents_not_implemented():
+    route = next(
+        route for route in router.routes if route.path == "/v1/responses/render"
+    )
+
+    assert HTTPStatus.NOT_IMPLEMENTED.value in route.responses
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_render_responses_returns_generate_request_without_stored_state():
+    serving = _build_responses_serving_render()
+    serving.online_renderer.render_responses = AsyncMock(
+        return_value=MagicMock(
+            messages=[{"role": "user", "content": "Test prompt"}],
+            engine_input={"prompt_token_ids": [7, 8, 9]},
+        )
+    )
+    request = ResponsesRequest(
+        model=MODEL_NAME,
+        input="Test prompt",
+        max_output_tokens=12,
+        stream=True,
+        cache_salt="request-salt",
+        priority=3,
+        kv_transfer_params={"do_remote_prefill": True},
+        ec_transfer_params={"remote": True},
+    )
+
+    response = await serving.render_responses_request(request)
+
+    assert response.token_ids == [7, 8, 9]
+    assert response.request_id == request.request_id
+    assert response.sampling_params.max_tokens == 12
+    assert response.model == MODEL_NAME
+    assert response.stream is True
+    assert response.cache_salt == "request-salt"
+    assert response.priority == 3
+    assert response.kv_transfer_params == {"do_remote_prefill": True}
+    assert response.ec_transfer_params == {"remote": True}
+    serving.online_renderer.render_responses.assert_awaited_once_with(
+        request,
+        previous_messages=None,
+        previous_response_outputs=None,
+        tool_server=serving.tool_server,
+        skip_mm_cache=True,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_render_responses_rejects_previous_response_id():
+    serving = _build_responses_serving_render()
+    serving.online_renderer.render_responses = AsyncMock()
+    request = ResponsesRequest(
+        model=MODEL_NAME,
+        input="Test prompt",
+        previous_response_id="resp_previous",
+    )
+
+    response = await serving.render_responses_request(request)
+
+    assert isinstance(response, ErrorResponse)
+    assert response.error.code == 400
+    assert response.error.param == "previous_response_id"
+    serving.online_renderer.render_responses.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_render_responses_rejects_empty_token_ids():
+    serving = _build_responses_serving_render()
+    serving.online_renderer.render_responses = AsyncMock(
+        return_value=MagicMock(
+            messages=[],
+            engine_input={"prompt_token_ids": []},
+        )
+    )
+
+    response = await serving.render_responses_request(
+        ResponsesRequest(model=MODEL_NAME, input="Test prompt")
+    )
+
+    assert isinstance(response, ErrorResponse)
+    assert response.error.message == "No token_ids rendered"
 
 
 @pytest.fixture(scope="module")
@@ -26,6 +149,71 @@ async def client(server):
         base_url=server.url_for(""), timeout=30.0
     ) as http_client:
         yield http_client
+
+
+@pytest.mark.asyncio
+async def test_responses_render_basic(client):
+    response = await client.post(
+        "/v1/responses/render",
+        json={
+            "model": MODEL_NAME,
+            "input": "When should a Responses handler return an empty string?",
+            "max_output_tokens": 7,
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["model"] == MODEL_NAME
+    assert data["request_id"].startswith("resp_")
+    assert data["sampling_params"]["max_tokens"] == 7
+    assert data["token_ids"]
+
+
+@pytest.mark.asyncio
+async def test_responses_render_includes_prior_input_items(client):
+    current_turn = {
+        "role": "user",
+        "content": "Which color should I remember?",
+    }
+    current_turn_response = await client.post(
+        "/v1/responses/render",
+        json={"model": MODEL_NAME, "input": [current_turn]},
+    )
+    multi_turn_response = await client.post(
+        "/v1/responses/render",
+        json={
+            "model": MODEL_NAME,
+            "input": [
+                {"role": "user", "content": "Remember the color cobalt."},
+                {"role": "assistant", "content": "I will remember cobalt."},
+                current_turn,
+            ],
+        },
+    )
+
+    assert current_turn_response.status_code == 200
+    assert multi_turn_response.status_code == 200
+    current_turn_token_ids = current_turn_response.json()["token_ids"]
+    multi_turn_token_ids = multi_turn_response.json()["token_ids"]
+    assert len(multi_turn_token_ids) > len(current_turn_token_ids)
+
+
+@pytest.mark.asyncio
+async def test_responses_render_rejects_previous_response_id_over_http(client):
+    response = await client.post(
+        "/v1/responses/render",
+        json={
+            "model": MODEL_NAME,
+            "input": "Continue the previous response.",
+            "previous_response_id": "resp_previous",
+        },
+    )
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["type"] == "invalid_request_error"
+    assert error["param"] == "previous_response_id"
 
 
 @pytest.mark.asyncio
@@ -529,6 +717,52 @@ async def test_chat_completion_render_assistant_tokens_mask_with_generation_tags
     assert detok_rest.status_code == 200
     assert "Hi!" not in detok_rest.json()["prompt"]
     assert "Bye" in detok_rest.json()["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_chat_render_assistant_tokens_mask_follows_truncation(client):
+    """The assistant mask must be truncated with the prompt it describes.
+
+    `assistant_tokens_mask` is positional: entry i labels token i. Truncating
+    `token_ids` from the left without truncating the mask leaves the two
+    describing different positions, and the mask ends up marking whichever
+    tokens happen to sit at the old offsets.
+    """
+    messages = [
+        # Deliberately lopsided: a long leading user turn and a short trailing
+        # one, so keeping the head of the mask is distinguishable from keeping
+        # its tail.
+        {"role": "user", "content": "Hello hello hello hello hello hello"},
+        {"role": "assistant", "content": "Hi!"},
+        {"role": "user", "content": "Bye"},
+    ]
+    body = {
+        "model": MODEL_NAME,
+        "messages": messages,
+        "chat_template": _TEMPLATE_WITH_GENERATION,
+        "return_assistant_tokens_mask": True,
+    }
+
+    full = await client.post("/v1/chat/completions/render", json=body)
+    assert full.status_code == 200
+    full_token_ids = full.json()["token_ids"]
+    full_mask = full.json()["assistant_tokens_mask"]
+    assert sum(full_mask) > 0
+
+    keep = len(full_token_ids) - 4
+    # Precondition: with this prompt the head and tail slices of the mask
+    # really do differ, so the assertion below can tell them apart.
+    assert full_mask[-keep:] != full_mask[:keep]
+
+    truncated = await client.post(
+        "/v1/chat/completions/render",
+        json={**body, "truncate_prompt_tokens": keep, "truncation_side": "left"},
+    )
+    assert truncated.status_code == 200
+    data = truncated.json()
+
+    assert data["token_ids"] == full_token_ids[-keep:]
+    assert data["assistant_tokens_mask"] == full_mask[-keep:]
 
 
 @pytest.mark.asyncio

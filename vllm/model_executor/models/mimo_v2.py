@@ -303,6 +303,7 @@ class MiMoV2Attention(nn.Module):
                 backend_enum = requested
             else:
                 fa_backend = AttentionBackendEnum.FLASH_ATTN_DIFFKV.get_class()
+                assert hasattr(fa_backend, "is_supported_on_current_device")
                 if fa_backend.is_supported_on_current_device(
                     head_size=self.head_dim,
                     head_size_v=self.v_head_dim,
@@ -312,6 +313,7 @@ class MiMoV2Attention(nn.Module):
                 else:
                     backend_enum = AttentionBackendEnum.TRITON_ATTN_DIFFKV
             attn_backend = backend_enum.get_class()
+            assert hasattr(attn_backend, "set_head_size_v")
             attn_backend.set_head_size_v(self.v_head_dim)
             logger.info_once("Using %s for attention.", attn_backend.get_name())
         else:
@@ -636,7 +638,7 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
+        stacked_params_mapping: list[tuple[str, str, str | int]] = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
@@ -709,7 +711,7 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
             ):
                 continue
             stacked_matched = False
-            for param_name, weight_name, shard_id in stacked_params_mapping:
+            for param_name, weight_name, stacked_shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 name_rewritten = name.replace(weight_name, param_name)
@@ -728,7 +730,7 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
 
                 param = params_dict[name_rewritten]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight, shard_id)
+                weight_loader(param, loaded_weight, stacked_shard_id)
                 loaded_params.add(name_rewritten)
 
                 stacked_matched = True

@@ -346,6 +346,7 @@ impl ChatRenderer for InklingChatRenderer {
 
         Ok(RenderedPrompt {
             prompt: Prompt::TokenIds(out),
+            media_order: None,
             effective_template_kwargs,
         })
     }

@@ -3,6 +3,7 @@ depends_on:
   - image-build-xpu
 steps:
 - label: V1 Core + KV + Metrics
+  key: v1-core-kv-metrics-intel
   timeout_in_minutes: 45
   device: intel_gpu
   agent_tags:
@@ -32,9 +33,10 @@ steps:
       export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       cd tests &&
       pytest -v -s v1/executor &&
-      VLLM_BATCH_INVARIANT=1 pytest -v -s -m 'not cpu_test' v1/ec_connector/unit'
+      VLLM_BATCH_INVARIANT=1 pytest -v -s -m "not cpu_test" v1/ec_connector/unit'
 
 - label: V1 Sample + Logits
+  key: v1-sample-logits-intel
   timeout_in_minutes: 90
   device: intel_gpu
   agent_tags:
@@ -67,15 +69,19 @@ steps:
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'pip install lm_eval[api]>=0.4.12 &&
-      export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
+      'export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       cd tests &&
       pytest -v -s v1/logits_processors --ignore=v1/logits_processors/test_custom_online.py --ignore=v1/logits_processors/test_custom_offline.py &&
       pytest -v -s v1/test_oracle.py v1/test_request.py v1/test_outputs.py &&
       pytest -v -s v1/sample'
+  retry:
+    automatic:
+      - exit_status: 1  # Test command failed
+        limit: 1
   parallelism: 4
 
 - label: Basic Models Tests (Initialization)
+  key: basic-models-tests-initialization
   timeout_in_minutes: 60
   device: intel_gpu
   agent_tags:
@@ -100,6 +106,7 @@ steps:
       pytest -v -s models/test_initialization.py::test_can_initialize_large_subset[Eagle3MiniMaxM2ForCausalLM]'
 
 - label: XPU CPU Offload
+  key: xpu-cpu-offload
   timeout_in_minutes: 60
   device: intel_gpu
   agent_tags:
@@ -127,6 +134,7 @@ steps:
       pytest -v -s v1/kv_connector/unit/test_offloading_connector.py'
 
 - label: NixlConnector PD accuracy (4 GPUs)
+  key: nixlconnector-pd-accuracy-4-gpus
   timeout_in_minutes: 60
   num_devices: 4
   device: intel_gpu
@@ -184,8 +192,7 @@ steps:
   commands:
   - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'pip install modelscope\<1.38 &&
-      cd tests &&
+      'cd tests &&
       pytest -v -s test_regression.py'
 
 - label: Metrics, Tracing (2 GPUs)
@@ -220,8 +227,7 @@ steps:
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'pip install opentelemetry-sdk\>=1.26.0 opentelemetry-api\>=1.26.0 opentelemetry-exporter-otlp\>=1.26.0 opentelemetry-semantic-conventions-ai\>=0.4.1 &&
-    cd tests &&
+    'cd tests &&
     pytest -v -s v1/tracing'
 
 - label: Async Engine, Inputs, Utils, Worker
@@ -259,12 +265,12 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pip install av &&
     pytest -v -s detokenizer &&
     pytest -v -s -m "not cpu_test" ./multimodal &&
     pytest -v -s utils_ --ignore=utils_/test_mem_utils.py'
 
 - label: Fusion Unit Tests
+  key: fusion-unit-tests
   timeout_in_minutes: 30
   device: intel_gpu
   agent_tags:

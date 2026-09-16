@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from vllm.entrypoints.chat_utils import parse_chat_messages
 from vllm.renderers.registry import RENDERER_REGISTRY
@@ -427,3 +428,60 @@ def test_deepseek_v4_encode_messages_rejects_invalid_arguments(kwargs):
 
     with pytest.raises(ValueError):
         encode_messages([{"role": "user", "content": "Hello"}], **kwargs)
+
+
+def test_deepseek_v4_image_blocks_become_placeholders():
+    prompt = _tokenizer().apply_chat_template(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "first:"},
+                    {"type": "image_url", "image_url": {"url": "file:///a.png"}},
+                    {"type": "text", "text": "second:"},
+                    {"type": "image", "source": {"data": "AAAA"}},
+                ],
+            }
+        ],
+        tokenize=False,
+        thinking=False,
+    )
+
+    assert "<｜User｜>first:<｜deepseek_image｜>second:<｜deepseek_image｜>" in prompt
+
+
+def test_deepseek_v4_image_sentinel_ids_match_tokenizer():
+    """The borrowed sentinel ids must line up with the reserved
+    ``<|place_holder_mm_span_XXXX|>`` tokens in the tokenizer."""
+    from vllm.models.deepseek_v4.common.mm_preprocess import (
+        IMAGE_SENTINEL_BASE_ID,
+        IMAGE_SENTINEL_TOKEN_NAMES,
+        image_sentinel_mask,
+        validate_image_sentinel_ids,
+    )
+
+    class FakeTokenizer:
+        def __init__(self, offset: int = 0) -> None:
+            self.offset = offset
+
+        def convert_tokens_to_ids(self, token: str) -> int:
+            return (
+                IMAGE_SENTINEL_BASE_ID
+                + self.offset
+                + (IMAGE_SENTINEL_TOKEN_NAMES.index(token))
+            )
+
+    validate_image_sentinel_ids(FakeTokenizer())  # no raise
+    with pytest.raises(ValueError, match="sentinel"):
+        validate_image_sentinel_ids(FakeTokenizer(offset=1))
+
+    ids = torch.tensor(
+        [
+            1,
+            IMAGE_SENTINEL_BASE_ID,
+            IMAGE_SENTINEL_BASE_ID + 4,
+            IMAGE_SENTINEL_BASE_ID + 5,
+            129264,
+        ]
+    )
+    assert image_sentinel_mask(ids).tolist() == [False, True, True, False, False]
