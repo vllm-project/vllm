@@ -118,13 +118,6 @@ _LOCALIZED_SHARD_PARAMS = (
 )
 
 
-def _swizzle_localized_blockscale(scale: torch.Tensor) -> torch.Tensor:
-    """Keep swizzle temporaries mapped until their stream work completes."""
-    swizzled = swizzle_blockscale(scale)
-    torch.cuda.current_stream(scale.device).synchronize()
-    return swizzled
-
-
 def _shard_nvfp4_moe_weights_per_die(layer, res, w13, w13_scale, w2, w2_scale):
     """Split weights across locality domains for locality-domain (TP-A) localization.
 
@@ -174,19 +167,20 @@ def _shard_nvfp4_moe_weights_per_die(layer, res, w13, w13_scale, w2, w2_scale):
             shard = {
                 "w13_weight": w13[:, a : a + n13, :].contiguous(),
                 "w2_weight": w2[:, b : b + n2, :].contiguous(),
-                # Swizzled but NOT yet in MMA layout. This is the form that gets
-                # registered: contiguous and expert-major, so EPLB's
-                # is_contiguous() assert and .view(local_num_experts, -1) both
-                # hold. convert_sf_to_mma_layout returns a strided view whose
-                # leading dim is 32, not the expert count, so registering that
-                # instead would make EPLB slice the wrong axis.
-                "w13_weight_scale_param": _swizzle_localized_blockscale(
-                    w13_scale[:, a : a + n13, :].contiguous()
-                ),
-                "w2_weight_scale_param": _swizzle_localized_blockscale(
-                    w2_scale[:, b : b + n2, :].contiguous()
-                ),
             }
+            # Swizzled but NOT yet in MMA layout. This is the form that gets
+            # registered: contiguous and expert-major, so EPLB's
+            # is_contiguous() assert and .view(local_num_experts, -1) both
+            # hold. convert_sf_to_mma_layout returns a strided view whose
+            # leading dim is 32, not the expert count, so registering that
+            # instead would make EPLB slice the wrong axis. Keep each input
+            # mapped until its asynchronous swizzle has completed.
+            scale_shard = w13_scale[:, a : a + n13, :].contiguous()
+            shard["w13_weight_scale_param"] = swizzle_blockscale(scale_shard)
+            torch.cuda.current_stream(w13_scale.device).synchronize()
+            scale_shard = w2_scale[:, b : b + n2, :].contiguous()
+            shard["w2_weight_scale_param"] = swizzle_blockscale(scale_shard)
+            torch.cuda.current_stream(w2_scale.device).synchronize()
 
         # Register so EPLB can see the shards at all: get_expert_weights()
         # builds its list from named_parameters(), and set_eplb_state() -- the
