@@ -404,9 +404,6 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
         if type(None) in type_hints and not contains_type(type_hints, bool):
             kwargs[name]["type"] = optional_type(kwargs[name]["type"])
             if kwargs[name].get("choices"):
-                # The sentinel has to be what optional_type returns, not its
-                # spelling: argparse converts before it checks choices, so the
-                # string "None" is advertised in --help and then rejected.
                 kwargs[name]["choices"].append(None)
     return kwargs
 
@@ -1488,7 +1485,6 @@ class EngineArgs:
         )
         # TODO: generalise this special case
         choices = observability_kwargs["collect_detailed_traces"]["choices"]
-        # str() because the optional sentinel in `choices` is the object None.
         metavar = f"{{{','.join(str(c) for c in choices)}}}"
         observability_kwargs["collect_detailed_traces"]["metavar"] = metavar
         observability_kwargs["collect_detailed_traces"]["choices"] += [
