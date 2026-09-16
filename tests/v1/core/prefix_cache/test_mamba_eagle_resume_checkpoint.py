@@ -196,6 +196,30 @@ def test_sibling_resumes_below_the_block_grid_when_the_prefix_ends_early():
     assert hit == resume, f"expected the resume point at {resume}, got {hit}"
 
 
+def test_prompt_tail_uses_model_wide_eagle_drop():
+    """Mamba must follow an EAGLE block drop owned by another KV group."""
+    block_size, hash_block_size = 512, 32
+    manager = _manager(
+        block_size,
+        hash_block_size,
+        shared_prefix_checkpoint=False,
+        eagle_group=0,
+    )
+    stub = _stub(manager, block_size, hash_block_size)
+    mamba = manager.coordinator.single_type_managers[1]
+    assert not mamba.use_eagle
+    assert mamba.drop_eagle_checkpoint_block
+
+    prompt_len = 2 * block_size + 1
+    owner = make_request("owner", PREFIX[:prompt_len], hash_block_size, sha256)
+    ends = _prefill(manager, stub, owner)
+    expected = block_size * 2 - hash_block_size
+    assert expected in ends
+
+    hit = _sibling_hit(manager, prompt_len, [], hash_block_size)
+    assert hit == expected
+
+
 # --------------------------------------------------------------------------
 # Invariants the two clauses have to keep
 
