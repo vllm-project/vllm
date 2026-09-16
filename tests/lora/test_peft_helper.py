@@ -114,3 +114,37 @@ def test_peft_helper_invalid_rank_direct(bad_rank: int):
     """
     with pytest.raises(ValueError, match="must be a positive integer"):
         PEFTHelper(r=bad_rank, lora_alpha=16, target_modules=["q_proj"])
+
+
+@pytest.mark.parametrize(
+    "indices",
+    [[], {}, [-1], [1, 1], [True], [1.5], ["1"], {"": [1]}, {"embed_tokens": []}],
+)
+def test_trainable_token_indices_reject_invalid_config(indices):
+    with pytest.raises(ValueError, match="trainable_token_indices"):
+        PEFTHelper(
+            r=8,
+            lora_alpha=32,
+            target_modules=["q_proj"],
+            trainable_token_indices=indices,
+        )
+
+
+@pytest.mark.parametrize("capacity", [0, 1, 2])
+def test_trainable_tokens_require_sufficient_capacity(capacity):
+    helper = PEFTHelper.from_dict(
+        {
+            "r": 8,
+            "lora_alpha": 32,
+            "target_modules": ["q_proj"],
+            "trainable_token_indices": {"embed_tokens": [2, 5]},
+            "ensure_weight_tying": True,
+        }
+    )
+    config = LoRAConfig(max_lora_trainable_tokens=capacity)
+    if capacity < 2:
+        with pytest.raises(ValueError, match="--max-lora-trainable-tokens"):
+            helper.validate_legal(config)
+    else:
+        helper.validate_legal(config)
+        assert helper.ensure_weight_tying
