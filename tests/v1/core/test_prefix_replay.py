@@ -219,6 +219,32 @@ def test_async_remote_kv_hit_replays_after_load():
     )
 
 
+def test_remote_kv_hit_is_taken_in_whole_blocks():
+    """A hit ending one token short of a block boundary would put the replay
+    window's first token in a block the sliding-window group retires, so a
+    connector hit is cut back to whole blocks."""
+    matched = 4 * BLOCK_SIZE - 1
+    scheduler = _replay_scheduler(
+        use_kv_connector=MockKVConfig(matched_tokens=matched, is_async=True)
+    )
+    request = create_requests(
+        num_requests=1, num_tokens=NUM_PROMPT_TOKENS, block_size=BLOCK_SIZE
+    )[0]
+    scheduler.add_request(request)
+    out = scheduler.schedule()
+    scheduler.update_from_output(
+        out, create_model_runner_output([], finished_recving={request.request_id})
+    )
+    out = scheduler.schedule()
+    new_req = _new_req_data(out, request)
+    hit = 3 * BLOCK_SIZE
+    assert new_req.replay_start == hit - WINDOW
+    assert new_req.num_computed_tokens == hit - WINDOW
+    swa_manager = scheduler.kv_cache_manager.coordinator.single_type_managers[SWA]
+    swa_blocks = scheduler.kv_cache_manager.get_blocks(request.request_id).blocks[SWA]
+    assert swa_blocks[new_req.replay_start // BLOCK_SIZE] is not swa_manager._null_block
+
+
 @pytest.mark.parametrize("via_connector", [False, True])
 def test_hit_no_longer_than_window_is_ignored(via_connector):
     """Such a hit would be recomputed in full anyway. It is not adopted (an
