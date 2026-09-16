@@ -7,8 +7,12 @@ import torch
 import torch.nn.functional as F
 
 import vllm.envs as envs
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    assert_hidden_dim_padding,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
@@ -170,16 +174,113 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 assert self.moe_kernel is not None
                 self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
+    def rebuild_moe_kernel(self, layer: "RoutedExperts", dry_run: bool = False) -> None:
+        """Re-select the experts class and rebuild the kernel around it.
+
+        Deliberately does NOT call ``convert_to_unquantized_kernel_format``:
+        TRITON and BATCHED_TRITON take the same branch of it, so the weights
+        on the device already suit either. Only that pair is allowed --
+        the FlashInfer and AITER backends do reshape weights at load time, and
+        swapping into one of those without reconverting would run the right
+        bytes through the wrong kernel.
+        """
+        backend, experts_cls = select_unquantized_moe_backend(moe_config=self.moe)
+        switchable = {
+            UnquantizedMoeBackend.TRITON,
+            UnquantizedMoeBackend.BATCHED_TRITON,
+        }
+        if (
+            backend != self.unquantized_backend
+            and not {
+                backend,
+                self.unquantized_backend,
+            }
+            <= switchable
+        ):
+            raise ValueError(
+                f"Cannot switch unquantized MoE backend "
+                f"{self.unquantized_backend.value} -> {backend.value} in "
+                f"place: they do not share a weight layout."
+            )
+
+        # Checked before the dry_run return, for the same reason the fp8 helper
+        # does: a dry run that passed must not be followed by a rebuild that
+        # asserts. The oracle's LoRA branch returns TritonExperts whatever the
+        # activation format and its TPU/OOT branches return no class at all;
+        # either passes the layout check above and would then trip the
+        # kernel's activation-format assert inside the real rebuild.
+        if experts_cls is None:
+            raise ValueError(
+                f"Cannot rebuild the unquantized MoE kernel in place: the "
+                f"{backend.value} backend selects no experts class."
+            )
+        if backend == UnquantizedMoeBackend.CPU:
+            # The CPU experts prepack the weights and capture the router
+            # config in their own process_weights_after_loading, which a
+            # rebuilt instance never sees; there is no all2all backend to
+            # switch on CPU anyway.
+            raise ValueError(
+                "Cannot rebuild the unquantized MoE kernel in place on CPU."
+            )
+        # The format the prepare/finalize will hand the experts. This is NOT
+        # the oracle's selection rule: that one also honours a batched_triton
+        # pin, which on CUDA changes the experts class but not the
+        # prepare/finalize, so a pinned engine moving to a standard all2all
+        # backend would pass a check written against the oracle and then trip
+        # the kernel's activation-format assert inside the real rebuild.
+        expected = (
+            mk.FusedMoEActivationFormat.BatchedExperts
+            if self.moe.moe_parallel_config.use_batched_activation_format
+            else mk.FusedMoEActivationFormat.Standard
+        )
+        if experts_cls.activation_format() != expected:
+            raise ValueError(
+                f"Cannot rebuild the unquantized MoE kernel in place: "
+                f"{experts_cls.__name__} takes the "
+                f"{experts_cls.activation_format().name} activation format but "
+                f"the current all2all backend hands it {expected.name}."
+            )
+        assert_hidden_dim_padding(self.moe)
+
+        if dry_run:
+            return
+
+        # Built before anything is assigned, for the same reason as the fp8
+        # helper: a failure in here leaves the method exactly as it was.
+        moe_quant_config, moe_kernel = self._build_moe_kernel(
+            layer, backend, experts_cls
+        )
+        self.unquantized_backend = backend
+        self.experts_cls = experts_cls
+        self.moe_quant_config = moe_quant_config
+        self.moe_kernel = moe_kernel
+
     def _init_moe_kernel(self, layer: "RoutedExperts") -> None:
         """Build the MoE kernel from the layer's current (shuffled) weights."""
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        assert self.moe_quant_config is not None
-        assert self.experts_cls is not None
-        self.moe_kernel = make_unquantized_moe_kernel(
-            quant_config=self.moe_quant_config,
+        self.moe_quant_config, self.moe_kernel = self._build_moe_kernel(
+            layer, self.unquantized_backend, self.experts_cls
+        )
+
+    def _build_moe_kernel(
+        self,
+        layer: "RoutedExperts",
+        backend: UnquantizedMoeBackend,
+        experts_cls: type[mk.FusedMoEExperts] | None,
+    ) -> tuple[FusedMoEQuantConfig, mk.FusedMoEKernel]:
+        """Build a kernel for ``backend`` around the layer's resident weights.
+
+        The quant config is recomputed from the layer's bias tensors and
+        SwiGLU gate params, neither of which depends on the backend, so a
+        rebuild lands on an equivalent config.
+        """
+        moe_quant_config = self.get_fused_moe_quant_config(layer)
+        assert moe_quant_config is not None
+        assert experts_cls is not None
+        return moe_quant_config, make_unquantized_moe_kernel(
+            quant_config=moe_quant_config,
             moe_config=self.moe,
-            backend=self.unquantized_backend,
-            experts_cls=self.experts_cls,
+            backend=backend,
+            experts_cls=experts_cls,
             routing_tables=layer._expert_routing_tables(),
         )
 

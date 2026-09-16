@@ -12,6 +12,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    assert_hidden_dim_padding,
     maybe_make_prepare_finalize,
 )
 from vllm.model_executor.layers.fused_moe.config import (
@@ -591,6 +592,114 @@ def convert_to_fp8_moe_kernel_format(
             raise ValueError(f"Unsupported FP8 MoE backend: {fp8_backend.value}")
 
     return w13, w2, w13_scale, w2_scale
+
+
+# Backends whose standard and batched variants take the same branch of
+# convert_to_fp8_moe_kernel_format above, and therefore consume the same
+# on-device weight layout. Only these pairs can be swapped after loading.
+_SAME_WEIGHT_LAYOUT_PAIRS = (
+    frozenset({Fp8MoeBackend.DEEPGEMM, Fp8MoeBackend.BATCHED_DEEPGEMM}),
+    frozenset({Fp8MoeBackend.TRITON, Fp8MoeBackend.BATCHED_TRITON}),
+    frozenset({Fp8MoeBackend.VLLM_CUTLASS, Fp8MoeBackend.BATCHED_VLLM_CUTLASS}),
+)
+
+
+def assert_same_fp8_weight_layout(old: Fp8MoeBackend, new: Fp8MoeBackend) -> None:
+    """Refuse a backend change that would need weights in a different layout.
+
+    P/D role switching rebuilds the MoE kernel around weights already on the
+    device. Moving between the standard and batched variants of one backend is
+    safe because they share a layout; any other move is not, and silently
+    running the wrong kernel over the right bytes produces plausible garbage
+    rather than an error.
+    """
+    if old == new or frozenset({old, new}) in _SAME_WEIGHT_LAYOUT_PAIRS:
+        return
+    raise ValueError(
+        f"Cannot switch FP8 MoE backend {old.value} -> {new.value} in place: "
+        f"they do not share a weight layout, so the weights on the device "
+        f"would have to be reconverted. Backends are picked per activation "
+        f"format, and the auto choice for one role may have no batched "
+        f"counterpart -- on Hopper with block-FP8 and EP, vLLM prefers "
+        f"FLASHINFER_CUTLASS, which does convert layout. Pin moe_backend to "
+        f"deep_gemm or triton so both roles use a layout-sharing pair."
+    )
+
+
+def rebuild_fp8_moe_kernel(
+    method,
+    layer,
+    weight_key: QuantKey | None,
+    activation_key: QuantKey | None,
+    allow_vllm_cutlass: bool = False,
+    dry_run: bool = False,
+) -> None:
+    """Re-select the experts class and rebuild ``method``'s MoE kernel.
+
+    Shared by the FP8 quantization methods that implement
+    ``rebuild_moe_kernel`` (``Fp8MoEMethod``, ``CompressedTensorsW8A8Fp8MoEMethod``);
+    the others that select through ``select_fp8_moe_backend`` differ only in
+    how they derive the two keys and can adopt it the same way. Used by P/D
+    role switching: after a
+    backend change the activation format and therefore the experts class
+    differ, and after a budget change on one backend only the buffer the
+    prepare/finalize is built around does.
+
+    Deliberately does NOT call convert_to_fp8_moe_kernel_format: the
+    standard and batched variants of one backend take the same branch
+    there, so the weights already on the device suit either. Re-running it
+    would allocate a second full-size copy of the weights this exists to
+    avoid moving.
+
+    With ``dry_run`` the selection and the compatibility checks run but
+    nothing is assigned, so a caller can refuse an impossible switch
+    before it has mutated anything. Buffer allocation is not covered: that
+    happens inside the real rebuild, per layer.
+    """
+    backend, experts_cls = select_fp8_moe_backend(
+        config=method.moe,
+        weight_key=weight_key,
+        activation_key=activation_key,
+        allow_vllm_cutlass=allow_vllm_cutlass,
+    )
+    if backend != method.fp8_backend:
+        assert_same_fp8_weight_layout(method.fp8_backend, backend)
+
+    # Checked before the dry_run return, not after: a dry run that passed and
+    # a real rebuild that then tripped one of these would defeat the point of
+    # offering a dry run at all. Refusals, not asserts, because the caller
+    # treats ValueError as "refused, keep serving".
+    if experts_cls is None:
+        raise ValueError(
+            f"Cannot rebuild the FP8 MoE kernel in place: the {backend.value} "
+            f"backend selects no experts class."
+        )
+    if method.moe_quant_config is None:
+        raise ValueError(
+            "Cannot rebuild the FP8 MoE kernel in place before the weights "
+            "have been loaded."
+        )
+    assert_hidden_dim_padding(method.moe)
+
+    if dry_run:
+        return
+
+    # Built before anything is assigned, so a failure in here leaves the
+    # method exactly as it was. Assigning first and building second would
+    # leave fp8_backend and experts_cls describing a kernel that was never
+    # built, and moe_kernel still running the outgoing one -- a layer that
+    # reports the new role while serving the old, which the caller cannot
+    # detect and has no way to roll back.
+    moe_kernel = make_fp8_moe_kernel(
+        moe_quant_config=method.moe_quant_config,
+        moe_config=method.moe,
+        fp8_backend=backend,
+        experts_cls=experts_cls,
+        routing_tables=layer._expert_routing_tables(),
+    )
+    method.fp8_backend = backend
+    method.experts_cls = experts_cls
+    method.moe_kernel = moe_kernel
 
 
 def make_fp8_moe_quant_config(
