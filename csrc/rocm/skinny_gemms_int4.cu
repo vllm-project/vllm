@@ -8,6 +8,7 @@
 
 #include <stdexcept>
 #include <algorithm>
+#include <type_traits>
 
 #include "../cuda_compat.h"
 #include "dispatch_utils.h"
@@ -171,15 +172,21 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     for (int i = 0; i < YTILE; i++)
       for (int n = 0; n < N; n++) sum[n][i] = 0;
 
-    bigTypeA bigA[N][UNRL];
     bigTypeW bigB[YTILE][UNRL];
 
-    for (uint32_t k1 = 0; k1 < K; k1 += THRDS * A_CHUNK * UNRL) {
+    // Load and compute halves, each instantiated twice on a constexpr CHECK
+    // flag. Whole K_STEP blocks take the unchecked one, where the UNRL weight
+    // loads clause together instead of being split by a divergent branch that
+    // drains vmcnt per step; only the ragged tail pays the check.
+    auto k_load = [&](auto CHECK_T, bigTypeW(&bigB)[YTILE][UNRL], uint32_t k1) {
+      constexpr bool CHECK = decltype(CHECK_T)::value;
   #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
         uint32_t k = k1 + k2 * THRDS * A_CHUNK;
         uint32_t k_ = k + threadIdx.x * A_CHUNK;
-        if (k_ >= K) break;
+        if constexpr (CHECK) {
+          if (k_ >= K) break;
+        }
 
         const uint8_t* B_ = &B_packed[(m + 0) * K_packed + k_ / 2];
         for (int y = 0; y < YTILE; y++) {
@@ -189,12 +196,20 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
             bigB[y][k2].f[i] = loadnt((float*)&src[i]);
         }
       }
+    };
+
+    auto k_compute = [&](auto CHECK_T, const bigTypeW(&bigB)[YTILE][UNRL],
+                         uint32_t k1) {
+      constexpr bool CHECK = decltype(CHECK_T)::value;
+      bigTypeA bigA[N][UNRL];
 
   #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
         uint32_t k = k1 + k2 * THRDS * A_CHUNK;
         uint32_t k_ = k + threadIdx.x * A_CHUNK;
-        if (k_ >= K) break;
+        if constexpr (CHECK) {
+          if (k_ >= K) break;
+        }
 
         for (int n = 0; n < N; n++) {
           bigA[n][k2] = *((const bigTypeA*)(&(s[k_ + K * n])));
@@ -205,7 +220,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
         uint32_t k = k1 + k2 * THRDS * A_CHUNK;
         uint32_t k_ = k + threadIdx.x * A_CHUNK;
-        if (k_ >= K) break;
+        if constexpr (CHECK) {
+          if (k_ >= K) break;
+        }
 
   #pragma unroll
         for (uint32_t n = 0; n < N; n++) {
@@ -321,6 +338,31 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
             }
           }
         }
+      }
+    };
+
+    constexpr uint32_t K_STEP = THRDS * A_CHUNK * UNRL;
+    // Instantiating the unchecked loop is worth several percent at N = 1, 2,
+    // 4 and 5, but at N = 3 with a wide unroll it is a consistent loss on
+    // every shape that reaches that tuple, and sweeping the whole tile grid
+    // at N = 3 finds nothing faster than what the dispatcher already picks.
+    // Drive that one combination through the checked instantiation.
+    constexpr bool CHECKED_K_LOOP = (N == 3) && (UNRL >= 4);
+
+    if constexpr (CHECKED_K_LOOP) {
+      for (uint32_t k1 = 0; k1 < K; k1 += K_STEP) {
+        k_load(std::true_type{}, bigB, k1);
+        k_compute(std::true_type{}, bigB, k1);
+      }
+    } else {
+      const uint32_t K_whole = K - (K % K_STEP);
+      for (uint32_t k1 = 0; k1 < K_whole; k1 += K_STEP) {
+        k_load(std::false_type{}, bigB, k1);
+        k_compute(std::false_type{}, bigB, k1);
+      }
+      if (K_whole < K) {
+        k_load(std::true_type{}, bigB, K_whole);
+        k_compute(std::true_type{}, bigB, K_whole);
       }
     }
 
