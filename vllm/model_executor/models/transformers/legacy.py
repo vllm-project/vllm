@@ -16,10 +16,14 @@
 # limitations under the License.
 """Transformers modeling backend mixin for legacy models."""
 
+from inspect import signature
 from typing import TYPE_CHECKING
 
 import torch
 
+from vllm import envs
+from vllm.config.compilation import CUDAGraphMode
+from vllm.model_executor.models.interfaces_base import get_score_type
 from vllm.sequence import IntermediateTensors
 
 if TYPE_CHECKING:
@@ -54,6 +58,29 @@ class LegacyMixin:
         # we should find a better way to handle this.
         self.is_roberta = "roberta" in self.text_config.model_type
         self.padding_idx = self.text_config.pad_token_id
+        self.register_buffer(
+            "_token_type_ids",
+            torch.zeros(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                dtype=torch.int32,
+                device=self.device_config.device,
+            )
+            if getattr(self.text_config, "type_vocab_size", 0) > 0
+            and "token_type_ids" in signature(self.model.forward).parameters
+            else None,
+            persistent=False,
+        )
+        if (
+            self._token_type_ids is not None
+            and get_score_type(self) == "cross-encoder"
+            and envs.VLLM_USE_BREAKABLE_CUDAGRAPH
+            and vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            raise ValueError(
+                "Transformers cross-encoders with token type IDs do not support "
+                "breakable CUDA graphs. Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 or "
+                "use enforce_eager=True."
+            )
 
     def forward(
         self,
@@ -61,7 +88,21 @@ class LegacyMixin:
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        token_type_ids: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        kwargs = {}
+        if self._token_type_ids is not None:
+            # Warmup and requests must use the same persistent graph input.
+            padded_token_type_ids = self._token_type_ids[: positions.shape[-1]]
+            padded_token_type_ids.zero_()
+            if token_type_ids is not None:
+                padded_token_type_ids[: token_type_ids.shape[-1]].copy_(token_type_ids)
+            kwargs["token_type_ids"] = padded_token_type_ids.unsqueeze(0)
+        elif token_type_ids is not None:
+            raise ValueError(
+                "Token type IDs require a Transformers model with a dedicated "
+                "token type vocabulary and token_type_ids input."
+            )
         if self.is_roberta:
             # RoBERTa positions start at padding_idx + 1.
             # Non-in-place add to avoid mutating the persistent GPU buffer --
@@ -72,4 +113,5 @@ class LegacyMixin:
             positions=positions,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
+            **kwargs,
         )

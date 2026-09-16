@@ -20,6 +20,7 @@ import os
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from functools import cached_property
+from inspect import signature
 from itertools import chain
 from operator import attrgetter
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -282,14 +283,21 @@ class Base(
     def _decorate_for_torch_compile(self):
         """Decorate the model's decoder class to indicate to vLLM that it
         supports torch compile if `can_enable_torch_compile` is True."""
+        # Applied to a PreTrainedModel so the batch dimension will exist.
+        dynamic_arg_dims = dict[str, int](
+            input_ids=1,  # shape: [1, seq_len]
+            inputs_embeds=1,  # shape: [1, seq_len, hidden_size]
+            position_ids=-1,  # shape: [1, seq_len] or [3, 1, seq_len] for mrope
+        )
+        if (
+            getattr(self.text_config, "type_vocab_size", 0) > 0
+            and "token_type_ids"
+            in signature(self._pre_trained_model_classes.decoder.forward).parameters
+        ):
+            dynamic_arg_dims["token_type_ids"] = 1
         self._decorate_cls_for_torch_compile(
             cls=self._pre_trained_model_classes.decoder,
-            # Applied to a PreTrainedModel so the batch dimension will exist
-            dynamic_arg_dims=dict[str, int](
-                input_ids=1,  # shape: [1, seq_len]
-                inputs_embeds=1,  # shape: [1, seq_len, hidden_size]
-                position_ids=-1,  # shape: [1, seq_len] or [3, 1, seq_len] for mrope
-            ),
+            dynamic_arg_dims=dynamic_arg_dims,
             enable_if=can_enable_torch_compile,
             is_encoder=False,
         )
@@ -675,9 +683,14 @@ class Base(
         is_encoder = lambda module: not getattr(module, "is_causal", True)
         has_encoder = lambda model: any(is_encoder(m) for m in model.modules())
         is_multimodal = lambda config: config != config.get_text_config()
+        text_is_encoder = getattr(self.text_config, "is_causal", None) is False
         # vLLM does not support encoder-decoder models, so if any encoder layer is
-        # found in a text only model, we assume the whole model is an encoder model
-        if has_encoder(self.model) and not is_multimodal(self.config):
+        # found in a text-only model, we assume the whole model is an encoder model.
+        # For multimodal models, use the text config so the modality encoder does not
+        # make an otherwise causal language model look bidirectional.
+        if text_is_encoder or (
+            has_encoder(self.model) and not is_multimodal(self.config)
+        ):
             self.check_version("5.0.0", "encoder models support")
             return EncoderOnlyAttention
         if self.model_config.use_mla:

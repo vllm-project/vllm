@@ -111,6 +111,48 @@ The three supported scoring functions are as illustrated in the figure below.
 
 --8<-- [end:supported-cross-encoder-models]
 
+#### Sentence Transformers module checkpoints
+
+vLLM also loads CrossEncoders saved by Sentence Transformers as
+`Transformer → Pooling → Dense`, without a model-specific classification class
+or `trust_remote_code`. The backbone must be supported by vLLM.
+
+```python
+from vllm import LLM
+
+model = LLM("path/to/checkpoint", trust_remote_code=False)
+outputs = model.score("query", ["document one", "document two"])
+```
+
+The checkpoint selects the pooling runner and classification conversion
+automatically. Supported exports have a feature-extraction Transformer at the
+checkpoint root, one `cls`, `mean`, or `lasttoken` pooling mode with
+`include_prompt=True`, and a Dense module mapping `sentence_embedding` to `scores`.
+vLLM loads the trained Dense weights, bias, and activation. CLS pooling requires
+right padding.
+
+Ordinary text pairs use tokenizer pair encoding. Exports declaring structured
+message inputs use their saved chat template with `query` and `document` roles;
+multimodal pairs additionally require a compatible multimodal backbone. The saved
+tokenizer length limit is used by default. Explicit tokenization options can
+override automatic truncation.
+
+Transformers-backend cross-encoders that use token type IDs support eager execution
+and ordinary piecewise CUDA graphs, but reject forced breakable CUDA graphs. Use
+`enforce_eager=True` or `VLLM_USE_BREAKABLE_CUDAGRAPH=0` for these models.
+
+Unsupported variants of this Pooling-based layout, saved prompts, custom processing
+settings, residual Dense layers, and prompt-excluding pooling are rejected instead
+of silently changing the checkpoint's behavior. This support does not interpret
+`Transformer → LogitScore` module stacks; existing model-specific reranker paths
+are unchanged.
+
+Saved CrossEncoder output activations take precedence over the backbone's
+`problem_type`, including the legacy `sbert_ce_default_activation_function`
+setting. A saved Sigmoid remains a sigmoid even for multi-output classifiers.
+Use `PoolingParams(use_activation=False)` to skip the final CrossEncoder
+activation; any activation within the Dense module still applies.
+
 ### Late-interaction models
 
 All models that support token embedding task also support using the score API to compute similarity scores by calculating the late interaction of two input prompts. See [this page](token_embed.md) for more information about token embedding models.
