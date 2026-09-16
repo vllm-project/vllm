@@ -9,6 +9,7 @@ change to them is what these tests catch.
 import asyncio
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -85,8 +86,17 @@ class _EncoderSession:
 
 
 @pytest.mark.parametrize("no_rewrite", [False, True])
-def test_image_batches_preserve_item_identity(proxy, monkeypatch, no_rewrite):
+@pytest.mark.parametrize(
+    "batch_size, expected_sizes", [(0, [3, 3]), (1, [1] * 6), (2, [2, 2, 1, 1])]
+)
+def test_image_batches_preserve_item_identity(
+    proxy, monkeypatch, no_rewrite, batch_size, expected_sizes
+):
     """Rehashed and repeated images retain metadata and per-occurrence transfers."""
+    from vllm.distributed.ec_transfer.ec_connector.mooncake.scheduler import (
+        ECMooncakeScheduler,
+    )
+
     seen = []
 
     class Session:
@@ -110,8 +120,9 @@ def test_image_batches_preserve_item_identity(proxy, monkeypatch, no_rewrite):
 
     monkeypatch.setattr(proxy, "encode_session", Session())
     monkeypatch.setattr(proxy, "NO_REWRITE", no_rewrite)
+    monkeypatch.setattr(proxy, "ENCODER_MAX_BATCH_SIZE", batch_size)
     monkeypatch.setattr(proxy, "encoder_rr_idx", 0)
-    images = ["A", "B", "C", "D", "A", "F"]
+    images = ["A", "A", "C", "D", "A", "F"]
     body = {
         "messages": [
             {
@@ -129,7 +140,7 @@ def test_image_batches_preserve_item_identity(proxy, monkeypatch, no_rewrite):
             body, ["http://e0", "http://e1"], "r", "tcp://consumer:1"
         )
     )
-    assert [len(b["messages"][0]["content"]) for _, b in seen] == [3, 3]
+    assert [len(b["messages"][0]["content"]) for _, b in seen] == expected_sizes
     assert (
         len(
             {
@@ -144,7 +155,7 @@ def test_image_batches_preserve_item_identity(proxy, monkeypatch, no_rewrite):
         assert batch["mm_processor_kwargs"] == body["mm_processor_kwargs"]
         for item in batch["messages"][0]["content"]:
             assert item["image_url"]["url"] in (
-                {"A", "C"} if url.startswith("http://e0/") else {"B", "D", "F"}
+                {"A", "C"} if url.startswith("http://e0/") else {"A", "D", "F"}
             )
     assert [meta[i]["image_grid_thw"][-1] for i in range(6)] == list(map(ord, images))
     assert [meta[i]["ec_mm_hash"] for i in range(6)] == [
@@ -152,6 +163,28 @@ def test_image_batches_preserve_item_identity(proxy, monkeypatch, no_rewrite):
     ]
     assert handles["A-processed"]["peer_port"] == 1234
     assert "ec_transfer_params" not in body
+
+    transfers_by_encoder: list[list[dict[str, str]]] = [[], []]
+    for url, batch in seen:
+        rank = 0 if url.startswith("http://e0/") else 1
+        transfers_by_encoder[rank].extend(batch["ec_transfer_params"]["ec_items"])
+    expected_transfers = [
+        transfers_by_encoder[i % 2][i // 2]["transfer_id"] for i in range(len(images))
+    ]
+    params = (
+        handles
+        if no_rewrite
+        else proxy.rewrite_for_decode(body, meta)["ec_transfer_params"]
+    )
+    request = SimpleNamespace(
+        ec_transfer_params=params,
+        mm_features=[
+            SimpleNamespace(identifier=image + "-processed") for image in images
+        ],
+    )
+    assert [
+        ECMooncakeScheduler._request_transfer_id(request, i) for i in range(len(images))
+    ] == expected_transfers
 
 
 def test_batch_rejects_ambiguous_metadata(proxy, monkeypatch):

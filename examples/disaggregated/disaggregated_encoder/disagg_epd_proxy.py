@@ -100,6 +100,11 @@ def validate_ec_consumer_routing(
 # Diagnostic switch: forward the original request to the decoder so the
 # only difference from the rewrite path is the rewrite itself.
 NO_REWRITE = False
+# Maximum images per encoder subrequest; 0 leaves batches unlimited.
+ENCODER_MAX_BATCH_SIZE = int(os.getenv("ENCODER_MAX_BATCH_SIZE", "0"))
+if ENCODER_MAX_BATCH_SIZE < 0:
+    raise ValueError("ENCODER_MAX_BATCH_SIZE must be non-negative")
+
 # Decode-side retries for a retryable internal error (`finish_reason="error"`,
 # e.g. an encoder embedding the connector could not deliver). Re-issuing runs
 # the encode again, which produces a fresh transfer.
@@ -251,6 +256,7 @@ async def fanout_encoder_primer(
     item_uuids: dict[int, str] = {}
     item_transfer_ids: dict[int, str] = {}
     item_meta: dict[int, dict] = {}
+    transfer_items: dict[int, dict[str, str]] = {}
     ec_params: dict[str, Any] = {}
 
     # Round-robin over encode servers to distribute load a bit. The cursor
@@ -267,7 +273,9 @@ async def fanout_encoder_primer(
     for idx, (item, target_url) in enumerate(zip(mm_items, url_cycle)):
         if item["type"] == "image_url":
             indices = image_groups.get(target_url)
-            if indices is None:
+            if indices is None or (
+                ENCODER_MAX_BATCH_SIZE and len(indices) >= ENCODER_MAX_BATCH_SIZE
+            ):
                 indices = []
                 image_groups[target_url] = indices
                 groups.append((target_url, indices))
@@ -410,9 +418,13 @@ async def fanout_encoder_primer(
                 # looks it up by mm_hash on the request, so carry it through.
                 ec_params[ec_mm_hash] = reported
                 if NO_REWRITE and consumer_zmq is not None:
-                    ec_params.setdefault("ec_items", []).append(
-                        {"mm_hash": ec_mm_hash, "transfer_id": item_transfer_ids[idx]}
-                    )
+                    transfer_items[idx] = {
+                        "mm_hash": ec_mm_hash,
+                        "transfer_id": item_transfer_ids[idx],
+                    }
+
+    if transfer_items:
+        ec_params["ec_items"] = [transfer_items[idx] for idx in sorted(transfer_items)]
 
     logger.info(
         "[%s] All %d encoder requests completed successfully", req_id, len(groups)
