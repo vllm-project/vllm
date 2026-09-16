@@ -193,6 +193,7 @@ class DecodeBenchConnectorScheduler:
 
     def __init__(self, vllm_config: "VllmConfig", kv_cache_config: "KVCacheConfig"):
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
+        self.kv_cache_groups = kv_cache_config.kv_cache_groups
         self.group_block_sizes = tuple(
             resolve_dcp_kv_block_size(
                 group.kv_cache_spec,
@@ -201,7 +202,7 @@ class DecodeBenchConnectorScheduler:
                     dcp_world_size,
                 ),
             )
-            for group in kv_cache_config.kv_cache_groups
+            for group in self.kv_cache_groups
         )
 
         # Track which requests have already been filled
@@ -261,17 +262,56 @@ class DecodeBenchConnectorScheduler:
         if num_external_tokens == 0:
             return
 
-        # Get the block IDs that were allocated
-        # block_groups is a tuple of lists, one per KV cache group
-        block_groups = blocks.get_block_ids()
-
-        # Extract the blocks covering the external tokens from each group
-        block_ids_per_group = tuple(
-            group_blocks[: cdiv(num_external_tokens, group_block_size)]
-            for group_blocks, group_block_size in zip(
-                block_groups, self.group_block_sizes, strict=True
+        total_computed_tokens = request.num_tokens - 1
+        num_local_computed_tokens = total_computed_tokens - num_external_tokens
+        block_ids_per_group_list: list[list[int]] = []
+        for group_idx, (
+            group,
+            group_blocks,
+            group_block_size,
+        ) in enumerate(
+            zip(
+                self.kv_cache_groups,
+                blocks.blocks,
+                self.group_block_sizes,
+                strict=True,
             )
-        )
+        ):
+            is_circular_buffer = all(
+                isinstance(spec, CircularBufferSpec)
+                for spec in iter_layer_specs(group.kv_cache_spec)
+            )
+            if not is_circular_buffer:
+                num_computed_blocks = cdiv(total_computed_tokens, group_block_size)
+                external_block_start = num_local_computed_tokens // group_block_size
+                assert (
+                    0
+                    <= external_block_start
+                    <= num_computed_blocks
+                    <= len(group_blocks)
+                ), (
+                    "DecodeBenchConnector block range exceeds allocated blocks: "
+                    f"request={req_id}, group={group_idx}, "
+                    f"range=[{external_block_start}, {num_computed_blocks}), "
+                    f"allocated={len(group_blocks)}"
+                )
+                selected_blocks = group_blocks[external_block_start:num_computed_blocks]
+            else:
+                selected_blocks = group_blocks
+
+            block_ids = [
+                block.block_id for block in selected_blocks if not block.is_null
+            ]
+            if not block_ids:
+                logger.warning(
+                    "DecodeBenchConnector: No blocks selected for KV cache group "
+                    "%d with %d external tokens for request %s",
+                    group_idx,
+                    num_external_tokens,
+                    req_id,
+                )
+            block_ids_per_group_list.append(block_ids)
+        block_ids_per_group = tuple(block_ids_per_group_list)
 
         # Store the blocks to fill for all group. _pending_fills doesn't need cleanup
         # as it's cleared after build_connector_meta
@@ -286,7 +326,7 @@ class DecodeBenchConnectorScheduler:
             "DecodeBenchConnector: Selected %d total blocks across %d KV cache "
             "groups for request %s (per-group counts: %s)",
             sum(block_counts),
-            len(block_groups),
+            len(blocks.blocks),
             req_id,
             ", ".join(map(str, block_counts)),
         )

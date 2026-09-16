@@ -637,9 +637,11 @@ def kpool_decode_update_and_maybe_write_cache_batched(
         tail_kv_cache: paged tail cache ``[num_blocks, 2, pool_size, head_dim]``
             bf16 (K at half 0, gate score at half 1).
         tail_slot_mapping: ``[num_requests, next_n]`` int32.
-        key / slot_score: ``[num_requests, next_n, head_dim]`` bf16.
+        key: ``[num_requests, next_n, head_dim]`` bf16.
+        slot_score: ``[num_requests, next_n, head_dim]`` bf16.
         ape: ``[pool_size, head_dim]`` fp32.
-        slot_mapping / positions: ``[num_requests, next_n]`` int32.
+        slot_mapping: ``[num_requests, next_n]`` int32.
+        positions: ``[num_requests, next_n]`` int32.
     """
     num_requests, next_n = key.shape[0], key.shape[1]
     if num_requests == 0 or next_n == 0:
