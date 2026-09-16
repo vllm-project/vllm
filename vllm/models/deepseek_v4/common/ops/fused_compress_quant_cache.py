@@ -35,6 +35,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
+from vllm.v1.worker.cp_utils import cp_global_to_local_block
 
 if current_platform.is_rocm():
     from vllm.platforms.rocm import _ON_GFX950
@@ -142,6 +143,106 @@ def compress_norm_rope_store_triton(
         **kernel_kwargs,
         **pdl_kwargs,
     )
+
+
+@triton.jit
+def dsv4_dcp_compressor_partial_stats_kernel(
+    # ── state cache (compressor internal state) ──
+    state_cache_ptr,
+    state_cache_stride0,
+    state_cache_stride1,
+    # ── metadata ──
+    token_to_req_indices_ptr,
+    positions_ptr,
+    block_table_ptr,
+    block_table_stride,
+    block_size,
+    # ── outputs ──
+    partial_m_ptr,
+    partial_s_ptr,
+    partial_v_ptr,
+    partial_stride0,
+    # ── constexprs ──
+    HEAD_SIZE: tl.constexpr,
+    TRITON_BLOCK_SIZE: tl.constexpr,
+    STATE_WIDTH: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    OVERLAP: tl.constexpr,
+    DCP_WORLD_SIZE: tl.constexpr,
+    DCP_RANK: tl.constexpr,
+    CP_KV_CACHE_INTERLEAVE_SIZE: tl.constexpr,
+):
+    token_idx = tl.program_id(0)
+
+    # T rows x H channels for all per-channel partial stats
+    # dcp_softmax_reduce later merges them rank-against-rank elementwise
+    # T * H independent softmaxes
+    block = tl.arange(0, TRITON_BLOCK_SIZE)
+    mask = block < HEAD_SIZE
+    out_offsets = token_idx * partial_stride0 + block
+
+    tl.store(partial_m_ptr + out_offsets, -float("inf"), mask=mask)
+    tl.store(partial_s_ptr + out_offsets, 0.0, mask=mask)
+    tl.store(partial_v_ptr + out_offsets, 0.0, mask=mask)
+
+    # NOTE: due to current allreduce limitations, need to instantiate tensors
+    #       with lots of wasted space (only the positions on the compression boundaries matter)
+    # TODO: optimize this to reduce waste on C4A and C128A attention layers
+    position = tl.load(positions_ptr + token_idx)
+    if (position + 1) % COMPRESS_RATIO != 0:
+        return
+
+    req_idx = tl.load(token_to_req_indices_ptr + token_idx)
+    start = position - (1 + OVERLAP) * COMPRESS_RATIO + 1
+    tokens = tl.arange(0, (1 + OVERLAP) * COMPRESS_RATIO)
+    pos = start + tokens
+    mask_pos = pos >= 0
+
+    block_indices, local_block_offsets, is_local = cp_global_to_local_block(
+        pos,
+        block_size,
+        DCP_WORLD_SIZE,
+        DCP_RANK,
+        CP_KV_CACHE_INTERLEAVE_SIZE,
+    )
+    mask_pos = mask_pos & is_local
+
+    block_numbers = tl.load(
+        block_table_ptr + req_idx * block_table_stride + block_indices,
+        mask=mask_pos,
+        other=0,
+    )
+    head_offset = (tokens >= COMPRESS_RATIO).to(tl.int32) * HEAD_SIZE
+    row_base = (
+        state_cache_ptr
+        + block_numbers.to(tl.int64) * state_cache_stride0
+        + local_block_offsets * state_cache_stride1
+        + head_offset
+    )
+    combined_mask = mask_pos[:, None] & mask[None, :]
+
+    score = tl.load(
+        row_base[:, None] + STATE_WIDTH + block[None, :],
+        mask=combined_mask,
+        other=-float("inf"),
+    )
+    local_m = tl.max(score, axis=0)
+    safe_m = tl.where(local_m == -float("inf"), 0.0, local_m)
+    weight = tl.exp(score - safe_m[None, :])
+    weight = tl.where(combined_mask, weight, 0.0)
+    local_s = tl.sum(weight, axis=0)
+
+    kv = tl.load(
+        row_base[:, None] + block[None, :],
+        mask=combined_mask,
+        other=0.0,
+    )
+    local_v = tl.sum(kv * weight, axis=0)
+    local_m = tl.where(local_s > 0, local_m, -float("inf"))
+
+    tl.store(partial_m_ptr + out_offsets, local_m, mask=mask)
+    tl.store(partial_s_ptr + out_offsets, local_s, mask=mask)
+    tl.store(partial_v_ptr + out_offsets, local_v, mask=mask)
 
 
 # =============================================================================
