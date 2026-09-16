@@ -51,6 +51,7 @@ class ExternalElasticEPScalePhase(str, enum.Enum):
 class ExternalElasticEPScaleUpHandshakeMetadata:
     engine_metadata: EngineHandshakeMetadata
     num_redundant_experts: int
+    elastic_ep_max_dp_size: int
 
 
 class ExternalElasticEPScaleUpHandshakeServer:
@@ -75,12 +76,14 @@ class ExternalElasticEPScaleUpHandshakeServer:
         addresses: EngineZmqAddresses,
         bootstrap: ReconfigureDistributedRequest,
         num_redundant_experts: int,
+        elastic_ep_max_dp_size: int,
     ) -> None:
         self.handshake_address = handshake_address
         self.expected_new_ranks = set(expected_new_ranks)
         self.addresses = addresses
         self.bootstrap = bootstrap
         self.num_redundant_experts = num_redundant_experts
+        self.elastic_ep_max_dp_size = elastic_ep_max_dp_size
         self.started_event = Event()
         self._stop_event = Event()
         self._thread = Thread(
@@ -168,6 +171,7 @@ class ExternalElasticEPScaleUpHandshakeServer:
                                     parallel_config=parallel_config,
                                 ),
                                 num_redundant_experts=self.num_redundant_experts,
+                                elastic_ep_max_dp_size=self.elastic_ep_max_dp_size,
                             )
                         )
                         handshake_socket.send_multipart(
@@ -424,6 +428,7 @@ class ExternalElasticEPScaleCoordinator:
         bootstrap: ReconfigureDistributedRequest,
         cur_data_parallel_size: int,
         num_redundant_experts: int,
+        elastic_ep_max_dp_size: int,
     ) -> ExternalElasticEPScaleUpHandshakeServer:
         handshake_server = ExternalElasticEPScaleUpHandshakeServer(
             handshake_address=get_engine_client_zmq_addr(
@@ -440,6 +445,7 @@ class ExternalElasticEPScaleCoordinator:
             addresses=self._get_existing_engine_zmq_address(),
             bootstrap=bootstrap,
             num_redundant_experts=num_redundant_experts,
+            elastic_ep_max_dp_size=elastic_ep_max_dp_size,
         )
         handshake_server.start()
         return handshake_server
@@ -600,6 +606,12 @@ class ExternalElasticEPScaleCoordinator:
         parallel_config = self.client.vllm_config.parallel_config
         dp_rank = parallel_config.data_parallel_rank
         scale_up = new_data_parallel_size > cur_data_parallel_size
+        if new_data_parallel_size > parallel_config.elastic_ep_max_dp_size:
+            raise ValueError(
+                f"Cannot scale to data_parallel_size {new_data_parallel_size}; "
+                "--elastic-ep-max-dp-size is "
+                f"{parallel_config.elastic_ep_max_dp_size}."
+            )
         if not parallel_config._coord_store_port:
             raise RuntimeError(
                 "External Elastic EP requires a runtime coordination store port."
@@ -634,6 +646,7 @@ class ExternalElasticEPScaleCoordinator:
                         bootstrap,
                         cur_data_parallel_size,
                         num_redundant_experts,
+                        parallel_config.elastic_ep_max_dp_size,
                     )
                 control_store.set(self.key(epoch, "prepared"), b"1")
             else:
