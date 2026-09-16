@@ -5813,6 +5813,7 @@ dependencies = [
  "vllm-engine-core-client",
  "vllm-managed-engine",
  "vllm-server",
+ "vllm-text",
  "vllm-tracing",
 ]
 

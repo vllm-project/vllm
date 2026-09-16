@@ -129,7 +129,8 @@ pub(super) async fn load_model_backends(
     model_id: &str,
     options: LoadModelBackendsOptions,
 ) -> Result<LoadedModelBackends> {
-    let files = ResolvedModelFiles::new(model_id, options.revision.as_deref()).await?;
+    let mut files = ResolvedModelFiles::new(model_id, options.revision.as_deref()).await?;
+    files.apply_overrides(&options.hf_overrides)?;
     let text_backend = HfTextBackend::from_resolved_model_files(
         files.clone(),
         model_id.to_string(),
@@ -166,13 +167,11 @@ fn resolve_multimodal_render_info(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::path::PathBuf;
     use std::sync::Arc;
 
     use tempfile::tempdir;
     use thiserror_ext::AsReport as _;
     use vllm_text::Prompt;
-    use vllm_text::backend::hf::TokenizerSource;
     use vllm_text::tokenizer::DynTokenizer;
     use vllm_tokenizer::test_utils::TestTokenizer;
 
@@ -206,16 +205,12 @@ mod tests {
         write_json(&config_path, config_json);
         write_json(&tokenizer_config_path, tokenizer_config_json);
 
-        vllm_text::backend::hf::ResolvedModelFiles {
-            tokenizer: TokenizerSource::HuggingFace(PathBuf::from("/tmp/unused-tokenizer.json")),
-            tokenizer_config_path: Some(tokenizer_config_path),
-            generation_config_path: None,
-            preprocessor_config_path: None,
-            video_preprocessor_config_path: None,
-            processor_config_path: None,
-            chat_template_path: None,
-            config_path: Some(config_path),
-        }
+        write_json(&root.join("tokenizer.json"), "{}");
+        futures::executor::block_on(vllm_text::backend::hf::ResolvedModelFiles::new(
+            root.to_str().unwrap(),
+            None,
+        ))
+        .unwrap()
     }
 
     fn test_tokenizer() -> DynTokenizer {
@@ -232,6 +227,7 @@ mod tests {
             "test-model".to_string(),
             LoadModelBackendsOptions {
                 revision: None,
+                hf_overrides: Default::default(),
                 generation_config: Default::default(),
                 renderer,
                 language_model_only: false,
