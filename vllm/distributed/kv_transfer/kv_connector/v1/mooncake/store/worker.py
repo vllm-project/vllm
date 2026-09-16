@@ -36,6 +36,9 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.distributed.kv_events import BlockStored
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorTransferResults,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import rdma_utils
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     ExternalCachedBlockPool,
@@ -67,6 +70,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_socket
+from vllm.utils.torch_utils import is_non_overlapping_and_dense
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -1264,6 +1268,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         record_operation: Callable[..., None] | None = None,
         request_queue: queue.Queue[Any] | None = None,
         group_participates: Sequence[bool] | None = None,
+        is_hma_required: bool = False,
     ):
         super().__init__(
             store,
@@ -1283,6 +1288,10 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         # _invalid_block_ids can be access by both the Worker and RecvingThread
         self._invalid_block_ids_lock = threading.Lock()
         self._invalid_block_ids: set[int] = set()
+        # With HMA the scheduler tracks a single merged group while block IDs
+        # are only unique within a group, so failures are reported per request.
+        self._is_hma_required = is_hma_required
+        self._failed_requests: set[str] = set()
         self.disk_offload_buffer_budget_bytes = disk_offload_buffer_budget_bytes
         self.usable_disk_offload_buffer_budget_bytes = (
             None
@@ -1296,6 +1305,22 @@ class KVCacheStoreRecvingThread(KVTransferThread):
     def _add_load_error_block_ids(self, block_ids: list[int]) -> None:
         with self._invalid_block_ids_lock:
             self._invalid_block_ids.update(block_ids)
+
+    def set_failed_request(self, req_id: str):
+        with self.done_task_lock:
+            self._failed_requests.add(req_id)
+
+    def get_and_clear_failed_requests(self) -> set[str]:
+        with self.done_task_lock:
+            failed = self._failed_requests.copy()
+            self._failed_requests.clear()
+        return failed
+
+    def _report_load_error(self, req_id: str, block_ids: list[int]) -> None:
+        if self._is_hma_required:
+            self.set_failed_request(req_id)
+        else:
+            self._add_load_error_block_ids(block_ids)
 
     def get_and_clear_block_ids_with_load_errors(self) -> set[int]:
         with self._invalid_block_ids_lock:
@@ -1391,7 +1416,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     # Mark every block: we skip the whole request, and the
                     # tp_rank rotation means oversized_key isn't necessarily
                     # the first block in the request's original order.
-                    self._add_load_error_block_ids(block_id_list_c)
+                    self._report_load_error(req_id, block_id_list_c)
                     oversized_key_bytes = _estimate_disk_offload_staging_bytes(
                         size_list_c[oversized_key_index]
                     )
@@ -1464,8 +1489,8 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     num_failed_keys=len(failed),
                 )
                 if failed:
-                    self._add_load_error_block_ids(
-                        [block_id for _, _, block_id in failed]
+                    self._report_load_error(
+                        req_id, [block_id for _, _, block_id in failed]
                     )
                     logger.warning(
                         "Failed to get %d Mooncake keys from sub-batch "
@@ -1476,7 +1501,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     )
                     break
         except Exception as e:
-            self._add_load_error_block_ids(current_batch_block_ids)
+            self._report_load_error(req_id, current_batch_block_ids)
             self._record_operation(
                 "load_get",
                 load_get_start,
@@ -1550,6 +1575,13 @@ class MooncakeStoreWorker:
             and not self.can_put
         )
         self.cache_config = vllm_config.cache_config
+        self._is_hma_required = (
+            not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
+            and any(
+                not isinstance(g.kv_cache_spec, FullAttentionSpec)
+                for g in kv_cache_config.transfer_groups
+            )
+        )
         self.block_size, self.hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
         )
@@ -1671,10 +1703,11 @@ class MooncakeStoreWorker:
             dataclasses.replace(
                 group,
                 kv_cache_spec=resolve_dcp_kv_cache_spec(
-                    group.kv_cache_spec, self.dcp_size
+                    group.kv_cache_spec,
+                    self.dcp_size,
                 ),
             )
-            for group in kv_cache_config.transfer_groups
+            for group in kv_cache_config.prefix_cacheable_groups
         ]
         spec_cfg = getattr(vllm_config, "speculative_config", None)
         use_eagle_block_drop = bool(
@@ -1909,21 +1942,37 @@ class MooncakeStoreWorker:
             logger.warning("No KV caches to offload.")
             return
 
+        # Resolve each entry to a representative tensor for storage
+        # deduplication. For attention layers the value is already a tensor;
+        # for Mamba layers it is a list of tensors that all share the same
+        # underlying raw storage, so we take the first one.
+        def _repr_tensor(v: torch.Tensor | list[torch.Tensor]) -> torch.Tensor:
+            assert isinstance(v, torch.Tensor | list)
+            return v if isinstance(v, torch.Tensor) else v[0]
+
         assert self.cache_config.num_gpu_blocks is not None
         self.num_blocks = self.cache_config.num_gpu_blocks
+        use_group_regions = self._kv_cache_config.hisparse_host_num_blocks is not None
 
-        seen_storage_ptrs: set[int] = set()
-        cache_tensors: list[torch.Tensor] = []
-
-        for cache in kv_caches.values():
-            cache = group_kernel_blocks(cache, self.num_blocks)
-            cache_tensors.append(cache)
-            cache_storage = cache.untyped_storage()
-            base_addr = cache_storage.data_ptr()
-            region_len = cache_storage.nbytes()
-
-            if base_addr not in seen_storage_ptrs:
+        if not use_group_regions:
+            store_layer_names = {
+                layer_name
+                for group in self._kv_cache_groups
+                for layer_name in group.layer_names
+            }
+            seen_storage_ptrs: set[int] = set()
+            cache_tensors = [
+                group_kernel_blocks(_repr_tensor(cache), self.num_blocks)
+                for layer_name, cache in kv_caches.items()
+                if layer_name in store_layer_names
+            ]
+            for cache in cache_tensors:
+                cache_storage = cache.untyped_storage()
+                base_addr = cache_storage.data_ptr()
+                if base_addr in seen_storage_ptrs:
+                    continue
                 seen_storage_ptrs.add(base_addr)
+                region_len = cache_storage.nbytes()
                 ret = self.store.register_buffer(base_addr, region_len)
                 if ret != 0:
                     logger.error(
@@ -1932,16 +1981,109 @@ class MooncakeStoreWorker:
                         region_len,
                         ret,
                     )
+            for db in self.token_dbs:
+                db.store_layout.register_kv_caches(cache_tensors, self.num_blocks)
+
+        registered_buffers: dict[int, int] = {}
+        num_host_segments = 0
+        num_device_segments = 0
+
+        for group, db in zip(self._kv_cache_groups, self.token_dbs, strict=True):
+            if not use_group_regions:
+                continue
+            missing_layers = [
+                layer_name
+                for layer_name in group.layer_names
+                if layer_name not in kv_caches
+            ]
+            if missing_layers:
+                raise ValueError(
+                    f"Missing transferable KV caches for layers: {missing_layers}"
+                )
+            group_caches = [
+                (layer_name, kv_caches[layer_name]) for layer_name in group.layer_names
+            ]
+
+            seen_group_ptrs: set[int] = set()
+            addrs: list[int] = []
+            block_lens: list[int] = []
+            for layer_name, value in group_caches:
+                cache = _repr_tensor(value)
+                is_host_resident = group.host_resident
+                if is_host_resident:
+                    num_blocks = self._kv_cache_config.hisparse_host_num_blocks
+                    assert num_blocks is not None
+                else:
+                    num_blocks = self._kv_cache_config.num_blocks
+                cache = group_kernel_blocks(cache, num_blocks)
+                cache_storage = cache.untyped_storage()
+                if is_host_resident:
+                    base_addr = cache.data_ptr()
+                    region_len = cache.nbytes
+                else:
+                    base_addr = cache_storage.data_ptr()
+                    region_len = cache_storage.nbytes()
+                if region_len % num_blocks != 0:
+                    raise ValueError(
+                        f"KV cache region for {layer_name} has size {region_len}, "
+                        f"which is not divisible by its {num_blocks} blocks."
+                    )
+
+                registered_len = registered_buffers.get(base_addr)
+                if registered_len is None:
+                    ret = self.store.register_buffer(base_addr, region_len)
+                    if ret != 0:
+                        mem_kind = "host" if is_host_resident else "device"
+                        raise RuntimeError(
+                            "Mooncake register_buffer failed for addr "
+                            f"{base_addr:#x} len {region_len} ({mem_kind}): {ret}"
+                        )
+                    registered_buffers[base_addr] = region_len
+                elif registered_len != region_len:
+                    raise ValueError(
+                        f"KV cache views at {base_addr:#x} expose inconsistent "
+                        f"region sizes: {registered_len} and {region_len}."
+                    )
+
+                regions: list[tuple[int, int]] = []
+                if not is_non_overlapping_and_dense(cache[0]):
+                    for head_idx in range(cache.shape[1]):
+                        head_cache = cache[:, head_idx]
+                        assert is_non_overlapping_and_dense(head_cache[0])
+                        regions.append(
+                            (
+                                head_cache.data_ptr(),
+                                head_cache.stride(0) * head_cache.element_size(),
+                            )
+                        )
+                elif cache.stride(0) * cache.element_size() * num_blocks == region_len:
+                    regions.append((base_addr, region_len // num_blocks))
+                else:
+                    regions.append(
+                        (cache.data_ptr(), cache.stride(0) * cache.element_size())
+                    )
+
+                for region_addr, block_len in regions:
+                    if region_addr in seen_group_ptrs:
+                        continue
+                    seen_group_ptrs.add(region_addr)
+                    addrs.append(region_addr)
+                    block_lens.append(block_len)
+                    if is_host_resident:
+                        num_host_segments += 1
+                    else:
+                        num_device_segments += 1
+
+            db.set_kv_caches_base_addr(addrs)
+            db.set_block_len(block_lens)
 
         logger.info(
-            "Registered KV caches: num_groups=%d, num_tensors=%d, num_blocks=%d",
+            "Registered KV caches: num_groups=%d, num_segments=%d (host=%d, device=%d)",
             len(self.token_dbs),
-            len(cache_tensors),
-            self.num_blocks,
+            num_host_segments + num_device_segments,
+            num_host_segments,
+            num_device_segments,
         )
-
-        for db in self.token_dbs:
-            db.store_layout.register_kv_caches(cache_tensors, self.num_blocks)
 
         # Start transfer threads
         if self.can_put:
@@ -1985,6 +2127,7 @@ class MooncakeStoreWorker:
                     group.kv_cache_spec.prefix_cacheable
                     for group in self._kv_cache_groups
                 ],
+                is_hma_required=self._is_hma_required,
             )
             recv_thread.name = f"KVCacheStoreRecvingThread-{i}"
             recv_thread.start()
@@ -2073,6 +2216,26 @@ class MooncakeStoreWorker:
         for recv_thread in self.kv_recv_threads:
             block_ids |= recv_thread.get_and_clear_block_ids_with_load_errors()
         return block_ids
+
+    def get_transfer_results(
+        self, finished_req_ids: set[str], meta: MooncakeStoreConnectorMetadata
+    ) -> KVConnectorTransferResults:
+        """Get completed sends/recvs plus requests whose remote KV load failed."""
+        done_sending, done_recving = self.get_finished(finished_req_ids, meta)
+
+        if self._capacity_only:
+            return KVConnectorTransferResults(done_sending, done_recving)
+
+        failed_recving: set[str] = set()
+        if self.load_async:
+            for recv_thread in self.kv_recv_threads:
+                failed_recving |= recv_thread.get_and_clear_failed_requests()
+
+        return KVConnectorTransferResults(
+            finished_sending=done_sending,
+            finished_recving=done_recving,
+            failed_recving=failed_recving,
+        )
 
     def _record_kv_connector_operation(
         self,
@@ -2316,6 +2479,19 @@ class MooncakeStoreWorker:
         if store is None:
             return
         self.store = None
+        deadline = time.monotonic() + 5.0
+        for thread in (self.kv_send_thread, *self.kv_recv_threads):
+            if thread is None:
+                continue
+            while thread.request_queue.unfinished_tasks and time.monotonic() < deadline:
+                time.sleep(0.05)
+            if thread.request_queue.unfinished_tasks:
+                logger.warning(
+                    "Mooncake store %s still has %d in-flight requests at "
+                    "close; closing anyway.",
+                    thread.name,
+                    thread.request_queue.unfinished_tasks,
+                )
         try:
             store.close()
         except Exception as e:

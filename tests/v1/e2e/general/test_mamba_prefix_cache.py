@@ -31,9 +31,8 @@ from vllm.v1.request import Request
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker import mamba_utils
-from vllm.v1.worker.gpu_input_batch import CachedRequestState
+from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
 from vllm.v1.worker.mamba_utils import get_mamba_groups
 
 
@@ -315,7 +314,7 @@ def get_fake_process_mamba_fn(
         action: tuple[int, int],
         kv_cache_config: KVCacheConfig,
         forward_context: dict[str, Any],
-        input_batch: GPUInputBatch,
+        input_batch: InputBatch,
     ):
         assert copy_info is not None
         if action == (-1, -1):
@@ -371,7 +370,7 @@ def get_fake_process_mamba_fn(
         kv_cache_config: KVCacheConfig,
         cache_config: CacheConfig,
         mamba_state_idx: dict[str, int],
-        input_batch: GPUInputBatch,
+        input_batch: InputBatch,
         requests: dict[str, CachedRequestState],
         forward_context: dict[str, Any],
         mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],

@@ -70,8 +70,7 @@ from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
-from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputManager
-from vllm.v1.structured_output.utils import strip_speculative_padding
+from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
@@ -263,13 +262,7 @@ class Scheduler(SchedulerInterface):
         self.use_eagle_block_drop = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
         self.num_lookahead_tokens = vllm_config.num_lookahead_tokens
-        # Positions past the computed tokens that the drafter reads mid-prefill.
-        # Eagle-family drafters read 1 ahead, but multi-module MTP reads
-        # num_spec_tokens ahead at chunked-prefill boundaries. Determines the
-        # encoder scheduling shift, the deferred encoder free, the KV cache
-        # manager's re-prefillable window (this minus 1), and how many tokens to
-        # reserve between a chunk boundary and the prefill end.
-        self.num_prefill_lookahead = 0
+        self.num_prefill_lookahead = vllm_config.num_prefill_lookahead_tokens
         self.dynamic_sd_lookup: list[int] | None = None
         if speculative_config is not None:
             if speculative_config.num_speculative_tokens_per_batch_size:
@@ -279,12 +272,6 @@ class Scheduler(SchedulerInterface):
                     vllm_num_speculative_tokens=self.num_spec_tokens,
                 )
             self.use_eagle = speculative_config.use_eagle()
-            if self.use_eagle:
-                self.num_prefill_lookahead = (
-                    self.num_spec_tokens
-                    if speculative_config.use_multi_module_mtp()
-                    else 1
-                )
             self.use_eagle_block_drop = speculative_config.use_eagle_block_drop()
             if self.use_eagle and not self.use_eagle_block_drop:
                 logger.warning(
@@ -316,10 +303,9 @@ class Scheduler(SchedulerInterface):
                 self.cache_config.enable_mamba_fine_grained_prefix_cache
             ),
         )
-        # Bind GPU block pool to the KV connector. This must happen after
-        # kv_cache_manager is constructed so block_pool is available.
+        # Bind after construction so connectors can access the cache manager.
         if self.connector is not None:
-            self.connector.bind_gpu_block_pool(self.kv_cache_manager.block_pool)
+            self.connector.bind_kv_cache_manager(self.kv_cache_manager)
 
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
@@ -736,6 +722,12 @@ class Scheduler(SchedulerInterface):
 
                     if new_blocks is not None:
                         # The request can be scheduled.
+                        break
+
+                    if (
+                        self.connector is not None
+                        and self.connector.has_pending_block_frees()
+                    ):
                         break
 
                     # The request cannot be scheduled.
@@ -1895,14 +1887,20 @@ class Scheduler(SchedulerInterface):
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: SpecDecodingStats | None = None
 
-        failed_kv_load_req_ids = None
+        failed_kv_load_req_ids: set[str] = set()
+        if kv_connector_output and kv_connector_output.failed_recving:
+            failed_kv_load_req_ids.update(
+                self._handle_failed_recving(kv_connector_output.failed_recving)
+            )
         if kv_connector_output and kv_connector_output.invalid_block_ids:
             # These blocks contain externally computed tokens that failed to
             # load. Identify affected requests and adjust their computed token
             # count to trigger recomputation of the invalid blocks.
-            failed_kv_load_req_ids = self._handle_invalid_blocks(
-                kv_connector_output.invalid_block_ids,
-                num_scheduled_tokens,
+            failed_kv_load_req_ids.update(
+                self._handle_invalid_blocks(
+                    kv_connector_output.invalid_block_ids,
+                    num_scheduled_tokens,
+                )
             )
 
         # Persist per-step routed experts into the scheduler-side slot
@@ -2041,33 +2039,18 @@ class Scheduler(SchedulerInterface):
                 request.status = RequestStatus.FINISHED_STOPPED
                 stopped = True
 
-            if new_token_ids and self.structured_output_manager.should_advance(
-                request, new_token_ids=new_token_ids
+            if new_token_ids and not self.structured_output_manager.accept_tokens(
+                request, new_token_ids
             ):
-                struct_output_request = request.structured_output_request
-                assert struct_output_request is not None
-                grammar = struct_output_request.grammar
-                assert isinstance(grammar, StructuredOutputGrammar)
-                # new_token_ids can be a mixed block of reasoning content, then
-                # the reasoning end marker, then the start of the grammar content.
-                # Trim the reasoning content so the grammar only sees grammar content.
-                advance_token_ids = (
-                    self.structured_output_manager.trim_reasoning_for_advance(
-                        request, new_token_ids
-                    )
+                logger.error(
+                    "Unexpected: grammar rejected tokens %s for request %s. "
+                    "Terminating request.",
+                    new_token_ids,
+                    req_id,
                 )
-                if advance_token_ids and not grammar.accept_tokens(
-                    req_id, advance_token_ids
-                ):
-                    logger.error(
-                        "Unexpected: grammar rejected tokens %s for request %s. "
-                        "Terminating request.",
-                        advance_token_ids,
-                        req_id,
-                    )
-                    request.status = RequestStatus.FINISHED_ERROR
-                    request.resumable = False
-                    stopped = True
+                request.status = RequestStatus.FINISHED_ERROR
+                request.resumable = False
+                stopped = True
 
             routed_experts = None
             if (
@@ -2090,7 +2073,7 @@ class Scheduler(SchedulerInterface):
                         prompt_start = (
                             request.sampling_params.routed_experts_prompt_start
                         )
-                        assert prompt_start < request.num_prompt_tokens
+                        assert prompt_start <= request.num_prompt_tokens
                     else:
                         prompt_start = 0
                     routed_experts = self.routed_experts_mgr.get(
@@ -2423,11 +2406,9 @@ class Scheduler(SchedulerInterface):
                 continue
 
             # Add newly generated spec token ids to the request.
-            if self.structured_output_manager.should_advance(request):
-                metadata = request.structured_output_request
-                spec_token_ids = strip_speculative_padding(spec_token_ids)
-                spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)  # type: ignore[union-attr]
-            request.spec_token_ids = spec_token_ids
+            request.spec_token_ids = self.structured_output_manager.validate_tokens(
+                request, spec_token_ids
+            )
 
     def update_draft_token_ids_in_output(
         self, draft_token_ids: DraftTokenIds, scheduler_output: SchedulerOutput
@@ -2453,10 +2434,9 @@ class Scheduler(SchedulerInterface):
             # (needed for chunked prefill case for example).
             del spec_token_ids[orig_num_spec_tokens:]
             # Filter out spec tokens which do not adhere to the grammar.
-            if self.structured_output_manager.should_advance(request):
-                metadata = request.structured_output_request
-                spec_token_ids = strip_speculative_padding(spec_token_ids)
-                spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)  # type: ignore[union-attr]
+            spec_token_ids = self.structured_output_manager.validate_tokens(
+                request, spec_token_ids
+            )
             # Pad to original number of spec tokens.
             num_invalid_tokens = orig_num_spec_tokens - len(spec_token_ids)
             if num_invalid_tokens:
@@ -3074,7 +3054,8 @@ class Scheduler(SchedulerInterface):
             is_affected = False
             marked_invalid_block = False
             req_id = request.request_id
-            # TODO (davidb): add support for hybrid memory allocator
+            # One block-id list per KV cache group; single-group layouts are
+            # enforced by _handle_invalid_blocks.
             (req_block_ids,) = self.kv_cache_manager.get_block_ids(req_id)
             # We iterate only over blocks that may contain externally computed
             # tokens
@@ -3135,6 +3116,21 @@ class Scheduler(SchedulerInterface):
 
         return affected_req_ids, total_affected_tokens, blocks_to_evict
 
+    def _handle_failed_recving(self, failed_req_ids: set[str]) -> set[str]:
+        """Fail closed for layouts whose block IDs are not globally unique."""
+        affected_req_ids: set[str] = set()
+        for req_id in failed_req_ids:
+            request = self.requests.get(req_id)
+            if (
+                request is not None
+                and request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+            ):
+                affected_req_ids.add(req_id)
+                if self.recompute_kv_load_failures:
+                    request.num_computed_tokens = 0
+                    self.failed_recving_kv_req_ids.add(req_id)
+        return set() if self.recompute_kv_load_failures else affected_req_ids
+
     def _handle_invalid_blocks(
         self, invalid_block_ids: set[int], num_scheduled_tokens: dict[str, int]
     ) -> set[str]:
@@ -3144,6 +3140,17 @@ class Scheduler(SchedulerInterface):
         Returns:
             Set of affected request IDs to skip in update_from_output main loop.
         """
+        if len(self.kv_cache_config.kv_cache_groups) > 1:
+            # Block IDs are only unique within a group, so a flat set of
+            # invalid block IDs cannot be mapped back to requests.
+            raise RuntimeError(
+                "A KV connector reported block-level load failures "
+                "(invalid_block_ids) on a layout with multiple KV cache "
+                "groups, where block IDs are only unique within a group. "
+                "Connectors must report failed requests via "
+                "KVConnectorTransferResults.failed_recving instead."
+            )
+
         should_fail = not self.recompute_kv_load_failures
 
         # handle async KV loads (not cached yet, evict_blocks=False)
