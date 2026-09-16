@@ -259,6 +259,9 @@ def dispatch_cg_and_sync_dp(
             same `uniform_token_count`; `num_reqs` may differ, as neither
             depends on it. Passing a sync from a different batch is a caller
             error and trips an assert.
+        num_speculative_tokens: Runtime speculative width used to select a
+            compatible specialized cudagraph. None selects only unspecialized
+            graphs.
 
     Returns:
         (batch_desc, sync), where `sync` is this batch's agreement for a later
