@@ -325,9 +325,11 @@ def select_fp8_moe_backend(
         else mk.FusedMoEActivationFormat.Standard
     )
 
-    def _backend_activation_key(backend: Fp8MoeBackend) -> QuantKey | None:
-        # FP8 Marlin intentionally falls back to W8A16, as reflected in
-        # make_fp8_moe_quant_config. Match the kernel's actual input scheme.
+    def _backend_activation_key(
+        backend: Fp8MoeBackend, activation_key: QuantKey | None
+    ) -> QuantKey | None:
+        # Preserve the existing Marlin fallback's unquantized input contract
+        # from make_fp8_moe_quant_config, including optional internal A8 mode.
         return None if backend == Fp8MoeBackend.MARLIN else activation_key
 
     def _make_log_backend(backend: Fp8MoeBackend):
@@ -361,7 +363,7 @@ def select_fp8_moe_backend(
                 k_cls,
                 config,
                 weight_key,
-                _backend_activation_key(backend),
+                _backend_activation_key(backend, activation_key),
                 activation_format,
             )
             if supported:
@@ -440,7 +442,7 @@ def select_fp8_moe_backend(
                 k_cls,
                 config,
                 weight_key,
-                _backend_activation_key(backend),
+                _backend_activation_key(backend, activation_key),
                 activation_format,
             )
             if supported:

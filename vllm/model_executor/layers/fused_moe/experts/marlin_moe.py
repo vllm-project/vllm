@@ -538,7 +538,8 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
     ):
-        # TODO (varun) : Enable activation quantization
+        # The modular config describes unquantized inputs; optional A8
+        # quantization is handled internally via VLLM_MARLIN_INPUT_DTYPE.
         assert (
             quant_config.use_mxfp4_w4a16
             or quant_config.use_nvfp4_w4a16
@@ -584,6 +585,8 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
             kInt4StaticAsym,
             kInt4Static32Asym,
         ]
+        # Internal INT8/FP8 input quantization does not implement arbitrary
+        # activation recipes requested through the oracle's activation key.
         return weight_key in SUPPORTED_W and activation_key is None
 
     @staticmethod

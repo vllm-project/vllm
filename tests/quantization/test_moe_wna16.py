@@ -642,3 +642,41 @@ def test_nvfp4_oracle_does_not_substitute_weight_only_marlin(
         backend, experts = nvfp4.select_nvfp4_moe_backend(config, kNvfp4Static, None)
         assert backend == nvfp4.NvFp4MoeBackend.MARLIN
         assert experts is MarlinExperts
+
+
+@pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.parametrize("input_mode", ["int8", "fp8"])
+@pytest.mark.usefixtures("default_vllm_config")
+def test_marlin_internal_a8_mode_survives_activation_contract(
+    monkeypatch, batched, input_mode
+):
+    """Marlin's internal A8 mode still accepts the WNA16 input contract."""
+    from vllm.model_executor.layers.fused_moe.config import int4_w4a16_moe_quant_config
+    from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
+        BatchedMarlinExperts,
+        MarlinExperts,
+    )
+    from vllm.model_executor.layers.quantization.utils import marlin_utils
+    from vllm.model_executor.layers.quantization.utils.quant_utils import kInt4Static
+
+    monkeypatch.setenv("VLLM_MARLIN_INPUT_DTYPE", input_mode)
+    monkeypatch.setattr(marlin_utils, "_quant_fp8_method", None)
+    # Exercise FP8 configuration eligibility on hosts other than SM89/SM12x;
+    # this test does not launch a GEMM or claim FP8 execution support there.
+    monkeypatch.setattr(
+        marlin_utils.current_platform, "is_device_capability", lambda cap: cap == 89
+    )
+    experts = BatchedMarlinExperts if batched else MarlinExperts
+    monkeypatch.setattr(experts, "_supports_current_device", staticmethod(lambda: True))
+    config = _weight_only_moe_config()
+    supported, reason = experts.is_supported_config(
+        experts, config, kInt4Static, None, experts.activation_format()
+    )
+    assert supported, reason
+    scale = torch.ones(1)
+    quant_config = int4_w4a16_moe_quant_config(scale, scale)
+    kwargs = {"max_num_tokens": 16, "num_dispatchers": 1} if batched else {}
+    instance = experts(config, quant_config, **kwargs)
+    expected_dtype = torch.int8 if input_mode == "int8" else torch.float8_e4m3fn
+    assert instance.input_dtype == expected_dtype
+    assert instance.quant_dtype is None
