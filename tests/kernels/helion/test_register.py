@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for Helion kernel registration.
+"""Unit tests for Helion kernel registration.
 
 Tests ConfiguredHelionKernel, HelionKernelWrapper, and PresetConfigSearch
 including config picker registration and custom autotuner integration.
@@ -1020,7 +1019,6 @@ class TestTorchCompileHOP:
     )
     def test_inductor_backend_compiles_helion_hop(self):
         """Test torch.compile with inductor backend and Helion fusion enabled."""
-
         configs: dict[CaseKey, helion.Config] = {
             CaseKey.default(): helion.Config(block_sizes=[4, 4])
         }

@@ -501,7 +501,6 @@ def test_cpu_fused_moe_unaligned_intermediate_size(
 ):
     """CPU kernels handle unaligned intermediate sizes by zero-padding the
     weights before prepacking."""
-
     set_random_seed(0)
     batch_size = 64
     intermediate_size = UNALIGNED_INTERMEDIATE_DIM

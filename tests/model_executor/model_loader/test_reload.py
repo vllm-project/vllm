@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
+import importlib.machinery
 import inspect
+import sys
+import types
 from unittest.mock import Mock
 from weakref import WeakKeyDictionary, ref
 
@@ -815,6 +818,110 @@ def test_layerwise_reload_updates_loaded_non_persistent_buffers(monkeypatch):
     assert torch.equal(layer.scale, loaded_scale)
     assert "scale" in layer._non_persistent_buffers_set
     assert "0.scale" not in model.state_dict()
+
+
+@pytest.fixture
+def hpc_rope_norm(monkeypatch, default_vllm_config):
+    """Import HpcRopeNorm with the external ``hpc`` package stubbed out."""
+    if "hpc" not in sys.modules:
+        stub = types.ModuleType("hpc")
+        stub.__spec__ = importlib.machinery.ModuleSpec("hpc", loader=None)
+        stub.QuantType = types.SimpleNamespace(  # type: ignore[attr-defined]
+            QPERTOKEN_PERHEAD_KPERTENSOR_VPERTENSOR=types.SimpleNamespace(value=0)
+        )
+        monkeypatch.setitem(sys.modules, "hpc", stub)
+    from vllm.model_executor.layers.hpc import rope_norm
+
+    monkeypatch.setattr(rope_norm, "_hpc_rope_norm_instances", {})
+    return rope_norm
+
+
+def test_hpc_rope_norm_kernel_sees_refit_norm_weights(monkeypatch, hpc_rope_norm):
+    """The fused HPC kernel is handed the live QK-norm weights after a refit.
+
+    Drives the production ``_forward_impl`` with a recording ``hpc`` stub. The
+    Q/K norm weights it receives must be the model's own float32 parameters,
+    so a layerwise reload that rewrites them in place (same storage) is what
+    the kernel sees. Previously the kernel read separate mirrors that no
+    reload path refreshed.
+    """
+    from vllm.model_executor.layers.layernorm import RMSNorm
+
+    head_dim, num_heads, num_kv_heads, block_size = 128, 8, 1, 4
+    layer = torch.nn.Module()
+    layer.q_norm = RMSNorm(head_dim, 1e-6, dtype=torch.float32)
+    layer.k_norm = RMSNorm(head_dim, 1e-6, dtype=torch.float32)
+    layer.hpc_rope_norm = hpc_rope_norm.HpcRopeNorm(
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        cos_sin_cache=torch.ones(16, head_dim),
+        use_qk_norm=True,
+        fallback_qnorm=layer.q_norm,
+        fallback_knorm=layer.k_norm,
+        kv_cache_dtype="auto",
+        layer_name="hpc_test_layer",
+    )
+    model = torch.nn.Sequential(layer)
+    rnorm = layer.hpc_rope_norm
+
+    calls: list[dict] = []
+
+    def record(*args, **kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(sys.modules["hpc"], "rope_norm_store_kv", record, raising=False)
+
+    def kernel_norm_weights():
+        q_size, kv_size = num_heads * head_dim, num_kv_heads * head_dim
+        qkv = torch.zeros(1, q_size + 2 * kv_size, dtype=torch.bfloat16)
+        kv_cache = torch.zeros(
+            2, num_kv_heads, block_size, 2 * head_dim, dtype=torch.bfloat16
+        )
+        attn_layer = types.SimpleNamespace(
+            _k_scale=torch.ones(1), _v_scale=torch.ones(1)
+        )
+        attn_metadata = types.SimpleNamespace(
+            num_actual_tokens=1,
+            num_decodes=1,
+            num_decode_tokens=1,
+            num_prefills=0,
+            num_prefill_tokens=0,
+            max_query_len=1,
+            decode_query_len=1,
+            qo_indptr=None,
+            qo_indptr_decode=None,
+            slot_mapping=torch.tensor([4]),
+            seq_lens=torch.tensor([1]),
+            block_table_tensor=torch.tensor([[1]]),
+            hpc_kv_written=False,
+        )
+        output = torch.zeros(1, q_size, dtype=torch.bfloat16)
+        rnorm._forward_impl(qkv, kv_cache, attn_metadata, attn_layer, output)
+        return calls[-1]["q_norm_weight"], calls[-1]["k_norm_weight"]
+
+    def loaded(value):
+        return torch.full((head_dim,), value, dtype=torch.bfloat16)
+
+    default_weight_loader(layer.q_norm.weight, loaded(0.5))
+    default_weight_loader(layer.k_norm.weight, loaded(0.25))
+    q, k = kernel_norm_weights()
+    assert torch.equal(q, loaded(0.5).float())
+    assert torch.equal(k, loaded(0.25).float())
+    q_ptr, k_ptr = q.data_ptr(), k.data_ptr()
+
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    layer.q_norm.weight.weight_loader(layer.q_norm.weight, loaded(2.0))
+    layer.k_norm.weight.weight_loader(layer.k_norm.weight, loaded(3.0))
+    finalize_layerwise_reload(model, model_config=None)
+
+    q, k = kernel_norm_weights()
+    assert q.dtype == k.dtype == torch.float32
+    assert torch.equal(q, loaded(2.0).float())
+    assert torch.equal(k, loaded(3.0).float())
+    assert (q.data_ptr(), k.data_ptr()) == (q_ptr, k_ptr)
+    assert not hasattr(rnorm, "qnorm_weight")
 
 
 @pytest.mark.parametrize(

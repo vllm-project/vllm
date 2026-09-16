@@ -72,8 +72,7 @@ from .vision import get_num_selected_vision_tokens, get_vision_encoder_info
 
 
 class LlavaImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
+    """Dimensions:
         - bn: Batch size * number of images
         - c: Number of channels (3)
         - h: Height
@@ -88,8 +87,7 @@ class LlavaImagePixelInputs(TensorSchema):
 
 
 class PixtralHFImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
+    """Dimensions:
         - bn: Batch size * number of images
         - c: Number of channels
         - h: Height
@@ -107,11 +105,10 @@ class PixtralHFImagePixelInputs(TensorSchema):
 
 
 class LlavaImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - ifs: Image feature size
-        - hs: Hidden size (must match language model backbone)
+    """Dimensions:
+    - bn: Batch size * number of images
+    - ifs: Image feature size
+    - hs: Hidden size (must match language model backbone)
     """
 
     type: Literal["image_embeds"] = "image_embeds"
@@ -323,7 +320,7 @@ class PixtralHFProcessingInfo(BaseLlavaProcessingInfo):
 
 
 class PixtralHFMultiModalProcessor(BaseMultiModalProcessor[PixtralHFProcessingInfo]):
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _postprocess_hf_mm_data(
@@ -440,6 +437,7 @@ def _get_num_hidden_layers(hf_config: LlavaLikeConfig) -> int:
 
     Args:
         hf_config: Model config with vision feature layer(s).
+
     """
     feature_layers = hf_config.vision_feature_layer
     num_hidden_layers = hf_config.vision_config.num_hidden_layers
@@ -707,9 +705,12 @@ class LlavaForConditionalGeneration(
             positions: Position indices for the input tokens.
             intermediate_tensors: Intermediate tensors from prior forward pass.
             inputs_embeds: Optional tensor of input embeddings.
+            **kwargs: Multimodal inputs for this batch, forwarded to the
+                multimodal embedding path.
 
         Info:
             [`LlavaImageInputs`][vllm.model_executor.models.llava.LlavaImageInputs]
+
         """
         if intermediate_tensors is not None:
             inputs_embeds = None
@@ -731,9 +732,7 @@ class LlavaForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="multi_modal_projector",

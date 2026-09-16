@@ -88,8 +88,7 @@ if has_humming():
 
 
 def _group_shape(group_size: int, group_size_n: int = 0) -> GroupShape:
-    """
-    Map humming group sizes to QuantKey GroupShape.
+    """Map humming group sizes to QuantKey GroupShape.
 
     group_size:   elements per group along K (col); 0 means full dimension.
     group_size_n: elements per group along N (row); 0 means 1 (per-row).
@@ -691,11 +690,9 @@ def select_humming_moe_experts(
     weight_key: QuantKey | None,
     activation_key: QuantKey | None,
 ) -> type[mk.FusedMoEExperts] | None:
-    """
-    Select the primary Humming MoE Experts class
+    """Select the primary Humming MoE Experts class
     Note: Shape-specific fallbacks may still occur at runtime.
     """
-
     if not has_humming():
         return None
 
@@ -809,14 +806,14 @@ def _replace_layer_parameters(
     tensors: dict[str, torch.Tensor],
     preserve_bias: bool = False,
 ) -> None:
-    """
-    Replace layer parameters for a sublayer with new tensors.
+    """Replace layer parameters for a sublayer with new tensors.
 
     Args:
         layer: The RoutedExperts layer
         sublayer_name: Name of the sublayer (e.g., "w13", "w2")
         tensors: Dict of parameter name to tensor
         preserve_bias: If True, don't delete bias parameters
+
     """
     # Delete old parameters
     for name, _ in list(layer.named_parameters()):
@@ -843,11 +840,11 @@ def _convert_sublayer_to_humming(
     num_experts: int,
     param_dtype: torch.dtype,
 ) -> tuple[Any, Any]:
-    """
-    Convert a sublayer's weights from checkpoint format to Humming format.
+    """Convert a sublayer's weights from checkpoint format to Humming format.
 
     Returns:
         Tuple of (converted_weight_schema, converted_input_schema)
+
     """
     from vllm.utils.humming import HummingWeightSchema
 
@@ -931,8 +928,7 @@ def _process_single_sublayer(
     param_dtype: torch.dtype,
     force_weight_schema: Any | None = None,
 ) -> tuple[Any, Any, "LayerConfig"]:
-    """
-    Process a single sublayer: convert, optionally requant, prepare, and transform.
+    """Process a single sublayer: convert, optionally requant, prepare, and transform.
 
     This combines the common logic from convert_to_humming_moe_kernel_format
     for processing a single sublayer.
@@ -951,6 +947,7 @@ def _process_single_sublayer(
 
     Returns:
         Tuple of the final weight schema, input schema, and Humming layer config.
+
     """
     from vllm.utils.humming import HummingWeightSchema
 
@@ -1005,8 +1002,7 @@ def convert_to_humming_moe_kernel_format(
     input_schema: Any | None = None,
     force_weight_schema: Any | None = None,
 ) -> dict[str, "LayerConfig"]:
-    """
-    Convert MoE weights from checkpoint format to Humming kernel format.
+    """Convert MoE weights from checkpoint format to Humming kernel format.
 
     This function processes weights for each sublayer (w13, w2) by:
     1. Converting from checkpoint format to humming format if needed
@@ -1032,8 +1028,8 @@ def convert_to_humming_moe_kernel_format(
         - Modifies layer parameters in place
         - Sets layer.weight_schemas and layer.input_schemas
         - Sets layer.humming_configs for quant config construction
-    """
 
+    """
     # Build schemas from quant_config if not provided
     has_bias = layer.moe_config.has_bias
     num_experts = layer.moe_config.num_local_experts
