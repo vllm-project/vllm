@@ -390,6 +390,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             prefix=f"{prefix}.wo_b",
         )
 
+        self.project_before_all_gather = False
+
         # Initialize rotary embedding before the indexer/compressor consume it.
         self.rotary_emb = build_deepseek_v4_rope(
             config,
@@ -613,6 +615,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
                 _COMBINE_TOPK_SWA_INDICES_KERNEL.register_warmup()
 
+    def use_projected_all_gather(self, num_tokens: int) -> bool:
+        return self.project_before_all_gather and num_tokens >= 2048
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -622,13 +627,25 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # The eager attention region writes into a caller-owned buffer
         # (breakable_cudagraph needs in-place outputs); its shape and how it is
         # projected afterwards follow the interface contract above.
-        attn_out = self._alloc_attn_out(hidden_states.shape[0], hidden_states)
+        project_locally = self.use_projected_all_gather(positions.shape[0])
+        num_tokens = positions.shape[0] if project_locally else hidden_states.shape[0]
+        attn_out = self._alloc_attn_out(num_tokens, hidden_states)
 
         # Keep the attention input preparation in the captured graph. Only the
         # sparse indexer and MLA attention run in the eager break below.
         qr_kv, kv_score, indexer_weights = self._run_parallel_input_projections(
             hidden_states
         )
+        if project_locally:
+            from vllm.models.common.ops.sequence_parallel import sp_all_gather
+
+            qr_kv = sp_all_gather(qr_kv)[:num_tokens]
+            if kv_score is not None:
+                kv_score = sp_all_gather(kv_score)[:num_tokens]
+            if indexer_weights is not None:
+                indexer_weights = sp_all_gather(indexer_weights)[:num_tokens]
+            # The sparse indexer only uses this tensor for token count/device.
+            hidden_states = qr_kv
         qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv)
 
         self._prepare_and_attn_fn(
