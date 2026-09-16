@@ -105,6 +105,7 @@ def export_entries(
         A ``(entries, aliases)`` pair where ``entries`` maps a canonical name to
         its ``TensorEntry`` and ``aliases`` maps each duplicate name to its
         canonical name.
+
     """
     entries: dict[str, TensorEntry] = {}
     aliases: dict[str, str] = {}
@@ -206,6 +207,7 @@ class WeightCacheDaemon:
         Args:
             ready_callback: Invoked once the socket is bound and listening,
                 so the launcher can report overall readiness.
+
         """
         socket_path = self._socket_path
         ensure_private_socket_dir(
