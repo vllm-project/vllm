@@ -848,6 +848,8 @@ class EngineCore:
         self.reset_encoder_cache()
 
     def _finish_pause(self, clear_cache: bool) -> None:
+        if envs.VLLM_SLEEP_OFFLOAD_CUDA_CONTEXT and self.model_executor.is_sleeping:
+            return
         # A completed pause promises an idle device: nothing else waits on
         # the last dummy batch an idle DP rank launches.
         self.model_executor.collective_rpc("synchronize_device")
@@ -886,6 +888,8 @@ class EngineCore:
 
     def resume_scheduler(self) -> None:
         """Resume the scheduler and flush any requests queued while paused."""
+        if envs.VLLM_SLEEP_OFFLOAD_CUDA_CONTEXT and self.model_executor.is_sleeping:
+            raise RuntimeError("Wake all sleeping memory before resuming generation")
         self.scheduler.set_pause_state(PauseState.UNPAUSED)
 
     def is_scheduler_paused(self) -> bool:
@@ -904,6 +908,9 @@ class EngineCore:
             mode: Pause mode - how to deal with any existing requests, see
                 documentation of pause_scheduler method.
         """
+
+        if envs.VLLM_SLEEP_OFFLOAD_CUDA_CONTEXT and level not in (0, 1):
+            raise ValueError("CUDA context offload supports sleep levels 0 and 1 only")
 
         # Pause scheduler before sleeping.
         clear_prefix_cache = level >= 1
@@ -1305,6 +1312,7 @@ class EngineCoreProc(EngineCore):
         engine_core: EngineCoreProc | None = None
         signal_callback: SignalCallback | None = None
         clean_shutdown = False
+        process_exit_code = 1
         try:
             vllm_config: VllmConfig = kwargs["vllm_config"]
             parallel_config: ParallelConfig = vllm_config.parallel_config
@@ -1366,8 +1374,10 @@ class EngineCoreProc(EngineCore):
             signal.signal(signal.SIGINT, signal_handler)
 
             engine_core.run_busy_loop()
+            process_exit_code = 0
 
         except SystemExit as e:
+            process_exit_code = 0 if e.code in (None, 0) else 1
             logger.info_once("[shutdown] EngineCore: exiting busy loop")
             clean_shutdown = (
                 e.code in (None, 0)
@@ -1389,6 +1399,15 @@ class EngineCoreProc(EngineCore):
             signal.signal(signal.SIGINT, signal.SIG_DFL)
             if signal_callback is not None:
                 signal_callback.stop()
+            if (
+                envs.VLLM_SLEEP_OFFLOAD_CUDA_CONTEXT
+                and engine_core is not None
+                and engine_core.model_executor.is_sleeping
+            ):
+                # A failed sleep may also leave allocations unmapped. Exit the
+                # dedicated process without CUDA finalizers or reallocation.
+                logger.info("Exiting offloaded engine without restoring CUDA memory")
+                os._exit(process_exit_code)
             if engine_core is not None:
                 engine_core.shutdown()
             if clean_shutdown:
