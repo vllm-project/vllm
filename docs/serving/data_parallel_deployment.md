@@ -26,6 +26,8 @@ vLLM supports "self-contained" data parallel deployments that expose a single AP
 
 It can be configured by simply including e.g. `--data-parallel-size=4` in the vllm serve command line arguments. This will require 4 GPUs. It can be combined with tensor parallel, for example `--data-parallel-size=4 --tensor-parallel-size=2`, which would require 8 GPUs. When sizing DP deployments, remember that `--max-num-seqs` applies per DP rank.
 
+By contrast, the admission control limits `--max-num-queued-reqs` and `--max-num-queued-tokens` apply to the whole server, not per DP rank: each API server process counts in-flight requests and prefill backlog across all DP ranks it routes to. For example, with `--data-parallel-size=4 --max-num-seqs=256 --max-num-queued-reqs=256`, the deployment rejects new requests once 256 are in-flight in total, even though ranks could jointly run 1024. To keep ranks saturating, size the cap as roughly `data-parallel-size * max-num-seqs` plus the desired queue depth.
+
 Running a single data parallel deployment across multiple nodes requires a different `vllm serve` to be run on each node, specifying which DP ranks should run on that node. In this case, there will still be a single HTTP entrypoint - the API server(s) will run only on one node, but it doesn't necessarily need to be co-located with the DP ranks.
 
 This will run DP=4, TP=2 on a single 8-GPU node:
