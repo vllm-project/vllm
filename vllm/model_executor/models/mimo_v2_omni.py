@@ -964,7 +964,6 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
                     assert isinstance(va_item, (list, tuple)) and len(va_item) == 2
                     vid, audio_src = va_item
                     va_item = VideoAudioInput(video=vid, audio=audio_src)
-                    vid = vid
                 # Convert video frames to (TCHW, timestamps) if needed
                 if (
                     isinstance(vid, tuple)
