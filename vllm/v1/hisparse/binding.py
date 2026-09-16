@@ -121,6 +121,7 @@ def init_hisparse_kv_cache(
 ) -> dict[str, torch.Tensor]:
     """Allocate and bind HiSparse caches within the caller's allocation context."""
     host_pool = HiSparseHostPool(vllm_config, kv_cache_config)
+    kv_caches: dict[str, torch.Tensor] = {}
     try:
         kv_caches = allocate_hisparse_kv_caches(
             kv_cache_config,
@@ -143,8 +144,17 @@ def init_hisparse_kv_cache(
         )
         return kv_caches
     except Exception:
-        if host_pool.shared_region is not None:
-            host_pool.shared_region.cleanup()
+        kv_caches.clear()
+        for attention_layer in forward_context.values():
+            cache_handle = getattr(attention_layer, "hisparse_cache", None)
+            if cache_handle is None:
+                continue
+            runtime = cache_handle.runtime
+            for attribute in ("_host_cache", "registered_host_pool"):
+                if hasattr(runtime, attribute):
+                    delattr(runtime, attribute)
+            runtime.shared_host_region = None
+        host_pool.abort_startup_cleanup()
         raise
 
 
