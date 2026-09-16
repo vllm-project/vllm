@@ -2,20 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import logging
+import queue
 import threading
 import time
 from collections import defaultdict
+from collections.abc import Collection
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import TYPE_CHECKING, Any
 
-import httpx
 import msgspec
 import numpy as np
 import torch
 import zmq
 import zmq.asyncio
+from huggingface_hub.utils import httpx
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -433,6 +435,9 @@ class PullReqMeta:
     expire_time: float = float("inf")
     # Designed for one D pairing to multiple P
     pull_tasks_count: int = 0
+    # Set once any worker reports a failure, so a success from another worker
+    # for the same request is not counted afterwards.
+    failed: bool = False
 
 
 @dataclass
@@ -582,6 +587,11 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
 
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """Get block IDs whose remote KV load failed."""
+        assert self.connector_worker is not None
+        return self.connector_worker.get_block_ids_with_load_errors()
+
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, MooncakeConnectorMetadata)
@@ -635,6 +645,7 @@ class MooncakeConnectorScheduler:
     ):
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
+        self.kv_cache_config = kv_cache_config
 
         assert vllm_config.kv_transfer_config
         self.is_kv_producer: bool = (
@@ -649,7 +660,7 @@ class MooncakeConnectorScheduler:
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
             and any(
                 not isinstance(g.kv_cache_spec, FullAttentionSpec)
-                for g in kv_cache_config.kv_cache_groups
+                for g in kv_cache_config.transfer_groups
             )
         )
         # GDN is represented as a MambaSpec in vLLM. This Mooncake MambaSpec
@@ -670,7 +681,7 @@ class MooncakeConnectorScheduler:
             (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
             if isinstance(g.kv_cache_spec, SlidingWindowSpec)
             else (0, self.block_size)
-            for g in kv_cache_config.kv_cache_groups
+            for g in kv_cache_config.transfer_groups
         ]
         # cdiv(n_tokens, block_size) gives blocks/window; add 1 to
         # conservatively account for boundary overlap.
@@ -684,11 +695,17 @@ class MooncakeConnectorScheduler:
         block_ids: tuple[list[int], ...] | list[list[int]],
     ) -> list[list[int]]:
         """Clip per-group block IDs to sliding window size."""
-        if len(block_ids) == 0 or not self._is_hma_required:
-            return list(block_ids)
+        if len(block_ids) == 0:
+            return []
+        if len(block_ids) == len(self.kv_cache_config.transfer_group_ids):
+            selected = list(block_ids)
+        else:
+            selected = list(self.kv_cache_config.select_transfer_block_ids(block_ids))
+        if len(selected) == 0 or not self._is_hma_required:
+            return selected
         return [
             blocks[-self.blocks_per_sw[i] :] if self.blocks_per_sw[i] > 0 else blocks
-            for i, blocks in enumerate(block_ids)
+            for i, blocks in enumerate(selected)
         ]
 
     def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
@@ -1027,6 +1044,8 @@ class MooncakeConnectorWorker:
 
         self.finished_sending_reqs: set[ReqId] = set()
         self.finished_recving_reqs: set[ReqId] = set()
+        # Written from the receiver loop, drained from the worker thread.
+        self._invalid_block_ids: queue.Queue[set[int]] = queue.Queue()
 
         self.xfer_stats = MooncakeKVConnectorStats()
 
@@ -1046,18 +1065,13 @@ class MooncakeConnectorWorker:
 
         self._tp_size: dict[EngineId, int] = {self.engine_id: self.tp_size}
         self._layer_specs: dict[str, KVCacheSpec] = {}
-        for group in kv_cache_config.kv_cache_groups:
+        for group in kv_cache_config.transfer_groups:
             group_spec = group.kv_cache_spec
             specs_by_layer = getattr(group_spec, "kv_cache_specs", {})
             for layer_name in group.layer_names:
                 self._layer_specs[layer_name] = specs_by_layer.get(
                     layer_name, group_spec
                 )
-        self._layer_group_indices: dict[str, int] = {
-            layer: group_index
-            for group_index, group in enumerate(kv_cache_config.kv_cache_groups)
-            for layer in group.layer_names
-        }
         self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
             tp_size=self.tp_size,
@@ -1441,7 +1455,7 @@ class MooncakeConnectorWorker:
         block_arange = np.arange(self._physical_blocks_per_logical_kv_block).reshape(
             1, -1
         )
-        group_specs = self.kv_cache_config.kv_cache_groups
+        group_specs = self.kv_cache_config.transfer_groups
         return [
             BlockTable.map_to_kernel_blocks(
                 np.array(group),
@@ -1494,7 +1508,7 @@ class MooncakeConnectorWorker:
             local_block_ids_by_group: list[list[int]] = []
             remote_block_ids_by_group: list[list[int]] = []
             has_block_error = False
-            group_specs = self.kv_cache_config.kv_cache_groups
+            group_specs = self.kv_cache_config.transfer_groups
             for group_index, (local_group, remote_group) in enumerate(
                 zip(send_meta.local_block_ids, remote_block_ids_per_group)
             ):
@@ -1750,7 +1764,7 @@ class MooncakeConnectorWorker:
                 self.registered_layer_names.append(layer_name)
                 self.registered_layer_indices.append(layer_index)
                 self.registered_group_indices.append(
-                    self._layer_group_indices[layer_name]
+                    self.kv_cache_config.transfer_group_index_by_layer[layer_name]
                 )
             storage = cache.untyped_storage()
             storage_addr = storage.data_ptr()
@@ -1905,12 +1919,11 @@ class MooncakeConnectorWorker:
                     ret_msg = await sock.recv()
                     response = self._xfer_resp_decoder.decode(ret_msg)
                     if response.status == MooncakeXferResponseStatus.ERROR:
-                        logger.error(
-                            "Error happens during transferring kvcache for %s: %s",
+                        self._handle_failed_recv(
+                            pull_metas,
                             req_ids,
-                            response.err_msg,
+                            response.err_msg or "transfer error",
                         )
-                        self.xfer_stats.record_failed_recv()
                         return
                     self.process_pulling_result(response, pull_metas)
                     if response.status == MooncakeXferResponseStatus.FINISH:
@@ -1918,9 +1931,49 @@ class MooncakeConnectorWorker:
         except zmq.ContextTerminated:
             logger.debug("ZMQ context terminated, exiting Mooncake receiver thread.")
         except Exception as e:
-            logger.error("MooncakeXferMetadata transfer failed for %s: %s", req_ids, e)
-            self.xfer_stats.record_failed_recv()
+            self._handle_failed_recv(pull_metas, req_ids, f"transfer failed: {e}")
             return
+
+    def _handle_failed_recv(
+        self,
+        pull_metas: dict[ReqId, PullReqMeta],
+        req_ids: Collection[ReqId],
+        reason: str,
+    ) -> None:
+        """Report a failed remote KV load so the scheduler can fail or recompute it."""
+        failed: list[ReqId] = []
+        for req_id in req_ids:
+            pull_meta = pull_metas.get(req_id)
+            if pull_meta is None or pull_meta.failed:
+                continue
+            pull_meta.failed = True
+            failed.append(req_id)
+            self.xfer_stats.record_failed_recv()
+
+            invalid = {b for group in pull_meta.local_block_ids for b in group}
+            if not invalid:
+                # A pull with no local blocks only asks P to release its blocks
+                # for a request that never reached the scheduler (see
+                # AsyncLLM.notify_kv_transfer_request_rejected, which submits an
+                # abort_immediately request just to run request_finished). No D
+                # request is waiting on a load, and reporting one here would trip
+                # the scheduler's `assert req_id in self.requests`.
+                continue
+            self._invalid_block_ids.put(invalid)
+            self.finished_recving_reqs.add(pull_meta.d_req_id)
+
+        if failed:
+            logger.error("pulling kv_caches for %s failed: %s", failed, reason)
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """Drain the blocks whose remote KV load failed since the last call."""
+        result: set[int] = set()
+        while True:
+            try:
+                result.update(self._invalid_block_ids.get_nowait())
+            except queue.Empty:
+                break
+        return result
 
     def process_pulling_result(
         self,
@@ -1931,6 +1984,8 @@ class MooncakeConnectorWorker:
 
         for req_id in ok_reqs:
             pull_meta = pull_metas[req_id]
+            if pull_meta.failed:
+                continue
             # No race because we are in async loop.
             pull_meta.pull_tasks_count -= 1
             if pull_meta.pull_tasks_count == 0:
@@ -1940,10 +1995,8 @@ class MooncakeConnectorWorker:
             logger.debug("pulling kv_caches for %s finished", ok_reqs)
 
         if response.err_reqs:
-            logger.error(
-                "pulling kv_caches for %s failed: %s",
-                response.err_reqs,
-                response.err_msg,
+            self._handle_failed_recv(
+                pull_metas, response.err_reqs, response.err_msg or "unknown error"
             )
 
     async def _connect_to_prefiller_bootstrap(self, remote_bootstrap_addr: str):
@@ -2021,10 +2074,11 @@ class MooncakeConnectorWorker:
             await self._pending_bootstrap_queries[remote_bootstrap_addr].wait()
 
         if remote_engine_id not in self._remote_agents:
-            logger.error(
-                "Failed to find remote engine_id %s from bootstrap server %s",
-                remote_engine_id,
-                remote_bootstrap_addr,
+            self._handle_failed_recv(
+                pull_metas,
+                list(pull_metas),
+                f"remote engine_id {remote_engine_id} not found from bootstrap "
+                f"server {remote_bootstrap_addr}",
             )
             return
 
@@ -2121,7 +2175,7 @@ class MooncakeConnectorWorker:
     ) -> list[TransferRegion]:
         if not group_indices:
             group_indices = [
-                self._layer_group_indices.get(layer_name, 0)
+                self.kv_cache_config.transfer_group_index_by_layer.get(layer_name, 0)
                 for layer_name in layer_names
             ]
         return _expand_transfer_regions(
