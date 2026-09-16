@@ -206,7 +206,7 @@ def test_molmo2_pooling_cuda_supports_graph_replay(
     op = Molmo2PoolingPreparation(masked_average=True)
     for _ in range(3):
         op(image_features, token_pooling)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):

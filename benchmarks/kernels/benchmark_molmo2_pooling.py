@@ -21,9 +21,9 @@ SHAPES = {
 def time_cuda(function: Callable[[], object], warmup: int, repeats: int) -> float:
     for _ in range(warmup):
         function()
-    torch.cuda.synchronize()
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
+    torch.accelerator.synchronize()
+    start = torch.Event(enable_timing=True)
+    end = torch.Event(enable_timing=True)
     start.record()
     for _ in range(repeats):
         function()
@@ -141,7 +141,7 @@ def main(args) -> None:
                         ]
                     )
                     gc.collect()
-                    torch.cuda.empty_cache()
+                    torch.accelerator.empty_cache()
 
     print("Molmo2 pooling preparation (median CUDA-event latency)")
     print(
