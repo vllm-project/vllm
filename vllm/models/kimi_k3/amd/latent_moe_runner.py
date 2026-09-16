@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 from typing import cast
 
 import torch
@@ -9,9 +10,52 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
+    MoERunner,
+    _layer_name_type,
+    _resolve_layer_name,
+    get_layer_from_name,
+)
+from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
+
+_KIMI_K3_ROUTED_HIDDEN = 3584
+_KIMI_K3_SHARED_HIDDEN = 7168
+
+
+def _kimi_k3_large_moe_core(
+    hidden_states: torch.Tensor,
+    layer_name: _layer_name_type,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run runtime-shape dispatch outside Dynamo."""
+
+    layer = get_layer_from_name(_resolve_layer_name(layer_name))
+    assert isinstance(layer, ROCmLatentMoERunner)
+    callback = layer._kimi_k3_large_moe_core_callback
+    if callback is None:
+        raise RuntimeError("Kimi-K3 large-M callback was not initialized")
+    return callback(hidden_states)
+
+
+def _kimi_k3_large_moe_core_fake(
+    hidden_states: torch.Tensor,
+    layer_name: _layer_name_type,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    del layer_name
+    return (
+        hidden_states.new_empty((hidden_states.shape[0], _KIMI_K3_SHARED_HIDDEN)),
+        hidden_states.new_empty((hidden_states.shape[0], _KIMI_K3_ROUTED_HIDDEN)),
+    )
+
+
+direct_register_custom_op(
+    op_name="kimi_k3_large_moe_core",
+    op_func=_kimi_k3_large_moe_core,
+    mutates_args=[],
+    fake_impl=_kimi_k3_large_moe_core_fake,
+    tags=(torch.Tag.needs_fixed_stride_order,),
+)
 
 
 class ROCmLatentMoERunner(MoERunner):
@@ -54,6 +98,96 @@ class ROCmLatentMoERunner(MoERunner):
                 scope="global",
             )
         self._logged_sharded_tail = False
+        self._kimi_k3_large_moe_core_callback: (
+            Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]] | None
+        ) = None
+
+    def set_kimi_k3_large_moe_core_callback(
+        self,
+        callback: Callable[
+            [torch.Tensor],
+            tuple[torch.Tensor, torch.Tensor],
+        ],
+    ) -> None:
+        self._kimi_k3_large_moe_core_callback = callback
+
+    def kimi_k3_large_moe_core(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return torch.ops.vllm.kimi_k3_large_moe_core(
+            hidden_states,
+            self._encode_layer_name(),
+        )
+
+    def run_kimi_k3_native_moe_core(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        shared_experts_input: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run the native MoE core without applying the latent output tail."""
+
+        hidden_states, pre_xform_trunc_size, _ = self._maybe_pad_hidden_states(
+            shared_experts_input,
+            hidden_states,
+        )
+        result = self._forward_impl(
+            hidden_states,
+            router_logits,
+            shared_experts_input,
+        )
+        shared_output, fused_output = cast(
+            tuple[torch.Tensor, torch.Tensor],
+            result,
+        )
+        if pre_xform_trunc_size is not None:
+            fused_output = fused_output[..., :pre_xform_trunc_size]
+        return shared_output, fused_output
+
+    def run_kimi_k3_large_moe_core(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        shared_experts_intermediate: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run native routed experts from the merged-front outputs."""
+
+        self.routed_experts._ensure_moe_quant_config_init()
+        if self.routed_experts.quant_method.is_monolithic:
+            raise RuntimeError("Kimi-K3 large-M front requires a modular MoE backend")
+
+        topk_weights, topk_ids = self.router.select_experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            topk_indices_dtype=self._quant_method.topk_indices_dtype,
+            input_ids=None,
+        )
+        fused_output = self.routed_experts.forward_modular(
+            x=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            shared_experts=None,
+            shared_experts_input=None,
+        )
+
+        assert self._shared_experts is not None
+        shared_layer = getattr(self._shared_experts, "_layer", None)
+        assert shared_layer is not None
+        shared_output, _ = shared_layer.down_proj(shared_experts_intermediate)
+        return shared_output, cast(torch.Tensor, fused_output)
+
+    def finish_kimi_k3_large_moe_core(
+        self,
+        shared_output: torch.Tensor,
+        fused_output: torch.Tensor,
+    ) -> torch.Tensor:
+        result = self._shard_up_proj_tail(
+            fused_output,
+            shared_output,
+            _KIMI_K3_SHARED_HIDDEN,
+        )
+        return self._maybe_add_zero_expert_output(result)
 
     def _shard_up_proj_tail(
         self,
@@ -64,7 +198,7 @@ class ROCmLatentMoERunner(MoERunner):
         """
         Tier 2: column-parallel up-projection folded into the final reduce.
         """
-        if not self._logged_sharded_tail:
+        if not torch.compiler.is_compiling() and not self._logged_sharded_tail:
             self._logged_sharded_tail = True
             logger.info_once(
                 "Kimi-K3 latent-MoE tail: up-projecting only this rank's "
