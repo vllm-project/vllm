@@ -175,8 +175,12 @@ steps:
           ;;
         1)
           # vit_cudagraph, keye, nemotron_parse, phi4mm, phi4siglip,
-          # moondream3, moondream3_moe, pixtral, maverick
+          # moondream3, pixtral, maverick
           pytest -v -s models/multimodal/generation/vision -m 'not core_model'
+          # moondream3_moe is a cpu_test that initializes a gloo process group
+          # in the pytest parent; run it in its own process, after the engine
+          # tests, so no EngineCore is forked from that state.
+          pytest -v -s models/multimodal/generation/moondream3_moe -m 'not core_model'
           ;;
         2)
           # ultravox, voxtral, voxtral_realtime, plus the mapping unit tests
