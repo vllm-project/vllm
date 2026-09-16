@@ -3526,3 +3526,97 @@ def test_revision_resolved_when_weights_match_model(mock_resolve):
     assert isinstance(config.revision, ResolvedRevision)
     assert config.revision.resolved == REVISION
     mock_resolve.assert_any_call(model, None, config.hf_token)
+
+
+@pytest.mark.parametrize(
+    "section, field, value, expected",
+    [
+        (None, None, None, "deep_gemm_mega_moe"),
+        ("kernel", "moe_backend", "flashinfer_trtllm", "flashinfer_trtllm"),
+        ("kernel", "moe_backend", "deep_gemm_mega_moe", "deep_gemm_mega_moe"),
+        ("parallel", "enable_expert_parallel", False, "auto"),
+        ("parallel", "pipeline_parallel_size", 2, "auto"),
+        ("parallel", "nnodes", 2, "auto"),
+        ("parallel", "data_parallel_size", 2, "auto"),
+        ("parallel", "distributed_executor_backend", "ray", "auto"),
+        ("parallel", "prefill_context_parallel_size", 2, "auto"),
+        ("parallel", "decode_context_parallel_size", 2, "auto"),
+        ("parallel", "use_ubatching", True, "auto"),
+        ("parallel", "world_size_across_dp", 1, "auto"),
+        ("parallel", "world_size_across_dp", 8, "auto"),
+        ("model", "quantization", None, "auto"),
+        ("hf", "expert_dtype", "fp8", "auto"),
+        ("hf", "scoring_func", "sigmoid", "auto"),
+        ("hf", "hidden_size", 5136, "auto"),
+        ("hf", "moe_intermediate_size", 2320, "auto"),
+        ("hf", "n_routed_experts", 513, "auto"),
+        ("config", "speculative_config", object(), "auto"),
+        ("platform", "is_cuda", False, "auto"),
+        ("platform", "is_device_capability_family", False, "auto"),
+        ("platform", "is_fully_connected", False, "auto"),
+        ("env", "VLLM_USE_DEEP_GEMM", "0", "auto"),
+        ("dependency", "has_deep_gemm", False, "auto"),
+    ],
+)
+def test_deepseek_v41_auto_moe_respects_supported_configurations(
+    monkeypatch, section, field, value, expected
+):
+    """Auto selects MegaMoE only for supported local EP deployments."""
+    from vllm.model_executor.models.config import MODELS_CONFIG_MAP
+
+    hf_config = SimpleNamespace(
+        expert_dtype="fp4",
+        n_routed_experts=512,
+        hidden_size=5120,
+        moe_intermediate_size=2304,
+    )
+    model = SimpleNamespace(hf_text_config=hf_config, quantization="deepseek_v4_fp8")
+    parallel = SimpleNamespace(
+        enable_expert_parallel=True,
+        pipeline_parallel_size=1,
+        nnodes=1,
+        data_parallel_size=1,
+        data_parallel_size_local=1,
+        distributed_executor_backend="mp",
+        prefill_context_parallel_size=1,
+        decode_context_parallel_size=1,
+        use_ubatching=False,
+        world_size_across_dp=4,
+        eplb_config=SimpleNamespace(num_redundant_experts=0),
+    )
+    kernel = KernelConfig()
+    config = SimpleNamespace(
+        model_config=model,
+        parallel_config=parallel,
+        kernel_config=kernel,
+        speculative_config=None,
+    )
+    monkeypatch.setenv("VLLM_USE_DEEP_GEMM", "1")
+    with (
+        patch("vllm.platforms.current_platform") as platform,
+        patch("vllm.utils.import_utils.has_deep_gemm", return_value=True) as available,
+    ):
+        platform.is_cuda.return_value = True
+        platform.is_device_capability_family.return_value = True
+        platform.device_count.return_value = 4
+        platform.device_id_to_physical_device_id.side_effect = lambda i: i + 4
+        platform.is_fully_connected.return_value = True
+        objects = {
+            "kernel": kernel,
+            "parallel": parallel,
+            "model": model,
+            "hf": hf_config,
+            "config": config,
+        }
+        if section == "platform":
+            getattr(platform, field).return_value = value
+        elif section == "dependency":
+            available.return_value = value
+        elif section == "env":
+            monkeypatch.setenv(field, value)
+        elif section is not None:
+            setattr(objects[section], field, value)
+        MODELS_CONFIG_MAP["DeepseekV41ForCausalLM"].verify_and_update_config(config)
+        assert kernel.moe_backend == expected
+        if expected == "deep_gemm_mega_moe" and section is None:
+            platform.is_fully_connected.assert_called_once_with([4, 5, 6, 7])

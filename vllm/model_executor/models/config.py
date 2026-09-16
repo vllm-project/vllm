@@ -349,6 +349,62 @@ class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
                 )
 
 
+class DeepseekV41ForCausalLMConfig(DeepseekV4ForCausalLMConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm import envs
+        from vllm.platforms import current_platform
+        from vllm.utils.import_utils import has_deep_gemm
+
+        parallel = vllm_config.parallel_config
+        model = vllm_config.model_config
+        hf_config = model.hf_text_config
+        if (
+            vllm_config.kernel_config.moe_backend != "auto"
+            or not parallel.enable_expert_parallel
+            or parallel.pipeline_parallel_size != 1
+            or parallel.nnodes != 1
+            or parallel.data_parallel_size_local != parallel.data_parallel_size
+            or parallel.distributed_executor_backend
+            not in (None, "mp", "uni", "external_launcher")
+            or parallel.prefill_context_parallel_size != 1
+            or parallel.decode_context_parallel_size != 1
+            or parallel.use_ubatching
+            or vllm_config.speculative_config is not None
+            or model.quantization != "deepseek_v4_fp8"
+            or getattr(hf_config, "expert_dtype", "fp4") != "fp4"
+            or getattr(hf_config, "scoring_func", "sqrtsoftplus") != "sqrtsoftplus"
+            or not current_platform.is_cuda()
+            or not current_platform.is_device_capability_family(100)
+            or not envs.VLLM_USE_DEEP_GEMM
+            or not has_deep_gemm()
+        ):
+            return
+
+        ep_size = parallel.world_size_across_dp
+        num_experts = (
+            hf_config.n_routed_experts + parallel.eplb_config.num_redundant_experts
+        )
+        if (
+            ep_size <= 1
+            or ep_size > current_platform.device_count()
+            or num_experts % ep_size != 0
+            or hf_config.hidden_size % 128 != 0
+            or hf_config.moe_intermediate_size % 128 != 0
+        ):
+            return
+        physical_ids = [
+            current_platform.device_id_to_physical_device_id(i) for i in range(ep_size)
+        ]
+        if not current_platform.is_fully_connected(physical_ids):
+            return
+
+        # Resolve before model construction so its sequence-parallel and
+        # shared-expert paths agree with the selected MoE implementation.
+        vllm_config.kernel_config.moe_backend = "deep_gemm_mega_moe"
+        logger.info("Using DeepGEMM MegaMoE for DeepSeek V4.1 expert parallelism.")
+
+
 class KimiK3ForConditionalGenerationConfig(VerifyAndUpdateConfig):
     """Route MXFP4-checkpointed Kimi-K3 MoE experts to the MXFP4 interface.
 
@@ -1003,7 +1059,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "ColQwen3_5": ColQwen3_5Config,
     "DeepseekV4ForCausalLM": DeepseekV4ForCausalLMConfig,
     "DeepseekV4ForConditionalGeneration": DeepseekV4ForCausalLMConfig,
-    "DeepseekV41ForCausalLM": DeepseekV4ForCausalLMConfig,
+    "DeepseekV41ForCausalLM": DeepseekV41ForCausalLMConfig,
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
     "DiffusionGemmaForBlockDiffusion": DiffusionGemmaModelForBlockDiffusionConfig,  # noqa: E501
     "Ernie4_5_VLMoeForConditionalGeneration": Ernie4_5_VLMoeForConditionalGenerationConfig,  # noqa: E501
