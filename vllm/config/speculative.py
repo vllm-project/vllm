@@ -446,7 +446,14 @@ class SpeculativeConfig:
     """Use vocab-parallel local argmax instead of all-gathering full logits
     for draft token generation. Reduces communication from O(vocab_size) to
     O(2 * tp_size) per token. Only applies to greedy draft selection in
-    non-tree speculation."""
+    non-tree speculation.
+
+    This is a trade rather than a strict win. It substitutes one small
+    collective, whose cost is latency-bound and grows with
+    `tensor_parallel_size`, for a gather that grows with the draft batch. So it
+    pays above a break-even draft batch size, and that break-even rises with
+    `tensor_parallel_size`. Low-concurrency serving at high TP is the case
+    where it can cost more than it saves; measure before enabling it there."""
 
     use_heterogeneous_vocab: bool = False
     """Allow draft and target models to use different vocabularies.
