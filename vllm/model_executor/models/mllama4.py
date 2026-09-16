@@ -17,7 +17,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Hashable, Iterable, Mapping
 from itertools import tee
 from typing import Annotated, Any, Literal
 
@@ -60,6 +60,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
@@ -70,6 +71,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -589,25 +591,23 @@ class Mllama4ProcessingInfo(BaseProcessingInfo):
 
 
 class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo]):
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
-        )
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
 
-        processor = self.info.get_hf_processor(**mm_kwargs)
+    def _postprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
+        if not mm_data:
+            return processed_data
+
+        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = processor.image_processor
         vision_config = self.info.get_hf_config().vision_config
 
-        if processed_outputs.get("pixel_values") is not None:
+        if processed_data.get("pixel_values") is not None:
             assert "images" in mm_data, (
                 "images expected to be in mm_data when pixel_values is present"
             )
@@ -621,14 +621,16 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
                 max_num_chunks=self.info.get_max_num_tiles(),
                 patch_size=SizeDict(height=tile_size, width=tile_size),
             )
-            best_fit_sizes = [
-                get_best_fit(
-                    (image.size[1], image.size[0]),
-                    torch.tensor(possible_resolutions),
-                    resize_to_max_canvas=image_processor.resize_to_max_canvas,
+            best_fit_sizes = []
+            for image in parsed_images:
+                assert image is not None
+                best_fit_sizes.append(
+                    get_best_fit(
+                        (image.size[1], image.size[0]),
+                        torch.tensor(possible_resolutions),
+                        resize_to_max_canvas=image_processor.resize_to_max_canvas,
+                    )
                 )
-                for image in parsed_images
-            ]
             # TODO tile height/width do not necessarily need to match
             aspect_ratios = [
                 (image_size[0] // tile_size, image_size[1] // tile_size)
@@ -638,10 +640,10 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
                 1 if r_h * r_w == 1 else 1 + r_h * r_w for (r_h, r_w) in aspect_ratios
             ]
 
-            processed_outputs["aspect_ratios"] = torch.tensor(aspect_ratios)
-            processed_outputs["patches_per_image"] = torch.tensor(patches_per_image)
+            processed_data["aspect_ratios"] = torch.tensor(aspect_ratios)
+            processed_data["patches_per_image"] = torch.tensor(patches_per_image)
 
-        return processed_outputs
+        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -653,8 +655,8 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
             pixel_values=MultiModalFieldConfig.flat_from_sizes(
                 "image", patches_per_image
             ),
-            patches_per_image=MultiModalFieldConfig.batched("image"),
-            aspect_ratios=MultiModalFieldConfig.batched("image"),
+            patches_per_image=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+            aspect_ratios=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         )
 
     def _get_prompt_updates(
@@ -668,8 +670,12 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
 
         num_patches_per_chunk = self.info.get_patch_per_chunk(vision_config)
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        image_token = hf_processor.image_token
         img_patch_token = hf_processor.img_patch_token
+
+        tokenizer = self.info.get_tokenizer()
+        img_patch_token_ids = cached_encode(
+            tokenizer, img_patch_token, add_special_tokens=False
+        )
 
         def get_replacement(item_idx: int):
             out_item = out_mm_kwargs["image"][item_idx]
@@ -680,12 +686,13 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
                 num_patches_per_chunk=num_patches_per_chunk,
             )
 
-            return PromptUpdateDetails.select_text(repl, img_patch_token)
+            repl_ids = cached_encode(tokenizer, repl, add_special_tokens=False)
+            return PromptUpdateDetails.select_token_ids(repl_ids, img_patch_token_ids)
 
         return [
             PromptReplacement(
                 modality="image",
-                target=image_token,
+                target=[hf_processor.image_token_id],
                 replacement=get_replacement,
             )
         ]
@@ -742,6 +749,7 @@ class Llama4ForConditionalGeneration(
     }
 
     supports_encoder_tp_data = True
+    supports_tower_connector_lora = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -755,6 +763,7 @@ class Llama4ForConditionalGeneration(
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
+        assert multimodal_config is not None
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
         self.vllm_config = vllm_config
@@ -916,6 +925,7 @@ class Llama4ForConditionalGeneration(
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
@@ -1272,21 +1282,18 @@ class Llama4ForConditionalGeneration(
             tower_model="vision_model.",
         )
 
-    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
         vision_config = self.config.vision_config
         patches_per_chunk = Mllama4ProcessingInfo.get_patch_per_chunk(vision_config)
-        if num_image_tokens <= 0 or patches_per_chunk <= 0:
-            return 0
+        if num_mm_embeds <= 0 or patches_per_chunk <= 0:
+            return 0, 0
         raw_patches = (vision_config.image_size // vision_config.patch_size) ** 2
-        num_chunks = num_image_tokens // patches_per_chunk
-        # Encoder processes raw_patches + 1 (CLS) per chunk
-        return num_chunks * (raw_patches + 1)
-
-    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
-        vision_config = self.config.vision_config
-        raw_patches = (vision_config.image_size // vision_config.patch_size) ** 2
-        if num_vision_tokens <= 0:
-            return 0
-        num_chunks = num_vision_tokens // (raw_patches + 1)
-        patches_per_chunk = Mllama4ProcessingInfo.get_patch_per_chunk(vision_config)
-        return num_chunks * patches_per_chunk
+        num_chunks = num_mm_embeds // patches_per_chunk
+        return num_chunks * (raw_patches + 1), num_chunks * patches_per_chunk

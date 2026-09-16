@@ -52,10 +52,11 @@ from vllm.v1.sample.sampler import _SAMPLING_EPS
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.utils import (
     PADDING_SLOT_ID,
+    _copy_and_expand_eagle_inputs,
+    _eagle_prepare_inputs_padded,
+    _eagle_prepare_next_token_padded,
+    _eagle_step_slot_mapping_metadata,
     compute_new_slot_mapping,
-    copy_and_expand_eagle_inputs_kernel,
-    eagle_prepare_inputs_padded_kernel,
-    eagle_prepare_next_token_padded_kernel,
     eagle_step_update_slot_mapping_and_metadata,
     extend_all_queries_by_N,
     next_power_of_2,
@@ -140,6 +141,23 @@ class SpecDecodeBaseProposer:
 
         self.max_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        _eagle_step_slot_mapping_metadata.register_warmup(
+            max_model_len=self.max_model_len,
+            max_batch_size=self.max_batch_size,
+        )
+        _eagle_prepare_inputs_padded.register_warmup(max_batch_size=self.max_batch_size)
+        _eagle_prepare_next_token_padded.register_warmup(
+            vocab_size=vllm_config.model_config.get_vocab_size(),
+            num_sampled_tokens_per_req=self.num_speculative_tokens + 1,
+            max_batch_size=self.max_batch_size,
+        )
+        if self.needs_extra_input_slots:
+            _copy_and_expand_eagle_inputs.register_warmup(
+                parallel_drafting_token_id=self.parallel_drafting_token_id,
+                num_padding_slots_per_request=self.extra_slots_per_request,
+                shift_input_ids=self.pass_hidden_states_to_model,
+                max_num_tokens=self.max_num_tokens,
+            )
         self.token_arange_np = np.arange(self.max_num_tokens, dtype=np.int32)
 
         # Can be specialized by methods like DFlash to reduce the limit
@@ -173,25 +191,17 @@ class SpecDecodeBaseProposer:
         # Use draft model's M-RoPE setting, not target model's
         # Draft models may be text-only even if target is multimodal
         self.uses_mrope = self.draft_model_config.uses_mrope
-        self.uses_xdrope_dim = self.vllm_config.model_config.uses_xdrope_dim
-        self.draft_uses_xdrope_dim = self.draft_model_config.uses_xdrope_dim
         if self.uses_mrope:
             # NOTE: `mrope_positions` is implemented with one additional dummy
             # position on purpose to make it non-contiguous so that it can work
             # with torch compile.
             # See detailed explanation in https://github.com/vllm-project/vllm/pull/12128#discussion_r1926431923
 
-            # NOTE: When M-RoPE is enabled, position ids are 3D regardless of
-            # the modality of inputs. For text-only inputs, each dimension has
-            # identical position IDs, making M-RoPE functionally equivalent to
-            # 1D-RoPE.
+            # NOTE: For text-only inputs, each dimension has identical position
+            # IDs, making M-RoPE functionally equivalent to 1D-RoPE.
             # See page 5 of https://arxiv.org/abs/2409.12191
             self.mrope_positions = torch.zeros(
-                (3, self.max_positions + 1), dtype=torch.int64, device=device
-            )
-        elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
-            self.xdrope_positions = torch.zeros(
-                (self.uses_xdrope_dim, self.max_positions + 1),
+                (self.draft_model_config.mrope_num_dims, self.max_positions + 1),
                 dtype=torch.int64,
                 device=device,
             )
@@ -245,7 +255,6 @@ class SpecDecodeBaseProposer:
         self.backup_next_token_ids = CpuGpuBuffer(
             self.max_batch_size,
             dtype=torch.int32,
-            pin_memory=PIN_MEMORY,
             device=device,
             with_numpy=True,
         )
@@ -357,6 +366,10 @@ class SpecDecodeBaseProposer:
         dflash_config = getattr(model_hf_config, "dflash_config", None)
         if dflash_config and "mask_token_id" in dflash_config:
             self.parallel_drafting_token_id = dflash_config["mask_token_id"]
+        elif getattr(model_hf_config, "mask_token_id", None) is not None:
+            self.parallel_drafting_token_id = model_hf_config.mask_token_id
+        elif hasattr(model_hf_config, "dspark_noise_token_id"):
+            self.parallel_drafting_token_id = model_hf_config.dspark_noise_token_id
         elif hasattr(model_hf_config, "pard_token"):
             self.parallel_drafting_token_id = model_hf_config.pard_token
         elif hasattr(model_hf_config, "ptd_token_id"):
@@ -364,8 +377,9 @@ class SpecDecodeBaseProposer:
         else:
             raise ValueError(
                 "For parallel drafting, the draft model config must have "
-                "`pard_token`, `ptd_token_id`, or "
-                "`dflash_config.mask_token_id` specified in its config.json."
+                "`dflash_config.mask_token_id`, `mask_token_id`, "
+                "`dspark_noise_token_id`, `pard_token`, or `ptd_token_id` "
+                "specified in its config.json."
             )
 
         if self.pass_hidden_states_to_model:
@@ -376,15 +390,11 @@ class SpecDecodeBaseProposer:
     def _get_positions(self, num_tokens: int):
         if self.uses_mrope:
             return self.mrope_positions[:, :num_tokens]
-        if self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
-            return self.xdrope_positions[:, :num_tokens]
         return self.positions[:num_tokens]
 
     def _set_positions(self, num_tokens: int, positions: torch.Tensor):
         if self.uses_mrope:
             self.mrope_positions[:, :num_tokens] = positions
-        elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
-            self.xdrope_positions[:, :num_tokens] = positions
         else:
             # Convert M-RoPE positions if target model uses M-RoPE
             # but draft doesn't, For text inputs, all M-RoPE
@@ -676,9 +686,6 @@ class SpecDecodeBaseProposer:
         # (i.e., not the first proposal).
         if self.num_speculative_tokens > 1 and num_rejected_tokens_gpu is not None:
             common_attn_metadata.seq_lens -= num_rejected_tokens_gpu
-            # Invalidate the CPU-side shadows to avoid H<>D sync.
-            common_attn_metadata._seq_lens_cpu = None
-            common_attn_metadata._num_computed_tokens_cpu = None
 
         block_size = self.block_size
         assert block_size > 0, "block_size has not been initialized."
@@ -782,8 +789,6 @@ class SpecDecodeBaseProposer:
         positions_1d = positions[0] if self.uses_mrope else positions
         if self.uses_mrope:
             out_pos = self.mrope_positions[0, :batch_size]
-        elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
-            out_pos = self.xdrope_positions[0, :batch_size]
         else:
             out_pos = self.positions[:batch_size]
         eagle_step_update_slot_mapping_and_metadata(
@@ -800,11 +805,6 @@ class SpecDecodeBaseProposer:
         if self.uses_mrope:
             self.mrope_positions[1:, :batch_size] = self.mrope_positions[0, :batch_size]
             positions = self.mrope_positions[:, :batch_size]
-        elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
-            self.xdrope_positions[1:, :batch_size] = self.xdrope_positions[
-                0, :batch_size
-            ]
-            positions = self.xdrope_positions[0, :batch_size]
         else:
             positions = self.positions[:batch_size]
         common_attn_metadata.max_seq_len = min(
@@ -812,10 +812,6 @@ class SpecDecodeBaseProposer:
             self.max_model_len,
         )
 
-        if common_attn_metadata._seq_lens_cpu is not None:
-            common_attn_metadata._seq_lens_cpu += 1
-        if common_attn_metadata._num_computed_tokens_cpu is not None:
-            common_attn_metadata._num_computed_tokens_cpu += 1
         if common_attn_metadata.seq_lens_cpu_upper_bound is not None:
             common_attn_metadata.seq_lens_cpu_upper_bound += 1
 
@@ -854,8 +850,6 @@ class SpecDecodeBaseProposer:
             self.input_ids[token_indices_to_sample] = next_token_ids
 
             # copy inputs to buffer for cudagraph
-            if self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim == 0:
-                target_positions = target_positions[0]
             self._set_positions(num_tokens, target_positions)
 
             self.hidden_states[:num_tokens] = target_hidden_states
@@ -895,13 +889,12 @@ class SpecDecodeBaseProposer:
             )
 
             # Kernel grid: one program per request (row)
-            grid = (batch_size, num_blocks)
             query_start_loc = cad.query_start_loc
             query_end_loc = cad.query_start_loc[1:] - 1
             if num_rejected_tokens_gpu is not None:
                 query_end_loc = query_end_loc - num_rejected_tokens_gpu
 
-            copy_and_expand_eagle_inputs_kernel[grid](
+            _copy_and_expand_eagle_inputs(
                 # (Padded) Inputs from the target model
                 target_token_ids_ptr=target_token_ids,
                 target_positions_ptr=target_positions,
@@ -924,6 +917,8 @@ class SpecDecodeBaseProposer:
                 num_padding_slots_per_request=self.extra_slots_per_request,
                 shift_input_ids=self.pass_hidden_states_to_model,
                 BLOCK_SIZE_TOKENS=BLOCK_SIZE_TOKENS,
+                batch_size=batch_size,
+                num_blocks=num_blocks,
             )
             if self.pass_hidden_states_to_model:
                 assert self.parallel_drafting_hidden_state_tensor is not None
@@ -1013,7 +1008,12 @@ class SpecDecodeBaseProposer:
             # feedback into the next draft step.
             architectures = self.draft_model_config.hf_config.architectures or []
             return bool(
-                {"DeepSeekMTPModel", "KimiK3MTPModel"}.intersection(architectures)
+                {
+                    "DeepSeekMTPModel",
+                    "DeepseekV32MTPModel",
+                    "Glm5NextMTPModel",
+                    "KimiK3MTPModel",
+                }.intersection(architectures)
             )
         return self.method not in ("mtp", "draft_model", "dflash")
 
@@ -1083,11 +1083,10 @@ class SpecDecodeBaseProposer:
         valid_sampled_tokens_count = next_token_ids.new_empty(batch_size)
 
         # Kernel grid: one program per request (row)
-        grid = (batch_size,)
 
         # Find the next power of 2 for block sizes
         BLOCK_SIZE_TOKENS = next_power_of_2(num_tokens)
-        eagle_prepare_next_token_padded_kernel[grid](
+        _eagle_prepare_next_token_padded(
             sampled_token_ids,
             discard_request_mask,
             backup_tokens_gpu,
@@ -1126,8 +1125,7 @@ class SpecDecodeBaseProposer:
             (num_reqs,), dtype=torch.int32, device=device
         )
 
-        grid = (num_reqs,)
-        eagle_prepare_inputs_padded_kernel[grid](
+        _eagle_prepare_inputs_padded(
             spec_decode_metadata.cu_num_draft_tokens,
             valid_sampled_tokens_count,
             common_attn_metadata.query_start_loc,
@@ -1145,8 +1143,6 @@ class SpecDecodeBaseProposer:
             query_start_loc=common_attn_metadata.query_start_loc,
             seq_lens=common_attn_metadata.seq_lens,
             query_start_loc_cpu=query_start_loc_cpu,
-            _seq_lens_cpu=common_attn_metadata._seq_lens_cpu,
-            _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
             seq_lens_cpu_upper_bound=common_attn_metadata.seq_lens_cpu_upper_bound,
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=total_num_tokens,
@@ -1256,8 +1252,6 @@ class SpecDecodeBaseProposer:
             query_start_loc=async_tensor_h2d(new_query_start_loc_cpu, device=device),
             seq_lens=async_tensor_h2d(new_seq_lens_cpu, device=device),
             query_start_loc_cpu=new_query_start_loc_cpu,
-            _seq_lens_cpu=new_seq_lens_cpu,
-            _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
             seq_lens_cpu_upper_bound=new_seq_lens_cpu,
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=total_num_tokens,
@@ -1367,6 +1361,7 @@ class SpecDecodeBaseProposer:
             # handle multimodality
             assert hasattr(target_model, "config")
             if self.get_model_name(target_model) in [
+                "BailingMoeV3VLForConditionalGeneration",
                 "Cohere2VisionForConditionalGeneration",
                 "Exaone4_5_ForConditionalGeneration",
                 "GlmOcrForConditionalGeneration",
@@ -1393,6 +1388,10 @@ class SpecDecodeBaseProposer:
             ):
                 self.model.config.image_token_index = (
                     target_model.config.media_placeholder_token_id
+                )
+            elif self.get_model_name(target_model) == "NemotronH_Nano_VL_V2":
+                self.model.config.image_token_index = (
+                    target_model.config.img_context_token_id
                 )
             else:
                 self.model.config.image_token_index = (

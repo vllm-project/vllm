@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal
 
 import torch
@@ -19,6 +19,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
@@ -32,6 +33,7 @@ from vllm.multimodal.processing.processor import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
     replace_token_matches,
 )
 from vllm.sequence import IntermediateTensors
@@ -165,7 +167,7 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         image_height: int,
         processor: Gemma3Processor,
         mm_kwargs: Mapping[str, object],
-    ) -> PromptUpdateDetails[str]:
+    ) -> PromptUpdateDetails:
         boi_token = processor.boi_token
 
         num_crops = self.get_num_crops(
@@ -189,8 +191,9 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         tokenizer = processor.tokenizer
         vocab = tokenizer.get_vocab()
         image_token_id = vocab[tokenizer.image_token]
+        repl_full_ids = cached_encode(tokenizer, repl_full, add_special_tokens=False)
 
-        return PromptUpdateDetails.select_token_id(repl_full, image_token_id)
+        return PromptUpdateDetails.select_token_id(repl_full_ids, image_token_id)
 
     def get_num_image_tokens(
         self,
@@ -261,41 +264,38 @@ class Gemma3DummyInputsBuilder(BaseDummyInputsBuilder[Gemma3ProcessingInfo]):
 
 
 class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        processed_outputs = super()._call_hf_processor(
-            prompt,
-            mm_data,
-            mm_kwargs,
-            tok_kwargs,
-        )
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
 
-        # HF processor pops the `num_crops` kwarg, which is needed by vLLM
+    def _postprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
+        if not mm_data:
+            return processed_data
+
         if (images := mm_data.get("images")) is not None:
             mm_items = self.info.parse_mm_data({"image": images}, validate=False)
             parsed_images = mm_items.get_items("image", ImageProcessorItems)
             image_sizes = [
                 parsed_images.get_image_size(i) for i in range(len(parsed_images))
             ]
-            hf_processor = self.info.get_hf_processor(**mm_kwargs)
+            hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
             num_crops = [
                 self.info.get_num_crops(
                     image_width=size.width,
                     image_height=size.height,
                     processor=hf_processor,
-                    mm_kwargs=mm_kwargs,
+                    mm_kwargs=hf_processor_mm_kwargs,
                 )
                 for size in image_sizes
             ]
-            processed_outputs["num_patches"] = torch.tensor(num_crops) + 1
+            processed_data["num_patches"] = torch.tensor(num_crops) + 1
 
-        return processed_outputs
+        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -316,7 +316,8 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        image_token = hf_processor.boi_token
+        tokenizer = self.info.get_tokenizer()
+        boi_token_id = tokenizer.get_vocab()[hf_processor.boi_token]
 
         def get_replacement_gemma3(item_idx: int):
             images = mm_items.get_items("image", ImageProcessorItems)
@@ -332,7 +333,7 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
         return [
             PromptReplacement(
                 modality="image",
-                target=image_token,
+                target=[boi_token_id],
                 replacement=get_replacement_gemma3,
             )
         ]
@@ -372,6 +373,40 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
         )
 
         return token_ids, res
+
+    def _apply_token_matches_with_placeholders(
+        self,
+        token_ids: list[int],
+        mm_prompt_updates: MultiModalPromptUpdates,
+    ) -> tuple[
+        list[int],
+        MultiModalPromptUpdatesApplyResult,
+        Mapping[str, list[PlaceholderFeaturesInfo]],
+    ]:
+        new_token_ids, match_result = self._apply_token_matches(
+            token_ids,
+            mm_prompt_updates,
+        )
+
+        placeholders: dict[str, list[PlaceholderFeaturesInfo]] = {
+            modality: [] for modality in mm_prompt_updates
+        }
+
+        if all(
+            all(update_idx is not None for update_idx in update_idxs)
+            for update_idxs in match_result.values()
+        ):
+            placeholders = dict(
+                self._find_mm_placeholders(
+                    new_token_ids,
+                    self._matched_updates_from_result(
+                        mm_prompt_updates,
+                        match_result,
+                    ),
+                )
+            )
+
+        return new_token_ids, match_result, placeholders
 
     def _find_mm_placeholders(
         self,
@@ -491,6 +526,8 @@ class Gemma3ForConditionalGeneration(
             "lm_head.": "language_model.lm_head.",
         }
     )
+
+    supports_tower_connector_lora = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -650,43 +687,16 @@ class Gemma3ForConditionalGeneration(
             tower_model="vision_tower",
         )
 
-    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
-        """
-        Calculate the number of tokens output by the vision encoder.
-
-        The vision encoder processes images into patch embeddings. For Gemma3,
-        the relationship between prompt placeholder tokens and actual vision
-        encoder output tokens depends on the patch grid size.
-
-        Args:
-            num_image_tokens: Number of image placeholder tokens in the prompt
-                              (typically mm_tokens_per_image per image)
-
-        Returns:
-            Number of tokens output by the vision encoder
-        """
-        # For Gemma3, the vision encoder outputs tokens_per_side x tokens_per_side
-        # tokens per image. Since num_image_tokens represents the number of
-        # connector output tokens (mm_tokens_per_image = 256), and tokens_per_side
-        # is sqrt(256) = 16, we need to account for the token expansion.
-        # Based on empirical testing, the multiplier of 16 works correctly.
-        return num_image_tokens * 16
-
-    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
-        """
-        Calculate the number of tokens output by the multimodal connector.
-
-        The connector applies projection and normalization but maintains the
-        token count for Gemma3.
-
-        Args:
-            num_vision_tokens: Number of tokens from vision encoder
-
-        Returns:
-            Number of tokens after connector processing
-        """
-        # The Gemma3 connector maintains a 1:1 token mapping
-        return num_vision_tokens
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
+        tower_tokens = num_mm_embeds * 16
+        return tower_tokens, tower_tokens
 
     def get_encoder_cudagraph_config(self):
         from vllm.v1.worker.encoder_cudagraph_defs import (
@@ -762,6 +772,7 @@ class Gemma3ForConditionalGeneration(
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
@@ -816,7 +827,9 @@ class Gemma3ForConditionalGeneration(
     def encoder_eager_forward(
         self,
         mm_kwargs: dict[str, Any],
+        path: str = "default",
     ) -> torch.Tensor:
         image_input = self._parse_and_validate_image_input(**mm_kwargs)
+        assert image_input is not None
         results = self._process_image_input(image_input)
         return torch.cat(results, dim=0)

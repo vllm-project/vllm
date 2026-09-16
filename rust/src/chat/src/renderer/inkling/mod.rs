@@ -346,6 +346,7 @@ impl ChatRenderer for InklingChatRenderer {
 
         Ok(RenderedPrompt {
             prompt: Prompt::TokenIds(out),
+            media_order: None,
             effective_template_kwargs,
         })
     }
@@ -383,18 +384,7 @@ fn rendered_tools(request: &ChatRequest) -> Vec<&ChatTool> {
         return Vec::new();
     }
 
-    let mut tools = Vec::with_capacity(request.tools.len());
-    tools.extend(request.tools.iter());
-    for message in &request.messages {
-        if let ChatMessage::Developer {
-            tools: Some(local_tools),
-            ..
-        } = message
-        {
-            tools.extend(local_tools.iter());
-        }
-    }
-    tools
+    request.tools().iter().collect()
 }
 
 fn tool_call_json(tool_call: &AssistantToolCall) -> Result<String> {

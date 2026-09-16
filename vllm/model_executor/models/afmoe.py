@@ -47,7 +47,6 @@ from vllm.model_executor.models.utils import (
     PPMissingLayer,
     WeightsMapper,
     extract_layer_index,
-    make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
 )
@@ -72,7 +71,6 @@ class AfmoeMoE(nn.Module):
         self.route_norm = config.route_norm
 
         self.ep_group = get_ep_group().device_group
-        self.ep_rank = self.ep_group.rank()
         self.ep_size = self.ep_group.size()
         self.n_routed_experts: int = config.num_experts
         self.n_shared_experts: int = config.num_shared_experts
@@ -103,11 +101,6 @@ class AfmoeMoE(nn.Module):
         self.n_logical_experts = self.n_routed_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
-
-        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
-        self.physical_expert_end = (
-            self.physical_expert_start + self.n_local_physical_experts
-        )
 
         self.shared_experts = None
         # Shared experts
@@ -232,7 +225,7 @@ class AfmoeAttention(nn.Module):
 
         # Only create rotary embeddings for local attention
         if self.is_local_attention:
-            self.rotary_emb = get_rope(
+            self.rotary_emb: nn.Module | None = get_rope(
                 self.head_dim,
                 max_position=max_position_embeddings,
                 rope_parameters=config.rope_parameters,
@@ -408,10 +401,6 @@ class AfmoeModel(nn.Module, EagleModelMixin):
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
-
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
-        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)

@@ -18,7 +18,7 @@ class MxFp6LinearLayerConfig:
 
     Attributes:
         weight_quant_key: Identifies the weight quantization format. Can be
-        kMxfp6E2M3Static or kMxfp6E3M2Static.
+            kMxfp6E2M3Static or kMxfp6E3M2Static.
         activation_quant_key: Identifies the activation quantization format,
             or `None` when activations must not be quantized.
     """

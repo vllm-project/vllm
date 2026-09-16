@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import safetensors
 
@@ -12,7 +12,12 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorMetadata,
     ECConnectorRole,
 )
+from vllm.distributed.ec_transfer.ec_connector.utils import (
+    PlaceholderMetadataResolver,
+    collect_ec_item_metadata,
+)
 from vllm.logger import init_logger
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -50,6 +55,7 @@ class ECExampleConnector(ECConnectorBase):
         super().__init__(vllm_config=vllm_config, role=role)
         # req_id -> index
         self._mm_datas_need_loads: dict[str, int] = {}
+        self._metadata_resolver = PlaceholderMetadataResolver(vllm_config.model_config)
         transfer_config = vllm_config.ec_transfer_config
         if transfer_config is not None:
             self._storage_path = transfer_config.get_from_extra_config(
@@ -84,14 +90,20 @@ class ECExampleConnector(ECConnectorBase):
                 "In connector.start_load_caches, but the connector metadata is None"
             )
             return
+        # A bare "cuda" makes safetensors load onto cuda:0. Pin the load to the
+        # selected device so tensor-parallel workers load the cache locally.
+        device = current_platform.device_type
+        if current_platform.is_cuda_alike():
+            device = f"{device}:{current_platform.current_device()}"
         # Load the EC for each mm data
         for mm_data in metadata.mm_datas:
             if mm_data.mm_hash in encoder_cache:
                 continue
             filename = self._generate_filename_debug(mm_data.mm_hash)
-            ec_cache = safetensors.torch.load_file(
-                filename, device=current_platform.device_type
-            )["ec_cache"]
+            with gpu_sync_allowed():
+                ec_cache = safetensors.torch.load_file(filename, device=device)[
+                    "ec_cache"
+                ]
             encoder_cache[mm_data.mm_hash] = ec_cache
             logger.debug("Success load encoder cache for hash %s", mm_data.mm_hash)
 
@@ -113,7 +125,8 @@ class ECExampleConnector(ECConnectorBase):
             return
         filename = self._generate_filename_debug(mm_hash)
         ec_cache = encoder_cache[mm_hash]
-        tensors = {"ec_cache": ec_cache.detach().cpu()}
+        with gpu_sync_allowed():
+            tensors = {"ec_cache": ec_cache.detach().cpu()}
         safetensors.torch.save_file(tensors, filename)
         logger.debug("Save cache successful for mm_hash %s", mm_hash)
 
@@ -164,6 +177,26 @@ class ECExampleConnector(ECConnectorBase):
             meta.add_mm_data(MMMeta.make_meta(mm_hash, num_encoder_token))
         self._mm_datas_need_loads.clear()
         return meta
+
+    def request_finished(
+        self,
+        request: "Request",
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """Report each item's cache key and grid so a consumer can skip the
+        image transform.
+
+        A consumer only needs the grid to size the prompt's placeholder range;
+        the embedding itself arrives through this connector. Reporting the grid
+        the producer actually computed keeps the two sides in agreement without
+        the caller re-deriving it from the raw media.
+        """
+        if not self.is_producer:
+            return False, None
+
+        items = collect_ec_item_metadata(request.mm_features, self._metadata_resolver)
+        if not items:
+            return False, None
+        return False, items
 
     # ==============================
     # Helper functions

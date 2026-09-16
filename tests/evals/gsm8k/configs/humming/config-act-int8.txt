@@ -1,3 +1,4 @@
+gpt-oss-20b-humming.yaml
 Qwen3-30B-A3B-Instruct-2507-quantized.w8a8-humming-act-int8.yaml
 Qwen3-30B-A3B-GPTQ-Int4-humming-act-int8.yaml
 Qwen3-30B-A3B-AWQ-humming.yaml

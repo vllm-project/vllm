@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from weakref import WeakValueDictionary
 
 import torch
@@ -8,7 +10,6 @@ import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 from vllm.logger import init_logger
-from vllm.utils import is_moe_layer
 
 logger = init_logger(__name__)
 
@@ -158,6 +159,16 @@ class All2AllManagerBase:
     def destroy(self):
         pass
 
+    def stage_ep_size(self) -> None:
+        pass
+
+    def commit_ep_size(self) -> None:
+        pass
+
+    @contextmanager
+    def mask_remote_ranks(self) -> Iterator[None]:
+        yield
+
 
 class DeviceCommunicatorBase:
     """
@@ -226,6 +237,12 @@ class DeviceCommunicatorBase:
 
     def checkpoint_restore(self) -> None:
         """Restore communicator state after checkpoint (default: no-op)."""
+
+    def suspend(self) -> None:
+        """Release reclaimable communicator memory (default: no-op)."""
+
+    def resume(self) -> None:
+        """Restore memory released by ``suspend`` (default: no-op)."""
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         if dim < 0:
@@ -357,17 +374,6 @@ class DeviceCommunicatorBase:
 
     def destroy(self):
         pass
-
-    def prepare_communication_buffer_for_model(self, model: torch.nn.Module) -> None:
-        """
-        Prepare the communication buffer for the model.
-        """
-        if not self.is_ep_communicator:
-            return
-
-        moe_modules = [module for module in model.modules() if is_moe_layer(module)]
-        for module in moe_modules:
-            module.maybe_init_modular_kernel()
 
     def dispatch_router_logits(
         self,

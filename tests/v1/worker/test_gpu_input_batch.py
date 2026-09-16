@@ -475,15 +475,14 @@ def test_placeholder_spec_token_ids_written_verbatim():
 
 
 @pytest.mark.parametrize(
-    ("pooling_params", "expect_device_prompt_token_ids", "expect_cpu_prompt_token_ids"),
+    ("pooling_params", "expect_cpu_prompt_token_ids"),
     [
-        ({"task": "classify"}, False, False),
-        ({"task": "classify", "requires_token_ids": True}, True, True),
+        ({"task": "classify"}, False),
+        ({"task": "classify", "requires_token_ids": True}, True),
     ],
 )
 def test_pooling_metadata_token_id_buffers(
     pooling_params: dict[str, object],
-    expect_device_prompt_token_ids: bool,
     expect_cpu_prompt_token_ids: bool,
 ):
     from vllm.pooling_params import PoolingParams
@@ -504,13 +503,8 @@ def test_pooling_metadata_token_id_buffers(
     input_batch.refresh_metadata()
 
     metadata = input_batch.get_pooling_metadata()
-    if expect_device_prompt_token_ids:
-        assert input_batch.sampling_metadata.prompt_token_ids is not None
-        assert metadata.prompt_token_ids is not None
-        assert metadata.get_prompt_token_ids()[0].tolist() == req.prompt_token_ids
-    else:
-        assert input_batch.sampling_metadata.prompt_token_ids is None
-        assert metadata.prompt_token_ids is None
+    assert input_batch.sampling_metadata.prompt_token_ids is None
+    assert metadata.prompt_token_ids is None
 
     if expect_cpu_prompt_token_ids:
         assert metadata.prompt_token_ids_cpu is not None

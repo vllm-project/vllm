@@ -306,28 +306,6 @@ __device__ __forceinline__ void cp_async(const uint32_t smem_addr,
 #endif
 }
 
-template <int SIZE_IN_BYTES>
-__device__ __forceinline__ void cp_async_ca(const uint32_t smem_addr,
-                                            const void* gmem_ptr,
-                                            const int src_in_bytes,
-                                            bool guard) {
-  static_assert(
-      (SIZE_IN_BYTES == 4 || SIZE_IN_BYTES == 8 || SIZE_IN_BYTES == 16),
-      "Size is not supported");
-#if __CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800
-  asm volatile(
-      "{.reg.pred p;\n"
-      " setp.ne.b32 p, %4, 0;\n"
-  #if __CUDACC_VER_MINOR__ >= 4
-      " @p cp.async.ca.shared.global.L2::256B [%0], [%1], %2, %3;}\n"
-  #else
-      " @p cp.async.ca.shared.global [%0], [%1], %2, %3;}\n"
-  #endif
-      ::"r"(smem_addr),
-      "l"(gmem_ptr), "n"(SIZE_IN_BYTES), "r"(src_in_bytes), "r"((int)guard));
-#endif
-}
-
 __device__ __forceinline__ void cp_async_commit_group() {
 #if __CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800
   asm volatile("cp.async.commit_group;\n");

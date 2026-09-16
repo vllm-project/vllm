@@ -1,19 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib
+import inspect
+import json
+import os
 from abc import ABC, abstractmethod
-from collections.abc import Callable
-from contextlib import nullcontext
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager, nullcontext, suppress
+from glob import glob
 from typing import Literal
+from uuid import uuid4
 
 import torch
+from packaging.version import InvalidVersion, Version
 from typing_extensions import override
 
+import vllm.version
 from vllm.config import ProfilerConfig
 from vllm.config.profiler import _is_uri_path
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+
+_TRITON_PROTON_3_7_VERSION = Version("3.7.0")
 
 
 class WorkerProfiler(ABC):
@@ -40,6 +51,11 @@ class WorkerProfiler(ABC):
         # Track when the profiler is actually running
         self._profiling_for_iters = 0
         self._running = False
+
+    @property
+    def is_running(self) -> bool:
+        """Whether the underlying profiler is currently collecting data."""
+        return self._running
 
     @abstractmethod
     def _start(self) -> None:
@@ -106,11 +122,13 @@ class WorkerProfiler(ABC):
             and self._running
             and self._profiling_for_iters > self._max_iters
         ):
-            # Automatically stop the profiler after max iters
-            # will be marked as not running, but leave as active so that stop
-            # can clean up properly
+            # Automatically stop the profiler after max iters. Go through the
+            # public stop() (not _call_stop() directly) so _active and the
+            # iteration counters reset too -- otherwise a later start_profile
+            # is silently ignored forever, since start() bails out early
+            # whenever _active is still True.
             logger.info_once("Max profiling iterations reached. Stopping profiler...")
-            self._call_stop()
+            self.stop()
             return
 
     def _profiler_step(self) -> bool:
@@ -143,15 +161,25 @@ class WorkerProfiler(ABC):
         if self._running:
             self.stop()
 
+    @property
+    def has_cuda_graph_session(self) -> bool:
+        """Whether a capture-time session is retained to attribute replays."""
+        return False
+
+    def capture_cuda_graphs(self) -> AbstractContextManager[None]:
+        """Observe graph creation for backends that attribute replay activity."""
+        return nullcontext()
+
     def annotate_context_manager(self, name: str):
         """Return a context manager to annotate profiler traces."""
         return nullcontext()
 
 
-TorchProfilerActivity = Literal["CPU", "CUDA", "XPU"]
+TorchProfilerActivity = Literal["CPU", "CUDA", "PrivateUse1", "XPU"]
 TorchProfilerActivityMap = {
     "CPU": torch.profiler.ProfilerActivity.CPU,
     "CUDA": torch.profiler.ProfilerActivity.CUDA,
+    "PrivateUse1": torch.profiler.ProfilerActivity.PrivateUse1,
     "XPU": torch.profiler.ProfilerActivity.XPU,
 }
 
@@ -235,15 +263,21 @@ class TorchProfilerWrapper(WorkerProfiler):
             profiler_config.wait_iterations + profiler_config.warmup_iterations - 1,
             0,
         )
+        self._version_metadata_added = False
 
     def _build_profiler_table(
         self,
         sort_key: str,
         row_limit: int | None = None,
     ) -> str:
+        group_by_input_shape = (
+            current_platform.is_cpu()
+            and self.profiler_config.torch_profiler_record_shapes
+        )
+        averages = self.profiler.key_averages(group_by_input_shape=group_by_input_shape)
         if row_limit is None:  # use profiler default row limit of 100
-            return self.profiler.key_averages().table(sort_by=sort_key)
-        return self.profiler.key_averages().table(
+            return averages.table(sort_by=sort_key)
+        return averages.table(
             sort_by=sort_key,
             row_limit=row_limit,
         )
@@ -258,9 +292,36 @@ class TorchProfilerWrapper(WorkerProfiler):
             with open(profiler_out_file, "w") as f:
                 print(table, file=f)
 
+    def _maybe_add_version_metadata(self) -> None:
+        """Stamp the vLLM version (which embeds the git commit) into the trace.
+
+        add_metadata_json is a no-op until Kineto is initialized, which with a
+        schedule only happens after the WAIT phase, so stamp once it's live.
+        """
+        if self._version_metadata_added:
+            return
+        # None while the schedule is still in the WAIT phase.
+        if self.profiler.profiler is None:
+            return
+        try:
+            self.profiler.add_metadata_json(
+                "vllm_version", json.dumps(vllm.version.__version__)
+            )
+            self.profiler.add_metadata_json(
+                "vllm_version_tuple",
+                json.dumps([str(p) for p in vllm.version.__version_tuple__]),
+            )
+        except Exception as e:
+            logger.warning("Failed to add vLLM version to profiler metadata: %s", e)
+        # Mark done even on failure, to avoid retrying every step.
+        self._version_metadata_added = True
+
     @override
     def _start(self) -> None:
         self.profiler.start()
+        # No-schedule case: Kineto is live immediately. With a schedule this
+        # no-ops and _profiler_step stamps it once WAIT ends.
+        self._maybe_add_version_metadata()
 
     @override
     def _stop(self) -> None:
@@ -296,6 +357,8 @@ class TorchProfilerWrapper(WorkerProfiler):
         """
         if self._uses_schedule:
             self.profiler.step()
+            # Stamp once the schedule leaves WAIT and Kineto is live.
+            self._maybe_add_version_metadata()
             # Track warmup steps - only count active steps toward max_iterations
             if self._warmup_steps_remaining > 0:
                 self._warmup_steps_remaining -= 1
@@ -305,6 +368,219 @@ class TorchProfilerWrapper(WorkerProfiler):
     @override
     def annotate_context_manager(self, name: str):
         return torch.profiler.record_function(name)
+
+
+class ProtonProfilerWrapper(WorkerProfiler):
+    """Worker profiler backed by :mod:`triton.profiler` (Proton)."""
+
+    def __init__(
+        self,
+        profiler_config: ProfilerConfig,
+        worker_name: str,
+    ) -> None:
+        super().__init__(profiler_config)
+
+        try:
+            self._proton = importlib.import_module("triton.profiler")
+            triton = importlib.import_module("triton")
+        except ImportError as exc:
+            raise RuntimeError(
+                "The Proton profiler requires a Triton installation with "
+                "triton.profiler support."
+            ) from exc
+
+        self._output_dir = profiler_config.proton_profiler_dir
+        self._output_path = os.path.join(self._output_dir, f"proton_{worker_name}")
+        self._context = profiler_config.proton_context
+        self._data = profiler_config.proton_data
+        self._backend = profiler_config.proton_backend
+        self._mode = profiler_config.proton_mode
+        self._hook = profiler_config.proton_hook
+        self._output_format = profiler_config.proton_output_format
+        self._graph_attribution = profiler_config.proton_graph_attribution
+        self._triton_version_string = getattr(triton, "__version__", "unknown")
+        try:
+            self._triton_version = Version(self._triton_version_string)
+        except InvalidVersion:
+            self._triton_version = None
+        self._validate_capabilities()
+        self._session_id: int | None = None
+        # Qualify output names by process and wrapper instance so a new
+        # worker cannot overwrite profiles left by an earlier server process.
+        self._instance_id = f"pid{os.getpid()}_{uuid4().hex}"
+        self._run_id = 0
+        self._graph_session = False
+        self._phase = 0
+        self._active_output_path: str | None = None
+        self._session_storage_path = os.path.join(
+            self._output_dir,
+            f".proton_cuda_graph_session_{worker_name}_{self._instance_id}",
+        )
+
+        logger.info_once(
+            "Proton profiling enabled. Output will be saved under: %s",
+            self._output_dir,
+        )
+
+    def _require_triton_version(self, feature: str, minimum: Version) -> None:
+        if self._triton_version is None or self._triton_version < minimum:
+            raise RuntimeError(
+                f"Proton {feature} requires Triton >= {minimum}; found "
+                f"{self._triton_version_string}."
+            )
+
+    def _validate_capabilities(self) -> None:
+        if self._graph_attribution:
+            self._require_triton_version(
+                "CUDA graph attribution", _TRITON_PROTON_3_7_VERSION
+            )
+        if self._output_format is not None:
+            parameters = inspect.signature(self._proton.finalize).parameters
+            supports_output_format = "output_format" in parameters or any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters.values()
+            )
+            if not supports_output_format:
+                raise RuntimeError(
+                    "The installed Triton Proton does not support selecting "
+                    "an output format during finalize."
+                )
+
+        if self._output_format == "hatchet_msgpack":
+            self._require_triton_version(
+                "hatchet_msgpack output", _TRITON_PROTON_3_7_VERSION
+            )
+        if self._mode and self._mode.split(":", 1)[0].lower() == "periodic_flushing":
+            self._require_triton_version(
+                "periodic flushing", _TRITON_PROTON_3_7_VERSION
+            )
+
+    def _create_session(self, output_path: str) -> int:
+        os.makedirs(self._output_dir, exist_ok=True)
+        session_id = self._proton.start(
+            name=output_path,
+            context=self._context,
+            data=self._data,
+            backend=self._backend,
+            mode=self._mode,
+            hook=self._hook,
+        )
+        if session_id is None:
+            raise RuntimeError("Proton did not create a profiling session")
+        return session_id
+
+    @property
+    def has_cuda_graph_session(self) -> bool:
+        return self._graph_session
+
+    def set_output_name(self, worker_name: str) -> None:
+        """Set the next run's output name after startup graph capture."""
+        if self._active:
+            return
+        self._output_path = os.path.join(self._output_dir, f"proton_{worker_name}")
+
+    @override
+    @contextmanager
+    def capture_cuda_graphs(self) -> Iterator[None]:
+        """Keep a Proton session active while vLLM captures CUDA graphs."""
+        if not self._graph_attribution:
+            yield
+            return
+        if self._session_id is None:
+            self._session_id = self._create_session(self._session_storage_path)
+        else:
+            self._proton.activate(session=self._session_id)
+        self._graph_session = True
+
+        try:
+            yield
+        finally:
+            captured_phase = self._phase
+            try:
+                self._phase = self._proton.data.advance_phase(self._session_id)
+            finally:
+                self._proton.deactivate(session=self._session_id, flushing=True)
+            self._proton.data.clear(self._session_id, captured_phase)
+
+    @override
+    def _start(self) -> None:
+        self._active_output_path = (
+            f"{self._output_path}_{self._instance_id}_run{self._run_id}"
+        )
+        self._run_id += 1
+        if self._graph_session:
+            assert self._session_id is not None
+            self._proton.activate(session=self._session_id)
+        else:
+            self._session_id = self._create_session(self._active_output_path)
+
+    def _write_graph_phase(self, phase: int) -> None:
+        assert self._active_output_path is not None
+        output_format = self._output_format or "hatchet"
+        output_path = f"{self._active_output_path}.{output_format}"
+        if output_format == "hatchet_msgpack":
+            with open(output_path, "wb") as output_file:
+                output_file.write(
+                    self._proton.data.get_msgpack(self._session_id, phase)
+                )
+        else:
+            with open(output_path, "w", encoding="utf-8") as output_file:
+                json.dump(self._proton.data.get(self._session_id, phase), output_file)
+
+    def _finalize_session(self, session_id: int) -> None:
+        if self._output_format is None:
+            self._proton.finalize(session=session_id)
+        else:
+            self._proton.finalize(session=session_id, output_format=self._output_format)
+
+    @override
+    def _stop(self) -> None:
+        assert self._session_id is not None
+        session_id = self._session_id
+        if self._graph_session:
+            completed_phase = self._phase
+            try:
+                self._phase = self._proton.data.advance_phase(session_id)
+            finally:
+                self._proton.deactivate(session=session_id, flushing=True)
+            try:
+                self._write_graph_phase(completed_phase)
+            finally:
+                self._proton.data.clear(session_id, completed_phase)
+                self._active_output_path = None
+            return
+
+        try:
+            self._proton.deactivate(session=session_id)
+        finally:
+            try:
+                self._finalize_session(session_id)
+            finally:
+                self._session_id = None
+                self._active_output_path = None
+
+    @override
+    def shutdown(self) -> None:
+        super().shutdown()
+        if self._graph_session and self._session_id is not None:
+            session_id = self._session_id
+            self._session_id = None
+            try:
+                self._finalize_session(session_id)
+            except Exception:
+                logger.exception(
+                    "Failed to finalize Proton CUDA graph session during shutdown."
+                )
+            finally:
+                for output_path in glob(f"{self._session_storage_path}.*"):
+                    with suppress(FileNotFoundError):
+                        os.remove(output_path)
+
+    @override
+    def annotate_context_manager(self, name: str):
+        if not self._running:
+            return nullcontext()
+        return self._proton.scope(name)
 
 
 class CudaProfilerWrapper(WorkerProfiler):
@@ -326,3 +602,24 @@ class CudaProfilerWrapper(WorkerProfiler):
     @override
     def annotate_context_manager(self, name: str):
         return torch.cuda.nvtx.range(name)
+
+
+def create_graph_capture_profiler(
+    profiler_config: ProfilerConfig, global_rank: int
+) -> WorkerProfiler | None:
+    """Create a profiler to observe CUDA graph capture, if configured.
+
+    Applies only to backends that attribute graph replay activity which
+    need a session around capture (Proton with ``proton_graph_attribution``).
+    """
+    if (
+        profiler_config.profiler == "proton"
+        and profiler_config.proton_graph_attribution
+    ):
+        from vllm.distributed.utils import get_worker_rank_suffix
+
+        return ProtonProfilerWrapper(
+            profiler_config,
+            worker_name=get_worker_rank_suffix(global_rank=global_rank),
+        )
+    return None

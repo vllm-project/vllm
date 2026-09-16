@@ -822,3 +822,19 @@ def test_completion_request_bad_words_default_empty():
         default_sampling_params={},
     )
     assert sampling_params.bad_words == []
+
+
+def test_completion_request_forwards_routed_experts_prompt_start():
+    request = CompletionRequest(
+        model="test-model",
+        prompt="Hello",
+        max_tokens=10,
+        routed_experts_prompt_start=3,
+    )
+
+    sampling_params = request.to_sampling_params(
+        max_tokens=10,
+        default_sampling_params={},
+    )
+
+    assert sampling_params.routed_experts_prompt_start == 3
