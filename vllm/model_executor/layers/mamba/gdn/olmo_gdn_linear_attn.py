@@ -305,7 +305,10 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
             return
 
         assert isinstance(attn_metadata, dict)
-        attn_metadata = attn_metadata[self.prefix]  # type: ignore[assignment]
+        attn_metadata = attn_metadata.get(self.prefix)  # type: ignore[assignment]
+        if attn_metadata is None:
+            # Profile/warmup dummy runs skip mamba-family metadata.
+            return
         assert isinstance(attn_metadata, GDNAttentionMetadata)
         has_initial_state = attn_metadata.has_initial_state
         spec_query_start_loc = attn_metadata.spec_query_start_loc
@@ -543,20 +546,10 @@ def olmo_hybrid_gdn_full_forward(
     )
 
 
-def olmo_hybrid_gdn_full_forward_fake(
-    hidden_states: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    """Fake implementation for torch.compile."""
-    return
-
-
 direct_register_custom_op(
     op_name="olmo_hybrid_gdn_full_forward",
     op_func=olmo_hybrid_gdn_full_forward,
     mutates_args=["output"],
-    fake_impl=olmo_hybrid_gdn_full_forward_fake,
 )
 
 

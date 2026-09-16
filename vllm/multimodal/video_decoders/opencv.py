@@ -42,7 +42,7 @@ def decode_opencv(
     frame_idx = loader_cls.compute_frames_index_to_sample(
         source=source, target=target, **sampling_kwargs
     )
-    frames, valid = OpenCVVideoBackendMixin.read_frames(
+    frames, valid = loader_cls.read_frames(
         cap,
         frame_idx,
         total_frames_num=source.total_frames_num,
