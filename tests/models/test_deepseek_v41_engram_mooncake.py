@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.models.deepseek_v4_1.nvidia import engram_mooncake
 from vllm.models.deepseek_v4_1.nvidia.engram_mooncake import (
     MooncakeEngramBackend,
     _consume_previous_lookup,
@@ -27,10 +28,17 @@ class _Table:
     def __init__(self):
         self.calls = []
 
-    def lookup_many_into(self, layer_ids, row_ids, outputs):
-        self.calls.append((list(layer_ids), [ids.copy() for ids in row_ids]))
-        for ids, output in zip(row_ids, outputs):
-            output[...] = ids[..., None]
+    def lookup_many_into_registered(
+        self, layer_ids, row_ids, output_addresses, output_sizes
+    ):
+        self.calls.append(
+            (
+                list(layer_ids),
+                [ids.copy() for ids in row_ids],
+                list(output_addresses),
+                list(output_sizes),
+            )
+        )
 
 
 def _layer(layer_id, hash_index, offsets):
@@ -47,7 +55,8 @@ def _layer(layer_id, hash_index, offsets):
         max_tokens=tokens,
         host_ids=[torch.empty(tokens, heads, dtype=torch.int32)],
         local_ids=[np.empty((tokens, heads), dtype=np.int64)],
-        host_rows=[torch.full((tokens, heads, row_bytes), 255, dtype=torch.uint8)],
+        host_dead=[torch.empty(tokens, heads, dtype=torch.bool)],
+        device_packed=[torch.empty(tokens, heads, row_bytes, dtype=torch.uint8)],
     )
 
 
@@ -71,30 +80,69 @@ def test_lookup_batches_layers_and_zeros_dead_and_trailing_rows():
     table = _Table()
     backend = MooncakeEngramBackend.__new__(MooncakeEngramBackend)
     backend._layers = {0: first, 1: second}
-    backend._slots = [SimpleNamespace(copied=_Event())]
+    backend._slots = [SimpleNamespace(ids_ready=_Event(), rows_consumed=_Event())]
     backend._table = table
 
     assert backend._lookup(0, 4) == 2
     assert len(table.calls) == 1
-    layer_ids, row_ids = table.calls[0]
+    layer_ids, row_ids, output_addresses, output_sizes = table.calls[0]
     assert layer_ids == [2, 28]
     np.testing.assert_array_equal(row_ids[0], [[[1, 2], [0, 5]]])
     np.testing.assert_array_equal(row_ids[1], [[[3, 9], [4, 0]]])
-    assert not first.host_rows[0][1, 0].any()
-    assert not second.host_rows[0][1, 1].any()
-    assert not first.host_rows[0][2:].any()
-    assert not second.host_rows[0][2:].any()
+    assert output_addresses == [
+        first.device_packed[0].data_ptr(),
+        second.device_packed[0].data_ptr(),
+    ]
+    assert output_sizes == [2 * 2 * 4, 2 * 2 * 4]
+    torch.testing.assert_close(
+        first.host_dead[0],
+        torch.tensor([[False, False], [True, False], [True, True], [True, True]]),
+    )
+    torch.testing.assert_close(
+        second.host_dead[0],
+        torch.tensor([[False, False], [False, True], [True, True], [True, True]]),
+    )
 
 
 def test_failed_lookup_is_consumed_once_and_allows_retry():
     failed = Future()
     failed.set_exception(RuntimeError("lookup failed"))
-    slot = _LookupSlot(copied=_Event(), future=failed)
+    slot = _LookupSlot(ids_ready=_Event(), rows_consumed=_Event(), future=failed)
 
     with pytest.raises(RuntimeError, match="lookup failed"):
         _consume_previous_lookup(slot)
     assert slot.future is None
     _consume_previous_lookup(slot)
+
+
+@pytest.mark.parametrize(
+    "active_rows, needs_flush, expected_flushes",
+    [(2, True, 1), (0, True, 0), (2, False, 0)],
+)
+def test_wait_flushes_gpudirect_writes_once(
+    monkeypatch, active_rows, needs_flush, expected_flushes
+):
+    future = Future()
+    future.set_result(active_rows)
+    slot = _LookupSlot(
+        ids_ready=_Event(),
+        rows_consumed=_Event(),
+        future=future,
+        writes_flushed=False,
+    )
+    backend = MooncakeEngramBackend.__new__(MooncakeEngramBackend)
+    backend._slots = [slot]
+    backend._needs_gpudirect_flush = needs_flush
+    flushes = []
+    monkeypatch.setattr(engram_mooncake, "dbo_current_ubatch_id", lambda: 0)
+    monkeypatch.setattr(
+        engram_mooncake, "_flush_gpudirect_writes", lambda: flushes.append(True)
+    )
+
+    backend.wait()
+    backend.wait()
+
+    assert len(flushes) == expected_flushes
 
 
 def test_packed_row_dequant_matches_torch():
@@ -115,10 +163,13 @@ def test_packed_row_dequant_matches_torch():
         dtype=torch.uint8,
     )
     packed = torch.cat((weight, scales), dim=-1).cuda()
+    dead = torch.zeros(tokens, actual_heads, dtype=torch.bool, device="cuda")
+    dead[1, 0] = True
     output = torch.zeros(tokens, part_heads, dim, dtype=torch.bfloat16, device="cuda")
     num_rows = tokens * actual_heads
     _dequant_packed_engram_rows[((num_rows + 15) // 16,)](
         packed,
+        dead,
         output,
         num_rows,
         ACTUAL_HEADS=actual_heads,
@@ -132,5 +183,7 @@ def test_packed_row_dequant_matches_torch():
         weight.view(torch.float8_e4m3fn).float().unflatten(-1, (-1, block))
         * scales.view(torch.float8_e8m0fnu).float().unsqueeze(-1)
     ).flatten(-2)
+    assert not output[1, 0].count_nonzero()
+    expected[1, 0].zero_()
     torch.testing.assert_close(output[:, :actual_heads].cpu(), expected.bfloat16())
     assert not output[:, actual_heads:].count_nonzero()

@@ -17,6 +17,11 @@ import torch
 import triton
 import triton.language as tl
 
+try:
+    from cuda.bindings import runtime as cudart
+except ImportError:
+    from cuda import cudart
+
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.logger import init_logger
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
@@ -25,6 +30,43 @@ if TYPE_CHECKING:
     from .engram import ParallelEngramEmbedding
 
 logger = init_logger(__name__)
+
+
+def _gpudirect_flush_required() -> bool:
+    error, device = cudart.cudaGetDevice()
+    if error != cudart.cudaError_t.cudaSuccess:
+        raise RuntimeError(f"Could not query the current CUDA device: {error}")
+    error, ordering = cudart.cudaDeviceGetAttribute(
+        cudart.cudaDeviceAttr.cudaDevAttrGPUDirectRDMAWritesOrdering, device
+    )
+    if error != cudart.cudaError_t.cudaSuccess:
+        raise RuntimeError(f"Could not query GPUDirect RDMA ordering: {error}")
+    owner_scope = (
+        cudart.cudaFlushGPUDirectRDMAWritesScope.cudaFlushGPUDirectRDMAWritesToOwner
+    )
+    if int(ordering) >= int(owner_scope):
+        return False
+    error, options = cudart.cudaDeviceGetAttribute(
+        cudart.cudaDeviceAttr.cudaDevAttrGPUDirectRDMAFlushWritesOptions, device
+    )
+    if error != cudart.cudaError_t.cudaSuccess:
+        raise RuntimeError(f"Could not query GPUDirect RDMA flush support: {error}")
+    flush_options = cudart.cudaFlushGPUDirectRDMAWritesOptions
+    host_flush = flush_options.cudaFlushGPUDirectRDMAWritesOptionHost
+    if not (int(options) & int(host_flush)):
+        raise RuntimeError(
+            "This CUDA device cannot make GPUDirect RDMA writes visible to kernels"
+        )
+    return True
+
+
+def _flush_gpudirect_writes() -> None:
+    result = cudart.cudaDeviceFlushGPUDirectRDMAWrites(
+        cudart.cudaFlushGPUDirectRDMAWritesTarget.cudaFlushGPUDirectRDMAWritesTargetCurrentDevice,
+        cudart.cudaFlushGPUDirectRDMAWritesScope.cudaFlushGPUDirectRDMAWritesToOwner,
+    )[0]
+    if result != cudart.cudaError_t.cudaSuccess:
+        raise RuntimeError(f"CUDA GPUDirect RDMA write flush failed: {result}")
 
 
 def engram_head_shard(
@@ -49,6 +91,7 @@ def engram_head_shard(
 @triton.jit(do_not_specialize=["num_rows"])
 def _dequant_packed_engram_rows(
     packed,
+    dead,
     output,
     num_rows,
     ACTUAL_HEADS: tl.constexpr,
@@ -62,6 +105,7 @@ def _dequant_packed_engram_rows(
     rows = tl.program_id(0) * BLOCK_R + tl.arange(0, BLOCK_R)
     valid = rows < num_rows
     row = rows.to(tl.int64)
+    alive = tl.load(dead + row, mask=valid, other=1) == 0
     raw = tl.load(
         packed + row[:, None] * ROW_BYTES + cols[None, :],
         mask=valid[:, None],
@@ -92,7 +136,7 @@ def _dequant_packed_engram_rows(
     out_row = token * PART_HEADS + head
     tl.store(
         output + out_row[:, None] * DIM + cols[None, :],
-        (values * scale).to(tl.bfloat16),
+        tl.where(alive[:, None], values * scale, 0.0).to(tl.bfloat16),
         mask=valid[:, None],
     )
 
@@ -110,8 +154,9 @@ class _LayerBuffers:
     max_tokens: int = 0
     host_ids: list[torch.Tensor] = field(default_factory=list)
     local_ids: list[np.ndarray] = field(default_factory=list)
-    host_rows: list[torch.Tensor] = field(default_factory=list)
+    host_dead: list[torch.Tensor] = field(default_factory=list)
     device_packed: list[torch.Tensor] = field(default_factory=list)
+    device_dead: list[torch.Tensor] = field(default_factory=list)
     device_rows: list[torch.Tensor] = field(default_factory=list)
 
     @property
@@ -121,9 +166,11 @@ class _LayerBuffers:
 
 @dataclass
 class _LookupSlot:
-    copied: torch.cuda.Event
+    ids_ready: torch.cuda.Event
+    rows_consumed: torch.cuda.Event
     future: Future[int] | None = None
     num_tokens: int = 0
+    writes_flushed: bool = True
 
 
 def _consume_previous_lookup(slot: _LookupSlot) -> None:
@@ -138,8 +185,8 @@ def _release_backend(resources: dict[str, Any], executor: ThreadPoolExecutor) ->
     store = resources.get("store")
     if store is None:
         return
-    for host in resources["registered"]:
-        rc = store.unregister_buffer(host.data_ptr())
+    for buffer in resources["registered"]:
+        rc = store.unregister_buffer(buffer.data_ptr())
         if rc != 0:
             logger.warning("Mooncake Engram buffer unregister failed: %s", rc)
     store.close()
@@ -176,10 +223,14 @@ class MooncakeEngramBackend:
         self._connect_lock = threading.Lock()
         self._store: Any | None = None
         self._table: Any | None = None
+        self._needs_gpudirect_flush = False
         self._executor = ThreadPoolExecutor(
             max_workers=num_slots, thread_name_prefix="vllm-engram-mooncake"
         )
-        self._slots = [_LookupSlot(torch.cuda.Event()) for _ in range(num_slots)]
+        self._slots = [
+            _LookupSlot(torch.cuda.Event(), torch.cuda.Event())
+            for _ in range(num_slots)
+        ]
         self._resources: dict[str, Any] = {"store": None, "registered": []}
         self._finalizer = weakref.finalize(
             self, _release_backend, self._resources, self._executor
@@ -251,12 +302,11 @@ class MooncakeEngramBackend:
             layer.local_ids.append(
                 np.empty((max_tokens, layer.actual_heads), dtype=np.int64)
             )
-            layer.host_rows.append(
+            layer.host_dead.append(
                 torch.empty(
                     max_tokens,
                     layer.actual_heads,
-                    layer.row_bytes,
-                    dtype=torch.uint8,
+                    dtype=torch.bool,
                     device="cpu",
                     pin_memory=True,
                 )
@@ -267,6 +317,14 @@ class MooncakeEngramBackend:
                     layer.actual_heads,
                     layer.row_bytes,
                     dtype=torch.uint8,
+                    device=device,
+                )
+            )
+            layer.device_dead.append(
+                torch.empty(
+                    max_tokens,
+                    layer.actual_heads,
+                    dtype=torch.bool,
                     device=device,
                 )
             )
@@ -329,20 +387,21 @@ class MooncakeEngramBackend:
             if rc != 0:
                 store.close()
                 raise RuntimeError(f"Mooncake Store setup failed, rc={rc}")
-            if not hasattr(EngramStore, "lookup_many_into"):
+            if not hasattr(EngramStore, "lookup_many_into_registered"):
                 store.close()
                 raise RuntimeError(
-                    "Mooncake Engram requires a build with lookup_many_into support"
+                    "Mooncake Engram requires direct registered output support"
                 )
 
             try:
+                needs_gpudirect_flush = _gpudirect_flush_required()
                 configs = {}
                 for layer in self._ordered_layers():
                     config = EngramStoreConfig()
                     config.table_vocab_sizes = list(layer.head_sizes)
                     config.row_bytes = layer.row_bytes
                     configs[layer.store_layer_id] = config
-                table = EngramStore(configs, store_client=store)
+                table = EngramStore(configs, store=store)
                 keys = [
                     key
                     for layer in self._ordered_layers()
@@ -363,12 +422,15 @@ class MooncakeEngramBackend:
             registered: list[torch.Tensor] = []
             try:
                 for layer in self._ordered_layers():
-                    for host in layer.host_rows:
-                        if store.register_buffer(host.data_ptr(), host.numel()) != 0:
+                    for packed in layer.device_packed:
+                        if (
+                            store.register_buffer(packed.data_ptr(), packed.numel())
+                            != 0
+                        ):
                             raise RuntimeError(
                                 "Could not register Mooncake Engram output buffer"
                             )
-                        registered.append(host)
+                        registered.append(packed)
             except Exception:
                 for host in registered:
                     store.unregister_buffer(host.data_ptr())
@@ -378,6 +440,7 @@ class MooncakeEngramBackend:
             self._resources["registered"] = registered
             self._store = store
             self._table = table
+            self._needs_gpudirect_flush = needs_gpudirect_flush
             logger.info(
                 "Connected Mooncake Engram shard %d/%d with model layers %s",
                 self.shard_rank,
@@ -386,7 +449,9 @@ class MooncakeEngramBackend:
             )
 
     def _lookup(self, slot_index: int, num_tokens: int) -> int:
-        self._slots[slot_index].copied.synchronize()
+        slot = self._slots[slot_index]
+        slot.rows_consumed.synchronize()
+        slot.ids_ready.synchronize()
         layers = self._ordered_layers()
         active_end = 0
         global_ids_by_layer = []
@@ -398,18 +463,19 @@ class MooncakeEngramBackend:
                 active_end = max(active_end, int(active[-1]) + 1)
         if active_end == 0:
             for layer in layers:
-                layer.host_rows[slot_index][:num_tokens].zero_()
+                layer.host_dead[slot_index][:num_tokens].fill_(True)
             return 0
 
         layer_ids: list[int] = []
         local_ids: list[np.ndarray] = []
-        outputs: list[np.ndarray] = []
-        dead_masks: list[np.ndarray] = []
+        output_addresses: list[int] = []
+        output_sizes: list[int] = []
         for layer, global_ids in zip(layers, global_ids_by_layer):
             current = layer.local_ids[slot_index][:active_end]
             np.subtract(global_ids[:active_end], layer.global_offsets, out=current)
-            dead = global_ids[:active_end] == -1
-            valid = dead | (
+            dead = global_ids[:num_tokens] == -1
+            active_dead = dead[:active_end]
+            valid = active_dead | (
                 (current >= 0)
                 & (current < np.asarray(layer.head_sizes, dtype=np.int64))
             )
@@ -418,19 +484,18 @@ class MooncakeEngramBackend:
                     f"Engram hashes are outside layer {layer.model_layer_id}'s "
                     "owned head ranges"
                 )
-            current[dead] = 0
-            output = layer.host_rows[slot_index]
-            if active_end < num_tokens:
-                output[active_end:num_tokens].zero_()
+            current[active_dead] = 0
+            layer.host_dead[slot_index][:num_tokens].copy_(torch.from_numpy(dead))
+            output = layer.device_packed[slot_index]
             layer_ids.append(layer.store_layer_id)
             local_ids.append(current[None])
-            outputs.append(output[:active_end].numpy()[None])
-            dead_masks.append(dead)
+            output_addresses.append(output.data_ptr())
+            output_sizes.append(active_end * layer.actual_heads * layer.row_bytes)
 
         assert self._table is not None
-        self._table.lookup_many_into(layer_ids, local_ids, outputs)
-        for output, dead in zip(outputs, dead_masks):
-            output[0, dead] = 0
+        self._table.lookup_many_into_registered(
+            layer_ids, local_ids, output_addresses, output_sizes
+        )
         return active_end
 
     @eager_break_during_capture
@@ -458,8 +523,9 @@ class MooncakeEngramBackend:
                 layer.head_start : layer.head_start + layer.actual_heads,
             ]
             layer.host_ids[slot_index][:num_tokens].copy_(source, non_blocking=True)
-        slot.copied.record(torch.cuda.current_stream())
+        slot.ids_ready.record(torch.cuda.current_stream())
         slot.num_tokens = num_tokens
+        slot.writes_flushed = False
         slot.future = self._executor.submit(self._lookup, slot_index, num_tokens)
 
     @eager_break_during_capture
@@ -471,7 +537,11 @@ class MooncakeEngramBackend:
         slot = self._slots[dbo_current_ubatch_id()]
         if slot.future is None:
             raise RuntimeError("Mooncake Engram rows were not prefetched")
-        slot.future.result()
+        active_rows = slot.future.result()
+        if active_rows and not slot.writes_flushed:
+            if self._needs_gpudirect_flush:
+                _flush_gpudirect_writes()
+            slot.writes_flushed = True
 
     def rows(self, layer_hash_index: int) -> torch.Tensor:
         slot_index = dbo_current_ubatch_id()
@@ -480,7 +550,8 @@ class MooncakeEngramBackend:
         layer = self._layers[layer_hash_index]
         num_tokens = slot.num_tokens
         packed = layer.device_packed[slot_index][:num_tokens]
-        packed.copy_(layer.host_rows[slot_index][:num_tokens], non_blocking=True)
+        dead = layer.device_dead[slot_index][:num_tokens]
+        dead.copy_(layer.host_dead[slot_index][:num_tokens], non_blocking=True)
         output = layer.device_rows[slot_index][:num_tokens]
         num_rows = num_tokens * layer.actual_heads
         if num_rows:
@@ -489,6 +560,7 @@ class MooncakeEngramBackend:
                 raise RuntimeError("Mooncake Engram embedding was released")
             _dequant_packed_engram_rows[(triton.cdiv(num_rows, 16),)](
                 packed,
+                dead,
                 output,
                 num_rows,
                 ACTUAL_HEADS=layer.actual_heads,
@@ -498,6 +570,7 @@ class MooncakeEngramBackend:
                 QUANT_BLOCK=embedding.block_size,
                 BLOCK_R=16,
             )
+        slot.rows_consumed.record(torch.cuda.current_stream())
         return output
 
 
