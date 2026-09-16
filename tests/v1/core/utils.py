@@ -17,6 +17,7 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.config.scheduler import SchedulerPolicy
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalKwargsItem,
@@ -74,6 +75,7 @@ def create_scheduler(
     use_v2_model_runner: bool | None = None,
     kv_cache_spec: KVCacheSpec | None = None,
     per_request_spec_decode_metrics: str = "none",
+    scheduling_policy: SchedulerPolicy = "fcfs",
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -94,6 +96,9 @@ def create_scheduler(
         dtype="float16",
         seed=42,
         skip_tokenizer_init=skip_tokenizer_init,
+        # The scheduler reads model_config.max_model_len, not the
+        # SchedulerConfig one, so both must agree.
+        max_model_len=max_model_len,
     )
     if use_ec_connector and ec_role == "ec_producer":
         model_config.multimodal_config = MultiModalConfig()
@@ -110,6 +115,7 @@ def create_scheduler(
         is_encoder_decoder=model_config.is_encoder_decoder,
         # Ensure admission/preemption mechanics are deterministic
         watermark=0.0,
+        policy=scheduling_policy,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(

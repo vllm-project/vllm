@@ -8,16 +8,16 @@
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
 from abc import abstractmethod
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from functools import cached_property
-from typing import Annotated, Any, Literal, TypeAlias, TypeVar
+from typing import Annotated, Any, Literal, TypeAlias, TypedDict, TypeVar
 
 import torch
 import torch.nn as nn
 from transformers import BatchFeature, PretrainedConfig
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
@@ -29,6 +29,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     BatchedTensorInputs,
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import (
@@ -126,6 +127,11 @@ class InternVLVideoEmbeddingInputs(TensorSchema):
 
 
 InternVLVideoInputs: TypeAlias = InternVLVideoPixelInputs | InternVLVideoEmbeddingInputs
+
+
+class InternVLMultiModalInputs(TypedDict, total=False):
+    images: InternVLImageInputs | None
+    videos: InternVLVideoInputs | None
 
 
 class BaseInternVLProcessingInfo(BaseProcessingInfo):
@@ -286,6 +292,7 @@ class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
             if isinstance(images, ImageEmbeddingItems):
                 feature_size = images.get_feature_size(item_idx)
             else:
+                assert isinstance(images, ImageProcessorItems)
                 image_size = images.get_image_size(item_idx)
                 feature_size = self.info.get_num_image_tokens(
                     image_width=image_size.width,
@@ -433,6 +440,9 @@ class InternVLDummyInputsBuilder(
             )
             num_videos = mm_counts.get("video", 0)
             video_overrides = mm_options.get("video")
+            assert video_overrides is None or isinstance(
+                video_overrides, VideoDummyOptions
+            )
             dummy_video = {
                 "video": self._get_dummy_videos(
                     width=image_size,
@@ -504,9 +514,9 @@ class InternVLMultiModalProcessor(
         tokenizer = self.info.get_tokenizer()
 
         if "video_num_patches" in out_mm_data:
-            video_num_patches = out_mm_data["video_num_patches"]
-            assert isinstance(video_num_patches, torch.Tensor)
-            video_num_patches = video_num_patches.tolist()
+            video_num_patches_tensor = out_mm_data["video_num_patches"]
+            assert isinstance(video_num_patches_tensor, torch.Tensor)
+            video_num_patches: list[int] = video_num_patches_tensor.tolist()
         else:
             video_num_patches = []
 
@@ -591,7 +601,7 @@ class InternVLChatModel(
 
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.multimodal_config
+        multimodal_config = vllm_config.model_config.get_multimodal_config()
 
         self.config = config
         self.multimodal_config = multimodal_config
@@ -621,15 +631,15 @@ class InternVLChatModel(
                 prefix=maybe_prefix(prefix, "language_model"),
             )
 
-        self.img_context_token_id = None
-        self.video_context_token_id = None
+        self.img_context_token_id: int | None = None
+        self.video_context_token_id: int | None = None
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
 
     def _patch_quant_config(
-        self, config: PretrainedConfig, quant_config: QuantizationConfig
+        self, config: PretrainedConfig, quant_config: QuantizationConfig | None
     ):
         # the awq models from OpenGVLab missing `modules_to_not_convert`
         # patch the quant_config to add `modules_to_not_convert` back
@@ -743,10 +753,10 @@ class InternVLChatModel(
 
     def _parse_and_validate_video_input(
         self, **kwargs: object
-    ) -> InternVLVideoPixelInputs | None:
+    ) -> InternVLVideoInputs | None:
         pixel_values_flat_video = kwargs.pop("pixel_values_flat_video", None)
         video_num_patches = kwargs.pop("video_num_patches", None)
-        video_embeds = kwargs.pop("image_embeds", None)
+        video_embeds = kwargs.pop("video_embeds", None)
 
         if pixel_values_flat_video is None and video_embeds is None:
             return None
@@ -804,8 +814,10 @@ class InternVLChatModel(
         ]
         return image_embeds.split(image_feature_sizes)
 
-    def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
-        modalities = {}
+    def _parse_and_validate_multimodal_inputs(
+        self, **kwargs: object
+    ) -> InternVLMultiModalInputs:
+        modalities: InternVLMultiModalInputs = {}
 
         # Preserve the order of modalities if there are multiple of them
         # from the order of kwargs.
@@ -834,12 +846,14 @@ class InternVLChatModel(
         for modality in modalities:
             if modality == "images":
                 image_input = modalities["images"]
-                image_embeddings = self._process_vision_input(image_input)
-                multimodal_embeddings += tuple(image_embeddings)
+                if image_input is not None:
+                    image_embeddings = self._process_vision_input(image_input)
+                    multimodal_embeddings += tuple(image_embeddings)
             if modality == "videos":
                 video_input = modalities["videos"]
-                video_embeddings = self._process_vision_input(video_input)
-                multimodal_embeddings += tuple(video_embeddings)
+                if video_input is not None:
+                    video_embeddings = self._process_vision_input(video_input)
+                    multimodal_embeddings += tuple(video_embeddings)
 
         return multimodal_embeddings
 
@@ -901,19 +915,20 @@ class InternVLChatModel(
             tower_model="vision_model",
         )
 
-    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
-        if num_image_tokens <= 0 or self.num_image_token <= 0:
-            return 0
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
+        if num_mm_embeds <= 0 or self.num_image_token <= 0:
+            return 0, 0
 
-        num_patches = num_image_tokens // self.num_image_token
-        return num_patches * (self.patch_tokens + 1)
-
-    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
-        if num_vision_tokens <= 0 or self.num_image_token <= 0:
-            return 0
-
-        num_patches = num_vision_tokens // (self.patch_tokens + 1)
-        return num_patches * self.num_image_token
+        num_patches = num_mm_embeds // self.num_image_token
+        tower_tokens = num_patches * (self.patch_tokens + 1)
+        return tower_tokens, num_patches * self.num_image_token
 
     # -- SupportsEncoderCudaGraph protocol methods --
 
@@ -1015,6 +1030,7 @@ class InternVLChatModel(
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
