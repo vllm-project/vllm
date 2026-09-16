@@ -115,27 +115,55 @@ class XPUWorker(Worker):
 
             self.local_rank += dp_local_rank * replica_world_size
 
-            assert self.local_rank < visible_device_count, (
-                f"DP adjusted local rank {self.local_rank} is out of bounds. "
-            )
-            assert parallel_config.local_world_size <= visible_device_count, (
-                f"local_world_size ({parallel_config.local_world_size}) must "
-                f"be less than or equal to the number of visible devices "
-                f"({visible_device_count})."
-            )
-
         device = self.device_config.device
         if (
             isinstance(device, torch.device)
             and device.type == "xpu"
             and current_platform.is_xpu()
         ):
-            self.device = torch.device(f"xpu:{self.local_rank}")
+            assigned_physical_gpu_ids = self.parallel_config.assigned_physical_gpu_ids
+            if assigned_physical_gpu_ids is not None:
+                from vllm.platforms.interface import set_assigned_physical_gpu_ids
+
+                set_assigned_physical_gpu_ids(assigned_physical_gpu_ids)
+                assert self.local_rank < len(assigned_physical_gpu_ids), (
+                    f"local_rank {self.local_rank} is out of bounds for "
+                    f"assigned_physical_gpu_ids {assigned_physical_gpu_ids}"
+                )
+                # NOTE: local_world_size is derived from parallel_config.nnodes,
+                # which is only set for the "mp" multi-node backend. With the
+                # "ray"/"external_launcher" backends nnodes stays 1, so
+                # local_world_size collapses to the full world_size and this
+                # check wrongly fires on cross-node deployments.
+                # assigned_physical_gpu_ids is already per-node and the
+                # local_rank bound above fully validates the mapping for
+                # these backends, so skip the check for them.
+                if parallel_config.distributed_executor_backend not in (
+                    "ray",
+                    "external_launcher",
+                ):
+                    assert parallel_config.local_world_size <= len(
+                        assigned_physical_gpu_ids
+                    ), (
+                        f"local_world_size ({parallel_config.local_world_size})"
+                        " exceeds assigned_physical_gpu_ids count "
+                        f"({len(assigned_physical_gpu_ids)})"
+                    )
+            else:
+                assert self.local_rank < torch.accelerator.device_count(), (
+                    f"DP adjusted local rank {self.local_rank} is out of "
+                    f"bounds for {torch.accelerator.device_count()} devices."
+                )
+
+            visible_device_index = (
+                current_platform.logical_device_id_to_visible_device_id(self.local_rank)
+            )
+            self.device = torch.device(f"xpu:{visible_device_index}")
             torch.accelerator.set_device_index(self.device)
             current_platform.check_if_supports_dtype(self.model_config.dtype)
             torch.accelerator.empty_cache()
             self.init_gpu_memory = torch.xpu.get_device_properties(
-                self.local_rank
+                visible_device_index
             ).total_memory
         else:
             raise RuntimeError(f"Unsupported device type: {self.device_config.device}")
