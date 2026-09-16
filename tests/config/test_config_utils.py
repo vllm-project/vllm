@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import astuple, dataclass
 from enum import Enum
 
 import pytest
@@ -236,6 +236,17 @@ def test_scheduler_config_hash_includes_max_num_seqs():
     ).compute_hash()
 
     assert larger_batch_hash != base_hash
+
+
+@pytest.mark.parametrize("token_budget", [4096, 8192])
+def test_scheduler_config_positional_and_computed_fields(token_budget):
+    config = SchedulerConfig(8192, False, "generate", token_budget, None, 8)
+
+    assert config.max_num_batched_tokens == token_budget
+    assert config.max_num_seqs == 8
+    # Existing dataclass consumers include the computed encoder budgets before
+    # the policy. Moving declarations into a base class changes this order.
+    assert astuple(config)[9:12] == (token_budget, token_budget, "fcfs")
 
 
 def test_cache_config_hash_ignores_prefix_cache_retention_interval():

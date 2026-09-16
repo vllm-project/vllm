@@ -107,10 +107,13 @@ from vllm.config.parallel import (
     DistributedExecutorBackend,
     ExpertPlacementStrategy,
 )
-from vllm.config.scheduler import SchedulerPolicy
+from vllm.config.scheduler import SchedulerPolicy as SchedulerPolicy
 from vllm.config.utils import get_field
 from vllm.config.vllm import OptimizationLevel, PerformanceMode
 from vllm.config.watermarking import WatermarkConfig
+from vllm.config_specs import cli_default, runtime_values
+from vllm.config_specs.cli import add_cli_args as add_declared_cli_args
+from vllm.config_specs.scheduler import SchedulerFields
 from vllm.logger import init_logger, suppress_logging
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
@@ -552,12 +555,26 @@ class EngineArgs:
     offload_params: set[str] = get_field(PrefetchOffloadConfig, "offload_params")
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
     kv_cache_memory_bytes: int | None = CacheConfig.kv_cache_memory_bytes
-    max_num_batched_tokens: int | None = None
-    max_num_scheduled_tokens: int | None = None
-    long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
-    max_num_seqs: int | None = None
-    max_num_queued_reqs: int | None = None
-    max_num_queued_tokens: int | None = None
+
+    # BEGIN GENERATED SchedulerFields inputs
+    max_num_batched_tokens: int | None = cli_default(
+        SchedulerFields, "max_num_batched_tokens"
+    )
+    max_num_scheduled_tokens: int | None = cli_default(
+        SchedulerFields, "max_num_scheduled_tokens"
+    )
+    long_prefill_token_threshold: int = cli_default(
+        SchedulerFields, "long_prefill_token_threshold"
+    )
+    max_num_seqs: int | None = cli_default(SchedulerFields, "max_num_seqs")
+    max_num_queued_reqs: int | None = cli_default(
+        SchedulerFields, "max_num_queued_reqs"
+    )
+    max_num_queued_tokens: int | None = cli_default(
+        SchedulerFields, "max_num_queued_tokens"
+    )
+    # END GENERATED SchedulerFields inputs
+
     max_logprobs: int = ModelConfig.max_logprobs
     logprobs_mode: LogprobsMode = ModelConfig.logprobs_mode
     use_fp64_gumbel: bool = ModelConfig.use_fp64_gumbel
@@ -643,17 +660,24 @@ class EngineArgs:
     model_loader_extra_config: dict = get_field(LoadConfig, "model_loader_extra_config")
     ignore_patterns: str | list[str] = get_field(LoadConfig, "ignore_patterns")
 
-    enable_chunked_prefill: bool | None = None
-    disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
-
-    scheduler_reserve_full_isl: bool = SchedulerConfig.scheduler_reserve_full_isl
-    prefill_schedule_interval: int = SchedulerConfig.prefill_schedule_interval
-
-    watermark: float = SchedulerConfig.watermark
-
-    disable_hybrid_kv_cache_manager: bool | None = (
-        SchedulerConfig.disable_hybrid_kv_cache_manager
+    # BEGIN GENERATED SchedulerFields inputs
+    enable_chunked_prefill: bool | None = cli_default(
+        SchedulerFields, "enable_chunked_prefill"
     )
+    disable_chunked_mm_input: bool = cli_default(
+        SchedulerFields, "disable_chunked_mm_input"
+    )
+    scheduler_reserve_full_isl: bool = cli_default(
+        SchedulerFields, "scheduler_reserve_full_isl"
+    )
+    prefill_schedule_interval: int = cli_default(
+        SchedulerFields, "prefill_schedule_interval"
+    )
+    watermark: float = cli_default(SchedulerFields, "watermark")
+    disable_hybrid_kv_cache_manager: bool | None = cli_default(
+        SchedulerFields, "disable_hybrid_kv_cache_manager"
+    )
+    # END GENERATED SchedulerFields inputs
 
     structured_outputs_config: StructuredOutputsConfig = get_field(
         VllmConfig, "structured_outputs_config"
@@ -693,8 +717,15 @@ class EngineArgs:
     jit_monitor_mode: Literal["warn", "error"] = ObservabilityConfig.jit_monitor_mode
     jit_monitor_verbose: bool = ObservabilityConfig.jit_monitor_verbose
     enable_mm_processor_stats: bool = ObservabilityConfig.enable_mm_processor_stats
-    scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
-    scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
+
+    # BEGIN GENERATED SchedulerFields inputs
+    scheduling_policy: Literal["fcfs", "priority"] = cli_default(
+        SchedulerFields, "policy"
+    )
+    scheduler_cls: str | type[object] | None = cli_default(
+        SchedulerFields, "scheduler_cls"
+    )
+    # END GENERATED SchedulerFields inputs
 
     pooler_config: PoolerConfig | None = ModelConfig.pooler_config
     compilation_config: CompilationConfig = get_field(VllmConfig, "compilation_config")
@@ -760,9 +791,10 @@ class EngineArgs:
     )
     """Custom logitproc types"""
 
-    async_scheduling: bool | None = SchedulerConfig.async_scheduling
-
-    stream_interval: int = SchedulerConfig.stream_interval
+    # BEGIN GENERATED SchedulerFields inputs
+    async_scheduling: bool | None = cli_default(SchedulerFields, "async_scheduling")
+    stream_interval: int = cli_default(SchedulerFields, "stream_interval")
+    # END GENERATED SchedulerFields inputs
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
     optimization_level: OptimizationLevel = VllmConfig.optimization_level
@@ -1563,79 +1595,13 @@ class EngineArgs:
         )
 
         # Scheduler arguments
-        scheduler_kwargs = get_kwargs(SchedulerConfig)
-        scheduler_group = parser.add_argument_group(
+        add_declared_cli_args(
+            parser,
+            SchedulerFields,
             title="SchedulerConfig",
-            description=SchedulerConfig.__doc__,
-        )
-        scheduler_group.add_argument(
-            "--max-num-batched-tokens",
-            **{
-                **scheduler_kwargs["max_num_batched_tokens"],
-                "default": None,
-            },
-        )
-        scheduler_group.add_argument(
-            "--max-num-scheduled-tokens",
-            **{
-                **scheduler_kwargs["max_num_scheduled_tokens"],
-                "default": None,
-            },
-        )
-        scheduler_group.add_argument(
-            "--max-num-seqs",
-            **{
-                **scheduler_kwargs["max_num_seqs"],
-                "default": None,
-            },
-        )
-        scheduler_group.add_argument(
-            "--max-num-queued-reqs", **scheduler_kwargs["max_num_queued_reqs"]
-        )
-        scheduler_group.add_argument(
-            "--max-num-queued-tokens",
-            **scheduler_kwargs["max_num_queued_tokens"],
-        )
-        scheduler_group.add_argument(
-            "--long-prefill-token-threshold",
-            **scheduler_kwargs["long_prefill_token_threshold"],
-        )
-        # multi-step scheduling has been removed; corresponding arguments
-        # are no longer supported.
-        scheduler_group.add_argument(
-            "--scheduling-policy", **scheduler_kwargs["policy"]
-        )
-        scheduler_group.add_argument(
-            "--enable-chunked-prefill",
-            **{
-                **scheduler_kwargs["enable_chunked_prefill"],
-                "default": None,
-            },
-        )
-        scheduler_group.add_argument(
-            "--disable-chunked-mm-input", **scheduler_kwargs["disable_chunked_mm_input"]
-        )
-        scheduler_group.add_argument(
-            "--scheduler-cls", **scheduler_kwargs["scheduler_cls"]
-        )
-        scheduler_group.add_argument(
-            "--scheduler-reserve-full-isl",
-            **scheduler_kwargs["scheduler_reserve_full_isl"],
-        )
-        scheduler_group.add_argument("--watermark", **scheduler_kwargs["watermark"])
-        scheduler_group.add_argument(
-            "--prefill-schedule-interval",
-            **scheduler_kwargs["prefill_schedule_interval"],
-        )
-        scheduler_group.add_argument(
-            "--disable-hybrid-kv-cache-manager",
-            **scheduler_kwargs["disable_hybrid_kv_cache_manager"],
-        )
-        scheduler_group.add_argument(
-            "--async-scheduling", **scheduler_kwargs["async_scheduling"]
-        )
-        scheduler_group.add_argument(
-            "--stream-interval", **scheduler_kwargs["stream_interval"]
+            human_readable_int=human_readable_int,
+            optional_type=optional_type,
+            include_help=NEEDS_HELP,
         )
 
         # Compilation arguments
@@ -2417,26 +2383,11 @@ class EngineArgs:
             "max_model_len must be set by this point"
         )
         scheduler_config = SchedulerConfig(
+            **runtime_values(SchedulerFields, self),
             runner_type=model_config.runner_type,
-            max_num_batched_tokens=self.max_num_batched_tokens,
-            max_num_scheduled_tokens=self.max_num_scheduled_tokens,
-            max_num_seqs=self.max_num_seqs,
-            max_num_queued_reqs=self.max_num_queued_reqs,
-            max_num_queued_tokens=self.max_num_queued_tokens,
             max_model_len=model_config.max_model_len,
-            enable_chunked_prefill=self.enable_chunked_prefill,
-            disable_chunked_mm_input=self.disable_chunked_mm_input,
             is_multimodal_model=model_config.is_multimodal_model,
             is_encoder_decoder=model_config.is_encoder_decoder,
-            policy=self.scheduling_policy,
-            scheduler_cls=self.scheduler_cls,
-            long_prefill_token_threshold=self.long_prefill_token_threshold,
-            scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
-            watermark=self.watermark,
-            prefill_schedule_interval=self.prefill_schedule_interval,
-            disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
-            async_scheduling=self.async_scheduling,
-            stream_interval=self.stream_interval,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:
