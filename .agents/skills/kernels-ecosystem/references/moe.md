@@ -8,6 +8,8 @@ An entry represents expert GEMMs or an FC1/activation/FC2 pipeline, not a
 framework's backend adapter. Gather, activation, weighted finalize, tile
 choices and routing configurations stay with their implementation family.
 CuTe DSL, CUDA/C++ CuTe, cuTile, Gluon and Triton are different technologies.
+Prefer upstream device source/project, then vLLM source; preserve other
+frameworks' material adaptations rather than relabeling imports as kernels.
 
 ## Grouped tensor-core and generated expert pipelines
 
@@ -48,19 +50,20 @@ CuTe DSL, CUDA/C++ CuTe, cuTile, Gluon and Triton are different technologies.
 
 ## Weight-only and external expert providers
 
-External citations identify the actual provider callable and its reviewed
-dependency contract. They are **not** audits of that package's device source.
+Upstream device links identify kernel bodies; project links establish origin.
+Integration citations identify the callable and its reviewed dependency
+contract, **not** an audit of that package's device source.
 The same provider appearing in multiple inference repositories is listed once.
 
 | Implementation family / origin | Concrete entry | Format / algorithm and pinned evidence |
 | --- | --- | --- |
-| Marlin - IST-DASLab lineage and adapted copies | `moe_wna16_marlin_gemm`, `fused_marlin_moe`, `marlin_nvfp4_moe_gemm` | CUDA packed low-bit expert family; standard/degree-of-batching variants and SGLang/TokenSpeed copies share the lineage. Integer/MXFP4/NVFP4 routes require distinct repacks/scales; TRTLLM NVFP4 W4A16 is SM89-99. [Retained CUDA source][v-moe], [TRTLLM adaptation][trt-marlin]. |
+| Marlin - IST-DASLab lineage and adapted copies | `moe_wna16_marlin_gemm`, `fused_marlin_moe`, `marlin_nvfp4_moe_gemm` | CUDA packed low-bit expert family; standard/degree-of-batching variants and SGLang/TokenSpeed copies share the lineage. Integer/MXFP4/NVFP4 routes require distinct repacks/scales; TRTLLM NVFP4 W4A16 is SM89-99. [Original GEMM project][marlin-origin]; expert adaptations are established by [vLLM CUDA source][v-moe] and [TRTLLM source][trt-marlin], not the original project. |
 | Native WNA16 expert GEMM - vLLM | `moe_wna16_gemm` | CUDA weight-only expert implementation in `moe_wna16.cu`; not automatically the Marlin algorithm. [Source][v-moe]. |
 | GGML/GGUF experts - adapted CUDA | `ggml_moe_a8`, `ggml_moe_a8_vec` | Quantized expert matrix/matrix and matrix/vector consumers; same GGML origin as [dense GEMM](gemm.md). [SGLang retained source][ggml]. |
-| DeepGEMM grouped experts - DeepGEMM | `m_grouped_fp8_gemm_nt_contiguous`, `m_grouped_fp8_gemm_nt_masked` | CUDA provider: contiguous throughput versus masked expert-major buffers; FP8 block scales and separate supported FP4 routes. Direct and FlashInfer integrations are not independent math. [Provider evidence][dg], [FP4 contract evidence][v-dg]. |
-| OpenAI `triton_kernels` experts | `matmul` | Upstream Triton ragged grouped implementation with unquantized, FP8 QDQ and MXFP4 contexts; fused/unfused activation orchestration does not create another provider. [Provider evidence][trt-openai]. |
-| Humming indexed / grouped experts | `HummingMethod`, `humming_forward` | External quantized GEMM provider; indexed, grouped and batched contracts. Language is not established by the adapter. [Provider evidence][sgl-humming], [indexed/grouped evidence][v-humming]. |
-| AITER experts | `fused_moe` | ROCm HIP/ASM provider; W4A16/W4A8 MXFP4 and MXFP8 routes depend on quantization contract. FlyDSL is a distinct implementation option within AITER, not assembly. [Provider evidence][sgl-aiter], [format contracts][v-aiter]. |
+| DeepGEMM grouped experts - DeepGEMM | `m_grouped_fp8_gemm_nt_contiguous`, `m_grouped_fp8_gemm_nt_masked` | CUDA provider: contiguous throughput versus masked expert-major buffers; FP8 block scales and separate supported FP4 routes. Direct and FlashInfer integrations are not independent math. [Upstream device kernels][dg] at [vLLM's dependency pin][dg-pin], [vLLM FP4/integration contract][v-dg]. |
+| OpenAI `triton_kernels` experts | `matmul` | Upstream Triton ragged grouped implementation with unquantized, FP8 QDQ and MXFP4 contexts; fused/unfused activation orchestration does not create another provider. [Upstream device source][openai-source] at [TRTLLM's retained v3.7.0 release][openai-pin], [integration contract][trt-openai]. This pin is not vLLM's different Triton dependency. |
+| Humming indexed / grouped experts | `HummingMethod`, `humming_forward` | External quantized GEMM provider; indexed, grouped and batched contracts. [Upstream project][humming-origin], [vLLM indexed/grouped integration][v-humming]. Language is not established by the adapter. |
+| AITER experts | `fused_moe` | ROCm HIP/ASM provider; W4A16/W4A8 MXFP4 and MXFP8 routes depend on quantization contract. FlyDSL is a distinct implementation option within AITER, not assembly. [vLLM integration/format contracts][v-aiter]. |
 | HPC Ops experts | `hpc.fuse_moe`, `hpc.fuse_moe_blockwise` | External FP8/BF16, tensor or 128x128 block scaling, gated SiLU only; rejects shared experts/no-combine. Evidence establishes provider availability, not a local kernel body. [Provider boundary][sgl-hpc]. |
 
 ## Gluon staged and warp-decode algorithms
@@ -90,7 +93,7 @@ The experimental Cake EP16 executor is outside that eight-entry registry.
 
 | Implementation family / origin | Concrete entry | Compute contract and pinned evidence |
 | --- | --- | --- |
-| DeepGEMM MegaMoE - DeepGEMM | `forward_mega_moe`, `fp8_mega_moe`; FlashInfer `DeepGemmMegaKernelBackend` | External fused compute/communication: SM100 mixed FP8/FP4->BF16 and separate Hopper FP8 path. Direct TRTLLM/SGLang/TokenSpeed and FlashInfer integration are one provider, not four kernels. [SM100 provider evidence][dg-mega], [Hopper provider evidence][dg-mega90], [FlashInfer registered exposure][fi-ep-deep]. |
+| DeepGEMM MegaMoE - DeepGEMM | `forward_mega_moe`, `fp8_mega_moe`; FlashInfer `DeepGemmMegaKernelBackend` | External fused compute/communication: SM100 mixed FP8/FP4->BF16 and separate Hopper FP8 path. Direct TRTLLM/SGLang/TokenSpeed and FlashInfer integration are one provider, not four kernels. [SM100 upstream device source][dg-mega] at [vLLM's dependency pin][dg-pin]; [Hopper integration fallback][dg-mega90] does not establish Hopper source at that pin. [FlashInfer registered exposure][fi-ep-deep]. |
 | Persistent NVFP4 FC12 MegaMoE - NVIDIA TRTLLM | `Sm100MegaMoEKernel`, `Sm100SwapABSwigluFp4Fc12Kernel` | CuTe DSL fused SwiGLU FC1/FC2 with symmetric buffers and grid synchronization; `TopkReduce` is a stage. [Mega kernel][trt-mega], [FC12 source][trt-fc12]. |
 | Hopper FP8 push MegaMoE - FlashInfer | `Sm90PushFp8MegaKernelBackend` | Native CUDA FP8 weights/activations->BF16 with push transport; single-node EP<=32, top-k 1/2/4/6/8. [Implementation boundary][fi-ep90-cuda]. |
 | Hopper FP8 pull MegaMoE - FlashInfer | `Sm90PullFp8MegaKernelBackend` | CuTe DSL FP8/FP8->BF16 with pull protocol; distinct compute/movement algorithm, not the CUDA push pipeline. [Implementation boundary][fi-ep90-dsl]. |
@@ -152,21 +155,24 @@ This does not exclude the substantive upstream `triton_kernels` provider.
 [fi-ep-fp4]: https://github.com/flashinfer-ai/flashinfer/blob/15e83b7bb9f32d81d84017e2e715c265fb7253f5/flashinfer/moe_ep/backends/mega/kernel/sm100/nvfp4_nvfp4_bf16_cutedsl/backend.py
 [fi-ep120]: https://github.com/flashinfer-ai/flashinfer/blob/15e83b7bb9f32d81d84017e2e715c265fb7253f5/flashinfer/moe_ep/backends/mega/kernel/sm120/mxfp8_mxfp8_bf16_cutedsl/backend.py
 [fi-ep-cake]: https://github.com/flashinfer-ai/flashinfer/blob/15e83b7bb9f32d81d84017e2e715c265fb7253f5/flashinfer/moe_ep/cake_mxfp8_megamoe_ep16.py
-[v-moe]: https://github.com/benchislett/vllm/tree/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/csrc/libtorch_stable/moe
-[v-cutlass]: https://github.com/benchislett/vllm/blob/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/vllm/model_executor/layers/fused_moe/experts/cutlass_moe.py
-[v-dg]: https://github.com/benchislett/vllm/blob/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/vllm/model_executor/layers/fused_moe/experts/deep_gemm_moe.py
-[v-humming]: https://github.com/benchislett/vllm/blob/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
-[v-aiter]: https://github.com/benchislett/vllm/tree/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/vllm/model_executor/layers/fused_moe/experts
+[v-moe]: https://github.com/vllm-project/vllm/tree/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/csrc/libtorch_stable/moe
+[v-cutlass]: https://github.com/vllm-project/vllm/blob/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/vllm/model_executor/layers/fused_moe/experts/cutlass_moe.py
+[v-dg]: https://github.com/vllm-project/vllm/blob/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/vllm/model_executor/layers/fused_moe/experts/deep_gemm_moe.py
+[v-humming]: https://github.com/vllm-project/vllm/blob/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
+[v-aiter]: https://github.com/vllm-project/vllm/tree/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/vllm/model_executor/layers/fused_moe/experts
 [sgl-moe]: https://github.com/sgl-project/sglang/blob/5c2de3f35567ffceec6cea86ba18e075692e9101/python/sglang/kernels/aot/python/sgl_kernel/moe.py
 [sgl-w4]: https://github.com/sgl-project/sglang/blob/5c2de3f35567ffceec6cea86ba18e075692e9101/python/sglang/kernels/aot/python/sgl_kernel/cutlass_moe.py
 [sgl-es]: https://github.com/sgl-project/sglang/blob/5c2de3f35567ffceec6cea86ba18e075692e9101/python/sglang/kernels/aot/python/sgl_kernel/expert_specialization.py
 [sgl-es-src]: https://github.com/sgl-project/sglang/tree/5c2de3f35567ffceec6cea86ba18e075692e9101/python/sglang/kernels/jit/csrc/moe/expert_specialization
 [ggml]: https://github.com/sgl-project/sglang/tree/5c2de3f35567ffceec6cea86ba18e075692e9101/python/sglang/kernels/aot/csrc/quantization/gguf
-[dg]: https://github.com/sgl-project/sglang/blob/5c2de3f35567ffceec6cea86ba18e075692e9101/python/sglang/srt/layers/moe/moe_runner/deep_gemm.py
-[sgl-humming]: https://github.com/sgl-project/sglang/blob/5c2de3f35567ffceec6cea86ba18e075692e9101/python/sglang/srt/layers/moe/moe_runner/humming.py
-[sgl-aiter]: https://github.com/sgl-project/sglang/blob/5c2de3f35567ffceec6cea86ba18e075692e9101/python/sglang/srt/layers/moe/moe_runner/aiter.py
+[dg]: https://github.com/deepseek-ai/DeepGEMM/tree/8b1392b978f5a03c828dd1711090d7fb50958b8a/deep_gemm/include/deep_gemm/impls
+[dg-pin]: https://github.com/vllm-project/vllm/blob/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/tools/install_deepgemm.sh
+[openai-source]: https://github.com/triton-lang/triton/blob/5f3f125e8f63c24613f1f73b937442864f263f94/python/triton_kernels/triton_kernels/matmul_details/_matmul.py
+[openai-pin]: https://github.com/NVIDIA/TensorRT-LLM/blob/a8ac7e5bccb972b35808dc973f7b4aac96cbbc13/triton_kernels/README.md
+[marlin-origin]: https://github.com/IST-DASLab/marlin
+[humming-origin]: https://github.com/vllm-project/humming
 [sgl-hpc]: https://github.com/sgl-project/sglang/blob/5c2de3f35567ffceec6cea86ba18e075692e9101/python/sglang/srt/layers/moe/moe_runner/hpc_ops.py
-[dg-mega]: https://github.com/sgl-project/sglang/blob/5c2de3f35567ffceec6cea86ba18e075692e9101/python/sglang/srt/layers/moe/mega_moe.py
+[dg-mega]: https://github.com/deepseek-ai/DeepGEMM/blob/8b1392b978f5a03c828dd1711090d7fb50958b8a/deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_mega_moe.cuh
 [dg-mega90]: https://github.com/sgl-project/sglang/blob/5c2de3f35567ffceec6cea86ba18e075692e9101/python/sglang/srt/layers/moe/mega_moe_sm90.py
 [ts-bf]: https://github.com/lightseekorg/tokenspeed/blob/d0a2d1e02a1a643f58737894de109d0f40d83334/tokenspeed-kernel/python/tokenspeed_kernel/ops/moe/gluon/bf16.py
 [ts-bf-split]: https://github.com/lightseekorg/tokenspeed/blob/d0a2d1e02a1a643f58737894de109d0f40d83334/tokenspeed-kernel-amd/python/tokenspeed_kernel_amd/ops/gfx950/moe/fp16/stage1_splitk_kernel.py

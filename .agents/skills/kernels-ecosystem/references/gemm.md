@@ -9,14 +9,16 @@ Python DSL; CUDA/C++ CUTLASS/CuTe is native C++.** Scale granularity, packed
 weights and output dtype are part of each contract, not interchangeable
 between implementations. Architecture/tile variants are grouped.
 
-"Provider evidence" links establish an external callable, not audited device
-source. Re-exports in inference frameworks are not additional candidates.
+Prefer upstream device source/project, then vLLM's implementation or vendored
+copy. Keep other frameworks' material adaptations at their own source.
+"Provider evidence" and integration links establish an external callable, not
+audited device source. Re-exports are not additional candidates.
 
 ## BF16/FP16 dense and low-latency algorithms
 
 | Implementation family / origin | Concrete entry | Contract and pinned evidence |
 | --- | --- | --- |
-| CUTLASS dense/batched - FlashInfer | `bf16_gemm_sm100`, `mm_bf16`, `bmm_bf16` with `backend="cutlass"` | CUDA/C++ CUTLASS; BF16 operands, output types depend on entry. [JIT/source manifest][fi-jit], [contract][fi-base]. |
+| CUTLASS dense/batched - FlashInfer | `bf16_gemm_sm100`, `mm_bf16`, `bmm_bf16` with `backend="cutlass"` | CUDA/C++ CUTLASS; BF16 operands, output types depend on entry. [Native templates][fi-gemm-src], [JIT/source manifest][fi-jit], [contract][fi-base]. |
 | Persistent tensor-core dense/BMM - NVIDIA TRTLLM | `PersistentDenseGemmKernel`, `SM107PersistentDenseGemmKernel` | CuTe DSL; Blackwell BF16/FP8 and Rubin BF16. Rubin preferred-cluster BMM uses `PersistentDenseGemmKernelPreferredCluster`; same family, distinct schedule. [Blackwell][trt-dense], [Rubin][trt-rubin]. |
 | TGV low-latency - FlashInfer | `tgv_gemm_sm100`, `TgvGemmCuteExtKernel` | Two implementations: CUDA/C++ CuTe and CuTe DSL `cute_ext`; Blackwell BF16, bias/PDL, 1-/2-CTA variants. [C++ source][tgv-cpp], [DSL source][tgv-dsl]. |
 | TinyGEMM2 - NVIDIA TRTLLM, also exposed by FlashInfer | `launch_tinygemm2`, `tinygemm2_cuda_forward`; `tinygemm_bf16` exposure | CUDA small-M family, not TGV or tensor-core split-K. [Native source][tiny-trt], [FlashInfer manifest][tiny-fi]. |
@@ -34,7 +36,7 @@ source. Re-exports in inference frameworks are not additional candidates.
 
 | Implementation family / origin | Concrete entry | Contract and pinned evidence |
 | --- | --- | --- |
-| CUTLASS FP8 tensor/group/block scaling - FlashInfer | `bmm_fp8`, `fp8_gemm_sm100`, `fp8_blockscale_gemm_sm90`, `gemm_fp8_nt_groupwise` | CUDA/C++ CUTLASS; per-entry scales and SM90/100/120 specializations. [Manifest][fi-jit], [contract][fi-base]. |
+| CUTLASS FP8 tensor/group/block scaling - FlashInfer | `bmm_fp8`, `fp8_gemm_sm100`, `fp8_blockscale_gemm_sm90`, `gemm_fp8_nt_groupwise` | CUDA/C++ CUTLASS; per-entry scales and SM90/100/120 specializations. [Native templates][fi-gemm-src], [manifest][fi-jit], [contract][fi-base]. |
 | CUTLASS rowwise/blockwise FP8 - NVIDIA TRTLLM | `FP8RowwiseGemmRunner`, `fp8_block_scaling_gemm` | Native C++ CUTLASS; row/column versus block-scale contracts. Not TRTLLM-GEN artifacts. [Rowwise source][trt-row], [block source][trt-block]. |
 | CUTLASS scaled INT8/FP8 - vLLM and SGLang source branches | `cutlass_scaled_mm`, `cutlass_scaled_mm_azp`; `fp8_scaled_mm`, `int8_scaled_mm`, `fp8_blockwise_scaled_mm` | CUDA/C++ CUTLASS family; retain branch-specific zero-point, scaling and SM120 JIT contracts rather than claiming identical bodies. [vLLM source][v-scaled], [SGLang AOT binding][sgl-scaled], [SGLang JIT source][sgl-gemm]. |
 | SmoothQuant INT8 tensor-core - NVIDIA TRTLLM | `CutlassInt8GemmRunner::gemm` | C++ CUTLASS INT8 with activation/weight scale granularity. [Source][trt-int8]. |
@@ -46,7 +48,7 @@ source. Re-exports in inference frameworks are not additional candidates.
 | FP8 groupwise persistent - TileGym-derived FlashInfer cuTile | `gemm_fp8_nt_groupwise`, `group_gemm_fp8_nt_groupwise(backend="cutile")` | cuTile dense/grouped NT; grouped persistent launch uses device `m_indptr`. [Source][fi-tile-fp8]. |
 | MXFP8 tensor-core - CUTLASS | `mxfp8_gemm_sm100`, `bmm_mxfp8(backend="cutlass")`; TRTLLM `mxfp8_mxfp8_gemm_autotuned` | CUDA/C++ blockscaled family; E8M0 scales, architecture-specific padded/swizzled layouts. [FlashInfer manifest][fi-jit], [TRTLLM template][trt-mxfp8]. |
 | TRTLLM-GEN dense/batched - NVIDIA | `gemm/KernelRunner`, `fp8_batched_gemm_trtllmgen`; FlashInfer `gemm_fp8_nt_groupwise`, `mm_mxfp8`, `mm_fp4` with `backend="trtllm"` | Generated CUDA family, listed once across native/exposed APIs. Includes `mm_fp8(backend="trtllm_low_latency")`, which loads TRTLLM-GEN GEMM artifacts. FP8/MXFP8/FP4 have different ABIs; not every dtype supports every entry. [Native boundary][trt-gen], [FlashInfer contract][fi-base], [low-latency exposure][fi-low-trt]. |
-| DeepGEMM blockscaled dense/grouped/batched - DeepGEMM | `fp8_gemm_nt`, `m_grouped_fp8_gemm_nt_contiguous`, `m_grouped_fp8_gemm_nt_masked`; FlashInfer `group_deepgemm_fp8_nt_groupwise` | CUDA provider, one family across direct and FlashInfer integrations. Contiguous/masked expert layouts and MXFP8 scale routes are not interchangeable. [Direct provider evidence][dg-evidence], [FlashInfer provider evidence][fi-dg]. |
+| DeepGEMM blockscaled dense/grouped/batched - DeepGEMM | `fp8_gemm_nt`, `m_grouped_fp8_gemm_nt_contiguous`, `m_grouped_fp8_gemm_nt_masked`; FlashInfer `group_deepgemm_fp8_nt_groupwise` | CUDA provider, one family across direct and FlashInfer integrations. Contiguous/masked expert layouts and MXFP8 scale routes are not interchangeable. [Upstream device kernels][dg-source] at [vLLM's dependency pin][dg-pin], [vLLM integration][dg-evidence], [FlashInfer integration][fi-dg]. |
 
 ## Grouped GEMM without a complete expert pipeline
 
@@ -55,7 +57,7 @@ For fused expert activation/finalization, use [MoE](moe.md).
 | Implementation family / origin | Concrete entry | Contract and pinned evidence |
 | --- | --- | --- |
 | Segmented CUTLASS - FlashInfer | `SegmentGEMMWrapper` | CUDA/C++ CUTLASS SM80/90 packed segments, not full MoE. [Implementation/contract][fi-base]. |
-| Native grouped low-precision CUTLASS - FlashInfer | `group_gemm_fp8_nt_groupwise`, `group_gemm_mxfp8_mxfp4_nt_groupwise`, `group_gemm_nvfp4_nt_groupwise` | CUDA/C++ grouped FP8 and mixed/blockscaled FP4. FP8 `backend="trtllm"` builds local SM100/120 kernels: **not** TRTLLM-GEN downloaded GEMM. [Source manifest][fi-jit]. |
+| Native grouped low-precision CUTLASS - FlashInfer | `group_gemm_fp8_nt_groupwise`, `group_gemm_mxfp8_mxfp4_nt_groupwise`, `group_gemm_nvfp4_nt_groupwise` | CUDA/C++ grouped FP8 and mixed/blockscaled FP4. FP8 `backend="trtllm"` builds local SM100/120 kernels: **not** TRTLLM-GEN downloaded GEMM. [Native templates][fi-gemm-src], [source manifest][fi-jit]. |
 | SM120 groupwise FP8 / MXFP8 - FlashInfer | `moe_gemm_fp8_nt_groupwise`, `moe_gemm_mxfp8_nt_groupwise` in `grouped_mm/cute_sm120_*` | **CUDA/C++ CuTe**, not Python DSL despite module names. Distinct scale-format specializations in `csrc/cute_sm12x_gemm`. [JIT/source boundary][fi-group120]. |
 | Tensor-core grouped / split-K - NVIDIA TRTLLM | `groupedGemm`, `splitkGroupedGemm` | CUDA/C++ grouped problem arrays and split-K workspace/reduction. `cudaGraphGroupedGemm`/`cudaGraphSplitKGroupedGemm` are execution variants, not new arithmetic. [Grouped source][trt-group], [split-K source][trt-split-group]. |
 | LoRA grouped projection - NVIDIA TRTLLM | `loraGroupGEMMParamFillRowReorderFusion` and LoRA GEMM runner | CUDA/C++ CUTLASS grouped low-rank projection; rank/adapter metadata and row reorder are part of this family. [Source][trt-lora]. |
@@ -76,7 +78,7 @@ compute are different formats/algorithms. Do not substitute by bit width.
 | Mixed-input W4A16 - FlashInfer | `mm_bf16_fp4`; `dense_gemm_bf16_fp4_sm12x`, `gemv_bf16_fp4_sm12x` | CuTe DSL SM100/SM12x dense kernels plus distinct small-M GEMV; BF16 activations, prepared FP4 weights. [Dense source][fi-w4-dsl], [SM12x source directory][fi-w4-dir]. |
 | Weight-only mixed-input tensor-core - NVIDIA TRTLLM | `weight_only_quant_gemm`, `finegrained_mixed_dtype_gemm` | C++ CUTLASS FP16/BF16xINT4/INT8; per-channel versus groupwise scale/zero contracts. [Source][trt-mixed]. |
 | Weight-only batched GEMV - NVIDIA TRTLLM | `weight_only::dispatcher` in `kernelDispatcher.h` | CUDA-core INT4/INT8 dequantization; column/interleaved layouts and dtype instantiations grouped. [Source][trt-weight]. |
-| Marlin - IST-DASLab lineage and adapted copies | `gptq_marlin_gemm`, `marlin_gemm`, `marlin_nvfp4_gemm` | CUDA packed-weight family covering supported GPTQ/AWQ integer, FP8, NVFP4/MXFP4/MXFP8 routes. TRTLLM NVFP4 is W4A16 on SM89-99; formats require distinct repacking/scales. [vLLM source][v-marlin], [TRTLLM adaptation][trt-marlin]. SGLang/TokenSpeed copies are not extra families. |
+| Marlin - IST-DASLab lineage and adapted copies | `gptq_marlin_gemm`, `marlin_gemm`, `marlin_nvfp4_gemm` | CUDA packed-weight family covering supported GPTQ/AWQ integer, FP8, NVFP4/MXFP4/MXFP8 routes. TRTLLM NVFP4 is W4A16 on SM89-99; formats require distinct repacking/scales. [Original project][marlin-origin]; [vLLM adapted source][v-marlin] and [TRTLLM adaptation][trt-marlin] establish the extended formats, not the original project. SGLang/TokenSpeed copies are not extra families. |
 | Machete - vLLM | `machete_mm`, `machete_prepack_B` | CUDA/C++ CUTLASS mixed precision with prepacked weights; not Marlin. [Source][v-machete]. |
 | GPTQ / ExLlama - adapted CUDA | `gptq_gemm` | Packed GPTQ weights and optional shuffled representation; separate from GPTQ-on-Marlin. [vLLM source][v-gptq]. |
 | AWQ native - adapted CUDA | `awq_gemm`, `awq_dequantize` | Native AWQ path, distinct from AWQ-on-Marlin. [vLLM source][v-awq]. |
@@ -112,9 +114,9 @@ they do not establish every package's internal kernel language or eligibility.
 | --- | --- | --- |
 | cuBLAS / cuBLASLt | cuBLAS-backed `bmm_fp8`; `mm_bf16(backend="cublaslt")`, `nvfp4_gemm_cublaslt` | Vendor CUDA-library dense/BMM alternatives; BF16, FP8 and NVFP4 availability depends on API/library version. [FlashInfer provider boundary][fi-base], [TRTLLM provider boundary][trt-ops]. |
 | cuDNN | `mm_bf16`, `bmm_fp8`, `mm_fp4`, `mm_bf16_fp4` with `backend="cudnn"`; `grouped_mm_bf16/fp8/mxfp8/fp4` | Graph/workspace/tactic provider, not a CUTLASS kernel. Per-format graph/scale contracts. [Dense evidence][fi-base], [grouped evidence][fi-grouped], [W4A16 evidence][fi-w4]. |
-| OpenAI `triton_kernels` | `matmul` | Substantive upstream Triton GEMM/ragged grouped family; unquantized, FP8 QDQ and MXFP4 precision contexts. [Provider evidence][trt-openai]. |
+| OpenAI `triton_kernels` | `matmul` | Substantive upstream Triton GEMM/ragged grouped family; unquantized, FP8 QDQ and MXFP4 precision contexts. [Upstream device source][openai-source] at the release recorded by [TRTLLM's vendoring provenance][openai-pin]; [integration contract][trt-openai]. This is TRTLLM's retained v3.7.0 source, not vLLM's different dependency pin. |
 | B12x | `mm_block_fp8`, `tensor_fp8_linear` | External block/tensor FP8 provider plus NVFP4/MX formats; do not equate all B12x names with FlashInfer's example-derived GEMM. [Provider evidence][v-b12x]. |
-| Humming | `HummingMethod`, `humming_forward` | External quantized dense/indexed/grouped family, INT8/FP8 and supported low-bit/MX formats. Language not established by these adapters. [Provider evidence][sgl-humming]. |
+| Humming | `HummingMethod`, `humming_forward` | External quantized dense/indexed/grouped family, INT8/FP8 and supported low-bit/MX formats. [Upstream project][humming-origin]; [vLLM integration contract][v-humming]. The adapter alone does not establish device language or every upstream version's eligibility. |
 | AITER | `gemm_a8w8`, `gemm_a8w8_blockscale` | ROCm HIP/ASM provider and separate tuned Triton routes; scale/layout and architecture predicates matter. [Provider evidence][v-aiter]. |
 | FBGEMM | `torch.ops.fbgemm.f4f4bf16` | External NVFP4 GEMM to BF16. [Provider evidence][v-fbgemm]. |
 | Conch | `conch.ops.quantization.gemm.mixed_precision_gemm` | External mixed-precision GEMM; not a local vLLM implementation. [Provider evidence][v-conch]. |
@@ -127,6 +129,7 @@ omitted. This is a candidate inventory, not a complete dtype/export census.
 
 [fi-base]: https://github.com/flashinfer-ai/flashinfer/blob/15e83b7bb9f32d81d84017e2e715c265fb7253f5/flashinfer/gemm/gemm_base.py
 [fi-jit]: https://github.com/flashinfer-ai/flashinfer/tree/15e83b7bb9f32d81d84017e2e715c265fb7253f5/flashinfer/jit/gemm
+[fi-gemm-src]: https://github.com/flashinfer-ai/flashinfer/tree/15e83b7bb9f32d81d84017e2e715c265fb7253f5/include/flashinfer/gemm
 [tgv-cpp]: https://github.com/flashinfer-ai/flashinfer/blob/15e83b7bb9f32d81d84017e2e715c265fb7253f5/include/flashinfer/gemm/tgv_gemm.cuh
 [tgv-dsl]: https://github.com/flashinfer-ai/flashinfer/blob/15e83b7bb9f32d81d84017e2e715c265fb7253f5/flashinfer/gemm/kernels/tgv_gemm_cute_ext.py
 [tiny-fi]: https://github.com/flashinfer-ai/flashinfer/blob/15e83b7bb9f32d81d84017e2e715c265fb7253f5/flashinfer/jit/tinygemm2.py
@@ -178,21 +181,21 @@ omitted. This is a candidate inventory, not a complete dtype/export census.
 [trt-a]: https://github.com/NVIDIA/TensorRT-LLM/blob/a8ac7e5bccb972b35808dc973f7b4aac96cbbc13/cpp/tensorrt_llm/kernels/dsv3MinLatencyKernels/dsv3FusedAGemm.cu
 [trt-ops]: https://github.com/NVIDIA/TensorRT-LLM/blob/a8ac7e5bccb972b35808dc973f7b4aac96cbbc13/tensorrt_llm/_torch/custom_ops/torch_custom_ops.py
 [trt-openai]: https://github.com/NVIDIA/TensorRT-LLM/blob/a8ac7e5bccb972b35808dc973f7b4aac96cbbc13/tensorrt_llm/_torch/modules/triton_linear.py
-[v-cute]: https://github.com/benchislett/vllm/tree/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/vllm/model_executor/kernels/linear/cute_dsl
-[v-kda]: https://github.com/benchislett/vllm/blob/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/vllm/models/kimi_k3/nvidia/ops/cute_dsl/kda_skinny_gemm.py
-[v-router]: https://github.com/benchislett/vllm/blob/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_cutedsl.py
-[v-scaled]: https://github.com/benchislett/vllm/tree/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/csrc/libtorch_stable/quantization/w8a8/cutlass
-[v-fp4]: https://github.com/benchislett/vllm/tree/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/csrc/libtorch_stable/quantization/fp4
-[v-marlin]: https://github.com/benchislett/vllm/tree/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/csrc/libtorch_stable/quantization/marlin
-[v-machete]: https://github.com/benchislett/vllm/tree/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/csrc/libtorch_stable/quantization/machete
-[v-gptq]: https://github.com/benchislett/vllm/tree/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/csrc/libtorch_stable/quantization/gptq
-[v-awq]: https://github.com/benchislett/vllm/tree/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/csrc/libtorch_stable/quantization/awq
-[v-allspark]: https://github.com/benchislett/vllm/tree/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/csrc/libtorch_stable/quantization/gptq_allspark
-[v-rocm]: https://github.com/benchislett/vllm/tree/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/csrc/rocm
-[v-b12x]: https://github.com/benchislett/vllm/blob/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/vllm/model_executor/kernels/linear/scaled_mm/b12x.py
-[v-aiter]: https://github.com/benchislett/vllm/blob/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/vllm/model_executor/kernels/linear/scaled_mm/aiter.py
-[v-fbgemm]: https://github.com/benchislett/vllm/blob/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/vllm/model_executor/kernels/linear/nvfp4/fbgemm.py
-[v-conch]: https://github.com/benchislett/vllm/blob/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/vllm/model_executor/kernels/linear/mixed_precision/conch.py
+[v-cute]: https://github.com/vllm-project/vllm/tree/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/vllm/model_executor/kernels/linear/cute_dsl
+[v-kda]: https://github.com/vllm-project/vllm/blob/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/vllm/models/kimi_k3/nvidia/ops/cute_dsl/kda_skinny_gemm.py
+[v-router]: https://github.com/vllm-project/vllm/blob/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_cutedsl.py
+[v-scaled]: https://github.com/vllm-project/vllm/tree/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/csrc/libtorch_stable/quantization/w8a8/cutlass
+[v-fp4]: https://github.com/vllm-project/vllm/tree/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/csrc/libtorch_stable/quantization/fp4
+[v-marlin]: https://github.com/vllm-project/vllm/tree/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/csrc/libtorch_stable/quantization/marlin
+[v-machete]: https://github.com/vllm-project/vllm/tree/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/csrc/libtorch_stable/quantization/machete
+[v-gptq]: https://github.com/vllm-project/vllm/tree/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/csrc/libtorch_stable/quantization/gptq
+[v-awq]: https://github.com/vllm-project/vllm/tree/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/csrc/libtorch_stable/quantization/awq
+[v-allspark]: https://github.com/vllm-project/vllm/tree/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/csrc/libtorch_stable/quantization/gptq_allspark
+[v-rocm]: https://github.com/vllm-project/vllm/tree/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/csrc/rocm
+[v-b12x]: https://github.com/vllm-project/vllm/blob/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/vllm/model_executor/kernels/linear/scaled_mm/b12x.py
+[v-aiter]: https://github.com/vllm-project/vllm/blob/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/vllm/model_executor/kernels/linear/scaled_mm/aiter.py
+[v-fbgemm]: https://github.com/vllm-project/vllm/blob/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/vllm/model_executor/kernels/linear/nvfp4/fbgemm.py
+[v-conch]: https://github.com/vllm-project/vllm/blob/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/vllm/model_executor/kernels/linear/mixed_precision/conch.py
 [sgl-scaled]: https://github.com/sgl-project/sglang/blob/5c2de3f35567ffceec6cea86ba18e075692e9101/python/sglang/kernels/aot/python/sgl_kernel/gemm.py
 [sgl-gemm]: https://github.com/sgl-project/sglang/tree/5c2de3f35567ffceec6cea86ba18e075692e9101/python/sglang/kernels/ops/gemm
 [sgl-cute]: https://github.com/sgl-project/sglang/blob/5c2de3f35567ffceec6cea86ba18e075692e9101/python/sglang/kernels/ops/gemm/cutedsl_bf16_gemm.py
@@ -200,8 +203,14 @@ omitted. This is a candidate inventory, not a complete dtype/export census.
 [sgl-fused4]: https://github.com/sgl-project/sglang/blob/5c2de3f35567ffceec6cea86ba18e075692e9101/python/sglang/kernels/ops/quantization/nvfp4_gemm_swiglu_nvfp4_quant.py
 [sgl-a]: https://github.com/sgl-project/sglang/blob/5c2de3f35567ffceec6cea86ba18e075692e9101/python/sglang/kernels/ops/gemm/cutedsl_dsv3_fused_a_gemm.py
 [ggml]: https://github.com/sgl-project/sglang/tree/5c2de3f35567ffceec6cea86ba18e075692e9101/python/sglang/kernels/aot/csrc/quantization/gguf
-[dg-evidence]: https://github.com/sgl-project/sglang/blob/5c2de3f35567ffceec6cea86ba18e075692e9101/python/sglang/srt/layers/deep_gemm_wrapper/entrypoint.py
-[sgl-humming]: https://github.com/sgl-project/sglang/blob/5c2de3f35567ffceec6cea86ba18e075692e9101/python/sglang/srt/layers/quantization/humming.py
+[dg-source]: https://github.com/deepseek-ai/DeepGEMM/tree/8b1392b978f5a03c828dd1711090d7fb50958b8a/deep_gemm/include/deep_gemm/impls
+[dg-pin]: https://github.com/vllm-project/vllm/blob/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/tools/install_deepgemm.sh
+[dg-evidence]: https://github.com/vllm-project/vllm/blob/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/vllm/utils/deep_gemm.py
+[openai-source]: https://github.com/triton-lang/triton/blob/5f3f125e8f63c24613f1f73b937442864f263f94/python/triton_kernels/triton_kernels/matmul_details/_matmul.py
+[openai-pin]: https://github.com/NVIDIA/TensorRT-LLM/blob/a8ac7e5bccb972b35808dc973f7b4aac96cbbc13/triton_kernels/README.md
+[marlin-origin]: https://github.com/IST-DASLab/marlin
+[humming-origin]: https://github.com/vllm-project/humming
+[v-humming]: https://github.com/vllm-project/vllm/blob/435c96f9dbdd29258cb8e0f433c5b54a00cf6b16/vllm/model_executor/layers/quantization/utils/humming_utils.py
 [sgl-bnb]: https://github.com/sgl-project/sglang/blob/5c2de3f35567ffceec6cea86ba18e075692e9101/python/sglang/srt/layers/quantization/bitsandbytes.py
 [sgl-petit]: https://github.com/sgl-project/sglang/blob/5c2de3f35567ffceec6cea86ba18e075692e9101/python/sglang/srt/layers/quantization/petit_utils.py
 [ts-dot]: https://github.com/lightseekorg/tokenspeed/blob/d0a2d1e02a1a643f58737894de109d0f40d83334/tokenspeed-kernel/python/tokenspeed_kernel/thirdparty/cute_dsl/ll_bf16/_kernel.py
