@@ -114,7 +114,7 @@ from .utils import (
     _merge_multimodal_embeddings,
     maybe_prefix,
 )
-from .vision import get_vit_attn_backend
+from .vision import get_vit_attn_backend, is_vit_use_data_parallel
 
 logger = init_logger(__name__)
 
@@ -605,8 +605,11 @@ class Qwen3_VisionMLP(nn.Module):
         act_fn: Callable[[torch.Tensor], torch.Tensor] = F.silu,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        use_data_parallel: bool | None = None,
     ):
         super().__init__()
+        if use_data_parallel is None:
+            use_data_parallel = is_vit_use_data_parallel()
         self.linear_fc1 = ColumnParallelLinear(
             in_features,
             hidden_features,
@@ -614,6 +617,7 @@ class Qwen3_VisionMLP(nn.Module):
             quant_config=quant_config,
             return_bias=False,
             prefix=f"{prefix}.linear_fc1",
+            disable_tp=use_data_parallel,
         )
         self.linear_fc2 = RowParallelLinear(
             hidden_features,
@@ -622,6 +626,7 @@ class Qwen3_VisionMLP(nn.Module):
             quant_config=quant_config,
             return_bias=False,
             prefix=f"{prefix}.linear_fc2",
+            disable_tp=use_data_parallel,
         )
         self.act_fn = act_fn
 
@@ -644,6 +649,7 @@ class Qwen3_VisionBlock(nn.Module):
         super().__init__()
         if norm_layer is None:
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
+        use_data_parallel = is_vit_use_data_parallel(num_heads)
         self.norm1 = norm_layer(dim)
         self.norm2 = norm_layer(dim)
         self.attn = Qwen2_5_VisionAttention(
@@ -652,6 +658,7 @@ class Qwen3_VisionBlock(nn.Module):
             projection_size=dim,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
+            use_data_parallel=use_data_parallel,
         )
         self.mlp = Qwen3_VisionMLP(
             dim,
@@ -660,6 +667,7 @@ class Qwen3_VisionBlock(nn.Module):
             bias=True,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
+            use_data_parallel=use_data_parallel,
         )
 
     def forward(
@@ -694,8 +702,11 @@ class Qwen3_VisionPatchMerger(nn.Module):
         use_postshuffle_norm: bool = False,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        use_data_parallel: bool | None = None,
     ) -> None:
         super().__init__()
+        if use_data_parallel is None:
+            use_data_parallel = is_vit_use_data_parallel()
         self.hidden_size = context_dim * (spatial_merge_size**2)
 
         self.use_postshuffle_norm = use_postshuffle_norm
@@ -716,6 +727,7 @@ class Qwen3_VisionPatchMerger(nn.Module):
                     bias=True,
                     quant_config=quant_config,
                     prefix=f"{prefix}.mlp.0",
+                    disable_tp=use_data_parallel,
                 ),
                 nn.GELU(),
                 RowParallelLinear(
@@ -724,6 +736,7 @@ class Qwen3_VisionPatchMerger(nn.Module):
                     bias=True,
                     quant_config=quant_config,
                     prefix=f"{prefix}.mlp.2",
+                    disable_tp=use_data_parallel,
                 ),
             ]
         )
@@ -768,6 +781,7 @@ class Qwen3Omni_VisionTransformer(nn.Module):
         self.num_grid_per_side = self.image_size // self.patch_size
         self.apply_vit_abs_pos_embed = vision_config.apply_vit_abs_pos_embed
         self.deepstack_visual_indexes = vision_config.deepstack_visual_indexes
+        use_data_parallel = is_vit_use_data_parallel(self.num_heads)
 
         self.patch_embed = Qwen3_VisionPatchEmbed(
             patch_size=self.patch_size,
@@ -814,6 +828,7 @@ class Qwen3Omni_VisionTransformer(nn.Module):
             spatial_merge_size=self.spatial_merge_size,
             quant_config=quant_config,
             prefix=f"{prefix}.merger",
+            use_data_parallel=use_data_parallel,
         )
         if self.deepstack_visual_indexes is not None:
             self.merger_list = nn.ModuleList(
@@ -826,6 +841,7 @@ class Qwen3Omni_VisionTransformer(nn.Module):
                         norm_layer=norm_layer,
                         quant_config=quant_config,
                         prefix=f"{prefix}.merger_list.{layer_idx}",
+                        use_data_parallel=use_data_parallel,
                     )
                     for layer_idx in range(len(self.deepstack_visual_indexes))
                 ]
