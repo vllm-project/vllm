@@ -22,7 +22,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only GLM-4.5, GLM-4.6, GLM-4.7 model
-compatible with HuggingFace weights."""
+compatible with HuggingFace weights.
+"""
 
 from collections.abc import Iterable
 from itertools import islice

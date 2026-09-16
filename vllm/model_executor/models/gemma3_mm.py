@@ -58,14 +58,13 @@ logger = init_logger(__name__)
 
 
 class Gemma3ImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - p: Number of patches total (over each image over each prompt in the
-          batch)
-        - c: Number of channels (3)
-        - h: Height of each patch
-        - w: Width of each patch
-        - bn: Batch size * number of images
+    """Dimensions:
+    - p: Number of patches total (over each image over each prompt in the
+      batch)
+    - c: Number of channels (3)
+    - h: Height of each patch
+    - w: Width of each patch
+    - bn: Batch size * number of images
     """
 
     type: Literal["pixel_values"] = "pixel_values"
@@ -678,9 +677,7 @@ class Gemma3ForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models"""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="multi_modal_projector",

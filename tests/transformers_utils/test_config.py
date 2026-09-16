@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This test file includes some cases where it is inappropriate to
+"""This test file includes some cases where it is inappropriate to
 only get the `eos_token_id` from the tokenizer as defined by
 `BaseRenderer.get_eos_token_id`.
 """
@@ -189,7 +188,8 @@ def test_model_config_generation_fallback_forwards_code_revision():
 
 def test_safetensors_metadata_of_repo_without_safetensors():
     """A repo storing its weights in another format is an answer, not a failure,
-    so it must not be retried."""
+    so it must not be retried.
+    """
     from huggingface_hub.errors import LocalEntryNotFoundError, NotASafetensorsRepoError
 
     get_safetensors_metadata = MagicMock(
@@ -228,7 +228,8 @@ def test_mrope_num_dims(section_key, mrope_section, expected_num_dims):
 @pytest.mark.parametrize("section_name", ["mrope_section", "xdrope_section"])
 def test_mrope_num_dims_from_config_attribute(section_name):
     """Some configs expose the section as an attribute rather than under
-    `rope_parameters`."""
+    `rope_parameters`.
+    """
     config = PretrainedConfig()
     setattr(config, section_name, [16, 16, 16, 16])
 

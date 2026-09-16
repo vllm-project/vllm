@@ -468,7 +468,8 @@ def test_deepseek_v4_flashinfer_cutlass_falls_through_to_w4a8(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Explicit flashinfer_cutlass must try the W4A8 variant when the BF16
-    variant is unsupported (the BF16 variant is gated to SM90)."""
+    variant is unsupported (the BF16 variant is gated to SM90).
+    """
     from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
         FlashInferExperts,
     )

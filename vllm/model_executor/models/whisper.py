@@ -95,11 +95,10 @@ class WhisperPosEmbedType(enum.Enum):
 
 
 class WhisperAudioInputs(TensorSchema):
-    """
-    Dimensions:
-        - b: Batch size
-        - nmb: Number of mel bins
-        - t: Time frames (M)
+    """Dimensions:
+    - b: Batch size
+    - nmb: Number of mel bins
+    - t: Time frames (M)
     """
 
     input_features: Annotated[
@@ -121,9 +120,8 @@ class WhisperEncoderAttention(MMEncoderAttention):
         # Only used for FlashInfer CuDNN backend.
         sequence_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """
-        Input shape: batch_size x seq_len x hidden_size
-                     or seq_len x hidden_size
+        """Input shape: batch_size x seq_len x hidden_size
+        or seq_len x hidden_size
         """
         is_2d = query.dim() == 2
         if is_2d:
@@ -919,7 +917,6 @@ class WhisperForConditionalGeneration(
         Decodes the first token ID and extracts the language code from the
         ``<|xx|>`` format. Expects a valid language token from constrained generation.
         """
-
         decoded = tokenizer.decode(
             [token_ids[0]],
             skip_special_tokens=False,
@@ -1046,8 +1043,7 @@ class WhisperForConditionalGeneration(
 def _create_fake_bias_for_k_proj(
     weights: Iterable[tuple[str, torch.Tensor]], fake_bias_key_name: str
 ) -> Iterable[tuple[str, torch.Tensor]]:
-    """
-    Create full zeros bias for k_proj weight in self-attn and x-attn layers.
+    """Create full zeros bias for k_proj weight in self-attn and x-attn layers.
     So that the bias for k_proj in qkv_proj can be initialized with zeros.
     """
     for name, weight in weights:

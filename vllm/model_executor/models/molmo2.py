@@ -105,15 +105,14 @@ _MAX_VIDEO_FPS = 8
 
 
 class Molmo2ImageInputs(TensorSchema):
-    """
-    Dimensions:
-        - nc: The total number of crops (dynamic)
-        - np: The total number of patches per crop
-        - cps: Number of channels * patch_size * patch_size
-        - npp: Number of pooled patches (dynamic)
-        - pp: pooling_size * pooling_size
-        - ni: Number of images
-        - nt: Number of image tokens (dynamic)
+    """Dimensions:
+    - nc: The total number of crops (dynamic)
+    - np: The total number of patches per crop
+    - cps: Number of channels * patch_size * patch_size
+    - npp: Number of pooled patches (dynamic)
+    - pp: pooling_size * pooling_size
+    - ni: Number of images
+    - nt: Number of image tokens (dynamic)
     """
 
     pixel_values: Annotated[torch.Tensor, TensorShape("nc", "np", "cps")]
@@ -132,15 +131,14 @@ class Molmo2ImageInputs(TensorSchema):
 
 
 class Molmo2VideoInputs(TensorSchema):
-    """
-    Dimensions:
-        - nc: The total number of frames (dynamic)
-        - np: The total number of patches per frame
-        - cps: Number of channels * patch_size * patch_size
-        - npp: Number of pooled patches (dynamic)
-        - pp: pooling_size * pooling_size
-        - nv: Number of videos
-        - nt: Number of video tokens (dynamic)
+    """Dimensions:
+    - nc: The total number of frames (dynamic)
+    - np: The total number of patches per frame
+    - cps: Number of channels * patch_size * patch_size
+    - npp: Number of pooled patches (dynamic)
+    - pp: pooling_size * pooling_size
+    - nv: Number of videos
+    - nt: Number of video tokens (dynamic)
     """
 
     pixel_values_videos: Annotated[torch.Tensor, TensorShape("nc", "np", "cps")]
@@ -165,7 +163,7 @@ class Molmo2MultiModalInputs(TypedDict, total=False):
 
 @dataclass
 class VitConfig:
-    """Config for a vision transformer"""
+    """Config for a vision transformer."""
 
     hidden_size: int = 1152
     intermediate_size: int = 4304
@@ -190,7 +188,7 @@ class VitConfig:
 
 @dataclass
 class AdapterConfig:
-    """Config for a vit-llm adapter"""
+    """Config for a vit-llm adapter."""
 
     vit_layers: tuple[int, int] = (-3, -9)
     pooling_attention_mask: bool = False
@@ -205,7 +203,7 @@ class AdapterConfig:
 
 @dataclass
 class TextConfig:
-    """Configuration for a text model transformer"""
+    """Configuration for a text model transformer."""
 
     hidden_size: int = 3584
     """
@@ -530,9 +528,7 @@ class Molmo2VisionTransformer(nn.Module):
         x: torch.Tensor,
         patch_num: tuple[int, int] | None = None,
     ) -> list[torch.Tensor]:
-        """
-        : param x: (batch_size, num_patch, n_pixels)
-        """
+        """: param x: (batch_size, num_patch, n_pixels)."""
         if patch_num is None:
             patch_num = self.patch_num
 
@@ -545,7 +541,7 @@ class Molmo2VisionTransformer(nn.Module):
 
 
 class ImagePoolingAttention(nn.Module):
-    """Multi-head attention used for image pooling"""
+    """Multi-head attention used for image pooling."""
 
     def __init__(
         self,
@@ -667,7 +663,7 @@ class ImagePoolingAttention(nn.Module):
 
 
 class ImageProjectorMLP(nn.Module):
-    """MLP used for the image projector"""
+    """MLP used for the image projector."""
 
     def __init__(
         self,
@@ -786,9 +782,7 @@ class Molmo2VisionBackbone(nn.Module, SupportsQuant):
         return self.image_vit.patch_embedding.weight.device
 
     def encode_image(self, images: torch.Tensor) -> torch.Tensor:
-        """
-        : param images: (batch_size, num_crops, num_patch, n_pixels)
-        """
+        """: param images: (batch_size, num_crops, num_patch, n_pixels)."""
         B, T, N, D = images.shape
         images = images.view(B * T, N, D)
         image_features = self.image_vit(images)
@@ -1444,8 +1438,7 @@ def get_candidate_target_fps(
     sampling_fps: int | float,
     max_fps: int | float = _MAX_VIDEO_FPS,
 ) -> list[float]:
-    """
-    Return the subset of `video_fps` factors that remain multiples
+    """Return the subset of `video_fps` factors that remain multiples
     of `sampling_fps`.
 
     Examples:
@@ -1460,6 +1453,7 @@ def get_candidate_target_fps(
             ...
         ValueError: sampling_fps=2 must divide video_fps=5 to produce
             consistent frame steps.
+
     """
     video_fps = int(video_fps)
     sampling_fps = int(sampling_fps)
@@ -1494,9 +1488,7 @@ def get_target_fps(
     frame_sample_mode: str,
     candidate_target_fps: list[float],
 ) -> float | None:
-    """
-    Get the target fps that best spans the video and has the most frames sampled
-    """
+    """Get the target fps that best spans the video and has the most frames sampled."""
     num_frames_sampled = 0
     selected_target_fps = None
     for target_fps in candidate_target_fps:
@@ -2651,9 +2643,7 @@ class Molmo2ForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="model",
             connector="vision_backbone.image_projector",

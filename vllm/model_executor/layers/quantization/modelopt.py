@@ -153,9 +153,7 @@ def algos_owned_by(config_name: str) -> tuple[str, ...]:
 
 
 class ModelOptKVCacheMethod(BaseKVCacheMethod):
-    """
-    Supports loading kv-cache scaling factors from FP8 or NVFP4 checkpoints.
-    """
+    """Supports loading kv-cache scaling factors from FP8 or NVFP4 checkpoints."""
 
     def __init__(self, quant_config: "ModelOptQuantConfigBase"):
         super().__init__(quant_config)
@@ -178,8 +176,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
         self.exclude_modules: list[str] = exclude_modules
 
     def is_layer_excluded(self, prefix: str) -> bool:
-        """
-        Check if a layer should be excluded from quantization.
+        """Check if a layer should be excluded from quantization.
 
         Handles both exact matching (for fused layers) and ModelOpt wildcard matching.
 
@@ -472,8 +469,10 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
     """MoE method for ModelOpt FP8.
     Supports loading FP8 checkpoints with static weight scale and
     activation scale.
+
     Args:
         quant_config: The ModelOpt quantization config.
+
     """
 
     def __init__(
@@ -818,10 +817,11 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
 
 
 class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
-    """
-    MoE Method for FP4 Quantization.
+    """MoE Method for FP4 Quantization.
+
     Args:
         quant_config: NVFP4 Quant Config
+
     """
 
     supports_pre_processed_weights = True
@@ -851,9 +851,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
 
     def uses_weight_scale_2_pattern(self) -> bool:
-        """
-        FP4 variants use 'weight_scale_2' pattern for per-tensor weight scales.
-        """
+        """FP4 variants use 'weight_scale_2' pattern for per-tensor weight scales."""
         return True
 
     def create_weights(
@@ -973,9 +971,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         layer.register_parameter("w2_input_scale", w2_input_scale)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
-        """
-        Convert NVFP4 MoE weights into kernel format and setup the kernel.
-        """
+        """Convert NVFP4 MoE weights into kernel format and setup the kernel."""
         if is_weights_pre_processed():
             if self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM:
                 raise RuntimeError(
@@ -1992,7 +1988,8 @@ class KNvfp4Static(QuantKeyScheme):
 
 class KNvfp4Dynamic(QuantKeyScheme):
     """NVFP4 activation scheme (W4A4). Has a static global input scale on disk;
-    the per-group scale is computed at runtime inside the kernel."""
+    the per-group scale is computed at runtime inside the kernel.
+    """
 
     key = kNvfp4Dynamic
 
@@ -2029,7 +2026,8 @@ class KNvfp4Dynamic(QuantKeyScheme):
 
 class KFp8StaticTensor(QuantKeyScheme):
     """Plain per-tensor static FP8 — bivalent: serves BOTH the weight slot and
-    the activation slot (W8A8). One key in both QuantSpec slots."""
+    the activation slot (W8A8). One key in both QuantSpec slots.
+    """
 
     key = kFp8StaticTensorSym
 
@@ -2099,7 +2097,8 @@ class KFp8StaticTensor(QuantKeyScheme):
 
 class KFp8StaticChannel(QuantKeyScheme):
     """Per-channel static FP8 weight (the 'PcPt' weight). Weight-role only —
-    there is no static per-channel *activation* today."""
+    there is no static per-channel *activation* today.
+    """
 
     key = kFp8StaticTokenSym
 
@@ -2140,7 +2139,8 @@ class KFp8StaticChannel(QuantKeyScheme):
 class KFp8Block128(QuantKeyScheme):
     """128x128 block-static FP8 weight ('PbWo'). Weight-role only. ModelOpt
     exports the scale 4-D [out_blk,1,in_blk,1]; process squeezes to 2-D.
-    No transpose (block kernel keeps [out,in])."""
+    No transpose (block kernel keeps [out,in]).
+    """
 
     key = kFp8Static128BlockSym
 
@@ -2196,7 +2196,8 @@ class KFp8Block128(QuantKeyScheme):
 
 class KMxfp8Static(QuantKeyScheme):
     """MXFP8 weight: fp8-e4m3 values + per-32-block e8m0 (uint8) scale.
-    Weight-role only. process is validate-only plus an idempotency guard."""
+    Weight-role only. process is validate-only plus an idempotency guard.
+    """
 
     key = kMxfp8Static
 
@@ -2271,7 +2272,8 @@ class KDynamicNoParam(QuantKeyScheme):
     """Dynamic activation with no stored scale (W8A8): quantized at runtime in
     the kernel. NOT the same as activation=None (weight-only) — init_fp8 needs a
     non-None activation key. Activation-role only. Serves the fp8 per-token, fp8
-    per-block, and mxfp8 dynamic activation keys."""
+    per-block, and mxfp8 dynamic activation keys.
+    """
 
     def create_weights(self, layer, role, ctx, shapes, wl) -> None:
         if role is not ACT:
@@ -2297,7 +2299,7 @@ SCHEME_FOR: dict[QuantKey | None, QuantKeyScheme] = {
 
 
 def maybe_fuse_global_scales(layer) -> None:
-    """alpha = input_global_scale * weight_global_scale, presence-gated.
+    """Alpha = input_global_scale * weight_global_scale, presence-gated.
 
     W4A4 has both -> computed; W4A16 has no input_global_scale -> skipped.
     """

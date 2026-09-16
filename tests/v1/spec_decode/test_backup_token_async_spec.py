@@ -131,7 +131,8 @@ class TestBackupTokenAsyncSpec:
 
     def test_buggy_code_was_always_off_by_one(self):
         """The original code used seq_len as index, which is always one past
-        the end of output_token_ids even without async inflation."""
+        the end of output_token_ids even without async inflation.
+        """
         req_ids = ["r0"]
         requests = {"r0": _FakeRequest([0, 1, 2], [1000, 1001])}
         batch = _FakeInputBatch(req_ids, [5])

@@ -104,12 +104,11 @@ MAX_AUDIO_LEN_S = 10 * 60  # 10 minutes
 
 
 class NanoNemotronVLAudioFeatureInputs(TensorSchema):
-    """
-    Dimensions:
-        - c: Number of audio clips (possibly flattened across audio items)
-        - b: Number of original audio items
-        - t: Audio feature length
-        - f: Feature size (mel bins)
+    """Dimensions:
+    - c: Number of audio clips (possibly flattened across audio items)
+    - b: Number of original audio items
+    - t: Audio feature length
+    - f: Feature size (mel bins)
     """
 
     type: Literal["audio_features"] = "audio_features"
@@ -119,13 +118,12 @@ class NanoNemotronVLAudioFeatureInputs(TensorSchema):
 
 
 class NanoNemotronVLImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - bnp: Batch size * number of images * (1 + num_patches)
-        - c: Number of channels (3)
-        - h: Height of each image patch
-        - w: Width of each image patch
+    """Dimensions:
+    - bn: Batch size * number of images
+    - bnp: Batch size * number of images * (1 + num_patches)
+    - c: Number of channels (3)
+    - h: Height of each image patch
+    - w: Width of each image patch
     """
 
     type: Literal["pixel_values"] = "pixel_values"
@@ -134,8 +132,7 @@ class NanoNemotronVLImagePixelInputs(TensorSchema):
 
 
 class NanoNemotronVLImagePixelInputsDynamic(TensorSchema):
-    """
-    Dynamic-resolution image inputs.
+    """Dynamic-resolution image inputs.
 
     imgs_sizes: per-image (height, width) in pixels.
     num_tokens_per_image: per-image number of embedding tokens (post downsample).
@@ -148,11 +145,10 @@ class NanoNemotronVLImagePixelInputsDynamic(TensorSchema):
 
 
 class NanoNemotronVLImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - n: Number of images
-        - f: Total image feature size
-        - h: Hidden size (must match the hidden size of language model backbone)
+    """Dimensions:
+    - n: Number of images
+    - f: Total image feature size
+    - h: Hidden size (must match the hidden size of language model backbone)
     """
 
     type: Literal["image_embeds"]
@@ -167,14 +163,13 @@ NanoNemotronVLImageInputs: TypeAlias = (
 
 
 class NanoNemotronVLVideoPixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bvf: Batch size * number of videos * num_frames
-        - bn: Batch size * number of videos
-        - f: Number of frames
-        - c: Number of channels (3)
-        - h: Height of each video frame
-        - w: Width of each video frame
+    """Dimensions:
+    - bvf: Batch size * number of videos * num_frames
+    - bn: Batch size * number of videos
+    - f: Number of frames
+    - c: Number of channels (3)
+    - h: Height of each video frame
+    - w: Width of each video frame
     """
 
     type: Literal["pixel_values_videos"]
@@ -185,11 +180,10 @@ class NanoNemotronVLVideoPixelInputs(TensorSchema):
 
 
 class NanoNemotronVLVideoEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - n: Number of videos
-        - f: Total video feature size
-        - h: Hidden size (must match the hidden size of language model backbone)
+    """Dimensions:
+    - n: Number of videos
+    - f: Total video feature size
+    - h: Hidden size (must match the hidden size of language model backbone)
     """
 
     type: Literal["video_embeds"]
@@ -631,6 +625,7 @@ class NanoNemotronVLMultiModalProcessor(
         Returns:
             A 3-tuple of (augmented mm_items, extracted audio items,
             per-video boolean mask indicating which videos have audio).
+
         """
         videos = mm_items.get_items("video", VideoProcessorItems)
         assert isinstance(videos.metadata, list)
@@ -1193,7 +1188,8 @@ class NemotronH_Nano_VL_V2(
         self, video_input: NanoNemotronVLVideoPixelInputs
     ) -> tuple[torch.Tensor, ...]:
         """Process video input and create final embeddings with video content
-        and indicator tokens."""
+        and indicator tokens.
+        """
         T = self.video_temporal_patch_size
 
         if T > 1:
@@ -1528,9 +1524,7 @@ class NemotronH_Nano_VL_V2(
         return hidden_states
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models"""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector=["mlp1", "sound_encoder.projection"],

@@ -303,11 +303,11 @@ class Qwen3OmniMoeAudioEncoderLayer(nn.Module):
         cu_seqlens: torch.Tensor,
         max_seqlen: torch.Tensor | None,
     ) -> torch.Tensor:
-        """
-        Args:
-            hidden_states: Input tensor of shape (seq_len, hidden_size)
-            cu_seqlens: Cumulative sequence lengths
-            max_seqlen: Maximum sequence length in the batch
+        """Args:
+        hidden_states: Input tensor of shape (seq_len, hidden_size)
+        cu_seqlens: Cumulative sequence lengths
+        max_seqlen: Maximum sequence length in the batch
+
         """
         residual = hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
@@ -1312,9 +1312,7 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
         mm_items: MultiModalDataItems,
         mm_res: MultiModalProcessingResult,
     ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
-        """
-        Qwen3-Omni reimplements this function to handle `use_audio_in_video`.
-        """
+        """Qwen3-Omni reimplements this function to handle `use_audio_in_video`."""
         mm_item_counts = mm_items.get_all_counts()
         prompt_ids = mm_res.prompt_ids
         mm_kwargs = mm_res.kwargs
@@ -1528,8 +1526,7 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
         placeholders: Mapping[str, list[PlaceholderFeaturesInfo]],
         mm_prompt_updates: MultiModalPromptUpdates,
     ) -> Mapping[str, list[PlaceholderFeaturesInfo]]:
-        """
-        Helper to derive audio placeholders from video placeholders when
+        """Helper to derive audio placeholders from video placeholders when
         use_audio_in_video=True.
         """
         if "video" not in placeholders:
@@ -1991,8 +1988,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
     def _get_audio_for_video_mapping(
         self, mm_features: list[MultiModalFeatureSpec]
     ) -> tuple[dict[int, int], set[int]]:
-        """
-        Map video offset -> paired audio_feature_length for use_audio_in_video.
+        """Map video offset -> paired audio_feature_length for use_audio_in_video.
 
         When use_audio_in_video=True, audio is interleaved within video.
         The pairing is based on feature order in mm_features.
@@ -2000,6 +1996,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         Returns:
             Tuple of (video_offset -> audio_feature_length mapping,
                       set of paired audio offsets to skip)
+
         """
         videos_with_audio = [
             f
@@ -2022,8 +2019,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
     def iter_mm_features(
         self, mm_features: list[MultiModalFeatureSpec]
     ) -> Iterator[tuple[int, str, dict[str, Any]]]:
-        """
-        Iterate over multimodal features sorted by position offset.
+        """Iterate over multimodal features sorted by position offset.
 
         Yields: (offset, modality, feature_data) where feature_data contains:
         - image: {"grid_t", "grid_h", "grid_w", "t_factor"}
@@ -2088,8 +2084,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
     def _compute_interleaved_positions(
         self, start_idx: int, data: dict[str, Any]
     ) -> tuple[np.ndarray, int]:
-        """
-        Compute positions for interleaved video+audio using Qwen3 token-by-token
+        """Compute positions for interleaved video+audio using Qwen3 token-by-token
         interleaving logic.
 
         Returns: (position_ids [3, N], total_token_count)
@@ -2153,9 +2148,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
 
     @classmethod
     def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
-        """
-        Construct a transcription/translation prompt for Qwen3-Omni.
-        """
+        """Construct a transcription/translation prompt for Qwen3-Omni."""
         audio = stt_params.audio
         stt_config = stt_params.stt_config
         model_config = stt_params.model_config
@@ -2315,9 +2308,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         return torch.from_numpy(llm_positions), mrope_position_delta
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models"""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="visual.merger",

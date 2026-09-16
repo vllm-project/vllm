@@ -37,7 +37,8 @@ def _dequant_gather_kernel(
     BLOCK: tl.constexpr,
 ):
     """Gather embedding rows by token id, unpack int32-packed INT weights, and
-    dequantize to ``out`` dtype in one pass (no int8 intermediate)."""
+    dequantize to ``out`` dtype in one pass (no int8 intermediate).
+    """
     row = tl.program_id(0)
     col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     col_mask = col < hidden

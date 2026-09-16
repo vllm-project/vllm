@@ -135,12 +135,11 @@ class KimiVLMultiModalProjector(nn.Module):
 
 
 class KimiVLImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - nc: Number of channels
-        - np: Number of patches
-        - ps: Patch size
-        - ni: Number of images
+    """Dimensions:
+    - nc: Number of channels
+    - np: Number of patches
+    - ps: Patch size
+    - ni: Number of images
     """
 
     type: Literal["pixel_values"] = "pixel_values"
