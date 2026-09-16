@@ -525,9 +525,7 @@ class ParallelConfig:
             )
 
         if self.enable_eplb:
-            if not (
-                current_platform.supports_eplb() or current_platform.is_cuda_alike()
-            ):
+            if not current_platform.supports_eplb():
                 raise ValueError(
                     "Expert parallelism load balancing is not supported "
                     "on this platform."

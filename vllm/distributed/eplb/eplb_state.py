@@ -30,6 +30,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import Any, cast
 
 import torch
 from torch.distributed import ProcessGroup, all_reduce
@@ -57,7 +58,6 @@ from .eplb_utils import CpuGpuEvent
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
 from .rebalance_execute import (
     AsyncEplbLayerResult,
-    TransferMetadata,
     move_from_buffer,
     rearrange_expert_weights_inplace,
 )
@@ -100,6 +100,25 @@ class EplbStats:
     """
     Number of GPUs.
     """
+
+
+@dataclass(frozen=True)
+class EplbTopology:
+    """Accelerator-independent topology used for rebalance planning."""
+
+    num_groups: int
+    num_nodes: int
+    num_ranks: int
+
+
+@dataclass(frozen=True)
+class EplbRebalanceContext:
+    """CPU inputs needed to plan an expert rebalance."""
+
+    load_window_cpu: torch.Tensor
+    physical_to_logical_map_cpu: torch.Tensor
+    topology: EplbTopology
+    num_replicas: int
 
 
 @dataclass
@@ -231,8 +250,6 @@ class EplbModelState:
     pointers remain stable across CUDA-graph replays.  The router kernel
     indexes this list with ``dbo_current_ubatch_id()``.
     """
-    transfer_layer_fn: Callable[..., TransferMetadata] | None = None
-    """Optional device-specific transfer for an asynchronous layer."""
 
 
 class EplbState:
@@ -372,25 +389,54 @@ class EplbState:
             group_coordinator, backend, model.expert_weights, expert_buffer
         )
 
+    def create_layer_state(self) -> "EplbLayerState":
+        """Create the runtime EPLB state stored in each MoE layer."""
+        return EplbLayerState()
+
+    def _create_model_layer_states(self, model: MixtureOfExperts) -> None:
+        for layer in model.moe_layers:
+            if getattr(layer, "eplb_state", None) is None:
+                continue
+            layer_state = self.create_layer_state()
+            if hasattr(layer, "router"):
+                layer.router.eplb_state = layer_state
+            else:
+                cast(Any, layer).eplb_state = layer_state
+
     def plan_rebalance(
         self,
-        model_state: EplbModelState,
-        physical_to_logical_map_cpu: torch.Tensor,
-        cuda_stream: torch.cuda.Stream,
+        context: EplbRebalanceContext,
     ) -> torch.Tensor:
         """Calculate a new layout on CPU; subclasses may choose another policy."""
-        assert model_state.eplb_stats is not None
-        stats = model_state.eplb_stats
-        with torch.cuda.stream(cuda_stream):
-            load_window_cpu = stats.global_expert_load_window.cpu()
         return self.policy.rebalance_experts(
-            load_window_cpu,
-            stats.num_replicas,
-            stats.num_groups,
-            stats.num_nodes,
-            stats.num_gpus,
-            physical_to_logical_map_cpu,
+            context.load_window_cpu,
+            context.num_replicas,
+            context.topology.num_groups,
+            context.topology.num_nodes,
+            context.topology.num_ranks,
+            context.physical_to_logical_map_cpu,
         )
+
+    def _commit_rebalance(
+        self,
+        model_state: EplbModelState,
+        new_physical_to_logical_map: torch.Tensor,
+        layer_idx: int | None = None,
+    ) -> None:
+        committed_layers: Sequence[int]
+        if layer_idx is None:
+            _commit_eplb_maps(model_state, new_physical_to_logical_map)
+            committed_layers = range(model_state.model.num_moe_layers)
+        else:
+            _commit_eplb_maps_for_layer(
+                model_state,
+                new_physical_to_logical_map,
+                layer_idx,
+            )
+            committed_layers = (layer_idx,)
+
+        for committed_layer in committed_layers:
+            self.on_layer_committed(model_state, committed_layer)
 
     def add_model(
         self,
@@ -517,6 +563,7 @@ class EplbState:
             for _ in range(num_ubatches)
         ]
 
+        self._create_model_layer_states(model)
         model.set_eplb_state(
             expert_load_pass_buffer,
             logical_to_physical_map,
@@ -699,7 +746,7 @@ class EplbState:
                     _move_to_workspace(
                         model_state=eplb_model_state,
                         ep_rank=ep_group.rank(),
-                        on_committed=self.on_layer_committed,
+                        commit_rebalance=self._commit_rebalance,
                     )
 
         if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:
@@ -881,14 +928,19 @@ class EplbState:
                 # Get new expert mappings for the model. The policy runs on the
                 # host, so the load window and current map have to come back.
                 with gpu_sync_allowed():
-                    new_physical_to_logical_map = self.policy.rebalance_experts(
-                        global_expert_load_window.cpu(),
-                        num_replicas,
-                        num_groups,
-                        num_nodes,
-                        num_gpus,
-                        eplb_model_state.physical_to_logical_map.cpu(),
+                    context = EplbRebalanceContext(
+                        load_window_cpu=global_expert_load_window.cpu(),
+                        physical_to_logical_map_cpu=(
+                            eplb_model_state.physical_to_logical_map.cpu()
+                        ),
+                        topology=EplbTopology(
+                            num_groups=num_groups,
+                            num_nodes=num_nodes,
+                            num_ranks=num_gpus,
+                        ),
+                        num_replicas=num_replicas,
                     )
+                    new_physical_to_logical_map = self.plan_rebalance(context)
 
                 skip_rearrange = False
                 if (
@@ -960,9 +1012,9 @@ class EplbState:
                     )
 
                     if not is_profile:
-                        _commit_eplb_maps(
+                        self._commit_rebalance(
                             eplb_model_state,
-                            new_physical_to_logical_map=new_physical_to_logical_map,
+                            new_physical_to_logical_map,
                         )
 
                 if is_main_rank:
@@ -1446,7 +1498,7 @@ def _commit_eplb_maps(
 def _move_to_workspace(
     model_state: EplbModelState,
     ep_rank: int,
-    on_committed: Callable[[EplbModelState, int], None] | None = None,
+    commit_rebalance: Callable[[EplbModelState, torch.Tensor, int | None], None],
 ) -> None:
     result = model_state.pending_result
     assert result is not None
@@ -1458,14 +1510,11 @@ def _move_to_workspace(
         ep_rank=ep_rank,
     )
 
-    _commit_eplb_maps_for_layer(
+    commit_rebalance(
         model_state,
-        new_physical_to_logical_map=result.new_physical_to_logical_map,
-        layer=result.layer_idx,
+        result.new_physical_to_logical_map,
+        result.layer_idx,
     )
-
-    if on_committed is not None:
-        on_committed(model_state, result.layer_idx)
 
     if result.layer_idx == model_state.model.num_moe_layers - 1:
         model_state.rebalanced = False

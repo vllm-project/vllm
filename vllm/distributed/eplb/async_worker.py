@@ -53,9 +53,23 @@ def run_rebalance_experts(
     physical_to_logical_map_cpu: torch.Tensor,
     cuda_stream: torch.cuda.Stream,
 ) -> torch.Tensor:
-    new_physical_to_logical_map = eplb_state.plan_rebalance(
-        model_state, physical_to_logical_map_cpu, cuda_stream
+    from .eplb_state import EplbRebalanceContext, EplbTopology
+
+    assert model_state.eplb_stats is not None
+    stats = model_state.eplb_stats
+    with torch.cuda.stream(cuda_stream):
+        load_window_cpu = stats.global_expert_load_window.cpu()
+    context = EplbRebalanceContext(
+        load_window_cpu=load_window_cpu,
+        physical_to_logical_map_cpu=physical_to_logical_map_cpu,
+        topology=EplbTopology(
+            num_groups=stats.num_groups,
+            num_nodes=stats.num_nodes,
+            num_ranks=stats.num_gpus,
+        ),
+        num_replicas=stats.num_replicas,
     )
+    new_physical_to_logical_map = eplb_state.plan_rebalance(context)
     assert new_physical_to_logical_map.device == torch.device("cpu")
 
     return new_physical_to_logical_map
@@ -114,8 +128,7 @@ def transfer_run_periodically(
                     model_state.rebalanced = False
                     break
 
-                transfer_fn = model_state.transfer_layer_fn or transfer_layer
-                transfer_metadata = transfer_fn(
+                transfer_metadata = transfer_layer(
                     old_layer_indices=physical_to_logical_map_cpu[layer_idx],
                     new_layer_indices=new_physical_to_logical_map[layer_idx],
                     expert_weights=model_state.model.expert_weights[layer_idx],
