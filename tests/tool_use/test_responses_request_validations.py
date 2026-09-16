@@ -187,6 +187,49 @@ def test_responses_request_empty_tools_named_tool_choice():
         )
 
 
+@pytest.mark.parametrize("detail", [None, "low"], ids=["default", "explicit"])
+def test_input_image_detail_defaults_or_preserves(detail: str | None) -> None:
+    image = {
+        "type": "input_image",
+        "image_url": "https://example.com/image.png",
+    }
+    if detail is not None:
+        image["detail"] = detail
+
+    item = {
+        "role": "user",
+        "content": [image],
+    }
+
+    request = ResponsesRequest.model_validate({"input": [item]})
+
+    assert request.input[0]["content"][0]["detail"] == (
+        "auto" if detail is None else detail
+    )
+
+
+def test_function_call_output_image_detail_defaults() -> None:
+    request = ResponsesRequest.model_validate(
+        {
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_123",
+                    "output": [
+                        {
+                            "type": "input_image",
+                            "image_url": "https://example.com/image.png",
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+    output = request.input[0]["output"][0]
+    assert output["detail"] == "auto"
+
+
 # Regression tests for parallel_tool_calls=null crash in Responses API
 # (from_request() passed None to ResponsesResponse.parallel_tool_calls,
 #  a non-optional bool field, causing a Pydantic ValidationError during
