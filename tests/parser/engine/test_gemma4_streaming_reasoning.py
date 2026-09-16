@@ -184,6 +184,74 @@ def request_obj():
 # ── Tests ────────────────────────────────────────────────────────────
 
 
+class TestGemma4SkipReasoningParsing:
+    """Reasoning markup must respect a missing reasoning-parser setup."""
+
+    @pytest.mark.parametrize(
+        ("sequence", "skip_special_tokens", "expected_content"),
+        [
+            pytest.param(
+                [
+                    (6000, "thought"),
+                    (6001, "\n"),
+                    (6002, "The answer is 391"),
+                    (CHANNEL_END_ID, "<channel|>"),
+                ],
+                False,
+                "thought\nThe answer is 391<channel|>",
+                id="plain-markup",
+            ),
+            pytest.param(
+                [
+                    (CHANNEL_START_ID, "<|channel>"),
+                    (6000, "thought"),
+                    (6001, "\n"),
+                    (6002, "The answer is 391"),
+                    (CHANNEL_END_ID, "<channel|>"),
+                ],
+                True,
+                "thought\nThe answer is 391",
+                id="stripped-markup",
+            ),
+        ],
+    )
+    def test_channel_markers_are_not_synthesized_or_restored(
+        self,
+        sequence,
+        skip_special_tokens,
+        expected_content,
+        request_obj,
+    ):
+        tokenizer = _make_tokenizer(sequence)
+        parser = Gemma4Parser(tokenizer)
+        parser.skip_reasoning_parsing = True
+
+        token_ids = [token_id for token_id, _ in sequence]
+        delta_text = tokenizer.decode(
+            token_ids, skip_special_tokens=skip_special_tokens
+        )
+        delta = parser.extract_tool_calls_streaming(
+            "",
+            delta_text,
+            delta_text,
+            [],
+            token_ids,
+            token_ids,
+            request_obj,
+        )
+        finish = parser.finish_streaming()
+
+        content = "".join(
+            item.content for item in (delta, finish) if item and item.content
+        )
+        reasoning = "".join(
+            item.reasoning for item in (delta, finish) if item and item.reasoning
+        )
+
+        assert content == expected_content
+        assert reasoning == ""
+
+
 class TestGemma4StreamingReasoningThenToolCall:
     """Streaming: reasoning followed by a tool call."""
 

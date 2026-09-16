@@ -448,9 +448,39 @@ class Gemma4Parser(ParserEngine):
         delta_text: str,
         delta_token_ids: Sequence[int],
     ) -> tuple[str, Sequence[int]]:
+        if self.skip_reasoning_parsing:
+            # When special tokens are skipped, their IDs can still reach the
+            # parser after their text has been removed by the detokenizer.
+            # Keep visible markers as content, but do not restore stripped
+            # markers from token IDs.
+            marker_ids = {
+                token_id
+                for token_id in (
+                    self._reasoning_start_token_id,
+                    self._reasoning_end_token_id,
+                )
+                if token_id is not None
+            }
+            visible_marker_ids = {
+                token_id
+                for token_id, marker_text in (
+                    (self._reasoning_start_token_id, CHANNEL_START),
+                    (self._reasoning_end_token_id, CHANNEL_END),
+                )
+                if token_id is not None and marker_text in delta_text
+            }
+            delta_token_ids = [
+                token_id
+                for token_id in delta_token_ids
+                if token_id not in marker_ids or token_id in visible_marker_ids
+            ]
+
         if not self._is_first_feed:
             return delta_text, delta_token_ids
         self._is_first_feed = False
+
+        if self.skip_reasoning_parsing:
+            return delta_text, delta_token_ids
 
         if (
             not delta_text
