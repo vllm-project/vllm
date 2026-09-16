@@ -79,19 +79,17 @@ def test_align_hybrid_block_size_is_stable_across_tp(monkeypatch):
         lambda *args, **kwargs: (_FakeModelCls, None),
     )
 
-    aligned_by_tp = {tp_size: _aligned_block_size(tp_size) for tp_size in (1, 2, 4)}
+    # 8 and 16 shard this model's 32776-byte state unevenly, which is why the
+    # alignment reads the unsharded state instead of scaling the per-rank page
+    # size back up by the TP size.
+    aligned_by_tp = {
+        tp_size: _aligned_block_size(tp_size) for tp_size in (1, 2, 4, 8, 16)
+    }
 
     assert aligned_by_tp == {
         1: 96,
         2: 96,
         4: 96,
+        8: 96,
+        16: 96,
     }
-
-    # The global mamba page size is reconstructed as local page size times TP,
-    # which is exact only while the state shards evenly. This model's state is
-    # 32776 bytes, so TP=8 floors to 2048 elements per rank and reconstructs
-    # 32768, shifting the mamba/attention ratio and the block size with it.
-    # Documented rather than asserted as correct: alignment across a TP size
-    # that shards unevenly needs the true global page size, not a scaled-up
-    # local one.
-    assert _aligned_block_size(8) == 64

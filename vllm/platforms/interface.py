@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import copy
 import enum
 import functools
 import os
@@ -900,9 +901,29 @@ class Platform:
         # Use the global Mamba/attention ratio so heterogeneous TP P/D
         # deployments choose the same logical token block size. The local page
         # size check below still enforces the per-rank memory invariant.
-        alignment_mamba_page_size = (
-            mamba_page_size * parallel_config.tensor_parallel_size
-        )
+        #
+        # Ask the model for its unsharded state instead of scaling the local
+        # page size by the TP size: shard padding means the total state is not
+        # simply `local * tp`. Mamba2 extends `n_groups` to keep each head's
+        # groups on one shard, so the summed state grows with the TP size.
+        alignment_vllm_config = copy.copy(vllm_config)
+        alignment_vllm_config.parallel_config = copy.copy(parallel_config)
+        alignment_vllm_config.parallel_config.tensor_parallel_size = 1
+        if hasattr(model_cls, "get_mamba_specs_from_config"):
+            alignment_mamba_page_size = max(
+                spec.page_size_bytes
+                for spec in model_cls.get_mamba_specs_from_config(alignment_vllm_config)
+            )
+        else:
+            alignment_mamba_page_size = MambaSpec(
+                shapes=model_cls.get_mamba_state_shape_from_config(
+                    alignment_vllm_config
+                ),
+                dtypes=model_cls.get_mamba_state_dtype_from_config(
+                    alignment_vllm_config
+                ),
+                block_size=-1,
+            ).page_size_bytes
 
         # mamba_block_size here should either be user specified value or None
         mamba_block_size = (
