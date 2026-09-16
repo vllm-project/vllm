@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for Qwen2.5-Omni embed_input_ids to verify embeddings are
+"""Unit tests for Qwen2.5-Omni embed_input_ids to verify embeddings are
 correctly assigned to audio/image/video token positions.
 
 Regression test for: https://github.com/vllm-project/vllm/issues/34506
@@ -40,8 +39,7 @@ def _mm_embed(shape: tuple[int, ...], value: float, modality: str) -> torch.Tens
 def make_token_seq(
     audio_n: int, image_n: int, video_n: int, text_prefix: int = 3, text_sep: int = 2
 ):
-    """
-    Build a flat token sequence:
+    """Build a flat token sequence:
       [text_prefix] [AUDIO * audio_n] [text_sep] [IMAGE * image_n]
       [text_sep] [VIDEO * video_n] [text_sep]
     Returns (input_ids tensor, is_multimodal mask, positions dict).
@@ -67,9 +65,8 @@ def make_token_seq(
 def make_interleaved_seq(
     video_chunks: list[int], audio_chunks: list[int], text_prefix: int = 2
 ):
-    """
-    Build an interleaved sequence like use_audio_in_video:
-      [text] [V*v0] [A*a0] [V*v1] [A*a1] ...
+    """Build an interleaved sequence like use_audio_in_video:
+    [text] [V*v0] [A*a0] [V*v1] [A*a1] ...
     """
     tokens = [TEXT_TOKEN_ID] * text_prefix
     for v, a in zip(video_chunks, audio_chunks):
@@ -140,8 +137,7 @@ class TestCheckInterleavedAudioVideo:
         )
 
     def test_batched_non_interleaved_no_false_positive(self):
-        """
-        Regression test for https://github.com/vllm-project/vllm/issues/35394.
+        """Regression test for https://github.com/vllm-project/vllm/issues/35394.
 
         5 identical non-interleaved mixed-modality requests batched together:
         each has [audio][image][video] in separate blocks with text between them.
@@ -172,8 +168,7 @@ class TestCheckInterleavedAudioVideo:
 
 
 def make_mock_model(hidden: int = 8):
-    """
-    Return a minimal mock of Qwen2_5OmniThinkerForConditionalGeneration
+    """Return a minimal mock of Qwen2_5OmniThinkerForConditionalGeneration
     that has enough structure to run embed_input_ids.
     """
     from vllm.model_executor.models.qwen2_5_omni_thinker import (
@@ -236,8 +231,7 @@ def make_mock_model(hidden: int = 8):
 def build_mm_embeds(
     audio_n, image_n, video_n, hidden, audio_val=10.0, image_val=20.0, video_val=30.0
 ):
-    """
-    Build multimodal_embeddings list in position order (audio, image, video).
+    """Build multimodal_embeddings list in position order (audio, image, video).
     Each embedding is filled with a distinct constant so we can verify placement.
     """
     embs = []
@@ -252,8 +246,7 @@ def build_mm_embeds(
 
 class TestEmbedInputIds:
     def _run(self, audio_n, image_n, video_n, hidden=8):
-        """
-        Run embed_input_ids for a non-interleaved mixed-modality sequence.
+        """Run embed_input_ids for a non-interleaved mixed-modality sequence.
         Returns (result_embeds, input_ids, is_multimodal).
         """
         input_ids, is_multimodal = make_token_seq(audio_n, image_n, video_n)
@@ -288,8 +281,7 @@ class TestEmbedInputIds:
         )
 
     def test_mixed_modalities_audio_goes_to_audio_pos(self):
-        """
-        Regression test for GitHub issue #34506:
+        """Regression test for GitHub issue #34506:
         With audio + image + video (non-interleaved), audio positions must
         receive audio embeddings (not image or video embeddings).
         """
@@ -329,8 +321,7 @@ class TestEmbedInputIds:
         )
 
     def test_interleaved_use_audio_in_video(self):
-        """
-        Interleaved (use_audio_in_video): video chunks interleaved with audio.
+        """Interleaved (use_audio_in_video): video chunks interleaved with audio.
         Video embeddings must go to video positions, audio to audio positions.
         """
         hidden = 8

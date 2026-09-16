@@ -21,7 +21,6 @@ from vllm.model_executor.models.transformers.fx_utils import (
     recover_forward,
     replace_expr,
     returned_linear,
-    single_self_call,
     upstream_linear,
 )
 from vllm.model_executor.models.transformers.utils import (
@@ -239,11 +238,12 @@ class MLAFuser(StackedFuser):
             # q_a_proj is usually inside the `else` of `if self.q_lora_rank is None`.
             # The fused call is inserted at the top-level statement preceding both.
             names = [self.q_a_proj_name, self.kv_a_proj_name]
-            calls = [single_self_call(funcdef, name) for name in names]
+            calls = self._unguarded_calls(funcdef, names)
             if ast.dump(calls[0].args[0]) != ast.dump(calls[1].args[0]):
                 raise ValueError("down-projections read different inputs")
-            index = min(_top_level_index(funcdef, call) for call in calls)
-            self._splice_merged_split(funcdef, calls, funcdef.body, index)
+            indices = [_top_level_index(funcdef, call) for call in calls]
+            self._check_input_stable(funcdef, module, calls, funcdef.body, indices)
+            self._splice_merged_split(funcdef, calls, funcdef.body, min(indices))
 
         # Transformers expands the latent into full key/value in a dedicated method.
         # `MLAAttention` consumes the latent directly (absorbing `kv_b_proj`),

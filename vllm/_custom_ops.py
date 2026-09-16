@@ -39,8 +39,7 @@ def create_fp4_scale_tensor(
     device: torch.device,
     is_sf_swizzled_layout: bool,
 ) -> torch.Tensor:
-    """
-    Allocate the output scale tensor for scaled_fp4_quant.
+    """Allocate the output scale tensor for scaled_fp4_quant.
 
     When is_sf_swizzled_layout=True, we use rounded values to store the
     swizzled scales. Due to the requirement of the Tensor Core, the minimum
@@ -73,8 +72,7 @@ def create_fp4_output_tensors(
     is_sf_swizzled_layout: bool,
     padded_n: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Allocate both output tensors for scaled_fp4_quant:
+    """Allocate both output tensors for scaled_fp4_quant:
     (quantized_output, output_scale).
 
     Must match the C++ scaled_fp4_quant_func allocation exactly when
@@ -265,9 +263,18 @@ def vocab_parallel_embedding(
     Args:
         input_ids: ``[num_tokens]`` int32 or int64 token ids.
         weight: ``[num_embeddings_per_partition, embedding_dim]`` shard.
+        org_vocab_start_index: First original vocab id owned by this rank.
+        org_vocab_end_index: One past the last original vocab id owned by
+            this rank.
+        num_org_vocab_padding: Padding rows between this rank's original and
+            added vocab shards.
+        added_vocab_start_index: First added vocab id owned by this rank.
+        added_vocab_end_index: One past the last added vocab id owned by
+            this rank.
 
     Returns:
         ``[num_tokens, embedding_dim]`` partial embeddings.
+
     """
     out = torch.empty(
         input_ids.shape[0],
@@ -399,6 +406,7 @@ def apply_repetition_penalties(
         prompt_mask: A boolean tensor indicating which tokens appear in the prompt.
         output_mask: A boolean tensor indicating which tokens appear in the output.
         repetition_penalties: The repetition penalties of shape (num_seqs, ).
+
     """
     if logits.is_cuda and logits.is_contiguous():
         apply_repetition_penalties_cuda(
@@ -787,8 +795,7 @@ def cutlass_scaled_mm(
     out_dtype: torch.dtype,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """
-    `cutlass_scaled_mm` implements a fused version of
+    """`cutlass_scaled_mm` implements a fused version of
         `output = torch.mm((scale_a * a), (scale_b * b)).to(out_dtype)`
     where scale_a * a and scale_b * b are implemented using numpy-style
     broadcasting.
@@ -840,11 +847,11 @@ def cutlass_scaled_mm_azp(
     azp: torch.Tensor | None = None,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """
-    Args:
-        azp_adj: In the per-tensor case, this should include the azp.
-            Always per-channel.
-        azp: Only set in the per-token case. Per-token if set.
+    """Args:
+    azp_adj: In the per-tensor case, this should include the azp.
+        Always per-channel.
+    azp: Only set in the per-token case. Per-token if set.
+
     """
     assert b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0
     assert out_dtype is torch.bfloat16 or out_dtype is torch.float16
@@ -883,8 +890,7 @@ def get_cutlass_moe_mm_data(
     blockscale_offsets: torch.Tensor | None = None,
     is_gated: bool = True,
 ):
-    """
-    Prepare data necessary to perform CUTLASS grouped matrix multiplications
+    """Prepare data necessary to perform CUTLASS grouped matrix multiplications
     used in CUTLASS-based fused MoE.
 
     The function takes in topk_ids (token-expert mapping) and uses it to
@@ -943,8 +949,7 @@ def get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
 
 
 def shuffle_rows(input_tensor: torch.Tensor, dst2src_map: torch.Tensor):
-    """
-    Shuffle and expand the input tensor according to the dst2src_map and store the result in output_tensor.
+    """Shuffle and expand the input tensor according to the dst2src_map and store the result in output_tensor.
     This is used in MoE to permute the input tensor before performing grouped matrix multiplications.
     """
     num_tokens_permuted = dst2src_map.shape[0]
@@ -967,8 +972,7 @@ def get_cutlass_batched_moe_mm_data(
     n: int,
     k: int,
 ):
-    """
-    Prepare data necessary to perform CUTLASS grouped matrix multiplications
+    """Prepare data necessary to perform CUTLASS grouped matrix multiplications
     used in CUTLASS-based fused MoE.
 
     The function takes in expert_num_tokens (token count per expert) and
@@ -1006,8 +1010,7 @@ def cutlass_moe_mm(
     per_act_token: bool,
     per_out_ch: bool,
 ):
-    """
-    A single grouped matrix multiplication used in CUTLASS-based fused MoE.
+    """A single grouped matrix multiplication used in CUTLASS-based fused MoE.
     The function executes fp8-quantized OUT = AB matrix multiplication.
 
     - expert_offsets: Indices that mark at which token index each expert begins
@@ -1044,8 +1047,7 @@ def cutlass_fp4_moe_mm(
     expert_offsets: torch.Tensor,
     sf_offsets: torch.Tensor,
 ):
-    """
-    An FP4 Blockscaled Group Gemm that takes in  a_tensors, b_tensors and runs
+    """An FP4 Blockscaled Group Gemm that takes in  a_tensors, b_tensors and runs
     the gemms for each combination based on the specified problem sizes.
 
     This is used as the MoE gemm during NVFP4 Quantized MoERunner forward.
@@ -1083,8 +1085,7 @@ def cutlass_mxfp4_moe_mm(
     expert_offsets: torch.Tensor,
     sf_offsets: torch.Tensor,
 ):
-    """
-    An MXFP4 Blockscaled Group Gemm for MoE (MXFP4 x MXFP4).
+    """An MXFP4 Blockscaled Group Gemm for MoE (MXFP4 x MXFP4).
 
     Uses mx_float4_t types with E8M0 scale factors and 32-element blocks.
     - a/b_tensors: MXFP4 packed activations/weights (uint8, 2 E2M1 per byte)
@@ -1458,8 +1459,7 @@ def cutlass_w4a8_moe_mm(
     group_scale_strides: torch.Tensor,
     maybe_schedule: str | None = None,
 ) -> None:
-    """
-    Executes the CUTLASS-based fused-MoE grouped matrix multiplication for the
+    """Executes the CUTLASS-based fused-MoE grouped matrix multiplication for the
     W4A8 quantization scheme. Uses group-wise quantization (INT4 -> FP8)
     and both per-channel + per-token scaling in the epilogue.
 
@@ -1482,13 +1482,20 @@ def cutlass_w4a8_moe_mm(
             Cumulative token offsets
         problem_sizes:
             Per-expert (M, N, K) GEMM sizes used by the grouped GEMM launcher.
-        a/b/c/group_scale_strides:
-            Strides describing the memory layout of the input tensors.
+        a_strides:
+            Strides describing the memory layout of a_tensors.
+        b_strides:
+            Strides describing the memory layout of b_tensors.
+        c_strides:
+            Strides describing the memory layout of out_tensors.
+        group_scale_strides:
+            Strides describing the memory layout of b_group_scales.
         maybe_schedule:
             Optional override to choose a specific kernel or epilogue schedule.
 
     Returns:
         out_tensors updated in-place with the dequantized INT4xFP8 grouped GEMM result.
+
     """
     return torch.ops._C.cutlass_w4a8_moe_mm(
         out_tensors,
@@ -1529,8 +1536,7 @@ def scaled_fp4_quant(
     backend: str = "none",
     padded_n: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Quantize input tensor to FP4 and return quantized tensor and scale.
+    """Quantize input tensor to FP4 and return quantized tensor and scale.
 
     This function quantizes the last dimension of the given tensor `input`. For
     every 16 consecutive elements, a single dynamically computed scaling factor
@@ -1553,6 +1559,7 @@ def scaled_fp4_quant(
         tuple[torch.Tensor, torch.Tensor]: The output tensor in FP4 but every
             two values are packed into a uint8 and float8_e4m3 scaling factors
             in the sizzled layout.
+
     """
     assert not current_platform.is_rocm()
     assert input.ndim >= 1, f"input.ndim needs to be >= 1, but got {input.ndim}."
@@ -1607,17 +1614,19 @@ def scaled_fp4_experts_quant(
     blockscale_offsets: torch.Tensor,
     topk: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Quantize input tensor to NVFP4 and return quantized tensor and scale, for
+    """Quantize input tensor to NVFP4 and return quantized tensor and scale, for
     packed MoE Inputs.
+
     Args:
         input_tensor: The input tensor to be quantized to NVFP4
         input_global_scale: A scalar scaling factor for the entire tensor.
         expert_offsets: The expert offsets tensor
         blockscale_offsets: The blockscale offsets tensor
+        topk: The number of experts each token is routed to
     Outputs:
         output: The quantized tensor in NVFP4
         output_scales: The blockscale tensor in FP8-E4M3
+
     """
     assert not current_platform.is_rocm()
     assert input_tensor.ndim == 2, (
@@ -1669,8 +1678,7 @@ def silu_and_mul_scaled_fp4_experts_quant(
     blockscale_offsets: torch.Tensor,
     topk: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Fused SiLU+Mul+NVFP4 quantization for MoE intermediate activations.
+    """Fused SiLU+Mul+NVFP4 quantization for MoE intermediate activations.
 
     Args:
         input_tensor: The input tensor with gate || up layout [m_topk, k*2]
@@ -1681,6 +1689,7 @@ def silu_and_mul_scaled_fp4_experts_quant(
     Outputs:
         output: The quantized tensor in NVFP4 [m_topk, k/2]
         output_scales: The blockscale tensor in FP8-E4M3
+
     """
     assert not current_platform.is_rocm()
     assert input_tensor.ndim == 2, (
@@ -1734,8 +1743,7 @@ def mxfp4_experts_quant(
     n_experts: int,
     topk: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Quantize input tensor to MXFP4 for packed MoE inputs.
+    """Quantize input tensor to MXFP4 for packed MoE inputs.
     Uses 32-element blocks with E8M0 (power-of-two) scale factors.
     MXFP4 has no global scale - only block-level E8M0 scale factors.
 
@@ -1748,6 +1756,7 @@ def mxfp4_experts_quant(
     Returns:
         output: [m_topk, k//2] packed E2M1 values (uint8)
         output_scales: E8M0 blockscales in swizzled layout (uint8 view)
+
     """
     assert not current_platform.is_rocm()
     assert input_tensor.ndim == 2
@@ -1793,8 +1802,7 @@ def silu_and_mul_mxfp4_experts_quant(
     n_experts: int,
     topk: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Fused SiLU+Mul+MXFP4 quantization for MoE intermediate activations.
+    """Fused SiLU+Mul+MXFP4 quantization for MoE intermediate activations.
     MXFP4 has no global scale - only block-level E8M0 scale factors.
     """
     assert not current_platform.is_rocm()
@@ -1840,8 +1848,7 @@ def scaled_fp8_quant(
     output: torch.Tensor | None = None,
     group_shape: tuple[int, int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Quantize input tensor to FP8 and return quantized tensor and scale.
+    """Quantize input tensor to FP8 and return quantized tensor and scale.
 
     This function supports both static and dynamic quantization: If you
     provide the scale, it will use static scaling and if you omit it,
@@ -1863,6 +1870,8 @@ def scaled_fp8_quant(
             of the output to at least this value.
         use_per_token_if_dynamic: Whether to do per_tensor or per_token
             in the dynamic quantization case.
+        output: Optional tensor to write the quantized result into. A new
+            tensor is allocated when omitted.
         group_shape: Optional tuple (group_m, group_n) specifying the group
             shape for static quantization. Use -1 for "full extent" (e.g.,
             (-1, -1) for per-tensor, (-1, 1) for per-channel, etc.)
@@ -1871,6 +1880,7 @@ def scaled_fp8_quant(
     Returns:
         tuple[torch.Tensor, torch.Tensor]: The output tensor in FP8 and
             scaling factor.
+
     """
     # This code assumes batch_dim and num_tokens are flattened
     assert input.ndim == 2
@@ -1907,8 +1917,7 @@ def allspark_repack_weight(
     zero_point: torch.Tensor | None = None,
     has_zp: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Rearrange qweight, scale, and zero_point(if asymmetric) to n32k16 format
+    """Rearrange qweight, scale, and zero_point(if asymmetric) to n32k16 format
     for Ampere W8A16 Fused Gemm kernel
 
     Args:
@@ -1922,6 +1931,7 @@ def allspark_repack_weight(
     Returns:
         tuple[torch.Tensor, torch.Tensor, torch.Tensor | None] :
             rearranged weight, scale, and optionally zero_point.
+
     """
     K = qweight.shape[0]
     N = qweight.shape[1]
@@ -1991,8 +2001,7 @@ def scaled_int8_quant(
     azp: torch.Tensor | None = None,
     symmetric: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    """
-    Quantize the input tensor to int8 and return the quantized tensor and scale, and maybe azp.
+    """Quantize the input tensor to int8 and return the quantized tensor and scale, and maybe azp.
 
     Args:
         input: The input tensor to be quantized to int8.
@@ -2004,6 +2013,7 @@ def scaled_int8_quant(
 
     Returns:
         Output int8 tensor, scales, and optionally azp.
+
     """
     if current_platform.is_xpu():
         # XPU has no _C int8 quant op; use the torch.compile reference.
@@ -2481,8 +2491,7 @@ def grouped_topk(
     bias: torch.Tensor,
     scoring_func: int = 0,
 ):
-    """
-    Perform grouped top-k routing for mixture of experts.
+    """Perform grouped top-k routing for mixture of experts.
 
     Args:
         scores: Raw inputs (logits if scoring_func=1, scores if scoring_func=0)
@@ -2493,6 +2502,7 @@ def grouped_topk(
         routed_scaling_factor: Scaling factor for routing weights
         bias: Bias tensor (e_score_correction_bias). Always fused in kernel.
         scoring_func: 0=none (no activation), 1=sigmoid
+
     """
     if not (current_platform.is_cuda() or current_platform.is_xpu()):
         raise NotImplementedError(
@@ -2852,6 +2862,8 @@ def concat_and_cache_mla_grouped(
     block_size: int,
     block_stride: int,
     entry_stride: int,
+    kv_scales: torch.Tensor | None = None,
+    kv_cache_dtype: str = "auto",
 ) -> None:
     torch.ops._C_cache_ops.concat_and_cache_mla_grouped(
         kv_c,
@@ -2861,6 +2873,8 @@ def concat_and_cache_mla_grouped(
         block_size,
         block_stride,
         entry_stride,
+        kv_scales,
+        kv_cache_dtype,
     )
 
 
@@ -2925,8 +2939,7 @@ def swap_blocks(
     block_size_in_bytes: int,
     block_mapping: torch.Tensor,
 ) -> None:
-    """
-    Copy specific blocks from one tensor to another.
+    """Copy specific blocks from one tensor to another.
 
     This method assumes each of the two input tensors is composed of
     consecutive contiguous blocks, of size block_size_in_bytes.
@@ -2954,8 +2967,7 @@ def swap_blocks_batch(
     sizes: torch.Tensor,
     is_src_access_order_any: bool = False,
 ) -> None:
-    """
-    Batch version of swap_blocks: submit all copies in a single driver call.
+    """Batch version of swap_blocks: submit all copies in a single driver call.
 
     Each entry specifies a raw pointer copy: src_ptrs[i] -> dst_ptrs[i]
     of sizes[i] bytes. All three tensors must be CPU tensors with the
@@ -3028,6 +3040,9 @@ def cp_gather_and_upconvert_fp8_kv_cache(
     workspace_starts: torch.Tensor,
     batch_size: int,
     seq_starts: torch.Tensor | None = None,
+    host_cache: torch.Tensor | None = None,
+    host_row_ids: torch.Tensor | None = None,
+    device_row_ids: torch.Tensor | None = None,
 ) -> None:
     """Gather and upconvert FP8 KV cache to BF16 workspace.
 
@@ -3038,9 +3053,21 @@ def cp_gather_and_upconvert_fp8_kv_cache(
         workspace_starts: Workspace start offsets [num_reqs]
         batch_size: Number of requests
         seq_starts: Optional source sequence offsets [num_reqs]
+        host_cache: Optional pinned host rows used for non-resident entries
+        host_row_ids: Host source row for each remapped cache row
+        device_row_ids: Device source row, or -1, for each remapped cache row
+
     """
     torch.ops._C_cache_ops.cp_gather_and_upconvert_fp8_kv_cache(
-        src_cache, dst, block_table, workspace_starts, batch_size, seq_starts
+        src_cache,
+        dst,
+        block_table,
+        workspace_starts,
+        batch_size,
+        seq_starts,
+        host_cache,
+        host_row_ids,
+        device_row_ids,
     )
 
 
@@ -3059,6 +3086,7 @@ def cp_gather_and_upconvert_nvfp4_kv_cache(
         block_table: Block indices [num_reqs, max_blocks]
         workspace_starts: Workspace start offsets [num_reqs]
         batch_size: Number of requests
+
     """
     torch.ops._C_cache_ops.cp_gather_and_upconvert_nvfp4_kv_cache(
         src_cache,
@@ -3080,6 +3108,7 @@ def concat_mla_q(
         ql_nope: Query nope component [num_tokens, num_heads, nope_dim]
         q_pe: Query rope component [num_tokens, num_heads, rope_dim]
         q_out: Output tensor [num_tokens, num_heads, nope_dim + rope_dim]
+
     """
     torch.ops._C_cache_ops.concat_mla_q(ql_nope, q_pe, q_out)
 
@@ -3381,31 +3410,6 @@ class CPUQuantMethod(IntEnum):
     MXFP4 = 4
 
 
-if hasattr(torch.ops._C, "fused_experts_cpu"):
-
-    @register_fake("_C::fused_experts_cpu")
-    def fused_experts_cpu_fake(
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        inplace: bool,
-        moe_comp_method: CPUQuantMethod,
-        w1_scale: torch.Tensor | None,
-        w2_scale: torch.Tensor | None,
-        w1_zero: torch.Tensor | None,
-        w2_zero: torch.Tensor | None,
-        block_size: list[int] | None,
-        w1_bias: torch.Tensor | None,
-        w2_bias: torch.Tensor | None,
-        alpha: float | None,
-        limit: float | None,
-        is_vnni: bool,
-    ) -> torch.Tensor:
-        return torch.empty_like(hidden_states)
-
-
 if hasattr(torch.ops._C, "dynamic_4bit_int_moe"):
 
     @register_fake("_C::dynamic_4bit_int_moe")
@@ -3425,12 +3429,12 @@ if hasattr(torch.ops._C, "dynamic_4bit_int_moe"):
 
 
 def fused_experts_cpu(
+    out: torch.Tensor,
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    inplace: bool,
     moe_comp_method: CPUQuantMethod,
     w1_scale: torch.Tensor | None,
     w2_scale: torch.Tensor | None,
@@ -3442,14 +3446,14 @@ def fused_experts_cpu(
     alpha: float | None = None,
     limit: float | None = None,
     is_vnni: bool = True,
-) -> torch.Tensor:
-    return torch.ops._C.fused_experts_cpu(
+) -> None:
+    torch.ops._C.fused_experts_cpu(
+        out,
         hidden_states,
         w1,
         w2,
         topk_weights,
         topk_ids,
-        inplace,
         moe_comp_method,
         w1_scale,
         w2_scale,
@@ -3827,8 +3831,7 @@ def onednn_scaled_int8_quant(
     azp: torch.Tensor | None = None,
     symmetric: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    """
-    Quantize the input tensor to int8 and return the quantized tensor and scale, and maybe azp.
+    """Quantize the input tensor to int8 and return the quantized tensor and scale, and maybe azp.
 
     Args:
         input: The input tensor to be quantized to int8.
@@ -3840,6 +3843,7 @@ def onednn_scaled_int8_quant(
 
     Returns:
         Output int8 tensor, scales, and optionally azp.
+
     """
     output = torch.empty_like(input, dtype=torch.int8)
     token_num = input.numel() // input.shape[-1]
@@ -4083,6 +4087,393 @@ def amx_mla_concat_and_cache(
     torch.ops._C.concat_and_cache_mla_cpu(kv_c_normed, k_pe, kv_cache, slot_mapping)
 
 
+if hasattr(torch.ops._C, "hc_pre_fused_cpu"):
+
+    @register_fake("_C::hc_pre_fused_cpu")
+    def hc_pre_fused_cpu_fake(
+        x: torch.Tensor,
+        hc_fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        hc_mult: int,
+        sinkhorn_iters: int,
+        rms_eps: float,
+        hc_eps: float,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        t, _, d = x.shape
+        y = x.new_empty((t, d))
+        post = x.new_empty((t, hc_mult), dtype=torch.float32)
+        comb = x.new_empty((t, hc_mult, hc_mult), dtype=torch.float32)
+        return y, post, comb
+
+
+def hc_pre_fused_cpu(
+    x: torch.Tensor,
+    hc_fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    hc_mult: int,
+    sinkhorn_iters: int,
+    rms_eps: float,
+    hc_eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return torch.ops._C.hc_pre_fused_cpu(
+        x, hc_fn, hc_scale, hc_base, hc_mult, sinkhorn_iters, rms_eps, hc_eps
+    )
+
+
+if hasattr(torch.ops._C, "hc_post_fused_cpu"):
+
+    @register_fake("_C::hc_post_fused_cpu")
+    def hc_post_fused_cpu_fake(
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        post: torch.Tensor,
+        comb: torch.Tensor,
+    ) -> torch.Tensor:
+        t, d = x.shape
+        hc = residual.size(1)
+        return x.new_empty((t, hc, d))
+
+
+def hc_post_fused_cpu(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    post: torch.Tensor,
+    comb: torch.Tensor,
+) -> torch.Tensor:
+    return torch.ops._C.hc_post_fused_cpu(x, residual, post, comb)
+
+
+if hasattr(torch.ops._C, "hc_head_fused_cpu"):
+
+    @register_fake("_C::hc_head_fused_cpu")
+    def hc_head_fused_cpu_fake(
+        x: torch.Tensor,
+        hc_fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        hc_eps: float,
+        norm_eps: float,
+    ) -> torch.Tensor:
+        t, _, d = x.shape
+        return x.new_empty((t, d))
+
+
+def hc_head_fused_cpu(
+    x: torch.Tensor,
+    hc_fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    hc_eps: float,
+    norm_eps: float,
+) -> torch.Tensor:
+    return torch.ops._C.hc_head_fused_cpu(x, hc_fn, hc_scale, hc_base, hc_eps, norm_eps)
+
+
+if hasattr(torch.ops._C, "fused_qnorm_rope_kv_insert_cpu"):
+
+    @register_fake("_C::fused_qnorm_rope_kv_insert_cpu")
+    def fused_qnorm_rope_kv_insert_cpu_fake(
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        positions: torch.Tensor,
+        swa_kv_cache_2d: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        q_head_padded: int,
+        eps: float,
+        cache_block_size: int,
+    ) -> torch.Tensor:
+        num_tokens_full, _, head_dim = q.shape
+        return q.new_empty((num_tokens_full, q_head_padded, head_dim))
+
+
+def fused_qnorm_rope_kv_insert_cpu(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    positions: torch.Tensor,
+    swa_kv_cache_2d: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    q_head_padded: int,
+    eps: float,
+    cache_block_size: int,
+) -> torch.Tensor:
+    return torch.ops._C.fused_qnorm_rope_kv_insert_cpu(
+        q,
+        kv,
+        positions,
+        swa_kv_cache_2d,
+        slot_mapping,
+        cos_sin_cache,
+        q_head_padded,
+        eps,
+        cache_block_size,
+    )
+
+
+def flash_mla_with_kvcache_cpu(
+    out: torch.Tensor,
+    q: torch.Tensor,
+    window_cache_2d: torch.Tensor,
+    window_slots: torch.Tensor,
+    window_block_size: int,
+    compressed_cache_2d: torch.Tensor,
+    compressed_slots: torch.Tensor,
+    compressed_block_size: int,
+    attn_sink: torch.Tensor,
+    scale: float,
+) -> None:
+    torch.ops._C.flash_mla_with_kvcache_cpu(
+        out,
+        q,
+        window_cache_2d,
+        window_slots,
+        window_block_size,
+        compressed_cache_2d,
+        compressed_slots,
+        compressed_block_size,
+        attn_sink,
+        scale,
+    )
+
+
+def save_partial_states_cpu(
+    kv: torch.Tensor,
+    score: torch.Tensor,
+    ape: torch.Tensor,
+    positions: torch.Tensor,
+    state_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+) -> None:
+    torch.ops._C.save_partial_states_cpu(
+        kv, score, ape, positions, state_cache, slot_mapping
+    )
+
+
+def compress_norm_rope_store_cpu(
+    state_cache: torch.Tensor,
+    gather_slots: torch.Tensor,
+    positions: torch.Tensor,
+    kv_slot_mapping: torch.Tensor,
+    rms_norm_weight: torch.Tensor,
+    rms_norm_eps: float,
+    cos_sin_cache: torch.Tensor,
+    kv_cache_2d: torch.Tensor,
+    kv_cache_block_size: int,
+    compress_ratio: int,
+) -> None:
+    torch.ops._C.compress_norm_rope_store_cpu(
+        state_cache,
+        gather_slots,
+        positions,
+        kv_slot_mapping,
+        rms_norm_weight,
+        rms_norm_eps,
+        cos_sin_cache,
+        kv_cache_2d,
+        kv_cache_block_size,
+        compress_ratio,
+    )
+
+
+def compress_norm_rope_store_indexer_cpu(
+    state_cache: torch.Tensor,
+    gather_slots: torch.Tensor,
+    positions: torch.Tensor,
+    kv_slot_mapping: torch.Tensor,
+    rms_norm_weight: torch.Tensor,
+    rms_norm_eps: float,
+    cos_sin_cache: torch.Tensor,
+    kv_cache_2d: torch.Tensor,
+    kv_cache_block_size: int,
+    compress_ratio: int,
+) -> None:
+    torch.ops._C.compress_norm_rope_store_indexer_cpu(
+        state_cache,
+        gather_slots,
+        positions,
+        kv_slot_mapping,
+        rms_norm_weight,
+        rms_norm_eps,
+        cos_sin_cache,
+        kv_cache_2d,
+        kv_cache_block_size,
+        compress_ratio,
+    )
+
+
+if hasattr(torch.ops._C, "fp8_paged_mqa_logits_cpu"):
+
+    @register_fake("_C::fp8_paged_mqa_logits_cpu")
+    def fp8_paged_mqa_logits_cpu_fake(
+        q_fp8: torch.Tensor,
+        kvcache_fp8: torch.Tensor,
+        weight: torch.Tensor,
+        seq_lens: torch.Tensor,
+        page_table: torch.Tensor,
+        block_size: int,
+        max_seq_len: int,
+    ) -> torch.Tensor:
+        batch_size = q_fp8.size(0)
+        return q_fp8.new_empty((batch_size, max_seq_len), dtype=torch.float32)
+
+
+def fp8_paged_mqa_logits_cpu(
+    q_fp8: torch.Tensor,
+    kvcache_fp8: torch.Tensor,
+    weight: torch.Tensor,
+    seq_lens: torch.Tensor,
+    page_table: torch.Tensor,
+    block_size: int,
+    max_seq_len: int,
+) -> torch.Tensor:
+    return torch.ops._C.fp8_paged_mqa_logits_cpu(
+        q_fp8, kvcache_fp8, weight, seq_lens, page_table, block_size, max_seq_len
+    )
+
+
+def topk_transform_512_cpu(
+    scores: torch.Tensor,
+    seq_lens: torch.Tensor,
+    page_tables: torch.Tensor,
+    out_page_indices: torch.Tensor,
+    page_size: int,
+    out_raw_indices: torch.Tensor | None = None,
+) -> None:
+    torch.ops._C.topk_transform_512_cpu(
+        scores, seq_lens, page_tables, out_page_indices, page_size, out_raw_indices
+    )
+
+
+def fused_indexer_q_rope_quant_cpu(
+    positions: torch.Tensor,
+    index_q: torch.Tensor,
+    index_q_cos_sin_cache: torch.Tensor,
+    index_q_fp8: torch.Tensor,
+    index_weights: torch.Tensor,
+    index_weights_softmax_scale: float,
+    index_weights_head_scale: float,
+    index_weights_out: torch.Tensor,
+) -> None:
+    torch.ops._C.fused_indexer_q_rope_quant_cpu(
+        positions,
+        index_q,
+        index_q_cos_sin_cache,
+        index_q_fp8,
+        index_weights,
+        index_weights_softmax_scale,
+        index_weights_head_scale,
+        index_weights_out,
+    )
+
+
+if hasattr(torch.ops._C, "biased_topk_cpu"):
+
+    @register_fake("_C::biased_topk_cpu")
+    def biased_topk_cpu_fake(
+        hidden_states: torch.Tensor,
+        gating_output: torch.Tensor,
+        correction_bias: torch.Tensor,
+        topk: int,
+        renormalize: bool,
+        scoring_func: str,
+        num_fused_shared_experts: int,
+        routed_scaling_factor: float | None,
+        apply_routed_scaling_factor_on_output: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        num_tokens = hidden_states.size(0)
+        topk_weights = hidden_states.new_empty((num_tokens, topk), dtype=torch.float32)
+        topk_ids = hidden_states.new_empty((num_tokens, topk), dtype=torch.int32)
+        return topk_weights, topk_ids
+
+
+def biased_topk_cpu(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    correction_bias: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    scoring_func: str,
+    num_fused_shared_experts: int,
+    routed_scaling_factor: float | None,
+    apply_routed_scaling_factor_on_output: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops._C.biased_topk_cpu(
+        hidden_states,
+        gating_output,
+        correction_bias,
+        topk,
+        renormalize,
+        scoring_func,
+        num_fused_shared_experts,
+        routed_scaling_factor,
+        apply_routed_scaling_factor_on_output,
+    )
+
+
+if hasattr(torch.ops._C, "hash_topk_cpu"):
+
+    @register_fake("_C::hash_topk_cpu")
+    def hash_topk_cpu_fake(
+        gating_output: torch.Tensor,
+        tid2eid: torch.Tensor,
+        topk: int,
+        scoring_func: str,
+        num_fused_shared_experts: int,
+        num_experts: int,
+        routed_scaling_factor: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        num_tokens = gating_output.size(0)
+        topk_weights = gating_output.new_empty((num_tokens, topk), dtype=torch.float32)
+        topk_ids = gating_output.new_empty((num_tokens, topk), dtype=torch.int32)
+        return topk_weights, topk_ids
+
+
+def hash_topk_cpu(
+    gating_output: torch.Tensor,
+    tid2eid: torch.Tensor,
+    topk: int,
+    scoring_func: str,
+    num_fused_shared_experts: int,
+    num_experts: int,
+    routed_scaling_factor: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops._C.hash_topk_cpu(
+        gating_output,
+        tid2eid,
+        topk,
+        scoring_func,
+        num_fused_shared_experts,
+        num_experts,
+        routed_scaling_factor,
+    )
+
+
+if hasattr(torch.ops._C, "inverse_gptj_rope_o_proj_cpu"):
+
+    @register_fake("_C::inverse_gptj_rope_o_proj_cpu")
+    def inverse_gptj_rope_o_proj_cpu_fake(
+        o: torch.Tensor,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        rope_dim: int,
+    ) -> torch.Tensor:
+        return o.new_empty(o.shape, dtype=torch.float32)
+
+
+def inverse_gptj_rope_o_proj_cpu(
+    o: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    rope_dim: int,
+) -> torch.Tensor:
+    return torch.ops._C.inverse_gptj_rope_o_proj_cpu(
+        o, positions, cos_sin_cache, rope_dim
+    )
+
+
 def cpu_gemm_wna16(
     input: torch.Tensor,
     q_weight: torch.Tensor,
@@ -4131,6 +4522,7 @@ def cpu_prepack_moe_weight_int8(
 
 
 def cpu_fused_moe(
+    out: torch.Tensor,
     input: torch.Tensor,
     w13: torch.Tensor,
     w2: torch.Tensor,
@@ -4141,10 +4533,9 @@ def cpu_fused_moe(
     act: str,
     isa: str,
     skip_weighted: bool = False,
-) -> torch.Tensor:
-    output = torch.empty_like(input)
+) -> None:
     torch.ops._C.cpu_fused_moe(
-        output,
+        out,
         input,
         w13,
         w2,
@@ -4156,10 +4547,10 @@ def cpu_fused_moe(
         act,
         isa,
     )
-    return output
 
 
 def cpu_fused_moe_int8(
+    out: torch.Tensor,
     input: torch.Tensor,
     w13: torch.Tensor,
     w2: torch.Tensor,
@@ -4172,10 +4563,9 @@ def cpu_fused_moe_int8(
     act: str,
     isa: str,
     skip_weighted: bool = False,
-) -> torch.Tensor:
-    output = torch.empty_like(input)
+) -> None:
     torch.ops._C.cpu_fused_moe_int8(
-        output,
+        out,
         input,
         w13,
         w2,
@@ -4189,7 +4579,6 @@ def cpu_fused_moe_int8(
         act,
         isa,
     )
-    return output
 
 
 if hasattr(torch.ops._qutlass_C, "matmul_mxf4_bf16_tn"):
@@ -4314,8 +4703,7 @@ def safeFusedQuantizeNv(
     xh_e4m3: torch.Tensor,
     global_scale: torch.Tensor,
 ) -> None:
-    """
-    Wrapper for QUTLASS fusedQuantizeNv method that operates on tensors in-place
+    """Wrapper for QUTLASS fusedQuantizeNv method that operates on tensors in-place
     rather than returning them, to prevent torch 2.12+ errors that outputs of custom
     operators may not alias any inputs to the custom operator.
     """
@@ -4324,8 +4712,7 @@ def safeFusedQuantizeNv(
 
 
 def hadacore_transform(x: torch.Tensor, inplace: bool = True) -> torch.Tensor:
-    """
-    Perform Hadamard transforms using [Hadacore](https://arxiv.org/abs/2412.08832)
+    """Perform Hadamard transforms using [Hadacore](https://arxiv.org/abs/2412.08832)
     kernels. Note that these kernels exploit the recursive properties of
     Sylvester Hadamards, and therefore do not require transform weight data
 
@@ -4338,6 +4725,7 @@ def hadacore_transform(x: torch.Tensor, inplace: bool = True) -> torch.Tensor:
 
     Returns:
         value after transformation
+
     """
     return torch.ops._C.hadacore_transform(x, inplace)
 
