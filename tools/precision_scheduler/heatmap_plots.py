@@ -107,3 +107,20 @@ def write_pngs(output_dir: Path, payload: dict[str, Any]) -> None:
         "speedup (higher is better for INT4)",
         output_dir / "speedup_heatmap.png",
     )
+    if any(v is not None for row in payload.get("nvfp4_tpot_ms", []) for v in row):
+        plot_matrix(
+            payload["nvfp4_tpot_ms"],
+            batch_sizes,
+            seq_lens,
+            "NVFP4 decode TPOT",
+            "ms/token",
+            output_dir / "nvfp4_tpot_heatmap.png",
+        )
+        plot_matrix(
+            payload["speedup_bf16_over_nvfp4"],
+            batch_sizes,
+            seq_lens,
+            "BF16 / NVFP4 Speedup",
+            "speedup (higher is better for NVFP4)",
+            output_dir / "speedup_nvfp4_heatmap.png",
+        )

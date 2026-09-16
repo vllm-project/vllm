@@ -12,7 +12,8 @@ The verl half lives in `verl/workers/config/rollout.py`,
 ## Purpose
 
 Keep two copies of the base model resident on one GPU, a BF16 copy (the one
-LoRA trains against) and a GPTQ INT4 shadow, and let every LoRA wrapper pick
+LoRA trains against) and a low-precision shadow (GPTQ-packed INT4 or ModelOpt
+NVFP4), and let every LoRA wrapper pick
 one of them per forward without changing module topology. The scheduler
 (C3/C4) decides *when* to use INT4 (long-tail decode with few live requests);
 this component only makes both bases available and switchable.
@@ -35,10 +36,13 @@ this component only makes both bases available and switchable.
    `load_int4_shadow_model` refuses a dummy shadow config outright). The
    format is validated first
    (`validate_shadow_quantization`): Intel AutoRound `auto_round:auto_gptq`,
-   plain GPTQ, or compressed-tensors `pack-quantized` are accepted; AWQ in any
-   form raises `ValueError`.
-2. **Match** (`policy_layers`). INT4 `LinearBase` modules carrying a packed
-   weight (`qweight`, `weight_packed`, ...) are matched by module name onto the
+   plain GPTQ, compressed-tensors `pack-quantized` and ModelOpt NVFP4 are
+   accepted; AWQ in any form raises `ValueError`, and ModelOpt FP8 is refused
+   as not being a W4 shadow.
+2. **Match** (`policy_layers`). Shadow `LinearBase` modules carrying a packed
+   weight (`qweight`, `weight_packed`, ...) or an NVFP4 scale
+   (`weight_global_scale`, `weight_scale_2` -- NVFP4 packs into the plain
+   `weight` name, which BF16 has too) are matched by module name onto the
    BF16 model's LoRA wrappers (the wrapper sits at the linear's original
    name). `VLLM_DUAL_PRECISION_BF16_LAYERS` (default `first:3,last:3`) keeps
    whole transformer blocks BF16; `VLLM_DUAL_PRECISION_INT4_MODULES`
@@ -117,7 +121,7 @@ this component only makes both bases available and switchable.
 | Env var | Default | Meaning |
 |---|---|---|
 | `VLLM_DUAL_PRECISION_ROLLOUT` | `0` | enable residency (`dual_precision_rollout_enabled()`) |
-| `VLLM_DUAL_PRECISION_INT4_MODEL` | `""` | GPTQ INT4 checkpoint; required when enabled |
+| `VLLM_DUAL_PRECISION_INT4_MODEL` | `""` | shadow checkpoint (GPTQ INT4 or ModelOpt NVFP4); required when enabled |
 | `VLLM_DUAL_PRECISION_BF16_LAYERS` | `first:3,last:3` | blocks kept BF16 (`none`, `first:N`, `last:N`, `i`, `a-b`); every final run used `none` |
 | `VLLM_DUAL_PRECISION_INT4_MODULES` | `all` | `all` or `mlp_only` (Gemma4 E2B/E4B QAT runs) |
 | `VLLM_DUAL_PRECISION_VALIDATE_SHADOW` | `0` | numerical check at load |
@@ -153,7 +157,8 @@ the engine default; `resolve_sleep_level` in that module applies it at both
 ## Dropped from the experimental tree, and why
 
 * **AWQ block-state pairing** (paired norm parameters swapped in
-  `_parameters`/`_buffers` per bind) and AWQ shadows altogether. GPTQ only:
+  `_parameters`/`_buffers` per bind) and AWQ shadows altogether. GPTQ and
+  NVFP4 only:
   on the Qwen3.5-9B AutoRound shadow 152 of 176 shared non-linear block
   tensors are bit-identical to BF16 and the remaining 24 (128-dim
   gated-deltanet norm vectors) differ at bf16 rounding level (max abs 0.004),
@@ -187,7 +192,8 @@ the engine default; `resolve_sleep_level` in that module applies it at both
 * Qwen3.5-9B BF16 (`/data/huggingface/hub/models--Qwen--Qwen3.5-9B/...c2022362`)
   + Intel AutoRound INT4 (`models--Intel--Qwen3.5-9B-int4-AutoRound/...29688b89`),
   `BF16_LAYERS=none`: `Loaded 286 GPTQ shadow linear layers; attached 152 ...
-  kept 0 ... left 134` (identical to the 697 archived runs under
+  kept 0 ... left 134` (the wording of that line has since dropped "GPTQ",
+  which no longer holds for every shadow; the counts are unchanged) (identical to the 697 archived runs under
   `/data/huanchen/verl/.codex-report/**`); shadow store 3.32 GiB; worst
   per-layer cosine 0.9856 (`layers.30.linear_attn.in_proj_ba`, rel-RMSE
   0.169). With the default `first:3,last:3`: 123 attached / 29 by policy
@@ -304,3 +310,30 @@ is exercised): one trigger per batch, `preempted_requests=8` ==
 batches identical, pre-switch tokens bit-identical to an uninterrupted run
 on the same engine and 7/8 sequences identical over all 128 tokens (token
 agreement 0.94).
+
+### NVFP4 shadow (2026-09-15, RTX PRO 6000 Blackwell sm_120, pro6000-adapt branch)
+
+Same BF16 base, shadow `models--AxionML--Qwen3.5-9B-NVFP4/...97aef923`
+(ModelOpt NVFP4, 4-bit float weights, group 16), `BF16_LAYERS=none`,
+`enforce_eager`: **152 attached / 0 by policy / 134 fallback, identical to the
+AutoRound INT4 shadow above**, shadow store 3.62 GiB (against 3.32 GiB for
+AutoRound), attach-time sanity probe cosine 0.9927, worst per-layer cosine
+0.9849 (`layers.6.linear_attn.in_proj_ba`, rel-RMSE 0.174) against AutoRound's
+0.9856. vLLM selects `FlashInferCutlassNvFp4LinearKernel` for the shadow GEMM.
+The engine generates normally with the shadow attached
+(`tests/model_executor/dual_precision/test_nvfp4_shadow_gpu.py`, 2 passed).
+
+Attached is not the same as bound, and the first test only covered the former:
+the runner rebinds before every forward from the scheduler's decision, so its
+generation still ran on BF16. `test_nvfp4_switch_gpu.py` covers the switch
+itself, driving `VLLM_DUAL_PRECISION_POLICY=uniform_w4` in a child process per
+precision. Bound: `active_precision=int4` with all 152 of 152 shadow bindings
+pointing at the NVFP4 layer; unbound control: `bf16` with 0 of 152. Greedy
+decode off the shadow answers "The capital of France is" with Paris and
+"17 plus 25" with 42, so the FP4 path is producing real logits and not noise
+that merely happens to be finite (3 passed, 102 s).
+
+That the counts match exactly is the point: the residency and binding path is
+not format-aware. A binding holds two `LinearBase` objects and the forward runs
+through whichever is active, using that layer's own `quant_method`, so the only
+format-specific code is the gate and the parameter predicate.

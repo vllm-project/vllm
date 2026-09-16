@@ -32,6 +32,19 @@ def test_recognize_quantized_shadow_weight_formats(weight_name: str):
     assert is_quantized_shadow_layer(layer)
 
 
+@pytest.mark.parametrize(
+    "weight_name",
+    ["weight_global_scale", "weight_scale_2", "w13_weight_global_scale"],
+)
+def test_nvfp4_scale_names_mark_a_quantized_shadow(weight_name):
+    layer = nn.Module()
+    # NVFP4 packs into the plain ``weight`` name, so only a scale can mark it.
+    layer.weight = object()
+    setattr(layer, weight_name, object())
+
+    assert is_quantized_shadow_layer(layer)
+
+
 def test_plain_weight_is_not_a_quantized_shadow():
     layer = nn.Module()
     layer.weight = object()
@@ -115,7 +128,9 @@ def _load_fixture(name: str) -> tuple[list[str], set[str]]:
     ("fixture", "num_layers", "bf16_layers", "module_policy", "expected"),
     [
         # Qwen3.5-9B BF16 + Intel AutoRound INT4 shadow, every headline run:
-        # "Loaded 286 GPTQ shadow linear layers; attached 152 ... left 134".
+        # Archived log wording: "Loaded 286 GPTQ shadow linear layers;
+        # attached 152 ... left 134". The same counts hold for the NVFP4
+        # shadow, so the live line no longer says GPTQ.
         ("qwen3_5_9b_autoround", 32, "none", "all", (152, 0, 134)),
         # Nemotron-Nano-9B-v2 + RedHatAI w4a16 (stage0 weight audit):
         # "Loaded 139 ...; attached 112 ... left 27" (27 = mamba conv1d).

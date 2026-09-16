@@ -9,10 +9,15 @@ BF16 model's LoRA wrappers, and only the attached linears are kept alive in an
 :class:`Int4ShadowLayerStore` registered as a submodule of the model. The
 temporary INT4 model is then dropped.
 
-Supported shadow formats are GPTQ packings only: Intel AutoRound
-``auto_round:auto_gptq`` and compressed-tensors ``pack-quantized``. AWQ is
-refused: its activation-aware scales live in the norms next to the linears,
-so a W4 linear against the BF16 norm is a different model.
+Supported shadow formats are the GPTQ packings -- Intel AutoRound
+``auto_round:auto_gptq`` and compressed-tensors ``pack-quantized`` -- and
+ModelOpt NVFP4. AWQ is refused: its activation-aware scales live in the norms
+next to the linears, so a W4 linear against the BF16 norm is a different model.
+
+Nothing in the residency or binding path is format-aware: a binding holds two
+``LinearBase`` objects and the forward runs through whichever is active, using
+that layer's own ``quant_method``. Adding NVFP4 is therefore a matter of letting
+it past the format gate and recognising its parameters, not of new dispatch.
 """
 
 from __future__ import annotations
@@ -66,6 +71,7 @@ _GPTQ_RESOLVED_METHODS = frozenset(
     {"gptq", "gptq_marlin", "auto_gptq", "inc", "compressed-tensors"}
 )
 _AWQ_RESOLVED_METHODS = frozenset({"awq", "awq_marlin"})
+_MODELOPT_RESOLVED_METHODS = frozenset({"modelopt", "modelopt_fp4"})
 
 
 class Int4ShadowLayerStore(nn.Module):
@@ -157,7 +163,7 @@ def clone_init_dataclass(config_obj: Any, **overrides: Any) -> Any:
 def validate_shadow_quantization(
     hf_quant_config: dict[str, Any] | None, resolved_method: str | None
 ) -> str:
-    """Accept GPTQ packings, reject everything else with a clear message.
+    """Accept GPTQ packings and ModelOpt NVFP4; reject the rest clearly.
 
     Returns a short label of the accepted format for logging.
     """
@@ -201,13 +207,62 @@ def validate_shadow_quantization(
                 f"pack-quantized (GPTQ); got format={fmt!r}."
             )
         return "compressed-tensors:pack-quantized"
+    if (
+        quant_method in _MODELOPT_RESOLVED_METHODS
+        or resolved in _MODELOPT_RESOLVED_METHODS
+    ):
+        return validate_modelopt_shadow(hf_quant_config, quant_method, resolved)
     if quant_method in ("gptq", "gptq_marlin") or resolved in _GPTQ_RESOLVED_METHODS:
         return f"gptq:{resolved or quant_method}"
     raise ValueError(
         "Dual precision shadow checkpoints must be GPTQ-packed (AutoRound "
-        "auto_round:auto_gptq or compressed-tensors pack-quantized); got "
+        "auto_round:auto_gptq or compressed-tensors pack-quantized) or "
+        "ModelOpt NVFP4; got "
         f"quant_method={quant_method!r} (resolved {resolved!r})."
     )
+
+
+def modelopt_weight_spec(hf_quant_config: dict[str, Any]) -> dict[str, Any]:
+    """The ``weights`` spec of a ModelOpt config, from whichever shape it uses."""
+    groups = hf_quant_config.get("config_groups") or {}
+    for group in groups.values():
+        if isinstance(group, dict) and isinstance(group.get("weights"), dict):
+            return group["weights"]
+    quantization = hf_quant_config.get("quantization")
+    if isinstance(quantization, dict):
+        return quantization
+    return {}
+
+
+def validate_modelopt_shadow(
+    hf_quant_config: dict[str, Any], quant_method: str, resolved: str
+) -> str:
+    """Accept a ModelOpt NVFP4 shadow; refuse the FP8 ModelOpt checkpoints.
+
+    ModelOpt covers both FP8 and NVFP4 under one ``quant_method``, and only the
+    4-bit float one is a W4 shadow. vLLM resolves NVFP4 to ``modelopt_fp4``;
+    older exports only say so in the weight spec (``num_bits`` 4, ``type``
+    ``float``) or in ``quant_algo``.
+    """
+    algo = str(hf_quant_config.get("quant_algo", "")).upper()
+    weights = modelopt_weight_spec(hf_quant_config)
+    num_bits = weights.get("num_bits")
+    weight_type = str(weights.get("type", "")).lower()
+
+    is_nvfp4 = (
+        resolved == "modelopt_fp4"
+        or quant_method == "modelopt_fp4"
+        or algo.startswith("NVFP4")
+        or (num_bits == 4 and weight_type == "float")
+    )
+    if not is_nvfp4:
+        raise ValueError(
+            "Dual precision ModelOpt shadow checkpoints must be NVFP4 "
+            f"(4-bit float); got quant_algo={algo or None!r}, "
+            f"num_bits={num_bits!r}, type={weight_type or None!r} "
+            f"(resolved {resolved!r}). ModelOpt FP8 is not a W4 shadow."
+        )
+    return "modelopt:nvfp4"
 
 
 SHADOW_LOAD_FORMAT = "auto"
@@ -261,10 +316,11 @@ def make_int4_vllm_config(vllm_config: VllmConfig, int4_model: str) -> VllmConfi
         hf_config_path=int4_model,
         quantization=None,
     )
-    validate_shadow_quantization(
+    shadow_format = validate_shadow_quantization(
         int4_model_config.model_arch_config.quantization_config,
         int4_model_config.quantization,
     )
+    logger.info("Dual precision shadow checkpoint format: %s.", shadow_format)
     int4_compilation_config = clone_init_dataclass(vllm_config.compilation_config)
     int4_load_config = make_shadow_load_config(vllm_config.load_config)
     return clone_init_dataclass(
@@ -474,9 +530,9 @@ def attach_shadow_layers(
     register_shadow_store(model, store)
 
     logger.info(
-        "Loaded %d GPTQ shadow linear layers; attached %d quantized INT4 "
-        "layers, kept %d quantized layers in BF16 by policy, and left %d "
-        "layers in BF16 because no INT4 shadow was available.",
+        "Loaded %d quantized shadow linear layers; attached %d of them, "
+        "kept %d quantized layers in BF16 by policy, and left %d layers in "
+        "BF16 because no shadow was available.",
         state.num_shadow_linears,
         attached,
         policy_bf16,
