@@ -9,6 +9,7 @@ import os
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
+from enum import IntEnum
 from functools import partial
 from typing import TYPE_CHECKING, Any, NamedTuple, NewType, TypeAlias, cast, overload
 
@@ -172,6 +173,15 @@ def init_none_hash(hash_fn: Callable[[Any], bytes]):
     NONE_HASH = BlockHash(hash_fn(_NONE_HASH_SEED))
 
 
+class BlockPriority(IntEnum):
+    """Cache priority for a block."""
+
+    # Keep opportunisticially (FIFO), as the probability of matching is low
+    LOW = 0
+    # Standard LRU policy (LIFO)
+    NORMAL = 1
+
+
 @dataclass(slots=True)
 class KVCacheBlock:
     """KV-cache block metadata."""
@@ -180,6 +190,8 @@ class KVCacheBlock:
     block_id: int
     # Reference count.
     ref_cnt: int = 0
+    # Cache priority
+    priority: BlockPriority = BlockPriority.NORMAL
     # Deferred frees may contain blocks from multiple pools.
     pool: "BlockPool | None" = field(
         default=None, repr=False, compare=False, kw_only=True
@@ -222,6 +234,7 @@ class KVCacheBlock:
         """Reset the block hash when the block is evicted."""
         self._block_hash = None
         self._block_hash_num_tokens = None
+        self.priority = BlockPriority.NORMAL
 
     def __repr__(self) -> str:
         # Use block_id instead of KVCacheBlock object to avoid calling __repr__
