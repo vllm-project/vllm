@@ -25,7 +25,8 @@ def _model_config() -> Mock:
 def test_completion_flag_forwarded_to_tok_params():
     """build_tok_params must forward return_token_offsets, defaulting to
     False (zero behavioral change for existing callers) and coercing JSON
-    null to False via the bool() guard."""
+    null to False via the bool() guard.
+    """
     cfg = _model_config()
 
     default = CompletionRequest(model="m", prompt="hi")
@@ -40,7 +41,8 @@ def test_completion_flag_forwarded_to_tok_params():
 
 def test_chat_flag_forwarded_to_tok_params():
     """Chat build_tok_params has its own (max_completion_tokens) branch, so
-    its return_token_offsets forwarding is verified independently."""
+    its return_token_offsets forwarding is verified independently.
+    """
     cfg = _model_config()
     messages = [{"role": "user", "content": "hi"}]
 
@@ -64,7 +66,8 @@ def test_generate_request_token_offsets_default_none():
 
 def test_generate_request_token_offsets_survive_json_round_trip():
     """GenerateRequest crosses the disagg serialization boundary; the
-    tuple[int, int] offsets must survive model_dump and re-validate."""
+    tuple[int, int] offsets must survive model_dump and re-validate.
+    """
     req = GenerateRequest(
         token_ids=[10, 20],
         sampling_params=SamplingParams(),

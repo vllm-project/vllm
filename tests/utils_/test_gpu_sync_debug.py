@@ -59,7 +59,8 @@ def test_with_env_set(monkeypatch, mode):
 @create_new_process_for_each_test()
 def test_other_threads_are_not_policed(monkeypatch):
     """A background thread that syncs deliberately must not be broken by the
-    check being armed on the thread running the decorated function."""
+    check being armed on the thread running the decorated function.
+    """
     monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", "error")
     monkeypatch.setattr(gsd, "_sync_check_enabled", True)
 
@@ -84,7 +85,8 @@ def test_other_threads_are_not_policed(monkeypatch):
 def test_allow_on_other_thread_does_not_disarm(monkeypatch):
     """`gpu_sync_allowed()` on one thread must not suppress the check on
     another. It is scoped by ContextVar rather than torch's process-global
-    sync debug mode, which a previous implementation mutated."""
+    sync debug mode, which a previous implementation mutated.
+    """
     monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", "error")
     monkeypatch.setattr(gsd, "_sync_check_enabled", True)
 
@@ -113,7 +115,8 @@ def test_allow_on_other_thread_does_not_disarm(monkeypatch):
 def test_suppressing_works_while_compiling(monkeypatch):
     """`_suppressing` wraps torch compile entry points, which run with
     `torch.compiler.is_compiling()` true. `gpu_sync_allowed()` deliberately
-    no-ops in that state, so `_suppressing` must not route through it."""
+    no-ops in that state, so `_suppressing` must not route through it.
+    """
     monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", "error")
     monkeypatch.setattr(gsd, "_sync_check_enabled", True)
     # Emulate being inside a torch compile, as inductor passes are.
@@ -124,10 +127,29 @@ def test_suppressing_works_while_compiling(monkeypatch):
 
 
 @create_new_process_for_each_test()
+def test_copy_checker_is_traceable_while_compiling(monkeypatch):
+    """The copy wrapper must bypass ContextVars while Dynamo is tracing."""
+    monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", "error")
+    monkeypatch.setattr(gsd, "_sync_check_enabled", True)
+    gsd._install_copy_checkers()
+
+    def convert_like(x, like):
+        return x.to(device=like.device, dtype=like.dtype)
+
+    compiled = torch.compile(convert_like, fullgraph=True)
+    result = compiled(
+        torch.ones(4, device="cuda", dtype=torch.float64),
+        torch.ones(4, device="cuda", dtype=torch.float32),
+    )
+    assert result.dtype == torch.float32
+
+
+@create_new_process_for_each_test()
 def test_sync_debug_mode_restored_after_checked_call(monkeypatch):
     """The mode is armed only for the duration of a checked call. Leaving it
     on process-wide made every sync outside a checked region emit a
-    `UserWarning` whenever our handler was not the installed one."""
+    `UserWarning` whenever our handler was not the installed one.
+    """
     monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", "error")
     monkeypatch.setattr(gsd, "_sync_check_enabled", True)
 
@@ -272,7 +294,8 @@ def test_genuinely_async_transfers_pass(monkeypatch):
     asynchronous in both directions -- even with a dtype conversion, which
     runs GPU-side, and even permuted (e.g. transposed), which uses pitched
     cudaMemcpy2D/3DAsync; D2H `Tensor.to` allocates a pinned destination.
-    None of these may be flagged."""
+    None of these may be flagged.
+    """
     monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", "error")
     monkeypatch.setattr(gsd, "_sync_check_enabled", True)
     gsd._install_copy_checkers()

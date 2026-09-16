@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Tests for HF3FS KV Connector high-level components:
-  - TestHf3fsMockClient      : file-backed mock client I/O correctness
-  - TestHF3FSKVConnectorStats: metric collection, aggregation, serialisation
+"""Tests for HF3FS KV Connector high-level components:
+- TestHf3fsMockClient      : file-backed mock client I/O correctness
+- TestHF3FSKVConnectorStats: metric collection, aggregation, serialisation
 """
 
 import os

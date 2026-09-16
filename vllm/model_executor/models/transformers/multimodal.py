@@ -224,7 +224,8 @@ class _MultiModalProcessorBase(BaseMultiModalProcessor[MultiModalProcessingInfo]
         mm_items: MultiModalDataItems,
     ) -> tuple[Mapping[str, object], Mapping[str, object]]:
         """Rename the parser's `audios` key to the `audio` argument HF audio
-        processors take."""
+        processors take.
+        """
         processor_data, passthrough_data = super()._get_hf_mm_data(mm_items)
         if self.info._is_audio_model() and "audios" in processor_data:
             processor_data["audio"] = processor_data.pop("audios")
@@ -432,7 +433,8 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         """Empty, because `apply` writes the placeholder ranges itself rather than
-        deriving them from updates."""
+        deriving them from updates.
+        """
         return []
 
     def _get_mm_token_ids(self, modality: str) -> list[int]:
@@ -466,7 +468,8 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
         num_audios: int,
     ) -> dict[str, list[PlaceholderRange]]:
         """Take each contiguous run of the audio token as one item's placeholder,
-        and record how many tokens the run holds."""
+        and record how many tokens the run holds.
+        """
         audio_token_ids = self._get_mm_token_ids("audio")
         prompt_tensor = torch.tensor(prompt_ids)
         is_audio = torch.isin(prompt_tensor, torch.tensor(audio_token_ids))
@@ -524,7 +527,8 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
         mm_token_type_ids: torch.Tensor | None,
     ) -> dict[str, list[PlaceholderRange]]:
         """Split the positions the processor marks as image into one placeholder per
-        item, sized by the token count it reports for each image."""
+        item, sized by the token count it reports for each image.
+        """
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         if mm_token_type_ids is None:
             raise ValueError(
@@ -577,7 +581,8 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
         timing_ctx: TimingContext,
     ) -> MultiModalInput:
         """Process the prompt and every multi-modal item in one HF processor call,
-        then read the placeholder ranges out of the token ids it returns."""
+        then read the placeholder ranges out of the token ids it returns.
+        """
         prompt = inputs.prompt
         mm_items = inputs.mm_data_items
         hf_processor_mm_kwargs = inputs.hf_processor_mm_kwargs
@@ -705,7 +710,8 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         """Replace each modality's placeholder token with the token ids that item's
-        replacement text encodes to, marking which of them hold embeddings."""
+        replacement text encodes to, marking which of them hold embeddings.
+        """
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
 
@@ -892,7 +898,8 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         self, model: "PreTrainedModel"
     ) -> dict[str, type["PreTrainedModel"]]:
         """Modalities whose encoder cannot be told apart from the model itself are
-        omitted, as are those `get_encoder` rejects."""
+        omitted, as are those `get_encoder` rejects.
+        """
         encoder_classes: dict[str, type[PreTrainedModel]] = {}
         for modality in _MODALITY_TO_TOKEN_TYPE_ID:
             try:
@@ -953,9 +960,8 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             yield
 
     def _decorate_for_torch_compile(self):
-        """
-        Decorate the model's decoder and encoder classes to indicate to vLLM that they
-        support torch compile if `can_enable_torch_compile` and
+        """Decorate the model's decoder and encoder classes to indicate to vLLM
+        that they support torch compile if `can_enable_torch_compile` and
         `should_torch_compile_mm_encoder` are True respectively.
         """
         super()._decorate_for_torch_compile()
@@ -1012,8 +1018,8 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
     def get_language_model(self) -> torch.nn.Module:
         """Transformers modeling backend multimodal classes do not contain a separate
         vLLM language model class. Therefore, in order to return a language model vLLM
-        class, we use a wrapper to give `self` the same interface as a text model."""
-
+        class, we use a wrapper to give `self` the same interface as a text model.
+        """
         # Exclude self and object
         bases = self.__class__.mro()[1:-1]
         # Keep only classes defined in `vllm.model_executor.models.transformers`
@@ -1031,9 +1037,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         return LanguageModel(self)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models"""
         for name in ("language_model", "text_model"):
             if getattr(self.model, name, None) is not None:
                 return MultiModelKeys.from_string_field(language_model=f"model.{name}")
@@ -1169,7 +1173,8 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
     ) -> dict[str, Any]:
         """Narrow the entries of `kwargs` that hold one row per item down to the item
         at `index`. Length is all there is to match on, so an unrelated entry of the
-        same length is narrowed too."""
+        same length is narrowed too.
+        """
         return {
             key: value[index : index + 1]
             if isinstance(value, (torch.Tensor, list)) and len(value) == num_items

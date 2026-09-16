@@ -34,7 +34,8 @@ from vllm.triton_utils import tl, triton
 
 def _select_cfg(M, N, K, block_m):
     """Pick the launch config from host constants only (M=num_valid_tokens, N, K,
-    block_m) — graph-capture safe (no GPU-scalar branch)."""
+    block_m) — graph-capture safe (no GPU-scalar branch).
+    """
     # Per-regime winners (measured, isolated cuda-event A/B on gfx950, GPU 3):
     #   BLOCK_K=256 (fewer K-iters + bigger MX scale-load coalesced with the dot),
     #   num_stages=2 (software-pipeline overlaps the E8M0 scale-load with the scaled

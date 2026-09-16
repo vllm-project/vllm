@@ -93,7 +93,8 @@ def test_eagle_max_len(
 @pytest.mark.parametrize("spec_max_model_len", [80, 150])
 def test_mtp_speculative_config_max_model_len(spec_max_model_len: int):
     """Regression test for #41456: max_model_len in speculative config
-    should be respected for the draft model."""
+    should be respected for the draft model.
+    """
     model_config = ModelConfig(
         model="XiaomiMiMo/MiMo-7B-Base",
         runner="generate",
