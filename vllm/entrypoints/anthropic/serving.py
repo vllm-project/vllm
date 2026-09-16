@@ -40,6 +40,7 @@ from vllm.entrypoints.generate.base.protocol import (
     JsonSchemaResponseFormat,
     ResponseFormat,
     StreamOptions,
+    ToolCall,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
@@ -70,6 +71,28 @@ class _StreamError(Exception):
     def __init__(self, error_info: ErrorInfo) -> None:
         super().__init__(error_info.message)
         self.error_info = error_info
+
+
+def _tool_call_input(tool_call: ToolCall) -> dict[str, Any]:
+    """Decode tool-call arguments, or `{}` if they are not a JSON object."""
+    arguments = tool_call.function.arguments
+    if not arguments:
+        return {}
+
+    try:
+        decoded = json.loads(arguments)
+    except json.JSONDecodeError:
+        decoded = None
+
+    if isinstance(decoded, dict):
+        return decoded
+
+    logger.warning(
+        "Discarding unusable arguments for Anthropic tool call %s (%s)",
+        tool_call.id,
+        tool_call.function.name,
+    )
+    return {}
 
 
 def _build_anthropic_usage(
@@ -901,7 +924,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                 type="tool_use",
                 id=tool_call.id,
                 name=tool_call.function.name,
-                input=json.loads(tool_call.function.arguments),
+                input=_tool_call_input(tool_call),
             )
             content += [anthropic_tool_call]
 
