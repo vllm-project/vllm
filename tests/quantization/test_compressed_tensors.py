@@ -414,6 +414,7 @@ def test_compressed_tensors_w8a8_fp8_moe_rebuild_reselects_under_the_same_rule()
     quant_method.moe = Mock()
     quant_method.fp8_backend = Fp8MoeBackend.VLLM_CUTLASS
     quant_method.experts_cls = object
+    quant_method.moe_quant_config = Mock()
     quant_method.weight_key = None
     quant_method.activation_key = None
     quant_method.allow_vllm_cutlass = True

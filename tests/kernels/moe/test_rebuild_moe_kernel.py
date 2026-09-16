@@ -177,6 +177,33 @@ def test_rebuild_assigns_and_builds_around_the_new_backend():
     assert kwargs["routing_tables"] is layer._expert_routing_tables.return_value
 
 
+def test_rebuild_leaves_the_method_untouched_when_the_kernel_build_fails():
+    """A failure inside the kernel build must not half-switch the method.
+
+    The kernel is built into a local and the three fields are assigned only
+    once it succeeds. Assigning first would leave fp8_backend and experts_cls
+    naming a kernel that was never built while moe_kernel still runs the
+    outgoing one -- a layer that reports the new role while serving the old,
+    which the caller cannot detect and has no way to roll back.
+    """
+    method = _method(Fp8MoeBackend.DEEPGEMM)
+    before = (method.fp8_backend, method.experts_cls, method.moe_kernel)
+
+    with (
+        patch(_SELECT, return_value=(Fp8MoeBackend.BATCHED_DEEPGEMM, object)),
+        patch(_MAKE_KERNEL, side_effect=RuntimeError("no buffer")),
+        pytest.raises(RuntimeError, match="no buffer"),
+    ):
+        rebuild_fp8_moe_kernel(
+            method,
+            Mock(),
+            weight_key=None,
+            activation_key=None,
+        )
+
+    assert (method.fp8_backend, method.experts_cls, method.moe_kernel) == before
+
+
 def test_allow_vllm_cutlass_is_forwarded_to_the_selection():
     """Whatever rule the caller selects under must reach the oracle.
 
@@ -199,3 +226,44 @@ def test_allow_vllm_cutlass_is_forwarded_to_the_selection():
         )
 
     assert select.call_args.kwargs["allow_vllm_cutlass"] is True
+
+
+def test_unquantized_rebuild_restores_the_fields_when_the_kernel_build_fails():
+    """The unquantized path assigns first, so it must restore on failure.
+
+    _init_moe_kernel reads the backend and experts class off self, which
+    forces the assignment before the call; a failure inside it has to put
+    the previous pair back or the method is left naming a kernel it never
+    built.
+    """
+    from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+        UnquantizedMoeBackend,
+    )
+    from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+        UnquantizedFusedMoEMethod,
+    )
+
+    method = object.__new__(UnquantizedFusedMoEMethod)
+    method.moe = Mock()
+    method.unquantized_backend = UnquantizedMoeBackend.TRITON
+    method.experts_cls = object
+    method.moe_kernel = "outgoing"
+
+    with (
+        patch(
+            "vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method"
+            ".select_unquantized_moe_backend",
+            return_value=(UnquantizedMoeBackend.BATCHED_TRITON, type("New", (), {})),
+        ),
+        patch.object(
+            UnquantizedFusedMoEMethod,
+            "_init_moe_kernel",
+            side_effect=RuntimeError("no buffer"),
+        ),
+        pytest.raises(RuntimeError, match="no buffer"),
+    ):
+        method.rebuild_moe_kernel(Mock())
+
+    assert method.unquantized_backend is UnquantizedMoeBackend.TRITON
+    assert method.experts_cls is object
+    assert method.moe_kernel == "outgoing"
