@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MLA backend correctness for the TokenSpeed MLA prefill backend.
+"""MLA backend correctness for the ROCm AITER FlashAttention prefill backend.
 
 The test bodies live in ``tests/v1/attention/_mla_backends.py``; this file only
-pins the slice of the correctness matrix that this directory owns. One
-directory per prefill backend lets the pipeline YAML say which shard runs
+pins the slice of the correctness matrix that this file owns. One
+file per prefill backend lets the pipeline YAML say which shard runs
 which part of the matrix, instead of hash-sharding the cases of one file.
 """
 
@@ -18,7 +18,7 @@ from tests.v1.attention._mla_backends import (
 from vllm.v1.attention.backends.mla.prefill import MLAPrefillBackendEnum
 
 PREFILL_BACKEND_DIMENSIONS = prefill_backend_dimension_params(
-    MLAPrefillBackendEnum.TOKENSPEED_MLA
+    MLAPrefillBackendEnum.ROCM_AITER_FA
 )
 
 
