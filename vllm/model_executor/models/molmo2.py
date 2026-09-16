@@ -46,7 +46,6 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.molmo2_pooling import Molmo2PoolingPreparation
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -708,6 +707,47 @@ class ImageProjectorMLP(nn.Module):
         return x
 
 
+def _prepare_molmo2_pooling(
+    image_features: torch.Tensor,
+    token_pooling: torch.Tensor,
+    *,
+    masked_average: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    batch_size, num_crops, num_patches, dim = image_features.shape
+    pool_size = token_pooling.shape[-1]
+
+    valid = token_pooling >= 0
+    flat_indices = token_pooling.clamp_min(0)
+    batch_offsets = torch.arange(
+        batch_size,
+        dtype=token_pooling.dtype,
+        device=token_pooling.device,
+    ).view(batch_size, 1, 1)
+    flat_indices.add_(batch_offsets * (num_crops * num_patches))
+
+    to_pool = torch.index_select(
+        image_features.reshape(-1, dim),
+        0,
+        flat_indices.reshape(-1),
+    )
+    to_pool = to_pool.reshape(-1, pool_size, dim)
+    to_pool.mul_(valid.reshape(-1, pool_size, 1))
+
+    if masked_average:
+        denom = valid.sum(-1, dtype=torch.float32).reshape(-1).clamp_min_(1)
+        query = to_pool.sum(-2, keepdim=True)
+        query.div_(denom[:, None, None])
+    else:
+        query = to_pool.mean(-2, keepdim=True)
+
+    return (
+        to_pool,
+        query,
+        valid.reshape(-1, 1, 1, pool_size),
+        valid.any(-1),
+    )
+
+
 class Molmo2VisionBackbone(nn.Module, SupportsQuant):
     packed_modules_mapping = {
         "merged_qkv": ["wq", "wk", "wv"],  # vision backbone
@@ -769,9 +809,6 @@ class Molmo2VisionBackbone(nn.Module, SupportsQuant):
             quant_config=quant_config,
             prefix=f"{prefix}.image_pooling_2d",
         )
-        self.pooling_preparation = Molmo2PoolingPreparation(
-            masked_average=adapter_config.pooling_attention_mask
-        )
         self.image_projector = ImageProjectorMLP(
             input_dim=adapter_config.hidden_size,
             hidden_dim=adapter_config.intermediate_size,
@@ -818,8 +855,10 @@ class Molmo2VisionBackbone(nn.Module, SupportsQuant):
         images = images.to(device=self.device, dtype=self.dtype)
         image_features = self.encode_image(images)
 
-        to_pool, query, valid, valid_token = self.pooling_preparation(
-            image_features, token_pooling
+        to_pool, query, valid, valid_token = _prepare_molmo2_pooling(
+            image_features,
+            token_pooling,
+            masked_average=self.adapter_config.pooling_attention_mask,
         )
         attn_mask = valid if self.adapter_config.pooling_attention_mask else None
 
