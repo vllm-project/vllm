@@ -346,7 +346,6 @@ class UBatchRunner:
         # Experimental scope: DeepSeek-V2 with FlashAttention MLA and NIXL only.
         self.conditional_real_split = (
             vllm_config.model_config.hf_config.model_type == "deepseek_v2"
-            and self.parallel_config.data_parallel_size == 2
             and self.parallel_config.tensor_parallel_size == 1
             and self.parallel_config.pipeline_parallel_size == 1
             and self.parallel_config.prefill_context_parallel_size == 1
