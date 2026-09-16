@@ -218,7 +218,7 @@ def test_load_audio_auto_falls_back_without_torchcodec(dummy_audio_bytes):
 
 
 def test_load_audio_auto_falls_back_without_ffmpeg(dummy_audio_bytes):
-    """torchcodec installed but system ffmpeg missing (`AudioDecoder is None`)
+    """Torchcodec installed but system ffmpeg missing (`AudioDecoder is None`)
     must surface as ImportError so `auto` falls back to soundfile → PyAV."""
     ref_audio, ref_sr = load_audio_soundfile(BytesIO(dummy_audio_bytes), sr=None)
     with patch.object(audio_module, "AudioDecoder", None):
@@ -232,7 +232,7 @@ def test_load_audio_auto_falls_back_without_ffmpeg(dummy_audio_bytes):
 def test_load_audio_auto_falls_back_when_libtorchcodec_unloadable(
     dummy_audio_bytes,
 ):
-    """torchcodec loads its ffmpeg-backed core lazily at decoder construction;
+    """Torchcodec loads its ffmpeg-backed core lazily at decoder construction;
     a "Could not load libtorchcodec" RuntimeError there (no system ffmpeg)
     must also surface as ImportError so `auto` falls back."""
 

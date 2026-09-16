@@ -129,8 +129,7 @@ class CustomAllreduce:
         max_mnnvl_reduce_scatter_size=_DEFAULT_MNNVL_REDUCE_SCATTER_MAX_SIZE,
         symm_mem_enabled=False,
     ) -> None:
-        """
-        Args:
+        """Args:
             group: the process group to work on. If None, it will use the
                 default process group.
             device: the device to bind the CustomAllreduce to. If None,
@@ -139,6 +138,7 @@ class CustomAllreduce:
         is bound to a unique device. CUDA IPC collectives require all ranks
         to be on the same node; cross-node groups only support MNNVL
         all-gather and reduce-scatter.
+
         """
         self._IS_CAPTURING = False
         self._ptr = 0
@@ -371,8 +371,7 @@ class CustomAllreduce:
 
     @contextmanager
     def capture(self):
-        """
-        The main responsibility of this context manager is the
+        """The main responsibility of this context manager is the
         `register_graph_buffers` call at the end of the context.
         It records all the buffer addresses used in the CUDA graph.
         """

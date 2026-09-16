@@ -477,14 +477,12 @@ class CutlassBatchedExpertsFp8(CutlassExpertsFp8Base):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        num_dp = self.num_dispatchers
-        assert num_dp is not None
         experts_per_worker = self.moe_config.num_local_experts
         activation_out_dim = self.adjust_N_for_activation(N, activation)
-        workspace1 = (experts_per_worker, M * num_dp, max(N, K))
+        workspace1 = (experts_per_worker, M, max(N, K))
         workspace2 = (
             experts_per_worker,
-            M * num_dp,
+            M,
             max(activation_out_dim, K),
         )
         output = (experts_per_worker, M, K)
@@ -520,8 +518,7 @@ def run_cutlass_moe_fp4(
     *,
     activation_config: ApplyMoEActivationConfig | None = None,
 ) -> None:
-    """
-    MoE implementation for FP4 Inputs
+    """MoE implementation for FP4 Inputs.
 
     # Gemm 1
     a: Input tensor: [m, k] (half/bfloat16)

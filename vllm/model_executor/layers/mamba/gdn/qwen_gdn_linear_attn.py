@@ -100,8 +100,9 @@ def _resolve_gdn_prefill_backend(
     * ``requested in ["flashinfer", "auto"]``;
     * ``platform == cuda``;
     * one of the following:
-      - Hopper (SM90) — no further constraints;
-      - Blackwell (SM10.x) with ``head_k_dim == 128``, ``cuda_runtime >= 13``.
+      - Hopper (SM90) - no further constraints;
+      - Blackwell (SM10.x) with ``head_k_dim == 128``, ``cuda_runtime >= 13``;
+      - Blackwell (SM12.x) with ``head_k_dim == 128``, ``cuda_runtime >= 13``.
 
     In-tree CuteDSL GDN prefill kernel is chosen when:
     * "cutedsl" is requested; (opt-in only)
@@ -134,6 +135,13 @@ def _resolve_gdn_prefill_backend(
     ):
         supports_flashinfer = True
         supports_cutedsl = True
+    elif (
+        current_platform.is_device_capability_family(120)
+        and head_k_dim == 128
+        and current_platform.get_cuda_runtime_major() >= 13
+    ):
+        # The in-tree CuteDSL kernel targets SM100 only, so it stays off here.
+        supports_flashinfer = True
 
     if backend in ["flashinfer", "auto"] and supports_flashinfer:
         return backend, "flashinfer"
@@ -631,9 +639,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         mixed_qkvz: torch.Tensor,
         mixed_ba: torch.Tensor,
     ):
-        """
-        Derives `query`, `key` and `value` tensors from `mixed_qkvzba`.
-        """
+        """Derives `query`, `key` and `value` tensors from `mixed_qkvzba`."""
         new_tensor_shape_qkvz = mixed_qkvz.size()[:-1] + (
             self.num_k_heads // self.tp_size,
             (
@@ -684,8 +690,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         mixed_ba: torch.Tensor,
         num_tokens: int,
     ):
-        """
-        Derives mixed_qkv, z, b, a from projected qkvz/ba for the GDN custom op.
+        """Derives mixed_qkv, z, b, a from projected qkvz/ba for the GDN custom op.
 
         For gqa_interleaved_layout (Qwen3-Next): unpack the interleaved
         [ng, (hk + hk + np/ng*hv + np/ng*hv)] layout into contiguous qkv.
@@ -891,8 +896,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Forward pass with three parts:
+        """Forward pass with three parts:
         1. Input projection
         2. Core attention (custom op)
         3. Output projection
@@ -969,8 +973,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Forward pass with three parts:
+        """Forward pass with three parts:
         1. Input projection
         2. Core attention (custom op)
         3. Output projection
@@ -1213,6 +1216,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             z_out: **output** buffer for z        (num_tokens, num_heads,
                    head_dim); mutated in-place.
             core_attn_out: Pre-allocated output buffer for attention results.
+
         """
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
@@ -1271,6 +1275,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             b: beta gating vector                   (num_tokens, num_heads)
             a: alpha gating vector                  (num_tokens, num_heads)
             core_attn_out: Pre-allocated output buffer for attention results.
+
         """
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
@@ -1567,14 +1572,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 3. Merge core attention output
         if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
-            merged_out = torch.empty(
-                (1, num_actual_tokens, *core_attn_out_spec.shape[2:]),
-                dtype=core_attn_out_non_spec.dtype,
-                device=core_attn_out_non_spec.device,
+            core_attn_out.index_copy_(0, spec_token_indx, core_attn_out_spec.squeeze(0))
+            core_attn_out.index_copy_(
+                0, non_spec_token_indx, core_attn_out_non_spec.squeeze(0)
             )
-            merged_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
-            merged_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
-            core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
         elif spec_sequence_masks is not None:
             core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
         else:
@@ -1654,9 +1655,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out: torch.Tensor,
         attn_metadata: GDNAttentionMetadata,
     ):
-        """
-        Core attention computation with a packed non-spec decode fast path.
-        """
+        """Core attention computation with a packed non-spec decode fast path."""
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
         self_kv_cache = self.kv_cache
         # conv_state must be (..., dim, width-1) for the conv kernels.
@@ -2026,8 +2025,7 @@ def fused_gdn_gating(
     beta: float = 1.0,
     threshold: float = 20.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Fused computation of g and beta for Gated Delta Net.
+    """Fused computation of g and beta for Gated Delta Net.
     g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
     beta_output = b.sigmoid()
     TODO maybe use torch.compile to replace this triton kernel
