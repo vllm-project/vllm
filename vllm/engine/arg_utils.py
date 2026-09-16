@@ -1865,6 +1865,12 @@ class EngineArgs:
             )
 
             boundary = TurboQuantConfig.get_boundary_skip_layers(model_config)
+            existing = set(cache_config.kv_cache_dtype_skip_layers)
+            cache_config.kv_cache_dtype_skip_layers = sorted(
+                existing | set(boundary), key=int
+            )
+            '''
+            boundary = TurboQuantConfig.get_boundary_skip_layers(model_config)
             kv_sharing_targets = TurboQuantConfig.get_kv_sharing_target_skip_layers(
                 model_config
             )
@@ -1875,7 +1881,7 @@ class EngineArgs:
                     list(existing | set(boundary) | set(kv_sharing_targets)),
                 )
             )
-
+            '''
         ray_runtime_env = None
         if is_ray_initialized():
             # Ray Serve LLM calls `create_engine_config` in the context

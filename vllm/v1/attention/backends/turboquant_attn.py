@@ -269,6 +269,7 @@ class TurboQuantAttentionBackend(AttentionBackend):
             return False
         return kv_cache_dtype in cls.supported_kv_cache_dtypes
 
+    '''
     @classmethod
     def supports_combination(
         cls,
@@ -285,7 +286,8 @@ class TurboQuantAttentionBackend(AttentionBackend):
         if kv_cache_dtype == "turboquant_k8v4" and head_size > 256:
             return "turboquant_k8v4 requires FlashAttention-compatible head_size <= 256"
         return None
-
+    '''
+    
     @classmethod
     def supports_head_size(cls, head_size: int) -> bool:
         # head_size from spec is effective_head_size (padded_slot//2),

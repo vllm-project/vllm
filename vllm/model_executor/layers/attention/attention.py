@@ -319,6 +319,11 @@ class Attention(nn.Module, AttentionLayerBase):
         # weight and activation dtype.
         dtype = torch.get_default_dtype()
         if attn_backend is None:
+            print(
+                f"DEBUG: layer={prefix} kv_cache_dtype={kv_cache_dtype!r} "
+                f"sliding_window={sliding_window!r}",
+                flush=True,
+            )
             backend_override = None
             if (
                 skipped_kv_cache_dtype
