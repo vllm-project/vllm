@@ -85,9 +85,14 @@ class SharedExperts(torch.nn.Module):
         # Both these comm backends have been shown to be safe for shared expert overlap.
         _EPLB_OVERLAP_SAFE_BACKENDS = (
             "allgather_reducescatter",
+            "deepep_v2",
             "flashinfer_nvlink_one_sided",
         )
 
+        import os  # TEMP-DEBUG
+
+        if os.environ.get("TEMP_FORCE_NO_OVERLAP") == "1":  # TEMP-DEBUG
+            return True
         parallel_config = self._moe_config.moe_parallel_config
         if getattr(self._layer, "shard_sequence_parallel", False):
             # TODO: we may enable this to optimize further
@@ -98,6 +103,14 @@ class SharedExperts(torch.nn.Module):
         ) or parallel_config.use_fi_nvl_two_sided_kernels
 
     def _determine_shared_experts_order(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> SharedExpertsOrder:
+        order = self._determine_shared_experts_order_impl(hidden_states)
+        logger.info_once("SHARED_ORDER_DEBUG %s", order.name)  # TEMP-DEBUG
+        return order
+
+    def _determine_shared_experts_order_impl(  # TEMP-DEBUG
         self,
         hidden_states: torch.Tensor,
     ) -> SharedExpertsOrder:

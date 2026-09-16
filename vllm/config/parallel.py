@@ -717,7 +717,6 @@ class ParallelConfig:
                 "allgather_reducescatter",
                 "deepep_high_throughput",
                 "deepep_low_latency",
-                "deepep_v2",
                 "flashinfer_nvlink_one_sided",
                 "mori_high_throughput",
                 "mori_low_latency",

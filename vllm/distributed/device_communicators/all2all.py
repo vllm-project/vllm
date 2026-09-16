@@ -1055,7 +1055,9 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
                 "DeepEPv2 communicator properties query failed; "
                 "networking capability could not be determined."
             )
-        if gin_type == 0:
+        import os  # TEMP-DEBUG
+
+        if gin_type == 0 and os.environ.get("EP_DISABLE_GIN", "0") == "0":
             raise RuntimeError(
                 "DeepEPv2 requires NCCL GIN (GPU-Initiated Networking). "
                 "This usually means IBGDA-capable InfiniBand NICs or drivers "

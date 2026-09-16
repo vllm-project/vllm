@@ -276,7 +276,6 @@ def maybe_make_prepare_finalize(
             num_topk=moe.experts_per_token,
             use_fp8_dispatch=use_fp8_dispatch,
             use_cudagraph=use_cudagraph,
-            sp_size=moe.moe_parallel_config.sp_size,
         )
 
     elif moe.use_mori_kernels:
