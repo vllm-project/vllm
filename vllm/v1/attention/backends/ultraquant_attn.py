@@ -16,7 +16,7 @@ Selected by the TurboQuant backend's ``get_impl_cls`` when the cache dtype is
 """
 
 import math
-from typing import Any
+from typing import Any, ClassVar
 
 import torch
 import torch.nn.functional as F
@@ -51,6 +51,9 @@ class UltraQuantAttentionImpl(TurboQuantAttentionImpl):
     and continuation seams of :class:`TurboQuantAttentionImpl`; all shared
     prefill/forward/metadata machinery is inherited unchanged.
     """
+
+    # FlyDSL D=256 decode loads query as bf16; fp16 is not supported.
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
 
     def _init_quant_config(self, kv_cache_dtype: str, head_size: int) -> None:
         # UltraQuant is not described by a TurboQuantConfig; the format lives in

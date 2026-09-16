@@ -47,11 +47,14 @@ def _kv_cache_flat(kv_cache: torch.Tensor) -> torch.Tensor:
 
 _SUPPORTED_DTYPES = {torch.float16, torch.bfloat16}
 
-# Triton only lets a @jit body reach a module global if it is a `constexpr`
-# instance, so the midpoint table is wrapped here and indexed via `.value`
-# inside the unrolled `static_range` (the index is a Python int at trace time,
-# so each comparison lowers to an immediate).
-_MIDPOINTS_C = tl.constexpr(tuple(float(m) for m in MIDPOINTS_SORTED))
+# Built lazily on first launch so importing this module does not require triton.
+_MIDPOINTS_C = None
+
+
+def _ensure_const_tables() -> None:
+    global _MIDPOINTS_C
+    if _MIDPOINTS_C is None:
+        _MIDPOINTS_C = tl.constexpr(tuple(float(m) for m in MIDPOINTS_SORTED))
 
 
 # ── Cached per-device constant tensors ─────────────────────────────────────
@@ -316,6 +319,7 @@ def ultraquant_store(
 
     c = constant_c if constant_c is not None else get_constant_c()
 
+    _ensure_const_tables()
     grid = (NH,)
     _ultraquant_store_kernel[grid](
         k_flat,

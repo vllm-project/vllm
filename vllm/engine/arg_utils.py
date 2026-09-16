@@ -2133,12 +2133,9 @@ class EngineArgs:
 
             boundary = TurboQuantConfig.get_boundary_skip_layers(model_config)
             existing = set(cache_config.kv_cache_dtype_skip_layers)
-            combined = existing | set(boundary)
-            numeric_values = {value for value in combined if value.isdigit()}
-            special_values = combined - numeric_values
             cache_config.kv_cache_dtype_skip_layers = sorted(
-                numeric_values, key=int
-            ) + sorted(special_values)
+                existing | set(boundary), key=int
+            )
 
         ray_runtime_env = None
         if is_ray_initialized():
