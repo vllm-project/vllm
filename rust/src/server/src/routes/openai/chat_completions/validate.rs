@@ -152,6 +152,21 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_prompt_token_ids() {
+        use validator::Validate;
+
+        let request = ChatCompletionRequest {
+            prompt_token_ids: Some(vec![10, 20, 30]),
+            ..base_request()
+        };
+
+        let err = request
+            .validate()
+            .expect_err("prompt_token_ids is implemented by the Python frontend only");
+        assert!(format!("{err}").contains("prompt_token_ids"));
+    }
+
+    #[test]
     fn validate_request_compat_accepts_stop() {
         let request = ChatCompletionRequest {
             stop: Some(StringOrArray::String("stop".to_string())),
