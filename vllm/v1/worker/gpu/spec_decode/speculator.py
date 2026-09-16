@@ -402,6 +402,7 @@ class DraftModelSpeculator(BaseSpeculator):
         temperature: torch.Tensor,
         # [max_num_reqs]
         seeds: torch.Tensor,
+        dummy_run: bool = False,
     ) -> None:
         # Copy temperature, seeds, and idx mapping to the pre-allocated buffers.
         # NOTE(woosuk): For draft sampling, we only consider the temperature
@@ -411,7 +412,14 @@ class DraftModelSpeculator(BaseSpeculator):
         # affect the output distribution after rejection sampling.
         self.temperature.copy_(temperature)
         self.seeds.copy_(seeds)
-        self.idx_mapping[:num_reqs].copy_(idx_mapping)
+        if dummy_run:
+            # A dummy batch's idx_mapping (arange) names real request-state
+            # slots whose persistent block tables are stale. The draft decode
+            # steps compute their slot mappings from those tables, so mark
+            # every row as dummy: the kernel then emits PAD and writes no KV.
+            self.idx_mapping[:num_reqs].fill_(-1)
+        else:
+            self.idx_mapping[:num_reqs].copy_(idx_mapping)
         # idx_mapping for CG padded requests points to -1, which is ignored
         # during sampling to prevent writing stale values to draft logits.
         self.idx_mapping[num_reqs:].fill_(-1)

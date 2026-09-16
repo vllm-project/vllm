@@ -255,13 +255,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             input_batch.idx_mapping,
             temperature,
             seeds,
+            dummy_run=dummy_run,
         )
-        if dummy_run:
-            # A dummy batch's idx_mapping (arange) names real request-state
-            # slots whose persistent block tables are stale. The draft decode
-            # steps compute their slot mappings from those tables, so mark
-            # every row as dummy: the kernel then emits PAD and writes no KV.
-            self.idx_mapping[:num_reqs].fill_(-1)
 
         # Get the input ids and last token indices for the speculator.
         prepare_prefill_inputs(
