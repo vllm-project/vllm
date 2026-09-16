@@ -29,9 +29,9 @@ def _validate_payload(body: dict) -> tuple[str, dict, str]:
     if not isinstance(params, dict):
         raise HTTPException(400, "'params' must be an object.")
 
-    request_id = body.get("request_id", "")
-    if not isinstance(request_id, str):
-        raise HTTPException(400, "'request_id' must be a string.")
+    request_id = body.get("request_id")
+    if not isinstance(request_id, str) or not request_id:
+        raise HTTPException(400, "'request_id' must be a non-empty string.")
     return instruction, params, request_id
 
 
@@ -53,10 +53,8 @@ async def process_fault_tolerance_instruction(
 
     instruction, params, request_id = _validate_payload(body)
     # One recovery round shares one request_id, which namespaces that round's
-    # coordination keys. The orchestrator must send the same non-empty
-    # request_id to every engine in a round; empty falls back to the engine's
-    # local epoch, which can diverge across engines after a partially failed
-    # round.
+    # coordination keys. The orchestrator must send the same request_id to
+    # every engine in a round; the engines verify this during recovery.
     ft_request = FaultToleranceRequest(
         instruction=instruction,
         params=params,

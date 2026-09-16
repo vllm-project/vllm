@@ -9,6 +9,7 @@ import contextlib
 import os
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -232,11 +233,20 @@ def _assert_serving_and_healthy(servers) -> None:
     _in_parallel(lambda s: _complete(s.get_client()), servers)
 
 
-def _apply_ft(server, instruction: str, params: dict | None = None) -> dict:
+def _apply_ft(
+    server,
+    instruction: str,
+    params: dict | None = None,
+    request_id: str | None = None,
+) -> dict:
     """POST an FT instruction; assert it is accepted (202) and return the body."""
     resp = requests.post(
         server.url_for("v1/fault_tolerance/apply"),
-        json={"instruction": instruction, "params": params or {}},
+        json={
+            "instruction": instruction,
+            "params": params or {},
+            "request_id": request_id or str(uuid.uuid4()),
+        },
         timeout=10,
     )
     assert resp.status_code == 202, resp.text
@@ -396,8 +406,9 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
         assert faulted[faulted_rank].get("fault_info"), faulted[faulted_rank]
 
         # 4. retry every engine.
+        round_id = str(uuid.uuid4())
         for server in servers_by_rank.values():
-            _apply_ft(server, "retry")
+            _apply_ft(server, "retry", request_id=round_id)
 
         # 5. Recovery completes: every engine returns to healthy and serves again.
         _assert_serving_and_healthy(list(servers_by_rank.values()))
@@ -468,8 +479,14 @@ def test_scale_down_removes_dead_rank_and_recovers():
         assert "status is DEAD" in ft_error, ft_error
 
         # 5. scale_down sent to every survivor: remove the dead rank.
+        round_id = str(uuid.uuid4())
         for server in survivors:
-            _apply_ft(server, "scale_down", {"removed_dp_ranks": [victim_rank]})
+            _apply_ft(
+                server,
+                "scale_down",
+                {"removed_dp_ranks": [victim_rank]},
+                request_id=round_id,
+            )
 
         # 6. Recovery completes: all survivors are healthy and serving.
         recovered = _wait_for_engines(
