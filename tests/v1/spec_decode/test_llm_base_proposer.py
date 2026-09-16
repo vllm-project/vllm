@@ -140,6 +140,8 @@ def draft_metadata():
         parallel_config=SimpleNamespace(
             data_parallel_size=1, decode_context_parallel_size=1
         ),
+        speculative_config=None,
+        scheduler_config=SimpleNamespace(max_num_seqs=2),
     )
     spec = FullAttentionSpec(
         block_size=128, num_kv_heads=8, head_size=64, dtype=torch.float32
