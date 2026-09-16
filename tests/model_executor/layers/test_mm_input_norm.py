@@ -642,4 +642,4 @@ class TestFusedMMInputNormConstruction:
             assert input_norm.bias is None
         else:
             assert input_norm.weight.device.type == default_device
-            assert input_norm.bias.device.
+            assert input_norm.bias.device.type == default_device
