@@ -131,6 +131,14 @@ _RESERVED_PLACEHOLDER_IN_TEXT_ERROR: Final[str] = (
     "positions in the tokenized prompt."
 )
 
+_MAX_MM_UUID_LENGTH: Final[int] = 128
+"""Maximum length of a multimodal content-part `uuid`.
+
+The uuid flows into the EngineCore block-hash pickle+SHA-256 path on the
+scheduler thread; bounding it mirrors the `cache_salt` cap shipped for
+GHSA-wpww-v874-ph2p (see validate_cache_salt).
+"""
+
 
 class AudioURL(TypedDict, total=False):
     url: Required[str]
@@ -1918,6 +1926,11 @@ def _parse_chat_message_content_part(
     uuid = part.get("uuid", None)
     if uuid is not None:
         uuid = str(uuid)
+        if len(uuid) > _MAX_MM_UUID_LENGTH:
+            raise VLLMValidationError(
+                f"Multimodal content-part 'uuid' must be at most "
+                f"{_MAX_MM_UUID_LENGTH} characters."
+            )
 
     modality = None
     if part_type == "image_pil":
