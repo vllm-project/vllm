@@ -10,6 +10,7 @@
 import torch
 
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.triton_utils import triton
 
 from .utils import tensor_cache
@@ -27,8 +28,8 @@ def prepare_chunk_indices(cu_seqlens: torch.Tensor, chunk_size: int) -> torch.Te
         chunk_counts = triton.cdiv(prepare_lens(cu_seqlens), chunk_size).tolist()
     indices = torch.cat([torch.arange(n) for n in chunk_counts])
     chunk_indices = torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1)
-    return chunk_indices.to(
-        device=cu_seqlens.device, dtype=cu_seqlens.dtype, non_blocking=True
+    return async_tensor_h2d(
+        chunk_indices, device=cu_seqlens.device, dtype=cu_seqlens.dtype
     )
 
 
