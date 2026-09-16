@@ -36,6 +36,16 @@ float8_info = torch.finfo(current_platform.fp8_dtype())
 MAX_UNIFORM_DECODE_QUERY_LEN = 5
 
 
+def _supports_uniform_decode(query_len: int, num_seqs: int, num_tokens: int) -> bool:
+    return query_len <= MAX_UNIFORM_DECODE_QUERY_LEN or (
+        query_len == 6
+        and num_seqs == 1
+        and num_tokens == 6
+        and current_platform.is_cuda()
+        and current_platform.is_device_capability((12, 0))
+    )
+
+
 @triton.jit
 def _cast_kv_tile(data, Q, tensor_scale, KV_QUANT_MODE: tl.constexpr):
     """Cast a loaded KV tile to Q's dtype, dequantizing if needed.
@@ -1064,7 +1074,7 @@ def unified_attention(
             max_seqlen_q > 1
             and (
                 not is_uniform_decode
-                or max_seqlen_q > MAX_UNIFORM_DECODE_QUERY_LEN
+                or not _supports_uniform_decode(max_seqlen_q, num_seqs, q.shape[0])
                 or not use_causal
                 or use_per_seq_causal
                 or use_mm_prefix

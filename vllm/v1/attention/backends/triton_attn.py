@@ -41,6 +41,7 @@ from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
 )
 from vllm.v1.attention.ops.triton_unified_attention import (
     MAX_UNIFORM_DECODE_QUERY_LEN,
+    _supports_uniform_decode,
     unified_attention,
 )
 from vllm.v1.kv_cache_interface import (
@@ -164,7 +165,10 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             query_len = 1 + num_speculative_tokens * (
                 2 if speculative_config.parallel_drafting else 1
             )
-            if query_len <= MAX_UNIFORM_DECODE_QUERY_LEN:
+            max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+            if _supports_uniform_decode(
+                query_len, max_num_seqs, max_num_seqs * query_len
+            ):
                 max_query_len_3d = query_len
         # Scratch is indexed by query token, including verification tokens.
         max_num_tokens_3d = (
@@ -226,7 +230,8 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         is_prefilling = common_attn_metadata.is_prefilling
         speculative_config = self.vllm_config.speculative_config
         if (
-            1 < max_query_len <= MAX_UNIFORM_DECODE_QUERY_LEN
+            max_query_len > 1
+            and _supports_uniform_decode(max_query_len, num_reqs, num_actual_tokens)
             and is_prefilling is not None
             and not (
                 speculative_config is not None
@@ -245,6 +250,10 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
                 )
                 and torch.all(query_lens[num_phase_rows:] == 0)
             )
+            if max_query_len > MAX_UNIFORM_DECODE_QUERY_LEN:
+                is_uniform_decode = is_uniform_decode and bool(
+                    query_starts[0] == 0 and query_starts[-1] == num_actual_tokens
+                )
 
         max_seq_len = common_attn_metadata.max_seq_len
         query_start_loc = common_attn_metadata.query_start_loc
