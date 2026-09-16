@@ -505,6 +505,9 @@ def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
 
 
 def test_nvfp4_per_token_backend_contract() -> None:
+    from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_moe import (
+        FlashInferCuteDSLExperts,
+    )
     from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
         FlashInferExperts,
     )
@@ -524,6 +527,8 @@ def test_nvfp4_per_token_backend_contract() -> None:
     scheme = (kNvfp4Static, kNvfp4DynamicToken)
     assert TrtLlmNvFp4ExpertsMonolithic._supports_quant_scheme(*scheme)
     assert TrtLlmNvFp4ExpertsModular._supports_quant_scheme(*scheme)
+    assert FlashInferCuteDSLExperts._supports_quant_scheme(*scheme)
+    assert FlashInferCuteDSLExperts._supports_no_act_and_mul()
     assert not FlashInferExperts._supports_quant_scheme(*scheme)
     assert not MarlinExperts._supports_quant_scheme(*scheme)
 

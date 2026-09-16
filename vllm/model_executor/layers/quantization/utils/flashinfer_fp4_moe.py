@@ -128,9 +128,9 @@ def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
 ]:
     """Prepare weights for the CuteDSL wrapper-based NvFP4 MoE backend.
 
-    Converts weight scale factors to MMA layout expected by CuteDslMoEWrapper,
-    and interleaves w13 gate/linear rows for gated activations. Non-gated
-    activations use a single w13 projection and keep its row order unchanged.
+    Pads the runtime expert tensors to the kernel's GEMM alignment, converts
+    weight scale factors to the MMA layout expected by CuteDslMoEWrapper, and
+    interleaves w13 gate/linear rows for gated activations.
     """
     # Global scaling factors (same as other FlashInfer backends).
     num_experts = w13.shape[0]
@@ -140,12 +140,27 @@ def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
     )
     a2_scale = amax_for_moe_activation_quant(a2_scale, enable_eplb).repeat(num_experts)
 
-    if layer.activation.is_gated:
+    gated = layer.activation.is_gated
+    if gated:
         w13, w13_scale = reorder_w13_to_w31_for_flashinfer_cutedsl(
             layer.activation, w13, w13_scale
         )
 
-        # Interleave up/gate rows for w13 weights and scales.
+    # CuTe DSL requires GEMM1's output dimension to be a multiple of 128.
+    # Keep the checkpoint tensors unchanged and pad only the kernel's runtime
+    # representation. Zero rows also make the padded GEMM2 contraction a no-op.
+    w13, w13_scale, w2, w2_scale, padded_intermediate = align_fp4_moe_weights_for_fi(
+        w13,
+        w13_scale,
+        w2,
+        w2_scale,
+        is_act_and_mul=gated,
+        min_alignment=128,
+    )
+    layer.moe_config.intermediate_size_per_partition = padded_intermediate
+
+    if gated:
+        # Interleave up/gate rows for the fused gated activation.
         w13 = interleave_linear_and_gate(w13, group_size=64, dim=1)
         w13_scale = interleave_linear_and_gate(w13_scale, group_size=64, dim=1)
 

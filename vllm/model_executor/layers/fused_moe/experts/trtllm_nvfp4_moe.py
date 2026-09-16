@@ -24,6 +24,7 @@ from vllm.model_executor.layers.fused_moe.utils import fi_moe_largest_bucket
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
     has_flashinfer_situ_activation,
+    quantize_nvfp4_per_token_input,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -36,10 +37,6 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
 logger = init_logger(__name__)
-
-# Base scale for per-token NVFP4 activation quant; the kernel folds the
-# per-token global scale (from the activation amax) on top of it.
-_PER_TOKEN_BASE_GLOBAL_SCALE = 1.0 / (448.0 * 6.0)
 
 
 class TrtLlmNvFp4ExpertsBase:
@@ -285,23 +282,6 @@ class TrtLlmNvFp4ExpertsBase:
     def expects_unquantized_inputs(self) -> bool:
         return self.per_token_activation
 
-    def _quantize_per_token_input(
-        self, hidden_states: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """NVFP4-quantize activations with a per-token global scale.
-
-        Returns ``(packed_fp4, block_scale, per_token_scale)``.
-        """
-        from flashinfer import SfLayout, nvfp4_quantize
-
-        hs_fp4, hs_block_scale, per_token_scale = nvfp4_quantize(
-            hidden_states,
-            _PER_TOKEN_BASE_GLOBAL_SCALE,
-            sfLayout=SfLayout.layout_linear,
-            per_token_activation=True,
-        )
-        return hs_fp4, hs_block_scale, per_token_scale
-
     def _get_chunk_size(self) -> int:
         MAX_GRID_Y = 65535
         MAX_TILE_TOKENS_DIM = 128
@@ -383,7 +363,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         # already quantized in prepare() with the static global scale.
         if self.expects_unquantized_inputs:
             hidden_states, block_scale, per_token_scale = (
-                self._quantize_per_token_input(hidden_states)
+                quantize_nvfp4_per_token_input(hidden_states)
             )
         else:
             block_scale, per_token_scale = a1q_scale, None
@@ -560,7 +540,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
         # Per-token: input is unquantized, quantize it here (see modular apply).
         if self.expects_unquantized_inputs:
             hidden_states, block_scale, per_token_scale = (
-                self._quantize_per_token_input(hidden_states)
+                quantize_nvfp4_per_token_input(hidden_states)
             )
         else:
             block_scale, per_token_scale = a1q_scale, None
