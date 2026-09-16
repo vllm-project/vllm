@@ -1074,3 +1074,63 @@ class TestConsolidateSystemMessages:
         assert len(conversation) == original_len
         assert conversation[0]["role"] == "user"
         assert conversation[1]["role"] == "system"
+
+
+class TestAssistantTokensMaskExpansion:
+    """The mask is built against the pre-expansion template stream and must
+    ride the multimodal expansion, or entry i stops describing token i."""
+
+    def test_single_placeholder_shifts_following_entries(self):
+        from vllm.renderers.hf import _expand_assistant_tokens_mask
+
+        pre = [1, 2, 3, 99, 5, 6, 7]  # 99 = the audio marker token
+        final = [1, 2, 3, 0, 0, 0, 0, 5, 6, 7]  # marker expands to 4 slots
+        mask = [0, 0, 0, 0, 1, 1, 1]
+        out = _expand_assistant_tokens_mask(mask, pre, final, [(3, 4)])
+        assert out == [0, 0, 0, 0, 0, 0, 0, 1, 1, 1]
+
+    def test_multiple_placeholders_and_adjacent_pairs(self):
+        from vllm.renderers.hf import _expand_assistant_tokens_mask
+
+        pre = [1, 98, 3, 99, 5]
+        final = [1, 0, 0, 3, 0, 0, 0, 5]
+        mask = [0, 0, 1, 0, 1]
+        out = _expand_assistant_tokens_mask(mask, pre, final, [(1, 2), (4, 3)])
+        assert out == [0, 0, 0, 1, 0, 0, 0, 1]
+
+        # adjacent placeholders: two markers back to back expand together
+        pre2 = [1, 98, 99, 4]
+        final2 = [1, 0, 0, 0, 0, 0, 4]
+        mask2 = [0, 0, 0, 1]
+        out2 = _expand_assistant_tokens_mask(mask2, pre2, final2, [(1, 2), (3, 3)])
+        assert out2 == [0, 0, 0, 0, 0, 0, 1]
+
+    def test_no_placeholders_is_identity(self):
+        from vllm.renderers.hf import _expand_assistant_tokens_mask
+
+        ids = [1, 2, 3]
+        mask = [0, 1, 1]
+        assert _expand_assistant_tokens_mask(mask, ids, ids, []) == mask
+
+    def test_mismatched_mask_length_fails_loudly(self):
+        from vllm.renderers.hf import _expand_assistant_tokens_mask
+
+        with pytest.raises(ValueError, match="does not match"):
+            _expand_assistant_tokens_mask([0, 1], [1, 2, 3], [1, 2, 3], [])
+
+    def test_changed_gap_content_fails_loudly(self):
+        from vllm.renderers.hf import _expand_assistant_tokens_mask
+
+        pre = [1, 99, 3]
+        final = [1, 0, 0, 7]  # 3 became 7: content around the span changed
+        with pytest.raises(ValueError, match="cannot be realigned"):
+            _expand_assistant_tokens_mask([0, 0, 1], pre, final, [(1, 2)])
+
+    def test_assistant_count_invariant_fails_loudly(self):
+        from vllm.renderers.hf import _expand_assistant_tokens_mask
+
+        # a 1 sits inside the marker run, which expansion drops
+        pre = [1, 99, 3]
+        final = [1, 0, 0, 3]
+        with pytest.raises(ValueError, match="assistant token count"):
+            _expand_assistant_tokens_mask([0, 1, 0], pre, final, [(1, 2)])

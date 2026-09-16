@@ -162,6 +162,65 @@ def _expand_prompt_embeds_placeholders(
     return expanded
 
 
+def _expand_assistant_tokens_mask(
+    mask: Sequence[int],
+    pre_ids: Sequence[int],
+    final_ids: Sequence[int],
+    placeholder_spans: list[tuple[int, int]],
+) -> list[int]:
+    """Expand a per-token assistant mask through multimodal expansion.
+
+    `mask` aligns to `pre_ids` (the token stream before placeholders
+    expanded); the result aligns to `final_ids`. `placeholder_spans` are
+    `(offset, length)` in final coordinates. Placeholder tokens are never
+    assistant content, so they are masked 0 and entries after each
+    placeholder shift right.
+
+    The walk anchors on the gaps between placeholder spans: gap content is
+    untouched by expansion, so each gap's position in the pre-expansion
+    stream is found by content from a monotone cursor. The token runs that
+    expansion replaced sit between gaps and are never assistant content.
+    """
+    if len(mask) != len(pre_ids):
+        raise ValueError(
+            f"assistant_tokens_mask length ({len(mask)}) does not match the "
+            f"pre-expansion token stream ({len(pre_ids)})"
+        )
+    if not placeholder_spans:
+        return list(mask)
+
+    def find_gap(content: Sequence[int], start: int) -> int:
+        for pos in range(start, len(pre_ids) - len(content) + 1):
+            if list(pre_ids[pos : pos + len(content)]) == list(content):
+                return pos
+        raise ValueError(
+            "assistant_tokens_mask cannot be realigned: prompt content "
+            "around a multimodal placeholder changed during expansion"
+        )
+
+    out = [0] * len(final_ids)
+    pre_pos = 0
+    final_pos = 0
+    for off, ln in sorted(placeholder_spans):
+        gap_ids = final_ids[final_pos:off]
+        if gap_ids:
+            gap_start = find_gap(gap_ids, pre_pos)
+            out[final_pos:off] = mask[gap_start : gap_start + len(gap_ids)]
+            pre_pos = gap_start + len(gap_ids)
+        final_pos = off + ln
+    tail_ids = final_ids[final_pos:]
+    if tail_ids:
+        tail_start = find_gap(tail_ids, pre_pos)
+        out[final_pos:] = mask[tail_start : tail_start + len(tail_ids)]
+
+    # Every assistant token lives in a gap, so the 1-count is invariant.
+    if sum(out) != sum(mask):
+        raise ValueError(
+            "assistant_tokens_mask realignment changed the assistant token count"
+        )
+    return out
+
+
 def _build_prompt_embeds_positions(
     token_ids: list[int],
     num_tensors: int,
@@ -1277,6 +1336,11 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         coordinate space, no offset shifting needed afterwards.
         """
         assistant_tokens_mask = cast(dict, prompt).pop("_assistant_tokens_mask", None)
+        # The mask aligns to the pre-expansion stream; capture it before the
+        # prompt_embeds sentinel expansion shifts positions.
+        pre_ids = (
+            list(prompt["prompt_token_ids"]) if assistant_tokens_mask is not None else None
+        )
         prompt_embeds_info = cast(dict, prompt).pop("_prompt_embeds", None)
         if prompt_embeds_info is not None:
             tensors, placeholder_token_id = prompt_embeds_info
@@ -1284,6 +1348,22 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             cast(dict, prompt)["prompt_token_ids"] = _expand_prompt_embeds_placeholders(
                 list(prompt["prompt_token_ids"]), mm_updates
             )
+            if assistant_tokens_mask is not None and pre_ids is not None:
+                # Each sentinel's 1-token slot grows to N tokens; none of it is
+                # assistant content, so splice zeros at the matched positions.
+                embeds_spans = find_mm_placeholders(
+                    prompt=pre_ids, mm_prompt_updates=mm_updates, tokenizer=None
+                ).get("prompt_embeds", [])
+                delta = 0
+                for f in embeds_spans:
+                    at = f.start_idx + delta
+                    assistant_tokens_mask = (
+                        assistant_tokens_mask[:at]
+                        + [0] * f.length
+                        + assistant_tokens_mask[at + 1 :]
+                    )
+                    delta += f.length - 1
+                pre_ids = list(cast(dict, prompt)["prompt_token_ids"])
         engine_input = super()._process_tokens(prompt, skip_mm_cache=skip_mm_cache)
         if prompt_embeds_info is not None:
             tensors, _ = prompt_embeds_info
@@ -1293,6 +1373,18 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 mm_updates,
             )
         if assistant_tokens_mask is not None:
+            if engine_input["type"] == "multimodal":
+                spans = sorted(
+                    (info.offset, info.length)
+                    for infos in engine_input["mm_placeholders"].values()
+                    for info in infos
+                )
+                assistant_tokens_mask = _expand_assistant_tokens_mask(
+                    assistant_tokens_mask,
+                    pre_ids if pre_ids is not None else [],
+                    engine_input["prompt_token_ids"],
+                    spans,
+                )
             engine_input["assistant_tokens_mask"] = assistant_tokens_mask
         return engine_input
 
@@ -1305,6 +1397,11 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
     ) -> TokensInput | MultiModalInput:
         """Async equivalent of `_process_tokens`."""
         assistant_tokens_mask = cast(dict, prompt).pop("_assistant_tokens_mask", None)
+        # The mask aligns to the pre-expansion stream; capture it before the
+        # prompt_embeds sentinel expansion shifts positions.
+        pre_ids = (
+            list(prompt["prompt_token_ids"]) if assistant_tokens_mask is not None else None
+        )
         prompt_embeds_info = cast(dict, prompt).pop("_prompt_embeds", None)
         if prompt_embeds_info is not None:
             tensors, placeholder_token_id = prompt_embeds_info
@@ -1312,6 +1409,22 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             cast(dict, prompt)["prompt_token_ids"] = _expand_prompt_embeds_placeholders(
                 list(prompt["prompt_token_ids"]), mm_updates
             )
+            if assistant_tokens_mask is not None and pre_ids is not None:
+                # Each sentinel's 1-token slot grows to N tokens; none of it is
+                # assistant content, so splice zeros at the matched positions.
+                embeds_spans = find_mm_placeholders(
+                    prompt=pre_ids, mm_prompt_updates=mm_updates, tokenizer=None
+                ).get("prompt_embeds", [])
+                delta = 0
+                for f in embeds_spans:
+                    at = f.start_idx + delta
+                    assistant_tokens_mask = (
+                        assistant_tokens_mask[:at]
+                        + [0] * f.length
+                        + assistant_tokens_mask[at + 1 :]
+                    )
+                    delta += f.length - 1
+                pre_ids = list(cast(dict, prompt)["prompt_token_ids"])
         engine_input = await super()._process_tokens_async(
             prompt, skip_mm_cache=skip_mm_cache
         )
@@ -1323,6 +1436,18 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 mm_updates,
             )
         if assistant_tokens_mask is not None:
+            if engine_input["type"] == "multimodal":
+                spans = sorted(
+                    (info.offset, info.length)
+                    for infos in engine_input["mm_placeholders"].values()
+                    for info in infos
+                )
+                assistant_tokens_mask = _expand_assistant_tokens_mask(
+                    assistant_tokens_mask,
+                    pre_ids if pre_ids is not None else [],
+                    engine_input["prompt_token_ids"],
+                    spans,
+                )
             engine_input["assistant_tokens_mask"] = assistant_tokens_mask
         return engine_input
 
