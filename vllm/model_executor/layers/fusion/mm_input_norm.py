@@ -24,7 +24,7 @@ from torch import nn
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.model_executor.custom_op import CustomOp
 from vllm.transformers_utils.processor import get_processor, get_processor_config
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
@@ -208,7 +208,8 @@ def fused_input_norm_triton(
     return outputs
 
 
-class FusedInputNorm(nn.Module):
+@CustomOp.register("fused_input_norm")
+class FusedInputNorm(CustomOp):
     """
     Module that applies rescaling and normalisation to input images.
     Equivalent to: output = (input * rescale_factor - mean) / std
@@ -223,6 +224,15 @@ class FusedInputNorm(nn.Module):
       dtype* only. It is completely independent of the compute dtype and can
       legitimately differ from it (e.g. compute in fp32, emit bf16 for the
       vision tower).
+
+    Platform dispatch:
+
+    * ``forward_native`` — pure PyTorch eager path, used as the semantic
+      reference and default fallback on all platforms.
+    * ``forward_cuda`` — Triton kernel path for CUDA devices.
+    * ``forward_xpu`` — custom XPU kernel path.
+    * ``forward_oot`` — out-of-tree platform override entry point; falls back
+      to ``forward_native`` unless a plugin overrides it.
     """
 
     def __init__(
@@ -407,30 +417,20 @@ class FusedInputNorm(nn.Module):
             dtype=torch.float32,
         )
 
-    def forward(
+    # ------------------------------------------------------------------
+    # Internal helpers shared by the platform-specific forward_* methods
+    # ------------------------------------------------------------------
+
+    def _prepare_output(
         self,
         grid_thw: torch.Tensor,
         visual_dtype: torch.dtype,
-        out: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Apply rescale + normalise.
-
-        Args:
-            grid_thw: Input tensor of shape ``(patches, size)`` where
-                ``size == channel * patch_size``.
-            visual_dtype: Desired output dtype.
-            out: Optional preallocated output buffer. Must be contiguous, on
-                the same device as ``grid_thw``, with dtype ``visual_dtype``
-                and shape ``(N_out, size)`` where ``N_out >= patches``.
-        Returns:
-            The transformed tensor of shape ``(patches, size)`` and dtype
-            ``visual_dtype`` (a view into ``out`` when supplied, or a freshly
-            produced tensor).
-        """
+        out: torch.Tensor | None,
+    ) -> tuple[int, int, torch.Tensor | None]:
+        """Validate ``out`` (if provided) and return ``(patches, size, out_view)``."""
         assert grid_thw.ndim == 2
         patches, size = grid_thw.shape
 
-        # ---- optional caller-provided output buffer -----------------------
         out_view: torch.Tensor | None = None
         if out is not None:
             assert out.dim() == 2, f"out must be 2D, got {out.dim()}D"
@@ -449,71 +449,45 @@ class FusedInputNorm(nn.Module):
             )
             out_view = out[:patches]
 
-        # ---- identity shortcut --------------------------------------------
+        return patches, size, out_view
+
+    def _identity_forward(
+        self,
+        grid_thw: torch.Tensor,
+        visual_dtype: torch.dtype,
+        out_view: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if out_view is not None:
+            out_view.copy_(grid_thw)
+            return out_view
+        return grid_thw.to(visual_dtype, copy=False)
+
+    # ------------------------------------------------------------------
+    # Platform-specific implementations
+    # ------------------------------------------------------------------
+
+    def forward_native(
+        self,
+        grid_thw: torch.Tensor,
+        visual_dtype: torch.dtype,
+        out: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Pure PyTorch eager implementation.
+
+        This is the semantic reference implementation and the fallback used
+        on any platform without a specialised kernel.
+        """
+        patches, size, out_view = self._prepare_output(grid_thw, visual_dtype, out)
+
         if self.is_identity:
-            if out_view is not None:
-                out_view.copy_(grid_thw)
-                return out_view
-            return grid_thw.to(visual_dtype, copy=False)
+            return self._identity_forward(grid_thw, visual_dtype, out_view)
 
         assert size % self.channel == 0, (
             f"size={size} is not divisible by channel={self.channel}"
         )
         patch_size = size // self.channel
 
-        # ---- Triton fast path ---------------------------------------------
-        if (
-            HAS_TRITON
-            and grid_thw.dtype in _SUPPORTED_INPUTS
-            and visual_dtype in _SUPPORTED_OUTPUTS
-            and self.weight.dtype in _SUPPORTED_COMPUTE
-            and self.weight.is_contiguous()
-            and self.bias.is_contiguous()
-        ):
-            # Materialize a contiguous copy once if needed; the kernel
-            # requires contiguous inputs.
-            x = grid_thw if grid_thw.is_contiguous() else grid_thw.contiguous()
-            x3 = x.view(patches, self.channel, patch_size)
-
-            # The Triton kernel writes in-place into a destination buffer, so
-            # this is the one path that genuinely needs ``out_view`` to exist
-            # before dispatch.
-            if out_view is None:
-                out_view = torch.empty(
-                    (patches, size), dtype=visual_dtype, device=grid_thw.device
-                )
-            y3 = out_view.view(patches, self.channel, patch_size)
-
-            fused_input_norm_triton(
-                x3,
-                y3,
-                self.weight,
-                self.bias,
-                compute_dtype=self._compute_dtype,
-            )
-            return out_view
-
-        # ---- XPU fused custom kernel --------------------------------------
-        # On XPU, fuse the whole rescale + normalise into a single custom
-        # kernel. The eager path below materializes an fp32 intermediate and
-        # then casts back, which adds device-side compute that cancels the
-        # bandwidth saving of transferring uint8 pixel_values. The fused
-        # kernel reads uint8 directly and writes ``visual_dtype`` in one pass.
-        if (
-            current_platform.is_xpu()
-            and grid_thw.dtype == torch.uint8
-            and self.weight.dtype == torch.float32
-        ):
-            y = torch.ops.vllm.xpu_fused_input_norm(
-                grid_thw, self.weight, self.bias, visual_dtype
-            )
-            if out_view is None:
-                return y
-            out_view.copy_(y)
-            return out_view
-
-        # ---- Fallback eager path ------------------------------------------
-        x = grid_thw.to(self.dtype).view(patches, self.channel, patch_size)
+        x = grid_thw.to(self._compute_dtype).view(patches, self.channel, patch_size)
         x = x * self.weight.view(1, self.channel, 1) + self.bias.view(
             1, self.channel, 1
         )
@@ -524,3 +498,94 @@ class FusedInputNorm(nn.Module):
             return y
         out_view.copy_(y)
         return out_view
+
+    def forward_cuda(
+        self,
+        grid_thw: torch.Tensor,
+        visual_dtype: torch.dtype,
+        out: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Triton kernel path for CUDA devices."""
+        patches, size, out_view = self._prepare_output(grid_thw, visual_dtype, out)
+
+        if self.is_identity:
+            return self._identity_forward(grid_thw, visual_dtype, out_view)
+
+        # Fall back to native if the Triton kernel cannot service this call.
+        if (
+            not HAS_TRITON
+            or grid_thw.dtype not in _SUPPORTED_INPUTS
+            or visual_dtype not in _SUPPORTED_OUTPUTS
+            or self.weight.dtype not in _SUPPORTED_COMPUTE
+            or not self.weight.is_contiguous()
+            or not self.bias.is_contiguous()
+        ):
+            return self.forward_native(grid_thw, visual_dtype, out)
+
+        assert size % self.channel == 0, (
+            f"size={size} is not divisible by channel={self.channel}"
+        )
+        patch_size = size // self.channel
+
+        # Materialize a contiguous copy once if needed; the kernel
+        # requires contiguous inputs.
+        x = grid_thw if grid_thw.is_contiguous() else grid_thw.contiguous()
+        x3 = x.view(patches, self.channel, patch_size)
+
+        # The Triton kernel writes in-place into a destination buffer, so
+        # this is the one path that genuinely needs ``out_view`` to exist
+        # before dispatch.
+        if out_view is None:
+            out_view = torch.empty(
+                (patches, size), dtype=visual_dtype, device=grid_thw.device
+            )
+        y3 = out_view.view(patches, self.channel, patch_size)
+
+        fused_input_norm_triton(
+            x3,
+            y3,
+            self.weight,
+            self.bias,
+            compute_dtype=self._compute_dtype,
+        )
+        return out_view
+
+    def forward_xpu(
+        self,
+        grid_thw: torch.Tensor,
+        visual_dtype: torch.dtype,
+        out: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """XPU fused custom kernel path.
+
+        On XPU, fuse the whole rescale + normalise into a single custom
+        kernel. The eager path materializes an fp32 intermediate and then
+        casts back, which adds device-side compute that cancels the
+        bandwidth saving of transferring uint8 pixel_values. The fused
+        kernel reads uint8 directly and writes ``visual_dtype`` in one pass.
+        """
+        patches, size, out_view = self._prepare_output(grid_thw, visual_dtype, out)
+
+        if self.is_identity:
+            return self._identity_forward(grid_thw, visual_dtype, out_view)
+
+        if grid_thw.dtype == torch.uint8 and self.weight.dtype == torch.float32:
+            y = torch.ops.vllm.xpu_fused_input_norm(
+                grid_thw, self.weight, self.bias, visual_dtype
+            )
+            if out_view is None:
+                return y
+            out_view.copy_(y)
+            return out_view
+
+        # Fall back to native for unsupported dtypes on XPU.
+        return self.forward_native(grid_thw, visual_dtype, out)
+
+    def forward_oot(
+        self,
+        grid_thw: torch.Tensor,
+        visual_dtype: torch.dtype,
+        out: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Out-of-tree platform override entrypoint."""
+        return self.forward_native(grid_thw, visual_dtype, out)
