@@ -24,10 +24,7 @@ from torch import nn
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
-from vllm.triton_utils import HAS_TRITON, triton
-
-if HAS_TRITON:
-    import triton.language as tl
+from vllm.triton_utils import tl, triton
 
 from vllm.platforms import current_platform
 from vllm.transformers_utils.processor import get_processor, get_processor_config
