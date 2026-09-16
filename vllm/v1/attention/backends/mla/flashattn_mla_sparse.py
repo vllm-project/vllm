@@ -426,6 +426,19 @@ class FlashAttnMLASparseFA4Backend(AttentionBackend):
         if vllm_config is None:
             return None
 
+        # The prefill lane is FlashInfer's trtllm-gen sparse kernel, which
+        # cannot run rank-local PCP prefill queries over a DCP-sharded cache.
+        parallel_config = vllm_config.parallel_config
+        if (
+            parallel_config.prefill_context_parallel_size > 1
+            and parallel_config.decode_context_parallel_size > 1
+        ):
+            return (
+                "FA4 sparse MLA does not support combined PCP+DCP; "
+                "use FLASHMLA_SPARSE, which gathers each DCP KV shard before "
+                "running the rank-local PCP prefill queries"
+            )
+
         if vllm_config.model_config is None:
             return None
 

@@ -3814,7 +3814,7 @@ def test_hisparse_autotune_dispatch_reaches_fa4():
     unbound.impl.autotune_hisparse_decode.assert_not_called()
 
 
-def _fa4_gate(local_heads, *, dcp_size=1, hisparse=False):
+def _fa4_gate(local_heads, *, dcp_size=1, pcp_size=1, hisparse=False):
     """``validate_configuration`` on a fixed SM100, not the running GPU's."""
     vllm_config = create_vllm_config(
         model_name="deepseek-ai/DeepSeek-V2-Lite-Chat",
@@ -3833,6 +3833,7 @@ def _fa4_gate(local_heads, *, dcp_size=1, hisparse=False):
         lambda self, parallel_config: local_heads, model_config
     )
     vllm_config.parallel_config.decode_context_parallel_size = dcp_size
+    vllm_config.parallel_config.prefill_context_parallel_size = pcp_size
     if hisparse:
         vllm_config.attention_config.hisparse_config = HiSparseConfig()
 
@@ -3871,6 +3872,26 @@ def test_fa4_sparse_supports_head_counts(monkeypatch, local_heads, dcp_size, sup
         (reason,) = reasons
         assert "heads" in reason
         assert ("DCP-gathered" in reason) == (dcp_size > 1)
+
+
+@pytest.mark.parametrize(
+    "pcp_size,dcp_size,supported",
+    [(1, 2, True), (2, 1, True), (2, 2, False)],
+)
+def test_fa4_sparse_rejects_pcp_with_dcp(monkeypatch, pcp_size, dcp_size, supported):
+    """The trtllm-gen prefill lane cannot serve PCP queries over a DCP shard."""
+    import vllm.v1.attention.backends.mla.flashattn_mla_sparse as fa4_sparse
+
+    monkeypatch.setattr("vllm.utils.flashinfer.has_flashinfer", lambda: True)
+    monkeypatch.setattr(fa4_sparse, "_fa4_cute_mla_available", lambda: None)
+
+    reasons = _fa4_gate(16, dcp_size=dcp_size, pcp_size=pcp_size)
+
+    if supported:
+        assert reasons == []
+    else:
+        (reason,) = reasons
+        assert "PCP+DCP" in reason
 
 
 def test_fa4_sparse_gates_flashinfer_and_hisparse(monkeypatch):
