@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU Qwen4Exp weight-free QSA indexer."""
 
+# TODO(refactor): Share the indexer lifecycle once backend hooks cover CPU 1D
+# RoPE and accelerator MRoPE and position-cache behavior.
+
 from __future__ import annotations
 
 from typing import cast

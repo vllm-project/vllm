@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Qwen4Exp model."""
 
+# TODO(refactor): Hoist the platform-neutral model orchestration into
+# ``common`` once backend-local QSA, PLE, and HC components share factories.
+
 from collections.abc import Iterable
 from itertools import islice
 from math import lcm
