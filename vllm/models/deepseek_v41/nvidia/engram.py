@@ -6,7 +6,6 @@ import mmap
 import tempfile
 import weakref
 from contextlib import ExitStack
-from pathlib import Path
 
 import numpy as np
 import torch
@@ -41,79 +40,6 @@ from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
 logger = init_logger(__name__)
-
-
-def _engram_thp_size() -> int | None:
-    path = Path("/sys/kernel/mm/transparent_hugepage/hpage_pmd_size")
-    return int(path.read_text()) if path.is_file() else None
-
-
-def _engram_hugepage_bytes(pointer: int, size: int) -> int | None:
-    smaps = Path("/proc/self/smaps")
-    if not smaps.is_file():
-        return None
-    total, active = 0, False
-    for line in smaps.read_text().splitlines():
-        fields = line.split()
-        if "-" in fields[0]:
-            start, end = (int(x, 16) for x in fields[0].split("-"))
-            active = start < pointer + size and end > pointer
-        elif active and fields[0] == "AnonHugePages:":
-            total += int(fields[1]) * 1024
-    return total
-
-
-def _allocate_engram_host_storage(num_bytes: int) -> torch.Tensor | None:
-    """Request THP backing, allowing the kernel to mix in ordinary pages."""
-    page_size = _engram_thp_size()
-    if page_size is None or num_bytes < page_size:
-        return None
-    size = (num_bytes + mmap.PAGESIZE - 1) // mmap.PAGESIZE * mmap.PAGESIZE
-    mapping = mmap.mmap(
-        -1, size + 2 * page_size, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS
-    )
-    address = np.frombuffer(mapping, dtype=np.uint8, count=1).ctypes.data
-    offset = page_size - address % page_size
-    # Untouched guard regions isolate this VMA for the coverage measurement.
-    mapping.madvise(mmap.MADV_NOHUGEPAGE)
-    mapping.madvise(mmap.MADV_HUGEPAGE, offset, size)
-    owner = np.frombuffer(mapping, dtype=np.uint8, count=num_bytes, offset=offset)
-    owner.fill(0)
-    tensor = torch.from_numpy(owner)
-    pointer = tensor.data_ptr()
-    result = torch.cuda.cudart().cudaHostRegister(pointer, num_bytes, 0)
-    if result.value != 0:
-        del tensor, owner
-        mapping.close()
-        logger.warning_once(
-            "Engram THP packing for private CPU-offload weights/scales: "
-            "cudaHostRegister failed for the combined mapping "
-            "(CUDA error=%d, %.2f GiB); falling back to separate torch "
-            "pinned allocations.",
-            result.value,
-            num_bytes / 1024**3,
-        )
-        return None
-    finalizer = weakref.finalize(
-        owner, DPSharedEngramStorage._unregister, mapping, pointer
-    )
-    finalizer.atexit = False  # type: ignore[misc]
-    assert tensor.is_pinned(), "CUDA did not recognize the Engram registration"
-    huge_bytes = _engram_hugepage_bytes(pointer, size)
-    # Disable background THP collapse after initialization to limit interference.
-    mapping.madvise(mmap.MADV_NOHUGEPAGE, offset, size)
-    log = (
-        logger.info if huge_bytes is None or 2 * huge_bytes >= size else logger.warning
-    )
-    log(
-        "Engram THP packing for private CPU-offload weights/scales: "
-        "%.2f GiB packed into one aligned anonymous mmap registered with CUDA; "
-        "actual host THP coverage=%s (THP size=%d MiB).",
-        num_bytes / 1024**3,
-        "unknown" if huge_bytes is None else f"{100 * huge_bytes / size:.1f}%",
-        page_size // 1024**2,
-    )
-    return tensor
 
 
 def engram_head_shard_rank() -> int:
@@ -302,9 +228,7 @@ class ParallelEngramEmbedding(BaseParallelEngramEmbedding):
         block_size: int = 32,
         cpu_offload: bool = False,
         dp_shared_memory: bool = False,
-        thp_packing: bool = False,
     ) -> None:
-        self.thp_packing = thp_packing
         self.cpu_offload = cpu_offload
         self.dp_shared_memory = dp_shared_memory
         self.dp_size = get_engram_dp_size()
@@ -345,7 +269,6 @@ class ParallelEngramEmbedding(BaseParallelEngramEmbedding):
 
     def _allocate_weights(self) -> tuple[torch.Tensor, torch.Tensor]:
         if self.dp_shared_memory:
-            # THP packing is not yet implemented for DP shared memory.
             group = get_engram_dp_group()
             assert group is not None
             storage = DPSharedEngramStorage(
@@ -356,18 +279,6 @@ class ParallelEngramEmbedding(BaseParallelEngramEmbedding):
             return storage.weight, storage.weight_scale_inv
         if not self.cpu_offload:
             return super()._allocate_weights()
-        if self.thp_packing:
-            weight_bytes = self.part_num_embeddings * self.dim
-            host_storage = _allocate_engram_host_storage(
-                weight_bytes + weight_bytes // self.block_size
-            )
-            if host_storage is not None:
-                return (
-                    host_storage[:weight_bytes]
-                    .view(torch.float8_e4m3fn)
-                    .view(-1, self.dim),
-                    host_storage[weight_bytes:].view(-1, self.dim // self.block_size),
-                )
         # Model initialization may be inside a CUDA device context.
         return (
             torch.empty(
@@ -475,7 +386,6 @@ class Engram(BaseEngram):
             tuple(size for order in layout.primes[layer_hash_index] for size in order),
             cpu_offload=engram_config.cpu_offload,
             dp_shared_memory=engram_config.dp_shared_memory,
-            thp_packing=engram_config.thp_packing,
         )
 
     def _init_staging(self, max_tokens: int, head_dim: int) -> None:
