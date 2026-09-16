@@ -37,6 +37,7 @@ from .modular_kernel_tools.parallel_utils import (
     ProcessGroupInfo,
     parallel_launch_with_config,
 )
+from .utils import check_accuracy
 
 has_any_multi_gpu_package = (
     has_deep_ep() or has_deep_gemm() or has_flashinfer_cutlass_fused_moe()
@@ -187,32 +188,7 @@ def rank_worker(
                 and config.quant_config is not None
             )
             if is_aiter_fp8:
-                diff = (ref_out - mk_out).abs()
-                n_total = diff.numel()
-                max_diff = diff.max().item()
-                n_exceed = int((diff > atol).sum().item())
-                pct_exceed = n_exceed / n_total * 100
-                # FP8 hw matmul vs f32 reference: up to ~4% of
-                # elements may exceed base tolerance, but max
-                # error should stay within 3x base tolerance.
-                max_pct_allowed = 5.0
-                relaxed_atol = atol * 4
-                print(
-                    f"[AITER FP8 precision] "
-                    f"max_diff={max_diff:.6f}, "
-                    f"exceed_atol={n_exceed}/{n_total} "
-                    f"({pct_exceed:.4f}%), "
-                    f"max_pct_allowed={max_pct_allowed}%, "
-                    f"relaxed_limit={relaxed_atol}"
-                )
-                assert pct_exceed <= max_pct_allowed, (
-                    f"AITER FP8: {pct_exceed:.2f}% elements exceed "
-                    f"atol={atol} (max allowed {max_pct_allowed}%)"
-                )
-                assert max_diff <= relaxed_atol, (
-                    f"AITER FP8: max_diff={max_diff:.6f} exceeds "
-                    f"relaxed limit {relaxed_atol}"
-                )
+                check_accuracy(ref_out, mk_out, atol=atol, rtol=rtol, percent=0.9)
             else:
                 torch.testing.assert_close(ref_out, mk_out, atol=atol, rtol=rtol)
             format_result(verbose, config.describe())

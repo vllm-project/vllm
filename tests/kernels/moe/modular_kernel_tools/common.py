@@ -15,6 +15,7 @@ from tests.kernels.quantization.nvfp4_utils import (
     dequantize_nvfp4_to_dtype,
 )
 from tests.kernels.utils import torch_experts
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_dp_group,
@@ -338,6 +339,11 @@ class Config:
             return False, "Needs Aiter, but Aiter not available."
         if self.needs_mori() and not has_mori():  # noqa: SIM103
             return False, "Needs MoRI, but MoRI not available."
+        if self.needs_mori() and not rocm_aiter_ops.is_fused_moe_enabled():
+            return False, (
+                "Mori requires AITER's fused-moe backend to be enabled "
+                "(VLLM_ROCM_USE_AITER=1 and VLLM_ROCM_USE_AITER_MOE=1)."
+            )
 
         try:
             if not self.fused_experts_type._supports_current_device():
