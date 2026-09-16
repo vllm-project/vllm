@@ -88,6 +88,7 @@ def _get_backend_priorities(
     use_non_causal: bool = False,
     head_size: int | None = None,
     use_mm_prefix: bool = False,
+    use_hisparse: bool = False,
 ) -> list[AttentionBackendEnum]:
     """Get backend priorities with lazy import to avoid circular dependency."""
     from vllm.utils.torch_utils import is_quantized_kv_cache
@@ -105,12 +106,20 @@ def _get_backend_priorities(
                 ]
             else:
                 # BF16 KV Cache
-                # Prefer FlashInfer at low head counts (FlashMLA uses padding)
+                # Prefer FA4, then FlashInfer, at low head counts (FlashMLA pads heads).
+                # Under HiSparse FA4 trails FlashInfer by 3-7% on decode ITL at
+                # 32K context (GLM-5.2 NVFP4, TP4 and TP8), so the order flips there.
                 if num_heads is not None and num_heads <= 16:
                     sparse_backends = [
+                        AttentionBackendEnum.FLASH_ATTN_MLA_SPARSE_FA4,
                         AttentionBackendEnum.FLASHINFER_MLA_SPARSE,
                         AttentionBackendEnum.FLASHMLA_SPARSE,
                     ]
+                    if use_hisparse:
+                        sparse_backends[0], sparse_backends[1] = (
+                            sparse_backends[1],
+                            sparse_backends[0],
+                        )
                 else:
                     sparse_backends = [
                         AttentionBackendEnum.FLASHMLA_SPARSE,
@@ -404,6 +413,7 @@ class CudaPlatformBase(Platform):
             use_non_causal=attn_selector_config.use_non_causal,
             head_size=attn_selector_config.head_size,
             use_mm_prefix=attn_selector_config.use_mm_prefix,
+            use_hisparse=attn_selector_config.use_hisparse,
         )
         for priority, backend in enumerate(backend_priorities):
             try:
