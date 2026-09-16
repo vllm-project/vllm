@@ -1349,17 +1349,26 @@ class DiffusionSampler:
                 if just_converged.any():
                     flat_logits = scaled.reshape(-1, scaled.shape[-1])
                     argmax_tokens = scaled.argmax(dim=-1)
+                    raw_flat: torch.Tensor | None = None
                     for local_idx in just_converged.nonzero(as_tuple=True)[0]:
                         li = local_idx.item()
-                        slot = tile_slots[local_idx]
+                        slot = tile_slots[local_idx].item()
                         # Stash only the real canvas positions (== CL unless this
                         # canvas was truncated near max_model_len); padded tail
                         # positions are never emitted.
                         k_i = int(valid_canvas_len_np[start_req + li])
                         pos = li * CL
+                        src = flat_logits
+                        if slot in states.read_only_slots:
+                            # A read reports the model's own distribution at
+                            # temperature 1, not the schedule-tempered one the
+                            # sampler draws from. The argmax is the same.
+                            if raw_flat is None:
+                                raw_flat = logits[start_req * CL : end_req * CL].float()
+                            src = raw_flat
                         per_req_ids = max_token_ids > 0
-                        self._pending_logprobs[slot.item()] = compute_topk_scores(
-                            flat_logits[pos : pos + k_i],
+                        self._pending_logprobs[slot] = compute_topk_scores(
+                            src[pos : pos + k_i],
                             num_logprobs,
                             argmax_tokens[local_idx][:k_i],
                             logprob_token_ids_state=(
@@ -1367,12 +1376,7 @@ class DiffusionSampler:
                             ),
                             # every row of this stash belongs to one slot
                             expanded_idx_mapping=(
-                                torch.full(
-                                    (k_i,),
-                                    slot.item(),
-                                    dtype=torch.int32,
-                                    device=flat_logits.device,
-                                )
+                                torch.full((k_i,), slot, dtype=torch.int32, device=device)
                                 if per_req_ids
                                 else None
                             ),
