@@ -877,6 +877,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.speculator.prepare_watermarking(
                     self.sampler._get_contexts(input_batch.idx_mapping),
                     self.sampler.watermarking.gpu[input_batch.idx_mapping],
+                    self.sampler.req_states.all_token_ids.gpu,
+                    self.sampler.req_states.prompt_len.gpu,
+                    self.sampler.req_states.total_len.gpu,
                 )
             with use_workspace_lane(self._draft_workspace_lane):
                 self.speculator.propose(
@@ -2130,6 +2133,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.speculator.prepare_watermarking(
                     self.sampler._get_contexts(input_batch.idx_mapping),
                     self.sampler.watermarking.gpu[input_batch.idx_mapping],
+                    self.sampler.req_states.all_token_ids.gpu,
+                    self.sampler.req_states.prompt_len.gpu,
+                    self.sampler.req_states.total_len.gpu,
                 )
             with use_workspace_lane(self._draft_workspace_lane):
                 draft_tokens = self.speculator.propose(

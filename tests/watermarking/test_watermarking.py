@@ -28,6 +28,7 @@ from vllm.v1.watermarking.spec_decode import (
 from vllm.v1.watermarking.watermarker import Watermarker, WatermarkSample
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.watermark import (
+    draft_watermarking_mask,
     philox_gumbel_sample,
     repeated_context_mask,
 )
@@ -202,11 +203,17 @@ def test_speculative_decoding_uses_fixed_dual_key_roles():
         max_num_reqs=1,
         device=torch.device("cpu"),
         allow_target_only=False,
+        num_speculative_steps=3,
+        deduplicate_contexts="all",
+        deduplicate_contexts_max_history=None,
     )
 
     assert target.prf.key == derive_watermark_key(42, b"key_b")
     assert draft is not None
     assert draft.watermarker.prf.key == derive_watermark_key(42, b"key_a")
+    assert draft.num_speculative_steps == 3
+    assert draft.deduplicate_contexts == "all"
+    assert draft.deduplicate_contexts_max_history is None
 
 
 def test_recovery_key_rejects_the_unsplit_dual_key_watermarker():
@@ -892,6 +899,159 @@ def test_gpu_sampler_builds_speculative_contexts_from_drafts():
     assert torch.equal(contexts, torch.tensor([[10, 11], [11, 20], [20, 21]]))
 
 
+def test_gpu_sampler_deduplicates_contexts_within_speculative_block():
+    sampler = object.__new__(GPUWatermarkSampler)
+    sampler.watermarker = SimpleNamespace(context_width=2)
+    sampler.deduplicate_contexts = "single_turn"
+    sampler.deduplicate_contexts_max_history = None
+    sampler.num_speculative_tokens = 4
+    sampler.req_states = SimpleNamespace(
+        all_token_ids=SimpleNamespace(gpu=torch.tensor([[100, 1, 2, 0, 0, 0]])),
+        prompt_len=SimpleNamespace(gpu=torch.tensor([1])),
+        total_len=SimpleNamespace(gpu=torch.tensor([3])),
+    )
+    request_indices = torch.tensor([0, 0, 0, 0, 0])
+    local_positions = torch.tensor([0, 1, 2, 3, 4])
+    contexts = sampler._get_contexts(
+        request_indices,
+        local_positions,
+        torch.tensor([0, 3, 4, 1, 2]),
+    )
+
+    repeated = sampler._get_repeated_contexts(
+        request_indices, contexts, local_positions
+    )
+
+    assert torch.equal(
+        contexts,
+        torch.tensor([[1, 2], [2, 3], [3, 4], [4, 1], [1, 2]]),
+    )
+    assert torch.equal(repeated, torch.tensor([False, False, False, False, True]))
+
+    sampler.deduplicate_contexts_max_history = 3
+    repeated = sampler._get_repeated_contexts(
+        request_indices, contexts, local_positions
+    )
+    assert not repeated.any()
+
+
+def test_gpu_sampler_all_scope_skips_only_partial_speculative_contexts():
+    sampler = object.__new__(GPUWatermarkSampler)
+    sampler.watermarker = SimpleNamespace(context_width=2)
+    sampler.deduplicate_contexts = "all"
+    sampler.deduplicate_contexts_max_history = None
+    sampler.num_speculative_tokens = 3
+    sampler.req_states = SimpleNamespace(
+        all_token_ids=SimpleNamespace(gpu=torch.tensor([[100, 101, 10, 0, 0]])),
+        prompt_len=SimpleNamespace(gpu=torch.tensor([2])),
+        total_len=SimpleNamespace(gpu=torch.tensor([3])),
+    )
+    request_indices = torch.tensor([0, 0, 0])
+    local_positions = torch.tensor([0, 1, 2])
+    contexts = sampler._get_contexts(
+        request_indices,
+        local_positions,
+        torch.tensor([10, 20, 30]),
+    )
+
+    repeated = sampler._get_repeated_contexts(
+        request_indices, contexts, local_positions
+    )
+
+    assert torch.equal(contexts, torch.tensor([[-1, 10], [10, 20], [20, 30]]))
+    assert torch.equal(repeated, torch.tensor([True, False, False]))
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+)
+@pytest.mark.parametrize("max_history,expected_last", [(None, True), (3, False)])
+def test_speculative_context_repetition_accelerator_parity(
+    max_history: int | None, expected_last: bool
+):
+    all_token_ids = torch.tensor([[10, 11]])
+    req_indices = torch.tensor([0, 0, 0, 0, 0])
+    prompt_lens = torch.tensor([0])
+    total_lens = torch.tensor([2])
+    local_positions = torch.tensor([0, 1, 2, 3, 4])
+    contexts = torch.tensor([[1, 2], [2, 3], [3, 4], [4, 1], [1, 2]])
+
+    expected = repeated_context_mask(
+        all_token_ids,
+        req_indices,
+        prompt_lens,
+        total_lens,
+        contexts,
+        history_offsets=local_positions,
+        local_positions=local_positions,
+        num_speculative_steps=4,
+        max_history=max_history,
+    )
+    actual = repeated_context_mask(
+        all_token_ids.cuda(),
+        req_indices.cuda(),
+        prompt_lens.cuda(),
+        total_lens.cuda(),
+        contexts.cuda(),
+        history_offsets=local_positions.cuda(),
+        local_positions=local_positions.cuda(),
+        num_speculative_steps=4,
+        max_history=max_history,
+    ).cpu()
+
+    assert torch.equal(
+        expected, torch.tensor([False, False, False, False, expected_last])
+    )
+    assert torch.equal(actual, expected)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+)
+def test_draft_context_deduplication_accelerator_parity():
+    all_token_ids = torch.tensor([[10, 11, 20], [30, 31, 40]])
+    req_indices = torch.tensor([0, 1])
+    prompt_lens = torch.tensor([0, 0])
+    total_lens = torch.tensor([3, 3])
+    prior_contexts = torch.tensor(
+        [[[10, 11], [20, 21], [0, 0]], [[30, 31], [0, 0], [0, 0]]]
+    )
+    contexts = torch.tensor([[10, 11], [40, 41]])
+    steps = torch.tensor([2, 1])
+    enabled = torch.tensor([True, True])
+
+    expected_prior = prior_contexts.clone()
+    expected = draft_watermarking_mask(
+        all_token_ids,
+        req_indices,
+        prompt_lens,
+        total_lens,
+        expected_prior,
+        contexts,
+        steps,
+        enabled,
+        max_history=2,
+        include_prompt=False,
+    )
+    actual_prior = prior_contexts.cuda()
+    actual = draft_watermarking_mask(
+        all_token_ids.cuda(),
+        req_indices.cuda(),
+        prompt_lens.cuda(),
+        total_lens.cuda(),
+        actual_prior,
+        contexts.cuda(),
+        steps.cuda(),
+        enabled.cuda(),
+        max_history=2,
+        include_prompt=False,
+    ).cpu()
+
+    assert torch.equal(expected, torch.tensor([False, True]))
+    assert torch.equal(actual, expected)
+    assert torch.equal(actual_prior.cpu(), expected_prior)
+
+
 def test_gpu_sampler_builds_chunked_multi_request_speculative_contexts():
     sampler = object.__new__(GPUWatermarkSampler)
     sampler.watermarker = SimpleNamespace(context_width=2)
@@ -937,21 +1097,31 @@ def test_draft_sampler_uses_draft_key_and_advances_context(monkeypatch):
             return torch.zeros(hidden_states.shape[0], 8)
 
     class StubWatermarker:
+        context_width = 2
+
         @staticmethod
-        def sample(logits, contexts, random_sampler=None):
-            assert random_sampler is None
-            return WatermarkSample(torch.tensor([7, 7]), logits)
+        def sample(logits, contexts, random_sampler=None, skip_mask=None):
+            assert random_sampler is not None
+            return WatermarkSample(
+                torch.where(skip_mask, random_sampler(logits), 7), logits
+            )
 
     speculator = object.__new__(StubSpeculator)
     speculator.model = StubModel()
     speculator.use_fp64_gumbel = False
-    draft_watermarker = object.__new__(DraftWatermarker)
-    draft_watermarker.watermarker = StubWatermarker()
-    draft_watermarker.contexts = torch.tensor([[1, 2], [3, 4]])
+    draft_watermarker = DraftWatermarker(
+        StubWatermarker(),
+        max_num_reqs=2,
+        device=torch.device("cpu"),
+        num_speculative_steps=1,
+        deduplicate_contexts="none",
+        deduplicate_contexts_max_history=None,
+    )
+    draft_watermarker.contexts.copy_(torch.tensor([[1, 2], [3, 4]]))
     draft_watermarker.enabled = torch.tensor([True, False])
     speculator.draft_watermarker = draft_watermarker
     monkeypatch.setattr(
-        "vllm.v1.worker.gpu.spec_decode.speculator.gumbel_sample",
+        "vllm.v1.watermarking.watermarker.gumbel_sample",
         lambda *args, **kwargs: torch.tensor([3, 4]),
     )
 
@@ -969,6 +1139,124 @@ def test_draft_sampler_uses_draft_key_and_advances_context(monkeypatch):
     assert torch.equal(draft_watermarker.contexts, torch.tensor([[2, 7], [4, 4]]))
 
 
+def test_draft_sampler_uses_ordinary_samples_for_repeated_contexts(monkeypatch):
+    class StubWatermarker:
+        context_width = 1
+
+        def __init__(self):
+            self.samples = iter((2, 1, 8))
+
+        def sample(self, logits, contexts, random_sampler=None, skip_mask=None):
+            watermarked = torch.tensor([next(self.samples)])
+            return WatermarkSample(
+                torch.where(skip_mask, random_sampler(logits), watermarked), logits
+            )
+
+    draft_watermarker = DraftWatermarker(
+        StubWatermarker(),
+        max_num_reqs=1,
+        device=torch.device("cpu"),
+        num_speculative_steps=3,
+        deduplicate_contexts="single_turn",
+        deduplicate_contexts_max_history=None,
+    )
+    draft_watermarker.prepare(
+        contexts=torch.tensor([[1]]),
+        enabled=torch.tensor([True]),
+        all_token_ids=torch.tensor([[100, 1, 0, 0]]),
+        prompt_lens=torch.tensor([1]),
+        total_lens=torch.tensor([2]),
+    )
+    idx_mapping = torch.tensor([0])
+    temperature = torch.tensor([1.0])
+    ordinary_samples = iter((torch.tensor([5]), torch.tensor([6]), torch.tensor([4])))
+    monkeypatch.setattr(
+        "vllm.v1.watermarking.watermarker.gumbel_sample",
+        lambda *args, **kwargs: next(ordinary_samples),
+    )
+    seeds = torch.tensor([0])
+    draft_logits = torch.zeros(1, 3, 8)
+
+    first = draft_watermarker.sample(
+        torch.zeros(1, 8),
+        idx_mapping=idx_mapping,
+        temperature=temperature,
+        seeds=seeds,
+        positions=torch.tensor([0]),
+        draft_step=0,
+        draft_logits=draft_logits,
+        use_fp64=False,
+    )
+    second = draft_watermarker.sample(
+        torch.zeros(1, 8),
+        idx_mapping=idx_mapping,
+        temperature=temperature,
+        seeds=seeds,
+        positions=torch.tensor([1]),
+        draft_step=1,
+        draft_logits=draft_logits,
+        use_fp64=False,
+    )
+    repeated = draft_watermarker.sample(
+        torch.zeros(1, 8),
+        idx_mapping=idx_mapping,
+        temperature=temperature,
+        seeds=seeds,
+        positions=torch.tensor([2]),
+        draft_step=2,
+        draft_logits=draft_logits,
+        use_fp64=False,
+    )
+
+    assert first.item() == 2
+    assert second.item() == 1
+    assert repeated.item() == 4
+
+
+def test_draft_sampler_deduplicates_against_committed_history(monkeypatch):
+    class StubWatermarker:
+        context_width = 1
+
+        @staticmethod
+        def sample(logits, contexts, random_sampler=None, skip_mask=None):
+            return WatermarkSample(
+                torch.where(skip_mask, random_sampler(logits), 7), logits
+            )
+
+    draft_watermarker = DraftWatermarker(
+        StubWatermarker(),
+        max_num_reqs=1,
+        device=torch.device("cpu"),
+        num_speculative_steps=1,
+        deduplicate_contexts="single_turn",
+        deduplicate_contexts_max_history=None,
+    )
+    draft_watermarker.prepare(
+        contexts=torch.tensor([[1]]),
+        enabled=torch.tensor([True]),
+        all_token_ids=torch.tensor([[100, 1, 2, 1]]),
+        prompt_lens=torch.tensor([1]),
+        total_lens=torch.tensor([4]),
+    )
+
+    monkeypatch.setattr(
+        "vllm.v1.watermarking.watermarker.gumbel_sample",
+        lambda *args, **kwargs: torch.tensor([4]),
+    )
+    sampled = draft_watermarker.sample(
+        torch.zeros(1, 8),
+        idx_mapping=torch.tensor([0]),
+        temperature=torch.tensor([1.0]),
+        seeds=torch.tensor([0]),
+        positions=torch.tensor([0]),
+        draft_step=0,
+        draft_logits=torch.zeros(1, 1, 8),
+        use_fp64=False,
+    )
+
+    assert sampled.item() == 4
+
+
 def test_dspark_reduced_vocab_draft_sampler_applies_watermarking(monkeypatch):
     speculator = object.__new__(DSparkSpeculator)
     speculator.draft_logits = torch.zeros(2, 1, 8)
@@ -980,15 +1268,20 @@ def test_dspark_reduced_vocab_draft_sampler_applies_watermarking(monkeypatch):
     speculator.use_fp64_gumbel = False
     watermark_logits: list[torch.Tensor] = []
 
-    def sample(logits, sampled, idx_map, temperature):
+    def sample(
+        logits,
+        idx_mapping,
+        temperature,
+        seeds,
+        positions,
+        draft_step,
+        draft_logits,
+        use_fp64,
+    ):
         watermark_logits.append(logits.clone())
-        return sampled + 1
+        return torch.tensor([4, 5])
 
     speculator.draft_watermarker = SimpleNamespace(sample=sample)
-    monkeypatch.setattr(
-        "vllm.v1.worker.gpu.spec_decode.dspark.speculator.gumbel_sample",
-        lambda *args, **kwargs: torch.tensor([3, 4]),
-    )
 
     sampled = speculator._sample_logits(
         torch.tensor([[10.0, 20.0], [30.0, 40.0]]),

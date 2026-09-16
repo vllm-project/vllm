@@ -194,6 +194,9 @@ class DraftModelSpeculator(BaseSpeculator):
                 self.max_num_reqs,
                 device,
                 watermark_config.allow_target_only_watermarking,
+                self.num_speculative_steps,
+                watermark_config.deduplicate_contexts,
+                watermark_config.deduplicate_contexts_max_history,
             )
 
         self.supports_mm_inputs = False
@@ -409,24 +412,29 @@ class DraftModelSpeculator(BaseSpeculator):
     ) -> torch.Tensor:
         if draft_logits is not None:
             logits = self.model.compute_logits(hidden_states)
-            sampled = gumbel_sample(
-                logits,
-                idx_mapping,
-                temperature,
-                seeds,
-                sample_src_positions,
-                apply_temperature=True,
-                is_drafting=True,
-                logits_cache=draft_logits,
-                logits_cache_col=draft_step,
-                use_fp64=self.use_fp64_gumbel,
-            )
             if self.draft_watermarker is not None:
                 sampled = self.draft_watermarker.sample(
                     logits,
-                    sampled,
+                    idx_mapping=idx_mapping,
+                    temperature=temperature,
+                    seeds=seeds,
+                    positions=sample_src_positions,
+                    draft_step=draft_step,
+                    draft_logits=draft_logits,
+                    use_fp64=self.use_fp64_gumbel,
+                )
+            else:
+                sampled = gumbel_sample(
+                    logits,
                     idx_mapping,
                     temperature,
+                    seeds,
+                    sample_src_positions,
+                    apply_temperature=True,
+                    is_drafting=True,
+                    logits_cache=draft_logits,
+                    logits_cache_col=draft_step,
+                    use_fp64=self.use_fp64_gumbel,
                 )
         elif self.use_local_argmax_reduction:
             return self.model.get_top_tokens(hidden_states)
@@ -466,11 +474,18 @@ class DraftModelSpeculator(BaseSpeculator):
             self.acceptance_estimator.step(idx_mapping, num_sampled, num_rejected)
 
     def prepare_watermarking(
-        self, contexts: torch.Tensor, watermarking: torch.Tensor
+        self,
+        contexts: torch.Tensor,
+        watermarking: torch.Tensor,
+        all_token_ids: torch.Tensor,
+        prompt_lens: torch.Tensor,
+        total_lens: torch.Tensor,
     ) -> None:
         if self.draft_watermarker is None:
             return
-        self.draft_watermarker.prepare(contexts, watermarking)
+        self.draft_watermarker.prepare(
+            contexts, watermarking, all_token_ids, prompt_lens, total_lens
+        )
 
     def _copy_request_inputs(
         self,
