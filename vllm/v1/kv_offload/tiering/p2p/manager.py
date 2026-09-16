@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-P2PSecondaryTierManager: Secondary tier for P2P KV cache sharing.
+"""P2PSecondaryTierManager: Secondary tier for P2P KV cache sharing.
 
 Owns transports and a single bidirectional P2PSession per remote peer.
 """
@@ -264,6 +263,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         Raises:
             ValueError: If ``unbound_store_timeout_s`` is not a positive
                 number, or anything convertible to one.
+
         """
         backpressure_detector = kwargs.pop("backpressure_detector", None)
         super().__init__(

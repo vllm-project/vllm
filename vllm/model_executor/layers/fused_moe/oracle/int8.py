@@ -37,9 +37,7 @@ class Int8MoeBackend(Enum):
 def _get_priority_backends(
     moe_config: FusedMoEConfig,
 ) -> list[Int8MoeBackend]:
-    """
-    Get available backends in priority order based on platform and config.
-    """
+    """Get available backends in priority order based on platform and config."""
     return [
         Int8MoeBackend.TRITON,
         Int8MoeBackend.HUMMING,
@@ -100,11 +98,9 @@ def select_int8_moe_backend(
     weight_key: QuantKey | None = kInt8StaticChannelSym,
     activation_key: QuantKey | None = kInt8DynamicTokenSym,
 ) -> tuple[Int8MoeBackend, type[mk.FusedMoEExperts]]:
-    """
-    Select the primary Int8 MoE backend.
+    """Select the primary Int8 MoE backend.
     Note: Shape-specific fallbacks may still occur at runtime.
     """
-
     AVAILABLE_BACKENDS = _get_priority_backends(config)
 
     activation_format = (

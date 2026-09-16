@@ -115,20 +115,20 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         locality: str | None = None,
         backpressure_detector: BackpressureDetector | None = None,
     ):
-        """
-        Args:
-            offloading_spec: Offloading configuration.
-            primary_kv_view: Memoryview of the primary tier's CPU KV cache.
-            tier_type: Tier type identifier, set by SecondaryTierFactory.
-            store_config: Object store connection parameters (see ObjStoreConfig).
-            prefix: Key prefix prepended to all object keys.
-            io_threads: Number of NIXL I/O threads.
-            enable_kv_events: Emit BlockStored KV events for blocks
-                successfully stored to this tier. Effective only when KV
-                cache events are enabled globally (kv_events_config).
-            locality: Whether this tier's storage is LOCAL or REMOTE relative
-                to the publishing vLLM instance.
-            backpressure_detector: Optional backpressure detector.
+        """Args:
+        offloading_spec: Offloading configuration.
+        primary_kv_view: Memoryview of the primary tier's CPU KV cache.
+        tier_type: Tier type identifier, set by SecondaryTierFactory.
+        store_config: Object store connection parameters (see ObjStoreConfig).
+        prefix: Key prefix prepended to all object keys.
+        io_threads: Number of NIXL I/O threads.
+        enable_kv_events: Emit BlockStored KV events for blocks
+            successfully stored to this tier. Effective only when KV
+            cache events are enabled globally (kv_events_config).
+        locality: Whether this tier's storage is LOCAL or REMOTE relative
+            to the publishing vLLM instance.
+        backpressure_detector: Optional backpressure detector.
+
         """
         super().__init__(
             offloading_spec,

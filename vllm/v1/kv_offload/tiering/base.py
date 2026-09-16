@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Abstract interfaces and data types for the secondary tiering layer.
-"""
+"""Abstract interfaces and data types for the secondary tiering layer."""
 
 import time
 from abc import ABC, abstractmethod
@@ -130,8 +128,7 @@ class ParentManager(ABC):
 
 
 class SecondaryTierManager(ABC):
-    """
-    Abstract interface for managing a single non-primary offloading tier.
+    """Abstract interface for managing a single non-primary offloading tier.
 
     Secondary tiers cannot directly access GPU memory. All data transfers
     must go through the CPU (primary) tier:
@@ -152,14 +149,14 @@ class SecondaryTierManager(ABC):
         tier_type: str,
         backpressure_detector: BackpressureDetector | None = None,
     ) -> None:
-        """
-        Args:
-            offloading_spec: Offloading configuration.
-            primary_kv_view: Memoryview of the primary tier's CPU KV cache.
-            tier_type: Tier type identifier, set by SecondaryTierFactory
-                from the registered tier type.
-            backpressure_config: Optional backpressure detector configuration.
-            backpressure_detector: Optional `BackpressureDetector`.
+        """Args:
+        offloading_spec: Offloading configuration.
+        primary_kv_view: Memoryview of the primary tier's CPU KV cache.
+        tier_type: Tier type identifier, set by SecondaryTierFactory
+            from the registered tier type.
+        backpressure_config: Optional backpressure detector configuration.
+        backpressure_detector: Optional `BackpressureDetector`.
+
         """
         self._offloading_spec = offloading_spec
         self._primary_kv_view: memoryview = primary_kv_view
@@ -179,8 +176,7 @@ class SecondaryTierManager(ABC):
 
     @abstractmethod
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
-        """
-        Check whether a chunk exists in this secondary tier.
+        """Check whether a chunk exists in this secondary tier.
 
         Args:
             key: Offload key to look up.
@@ -190,13 +186,13 @@ class SecondaryTierManager(ABC):
             HIT if the chunk is present and ready,
             MISS if not found,
             or RETRY if the chunk is being transferred (retry later).
+
         """
         pass
 
     @abstractmethod
     def submit_store(self, job_metadata: TransferJob) -> None:
-        """
-        Submit an async job to store chunks from the primary tier to this
+        """Submit an async job to store chunks from the primary tier to this
         secondary tier.
 
         This method must be lightweight and non-blocking: allocate metadata
@@ -218,13 +214,13 @@ class SecondaryTierManager(ABC):
         Args:
             job_metadata: Job metadata including job_id, keys, and chunk_ids
                           identifying the primary-tier slots to read from.
+
         """
         pass
 
     @abstractmethod
     def submit_load(self, job_metadata: TransferJob) -> None:
-        """
-        Submit an async job to load chunks from this secondary tier to the
+        """Submit an async job to load chunks from this secondary tier to the
         primary tier.
 
         This method must be lightweight and non-blocking: mark chunks as
@@ -243,13 +239,13 @@ class SecondaryTierManager(ABC):
         Args:
             job_metadata: Job metadata including job_id, keys, and chunk_ids
                           identifying the primary-tier slots to write into.
+
         """
         pass
 
     @abstractmethod
     def get_finished_jobs(self) -> Iterable[JobResult]:
-        """
-        Return all jobs (loads and stores) that completed since the last call.
+        """Return all jobs (loads and stores) that completed since the last call.
 
         The framework uses these results to release resources and finalize
         transfers.
@@ -257,6 +253,7 @@ class SecondaryTierManager(ABC):
         Returns:
             Iterable of JobResult objects for jobs finished since the
             last call.
+
         """
         pass
 
@@ -273,31 +270,30 @@ class SecondaryTierManager(ABC):
         return ()
 
     def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
-        """
-        Mark chunks as recently used for eviction policy.
+        """Mark chunks as recently used for eviction policy.
 
         Args:
             keys: Offload keys to mark as recently used.
             req_context: Per-request context.
+
         """
         return
 
     @abstractmethod
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
-        """
-        Called when a new request is first seen by the scheduler.
+        """Called when a new request is first seen by the scheduler.
 
         Returns a RequestOffloadingContext expressing this tier's preference
         for how chunks should be offloaded for this request.
 
         Args:
             req_context: Per-request context.
+
         """
         pass
 
     def on_request_finished(self, req_context: ReqContext) -> None:
-        """
-        Called when a request has finished.
+        """Called when a request has finished.
 
         By the time this is called, all per-request calls for this request
         (submit_store, submit_load, touch) have already been issued, and none
@@ -308,6 +304,7 @@ class SecondaryTierManager(ABC):
 
         Args:
             req_context: per-request context.
+
         """
         return
 
@@ -325,6 +322,7 @@ class SecondaryTierManager(ABC):
 
         Args:
             context: Per-step context from the scheduler.
+
         """
         return
 

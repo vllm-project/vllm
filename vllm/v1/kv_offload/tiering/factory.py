@@ -113,6 +113,7 @@ class SecondaryTierFactory:
         Raises:
             ValueError: If 'type' is missing, or is neither registered nor
                 resolvable via module_path.
+
         """
         tier_type = tier_config.get("type")
         if not tier_type:
