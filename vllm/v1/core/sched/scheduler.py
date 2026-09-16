@@ -1142,11 +1142,11 @@ class Scheduler(SchedulerInterface):
                     # An async load holds its blocks for the whole transfer with
                     # no forward progress and isn't preemptible here. Admit it
                     # only if it fits in (free - other in-flight reservations)
-                    # plus its own promotion margin, to avoid deadlock and
+                    # plus its own spec decode step blocks, to avoid deadlock and
                     # predictable preemptions.
                     reserved_blocks = (
                         self._inflight_prefill_reserved_blocks()
-                        + self._promotion_margin_blocks()
+                        + self._spec_decode_step_blocks()
                     )
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
@@ -2897,9 +2897,9 @@ class Scheduler(SchedulerInterface):
         return delay_free or partial_tail_delay, kv_xfer_params
 
     def _request_remaining_blocks(self, request: Request) -> int:
-        """Blocks `request` still needs to allocate to hold its full sequence."""
+        """Blocks `request` still needs to hold its full sequence and be promoted."""
         full_num_tokens = min(request.num_tokens, self.max_model_len)
-        return self.kv_cache_manager.coordinator.get_num_blocks_to_allocate(
+        num_blocks = self.kv_cache_manager.coordinator.get_num_blocks_to_allocate(
             request_id=request.request_id,
             num_tokens=full_num_tokens,
             new_computed_blocks=self.kv_cache_manager.empty_kv_cache_blocks.blocks,
@@ -2909,26 +2909,25 @@ class Scheduler(SchedulerInterface):
             num_tokens_main_model=full_num_tokens,
             apply_admission_cap=True,
         )
+        return num_blocks + self._spec_decode_step_blocks()
 
-    def _promotion_margin_blocks(self) -> int:
-        """Blocks an async load needs on promotion but does not allocate now.
+    def _spec_decode_step_blocks(self) -> int:
+        """Blocks for the extra KV slots a spec decode step needs.
 
-        A load is allocated without lookahead slots (see
-        `limit_lookahead_tokens`) and `_request_remaining_blocks` does not count
-        them either, yet promotion pads the request to `1 + num_spec_tokens`
-        and asks `allocate_slots` for the lookahead margin on top. Reserving
-        that margin up front keeps a load from being admitted into a pool it
-        can never be promoted in, which would wedge the scheduler: a parked
-        load is not preemptible and nothing else is running to free a block.
+        Covers the `num_spec_tokens` draft slots the target model verifies plus
+        the `num_lookahead_tokens` slots the drafter writes beyond them. An
+        async load is allocated without either (see `limit_lookahead_tokens`),
+        yet its promotion step needs both. Reserving these blocks up front keeps
+        a load from being admitted into a pool it can never be promoted in,
+        which would wedge the scheduler: a parked load is not preemptible and
+        nothing else is running to free a block.
         """
         return cdiv(self.num_spec_tokens + self.num_lookahead_tokens, self.block_size)
 
     def _inflight_prefill_reserved_blocks(self) -> int:
         """Num blocks in-flight prefills still need to finish (their reservation)."""
-        margin = self._promotion_margin_blocks()
         return sum(
-            self._request_remaining_blocks(req) + margin
-            for req in self._inflight_prefills
+            self._request_remaining_blocks(req) for req in self._inflight_prefills
         )
 
     def _update_waiting_for_remote_kv(self, request: Request) -> None:
