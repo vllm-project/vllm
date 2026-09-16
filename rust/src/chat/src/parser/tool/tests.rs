@@ -240,3 +240,15 @@ fn factory_new_registers_phi4_mini_json_by_name() {
     assert!(factory.contains(names::PHI4_MINI_JSON));
     factory.create(names::PHI4_MINI_JSON, &[]).unwrap();
 }
+
+#[test]
+fn factory_registers_minicpm5_by_name_and_model() {
+    let factory = ToolParserFactory::new();
+
+    assert!(factory.contains(names::MINICPM5));
+    factory.create(names::MINICPM5, &[]).unwrap();
+    assert_eq!(
+        factory.resolve_name_for_model("openbmb/MiniCPM5-2B"),
+        Some(names::MINICPM5)
+    );
+}
