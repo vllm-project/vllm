@@ -168,7 +168,11 @@ def _block_fp8_config() -> SimpleNamespace:
     )
 
 
-def _moe_vllm_config(tp_size: int) -> SimpleNamespace:
+def _moe_vllm_config(
+    tp_size: int,
+    *,
+    fp8_checkpoint: bool = True,
+) -> SimpleNamespace:
     text_config = SimpleNamespace(
         moe_intermediate_size=640,
         shared_expert_intermediate_size=0,
@@ -179,19 +183,33 @@ def _moe_vllm_config(tp_size: int) -> SimpleNamespace:
             tensor_parallel_size=tp_size,
             use_sequence_parallel_moe=False,
         ),
-        quant_config=_block_fp8_config(),
+        quant_config=_block_fp8_config() if fp8_checkpoint else None,
     )
 
 
 def test_block_fp8_moe_intermediate_padding() -> None:
     quant_config = _block_fp8_config()
 
+    assert _get_padded_moe_intermediate_size(None, 640, 2) == 640
     assert _get_padded_moe_intermediate_size(quant_config, 640, 1) == 640
     assert _get_padded_moe_intermediate_size(quant_config, 640, 2) == 768
 
 
-def test_sparse_moe_constructs_with_padded_intermediate_size() -> None:
-    vllm_config = _moe_vllm_config(tp_size=2)
+@pytest.mark.parametrize(
+    ("fp8_checkpoint", "expected_intermediate_size"),
+    [
+        pytest.param(False, 640, id="bf16"),
+        pytest.param(True, 768, id="fp8"),
+    ],
+)
+def test_sparse_moe_constructs_with_expected_intermediate_size(
+    fp8_checkpoint: bool,
+    expected_intermediate_size: int,
+) -> None:
+    vllm_config = _moe_vllm_config(
+        tp_size=2,
+        fp8_checkpoint=fp8_checkpoint,
+    )
     constructed: dict[str, int] = {}
 
     def init_base(
@@ -208,10 +226,16 @@ def test_sparse_moe_constructs_with_padded_intermediate_size() -> None:
     with patch.object(Qwen3NextSparseMoeBlock, "__init__", init_base):
         layer = Qwen4ExpSparseMoeBlock(vllm_config)
 
-    assert constructed["intermediate_size"] == 768
+    assert constructed["intermediate_size"] == expected_intermediate_size
     assert vllm_config.model_config.hf_text_config.moe_intermediate_size == 640
     assert layer.original_intermediate_size_per_partition == 320
-    assert layer.experts.moe_config.intermediate_size_per_partition_unpadded == 320
+    if fp8_checkpoint:
+        assert layer.experts.moe_config.intermediate_size_per_partition_unpadded == 320
+    else:
+        assert not hasattr(
+            layer.experts.moe_config,
+            "intermediate_size_per_partition_unpadded",
+        )
 
 
 def test_block_fp8_moe_checkpoint_padding_is_aligned_and_idempotent() -> None:
