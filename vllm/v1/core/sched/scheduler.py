@@ -2918,8 +2918,13 @@ class Scheduler(SchedulerInterface):
         full sequence + the spec decode step, otherwise request cannot be
         able to run after the async_load if we are out of kv blocks.
         """
-        return 0 if not self.num_spec_tokens else cdiv(
-            1 + self.num_spec_tokens + self.num_lookahead_tokens, self.kv_cache_config.block_size
+        return (
+            0
+            if not self.num_spec_tokens
+            else cdiv(
+                1 + self.num_spec_tokens + self.num_lookahead_tokens,
+                self.block_size,
+            )
         )
 
     def _inflight_prefill_reserved_blocks(self) -> int:
