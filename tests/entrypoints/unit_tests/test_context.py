@@ -71,8 +71,8 @@ async def generate_mock_outputs(
 class FakeHarmonyParser(HarmonyParser):
     def __init__(self):
         # Skip HarmonyParser initialization and script outputs directly.
-        self.reasoning_parser = None
-        self.tool_parser = None
+        self._reasoning_parser = None
+        self._tool_parser = None
         self._chunk_results: list[ChunkResult] = []
         self._flush_results: list[list[Segment]] = []
         self.processed_chunks: list[list[int]] = []
