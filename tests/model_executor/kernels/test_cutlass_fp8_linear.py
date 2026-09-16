@@ -130,7 +130,10 @@ def test_pre_ada_fp8_selection_falls_through_to_marlin(monkeypatch) -> None:
     _patch_device(monkeypatch, 80)
 
     chosen = choose_scaled_mm_linear_kernel(
-        _fp8_per_tensor_config(), _POSSIBLE_FP8_KERNELS, compute_capability=80
+        _fp8_per_tensor_config(),
+        _POSSIBLE_FP8_KERNELS,
+        compute_capability=80,
+        quantization="fp8_w8a8",
     )
 
     assert chosen is MarlinFP8ScaledMMLinearKernel
@@ -150,7 +153,10 @@ def test_pre_ada_fp8_selection_picks_cutlass_without_the_gate(monkeypatch) -> No
     )
 
     chosen = choose_scaled_mm_linear_kernel(
-        _fp8_per_tensor_config(), _POSSIBLE_FP8_KERNELS, compute_capability=80
+        _fp8_per_tensor_config(),
+        _POSSIBLE_FP8_KERNELS,
+        compute_capability=80,
+        quantization="fp8_w8a8",
     )
 
     assert chosen is CutlassFP8ScaledMMLinearKernel
@@ -161,7 +167,10 @@ def test_supported_capability_still_selects_cutlass(monkeypatch) -> None:
     _patch_device(monkeypatch, 90)
 
     chosen = choose_scaled_mm_linear_kernel(
-        _fp8_per_tensor_config(), _POSSIBLE_FP8_KERNELS, compute_capability=90
+        _fp8_per_tensor_config(),
+        _POSSIBLE_FP8_KERNELS,
+        compute_capability=90,
+        quantization="fp8_w8a8",
     )
 
     assert chosen is CutlassFP8ScaledMMLinearKernel
