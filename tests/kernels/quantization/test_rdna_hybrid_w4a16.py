@@ -491,6 +491,12 @@ def _hip_skinny_reference(
         (3, 4096, 256, 64),
         (4, 2560, 256, 128),
         (5, 4096, 256, 32),
+        # Batch 1 with K == 4096, or K a multiple of 8192, takes a tuple with
+        # A_CHUNK = 32 instead of 16. G = 32 is the tight case there: one
+        # unrolled step then spans exactly one scale group.
+        (1, 4096, 256, 32),
+        (1, 8192, 256, 128),
+        (1, 16384, 256, 64),
         # K * batch beyond what LDS holds (32768 fp16 elements), so K is walked
         # in chunks. The per-row window shrinks as the batch grows, so these
         # cover a single reload and several, with and without a short final

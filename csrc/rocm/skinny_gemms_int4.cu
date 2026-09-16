@@ -871,22 +871,29 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
   const at::cuda::OptionalCUDAGuard device_guard(device_of(in_a));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-// Dispatch macro: _HAS_ZP selects the HAS_ZERO_POINTS template parameter
-#define WVSPLITK_INT4G_LAUNCH(_THRDS, _YTILE, _UNRL, _N, _GS, _HAS_ZP)      \
-  {                                                                         \
-    dim3 block(_THRDS, 16);                                                 \
-    int __wvPrGrp = mindiv_int4(M_in, CuCount * _YTILE, 16);                \
-    if (K_in * N_in <= max_lds_len && M_in % _YTILE == 0)                   \
-      wvSplitK_int4_hf_sml_<fptype, _THRDS, _YTILE, 16, 16, _UNRL, _N, _GS, \
-                            _HAS_ZP><<<grid, block, 0, stream>>>(           \
-          K_in, M_in, Bx_in, By_in, wptr, aptr, sptr, zpptr, biasptr, cptr, \
-          __wvPrGrp, CuCount, group_stride_i32);                            \
-    else                                                                    \
-      wvSplitK_int4_hf_<fptype, _THRDS, _YTILE, 16, 16, _UNRL, _N, _GS,     \
-                        _HAS_ZP><<<grid, block, 0, stream>>>(               \
-          K_in, M_in, Bx_in, By_in, wptr, aptr, sptr, zpptr, biasptr, cptr, \
-          __wvPrGrp, CuCount, group_stride_i32);                            \
+// Dispatch macro: _HAS_ZP selects the HAS_ZERO_POINTS template parameter.
+// _W is the workgroup's wave count and _AC the per-thread K chunk. Almost every
+// tuple takes the 16/16 default through WVSPLITK_INT4G_LAUNCH; only the deep-K
+// N = 1 rules below widen _AC.
+#define WVSPLITK_INT4G_LAUNCH_W_AC(_THRDS, _YTILE, _W, _AC, _UNRL, _N, _GS,  \
+                                   _HAS_ZP)                                  \
+  {                                                                          \
+    dim3 block(_THRDS, _W);                                                  \
+    int __wvPrGrp = mindiv_int4(M_in, CuCount * _YTILE, _W);                 \
+    if (K_in * N_in <= max_lds_len && M_in % _YTILE == 0)                    \
+      wvSplitK_int4_hf_sml_<fptype, _THRDS, _YTILE, _W, _AC, _UNRL, _N, _GS, \
+                            _HAS_ZP><<<grid, block, 0, stream>>>(            \
+          K_in, M_in, Bx_in, By_in, wptr, aptr, sptr, zpptr, biasptr, cptr,  \
+          __wvPrGrp, CuCount, group_stride_i32);                             \
+    else                                                                     \
+      wvSplitK_int4_hf_<fptype, _THRDS, _YTILE, _W, _AC, _UNRL, _N, _GS,     \
+                        _HAS_ZP><<<grid, block, 0, stream>>>(                \
+          K_in, M_in, Bx_in, By_in, wptr, aptr, sptr, zpptr, biasptr, cptr,  \
+          __wvPrGrp, CuCount, group_stride_i32);                             \
   }
+
+#define WVSPLITK_INT4G_LAUNCH(_THRDS, _YTILE, _UNRL, _N, _GS, _HAS_ZP) \
+  WVSPLITK_INT4G_LAUNCH_W_AC(_THRDS, _YTILE, 16, 16, _UNRL, _N, _GS, _HAS_ZP)
 
 #define WVSPLITK_INT4G(_YTILE, _UNRL, _N, _GS, _HAS_ZP) \
   WVSPLITK_INT4G_LAUNCH(32, _YTILE, _UNRL, _N, _GS, _HAS_ZP)
@@ -898,6 +905,17 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
     WVSPLITK_INT4G(_YTILE, _UNRL, _N, 64, _HAS_ZP)   \
   else                                               \
     WVSPLITK_INT4G(_YTILE, _UNRL, _N, 128, _HAS_ZP)
+
+#define WVSPLITK_INT4G_W_AC(_YTILE, _UNRL, _W, _AC, _N, _GS, _HAS_ZP) \
+  WVSPLITK_INT4G_LAUNCH_W_AC(32, _YTILE, _W, _AC, _UNRL, _N, _GS, _HAS_ZP)
+
+#define WVSPLIT_INT4G_GS_W_AC(_YTILE, _UNRL, _W, _AC, _N, _HAS_ZP) \
+  if (group_size == 32)                                            \
+    WVSPLITK_INT4G_W_AC(_YTILE, _UNRL, _W, _AC, _N, 32, _HAS_ZP)   \
+  else if (group_size == 64)                                       \
+    WVSPLITK_INT4G_W_AC(_YTILE, _UNRL, _W, _AC, _N, 64, _HAS_ZP)   \
+  else                                                             \
+    WVSPLITK_INT4G_W_AC(_YTILE, _UNRL, _W, _AC, _N, 128, _HAS_ZP)
 
 // Launch for shapes whose activation does not fit LDS in one go, falling back
 // to the medium kernel when M rules the chunked path out. Its own macro so the
@@ -935,27 +953,49 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
   else                                                       \
     WVSPLITK_INT4G_CHUNKED(_YTILE, _UNRL, _N, 128, _HAS_ZP)
 
-#define WVSPLIT_INT4G_TILE(_sYT, __N, _HAS_ZP)                        \
-  {                                                                   \
-    if (K_in * N_in > max_lds_len) {                                  \
-      if (_sYT < 30)                                                  \
-        WVSPLIT_INT4G_GS_CHUNKED(4, 2, __N, _HAS_ZP)                  \
-      else                                                            \
-        WVSPLIT_INT4G_GS_CHUNKED(4, 1, __N, _HAS_ZP)                  \
-    } else if (__N >= 4 && _sYT >= 480)                               \
-      WVSPLIT_INT4G_GS(4, 1, __N, _HAS_ZP)                            \
-    else if (__N >= 3 && _sYT >= 40)                                  \
-      WVSPLIT_INT4G_GS(4, 1, __N, _HAS_ZP)                            \
-    else if (__N >= 3 && _sYT < 40 && (K_in <= 2048 || K_in >= 4096)) \
-      WVSPLIT_INT4G_GS(2, 4, __N, _HAS_ZP)                            \
-    else if (__N >= 3 && _sYT < 40)                                   \
-      WVSPLIT_INT4G_GS(2, 2, __N, _HAS_ZP)                            \
-    else if (__N >= 2)                                                \
-      WVSPLIT_INT4G_GS(2, 2, __N, _HAS_ZP)                            \
-    else if (_sYT >= 30)                                              \
-      WVSPLIT_INT4G_GS(2, 4, __N, _HAS_ZP)                            \
-    else                                                              \
-      WVSPLIT_INT4G_GS(1, 4, __N, _HAS_ZP)                            \
+#define WVSPLIT_INT4G_TILE(_sYT, __N, _HAS_ZP)                            \
+  {                                                                       \
+    if (K_in * N_in > max_lds_len) {                                      \
+      if (_sYT < 30)                                                      \
+        WVSPLIT_INT4G_GS_CHUNKED(4, 2, __N, _HAS_ZP)                      \
+      else if (mindiv_int4(M_in, CuCount * 4, 16) < 16)                   \
+        WVSPLIT_INT4G_GS_CHUNKED(2, 2, __N, _HAS_ZP)                      \
+      else                                                                \
+        WVSPLIT_INT4G_GS_CHUNKED(4, 1, __N, _HAS_ZP)                      \
+    } else if (__N >= 3 && _sYT >= 40 && K_in >= 4096 &&                  \
+               mindiv_int4(M_in, CuCount * 4, 16) < 16)                   \
+      /* YTILE = 4 is better here, but mindiv_int4 can trim WvPrGrp       \
+         harder at YTILE = 4 than at YTILE = 2, and idle wave rows        \
+         cost more than the tile gains. The K bound keeps this off        \
+         shallow rows, where the k1 loop cannot amortise the extra        \
+         m-tiles. */                                                      \
+      WVSPLIT_INT4G_GS(2, 2, __N, _HAS_ZP)                                \
+    else if (__N >= 4 && _sYT >= 480)                                     \
+      WVSPLIT_INT4G_GS(4, 1, __N, _HAS_ZP)                                \
+    else if (__N >= 3 && _sYT >= 40)                                      \
+      WVSPLIT_INT4G_GS(4, 1, __N, _HAS_ZP)                                \
+    else if (__N >= 3 && _sYT < 40 && (K_in <= 2048 || K_in >= 4096))     \
+      WVSPLIT_INT4G_GS(2, 4, __N, _HAS_ZP)                                \
+    else if (__N >= 3 && _sYT < 40)                                       \
+      WVSPLIT_INT4G_GS(2, 2, __N, _HAS_ZP)                                \
+    else if (__N >= 2)                                                    \
+      WVSPLIT_INT4G_GS(2, 2, __N, _HAS_ZP)                                \
+    else if (__N == 1 && K_in == 4096)                                    \
+      /* A_CHUNK = 32 doubles the per-thread load granularity, and a      \
+         K = 4096 row has the work to amortise it. _W stays at 16         \
+         because A_CHUNK = 32 with _W = 32 spills. */                     \
+      WVSPLIT_INT4G_GS_W_AC(1, 4, 16, 32, __N, _HAS_ZP)                   \
+    else if (__N == 1 && !(_HAS_ZP) && K_in % (32 * 32 * 8) == 0)         \
+      /* Deep-K rows dividing this tuple's K step exactly, where UNRL = 8 \
+         gives each row a 4 KB contiguous run. A K leaving a large ragged \
+         tail has too few k1 iterations to hide it. Symmetric only: the   \
+         tuple sits at the edge of the register budget and the zero-point \
+         lookup pushes it over, costing 13.5% asymmetric at K = 8192. */  \
+      WVSPLIT_INT4G_GS_W_AC(2, 8, 16, 32, __N, _HAS_ZP)                   \
+    else if (_sYT >= 30)                                                  \
+      WVSPLIT_INT4G_GS(2, 4, __N, _HAS_ZP)                                \
+    else                                                                  \
+      WVSPLIT_INT4G_GS(1, 4, __N, _HAS_ZP)                                \
   }
 
 // Inner dispatch: shared by both symmetric and asymmetric paths
@@ -1002,6 +1042,9 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
           WVSPLIT_INT4G_DISPATCH(false)
       });
 
+#undef WVSPLITK_INT4G_LAUNCH_W_AC
+#undef WVSPLITK_INT4G_W_AC
+#undef WVSPLIT_INT4G_GS_W_AC
 #undef WVSPLITK_INT4G_LAUNCH
 #undef WVSPLITK_INT4G
 #undef WVSPLIT_INT4G_GS
