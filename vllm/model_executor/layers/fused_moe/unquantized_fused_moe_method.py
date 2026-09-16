@@ -7,8 +7,12 @@ import torch
 import torch.nn.functional as F
 
 import vllm.envs as envs
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    assert_hidden_dim_padding,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
@@ -21,7 +25,6 @@ from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
     convert_to_unquantized_kernel_format,
-    expected_activation_format,
     make_unquantized_moe_kernel,
     select_unquantized_moe_backend,
 )
@@ -211,7 +214,25 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 f"Cannot rebuild the unquantized MoE kernel in place: the "
                 f"{backend.value} backend selects no experts class."
             )
-        expected = expected_activation_format(self.moe)
+        if backend == UnquantizedMoeBackend.CPU:
+            # The CPU experts prepack the weights and capture the router
+            # config in their own process_weights_after_loading, which a
+            # rebuilt instance never sees; there is no all2all backend to
+            # switch on CPU anyway.
+            raise ValueError(
+                "Cannot rebuild the unquantized MoE kernel in place on CPU."
+            )
+        # The format the prepare/finalize will hand the experts. This is NOT
+        # the oracle's selection rule: that one also honours a batched_triton
+        # pin, which on CUDA changes the experts class but not the
+        # prepare/finalize, so a pinned engine moving to a standard all2all
+        # backend would pass a check written against the oracle and then trip
+        # the kernel's activation-format assert inside the real rebuild.
+        expected = (
+            mk.FusedMoEActivationFormat.BatchedExperts
+            if self.moe.moe_parallel_config.use_batched_activation_format
+            else mk.FusedMoEActivationFormat.Standard
+        )
         if experts_cls.activation_format() != expected:
             raise ValueError(
                 f"Cannot rebuild the unquantized MoE kernel in place: "
@@ -219,38 +240,47 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 f"{experts_cls.activation_format().name} activation format but "
                 f"the current all2all backend hands it {expected.name}."
             )
+        assert_hidden_dim_padding(self.moe)
 
         if dry_run:
             return
 
-        previous = (self.unquantized_backend, self.experts_cls)
+        # Built before anything is assigned, for the same reason as the fp8
+        # helper: a failure in here leaves the method exactly as it was.
+        moe_quant_config, moe_kernel = self._build_moe_kernel(
+            layer, backend, experts_cls
+        )
         self.unquantized_backend = backend
         self.experts_cls = experts_cls
-        try:
-            # _init_moe_kernel already builds the kernel from the weights
-            # resident on the device. Its quant-config recompute reads only the
-            # layer's bias tensors and SwiGLU gate params, neither of which a
-            # backend re-selection touches, so it lands on an equivalent config.
-            self._init_moe_kernel(layer)
-        except Exception:
-            # It reads both fields off self, so they must be assigned before
-            # the call -- which means a failure inside it would otherwise
-            # leave the method naming a kernel that was never built, while
-            # moe_kernel still runs the outgoing one. Put them back so the
-            # caller sees a clean refusal rather than a half-switched layer.
-            self.unquantized_backend, self.experts_cls = previous
-            raise
+        self.moe_quant_config = moe_quant_config
+        self.moe_kernel = moe_kernel
 
     def _init_moe_kernel(self, layer: "RoutedExperts") -> None:
         """Build the MoE kernel from the layer's current (shuffled) weights."""
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        assert self.moe_quant_config is not None
-        assert self.experts_cls is not None
-        self.moe_kernel = make_unquantized_moe_kernel(
-            quant_config=self.moe_quant_config,
+        self.moe_quant_config, self.moe_kernel = self._build_moe_kernel(
+            layer, self.unquantized_backend, self.experts_cls
+        )
+
+    def _build_moe_kernel(
+        self,
+        layer: "RoutedExperts",
+        backend: UnquantizedMoeBackend,
+        experts_cls: type[mk.FusedMoEExperts] | None,
+    ) -> tuple[FusedMoEQuantConfig, mk.FusedMoEKernel]:
+        """Build a kernel for ``backend`` around the layer's resident weights.
+
+        The quant config is recomputed from the layer's bias tensors and
+        SwiGLU gate params, neither of which depends on the backend, so a
+        rebuild lands on an equivalent config.
+        """
+        moe_quant_config = self.get_fused_moe_quant_config(layer)
+        assert moe_quant_config is not None
+        assert experts_cls is not None
+        return moe_quant_config, make_unquantized_moe_kernel(
+            quant_config=moe_quant_config,
             moe_config=self.moe,
-            backend=self.unquantized_backend,
-            experts_cls=self.experts_cls,
+            backend=backend,
+            experts_cls=experts_cls,
             routing_tables=layer._expert_routing_tables(),
         )
 

@@ -205,21 +205,6 @@ def _trtllm_bf16_lora_supported(moe_config: FusedMoEConfig) -> bool:
     return moe_config.intermediate_size_per_partition % 128 == 0
 
 
-def expected_activation_format(
-    moe_config: FusedMoEConfig,
-) -> mk.FusedMoEActivationFormat:
-    """The activation format the current all2all backend hands the experts."""
-    # NOTE(rob): We need to peak into the P/F selection to determine
-    # if we are using the batched or standard expert format, which
-    # if not ideal. Once we unify TP + DP/EP, we can select P/F first.
-    return (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if moe_config.moe_parallel_config.use_batched_activation_format
-        or moe_config.moe_backend == "batched_triton"
-        else mk.FusedMoEActivationFormat.Standard
-    )
-
-
 def select_unquantized_moe_backend(
     moe_config: FusedMoEConfig,
 ) -> tuple[UnquantizedMoeBackend, type[mk.FusedMoEExperts] | None]:
@@ -253,7 +238,15 @@ def select_unquantized_moe_backend(
     # NOTE: the kernels are selected in the following order.
     AVAILABLE_BACKENDS = _get_priority_backends(moe_config)
 
-    activation_format = expected_activation_format(moe_config)
+    # NOTE(rob): We need to peak into the P/F selection to determine
+    # if we are using the batched or standard expert format, which
+    # if not ideal. Once we unify TP + DP/EP, we can select P/F first.
+    activation_format = (
+        mk.FusedMoEActivationFormat.BatchedExperts
+        if moe_config.moe_parallel_config.use_batched_activation_format
+        or moe_config.moe_backend == "batched_triton"
+        else mk.FusedMoEActivationFormat.Standard
+    )
 
     def _make_log_backend(backend: UnquantizedMoeBackend) -> str:
         available_strs = [b.value for b in AVAILABLE_BACKENDS]

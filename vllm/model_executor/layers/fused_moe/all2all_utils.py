@@ -159,6 +159,27 @@ def maybe_roundup_layer_hidden_size(
     return hidden_size
 
 
+def assert_hidden_dim_padding(moe: FusedMoEConfig) -> None:
+    """Refuse an all2all backend that would pad the hidden size differently.
+
+    The weights were allocated at ``moe.hidden_dim``, which
+    ``maybe_roundup_layer_hidden_size`` derived from the backend active at
+    load. A backend selected later (a P/D role switch) may round the
+    unpadded size differently, and nothing downstream checks: the kernel
+    builds, and the first forward dies inside the dispatch kernel.
+    """
+    needed = maybe_roundup_layer_hidden_size(
+        moe.hidden_dim_unpadded, moe.in_dtype, moe.moe_parallel_config
+    )
+    if needed != moe.hidden_dim:
+        raise ValueError(
+            f"Cannot rebuild the MoE kernel in place: the "
+            f"{moe.moe_parallel_config.all2all_backend} all2all backend pads "
+            f"hidden size {moe.hidden_dim_unpadded} to {needed}, but the weights "
+            f"were allocated at {moe.hidden_dim} for the backend loaded with."
+        )
+
+
 def maybe_make_prepare_finalize(
     moe: FusedMoEConfig,
     quant_config: FusedMoEQuantConfig | None,

@@ -552,13 +552,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # neither changes when the all2all backend does.
         self.weight_key = weight_key
         self.activation_key = activation_key
+        # Stashed for the same reason: the rebuild must re-select under the
+        # rule the load-time selection ran under.
+        self.allow_vllm_cutlass = False
 
         # Select Fp8 MoE backend
         self.fp8_backend, self.experts_cls = select_fp8_moe_backend(
             config=self.moe,
             weight_key=weight_key,
             activation_key=activation_key,
-            allow_vllm_cutlass=False,
+            allow_vllm_cutlass=self.allow_vllm_cutlass,
         )
 
     def create_weights(
@@ -751,7 +754,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer,
             weight_key=self.weight_key,
             activation_key=self.activation_key,
-            allow_vllm_cutlass=False,
+            allow_vllm_cutlass=self.allow_vllm_cutlass,
             dry_run=dry_run,
         )
 

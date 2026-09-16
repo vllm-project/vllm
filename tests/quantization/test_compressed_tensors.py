@@ -5,6 +5,7 @@
 Run `pytest tests/quantization/test_compressed_tensors.py`.
 """
 
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
@@ -405,27 +406,50 @@ def test_compressed_tensors_w8a8_fp8_moe_forwards_swiglu_params():
 def test_compressed_tensors_w8a8_fp8_moe_rebuild_reselects_under_the_same_rule():
     """A rebuild must re-select under the rule the load-time selection used.
 
-    This method selects with allow_vllm_cutlass=True, so a layer can load as
-    VLLM_CUTLASS. If the rebuild re-selects with the default False it lands on
-    a different backend and then refuses a switch the layout allow-list
-    explicitly permits.
+    Driven through the real __init__ so the test pins the two selections
+    against each other, not against a value it planted itself: if __init__
+    ever selects with a literal the rebuild cannot see, the two calls below
+    disagree and this fails.
     """
-    quant_method = object.__new__(CompressedTensorsW8A8Fp8MoEMethod)
-    quant_method.moe = Mock()
-    quant_method.fp8_backend = Fp8MoeBackend.VLLM_CUTLASS
-    quant_method.experts_cls = object
+    args = dict(num_bits=8, type=QuantizationType.FLOAT, symmetric=True)
+    weight_quant = QuantizationArgs(
+        strategy=QuantizationStrategy.CHANNEL, dynamic=False, **args
+    )
+    input_quant = QuantizationArgs(
+        strategy=QuantizationStrategy.TOKEN, dynamic=True, **args
+    )
+    moe = SimpleNamespace(
+        hidden_dim=4096,
+        hidden_dim_unpadded=4096,
+        in_dtype=torch.bfloat16,
+        moe_parallel_config=SimpleNamespace(
+            all2all_backend="deepep_high_throughput",
+            use_deepep_ht_kernels=False,
+            use_deepep_ll_kernels=False,
+            use_deepep_v2_kernels=False,
+            use_nixl_ep_kernels=False,
+        ),
+    )
+
+    module = "vllm.model_executor.layers.quantization.compressed_tensors"
+    module += ".compressed_tensors_moe.compressed_tensors_moe_w8a8_fp8"
+    with patch(
+        f"{module}.select_fp8_moe_backend",
+        return_value=(Fp8MoeBackend.VLLM_CUTLASS, object),
+    ) as load_select:
+        quant_method = CompressedTensorsW8A8Fp8MoEMethod(weight_quant, input_quant, moe)
     quant_method.moe_quant_config = Mock()
-    quant_method.weight_key = None
-    quant_method.activation_key = None
-    quant_method.allow_vllm_cutlass = True
 
     with patch(
         "vllm.model_executor.layers.fused_moe.oracle.fp8.select_fp8_moe_backend",
         return_value=(Fp8MoeBackend.BATCHED_VLLM_CUTLASS, object),
-    ) as select:
+    ) as rebuild_select:
         quant_method.rebuild_moe_kernel(Mock(), dry_run=True)
 
-    assert select.call_args.kwargs["allow_vllm_cutlass"] is True
+    load, rebuild = load_select.call_args.kwargs, rebuild_select.call_args.kwargs
+    assert rebuild["allow_vllm_cutlass"] is load["allow_vllm_cutlass"]
+    assert rebuild["weight_key"] is load["weight_key"]
+    assert rebuild["activation_key"] is load["activation_key"]
 
 
 @pytest.mark.skipif(

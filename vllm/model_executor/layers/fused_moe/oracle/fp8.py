@@ -12,6 +12,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    assert_hidden_dim_padding,
     maybe_make_prepare_finalize,
 )
 from vllm.model_executor.layers.fused_moe.config import (
@@ -640,8 +641,11 @@ def rebuild_fp8_moe_kernel(
 ) -> None:
     """Re-select the experts class and rebuild ``method``'s MoE kernel.
 
-    Shared by every FP8 quantization method, because they differ only in
-    how they derive the two keys. Used by P/D role switching: after a
+    Shared by the FP8 quantization methods that implement
+    ``rebuild_moe_kernel`` (``Fp8MoEMethod``, ``CompressedTensorsW8A8Fp8MoEMethod``);
+    the others that select through ``select_fp8_moe_backend`` differ only in
+    how they derive the two keys and can adopt it the same way. Used by P/D
+    role switching: after a
     backend change the activation format and therefore the experts class
     differ, and after a budget change on one backend only the buffer the
     prepare/finalize is built around does.
@@ -652,9 +656,10 @@ def rebuild_fp8_moe_kernel(
     would allocate a second full-size copy of the weights this exists to
     avoid moving.
 
-    With ``dry_run`` the selection and every compatibility check run but
+    With ``dry_run`` the selection and the compatibility checks run but
     nothing is assigned, so a caller can refuse an impossible switch
-    before it has mutated anything.
+    before it has mutated anything. Buffer allocation is not covered: that
+    happens inside the real rebuild, per layer.
     """
     backend, experts_cls = select_fp8_moe_backend(
         config=method.moe,
@@ -667,9 +672,19 @@ def rebuild_fp8_moe_kernel(
 
     # Checked before the dry_run return, not after: a dry run that passed and
     # a real rebuild that then tripped one of these would defeat the point of
-    # offering a dry run at all.
-    assert method.moe_quant_config is not None
-    assert experts_cls is not None
+    # offering a dry run at all. Refusals, not asserts, because the caller
+    # treats ValueError as "refused, keep serving".
+    if experts_cls is None:
+        raise ValueError(
+            f"Cannot rebuild the FP8 MoE kernel in place: the {backend.value} "
+            f"backend selects no experts class."
+        )
+    if method.moe_quant_config is None:
+        raise ValueError(
+            "Cannot rebuild the FP8 MoE kernel in place before the weights "
+            "have been loaded."
+        )
+    assert_hidden_dim_padding(method.moe)
 
     if dry_run:
         return

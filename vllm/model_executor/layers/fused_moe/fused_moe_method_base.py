@@ -59,8 +59,9 @@ class FusedMoEMethodBase(QuantizeMethodBase):
           the engine-wide parallel config alone reaches no layer's copy, so
           this would re-select the same backend and rebuild an identical
           kernel, a silent no-op that reports success. Also point the EP
-          group's device communicator at the new manager first, or the
-          handle comes back shaped for the outgoing role.
+          group's device communicator at the new manager first: the rebuild
+          asks whichever manager is installed for a handle, and the outgoing
+          one refuses the incoming role's arguments.
 
         Implementations must NOT touch weights. The batched and standard
         variants of one backend share a weight layout, which is what allows the
@@ -68,10 +69,18 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         both cost a full-size allocation and re-process weights that are
         already in kernel format.
 
-        With ``dry_run``, run the selection and every compatibility check but
-        assign nothing. Role switching uses this to refuse an impossible
-        switch before it has mutated anything, and running the real code path
-        beats a second copy of the rules that could drift from it.
+        With ``dry_run``, run the selection and the compatibility checks
+        (weight layout, activation format, hidden-size padding) but assign
+        nothing. Role switching uses this to refuse an impossible switch
+        before it has mutated anything, and running the real code path beats
+        a second copy of the rules that could drift from it. Buffer
+        allocation is not covered -- it happens inside the real rebuild, per
+        layer, so a caller switching a whole model owns the rollback if a
+        later layer fails to allocate.
+
+        A method wrapped in ``FusedMoEModularMethod`` (LoRA, or after an
+        elastic-EP scale) does not forward this and refuses; the wrapper runs
+        its own kernel, so forwarding alone would not be enough.
         """
         raise NotImplementedError(
             f"{type(self).__name__} does not support rebuilding its MoE kernel "
