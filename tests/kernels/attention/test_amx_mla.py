@@ -247,7 +247,8 @@ def test_extend_attention_cpu_matches_reference(prefix_lens, extend_lens):
 
 class _FakeLinear:
     """Minimal duck-typed stand-in for kv_b_proj: only .weight and
-    .quant_method are read by get_and_maybe_dequant_weights()."""
+    .quant_method are read by get_and_maybe_dequant_weights().
+    """
 
     def __init__(self, weight: torch.Tensor):
         self.weight = weight
@@ -318,7 +319,8 @@ class _FakeAttnMetadata:
 def test_amx_mla_impl_forward_mqa_matches_reference(default_vllm_config):
     """forward_mqa receives already-absorbed Q (as MLAAttention.forward_impl
     would produce via layer.W_UK_T) and must reproduce plain per-head MLA
-    decode attention through W_UK/W_UV."""
+    decode attention through W_UK/W_UV.
+    """
     set_random_seed(1)
     num_heads, qk_nope_head_dim, v_head_dim, kv_lora_rank = 4, 32, 32, 64
     impl, kv_b_weight = _make_amx_mla_impl(
@@ -384,7 +386,8 @@ def test_amx_mla_impl_forward_mqa_matches_reference(default_vllm_config):
 def test_amx_mla_impl_forward_mha_matches_reference(default_vllm_config):
     """forward_mha receives raw unabsorbed Q and must attend correctly for a
     prefill batch with a mix of fresh and continued (cached-prefix)
-    sequences."""
+    sequences.
+    """
     set_random_seed(2)
     num_heads, qk_nope_head_dim, v_head_dim, kv_lora_rank = 4, 32, 32, 64
     impl, kv_b_weight = _make_amx_mla_impl(

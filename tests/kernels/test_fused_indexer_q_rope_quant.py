@@ -45,6 +45,7 @@ def quantize_to_mxfp4(
     Returns:
         packed: [..., head_dim//2]  uint8   2 E2M1 nibbles/byte, low nibble = even index
         scales: [..., head_dim//32] uint8   1 ue8m0 byte
+
     """
     MXFP4_BLOCK_SIZE = 32
     orig_shape = x.shape
@@ -573,7 +574,8 @@ def test_indexer_k_store_roundtrips_through_rocm_gather(block_size, compress_rat
 def test_fused_indexer_q_rope_quant_writes_bf16_weights(use_cutedsl):
     """The MXFP4 path can emit the per-head weights in bf16 (what DeepGEMM's
     sparse MQA-logits kernels take) instead of fp32; the values are the fp32
-    result rounded once, so the scoring kernel needs no cast."""
+    result rounded once, so the scoring kernel needs no cast.
+    """
     if use_cutedsl and not has_cutedsl():
         pytest.skip("cutedsl (cutlass) not installed")
 

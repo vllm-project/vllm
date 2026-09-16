@@ -808,7 +808,6 @@ def test_models_fse_init(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Model construction resolves FSE consistently with Quark quantization."""
-
     quantization_config: dict[str, Any] = (
         get_deepseek_v4_quark_config(["layers.0.ffn.shared_experts"] if exclude else [])
         if model_type == "deepseek_v4"
@@ -1320,7 +1319,8 @@ def test_fp8_shared_expert_fse_allows_symmetric_ignored_layers() -> None:
 
 def test_fp8_shared_expert_fse_expands_packed_projections() -> None:
     """Both shards of a fused projection ignored is symmetric within that
-    projection, so the mismatch reported is against the routed experts."""
+    projection, so the mismatch reported is against the routed experts.
+    """
     quant_config = _fp8_config(
         ignored_layers=[
             "model.layers.0.mlp.shared_experts.gate_proj",
@@ -1344,7 +1344,8 @@ def test_fp8_shared_expert_fse_expands_packed_projections() -> None:
 
 def test_fp8_shared_expert_fse_propagates_partial_shard_exclusion() -> None:
     """Half a fused projection excluded is rejected by `is_layer_skipped`
-    itself, exactly as it is in `Fp8Config.get_quant_method`."""
+    itself, exactly as it is in `Fp8Config.get_quant_method`.
+    """
     quant_config = _fp8_config(
         ignored_layers=["model.layers.0.mlp.shared_experts.gate_proj"]
     )

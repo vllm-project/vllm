@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-ColPali late interaction model for multi-modal retrieval and reranking.
+"""ColPali late interaction model for multi-modal retrieval and reranking.
 
 ColPali extends PaliGemma with a ColBERT-style late interaction head,
 producing per-token embeddings for both text and image inputs. It uses

@@ -366,7 +366,7 @@ def test_extract_tool_calls(
 
 
 def test_extract_tool_calls_fallback_no_tags(step3p5_tool_parser, sample_tools):
-    """Test fallback parsing when XML tags are missing"""
+    """Test fallback parsing when XML tags are missing."""
     model_output = """<function=get_current_weather>
 <parameter=city>
 Dallas
@@ -387,7 +387,7 @@ TX
 
 
 def test_extract_tool_calls_type_conversion(step3p5_tokenizer):
-    """Test parameter type conversion based on tool schema"""
+    """Test parameter type conversion based on tool schema."""
     tools = [
         ChatCompletionToolsParam(
             type="function",
@@ -622,7 +622,7 @@ def test_extract_tool_calls_streaming(
     expected_tool_calls,
     expected_content,
 ):
-    """Test incremental streaming behavior including typed parameters"""
+    """Test incremental streaming behavior including typed parameters."""
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
     other_content = ""
@@ -692,7 +692,7 @@ def test_extract_tool_calls_streaming(
 def test_extract_tool_calls_missing_closing_parameter_tag(
     step3p5_tool_parser, sample_tools
 ):
-    """Test handling of missing closing </parameter> tag"""
+    """Test handling of missing closing </parameter> tag."""
     # Using get_current_weather from sample_tools but with malformed XML
     model_output = """Let me check the weather for you:
 <tool_call>
@@ -734,7 +734,7 @@ fahrenheit
 def test_extract_tool_calls_streaming_missing_closing_tag(
     step3p5_tool_parser, step3p5_tokenizer, sample_tools
 ):
-    """Test streaming with missing closing </parameter> tag"""
+    """Test streaming with missing closing </parameter> tag."""
     # Using get_current_weather from sample_tools but with malformed XML
     model_output = """Let me check the weather for you:
 <tool_call>
@@ -808,7 +808,7 @@ fahrenheit
 def test_extract_tool_calls_streaming_incremental(
     step3p5_tool_parser, step3p5_tokenizer, sample_tools
 ):
-    """Test that streaming is truly incremental"""
+    """Test that streaming is truly incremental."""
     model_output = """I'll check the weather.<tool_call>
 <function=get_current_weather>
 <parameter=city>
@@ -864,7 +864,7 @@ TX
 
 
 def test_extract_tool_calls_complex_type_with_single_quote(step3p5_tokenizer):
-    """Test parameter type conversion based on tool schema"""
+    """Test parameter type conversion based on tool schema."""
     tools = [
         ChatCompletionToolsParam(
             type="function",
