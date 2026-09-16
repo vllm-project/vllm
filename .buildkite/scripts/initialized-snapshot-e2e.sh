@@ -191,7 +191,16 @@ VISIBLE_GPU="${NVIDIA_VISIBLE_DEVICES:-}"
 if [[ -z "$VISIBLE_GPU" || "$VISIBLE_GPU" == "all" || "$VISIBLE_GPU" == "void" ]]; then
     VISIBLE_GPU="${CUDA_VISIBLE_DEVICES:-}"
 fi
-[[ -n "$VISIBLE_GPU" && "$VISIBLE_GPU" != *","* ]] \
+if [[ -z "$VISIBLE_GPU" || "$VISIBLE_GPU" == "all" || "$VISIBLE_GPU" == "void" ]]; then
+    CDI_GPU="${BUILDKITE_PLUGIN_DOCKER_DEVICES_0:-}"
+    if [[ "$CDI_GPU" == nvidia.com/gpu=* ]]; then
+        VISIBLE_GPU="${CDI_GPU#nvidia.com/gpu=}"
+    else
+        VISIBLE_GPU=""
+    fi
+fi
+[[ -n "$VISIBLE_GPU" && "$VISIBLE_GPU" != all && "$VISIBLE_GPU" != void \
+    && "$VISIBLE_GPU" != *","* ]] \
     || die "the runner must expose exactly one selected GPU"
 GPU_ROW="$(nvidia-smi --id="$VISIBLE_GPU" \
     --query-gpu=name,uuid,mig.mode.current,memory.total \
@@ -225,7 +234,7 @@ IFS='|' read -r IMAGE_ID IMAGE_PLATFORM OCI_COMMIT VLLM_COMMIT < <(
 CONTAINER_ID="$(run "start exact candidate container" 90 docker run --detach \
     --name "$CONTAINER_NAME" --label "ai.vllm.snapshot.e2e.run=$RUN_ID" \
     --gpus "device=$GPU_UUID" --user 0 --privileged --pid=host --ipc=host \
-    --network=host --env CUDA_VISIBLE_DEVICES=0 --env HF_HUB_DISABLE_TELEMETRY=1 \
+    --network=host --env "CUDA_VISIBLE_DEVICES=$GPU_UUID" --env HF_HUB_DISABLE_TELEMETRY=1 \
     --env VLLM_NO_USAGE_STATS=1 --env VLLM_USE_V2_MODEL_RUNNER=1 \
     ${HF_CACHE_MOUNT[@]+"${HF_CACHE_MOUNT[@]}"} \
     --entrypoint sleep "$IMAGE_ID" infinity)"
@@ -234,6 +243,15 @@ run "prepare private artifact root" 60 docker exec "$CONTAINER_NAME" sh -c \
     "$PREPARE_ARTIFACT_ROOT && df -Pk / | awk 'NR == 2 && \$4 >= 10485760 {ok=1} END {exit !ok}'"
 run "verify snapshot runtime" 60 docker exec "$CONTAINER_NAME" sh -c \
     'criu --version; test -x /usr/local/sbin/cuda-checkpoint; test -f /usr/local/lib/criu/cuda_plugin.so'
+run "verify selected CUDA device" 60 docker exec "$CONTAINER_NAME" python3 -c '
+import sys, torch
+if torch.cuda.device_count() != 1:
+    raise SystemExit("expected exactly one visible CUDA device")
+actual = str(torch.cuda.get_device_properties(0).uuid).removeprefix("GPU-")
+if actual != sys.argv[1].removeprefix("GPU-"):
+    raise SystemExit(f"CUDA device {actual} does not match {sys.argv[1]}")
+print(f"selected_cuda_uuid=GPU-{actual}")
+' "$GPU_UUID"
 OFFLINE_EXEC=(docker exec --env HF_HOME=/e2e/hf --env HF_HUB_OFFLINE=1 \
     --env TRANSFORMERS_OFFLINE=1 --env VLLM_SNAPSHOT_TIMEOUT_S=900 \
     "$CONTAINER_NAME")
