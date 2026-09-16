@@ -6,7 +6,6 @@ import pytest
 import torch
 
 from vllm.config import ParallelConfig
-from vllm.distributed import parallel_state
 from vllm.distributed.device_communicators.all2all import AgRsAll2AllManager
 from vllm.forward_context import DPMetadata
 from vllm.v1.attention.ops.pcp import maybe_gather_mla_latent_cache_inputs
@@ -38,25 +37,38 @@ def test_dispatch_sizes_expand_pcp_before_tp(pcp_size, sp_size, enable_ep, expec
 
 
 @pytest.mark.parametrize(
-    "dp_size,pcp_size,tp_size,expected",
-    [(2, 1, 2, "dp"), (1, 2, 2, "pcp"), (2, 2, 1, "ep"), (2, 2, 2, "dp_pcp")],
+    "dp_size,pcp_size,tp_size,use_ep,is_sp,expected",
+    [
+        (2, 2, 1, True, False, "ep"),
+        (2, 2, 2, True, True, "ep"),
+        (2, 2, 2, False, False, "dp"),
+        (2, 1, 2, True, False, "dp"),
+        (1, 2, 2, True, False, "pcp"),
+        (2, 2, 2, True, False, None),
+    ],
 )
-def test_dp_group_including_pcp_reuses_existing_groups(
-    dp_size, pcp_size, tp_size, expected, monkeypatch
+def test_dispatch_reuses_existing_groups(
+    dp_size, pcp_size, tp_size, use_ep, is_sp, expected, monkeypatch
 ):
     groups = {
         "dp": SimpleNamespace(world_size=dp_size),
         "pcp": SimpleNamespace(world_size=pcp_size),
         "ep": object(),
-        "dp_pcp": object(),
     }
-    monkeypatch.setattr(parallel_state, "_DP", groups["dp"])
-    monkeypatch.setattr(parallel_state, "_PCP", groups["pcp"])
-    monkeypatch.setattr(parallel_state, "_TP", SimpleNamespace(world_size=tp_size))
-    monkeypatch.setattr(parallel_state, "_EP", groups["ep"])
-    monkeypatch.setattr(parallel_state, "_DP_PCP", groups["dp_pcp"])
-    assert parallel_state.get_dp_group() is groups["dp"]
-    assert parallel_state.get_dp_group(include_pcp=True) is groups[expected]
+    for name, group in groups.items():
+        monkeypatch.setattr(
+            f"vllm.distributed.device_communicators.all2all.get_{name}_group",
+            lambda group=group: group,
+        )
+    manager = AgRsAll2AllManager.__new__(AgRsAll2AllManager)
+    manager.dp_world_size = dp_size
+    manager.tp_group = SimpleNamespace(world_size=tp_size)
+    manager.use_ep = use_ep
+    if expected is None:
+        with pytest.raises(AssertionError, match="requires sequence-parallel MoE"):
+            manager._get_comm_group(is_sp)
+    else:
+        assert manager._get_comm_group(is_sp) is groups[expected]
 
 
 @pytest.mark.parametrize("enable_ep", [False, True])
@@ -88,13 +100,15 @@ def test_ag_rs_dispatch_and_combine_use_dp_pcp_sizes(monkeypatch, enable_ep):
     manager.dp_world_size = 2
     manager.use_ep = enable_ep
 
-    def get_dp_group(*, include_pcp):
-        assert include_pcp == enable_ep
-        return FakeGroup()
-
+    manager.tp_group = SimpleNamespace(world_size=1)
+    for name in ("dp", "ep"):
+        monkeypatch.setattr(
+            f"vllm.distributed.device_communicators.all2all.get_{name}_group",
+            FakeGroup,
+        )
     monkeypatch.setattr(
-        "vllm.distributed.device_communicators.all2all.get_dp_group",
-        get_dp_group,
+        "vllm.distributed.device_communicators.all2all.get_pcp_group",
+        lambda: SimpleNamespace(world_size=2),
     )
     monkeypatch.setattr(
         "vllm.distributed.device_communicators.all2all.get_forward_context",

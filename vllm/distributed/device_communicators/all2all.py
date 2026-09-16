@@ -11,7 +11,7 @@ import torch.distributed as dist
 
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config
-from vllm.distributed import get_dp_group, get_ep_group
+from vllm.distributed import get_dp_group, get_ep_group, get_pcp_group
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
@@ -56,7 +56,14 @@ class AgRsAll2AllManager(All2AllManagerBase):
     def _get_comm_group(self, is_sequence_parallel: bool) -> Any:
         if is_sequence_parallel:
             return get_ep_group()
-        return get_dp_group(include_pcp=self.use_ep)
+        if self.dp_world_size > 1:
+            if self.use_ep and get_pcp_group().world_size > 1:
+                assert self.tp_group.world_size == 1, (
+                    "DP+PCP with TP>1 requires sequence-parallel MoE inputs"
+                )
+                return get_ep_group()
+            return get_dp_group()
+        return get_pcp_group()
 
     def _get_sizes(self, num_local_tokens: int, comm_group: Any) -> list[int]:
         if self.dp_world_size == 1:

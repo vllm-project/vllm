@@ -1522,22 +1522,20 @@ def _replace_active_groups(
     *,
     world: GroupCoordinator | None,
     dp: GroupCoordinator | None,
-    dp_pcp: GroupCoordinator | None,
     ep: GroupCoordinator | None,
     eplb: GroupCoordinator | None,
     node_count: int | None,
 ) -> tuple[GroupCoordinator | None, ...]:
     """Replace the active groups and return the groups they replaced.
 
-    The caller must destroy the returned DP, DP×PCP, EP, WORLD, and EPLB
-    groups collectively and in that order. Pass all-``None`` to remove the
-    active groups without replacement.
+    The caller must destroy the returned DP, EP, WORLD, and EPLB groups
+    collectively and in that order. Pass all-``None`` to remove the active
+    groups without replacement.
     """
-    global _WORLD, _DP, _DP_PCP, _EP, _EPLB, _NODE_COUNT
-    old_groups = _DP, _DP_PCP, _EP, _WORLD, _EPLB
+    global _WORLD, _DP, _EP, _EPLB, _NODE_COUNT
+    old_groups = _DP, _EP, _WORLD, _EPLB
     _WORLD = world
     _DP = dp
-    _DP_PCP = dp_pcp
     _EP = ep
     _EPLB = eplb
     _NODE_COUNT = node_count
@@ -1595,20 +1593,11 @@ def get_pp_group() -> GroupCoordinator:
 
 
 _DP: GroupCoordinator | None = None
-_DP_PCP: GroupCoordinator | None = None
 
 
-def get_dp_group(*, include_pcp: bool = False) -> GroupCoordinator:
-    """Return DP ranks, optionally including PCP ranks for MoE dispatch."""
+def get_dp_group() -> GroupCoordinator:
     assert _DP is not None, "data parallel group is not initialized"
-    if not include_pcp or get_pcp_group().world_size == 1:
-        return _DP
-    if _DP.world_size == 1:
-        return get_pcp_group()
-    if get_tp_group().world_size == 1:
-        return get_ep_group()
-    assert _DP_PCP is not None, "DP×PCP group is not initialized"
-    return _DP_PCP
+    return _DP
 
 
 _EP: GroupCoordinator | None = None
@@ -2218,35 +2207,6 @@ def initialize_model_parallel(
     assert _EP is None, "expert parallel group is already initialized"
     # Don't create EP group for dense models.
     if config.model_config is None or config.model_config.is_moe:
-        if (
-            data_parallel_size > 1
-            and prefill_context_model_parallel_size > 1
-            and tensor_model_parallel_size > 1
-        ):
-            global _DP_PCP
-            assert _DP_PCP is None, "DP×PCP group is already initialized"
-            # Fix ExternalDP, PP, and TP; flatten DP then PCP into each group.
-            group_ranks = all_ranks.permute(0, 2, 4, 1, 3).reshape(
-                -1,
-                data_parallel_size * prefill_context_model_parallel_size,
-            )
-            group_ranks = [x.tolist() for x in group_ranks.unbind(0)]
-            if enable_elastic_ep:
-                _DP_PCP = _init_stateless_group(
-                    group_ranks,
-                    "dp_pcp",
-                    parallel_config.data_parallel_master_ip,
-                    backend,
-                    coord_store=coord_store,
-                )
-            else:
-                _DP_PCP = init_model_parallel_group(
-                    group_ranks,
-                    get_world_group().local_rank,
-                    backend,
-                    group_name="dp_pcp",
-                )
-
         group_ranks = (
             all_ranks.transpose(1, 2)
             .reshape(
@@ -2443,11 +2403,6 @@ def destroy_model_parallel():
     if _DP:
         _DP.destroy()
     _DP = None
-
-    global _DP_PCP
-    if _DP_PCP:
-        _DP_PCP.destroy()
-    _DP_PCP = None
 
     global _EP
     if _EP:

@@ -16,7 +16,6 @@ from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 _STANDBY_WORLD: StatelessGroupCoordinator | None = None
 _STANDBY_WORLD_NODE_COUNT: int | None = None
 _STANDBY_DP: StatelessGroupCoordinator | None = None
-_STANDBY_DP_PCP: StatelessGroupCoordinator | None = None
 _STANDBY_EP: StatelessGroupCoordinator | None = None
 _STANDBY_EPLB: StatelessGroupCoordinator | None = None
 
@@ -50,7 +49,6 @@ def create_standby_groups(
         _STANDBY_WORLD, \
         _STANDBY_WORLD_NODE_COUNT, \
         _STANDBY_DP, \
-        _STANDBY_DP_PCP, \
         _STANDBY_EP, \
         _STANDBY_EPLB
 
@@ -90,21 +88,6 @@ def create_standby_groups(
             standby_dp_ranks, "dp", master_ip, backend, coord_store=coord_store
         )
 
-        if new_dp_size > 1 and pcp_size > 1 and tp_size > 1:
-            standby_dp_pcp_ranks = (
-                all_ranks.permute(0, 2, 4, 1, 3)
-                .reshape(-1, new_dp_size * pcp_size)
-                .unbind(0)
-            )
-            standby_dp_pcp_ranks = [x.tolist() for x in standby_dp_pcp_ranks]
-            _STANDBY_DP_PCP = _init_stateless_group(
-                standby_dp_pcp_ranks,
-                "dp_pcp",
-                master_ip,
-                backend,
-                coord_store=coord_store,
-            )
-
         standby_ep_ranks = (
             all_ranks.transpose(1, 2)
             .reshape(-1, new_dp_size * pcp_size * tp_size)
@@ -136,14 +119,12 @@ def pop_standby_groups() -> dict:
         _STANDBY_WORLD, \
         _STANDBY_WORLD_NODE_COUNT, \
         _STANDBY_DP, \
-        _STANDBY_DP_PCP, \
         _STANDBY_EP, \
         _STANDBY_EPLB
 
     result = dict(
         world=_STANDBY_WORLD,
         dp=_STANDBY_DP,
-        dp_pcp=_STANDBY_DP_PCP,
         ep=_STANDBY_EP,
         eplb=_STANDBY_EPLB,
         node_count=_STANDBY_WORLD_NODE_COUNT,
@@ -151,7 +132,6 @@ def pop_standby_groups() -> dict:
     _STANDBY_WORLD = None
     _STANDBY_WORLD_NODE_COUNT = None
     _STANDBY_DP = None
-    _STANDBY_DP_PCP = None
     _STANDBY_EP = None
     _STANDBY_EPLB = None
     return result

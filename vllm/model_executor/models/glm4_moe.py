@@ -38,6 +38,7 @@ from vllm.distributed import (
     get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
@@ -72,6 +73,7 @@ from .utils import (
     make_layers,
     maybe_fuse_shared_experts,
     maybe_prefix,
+    sequence_parallel_chunk,
     skip_spec_layers,
 )
 
@@ -85,6 +87,7 @@ class Glm4MoeMLP(nn.Module):
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         prefix: str = "",
+        is_sequence_parallel: bool = False,
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -92,6 +95,7 @@ class Glm4MoeMLP(nn.Module):
             [intermediate_size] * 2,
             bias=False,
             quant_config=quant_config,
+            disable_tp=is_sequence_parallel,
             prefix=f"{prefix}.gate_up_proj",
         )
         self.down_proj = RowParallelLinear(
@@ -100,6 +104,7 @@ class Glm4MoeMLP(nn.Module):
             bias=False,
             quant_config=quant_config,
             reduce_results=reduce_results,
+            disable_tp=is_sequence_parallel,
             prefix=f"{prefix}.down_proj",
         )
         if hidden_act != "silu":
@@ -152,6 +157,10 @@ class Glm4MoE(nn.Module):
 
         # Load balancing settings.
         vllm_config = get_current_vllm_config()
+        self.is_sequence_parallel = (
+            vllm_config.parallel_config.prefill_context_parallel_size > 1
+            and vllm_config.parallel_config.use_sequence_parallel_moe
+        )
         eplb_config = vllm_config.parallel_config.eplb_config
         self.enable_eplb = enable_eplb
 
@@ -179,6 +188,7 @@ class Glm4MoE(nn.Module):
                 quant_config=quant_config,
                 reduce_results=False,
                 prefix=f"{prefix}.shared_experts",
+                is_sequence_parallel=self.is_sequence_parallel,
             )
 
         self.experts = FusedMoEFactory(
@@ -205,11 +215,14 @@ class Glm4MoE(nn.Module):
                 config.n_shared_experts if self.is_fused_shared_expert_enabled else None
             ),
             fuse_shared_experts=self.is_fused_shared_expert_enabled,
+            is_sequence_parallel=self.is_sequence_parallel,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
+        if self.is_sequence_parallel:
+            hidden_states = sequence_parallel_chunk(hidden_states)
 
         # router_logits: (num_tokens, n_experts)
         router_logits = self.gate(hidden_states.to(dtype=torch.float32))
@@ -217,6 +230,10 @@ class Glm4MoE(nn.Module):
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
+        if self.is_sequence_parallel:
+            final_hidden_states = tensor_model_parallel_all_gather(
+                final_hidden_states, 0
+            )[:num_tokens]
         return final_hidden_states.view(num_tokens, hidden_dim)
 
 
