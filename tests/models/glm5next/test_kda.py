@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import torch
 
-from vllm.models.glm5next.nvidia.kda import Glm5NextLinearAttention
+from vllm.models.glm5next.common.kda import Glm5NextLinearAttention
 
 
 def _make_attention():
