@@ -26,9 +26,6 @@ def _engram_gather_quant_kernel(
     BLOCK_GROUPS: tl.constexpr,
     LAUNCH_PDL: tl.constexpr,
 ):
-    if LAUNCH_PDL:
-        tl.extra.cuda.gdc_wait()
-        tl.extra.cuda.gdc_launch_dependents()
     groups = tl.program_id(0).to(tl.int64) * BLOCK_GROUPS + tl.arange(0, BLOCK_GROUPS)
     tokens = groups // PADDED_GROUPS
     cols = (groups % PADDED_GROUPS)[:, None] * 32 + tl.arange(0, 32)[None, :]
@@ -37,10 +34,14 @@ def _engram_gather_quant_kernel(
     ranks = cols // LOCAL_WIDTH
     source = (ranks * num_tokens + source_tokens[:, None]) * LOCAL_WIDTH
     source += cols % LOCAL_WIDTH
+    if LAUNCH_PDL:
+        tl.extra.cuda.gdc_launch_dependents()
+        tl.extra.cuda.gdc_wait()
     values = tl.load(
         gathered + source,
         valid & (source_tokens[:, None] < num_tokens),
         other=0,
+        eviction_policy="evict_first",
     ).to(tl.float32)
     amax = tl.max(tl.abs(values), 1)
     normalized = amax * (1.0 / 448.0)
