@@ -204,6 +204,18 @@ def test_partition_padding_is_derived_from_batch_descriptor(
     )
 
 
+def test_dummy_draft_does_not_reuse_previous_graph_batch():
+    manager, _ = _make_capture_manager(torch.ones((4, 2), dtype=torch.int32))
+    dummy_batch = InputBatch.make_dummy(1, 4, manager.input_buffers)
+    manager.draft_prefill_batch = replace(dummy_batch)
+
+    manager.prepare_draft_prefill(dummy_batch, dummy_batch.input_ids)
+
+    assert (
+        manager.get_draft_input_buffers(manager.input_buffers) is manager.input_buffers
+    )
+
+
 def test_capture_uses_pcp_persistent_inputs():
     manager, _ = _make_capture_manager(torch.ones((4, 2), dtype=torch.int32))
 

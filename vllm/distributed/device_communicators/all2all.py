@@ -11,7 +11,7 @@ import torch.distributed as dist
 
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config
-from vllm.distributed import get_ep_group, get_moe_non_sp_group
+from vllm.distributed import get_dp_group, get_ep_group
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
@@ -51,11 +51,12 @@ class AgRsAll2AllManager(All2AllManagerBase):
 
     def __init__(self, cpu_group, tcp_store_group=None):
         super().__init__(cpu_group, tcp_store_group)
+        self.use_ep = get_current_vllm_config().parallel_config.enable_expert_parallel
 
     def _get_comm_group(self, is_sequence_parallel: bool) -> Any:
         if is_sequence_parallel:
             return get_ep_group()
-        return get_moe_non_sp_group()
+        return get_dp_group(include_pcp=self.use_ep)
 
     def _get_sizes(self, num_local_tokens: int, comm_group: Any) -> list[int]:
         if self.dp_world_size == 1:

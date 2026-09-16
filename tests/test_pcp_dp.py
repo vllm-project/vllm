@@ -17,7 +17,7 @@ from vllm.v1.attention.ops.pcp import maybe_gather_mla_latent_cache_inputs
     [
         (1, 1, True, [5, 7]),
         (1, 2, True, [3, 3, 4, 4]),
-        (2, 1, False, [5, 7]),
+        (2, 1, False, [10, 14]),
         (2, 1, True, [5, 5, 7, 7]),
         (2, 2, True, [3, 3, 3, 3, 4, 4, 4, 4]),
     ],
@@ -34,29 +34,39 @@ def test_dispatch_sizes_expand_pcp_before_tp(pcp_size, sp_size, enable_ep, expec
     with metadata.sp_local_sizes(sp_size) as sizes:
         assert sizes == expected
     assert metadata.local_sizes is None
+    assert metadata.num_tokens_across_dp_cpu.tolist() == [5, 7]
 
 
 @pytest.mark.parametrize(
-    "dp_size,pcp_size,expected", [(2, 1, "dp"), (1, 2, "pcp"), (2, 2, "moe")]
+    "dp_size,pcp_size,tp_size,expected",
+    [(2, 1, 2, "dp"), (1, 2, 2, "pcp"), (2, 2, 1, "ep"), (2, 2, 2, "dp_pcp")],
 )
-def test_non_sp_group_reuses_existing_groups(dp_size, pcp_size, expected, monkeypatch):
+def test_dp_group_including_pcp_reuses_existing_groups(
+    dp_size, pcp_size, tp_size, expected, monkeypatch
+):
     groups = {
         "dp": SimpleNamespace(world_size=dp_size),
         "pcp": SimpleNamespace(world_size=pcp_size),
-        "moe": object(),
+        "ep": object(),
+        "dp_pcp": object(),
     }
     monkeypatch.setattr(parallel_state, "_DP", groups["dp"])
     monkeypatch.setattr(parallel_state, "_PCP", groups["pcp"])
-    monkeypatch.setattr(parallel_state, "_MOE_NON_SP_GROUP", groups["moe"])
-    assert parallel_state.get_moe_non_sp_group() is groups[expected]
+    monkeypatch.setattr(parallel_state, "_TP", SimpleNamespace(world_size=tp_size))
+    monkeypatch.setattr(parallel_state, "_EP", groups["ep"])
+    monkeypatch.setattr(parallel_state, "_DP_PCP", groups["dp_pcp"])
+    assert parallel_state.get_dp_group() is groups["dp"]
+    assert parallel_state.get_dp_group(include_pcp=True) is groups[expected]
 
 
-def test_ag_rs_dispatch_and_combine_use_dp_pcp_sizes(monkeypatch):
+@pytest.mark.parametrize("enable_ep", [False, True])
+def test_ag_rs_dispatch_and_combine_use_dp_pcp_sizes(monkeypatch, enable_ep):
     calls = []
+    local_tokens = [20, 21] if enable_ep else [20, 21, 22, 23]
 
     class FakeGroup:
-        world_size = 4
-        rank_in_group = 2
+        world_size = 4 if enable_ep else 2
+        rank_in_group = 2 if enable_ep else 1
 
         def all_gatherv(self, tensors, dim, sizes):
             calls.append(("gather", sizes))
@@ -64,20 +74,27 @@ def test_ag_rs_dispatch_and_combine_use_dp_pcp_sizes(monkeypatch):
 
         def reduce_scatterv(self, tensor, dim, sizes):
             calls.append(("scatter", sizes))
-            return tensor[2:4]
+            return tensor[2 : 2 + len(local_tokens)]
 
     config = ParallelConfig(
         distributed_executor_backend="mp",
         data_parallel_size=2,
         data_parallel_rank=1,
         prefill_context_parallel_size=2,
-        enable_expert_parallel=True,
+        enable_expert_parallel=enable_ep,
     )
     metadata = DPMetadata.make(config, 2, torch.tensor([1, 2]))
     manager = AgRsAll2AllManager.__new__(AgRsAll2AllManager)
     manager.dp_world_size = 2
+    manager.use_ep = enable_ep
+
+    def get_dp_group(*, include_pcp):
+        assert include_pcp == enable_ep
+        return FakeGroup()
+
     monkeypatch.setattr(
-        "vllm.distributed.device_communicators.all2all.get_moe_non_sp_group", FakeGroup
+        "vllm.distributed.device_communicators.all2all.get_dp_group",
+        get_dp_group,
     )
     monkeypatch.setattr(
         "vllm.distributed.device_communicators.all2all.get_forward_context",
@@ -85,11 +102,14 @@ def test_ag_rs_dispatch_and_combine_use_dp_pcp_sizes(monkeypatch):
     )
     with metadata.sp_local_sizes(1):
         hidden_states, _, _ = manager.dispatch(
-            torch.tensor([20, 21]), torch.tensor([1, 1]), torch.tensor([0, 0])
+            torch.tensor(local_tokens),
+            torch.ones(len(local_tokens)),
+            torch.zeros(len(local_tokens)),
         )
         combined = manager.combine(hidden_states)
-    assert combined.tolist() == [20, 21]
-    assert calls == [("gather", [1, 1, 2, 2]), ("scatter", [1, 1, 2, 2])]
+    assert combined.tolist() == local_tokens
+    sizes = [1, 1, 2, 2] if enable_ep else [2, 4]
+    assert calls == [("gather", sizes), ("scatter", sizes)]
 
 
 @pytest.mark.parametrize("slots", [[3, 4], [3, 4, -1, -1, -1, -1]])

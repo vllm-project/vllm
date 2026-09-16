@@ -443,7 +443,7 @@ class ElasticEPScalingExecutor:
         retired_groups = _replace_active_groups(
             world=None,
             dp=None,
-            moe_non_sp=None,
+            dp_pcp=None,
             ep=None,
             eplb=None,
             node_count=None,
