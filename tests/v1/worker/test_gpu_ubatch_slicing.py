@@ -701,7 +701,8 @@ def test_microbatches_recompute_dcp_lens_from_truncated_seq_lens(dcp_rank: int):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="triton kernel needs CUDA")
 def test_each_microbatch_owns_its_dcp_buffer():
     """Microbatch DCP lengths live in per-microbatch persistent buffers so
-    CPU-visible shapes stay valid under CUDA graph capture and replay."""
+    CPU-visible shapes stay valid under CUDA graph capture and replay.
+    """
     input_batch, _ = _make_cuda_input_batch([4, 4, 4, 4], [8, 9, 10, 11])
 
     ubatches, dcp_buffers = _slice_with_dcp(input_batch, dcp_rank=0)

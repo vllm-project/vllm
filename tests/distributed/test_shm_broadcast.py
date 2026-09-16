@@ -43,6 +43,7 @@ def distributed_run(fn, world_size, timeout=60):
         fn: Function to run in each process
         world_size: Number of processes to spawn
         timeout: Maximum time in seconds to wait for processes (default: 60)
+
     """
     number_of_processes = world_size
     processes = []
@@ -418,7 +419,8 @@ def test_tensor_broadcast():
 
 def _dumps_oob(obj) -> tuple[bytes, list]:
     """Pickle `obj` the same way `MessageQueue.enqueue` does: tensor
-    dispatch table + out-of-band buffers >= 1MiB."""
+    dispatch table + out-of-band buffers >= 1MiB.
+    """
     buffers = []
 
     def callback(buf: pickle.PickleBuffer) -> bool:
@@ -489,7 +491,8 @@ def test_tensor_pickle_roundtrip(case: str):
 @pytest.mark.parametrize("case", ["cuda", "requires_grad", "conj"])
 def test_reduce_tensor_fallback(case: str):
     """Tensors the zero-copy reducer can't safely alias must fall back to
-    torch's default reduction."""
+    torch's default reduction.
+    """
     if case == "cuda":
         if not torch.cuda.is_available():
             pytest.skip("requires CUDA")
@@ -634,11 +637,9 @@ def test_acquire_read_releases_slot_when_reader_raises():
 
 
 def test_warning_logs(caplog_vllm):
-    """
-    Test that warning logs are emitted at VLLM_RINGBUFFER_WARNING_INTERVAL intervals
+    """Test that warning logs are emitted at VLLM_RINGBUFFER_WARNING_INTERVAL intervals
     when indefinite=False, and are not emitted when indefinite=True.
     """
-
     # Patch the warning log interval to every 1 ms during reads
     with mock.patch(
         "vllm.distributed.device_communicators.shm_broadcast.VLLM_RINGBUFFER_WARNING_INTERVAL",
@@ -694,14 +695,43 @@ def test_check_shm_free_space_raises_when_insufficient(tmp_path):
 
 
 def test_check_shm_free_space_passes_when_sufficient(tmp_path):
-    with mock.patch.object(
-        shm_broadcast.shutil, "disk_usage", return_value=_fake_disk_usage(512 << 20)
+    with (
+        mock.patch.object(
+            shm_broadcast.shutil,
+            "disk_usage",
+            return_value=_fake_disk_usage(512 << 20),
+        ),
+        mock.patch.object(shm_broadcast, "check_cgroup_memory_available"),
     ):
         check_shm_free_space(240 << 20, shm_path=str(tmp_path))
 
 
 def test_check_shm_free_space_skipped_when_path_missing(tmp_path):
-    check_shm_free_space(1 << 60, shm_path=str(tmp_path / "does-not-exist"))
+    with mock.patch.object(shm_broadcast, "check_cgroup_memory_available"):
+        check_shm_free_space(1 << 60, shm_path=str(tmp_path / "does-not-exist"))
+
+
+def test_check_shm_free_space_checks_cgroup(tmp_path):
+    with (
+        mock.patch.object(
+            shm_broadcast.shutil,
+            "disk_usage",
+            return_value=_fake_disk_usage(512 << 20),
+        ),
+        mock.patch.object(
+            shm_broadcast, "check_cgroup_memory_available"
+        ) as check_cgroup,
+    ):
+        check_shm_free_space(
+            240 << 20,
+            shm_path=str(tmp_path),
+            allocation_name="SHM mmap",
+        )
+
+    check_cgroup.assert_called_once_with(
+        240 << 20,
+        "SHM mmap",
+    )
 
 
 def test_shm_ring_buffer_creation_checks_free_space():
@@ -725,7 +755,8 @@ def test_remote_subscribe_addr_unique_concurrent_writers(
     Pre-fix, the writer probed a port with get_open_port() and bound it
     afterwards; pinning the probe to one free port makes every writer
     bind the same port and fail deterministically on that code path,
-    while the late-binding implementation never consults the probe."""
+    while the late-binding implementation never consults the probe.
+    """
     from vllm.distributed.device_communicators import shm_broadcast
 
     colliding_port = get_open_port()

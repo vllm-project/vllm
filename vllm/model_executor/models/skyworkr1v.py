@@ -49,13 +49,12 @@ from .utils import (
 
 
 class SkyworkR1VImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bnp: Batch size * number of images * (1 + num_patches)
-        - c: Number of channels (3)
-        - h: Height
-        - w: Width
-        - bn: Batch size * number of images
+    """Dimensions:
+    - bnp: Batch size * number of images * (1 + num_patches)
+    - c: Number of channels (3)
+    - h: Height
+    - w: Width
+    - bn: Batch size * number of images
     """
 
     type: Literal["pixel_values"] = "pixel_values"
@@ -72,12 +71,11 @@ class SkyworkR1VImagePixelInputs(TensorSchema):
 
 
 class SkyworkR1VImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - ni: Number of images
-        - ifs: Image feature size
-        - hs: Hidden size (must match the hidden size of language model
-          backbone)
+    """Dimensions:
+    - ni: Number of images
+    - ifs: Image feature size
+    - hs: Hidden size (must match the hidden size of language model
+      backbone)
     """
 
     type: Literal["image_embeds"] = "image_embeds"

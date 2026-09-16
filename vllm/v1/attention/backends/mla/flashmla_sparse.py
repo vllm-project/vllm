@@ -20,7 +20,11 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.platform_utils import num_compute_units
-from vllm.utils.torch_utils import current_stream, is_quantized_kv_cache
+from vllm.utils.torch_utils import (
+    async_tensor_h2d,
+    current_stream,
+    is_quantized_kv_cache,
+)
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -48,7 +52,6 @@ from vllm.v1.attention.ops.flashmla import (
     get_mla_metadata,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -434,7 +437,6 @@ class FlashMLASparseMetadataBuilder(
         be the full batch or only decodes when prefills use dense MHA. This avoids
         the BF16 prefill kernel's head-padding overhead at high TP.
         """
-
         scheduler_metadata, _ = get_mla_metadata()
         return FlashMLASparseMetadata.FP8KernelMetadata(
             scheduler_metadata=scheduler_metadata,
@@ -519,7 +521,7 @@ class FlashMLASparseMetadataBuilder(
                 )
                 workspace_rows = torch.from_numpy(rows_per_rank.astype(np.int32))
                 max_prefill_buffer_size //= self.dcp_world_size
-                entry_rows = async_copy_to_gpu(row_bounds[:-1], device=self.device)
+                entry_rows = async_tensor_h2d(row_bounds[:-1], device=self.device)
                 prefill_block_table = prefill_block_table.index_select(0, entry_rows)
                 prefill_seq_lens = prefill_seq_lens.index_select(0, entry_rows)
             num_entries = len(workspace_rows)
@@ -845,7 +847,8 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         prefill_meta: "FlashMLASparseMetadata.FP8SeparatePrefillDecode.Prefill",
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """All-gather this rank's upconverted KV shard so the chunk's rows attend
-        the whole context, and map their top-k onto the rank-major result."""
+        the whole context, and map their top-k onto the rank-major result.
+        """
         shard_rows = int(chunk.chunk_tot_seqlen)
         assert self.gathered_kv_workspace is not None
         gathered_kv = self.gathered_kv_workspace[: self.dcp_world_size * shard_rows]

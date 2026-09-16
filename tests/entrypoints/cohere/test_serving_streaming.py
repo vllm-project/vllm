@@ -87,7 +87,8 @@ def _make_chunk(
     citations: list[Any] | None = None,
 ) -> str:
     """Build the ``data: {...}\\n\\n`` SSE frame the production code
-    consumes."""
+    consumes.
+    """
     delta: dict[str, Any] = {}
     if role is not None:
         delta["role"] = role
@@ -135,7 +136,8 @@ async def _stream_from(items: list[str]) -> AsyncGenerator[str, None]:
 
 async def _drain(serving: CohereServingChatV2, items: list[str]) -> list[str]:
     """Drive ``_chat_completion_stream_to_v2`` over ``items`` and collect
-    the emitted SSE frames."""
+    the emitted SSE frames.
+    """
     request = CohereChatV2Request(
         model="m", messages=[{"role": "user", "content": "hi"}], stream=True
     )

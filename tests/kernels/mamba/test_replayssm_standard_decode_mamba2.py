@@ -95,7 +95,8 @@ def _run_standard_decode(
 ) -> None:
     """Drive ``num_steps`` decode steps and check every path against the
     trusted recurrence. ``state_dtype`` is the recurrent-state precision;
-    ``act_dtype`` is the activation/buffer precision."""
+    ``act_dtype`` is the activation/buffer precision.
+    """
     device = "cuda"
     both_fp32 = state_dtype == torch.float32 and act_dtype == torch.float32
     rtol, atol = _tolerances(torch.float32 if both_fp32 else torch.bfloat16)
@@ -539,7 +540,8 @@ def test_replayssm_standard_decode_tp_head_shard_equivalence(
     separable: one run over all heads must equal concatenating ``tp`` independent
     per-rank runs on ``nheads // tp`` heads and ``ngroups // tp`` groups. This
     guards the per-rank divisors and group->head mapping the state-shape wiring
-    relies on. The real TP1==TP2 engine check lives in the v1/e2e suite."""
+    relies on. The real TP1==TP2 engine check lives in the v1/e2e suite.
+    """
     state_dtype, act_dtype = precision
     nheads, headdim, dstate, ngroups = geometry
     assert nheads % tp == 0 and ngroups % tp == 0

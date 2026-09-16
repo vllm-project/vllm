@@ -2,8 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E501
 
-"""
-Script to convert Large Language Models (LLMs) to Sequence Classification models.
+"""Script to convert Large Language Models (LLMs) to Sequence Classification models.
 This is particularly useful for converting reranker models that use next-token
 prediction to a sequence classification format for compatibility with standard
 classification and rerank pipelines.
@@ -35,8 +34,7 @@ import transformers
 
 
 def from_2_way_softmax(causal_lm, seq_cls_model, tokenizer, tokens, device):
-    """
-    This method extracts the difference between weights for 'true' and 'false' tokens
+    """This method extracts the difference between weights for 'true' and 'false' tokens
     from the language model head to create a single classification weight vector.
 
     Args:
@@ -47,6 +45,7 @@ def from_2_way_softmax(causal_lm, seq_cls_model, tokenizer, tokens, device):
         device: Target device (cpu/cuda)
 
     Reference: https://huggingface.co/Qwen/Qwen3-Reranker-0.6B/discussions/3
+
     """
     assert len(tokens) == 2, (
         "Method requires exactly two tokens for binary classification"
@@ -73,8 +72,7 @@ def from_2_way_softmax(causal_lm, seq_cls_model, tokenizer, tokens, device):
 
 
 def no_post_processing(causal_lm, seq_cls_model, tokenizer, tokens, device):
-    """
-    Directly use token weights from the language model head for classification.
+    """Directly use token weights from the language model head for classification.
 
     This method maps each classification label directly to a corresponding token
     in the vocabulary without additional transformation.
@@ -85,6 +83,7 @@ def no_post_processing(causal_lm, seq_cls_model, tokenizer, tokens, device):
         tokenizer: Model tokenizer
         tokens: List of tokens representing class labels
         device: Target device (cpu/cuda)
+
     """
     # Get the language model head weights (vocabulary_size x hidden_size)
     lm_head_weights = causal_lm.lm_head.weight
@@ -110,8 +109,7 @@ method_map = {
 def converting(
     model_name, classifier_from_tokens, path, method, use_sep_token=False, device="cpu"
 ):
-    """
-    Main conversion function to transform a CausalLM model to SequenceClassification.
+    """Main conversion function to transform a CausalLM model to SequenceClassification.
 
     Args:
         model_name: Name or path of the pretrained model
@@ -120,6 +118,7 @@ def converting(
         method: Conversion method ('from_2_way_softmax' or 'no_post_processing')
         use_sep_token: Whether to use separating token in the sequence classification model
         device: Device to load the model on ('cpu' or 'cuda')
+
     """
     assert method in method_map, f"Unknown method: {method}"
 
