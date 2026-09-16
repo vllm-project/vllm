@@ -48,8 +48,7 @@ class INCScheme(ABC):
         layer_config: "INCLayerConfig",
     ) -> "FusedMoEMethodBase | None":
         """Optional. Override if this scheme supports MoE.
-        Default raises NotImplementedError.
-        """
+        Default raises NotImplementedError."""
         raise NotImplementedError(
             f"{type(self).__name__} does not support MoE layers. "
             f"Layer config: {layer_config}"

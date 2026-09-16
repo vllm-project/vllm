@@ -129,8 +129,7 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
 
     def is_argmax_invariant(self) -> bool:
         """Logit bias can rebalance token probabilities and change the
-        outcome of argmax in greedy sampling.
-        """
+        outcome of argmax in greedy sampling."""
         return False
 
     def update_state(self, batch_update: BatchUpdate | None):
@@ -189,8 +188,7 @@ class MinTokensLogitsProcessor(LogitsProcessor):
 
     def is_argmax_invariant(self) -> bool:
         """By censoring stop tokens, min-tokens can change the outcome
-        of the argmax operation in greedy sampling.
-        """
+        of the argmax operation in greedy sampling."""
         return False
 
     @staticmethod

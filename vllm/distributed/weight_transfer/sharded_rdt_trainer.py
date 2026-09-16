@@ -132,8 +132,7 @@ PRODUCE_METHOD_NAME = "rdt_produce_weights_batched"
 @dataclass
 class _SharedPack:
     """One generation of one slot-sharing group: the rendezvous state for a
-    single chunk, identified by the consumers' issue index.
-    """
+    single chunk, identified by the consumers' issue index."""
 
     group: int
     slot: int
@@ -467,8 +466,7 @@ class _RDTProducerServer:
 
     def end_sync(self) -> list[int]:
         """Block until every published group has been freed by its consumers;
-        return the remaining freed keys so the engine drops its last refs.
-        """
+        return the remaining freed keys so the engine drops its last refs."""
         with self._cache_cond:
             self._wait_for(
                 lambda: bool(self._inflight_groups),
@@ -481,8 +479,7 @@ class _RDTProducerServer:
 
     def set_gather_error(self, message: str) -> None:
         """Record a trainer-side gather failure so blocked serves / publishes
-        stop waiting and surface it.
-        """
+        stop waiting and surface it."""
         with self._cache_cond:
             self._gather_error = RuntimeError(message)
             self._cache_cond.notify_all()
@@ -511,8 +508,7 @@ class _RDTProducerServer:
     def _new_serve_buffer(self, nbytes: int) -> torch.Tensor:
         """Allocate + NIXL-register one serve slot: the single allocation seam,
         so registration cannot be skipped on either of the two paths that make
-        buffers (the init-time reservation and the serve-path backstop).
-        """
+        buffers (the init-time reservation and the serve-path backstop)."""
         t = torch.empty(nbytes, dtype=torch.uint8, device=self._serve_device)
         with self._reg_lock:
             register_nixl_memory(t)
@@ -584,15 +580,13 @@ class _RDTProducerServer:
     def _share_group(self, consumer_id: int) -> int:
         """The slot-sharing group ``consumer_id`` belongs to: its index within
         its own deployment, since that is what fixes the plan. Without a width
-        the group is the consumer itself and nothing is shared.
-        """
+        the group is the consumer itself and nothing is shared."""
         return consumer_id % self._share_width if self._share_width > 0 else consumer_id
 
     def _sharers_of(self, sg: int) -> frozenset:
         """The LIVE consumers of group ``sg``: the rendezvous width. Derived from
         ``begin_sync``'s live set, so a degraded sync narrows the barrier instead
-        of waiting forever on a dead deployment. Caller holds ``_cache_cond``.
-        """
+        of waiting forever on a dead deployment. Caller holds ``_cache_cond``."""
         cached = self._sharers.get(sg)
         if cached is None:
             if not self._sharing_active or self._live_ids is None:
@@ -628,8 +622,7 @@ class _RDTProducerServer:
     def _await_shared_pack(self, gen: _SharedPack) -> torch.Tensor:
         """Block until this generation's packer published its blob, and return
         it. A failed pack is re-raised here, so every sharer of a bad pack fails
-        instead of reading a half-written slot.
-        """
+        instead of reading a half-written slot."""
         with self._cache_cond:
             self._wait_for(
                 lambda: not gen.done and gen.error is None,
@@ -650,8 +643,7 @@ class _RDTProducerServer:
         """Group ``sg``'s ring slot ``idx``, grown if this chunk outgrew the
         reservation. Growing registers memory while the fabric is busy, the
         hazard ``reserve_serve_buffer`` exists to avoid, so it is a backstop: the
-        reservation is sized from the same static plan as this pack.
-        """
+        reservation is sized from the same static plan as this pack."""
         with self._serve_lock:
             buffer = self._serve_rings.setdefault(sg, [None] * self._nring)[idx]
         if buffer is not None and buffer.numel() >= need:
@@ -663,8 +655,7 @@ class _RDTProducerServer:
 
     def _fail_shared_pack(self, gen: _SharedPack, exc: BaseException) -> None:
         """Publish a pack failure so waiting sharers raise instead of hanging on
-        a generation that will never complete.
-        """
+        a generation that will never complete."""
         with self._cache_cond:
             gen.error = exc
             self._cache_cond.notify_all()
@@ -866,8 +857,7 @@ class ShardedRDTTrainerWeightTransferEngine(
     def _rpc(self, method: str, *args: Any) -> Any:
         """Call one of the server actor's methods and block for the result.
         The single seam through which the engine talks to its server, so tests
-        can inject a local (non-Ray) fake server.
-        """
+        can inject a local (non-Ray) fake server."""
         import ray
 
         return ray.get(getattr(self._server, method).remote(*args))
@@ -944,8 +934,7 @@ class ShardedRDTTrainerWeightTransferEngine(
         """Fire publish_group WITHOUT waiting on the RPC (the gather loop
         overlaps the publish's server-side rebuild with the next group's
         gather) and return a handle that ``_await_publish`` resolves. Ray actor
-        handle in production; a plain (non-Ray) fake server runs inline.
-        """
+        handle in production; a plain (non-Ray) fake server runs inline."""
         method = self._server.publish_group
         remote = getattr(method, "remote", None)
         if remote is not None:
@@ -956,8 +945,7 @@ class ShardedRDTTrainerWeightTransferEngine(
         """Resolve one async publish so a server-side rebuild error surfaces at
         window depth instead of at end_sync. Publishes carry nothing back —
         freed groups flow only through wait_freed/end_sync (one channel; see
-        publish_group).
-        """
+        publish_group)."""
         import ray
 
         if isinstance(ref, ray.ObjectRef):
@@ -1144,8 +1132,7 @@ class ShardedRDTTrainerWeightTransferEngine(
         by stall watchdog 300s later: consumers route pulls here, the pull
         passes the served-names guard, and the cache wait never completes. With
         it, that is an immediate error naming the weight. One set lookup per
-        name per sync.
-        """
+        name per sync."""
         if self._held_names is None:
             return
         for name, tensor in zip(names, tensors):
@@ -1346,8 +1333,7 @@ class ShardedRDTTrainerWeightTransferEngine(
         credit releases when every live consumer has signaled the group). So
         the loop self-paces to the consumers' pull rate with at most
         `gather_lookahead + 1` groups resident. Runs on every rank; only the
-        sender has an `update_future` to fail fast on.
-        """
+        sender has an `update_future` to fail fast on."""
         assert self.source is not None  # guaranteed by trainer_init
         # The live IDS ride along with the count: the free barrier needs only
         # the count, but the slot-sharing rendezvous needs to know WHICH

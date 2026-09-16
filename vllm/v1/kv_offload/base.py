@@ -472,8 +472,7 @@ class CopyRun:
     """A strided byte correspondence between this worker's physical page and
     a canonical page: for i in range(num_fragments), fragment i spans
     [local_offset + i * local_stride, +fragment_size) in the worker's page and
-    [canonical_offset + i * canonical_stride, +fragment_size) canonically.
-    """
+    [canonical_offset + i * canonical_stride, +fragment_size) canonically."""
 
     local_offset: int
     canonical_offset: int
@@ -554,8 +553,7 @@ class TransferResult:
 class OffloadingWorker(ABC):
     """Runs in the worker process. Performs async KV transfers for ONE
     offloaded medium (e.g. CPU). Direction is explicit via submit_store /
-    submit_load, so there is no (src_medium, dst_medium) routing.
-    """
+    submit_load, so there is no (src_medium, dst_medium) routing."""
 
     @abstractmethod
     def submit_store(

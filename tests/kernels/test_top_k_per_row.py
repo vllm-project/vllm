@@ -1740,8 +1740,7 @@ def test_sparse_indexer_decode_topk_explicit_backends(
 ) -> None:
     """Every explicit sparse-indexer decode top-k backend must restrict each
     row to its seq_len (dirty data past the end must never be selected) and
-    match torch.topk on the valid region.
-    """
+    match torch.topk on the valid region."""
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.indexer_topk import SparseIndexerTopk
 
@@ -1812,8 +1811,7 @@ def test_sparse_indexer_decode_topk_short_seq_lens(
     backend: str, workspace_init
 ) -> None:
     """seq_len < next_n: derived per-row ends must clamp at 0 (the reference
-    kernels do max(0, ...)); negative ends are OOB for the ragged kernels.
-    """
+    kernels do max(0, ...)); negative ends are OOB for the ragged kernels."""
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.indexer_topk import SparseIndexerTopk
 
