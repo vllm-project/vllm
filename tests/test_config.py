@@ -3007,6 +3007,17 @@ def test_eagle_block_drop_can_be_disabled_without_disabling_eagle(
     assert speculative_config.use_eagle_block_drop() is not disable_eagle_block_drop
 
 
+def test_dspark_does_not_use_eagle_block_drop():
+    speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=3,
+    )
+    speculative_config.method = "dspark"
+
+    assert speculative_config.use_eagle()
+    assert not speculative_config.use_eagle_block_drop()
+
+
 def test_draft_sample_method_gumbel_is_rejected():
     with pytest.raises(ValidationError):
         SpeculativeConfig(
