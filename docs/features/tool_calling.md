@@ -473,6 +473,12 @@ Supported models:
 
 Flags: `--tool-call-parser apertus`
 
+### Xing4_0 Models (`xing4_0`)
+
+Tool calls are emitted inside `<tool_call>...</tool_call>` blocks, either as JSON (`{"name": ..., "arguments": {...}}`) or as a tag-based form (`<param_key>...</param_key><param_value>...</param_value>`).
+
+Flags: `--tool-call-parser xing4_0`
+
 ### Models with Pythonic Tool Calls (`pythonic`)
 
 A growing number of models output a python list to represent tool calls instead of using JSON. This has the advantage of inherently supporting parallel tool calls and removing ambiguity around the JSON schema required for tool calls. The `pythonic` tool parser can support such models.

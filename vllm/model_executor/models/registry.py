@@ -214,6 +214,7 @@ _TEXT_GENERATION_MODELS = {
     "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
     "TeleChat3ForCausalLM": ("llama", "LlamaForCausalLM"),
     "TeleFLMForCausalLM": ("teleflm", "TeleFLMForCausalLM"),
+    "Xing4_0ForCausalLM": ("xing4_0", "Xing4_0ForCausalLM"),
     "Zamba2ForCausalLM": ("zamba2", "Zamba2ForCausalLM"),
 }
 
