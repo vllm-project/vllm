@@ -400,22 +400,15 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
 
         spec_request_indices = None
         if num_spec_decodes == 0:
-            # The runner orders ordinary decodes before prefills. Query length
-            # alone cannot distinguish a true decode from a one-token prefill
-            # chunk, so classify by state instead: a chunk that resumes a
-            # partially prefilled request owns valid KDA state and stays a
-            # decode, while a *first* chunk owns none and must be a prefill.
-            # The decode route below reads its conv/recurrent slot
-            # unconditionally, and mamba blocks are not zeroed on reallocation;
-            # only the prefill route masks the slot with `has_initial_state`.
-            # The dummy batch used for cudagraph capture also has
-            # seq_len == query_len, so require the runner's prefill flag as
-            # well and only ever demote a row the runner is still prefilling.
+            # V2 already excludes prefills from full decode graphs via has_prefill.
+            # Classify first chunks as prefills to mask recycled state;
+            # resumed one-token chunks can still use the decode kernels.
             assert m.seq_lens_cpu_upper_bound is not None
             query_lens_cpu = query_start_loc_cpu.diff()
             no_prior_state = (query_lens_cpu > 0) & (
                 m.seq_lens_cpu_upper_bound <= query_lens_cpu
             )
+            # Capture batches also have seq_len == query_len, but are not prefills.
             if m.is_prefilling is not None:
                 no_prior_state &= m.is_prefilling
             else:
@@ -427,13 +420,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                     treat_short_extends_as_decodes=False,
                 )
             )
-            # `split_decodes_and_prefills` counts the whole suffix after the
-            # first prefill, so trailing cudagraph padding lands in
-            # `num_prefills` once a stateless first chunk promotes a row ahead
-            # of it. `num_prefill_tokens` is inflated separately: it inherits
-            # `num_actual_tokens`, which a full cudagraph pads past the last
-            # real token. Padding rows only ever trail the batch, so dropping
-            # them from the request count also gives the real token boundary.
+            # Exclude trailing padding from both prefill counts.
             if num_prefills:
                 num_prefills -= int((query_lens_cpu[num_decodes:] == 0).sum())
                 num_prefill_tokens = (
@@ -689,11 +676,8 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             spec_query_start_loc = self.spec_query_start_loc[: batch_size + 1]
             num_accepted_tokens = self.num_accepted_tokens[:batch_size]
 
-        # Decode-graph dispatch is shape-based, so a one-token batch can replay
-        # the captured decode graph even when a stateless first chunk made it a
-        # prefill batch above. Stage on the same condition the dispatcher uses,
-        # otherwise the replay would read state indices from an earlier step.
-        # `block_table_tensor` already holds NULL_BLOCK_ID for padded requests.
+        # The V1 runner dispatches decode graphs by shape, even for first chunks.
+        # Refresh their state indices too; this does not initialize the state.
         if (
             self.use_full_cuda_graph
             and num_spec_decodes == 0
