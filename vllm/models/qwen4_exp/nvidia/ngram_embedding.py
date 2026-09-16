@@ -14,6 +14,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
 from vllm.model_executor.models.utils import AutoWeightsLoader
+from vllm.utils.math_utils import round_up
 
 from ..common.ngram_embedding import (
     Qwen4ExpPLEDeviceEmbedding,
@@ -196,7 +197,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             persistent=True,
         )
         divisor = int(config.make_ngram_vocab_size_divisible_by)
-        padded_vocab_size = ((total_vocab_size + divisor - 1) // divisor) * divisor
+        padded_vocab_size = round_up(total_vocab_size, divisor)
         embedding_prefix = f"{prefix}.ngram_embedding"
         embedding_quant_method = Qwen4ExpPLEEmbeddingMethod.from_quant_config(
             quant_config,

@@ -22,6 +22,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
 from vllm.model_executor.models.utils import AutoWeightsLoader
+from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import (
@@ -232,7 +233,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             persistent=True,
         )
         divisor = int(config.make_ngram_vocab_size_divisible_by)
-        padded_vocab_size = ((total_vocab_size + divisor - 1) // divisor) * divisor
+        padded_vocab_size = round_up(total_vocab_size, divisor)
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         embedding_prefix = f"{prefix}.ngram_embedding"
