@@ -757,9 +757,12 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
   }
   TORCH_CHECK(K_in % 16 == 0, "K must be divisible by 16");
 
+  // The medium kernel reads the activation rows that do not fit in LDS
+  // straight from global memory, so K * N is not bounded by LDS. It does index
+  // A linearly, which a non-contiguous activation would break.
+  TORCH_CHECK(in_b.is_contiguous(), "Activation must be contiguous");
+
   const int max_lds_len = get_lds_size_int4() / 2;
-  TORCH_CHECK(K_in * N_in <= (int64_t)(max_lds_len * 1.2),
-              "K*N exceeds LDS capacity (medium limit). K=", K_in, " N=", N_in);
 
   auto out_c = torch::empty(
       {N_in, M_in},

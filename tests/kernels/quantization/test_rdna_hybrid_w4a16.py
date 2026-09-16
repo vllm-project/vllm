@@ -491,6 +491,12 @@ def _hip_skinny_reference(
         (3, 4096, 256, 64),
         (4, 2560, 256, 128),
         (5, 4096, 256, 32),
+        # K * batch beyond what LDS holds (32768 fp16 elements): the medium
+        # kernel reads the overflow rows from global memory. These raised
+        # before the LDS bound was lifted.
+        (3, 16384, 512, 32),
+        (4, 16384, 512, 128),
+        (5, 21504, 512, 32),
     ],
 )
 def test_hip_skinny_wvSplitK_int4_g(dtype, M, K, N, G, has_zp):
