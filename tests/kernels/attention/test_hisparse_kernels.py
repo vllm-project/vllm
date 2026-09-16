@@ -665,6 +665,7 @@ def run_device_resolve(case: ResolveCase, state: ResolveState) -> ResolveOutputs
         dev(cfg.request_state_indices),
         cfg.region_stride,
         d_miss,
+        None,  # stats: hit/miss counters, not part of the oracle contract
         d_attention,
         cfg.attention_block_stride,
         dev(cfg.request_ids),
