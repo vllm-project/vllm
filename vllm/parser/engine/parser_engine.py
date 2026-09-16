@@ -429,6 +429,17 @@ class ParserEngine(Parser):
             if tool_choice == "none" and tools:
                 self._suppress_tool_calls = True
 
+    def _sync_skip_special_tokens(
+        self,
+        request: ChatCompletionRequest | ResponsesRequest,
+    ) -> None:
+        # Serving normally clears this via adjust_request(); when it does
+        # not (tool parser only, tool_choice "none"), the detokenizer
+        # strips special tokens and the scanner must not wait for them.
+        self._engine.skip_special_tokens = bool(
+            getattr(request, "skip_special_tokens", False)
+        )
+
     def _strip_content_whitespace(
         self,
         content: str,
@@ -460,6 +471,7 @@ class ParserEngine(Parser):
             self.adjust_initial_state_from_prompt(prompt_token_ids)
             self._prompt_streaming_prepared = True
         self._check_skip_tool_parsing(request)
+        self._sync_skip_special_tokens(request)
         events = self._feed(delta_text, delta_token_ids)
         if finished:
             events.extend(self._engine.finish())
@@ -606,6 +618,7 @@ class ParserEngine(Parser):
     ) -> DeltaMessage | None:
         self.initialize_streaming()
         self._check_skip_tool_parsing(request)
+        self._sync_skip_special_tokens(request)
         events = self._feed(delta_text, delta_token_ids)
         return self._strip_trailing_reasoning(self._events_to_delta(events))
 

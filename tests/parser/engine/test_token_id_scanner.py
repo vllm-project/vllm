@@ -1015,3 +1015,59 @@ class TestRebuildFromAnchorsCascadingDeferral:
         assert bare_scanner._deferred_post_text == "more"
         assert len(bare_scanner._deferred_terminals) == 1
         assert bare_scanner._deferred_terminals[0].terminal == "THINK_END"
+
+
+class TestSkipSpecialTokens:
+    """Under ``skip_special_tokens`` the detokenizer never emits special-
+    token text, so a deferred terminal must neither hold the stream nor
+    resurface as text (vllm-project/vllm#57232)."""
+
+    @pytest.fixture
+    def stripping_scanner(self, tokenizer):
+        scanner = TokenIDScanner(
+            token_id_to_terminal={
+                CHANNEL_START_ID: "THINK_START",
+                CHANNEL_END_ID: "THINK_END",
+            },
+            tokenizer=tokenizer,
+            special_token_ids=frozenset({CHANNEL_START_ID, CHANNEL_END_ID}),
+        )
+        scanner.skip_special_tokens = True
+        return scanner
+
+    def test_terminal_resolves_textless_at_next_delta(self, stripping_scanner):
+        assert stripping_scanner.scan("", [CHANNEL_END_ID]) == []
+
+        result = stripping_scanner.scan("after", [REGULAR_TOKEN_ID])
+
+        assert [type(r) for r in result] == [PreLexedTerminal, TextChunk]
+        assert result[0].terminal == "THINK_END"
+        assert result[0].text == ""
+        assert result[1].text == "after"
+
+    def test_terminal_resolves_textless_at_finish(self, stripping_scanner):
+        assert stripping_scanner.scan("", [CHANNEL_END_ID]) == []
+
+        [terminal] = stripping_scanner.flush_pending()
+
+        assert isinstance(terminal, PreLexedTerminal)
+        assert terminal.text == ""
+
+    def test_text_captured_with_terminal_stays_before_it(self, stripping_scanner):
+        """A batched delta whose text precedes the stripped id keeps that
+        order once the terminal is resolved."""
+        assert (
+            stripping_scanner.scan("regular", [REGULAR_TOKEN_ID, CHANNEL_END_ID]) == []
+        )
+
+        result = stripping_scanner.scan("after", [REGULAR_TOKEN_ID])
+
+        assert [type(r) for r in result] == [TextChunk, PreLexedTerminal, TextChunk]
+        assert result[0].text == "regular"
+        assert result[1].text == ""
+        assert result[2].text == "after"
+
+    def test_flag_off_keeps_deferring(self, scanner):
+        """Without the flag, hold-back text may still arrive: unchanged."""
+        assert not scanner.scan("", [CHANNEL_END_ID])
+        assert not scanner.scan("after", [REGULAR_TOKEN_ID])
