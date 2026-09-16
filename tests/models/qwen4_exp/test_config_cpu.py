@@ -7,12 +7,20 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
+import torch
+from torch import nn
 
 from vllm.model_executor.models.config import (
     Qwen3_5ForConditionalGenerationConfig,
     Qwen4ExpForConditionalGenerationConfig,
 )
+from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
 from vllm.models.qwen4_exp.cpu import runtime as cpu_runtime
+from vllm.models.qwen4_exp.cpu.model import (
+    Qwen4ExpSparseMoeBlock,
+    _get_padded_moe_intermediate_size,
+    _pad_moe_checkpoint_weights,
+)
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.transformers_utils.configs.qwen4_exp import Qwen4ExpTextConfig
@@ -59,9 +67,7 @@ def _vllm_config(restriction: str | None = None) -> SimpleNamespace:
         lora_config=None,
         use_v2_model_runner=restriction != "model_runner",
     )
-    if restriction == "tensor_parallel":
-        config.parallel_config.tensor_parallel_size = 2
-    elif restriction == "speculative":
+    if restriction == "speculative":
         config.speculative_config = SimpleNamespace()
     elif restriction == "lora":
         config.lora_config = SimpleNamespace()
@@ -74,7 +80,6 @@ def _vllm_config(restriction: str | None = None) -> SimpleNamespace:
     ("restriction", "error", "message"),
     [
         ("architecture", NotImplementedError, "x86-64"),
-        ("tensor_parallel", NotImplementedError, "tensor_parallel_size=1"),
         ("speculative", NotImplementedError, "speculative decoding"),
         ("lora", NotImplementedError, "LoRA"),
         ("multimodal", NotImplementedError, "text-only"),
@@ -131,6 +136,134 @@ def test_qwen4_exp_cpu_accepts_supported_runtime() -> None:
         ),
     ):
         Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(_vllm_config())
+
+
+def test_qwen4_exp_cpu_accepts_tensor_parallel_runtime() -> None:
+    config = _vllm_config()
+    config.parallel_config.tensor_parallel_size = 2
+    with (
+        patch.object(
+            Qwen3_5ForConditionalGenerationConfig,
+            "verify_and_update_config",
+        ),
+        patch.object(current_platform, "is_cpu", return_value=True),
+        patch.object(
+            current_platform,
+            "get_cpu_architecture",
+            return_value=CpuArchEnum.X86,
+        ),
+        patch.object(
+            cpu_runtime,
+            "has_active_triton_cpu_backend",
+            return_value=True,
+        ),
+    ):
+        Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(config)
+
+
+def _block_fp8_config() -> SimpleNamespace:
+    return SimpleNamespace(
+        get_name=lambda: "fp8",
+        is_checkpoint_fp8_serialized=True,
+        weight_block_size=[128, 128],
+    )
+
+
+def _moe_vllm_config(tp_size: int) -> SimpleNamespace:
+    text_config = SimpleNamespace(
+        moe_intermediate_size=640,
+        shared_expert_intermediate_size=0,
+    )
+    return SimpleNamespace(
+        model_config=SimpleNamespace(hf_text_config=text_config),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=tp_size,
+            use_sequence_parallel_moe=False,
+        ),
+        quant_config=_block_fp8_config(),
+    )
+
+
+def test_block_fp8_moe_intermediate_padding() -> None:
+    quant_config = _block_fp8_config()
+
+    assert _get_padded_moe_intermediate_size(quant_config, 640, 1) == 640
+    assert _get_padded_moe_intermediate_size(quant_config, 640, 2) == 768
+
+
+def test_sparse_moe_constructs_with_padded_intermediate_size() -> None:
+    vllm_config = _moe_vllm_config(tp_size=2)
+    constructed: dict[str, int] = {}
+
+    def init_base(
+        layer: Qwen3NextSparseMoeBlock,
+        vllm_config: SimpleNamespace,
+        prefix: str,
+    ) -> None:
+        nn.Module.__init__(layer)
+        constructed["intermediate_size"] = (
+            vllm_config.model_config.hf_text_config.moe_intermediate_size
+        )
+        layer.experts = SimpleNamespace(moe_config=SimpleNamespace())
+
+    with patch.object(Qwen3NextSparseMoeBlock, "__init__", init_base):
+        layer = Qwen4ExpSparseMoeBlock(vllm_config)
+
+    assert constructed["intermediate_size"] == 768
+    assert vllm_config.model_config.hf_text_config.moe_intermediate_size == 640
+    assert layer.original_intermediate_size_per_partition == 320
+    assert layer.experts.moe_config.intermediate_size_per_partition_unpadded == 320
+
+
+def test_block_fp8_moe_checkpoint_padding_is_aligned_and_idempotent() -> None:
+    vllm_config = _moe_vllm_config(tp_size=2)
+    weights = [
+        (
+            "model.layers.0.mlp.experts.0.gate_proj.weight",
+            torch.ones(640, 2),
+        ),
+        (
+            "model.layers.0.mlp.experts.0.up_proj.weight_scale_inv",
+            torch.ones(5, 1),
+        ),
+        (
+            "model.layers.0.mlp.experts.0.down_proj.weight",
+            torch.ones(2, 640),
+        ),
+        (
+            "model.layers.0.mlp.experts.0.down_proj.weight_scale_inv",
+            torch.ones(1, 5),
+        ),
+        (
+            "model.layers.0.mlp.experts.0.gate_up_proj.weight",
+            torch.cat((torch.ones(640, 2), torch.full((640, 2), 2.0))),
+        ),
+    ]
+
+    padded = dict(_pad_moe_checkpoint_weights(weights, vllm_config))
+    gate = padded["model.layers.0.mlp.experts.0.gate_proj.weight"]
+    up_scale = padded["model.layers.0.mlp.experts.0.up_proj.weight_scale_inv"]
+    down = padded["model.layers.0.mlp.experts.0.down_proj.weight"]
+    down_scale = padded["model.layers.0.mlp.experts.0.down_proj.weight_scale_inv"]
+    gate_up = padded["model.layers.0.mlp.experts.0.gate_up_proj.weight"]
+
+    assert gate.shape == (768, 2)
+    assert up_scale.shape == (6, 1)
+    assert down.shape == (2, 768)
+    assert down_scale.shape == (1, 6)
+    assert gate_up.shape == (1536, 2)
+    assert torch.count_nonzero(gate[640:]) == 0
+    assert torch.count_nonzero(up_scale[5:]) == 0
+    assert torch.count_nonzero(down[:, 640:]) == 0
+    assert torch.count_nonzero(down_scale[:, 5:]) == 0
+    assert torch.equal(gate_up[:640], torch.ones(640, 2))
+    assert torch.count_nonzero(gate_up[640:768]) == 0
+    assert torch.equal(gate_up[768:1408], torch.full((640, 2), 2.0))
+    assert torch.count_nonzero(gate_up[1408:]) == 0
+
+    padded_twice = dict(_pad_moe_checkpoint_weights(padded.items(), vllm_config))
+    for name, tensor in padded.items():
+        assert torch.equal(padded_twice[name], tensor)
 
 
 @pytest.mark.parametrize(
