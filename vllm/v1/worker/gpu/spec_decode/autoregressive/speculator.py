@@ -301,11 +301,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             need_eager=is_profile,
             dp_sync=dp_sync,
         )
-        num_tokens_across_dp = (
-            prefill_batch_sync.num_tokens_across_dp
-            if prefill_batch_sync is not None
-            else None
-        )
 
         self._prepare_eplb_forward(num_tokens)
 
@@ -323,7 +318,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 prefill_batch_desc.num_tokens,
                 attn_metadata,
                 slot_mappings,
-                num_tokens_across_dp=num_tokens_across_dp,
+                dp_sync=prefill_batch_sync,
                 cudagraph_runtime_mode=prefill_batch_desc.cg_mode,
                 mm_inputs=mm_inputs,
             )
@@ -367,11 +362,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             need_eager=is_profile,
             dp_sync=decode_batch_sync,
         )
-        num_tokens_across_dp = (
-            decode_batch_sync.num_tokens_across_dp
-            if decode_batch_sync is not None
-            else None
-        )
 
         self.on_multi_step_decode_begin(num_reqs)
         # Generate the remaining num_speculative_steps - 1 draft tokens.
@@ -384,7 +374,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             num_reqs,
             dummy_run and skip_attn_for_dummy_run,
             decode_batch_desc,
-            num_tokens_across_dp,
+            decode_batch_sync,
             input_batch.seq_lens_cpu_upper_bound,
         )
         self.on_multi_step_decode_end(num_reqs)
@@ -397,7 +387,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         num_tokens: int,
         attn_metadata: dict[str, Any] | None,
         slot_mappings: dict[str, torch.Tensor] | None,
-        num_tokens_across_dp: torch.Tensor | None,
+        dp_sync: DPSyncState | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -412,7 +402,12 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             self.vllm_config,
             num_tokens=num_tokens,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
-            num_tokens_across_dp=num_tokens_across_dp,
+            num_tokens_across_dp=(
+                dp_sync.num_tokens_across_dp if dp_sync is not None else None
+            ),
+            moe_non_sp_token_counts=(
+                dp_sync.moe_non_sp_token_counts if dp_sync is not None else None
+            ),
             slot_mapping=slot_mappings,
             batch_descriptor=batch_descriptor,
             is_padding=is_padding,
@@ -463,7 +458,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         num_tokens: int,
         attn_metadata: dict[str, Any] | None,
         slot_mappings: dict[str, torch.Tensor] | None,
-        num_tokens_across_dp: torch.Tensor | None,
+        dp_sync: DPSyncState | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
     ) -> None:
@@ -479,7 +474,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             num_tokens,
             attn_metadata,
             slot_mappings,
-            num_tokens_across_dp=num_tokens_across_dp,
+            dp_sync=dp_sync,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
             mm_inputs=mm_inputs,
         )
@@ -510,7 +505,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         num_reqs: int,
         skip_attn: bool,
         batch_desc: BatchExecutionDescriptor,
-        num_tokens_across_dp: torch.Tensor | None,
+        dp_sync: DPSyncState | None,
         seq_lens_cpu_upper_bound: torch.Tensor,
     ) -> None:
         positions = self.input_buffers.positions[:num_reqs]
@@ -551,7 +546,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                     batch_desc.num_tokens,
                     attn_metadata,
                     slot_mappings_by_layer,
-                    num_tokens_across_dp=num_tokens_across_dp,
+                    dp_sync=dp_sync,
                     cudagraph_runtime_mode=batch_desc.cg_mode,
                 )
 
@@ -560,7 +555,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         num_reqs: int,
         skip_attn: bool,
         batch_desc: BatchExecutionDescriptor,
-        num_tokens_across_dp: torch.Tensor | None,
+        dp_sync: DPSyncState | None,
         seq_lens_cpu_upper_bound: torch.Tensor,
     ) -> None:
         positions = self.input_buffers.positions[:num_reqs]
@@ -598,7 +593,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             batch_desc.num_tokens,
             attn_metadata,
             slot_mappings_by_layer,
-            num_tokens_across_dp,
+            dp_sync,
             batch_desc.cg_mode,
         )
 
@@ -608,7 +603,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         num_tokens_padded: int,
         attn_metadata: dict[str, Any] | None,
         slot_mappings: dict[str, torch.Tensor] | None,
-        num_tokens_across_dp: torch.Tensor | None,
+        dp_sync: DPSyncState | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ) -> None:
         idx_mapping = self.idx_mapping[:num_reqs]
@@ -627,7 +622,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 num_tokens_padded,
                 attn_metadata,
                 slot_mappings,
-                num_tokens_across_dp,
+                dp_sync,
                 cudagraph_runtime_mode,
             )
             if (
@@ -650,7 +645,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         num_tokens_padded: int,
         attn_metadata: dict[str, Any] | None,
         slot_mappings: dict[str, torch.Tensor] | None,
-        num_tokens_across_dp: torch.Tensor | None,
+        dp_sync: DPSyncState | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ) -> None:
         self._prepare_eplb_forward(num_reqs)
@@ -661,7 +656,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             num_tokens_padded,
             attn_metadata,
             slot_mappings,
-            num_tokens_across_dp,
+            dp_sync,
             cudagraph_runtime_mode,
         )
 

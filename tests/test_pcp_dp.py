@@ -10,7 +10,10 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.device_communicators.all2all import AgRsAll2AllManager
 from vllm.forward_context import DPMetadata, _compute_sp_num_tokens
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
-from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.cudagraph_utils import (
+    BatchExecutionDescriptor,
+    uniform_dp_token_counts,
+)
 from vllm.v1.worker.gpu.dp_utils import sync_cudagraph_and_dp_padding
 from vllm.v1.worker.gpu_worker import _dp_local_rank_offset
 
@@ -58,6 +61,36 @@ def test_ep_dispatch_sizes_preserve_dp_pcp_order_without_sp():
         num_dispatchers_per_dp_rank=2,
     ) as sizes:
         assert sizes == [10, 7, 5, 3]
+
+
+def test_uniform_token_counts_cover_every_moe_dispatch_rank():
+    config = ParallelConfig(
+        prefill_context_parallel_size=2,
+        data_parallel_size=2,
+        enable_expert_parallel=True,
+    )
+
+    num_tokens_across_dp, moe_non_sp_token_counts = uniform_dp_token_counts(config, 5)
+
+    assert num_tokens_across_dp.tolist() == [5, 5]
+    assert moe_non_sp_token_counts.tolist() == [5, 5, 5, 5]
+
+
+def test_uniform_token_counts_skip_moe_counts_without_expert_parallelism():
+    config = ParallelConfig(prefill_context_parallel_size=2, data_parallel_size=2)
+
+    num_tokens_across_dp, moe_non_sp_token_counts = uniform_dp_token_counts(config, 5)
+
+    assert num_tokens_across_dp.tolist() == [5, 5]
+    assert moe_non_sp_token_counts is None
+
+
+def test_uniform_token_counts_are_unset_without_data_parallelism():
+    config = ParallelConfig(
+        prefill_context_parallel_size=2, enable_expert_parallel=True
+    )
+
+    assert uniform_dp_token_counts(config, 5) == (None, None)
 
 
 def test_batch_coordination_returns_dp_and_moe_non_sp_token_counts(monkeypatch):

@@ -506,10 +506,7 @@ class DraftModelSpeculator(BaseSpeculator):
             "reusing a DP sync that does not cover this batch's requests"
         )
         return replace(
-            target_dp_sync,
-            num_tokens_across_dp=torch.full_like(
-                target_dp_sync.num_tokens_across_dp, num_batch_tokens
-            ),
+            target_dp_sync.padded_to(num_batch_tokens),
             uniform_token_count=num_query_per_req,
             eager=False,
         ), num_batch_tokens

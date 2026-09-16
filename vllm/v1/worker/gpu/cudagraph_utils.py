@@ -20,7 +20,7 @@ from vllm.compilation.breakable_cudagraph import (
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
 from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.distributed.parallel_state import (
@@ -127,6 +127,24 @@ def _is_compatible(
         and desc.num_active_loras == num_active_loras
         and desc.num_ubatches == num_ubatches
     )
+
+
+def uniform_dp_token_counts(
+    parallel_config: ParallelConfig, num_tokens: int
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    """Token counts for a batch every DP rank runs identically.
+
+    Returns ``(num_tokens_across_dp, moe_non_sp_token_counts)``, both None when
+    DP is off. The second is None unless MoE dispatch spans DP x PCP, where it
+    holds one count per rank of `get_moe_non_sp_group()`.
+    """
+    dp_size = parallel_config.data_parallel_size
+    if dp_size == 1:
+        return None, None
+    counts = torch.full((dp_size,), num_tokens, dtype=torch.int32, device="cpu")
+    if not parallel_config.moe_dispatch_across_pcp:
+        return counts, None
+    return counts, counts.repeat(parallel_config.prefill_context_parallel_size)
 
 
 def has_compiled_submodule(model: nn.Module) -> bool:
@@ -652,24 +670,9 @@ class ModelCudaGraphManager(CudaGraphManager):
             if lora_capture_hook is not None:
                 lora_capture_hook(desc.num_active_loras, num_reqs, num_tokens)
 
-            num_tokens_across_dp = (
-                torch.full((self.dp_size,), num_tokens, dtype=torch.int32, device="cpu")
-                if self.dp_size > 1
-                else None
+            num_tokens_across_dp, moe_non_sp_token_counts = uniform_dp_token_counts(
+                self.vllm_config.parallel_config, num_tokens
             )
-            parallel_config = self.vllm_config.parallel_config
-            moe_non_sp_token_counts = None
-            if (
-                self.dp_size > 1
-                and parallel_config.enable_expert_parallel
-                and parallel_config.prefill_context_parallel_size > 1
-            ):
-                moe_non_sp_token_counts = torch.full(
-                    (self.dp_size * parallel_config.prefill_context_parallel_size,),
-                    num_tokens,
-                    dtype=torch.int32,
-                    device="cpu",
-                )
 
             model_inputs = {
                 "input_ids": input_buffers.input_ids[:num_tokens],

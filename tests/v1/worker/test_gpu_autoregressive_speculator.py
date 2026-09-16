@@ -309,7 +309,7 @@ def test_run_model_unpacks_tuple_return_for_mtp(monkeypatch):
         4,
         attn_metadata=None,
         slot_mappings=None,
-        num_tokens_across_dp=None,
+        dp_sync=None,
         cudagraph_runtime_mode=CUDAGraphMode.NONE,
     )
 
@@ -325,7 +325,7 @@ def test_run_model_reuses_tensor_return_for_mtp(monkeypatch):
         4,
         attn_metadata=None,
         slot_mappings=None,
-        num_tokens_across_dp=None,
+        dp_sync=None,
         cudagraph_runtime_mode=CUDAGraphMode.NONE,
     )
 
@@ -378,7 +378,7 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
         skip_attn=True,
         batch_desc=batch_desc,
         seq_lens_cpu_upper_bound=None,
-        num_tokens_across_dp=None,
+        dp_sync=None,
     )
 
     assert generate_draft.call_count == expected_eager_calls
