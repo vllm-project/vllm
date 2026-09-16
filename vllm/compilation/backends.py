@@ -144,6 +144,9 @@ class CompilerManager:
         self.loaded_artifacts: dict[str, Any] = {}
         self.prefix: str = ""
 
+    def _log_prefix(self) -> str:
+        return f"[{self.prefix}] " if self.prefix else ""
+
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         return self.compiler.compute_hash(vllm_config)
 
@@ -292,9 +295,9 @@ class CompilerManager:
                 # there can be multiple graphs due to piecewise compilation.
                 elapsed = time.perf_counter() - compilation_start_time
                 logger.info(
-                    "[%s] Directly load the compiled graph(s) for compile "
+                    "%sDirectly load the compiled graph(s) for compile "
                     "range %s from the cache, took %.3f s",
-                    self.prefix,
+                    self._log_prefix(),
                     str(compile_range),
                     elapsed,
                 )
@@ -379,8 +382,8 @@ class CompilerManager:
             if graph_index == 0:
                 # adds some info logging for the first graph
                 logger.info(
-                    "[%s] Cache the graph of compile range %s for later use",
-                    self.prefix,
+                    "%sCache the graph of compile range %s for later use",
+                    self._log_prefix(),
                     str(compile_range),
                 )
             logger.debug_once(
@@ -395,8 +398,8 @@ class CompilerManager:
         if graph_index == num_graphs - 1:
             elapsed = time.perf_counter() - compilation_start_time
             logger.info(
-                "[%s] Compiling a graph for compile range %s takes %.2f s",
-                self.prefix,
+                "%sCompiling a graph for compile range %s takes %.2f s",
+                self._log_prefix(),
                 str(compile_range),
                 elapsed,
             )
@@ -874,6 +877,9 @@ class VllmBackend:
         # `torch.compile` is JIT compiled, so we don't need to
         # do anything here
 
+    def _log_prefix(self) -> str:
+        return f"[{self.prefix}] " if self.prefix else ""
+
     def collect_standalone_compile_artifacts(
         self,
     ) -> tuple[Any, dict[str, list[int]] | None, dict[str, bool] | None]:
@@ -1094,11 +1100,11 @@ class VllmBackend:
         disable_cache = disable_cache or is_ngram_gpu_enabled
 
         if disable_cache:
-            logger.info("[%s] vLLM's torch.compile cache is disabled.", self.prefix)
+            logger.info("%svLLM's torch.compile cache is disabled.", self._log_prefix())
         else:
             logger.info(
-                "[%s] Using cache directory: %s for vLLM's torch.compile",
-                self.prefix,
+                "%sUsing cache directory: %s for vLLM's torch.compile",
+                self._log_prefix(),
                 local_cache_dir,
             )
 
@@ -1159,8 +1165,8 @@ class VllmBackend:
         current_epoch = time.time()
         dynamo_time = current_perf - torch_compile_start_time
         logger.info(
-            "[%s] Dynamo bytecode transform time: %.2f s",
-            self.prefix,
+            "%sDynamo bytecode transform time: %.2f s",
+            self._log_prefix(),
             dynamo_time,
         )
 

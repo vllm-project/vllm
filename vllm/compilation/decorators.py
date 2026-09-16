@@ -733,6 +733,7 @@ def _support_torch_compile(
             self.aot_compiled_fn and self._aot_compilation_path and self._aot_cache_dir
         )
 
+        log_prefix = f"[{self._compile_tag}] " if self._compile_tag else ""
         try:
             os.makedirs(self._aot_cache_dir, exist_ok=True)
             # File saving should be atomic, so we will save to a temporary location
@@ -742,14 +743,14 @@ def _support_torch_compile(
             os.replace(tmp_file, self._aot_compilation_path)
             compilation_counter.num_aot_artifacts_saved += 1
             logger.info(
-                "[%s] saved AOT compiled function to %s",
-                self._compile_tag,
+                "%ssaved AOT compiled function to %s",
+                log_prefix,
                 self._aot_compilation_path,
             )
         except Exception as e:
             logger.warning(
-                "[%s] unable to save AOT compiled function to %s: %s",
-                self._compile_tag,
+                "%sunable to save AOT compiled function to %s: %s",
+                log_prefix,
                 self._aot_compilation_path,
                 e,
             )
