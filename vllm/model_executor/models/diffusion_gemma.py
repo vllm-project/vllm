@@ -629,10 +629,17 @@ class DiffusionGemmaRequestStates:
         self.max_steps = torch.full(
             (max_num_reqs,), float(max_denoising_steps), dtype=torch.float32, device=device
         )
-        # Seeded initial canvases, by slot, applied when the prompt finishes.
-        self.seed_canvas: dict[int, list[int]] = {}
+        # A seed canvas replaces the random initial canvas once the prompt is
+        # prefilled. The host-side slot sets let the sampler skip the seed and
+        # read-only work when no live request asked for it.
+        self.seed_canvas = torch.zeros(
+            max_num_reqs, canvas_length, dtype=torch.int64, device=device
+        )
+        self.has_seed = torch.zeros(max_num_reqs, dtype=torch.bool, device=device)
+        self.seeded_slots: set[int] = set()
         # Read-only slots finish on their converging step (no commit forward).
         self.read_only = torch.zeros(max_num_reqs, dtype=torch.bool, device=device)
+        self.read_only_slots: set[int] = set()
 
         # Per-slot self-conditioning soft embedding (probs @ embed_weight) from
         # the previous denoise step. Storing the [.., hidden] soft embed instead
@@ -664,14 +671,40 @@ class DiffusionGemmaRequestStates:
         self.accepted_canvas_history_len[slot_idx].fill_(0)
         self.self_conditioning_embeds[slot_idx] = 0
         self.max_steps[slot_idx].fill_(float(self.max_denoising_steps))
-        self.seed_canvas.pop(slot_idx, None)
+        self.has_seed[slot_idx].fill_(False)
+        self.seeded_slots.discard(slot_idx)
         self.read_only[slot_idx].fill_(False)
+        self.read_only_slots.discard(slot_idx)
 
     def remove_request(self, slot_idx: int) -> None:
         self.is_encoder_phase[slot_idx].fill_(False)
         self.accepted_canvas_history_len[slot_idx].fill_(0)
         self.self_conditioning_embeds[slot_idx] = 0
-        self.seed_canvas.pop(slot_idx, None)
+        self.seeded_slots.discard(slot_idx)
+        self.read_only_slots.discard(slot_idx)
+
+    def set_seed_canvas(self, slot_idx: int, ids: list[int]) -> None:
+        self.seed_canvas[slot_idx] = async_tensor_h2d(
+            ids, dtype=torch.int64, device=self.device
+        )
+        self.has_seed[slot_idx].fill_(True)
+        self.seeded_slots.add(slot_idx)
+
+    def set_read_only(self, slot_idx: int) -> None:
+        self.read_only[slot_idx].fill_(True)
+        self.read_only_slots.add(slot_idx)
+
+    def apply_seed_canvases(
+        self, slots_np: np.ndarray, slots_gpu: torch.Tensor
+    ) -> None:
+        """Replace the canvas of every seeded slot among ``slots_gpu``."""
+        if self.seeded_slots.isdisjoint(slots_np.tolist()):
+            return
+        self.canvas[slots_gpu] = torch.where(
+            self.has_seed[slots_gpu, None],
+            self.seed_canvas[slots_gpu],
+            self.canvas[slots_gpu],
+        )
 
 
 class DiffusionGemmaModelState(ModelState):
@@ -1045,15 +1078,15 @@ class DiffusionSampler:
         cap = extra.get("diffusion_max_steps")
         if cap is not None:
             states.max_steps[req_idx].fill_(float(max(1, min(int(cap), states.max_denoising_steps))))
-        canvas = extra.get("diffusion_seed_canvas")
-        if canvas is not None:
-            if len(canvas) != self.canvas_length:
+        seed = extra.get("diffusion_seed_canvas")
+        if seed is not None:
+            if len(seed) != self.canvas_length:
                 raise ValueError(
-                    f"diffusion_seed_canvas must hold exactly {self.canvas_length} ids, got {len(canvas)}"
+                    f"diffusion_seed_canvas must hold exactly {self.canvas_length} ids, got {len(seed)}"
                 )
-            states.seed_canvas[req_idx] = [int(t) for t in canvas]
+            states.set_seed_canvas(req_idx, seed)
         if extra.get("diffusion_read_only"):
-            states.read_only[req_idx].fill_(True)
+            states.set_read_only(req_idx)
 
     def apply_staged_writes(self) -> None:
         self.sampling_states.apply_staged_writes()
@@ -1095,12 +1128,7 @@ class DiffusionSampler:
             ps.astype(np.int64), device=states.is_encoder_phase.device
         )
         states.init_canvas(ps_gpu)
-        for slot in ps.tolist():
-            seed = states.seed_canvas.get(int(slot))
-            if seed is not None:
-                states.canvas[slot] = torch.tensor(
-                    seed, dtype=states.canvas.dtype, device=states.canvas.device
-                )
+        states.apply_seed_canvases(ps, ps_gpu)
         self.req_states.draft_tokens[ps_gpu, : self.canvas_length] = states.canvas[
             ps_gpu
         ]
@@ -1356,7 +1384,9 @@ class DiffusionSampler:
         # (as a commit would), keep them out of the encoder phase, and hand out
         # their logprobs below. The request ends on these tokens.
         emit_now: set[int] = set()
-        if num_decode > 0:
+        if states.read_only_slots and not states.read_only_slots.isdisjoint(
+            decode_slots_np.tolist()
+        ):
             ro_mask = states.read_only[decode_slots] & states.is_encoder_phase[
                 decode_slots
             ] & ~is_committing
