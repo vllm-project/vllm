@@ -21,7 +21,7 @@ Key Design Principles:
 """
 
 import time
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
@@ -924,6 +924,22 @@ class TieringOffloadingManager(OffloadingManager):
                 stats.aggregate(tier_stats)
 
         return stats
+
+    @override
+    def config_info(self) -> Mapping[str, str | int | float | bool]:
+        """Compose the config facts of the primary tier and every secondary.
+
+        The primary tier passes through unprefixed, so a CPU fact reads the
+        same standalone and tiered. The secondary prefix mirrors the tier label
+        that TieringMetricsTracker.tier_label() builds, with "_" for ":".
+        """
+        info: dict[str, str | int | float | bool] = dict(
+            self.primary_tier.config_info()
+        )
+        for tier_idx, tier in enumerate(self.secondary_tiers):
+            prefix = f"tier{tier_idx + 1}_{tier.tier_type}_"
+            info.update({prefix + k: v for k, v in tier.config_info().items()})
+        return info
 
     @override
     def shutdown(self) -> None:

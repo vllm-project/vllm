@@ -103,8 +103,13 @@ class KVConnectorLogging:
             # Produce a single cumulative stats object for the last time
             # interval from the recorded observations.
             xfer_metrics = self.transfer_stats_accumulator.reduce()
-            xfer_metrics_str = ", ".join(f"{k}={v}" for k, v in xfer_metrics.items())
-            log_fn("KV Transfer metrics: %s", xfer_metrics_str)
+            # A payload can hold static config facts alone (info metric), which reduce()
+            # drops, because they belong to the Prometheus metrics only.
+            if xfer_metrics:
+                xfer_metrics_str = ", ".join(
+                    f"{k}={v}" for k, v in xfer_metrics.items()
+                )
+                log_fn("KV Transfer metrics: %s", xfer_metrics_str)
 
             # Reset metrics for next interval
             self.reset()

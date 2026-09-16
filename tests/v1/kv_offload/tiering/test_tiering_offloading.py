@@ -98,7 +98,8 @@ def has_histogram_count(reduced: dict[str, int | float], metric_name: str) -> bo
 
 
 class MetricsSecondaryTierManager(SecondaryTierManager):
-    """Test-only secondary tier that declares and emits one labeled metric."""
+    """Test-only secondary tier that declares and emits one labeled metric,
+    and publishes one config fact."""
 
     MY_TIER_METRIC = "my_tier_metric"
 
@@ -110,6 +111,9 @@ class MetricsSecondaryTierManager(SecondaryTierManager):
                 labelnames=("tier",),
             )
         }
+
+    def config_info(self):
+        return {"path": f"/mnt/{self.tier_type}"}
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -1458,3 +1462,30 @@ def test_parse_tier_filter_skips_bad_entries():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_tiering_manager_prefixes_the_config_info_of_every_secondary_tier():
+    """A secondary tier cannot know its own index, so the manager gives it one.
+    The index separates two tiers of one type. No in-tree tier publishes a fact
+    yet, so the primary tier adds nothing here."""
+    mock_region = _mock_mmap_region(5)
+    primary_tier = CPUPrimaryTierOffloadingManager(
+        num_chunks=5, mmap_region=mock_region
+    )
+    secondary_tiers = [
+        MetricsSecondaryTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=mock_region.create_kv_memoryview(),
+            tier_type="test_metrics",
+        )
+        for _ in range(2)
+    ]
+    manager = TieringOffloadingManager(
+        primary_tier=primary_tier,
+        secondary_tiers=secondary_tiers,
+    )
+
+    assert manager.config_info() == {
+        "tier1_test_metrics_path": "/mnt/test_metrics",
+        "tier2_test_metrics_path": "/mnt/test_metrics",
+    }
