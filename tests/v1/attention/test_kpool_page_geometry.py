@@ -12,10 +12,7 @@ from vllm.v1.attention.backends.mla.indexer import kpool_page_geometry
 
 
 def _flat_page_view():
-    # The kpool op module is only importable after the GLM attention module
-    # (they import each other); the engine always loads the model first.
-    import vllm.models.glm5next.common.attention  # noqa: F401
-    from vllm.model_executor.layers.sparse_attn_indexer_kpool import (
+    from vllm.models.glm5next.common.sparse_indexer import (
         _kpool_flat_page_view,
     )
 

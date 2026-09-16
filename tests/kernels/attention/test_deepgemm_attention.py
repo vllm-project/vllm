@@ -321,8 +321,7 @@ def test_deepgemm_fp8_fp4_paged_mqa_logits(batch_size: int, next_n: int):
     not current_platform.has_device_capability(90), reason="SM90 and SM100 only"
 )
 def test_deepgemm_paged_mqa_packed_manager_block_stride():
-    import vllm.models.glm5next.common.attention  # noqa: F401
-    from vllm.model_executor.layers.sparse_attn_indexer_kpool import (
+    from vllm.models.glm5next.common.sparse_indexer import (
         _kpool_flat_page_view,
     )
     from vllm.v1.attention.backends.mla.indexer import kpool_page_geometry
