@@ -587,11 +587,11 @@ def test_read_blocks_for_req_expands_remote_ids(
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
         NixlConnectorMetadata,
     )
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
-        TPMapping,
-    )
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.transfer_planning import (
+        TPMapping,
     )
     from vllm.v1.kv_cache_interface import (
         FullAttentionSpec,
@@ -2246,7 +2246,7 @@ def test_push_write_hybrid_mla_replicates_attention():
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
         NixlPushConnectorWorker,
     )
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.transfer_planning import (
         TPMapping,
     )
     from vllm.v1.kv_cache_interface import MambaSpec, MLAAttentionSpec

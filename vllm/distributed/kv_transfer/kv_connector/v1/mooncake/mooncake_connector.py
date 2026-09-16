@@ -41,6 +41,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import (
     MooncakeKVConnectorStats,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.transfer_planning import (
+    is_attention_spec,
+    is_ssm_spec,
+)
 from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -61,7 +65,6 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KpoolTailSpec,
     KVCacheSpec,
-    MambaSpec,
     SlidingWindowSpec,
 )
 from vllm.v1.request import RequestStatus
@@ -1475,7 +1478,7 @@ class MooncakeConnectorWorker:
                 self._physical_blocks_per_logical_kv_block,
                 block_arange,
             ).tolist()
-            if not isinstance(group_specs[i].kv_cache_spec, MambaSpec)
+            if not is_ssm_spec(type(group_specs[i].kv_cache_spec))
             else group
             for i, group in enumerate(block_ids)
         ]
@@ -1525,9 +1528,8 @@ class MooncakeConnectorWorker:
             for group_index, (local_group, remote_group) in enumerate(
                 zip(send_meta.local_block_ids, remote_block_ids_per_group)
             ):
-                is_mamba_group = isinstance(
-                    group_specs[group_index].kv_cache_spec,
-                    MambaSpec,
+                is_mamba_group = is_ssm_spec(
+                    type(group_specs[group_index].kv_cache_spec)
                 )
                 if is_mamba_group:
                     # Mamba/GDN prefix caching can use null blocks only as
@@ -1753,7 +1755,7 @@ class MooncakeConnectorWorker:
 
                 if isinstance(layer_spec, KpoolTailSpec):
                     kv_block_len = layer_spec.unpadded_page_size_bytes // 2
-                elif isinstance(layer_spec, AttentionSpec) and block_is_contiguous:
+                elif is_attention_spec(type(layer_spec)) and block_is_contiguous:
                     assert (
                         layer_spec.page_size_bytes
                         % self._physical_blocks_per_logical_kv_block

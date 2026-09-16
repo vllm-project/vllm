@@ -50,10 +50,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
     NixlKVConnectorStats,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import TPMapping
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     get_base_request_id,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.transfer_planning import TPMapping
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -1366,7 +1366,7 @@ class TestPushWriterMlaReplication:
     def _mla_worker_writing_to(d_ranks):
         from types import SimpleNamespace
 
-        from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
+        from vllm.distributed.kv_transfer.kv_connector.v1.transfer_planning import (
             TPMapping,
         )
 
@@ -1446,7 +1446,7 @@ class TestPushWriterMlaReplication:
             RemoteMeta,
             ReqMeta,
         )
-        from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
+        from vllm.distributed.kv_transfer.kv_connector.v1.transfer_planning import (
             TPMapping,
         )
 
@@ -1528,7 +1528,7 @@ class TestPushPrefixCaching:
     def _worker_driving_xfer(engine_id: str = "decode-engine"):
         from types import SimpleNamespace
 
-        from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
+        from vllm.distributed.kv_transfer.kv_connector.v1.transfer_planning import (
             TPMapping,
         )
 
