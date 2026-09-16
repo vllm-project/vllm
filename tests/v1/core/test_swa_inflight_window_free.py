@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Out-of-window block frees vs in-flight GPU steps.
+"""Out-of-window block allocation vs in-flight GPU steps.
 
-With async scheduling / PP, `num_computed_tokens` optimistically includes
-tokens of unprocessed steps whose attention windows still read the blocks
-just below the optimistic boundary (and rejected spec tokens can roll it
-back), so `allocate_slots` frees on the processed-token basis:
-`num_computed_tokens - num_in_flight_tokens`.
+Sliding-window allocation preserves absolute block-table positions with null
+blocks while retaining only the window tail. Chunked-local attention still
+frees on the processed-token basis because it retains the current full chunk.
 """
 
 import torch
@@ -95,9 +93,8 @@ def test_num_in_flight_tokens_accounting():
     assert request.num_in_flight_tokens == 0
 
 
-def test_swa_free_waits_for_in_flight_step():
-    """Async: out-of-window blocks stay allocated until the step that still
-    reads them has been processed."""
+def test_swa_caps_blocks_for_in_flight_step():
+    """Async: logical slots outside the retained window use null blocks."""
     scheduler = _create_swa_scheduler(async_scheduling=True)
     request = create_requests(
         num_requests=1, num_tokens=NUM_PROMPT_TOKENS, block_size=BLOCK_SIZE
@@ -109,30 +106,25 @@ def test_swa_free_waits_for_in_flight_step():
     out0 = scheduler.schedule()  # prefill, in flight from here on
     free_after_prefill = block_pool.get_num_free_blocks()
 
-    # Decode scheduled while the prefill still reads the out-of-window blocks:
-    # they must not be freed yet.
+    # The prefill allocation retains only the window tail while preserving
+    # absolute block-table positions with null blocks.
     out1 = scheduler.schedule()
-    assert _num_null_blocks(scheduler, req_id) == 0
+    assert _num_null_blocks(scheduler, req_id) == NUM_OUT_OF_WINDOW_BLOCKS
     assert block_pool.get_num_free_blocks() == free_after_prefill
 
-    # Prefill output processed; the next allocate frees the out-of-window
-    # blocks.
+    # Processing the prefill does not free the already-null slots again.
     scheduler.update_from_output(out0, _make_model_runner_output(out0))
     scheduler.schedule()
     assert _num_null_blocks(scheduler, req_id) == NUM_OUT_OF_WINDOW_BLOCKS
-    assert (
-        block_pool.get_num_free_blocks()
-        == free_after_prefill + NUM_OUT_OF_WINDOW_BLOCKS
-    )
+    assert block_pool.get_num_free_blocks() == free_after_prefill
     # Not double-freed on the following steps.
     scheduler.update_from_output(out1, _make_model_runner_output(out1))
     scheduler.schedule()
     assert _num_null_blocks(scheduler, req_id) == NUM_OUT_OF_WINDOW_BLOCKS
 
 
-def test_swa_free_immediate_when_sync():
-    """Sync: no in-flight step at schedule time, frees happen at the first
-    decode allocation as before."""
+def test_swa_caps_blocks_immediately_when_sync():
+    """Sync: the initial allocation retains only the window tail."""
     scheduler = _create_swa_scheduler(async_scheduling=False)
     request = create_requests(
         num_requests=1, num_tokens=NUM_PROMPT_TOKENS, block_size=BLOCK_SIZE
@@ -141,6 +133,7 @@ def test_swa_free_immediate_when_sync():
     req_id = request.request_id
 
     out0 = scheduler.schedule()
+    assert _num_null_blocks(scheduler, req_id) == NUM_OUT_OF_WINDOW_BLOCKS
     scheduler.update_from_output(out0, _make_model_runner_output(out0))
     assert request.num_in_flight_tokens == 0
 
@@ -148,7 +141,7 @@ def test_swa_free_immediate_when_sync():
     assert _num_null_blocks(scheduler, req_id) == NUM_OUT_OF_WINDOW_BLOCKS
 
 
-def test_swa_admission_cap_accounts_for_overlapping_batches():
+def test_swa_admission_cap_is_independent_of_in_flight_tokens():
     spec = SlidingWindowSpec(
         block_size=16,
         num_kv_heads=1,
@@ -159,13 +152,12 @@ def test_swa_admission_cap_accounts_for_overlapping_batches():
     base = spec.max_admission_blocks_per_request(
         max_in_flight_tokens=1024, max_model_len=16384
     )
-    # (1024 - 1 + 1024) tokens -> 128 blocks, +1 for window misalignment.
-    assert base == 129
+    # 1024 - 1 tokens -> 64 blocks, +1 for window misalignment.
+    assert base == 65
     overlapped = spec.max_admission_blocks_per_request(
         max_in_flight_tokens=2 * 1024, max_model_len=16384
     )
-    # One extra in-flight chunk is held back: (1024 - 1 + 2 * 1024) tokens.
-    assert overlapped == 193
+    assert overlapped == base
 
 
 def test_chunked_local_free_waits_for_in_flight_step():
@@ -248,12 +240,11 @@ def test_connector_finish_frees_on_settled_basis():
     out0 = scheduler.schedule()  # prefill, in flight from here on
     scheduler.schedule()  # decode over-scheduled: num_computed_tokens optimistic
 
-    # Finishing now (connector store) must NOT prune out-of-window blocks the
-    # in-flight prefill still reads.
+    # The allocation already represents out-of-window logical slots as nulls.
     scheduler._connector_finished(request)
-    assert _num_null_blocks(scheduler, req_id) == 0
+    assert _num_null_blocks(scheduler, req_id) == NUM_OUT_OF_WINDOW_BLOCKS
 
-    # Once the in-flight step settles, the same prune releases them.
+    # Settling the in-flight step must not change the capped allocation.
     scheduler.update_from_output(out0, _make_model_runner_output(out0))
     scheduler._connector_finished(request)
     assert _num_null_blocks(scheduler, req_id) == NUM_OUT_OF_WINDOW_BLOCKS
