@@ -3,15 +3,16 @@
 """CPU tests for the kpool tail slot mapping (no GPU required).
 
 The kpool tail cache is a 1-block-per-request circular ring addressed by
-``pos % kpool`` (``CircularBufferSpec`` / ``CircularBufferManager``: exactly one block
-allocated per request, never grown, so only column 0 of its block table is
-ever written; the rest stays zero-initialized).
+``pos % ring_size``. The ring is one kpool without speculation and expands by
+whole kpools to preserve speculative rows. ``CircularBufferSpec`` /
+``CircularBufferManager`` still allocate exactly one block per request, so only
+column 0 of its block table is ever written; the rest stays zero-initialized.
 
 The generic per-group slot kernel cannot express that layout: it maps
 ``pos -> bt[req][pos // bs] * bs + pos % bs`` (``_compute_slot_mappings_kernel``
-in vllm/v1/worker/gpu/block_table.py), so every token at ``pos >= kpool``
+in vllm/v1/worker/gpu/block_table.py), so every token at ``pos >= ring_size``
 reads a zero column and collapses onto physical tail block 0. All concurrent
-requests then share one ``kpool``-slot ring and corrupt each other's pool
+requests then share one tail ring and corrupt each other's pool
 compression.
 
 These tests pin that defect's arithmetic, verify the circular replacement
@@ -270,8 +271,8 @@ def test_builder_reuses_slot_mapping_storage():
 
 class TailRingMirror:
     """Mirror of _kpool_tail_seed_kernel / _kpool_decode_update_batched_kernel
-    addressing: block = tail_slot // kpool, ring offset = pos % kpool; a pool
-    completing at pos reads ring slots (pool_start + s) % kpool and uses the
+    addressing: block = tail_slot // ring, ring offset = pos % ring; a pool
+    completing at pos reads ring slots (pool_start + s) % ring and uses the
     current token's own K/score for the last member."""
 
     def __init__(self, num_blocks, kpool=KPOOL, ring=None):
