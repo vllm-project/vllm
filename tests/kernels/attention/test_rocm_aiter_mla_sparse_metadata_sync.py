@@ -39,6 +39,9 @@ def _make_builder():
     topk_tokens = 4
 
     builder.device = torch.device("cpu")
+    builder.vllm_config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=None)
+    )
     builder.kv_cache_spec = SimpleNamespace(block_size=1)
     builder.model_dtype = torch.bfloat16
     builder.kv_cache_dtype = "fp8"

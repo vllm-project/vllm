@@ -1550,16 +1550,15 @@ class VllmConfig:
         self._maybe_override_dynamic_sd_cudagraph_mode()
 
         if self.attention_config.hisparse_config is not None:
-            if not current_platform.is_cuda():
-                # The fused cache ops now build and pass on ROCm, but HiSparse
-                # is only reachable through HiSparseMLAIndexGroup, which no
-                # ROCm attention backend consumes yet. Keep the gate closed
-                # until ROCMAiterMLASparseBackend is wired up, otherwise
-                # enabling HiSparse here silently has no effect.
+            if not (current_platform.is_cuda() or current_platform.is_rocm()):
+                raise ValueError("HiSparse requires NVIDIA CUDA or AMD ROCm.")
+            if current_platform.is_rocm() and (
+                self.cache_config is not None
+                and self.cache_config.cache_dtype == "fp8_ds_mla"
+            ):
                 raise ValueError(
-                    "HiSparse currently requires NVIDIA CUDA. The ROCm cache "
-                    "kernels are implemented, but no ROCm sparse-MLA "
-                    "attention backend consumes the HiSparse index group yet."
+                    "HiSparse on ROCm does not support the fp8_ds_mla KV cache "
+                    "dtype; use auto, bfloat16, or fp8."
                 )
             if self.parallel_config.pipeline_parallel_size > 1:
                 raise ValueError("HiSparse does not support pipeline parallelism.")

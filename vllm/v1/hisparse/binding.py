@@ -21,6 +21,7 @@ from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     HiSparseResidentSpec,
     KVCacheConfig,
+    KVCacheTensor,
 )
 from vllm.v1.worker.utils import allocate_kv_cache
 
@@ -114,6 +115,14 @@ def release_hisparse_profiling_cache(forward_context: dict[str, Any]) -> None:
         cache.mirror_staging_slots = None
 
 
+def _hisparse_layer_byte_offset(
+    tensor_config: KVCacheTensor, cache_name: str
+) -> int:
+    return tensor_config.offset + (
+        tensor_config.layers.index(cache_name) * tensor_config.layer_stride
+    )
+
+
 def bind_hisparse_kv_caches(
     *,
     forward_context: dict[str, Any],
@@ -140,7 +149,7 @@ def bind_hisparse_kv_caches(
             cache_handle = _get_hisparse_cache(forward_context, layer_name)
             cache_handle.bind_cache(
                 kv_caches[cache_name],
-                byte_offset=tensor_config.offset,
+                byte_offset=_hisparse_layer_byte_offset(tensor_config, cache_name),
                 block_stride=tensor_config.block_stride,
                 num_blocks=kv_cache_config.num_blocks,
                 block_size=group.kv_cache_spec.block_size,
@@ -172,7 +181,7 @@ def bind_hisparse_kv_caches(
             assert not tensor_config.host_resident
             cache_handle.runtime.bind_hot_cache(
                 raw_tensor,
-                byte_offset=tensor_config.offset,
+                byte_offset=_hisparse_layer_byte_offset(tensor_config, cache_name),
                 block_stride=tensor_config.block_stride,
                 num_blocks=kv_cache_config.num_blocks,
                 block_size=group.kv_cache_spec.block_size,

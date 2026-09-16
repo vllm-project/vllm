@@ -270,6 +270,7 @@ class HiSparseConnectorWorker:
             deque()
         )
         self._dma_submitted = False
+        self._step_in_flight = False
         self._per_layer_mirrored: set[int] = set()
         self._submitted_mirror_layers: set[int] = set()
         self._layer_ready_events = tuple(torch.Event() for _ in cache_handles)
@@ -378,6 +379,7 @@ class HiSparseConnectorWorker:
         self._set_row_mirrors(mirrors)
         self._dma_submitted = False
         self._clear_forward_mirror_state()
+        self._step_in_flight = True
         for handle in self.cache_handles:
             handle.all_context_pages_resident = metadata.all_context_pages_resident
             handle.mirror_from_resident = True
@@ -396,6 +398,7 @@ class HiSparseConnectorWorker:
             self.set_request_state_indices(request_state_indices)
 
     def _clear_forward_mirror_state(self) -> None:
+        self._step_in_flight = False
         self._per_layer_mirrored.clear()
         self._submitted_mirror_layers.clear()
         for handle in self.cache_handles:
@@ -619,6 +622,9 @@ class HiSparseConnectorWorker:
     def _enqueue_layer_mirror(self, layer_index: int) -> None:
         handle = self.cache_handles[layer_index]
         if not handle.host_mirror_required:
+            return
+        if not self._step_in_flight:
+            # Don't mirror on warmup/dummy; connector disabled
             return
         if layer_index in self._per_layer_mirrored:
             raise RuntimeError(f"HiSparse layer {layer_index} mirrored twice.")
