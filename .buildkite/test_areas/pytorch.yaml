@@ -2,7 +2,7 @@ group: PyTorch
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H200) PyTorch Compilation"
+- label: ":nvidia: (H200 MIG 35GB) PyTorch Compilation"
   device: h200_35gb
   key: pytorch-compilation-unit-tests
   timeout_in_minutes: 60
@@ -54,7 +54,7 @@ steps:
       - csrc/
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200) PyTorch Compilation H100 Cases"
+- label: ":nvidia: (H200 MIG 18GB) PyTorch Compilation H100 Cases"
   key: pytorch-compilation-unit-tests-h100
   timeout_in_minutes: 30
   device: h200_18gb
@@ -90,6 +90,8 @@ steps:
 
 - label: ":nvidia: (L4) PyTorch Compilation Passes"
   key: pytorch-compilation-passes-unit-tests
+  device: l4
+  num_devices: 1
   timeout_in_minutes: 45
   source_file_dependencies:
     - vllm/__init__.py
@@ -121,7 +123,7 @@ steps:
   commands:
   - pytest -s -v compile/passes --ignore compile/passes/distributed
 
-- label: ":nvidia: (H200) PyTorch Fullgraph"
+- label: ":nvidia: (H200 MIG 35GB) PyTorch Fullgraph"
   device: h200_35gb
   key: pytorch-fullgraph-test
   timeout_in_minutes: 90
@@ -158,12 +160,22 @@ steps:
   # Use `find` to launch multiple instances of pytest so that
   # they do not suffer from https://github.com/vllm-project/vllm/issues/28965
   - "find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_cudagraph.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
+  mirror:
+    amd:
+      label: ":amd: (MI355) PyTorch Fullgraph"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 90
+      depends_on:
+      - image-build-amd
 
 # Hopper-only DeepSeek-V2-Lite cases in this file require two 29.3-GiB model
 # instances and cannot fit a 35GB MIG slice. L4 retains the original coverage:
 # those SM90 cases skip while the architecture-compatible cases still run.
 - label: ":nvidia: (L4) PyTorch Fullgraph CUDAGraph Compatibility"
   key: pytorch-fullgraph-cudagraph-l4-compatibility
+  device: l4
+  num_devices: 1
   timeout_in_minutes: 60
   source_file_dependencies:
   - vllm/__init__.py
@@ -195,7 +207,7 @@ steps:
   commands:
   - pytest -s -v compile/fullgraph/test_full_cudagraph.py
 
-- label: ":nvidia: (H200) PyTorch Nightly Dependency Override Check"
+- label: ":nvidia: (H200 MIG 18GB) PyTorch Nightly Dependency Override Check"
   key: pytorch-nightly-dependency-override-check
   # if this test fails, it means the nightly torch version is not compatible with some
   # of the dependencies. Please check the error message and add the package to whitelist

@@ -7,12 +7,12 @@ from collections.abc import Generator
 
 import pytest
 
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     FunctionCall,
     ToolCall,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.tool_parsers.ernie45_tool_parser import Ernie45ToolParser

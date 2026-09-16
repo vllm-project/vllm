@@ -137,9 +137,10 @@ class CpuGpuBuffer:
             self.np = self.cpu.numpy()
 
     def copy_to_gpu(self, n: int | None = None) -> torch.Tensor:
-        if n is None:
-            return self.gpu.copy_(self.cpu, non_blocking=True)
-        return self.gpu[:n].copy_(self.cpu[:n], non_blocking=True)
+        cpu, gpu = self.cpu, self.gpu
+        if n is not None:
+            cpu, gpu = cpu[:n], gpu[:n]
+        return gpu.copy_(cpu.pin_memory() if PIN_MEMORY else cpu, non_blocking=True)
 
     def copy_to_cpu(self, n: int | None = None) -> torch.Tensor:
         """NOTE: Because this method is non-blocking, explicit synchronization
@@ -202,6 +203,15 @@ class APIServerProcessManager:
         spawn_context = multiprocessing.get_context("spawn")
         self.processes: list[BaseProcess] = []
 
+        admission_counters = None
+        if num_servers > 1 and getattr(args, "max_num_queued_reqs", None) is not None:
+            from vllm.v1.engine.admission_control import SharedAdmissionStats
+
+            admission_counters = spawn_context.RawArray(
+                "q",
+                SharedAdmissionStats.num_counters(num_servers),
+            )
+
         listeners = [*input_listeners, *output_listeners]
         self._listeners = listeners
         try:
@@ -217,6 +227,8 @@ class APIServerProcessManager:
                     "client_count": num_servers,
                     "client_index": i,
                 }
+                if admission_counters is not None:
+                    client_config["mp_admission_counters"] = admission_counters
                 if stats_update_address is not None:
                     client_config["stats_update_address"] = stats_update_address
                 if tensor_queue is not None:

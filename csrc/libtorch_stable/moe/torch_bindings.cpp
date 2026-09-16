@@ -20,7 +20,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
       "topk_softplus_sqrt(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
       "token_expert_indices, Tensor gating_output, bool renormalize, float "
       "routed_scaling_factor, Tensor? "
-      "bias, Tensor? input_ids, Tensor? tid2eid, Tensor? is_padding) -> ()");
+      "bias, Tensor? input_ids, Tensor? tid2eid, Tensor? is_padding, "
+      "Tensor? bias_vl=None, int image_sentinel_lo=0) -> ()");
 
   // Calculate the result of moe by summing up the partial results
   // from all selected experts. topk_ids/expert_map are optional and, when
@@ -78,13 +79,12 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
       "Tensor! b_q_weight, Tensor? b_bias_or_none,"
       "Tensor! b_scales, Tensor? a_scales, Tensor? global_scale, Tensor? "
       "b_zeros_or_none,"
-      "Tensor? g_idx_or_none, Tensor? perm_or_none, Tensor! workspace,"
+      "Tensor! workspace,"
       "Tensor sorted_token_ids,"
       "Tensor! expert_ids, Tensor! num_tokens_past_padded,"
       "Tensor! topk_weights, int moe_block_size, int top_k, "
       "bool mul_topk_weights, int b_type_id,"
-      "int size_m, int size_n, int size_k,"
-      "bool is_full_k, bool use_atomic_add,"
+      "int size_m, int size_n, int size_k, bool use_atomic_add,"
       "bool use_fp32_reduce, bool is_zp_float,"
       "int thread_k, int thread_n, int blocks_per_sm) -> Tensor");
 
@@ -126,10 +126,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
       "topk_group, int topk, bool renormalize, float "
       "routed_scaling_factor, Tensor bias, int scoring_func) -> (Tensor, "
       "Tensor)");
-
-  // DeepSeek V3 optimized router GEMM for SM90+
-  m.def("dsv3_router_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
-  // conditionally compiled so impl registration is in source file
 #endif
 }
 
