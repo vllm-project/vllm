@@ -655,11 +655,16 @@ def _create_backend_impl(
     # Create KV cache spec for MockLayer
     from vllm.v1.kv_cache_interface import FullAttentionSpec
 
+    cache_dtype = torch.bfloat16
+    if kv_cache_dtype.startswith("fp8") and kv_cache_dtype != "fp8_ds_mla":
+        from vllm.platforms import current_platform
+
+        cache_dtype = current_platform.fp8_dtype()
     kv_cache_spec = FullAttentionSpec(
         block_size=backend_cfg["block_size"] or vllm_config.cache_config.block_size,
         num_kv_heads=1,  # MLA uses 1 KV head
-        head_size=576,  # MLA head dim
-        dtype=torch.bfloat16,
+        head_size=mla_dims["kv_lora_rank"] + mla_dims["qk_rope_head_dim"],
+        dtype=cache_dtype,
     )
 
     # Create mock layer
@@ -817,7 +822,7 @@ def _run_single_benchmark(
             device=device,
             dtype=torch.uint8,
         )
-    elif kv_cache_dtype == "fp8":
+    elif kv_cache_dtype.startswith("fp8"):
         from vllm.platforms import current_platform
 
         kv_cache = torch.zeros(
@@ -850,7 +855,9 @@ def _run_single_benchmark(
     # Sparse backends use num_decode_tokens/num_prefills directly.
     #
     # sparse_mla_force_mqa overrides: even for prefill metadata, use MQA.
-    force_mqa = getattr(config, "sparse_mla_force_mqa", False)
+    force_mqa = getattr(config, "sparse_mla_force_mqa", False) or (
+        is_sparse and not getattr(impl, "supports_dense_mha_prefill", True)
+    )
     force_dense_mha = getattr(config, "sparse_mla_mha_mode", "auto") == "dense"
     if force_mqa:
         has_decode = True
