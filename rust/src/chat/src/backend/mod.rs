@@ -64,6 +64,12 @@ pub type DynChatTextBackend = Arc<dyn ChatTextBackend>;
 pub struct LoadModelBackendsOptions {
     /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
     pub revision: Option<String>,
+    /// Hugging Face tokenizer identifier or local directory. Defaults to the model.
+    pub tokenizer: Option<String>,
+    /// Tokenizer revision on the Hugging Face Hub. Defaults to the model revision.
+    pub tokenizer_revision: Option<String>,
+    /// Hugging Face config identifier or local directory. Defaults to the model.
+    pub hf_config_path: Option<String>,
     /// JSON Merge Patch applied to the model config before loading any backend.
     pub hf_overrides: HfOverrides,
     /// Which generation-config sampling defaults to inherit.

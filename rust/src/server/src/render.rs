@@ -26,6 +26,9 @@ use crate::{
 pub struct RenderConfig {
     pub model: String,
     pub revision: Option<String>,
+    pub tokenizer: Option<String>,
+    pub tokenizer_revision: Option<String>,
+    pub hf_config_path: Option<String>,
     pub hf_overrides: HfOverrides,
     pub served_model_name: Vec<String>,
     pub host: String,
@@ -71,6 +74,9 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
         &config.model,
         LoadModelBackendsOptions {
             revision: config.revision.clone(),
+            tokenizer: config.tokenizer.clone(),
+            tokenizer_revision: config.tokenizer_revision.clone(),
+            hf_config_path: config.hf_config_path.clone(),
             hf_overrides: config.hf_overrides.clone(),
             generation_config: Default::default(),
             renderer: config.renderer,
@@ -156,6 +162,9 @@ mod tests {
             RenderConfig {
                 model: "test-model".to_string(),
                 revision: None,
+                tokenizer: None,
+                tokenizer_revision: None,
+                hf_config_path: None,
                 hf_overrides: Default::default(),
                 served_model_name: Vec::new(),
                 host: "127.0.0.1".to_string(),
