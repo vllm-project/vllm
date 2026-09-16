@@ -53,6 +53,7 @@ class InputProcessor:
         self.speculative_config = vllm_config.speculative_config
         self.structured_outputs_config = vllm_config.structured_outputs_config
         self.observability_config = vllm_config.observability_config
+        self.diffusion_config = vllm_config.diffusion_config
         # Load the custom logits processor classes once; the returned callable
         # runs their validate_params hooks per request at admission.
         self.validate_logits_processors_params = (
@@ -125,6 +126,7 @@ class InputProcessor:
                 self.speculative_config,
                 self.structured_outputs_config,
                 self.tokenizer,
+                diffusion_config=self.diffusion_config,
             )
 
             self.validate_logits_processors_params(params)

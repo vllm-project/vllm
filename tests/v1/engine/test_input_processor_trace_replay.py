@@ -84,6 +84,7 @@ def _validate(enable_trace_replay: bool) -> None:
         vllm_config=SimpleNamespace(reasoning_config=None),
         speculative_config=None,
         structured_outputs_config=None,
+        diffusion_config=None,
         tokenizer=None,
         validate_logits_processors_params=lambda params: None,
     )
