@@ -69,6 +69,11 @@ _SHUTDOWN_DRAIN_TIMEOUT_S = 3.0
 # enough to avoid busy-spinning the scheduler thread.
 _DRAIN_SLEEP_S = 0.001
 
+# Idle sessions are only reaped when remaining capacity is at most this
+# many slots. Session setup is expensive; below this headroom, keep idle
+# peers so a later burst does not pay handshake again.
+_IDLE_REAP_HEADROOM = 8
+
 
 def _remote_prefiller_params(kv_params: dict | None) -> dict | None:
     """Return the ``remote_prefiller`` sub-dict, or None if absent.
@@ -695,24 +700,27 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             )
             return None
 
+        conn = None
         try:
             conn = self._control.connect(peer_id)
+            session = P2PSession(
+                peer_id=peer_id,
+                local_id=self._local_id,
+                transport=self._data,
+                local_block_len=self._data.block_len,
+                local_hash_seed=self._get_hash_seed(),
+                conn=conn,
+            )
         except Exception:
             logger.exception(
                 "P2P %s: failed to open connection to %s",
                 self._local_id,
                 peer_id,
             )
+            if conn is not None:
+                conn.close()
             return None
 
-        session = P2PSession(
-            peer_id=peer_id,
-            local_id=self._local_id,
-            transport=self._data,
-            local_block_len=self._data.block_len,
-            local_hash_seed=self._get_hash_seed(),
-            conn=conn,
-        )
         self._sessions[peer_id] = session
         return session
 
@@ -846,14 +854,20 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             )
 
     def _reap_idle_sessions(self) -> None:
-        """Evict sessions that have been idle beyond the configured limit.
+        """Evict idle sessions when remaining peer slots are scarce.
 
         A session is idle when it has no pending work and its last activity
-        timestamp exceeds ``VLLM_P2P_IDLE_TIMEOUT_S``. Uses the same
+        timestamp exceeds ``VLLM_P2P_IDLE_TIMEOUT_S``. Eviction runs only
+        when ``len(_sessions) >= VLLM_P2P_MAX_PEERS - _IDLE_REAP_HEADROOM``
+        so a quiet but healthy mesh is not torn down. Uses the same
         teardown path as ``_reap_dead_sessions``.
         """
         idle_timeout = envs.VLLM_P2P_IDLE_TIMEOUT_S
         if idle_timeout <= 0:
+            return
+        max_peers = envs.VLLM_P2P_MAX_PEERS
+        headroom = min(_IDLE_REAP_HEADROOM, max(0, max_peers - 1))
+        if len(self._sessions) < max_peers - headroom:
             return
         deadline = time.monotonic() - idle_timeout
         idle: list[str] | None = None

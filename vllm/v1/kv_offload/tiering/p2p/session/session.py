@@ -270,11 +270,21 @@ class P2PSession:
                 new_fetch_ids=[],
             )
 
+        # Drain the inbox first so a ConnectAck already buffered at the
+        # deadline (e.g. after a scheduler stall) can complete the
+        # handshake instead of being discarded by mark_dead.
+        messages = self._conn.recv()
+        if messages:
+            self._last_activity_at = time.monotonic()
+        for msg in messages:
+            self._on_message(msg)
+
         # Handshake deadline: a peer that never completes the handshake
         # is stuck in connected-but-not-ready state. Mark it dead so the
         # manager reaps it instead of accumulating sockets indefinitely.
         if (
             not self._send_ready
+            and self._conn.alive
             and self._connected_at is not None
             and time.monotonic() - self._connected_at
             > envs.VLLM_P2P_HANDSHAKE_TIMEOUT_S
@@ -286,12 +296,6 @@ class P2PSession:
                 envs.VLLM_P2P_HANDSHAKE_TIMEOUT_S,
             )
             self._conn.mark_dead()
-
-        messages = self._conn.recv()
-        if messages:
-            self._last_activity_at = time.monotonic()
-        for msg in messages:
-            self._on_message(msg)
 
         loads = self._client.collect_results()
         stores = self._server.collect_results()

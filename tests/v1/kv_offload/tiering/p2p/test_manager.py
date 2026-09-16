@@ -1938,6 +1938,42 @@ class TestGetOrCreateSessionErrorBoundary:
         assert result is None
         assert "bad:1" not in mgr._sessions
 
+    def test_session_construction_failure_closes_conn(self):
+        """connect() succeeding but P2PSession construction failing must
+        close the conn so it is not left registered without a session."""
+        mgr = _make_manager()
+        created: list[_RecordingConn] = []
+
+        class RaisingConn(_RecordingConn):
+            def send(self, msg):
+                raise RuntimeError("send failed during connect")
+
+        class Control:
+            def connect(self, peer_id):
+                conn = RaisingConn(peer_id)
+                created.append(conn)
+                return conn
+
+            def poll(self):
+                return []
+
+        class FakeData:
+            block_len = 4096
+            base_addr = 0x1000
+            num_blocks = 16
+            config_fingerprint = ""
+
+            def get_agent_metadata(self):
+                return b"meta"
+
+        mgr._control = Control()  # type: ignore[assignment]
+        mgr._data = FakeData()  # type: ignore[assignment]
+        result = mgr._get_or_create_session("bad:2")
+        assert result is None
+        assert "bad:2" not in mgr._sessions
+        assert len(created) == 1
+        assert created[0].close_calls == 1
+
 
 # ---------------------------------------------------------------------------
 # Tests for idle session eviction
@@ -1962,9 +1998,11 @@ class TestIdleSessionEviction:
 
     def test_idle_session_evicted(self, monkeypatch):
         monkeypatch.setenv("VLLM_P2P_IDLE_TIMEOUT_S", "10")
+        monkeypatch.setenv("VLLM_P2P_MAX_PEERS", "1")
         import vllm.envs
 
         vllm.envs.__dict__.pop("VLLM_P2P_IDLE_TIMEOUT_S", None)
+        vllm.envs.__dict__.pop("VLLM_P2P_MAX_PEERS", None)
 
         mgr = self._make_with_fake_data()
         idle_session = _FakeSession(
@@ -1976,11 +2014,30 @@ class TestIdleSessionEviction:
         mgr._reap_idle_sessions()
         assert "idle:1" not in mgr._sessions
 
-    def test_active_session_kept(self, monkeypatch):
+    def test_idle_session_kept_below_headroom(self, monkeypatch):
         monkeypatch.setenv("VLLM_P2P_IDLE_TIMEOUT_S", "10")
         import vllm.envs
 
         vllm.envs.__dict__.pop("VLLM_P2P_IDLE_TIMEOUT_S", None)
+        vllm.envs.__dict__.pop("VLLM_P2P_MAX_PEERS", None)
+
+        mgr = self._make_with_fake_data()
+        idle_session = _FakeSession(
+            peer_id="idle:1",
+            last_activity_at=time.monotonic() - 20,
+        )
+        mgr._sessions["idle:1"] = idle_session  # type: ignore[assignment]
+
+        mgr._reap_idle_sessions()
+        assert "idle:1" in mgr._sessions
+
+    def test_active_session_kept(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_IDLE_TIMEOUT_S", "10")
+        monkeypatch.setenv("VLLM_P2P_MAX_PEERS", "1")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_IDLE_TIMEOUT_S", None)
+        vllm.envs.__dict__.pop("VLLM_P2P_MAX_PEERS", None)
 
         mgr = self._make_with_fake_data()
         active = _FakeSession(
@@ -1994,9 +2051,11 @@ class TestIdleSessionEviction:
 
     def test_session_with_pending_work_not_evicted(self, monkeypatch):
         monkeypatch.setenv("VLLM_P2P_IDLE_TIMEOUT_S", "1")
+        monkeypatch.setenv("VLLM_P2P_MAX_PEERS", "1")
         import vllm.envs
 
         vllm.envs.__dict__.pop("VLLM_P2P_IDLE_TIMEOUT_S", None)
+        vllm.envs.__dict__.pop("VLLM_P2P_MAX_PEERS", None)
 
         mgr = self._make_with_fake_data()
         busy = _FakeSession(

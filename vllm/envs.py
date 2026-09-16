@@ -1685,8 +1685,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_P2P_HANDSHAKE_TIMEOUT_S", "30")
     ),
     # Seconds a P2P session may remain idle (no pending work, no
-    # messages) before it is evicted. Reclaims resources from peers
-    # that have gone quiet. Default: 300.
+    # messages) before it is eligible for eviction. Idle eviction runs
+    # only when remaining peer slots are within 8 of VLLM_P2P_MAX_PEERS.
+    # Default: 300. Set to 0 to disable.
     "VLLM_P2P_IDLE_TIMEOUT_S": lambda: int(os.getenv("VLLM_P2P_IDLE_TIMEOUT_S", "300")),
     # IP address used for the EC connector's ZMQ side channel
     # (producer ROUTER bind, consumer DEALER dial).

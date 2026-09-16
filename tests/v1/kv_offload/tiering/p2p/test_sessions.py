@@ -2773,6 +2773,42 @@ class TestHandshakeDeadline:
         session.poll()
         assert session.alive
 
+    def test_buffered_ack_at_deadline_completes_handshake(self, monkeypatch):
+        """A ConnectAck already in the inbox at the deadline must complete
+        the handshake instead of being discarded by mark_dead."""
+        monkeypatch.setenv("VLLM_P2P_HANDSHAKE_TIMEOUT_S", "1")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_HANDSHAKE_TIMEOUT_S", None)
+
+        transport = FakeDataTransport()
+        conn = FakeConnection(peer_id="late-ack:1")
+        session = P2PSession(
+            peer_id="late-ack:1",
+            local_id="local:1",
+            transport=transport,
+            local_block_len=4096,
+            local_hash_seed=_DEFAULT_HASH_SEED,
+            conn=conn,
+        )
+        session._connected_at = time.monotonic() - 5
+        conn._inbox = [
+            {
+                TYPE_KEY: ConnectMsg.TYPE,
+                ConnectMsg.PEER_ID: "late-ack:1",
+                ConnectMsg.AGENT_METADATA: b"meta",
+                ConnectMsg.BASE_ADDR: 0x1000,
+                ConnectMsg.NUM_BLOCKS: 16,
+                ConnectMsg.BLOCK_LEN: 4096,
+                ConnectMsg.CONFIG_FINGERPRINT: "",
+                ConnectMsg.HASH_SEED: _DEFAULT_HASH_SEED,
+            },
+            {TYPE_KEY: ConnectAckMsg.TYPE, ConnectAckMsg.PEER_ID: "late-ack:1"},
+        ]
+        session.poll()
+        assert session.ready
+        assert session.alive
+
     def test_activity_timestamp_updated_on_recv(self):
         transport = FakeDataTransport()
         conn = FakeConnection(peer_id="peer:1")
