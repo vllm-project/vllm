@@ -506,6 +506,11 @@ def _rejection_kernel(
     target_local_sumexp_stride,
     # [num_logits]
     draft_sampled_ptr,
+    # [max_num_reqs, num_speculative_steps], only for suffix compaction
+    synthetic_compaction_draft_sampled_ptr,
+    synthetic_compaction_draft_sampled_stride,
+    # [num_reqs], only for suffix compaction
+    synthetic_compaction_mask_ptr,
     # [max_num_reqs, num_speculative_steps, V]
     draft_logits_ptr,
     draft_logits_stride_0,
@@ -537,13 +542,17 @@ def _rejection_kernel(
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
     SYNTHETIC_MODE: tl.constexpr,
+    SYNTHETIC_SUFFIX_COMPACT: tl.constexpr,
     USE_BLOCK_VERIFICATION: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx).to(tl.int64)
     start_idx = tl.load(cu_num_logits_ptr + req_idx).to(tl.int64)
     end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
-    num_draft_tokens = end_idx - start_idx - 1
+    is_compacted = False
+    if SYNTHETIC_SUFFIX_COMPACT:
+        is_compacted = tl.load(synthetic_compaction_mask_ptr + req_idx)
+    num_draft_tokens = end_idx - start_idx - 1 + is_compacted
     seed = tl.load(seed_ptr + req_state_idx)
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
     is_greedy = temp == 0.0
@@ -554,7 +563,24 @@ def _rejection_kernel(
     verifying = True
     for i in range(num_draft_tokens):
         logit_idx = start_idx + i
-        draft_sampled = tl.load(draft_sampled_ptr + logit_idx + 1).to(tl.int64)
+        if SYNTHETIC_SUFFIX_COMPACT:
+            compacted_draft_sampled = tl.load(
+                synthetic_compaction_draft_sampled_ptr
+                + req_state_idx * synthetic_compaction_draft_sampled_stride
+                + i,
+                mask=is_compacted,
+                other=0,
+            ).to(tl.int64)
+            regular_draft_sampled = tl.load(
+                draft_sampled_ptr + logit_idx + 1,
+                mask=not is_compacted,
+                other=0,
+            ).to(tl.int64)
+            draft_sampled = tl.where(
+                is_compacted, compacted_draft_sampled, regular_draft_sampled
+            )
+        else:
+            draft_sampled = tl.load(draft_sampled_ptr + logit_idx + 1).to(tl.int64)
         # -1 is used for placeholder draft token ids that should be rejected.
         is_valid_draft = draft_sampled >= 0
         # Avoid possible OOB ptr access.
@@ -753,6 +779,11 @@ def _resample_kernel(
     expanded_idx_mapping_ptr,
     # [num_logits]
     draft_sampled_ptr,
+    # [max_num_reqs, num_speculative_steps], only for suffix compaction
+    synthetic_compaction_draft_sampled_ptr,
+    synthetic_compaction_draft_sampled_stride,
+    # [num_reqs], only for suffix compaction
+    synthetic_compaction_mask_ptr,
     # [max_num_reqs]
     temp_ptr,
     # [max_num_reqs]
@@ -773,6 +804,7 @@ def _resample_kernel(
     HAS_DRAFT_LOGITS: tl.constexpr,
     USE_FP64: tl.constexpr,
     USE_BLOCK_VERIFICATION: tl.constexpr,
+    SYNTHETIC_SUFFIX_COMPACT: tl.constexpr,
     CONTEXT_WIDTH: tl.constexpr,
     WATERMARK: tl.constexpr,
 ):
@@ -783,18 +815,40 @@ def _resample_kernel(
     resample_token_idx = start_idx + resample_idx
     req_state_idx = tl.load(expanded_idx_mapping_ptr + resample_token_idx).to(tl.int64)
 
+    is_compacted = False
+    if SYNTHETIC_SUFFIX_COMPACT:
+        is_compacted = tl.load(synthetic_compaction_mask_ptr + req_idx)
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
-    is_bonus = resample_token_idx == end_idx - 1
+    is_bonus = (not is_compacted) & (resample_token_idx == end_idx - 1)
     if temp == 0.0 and not is_bonus:
         # Greedy + non-bonus token. No resampling needed because
         # the target argmax is already in the sampled tensor.
         return
 
-    rejected_draft_token = tl.load(
-        draft_sampled_ptr + resample_token_idx + 1,
-        mask=not is_bonus,
-        other=0,
-    )
+    if SYNTHETIC_SUFFIX_COMPACT:
+        compacted_rejected_draft_token = tl.load(
+            synthetic_compaction_draft_sampled_ptr
+            + req_state_idx * synthetic_compaction_draft_sampled_stride
+            + resample_idx,
+            mask=is_compacted,
+            other=0,
+        )
+        regular_rejected_draft_token = tl.load(
+            draft_sampled_ptr + resample_token_idx + 1,
+            mask=(not is_compacted) & (not is_bonus),
+            other=0,
+        )
+        rejected_draft_token = tl.where(
+            is_compacted,
+            compacted_rejected_draft_token,
+            regular_rejected_draft_token,
+        )
+    else:
+        rejected_draft_token = tl.load(
+            draft_sampled_ptr + resample_token_idx + 1,
+            mask=not is_bonus,
+            other=0,
+        )
     is_valid_rejected_draft = rejected_draft_token >= 0
 
     block_idx = tl.program_id(1)
@@ -933,7 +987,10 @@ def _insert_resampled_kernel(
     expanded_idx_mapping_ptr,
     # [max_num_reqs]
     temp_ptr,
+    # [num_reqs], only for suffix compaction
+    synthetic_compaction_mask_ptr,
     PADDED_RESAMPLE_NUM_BLOCKS: tl.constexpr,
+    SYNTHETIC_SUFFIX_COMPACT: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     num_sampled = tl.load(num_sampled_ptr + req_idx)
@@ -945,8 +1002,11 @@ def _insert_resampled_kernel(
     # Increment the number of sampled tokens.
     tl.store(num_sampled_ptr + req_idx, num_sampled + 1)
 
+    is_compacted = False
+    if SYNTHETIC_SUFFIX_COMPACT:
+        is_compacted = tl.load(synthetic_compaction_mask_ptr + req_idx)
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
-    is_bonus = resample_token_idx == end_idx - 1
+    is_bonus = (not is_compacted) & (resample_token_idx == end_idx - 1)
     if temp == 0.0 and not is_bonus:
         # Greedy + non-bonus token. The target argmax is already
         # in the sampled tensor.
@@ -1009,6 +1069,11 @@ def rejection_sample(
     contexts: torch.Tensor | None = None,
     watermarking: torch.Tensor | None = None,
     watermark_key: int | None = None,
+    # [max_num_reqs, num_speculative_steps]. When set, every physical target
+    # logit verifies one draft, including the first guaranteed-zero-rate draft.
+    synthetic_compaction_draft_sampled: torch.Tensor | None = None,
+    # [num_reqs]. True selects suffix-compacted semantics for that request.
+    synthetic_compaction_mask: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
     assert draft_logits is None or (
@@ -1016,6 +1081,23 @@ def rejection_sample(
     )
     num_reqs = cu_num_logits.shape[0] - 1
     num_logits, vocab_size = target_logits.shape
+    synthetic_suffix_compact = synthetic_compaction_mask is not None
+    synthetic_compaction_draft_sampled_stride = 0
+    if synthetic_suffix_compact:
+        assert synthetic_conditional_rates is not None
+        assert not use_block_verification
+        assert synthetic_compaction_draft_sampled is not None
+        assert synthetic_compaction_draft_sampled.ndim == 2
+        assert synthetic_compaction_draft_sampled.shape[1] >= num_speculative_steps
+        synthetic_compaction_draft_sampled_stride = (
+            synthetic_compaction_draft_sampled.stride(0)
+        )
+        assert synthetic_compaction_mask is not None
+        assert synthetic_compaction_mask.ndim == 1
+        assert synthetic_compaction_mask.shape[0] == num_reqs
+        assert synthetic_compaction_mask.dtype == torch.bool
+    else:
+        assert synthetic_compaction_draft_sampled is None
 
     watermark = contexts is not None
     assert watermark == (watermarking is not None) == (watermark_key is not None), (
@@ -1195,6 +1277,9 @@ def rejection_sample(
         target_local_sumexp,
         target_local_sumexp.stride(0),
         draft_sampled,
+        synthetic_compaction_draft_sampled,
+        synthetic_compaction_draft_sampled_stride,
+        synthetic_compaction_mask,
         draft_logits,
         draft_logits_stride_0,
         draft_logits_stride_1,
@@ -1215,6 +1300,7 @@ def rejection_sample(
         PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
         HAS_DRAFT_LOGITS=has_draft_logits,
         SYNTHETIC_MODE=synthetic_conditional_rates is not None,
+        SYNTHETIC_SUFFIX_COMPACT=synthetic_suffix_compact,
         USE_BLOCK_VERIFICATION=use_block_verification,
         num_warps=1,
     )
@@ -1247,6 +1333,9 @@ def rejection_sample(
         cu_num_logits,
         expanded_idx_mapping,
         draft_sampled,
+        synthetic_compaction_draft_sampled,
+        synthetic_compaction_draft_sampled_stride,
+        synthetic_compaction_mask,
         temperature,
         seed,
         pos,
@@ -1261,6 +1350,7 @@ def rejection_sample(
         HAS_DRAFT_LOGITS=has_draft_logits,
         USE_FP64=use_fp64,
         USE_BLOCK_VERIFICATION=use_block_verification,
+        SYNTHETIC_SUFFIX_COMPACT=synthetic_suffix_compact,
         CONTEXT_WIDTH=context_width,
         WATERMARK=watermark,
     )
@@ -1278,6 +1368,8 @@ def rejection_sample(
         cu_num_logits,
         expanded_idx_mapping,
         temperature,
+        synthetic_compaction_mask,
         PADDED_RESAMPLE_NUM_BLOCKS=padded_resample_num_blocks,
+        SYNTHETIC_SUFFIX_COMPACT=synthetic_suffix_compact,
     )
     return sampled, num_sampled

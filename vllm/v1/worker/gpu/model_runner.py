@@ -163,6 +163,11 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     get_max_chunk_logits,
 )
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+from vllm.v1.worker.gpu.spec_decode.synthetic_verification import (
+    can_compact_synthetic_verification,
+    compact_synthetic_verification_counts,
+    resolve_synthetic_verify_max_drafts,
+)
 from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
@@ -273,6 +278,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.speculator = None
         self.use_aux_hidden_state_outputs = False
         self.num_speculative_steps = vllm_config.num_speculative_tokens
+        self.synthetic_verify_max_drafts = resolve_synthetic_verify_max_drafts(
+            vllm_config
+        )
         if self.speculative_config is not None:
             if self.is_last_pp_rank:
                 self.speculator = init_speculator(self.vllm_config, self.device)
@@ -431,6 +439,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.num_speculative_steps
             + self.model_state.num_new_sampled_tokens_per_step
         )
+        if self.synthetic_verify_max_drafts is not None:
+            self.decode_query_len = (
+                self.synthetic_verify_max_drafts
+                + self.model_state.num_new_sampled_tokens_per_step
+            )
+            logger.info(
+                "Kimi-K3 synthetic verifier executes %d/%d target rows "
+                "(including the zero-rate rejection); scheduler accounting "
+                "remains K=%d",
+                self.decode_query_len,
+                self.num_speculative_steps
+                + self.model_state.num_new_sampled_tokens_per_step,
+                self.num_speculative_steps,
+            )
 
         if self.parallel_config.enable_batch_sharded_sampling:
             if hasattr(self.model, "compute_logits_local"):
@@ -1230,6 +1252,26 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         numtoks_iter = map(num_tokens_per_req.__getitem__, req_ids)
         num_scheduled_tokens = np.fromiter(numtoks_iter, dtype=np.int32, count=num_reqs)
+        if self.synthetic_verify_max_drafts is not None and draft_tokens:
+            logical_num_draft_tokens = np.fromiter(
+                (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
+                dtype=np.int32,
+                count=num_reqs,
+            )
+            # Warmup already uses the physical decode_query_len while carrying
+            # a logical K-sized draft list. Real scheduler outputs still carry
+            # all K+bonus rows and need compaction here.
+            if can_compact_synthetic_verification(
+                logical_num_draft_tokens,
+                self.synthetic_verify_max_drafts,
+            ):
+                num_scheduled_tokens, _ = compact_synthetic_verification_counts(
+                    num_scheduled_tokens,
+                    logical_num_draft_tokens,
+                    self.synthetic_verify_max_drafts,
+                )
+            num_toks = int(num_scheduled_tokens.sum())
+            max_query_len = int(num_scheduled_tokens.max())
 
         idx_mapping_iter = map(self.req_states.req_id_to_index.__getitem__, req_ids)
         idx_mapping_np = np.fromiter(idx_mapping_iter, dtype=np.intp, count=num_reqs)
@@ -1283,6 +1325,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Get the number of draft tokens for each request.
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
         num_draft_tokens_per_req = None
+        synthetic_verify_compaction_mask = None
         if not draft_tokens:
             # No draft token scheduled (common case).
             total_num_draft_tokens = 0
@@ -1301,6 +1344,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 dtype=np.int32,
                 count=num_reqs,
             )
+            if self.synthetic_verify_max_drafts is not None and (
+                can_compact_synthetic_verification(
+                    num_draft_tokens_per_req,
+                    self.synthetic_verify_max_drafts,
+                )
+            ):
+                synthetic_verify_compaction_mask = async_tensor_h2d(
+                    num_draft_tokens_per_req > self.synthetic_verify_max_drafts,
+                    device=self.device,
+                )
+                num_draft_tokens_per_req = np.minimum(
+                    num_draft_tokens_per_req,
+                    self.synthetic_verify_max_drafts,
+                )
             num_bonus_tokens = self.model_state.num_new_sampled_tokens_per_step
             total_num_draft_tokens = int(num_draft_tokens_per_req.sum())
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
@@ -1452,6 +1509,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 if adaptive_verification is not None
                 else None
             ),
+            synthetic_verify_compaction_mask=synthetic_verify_compaction_mask,
         )
         input_batch = pcp.maybe_partition_pcp_batch(
             self.pcp_manager,
@@ -1653,6 +1711,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         if batch_req_state is not None:
             num_toks = batch_req_state.num_tokens
+            max_query_len = int(batch_req_state.num_scheduled_tokens.max())
             if self.pcp_manager is not None:
                 num_toks = self.pcp_manager.get_num_tokens_for_dispatch(
                     batch_req_state.num_scheduled_tokens,

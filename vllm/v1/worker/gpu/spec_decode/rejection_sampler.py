@@ -176,6 +176,7 @@ class RejectionSampler:
         idx_mapping_np: np.ndarray,
         expanded_idx_mapping: torch.Tensor,
         expanded_local_pos: torch.Tensor,
+        synthetic_verify_compaction_mask: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         processed_logits = self.sampler.apply_sampling_params(
             logits,
@@ -199,6 +200,12 @@ class RejectionSampler:
             self.sampler.sampling_states.seeds.gpu,
             self.num_speculative_steps,
             self.synthetic_conditional_rates,
+            synthetic_compaction_draft_sampled=(
+                self.sampler.req_states.draft_tokens
+                if synthetic_verify_compaction_mask is not None
+                else None
+            ),
+            synthetic_compaction_mask=synthetic_verify_compaction_mask,
             use_fp64=self.sampler.use_fp64_gumbel,
             use_block_verification=self.use_block_verification,
             **self._watermarking_kwargs(
@@ -251,6 +258,11 @@ class RejectionSampler:
                 input_batch.idx_mapping_np[start:end],
                 input_batch.expanded_idx_mapping[lo:hi],
                 input_batch.expanded_local_pos[lo:hi],
+                (
+                    input_batch.synthetic_verify_compaction_mask[start:end]
+                    if input_batch.synthetic_verify_compaction_mask is not None
+                    else None
+                ),
             )
             chunk_logprobs = self._get_logprobs_tensors(
                 sampled,

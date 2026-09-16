@@ -212,6 +212,7 @@ if TYPE_CHECKING:
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
     VLLM_KIMI_K3_GEMM_AR: bool = True
     VLLM_KIMI_K3_GEMM_RS: bool = False
+    VLLM_KIMI_K3_SYNTHETIC_VERIFY_COMPACTION: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
@@ -1607,6 +1608,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use the SM100 BF16 GEMM-RS kernel for eligible Kimi-K3 sequence-parallel
     # row-parallel projections. All TP ranks must belong to one NVLink domain.
     "VLLM_KIMI_K3_GEMM_RS": lambda: bool(int(os.getenv("VLLM_KIMI_K3_GEMM_RS", "0"))),
+    # Kimi-K3 DSpark synthetic-greedy only. Preserve the configured draft
+    # count for scheduler accounting, but omit target verifier suffix rows
+    # whose committed unconditional acceptance rate is exactly zero.
+    "VLLM_KIMI_K3_SYNTHETIC_VERIFY_COMPACTION": lambda: bool(
+        int(os.getenv("VLLM_KIMI_K3_SYNTHETIC_VERIFY_COMPACTION", "0"))
+    ),
     # Allow use of FlashInfer FP8 block-scale GEMM for linear layers.
     # This uses TensorRT-LLM kernels and requires SM90+ (Hopper).
     "VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER": lambda: bool(
