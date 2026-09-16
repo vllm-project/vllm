@@ -327,6 +327,33 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         )
         y = y.view_as(y_org)
 
+    def apply_lora_full_linear(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        weight_stacked: torch.Tensor,
+        bias_stacked: torch.Tensor,
+        module_enabled: torch.Tensor,
+    ) -> None:
+        adapter_y = torch.empty(
+            (x.size(0), weight_stacked.size(-2)),
+            dtype=torch.float32,
+            device=x.device,
+        )
+        lora_shrink(
+            x,
+            [weight_stacked],
+            adapter_y.unsqueeze(0),
+            *self.prompt_mapping_meta.meta_args(
+                x.size(0), self.lora_config.specialize_active_lora
+            ),
+            1.0,
+        )
+        result = self._select_full_linear_output(
+            y, adapter_y, bias_stacked, module_enabled
+        )
+        y.copy_(result)
+
     def moe_lora_align_block_size(
         self,
         topk_ids: torch.Tensor,
