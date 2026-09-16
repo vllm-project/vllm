@@ -707,7 +707,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             )
 
         self.pcp_dcp_kv_gather = False
-        self._workspace_specs: list[tuple[tuple[int, ...], torch.dtype]] = [
+        self.workspace_specs: list[tuple[tuple[int, ...], torch.dtype]] = [
             (q_concat_shape, torch.bfloat16)
         ]
         if kv_cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS:
@@ -727,31 +727,14 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 # shards into a workspace of the full prefill size.
                 shard_rows //= parallel_config.decode_context_parallel_size
             self.prefill_workspace_shape = (shard_rows, head_size)
-            self._workspace_specs.append((self.prefill_workspace_shape, torch.bfloat16))
+            self.workspace_specs.append((self.prefill_workspace_shape, torch.bfloat16))
             if self.pcp_dcp_kv_gather:
-                self._workspace_specs.append(
+                self.workspace_specs.append(
                     ((prefill_workspace_size, head_size), torch.bfloat16)
                 )
         # Reserve capacity without retaining views that prevent old storage
         # from being released when another layer grows the shared workspace.
-        self._get_workspace_buffers()
-
-    def _get_workspace_buffers(self) -> list[torch.Tensor]:
-        return current_workspace_manager().get_simultaneous(*self._workspace_specs)
-
-    @property
-    def q_concat_buffer(self) -> torch.Tensor:
-        return self._get_workspace_buffers()[0]
-
-    @property
-    def prefill_bf16_workspace(self) -> torch.Tensor:
-        return self._get_workspace_buffers()[1]
-
-    @property
-    def gathered_kv_workspace(self) -> torch.Tensor | None:
-        if not self.pcp_dcp_kv_gather:
-            return None
-        return self._get_workspace_buffers()[2]
+        current_workspace_manager().get_simultaneous(*self.workspace_specs)
 
     def _forward_bf16_kv(
         self,
@@ -849,8 +832,10 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         """All-gather this rank's upconverted KV shard so the chunk's rows attend
         the whole context, and map their top-k onto the rank-major result."""
         shard_rows = int(chunk.chunk_tot_seqlen)
-        assert self.gathered_kv_workspace is not None
-        gathered_kv = self.gathered_kv_workspace[: self.dcp_world_size * shard_rows]
+        _, _, gathered_kv_workspace = current_workspace_manager().get_simultaneous(
+            *self.workspace_specs
+        )
+        gathered_kv = gathered_kv_workspace[: self.dcp_world_size * shard_rows]
         dist.all_gather_into_tensor(
             gathered_kv, shard, group=get_dcp_group().device_group
         )
@@ -902,10 +887,13 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             assert fp8_metadata.prefill is not None
             first_chunk = fp8_metadata.prefill.chunks[0]
             assert isinstance(index_group, HiSparseMLAIndexGroup)
+            _, prefill_bf16_workspace, *_ = (
+                current_workspace_manager().get_simultaneous(*self.workspace_specs)
+            )
             prefill_ready = index_group.gather_fp8_prefill(
                 self.index_group_index,
                 kv_c_and_k_pe_cache,
-                self.prefill_bf16_workspace[: first_chunk.chunk_tot_seqlen],
+                prefill_bf16_workspace[: first_chunk.chunk_tot_seqlen],
                 first_chunk.block_table,
                 first_chunk.workspace_starts,
                 len(first_chunk.block_table),
@@ -1022,8 +1010,11 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 )
 
             assert fp8_metadata.prefill is not None
+            _, prefill_bf16_workspace, *_ = (
+                current_workspace_manager().get_simultaneous(*self.workspace_specs)
+            )
             for chunk_index, chunk in enumerate(fp8_metadata.prefill.chunks):
-                chunk_workspace = self.prefill_bf16_workspace[: chunk.chunk_tot_seqlen]
+                chunk_workspace = prefill_bf16_workspace[: chunk.chunk_tot_seqlen]
                 if uses_host_cache and chunk_index > 0:
                     assert isinstance(index_group, HiSparseMLAIndexGroup)
                     prefill_ready = index_group.gather_fp8_prefill(
@@ -1302,7 +1293,10 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         actual_num_heads = self.num_heads
         if isinstance(q, tuple):
             ql_nope, q_pe = q
-            q = self.q_concat_buffer[: ql_nope.shape[0]]
+            q_concat_buffer, *_ = current_workspace_manager().get_simultaneous(
+                *self.workspace_specs
+            )
+            q = q_concat_buffer[: ql_nope.shape[0]]
             ops.concat_mla_q(ql_nope, q_pe, q)
         else:
             actual_num_heads = q.shape[1]
