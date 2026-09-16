@@ -664,7 +664,8 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                 and fp8_scale is not None
                 and fp8_weight.dtype == torch.float8_e4m3fn
                 and self._cos_sin_cache_fp32 is not None
-                and not torch.cuda.is_current_stream_capturing()):
+                and not torch.cuda.is_current_stream_capturing()
+                and o.shape[0] <= self._cos_sin_cache_fp32.shape[0]):
             try:
                 from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
                     fused_inv_rope_fp8_quant,
