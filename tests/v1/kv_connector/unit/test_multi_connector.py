@@ -20,7 +20,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     SupportsHMA,
     supports_hma,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorLogging,
+    KVConnectorStats,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
     MultiKVConnectorPromMetrics,
@@ -816,6 +819,36 @@ class TestMultiConnectorStats:
         # Check that the stats were reduced (should have aggregated values)
         assert "Num successful transfers" in reduced["NixlConnector"]
         assert reduced["NixlConnector"]["Num successful transfers"] == 2
+
+    def test_log_renders_plain_scalars(self):
+        """Reduced stats must render as plain numbers in the CLI log, not
+        numpy reprs (eg np.float64(2.338))."""
+        stats = MultiKVConnectorStats(
+            data={
+                "NixlConnector": NixlKVConnectorStats(
+                    data={
+                        "transfer_duration": [1.0, 2.0],
+                        "post_duration": [0.1, 0.2],
+                        "bytes_transferred": [1024, 2048],
+                        "num_descriptors": [10, 20],
+                        "num_failed_transfers": [],
+                        "num_failed_notifications": [],
+                    }
+                )
+            }
+        )
+
+        kv_logging = KVConnectorLogging(kv_transfer_config=None)
+        kv_logging.transfer_stats_accumulator = stats
+        log_records: list[tuple] = []
+        kv_logging.log(log_fn=lambda *args: log_records.append(args))
+
+        assert len(log_records) == 1
+        msg = log_records[0][1]
+        assert "np.float" not in msg
+        assert "'Avg xfer time (ms)': 1500.0" in msg
+        # The accumulator is reset after logging.
+        assert kv_logging.transfer_stats_accumulator is None
 
     def test_reset(self):
         """Test that reset() resets all nested connector stats."""
