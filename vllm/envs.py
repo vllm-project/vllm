@@ -210,8 +210,12 @@ if TYPE_CHECKING:
     VLLM_MOE_SKIP_PADDING: bool = True
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
+    VLLM_KIMI_K3_DEFER_ATTN_RES_MLP: bool = False
+    VLLM_KIMI_K3_DEFER_ATTN_RES_MLP_MAX_TOKENS: int = 16
     VLLM_KIMI_K3_GEMM_AR: bool = True
     VLLM_KIMI_K3_GEMM_RS: bool = False
+    VLLM_KIMI_K3_DSPARK_CONTEXT_CG_MAX_TOKENS: int = 0
+    VLLM_KIMI_K3_DSPARK_CONTEXT_CG_DIRECT_PROJECTION: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
@@ -1596,12 +1600,31 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_KIMI_K3_AUX_ATTN_RES_STREAM": lambda: bool(
         int(os.getenv("VLLM_KIMI_K3_AUX_ATTN_RES_STREAM", "0"))
     ),
+    # Kimi-K3 ROCm AttnRes only. Carry each layer's MLP output into the next
+    # AttnRes call as its delta instead of materializing a standalone prefix
+    # add. The AttnRes kernel performs the same dtype-rounded add before any
+    # block write, scoring, or normalization. Keep opt-in until the supported
+    # ROCm kernel set has been benchmarked end to end.
+    "VLLM_KIMI_K3_DEFER_ATTN_RES_MLP": lambda: bool(
+        int(os.getenv("VLLM_KIMI_K3_DEFER_ATTN_RES_MLP", "0"))
+    ),
+    "VLLM_KIMI_K3_DEFER_ATTN_RES_MLP_MAX_TOKENS": lambda: int(
+        os.getenv("VLLM_KIMI_K3_DEFER_ATTN_RES_MLP_MAX_TOKENS", "16")
+    ),
     # Use the SM100 BF16 GEMM-AR kernel for eligible Kimi-K3 row-parallel
     # attention projections. All TP ranks must belong to one NVLink domain.
     "VLLM_KIMI_K3_GEMM_AR": lambda: bool(int(os.getenv("VLLM_KIMI_K3_GEMM_AR", "1"))),
     # Use the SM100 BF16 GEMM-RS kernel for eligible Kimi-K3 sequence-parallel
     # row-parallel projections. All TP ranks must belong to one NVLink domain.
     "VLLM_KIMI_K3_GEMM_RS": lambda: bool(int(os.getenv("VLLM_KIMI_K3_GEMM_RS", "0"))),
+    # Kimi-K3 DSpark ROCm only. Allow the fixed decode context-KV graph up to
+    # this token bound. Replay preserves PAD_SLOT_ID cache rows. Zero disables it.
+    "VLLM_KIMI_K3_DSPARK_CONTEXT_CG_MAX_TOKENS": lambda: int(
+        os.getenv("VLLM_KIMI_K3_DSPARK_CONTEXT_CG_MAX_TOKENS", "0")
+    ),
+    "VLLM_KIMI_K3_DSPARK_CONTEXT_CG_DIRECT_PROJECTION": lambda: bool(
+        int(os.getenv("VLLM_KIMI_K3_DSPARK_CONTEXT_CG_DIRECT_PROJECTION", "0"))
+    ),
     # Allow use of FlashInfer FP8 block-scale GEMM for linear layers.
     # This uses TensorRT-LLM kernels and requires SM90+ (Hopper).
     "VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER": lambda: bool(

@@ -6,6 +6,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from vllm import envs
 from vllm.config import VllmConfig, replace
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
@@ -23,13 +24,252 @@ from vllm.v1.worker.gpu.cp_utils import cp_local_slot
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManager
+from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import (
+    BoundedContextCudaGraph,
+    DFlashCudaGraphManager,
+)
 from vllm.v1.worker.gpu.spec_decode.dflash.utils import load_dflash_model
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import get_parallel_drafting_token_id
 from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
+
+
+def _slice_context_slot_mapping(
+    context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | None,
+    start: int,
+    end: int,
+) -> torch.Tensor | list[torch.Tensor | None] | None:
+    if isinstance(context_slot_mapping, torch.Tensor):
+        return context_slot_mapping[start:end]
+    if context_slot_mapping is None:
+        return None
+    return [
+        None if slot_mapping is None else slot_mapping[start:end]
+        for slot_mapping in context_slot_mapping
+    ]
+
+
+def _record_segmented_context_replays(
+    context_cudagraph_manager: BoundedContextCudaGraph,
+    input_batch: InputBatch,
+    replayed: int,
+) -> None:
+    has_prefill = getattr(input_batch, "has_prefill", None)
+    if has_prefill is None:
+        has_prefill = bool(input_batch.is_prefilling_np.any())
+    if not replayed or (not has_prefill and input_batch.num_reqs == 1):
+        return
+    context_cudagraph_manager.segmented_batch_count += 1
+    context_cudagraph_manager.segmented_replay_count += replayed
+    if context_cudagraph_manager.segmented_batch_count == 1:
+        logger.info(
+            "Replayed %d DSpark context graph slice(s) in the first "
+            "mixed or multi-request batch",
+            replayed,
+        )
+
+
+def _record_batched_context_replay(
+    context_cudagraph_manager: BoundedContextCudaGraph,
+    num_reqs: int,
+) -> None:
+    context_cudagraph_manager.batched_replay_count += 1
+    if context_cudagraph_manager.batched_replay_count == 1:
+        logger.info(
+            "Replayed first batched DSpark context graph for %d requests",
+            num_reqs,
+        )
+
+
+def _store_context_kv_with_graphs(
+    model: Any,
+    context_cudagraph_manager: BoundedContextCudaGraph | None,
+    context_states: torch.Tensor,
+    context_positions: torch.Tensor,
+    context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | None,
+    input_batch: InputBatch,
+    *,
+    dummy_run: bool,
+    is_profile: bool,
+) -> None:
+    """Graph decode slices and eagerly store prefill slices in one projection."""
+    num_reqs = input_batch.num_reqs
+    num_target_tokens = context_states.shape[0]
+    exact_layout = (
+        num_target_tokens == int(input_batch.num_scheduled_tokens[:num_reqs].sum())
+        and int(input_batch.query_start_loc_np[num_reqs]) == num_target_tokens
+    )
+    decode_req_indices = {
+        req_idx
+        for req_idx in range(num_reqs)
+        if not input_batch.is_prefilling_np[req_idx]
+    }
+    if (
+        context_cudagraph_manager is None
+        or dummy_run
+        or is_profile
+        or not exact_layout
+        or not decode_req_indices
+    ):
+        model.precompute_and_store_context_kv(
+            context_states,
+            context_positions,
+            context_slot_mapping,
+        )
+        return
+
+    segments = [
+        (
+            req_idx,
+            int(input_batch.query_start_loc_np[req_idx]),
+            int(input_batch.query_start_loc_np[req_idx + 1]),
+        )
+        for req_idx in range(num_reqs)
+    ]
+    project_into = (
+        getattr(model, "project_context_kv_into", None)
+        if envs.VLLM_KIMI_K3_DSPARK_CONTEXT_CG_DIRECT_PROJECTION
+        else None
+    )
+    all_decode = len(decode_req_indices) == num_reqs
+    if (
+        all_decode
+        and num_reqs > 1
+        and project_into is not None
+        and context_cudagraph_manager.can_replay(
+            context_cudagraph_manager.context_states[:num_target_tokens],
+            context_positions,
+            context_slot_mapping,
+            eligible=True,
+        )
+    ):
+        projected_context = project_into(
+            context_states,
+            context_cudagraph_manager.context_states[:num_target_tokens],
+        )
+        if context_cudagraph_manager.replay(
+            projected_context,
+            context_positions,
+            context_slot_mapping,
+            eligible=True,
+        ):
+            _record_batched_context_replay(context_cudagraph_manager, num_reqs)
+            return
+        model.store_projected_context_kv(
+            projected_context,
+            context_positions,
+            context_slot_mapping,
+        )
+        return
+
+    direct_replayable = {
+        req_idx
+        for req_idx, start, end in segments
+        if project_into is not None
+        and req_idx in decode_req_indices
+        and context_cudagraph_manager.can_replay(
+            context_cudagraph_manager.context_states[: end - start],
+            context_positions[start:end],
+            _slice_context_slot_mapping(context_slot_mapping, start, end),
+            eligible=True,
+        )
+    }
+    if direct_replayable:
+        assert project_into is not None
+        replayed = 0
+        for req_idx, start, end in segments:
+            if start == end:
+                continue
+            sliced_slots = _slice_context_slot_mapping(context_slot_mapping, start, end)
+            if req_idx in direct_replayable:
+                projected_context = project_into(
+                    context_states[start:end],
+                    context_cudagraph_manager.context_states[: end - start],
+                )
+                if context_cudagraph_manager.replay(
+                    projected_context,
+                    context_positions[start:end],
+                    sliced_slots,
+                    eligible=True,
+                ):
+                    replayed += 1
+                    continue
+                model.store_projected_context_kv(
+                    projected_context,
+                    context_positions[start:end],
+                    sliced_slots,
+                )
+                continue
+            model.precompute_and_store_context_kv(
+                context_states[start:end],
+                context_positions[start:end],
+                sliced_slots,
+            )
+        _record_segmented_context_replays(
+            context_cudagraph_manager, input_batch, replayed
+        )
+        return
+
+    projected_context = model.project_context_kv(context_states)
+    if (
+        all_decode
+        and num_reqs > 1
+        and context_cudagraph_manager.can_replay(
+            projected_context,
+            context_positions,
+            context_slot_mapping,
+            eligible=True,
+        )
+        and context_cudagraph_manager.replay(
+            projected_context,
+            context_positions,
+            context_slot_mapping,
+            eligible=True,
+        )
+    ):
+        _record_batched_context_replay(context_cudagraph_manager, num_reqs)
+        return
+    replayable = {
+        req_idx
+        for req_idx, start, end in segments
+        if req_idx in decode_req_indices
+        and context_cudagraph_manager.can_replay(
+            projected_context[start:end],
+            context_positions[start:end],
+            _slice_context_slot_mapping(context_slot_mapping, start, end),
+            eligible=True,
+        )
+    }
+    if not replayable:
+        model.store_projected_context_kv(
+            projected_context,
+            context_positions,
+            context_slot_mapping,
+        )
+        return
+
+    replayed = 0
+    for req_idx, start, end in segments:
+        if start == end:
+            continue
+        sliced_slots = _slice_context_slot_mapping(context_slot_mapping, start, end)
+        if req_idx in replayable and context_cudagraph_manager.replay(
+            projected_context[start:end],
+            context_positions[start:end],
+            sliced_slots,
+            eligible=True,
+        ):
+            replayed += 1
+            continue
+        model.store_projected_context_kv(
+            projected_context[start:end],
+            context_positions[start:end],
+            sliced_slots,
+        )
+
+    _record_segmented_context_replays(context_cudagraph_manager, input_batch, replayed)
 
 
 class DFlashSpeculator(DraftModelSpeculator):
@@ -107,6 +347,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         ).repeat(self.max_num_reqs)
 
         self.query_cudagraph_manager: DFlashCudaGraphManager | None = None
+        self.context_cudagraph_manager: BoundedContextCudaGraph | None = None
         self.draft_kv_cache_group_id: int = -1
 
     @property
@@ -162,6 +403,10 @@ class DFlashSpeculator(DraftModelSpeculator):
             causal=self._group_causal,
             progress_bar_desc=f"Capturing {self._speculator_name.lower()} CUDA graphs",
         )
+        if self.context_cudagraph_manager is not None:
+            self.context_cudagraph_manager.capture(
+                self.model.store_projected_context_kv
+            )
 
     def load_draft_model(
         self,
@@ -420,10 +665,17 @@ class DFlashSpeculator(DraftModelSpeculator):
             ]
         else:
             context_slots = self._context_slot_mappings[0][:num_target_tokens]
-        self.model.precompute_and_store_context_kv(
-            self.hidden_states[:num_target_tokens],
-            self.context_positions[:num_target_tokens],
+        context_states = self.hidden_states[:num_target_tokens]
+        context_positions = self.context_positions[:num_target_tokens]
+        _store_context_kv_with_graphs(
+            self.model,
+            self.context_cudagraph_manager,
+            context_states,
+            context_positions,
             context_slots,
+            input_batch,
+            dummy_run=dummy_run,
+            is_profile=is_profile,
         )
 
         batch_sync, num_batch_tokens = (

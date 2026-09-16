@@ -13,6 +13,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     ReplicatedLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
@@ -245,18 +246,43 @@ class K3DSparkModel(nn.Module):
                 [attn._k_scale.reshape(()) for attn in attentions]
             )
 
-    def _precompute_fused_context_kv(
+    @property
+    def context_cudagraph_input_size(self) -> int:
+        """Width of the eager projection consumed by the graph-safe tail."""
+        return self.config.num_hidden_layers * (
+            self.config.kv_lora_rank + self.config.qk_rope_head_dim
+        )
+
+    def project_context_kv(self, context_states: torch.Tensor) -> torch.Tensor:
+        """Keep the AITER GEMM outside HIP graph capture."""
+        return self.context_kv_proj(context_states)
+
+    def project_context_kv_into(
         self,
         context_states: torch.Tensor,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        """Project directly into a stable context-graph input buffer."""
+        if not isinstance(self.context_kv_proj.quant_method, UnquantizedLinearMethod):
+            output.copy_(self.project_context_kv(context_states))
+            return output
+        torch.mm(
+            context_states,
+            self.context_kv_proj.weight.t(),
+            out=output,
+        )
+        return output
+
+    def store_projected_context_kv(
+        self,
+        all_kv: torch.Tensor,
         context_positions: torch.Tensor,
         context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | None,
     ) -> None:
-        num_ctx = context_states.shape[0]
+        """Normalize, rotate, and cache an already projected context tensor."""
+        num_ctx = all_kv.shape[0]
         num_layers = self._num_context_layers
 
-        # One KV-only GEMM replaces five full Q+KV GEMMs. For K3 this projects
-        # 5*576 rows rather than 5*2112 rows (72.7% fewer A-projection FLOPs).
-        all_kv = self.context_kv_proj(context_states)
         all_kv = all_kv.view(num_ctx, num_layers, self._context_kv_width)
         all_kv_c = all_kv[..., : self._context_kv_lora_rank]
         all_k_pe = all_kv[..., self._context_kv_lora_rank :]
@@ -357,34 +383,53 @@ class K3DSparkModel(nn.Module):
                 attn._k_scale,
             )
 
+    def _precompute_fused_context_kv(
+        self,
+        context_states: torch.Tensor,
+        context_positions: torch.Tensor,
+        context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | None,
+    ) -> None:
+        # One KV-only GEMM replaces five full Q+KV GEMMs. For K3 this projects
+        # 5*576 rows rather than 5*2112 rows (72.7% fewer A-projection FLOPs).
+        all_kv = self.project_context_kv(context_states)
+        self.store_projected_context_kv(all_kv, context_positions, context_slot_mapping)
+
     def _has_uniform_block_layout(
         self,
         cache_layers: list[MultiHeadLatentAttention],
     ) -> bool:
-        if not hasattr(self, "_layers_share_kv_block_layout"):
-            ref_cache = cache_layers[0].kv_cache
+        ref_cache = cache_layers[0].kv_cache
+        layout_signature = tuple(
+            (cache.size(1), cache.stride(0), cache.stride(1))
+            for cache in (layer.kv_cache for layer in cache_layers)
+        )
+        if getattr(self, "_context_cache_layout_signature", None) != layout_signature:
             self._layers_share_kv_block_layout = all(
                 cl.kv_cache.size(1) == ref_cache.size(1)
                 and cl.kv_cache.stride(0) == ref_cache.stride(0)
                 and cl.kv_cache.stride(1) == ref_cache.stride(1)
                 for cl in cache_layers
             )
+            self._context_cache_layout_signature = layout_signature
         return self._layers_share_kv_block_layout
 
     def _get_context_kv_cache_ptrs(
         self,
         cache_layers: list[MultiHeadLatentAttention],
     ) -> torch.Tensor:
-        # The per-layer KV cache base pointers are stable after allocation, so
-        # build the pointer array once and return it on every call.
-        if not hasattr(self, "_context_cache_ptrs"):
+        # KV caches are allocated twice when CUDA-graph memory is profiled:
+        # first against a throwaway cache, then against the real cache. Rebuild
+        # the device pointer array whenever that allocation identity changes.
+        pointer_signature = tuple(cl.kv_cache.data_ptr() for cl in cache_layers)
+        if getattr(self, "_context_cache_pointer_signature", None) != pointer_signature:
             ref_cache = cache_layers[0].kv_cache
             cache_ptrs = torch.tensor(
-                [cl.kv_cache.data_ptr() for cl in cache_layers],
+                pointer_signature,
                 dtype=torch.int64,
                 device=ref_cache.device,
             )
             self._context_cache_ptrs = cache_ptrs
+            self._context_cache_pointer_signature = pointer_signature
         return self._context_cache_ptrs
 
     def forward(
@@ -413,6 +458,7 @@ class K3DSparkModel(nn.Module):
 class K3DSparkForCausalLM(nn.Module):
     has_own_embed_tokens = False
     has_own_lm_head = False
+    supports_bounded_context_cudagraph = True
     draft_id_to_target_id = None
     hf_to_vllm_mapper = WeightsMapper(
         # confidence_head is training-only. The frozen target embedding and LM
@@ -456,6 +502,34 @@ class K3DSparkForCausalLM(nn.Module):
 
     def combine_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.model.combine_hidden_states(hidden_states)
+
+    @property
+    def context_cudagraph_input_size(self) -> int:
+        return self.model.context_cudagraph_input_size
+
+    def project_context_kv(self, context_states: torch.Tensor) -> torch.Tensor:
+        if not hasattr(self.model, "_num_context_layers"):
+            self.model._build_fused_context_kv_metadata()
+        return self.model.project_context_kv(context_states)
+
+    def project_context_kv_into(
+        self,
+        context_states: torch.Tensor,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        if not hasattr(self.model, "_num_context_layers"):
+            self.model._build_fused_context_kv_metadata()
+        return self.model.project_context_kv_into(context_states, output)
+
+    def store_projected_context_kv(
+        self,
+        projected_context: torch.Tensor,
+        context_positions: torch.Tensor,
+        context_slot_mapping: torch.Tensor | list[torch.Tensor | None] | None,
+    ) -> None:
+        self.model.store_projected_context_kv(
+            projected_context, context_positions, context_slot_mapping
+        )
 
     def get_draft_kv_cache_layer_names(self) -> list[str]:
         return [layer.self_attn.layer_name for layer in self.model.layers]
