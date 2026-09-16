@@ -76,8 +76,7 @@ class QutlassNvFP4LinearMethod(CompressedTensorsLinearTransformMethod):
 
     @staticmethod
     def _get_flashinfer_gemm_backend(kernel: NvFp4LinearKernel) -> str:
-        """
-        Given a kernel, find the string that is needed to be passed into
+        """Given a kernel, find the string that is needed to be passed into
         `flashinfer_scaled_fp4_mm`, using
         vllm.model_executor.kernels.linear._LINEAR_BACKEND_KERNEL_MAP as source of truth
         """

@@ -119,8 +119,7 @@ class UBatchWrapper:
         return self.runnable
 
     def _capture_ubatches(self, ubatch_metadata, model) -> torch.Tensor:
-        """
-        Capture a cudagraph for a microbatched run.
+        """Capture a cudagraph for a microbatched run.
 
         The logic here is somewhat complicated because we need to make sure that
         each of the ubatch threads initialize the cuda context before we start

@@ -900,6 +900,7 @@ def rebuild_mm_uuids_from_mm_data(
 
     Returns:
         Updated UUIDs dictionary with chunk UUIDs
+
     """
     vision_chunks = mm_data.get("vision_chunk")
     if vision_chunks is None:
@@ -932,6 +933,7 @@ def build_video_prompts_from_mm_data(
 
     Returns:
         List of video prompts, one per video.
+
     """
     vision_chunks = mm_data.get("vision_chunk")
     if vision_chunks is None:
