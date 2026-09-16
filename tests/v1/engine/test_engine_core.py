@@ -5,9 +5,11 @@ import copy
 import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
+from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
+import torch
 from transformers import AutoTokenizer
 
 from vllm import SamplingParams
@@ -27,7 +29,12 @@ from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import DPEngineCoreProc, EngineCore, EngineCoreProc
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    SlidingWindowSpec,
+)
 from vllm.v1.outputs import ModelRunnerOutput
 
 from ...utils import create_new_process_for_each_test, multi_gpu_test
@@ -61,6 +68,47 @@ def make_request() -> EngineCoreRequest:
         cache_salt=None,
         data_parallel_rank=None,
     )
+
+
+def test_dp_engine_core_exposes_kv_cache_group_metadata():
+    full_attention = FullAttentionSpec(
+        block_size=256,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.float16,
+    )
+    sliding_window = SlidingWindowSpec(
+        block_size=64,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.float16,
+        sliding_window=4096,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["full_attention"], full_attention),
+            KVCacheGroupSpec(["sliding_window"], sliding_window),
+        ],
+    )
+    core = object.__new__(DPEngineCoreProc)
+    core.scheduler = SimpleNamespace(kv_cache_config=kv_cache_config)
+
+    assert core.get_kv_cache_group_metadata() == [
+        {
+            "group_idx": 0,
+            "kind": "full_attention",
+            "block_size": 256,
+            "sliding_window": None,
+        },
+        {
+            "group_idx": 1,
+            "kind": "sliding_window",
+            "block_size": 64,
+            "sliding_window": 4096,
+        },
+    ]
 
 
 @create_new_process_for_each_test()
