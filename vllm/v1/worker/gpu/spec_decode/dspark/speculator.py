@@ -108,6 +108,7 @@ class DSparkSpeculator(DFlashSpeculator):
         self._base_cand_ids: torch.Tensor | None = None
         self._union_cand_ids: torch.Tensor | None = None
         self._markov_static_ids: torch.Tensor | None = None
+        self._markov_static_biases: torch.Tensor | None = None
         # Probabilistic drafting / adaptive verification only.
         self._realized_scores: torch.Tensor | None = None
         self._cached_candidate_ids: torch.Tensor | None = None
@@ -216,8 +217,10 @@ class DSparkSpeculator(DFlashSpeculator):
             # Bigram side of the candidate union: the top-m rows of the dense
             # Markov projection for every possible `prev`, precomputed once from
             # the trained weights (and disk-cached) so no step projects [r, V].
-            self._markov_static_ids = compute_markov_bias_top_ids(
-                w1, w2, bias_topk, self._markov_walk_scale
+            # The fp32 bias values let the walk kernel skip W1[prev]·W2[cand]
+            # for static candidates, eliminating scattered W2 row reads.
+            self._markov_static_ids, self._markov_static_biases = (
+                compute_markov_bias_top_ids(w1, w2, bias_topk, self._markov_walk_scale)
             )
         shape = (self.max_num_reqs, num_steps, union_k)
         if self.draft_logits is not None:
@@ -385,6 +388,7 @@ class DSparkSpeculator(DFlashSpeculator):
             cand_values=base_values,
             cand_ids=base_ids,
             static_ids=static_ids,
+            static_biases=self._markov_static_biases,
             base_logits=base_logits if static_ids is not None else None,
             union_ids=(
                 self._union_cand_ids[:num_reqs]

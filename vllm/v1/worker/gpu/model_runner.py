@@ -931,7 +931,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Warm head-dtype logits; scheduler warmup covers processed FP32 logits.
             assert self.speculator is not None
             self.rejection_sampler(
-                logits, dummy_input_batch, self.speculator.draft_logits
+                logits,
+                dummy_input_batch,
+                self.speculator.draft_logits,
             )
 
     @torch.inference_mode()

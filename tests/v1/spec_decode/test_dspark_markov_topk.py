@@ -146,6 +146,7 @@ def _run_walk(
     store_embeds: bool = False,
     base_logits: torch.Tensor | None = None,
     static_ids: torch.Tensor | None = None,
+    static_biases: torch.Tensor | None = None,
 ) -> SimpleNamespace:
     """Select the candidates and run the fused walk (as the speculator does)."""
     base_logits = case.base if base_logits is None else base_logits
@@ -214,6 +215,7 @@ def _run_walk(
         seeds=case.seeds,
         d2t=case.d2t,
         static_ids=static_ids,
+        static_biases=static_biases,
         base_logits=base_logits if static_ids is not None else None,
         union_ids=union_ids,
         realized_scores=realized,
@@ -619,6 +621,15 @@ def _dense_bias_top_ids(case: SimpleNamespace, m: int) -> torch.Tensor:
     return torch.topk(rows, m, dim=-1, largest=case.scale >= 0).indices
 
 
+def _dense_bias_top_table(
+    case: SimpleNamespace, m: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reference bigram table with fp32 bias values: (top-m ids, top-m values)."""
+    rows = case.w1.float() @ case.w2.float().T
+    topk = torch.topk(rows, m, dim=-1, largest=case.scale >= 0)
+    return topk.indices, topk.values
+
+
 def test_compute_markov_bias_top_ids_matches_dense_projection(tmp_path):
     """The precomputed table is the dense Markov projection's own top-m."""
     case = _case(
@@ -626,24 +637,30 @@ def test_compute_markov_bias_top_ids_matches_dense_projection(tmp_path):
     )
     m = 12
     rows = case.w1.float() @ case.w2.float().T
-    expected_values = torch.topk(rows, m, dim=-1).values
+    expected_topk = torch.topk(rows, m, dim=-1)
+    expected_values = expected_topk.values
 
-    ids = compute_markov_bias_top_ids(
+    ids, bias_values = compute_markov_bias_top_ids(
         case.w1, case.w2, m, case.scale, chunk=97, cache_dir=str(tmp_path)
     )
     assert ids.shape == (case.vocab, m)
     assert ids.dtype == torch.int32
+    assert bias_values.shape == (case.vocab, m)
+    assert bias_values.dtype == torch.float32
     rows_cpu = rows.cpu()
     got_values = torch.gather(rows_cpu, 1, ids.to(torch.int64).cpu())
     torch.testing.assert_close(got_values, expected_values.cpu())
+    # The cached fp32 bias values must match the fp32 projection at those ids.
+    torch.testing.assert_close(bias_values.cpu(), expected_values.cpu())
     # Highest-scoring continuation is reproduced exactly (ties cannot move it).
     torch.testing.assert_close(ids[:, 0].cpu(), rows_cpu.argmax(dim=-1).int().cpu())
 
     # A second call must reuse the cached artifact bit-for-bit.
-    again = compute_markov_bias_top_ids(
+    again_ids, again_biases = compute_markov_bias_top_ids(
         case.w1, case.w2, m, case.scale, chunk=97, cache_dir=str(tmp_path)
     )
-    assert torch.equal(ids, again)
+    assert torch.equal(ids, again_ids)
+    assert torch.equal(bias_values, again_biases)
 
 
 def test_compute_markov_bias_top_ids_follows_negative_scale(tmp_path):
@@ -653,17 +670,20 @@ def test_compute_markov_bias_top_ids_follows_negative_scale(tmp_path):
     )
     m = 8
     rows = case.w1.float() @ case.w2.float().T
-    ids = compute_markov_bias_top_ids(
+    ids, bias_values = compute_markov_bias_top_ids(
         case.w1, case.w2, m, case.scale, chunk=64, cache_dir=str(tmp_path)
     )
     reference = _dense_bias_top_ids(case, m).to(torch.int32)
     torch.testing.assert_close(ids.cpu(), reference.cpu())
     # Sanity: with scale < 0 these are the *smallest* projection rows.
     rows_cpu = rows.cpu()
+    expected_values = torch.topk(rows_cpu, m, dim=-1, largest=False).values
     torch.testing.assert_close(
         torch.gather(rows_cpu, 1, reference.to(torch.int64).cpu()),
-        torch.topk(rows_cpu, m, dim=-1, largest=False).values.cpu(),
+        expected_values,
     )
+    # The cached fp32 bias values must match the smallest projection values.
+    torch.testing.assert_close(bias_values.cpu(), expected_values)
 
 
 @pytest.mark.parametrize("num_steps,rank,vocab", [(4, 16, 128), (8, 64, 512)])
@@ -685,7 +705,10 @@ def test_union_with_full_bigram_table_equals_dense_reference(num_steps, rank, vo
     )
     dense_tokens, _ = _dense_reference(case)
 
-    out = _run_walk(case, static_ids=_dense_bias_top_ids(case, vocab).to(torch.int32))
+    static_ids, static_biases = _dense_bias_top_table(case, vocab)
+    out = _run_walk(
+        case, static_ids=static_ids.to(torch.int32), static_biases=static_biases
+    )
     assert out.union_k == 8 + vocab
     torch.testing.assert_close(out.draft_tokens, dense_tokens)
 
@@ -729,8 +752,12 @@ def test_union_covers_what_logit_only_candidates_miss():
     assert base_misses > 0
 
     for m in (16, 64):
-        static_ids = _dense_bias_top_ids(case, m).to(torch.int32)
-        union = _run_walk(case, static_ids=static_ids)
+        static_ids, static_biases = _dense_bias_top_table(case, m)
+        union = _run_walk(
+            case,
+            static_ids=static_ids.to(torch.int32),
+            static_biases=static_biases,
+        )
         union_misses = int((union.draft_tokens != dense_tokens).sum())
         assert union_misses <= base_misses
         if m == 64:
@@ -744,8 +771,13 @@ def test_union_walk_keeps_candidate_scores_identical_to_dense_head():
         num_reqs=4, num_steps=5, vocab=256, rank=32, top_k=6, scale=0.75, seed=13
     )
     m = 16
-    static_ids = _dense_bias_top_ids(case, m).to(torch.int32)
-    out = _run_walk(case, probabilistic=True, static_ids=static_ids)
+    static_ids, static_biases = _dense_bias_top_table(case, m)
+    out = _run_walk(
+        case,
+        probabilistic=True,
+        static_ids=static_ids.to(torch.int32),
+        static_biases=static_biases,
+    )
 
     dense_scores = _dense_scores_on_chain(case, out)
     # out.realized is indexed by candidate position, not by vocab id.
@@ -766,8 +798,13 @@ def test_probabilistic_union_publishes_truncated_distribution():
         temperature=0.9,
         seed=17,
     )
-    static_ids = _dense_bias_top_ids(case, 10).to(torch.int32)
-    out = _run_walk(case, probabilistic=True, static_ids=static_ids)
+    static_ids, static_biases = _dense_bias_top_table(case, 10)
+    out = _run_walk(
+        case,
+        probabilistic=True,
+        static_ids=static_ids.to(torch.int32),
+        static_biases=static_biases,
+    )
 
     cache = torch.full(
         (case.num_reqs, case.num_steps, case.draft_vocab),
@@ -849,3 +886,219 @@ def test_resolve_markov_bias_topk(
         draft_model_config=draft_model_config,
     )
     assert resolve_markov_bias_topk(config) == expected
+
+
+# ---------------------------------------------------------------------------
+# Microbenchmarks: GPU-timed latency comparisons
+# ---------------------------------------------------------------------------
+
+_BENCH_WARMUP = 3
+_BENCH_REPEATS = 10
+
+
+def _cuda_time(fn, *, warmup=_BENCH_WARMUP, repeats=_BENCH_REPEATS) -> float:
+    """Median GPU time in ms for *fn*, measured with CUDA events."""
+    for _ in range(warmup):
+        fn()
+    torch.cuda.synchronize()
+    times_ms: list[float] = []
+    for _ in range(repeats):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        fn()
+        end.record()
+        torch.cuda.synchronize()
+        times_ms.append(start.elapsed_time(end))
+    times_ms.sort()
+    return times_ms[len(times_ms) // 2]
+
+
+@requires_cuda
+@pytest.mark.parametrize("top_k", [16, 32])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_markov_walk_topk_faster_than_dense(top_k, dtype):
+    """Fused topk walk must be faster than the per-step dense Markov projection."""
+    case = _case(
+        num_reqs=32,
+        num_steps=8,
+        vocab=152064,
+        rank=256,
+        top_k=top_k,
+        dtype=dtype,
+        scale=1.0,
+        seed=42,
+    )
+
+    # Pre-compute candidates so _run_walk only measures the walk kernel.
+    base_logits = case.base
+    cand_values = torch.empty(
+        (case.num_reqs, case.num_steps, case.top_k),
+        dtype=base_logits.dtype,
+        device=case.device,
+    )
+    cand_ids = torch.empty(
+        (case.num_reqs, case.num_steps, case.top_k),
+        dtype=torch.int64,
+        device=case.device,
+    )
+    torch.topk(
+        base_logits, case.top_k, dim=-1, sorted=False, out=(cand_values, cand_ids)
+    )
+
+    topk_ms = _cuda_time(
+        lambda: _run_walk(
+            case,
+            base_logits=base_logits,
+        )
+    )
+    dense_ms = _cuda_time(lambda: _dense_reference(case))
+    print(
+        f"\n[topk={top_k}, {dtype}]  topk walk: {topk_ms:.2f} ms, "
+        f"dense walk: {dense_ms:.2f} ms  (dense/topk = {dense_ms / topk_ms:.1f}x)"
+    )
+    torch.cuda.empty_cache()
+    assert topk_ms < dense_ms
+
+
+@requires_cuda
+@pytest.mark.parametrize("top_k", [16, 32])
+def test_cache_markov_candidates_faster_than_dense_scatter(top_k):
+    """O(k) cache kernel must be faster than writing the full-vocab cache."""
+    case = _case(
+        num_reqs=32,
+        num_steps=8,
+        vocab=152064,
+        rank=256,
+        top_k=top_k,
+        dtype=torch.bfloat16,
+        temperature=1.0,
+        scale=1.0,
+        seed=43,
+    )
+    out = _run_walk(case, probabilistic=True)
+
+    draft_logits = torch.full(
+        (case.num_reqs, case.num_steps, case.draft_vocab),
+        NEG_INF,
+        dtype=torch.float32,
+        device=case.device,
+    )
+    cached_ids = torch.zeros(
+        (case.num_reqs, case.num_steps, case.top_k),
+        dtype=torch.int64,
+        device=case.device,
+    )
+
+    def cache_fn():
+        cache_markov_candidates(
+            draft_logits=draft_logits,
+            cached_ids=cached_ids,
+            cand_ids=out.cand_ids,
+            realized_scores=out.realized,
+            sample_idx_mapping=case.idx_mapping,
+            d2t=case.d2t,
+        )
+
+    cache_ms = _cuda_time(cache_fn)
+
+    # Dense baseline: write the full [num_reqs, num_steps, V] tensor into the
+    # cache each step (what the non-topk probabilistic path must do).
+    _, dense_logits = _dense_reference(case)
+
+    def dense_fn(ref=dense_logits):
+        fresh = torch.full(
+            (case.num_reqs, case.num_steps, case.draft_vocab),
+            NEG_INF,
+            dtype=torch.float32,
+            device=case.device,
+        )
+        fresh.copy_(ref)
+
+    dense_ms = _cuda_time(dense_fn)
+    print(
+        f"\n[topk={top_k}]  cache kernel: {cache_ms:.2f} ms, "
+        f"dense write: {dense_ms:.2f} ms  (dense/cache = {dense_ms / cache_ms:.1f}x)"
+    )
+    del dense_logits
+    torch.cuda.empty_cache()
+    assert cache_ms < dense_ms
+
+
+@requires_cuda
+@pytest.mark.parametrize("top_k", [16, 32])
+def test_topk_overhead_is_small_relative_to_walk(top_k):
+    """torch.topk selection must not dominate the fused walk kernel time."""
+    case = _case(
+        num_reqs=32,
+        num_steps=8,
+        vocab=152064,
+        rank=256,
+        top_k=top_k,
+        dtype=torch.bfloat16,
+        scale=1.0,
+        seed=44,
+    )
+    base_flat = case.base.reshape(-1, case.draft_vocab)
+
+    topk_ms = _cuda_time(
+        lambda: torch.topk(base_flat, top_k, dim=-1, sorted=False)
+    )
+
+    # Walk kernel: includes candidate + Markov projection + sampling.
+    walk_ms = _cuda_time(lambda: _run_walk(case))
+    print(
+        f"\n[topk={top_k}]  torch.topk: {topk_ms:.2f} ms, "
+        f"walk kernel: {walk_ms:.2f} ms  (topk/walk = {topk_ms / walk_ms:.1%})"
+    )
+    torch.cuda.empty_cache()
+    assert topk_ms < walk_ms
+
+
+@requires_cuda
+def test_bias_topk_table_walk_not_slower_than_base_only_at_large_vocab():
+    """Union walk with static biases should not be catastrophically slower
+    than base-only at the same total candidate count."""
+    m = 16
+    case = _case(
+        num_reqs=32,
+        num_steps=8,
+        vocab=152064,
+        rank=256,
+        top_k=16,
+        dtype=torch.bfloat16,
+        scale=1.0,
+        seed=45,
+    )
+    # Use the chunked builder instead of _dense_bias_top_table to avoid the
+    # O(V^2) dense matmul that would need ~86 GiB at V=152k.
+    static_ids, static_biases = compute_markov_bias_top_ids(
+        case.w1, case.w2, m, case.scale, chunk=512
+    )
+
+    # Base-only with top_k=32 (same total k as 16 base + 16 static).
+    case_base = _case(
+        num_reqs=32,
+        num_steps=8,
+        vocab=152064,
+        rank=256,
+        top_k=32,
+        dtype=torch.bfloat16,
+        scale=1.0,
+        seed=45,
+    )
+
+    union_ms = _cuda_time(
+        lambda: _run_walk(
+            case,
+            static_ids=static_ids,
+            static_biases=static_biases,
+        )
+    )
+    base_ms = _cuda_time(lambda: _run_walk(case_base))
+    print(
+        f"\n[16+16 union vs 32 base]  union: {union_ms:.2f} ms, "
+        f"base-only: {base_ms:.2f} ms  (union/base = {union_ms / base_ms:.2f}x)"
+    )
+    torch.cuda.empty_cache()
+    assert union_ms <= base_ms * 1.5

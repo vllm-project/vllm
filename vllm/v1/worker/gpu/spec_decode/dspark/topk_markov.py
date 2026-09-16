@@ -82,6 +82,8 @@ def _markov_walk_kernel(
     cand_ids_ptr,
     # [target_vocab, static_m] precomputed bigram top-m draft ids, or nullptr
     static_ids_ptr,
+    # [target_vocab, static_m] fp32 precomputed bias values, or nullptr
+    static_biases_ptr,
     # [num_reqs * num_steps, draft_vocab] base logits, read by the bigram half
     base_logits_ptr,
     # [num_reqs, num_steps, top_k] int64 out: the union ids actually scored
@@ -130,130 +132,160 @@ def _markov_walk_kernel(
 
     req_state = tl.load(req_state_ptr + row * num_steps).to(tl.int64)
     valid = req_state >= 0
-    k_valid = k_mask & valid
-    temperature = tl.load(temperature_ptr + req_state, mask=valid, other=0.0).to(
-        tl.float32
-    )
-    seed = tl.load(seeds_ptr + req_state, mask=valid, other=0)
-    # The anchor (bonus) token seeds the chain: it is the input id of query
-    # offset 0 for this request, read through the persistent index buffer so a
-    # replayed CUDA graph sees the current batch.
-    prev = tl.load(
-        input_ids_ptr + tl.load(anchor_indices_ptr + row), mask=valid, other=0
-    ).to(tl.int64)
 
-    for step in range(num_steps):
-        flat = row * num_steps + step
-        cand_base = flat * top_k
+    if valid:
+        temperature = tl.load(temperature_ptr + req_state).to(tl.float32)
+        seed = tl.load(seeds_ptr + req_state)
+        # The anchor (bonus) token seeds the chain: it is the input id of query
+        # offset 0 for this request, read through the persistent index buffer so a
+        # replayed CUDA graph sees the current batch.
+        prev = tl.load(
+            input_ids_ptr + tl.load(anchor_indices_ptr + row)
+        ).to(tl.int64)
 
-        if HAS_STATIC:
-            # Two complementary candidate halves. The backbone fills every draft
-            # slot with a mask token, so its base logits describe the slot in
-            # isolation while the Markov bias supplies the sequential signal --
-            # the dense winner is therefore usually a token the *bigram* ranks
-            # high and the base logits rank low, which a logit-only candidate
-            # set keeps missing. Unioning the base top-k with the precomputed
-            # bigram top-m of `prev` covers both sides at O(k + m) cost.
-            is_base_col = offsets < base_top_k
-            static_col = offsets - base_top_k
-            is_static_col = (static_col >= 0) & (static_col < static_m)
-            base_idx = tl.where(is_base_col, offsets, 0)
-            static_idx = tl.where(is_static_col, static_col, 0)
-            cand = tl.where(
-                is_base_col,
-                tl.load(
-                    cand_ids_ptr + flat * base_top_k + base_idx,
-                    mask=k_valid,
-                    other=0,
-                ).to(tl.int64),
-                tl.load(
-                    static_ids_ptr + prev * static_m + static_idx,
-                    mask=k_valid,
-                    other=0,
-                ).to(tl.int64),
-            )
-            base = tl.where(
-                is_base_col,
-                tl.load(
-                    cand_values_ptr + flat * base_top_k + base_idx,
-                    mask=k_valid,
-                    other=0.0,
-                ).to(tl.float32),
-                tl.load(
-                    base_logits_ptr + flat * base_row_stride + cand,
-                    mask=k_valid,
+        for step in range(num_steps):
+            flat = row * num_steps + step
+            cand_base = flat * top_k
+
+            if HAS_STATIC:
+                is_base_col = offsets < base_top_k
+                static_col = offsets - base_top_k
+                is_static_col = (static_col >= 0) & (static_col < static_m)
+                base_idx = tl.where(is_base_col, offsets, 0)
+                static_idx = tl.where(is_static_col, static_col, 0)
+                base_k_mask = k_mask & is_base_col
+                static_k_mask = k_mask & is_static_col
+                cand = tl.where(
+                    is_base_col,
+                    tl.load(
+                        cand_ids_ptr + flat * base_top_k + base_idx,
+                        mask=base_k_mask,
+                        other=0,
+                    ).to(tl.int64),
+                    tl.load(
+                        static_ids_ptr + prev * static_m + static_idx,
+                        mask=static_k_mask,
+                        other=0,
+                    ).to(tl.int64),
+                )
+                base = tl.where(
+                    is_base_col,
+                    tl.load(
+                        cand_values_ptr + flat * base_top_k + base_idx,
+                        mask=base_k_mask,
+                        other=0.0,
+                    ).to(tl.float32),
+                    tl.load(
+                        base_logits_ptr + flat * base_row_stride + cand,
+                        mask=static_k_mask,
+                        other=float("-inf"),
+                    ).to(tl.float32),
+                ).to(tl.float32)
+            else:
+                cand = tl.load(
+                    cand_ids_ptr + cand_base + offsets, mask=k_mask, other=0
+                )
+                base = tl.load(
+                    cand_values_ptr + cand_base + offsets,
+                    mask=k_mask,
                     other=float("-inf"),
-                ).to(tl.float32),
-            ).to(tl.float32)
-        else:
-            cand = tl.load(cand_ids_ptr + cand_base + offsets, mask=k_valid, other=0)
-            base = tl.load(
-                cand_values_ptr + cand_base + offsets,
-                mask=k_valid,
-                other=float("-inf"),
-            ).to(tl.float32)
-        cand = cand.to(tl.int64)
+                ).to(tl.float32)
+            cand = cand.to(tl.int64)
 
-        # Candidate-only Markov projection: [k, r] gathered rows dotted with the
-        # [r] embedding of the previously sampled token, chunked over the rank.
-        bias = tl.zeros([BLOCK_K], dtype=tl.float32)
-        for r_start in tl.range(0, rank, BLOCK_R):
-            r_offsets = r_start + tl.arange(0, BLOCK_R)
-            r_mask = r_offsets < rank
-            embed = tl.load(
-                w1_ptr + prev * w1_stride + r_offsets,
-                mask=r_mask & valid,
-                other=0.0,
-            ).to(tl.float32)
-            weight = tl.load(
-                w2_ptr + cand[:, None].to(tl.int64) * w2_stride + r_offsets[None, :],
-                mask=k_valid[:, None] & r_mask[None, :],
-                other=0.0,
-            ).to(tl.float32)
-            bias += tl.sum(weight * embed[None, :], axis=1)
-        scores = base + bias * scale
+            # Candidate-only Markov bias.
+            if HAS_STATIC:
+                # Base candidates: online W1[prev]·W2[cand] projection.
+                # Static candidates: precomputed fp32 bias loaded directly from
+                # the bigram table, eliminating the W2 row gather and dot
+                # product.
+                base_bias = tl.zeros([BLOCK_K], dtype=tl.float32)
+                for r_start in tl.range(0, rank, BLOCK_R):
+                    r_offsets = r_start + tl.arange(0, BLOCK_R)
+                    r_mask = r_offsets < rank
+                    embed = tl.load(
+                        w1_ptr + prev * w1_stride + r_offsets,
+                        mask=r_mask,
+                        other=0.0,
+                    ).to(tl.float32)
+                    base_cand_ids = tl.where(is_base_col, cand, 0)
+                    weight = tl.load(
+                        w2_ptr
+                        + base_cand_ids[:, None].to(tl.int64) * w2_stride
+                        + r_offsets[None, :],
+                        mask=is_base_col[:, None]
+                        & k_mask[:, None]
+                        & r_mask[None, :],
+                        other=0.0,
+                    ).to(tl.float32)
+                    base_bias += tl.sum(weight * embed[None, :], axis=1)
+                static_bias = tl.load(
+                    static_biases_ptr + prev * static_m + static_idx,
+                    mask=k_mask & is_static_col,
+                    other=0.0,
+                ).to(tl.float32)
+                bias = tl.where(is_base_col, base_bias, static_bias)
+            else:
+                bias = tl.zeros([BLOCK_K], dtype=tl.float32)
+                for r_start in tl.range(0, rank, BLOCK_R):
+                    r_offsets = r_start + tl.arange(0, BLOCK_R)
+                    r_mask = r_offsets < rank
+                    embed = tl.load(
+                        w1_ptr + prev * w1_stride + r_offsets,
+                        mask=r_mask,
+                        other=0.0,
+                    ).to(tl.float32)
+                    weight = tl.load(
+                        w2_ptr
+                        + cand[:, None].to(tl.int64) * w2_stride
+                        + r_offsets[None, :],
+                        mask=k_mask[:, None] & r_mask[None, :],
+                        other=0.0,
+                    ).to(tl.float32)
+                    bias += tl.sum(weight * embed[None, :], axis=1)
+            scores = base + bias * scale
 
-        # sample_pos is the predicted token's position Q; verification keys the
-        # Gumbel noise by the predecessor (Q - 1), and the noise itself is keyed
-        # by the candidate token id, with IS_DRAFTING=True to keep the draft
-        # noise stream disjoint from the target/residual one.
-        position = tl.load(sample_pos_ptr + flat, mask=valid, other=1) - 1
-        _, index = gumbel_noised_argmax(
-            scores,
-            cand,
-            k_valid,
-            seed,
-            position,
-            temperature if PROBABILISTIC else 0.0,
-            IS_DRAFTING=True,
-            USE_FP64=USE_FP64,
-        )
-
-        if STORE_IDS:
-            tl.store(union_ids_ptr + cand_base + offsets, cand, mask=k_valid)
-        if STORE_REALIZED:
-            tl.store(realized_ptr + cand_base + offsets, scores, mask=k_valid)
-        if STORE_EMBED:
-            rank_offsets = tl.arange(0, BLOCK_RANK)
-            rank_mask = rank_offsets < rank
-            prev_embed = tl.load(
-                w1_ptr + prev * w1_stride + rank_offsets,
-                mask=rank_mask & valid,
-                other=0.0,
+            position = tl.load(sample_pos_ptr + flat) - 1
+            _, index = gumbel_noised_argmax(
+                scores,
+                cand,
+                k_mask,
+                seed,
+                position,
+                temperature if PROBABILISTIC else 0.0,
+                IS_DRAFTING=True,
+                USE_FP64=USE_FP64,
             )
+
+            if STORE_IDS:
+                tl.store(union_ids_ptr + cand_base + offsets, cand, mask=k_mask)
+            if STORE_REALIZED:
+                tl.store(
+                    realized_ptr + cand_base + offsets, scores, mask=k_mask
+                )
+            if STORE_EMBED:
+                rank_offsets = tl.arange(0, BLOCK_RANK)
+                rank_mask = rank_offsets < rank
+                prev_embed = tl.load(
+                    w1_ptr + prev * w1_stride + rank_offsets,
+                    mask=rank_mask,
+                    other=0.0,
+                )
+                tl.store(
+                    markov_embed_ptr + flat * rank + rank_offsets,
+                    prev_embed,
+                    mask=rank_mask,
+                )
+
+            # The winner's id, read out of the register tile the union was
+            # built in (dynamic indexing of a vector is a masked reduction in
+            # Triton).
+            token = tl.sum(tl.where(offsets == index, cand, 0), axis=0)
+            if HAS_D2T:
+                token = token + tl.load(d2t_ptr + token)
             tl.store(
-                markov_embed_ptr + flat * rank + rank_offsets,
-                prev_embed,
-                mask=rank_mask & valid,
+                draft_tokens_ptr + row * draft_tokens_stride + step, token
             )
-
-        # The winner's id, read out of the register tile the union was built in
-        # (dynamic indexing of a vector is a masked reduction in Triton).
-        token = tl.sum(tl.where(offsets == index, cand, 0), axis=0)
-        if HAS_D2T:
-            token = token + tl.load(d2t_ptr + token, mask=valid, other=0)
-        tl.store(draft_tokens_ptr + row * draft_tokens_stride + step, token, mask=valid)
-        prev = token
+            prev = token
 
 
 @triton.jit
@@ -309,8 +341,14 @@ def compute_markov_bias_top_ids(
     *,
     chunk: int = 512,
     cache_dir: str | None = None,
-) -> torch.Tensor:
-    """Top-``m`` draft ids of the bigram bias, for every possible ``prev`` token.
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Top-``m`` draft ids and fp32 bias values of the bigram bias.
+
+    Returns:
+        ids:    ``[target_vocab, m]`` int32 tensor of top-m draft-token ids.
+        values: ``[target_vocab, m]`` float32 tensor of the unscaled fp32 bias
+                ``W1[v] @ W2[candidate]^T`` for each (prev, candidate) pair,
+                matching the fp32 accumulation the walk kernel uses at runtime.
 
     ``bias[v] = scale * W1[v] @ W2^T`` is exactly the full-vocab Markov
     projection row the dense head computes at runtime, so the top-m ids are the
@@ -322,6 +360,11 @@ def compute_markov_bias_top_ids(
     the slot in isolation, while the chain direction comes from the bias. Giving
     the walk a small precomputed bigram candidate set (a ``[V, m]`` int32 table)
     lets it reach those tokens without a ``[r] @ [r, V]`` projection per step.
+
+    The returned fp32 bias values eliminate the online ``W1[prev] @ W2[c]``
+    dot product for static candidates: each ``(prev, candidate)`` pair's bias
+    depends only on the fixed weights, so the walk kernel can load the
+    precomputed value directly instead of gathering and reducing a ``W2`` row.
 
     Building the table reads ``[target_vocab, draft_vocab]``, so it is computed
     once and cached on disk keyed by a weight checksum; later server starts load
@@ -347,6 +390,7 @@ def compute_markov_bias_top_ids(
                 f"{float(w1.float().abs().sum()):.6e}",
                 f"{float(w2.float().sum()):.6e}",
                 f"{float(w2.float().abs().sum()):.6e}",
+                "v2",  # cache version: includes fp32 bias values
             ]
         ).encode()
     ).hexdigest()[:16]
@@ -357,18 +401,26 @@ def compute_markov_bias_top_ids(
     path = os.path.join(directory, f"markov_bias_top{m}_{checksum}.pt")
     if os.path.exists(path):
         try:
-            ids = torch.load(path, map_location="cpu", weights_only=True)
-            if ids.shape == (target_vocab, m) and ids.dtype == torch.int32:
+            data = torch.load(path, map_location="cpu", weights_only=True)
+            # v2 cache: dict with "ids" and "values" keys.
+            if (
+                isinstance(data, dict)
+                and data["ids"].shape == (target_vocab, m)
+                and data["ids"].dtype == torch.int32
+                and data["values"].shape == (target_vocab, m)
+                and data["values"].dtype == torch.float32
+            ):
                 logging.getLogger(__name__).info(
                     "DSpark bigram candidate table: loaded %s (%d x %d)",
                     path,
                     target_vocab,
                     m,
                 )
-                return ids.to(device)
+                return data["ids"].to(device), data["values"].to(device)
+            # v1 cache (ids only): rebuild with values.
             logging.getLogger(__name__).warning(
-                "DSpark bigram candidate table %s has an unexpected shape/dtype; "
-                "rebuilding",
+                "DSpark bigram candidate table %s has an outdated format; "
+                "rebuilding with fp32 bias values",
                 path,
             )
         except Exception as exc:  # a corrupt entry must never break startup
@@ -379,23 +431,24 @@ def compute_markov_bias_top_ids(
             )
 
     start_time = time.perf_counter()
-    mm_dtype = torch.float32 if w1.dtype == torch.float32 else torch.bfloat16
-    w2t = w2.to(mm_dtype).t()
+    # fp32 matmul matches the walk kernel's fp32 accumulation.
+    w2t = w2.float().t()
     largest = scale >= 0
     ids = torch.empty((target_vocab, m), dtype=torch.int32, device=device)
+    values = torch.empty((target_vocab, m), dtype=torch.float32, device=device)
     for begin in range(0, target_vocab, chunk):
         stop = min(begin + chunk, target_vocab)
-        bias = w1[begin:stop].to(mm_dtype) @ w2t
-        ids[begin:stop] = torch.topk(bias, m, dim=-1, largest=largest).indices.to(
-            torch.int32
-        )
-        del bias
+        bias = w1[begin:stop].float() @ w2t
+        topk = torch.topk(bias, m, dim=-1, largest=largest)
+        ids[begin:stop] = topk.indices.to(torch.int32)
+        values[begin:stop] = topk.values
+        del bias, topk
     elapsed = time.perf_counter() - start_time
 
     try:
         os.makedirs(directory, exist_ok=True)
         tmp = os.path.join(directory, f".{os.getpid()}.{os.path.basename(path)}.tmp")
-        torch.save(ids.cpu(), tmp)
+        torch.save({"ids": ids.cpu(), "values": values.cpu()}, tmp)
         os.replace(tmp, path)
     except OSError as exc:  # the table stays usable in memory regardless
         logging.getLogger(__name__).warning(
@@ -408,7 +461,7 @@ def compute_markov_bias_top_ids(
         elapsed,
         path,
     )
-    return ids
+    return ids, values
 
 
 def markov_walk_topk(
@@ -427,6 +480,7 @@ def markov_walk_topk(
     temperature: torch.Tensor,  # [max_num_reqs]
     seeds: torch.Tensor,  # [max_num_reqs]
     static_ids: torch.Tensor | None = None,  # [target_vocab, static_m] int32
+    static_biases: torch.Tensor | None = None,  # [target_vocab, static_m] fp32
     base_logits: torch.Tensor | None = None,  # [num_reqs, num_steps, draft_vocab]
     union_ids: torch.Tensor | None = None,  # [num_reqs, num_steps, top_k] int64 out
     d2t: torch.Tensor | None = None,  # [draft_vocab] draft -> target offsets
@@ -443,6 +497,11 @@ def markov_walk_topk(
     reads the token position ``i - 1`` produced. When ``static_ids`` is given the
     candidate set of every position is the union of the base-logit top-k and the
     precomputed bigram top-m of the chained ``prev`` token.
+
+    When ``static_biases`` is provided alongside ``static_ids``, the walk kernel
+    loads the precomputed fp32 bigram bias directly for static candidates
+    instead of computing ``W1[prev] @ W2[candidate]`` online, eliminating
+    scattered ``W2`` row reads for the static half of the candidate set.
     """
     base_top_k = cand_ids.shape[-1]
     num_steps = cand_ids.shape[-2]
@@ -460,6 +519,7 @@ def markov_walk_topk(
         cand_values.contiguous(),
         cand_ids.contiguous(),
         static_ids if static_ids is not None else cand_ids,
+        static_biases if static_biases is not None else cand_values,
         base_logits if base_logits is not None else cand_values,
         union_ids if union_ids is not None else cand_ids,
         w1,
