@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Tests for FusedInputNorm and the fused affine transform kernel."""
+"""Tests for FusedMMInputNorm and the fused affine transform kernel."""
 
 import pytest
 import torch
 
 from vllm.model_executor.layers.fusion.mm_input_norm import (
-    FusedInputNorm,
+    FusedMMInputNorm,
     fused_input_norm_triton,
 )
 from vllm.platforms import current_platform
@@ -60,7 +60,7 @@ _RGB_RESCALE = 1.0 / 255.0
 # ===========================================================================
 @requires_vllm_config
 @requires_accelerator
-class TestFusedInputNormModule:
+class TestFusedMMInputNormModule:
     @pytest.mark.parametrize("num_patches", [1, 37, 70000])
     def test_matches_reference(self, num_patches: int):
         """Including num_patches above the old cuDNN batch-norm grid limit
@@ -77,7 +77,7 @@ class TestFusedInputNormModule:
             device=_DEVICE,
         )
 
-        norm = FusedInputNorm(
+        norm = FusedMMInputNorm(
             image_mean=_RGB_MEAN,
             image_std=_RGB_STD,
             rescale_factor=_RGB_RESCALE,
@@ -97,7 +97,7 @@ class TestFusedInputNormModule:
         torch.testing.assert_close(out, expected)
 
     def test_identity_passthrough(self):
-        norm = FusedInputNorm.identity().to(_DEVICE)
+        norm = FusedMMInputNorm.identity().to(_DEVICE)
         assert norm.is_identity
 
         pixel_values = torch.randn(8, 3 * 196, dtype=torch.float32, device=_DEVICE)
@@ -110,7 +110,7 @@ class TestFusedInputNormModule:
 # ===========================================================================
 @requires_vllm_config
 @requires_accelerator
-class TestFusedInputNormDtypes:
+class TestFusedMMInputNormDtypes:
     @pytest.mark.parametrize(
         "in_dtype,out_dtype",
         [
@@ -147,7 +147,7 @@ class TestFusedInputNormDtypes:
                 device=_DEVICE,
             ).to(in_dtype)
 
-        norm = FusedInputNorm(
+        norm = FusedMMInputNorm(
             image_mean=image_mean,
             image_std=image_std,
             rescale_factor=rescale_factor,
@@ -170,7 +170,7 @@ class TestFusedInputNormDtypes:
 # ===========================================================================
 @requires_vllm_config
 @requires_accelerator
-class TestFusedInputNormShapes:
+class TestFusedMMInputNormShapes:
     @pytest.mark.parametrize("channel", [1, 3, 4])
     def test_channel_variants(self, channel: int):
         patch_size = 64
@@ -187,7 +187,7 @@ class TestFusedInputNormShapes:
             device=_DEVICE,
         )
 
-        norm = FusedInputNorm(
+        norm = FusedMMInputNorm(
             image_mean=image_mean,
             image_std=image_std,
             rescale_factor=rescale_factor,
@@ -221,7 +221,7 @@ class TestFusedInputNormShapes:
             device=_DEVICE,
         )
 
-        norm = FusedInputNorm(
+        norm = FusedMMInputNorm(
             image_mean=image_mean,
             image_std=image_std,
             rescale_factor=rescale_factor,
@@ -244,7 +244,7 @@ class TestFusedInputNormShapes:
 # ===========================================================================
 @requires_vllm_config
 @requires_accelerator
-class TestFusedInputNormInputHandling:
+class TestFusedMMInputNormInputHandling:
     def test_non_contiguous_input_matches_reference(self):
         channel = 3
         patch_size = 32
@@ -261,7 +261,7 @@ class TestFusedInputNormInputHandling:
         non_contig = base[..., 0]
         assert not non_contig.is_contiguous()
 
-        norm = FusedInputNorm(
+        norm = FusedMMInputNorm(
             image_mean=_RGB_MEAN,
             image_std=_RGB_STD,
             rescale_factor=_RGB_RESCALE,
@@ -296,7 +296,7 @@ class TestFusedInputNormInputHandling:
         non_contig = base[..., 0]
         assert not non_contig.is_contiguous()
 
-        norm = FusedInputNorm(
+        norm = FusedMMInputNorm(
             image_mean=_RGB_MEAN,
             image_std=_RGB_STD,
             rescale_factor=_RGB_RESCALE,
@@ -331,7 +331,7 @@ class TestFusedInputNormInputHandling:
 # ===========================================================================
 @requires_vllm_config
 @requires_accelerator
-class TestFusedInputNormOutBuffer:
+class TestFusedMMInputNormOutBuffer:
     def test_reuse(self):
         channel = 3
         patch_size = 32
@@ -345,7 +345,7 @@ class TestFusedInputNormOutBuffer:
             device=_DEVICE,
         )
 
-        norm = FusedInputNorm(
+        norm = FusedMMInputNorm(
             image_mean=_RGB_MEAN,
             image_std=_RGB_STD,
             rescale_factor=_RGB_RESCALE,
@@ -380,7 +380,7 @@ class TestFusedInputNormOutBuffer:
             device=_DEVICE,
         )
 
-        norm = FusedInputNorm(
+        norm = FusedMMInputNorm(
             image_mean=_RGB_MEAN,
             image_std=_RGB_STD,
             rescale_factor=_RGB_RESCALE,
@@ -410,7 +410,7 @@ class TestFusedInputNormOutBuffer:
         assert torch.all(out[patches:] == 123.0)
 
     def test_identity_oversized_out_buffer(self):
-        norm = FusedInputNorm.identity().to(_DEVICE)
+        norm = FusedMMInputNorm.identity().to(_DEVICE)
         x = torch.randn(4, 3 * 8, dtype=torch.float32, device=_DEVICE)
 
         out = torch.full((10, 3 * 8), 7.0, dtype=torch.bfloat16, device=_DEVICE)
@@ -424,7 +424,7 @@ class TestFusedInputNormOutBuffer:
     def test_validation(self):
         """Wrong shape / dtype / device must be rejected."""
         channel = 3
-        norm = FusedInputNorm(
+        norm = FusedMMInputNorm(
             image_mean=_RGB_MEAN,
             image_std=_RGB_STD,
             rescale_factor=_RGB_RESCALE,
@@ -452,7 +452,7 @@ class TestFusedInputNormOutBuffer:
             )
 
     def test_identity_out_buffer(self):
-        norm = FusedInputNorm.identity().to(_DEVICE)
+        norm = FusedMMInputNorm.identity().to(_DEVICE)
         x = torch.randn(4, 3 * 8, dtype=torch.float32, device=_DEVICE)
         out = torch.empty_like(x, dtype=torch.bfloat16)
         sentinel = out.data_ptr()
@@ -470,7 +470,7 @@ class TestFusedInputNormOutBuffer:
 # ===========================================================================
 @requires_accelerator
 @requires_triton
-class TestFusedInputNormKernel:
+class TestFusedMMInputNormKernel:
     @pytest.mark.parametrize("block", [128, 256, 1024, 2048])
     def test_block_sizes(self, block: int):
         """``N*C*L`` is never a multiple of the tested blocks, so the masked
@@ -573,11 +573,11 @@ class TestFusedInputNormKernel:
 # Construction / configuration
 # ===========================================================================
 @requires_vllm_config
-class TestFusedInputNormConstruction:
+class TestFusedMMInputNormConstruction:
     """Identity detection and weight/bias buffer semantics at init time."""
 
     def test_identity_from_identity_config(self):
-        norm = FusedInputNorm(
+        norm = FusedMMInputNorm(
             image_mean=[0.0, 0.0, 0.0],
             image_std=[1.0, 1.0, 1.0],
             rescale_factor=1.0,
@@ -588,7 +588,7 @@ class TestFusedInputNormConstruction:
 
     def test_non_identity_buffers(self):
         channel = 3
-        norm = FusedInputNorm(
+        norm = FusedMMInputNorm(
             image_mean=_RGB_MEAN,
             image_std=_RGB_STD,
             rescale_factor=_RGB_RESCALE,
@@ -632,7 +632,7 @@ class TestFusedInputNormConstruction:
         # default-device semantics without requiring a CUDA build.
         default_device = "cuda" if torch.cuda.is_available() else "meta"
         with torch.device(default_device):
-            input_norm = FusedInputNorm(image_mean, image_std, rescale_factor)
+            input_norm = FusedMMInputNorm(image_mean, image_std, rescale_factor)
 
         assert input_norm.is_identity is is_identity
         if is_identity:

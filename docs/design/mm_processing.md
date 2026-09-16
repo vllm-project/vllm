@@ -41,7 +41,7 @@ To accelerate the multi‑modal data pipeline (decoding, resizing, normalisation
 
 Traditionally, the CPU would divide pixel values by 255, then subtract the mean and divide by the standard deviation. We fuse these steps into one operation and run it entirely on the GPU.
 
-`FusedInputNorm` implements this via `fused_input_norm_triton`, which applies a single per-channel affine transform:
+`FusedMMInputNorm` implements this via `fused_input_norm_triton`, which applies a single per-channel affine transform:
 
 ```text
 y = x * weight[c] + bias[c]
@@ -79,7 +79,7 @@ Overall path: **`Entrypoint (uint8) → Engine Core (uint8) → Device Memory (u
 
 This GPU‑side fusion is controlled by a config flag called **`mm_device_do_normalize`**.
 
-- When `True`, normalisation and rescaling are done on the GPU using the `FusedInputNorm` layer; when `False`, we fall back to the old CPU‑side path.
+- When `True`, normalisation and rescaling are done on the GPU using the `FusedMMInputNorm` layer; when `False`, we fall back to the old CPU‑side path.
 - The flag is **enabled by default** for all models that support it.
 - Currently, it’s on by default for these architectures:
 

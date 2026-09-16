@@ -11,7 +11,7 @@ from tests.model_executor.layers.test_mm_input_norm import (
     requires_vllm_config,
 )
 from tests.models.utils import GenerateModelInfo, build_model_context
-from vllm.model_executor.layers.fusion.mm_input_norm import FusedInputNorm
+from vllm.model_executor.layers.fusion.mm_input_norm import FusedMMInputNorm
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from .ppl_utils import vqa_ppl_test
@@ -50,7 +50,7 @@ def test_ppl(
 @requires_vllm_config
 @requires_accelerator
 class TestMMDeviceDoNormalize:
-    """Processor-level integration: FusedInputNorm must reproduce the
+    """Processor-level integration: FusedMMInputNorm must reproduce the
     on-CPU processor normalization exactly."""
 
     @pytest.mark.parametrize(
@@ -95,7 +95,9 @@ class TestMMDeviceDoNormalize:
         ].get_data()["pixel_values"]
 
         ctx.model_config.multimodal_config.mm_device_do_normalize = True
-        input_norm = FusedInputNorm.from_model_config(ctx.model_config).to(_DEVICE_TYPE)
+        input_norm = FusedMMInputNorm.from_model_config(ctx.model_config).to(
+            _DEVICE_TYPE
+        )
 
         pixel_values_do_input_norm = input_norm(
             pixel_values_without_normalize.to(dtype).to(_DEVICE_TYPE), dtype

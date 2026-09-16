@@ -53,7 +53,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv3dLayer
-from vllm.model_executor.layers.fusion.mm_input_norm import FusedInputNorm
+from vllm.model_executor.layers.fusion.mm_input_norm import FusedMMInputNorm
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -71,7 +71,6 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
-    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import MultiModalDataItems
@@ -664,7 +663,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
             hidden_size=self.hidden_size,
         )
         self.input_norm = (
-            input_norm if input_norm is not None else FusedInputNorm.identity()
+            input_norm if input_norm is not None else FusedMMInputNorm.identity()
         )
 
         norm_layer = partial(RMSNorm, eps=norm_eps)
@@ -1364,7 +1363,7 @@ class Qwen2_5_VLForConditionalGeneration(
                 vision_config=config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=self.quant_config,
-                input_norm=FusedInputNorm.from_model_config(self.model_config),
+                input_norm=FusedMMInputNorm.from_model_config(self.model_config),
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
@@ -2051,15 +2050,21 @@ class Qwen2_5_VLForConditionalGeneration(
             tower_model="visual.",
         )
 
-    def get_mm_lora_token_counts(
+    def get_num_mm_encoder_tokens(
         self,
-        *,
-        modality: str,
-        mm_kwargs: MultiModalKwargsItem | None,
-        num_mm_embeds: int,
-    ) -> tuple[int, int | None]:
-        del modality, mm_kwargs
+        num_image_tokens: int,
+    ) -> int:
         hf_config = self.config
         vision_config = hf_config.vision_config
         merge_size = vision_config.spatial_merge_size
-        return num_mm_embeds * merge_size**2, num_mm_embeds
+
+        return num_image_tokens * merge_size**2
+
+    def get_num_mm_connector_tokens(
+        self,
+        num_vision_tokens: int,
+    ) -> int:
+        hf_config = self.config
+        vision_config = hf_config.vision_config
+        merge_size = vision_config.spatial_merge_size
+        return num_vision_tokens // merge_size**2

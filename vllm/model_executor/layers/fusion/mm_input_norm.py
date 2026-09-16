@@ -203,8 +203,8 @@ def fused_input_norm_triton(
     return outputs
 
 
-@CustomOp.register("fused_input_norm")
-class FusedInputNorm(CustomOp):
+@CustomOp.register("fused_mm_input_norm")
+class FusedMMInputNorm(CustomOp):
     """
     Module that applies rescaling and normalisation to input images.
     Equivalent to: output = (input * rescale_factor - mean) / std
@@ -285,7 +285,7 @@ class FusedInputNorm(CustomOp):
 
         if not self.is_identity and dtype != torch.float32:
             logger.warning_once(
-                "FusedInputNorm is initialized with compute dtype=%s, which "
+                "FusedMMInputNorm is initialized with compute dtype=%s, which "
                 "is not torch.float32. The per-channel weight/bias are stored "
                 "and applied at this reduced precision, which can cause "
                 "precision loss during rescale + normalise. Recommend "
@@ -302,7 +302,7 @@ class FusedInputNorm(CustomOp):
     @classmethod
     def identity(
         cls, channel: int = 3, dtype: torch.dtype = torch.float32
-    ) -> "FusedInputNorm":
+    ) -> "FusedMMInputNorm":
         return cls(
             image_mean=[0.0] * channel,
             image_std=[1.0] * channel,
