@@ -118,6 +118,21 @@ def _num_workspace_lanes(vllm_config: VllmConfig, use_v2_model_runner: bool) -> 
     )
 
 
+def _fill_random_inplace_(tensor: torch.Tensor) -> None:
+    """Fill ``tensor`` with random values without a same-sized temporary."""
+    if tensor.is_floating_point():
+        values = torch.rand_like(tensor, dtype=torch.float32).to(tensor.dtype)
+    else:
+        values = torch.randint(
+            0,
+            2,
+            tensor.shape,
+            device=tensor.device,
+            dtype=tensor.dtype,
+        )
+    tensor.copy_(values)
+
+
 def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int | None:
     """Memory in bytes to size the KV cache from when profiling measured a
     release on ROCm, or None to keep what profiling measured.
@@ -349,51 +364,18 @@ class Worker(WorkerBase):
         return checksums
 
     def reset_weights(self) -> None:
-        """Randomize exactly the tensors covered by compute_weight_checksums.
-
-        Tensors outside the checksum coverage remain unchanged.
-        """
+        """Randomize exactly the tensors covered by compute_weight_checksums."""
         for _, tensor in _iter_checksum_targets(self.model_runner.model):
-            # Write in place: a full-sized temp tensor would double weight memory.
             if tensor.numel() == 0:
                 continue
+            # Chunk so the float32 staging buffer stays bounded for large weights.
             if tensor.is_contiguous():
-                chunks = tensor.data.view(-1).split(64 * 1024 * 1024)
-            elif tensor.ndim == 0:
-                chunks = (tensor.data,)
+                chunks = tensor.view(-1).split(64 * 1024 * 1024)
             else:
-                row_numel = tensor[0].numel()
-                rows_per_chunk = max(1, (64 * 1024 * 1024) // row_numel)
-                chunks = tensor.data.split(rows_per_chunk, dim=0)
-
+                rows_per_chunk = max(1, (64 * 1024 * 1024) // tensor[0].numel())
+                chunks = tensor.split(rows_per_chunk, dim=0)
             for chunk in chunks:
-                if tensor.is_floating_point():
-                    random_values = torch.rand(
-                        chunk.shape,
-                        device=tensor.device,
-                        dtype=torch.float32,
-                    ).to(tensor.dtype)
-                    chunk.copy_(random_values)
-                elif tensor.dtype == torch.bool:
-                    chunk.copy_(
-                        torch.randint(
-                            0,
-                            2,
-                            chunk.shape,
-                            device=tensor.device,
-                            dtype=torch.bool,
-                        )
-                    )
-                else:
-                    chunk.copy_(
-                        torch.randint(
-                            0,
-                            2,
-                            chunk.shape,
-                            device=tensor.device,
-                            dtype=tensor.dtype,
-                        )
-                    )
+                _fill_random_inplace_(chunk)
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if (
