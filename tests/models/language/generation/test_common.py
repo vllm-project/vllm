@@ -34,16 +34,16 @@ AITER_MODEL_LIST = [
     "Qwen/Qwen3-8B",
 ]
 
-# Near-tie window for the MoE top-2 rescue below, in fp32 router logits; 0 off.
-# Calibrated: decisive flip margin 0.0068, nearest non-tie 0.0176. A constant
-# rather than an env var, since the rescue patches a class at import time.
-MOE_NEAR_TIE_TOL = 0.01
+# Near-tie window for the MoE expert-flip check below, in fp32 router logits;
+# 0 off. Calibrated: decisive flip margin 0.0068, nearest non-tie 0.0176. A
+# constant rather than an env var, since the check patches a class at import time.
+MOE_NEAR_TIE_EXPERT_FLIP_TOL = 0.01
 
 
 @contextmanager
 def record_hf_expert_choice(hf_model, store: dict[int, torch.Tensor]):
     """Record HF's top-k expert indices per MoE layer, as rows in call order."""
-    if MOE_NEAR_TIE_TOL <= 0:
+    if MOE_NEAR_TIE_EXPERT_FLIP_TOL <= 0:
         yield
         return
 
@@ -80,14 +80,17 @@ def record_hf_expert_choice(hf_model, store: dict[int, torch.Tensor]):
 
 
 @contextmanager
-def moe_near_tie_rescue(hf_choice: dict[int, torch.Tensor], tol: float):
+def moe_near_tie_expert_flip_rescue(hf_choice: dict[int, torch.Tensor], tol: float):
     """Adopt HF's expert pair on a one-for-one swap that is a near tie in vLLM.
 
-    Rows match `hf_choice` by position: enter once per generate call, under eager
-    execution only -- graph replay skips Python and misaligns the cursor.
+    Yields the list of adopted row counts, so a caller can tell an empty rescue
+    from one that changed something. Rows match `hf_choice` by position: enter
+    once per generate call, under eager execution only -- graph replay skips
+    Python and misaligns the cursor.
     """
+    adopted: list[int] = []
     if tol <= 0 or not hf_choice:
-        yield
+        yield adopted
         return
 
     from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
@@ -128,8 +131,10 @@ def moe_near_tie_rescue(hf_choice: dict[int, torch.Tensor], tol: float):
                 1, only_mine.float().argmax(-1, keepdim=True)
             ) - logits.gather(1, only_theirs.float().argmax(-1, keepdim=True))
             take = swapped & (margin.squeeze(1).abs() <= tol)
-            if not bool(take.any()):
+            count = int(take.sum())
+            if not count:
                 return weights, ids
+            adopted.append(count)
 
             # Rebuild the weights HF's pick implies, the way the kernel would.
             rescued = logits.softmax(-1).gather(1, hf_ids)
@@ -143,7 +148,7 @@ def moe_near_tie_rescue(hf_choice: dict[int, torch.Tensor], tol: float):
             )
 
     with patch.object(FusedMoERouter, "select_experts", select_experts):
-        yield
+        yield adopted
 
 
 # @maybe_test_rocm_aiter
@@ -318,6 +323,9 @@ def test_models(
     if hf_expert_choice:
         # Graph replay skips Python, so the rescue would miss every decode row.
         vllm_kwargs["enforce_eager"] = True
+        # A cache hit would skip the prefill the rescue counts rows against, and
+        # the second generate below re-sends prompts the first one just ran.
+        vllm_kwargs["enable_prefix_caching"] = False
         # The patch is process-local; a spawned EngineCore would never see it.
         monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
@@ -335,23 +343,42 @@ def test_models(
         compilation_config={"cudagraph_capture_sizes": [1, 2]},
         **vllm_kwargs,
     ) as vllm_model:
-        # One context per generate: the cursor into HF's rows restarts here.
-        with moe_near_tie_rescue(hf_expert_choice, MOE_NEAR_TIE_TOL):
-            vllm_outputs = vllm_model.generate_greedy_logprobs(
-                example_prompts, max_tokens, num_logprobs
-            )
+        vllm_outputs = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs
+        )
         if prompt_embeds is not None:
-            with moe_near_tie_rescue(hf_expert_choice, MOE_NEAR_TIE_TOL):
-                vllm_outputs_from_embeds = vllm_model.generate_greedy_logprobs(
-                    prompt_embeds, max_tokens, num_logprobs
-                )
+            vllm_outputs_from_embeds = vllm_model.generate_greedy_logprobs(
+                prompt_embeds, max_tokens, num_logprobs
+            )
 
-    check_logprobs_close(
-        outputs_0_lst=hf_outputs,
-        outputs_1_lst=vllm_outputs,
-        name_0="hf",
-        name_1="vllm",
-    )
+        try:
+            check_logprobs_close(
+                outputs_0_lst=hf_outputs,
+                outputs_1_lst=vllm_outputs,
+                name_0="hf",
+                name_1="vllm",
+            )
+        except AssertionError:
+            # Near-tie expert flip double check: a one-for-one swap of experts
+            # whose router logits are tied picks an arbitrary winner, and either
+            # winner is a correct answer. Generate again with HF's pick taken on
+            # those rows only, and fail only if that diverges too.
+            with moe_near_tie_expert_flip_rescue(
+                hf_expert_choice, MOE_NEAR_TIE_EXPERT_FLIP_TOL
+            ) as flips:
+                vllm_outputs_flipped = vllm_model.generate_greedy_logprobs(
+                    example_prompts, max_tokens, num_logprobs
+                )
+            if not flips:
+                raise  # Nothing was tied, so the first divergence is the answer.
+            check_logprobs_close(
+                outputs_0_lst=hf_outputs,
+                outputs_1_lst=vllm_outputs_flipped,
+                name_0="hf",
+                name_1="vllm_near_tie_expert_flip",
+            )
+
+    # Both sides are vLLM here, so HF's expert choice says nothing about them.
     if prompt_embeds is not None:
         check_logprobs_close(
             outputs_0_lst=vllm_outputs,
