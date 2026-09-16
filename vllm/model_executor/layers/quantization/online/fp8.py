@@ -565,9 +565,17 @@ class Fp8PerTensorOnlineMoEMethod(_Fp8OnlineMoEBase):
         *,
         moe: FusedMoEConfig,
     ):
+        # A per-tensor dynamic activation scale is the max over every token in
+        # the batch, so a request's quantized expert inputs would depend on the
+        # requests it is batched with.
+        self.per_act_token_quant = envs.VLLM_BATCH_INVARIANT
         super().__init__(
             weight_block_size=None,
             moe=moe,
+            weight_key=kFp8StaticTensorSym,
+            activation_key=kFp8DynamicTokenSym
+            if self.per_act_token_quant
+            else kFp8DynamicTensorSym,
         )
 
     def process_weights_after_loading(self, layer: Module) -> None:
