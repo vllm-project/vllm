@@ -36,7 +36,7 @@ from vllm.v1.kv_offload.tiering.p2p.session import (
     SessionPollResult,
     StoreResult,
 )
-from vllm.v1.kv_offload.tiering.p2p.session import client as client_module
+from vllm.v1.kv_offload.tiering.p2p.session.client import _LOOKUP_TIMEOUT_S
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1124,11 +1124,7 @@ def _build_paired_managers() -> tuple[P2PSecondaryTierManager, P2PSecondaryTierM
 class TestBidirectionalManager:
     """Two managers each load FROM and serve TO the other over a single peer."""
 
-    def test_unanswered_lookup_falls_back_to_local_prefill(self, monkeypatch):
-        clock = SimpleNamespace(now=0.0)
-        monkeypatch.setattr(
-            client_module, "time", SimpleNamespace(monotonic=lambda: clock.now)
-        )
+    def test_unanswered_lookup_falls_back_to_local_prefill(self, lookup_clock):
         mgr_a, mgr_b = _build_paired_managers()
         ctx = _req_context(_remote_kv_source_kv_params("B", 2))
         mgr_a.on_new_request(ctx)
@@ -1140,10 +1136,10 @@ class TestBidirectionalManager:
         mgr_a.on_schedule_end(ScheduleEndContext(new_req_ids=[], preempted_req_ids=[]))
 
         # Stop the server's progress without closing its live connection.
-        clock.now = 29.0
+        lookup_clock.now = _LOOKUP_TIMEOUT_S - 1
         assert list(mgr_a.get_finished_jobs()) == []
         assert mgr_a.lookup(b"key", ctx) == LookupResult.RETRY
-        clock.now = 30.0
+        lookup_clock.now = _LOOKUP_TIMEOUT_S
         assert list(mgr_a.get_finished_jobs()) == []
         assert mgr_a.lookup(b"key", ctx) == LookupResult.MISS
         assert "B:2" not in mgr_a._sessions

@@ -135,8 +135,8 @@ class ClientRole:
         # Kept in exact sync with ``st.loads``.
         self._active_loads: set[str] = set()
         self._completed_loads: list[LoadResult] = []
-        # First unanswered lookup batch per request. Additional keys and
-        # repeated scheduler polls must not extend an existing deadline.
+        # Per-request progress deadlines. Only newly resolved probes extend
+        # them; additional keys and repeated scheduler polls do not.
         self._lookup_deadlines: dict[str, float] = {}
 
     # ------------------------------------------------------------------
@@ -174,9 +174,13 @@ class ClientRole:
         """True if any kv_request_id has a fetch in flight."""
         return bool(self._active_loads)
 
-    def has_expired_lookup(self) -> bool:
+    def get_expired_lookup(self) -> tuple[str, float] | None:
+        """Return an expired request and seconds without progress, if any."""
         now = time.monotonic()
-        return any(now >= deadline for deadline in self._lookup_deadlines.values())
+        for req_id, deadline in self._lookup_deadlines.items():
+            if now >= deadline:
+                return req_id, now - deadline + _LOOKUP_TIMEOUT_S
+        return None
 
     # ------------------------------------------------------------------
     # Public API
@@ -455,12 +459,16 @@ class ClientRole:
         st = self._requests.get(kv_request_id)
         if st is None:
             return
+        progressed = False
         for h, hit in zip(keys, hits):
             key = OffloadKey(h)
             if key in st.probes:
+                progressed |= st.probes[key] is None
                 st.probes[key] = hit
         if all(hit is not None for hit in st.probes.values()):
             self._lookup_deadlines.pop(kv_request_id, None)
+        elif progressed:
+            self._lookup_deadlines[kv_request_id] = time.monotonic() + _LOOKUP_TIMEOUT_S
 
     def collect_results(self) -> list[LoadResult]:
         """Walk load timeouts and drain completed loads.
@@ -468,9 +476,6 @@ class ClientRole:
         Loads past ``_LOAD_TIMEOUT_S`` get an AbortFetchMsg sent and
         enter the aborting phase. Aborting loads past
         ``_ABORT_ACK_TIMEOUT_S`` are surfaced as failed.
-
-        The session handles unanswered lookup deadlines before dispatching
-        messages, so a late response cannot revive an expired lookup.
         """
         now = time.monotonic()
         to_remove: list[tuple[str, int]] = []

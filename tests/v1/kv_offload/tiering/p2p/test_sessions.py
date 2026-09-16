@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import time
 from collections.abc import Sequence
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -31,10 +30,10 @@ from vllm.v1.kv_offload.tiering.p2p.session import (
     P2PSession,
     StoreResult,
 )
-from vllm.v1.kv_offload.tiering.p2p.session import client as client_module
 from vllm.v1.kv_offload.tiering.p2p.session.client import (
     _ABORT_ACK_TIMEOUT_S,
     _LOAD_TIMEOUT_S,
+    _LOOKUP_TIMEOUT_S,
 )
 from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
     TYPE_KEY,
@@ -739,19 +738,11 @@ class TestClientFlows:
 class TestLookupFlow:
     """Consumer-side state machine for do_p2p_fetch lookups."""
 
-    @pytest.fixture
-    def lookup_clock(self, monkeypatch):
-        clock = SimpleNamespace(now=0.0)
-        monkeypatch.setattr(
-            client_module, "time", SimpleNamespace(monotonic=lambda: clock.now)
-        )
-        return clock
-
     def test_lookup_deadline_starts_after_handshake(self, lookup_clock):
         session, conn, _ = _make_session()
         session.register_lookup("req-1", b"hA")
         session.flush_pending_lookups()
-        lookup_clock.now = 100.0
+        lookup_clock.now = 2 * _LOOKUP_TIMEOUT_S
         session.poll()
         assert session.alive
 
@@ -759,7 +750,7 @@ class TestLookupFlow:
         session.flush_pending_lookups()
         lookups = [m for m in conn._sent if m[TYPE_KEY] == LookupMsg.TYPE]
         assert len(lookups) == 1
-        lookup_clock.now += 29
+        lookup_clock.now += _LOOKUP_TIMEOUT_S - 1
         session.poll()
         assert session.alive
         lookup_clock.now += 1
@@ -767,13 +758,13 @@ class TestLookupFlow:
         assert not session.alive
         assert session.close().failed_req_ids == ["req-1"]
 
-    def test_partial_response_does_not_extend_lookup_deadline(self, lookup_clock):
+    def test_partial_response_rearms_lookup_deadline(self, lookup_clock):
         session, conn, _ = _make_session()
         _activate(session, conn)
         session.register_lookup("req-1", b"hA")
         session.register_lookup("req-1", b"hB")
         session.flush_pending_lookups()
-        lookup_clock.now = 29.0
+        lookup_clock.now = _LOOKUP_TIMEOUT_S - 1
         conn.enqueue(
             {
                 TYPE_KEY: LookupRespMsg.TYPE,
@@ -789,17 +780,119 @@ class TestLookupFlow:
         session.flush_pending_lookups()
 
         lookup_clock.now += 1
+        session.poll()
+        assert session.alive
+        lookup_clock.now += _LOOKUP_TIMEOUT_S - 1
+        session.poll()
+        assert not session.alive
+        assert session.close().failed_req_ids == ["req-1"]
+
+    def test_lookup_progress_keeps_overlapping_batches_alive(self, lookup_clock):
+        """Prompt batch replies keep a long-running lookup phase alive."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        previous_key = b"key-0"
+        session.register_lookup("req-1", previous_key)
+        session.flush_pending_lookups()
+
+        for step in range(1, int(2 * _LOOKUP_TIMEOUT_S) + 1):
+            lookup_clock.now = float(step)
+            next_key = f"key-{step}".encode()
+            hit = step % 2 == 0
+            session.register_lookup("req-1", next_key)
+            session.flush_pending_lookups()
+            conn.enqueue(
+                {
+                    TYPE_KEY: LookupRespMsg.TYPE,
+                    LookupRespMsg.KV_REQUEST_ID: "req-1",
+                    LookupRespMsg.KEYS: [previous_key],
+                    LookupRespMsg.HITS: [hit],
+                }
+            )
+            session.poll()
+            assert session.alive
+            assert session.register_lookup("req-1", previous_key) is hit
+            previous_key = next_key
+
+    def test_buffered_lookup_response_precedes_expiry(self, lookup_clock):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.register_lookup("req-1", b"hA")
+        session.flush_pending_lookups()
+        lookup_clock.now = _LOOKUP_TIMEOUT_S - 1
         conn.enqueue(
             {
                 TYPE_KEY: LookupRespMsg.TYPE,
                 LookupRespMsg.KV_REQUEST_ID: "req-1",
-                LookupRespMsg.KEYS: [b"hB", b"hC"],
-                LookupRespMsg.HITS: [True, True],
+                LookupRespMsg.KEYS: [b"hA"],
+                LookupRespMsg.HITS: [True],
+            }
+        )
+        lookup_clock.now = _LOOKUP_TIMEOUT_S
+        session.poll()
+        assert session.alive
+        assert session.register_lookup("req-1", b"hA") is True
+
+    def test_duplicate_responses_and_new_keys_do_not_rearm(self, lookup_clock):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.register_lookup("req-1", b"hA")
+        session.register_lookup("req-1", b"hB")
+        session.flush_pending_lookups()
+        response = {
+            TYPE_KEY: LookupRespMsg.TYPE,
+            LookupRespMsg.KV_REQUEST_ID: "req-1",
+            LookupRespMsg.KEYS: [b"hA", b"unknown"],
+            LookupRespMsg.HITS: [True, False],
+        }
+        conn.enqueue(response)
+        session.poll()
+        lookup_clock.now = _LOOKUP_TIMEOUT_S - 1
+        conn.enqueue(response)
+        session.register_lookup("req-1", b"hC")
+        session.flush_pending_lookups()
+        session.poll()
+        assert session.alive
+        lookup_clock.now = _LOOKUP_TIMEOUT_S
+        session.poll()
+        assert not session.alive
+
+    def test_lookup_expiry_preserves_completed_transfers(self, lookup_clock):
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        session.register_lookup("stalled", b"key")
+        session.flush_pending_lookups()
+        lookup_clock.now = _LOOKUP_TIMEOUT_S - 1
+        session.request_blocks(1, "load", [b"key"], [0])
+        session.add_stored_blocks("store", [b"key"], [1], 2)
+        conn.enqueue(
+            {
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.KV_REQUEST_ID: "store",
+                FetchMsg.KEYS: [b"key"],
+                FetchMsg.BLOCK_INDEXES: [0],
+                FetchMsg.ROUND_SEQ: 0,
             }
         )
         session.poll()
+        transport._poll_done = list(transport._transfers)
+        conn.enqueue(
+            {
+                TYPE_KEY: TransferDoneMsg.TYPE,
+                TransferDoneMsg.KV_REQUEST_ID: "load",
+                TransferDoneMsg.SUCCESS: True,
+                TransferDoneMsg.ROUND_SEQ: 0,
+            }
+        )
+        lookup_clock.now = _LOOKUP_TIMEOUT_S
+        result = session.poll()
         assert not session.alive
-        assert session.close().failed_req_ids == ["req-1"]
+        assert result.loads == [LoadResult(1, "load", True)]
+        assert result.stores == [StoreResult(2, True)]
+        closed = session.close()
+        assert closed.failed_req_ids == ["stalled"]
+        assert closed.failed_jobs == []
+        assert closed.failed_stores == []
 
     @pytest.mark.parametrize("action", ["resolve", "finish", "fetch"])
     def test_lookup_deadline_cleared_before_next_batch(self, lookup_clock, action):
@@ -808,7 +901,7 @@ class TestLookupFlow:
         session.register_lookup("req-1", b"hA")
         session.register_lookup("req-1", b"hB")
         session.flush_pending_lookups()
-        lookup_clock.now = 29.0
+        lookup_clock.now = _LOOKUP_TIMEOUT_S - 1
         conn.enqueue(
             {
                 TYPE_KEY: LookupRespMsg.TYPE,
@@ -838,7 +931,7 @@ class TestLookupFlow:
         assert session.alive
         session.register_lookup("req-1", b"hC")
         session.flush_pending_lookups()
-        lookup_clock.now += 29
+        lookup_clock.now += _LOOKUP_TIMEOUT_S - 1
         session.poll()
         assert session.alive
         lookup_clock.now += 1
