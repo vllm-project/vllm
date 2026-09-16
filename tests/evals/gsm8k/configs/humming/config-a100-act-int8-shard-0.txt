@@ -1,0 +1,3 @@
+gpt-oss-20b-humming.yaml
+Qwen3.5-35B-A3B-experts-int8-humming-act-int8.yaml
+Qwen3.5-35B-A3B-int6wc-hadamard-humming-act-int8.yaml
