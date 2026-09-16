@@ -316,3 +316,84 @@ def test_whitespace_only_surrounding_content_is_not_preserved(tokenizer):
 def test_tool_parser_registered():
     assert ToolParserManager.get_tool_parser("k2_horizon") is K2HorizonToolParser
     assert K2HorizonToolParser.supports_required_and_named is False
+
+
+class TestCoerceJsonValue:
+    """Note(arpera):
+    Unit tests coverage for K2HorizonToolParser._coerce_json_value
+    Tests are organized in subclasses following the same approach
+    that tests/tool_parsers/test_utils.py uses for testing coerce_to_schema_type.
+
+    Once you identify a new regression in K2._coerce_json_value
+    please implement a regression test as a subclass here.
+    """
+
+    class TestDecodedValuesArePreserved:
+        @pytest.mark.parametrize(
+            ("value", "schema"),
+            [
+                ([1, 2], {"type": "array"}),
+                ({"a": 1}, {"type": "object"}),
+                (3, {"type": "integer"}),
+                (True, {"type": "boolean"}),
+            ],
+        )
+        def test_value_matching_its_schema_is_untouched(self, value, schema):
+            assert K2HorizonToolParser._coerce_json_value(value, schema) == value
+
+        def test_schema_without_types_returns_value(self):
+            assert K2HorizonToolParser._coerce_json_value([1, 2], None) == [1, 2]
+
+    class TestStringOrientedCoercionStillApplies:
+        def test_double_encoded_object_is_decoded(self):
+            """The helper exists for this: a model sending an object as text."""
+            result = K2HorizonToolParser._coerce_json_value(
+                '{"a": 1}', {"type": "object"}
+            )
+            assert result == {"a": 1}
+
+        def test_numeric_string_is_decoded(self):
+            assert K2HorizonToolParser._coerce_json_value("3", {"type": "integer"}) == 3
+
+        @pytest.mark.parametrize(
+            ("value", "expected"),
+            [([1, 2], "[1, 2]"), (3, "3"), (True, "true")],
+        )
+        def test_declared_string_encodes_a_decoded_value(self, value, expected):
+            """A declared string still wins: the encoding is what was asked for."""
+            result = K2HorizonToolParser._coerce_json_value(value, {"type": "string"})
+            assert result == expected
+            assert isinstance(result, str)
+
+    class TestPR57005Regressions:
+        """Note(arpera):
+        List of regressions that were caught during review of PR #57005
+        """
+
+        @pytest.mark.parametrize(
+            ("value", "schema"),
+            [
+                ([1, 2], {"type": "object"}),
+                ({"a": 1}, {"type": "array"}),
+                (3, {"type": "object"}),
+                (True, {"type": "object"}),
+                (None, {"type": "object"}),
+            ],
+        )
+        def test_unmatched_schema_keeps_the_decoded_value(self, value, schema):
+            result = K2HorizonToolParser._coerce_json_value(value, schema)
+            assert result == value
+            assert not isinstance(result, str)
+
+        @pytest.mark.parametrize("alias", ["str", "text", "varchar"])
+        def test_string_alias_still_encodes(self, alias):
+            """The keep-decoded guard must use the same alias table as coercion."""
+            result = K2HorizonToolParser._coerce_json_value(3, {"type": alias})
+            assert result == "3"
+            assert isinstance(result, str)
+
+        def test_zero_fraction_number_reaches_the_integer_branch(self):
+            """Shares ``coerce_to_schema_type``'s integer fix: 3.0 is an integer."""
+            result = K2HorizonToolParser._coerce_json_value(3.0, {"type": "integer"})
+            assert result == 3
+            assert isinstance(result, int)

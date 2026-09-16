@@ -882,6 +882,36 @@ class TestFixArgTypes:
         result = engine._fix_arg_types('{"days": "3"}', "f")
         assert json.loads(result) == {"days": 3}
 
+    def test_non_finite_number_stays_json_serialisable(self):
+        """PR #57005 regression: a kept inf re-serialised as bare ``Infinity``.
+
+        ``json.dumps`` emits ``Infinity``/``NaN`` for non-finite floats, which
+        strict JSON parsers reject, so the arguments string must never carry
+        the decoded value here.
+        """
+
+        def _reject(token):
+            raise AssertionError(f"non-JSON token {token} emitted")
+
+        tool = _make_tool("f", {"a": {"type": "integer"}, "b": {"type": "number"}})
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"a": "5", "b": 1e999}', "f")
+        assert json.loads(result, parse_constant=_reject)["a"] == 5
+
+    def test_string_alias_still_coerces(self):
+        """PR #57005 regression: the keep-decoded guard ignored type aliases."""
+        tool = _make_tool("f", {"a": {"type": "str"}})
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"a": 3}', "f")
+        assert json.loads(result) == {"a": "3"}
+
+    def test_unmatched_schema_keeps_the_decoded_value(self):
+        """A value the schema rules out is left alone, not stringified."""
+        tool = _make_tool("f", {"a": {"type": "object"}})
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"a": 3}', "f")
+        assert json.loads(result) == {"a": 3}
+
     def test_array_not_substituted_for_object_property(self):
         """Parsing to the wrong type is worse than not coercing at all.
 
@@ -895,6 +925,106 @@ class TestFixArgTypes:
 
 
 # ── TestBuildExtractedResult ─────────────────────────────────────────
+
+
+class TestCoerceValue:
+    """Note(arpera):
+    Unit tests coverage for ParserEngine._coerce_value method.
+    Tests are organized in subclasses following the same approach
+    that tests/tool_parsers/test_utils.py uses for testing coerce_to_schema_type.
+
+    Once you identify a new regression in _coerce_value
+    please implement a regression test as a subclass here.
+    """
+
+    class TestStringValues:
+        def test_numeric_string_is_coerced(self):
+            assert ParserEngine._coerce_value("42", {"type": "integer"}) == (42, True)
+
+        def test_string_matching_its_schema_is_untouched(self):
+            assert ParserEngine._coerce_value("hello", {"type": "string"}) == (
+                "hello",
+                False,
+            )
+
+        def test_double_encoded_object_is_decoded(self):
+            assert ParserEngine._coerce_value('{"a": 1}', {"type": "object"}) == (
+                {"a": 1},
+                True,
+            )
+
+    class TestContainers:
+        def test_nested_property_is_coerced(self):
+            schema = {"type": "object", "properties": {"count": {"type": "integer"}}}
+            assert ParserEngine._coerce_value({"count": "42"}, schema) == (
+                {"count": 42},
+                True,
+            )
+
+        def test_array_items_are_coerced(self):
+            schema = {"type": "array", "items": {"type": "integer"}}
+            assert ParserEngine._coerce_value(["1", "2"], schema) == ([1, 2], True)
+
+        def test_container_without_schema_detail_is_untouched(self):
+            assert ParserEngine._coerce_value({"a": "1"}, {"type": "object"}) == (
+                {"a": "1"},
+                False,
+            )
+
+    class TestPR57005Regressions:
+        """Cases this PR and its review changed, at the level they broke."""
+
+        def test_decoded_object_has_its_own_fields_coerced(self):
+            """The string branch used to return before the dict branch ran."""
+            schema = {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "age": {"type": "integer"},
+                },
+            }
+            value = '{"name": "Alice", "age": "42"}'
+            assert ParserEngine._coerce_value(value, schema) == (
+                {"name": "Alice", "age": 42},
+                True,
+            )
+
+        def test_properties_are_found_inside_a_combinator(self):
+            """A property may declare its object shape through ``anyOf``."""
+            schema = {
+                "anyOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "age": {"type": "integer"},
+                        },
+                    },
+                    {"type": "object", "properties": {"city": {"type": "string"}}},
+                ]
+            }
+            value = '{"name": "Alice", "age": "42"}'
+            assert ParserEngine._coerce_value(value, schema) == (
+                {"name": "Alice", "age": 42},
+                True,
+            )
+
+        @pytest.mark.parametrize("value", [3, True, None, 3.5])
+        def test_value_the_schema_rules_out_is_left_alone(self, value):
+            """The encoding made here is not model output, so it must not leak."""
+            coerced, changed = ParserEngine._coerce_value(value, {"type": "object"})
+            assert coerced is value
+            assert changed is False
+
+        def test_string_alias_is_honoured(self):
+            """The keep-decoded guard has to resolve aliases like coercion does."""
+            assert ParserEngine._coerce_value(3, {"type": "str"}) == ("3", True)
+
+        @pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan")])
+        def test_non_finite_number_is_never_kept(self, value):
+            """``json.dumps`` renders a kept inf as bare ``Infinity``: invalid JSON."""
+            coerced, _ = ParserEngine._coerce_value(value, {"type": "number"})
+            json.dumps(coerced, allow_nan=False)
 
 
 class TestBuildExtractedResult:

@@ -28,11 +28,13 @@ from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine_config import ParserEngineConfig, ParserState
 from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
 from vllm.tool_parsers.utils import (
+    _is_json_finite,
     coerce_to_schema_type,
     extract_types_from_schema,
     find_tool_name,
     find_tool_properties,
     get_properties,
+    normalize_schema_types,
 )
 
 if TYPE_CHECKING:
@@ -284,6 +286,16 @@ class ParserEngine(Parser):
         types = extract_types_from_schema(schema)
         as_str = json.dumps(value, ensure_ascii=False)
         coerced = coerce_to_schema_type(as_str, types)
+        if (
+            coerced is as_str
+            and "string" not in normalize_schema_types(types)
+            and _is_json_finite(value)
+        ):
+            # Nothing matched, and the string handed back is our own encoding
+            # rather than model output, so keep the decoded value. Non-finite
+            # floats are the exception: json.dumps renders them as bare
+            # Infinity/NaN, which is not valid JSON for the client.
+            return value, False
         if type(coerced) is not type(value) or coerced != value:
             return coerced, True
         return value, False

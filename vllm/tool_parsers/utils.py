@@ -1025,15 +1025,25 @@ def get_properties(schema: Any) -> dict[str, Any]:
     if isinstance(properties, dict):
         return properties
 
+    collected: dict[str, list[Any]] = {}
     for keyword in ("allOf", "anyOf", "oneOf"):
         branches = schema.get(keyword)
         if not isinstance(branches, list):
             continue
         for branch in branches:
             if isinstance(branch, dict) and isinstance(branch.get("properties"), dict):
-                return branch["properties"]
+                for name, prop in branch["properties"].items():
+                    collected.setdefault(name, []).append(prop)
 
-    return {}
+    # anyOf/oneOf are alternatives, not ordered fallbacks: a name declared by
+    # several branches with different schemas would be coerced by whichever
+    # branch came first, and which one actually applies depends on values the
+    # streaming parser may not have seen yet. Such names are left alone.
+    return {
+        name: schemas[0]
+        for name, schemas in collected.items()
+        if all(other == schemas[0] for other in schemas[1:])
+    }
 
 
 def _json_type_name(value: Any) -> str | None:
@@ -1132,6 +1142,15 @@ _TYPE_PRIORITY = (
 _JSON_SCHEMA_TYPES = frozenset(_TYPE_PRIORITY)
 
 
+def normalize_schema_types(schema_type: str | list[str]) -> set[str]:
+    """Declared type names with aliases, case and padding resolved."""
+    if isinstance(schema_type, str):
+        schema_type = [schema_type]
+    return {
+        _TYPE_ALIASES.get(key, key) for t in schema_type for key in [t.strip().lower()]
+    }
+
+
 def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
     """Best-effort coercion of a raw string value to a JSON Schema type.
 
@@ -1147,9 +1166,7 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
     if isinstance(schema_type, str):
         schema_type = [schema_type]
 
-    normalized_types = {
-        _TYPE_ALIASES.get(key, key) for t in schema_type for key in [t.strip().lower()]
-    }
+    normalized_types = normalize_schema_types(schema_type)
 
     for candidate_type in _TYPE_PRIORITY:
         if candidate_type not in normalized_types:
@@ -1165,7 +1182,16 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
             try:
                 return int(value)
             except (ValueError, TypeError):
+                pass
+            # JSON Schema counts a zero-fraction number as an integer, so
+            # "3.0" has to coerce to 3 instead of falling through to a string.
+            try:
+                val = float(value)
+            except (ValueError, TypeError):
                 continue
+            if math.isfinite(val) and val == int(val):
+                return int(val)
+            continue
         if candidate_type == "number":
             try:
                 val = float(value)
@@ -1216,7 +1242,11 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
     # If no type can be accepted then return it as it is, do NOT try to guess here
     # Names outside the JSON Schema set constrain nothing, so they keep guessing.
     declared = normalized_types & _JSON_SCHEMA_TYPES
-    if declared and _json_type_name(parsed) not in declared:
+    parsed_type = _json_type_name(parsed)
+    if parsed_type == "integer" and "number" in declared:
+        # JSON Schema numbers include the integers.
+        parsed_type = "number"
+    if declared and parsed_type not in declared:
         return value
     return parsed
 
