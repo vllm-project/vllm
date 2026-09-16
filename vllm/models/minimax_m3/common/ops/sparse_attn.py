@@ -19,11 +19,20 @@ leaves the prefill kernels (which parallelize over the query dim) idle.
 
 import torch
 
+from vllm import envs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 # One sparse block == one KV page.
 SPARSE_BLOCK_SIZE = 128
+
+# Keep the scalar kernel as the default until the tiled path has been measured
+# across more hardware and workloads. Values greater than one opt into tiling.
+_PREFILL_TILE_Q = envs.VLLM_MINIMAX_SPARSE_PREFILL_TILE_Q
+if _PREFILL_TILE_Q not in (0, 1, 2, 4, 8, 16, 32):
+    raise ValueError(
+        "VLLM_MINIMAX_SPARSE_PREFILL_TILE_Q must be 0, 1, 2, 4, 8, 16, or 32"
+    )
 
 _FP8_DTYPES = (
     torch.float8_e4m3fn,
@@ -34,12 +43,9 @@ _FP8_DTYPES = (
 
 
 # ---------------------------------------------------------------------------
-# GQA block-sparse attention (paged). Main heads attend only to the selected
-# blocks. BLOCK_SIZE_K == 128 so each selected block is one page.
+# Scalar-query GQA block-sparse attention (paged). This remains the default
+# until the query-tiled path has broader workload and hardware coverage.
 # ---------------------------------------------------------------------------
-# since prefill metadata is sliced from mixed batch metadata, seq_lens and prefix_lens
-# might lose pointer alignment, which trigger Triton recompiles. we don't actually
-# need pointer alignment for those tensors anyway because we do scalar load.
 @triton.heuristics(
     {
         "BLOCK_SIZE_D": lambda args: triton.next_power_of_2(args["head_dim"]),
@@ -50,168 +56,344 @@ _FP8_DTYPES = (
 )
 @triton.jit(do_not_specialize_on_alignment=["seq_lens", "prefix_lens"])
 def _gqa_sparse_fwd_kernel(
-    q_ptr,  # [total_q, num_heads, head_dim]
-    kv_cache_ptr,  # main cache: [num_blocks, num_kv_heads, 128, 2*head_dim]
+    q_ptr,
+    kv_cache_ptr,
     k_scale_ptr,
     v_scale_ptr,
-    t_ptr,  # topk_idx: [num_kv_heads, total_q, topk]
-    o_ptr,  # [total_q, num_heads, head_dim]
-    block_table_ptr,  # [num_reqs, max_blocks]
+    t_ptr,
+    o_ptr,
+    block_table_ptr,
     cu_seqlens_q,
-    cu_seqblocks_q,
     seq_lens,
     prefix_lens,
-    num_kv_heads,
-    gqa_group_size,
-    head_dim,
-    max_topk,
-    num_q_loop,
+    gqa_group_size: tl.constexpr,
+    head_dim: tl.constexpr,
+    max_topk: tl.constexpr,
     sm_scale,
-    stride_qn,
-    stride_qh,
-    stride_qd,
-    stride_kv_blk,
-    stride_kv_h,
-    stride_kv_pos,
-    stride_kv_d,
-    stride_ks_h,
-    stride_ks_t,
-    stride_vs_h,
-    stride_vs_t,
-    stride_th,
-    stride_tn,
-    stride_tk,
-    stride_on,
-    stride_oh,
-    stride_od,
-    stride_bt_b,
+    stride_qn: tl.constexpr,
+    stride_qh: tl.constexpr,
+    stride_qd: tl.constexpr,
+    stride_kv_blk: tl.constexpr,
+    stride_kv_h: tl.constexpr,
+    stride_kv_pos: tl.constexpr,
+    stride_kv_d: tl.constexpr,
+    stride_ks_h: tl.constexpr,
+    stride_ks_t: tl.constexpr,
+    stride_vs_h: tl.constexpr,
+    stride_vs_t: tl.constexpr,
+    stride_th: tl.constexpr,
+    stride_tn: tl.constexpr,
+    stride_tk: tl.constexpr,
+    stride_on: tl.constexpr,
+    stride_oh: tl.constexpr,
+    stride_od: tl.constexpr,
+    stride_bt_b: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,  # == SPARSE_BLOCK_SIZE (128)
+    BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_D: tl.constexpr,
     BLOCK_SIZE_H: tl.constexpr,
     BLOCK_SIZE_QH: tl.constexpr,
-    USE_FP8: tl.constexpr,  # fp8 KV cache: dequantize K/V to q.dtype on load
-    KV_SCALE_MODE: tl.constexpr,  # 0: none, 1: scalar, 2: [kv_head, token]
+    USE_FP8: tl.constexpr,
+    KV_SCALE_MODE: tl.constexpr,
 ):
-    sm_scale_log2e = sm_scale * 1.4426950409
     pid_q = tl.program_id(0)
     pid_kh = tl.program_id(1)
     pid_b = tl.program_id(2)
-    pid_h = pid_kh * gqa_group_size
     q_start = tl.load(cu_seqlens_q + pid_b)
     q_len = tl.load(cu_seqlens_q + pid_b + 1) - q_start
-    q_block_start = tl.load(cu_seqblocks_q + pid_b)
-    q_block_len = tl.load(cu_seqblocks_q + pid_b + 1) - q_block_start
+    if pid_q >= q_len:
+        return
     seq_len = tl.load(seq_lens + pid_b)
     prefix_len = tl.load(prefix_lens + pid_b)
-    if pid_q * num_q_loop >= q_block_len:
-        return
-    real_q_loop = min(num_q_loop, q_block_len - pid_q * num_q_loop)
-    bt_row = block_table_ptr + pid_b * stride_bt_b
+    q_abs = prefix_len + pid_q
+    real_topk = tl.minimum(max_topk, (q_abs + BLOCK_SIZE_K) // BLOCK_SIZE_K)
+    topk_ptr = t_ptr + pid_kh * stride_th + (q_start + pid_q) * stride_tn
+    q_ptrs = tl.make_block_ptr(
+        base=q_ptr + q_start * stride_qn + pid_kh * gqa_group_size * stride_qh,
+        shape=(q_len, gqa_group_size, head_dim),
+        strides=(stride_qn, stride_qh, stride_qd),
+        offsets=(pid_q, 0, 0),
+        block_shape=(BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D),
+        order=(2, 1, 0),
+    )
+    q = tl.load(q_ptrs, boundary_check=(0, 1, 2), padding_option="zero")
+    q = tl.reshape(q, (BLOCK_SIZE_QH, BLOCK_SIZE_D))
     off_n = tl.arange(0, BLOCK_SIZE_K)
     off_d = tl.arange(0, BLOCK_SIZE_D)
     d_mask = off_d < head_dim
-    for j in range(real_q_loop):
-        pid_q_j = pid_q * num_q_loop + j
-        t_ptr_j = t_ptr + (q_block_start + pid_q_j) * stride_tn + pid_kh * stride_th
-        # Valid block count from seq position (no sentinel): block_size_q == 1.
-        q_abs = prefix_len + pid_q_j * BLOCK_SIZE_Q
-        valid_blocks = (q_abs + BLOCK_SIZE_K) // BLOCK_SIZE_K
-        real_topk = tl.minimum(max_topk, valid_blocks)
-        q_ptrs = tl.make_block_ptr(
-            base=q_ptr + q_start * stride_qn + pid_h * stride_qh,
-            shape=(q_len, gqa_group_size, head_dim),
-            strides=(stride_qn, stride_qh, stride_qd),
-            offsets=(pid_q_j * BLOCK_SIZE_Q, 0, 0),
-            block_shape=(BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D),
-            order=(2, 1, 0),
+    bt_row = block_table_ptr + pid_b * stride_bt_b
+    sm_scale_log2e = sm_scale * 1.4426950409
+    m_i = tl.full((BLOCK_SIZE_QH,), float("-inf"), tl.float32)
+    lse_i = tl.full((BLOCK_SIZE_QH,), float("-inf"), tl.float32)
+    acc_o = tl.zeros((BLOCK_SIZE_QH, BLOCK_SIZE_D), tl.float32)
+    for topk_offset in range(real_topk):
+        blk = tl.load(topk_ptr + topk_offset * stride_tk).to(tl.int32)
+        page = tl.load(bt_row + blk).to(tl.int64)
+        pos = blk * BLOCK_SIZE_K + off_n
+        pos_mask = pos < seq_len
+        k = tl.load(
+            kv_cache_ptr
+            + page * stride_kv_blk
+            + pid_kh * stride_kv_h
+            + off_n[None, :] * stride_kv_pos
+            + off_d[:, None] * stride_kv_d,
+            mask=d_mask[:, None] & pos_mask[None, :],
+            other=0.0,
         )
-        q = tl.load(q_ptrs, boundary_check=(0, 1, 2), padding_option="zero")
-        off_q = (
-            tl.arange(0, BLOCK_SIZE_Q)[:, None]
-            + pid_q_j * BLOCK_SIZE_Q
-            + prefix_len
-            - tl.arange(0, BLOCK_SIZE_K)[None, :]
+        if USE_FP8:
+            k = k.to(q.dtype)
+            if KV_SCALE_MODE == 1:
+                k = (k * tl.load(k_scale_ptr)).to(q.dtype)
+            elif KV_SCALE_MODE == 2:
+                k_scale = tl.load(
+                    k_scale_ptr
+                    + pid_kh * stride_ks_h
+                    + (page * BLOCK_SIZE_K + off_n) * stride_ks_t,
+                    mask=pos_mask,
+                    other=1.0,
+                )
+                k = (k * k_scale[None, :]).to(q.dtype)
+        mask = (q_abs >= pos) & pos_mask
+        mask = tl.broadcast_to(mask[None, :], (BLOCK_SIZE_QH, BLOCK_SIZE_K))
+        qk = tl.dot(q, k) * sm_scale_log2e
+        qk = tl.where(mask, qk, float("-inf"))
+        m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
+        p = tl.exp2(qk - m_ij[:, None])
+        l_ij = tl.sum(p, axis=1)
+        acc_o = acc_o * tl.exp2(m_i - m_ij)[:, None]
+        v = tl.load(
+            kv_cache_ptr
+            + page * stride_kv_blk
+            + pid_kh * stride_kv_h
+            + off_n[:, None] * stride_kv_pos
+            + (head_dim + off_d[None, :]) * stride_kv_d,
+            mask=pos_mask[:, None] & d_mask[None, :],
+            other=0.0,
         )
-        m_i = tl.full((BLOCK_SIZE_QH,), float("-inf"), dtype=tl.float32)
-        lse_i = tl.full((BLOCK_SIZE_QH,), float("-inf"), dtype=tl.float32)
-        acc_o = tl.zeros((BLOCK_SIZE_QH, BLOCK_SIZE_D), dtype=tl.float32)
-        q = tl.reshape(q, BLOCK_SIZE_QH, BLOCK_SIZE_D)
-        for _ in range(real_topk):
-            blk = tl.load(t_ptr_j).to(tl.int32)
-            t_ptr_j = t_ptr_j + stride_tk
-            c = blk * BLOCK_SIZE_K
-            page = tl.load(bt_row + blk).to(tl.int64)
-            pos = c + off_n
-            pos_mask = pos < seq_len
-            k = tl.load(
-                kv_cache_ptr
-                + page * stride_kv_blk
-                + pid_kh * stride_kv_h
-                + off_n[None, :] * stride_kv_pos
-                + off_d[:, None] * stride_kv_d,
-                mask=d_mask[:, None] & pos_mask[None, :],
-                other=0.0,
-            )
-            if USE_FP8:
-                k = k.to(q.dtype)
-                if KV_SCALE_MODE == 1:
-                    k = (k * tl.load(k_scale_ptr)).to(q.dtype)
-                elif KV_SCALE_MODE == 2:
-                    k_scale = tl.load(
-                        k_scale_ptr
-                        + pid_kh * stride_ks_h
-                        + (page * BLOCK_SIZE_K + off_n) * stride_ks_t,
-                        mask=pos_mask,
-                        other=1.0,
-                    )
-                    k = (k * k_scale[None, :]).to(q.dtype)
-            qk = tl.zeros((BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_K), dtype=tl.float32)
-            # causal: q_abs_pos - k_off >= block_start (c)
-            qk += tl.where(off_q[:, None, :] >= c, 0, float("-inf"))
-            qk = tl.reshape(qk, BLOCK_SIZE_QH, BLOCK_SIZE_K)
-            qk += tl.dot(q, k) * sm_scale_log2e
-            qk += tl.where(pos_mask[None, :], 0, float("-inf"))
-            m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
-            p = tl.exp2(qk - m_ij[:, None])
-            l_ij = tl.sum(p, axis=1)
-            acc_o = acc_o * tl.exp2(m_i - m_ij)[:, None]
-            v = tl.load(
-                kv_cache_ptr
-                + page * stride_kv_blk
-                + pid_kh * stride_kv_h
-                + off_n[:, None] * stride_kv_pos
-                + (head_dim + off_d[None, :]) * stride_kv_d,
-                mask=pos_mask[:, None] & d_mask[None, :],
-                other=0.0,
-            )
-            if USE_FP8:
-                v = v.to(q.dtype)
-                if KV_SCALE_MODE == 1:
-                    v = (v * tl.load(v_scale_ptr)).to(q.dtype)
-                elif KV_SCALE_MODE == 2:
-                    v_scale = tl.load(
-                        v_scale_ptr
-                        + pid_kh * stride_vs_h
-                        + (page * BLOCK_SIZE_K + off_n) * stride_vs_t,
-                        mask=pos_mask,
-                        other=1.0,
-                    )
-                    v = (v * v_scale[:, None]).to(q.dtype)
-            acc_o += tl.dot(p.to(v.dtype), v)
-            m_i = m_ij
-            lse_i = m_ij + tl.log2(tl.exp2(lse_i - m_ij) + l_ij)
-        acc_o = acc_o * tl.exp2(m_i - lse_i)[:, None]
-        acc_o = tl.reshape(acc_o, BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D)
-        o_ptrs = tl.make_block_ptr(
-            base=o_ptr + q_start * stride_on + pid_h * stride_oh,
-            shape=(q_len, gqa_group_size, head_dim),
-            strides=(stride_on, stride_oh, stride_od),
-            offsets=(pid_q_j * BLOCK_SIZE_Q, 0, 0),
-            block_shape=(BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D),
-            order=(2, 1, 0),
+        if USE_FP8:
+            v = v.to(q.dtype)
+            if KV_SCALE_MODE == 1:
+                v = (v * tl.load(v_scale_ptr)).to(q.dtype)
+            elif KV_SCALE_MODE == 2:
+                v_scale = tl.load(
+                    v_scale_ptr
+                    + pid_kh * stride_vs_h
+                    + (page * BLOCK_SIZE_K + off_n) * stride_vs_t,
+                    mask=pos_mask,
+                    other=1.0,
+                )
+                v = (v * v_scale[:, None]).to(q.dtype)
+        acc_o += tl.dot(p.to(v.dtype), v)
+        m_i = m_ij
+        lse_i = m_ij + tl.log2(tl.exp2(lse_i - m_ij) + l_ij)
+    acc_o *= tl.exp2(m_i - lse_i)[:, None]
+    o_ptrs = tl.make_block_ptr(
+        base=o_ptr + q_start * stride_on + pid_kh * gqa_group_size * stride_oh,
+        shape=(q_len, gqa_group_size, head_dim),
+        strides=(stride_on, stride_oh, stride_od),
+        offsets=(pid_q, 0, 0),
+        block_shape=(BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D),
+        order=(2, 1, 0),
+    )
+    tl.store(
+        o_ptrs,
+        tl.reshape(acc_o, (BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D)).to(
+            o_ptr.dtype.element_ty
+        ),
+        boundary_check=(0, 1, 2),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Query-tiled GQA block-sparse attention (paged). Main heads attend only to the
+# selected blocks. BLOCK_SIZE_K == 128 so each selected block is one page.
+# ---------------------------------------------------------------------------
+# since prefill metadata is sliced from mixed batch metadata, seq_lens and prefix_lens
+# might lose pointer alignment, which trigger Triton recompiles. we don't actually
+# need pointer alignment for those tensors anyway because we do scalar load.
+@triton.heuristics(
+    {
+        "BLOCK_SIZE_D": lambda args: triton.next_power_of_2(args["head_dim"]),
+        "BLOCK_SIZE_H": lambda args: triton.next_power_of_2(args["gqa_group_size"]),
+        "BLOCK_SIZE_QH": lambda args: args["BLOCK_SIZE_Q"]
+        * triton.next_power_of_2(args["gqa_group_size"]),
+        "BLOCK_SIZE_T": lambda args: triton.next_power_of_2(args["max_topk"]),
+    }
+)
+@triton.jit(do_not_specialize_on_alignment=["seq_lens", "prefix_lens"])
+def _gqa_sparse_fwd_tiled_kernel(
+    q_ptr,
+    kv_cache_ptr,
+    k_scale_ptr,
+    v_scale_ptr,
+    t_ptr,
+    o_ptr,
+    block_table_ptr,
+    cu_seqlens_q,
+    seq_lens,
+    prefix_lens,
+    gqa_group_size: tl.constexpr,
+    head_dim: tl.constexpr,
+    max_topk: tl.constexpr,
+    sm_scale,
+    stride_qn: tl.constexpr,
+    stride_qh: tl.constexpr,
+    stride_qd: tl.constexpr,
+    stride_kv_blk: tl.constexpr,
+    stride_kv_h: tl.constexpr,
+    stride_kv_pos: tl.constexpr,
+    stride_kv_d: tl.constexpr,
+    stride_ks_h: tl.constexpr,
+    stride_ks_t: tl.constexpr,
+    stride_vs_h: tl.constexpr,
+    stride_vs_t: tl.constexpr,
+    stride_th: tl.constexpr,
+    stride_tn: tl.constexpr,
+    stride_tk: tl.constexpr,
+    stride_on: tl.constexpr,
+    stride_oh: tl.constexpr,
+    stride_od: tl.constexpr,
+    stride_bt_b: tl.constexpr,
+    BLOCK_SIZE_Q: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_SIZE_D: tl.constexpr,
+    BLOCK_SIZE_H: tl.constexpr,
+    BLOCK_SIZE_QH: tl.constexpr,
+    BLOCK_SIZE_T: tl.constexpr,
+    USE_FP8: tl.constexpr,
+    KV_SCALE_MODE: tl.constexpr,
+):
+    pid_q = tl.program_id(0) * BLOCK_SIZE_Q
+    pid_kh = tl.program_id(1)
+    pid_b = tl.program_id(2)
+    q_start = tl.load(cu_seqlens_q + pid_b)
+    q_len = tl.load(cu_seqlens_q + pid_b + 1) - q_start
+    if pid_q >= q_len:
+        return
+    seq_len = tl.load(seq_lens + pid_b)
+    prefix_len = tl.load(prefix_lens + pid_b)
+    off_q = pid_q + tl.arange(0, BLOCK_SIZE_Q)
+    q_abs = prefix_len + off_q
+    off_t = tl.arange(0, BLOCK_SIZE_T)
+    real_topk = tl.minimum(max_topk, (q_abs + BLOCK_SIZE_K) // BLOCK_SIZE_K)
+    END: tl.constexpr = 0x7FFFFFFF
+    ids = tl.load(
+        t_ptr
+        + pid_kh * stride_th
+        + (q_start + off_q[:, None]) * stride_tn
+        + off_t[None, :] * stride_tk,
+        mask=(off_q[:, None] < q_len) & (off_t[None, :] < real_topk[:, None]),
+        other=END,
+    ).to(tl.int32)
+    ids = tl.where(ids >= 0, ids, END)
+    q_ptrs = tl.make_block_ptr(
+        base=q_ptr + q_start * stride_qn + pid_kh * gqa_group_size * stride_qh,
+        shape=(q_len, gqa_group_size, head_dim),
+        strides=(stride_qn, stride_qh, stride_qd),
+        offsets=(pid_q, 0, 0),
+        block_shape=(BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D),
+        order=(2, 1, 0),
+    )
+    q = tl.load(q_ptrs, boundary_check=(0, 1, 2), padding_option="zero")
+    q = tl.reshape(q, (BLOCK_SIZE_QH, BLOCK_SIZE_D))
+    off_n = tl.arange(0, BLOCK_SIZE_K)
+    off_d = tl.arange(0, BLOCK_SIZE_D)
+    d_mask = off_d < head_dim
+    bt_row = block_table_ptr + pid_b * stride_bt_b
+    sm_scale_log2e = sm_scale * 1.4426950409
+    m_i = tl.full((BLOCK_SIZE_QH,), float("-inf"), tl.float32)
+    lse_i = tl.full((BLOCK_SIZE_QH,), float("-inf"), tl.float32)
+    acc_o = tl.zeros((BLOCK_SIZE_QH, BLOCK_SIZE_D), tl.float32)
+    blk = tl.min(tl.reshape(ids, (BLOCK_SIZE_Q * BLOCK_SIZE_T,)), axis=0)
+    while blk < END:
+        member = tl.sum((ids == blk).to(tl.int32), axis=1) > 0
+        page = tl.load(bt_row + blk).to(tl.int64)
+        pos = blk * BLOCK_SIZE_K + off_n
+        pos_mask = pos < seq_len
+        k = tl.load(
+            kv_cache_ptr
+            + page * stride_kv_blk
+            + pid_kh * stride_kv_h
+            + off_n[None, :] * stride_kv_pos
+            + off_d[:, None] * stride_kv_d,
+            mask=d_mask[:, None] & pos_mask[None, :],
+            other=0.0,
         )
-        tl.store(o_ptrs, acc_o.to(o_ptr.dtype.element_ty), boundary_check=(0, 1, 2))
+        if USE_FP8:
+            k = k.to(q.dtype)
+            if KV_SCALE_MODE == 1:
+                k = (k * tl.load(k_scale_ptr)).to(q.dtype)
+            elif KV_SCALE_MODE == 2:
+                k_scale = tl.load(
+                    k_scale_ptr
+                    + pid_kh * stride_ks_h
+                    + (page * BLOCK_SIZE_K + off_n) * stride_ks_t,
+                    mask=pos_mask,
+                    other=1.0,
+                )
+                k = (k * k_scale[None, :]).to(q.dtype)
+        mask = (
+            member[:, None, None]
+            & (q_abs[:, None, None] >= pos[None, None, :])
+            & pos_mask[None, None, :]
+        )
+        mask = tl.reshape(
+            tl.broadcast_to(mask, (BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_K)),
+            (BLOCK_SIZE_QH, BLOCK_SIZE_K),
+        )
+        qk = tl.dot(q, k) * sm_scale_log2e
+        qk = tl.where(mask, qk, float("-inf"))
+        m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
+        # A row may not select any of the union blocks visited so far. Avoid
+        # -inf - -inf without giving these masked rows any softmax mass.
+        safe_m = tl.where(m_ij == float("-inf"), 0.0, m_ij)
+        p = tl.exp2(qk - safe_m[:, None])
+        l_ij = tl.sum(p, axis=1)
+        acc_o = acc_o * tl.exp2(m_i - safe_m)[:, None]
+        v = tl.load(
+            kv_cache_ptr
+            + page * stride_kv_blk
+            + pid_kh * stride_kv_h
+            + off_n[:, None] * stride_kv_pos
+            + (head_dim + off_d[None, :]) * stride_kv_d,
+            mask=pos_mask[:, None] & d_mask[None, :],
+            other=0.0,
+        )
+        if USE_FP8:
+            v = v.to(q.dtype)
+            if KV_SCALE_MODE == 1:
+                v = (v * tl.load(v_scale_ptr)).to(q.dtype)
+            elif KV_SCALE_MODE == 2:
+                v_scale = tl.load(
+                    v_scale_ptr
+                    + pid_kh * stride_vs_h
+                    + (page * BLOCK_SIZE_K + off_n) * stride_vs_t,
+                    mask=pos_mask,
+                    other=1.0,
+                )
+                v = (v * v_scale[:, None]).to(q.dtype)
+        acc_o += tl.dot(p.to(v.dtype), v)
+        m_i = m_ij
+        lse_i = safe_m + tl.log2(tl.exp2(lse_i - safe_m) + l_ij)
+        remaining = tl.where(ids > blk, ids, END)
+        blk = tl.min(tl.reshape(remaining, (BLOCK_SIZE_Q * BLOCK_SIZE_T,)), axis=0)
+    norm = tl.where(lse_i == float("-inf"), 0.0, tl.exp2(m_i - lse_i))
+    acc_o *= norm[:, None]
+    o_ptrs = tl.make_block_ptr(
+        base=o_ptr + q_start * stride_on + pid_kh * gqa_group_size * stride_oh,
+        shape=(q_len, gqa_group_size, head_dim),
+        strides=(stride_on, stride_oh, stride_od),
+        offsets=(pid_q, 0, 0),
+        block_shape=(BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D),
+        order=(2, 1, 0),
+    )
+    tl.store(
+        o_ptrs,
+        tl.reshape(acc_o, (BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D)).to(
+            o_ptr.dtype.element_ty
+        ),
+        boundary_check=(0, 1, 2),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -526,7 +708,12 @@ def minimax_m3_sparse_attn(
     k_scale: torch.Tensor | None = None,
     v_scale: torch.Tensor | None = None,
 ) -> None:
-    """GQA block-sparse attention over the selected blocks. block_size_q == 1."""
+    """GQA block-sparse attention over the selected blocks.
+
+    The scalar kernel is the default. Set
+    ``VLLM_MINIMAX_SPARSE_PREFILL_TILE_Q`` to a value greater than one to
+    opt into query tiling.
+    """
     total_q, num_heads, head_dim = q.shape
     batch = cu_seqlens_q.shape[0] - 1
     topk = topk_idx.shape[-1]
@@ -553,8 +740,21 @@ def minimax_m3_sparse_attn(
             _KV_SCALE_NONE,
         )
     )
-    grid = (max_query_len, num_kv_heads, batch)
-    _gqa_sparse_fwd_kernel[grid](
+    use_tiled = _PREFILL_TILE_Q > 1
+    tile_q = _PREFILL_TILE_Q if use_tiled else 1
+    kernel = _gqa_sparse_fwd_tiled_kernel if use_tiled else _gqa_sparse_fwd_kernel
+    # Spread the larger Q/accumulator tiles over more threads to limit spilling.
+    launch_options = (
+        {
+            "num_warps": min(
+                16, max(4, tile_q * triton.next_power_of_2(gqa_group_size) // 16)
+            )
+        }
+        if use_tiled
+        else {}
+    )
+    grid = (triton.cdiv(max_query_len, tile_q), num_kv_heads, batch)
+    kernel[grid](
         q,
         kv_cache,
         k_scale_arg,
@@ -563,14 +763,11 @@ def minimax_m3_sparse_attn(
         output,
         block_table,
         cu_seqlens_q,
-        cu_seqlens_q,  # cu_seqblocks_q == cu_seqlens_q when block_size_q == 1
         seq_lens,
         prefix_lens,
-        num_kv_heads,
         gqa_group_size,
         head_dim,
         topk,
-        1,  # num_q_loop
         sm_scale,
         q.stride(0),
         q.stride(1),
@@ -590,10 +787,11 @@ def minimax_m3_sparse_attn(
         output.stride(1),
         output.stride(2),
         block_table.stride(0),
-        BLOCK_SIZE_Q=1,
+        BLOCK_SIZE_Q=tile_q,
         BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
         USE_FP8=use_fp8,
         KV_SCALE_MODE=kv_scale_mode,
+        **launch_options,
     )
 
 
