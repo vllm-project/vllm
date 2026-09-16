@@ -23,9 +23,15 @@
  *   cos_sin_cache layout [max_pos, rope_dim] = cos || sin (cos first, sin
  *     second along last dim; each half is rope_dim/2 = 32 values)
  *
- * Cache layout per paged-cache block (block_size tokens):
- *   [0,            bs*576):          token data, 448 fp8 + 128 bf16 each
- *   [bs*576,       bs*576 + bs*8):   UE8M0 scales, 7 real + 1 pad per token
+ * Cache layout per paged-cache block (block_size tokens), selected by the
+ * `kv_mxfp8` argument:
+ *   V4 (584 B/token, kv_mxfp8=false)
+ *     [0,      bs*576):          token data, 448 fp8 + 128 bf16 each
+ *     [bs*576, bs*576 + bs*8):   UE8M0 scales, 7 real + 1 pad per token
+ *   V4.1 (528 B/token, kv_mxfp8=true) -- RoPE is quantized as well, so the
+ *   whole row is MXFP8 (fp8 e4m3 with one UE8M0 scale per 32 dims)
+ *     [0,      bs*512):          token data, 512 fp8 each
+ *     [bs*512, bs*512 + bs*16):  UE8M0 scales, 16 per token
  */
 
 #include "torch_utils.h"
@@ -91,6 +97,10 @@ constexpr int kQuantBlock = 64;
 constexpr int kNumQuantBlocks = kNopeDim / kQuantBlock;   // 7
 constexpr int kScaleBytesPerToken = kNumQuantBlocks + 1;  // 8 (7 real + 1 pad)
 constexpr int kTokenDataBytes = kNopeDim + kRopeDim * 2;  // 448 + 128 = 576
+// V4.1 MXFP8 record: every dim quantized, one UE8M0 scale per 32 dims.
+constexpr int kMxfp8QuantBlock = 32;
+constexpr int kMxfp8NumQuantBlocks = kHeadDim / kMxfp8QuantBlock;  // 16
+constexpr int kMxfp8TokenDataBytes = kHeadDim;                     // 512
 // FNUZ on gfx942 / OCP elsewhere. FNUZ uses 224.0 (not the dtype's raw
 // 240.0) to match the rest of vLLM's FNUZ pipeline.
 #if defined(USE_ROCM) && defined(__gfx942__)
@@ -141,6 +151,11 @@ __device__ __forceinline__ uint4 packFp8E4M3x16(float const* values,
 // ────────────────────────────────────────────────────────────────────────────
 // Small inline helpers
 // ────────────────────────────────────────────────────────────────────────────
+__device__ __forceinline__ float warp2MaxAbs(float val) {
+  // Reduce absolute max across 2 consecutive lanes (32 dims = one MXFP8 block).
+  return fmaxf(val, __shfl_xor_sync(FINAL_MASK, val, 1));
+}
+
 __device__ __forceinline__ float warp4MaxAbs(float val) {
   // Reduce absolute max across 4 consecutive lanes (lane id & 3 group).
   float peer = __shfl_xor_sync(FINAL_MASK, val, 1);
@@ -176,6 +191,10 @@ __device__ __forceinline__ float warpSum(float val) {
 //   slot == kNumHeadsQPadded                    → KV       (RoPE + UE8M0 quant
 //                                                           + paged-cache
 //                                                           insert)
+//
+// `kv_mxfp8` is grid-uniform and only steers the KV branch, so it stays a
+// runtime argument rather than doubling every (head count, q-norm)
+// instantiation of a kernel whose hot path is the Q branch.
 template <typename scalar_t_in, int kNumHeadsQPadded, bool APPLY_Q_NORM>
 __device__ __forceinline__ void processDeepseekV4Slot(
     uint4 v0, uint4 v1, int const tokenIdx, int const slotIdx,
@@ -184,7 +203,7 @@ __device__ __forceinline__ void processDeepseekV4Slot(
     uint8_t* __restrict__ k_cache, int64_t const* __restrict__ slot_mapping,
     int64_t const* __restrict__ position_ids,
     float const* __restrict__ cos_sin_cache, int const cache_block_size,
-    int const kv_block_stride) {
+    int const kv_block_stride, bool const kv_mxfp8) {
   using Converter = vllm::_typeConvert<scalar_t_in>;
   bool const isKV = (slotIdx == kNumHeadsQPadded);
   bool const isPadQ = !isKV && (slotIdx >= num_heads_q);
@@ -302,19 +321,24 @@ __device__ __forceinline__ void processDeepseekV4Slot(
     *reinterpret_cast<uint4*>(dst) = out0;
     *reinterpret_cast<uint4*>(dst + 8) = out1;
   } else {
-    // ── KV: FP8 quant on NoPE + bf16 store on RoPE + cache insert.
+    // ── KV: FP8 quant + cache insert.  V4 keeps the RoPE dims in bf16;
+    // V4.1 (kv_mxfp8) quantizes them too.
     int64_t const slot_id = slot_mapping[tokenIdx];
     if (slot_id >= 0) {
+      int const token_data_bytes =
+          kv_mxfp8 ? kMxfp8TokenDataBytes : kTokenDataBytes;
+      int const scale_bytes =
+          kv_mxfp8 ? kMxfp8NumQuantBlocks : kScaleBytesPerToken;
       int64_t const block_idx = slot_id / cache_block_size;
       int64_t const pos_in_block = slot_id % cache_block_size;
       uint8_t* block_base =
           k_cache + block_idx * static_cast<int64_t>(kv_block_stride);
-      uint8_t* token_fp8_ptr = block_base + pos_in_block * kTokenDataBytes;
+      uint8_t* token_fp8_ptr = block_base + pos_in_block * token_data_bytes;
       uint8_t* token_bf16_ptr = token_fp8_ptr + kNopeDim;
       uint8_t* token_scale_ptr =
           block_base +
-          static_cast<int64_t>(cache_block_size) * kTokenDataBytes +
-          pos_in_block * kScaleBytesPerToken;
+          static_cast<int64_t>(cache_block_size) * token_data_bytes +
+          pos_in_block * scale_bytes;
 
 #pragma unroll
       for (int i = 0; i < kElemsPerLane; i++) {
@@ -326,11 +350,13 @@ __device__ __forceinline__ void processDeepseekV4Slot(
       for (int i = 0; i < kElemsPerLane; i++) {
         local_absmax = fmaxf(local_absmax, fabsf(elements[i]));
       }
-      float const absmax = fmaxf(warp4MaxAbs(local_absmax), 1e-4f);
+      float const absmax = fmaxf(
+          kv_mxfp8 ? warp2MaxAbs(local_absmax) : warp4MaxAbs(local_absmax),
+          1e-4f);
       float const exponent = ceilf(log2f(absmax / kFp8Max));
       float const inv_scale = exp2f(-exponent);
 
-      if (!is_rope_lane) {
+      if (kv_mxfp8 || !is_rope_lane) {
         uint8_t out_bytes[kElemsPerLane];
 #pragma unroll
         for (int i = 0; i < kElemsPerLane; i++) {
@@ -347,13 +373,19 @@ __device__ __forceinline__ void processDeepseekV4Slot(
         *reinterpret_cast<uint4*>(token_fp8_ptr + dim_base) =
             *reinterpret_cast<uint4 const*>(out_bytes);
 
-        if ((laneId & 3) == 0) {
-          int const q_block_idx = laneId >> 2;
-          float encoded = fmaxf(fminf(exponent + 127.0f, 255.0f), 0.0f);
-          token_scale_ptr[q_block_idx] = static_cast<uint8_t>(encoded);
-        }
-        if (laneId == 0) {
-          token_scale_ptr[kNumQuantBlocks] = 0;
+        float const encoded = fmaxf(fminf(exponent + 127.0f, 255.0f), 0.0f);
+        if (kv_mxfp8) {
+          // One scale per 32 dims = one per lane pair.
+          if ((laneId & 1) == 0) {
+            token_scale_ptr[laneId >> 1] = static_cast<uint8_t>(encoded);
+          }
+        } else {
+          if ((laneId & 3) == 0) {
+            token_scale_ptr[laneId >> 2] = static_cast<uint8_t>(encoded);
+          }
+          if (laneId == 0) {
+            token_scale_ptr[kNumQuantBlocks] = 0;
+          }
         }
       } else {
         uint4 out0, out1;
@@ -421,7 +453,8 @@ __global__ void fusedDeepseekV4QNormRopeKVRopeQuantInsertKernel(
     int const num_tokens_insert,  // = slot_mapping.size(0), ≤ num_tokens_full
     int const num_heads_q,        // live Q heads (input layout)
     int const cache_block_size,   // tokens per paged-cache block
-    int const kv_block_stride) {  // bytes per paged-cache block
+    int const kv_block_stride,    // bytes per paged-cache block
+    bool const kv_mxfp8) {        // V4.1 all-dims MXFP8 record
 #if (!defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 800) && !defined(USE_ROCM)
   // BF16 _typeConvert specialization is unavailable on pre-Ampere.  The
   // DeepseekV4 kernel only runs with bf16 inputs in practice, so compile a
@@ -477,7 +510,7 @@ __global__ void fusedDeepseekV4QNormRopeKVRopeQuantInsertKernel(
     processDeepseekV4Slot<scalar_t_in, kNumHeadsQPadded, APPLY_Q_NORM>(
         v0, v1, tokenIdx, slotIdx, dim_base, laneId, num_heads_q, eps, q_out,
         k_cache, slot_mapping, position_ids, cos_sin_cache, cache_block_size,
-        kv_block_stride);
+        kv_block_stride, kv_mxfp8);
 
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
     cudaTriggerProgrammaticLaunchCompletion();
@@ -506,7 +539,7 @@ __global__ void fusedDeepseekV4QNormRopeKVRopeQuantInsertKernelReducedGrid(
     float const* __restrict__ cos_sin_cache, float const eps,
     int const num_tokens_full, int const num_tokens_insert,
     int const num_heads_q, int const cache_block_size,
-    int const kv_block_stride) {
+    int const kv_block_stride, bool const kv_mxfp8) {
 #if (!defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 800) && !defined(USE_ROCM)
   if constexpr (std::is_same_v<scalar_t_in, c10::BFloat16>) {
     return;
@@ -564,7 +597,7 @@ __global__ void fusedDeepseekV4QNormRopeKVRopeQuantInsertKernelReducedGrid(
         processDeepseekV4Slot<scalar_t_in, kNumHeadsQPadded, APPLY_Q_NORM>(
             v0_curr, v1_curr, tokenIdx, curr_slot, dim_base, laneId,
             num_heads_q, eps, q_out, k_cache, slot_mapping, position_ids,
-            cos_sin_cache, cache_block_size, kv_block_stride);
+            cos_sin_cache, cache_block_size, kv_block_stride, kv_mxfp8);
 
         // ── Buffer rotation: hand the prefetched LDGs to the next iter.
         v0_curr = v0_next;
@@ -590,7 +623,7 @@ static void launchFusedDeepseekV4Templated(
     uint8_t* k_cache, int64_t const* slot_mapping, int64_t const* position_ids,
     float const* cos_sin_cache, float const eps, int const num_tokens_full,
     int const num_tokens_insert, int const num_heads_q,
-    int const cache_block_size, int const kv_block_stride,
+    int const cache_block_size, int const kv_block_stride, bool const kv_mxfp8,
     cudaStream_t stream) {
   constexpr int kBlockSize = 256;
   constexpr int kWarpsPerBlock = kBlockSize / 32;
@@ -624,13 +657,19 @@ static void launchFusedDeepseekV4Templated(
   config.attrs = attrs;
   config.numAttrs = (sm_version >= 90) ? 1 : 0;
 
-  if (num_tokens_full < NUM_TOKEN_CUTOFF) {
+  // The reduced grid pays off by iterating a token's Q heads inside one CTA.
+  // With zero query heads there is nothing to iterate, so one warp per block
+  // would do all the work and the other seven idle; keep the warp-per-slot
+  // grid instead. Only reachable above NUM_TOKEN_CUTOFF tokens in a single
+  // insert, where it is worth ~2x.
+  if (kNumHeadsQPadded == 0 || num_tokens_full < NUM_TOKEN_CUTOFF) {
     cudaLaunchKernelEx(&config,
                        fusedDeepseekV4QNormRopeKVRopeQuantInsertKernel<
                            scalar_t_in, kNumHeadsQPadded, APPLY_Q_NORM>,
                        q_in, q_out, kv_in, k_cache, slot_mapping, position_ids,
                        cos_sin_cache, eps, num_tokens_full, num_tokens_insert,
-                       num_heads_q, cache_block_size, kv_block_stride);
+                       num_heads_q, cache_block_size, kv_block_stride,
+                       kv_mxfp8);
   } else {
     config.gridDim = dim3(num_tokens_full);
     cudaLaunchKernelEx(
@@ -639,7 +678,7 @@ static void launchFusedDeepseekV4Templated(
             scalar_t_in, kNumHeadsQPadded, APPLY_Q_NORM>,
         q_in, q_out, kv_in, k_cache, slot_mapping, position_ids, cos_sin_cache,
         eps, num_tokens_full, num_tokens_insert, num_heads_q, cache_block_size,
-        kv_block_stride);
+        kv_block_stride, kv_mxfp8);
   }
 #else
   // ROCm: use standard kernel launch syntax (no PDL/stream serialization)
@@ -649,7 +688,7 @@ static void launchFusedDeepseekV4Templated(
       <<<grid, kBlockSize, 0, stream>>>(
           q_in, q_out, kv_in, k_cache, slot_mapping, position_ids,
           cos_sin_cache, eps, num_tokens_full, num_tokens_insert, num_heads_q,
-          cache_block_size, kv_block_stride);
+          cache_block_size, kv_block_stride, kv_mxfp8);
 #endif
 }
 
@@ -663,19 +702,19 @@ void launchFusedDeepseekV4QNormRopeKVRopeQuantInsert(
     int const num_tokens_full, int const num_tokens_insert,
     int const num_heads_q, int const num_heads_q_padded,
     int const cache_block_size, int const kv_block_stride,
-    bool const apply_q_norm, cudaStream_t stream) {
+    bool const apply_q_norm, bool const kv_mxfp8, cudaStream_t stream) {
 #define DISPATCH(N)                                                         \
   case N:                                                                   \
     if (apply_q_norm) {                                                     \
       launchFusedDeepseekV4Templated<scalar_t_in, N, true>(                 \
           q_in, q_out, kv_in, k_cache, slot_mapping, position_ids,          \
           cos_sin_cache, eps, num_tokens_full, num_tokens_insert,            \
-          num_heads_q, cache_block_size, kv_block_stride, stream);           \
+          num_heads_q, cache_block_size, kv_block_stride, kv_mxfp8, stream); \
     } else {                                                                \
       launchFusedDeepseekV4Templated<scalar_t_in, N, false>(                \
           q_in, q_out, kv_in, k_cache, slot_mapping, position_ids,          \
           cos_sin_cache, eps, num_tokens_full, num_tokens_insert,            \
-          num_heads_q, cache_block_size, kv_block_stride, stream);           \
+          num_heads_q, cache_block_size, kv_block_stride, kv_mxfp8, stream); \
     }                                                                       \
     return;
 
@@ -959,6 +998,86 @@ static void launchFullCacheKernel(
 // ────────────────────────────────────────────────────────────────────────────
 // Torch op wrapper
 // ────────────────────────────────────────────────────────────────────────────
+void fused_deepseek_v4_kv_rope_insert(
+    torch::stable::Tensor const& kv, torch::stable::Tensor& k_cache,
+    torch::stable::Tensor const& slot_mapping,
+    torch::stable::Tensor const& position_ids,
+    torch::stable::Tensor const& cos_sin_cache, int64_t cache_block_size,
+    std::optional<torch::stable::Tensor> fp8_scale, bool kv_mxfp8) {
+  using torch::headeronly::ScalarType;
+  STD_TORCH_CHECK(kv.device().is_cuda() && kv.is_contiguous() &&
+                      kv.dim() == 2 && kv.size(1) == 512 &&
+                      kv.scalar_type() == ScalarType::BFloat16,
+                  "kv must be contiguous CUDA bfloat16 [tokens, 512]");
+  auto const device = kv.get_device_index();
+  STD_TORCH_CHECK(k_cache.device().is_cuda() &&
+                      k_cache.get_device_index() == device &&
+                      k_cache.dim() == 3 && cache_block_size > 0 &&
+                      k_cache.size(1) == cache_block_size &&
+                      k_cache.stride(2) == 1,
+                  "k_cache must be a paged cache on the KV device");
+  for (auto const* tensor : {&slot_mapping, &position_ids}) {
+    STD_TORCH_CHECK(tensor->device().is_cuda() &&
+                        tensor->get_device_index() == device &&
+                        tensor->scalar_type() == ScalarType::Long &&
+                        tensor->dim() == 1 && tensor->is_contiguous(),
+                    "slots and positions must be contiguous int64 on the KV device");
+  }
+  STD_TORCH_CHECK(position_ids.size(0) == kv.size(0) &&
+                      slot_mapping.size(0) <= kv.size(0),
+                  "positions must match KV rows; slots may omit padded rows");
+  STD_TORCH_CHECK(cos_sin_cache.device().is_cuda() &&
+                      cos_sin_cache.get_device_index() == device &&
+                      cos_sin_cache.scalar_type() == ScalarType::Float &&
+                      cos_sin_cache.dim() == 2 &&
+                      cos_sin_cache.size(1) == 64 && cos_sin_cache.is_contiguous(),
+                  "cos_sin_cache must be contiguous float32 [max_pos, 64]");
+  bool const packed = k_cache.scalar_type() == ScalarType::Byte;
+  bool const fp8 = k_cache.scalar_type() == ScalarType::Float8_e4m3fn;
+  STD_TORCH_CHECK(packed || fp8 ||
+                      k_cache.scalar_type() == ScalarType::BFloat16,
+                  "cache must be uint8, bfloat16 or float8_e4m3fn");
+  STD_TORCH_CHECK(k_cache.size(2) == (packed ? (kv_mxfp8 ? 528 : 584) : 512),
+                  "cache row width does not match its dtype");
+  if (fp8) {
+    STD_TORCH_CHECK(fp8_scale.has_value() && fp8_scale->device().is_cuda() &&
+                        fp8_scale->get_device_index() == device &&
+                        fp8_scale->scalar_type() == ScalarType::Float &&
+                        fp8_scale->numel() == 1,
+                    "fp8 cache requires one float32 KV scale on the KV device");
+  }
+  int const num_tokens = static_cast<int>(slot_mapping.size(0));
+  if (num_tokens == 0) return;
+  const torch::stable::accelerator::DeviceGuard device_guard(device);
+  const cudaStream_t stream = get_current_cuda_stream(device);
+  using scalar_t = c10::BFloat16;
+  auto const* input = reinterpret_cast<scalar_t const*>(kv.const_data_ptr());
+  auto* cache = reinterpret_cast<uint8_t*>(k_cache.mutable_data_ptr());
+  auto const* slots = slot_mapping.const_data_ptr<int64_t>();
+  auto const* positions = position_ids.const_data_ptr<int64_t>();
+  auto const* cos_sin = cos_sin_cache.const_data_ptr<float>();
+  // Zero query heads schedules only the existing KV branch, preserving its
+  // RoPE rounding and quantization without allocating any query tensors.
+  if (packed) {
+    vllm::deepseek_v4_fused_ops::launchFusedDeepseekV4Templated<scalar_t, 0, false>(
+        nullptr, nullptr, input, cache, slots, positions, cos_sin, 0.0f,
+        num_tokens, num_tokens, 0, static_cast<int>(cache_block_size),
+        static_cast<int>(k_cache.stride(0)), kv_mxfp8, stream);
+  } else if (fp8) {
+    vllm::deepseek_v4_fused_ops::launchFullCacheKernel<scalar_t, false, true>(
+        nullptr, nullptr, 0, 0, input, cache, slots, positions, cos_sin,
+        fp8_scale->const_data_ptr<float>(), nullptr, 0.0f, num_tokens, num_tokens,
+        0, static_cast<int>(cache_block_size), k_cache.stride(0),
+        k_cache.stride(1), false, "fused_deepseek_v4_kv_rope_insert", stream);
+  } else {
+    vllm::deepseek_v4_fused_ops::launchFullCacheKernel<scalar_t, false, false>(
+        nullptr, nullptr, 0, 0, input, cache, slots, positions, cos_sin, nullptr,
+        nullptr, 0.0f, num_tokens, num_tokens, 0, static_cast<int>(cache_block_size),
+        k_cache.stride(0) * 2, k_cache.stride(1) * 2, false,
+        "fused_deepseek_v4_kv_rope_insert", stream);
+  }
+}
+
 torch::stable::Tensor fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
     torch::stable::Tensor const& q_in,           // [N, num_heads_q, 512] bf16
     torch::stable::Tensor const& kv,             // [N, 512] bf16 (read-only)
@@ -967,7 +1086,7 @@ torch::stable::Tensor fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
     torch::stable::Tensor const& position_ids,   // [N] int64
     torch::stable::Tensor const& cos_sin_cache,  // [max_pos, rope_dim] bf16
     int64_t q_head_padded,                       // padded Q head count for output
-    double eps, int64_t cache_block_size, bool apply_q_norm) {
+    double eps, int64_t cache_block_size, bool apply_q_norm, bool kv_mxfp8) {
   STD_TORCH_CHECK(q_in.device().is_cuda() && q_in.is_contiguous(),
                   "q_in must be contiguous CUDA");
   STD_TORCH_CHECK(kv.device().is_cuda() && kv.is_contiguous(),
@@ -1036,7 +1155,7 @@ torch::stable::Tensor fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
                 cos_sin_cache.const_data_ptr<float>(), static_cast<float>(eps),
                 num_tokens_full, num_tokens_insert, num_heads_q,
                 num_heads_q_padded, cache_block_size_i, kv_block_stride,
-                apply_q_norm, stream);
+                apply_q_norm, kv_mxfp8, stream);
       });
   return q_out;
 }

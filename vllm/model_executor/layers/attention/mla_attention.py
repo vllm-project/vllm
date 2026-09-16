@@ -269,11 +269,11 @@ from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
     _resolve_layer_name,
+    async_tensor_h2d,
     direct_register_custom_op,
     get_dtype_size,
     is_quantized_kv_cache,
     kv_cache_dtype_str_to_dtype,
-    np_to_pinned_tensor,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -1988,11 +1988,6 @@ def plan_mla_context_chunks(
     return plans
 
 
-def _flat_int32(values: list[int] | np.ndarray) -> torch.Tensor:
-    """Pinned int32 CPU tensor backing one concatenated per-chunk field."""
-    return np_to_pinned_tensor(np.asarray(values, dtype=np.int32))
-
-
 def align_mla_chunked_context_workspace_size(
     vllm_config: VllmConfig,
     workspace_size: int,
@@ -2169,26 +2164,34 @@ def build_mla_chunked_context_metadata(
         token_offset += num_tokens
         local_token_offset += num_local_tokens
 
-    seq_lens_cpu = _flat_int32(seq_lens_flat)
-    starts_and_context_lens = _flat_int32(starts_flat + context_lens).to(
-        device, non_blocking=True
+    seq_lens_cpu = torch.tensor(
+        seq_lens_flat, dtype=torch.int32, device="cpu", pin_memory=PIN_MEMORY
+    )
+    starts_and_context_lens = async_tensor_h2d(
+        starts_flat + context_lens, device=device, dtype=torch.int32
     )
     starts = starts_and_context_lens[: len(starts_flat)]
     context_lens_gpu = starts_and_context_lens[len(starts_flat) :]
-    cu_seq_lens_cpu = _flat_int32(cu_seq_lens_flat)
+    cu_seq_lens_cpu = torch.tensor(
+        cu_seq_lens_flat, dtype=torch.int32, device="cpu", pin_memory=PIN_MEMORY
+    )
     cu_seq_lens = cu_seq_lens_cpu.to(device, non_blocking=True)
-    cu_seqlens_q_cpu = _flat_int32(cu_seqlens_q_flat)
+    cu_seqlens_q_cpu = torch.tensor(
+        cu_seqlens_q_flat, dtype=torch.int32, device="cpu", pin_memory=PIN_MEMORY
+    )
     cu_seqlens_q = cu_seqlens_q_cpu.to(device, non_blocking=True)
-    token_to_seq = _flat_int32(np.concatenate(token_to_seq_parts)).to(
-        device, non_blocking=True
+    token_to_seq = async_tensor_h2d(
+        np.concatenate(token_to_seq_parts), device=device, dtype=torch.int32
     )
     if use_dcp:
-        padded_local_cu_seq_lens = _flat_int32(padded_local_cu_seq_lens_flat).to(
-            device, non_blocking=True
+        padded_local_cu_seq_lens = async_tensor_h2d(
+            padded_local_cu_seq_lens_flat, device=device, dtype=torch.int32
         )
-        padded_local_token_to_seq = _flat_int32(
-            np.concatenate(padded_local_token_to_seq_parts)
-        ).to(device, non_blocking=True)
+        padded_local_token_to_seq = async_tensor_h2d(
+            np.concatenate(padded_local_token_to_seq_parts),
+            device=device,
+            dtype=torch.int32,
+        )
 
     chunks: list[MLACommonPrefillMetadata.ContextChunk] = []
     for index, (plan, layout) in enumerate(zip(plans, layouts)):
