@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Demonstrates async reinforcement learning using vLLM and Ray,
+"""Demonstrates async reinforcement learning using vLLM and Ray,
 with native weight syncing APIs and batch-invariant generation.
 
 The script separates training and inference workloads onto distinct GPUs

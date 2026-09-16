@@ -67,8 +67,7 @@ def _canonical_cache_dtype(cache_dtype: str) -> str:
 def get_ssm_configs(
     headdim: int, dstate: int, cache_dtype: str
 ) -> dict[int, Any] | None:
-    """
-    Return tuned (BLOCK_SIZE_M, num_warps) configs for *selective_state_update*
+    """Return tuned (BLOCK_SIZE_M, num_warps) configs for *selective_state_update*
     keyed by ``effective_batch = batch * nheads``, or ``None`` if no config
     file is found for the (headdim, dstate, cache_dtype, device) combination.
 
@@ -515,30 +514,29 @@ def selective_state_update(
     enable_stochastic_rounding=False,
     cache_philox_rounds=0,
 ):
-    """
-    Argument:
-        state: (batch, dim, dstate) or (batch, nheads, dim, dstate)
-        x: (batch, dim) or (batch, nheads, dim)
-        dt: (batch, dim) or (batch, nheads, dim)
-        A: (dim, dstate) or (nheads, dim, dstate)
-        B: (batch, dstate) or (batch, ngroups, dstate)
-        C: (batch, dstate) or (batch, ngroups, dstate)
-        D: (dim,) or (nheads, dim)
-        z: (batch, dim) or (batch, nheads, dim)
-        dt_bias: (dim,) or (nheads, dim)
-        null_block_id: int
-            if state_batch_indices is passed, lets the kernel identify
-            padded entries that will not be processed,
-            for example: state_batch_indices = [null_block_id, 1, 20,
-            null_block_id] in this case, the kernel will not process
-            entries at indices 0 and 3
-        out: Preallocated ssm output tensor. Assume same shape as x.
-             In-place updated.
-        num_accepted_tokens: (batch,)
-            number of accepted tokens from previous verification step,
-            tells the kernel which initial state to use
-        cu_seqlens: (batch,)
-            length per sequence, for variable length in speculative decoding cases
+    """Argument:
+    state: (batch, dim, dstate) or (batch, nheads, dim, dstate)
+    x: (batch, dim) or (batch, nheads, dim)
+    dt: (batch, dim) or (batch, nheads, dim)
+    A: (dim, dstate) or (nheads, dim, dstate)
+    B: (batch, dstate) or (batch, ngroups, dstate)
+    C: (batch, dstate) or (batch, ngroups, dstate)
+    D: (dim,) or (nheads, dim)
+    z: (batch, dim) or (batch, nheads, dim)
+    dt_bias: (dim,) or (nheads, dim)
+    null_block_id: int
+        if state_batch_indices is passed, lets the kernel identify
+        padded entries that will not be processed,
+        for example: state_batch_indices = [null_block_id, 1, 20,
+        null_block_id] in this case, the kernel will not process
+        entries at indices 0 and 3
+    out: Preallocated ssm output tensor. Assume same shape as x.
+         In-place updated.
+    num_accepted_tokens: (batch,)
+        number of accepted tokens from previous verification step,
+        tells the kernel which initial state to use
+    cu_seqlens: (batch,)
+        length per sequence, for variable length in speculative decoding cases
     """
     if state.dim() == 3:
         state = state.unsqueeze(1)
@@ -723,8 +721,7 @@ def selective_scan_fn(
     cu_chunk_seqlen=None,
     last_chunk_indices=None,
 ) -> torch.Tensor:
-    """
-    u: (dim, total_length) for varlen or (batch, dim, seqlen)
+    """u: (dim, total_length) for varlen or (batch, dim, seqlen)
         applies changes in place.
     ssm_states: (batch, dim, dstate) or (batch, nheads, dim, dstate)
         applies changes in place.
@@ -769,9 +766,12 @@ def selective_scan_fn(
     initial_state_idx: (batch,), dtype int32
         The pointer into cache_indices, where the cache block
         containing the initial state is located.
-    returns
+
+    Returns
+    -------
         output: (dim, total_length) for varlen or (batch, dim, seqlen)
                 supports inplace replacement
+
     """
     if u.stride(-1) != 1:
         u = u.contiguous()

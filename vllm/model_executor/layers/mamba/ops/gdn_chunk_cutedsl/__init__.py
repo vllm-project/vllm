@@ -173,6 +173,7 @@ def chunk_gated_delta_rule_cutedsl(
         ``[1, T, Hv, V]`` and ``final_state`` has shape ``[N, Hv, V, K]``.
         When ``core_attn_out`` is provided, ``output`` is an unsqueezed view of
         that buffer.
+
     """
     q = q.squeeze(0)
     k = k.squeeze(0)
