@@ -180,10 +180,6 @@ class RequestState:
         self.queue = queue
         self.num_cached_tokens = 0
         self.num_cache_creation_tokens = 0
-        # P/D: cache hits reported by the remote prefill worker via
-        # kv_transfer_params. When set, reported as num_cached_tokens in
-        # place of the local count, which sees KVs pulled from the remote
-        # prefill as a (near-100%) cache hit.
         self.remote_prefill_cached_tokens = remote_prefill_cached_tokens
         # Per-sequence spec-decode accumulator; arrives once (on finish) via
         # EngineCoreOutput, then attached to this sequence's CompletionOutput.
@@ -238,6 +234,8 @@ class RequestState:
     ) -> "RequestState":
         remote_prefill_cached_tokens = None
         if sampling_params := request.sampling_params:
+            # In a remote prefill scenario, report cached tokens
+            # as cache hit rate on the remote P worker.
             if sampling_params.extra_args:
                 kv_transfer_params = sampling_params.extra_args.get(
                     "kv_transfer_params"
