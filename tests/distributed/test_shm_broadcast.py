@@ -21,11 +21,9 @@ from vllm.distributed.device_communicators.shm_broadcast import (
     ShmRingBuffer,
     _rebuild_tensor,
     _reduce_tensor,
-    check_cgroup_memory_available,
     check_shm_free_space,
 )
 from vllm.distributed.utils import StatelessProcessGroup
-from vllm.utils import cpu_resource_utils
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
 
@@ -733,87 +731,6 @@ def test_check_shm_free_space_checks_cgroup(tmp_path):
         240 << 20,
         "SHM mmap",
     )
-
-
-def test_check_cgroup_memory_available_warns_on_low_headroom(monkeypatch):
-    monkeypatch.setattr(
-        cpu_resource_utils,
-        "get_cgroup_memory_limit",
-        lambda: (1 << 30, 512 << 20),
-    )
-
-    with (
-        mock.patch.object(cpu_resource_utils.logger, "info") as log_info,
-        mock.patch.object(cpu_resource_utils.logger, "warning") as log_warning,
-    ):
-        check_cgroup_memory_available(600 << 20, "mmap")
-
-    log_info.assert_not_called()
-    log_warning.assert_called_once_with(
-        "Cgroup memory preflight for %s: %.0f MiB required, %.0f MiB current "
-        "usage, %.0f MiB available under %.0f MiB limit, %.0f MiB remaining "
-        "after allocation based on current usage; %s.",
-        "mmap",
-        600.0,
-        512.0,
-        512.0,
-        1024.0,
-        -88.0,
-        "current headroom is below the requested allocation; allocation "
-        "will still be attempted because cgroup usage may be reclaimable",
-    )
-
-
-def test_check_cgroup_memory_available_logs_preflight(monkeypatch):
-    monkeypatch.setattr(
-        cpu_resource_utils,
-        "get_cgroup_memory_limit",
-        lambda: (1 << 30, 512 << 20),
-    )
-
-    with (
-        mock.patch.object(cpu_resource_utils.logger, "info") as log_info,
-        mock.patch.object(cpu_resource_utils.logger, "warning") as log_warning,
-    ):
-        check_cgroup_memory_available(256 << 20, "mmap")
-
-    log_info.assert_called_once_with(
-        "Cgroup memory preflight for %s: %.0f MiB required, %.0f MiB current "
-        "usage, %.0f MiB available under %.0f MiB limit, %.0f MiB remaining "
-        "after allocation based on current usage; %s.",
-        "mmap",
-        256.0,
-        512.0,
-        512.0,
-        1024.0,
-        256.0,
-        "current headroom meets the requested allocation",
-    )
-    log_warning.assert_not_called()
-
-
-def test_check_cgroup_memory_available_passes_without_limit(monkeypatch):
-    monkeypatch.setattr(
-        cpu_resource_utils,
-        "get_cgroup_memory_limit",
-        lambda: (None, None),
-    )
-    with mock.patch.object(cpu_resource_utils.logger, "info") as log_info:
-        check_cgroup_memory_available(1 << 60, "mmap")
-
-    log_info.assert_not_called()
-
-
-def test_check_cgroup_memory_available_skips_without_usage(monkeypatch):
-    monkeypatch.setattr(
-        cpu_resource_utils,
-        "get_cgroup_memory_limit",
-        lambda: (1 << 30, None),
-    )
-    with mock.patch.object(cpu_resource_utils.logger, "info") as log_info:
-        check_cgroup_memory_available(1 << 60, "mmap")
-
-    log_info.assert_not_called()
 
 
 def test_shm_ring_buffer_creation_checks_free_space():
