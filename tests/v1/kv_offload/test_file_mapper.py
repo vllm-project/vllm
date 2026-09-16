@@ -62,6 +62,8 @@ def make_mapper_from_offloading_spec(**kwargs) -> FileMapper:
     )
     spec = MagicMock(spec=OffloadingSpec)
     spec.config = config
+    spec.compact_group_layout = kwargs.get("storage_format") is not None
+    spec.storage_format = kwargs.get("storage_format")
     return FileMapper.from_offloading_spec(
         root_dir=kwargs.get("root_dir", "/tmp/cache"),
         offloading_spec=spec,
@@ -327,3 +329,22 @@ def test_replicated_layout_run_config_tp_invariant():
     tp2 = make_mapper_from_offloading_spec(tp_size=2, world_size=2, rank=0, **shared)
     tp4 = make_mapper_from_offloading_spec(tp_size=4, world_size=4, rank=2, **shared)
     assert tp2.get_run_config() == tp4.get_run_config()
+
+
+def test_compact_groups_isolate_persisted_row_geometry():
+    common = dict(
+        groups=((16, "layer0"), (16, "layer1")),
+        canonical_layout=True,
+        is_parallelism_agnostic=True,
+        parallel_agnostic=True,
+    )
+    key = make_offload_key(bytes(range(8)), 1)
+    # Even portable payloads cannot share files when whole-row transfers have
+    # different padding, or when groups used disjoint ranges in the old layout.
+    paths = {
+        make_mapper_from_offloading_spec(**common, storage_format=layout).get_file_name(
+            key
+        )
+        for layout in (None, "grouped-v1-4096", "grouped-v1-8192")
+    }
+    assert len(paths) == 3

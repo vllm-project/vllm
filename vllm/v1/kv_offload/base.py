@@ -576,6 +576,10 @@ class OffloadingWorker(ABC):
 class OffloadingSpec(ABC):
     """Spec for an offloading connector"""
 
+    # CPU slots can overlay groups because each OffloadKey belongs to one group.
+    compact_group_layout: bool = False
+    storage_format: str | None = None
+
     @classmethod
     def build_metric_definitions(
         cls, extra_config: dict[str, Any]

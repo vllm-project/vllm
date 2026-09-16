@@ -113,7 +113,8 @@ class SharedOffloadRegion:
         self.rank = rank
         if rank is not None:
             # byte offset to this worker's first slot within each chunk row
-            self._worker_offset = rank * cpu_page_size
+            self._worker_area_start = rank * cpu_page_size
+            self._worker_offset = self._worker_area_start
             # exclusive upper bound for this worker's area within each row
             self._worker_area_end = (rank + 1) * cpu_page_size
         try:
@@ -243,7 +244,9 @@ class SharedOffloadRegion:
             raise RuntimeError("Shared offload region has been released.")
         return self._base
 
-    def create_next_worker_view(self, tensor_page_size: int) -> torch.Tensor:
+    def create_next_worker_view(
+        self, tensor_page_size: int, *, offset: int | None = None
+    ) -> torch.Tensor:
         """Allocate a strided int8 view for this worker, one canonical tensor.
 
         Must be called once per canonical tensor. The full mmap layout is:
@@ -264,8 +267,12 @@ class SharedOffloadRegion:
 
         Args:
             tensor_page_size: Bytes per chunk for this tensor.
+            offset: Start within the worker slot; allows different groups to overlap.
         """
         assert self.rank is not None
+        if offset is not None:
+            assert offset >= 0
+            self._worker_offset = self._worker_area_start + offset
         new_offset = self._worker_offset + tensor_page_size
         assert new_offset <= self._worker_area_end, (
             f"Worker offset {new_offset} exceeds worker area end "
@@ -282,7 +289,9 @@ class SharedOffloadRegion:
         self._views.append(worker_layer_view)
         return worker_layer_view
 
-    def create_next_canonical_view(self, tensor_page_size: int) -> torch.Tensor:
+    def create_next_canonical_view(
+        self, tensor_page_size: int, *, offset: int | None = None
+    ) -> torch.Tensor:
         """Allocate a strided int8 view shared by all workers for one
         canonical tensor (canonical layout).
 
@@ -313,7 +322,11 @@ class SharedOffloadRegion:
 
         Args:
             tensor_page_size: Canonical bytes per chunk for this tensor.
+            offset: Start within the slot; allows different groups to overlap.
         """
+        if offset is not None:
+            assert offset >= 0
+            self._canonical_offset = offset
         new_offset = self._canonical_offset + tensor_page_size
         assert new_offset <= self._row_stride
         view = torch.as_strided(

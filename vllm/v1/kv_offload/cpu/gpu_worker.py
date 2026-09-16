@@ -4,7 +4,7 @@ import functools
 import time
 from collections import deque
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import NamedTuple
 
 import numpy as np
@@ -20,6 +20,7 @@ from vllm.v1.kv_offload.base import (
     BlockIDsLoadStoreSpec,
     CanonicalKVCacheRef,
     CanonicalKVCaches,
+    CanonicalKVCacheTensor,
     CanonicalPageMapping,
     GPULoadStoreSpec,
     LoadStoreSpec,
@@ -739,6 +740,45 @@ class SingleDirectionOffloadingHandler:
             raise sync_error
 
 
+def _compact_groups(
+    kv_caches: CanonicalKVCaches, blocks_per_chunk: int, canonical_layout: bool
+) -> tuple[CanonicalKVCaches, list[int], int]:
+    """Pack each group's pages from offset zero within a shared pool slot.
+
+    Give each ref its own tensor index: GPU regions may alias across groups,
+    but their CPU page sizes and offsets need not be the same.
+    """
+    tensors: list[CanonicalKVCacheTensor] = []
+    groups: list[list[CanonicalKVCacheRef]] = []
+    offsets: list[int] = []
+    max_group_bytes = 0
+    for refs in kv_caches.group_data_refs:
+        offset = 0
+        group_refs = []
+        for ref in refs:
+            source = kv_caches.tensors[ref.tensor_idx]
+            pages = source.tensor.view(torch.int8).view(-1, source.page_size_bytes)
+            tensor_idx = len(tensors)
+            tensors.append(
+                CanonicalKVCacheTensor(
+                    pages.as_strided(
+                        (pages.shape[0], ref.page_size_bytes), pages.stride()
+                    ),
+                    ref.page_size_bytes,
+                )
+            )
+            group_refs.append(replace(ref, tensor_idx=tensor_idx))
+            offsets.append(offset)
+            page_bytes = ref.page_size_bytes
+            if canonical_layout:
+                assert ref.mapping is not None
+                page_bytes = ref.mapping.canonical_page_size_bytes
+            offset += page_bytes * blocks_per_chunk
+        groups.append(group_refs)
+        max_group_bytes = max(max_group_bytes, offset)
+    return CanonicalKVCaches(tensors, groups), offsets, max_group_bytes
+
+
 class CPUOffloadingWorker(OffloadingWorker):
     """OffloadingWorker for CPU offloading.
 
@@ -754,6 +794,7 @@ class CPUOffloadingWorker(OffloadingWorker):
         num_cpu_chunks: int,
         mmap_region: SharedOffloadRegion | None = None,
         canonical_layout: bool = False,
+        compact_group_layout: bool = False,
     ):
         assert not canonical_layout or mmap_region is not None
         # The caller owns mmap_region until this constructor returns. After a
@@ -761,6 +802,19 @@ class CPUOffloadingWorker(OffloadingWorker):
         # it after both transfer directions have stopped.
         self._mmap_region = mmap_region
         pin_memory = PIN_MEMORY
+        group_offsets: list[int] | None = None
+        cpu_buffer: torch.Tensor | None = None
+        if compact_group_layout:
+            kv_caches, group_offsets, group_bytes = _compact_groups(
+                kv_caches, blocks_per_chunk, canonical_layout
+            )
+            if mmap_region is None:
+                cpu_buffer = torch.zeros(
+                    (num_cpu_chunks, group_bytes),
+                    dtype=torch.int8,
+                    device="cpu",
+                    pin_memory=pin_memory,
+                )
         logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
         if mmap_region is not None and pin_memory:
             pin_mmap_region(mmap_region)
@@ -780,13 +834,25 @@ class CPUOffloadingWorker(OffloadingWorker):
             )
             cpu_page_size_bytes = gpu_page_size_bytes * blocks_per_chunk
 
+            offset = group_offsets[t_idx] if group_offsets is not None else None
             if canonical_bytes_per_block is not None:
                 assert mmap_region is not None
                 cpu_tensor = mmap_region.create_next_canonical_view(
-                    canonical_bytes_per_block[t_idx] * blocks_per_chunk
+                    canonical_bytes_per_block[t_idx] * blocks_per_chunk,
+                    offset=offset,
                 )
             elif mmap_region is not None:
-                cpu_tensor = mmap_region.create_next_worker_view(cpu_page_size_bytes)
+                cpu_tensor = mmap_region.create_next_worker_view(
+                    cpu_page_size_bytes, offset=offset
+                )
+            elif cpu_buffer is not None:
+                assert offset is not None
+                cpu_tensor = torch.as_strided(
+                    cpu_buffer,
+                    (num_cpu_chunks, cpu_page_size_bytes),
+                    (cpu_buffer.stride(0), 1),
+                    storage_offset=offset,
+                )
             else:
                 t0 = time.monotonic()
                 cpu_tensor = torch.zeros(
