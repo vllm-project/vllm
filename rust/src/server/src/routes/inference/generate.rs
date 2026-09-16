@@ -164,20 +164,17 @@ async fn generate_chunk_stream(
                 usage.output_token_count = usage.output_token_count.saturating_add(token_ids.len());
                 let finish_reason = output.finish_reason;
 
-                if matches!(finish_reason.as_ref(), Some(FinishReason::Error)) {
-                    bail_server_error!("Internal server error");
-                }
-
-                if let Some(finish_reason) = finish_reason.as_ref()
-                    && enable_log_requests
-                {
-                    info!(
-                        stream = true,
-                        prompt_tokens = usage.prompt_token_count,
-                        output_tokens = usage.output_token_count,
-                        finish_reason = finish_reason.as_str(),
-                        "generate finished"
-                    );
+                if let Some(finish_reason) = finish_reason.as_ref() {
+                    validate_finish_reason(finish_reason)?;
+                    if enable_log_requests {
+                        info!(
+                            stream = true,
+                            prompt_tokens = usage.prompt_token_count,
+                            output_tokens = usage.output_token_count,
+                            finish_reason = finish_reason.as_str(),
+                            "generate finished"
+                        );
+                    }
                 }
 
                 if token_ids.is_empty() && finish_reason.is_none() {
@@ -246,6 +243,8 @@ fn collect_generate(
         include_prompt_logprobs,
     }: ResponseOptions,
 ) -> Result<GenerateResponse, ApiError> {
+    validate_finish_reason(&collected.finish_reason)?;
+
     let logprobs = if include_logprobs {
         let logprobs = collected.logprobs.as_ref().ok_or_else(|| {
             ApiError::server_error(
@@ -295,6 +294,14 @@ fn collect_generate(
         kv_transfer_params: collected.kv_transfer_params,
         ec_transfer_params: collected.ec_transfer_params,
     })
+}
+
+fn validate_finish_reason(finish_reason: &FinishReason) -> Result<(), ApiError> {
+    match finish_reason {
+        FinishReason::Error => Err(server_error!("Internal server error")),
+        FinishReason::Rejected(reason) => Err(ApiError::engine_rejection(reason.as_ref())),
+        _ => Ok(()),
+    }
 }
 
 fn raw_logprobs_to_openai_chat(logprobs: &Logprobs) -> Result<ChatLogProbs, ApiError> {
