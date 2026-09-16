@@ -20,6 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
     _is_attention_spec,
 )
 from vllm.logger import init_logger
+from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -168,8 +169,12 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         local_block_ids = meta.local_physical_block_ids
         remote_region_groups = self.dst_region_group_ids[engine_id]
         local_region_groups = self.region_group_ids or remote_region_groups
-        groups_differ = local_region_groups != remote_region_groups
-        if groups_differ:
+        if not local_block_ids:
+            read_specs = [
+                ReadSpec(remote_rank=rank, local_block_ids=[], remote_block_ids=[])
+                for rank in plan.all_source_ranks
+            ]
+        elif local_region_groups != remote_region_groups:
             if not self.use_mla or self._has_mamba:
                 raise NotImplementedError(
                     "Different NIXL cache-group layouts are only supported for "
@@ -180,6 +185,16 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 meta.remote.block_ids,
                 remote_info.remote_physical_blocks_per_logical,
             )
+            if meta.remote_token_limit is not None:
+                remote_physical_block_ids = [
+                    ids[
+                        : cdiv(
+                            meta.remote_token_limit,
+                            remote_info.remote_block_size * remote_info.remote_dcp_size,
+                        )
+                    ]
+                    for ids in remote_physical_block_ids
+                ]
             remote_by_region = self._block_ids_by_region(
                 remote_physical_block_ids, remote_region_groups
             )
@@ -199,6 +214,18 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 remote_logical_block_ids,
                 remote_info.remote_physical_blocks_per_logical,
             )
+            if meta.remote_token_limit is not None:
+                limit = cdiv(
+                    meta.remote_token_limit,
+                    remote_info.remote_block_size * remote_info.remote_dcp_size,
+                )
+                meta.remote.block_ids = [ids[:limit] for ids in meta.remote.block_ids]
+                logical_limit = cdiv(
+                    limit, remote_info.remote_physical_blocks_per_logical
+                )
+                remote_logical_block_ids = [
+                    ids[:logical_limit] for ids in remote_logical_block_ids
+                ]
             num_groups = len(meta.local_block_ids)
 
             def group_ids(block_ids: BlockIds, rank: int) -> list[list[int]]:

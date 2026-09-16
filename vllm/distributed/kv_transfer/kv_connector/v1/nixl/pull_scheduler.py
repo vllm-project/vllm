@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Pull-specific scheduler-side logic for the NIXL connector."""
 
+import math
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -10,6 +11,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
     NixlBaseConnectorScheduler,
 )
 from vllm.logger import init_logger
+from vllm.v1.kv_cache_interface import HiSparseResidentSpec
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -23,6 +25,8 @@ logger = init_logger(__name__)
 class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
     """Pull-specific scheduler logic (READ-based KV transfer)."""
 
+    _host_import_alignment: int = 1
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -30,6 +34,23 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, engine_id, kv_cache_config)
+        host_only_block_sizes = [
+            group.kv_cache_spec.block_size
+            for group in kv_cache_config.kv_cache_groups
+            if isinstance(group.kv_cache_spec, HiSparseResidentSpec)
+            and not group.enable_kv_transfer
+        ]
+        if host_only_block_sizes:
+            self._host_import_alignment = (
+                math.lcm(
+                    *host_only_block_sizes,
+                    *(
+                        g.kv_cache_spec.block_size
+                        for g in kv_cache_config.transfer_groups
+                    ),
+                )
+                * vllm_config.parallel_config.decode_context_parallel_size
+            )
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
@@ -61,6 +82,14 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             # Remote prefill: get all prompt blocks from remote.
             token_ids = request.prompt_token_ids or []
             actual = self._get_remote_prefill_token_count(len(token_ids))
+            aligned = (
+                actual // self._host_import_alignment * self._host_import_alignment
+            )
+            if aligned != actual:
+                # HiSparse can publish only sealed host pages. Recompute the
+                # partial tail locally, and exclude it from both transfer lists.
+                params["_nixl_host_import_tokens"] = aligned
+                actual = aligned
             count = actual - num_computed_tokens
             if count > 0:
                 return count, True
@@ -152,6 +181,23 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                         if num_external_tokens > 0
                         else ()
                     )
+                    import_tokens = params.get("_nixl_host_import_tokens")
+                    if import_tokens is not None and num_external_tokens > 0:
+                        parallel_config = self.vllm_config.parallel_config
+                        dcp_size = parallel_config.decode_context_parallel_size
+                        unhashed_local_block_ids = [
+                            [
+                                block.block_id
+                                for block in group_blocks[
+                                    : import_tokens
+                                    // (group.kv_cache_spec.block_size * dcp_size)
+                                ]
+                                if block.block_hash is None and not block.is_null
+                            ]
+                            for group_blocks, group in zip(
+                                blocks.blocks, self.kv_cache_config.kv_cache_groups
+                            )
+                        ]
                     local_block_ids = self.get_exchange_clipped_blocks(
                         unhashed_local_block_ids
                     )
