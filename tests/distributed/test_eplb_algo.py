@@ -5,11 +5,75 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.config.parallel import EPLBConfig
 from vllm.distributed.eplb.eplb_state import (
     _compute_eplb_load_stats,  # pyright: ignore[reportPrivateUsage]
     compute_logical_maps,
 )
+from vllm.distributed.eplb.policy import EPLB_POLICIES
+from vllm.distributed.eplb.policy.batched import BatchedEplbPolicy
 from vllm.distributed.eplb.policy.default import DefaultEplbPolicy
+
+
+def test_batched_policy_is_selectable_with_async_eplb():
+    config = EPLBConfig(policy="batched", use_async=True)
+
+    assert config.policy == "batched"
+    assert EPLB_POLICIES[config.policy] is BatchedEplbPolicy
+
+
+@pytest.mark.parametrize(
+    "num_layers,num_groups,num_packs",
+    [(1, 8, 1), (1, 8, 8), (3, 16, 4), (16, 72, 8), (58, 288, 8)],
+)
+@pytest.mark.parametrize("distribution", ["random", "equal", "zeros"])
+def test_batched_balanced_packing_matches_reference(
+    num_layers: int,
+    num_groups: int,
+    num_packs: int,
+    distribution: str,
+):
+    rng = np.random.default_rng(7)
+    if distribution == "random":
+        weight = rng.integers(0, 1000, size=(num_layers, num_groups))
+    elif distribution == "equal":
+        weight = np.full((num_layers, num_groups), 17)
+    else:
+        weight = np.zeros((num_layers, num_groups))
+
+    expected = DefaultEplbPolicy.balanced_packing(weight, num_packs)
+    actual = BatchedEplbPolicy.balanced_packing(weight, num_packs)
+
+    np.testing.assert_array_equal(actual[0], expected[0])
+    np.testing.assert_array_equal(actual[1], expected[1])
+
+
+@pytest.mark.parametrize(
+    "layers,experts,physical,groups,nodes,ranks",
+    [
+        (1, 8, 12, 4, 1, 4),
+        (16, 64, 72, 8, 2, 8),
+        (58, 256, 288, 8, 1, 8),
+        (58, 256, 288, 8, 4, 32),
+        (58, 256, 288, 8, 18, 144),
+    ],
+)
+def test_batched_rebalance_matches_reference(
+    layers: int,
+    experts: int,
+    physical: int,
+    groups: int,
+    nodes: int,
+    ranks: int,
+):
+    generator = torch.Generator().manual_seed(11)
+    weight = torch.randint(0, 1000, (layers, experts), generator=generator)
+    arguments = (weight, physical, groups, nodes, ranks)
+
+    expected = DefaultEplbPolicy.rebalance_experts(*arguments)
+    actual = BatchedEplbPolicy.rebalance_experts(*arguments)
+
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 def test_eplb_load_stats_reduce_across_ranks():
@@ -263,27 +327,36 @@ def test_global_load_balance_fallback():
     assert torch.sum(logcnt) == num_replicas
 
 
+@pytest.mark.parametrize("policy_name", ["batched", "default"])
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
-def test_device_compatibility(device):
-    """Test device compatibility"""
+def test_policy_device_compatibility(policy_name: str, device: str):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA not available")
 
-    weight = torch.tensor([[10, 20, 30, 40]], device=device)
-    num_replicas = 6
-    num_groups = 2
-    num_nodes = 1
-    num_gpus = 2
-
-    phy2log = DefaultEplbPolicy.rebalance_experts(
-        weight, num_replicas, num_groups, num_nodes, num_gpus
+    weight_cpu = torch.tensor(
+        [
+            [10, 20, 30, 40, 50, 60, 70, 80],
+            [80, 70, 60, 50, 40, 30, 20, 10],
+            [10, 80, 20, 70, 30, 60, 40, 50],
+        ]
     )
-    _, logcnt = compute_logical_maps(phy2log, weight.shape[-1])
+    expected = DefaultEplbPolicy.rebalance_experts(weight_cpu, 12, 4, 1, 4)
 
-    # Function will convert to CPU internally, but should handle different
-    # device inputs normally
-    assert phy2log.shape == (1, 6)
-    assert logcnt.shape == (1, 4)
+    policy = EPLB_POLICIES[policy_name]
+    phy2log = policy.rebalance_experts(
+        weight_cpu.to(device),
+        12,
+        4,
+        1,
+        4,
+        old_global_expert_indices=expected,
+    )
+    _, logcnt = compute_logical_maps(phy2log, weight_cpu.shape[-1])
+
+    assert phy2log.device.type == "cpu"
+    assert phy2log.shape == (3, 12)
+    assert logcnt.shape == (3, 8)
+    torch.testing.assert_close(phy2log, expected, rtol=0, atol=0)
 
 
 def test_additional_cases():
