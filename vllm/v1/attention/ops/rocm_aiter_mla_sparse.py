@@ -31,6 +31,13 @@ logger = init_logger(__name__)
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
+_FP8_DTYPES = (
+    torch.float8_e4m3fn,
+    torch.float8_e4m3fnuz,
+    torch.float8_e5m2,
+    torch.float8_e5m2fnuz,
+)
+
 
 @functools.cache
 def _get_aiter_sparse_prefill_opus() -> Callable[..., torch.Tensor] | None:
@@ -2093,6 +2100,12 @@ def _sparse_kv_row_offset(slot, stride):
 
 
 @triton.jit
+def _sparse_query_row_offset(query_idx, stride):
+    # A long prefill can also overflow int32 when the per-token row is wide.
+    return query_idx.to(tl.int64) * stride
+
+
+@triton.jit
 def _sparse_attn_prefill_ragged_kernel(
     q_ptr,
     kv_ptr,
@@ -2112,8 +2125,10 @@ def _sparse_attn_prefill_ragged_kernel(
     head_dim,
     num_kv,
     scale,
+    kv_scale,
     HAS_ATTN_SINK: tl.constexpr,
     OUT_DV: tl.constexpr,
+    KV_IS_FP8: tl.constexpr,
     BLOCK_H: tl.constexpr,
     BLOCK_D: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -2128,7 +2143,7 @@ def _sparse_attn_prefill_ragged_kernel(
 
     q = tl.load(
         q_ptr
-        + query_idx * q_stride_t
+        + _sparse_query_row_offset(query_idx, q_stride_t)
         + head_offsets[:, None] * q_stride_h
         + dim_offsets[None, :] * q_stride_d,
         mask=head_mask[:, None] & dim_mask[None, :],
@@ -2161,6 +2176,11 @@ def _sparse_attn_prefill_ragged_kernel(
             mask=valid[:, None] & dim_mask[None, :],
             other=0.0,
         )
+        if KV_IS_FP8:
+            # Direct fp8-to-f32 conversion is unreliable for the FNUZ
+            # encodings used on gfx942. BF16 represents every e4m3/e5m2 value
+            # exactly, so this intermediate conversion is lossless.
+            kv = (kv.to(tl.bfloat16).to(tl.float32) * kv_scale).to(q.dtype)
 
         next_k_pos = k_start + BLOCK_K + k_offsets
         slot = tl.load(
@@ -2200,7 +2220,7 @@ def _sparse_attn_prefill_ragged_kernel(
 
     tl.store(
         out_ptr
-        + query_idx * out_stride_t
+        + _sparse_query_row_offset(query_idx, out_stride_t)
         + head_offsets[:, None] * out_stride_h
         + dim_offsets[None, :] * out_stride_d,
         out,
@@ -3367,6 +3387,7 @@ def _rocm_sparse_attn_prefill_ragged_triton(
     nope_head_dim: int,
     rope_head_dim: int,
     out: torch.Tensor | None = None,
+    kv_scale: float = 1.0,
 ) -> torch.Tensor:
     assert q.ndim == 3, f"expected q=[sq,h,d], got {q.shape}"
     assert kv.ndim == 2, f"expected kv=[skv,d], got {kv.shape}"
@@ -3393,6 +3414,10 @@ def _rocm_sparse_attn_prefill_ragged_triton(
         "_rocm_sparse_attn_prefill_ragged_triton",
     )
 
+    kv_is_fp8 = kv.dtype in _FP8_DTYPES
+    assert not (kv_is_fp8 and q.dtype in _FP8_DTYPES), (
+        f"FP8 KV requires model-dtype Q, got q={q.dtype}"
+    )
     block_h = 16
     block_d = triton.next_power_of_2(head_dim)
     block_k = 16 if head_dim >= 256 else 32
@@ -3425,8 +3450,10 @@ def _rocm_sparse_attn_prefill_ragged_triton(
         head_dim,
         kv.shape[0],
         float(scale),
+        float(kv_scale),
         HAS_ATTN_SINK=has_attn_sink,
         OUT_DV=out.shape[-1],
+        KV_IS_FP8=kv_is_fp8,
         BLOCK_H=block_h,
         BLOCK_D=block_d,
         BLOCK_K=block_k,
@@ -3445,6 +3472,7 @@ def _rocm_sparse_attn_prefill_triton(
     rope_head_dim: int,
     topk_length: torch.Tensor | None = None,
     out: torch.Tensor | None = None,
+    kv_scale: float = 1.0,
 ) -> torch.Tensor:
     ragged_indices, ragged_indptr = build_ragged_indices_from_dense(
         indices,
@@ -3463,6 +3491,7 @@ def _rocm_sparse_attn_prefill_triton(
         nope_head_dim=nope_head_dim,
         rope_head_dim=rope_head_dim,
         out=out,
+        kv_scale=kv_scale,
     )
 
 
@@ -4078,6 +4107,7 @@ def rocm_sparse_attn_prefill(
     output: torch.Tensor,
     ragged_indices: torch.Tensor | None = None,
     ragged_indptr: torch.Tensor | None = None,
+    kv_scale: float = 1.0,
 ) -> None:
     assert kv.ndim == 3 and kv.shape[1] == 1, (
         f"ROCm Triton sparse prefill expects kv=[skv,1,d], got {kv.shape}"
@@ -4126,6 +4156,7 @@ def rocm_sparse_attn_prefill(
             nope_head_dim=nope_head_dim,
             rope_head_dim=rope_head_dim,
             out=output,
+            kv_scale=kv_scale,
         )
     else:
         assert indices is not None
@@ -4140,6 +4171,7 @@ def rocm_sparse_attn_prefill(
             rope_head_dim=rope_head_dim,
             topk_length=topk_length,
             out=output,
+            kv_scale=kv_scale,
         )
 
 
