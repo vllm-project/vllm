@@ -336,8 +336,7 @@ class Worker(WorkerBase):
     def _scoped_allocator_max_split(self, max_split_size_mb: int):
         """Temporarily set max_split_size_mb to reduce allocator fragmentation at the
         cost of more cudaMalloc calls (negligible in practice). Restores the original
-        value on exit.
-        """
+        value on exit."""
         if not current_platform.is_cuda():
             yield
             return

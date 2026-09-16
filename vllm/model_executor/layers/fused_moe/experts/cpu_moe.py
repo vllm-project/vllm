@@ -192,8 +192,7 @@ class CPUUnquantizedExperts(mk.FusedMoEExpertsModular):
 
     def _pad_moe_intermediate(self, layer: torch.nn.Module) -> None:
         """Zero-pad the per-partition MoE intermediate dim of both weights and
-        the expert bias, see `_padded_intermediate_size`.
-        """
+        the expert bias, see `_padded_intermediate_size`."""
         intermediate_size = self.moe_config.intermediate_size_per_partition
         padded_size = self._padded_intermediate_size(self.moe_config)
         if padded_size == intermediate_size:
@@ -953,8 +952,7 @@ class CPUExpertsInt4(mk.FusedMoEExpertsModular):
 
 class CPUExpertsInt8(mk.FusedMoEExpertsModular):
     """CPU INT8 W8A8 per-channel weight / dynamic per-token activation
-    modular MoE experts.
-    """
+    modular MoE experts."""
 
     def __init__(
         self,
@@ -1287,8 +1285,7 @@ class ArmCPUExpertsInt8(mk.FusedMoEExpertsModular):
 
 class ZenCPUExpertsInt8(mk.FusedMoEExpertsModular):
     """AMD Zen INT8 MoE with per-token activation and channelwise weight
-    quantization, dispatched through zentorch.
-    """
+    quantization, dispatched through zentorch."""
 
     def __init__(
         self,

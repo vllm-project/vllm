@@ -91,8 +91,7 @@ def _rocm_device_count_stateless(cuda_visible_devices: str | None = None) -> int
     CUDA_VISIBLE_DEVICES has already been set to the desired value.
 
     # This can be removed and simply replaced with torch.cuda.get_device_count
-    # after https://github.com/pytorch/pytorch/pull/122815 is released.
-    """
+    # after https://github.com/pytorch/pytorch/pull/122815 is released."""
     # Note: cuda_visible_devices is not used, but we keep it as an argument for
     # LRU Cache purposes.
 
@@ -127,8 +126,7 @@ def _get_wsl_kernel_version() -> tuple[int, ...] | None:
 
 def _sync_hip_cuda_env_vars():
     """Ensure HIP_VISIBLE_DEVICES and CUDA_VISIBLE_DEVICES are consistent.
-    Treats empty string as unset. Raises on genuine conflicts.
-    """
+    Treats empty string as unset. Raises on genuine conflicts."""
     hip_val = os.environ.get("HIP_VISIBLE_DEVICES") or None
     cuda_val = os.environ.get("CUDA_VISIBLE_DEVICES") or None
 

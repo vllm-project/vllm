@@ -117,8 +117,7 @@ def serialize_messages(msgs):
 
 class ResponseRawMessageAndToken(OpenAIBaseModel):
     """Class to show the raw message.
-    If message / tokens diverge, tokens is the source of truth
-    """
+    If message / tokens diverge, tokens is the source of truth"""
 
     message: str
     tokens: list[int]

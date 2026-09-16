@@ -144,8 +144,7 @@ def atomic_writer(
 
 def _natural_sort_key(filepath: str) -> list:
     """Natural sort key for filenames with numeric components, such as
-    model-00001-of-00005.safetensors -> ['model-', 1, '-of-', 5, '.safetensors']
-    """
+    model-00001-of-00005.safetensors -> ['model-', 1, '-of-', 5, '.safetensors']"""
     return [
         int(s) if s.isdigit() else s
         for s in re.split(r"(\d+)", os.path.basename(filepath))
@@ -162,8 +161,7 @@ def maybe_download_from_modelscope(
     """Download model from ModelScope hub if VLLM_USE_MODELSCOPE is True.
 
     Returns the path to the downloaded model, or None if the model is not
-    downloaded from ModelScope.
-    """
+    downloaded from ModelScope."""
     if envs.VLLM_USE_MODELSCOPE:
         # download model from ModelScope hub,
         # lazy import so that modelscope is not required for normal use.
@@ -1148,8 +1146,7 @@ def instanttensor_weights_iterator(
     use_tqdm_on_load: bool,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files
-    using instanttensor library.
-    """
+    using instanttensor library."""
     try:
         import instanttensor
     except ImportError as e:

@@ -25,8 +25,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only GLM-4.1V & GLM-4.6V-Flash, AutoGLM-Phone-9B model
-compatible with HuggingFace weights.
-"""
+compatible with HuggingFace weights."""
 
 import math
 from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence

@@ -451,8 +451,7 @@ def _humming_fp8_weight_schema(
     layer: RoutedExperts, weight: torch.Tensor, weight_scale: torch.Tensor
 ) -> dict[str, Any]:
     """Build the humming weight schema from the canonical on-device fp8/mxfp8
-    tensors (scale dtype/shape, block size), not the producing quant method.
-    """
+    tensors (scale dtype/shape, block size), not the producing quant method."""
     # mxfp8: e8m0 group-32 scales (stored as uint8 bytes or e8m0). humming has
     # no compressed-tensors mxfp8 loader; its modelopt schema fits both sources.
     if weight_scale.dtype in (torch.uint8, torch.float8_e8m0fnu):

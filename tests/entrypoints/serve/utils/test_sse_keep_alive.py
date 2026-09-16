@@ -17,8 +17,7 @@ from vllm.entrypoints.serve.utils.sse_keep_alive import (
 def test_disabled_returns_same_generator():
     """For 0, negative, and NaN intervals the exact same generator object must
     be returned (identity), proving no wrapper or per-chunk overhead when
-    disabled.
-    """
+    disabled."""
 
     async def gen():
         yield "x"
@@ -34,8 +33,7 @@ def test_disabled_returns_same_generator():
 @pytest.mark.asyncio
 async def test_keep_alive_during_silent_start():
     """A silent start (queue wait / prefill) emits keep-alive comments before
-    the first real chunk.
-    """
+    the first real chunk."""
     release = asyncio.Event()
 
     async def gen():
@@ -57,8 +55,7 @@ async def test_keep_alive_during_silent_start():
 @pytest.mark.asyncio
 async def test_no_keep_alive_when_streaming_is_fast():
     """If chunks arrive faster than the interval, no comment is emitted and all
-    data is forwarded.
-    """
+    data is forwarded."""
 
     async def gen():
         for chunk in ["a", "b", "c"]:
@@ -72,8 +69,7 @@ async def test_no_keep_alive_when_streaming_is_fast():
 @pytest.mark.asyncio
 async def test_keep_alive_between_chunks_does_not_drop_data():
     """Keep-alives interleaved with real chunks must never drop or reorder
-    data.
-    """
+    data."""
     release_b = asyncio.Event()
     release_c = asyncio.Event()
 
@@ -139,8 +135,7 @@ async def test_upstream_cancelled_error_propagates():
 @pytest.mark.asyncio
 async def test_aclose_closes_upstream():
     """Closing a wrapper that is mid-stream must complete promptly and close
-    the upstream generator (regression for the earlier leaked-task hang).
-    """
+    the upstream generator (regression for the earlier leaked-task hang)."""
     finalized = asyncio.Event()
 
     async def gen():
@@ -159,8 +154,7 @@ async def test_aclose_closes_upstream():
 @pytest.mark.asyncio
 async def test_client_disconnect_cancels_upstream():
     """Cancelling the consumer mid-stream must cancel the pending anext and
-    close the upstream generator so its cleanup runs.
-    """
+    close the upstream generator so its cleanup runs."""
     finalized = asyncio.Event()
 
     async def gen():
@@ -187,8 +181,7 @@ async def test_client_disconnect_cancels_upstream():
 @pytest.mark.asyncio
 async def test_streaming_response_emits_comment():
     """A keep-alive comment must reach the client through the real
-    StreamingResponse used by the routers.
-    """
+    StreamingResponse used by the routers."""
     release = asyncio.Event()
 
     async def gen():
@@ -227,8 +220,7 @@ async def test_streaming_response_emits_comment():
 async def test_streaming_response_disconnect_closes_upstream():
     """On the ASGI 2.3 disconnect path used by the pinned Uvicorn, Starlette
     cancels streaming and the wrapper's finally must close the upstream
-    generator.
-    """
+    generator."""
     finalized = asyncio.Event()
 
     async def gen():

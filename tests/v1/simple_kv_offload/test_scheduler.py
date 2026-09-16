@@ -1170,8 +1170,7 @@ def test_touched_blocks_survive_eviction() -> None:
 # ---------------------------------------------------------------------------
 def test_preemption_no_cpu_block_leak() -> None:
     """request_finished during in-flight load defers cleanup;
-    completes after load done.
-    """
+    completes after load done."""
     fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=16, lazy=False)
     sched = fix.scheduler
 
@@ -1266,8 +1265,7 @@ def test_eager_store_preemption_cleanup() -> None:
 # ---------------------------------------------------------------------------
 def test_inflight_finish_deferred_cleanup() -> None:
     """Store, then start a load, request_finished defers,
-    load completion fires cleanup.
-    """
+    load completion fires cleanup."""
     fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=16, lazy=False)
     sched = fix.scheduler
 
@@ -1401,8 +1399,7 @@ def test_chunked_prefill_reads_live_block_ids() -> None:
     """With chunked prefill, block IDs accumulate across scheduler steps.
     _prepare_eager_store_specs reads block IDs from scheduler_output via
     yield_req_data, so the store should reflect the updated (larger) block
-    list, not a stale snapshot.
-    """
+    list, not a stale snapshot."""
     fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=16, lazy=False)
     sched = fix.scheduler
 
@@ -1973,8 +1970,7 @@ def test_cp_eager_store_and_load_roundtrip(
 ) -> None:
     """With CP enabled, store blocks to CPU and reload them for a new request
     with matching tokens.  Verifies that hash matching and transfer-pair
-    construction work with the virtual block size.
-    """
+    construction work with the virtual block size."""
     fix = _make_cp_scheduler(
         dcp_world_size=dcp_world_size,
         pcp_world_size=pcp_world_size,
@@ -2118,8 +2114,7 @@ def test_cp_effective_block_size_store_and_load(
 @pytest.mark.parametrize("cp_world_size", [1, 2, 4])
 def test_cp_lazy_target_blocks_scaling(cp_world_size: int) -> None:
     """_estimate_lazy_target_blocks returns fewer blocks when cp_world_size > 1
-    because each virtual block covers more tokens.
-    """
+    because each virtual block covers more tokens."""
     kv_cache_config = _make_kv_cache_config(num_blocks=16)
     max_batched = 64
 
@@ -2811,8 +2806,7 @@ def test_finished_eager_store_recovers_nulled_window_tail() -> None:
     """A sliding-window group nulls pages that left the window before the
     connector sees the finished request's block table, while the GPU keeps
     them hashed in its free queue. The eager store must copy those pages, or
-    the CPU lookup (which needs the whole window) misses every time.
-    """
+    the CPU lookup (which needs the whole window) misses every time."""
     fix = make_scheduler(num_cpu_blocks=16, num_gpu_blocks=32, num_groups=2, lazy=False)
     sched = fix.scheduler
     gpu_pool = fix.gpu_block_pool

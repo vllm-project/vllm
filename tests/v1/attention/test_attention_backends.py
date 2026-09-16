@@ -1455,8 +1455,7 @@ def test_non_causal_backend_correctness(
     model: str,
 ):
     """Test backend's correctness with non-causal (bidirectional) decoder
-    attention, as used by DFlash speculative decoding.
-    """
+    attention, as used by DFlash speculative decoding."""
 
     def bidirectional_mask_mod(
         b: torch.Tensor,
