@@ -103,6 +103,139 @@ def test_mamba_speculative_block_relocation_requires_exclusive_ownership():
         manager._relocate_speculative_block([pinned_block], 0)
 
 
+def test_mamba_retirement_crosses_null_gaps():
+    spec = MambaSpec(
+        block_size=4,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    pool = BlockPool(num_gpu_blocks=8, enable_caching=False, hash_block_size=4)
+    manager = MambaManager(
+        spec,
+        block_pool=pool,
+        enable_caching=False,
+        kv_cache_group_id=0,
+        scheduler_block_size=4,
+    )
+    old, committed, in_flight = pool.get_new_blocks(3)
+    manager.req_to_blocks["r"] = [old, pool.null_block, committed, in_flight]
+
+    # The state at token 12 and the following in-flight state must survive.
+    for _ in range(2):
+        manager.remove_skipped_blocks("r", processed_computed_tokens=12)
+        assert manager.req_to_blocks["r"] == [
+            pool.null_block,
+            pool.null_block,
+            committed,
+            in_flight,
+        ]
+        assert old.ref_cnt == 0
+        assert committed.ref_cnt == in_flight.ref_cnt == 1
+        assert pool.get_num_free_blocks() == 5
+
+    manager.free("r")
+    manager.req_to_blocks["r"] = pool.get_new_blocks(2)
+    manager.remove_skipped_blocks("r", processed_computed_tokens=5)
+    assert manager.req_to_blocks["r"][0].is_null
+    assert manager.req_to_blocks["r"][1].ref_cnt == 1
+
+
+@pytest.mark.parametrize("block_size", [3584, 4608])
+@pytest.mark.parametrize("in_flight_chunks", [0, 1, 2])
+def test_mamba_retirement_bounds_prefill_states(block_size, in_flight_chunks):
+    spec = MambaSpec(
+        block_size=block_size,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+        num_speculative_blocks=5,
+    )
+    pool = BlockPool(num_gpu_blocks=1000, enable_caching=True, hash_block_size=256)
+    manager = MambaManager(
+        spec,
+        block_pool=pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=block_size,
+    )
+    initial_free = pool.get_num_free_blocks()
+    chunk = 8192 // block_size * block_size
+    peak_held = 0
+    # Replay full prefill chunks with an async committed-token lag.
+    for target in range(chunk, 480031 + 1, chunk):
+        computed = target - chunk
+        committed = max(0, computed - in_flight_chunks * chunk)
+        manager.remove_skipped_blocks("r", committed)
+        manager.get_num_blocks_to_allocate(
+            "r", target + 5, [], computed, computed, target
+        )
+        manager.allocate_new_blocks("r", target + 5, target)
+        peak_held = max(peak_held, initial_free - pool.get_num_free_blocks())
+
+    # Five speculative blocks, current/previous states, and bounded in-flight states.
+    assert peak_held == 7 + in_flight_chunks
+    manager.free("r")
+    assert pool.get_num_free_blocks() == initial_free
+
+
+@pytest.mark.parametrize("block_size", [896, 1536])
+@pytest.mark.parametrize("num_speculative_blocks", [0, 1, 4])
+@pytest.mark.parametrize("prompt_tokens", [25121, 704547])
+def test_mamba_checkpoint_admission_matches_allocation(
+    block_size, num_speculative_blocks, prompt_tokens
+):
+    """Checkpoint admission must match the subsequent physical allocation."""
+    spec = MambaSpec(
+        block_size=block_size,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+        num_speculative_blocks=num_speculative_blocks,
+        num_prefill_checkpoint_blocks=1,
+        prefill_checkpoint_alignment=64,
+    )
+    pool = BlockPool(
+        num_gpu_blocks=2048,
+        enable_caching=True,
+        hash_block_size=128,
+    )
+    manager = MambaManager(
+        spec,
+        block_pool=pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=block_size,
+    )
+    request_id = "prefill"
+    computed_tokens = 23040
+
+    def estimate(num_tokens, total_computed_tokens, apply_admission_cap):
+        return manager.get_num_blocks_to_allocate(
+            request_id=request_id,
+            num_tokens=num_tokens,
+            new_computed_blocks=[],
+            total_computed_tokens=total_computed_tokens,
+            num_local_computed_tokens=total_computed_tokens,
+            num_tokens_main_model=num_tokens,
+            apply_admission_cap=apply_admission_cap,
+        )
+
+    estimate(computed_tokens, 0, False)
+    manager.allocate_new_blocks(request_id, computed_tokens, computed_tokens)
+    assert request_id in manager._allocated_block_reqs
+
+    admission_estimate = estimate(prompt_tokens, computed_tokens, True)
+    allocation_estimate = estimate(prompt_tokens, computed_tokens, False)
+    assert request_id in manager._checkpoints
+
+    free_before = pool.get_num_free_blocks()
+    manager.allocate_new_blocks(request_id, prompt_tokens, prompt_tokens)
+    allocated = free_before - pool.get_num_free_blocks()
+
+    assert admission_estimate == allocation_estimate == allocated
+
+
 def get_sliding_window_manager(
     sliding_window_spec,
     block_pool,
