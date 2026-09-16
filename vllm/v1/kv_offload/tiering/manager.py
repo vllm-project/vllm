@@ -110,12 +110,21 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         # read/write is for CPU<->secondary transfers,
         # load/store is for CPU<->GPU transfers.
         # These aliases avoid calling prepare_load inside a store path.
-        self.prepare_read = self.prepare_load
         self.complete_read = self.complete_load
         self.prepare_write = self.prepare_store
         self.complete_write = self.complete_store
 
         self._kv_memoryview = mmap_region.create_kv_memoryview()
+
+    def prepare_read(
+        self, keys: Collection[OffloadKey], req_context: ReqContext
+    ) -> LoadStoreSpec:
+        """Pin chunks for a CPU-to-secondary transfer.
+
+        Cascade reads are implementation details of tiering, not additional
+        request accesses, so they must not alter request-scoped recency.
+        """
+        return self._prepare_load(keys, req_context, record_access=False)
 
     def get_kv_memoryview(self) -> memoryview:
         """Return the memoryview over the primary tier's KV cache buffer.
@@ -781,11 +790,10 @@ class TieringOffloadingManager(OffloadingManager):
         req_id: str,
         exclude_tier_idx: int | None = None,
     ) -> None:
-        """Finalize secondary tiers once no more store cascades can be submitted.
+        """Finalize secondary tiers once no more cascades can be submitted.
 
-        Finalization means forwarding on_request_finished() to secondary tiers.
-        It is delayed until pending GPU->primary stores finish, since their
-        complete_store() callbacks may still submit primary->secondary stores.
+        Their finalization is delayed until pending GPU->primary stores
+        finish, since those callbacks may still submit secondary stores.
         """
         state = self._req_state[req_id]
         if not state.is_finished:

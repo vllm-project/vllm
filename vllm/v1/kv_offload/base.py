@@ -96,12 +96,24 @@ class ReqContext:
     # kv_transfer_params once (in on_new_request) and read the result back
     # on later calls for the same request.
     _state: dict[type, Any] = field(default_factory=dict, repr=False, init=False)
+    # End-token position for each key in this request. The scheduler records
+    # these positions so managers can recover prefix order even when store
+    # calls arrive out of order (for example, SWA backfills).
+    _offload_key_positions: dict[OffloadKey, int] = field(
+        default_factory=dict, repr=False, init=False
+    )
 
     def set_state(self, val: Any) -> None:
         self._state[type(val)] = val
 
     def get_state(self, cls: type[_T]) -> _T | None:
         return self._state.get(cls)
+
+    def set_offload_key_position(self, key: OffloadKey, end_token: int) -> None:
+        self._offload_key_positions[key] = end_token
+
+    def get_offload_key_position(self, key: OffloadKey) -> int | None:
+        return self._offload_key_positions.get(key)
 
 
 class LookupResult(Enum):
