@@ -345,6 +345,7 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
         # TRITON_UNFUSED has bug with MTP support
         # TODO re-enable after kernel is fixed
         # TRITON_UNFUSED
+        Mxfp4MoeBackend.HUMMING,
         Mxfp4MoeBackend.MARLIN,
         Mxfp4MoeBackend.BATCHED_MARLIN,
         Mxfp4MoeBackend.XPU,
@@ -357,7 +358,7 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
 def _get_priority_backends() -> list[Mxfp4MoeBackend]:
     """
     Get available backends in priority order. SM100+ prefers DeepGEMM FP4 /
-    TRTLLM MXFP8; SM90 falls through to Triton_unfused or Marlin (the
+    TRTLLM MXFP8; SM90 falls through to Humming or Marlin (the
     backend-level ``is_supported_config`` check filters by device capability).
     """
     if current_platform.is_rocm():
@@ -375,6 +376,7 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
         # TRITON_UNFUSED has bug with MTP support
         # TODO re-enable after kernel is fixed
         # TRITON_UNFUSED
+        Mxfp4MoeBackend.HUMMING,
         Mxfp4MoeBackend.MARLIN,
         Mxfp4MoeBackend.BATCHED_MARLIN,
     ]
