@@ -12,6 +12,8 @@ from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
     flashinfer_sample,
     flashinfer_sampler_supported,
+    xpu_sample,
+    xpu_sampler_supported,
 )
 from vllm.v1.worker.gpu.input_batch import InputBatch, get_num_sampled_and_rejected
 from vllm.v1.worker.gpu.metrics.logits import get_num_nans
@@ -63,6 +65,10 @@ class Sampler:
         self.return_sampling_mask = return_sampling_mask
         self.use_flashinfer = (
             not return_sampling_mask and flashinfer_sampler_supported()
+        )
+        # The XPU kernel draws fp32 exponential noise, so it can't honor fp64.
+        self.use_xpu_sampler = (
+            not return_sampling_mask and not use_fp64_gumbel and xpu_sampler_supported()
         )
 
     def add_request(
@@ -297,15 +303,17 @@ class Sampler:
         top_k, top_p = self.sampling_states.get_top_k_top_p(
             expanded_idx_mapping, idx_mapping_np
         )
-        use_flashinfer = self.use_flashinfer and not (
-            # Don't use FI sampler if no requests use top_k/top_p, if there are
-            # any greedy requests or per-request seeds, or if post-processed
-            # logprobs need to be returned for any requests.
+        # Don't use a fused sampler if no requests use top_k/top_p, if there are
+        # any greedy requests or per-request seeds, or if post-processed
+        # logprobs need to be returned for any requests.
+        fused_sampler_eligible = not (
             (top_k is None and top_p is None)
             or (return_logprobs and self.logprobs_mode in PROCESSED_LOGPROBS_MODES)
             or self.sampling_states.any_greedy(idx_mapping_np)
             or self.sampling_states.any_explicit_seed(idx_mapping_np)
         )
+        use_flashinfer = self.use_flashinfer and fused_sampler_eligible
+        use_xpu_sampler = self.use_xpu_sampler and fused_sampler_eligible
 
         return self._sample_random(
             processed_logits,
@@ -315,6 +323,7 @@ class Sampler:
             top_k,
             top_p,
             use_flashinfer,
+            use_xpu_sampler,
         )
 
     def _sample_random(
@@ -326,9 +335,12 @@ class Sampler:
         top_k: torch.Tensor | None,
         top_p: torch.Tensor | None,
         use_flashinfer: bool,
+        use_xpu_sampler: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if use_flashinfer:
             sampled = flashinfer_sample(processed_logits, top_k, top_p).to(torch.int64)
+        elif use_xpu_sampler:
+            sampled, _ = xpu_sample(processed_logits, top_k, top_p)
         else:
             processed_logits = apply_top_k_top_p(processed_logits, top_k, top_p)
             sampled = gumbel_sample(
