@@ -16,6 +16,7 @@ from transformers import DeepseekV2Config, DeepseekV3Config
 
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -915,11 +916,18 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             compressor = self.compressor
 
             def compressor_kv_score() -> torch.Tensor:
-                return torch.mm(
+                kv_score = torch.mm(
                     hidden_states,
                     compressor.fused_wkv_wgate.weight.T,
                     out_dtype=torch.float32,
                 )
+                if isinstance(compressor.fused_wkv_wgate, BaseLinearLayerWithLoRA):
+                    delta = compressor.fused_wkv_wgate._apply_lora_to_output(
+                        hidden_states,
+                        torch.zeros_like(kv_score, dtype=hidden_states.dtype),
+                    )
+                    kv_score.add_(delta)
+                return kv_score
 
             aux_fns[0] = compressor_kv_score
 

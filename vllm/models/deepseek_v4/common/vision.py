@@ -12,6 +12,7 @@ every rank.
 """
 
 import itertools
+from collections.abc import Callable
 from functools import lru_cache
 
 import torch
@@ -395,6 +396,8 @@ def run_dp_sharded_vision_tower(
     aligner: DeepseekV4Aligner,
     patches: torch.Tensor,
     vit_grid: list[list[int]],
+    *,
+    encode_image: Callable[[int], torch.Tensor] | None = None,
 ) -> list[torch.Tensor]:
     """Run the ViT + aligner with images sharded across TP ranks.
 
@@ -409,6 +412,7 @@ def run_dp_sharded_vision_tower(
         aligner: The (weight-replicated) spatial-merge projector.
         patches: ``(sum(n_vit_h * n_vit_w), 3, p, p)`` patches of all images.
         vit_grid: ``[n_vit_h, n_vit_w]`` per image.
+        encode_image: Optional encoder receiving the original image index.
 
     Returns:
         One ``(n_aligner_rows, hidden_size)`` embedding tensor per image.
@@ -436,18 +440,17 @@ def run_dp_sharded_vision_tower(
         sum(rows_per_image[i] for i in rank_image_idxs(g)) for g in range(tp_size)
     )
 
-    local_embeds = [
-        aligner(
-            vision_model(
-                patches[cum_patches[i] : cum_patches[i + 1]],
-                vit_grid[i][0],
-                vit_grid[i][1],
-            ),
-            vit_grid[i][0],
-            vit_grid[i][1],
-        )
-        for i in rank_image_idxs(tp_rank)
-    ]
+    if encode_image is None:
+
+        def encode_image(i: int) -> torch.Tensor:
+            h, w = vit_grid[i]
+            return aligner(
+                vision_model(patches[cum_patches[i] : cum_patches[i + 1]], h, w),
+                h,
+                w,
+            )
+
+    local_embeds = [encode_image(i) for i in rank_image_idxs(tp_rank)]
     if local_embeds:
         embeds_local = torch.cat(local_embeds, dim=0)
     else:

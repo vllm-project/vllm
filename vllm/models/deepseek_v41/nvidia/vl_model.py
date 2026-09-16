@@ -17,6 +17,8 @@ Thin multimodal wrapper around the text-only ``DeepseekV41LLMForCausalLM``:
 """
 
 from collections.abc import Iterable
+from contextlib import nullcontext
+from itertools import accumulate
 from typing import Annotated
 
 import torch
@@ -27,9 +29,11 @@ from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsEagle3,
     SupportsEncoderCudaGraph,
+    SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
 )
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -42,6 +46,7 @@ from vllm.models.deepseek_v4.common.vision import (
     run_dp_sharded_vision_tower,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from ..common.mm_preprocess import (
@@ -120,6 +125,7 @@ class DeepseekV41ForCausalLM(
     SupportsEncoderCudaGraph,
     SupportsPP,
     SupportsEagle3,
+    SupportsLoRA,
 ):
     """Multimodal entry point for DeepSeek-V4.1 checkpoints with a vision tower.
 
@@ -131,10 +137,23 @@ class DeepseekV41ForCausalLM(
 
     supports_encoder_tp_data = True
 
+    packed_modules_mapping = {
+        "gate_up_proj": ["w1", "w3"],
+        "fused_wqa_wkv": ["wq_a", "wkv"],
+        "fused_wkv_wgate": ["wkv", "wgate"],
+        # for visual encoder
+        "wqkv": ["wqkv"],
+        "w1": ["w1"],
+    }
+
+    # The MTP draft head is not LoRA-adapted.
+    lora_skip_prefixes = ["mtp."]
+
     # The MoE router needs raw token ids to detect image-span tokens
     # (all carrying image_token_id, see common/mm_preprocess.py) and apply
     # bias_vl.
     requires_raw_input_tokens = True
+    supports_tower_connector_lora = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -209,25 +228,32 @@ class DeepseekV41ForCausalLM(
     ) -> tuple[torch.Tensor, ...]:
         patches = image_input.patches.to(self.aligner.w1.weight.dtype)
         vit_grid = image_input.vit_grid.tolist()
+        offsets = [0, *accumulate(h * w for h, w in vit_grid)]
+        lora_manager = getattr(self, "lora_manager", None)
+
+        def encode_image(index: int) -> torch.Tensor:
+            h, w = vit_grid[index]
+            r = self.aligner.downsample_ratio
+            mapping = (
+                lora_manager.use_mm_lora_mapping(index, h * w, -(-h // r) * -(-w // r))
+                if lora_manager is not None
+                and lora_manager.supports_tower_connector_lora
+                else nullcontext()
+            )
+            with mapping:
+                return self._encode_image(
+                    patches[offsets[index] : offsets[index + 1]], h, w
+                )
 
         image_embeds_list: list[torch.Tensor]
         if self.use_data_parallel and get_tensor_model_parallel_world_size() > 1:
             # Data-parallel ViT: shard images across TP ranks and all-gather
             # the per-image embeddings (weights are replicated on every rank).
             image_embeds_list = run_dp_sharded_vision_tower(
-                self.vision, self.aligner, patches, vit_grid
+                self.vision, self.aligner, patches, vit_grid, encode_image=encode_image
             )
         else:
-            image_embeds_list = []
-            vit_offset = 0
-            for n_vit_h, n_vit_w in vit_grid:
-                n_vit = n_vit_h * n_vit_w
-                image_embeds_list.append(
-                    self._encode_image(
-                        patches[vit_offset : vit_offset + n_vit], n_vit_h, n_vit_w
-                    )
-                )
-                vit_offset += n_vit
+            image_embeds_list = [encode_image(i) for i in range(len(vit_grid))]
 
         embeds: list[torch.Tensor] = []
         span_offset = 0
@@ -331,3 +357,31 @@ class DeepseekV41ForCausalLM(
         if getattr(self, "_weights_finalized", False):
             return
         self.language_model.process_weights_after_loading()
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """Get the module prefixes in the multimodal model."""
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="aligner",
+            tower_model="vision.",
+        )
+
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        if modality != "image":
+            raise ValueError(f"Unsupported modality: {modality!r}")
+
+        ratio = self.config.vision_downsample_ratio
+        if mm_kwargs is None:
+            # LoRA buffer initialization supplies only the encoder token budget.
+            return num_mm_embeds * ratio**2, num_mm_embeds
+        grid: torch.Tensor = mm_kwargs["vit_grid"].data
+        n_vit_h, n_vit_w = grid.reshape(-1).tolist()
+        # The connector processes patch rows; delimiters are added afterwards.
+        connector_tokens = -(-n_vit_h // ratio) * -(-n_vit_w // ratio)
+        return n_vit_h * n_vit_w, connector_tokens
