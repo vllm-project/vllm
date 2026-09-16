@@ -30,6 +30,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorTransferResults,
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
@@ -587,6 +588,13 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
 
+    def get_transfer_results(
+        self, finished_req_ids: set[str]
+    ) -> KVConnectorTransferResults:
+        """Get finished and failed sends/recvs from the worker."""
+        assert self.connector_worker is not None
+        return self.connector_worker.get_transfer_results()
+
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Get block IDs whose remote KV load failed."""
         assert self.connector_worker is not None
@@ -1046,6 +1054,16 @@ class MooncakeConnectorWorker:
         self.finished_recving_reqs: set[ReqId] = set()
         # Written from the receiver loop, drained from the worker thread.
         self._invalid_block_ids: queue.Queue[set[int]] = queue.Queue()
+        self._is_hma_required = (
+            not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
+            and any(
+                not isinstance(g.kv_cache_spec, FullAttentionSpec)
+                for g in kv_cache_config.transfer_groups
+            )
+        )
+        # Block IDs are only unique within a group; with HMA the scheduler
+        # tracks a single merged group, so failures are reported per request.
+        self._failed_recv_reqs: queue.Queue[ReqId] = queue.Queue()
 
         self.xfer_stats = MooncakeKVConnectorStats()
 
@@ -1866,6 +1884,29 @@ class MooncakeConnectorWorker:
 
         return finished_sending_reqs or None, finished_recving_reqs or None
 
+    def get_transfer_results(self) -> KVConnectorTransferResults:
+        """
+        Get transfers that completed on this specific worker, including
+        requests whose remote KV load failed.
+
+        The scheduler process (via the MultiprocExecutor) will use this output
+        to track which workers are done.
+        """
+        finished_sending_reqs, finished_recving_reqs = self.get_finished()
+
+        failed_recving_reqs: set[ReqId] = set()
+        while True:
+            try:
+                failed_recving_reqs.add(self._failed_recv_reqs.get_nowait())
+            except queue.Empty:
+                break
+
+        return KVConnectorTransferResults(
+            finished_sending=set(finished_sending_reqs or ()),
+            finished_recving=set(finished_recving_reqs or ()),
+            failed_recving=failed_recving_reqs,
+        )
+
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         """Return transfer stats collected since the last call, or None
         if nothing has been recorded in this interval."""
@@ -1959,7 +2000,10 @@ class MooncakeConnectorWorker:
                 # request is waiting on a load, and reporting one here would trip
                 # the scheduler's `assert req_id in self.requests`.
                 continue
-            self._invalid_block_ids.put(invalid)
+            if self._is_hma_required:
+                self._failed_recv_reqs.put(pull_meta.d_req_id)
+            else:
+                self._invalid_block_ids.put(invalid)
             self.finished_recving_reqs.add(pull_meta.d_req_id)
 
         if failed:
