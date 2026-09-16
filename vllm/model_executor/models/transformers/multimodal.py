@@ -60,6 +60,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.torch_utils import async_tensor_h2d
 
 if TYPE_CHECKING:
     from transformers import BatchFeature, PreTrainedModel
@@ -173,6 +174,11 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
                 image_token = processor.boi_token
             else:
                 image_token = getattr(processor, "image_token", "")
+                # Some processors (e.g. HunYuanVL) reject a bare image token and
+                # require each one to be wrapped in its start/end markers.
+                start_token = getattr(processor, "image_start_token", "")
+                end_token = getattr(processor, "image_end_token", "")
+                image_token = f"{start_token}{image_token}{end_token}"
             text += image_token * num_images
         return text
 
@@ -841,7 +847,7 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
         replacements = defaultdict[str, list[list[int]]](list)
         for entry in offsets[0]:
             replacements[entry["type"]].append(
-                tokenizer.encode(entry["replacement"], add_special_tokens=False)
+                cached_encode(tokenizer, entry["replacement"], add_special_tokens=False)
             )
 
         for modality, seqs in replacements.items():
@@ -1175,8 +1181,8 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         # grid_thw fields are registered keep_on_cpu; restore the on-device
         # placement that HF get_image_features implementations expect.
         for key, value in kwargs.items():
-            if isinstance(value, torch.Tensor):
-                kwargs[key] = value.to(pixel_values.device, non_blocking=True)
+            if isinstance(value, torch.Tensor) and value.is_cpu:
+                kwargs[key] = async_tensor_h2d(value, pixel_values.device)
 
         # The underlying HuggingFace `get_image_features` implementations
         # contain model-internal syncs (e.g. Idefics3 filters all-zero
@@ -1230,17 +1236,31 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         video_grid_thw = torch.stack(video_grid_thw) if video_grid_thw else None
 
         # `get_rope_index` doesn't always accept arbitrary `kwargs`
-        kwargs = {}
-        if not hasattr(self, "_get_rope_index_accepts_mm_token_type_ids"):
+        if not hasattr(self, "_get_rope_index_kwarg_names"):
             import inspect
 
-            sig = inspect.signature(self.model.get_rope_index)
-            params = sig.parameters
-            self._get_rope_index_accepts_mm_token_type_ids = (
-                "mm_token_type_ids" in params
-                or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+            params = inspect.signature(self.model.get_rope_index).parameters
+            self._get_rope_index_kwarg_names = (
+                None
+                if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+                else frozenset(params)
             )
-        if self._get_rope_index_accepts_mm_token_type_ids:
+
+        kwarg_names = self._get_rope_index_kwarg_names
+
+        def accepts_kwarg(name: str) -> bool:
+            return kwarg_names is None or name in kwarg_names
+
+        # Drop a grid the model can't accept only when there is nothing to pass.
+        kwargs = {
+            name: value
+            for name, value in (
+                ("image_grid_thw", image_grid_thw),
+                ("video_grid_thw", video_grid_thw),
+            )
+            if value is not None or accepts_kwarg(name)
+        }
+        if accepts_kwarg("mm_token_type_ids"):
             mm_token_type_ids = torch.zeros(len(input_tokens), dtype=torch.int)
             for feature in mm_features:
                 position = feature.mm_position
@@ -1251,8 +1271,6 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
 
         mrope_positions, mrope_position_delta = self.model.get_rope_index(
             input_ids=torch.tensor(input_tokens).unsqueeze(0),
-            image_grid_thw=image_grid_thw,
-            video_grid_thw=video_grid_thw,
             **kwargs,
         )
 

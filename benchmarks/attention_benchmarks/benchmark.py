@@ -1143,12 +1143,26 @@ def main():
             ]
         else:
             variants = available_variants
+        model_sweep = getattr(args, "model_parameter_sweep", None)
+        if model_sweep is None:
+            num_q_heads_values = [args.num_q_heads]
+        elif model_sweep.param_name == "num_q_heads":
+            num_q_heads_values = model_sweep.values
+        else:
+            raise ValueError(
+                "mha_vs_mqa mode only supports a num_q_heads model parameter sweep"
+            )
+        benchmark_specs = [
+            (spec, num_q_heads)
+            for spec in args.batch_specs
+            for num_q_heads in num_q_heads_values
+        ]
         masked_mha_max_seq_len = getattr(
             args, "sparse_mla_masked_mha_max_seq_len", None
         )
         formatter = ResultsFormatter(console)
         total = 0
-        for spec in args.batch_specs:
+        for spec, _ in benchmark_specs:
             q_len = max(request.q_len for request in parse_batch_spec(spec))
             for variant_label, _, _ in variants:
                 if (
@@ -1164,7 +1178,7 @@ def main():
                 total += len(backends)
 
         with tqdm(total=total, desc="Benchmarking") as pbar:
-            for spec in args.batch_specs:
+            for spec, num_q_heads in benchmark_specs:
                 q_len = max(request.q_len for request in parse_batch_spec(spec))
                 for backend in backends:
                     for variant_label, force_mqa, mha_mode in variants:
@@ -1178,12 +1192,17 @@ def main():
                             and q_len > masked_mha_max_seq_len
                         ):
                             continue
+                        result_backend = f"{backend}_{variant_label}"
+                        if model_sweep is not None:
+                            result_backend = model_sweep.get_label(
+                                result_backend, num_q_heads
+                            )
                         config = BenchmarkConfig(
-                            backend=f"{backend}_{variant_label}",
+                            backend=result_backend,
                             batch_spec=spec,
                             num_layers=args.num_layers,
                             head_dim=args.head_dim,
-                            num_q_heads=args.num_q_heads,
+                            num_q_heads=num_q_heads,
                             num_kv_heads=args.num_kv_heads,
                             block_size=args.block_size,
                             device=args.device,
@@ -1211,7 +1230,7 @@ def main():
                         # run_mla_benchmark needs the real backend name
                         from mla_runner import run_mla_benchmark as run_mla
 
-                        run_label = f"{backend}_{variant_label} {spec}"
+                        run_label = f"{backend}_{variant_label} {num_q_heads}h {spec}"
                         pbar.set_postfix_str(run_label)
 
                         try:
@@ -1248,7 +1267,14 @@ def main():
 
         # Display results with variant labels as separate "backends"
         console.print("\n[bold green]MHA vs MQA Results:[/]")
-        variant_backends = [f"{b}_{v}" for b in backends for v, _, _ in variants]
+        variant_backends = []
+        for num_q_heads in num_q_heads_values:
+            for backend in backends:
+                for variant, _, _ in variants:
+                    label = f"{backend}_{variant}"
+                    if model_sweep is not None:
+                        label = model_sweep.get_label(label, num_q_heads)
+                    variant_backends.append(label)
         formatter.print_table(all_results, variant_backends)
 
     # Handle model parameter sweep mode
