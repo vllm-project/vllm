@@ -727,11 +727,15 @@ def _get_available_ram_bytes() -> int:
 
     host_available = psutil.virtual_memory().available
 
-    from vllm.utils.cpu_resource_utils import get_cgroup_memory_limit
+    from vllm.utils.cpu_resource_utils import (
+        get_cgroup_memory_limit,
+        get_cgroup_memory_usage,
+    )
 
-    cgroup_limit, cgroup_usage = get_cgroup_memory_limit()
+    cgroup_limit = get_cgroup_memory_limit()
     if cgroup_limit is None:
         return host_available
+    cgroup_usage = get_cgroup_memory_usage()
     cgroup_available = (
         cgroup_limit if cgroup_usage is None else max(0, cgroup_limit - cgroup_usage)
     )
