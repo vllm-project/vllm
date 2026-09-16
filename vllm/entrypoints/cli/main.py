@@ -100,7 +100,9 @@ def main():
             cmds[cmd.name] = cmd
     args = parser.parse_args()
     if args.subparser in cmds:
-        cmds[args.subparser].validate(args)
+        cmd = cmds[args.subparser]
+        cmd.post_parse(args)
+        cmd.validate(args)
 
     if hasattr(args, "dispatch_function"):
         args.dispatch_function(args)

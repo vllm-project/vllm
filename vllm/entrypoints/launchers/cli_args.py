@@ -131,8 +131,6 @@ class BaseFrontendArgs:
     The `demo` Python tool executes model-generated code in Docker without
     network isolation by default. See the security guide for more
     information."""
-    log_config_file: str | None = envs.VLLM_LOGGING_CONFIG_PATH
-    """Path to logging config JSON file for both vllm and uvicorn"""
     max_log_len: int | None = None
     """Max number of prompt characters or prompt ID numbers being printed in
     log. The default of None means unlimited."""

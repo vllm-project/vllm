@@ -17,7 +17,7 @@ from vllm.entrypoints.launchers.cli_args import (
 )
 from vllm.entrypoints.launchers.dp_supervisor import run_dp_supervisor
 from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
-from vllm.logger import init_logger
+from vllm.logger import configure_logging_from_args, init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -152,6 +152,9 @@ class ServeSubcommand(CLISubcommand):
             # Single API server (this process).
             args.api_server_count = None
             uvloop.run(run_server(args))
+
+    def post_parse(self, args: argparse.Namespace) -> None:
+        configure_logging_from_args(args)
 
     def validate(self, args: argparse.Namespace) -> None:
         validate_parsed_serve_args(args)

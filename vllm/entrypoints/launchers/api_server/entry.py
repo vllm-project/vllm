@@ -15,7 +15,7 @@ from typing import Any
 import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
-from vllm.logger import init_logger
+from vllm.logger import configure_logging_from_args, init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.tool_parsers import ToolParserManager
 from vllm.usage.usage_lib import UsageContext
@@ -216,6 +216,7 @@ def main():
     )
     parser = make_arg_parser(parser)
     args = parser.parse_args()
+    configure_logging_from_args(args)
     validate_parsed_serve_args(args)
 
     uvloop.run(run_server(args))

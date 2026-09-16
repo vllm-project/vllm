@@ -29,7 +29,7 @@ class RequestLogger:
                 "`--enable-log-requests` is set but "
                 "the minimum log level is higher than DEBUG. "
                 "Only limited information will be logged to minimize overhead. "
-                "To view more details, set `VLLM_LOGGING_LEVEL=DEBUG`."
+                "To view more details, set `--log-level DEBUG`."
             )
 
     def log_inputs(

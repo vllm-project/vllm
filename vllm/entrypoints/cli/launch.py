@@ -13,7 +13,7 @@ from vllm.entrypoints.launchers.cli_args import (
 )
 from vllm.entrypoints.launchers.render.entry import run_launch_fastapi
 from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
-from vllm.logger import init_logger
+from vllm.logger import configure_logging_from_args, init_logger
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
@@ -63,6 +63,9 @@ class RenderSubcommand(LaunchSubcommandBase):
     def cmd(args: argparse.Namespace) -> None:
         uvloop.run(run_launch_fastapi(args))
 
+    def post_parse(self, args: argparse.Namespace) -> None:
+        configure_logging_from_args(args)
+
 
 class LaunchSubcommand(CLISubcommand):
     """The `launch` subcommand for the vLLM CLI.
@@ -73,12 +76,18 @@ class LaunchSubcommand(CLISubcommand):
 
     name = "launch"
 
+    def __init__(self) -> None:
+        self.commands: dict[str, type[LaunchSubcommandBase]] = {}
+
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
         if hasattr(args, "model_tag") and args.model_tag is not None:
             args.model = args.model_tag
 
         args.launch_command(args)
+
+    def post_parse(self, args: argparse.Namespace) -> None:
+        self.commands[args.launch_component]().post_parse(args)
 
     def validate(self, args: argparse.Namespace) -> None:
         validate_parsed_serve_args(args)
@@ -107,6 +116,7 @@ class LaunchSubcommand(CLISubcommand):
             cmd_subparser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(
                 subcmd=f"{self.name} {cmd_cls.name}"
             )
+            self.commands[cmd_cls.name] = cmd_cls
 
         return launch_parser
 
