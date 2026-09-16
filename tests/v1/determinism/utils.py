@@ -28,9 +28,6 @@ DEVICE_BACKENDS: dict[str, DeviceConfig] = {
         and current_platform.has_device_capability(80),
         # FlashInfer backend temporarily disabled due to invariant CTA sizes.
         # See FlashInfer issue #2424
-        # GDN_ATTN is excluded from the default list: it is only valid for
-        # models with GDN layers (model_type="qwen3_5" or dual_chunk_attention).
-        # The model-specific override below adds it when appropriate.
         backends=["FLASH_ATTN", "TRITON_ATTN", "FLEX_ATTENTION"],
     ),
     "xpu": DeviceConfig(
@@ -42,28 +39,29 @@ DEVICE_BACKENDS: dict[str, DeviceConfig] = {
 DEFAULT_MODEL = "Qwen/Qwen3-1.7B"
 TEST_MODEL = os.getenv("VLLM_TEST_MODEL", DEFAULT_MODEL)
 
-# Override backends based on the model architecture.
-config = get_config(TEST_MODEL, trust_remote_code=False)
-if ModelArchConfigConvertorBase(config, config.get_text_config()).is_deepseek_mla():
-    DEVICE_BACKENDS["cuda"] = DeviceConfig(
-        available=DEVICE_BACKENDS["cuda"].available,
-        backends=["TRITON_MLA"]
-        + (["FLASH_ATTN_MLA"] if flash_attn_supports_mla() else []),
-    )
-    DEVICE_BACKENDS["xpu"] = DeviceConfig(
-        available=DEVICE_BACKENDS["xpu"].available,
-        backends=[],
-    )
-# GDN_ATTN is for Qwen3.5 models (model_type="qwen3_5") and
-# Qwen3-Next hybrid models (dual_chunk_attention_config present).
-elif getattr(config, "model_type", "") == "qwen3_5" or (
-    hasattr(config, "dual_chunk_attention_config")
-    and config.dual_chunk_attention_config is not None
-):
-    DEVICE_BACKENDS["cuda"] = DeviceConfig(
-        available=DEVICE_BACKENDS["cuda"].available,
-        backends=["GDN_ATTN"],
-    )
+# Override backends for MLA models (MLA only supported on CUDA).
+if os.getenv("VLLM_TEST_MODEL"):
+    config = get_config(TEST_MODEL, trust_remote_code=False)
+    text_config = config.get_text_config()
+    if ModelArchConfigConvertorBase(config, text_config).is_deepseek_mla():
+        DEVICE_BACKENDS["cuda"] = DeviceConfig(
+            available=DEVICE_BACKENDS["cuda"].available,
+            backends=["TRITON_MLA"]
+            + (["FLASH_ATTN_MLA"] if flash_attn_supports_mla() else []),
+        )
+        DEVICE_BACKENDS["xpu"] = DeviceConfig(
+            available=DEVICE_BACKENDS["xpu"].available,
+            backends=[],
+        )
+    elif getattr(text_config, "model_type", None) == "qwen3_5":
+        # GDN_ATTN is for Qwen3.5/Qwen3.6 models only (auto-selected by arch).
+        # GDN_ATTN is excluded from the default list: it is only valid for
+        # models that use GDN layers (Qwen3.5/Qwen3.6), so we add it only
+        # when the test model is of that type.
+        DEVICE_BACKENDS["cuda"] = DeviceConfig(
+            available=DEVICE_BACKENDS["cuda"].available,
+            backends=["GDN_ATTN"],
+        )
 
 # Only include backends for devices that are actually available.
 BACKENDS: list[str] = sorted(
