@@ -1409,8 +1409,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # (block_tables, seq_lens) directly.
         needs_seq_lens_cpu = self.use_dcp or use_cascade or not all_uses_trtllm
         if needs_seq_lens_cpu:
-            with gpu_sync_allowed():
-                seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
+            if (
+                self.model_config.runner_type == "pooling"
+                and common_attn_metadata.seq_lens_cpu_upper_bound is not None
+            ):
+                # Pooling has no speculative tokens, so this upper bound is exact.
+                seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+            else:
+                with gpu_sync_allowed():
+                    seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
         else:
             seq_lens_cpu = None
 
