@@ -8,7 +8,7 @@ import torch
 
 from vllm.model_executor.layers.fusion.mm_input_norm import (
     FusedMMInputNorm,
-    fused_input_norm_triton,
+    fused_mm_input_norm_triton,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
@@ -482,7 +482,9 @@ class TestFusedMMInputNormKernel:
         b = torch.randn(C, dtype=torch.float32, device=_DEVICE)
 
         out = torch.empty_like(x)
-        fused_input_norm_triton(x, out, w, b, compute_dtype=torch.float32, block=block)
+        fused_mm_input_norm_triton(
+            x, out, w, b, compute_dtype=torch.float32, block=block
+        )
 
         expected = x * w.view(1, C, 1) + b.view(1, C, 1)
         torch.testing.assert_close(out, expected)
@@ -507,7 +509,7 @@ class TestFusedMMInputNormKernel:
         b = torch.randn(C, dtype=torch.float32, device=_DEVICE)
 
         out = torch.empty_like(x)
-        fused_input_norm_triton(x, out, w, b, compute_dtype=torch.float32)
+        fused_mm_input_norm_triton(x, out, w, b, compute_dtype=torch.float32)
 
         expected = x * w.view(1, C, 1) + b.view(1, C, 1)
         torch.testing.assert_close(out, expected)
@@ -528,7 +530,7 @@ class TestFusedMMInputNormKernel:
             dtype=torch.float32,
             device=_DEVICE,
         )
-        fused_input_norm_triton(x, out, w, b, compute_dtype=torch.float32)
+        fused_mm_input_norm_triton(x, out, w, b, compute_dtype=torch.float32)
 
         expected = x * w.view(1, C, 1) + b.view(1, C, 1)
         torch.testing.assert_close(out[:N], expected)
@@ -542,7 +544,7 @@ class TestFusedMMInputNormKernel:
         b = torch.randn(C, dtype=torch.float32, device=_DEVICE)
 
         with pytest.raises(AssertionError):
-            fused_input_norm_triton(
+            fused_mm_input_norm_triton(
                 x,
                 torch.empty(N, C + 1, L, dtype=torch.float32, device=_DEVICE),
                 w,
@@ -550,7 +552,7 @@ class TestFusedMMInputNormKernel:
                 compute_dtype=torch.float32,
             )
         with pytest.raises(AssertionError):
-            fused_input_norm_triton(
+            fused_mm_input_norm_triton(
                 x,
                 torch.empty(N, C, L + 1, dtype=torch.float32, device=_DEVICE),
                 w,
@@ -566,7 +568,7 @@ class TestFusedMMInputNormKernel:
         b = torch.randn(C, dtype=torch.float32, device=_DEVICE)
 
         with pytest.raises(AssertionError):
-            fused_input_norm_triton(x, out, w, b, compute_dtype=torch.float16)
+            fused_mm_input_norm_triton(x, out, w, b, compute_dtype=torch.float16)
 
 
 # ===========================================================================
@@ -640,4 +642,4 @@ class TestFusedMMInputNormConstruction:
             assert input_norm.bias is None
         else:
             assert input_norm.weight.device.type == default_device
-            assert input_norm.bias.device.type == default_device
+            assert input_norm.bias.device.

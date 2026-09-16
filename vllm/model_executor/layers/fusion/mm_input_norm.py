@@ -57,7 +57,7 @@ _ELEMS_PER_THREAD = 8
 
 
 @triton.jit
-def _fused_input_norm_kernel(
+def _fused_mm_input_norm_kernel(
     x_ptr,
     y_ptr,
     w_ptr,
@@ -92,7 +92,7 @@ def _fused_input_norm_kernel(
     )
 
 
-def fused_input_norm_triton(
+def fused_mm_input_norm_triton(
     inputs: torch.Tensor,
     outputs: torch.Tensor,
     weight: torch.Tensor,
@@ -188,7 +188,7 @@ def fused_input_norm_triton(
             num_warps *= 2
 
     # --- dispatch ------------------------------------------------------
-    _fused_input_norm_kernel[grid](
+    _fused_mm_input_norm_kernel[grid](
         inputs,
         outputs,
         weight,
@@ -536,7 +536,7 @@ class FusedMMInputNorm(CustomOp):
             )
         y3 = out_view.view(patches, self.channel, patch_size)
 
-        fused_input_norm_triton(
+        fused_mm_input_norm_triton(
             x3,
             y3,
             self.weight,

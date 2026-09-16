@@ -41,7 +41,7 @@ To accelerate the multi‑modal data pipeline (decoding, resizing, normalisation
 
 Traditionally, the CPU would divide pixel values by 255, then subtract the mean and divide by the standard deviation. We fuse these steps into one operation and run it entirely on the GPU.
 
-`FusedMMInputNorm` implements this via `fused_input_norm_triton`, which applies a single per-channel affine transform:
+`FusedMMInputNorm` implements this via `fused_mm_input_norm_triton`, which applies a single per-channel affine transform:
 
 ```text
 y = x * weight[c] + bias[c]
@@ -71,9 +71,9 @@ The kernel takes raw pixel values (`uint8`), performs one fused multiply-add per
 
 #### Optimized Data Path for Fused Normalisation
 
-The transfer path **Entrypoint → Engine Core → Device Memory** stays in `uint8`. On device, `fused_input_norm_triton` computes in fp32 internally and writes the requested output dtype, `visual_dtype` (commonly `bf16`), directly—without a global fp32 intermediate.
+The transfer path **Entrypoint → Engine Core → Device Memory** stays in `uint8`. On device, `fused_mm_input_norm_triton` computes in fp32 internally and writes the requested output dtype, `visual_dtype` (commonly `bf16`), directly—without a global fp32 intermediate.
 
-Overall path: **`Entrypoint (uint8) → Engine Core (uint8) → Device Memory (uint8)`** → `fused_input_norm_triton` (fp32 compute) → `visual_dtype` output.
+Overall path: **`Entrypoint (uint8) → Engine Core (uint8) → Device Memory (uint8)`** → `fused_mm_input_norm_triton` (fp32 compute) → `visual_dtype` output.
 
 #### Toggle: `mm_device_do_normalize`
 
