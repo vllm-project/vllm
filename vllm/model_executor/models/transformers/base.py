@@ -207,8 +207,7 @@ class Base(
     def _mark_model_components(self, vllm_config: "VllmConfig"):
         """Mark language model and tower submodules as `self.model` is created.
 
-        Nothing to do in `Base`, `MultiModalMixin` will override.
-        """
+        Nothing to do in `Base`, `MultiModalMixin` will override."""
         yield
 
     @cached_property
@@ -281,8 +280,7 @@ class Base(
 
     def _decorate_for_torch_compile(self):
         """Decorate the model's decoder class to indicate to vLLM that it
-        supports torch compile if `can_enable_torch_compile` is True.
-        """
+        supports torch compile if `can_enable_torch_compile` is True."""
         self._decorate_cls_for_torch_compile(
             cls=self._pre_trained_model_classes.decoder,
             # Applied to a PreTrainedModel so the batch dimension will exist

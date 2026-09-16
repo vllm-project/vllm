@@ -153,8 +153,7 @@ def _get_vllm_functorch_config() -> dict[str, Any]:
     """Return the functorch config overrides that vLLM applies at compile time.
 
     Used by both set_functorch_config() and get_inductor_factors() to ensure
-    the compile-time config and cache key are always consistent.
-    """
+    the compile-time config and cache key are always consistent."""
     cfg: dict[str, Any] = {}
     if not envs.VLLM_USE_MEGA_AOT_ARTIFACT:
         cfg["bundled_autograd_cache"] = False

@@ -992,8 +992,7 @@ def _inkling_block(
 ) -> None:
     """Append one Inkling content block; blocks after the first start with
     the ``<|message_model|>`` role token (the first block continues the
-    generation prompt directly).
-    """
+    generation prompt directly)."""
     if segs:
         segs.append(("<|message_model|>", True))
     segs.append((kind_token, True))

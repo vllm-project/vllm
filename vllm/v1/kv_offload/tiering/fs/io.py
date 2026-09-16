@@ -139,8 +139,7 @@ def _load_block(
 ) -> None:
     """Read one KV block from disk; remove the file only on a provable short
     read (a too-short file is genuine corruption) and leave it untouched on any
-    other error.
-    """
+    other error."""
     fd: int | None = None
     view_slice = view.cast("B")[offset : offset + block_size]
     o_direct = O_DIRECT if use_o_direct else 0
