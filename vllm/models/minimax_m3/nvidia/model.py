@@ -790,6 +790,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
 
 class MiniMaxM3Model(nn.Module, EagleModelMixin):
     fall_back_to_pt_during_load = False
+    supports_aux_hidden_states_over_pp = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -880,9 +881,18 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        # EAGLE3 is not yet compatible with pipeline parallel
-        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
-        for idx, layer in enumerate(self.layers[self.start_layer : self.end_layer]):
+        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
+        aux_hidden_states: list[torch.Tensor] = []
+        if get_pp_group().is_first_rank:
+            self._maybe_add_hidden_state(
+                aux_hidden_states, self.start_layer, hidden_states, residual
+            )
+            # Preserve the entry tap before in-place residual updates.
+            if aux_hidden_states:
+                aux_hidden_states[0] = aux_hidden_states[0].clone()
+        for idx, layer in enumerate(
+            self.layers[self.start_layer : self.end_layer], start=self.start_layer
+        ):
             hidden_states, residual = layer(positions, hidden_states, residual)
             self._maybe_add_hidden_state(
                 aux_hidden_states, idx + 1, hidden_states, residual
@@ -890,7 +900,11 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+                {
+                    "hidden_states": hidden_states,
+                    "residual": residual,
+                    **self.pack_local_aux_hidden_states(aux_hidden_states),
+                }
             )
 
         if self.fuse_final_norm_allreduce:
@@ -900,6 +914,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         else:
             hidden_states, _ = self.norm(hidden_states, residual)
 
+        aux_hidden_states = remote_aux + aux_hidden_states
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states
