@@ -544,7 +544,6 @@ async def test_streaming_multi_turn_token_counting():
 @pytest.mark.asyncio
 async def test_streaming_message_synchronization():
     """Completed messages from append-local and flush segments sync into context."""
-
     # Create a streaming context with some initial messages
     initial_messages = [
         Message(

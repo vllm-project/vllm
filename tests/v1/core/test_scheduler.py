@@ -295,7 +295,7 @@ def test_schedule_multimodal_requests():
 
 
 def test_async_scheduling_pp_allows_rescheduling_with_output_placeholders():
-    """Async scheduling + PP: allow multi-step in-flight scheduling per request"""
+    """Async scheduling + PP: allow multi-step in-flight scheduling per request."""
     scheduler = create_scheduler(async_scheduling=True, pipeline_parallel_size=2)
     (req,) = create_requests(num_requests=1, num_tokens=8)
     scheduler.add_request(req)
@@ -785,7 +785,7 @@ def test_update_from_output_routes_sampling_masks_by_request():
 
 
 def test_stop_via_update_from_output():
-    """Test stopping behavior through update_from_output"""
+    """Test stopping behavior through update_from_output."""
     scheduler = create_scheduler(num_speculative_tokens=1)
 
     # Test case 1: Stop on EOS token
@@ -2130,7 +2130,6 @@ def _assert_right_scheduler_output(
     expected_num_scheduled_tokens: int,
 ):
     """Check if SchedulerOutput is correct after remote KV cache hit."""
-
     # We should inject the kv_connector_metadata.
     assert len(output.kv_connector_metadata.requests) == num_requests
 
@@ -2148,7 +2147,6 @@ def _assert_right_kv_cache_manager(
     num_total_blocks: int,
 ):
     """Check whether KVCacheManager is correct after allocate."""
-
     # Make sure the request stats are right.
     EXPECTED_TOTAL_BLOCKS = num_tokens // block_size
     for req in requests:
@@ -2179,7 +2177,6 @@ def _step_until_done(
     model_runner_output: ModelRunnerOutput,
 ):
     """Loop over schedule(), update_from_output() until finished."""
-
     all_finished = False
     _ = scheduler.update_from_output(output, model_runner_output)
     while not all_finished:
@@ -2207,7 +2204,6 @@ def _num_waiting_requests(scheduler: Scheduler) -> int:
 
 def _step_until_kv_transfer_finished(scheduler: Scheduler, req_ids: list[str]):
     """Cycle requests through a KV transfer cycle."""
-
     # Requests should first transition to WAITING_FOR_REMOTE_KVS
     output = scheduler.schedule()
     assert _num_waiting_requests(scheduler) == len(req_ids)
@@ -2291,11 +2287,9 @@ def test_has_sync_kv_loads(
 
 @pytest.mark.parametrize("is_async", [False, True])
 def test_kv_connector_basic(is_async: bool):
-    """
-    Test whether Scheduler with KVConnector schedules tokens, allocates
+    """Test whether Scheduler with KVConnector schedules tokens, allocates
     memory, and cleans up requests as expected under normal operation.
     """
-
     # Setup Scheduler.
     BLOCK_SIZE = 16
     NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE * 2
@@ -2420,11 +2414,9 @@ def test_kv_connector_basic(is_async: bool):
 @pytest.mark.parametrize("is_async", [False, True])
 @pytest.mark.parametrize("local_cache_hits", [False, True])
 def test_external_prefix_cache_metrics(is_async: bool, local_cache_hits: bool):
-    """
-    Verify connector prefix cache metrics are updated
+    """Verify connector prefix cache metrics are updated
     correctly when the scheduler processes requests with KV connector hits.
     """
-
     BLOCK_SIZE = 16
     if local_cache_hits:
         NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE * 2  # 32 tokens
@@ -2540,11 +2532,9 @@ def test_external_prefix_cache_metrics(is_async: bool, local_cache_hits: bool):
     "use_ec_connector, ec_role", [(False, None), (True, "ec_consumer")]
 )
 def test_kv_connector_unable_to_allocate(use_ec_connector, ec_role):
-    """
-    Test whether scheduler with KVConnector is able to handle
+    """Test whether scheduler with KVConnector is able to handle
     unable to allocate (run out of blocks in allocate_slots().
     """
-
     # Setup Scheduler With Mock External Cache Hit.
     BLOCK_SIZE = 4
     NUM_BLOCKS = 10
@@ -2627,11 +2617,9 @@ def test_kv_connector_unable_to_allocate(use_ec_connector, ec_role):
 def test_kv_connector_handles_preemption(
     is_async, use_ec_connector, ec_role, use_v2_model_runner
 ):
-    """
-    Test whether scheduler with KVConnector is able to handle
+    """Test whether scheduler with KVConnector is able to handle
     unable to allocate (run out of blocks in allocate_slots().
     """
-
     # Setup Scheduler With Mock External Cache Hit.
     BLOCK_SIZE = 2
     # NOTE: there is 1 null block, so this is 6 blocks.
@@ -2842,7 +2830,6 @@ def assert_scheduler_empty(scheduler: Scheduler):
 
 def test_memory_leak():
     """Test that we do not have a memory leak."""
-
     scheduler = create_scheduler(enable_prefix_caching=True)
 
     NUM_REQUESTS = 5
@@ -2899,6 +2886,7 @@ def create_scheduler_with_priority(
 
     Returns:
       {class}`Scheduler` instance with priority scheduling
+
     """
     model_config = ModelConfig(
         model=model,
@@ -3987,7 +3975,7 @@ def _assert_right_ec_connector_metadata(
     output: SchedulerOutput,
     mm_features_list: list[MultiModalFeatureSpec],
 ):
-    """Verify that ECConnector metadata EXACTLY matches the input MM data"""
+    """Verify that ECConnector metadata EXACTLY matches the input MM data."""
     # Get the connector metadata
     metadata = output.ec_connector_metadata
 
@@ -4018,7 +4006,6 @@ def _assert_right_encoder_inputs(
     """Verify that requests/mm_hashes should (not) in scheduled encoder input
     If check_exist is False, this function returns True
     if requests are NOT in encoder inputs"""
-
     # Get the scheduled encoder inputs
     # NOTE: scheduled_encoder_inputs is a dictionary with request id as key
     scheduled_encoder_inputs = output.scheduled_encoder_inputs
@@ -4527,11 +4514,9 @@ def test_ec_connector_schedule_multiple_requests(cache_exist, use_kv_connector):
 
 @pytest.mark.parametrize("use_kv_connector", [False, True])
 def test_ec_connector_unable_to_allocate(use_kv_connector):
-    """
-    Test whether scheduler with ECConnector is able to handle
+    """Test whether scheduler with ECConnector is able to handle
     unable to allocate (run out of blocks).
     """
-
     # Setup Scheduler With Mock External Cache Hit.
     BLOCK_SIZE = 4
     NUM_BLOCKS = 10
@@ -4860,8 +4845,7 @@ def test_priority_scheduling_ec_connector_preemption_and_resumption(
 
 @pytest.mark.parametrize("use_kv_connector", [False, True])
 def test_ec_connector_allocate_encoder_tokens_with_external_load(use_kv_connector):
-    """
-    Scenario:
+    """Scenario:
       - Encoder cache size: 32
       - Request A: 1 feature (12 tokens) → NOT cached remotely.
       - Request B: 3 features (3 x 10 tokens) → ALL cached remotely.

@@ -1835,6 +1835,7 @@ class rocm_aiter_ops:
         - MLA decode: mla_decode_fwd
         - Quantization: per_tensor_quant, per_token_quant, group_fp8_quant
         - Triton ops: triton_rotary_embed, triton_fp8_bmm, triton_gemm_a8w8_blockscale
+
     """
 
     _MOE_DISPATCH_POLICY: int | None = None
@@ -1874,8 +1875,7 @@ class rocm_aiter_ops:
 
     @classmethod
     def refresh_env_variables(cls):
-        """
-        Since the environment variables are assigned when the module is imported,
+        """Since the environment variables are assigned when the module is imported,
         This is a helper function to reload all the env variables from
         the environment variables.
         for example, after monkey patching the env variables in the unit test,
@@ -1900,8 +1900,7 @@ class rocm_aiter_ops:
 
     @staticmethod
     def get_aiter_activation_type(activation_str: str) -> "ActivationType | None":
-        """
-        Given an activation type as a string, returns the corresponding aiter ActivationType enum.
+        """Given an activation type as a string, returns the corresponding aiter ActivationType enum.
         Supported activation types: "no", "none", "silu", "gelu", "swiglu".
         Returns None if the mapping fails.
 
@@ -1910,6 +1909,7 @@ class rocm_aiter_ops:
 
         Returns:
             Aiter ActivationType enum value, or None if not found.
+
         """
         # Import only locally, since aiter may not always be available.
         try:
@@ -1933,8 +1933,7 @@ class rocm_aiter_ops:
 
     @staticmethod
     def get_aiter_quant_type(quant_type_str: str) -> "QuantType | None":
-        """
-        Given a quantization type as a string, returns the corresponding aiter QuantType enum.
+        """Given a quantization type as a string, returns the corresponding aiter QuantType enum.
         Supported quantization types: "no", "per_tensor", "per_token", "per_1x32", "per_1x128", "per_128x128".
         Returns None if the mapping fails.
 
@@ -1943,6 +1942,7 @@ class rocm_aiter_ops:
 
         Returns:
             Aiter QuantType enum value, or None if not found.
+
         """
         try:
             from aiter import QuantType
@@ -3357,8 +3357,7 @@ class rocm_aiter_ops:
         nLane: int,
         gate_up: bool,
     ) -> "torch.Tensor":
-        """
-        Shuffles the weight tensor into (A16W4) layout for AITER kernels.
+        """Shuffles the weight tensor into (A16W4) layout for AITER kernels.
 
         Args:
             tensor: The input weight tensor to be shuffled.
@@ -3367,6 +3366,7 @@ class rocm_aiter_ops:
 
         Returns:
             torch.Tensor: The shuffled tensor.
+
         """
         from aiter.ops.shuffle import shuffle_weight_a16w4
 
@@ -3378,8 +3378,7 @@ class rocm_aiter_ops:
         num_experts: int,
         gate_up: bool,
     ) -> "torch.Tensor":
-        """
-        Shuffles the scale tensor into (A16W4) layout for AITER kernels.
+        """Shuffles the scale tensor into (A16W4) layout for AITER kernels.
 
         Args:
             tensor: The input scale tensor to be shuffled.
@@ -3388,6 +3387,7 @@ class rocm_aiter_ops:
 
         Returns:
             torch.Tensor: The shuffled scale tensor.
+
         """
         from aiter.ops.shuffle import shuffle_scale_a16w4
 
@@ -3404,8 +3404,7 @@ class rocm_aiter_ops:
     def shuffle_weights(
         *tensors: torch.Tensor, layout: tuple[int, int] = (16, 16)
     ) -> tuple[torch.Tensor, ...]:
-        """
-        Applies shuffle_weight function from AITER to each
+        """Applies shuffle_weight function from AITER to each
         input tensor and returns them.
 
         Rearranges (shuffles) the input tensor/s
@@ -3418,6 +3417,7 @@ class rocm_aiter_ops:
 
         Returns:
         A Tuple of shuffled tensors.
+
         """
         from aiter.ops.shuffle import shuffle_weight
 
@@ -3467,8 +3467,7 @@ class rocm_aiter_ops:
         out: torch.Tensor | None = None,
         sink_ptr: torch.Tensor | None = None,
     ):
-        """
-        Flash attention with variable length sequences.
+        """Flash attention with variable length sequences.
 
         This function is NOT wrapped with @is_aiter_supported decorator
         to allow explicit backend selection via attention_config to work
@@ -3537,8 +3536,7 @@ class rocm_aiter_ops:
         V_QScale: torch.Tensor,
         out_: torch.Tensor,
     ):
-        """
-        Paged attention forward pass using assembly kernel.
+        """Paged attention forward pass using assembly kernel.
 
         This function is NOT wrapped with @is_aiter_supported decorator
         to allow explicit backend selection via attention_config to work
@@ -3580,8 +3578,7 @@ class rocm_aiter_ops:
         out_: torch.Tensor,
         kv_cache_dtype: str,
     ):
-        """
-        Paged attention common function.
+        """Paged attention common function.
 
         This function is NOT wrapped with @is_aiter_supported decorator
         to allow explicit backend selection via attention_config to work
@@ -3625,8 +3622,7 @@ class rocm_aiter_ops:
         norm_weight: torch.Tensor | None = None,
         norm_eps: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Forward pass for mHC pre block.
+        """Forward pass for mHC pre block.
 
         Args:
             residual: shape (..., hc_mult, hidden_size), dtype torch.bfloat16
@@ -3645,6 +3641,7 @@ class rocm_aiter_ops:
             post_mix: shape (..., hc_mult), dtype torch.float32
             comb_mix: shape (..., hc_mult, hc_mult), dtype torch.float32
             layer_input: shape (..., hidden_size), dtype torch.bfloat16
+
         """
         from aiter.ops.mhc import mhc_pre
 
@@ -3735,7 +3732,7 @@ class rocm_aiter_ops:
         comb_res_mix: torch.Tensor | None = None,
         residual_out: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """mHC pre using the pre-mix carried from the previous sublayer.
+        """MHC pre using the pre-mix carried from the previous sublayer.
 
         Same gates as :meth:`mhc_pre`, but the stream collapse applies the
         caller's ``pre_mix`` instead of the one computed here, and the one
@@ -3762,6 +3759,7 @@ class rocm_aiter_ops:
             comb_mix: shape (..., hc_mult, hc_mult), dtype torch.float32
             layer_input: shape (..., hidden_size), dtype torch.bfloat16
             next_pre_mix: shape (..., hc_mult), dtype torch.float32
+
         """
         from aiter.ops.mhc import (
             get_mhc_fused_post_pre_config,

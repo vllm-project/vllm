@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for TieringOffloadingManager and ExampleSecondaryTierManager.
+"""Unit tests for TieringOffloadingManager and ExampleSecondaryTierManager.
 
 These tests verify:
 1. Basic tiered offloading operations (store, load, lookup)
