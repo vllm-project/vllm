@@ -510,6 +510,15 @@ impl EngineCoreClient {
         self.engines.iter().map(|engine| engine.ready_response.num_gpu_blocks).sum()
     }
 
+    /// Return the effective attention block size if all engines report the same value.
+    pub fn effective_attention_block_size(&self) -> Option<u64> {
+        let size = self.ready_response().effective_attention_block_size?;
+        self.engines
+            .iter()
+            .all(|engine| engine.ready_response.effective_attention_block_size == Some(size))
+            .then_some(size)
+    }
+
     /// Return the minimum engine-reported `max_model_len` across all engines.
     ///
     /// This is the auto-fitted value after KV cache profiling and may differ
