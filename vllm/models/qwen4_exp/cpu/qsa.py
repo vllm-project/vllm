@@ -236,6 +236,8 @@ class Qwen4ExpQSACPUAttentionImpl(AttentionImpl):
         return output
 
 
+# TODO(refactor): Hoist the shared QSA owner lifecycle once attention metadata
+# and cache-layout handling are supplied by backend-local hooks.
 class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
     """Merged Qwen full-attention owner with a CPU QSA side branch."""
 

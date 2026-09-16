@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Model-runner state for Qwen4Exp PLE inputs."""
 
+# TODO(refactor): Share this state implementation once sliced CPU buffers and
+# fixed-capacity accelerator graph buffers have a common contract.
+
 from typing import Any
 
 import torch

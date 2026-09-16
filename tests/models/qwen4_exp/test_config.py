@@ -158,6 +158,7 @@ def test_qwen4_exp_rejects_pipeline_parallel_only_with_ple(ple_layer_ids) -> Non
     )
     with (
         patch.object(Qwen3_5ForConditionalGenerationConfig, "verify_and_update_config"),
+        # This platform-neutral validation is exercised with CPU-host tensors.
         patch.object(current_platform, "is_cpu", return_value=False),
     ):
         if ple_layer_ids:

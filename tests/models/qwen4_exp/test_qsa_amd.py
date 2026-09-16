@@ -140,6 +140,7 @@ def test_qsa_selection_uses_portable_topk_on_rocm(
         "qsa_mqa_paged",
         lambda *args, **kwargs: (logits, visible_blocks),
     )
+    # CPU-host tensors exercise ROCm's portable non-CUDA selection path.
     monkeypatch.setattr(qsa_ops.current_platform, "is_cuda", lambda: False)
 
     def top_k_per_row_decode(

@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU Triton HyperConnection kernels for Qwen4Exp."""
 
+# TODO(refactor): Share the HC kernel math once launch hooks cover CUDA PDL,
+# Triton-CPU thread configuration, and backend-local custom-op registration.
+
 import torch
 
 from vllm.triton_utils import tl, triton
