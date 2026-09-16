@@ -580,7 +580,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         if num_prefills > 0:
             request_rows = list(range(m.num_reqs))
             if spec_sequence_masks_cpu is not None:
-                request_rows = (~spec_sequence_masks_cpu).nonzero().flatten().tolist()
+                request_rows = non_spec_sequence_masks_cpu.nonzero().flatten().tolist()
             checkpoint = self._build_checkpoint_metadata(m, request_rows)
 
         attn_metadata = GDNAttentionMetadata(
