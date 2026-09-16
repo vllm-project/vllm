@@ -20,15 +20,19 @@ def test_align_hybrid_block_size_is_stable_across_tp(monkeypatch):
         def get_supported_kernel_block_sizes():
             return [MultipleOf(32)]
 
+        @staticmethod
+        def customize_spec(spec):
+            # Identity, matching AttentionBackend's default. This backend has
+            # no packing requirements; alignment is what's under test.
+            return spec
+
     class _FakeModelCls:
         global_mamba_page_size = 32776
 
         @staticmethod
         def get_mamba_state_shape_from_config(vllm_config):
             tp_size = vllm_config.parallel_config.tensor_parallel_size
-            return ((
-                _FakeModelCls.global_mamba_page_size // 2 // tp_size,
-            ),)
+            return ((_FakeModelCls.global_mamba_page_size // 2 // tp_size,),)
 
         @staticmethod
         def get_mamba_state_dtype_from_config(vllm_config):
@@ -49,8 +53,7 @@ def test_align_hybrid_block_size_is_stable_across_tp(monkeypatch):
         def get_num_kv_heads(self, parallel_config):
             return max(
                 1,
-                self.get_total_num_kv_heads()
-                // parallel_config.tensor_parallel_size,
+                self.get_total_num_kv_heads() // parallel_config.tensor_parallel_size,
             )
 
         def get_mamba_chunk_size(self):
