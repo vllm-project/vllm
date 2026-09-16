@@ -471,10 +471,18 @@ def make_builder(
     builder_cls: type[
         DeepseekSparseSWAMetadataBuilder
     ] = DeepseekSparseSWAMetadataBuilder,
+    mm_prefix_clamp_sliding_window: bool = True,
 ) -> DeepseekSparseSWAMetadataBuilder:
     overrides: dict = {"sliding_window": window}
     if vision:
-        overrides.update(vision_n_layers=2, vision_max_n_token=max_image_tokens)
+        # Emulate the V4 vision config, whose mm_prefix_clamp_sliding_window
+        # gates the in-kernel SWA widening. V4.1 (causal image tokens) leaves
+        # it off.
+        overrides.update(
+            vision_n_layers=2,
+            vision_max_n_token=max_image_tokens,
+            mm_prefix_clamp_sliding_window=mm_prefix_clamp_sliding_window,
+        )
     vllm_config = create_vllm_config(
         model_name=model_name,
         max_model_len=4096,
@@ -593,22 +601,13 @@ def test_builder_text_model_unchanged():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("compress_ratio", [0, 1, 2])
 @pytest.mark.parametrize("query_len", [100, 4000])
-def test_v41_image_prefill_uses_causal_swa(compress_ratio, query_len, tmp_path):
+def test_v41_image_prefill_uses_causal_swa(compress_ratio, query_len):
     """V4.1 image tokens use the same causal SWA as text, including in chunks."""
-    from transformers import LlamaConfig
-
     from vllm.models.deepseek_v41.common.ops.cache_utils import (
         combine_topk_swa_indices as combine_v41,
     )
     from vllm.models.deepseek_v41.sparse_mla import DeepseekV41SparseSWAMetadataBuilder
-    from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
 
-    config = DeepseekV41Config(vision_config={"num_hidden_layers": 2})
-    LlamaConfig(
-        architectures=["LlamaForCausalLM"],
-        max_position_embeddings=4096,
-        is_mm_prefix_lm=config.is_mm_prefix_lm,
-    ).save_pretrained(tmp_path)
     seq_len, window, max_image_tokens = 4000, 128, 2048
     spans = [(1900, 3947)]
     builder = make_builder(
@@ -616,9 +615,10 @@ def test_v41_image_prefill_uses_causal_swa(compress_ratio, query_len, tmp_path):
         window,
         max_image_tokens,
         query_len,
-        str(tmp_path),
         builder_cls=DeepseekV41SparseSWAMetadataBuilder,
+        mm_prefix_clamp_sliding_window=False,
     )
+    assert builder.max_image_tokens == 0
     md = build_metadata(builder, [seq_len], [query_len], {0: spans})
     assert md.prefill_left_visible is None
     assert md.prefill_right_visible is None
@@ -640,9 +640,6 @@ def test_v41_image_prefill_uses_causal_swa(compress_ratio, query_len, tmp_path):
         0,
         m,
         n,
-        left_visible=md.prefill_left_visible,
-        right_visible=md.prefill_right_visible,
-        max_image_tokens=builder.max_image_tokens,
     )
     indices, lens = indices.cpu(), lens.cpu().tolist()
     paged_indices = md.prefill_swa_indices.cpu()

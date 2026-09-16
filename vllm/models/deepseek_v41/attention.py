@@ -250,8 +250,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         self.n_groups = config.o_groups
         self.n_local_groups = self.n_groups // tp_size
         self.window_size = config.sliding_window
-        # V4.1 image tokens use the same causal SWA window as text tokens.
-        self.max_image_tokens = 0
         # ---- v4.1 sparse-attention topology ----
         # compress_ratios has one entry per layer (MTP layers included):
         # 0 = pure sliding window, 1 = full-length compressed cache,
@@ -517,7 +515,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             _COMPUTE_SWA_INDICES_AND_LENS_KERNEL.register_warmup(
                 window_size=self.window_size,
                 block_size=self.swa_cache_layer.block_size,
-                max_image_tokens=self.max_image_tokens,
             )
 
             if self.compress_ratio > 1:

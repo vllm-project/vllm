@@ -449,14 +449,15 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         assert hasattr(hf_config, "sliding_window")
         self.window_size = hf_config.sliding_window
 
-        # Vision variant: image spans (up to vision_max_n_token tokens) are
+        # V4 vision variant: image spans (up to vision_max_n_token tokens) are
         # visible bidirectionally, so prefill index rows widen from
-        # window_size to window_size + max_image_tokens. Text-only models keep
-        # max_image_tokens == 0 and take the original code paths everywhere.
+        # window_size to window_size + max_image_tokens. The V4 config sets
+        # mm_prefix_clamp_sliding_window exactly for these in-kernel-widened
+        # ranges; V4.1 image tokens use the plain causal window, and text-only
+        # models keep max_image_tokens == 0 everywhere.
         self.max_image_tokens = (
             getattr(hf_config, "vision_max_n_token", 0)
-            if getattr(hf_config, "is_mm_prefix_lm", True)
-            and getattr(hf_config, "vision_n_layers", 0) > 0
+            if getattr(hf_config, "mm_prefix_clamp_sliding_window", False)
             else 0
         )
         self.prefill_index_width = self.window_size + self.max_image_tokens
