@@ -587,34 +587,3 @@ def warp_sum_specialized(
                     mask_and_clamp=31,
                 )
     return value
-
-
-@cute.jit
-def block_sum_specialized(
-    value: Float32,
-    warp_sums: cute.Tensor,
-    tidx: Int32,
-    warps: cutlass.Constexpr[int],
-    last_warp_lanes: cutlass.Constexpr[int],
-    last_warp_mask: cutlass.Constexpr[int],
-) -> Float32:
-    """Upstream-equivalent FP32 block reduction."""
-
-    lane = cute.arch.lane_idx()
-    warp_idx = cute.arch.warp_idx()
-    value = warp_sum_specialized(
-        value, warp_idx, lane, warps, last_warp_lanes, last_warp_mask
-    )
-    if lane == 0:
-        warp_sums[warp_idx] = value
-    cute.arch.barrier()
-
-    block_sum = Float32(0.0)
-    if warp_idx == 0:
-        if lane < Int32(warps):
-            block_sum = warp_sums[lane]
-        block_sum = cute.arch.warp_reduction_sum(block_sum)
-        if lane == 0:
-            warp_sums[0] = block_sum
-    cute.arch.barrier()
-    return warp_sums[0]
