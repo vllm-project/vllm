@@ -29,6 +29,14 @@ from .yarn_scaling_rope import YaRNScalingRotaryEmbedding
 _ROPE_DICT: dict[tuple[Any, ...], RotaryEmbedding] = {}
 
 
+def _make_hashable(val: Any) -> Any:
+    if isinstance(val, dict):
+        return tuple(sorted((k, _make_hashable(v)) for k, v in val.items()))
+    if isinstance(val, list):
+        return tuple(_make_hashable(v) for v in val)
+    return val
+
+
 def get_rope(
     head_size: int,
     max_position: int,
@@ -40,22 +48,18 @@ def get_rope(
     if dtype is None:
         dtype = torch.get_default_dtype()
     if rope_parameters is not None:
-        # Transforms every value that is a list into a tuple for caching calls
-        rope_parameters_tuple = {
-            k: tuple(v) if isinstance(v, list) else v
-            for k, v in rope_parameters.items()
-        }
-        rope_parameters_args = tuple(rope_parameters_tuple.items())
+        rope_parameters_args = _make_hashable(rope_parameters)
     else:
         rope_parameters_args = None
 
     if dual_chunk_attention_config is not None:
-        dual_chunk_attention_tuple = {
-            k: tuple(v) if isinstance(v, list) else v
-            for k, v in dual_chunk_attention_config.items()
-            if k != "sparse_attention_config"
-        }
-        dual_chunk_attention_args = tuple(dual_chunk_attention_tuple.items())
+        dual_chunk_attention_args = _make_hashable(
+            {
+                k: v
+                for k, v in dual_chunk_attention_config.items()
+                if k != "sparse_attention_config"
+            }
+        )
     else:
         dual_chunk_attention_args = None
 
