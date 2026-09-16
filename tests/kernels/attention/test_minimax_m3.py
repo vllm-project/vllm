@@ -1016,9 +1016,14 @@ def test_decode_index_topk_correctness(
 
 
 def _decode_topk_boundary_inputs(
-    decode_query_len: int, *, tied: bool = False, score_sign: int = 1
+    decode_query_len: int,
+    *,
+    num_heads: int = 2,
+    max_blocks: int = 17,
+    tied: bool = False,
+    score_sign: int = 1,
 ):
-    num_heads, max_blocks, topk = 2, 17, 6
+    topk = 6
     total_q = 3 * decode_query_len
     seq_lens = torch.tensor(
         (max_blocks * BLOCK_SIZE - 1, 129, 0), device="cuda", dtype=torch.int32
@@ -1030,7 +1035,7 @@ def _decode_topk_boundary_inputs(
         scores = scores // 5
     cache = torch.zeros(3, max_blocks, BLOCK_SIZE, 16, device="cuda")
     cache[..., 0] = score_sign * scores[None, :, None]
-    cache[:, 14, :, 0] = float("nan")
+    cache[:, -3, :, 0] = float("nan")
     output_storage = torch.full(
         (total_q + 2, num_heads, 2 * topk), -2, device="cuda", dtype=torch.int32
     )
@@ -1057,10 +1062,12 @@ def _decode_topk_boundary_inputs(
 
 
 @pytest.mark.parametrize("decode_query_len", [1, 4])
+@pytest.mark.parametrize("num_heads", [1, 2, 4])
+@pytest.mark.parametrize("max_blocks", [17, 33])
 def test_decode_index_topk_nan_forced_blocks_and_strides(
-    decode_query_len: int, monkeypatch
+    decode_query_len: int, num_heads: int, max_blocks: int, monkeypatch
 ):
-    """Keep forced blocks, discard a NaN candidate, and preserve output padding."""
+    """Preserve strided token-major storage with one or many selector producers."""
     from vllm.models.minimax_m3.common.ops import index_topk
 
     score = index_topk.minimax_m3_index_decode_score
@@ -1075,11 +1082,15 @@ def test_decode_index_topk_nan_forced_blocks_and_strides(
     monkeypatch.setattr(
         index_topk, "minimax_m3_index_decode_score", score_with_poisoned_counter
     )
-    kwargs, output_storage = _decode_topk_boundary_inputs(decode_query_len)
+    kwargs, output_storage = _decode_topk_boundary_inputs(
+        decode_query_len, num_heads=num_heads, max_blocks=max_blocks
+    )
     actual = minimax_m3_index_decode(**kwargs)
     expected = torch.full_like(actual, -1)
     expected[:, :decode_query_len] = torch.tensor(
-        (0, 1, 12, 13, 15, 16), device="cuda", dtype=torch.int32
+        (0, 1, max_blocks - 5, max_blocks - 4, max_blocks - 2, max_blocks - 1),
+        device="cuda",
+        dtype=torch.int32,
     )
     for offset in range(decode_query_len):
         num_blocks = (129 - decode_query_len + offset + BLOCK_SIZE) // BLOCK_SIZE
@@ -1089,27 +1100,36 @@ def test_decode_index_topk_nan_forced_blocks_and_strides(
     assert torch.equal(actual.sort(dim=-1).values, expected.sort(dim=-1).values)
     assert torch.all(output_storage[..., 1::2] == -2)
     assert torch.all(output_storage[-2:, :, ::2] == -2)
-    assert torch.isnan(kwargs["score_out"][..., 17:]).all()
+    assert torch.isnan(kwargs["score_out"][..., max_blocks:]).all()
     assert len(counters) == 1
     assert torch.count_nonzero(counters[0]) == 0
 
 
 @pytest.mark.parametrize("use_graph", [False, True])
-def test_decode_index_topk_concurrent_calls_and_replay(use_graph: bool):
+@pytest.mark.parametrize(
+    "max_blocks,tied_ids", [(17, (10, 11, 12, 13)), (33, (25, 26, 27, 28, 29))]
+)
+def test_decode_index_topk_concurrent_calls_and_replay(
+    use_graph: bool, max_blocks: int, tied_ids: tuple[int, ...]
+):
     """Calls preserve valid tied-cutoff selections and ordering across streams."""
     inputs = [
-        _decode_topk_boundary_inputs(4, tied=True, score_sign=sign)[0]
+        _decode_topk_boundary_inputs(
+            4, max_blocks=max_blocks, tied=True, score_sign=sign
+        )[0]
         for sign in (1, -1)
     ]
     expected = [minimax_m3_index_decode(**kwargs).clone() for kwargs in inputs]
-    for actual, tied_ids in zip(expected, ((10, 11, 12, 13), (2, 3, 4))):
+    for actual, allowed_tied_ids in zip(expected, (tied_ids, (2, 3, 4))):
         full = actual[:, :4]
         allowed = torch.tensor(
-            (0, 1, *tied_ids, 15, 16), dtype=full.dtype, device=full.device
+            (0, 1, *allowed_tied_ids, max_blocks - 2, max_blocks - 1),
+            dtype=full.dtype,
+            device=full.device,
         )
         assert torch.isin(full, allowed).all()
         assert (full.sort(dim=-1).values.diff(dim=-1) > 0).all()
-        for forced in (0, 1, 15, 16):
+        for forced in (0, 1, max_blocks - 2, max_blocks - 1):
             assert (full == forced).any(dim=-1).all()
     torch.accelerator.synchronize()
     streams = [torch.cuda.Stream(), torch.cuda.Stream()]
