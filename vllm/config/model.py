@@ -1185,6 +1185,16 @@ class ModelConfig:
         runner: RunnerOption,
         convert: ConvertOption,
     ) -> RunnerType:
+        """Determine the runner type based on runner options and architecture.
+
+        Args:
+            architectures: List of model architecture names.
+            runner: The specified runner option ("auto", "generate", etc.).
+            convert: The specified model convert option.
+
+        Returns:
+            The resolved RunnerType.
+        """
         if runner != "auto":
             return runner
 
