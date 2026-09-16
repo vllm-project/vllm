@@ -199,13 +199,7 @@ MAX_HOST_REGISTER_CHUNK_BYTES = 64 * 1024**3
 
 
 def pin_mmap_region(region: SharedOffloadRegion) -> None:
-    """Register the mmap as CUDA pinned memory, one chunk at a time.
-
-    Chunks end on block-row boundaries, which are page aligned, so neither the
-    driver's page rounding nor any single block transfer straddles two
-    registrations. Registration is all or nothing: a failed chunk unregisters
-    the chunks before it, so ``region.is_pinned`` means the whole region.
-    """
+    """Register row-aligned chunks, rolling back on failure."""
     if not current_platform.is_cuda_alike():
         logger.info(
             "Skipping mmap host registration on %s; cudaHostRegister is only "
@@ -228,6 +222,9 @@ def pin_mmap_region(region: SharedOffloadRegion) -> None:
 
     base_ptr = region._base.data_ptr()
     total_size = region.total_size_bytes
+    # Chunks end on block-row boundaries, which are page aligned, so neither the
+    # driver's page rounding nor any single block transfer straddles two
+    # registrations.
     rows_per_chunk = max(MAX_HOST_REGISTER_CHUNK_BYTES // region._row_stride, 1)
     chunk_size = rows_per_chunk * region._row_stride
 

@@ -789,36 +789,18 @@ def test_cleanup_unregisters_every_pinned_chunk(iid, monkeypatch):
     ]
 
 
-class _FakeCudaRT:
-    """Records the host registrations made through CudaRTLibrary."""
-
-    def __init__(self):
-        self.fail_at: int | None = None
-        self.calls: list[tuple] = []
-
-    def cudaHostRegister(self, ptr: int, size: int, flags: int = 0) -> int:
-        self.calls.append(("register", ptr, size))
-        registers = sum(c[0] == "register" for c in self.calls)
-        return 2 if self.fail_at is not None and registers > self.fail_at else 0
-
-    def cudaHostUnregister(self, ptr: int) -> int:
-        self.calls.append(("unregister", ptr))
-        return 0
-
-    def cudaGetLastError(self) -> int:
-        self.calls.append(("drain",))
-        return 2
-
-
 @pytest.fixture
 def host_register(monkeypatch):
     """Pretend to run on CUDA with host registrations capped at seven pages.
 
-    Registration goes to a fake CudaRTLibrary and the region's cleanup to a
-    separate fake torch runtime. Both stay installed through the cleanup that
+    Registration goes to a mock CudaRTLibrary and the region's cleanup to a
+    separate mock torch runtime. Both stay installed through the cleanup that
     ``_region`` runs on exit.
     """
-    cudart = _FakeCudaRT()
+    cudart = MagicMock()
+    cudart.cudaHostRegister.return_value = 0
+    cudart.cudaHostUnregister.return_value = 0
+    cudart.cudaGetLastError.return_value = 2
     torch_cudart = MagicMock()
     torch_cudart.cudaHostUnregister.return_value = MagicMock(value=0)
     monkeypatch.setattr(gpu_worker.current_platform, "is_cuda_alike", lambda: True)
@@ -835,10 +817,10 @@ def test_pin_mmap_region_registers_row_aligned_chunks(iid, host_register):
     with _region(iid, num_chunks=5, cpu_page_size=3 * PAGE_SIZE) as region:
         gpu_worker.pin_mmap_region(region)
         base = region._base.data_ptr()
-        assert cudart.calls == [
-            ("register", base, 6 * PAGE_SIZE),
-            ("register", base + 6 * PAGE_SIZE, 6 * PAGE_SIZE),
-            ("register", base + 12 * PAGE_SIZE, 3 * PAGE_SIZE),
+        assert cudart.mock_calls == [
+            call.cudaHostRegister(base, 6 * PAGE_SIZE),
+            call.cudaHostRegister(base + 6 * PAGE_SIZE, 6 * PAGE_SIZE),
+            call.cudaHostRegister(base + 12 * PAGE_SIZE, 3 * PAGE_SIZE),
         ]
         assert region.is_pinned
 
@@ -854,7 +836,7 @@ def test_pin_mmap_region_failure_leaves_region_pageable(iid, host_register, fail
     """A failed chunk drains its pending error and unregisters the chunks
     before it on the same handle, so the region is pinned whole or not at all."""
     cudart, torch_cudart = host_register
-    cudart.fail_at = fail_at
+    cudart.cudaHostRegister.side_effect = [0] * fail_at + [2]
     with _region(iid, num_chunks=5, cpu_page_size=3 * PAGE_SIZE) as region:
         gpu_worker.pin_mmap_region(region)
         base = region._base.data_ptr()
@@ -863,11 +845,11 @@ def test_pin_mmap_region_failure_leaves_region_pageable(iid, host_register, fail
 
     registered = [base + i * 6 * PAGE_SIZE for i in range(fail_at)]
     failed_size = min(6, 15 - 6 * fail_at) * PAGE_SIZE
-    assert cudart.calls == [
-        *(("register", address, 6 * PAGE_SIZE) for address in registered),
-        ("register", base + fail_at * 6 * PAGE_SIZE, failed_size),
-        ("drain",),
-        *(("unregister", address) for address in reversed(registered)),
+    assert cudart.mock_calls == [
+        *(call.cudaHostRegister(address, 6 * PAGE_SIZE) for address in registered),
+        call.cudaHostRegister(base + fail_at * 6 * PAGE_SIZE, failed_size),
+        call.cudaGetLastError(),
+        *(call.cudaHostUnregister(address) for address in reversed(registered)),
     ]
     torch_cudart.cudaHostUnregister.assert_not_called()
 
