@@ -80,44 +80,18 @@ setup_buildx_builder() {
 }
 
 annotate_image_tags() {
-    local tags=("${IMAGE_TAG:-}" "${IMAGE_TAG_LATEST:-}")
-    if [[ "${VLLM_CI_PUBLISH_ZSTD}" == "1" ]]; then
-        tags+=("${IMAGE_TAG}-zstd")
-        if [[ -n "${IMAGE_TAG_LATEST:-}" ]]; then
-            tags+=("${IMAGE_TAG_LATEST}-zstd")
-        fi
-    fi
-    .buildkite/scripts/annotate-image-build.sh "${tags[@]}"
+    .buildkite/scripts/annotate-image-build.sh \
+        "${IMAGE_TAG:-}" "${IMAGE_TAG_LATEST:-}"
 }
 
 check_and_skip_if_image_exists() {
     if [[ -n "${IMAGE_TAG:-}" ]]; then
         echo "--- :mag: Checking if image exists"
-        if [[ "${VLLM_CI_PUBLISH_ZSTD}" == "0" ]] &&
-            docker manifest inspect "${IMAGE_TAG}" >/dev/null 2>&1; then
+        if docker manifest inspect "${IMAGE_TAG}" >/dev/null 2>&1; then
             echo "Image already exists: ${IMAGE_TAG}"
             echo "Skipping build"
             annotate_image_tags
             exit 0
-        fi
-        if [[ "${VLLM_CI_PUBLISH_ZSTD}" == "1" ]]; then
-            local required_tags=("${IMAGE_TAG}" "${IMAGE_TAG}-zstd")
-            if [[ -n "${IMAGE_TAG_LATEST:-}" ]]; then
-                required_tags+=("${IMAGE_TAG_LATEST}" "${IMAGE_TAG_LATEST}-zstd")
-            fi
-            local image all_exist=1
-            for image in "${required_tags[@]}"; do
-                if ! docker manifest inspect "${image}" >/dev/null 2>&1; then
-                    echo "Image not found: ${image}"
-                    all_exist=0
-                fi
-            done
-            if [[ "${all_exist}" == "1" ]]; then
-                echo "All gzip and zstd images already exist"
-                echo "Skipping build"
-                annotate_image_tags
-                exit 0
-            fi
         fi
         echo "Image not found, proceeding with build"
     fi
@@ -238,15 +212,6 @@ BUILDKITE_COMMIT=$3
 BRANCH=$4
 IMAGE_TAG=$5
 IMAGE_TAG_LATEST=${6:-} # only used for main branch, optional
-VLLM_CI_PUBLISH_ZSTD="${VLLM_CI_PUBLISH_ZSTD:-0}"
-
-case "${VLLM_CI_PUBLISH_ZSTD}" in
-    0 | 1) ;;
-    *)
-        echo "Error: VLLM_CI_PUBLISH_ZSTD must be 0 or 1" >&2
-        exit 1
-        ;;
-esac
 
 # When TORCH_NIGHTLY=1, build the base CI image against PyTorch nightly so the
 # entire existing pipeline runs on nightly torch (CUDA/GPU lane only). Delegate
@@ -254,10 +219,6 @@ esac
 # normal IMAGE_TAG that every test step already pulls -- no separate image tag,
 # no duplicate "vLLM Against PyTorch Nightly" pipeline section.
 if [[ "${TORCH_NIGHTLY:-0}" == "1" ]]; then
-    if [[ "${VLLM_CI_PUBLISH_ZSTD}" == "1" ]]; then
-        echo "Error: VLLM_CI_PUBLISH_ZSTD=1 does not support TORCH_NIGHTLY=1" >&2
-        exit 1
-    fi
     echo "--- :warning: TORCH_NIGHTLY=1 -- building base image on PyTorch nightly"
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     exec "${SCRIPT_DIR}/image_build_torch_nightly.sh" \
@@ -272,14 +233,7 @@ CI_HCL_URL="${CI_HCL_URL:-https://raw.githubusercontent.com/vllm-project/ci-infr
 CI_HCL_PATH="${CI_HCL_PATH:-/tmp/ci.hcl}"
 ZSTD_HCL_PATH="${ZSTD_HCL_PATH:-.buildkite/image_build/zstd.hcl}"
 BUILDKIT_SOCKET="/run/buildkit/buildkitd.sock"
-BAKE_FILES=(-f "${VLLM_BAKE_FILE_PATH}" -f "${CI_HCL_PATH}")
-if [[ "${VLLM_CI_PUBLISH_ZSTD}" == "1" ]]; then
-    if [[ -z "${IMAGE_TAG}" ]]; then
-        echo "Error: IMAGE_TAG must be nonempty when publishing zstd" >&2
-        exit 1
-    fi
-    BAKE_FILES+=(-f "${ZSTD_HCL_PATH}")
-fi
+BAKE_FILES=(-f "${VLLM_BAKE_FILE_PATH}" -f "${CI_HCL_PATH}" -f "${ZSTD_HCL_PATH}")
 
 prepare_cache_tags
 ecr_login
@@ -315,7 +269,6 @@ echo "TARGET: ${TARGET}"
 echo "vLLM bake file: ${VLLM_BAKE_FILE_PATH}"
 echo "BUILDER_NAME: ${BUILDER_NAME}"
 echo "CI_HCL_URL: ${CI_HCL_URL}"
-echo "VLLM_CI_PUBLISH_ZSTD: ${VLLM_CI_PUBLISH_ZSTD}"
 echo "BUILDKIT_SOCKET: ${BUILDKIT_SOCKET}"
 
 echo "--- :mag: Cache tags"
