@@ -15,15 +15,15 @@ from vllm.multimodal.image import convert_image_mode, rescale_image_size
 from vllm.multimodal.media.audio import load_audio
 from vllm.transformers_utils.repo_utils import hf_api
 
-from ....conftest import (
+from .....conftest import (
     IMAGE_ASSETS,
     HfRunner,
     PromptAudioInput,
     PromptImageInput,
     VllmRunner,
 )
-from ....utils import large_gpu_test
-from ...utils import check_logprobs_close
+from .....utils import large_gpu_test
+from ....utils import check_logprobs_close
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
     {
