@@ -22,12 +22,12 @@ import torch
 import torch.nn.functional as F
 from flashinfer.autotuner import AutoTuner, autotune
 from flashinfer.gemm.kernels.native_bf16_fp4.runner import get_runner
-from flashinfer.gemm.kernels.native_bf16_fp4.tiled_silu import run as native_silu
 from flashinfer.quantization.fp4_quantization import silu_and_mul_nvfp4_quantize
 from flashinfer.testing import bench_gpu_time_with_cupti
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.kernels.linear.nvfp4.base import NvFp4LinearLayerConfig
+from vllm.model_executor.kernels.linear.nvfp4.cutedsl_silu import run as native_silu
 from vllm.model_executor.kernels.linear.nvfp4.dynamic_cutedsl import (
     cutedsl_dynamic_nvfp4,
 )
