@@ -704,7 +704,7 @@ def test_prom_metrics_registers_tiering_metrics_from_spec():
     )
 
     metric = prom_metrics._offloading_metric_defs[
-        TieringOffloadingMetrics.BLOCK_QUERIES
+        TieringOffloadingMetrics.CHUNK_QUERIES
     ]
     assert metric.kwargs["labelnames"] == ["model_name", "engine", "tier"]
 
