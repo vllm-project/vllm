@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import chain, islice
 from typing import Any, NamedTuple
 
@@ -114,7 +114,10 @@ class GroupOffloadConfig(NamedTuple):
             window = max(
                 window,
                 cdiv(
-                    self.kv_cache_spec.sliding_window - 1 + right_padding,
+                    self.kv_cache_spec.sliding_window
+                    - 1
+                    + self.kv_cache_spec.extra_retained_tokens
+                    + right_padding,
                     self.tokens_per_chunk,
                 ),
             )
@@ -126,7 +129,13 @@ def get_sliding_window_size_in_chunks(
 ) -> int | None:
     if isinstance(kv_cache_spec, SlidingWindowSpec):
         assert kv_cache_spec.sliding_window > 0
-        return cdiv(kv_cache_spec.sliding_window, tokens_per_chunk)
+        return max(
+            cdiv(kv_cache_spec.sliding_window, tokens_per_chunk),
+            cdiv(
+                kv_cache_spec.sliding_window - 1 + kv_cache_spec.extra_retained_tokens,
+                tokens_per_chunk,
+            ),
+        )
 
     if isinstance(kv_cache_spec, ChunkedLocalAttentionSpec):
         # Attention never reaches back past one chunk
@@ -354,6 +363,8 @@ class RequestOffloadState:
     req_context: ReqContext
     offloading_context: RequestOffloadingContext
     group_states: tuple[RequestGroupState, ...] = field(init=False)
+    # upper bound on tokens to load for this request; None means no cap
+    max_load_tokens: int | None = None
     # upper bound on tokens to offload for this request; None means no cap
     max_offload_tokens: int | None = None
     # number of hits in the GPU cache
@@ -375,6 +386,20 @@ class RequestOffloadState:
             RequestGroupState() for _ in self.config.kv_group_configs
         )
         params = self.req.kv_transfer_params
+
+        # NOTE: This field is experimental and subject to change in the future.
+        raw = params.get("max_load_tokens") if params else None
+        if type(raw) is int and raw >= 0:
+            self.max_load_tokens = raw
+            logger.debug(
+                "Request %s: max_load_tokens set to %d",
+                self.req.request_id,
+                raw,
+            )
+        elif raw is not None:
+            logger.warning(
+                "max_load_tokens must be a non-negative int, got %r; ignoring", raw
+            )
 
         # NOTE: This field is experimental and subject to change in the future.
         raw = params.get("max_offload_tokens") if params else None
@@ -402,8 +427,11 @@ class RequestOffloadState:
                 None,
                 group_config.hashes_per_chunk,
             ):
-                group_state.offload_keys.append(
-                    make_offload_key(req_block_hash, group_config.group_idx)
+                key = make_offload_key(req_block_hash, group_config.group_idx)
+                group_state.offload_keys.append(key)
+                self.req_context.set_offload_key_position(
+                    key,
+                    len(group_state.offload_keys) * group_config.tokens_per_chunk,
                 )
 
     def update_block_id_groups(
@@ -717,37 +745,6 @@ class OffloadingConnectorScheduler:
                 )
         return None if defer_lookup or pending_in_window else consecutive_hits
 
-    def _touch(self, req_status: RequestOffloadState):
-        for group_config, group_state in zip(
-            self.config.kv_group_configs, req_status.group_states
-        ):
-            if group_config.sliding_window_size_in_chunks is None:
-                self.manager.touch(group_state.offload_keys, req_status.req_context)
-            else:
-                # Keep only chunks needed to hit the original request, plus
-                # decoded chunks.
-                chunks_to_skip = max(
-                    0,
-                    group_state.num_hit_chunks
-                    - group_config.sliding_window_size_in_chunks,
-                )
-                self.manager.touch(
-                    group_state.offload_keys[chunks_to_skip:],
-                    req_status.req_context,
-                )
-        if req_status.partial_tail_boundary is not None:
-            self.manager.touch(
-                tuple(
-                    self._make_boundary_key(
-                        req_status.req,
-                        group.group_idx,
-                        req_status.partial_tail_boundary,
-                    )
-                    for group in self.config.kv_group_configs
-                ),
-                req_status.req_context,
-            )
-
     def _lookup_complete_chunks(
         self,
         req_status: RequestOffloadState,
@@ -766,6 +763,11 @@ class OffloadingConnectorScheduler:
         if max_num_new_tokens is not None:
             max_hit_size_tokens = min(
                 max_hit_size_tokens, num_computed_tokens + max_num_new_tokens
+            )
+        if req_status.max_load_tokens is not None:
+            max_hit_size_tokens = min(
+                max_hit_size_tokens,
+                num_computed_tokens + req_status.max_load_tokens,
             )
         if self._sliding_window_groups:
             # the last prompt token has to be recomputed to get the logprobs
@@ -810,6 +812,10 @@ class OffloadingConnectorScheduler:
                 max_hit_size_tokens = min(
                     max_hit_size_tokens, len(offload_keys) * tokens_per_chunk
                 )
+                if req_status.max_load_tokens is not None:
+                    max_hit_size_tokens = round_down(
+                        max_hit_size_tokens, tokens_per_chunk
+                    )
                 if max_hit_size_tokens - num_computed_tokens < tokens_per_chunk:
                     # We can only load less than a chunk, so skip.
                     return 0
@@ -943,10 +949,16 @@ class OffloadingConnectorScheduler:
         return num_hit_tokens
 
     def _make_boundary_key(
-        self, request: Request, group_idx: int, boundary_tokens: int
+        self,
+        request: Request,
+        group_idx: int,
+        boundary_tokens: int,
+        req_context: ReqContext,
     ) -> OffloadKey:
         hash_idx = boundary_tokens // self.config.tokens_per_hash - 1
-        return make_offload_key(request.block_hashes[hash_idx], group_idx)
+        key = make_offload_key(request.block_hashes[hash_idx], group_idx)
+        req_context.set_offload_key_position(key, boundary_tokens)
+        return key
 
     def _lookup(
         self,
@@ -965,6 +977,11 @@ class OffloadingConnectorScheduler:
         max_boundary = min(req_status.req.num_prompt_tokens - 1, block_end - 1)
         if max_num_new_tokens is not None:
             max_boundary = min(max_boundary, local_tokens + max_num_new_tokens)
+        if req_status.max_load_tokens is not None:
+            max_boundary = min(
+                max_boundary,
+                local_tokens + req_status.max_load_tokens,
+            )
         max_boundary = round_down(max_boundary, tokens_per_hash)
         if max_boundary <= complete_boundary:
             return complete_hit
@@ -976,7 +993,10 @@ class OffloadingConnectorScheduler:
             boundary_keys = []
             for group_config in self.config.kv_group_configs:
                 key = self._make_boundary_key(
-                    req_status.req, group_config.group_idx, boundary
+                    req_status.req,
+                    group_config.group_idx,
+                    boundary,
+                    req_status.req_context,
                 )
                 boundary_keys.append(key)
                 result = self.manager.lookup(key, req_status.req_context)
@@ -1069,8 +1089,6 @@ class OffloadingConnectorScheduler:
                 self._maybe_observe_lookup_async_delay(req_status)
         req_status.update_num_hit_chunks(num_computed_tokens + (num_hit_tokens or 0))
 
-        self._touch(req_status)
-
         return num_hit_tokens, bool(num_hit_tokens)
 
     def update_state_after_alloc(
@@ -1144,7 +1162,10 @@ class OffloadingConnectorScheduler:
                 if partial_tail_boundary is not None:
                     keys_to_load.append(
                         self._make_boundary_key(
-                            request, group_config.group_idx, partial_tail_boundary
+                            request,
+                            group_config.group_idx,
+                            partial_tail_boundary,
+                            req_status.req_context,
                         )
                     )
 
@@ -1268,7 +1289,9 @@ class OffloadingConnectorScheduler:
                 ):
                     continue
 
-                key = self._make_boundary_key(req, group_idx, boundary)
+                key = self._make_boundary_key(
+                    req, group_idx, boundary, req_status.req_context
+                )
                 store_output = self.manager.prepare_store([key], req_status.req_context)
                 if store_output is None:
                     self._connector_stats.increase_counter(
@@ -1363,7 +1386,9 @@ class OffloadingConnectorScheduler:
             ):
                 continue
             keys = [
-                self._make_boundary_key(req, group.group_idx, boundary)
+                self._make_boundary_key(
+                    req, group.group_idx, boundary, req_status.req_context
+                )
                 for group in self.config.kv_group_configs
             ]
             block_ids = [
@@ -1431,11 +1456,24 @@ class OffloadingConnectorScheduler:
     ) -> list[bool] | None:
         """Build the block mask for a range of candidate offload chunks."""
         blocks_per_chunk = self.config.blocks_per_chunk
+        kv_cache_spec = group_config.kv_cache_spec
+        if isinstance(kv_cache_spec, SlidingWindowSpec) and (
+            kv_cache_spec.extra_retained_tokens
+        ):
+            # Offload restores all allocated history, including MTP re-prefill
+            # tokens. Widen only the store mask, not the model's attention window.
+            kv_cache_spec = replace(
+                kv_cache_spec,
+                sliding_window=(
+                    kv_cache_spec.sliding_window + kv_cache_spec.extra_retained_tokens
+                ),
+                extra_retained_tokens=0,
+            )
         return group_config.manager_cls.reachable_block_mask(
             start_block=start_chunk_idx * blocks_per_chunk,
             end_block=end_chunk_idx * blocks_per_chunk,
             alignment_tokens=self.config.alignment_tokens,
-            kv_cache_spec=group_config.kv_cache_spec,
+            kv_cache_spec=kv_cache_spec,
             use_eagle=group_config.is_eagle_group,
             retention_interval=self.config.retention_interval,
             reachable_boundaries=reachable_boundaries,
@@ -1636,8 +1674,6 @@ class OffloadingConnectorScheduler:
             if not store_output.keys_to_store:
                 req_status.advance_stored_idx(num_offloadable_tokens)
                 continue
-
-            self._touch(req_status)
 
             keys_to_store = set(store_output.keys_to_store)
 
