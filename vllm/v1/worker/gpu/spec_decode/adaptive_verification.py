@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Adaptive verification for DSpark speculative decoding."""
 
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Iterable, Iterator
 from typing import TYPE_CHECKING
 
@@ -13,7 +13,6 @@ import vllm.envs as envs
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu.async_utils import StepTimingSample, stream
@@ -25,6 +24,7 @@ from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 
 logger = init_logger(__name__)
 _PROFILE_REPLAYS = 5
+_CONFIDENCE_RING_SIZE = 4
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -160,7 +160,8 @@ class AdaptiveVerificationManager:
         self._num_non_draft_tokens = torch.empty_like(query_start_loc[:-1])
         self._cu_num_logits = torch.empty_like(query_start_loc)
 
-        # Two D2H slots preserve stale inputs for budget selection.
+        # Keep several D2H snapshots in flight so budget selection never has
+        # to wait for the copy stream.
         self._stale_confidences = [
             CpuGpuBuffer(
                 max_num_reqs,
@@ -168,11 +169,19 @@ class AdaptiveVerificationManager:
                 dtype=torch.float32,
                 device=device,
             )
-            for _ in range(2)
+            for _ in range(_CONFIDENCE_RING_SIZE)
         ]
-        self._copy_events = [torch.cuda.Event(blocking=True) for _ in range(2)]
-        self._pending_resets: list[int] = []
+        self._copy_events = [
+            torch.cuda.Event(blocking=False) for _ in range(_CONFIDENCE_RING_SIZE)
+        ]
+        self._pending_copy_indices: deque[int] = deque()
+        self._free_copy_indices: deque[int] = deque(range(1, _CONFIDENCE_RING_SIZE))
+        self._pending_resets_by_slot: list[set[int]] = [
+            set() for _ in range(_CONFIDENCE_RING_SIZE)
+        ]
         self._stale_idx = 0
+        self._tp_group = get_tp_group()
+        self._is_tp_driver = self._tp_group.rank_in_group == 0
         for slot in self._stale_confidences:
             slot.np.fill(1.0)
 
@@ -182,8 +191,30 @@ class AdaptiveVerificationManager:
 
     def add_request(self, req_idx: int) -> None:
         self._stale_confidences[self._stale_idx].np[req_idx].fill(1.0)
-        self._pending_resets.append(req_idx)
+        for slot_idx in self._pending_copy_indices:
+            self._pending_resets_by_slot[slot_idx].add(req_idx)
         self._confidence_probs[req_idx].fill_(1.0)
+
+    def _promote_completed_confidences(self) -> None:
+        """Promote completed D2H snapshots without waiting for the GPU.
+
+        Copies use one stream, so completion is ordered. A completed newer
+        snapshot supersedes the current CPU view and releases the old slot for
+        reuse. If the oldest copy is not ready, later copies cannot be ready
+        either and the current (slightly staler) snapshot remains valid.
+        """
+        while self._pending_copy_indices:
+            slot_idx = self._pending_copy_indices[0]
+            if not self._copy_events[slot_idx].query():
+                break
+            self._pending_copy_indices.popleft()
+            pending_resets = self._pending_resets_by_slot[slot_idx]
+            if pending_resets:
+                self._stale_confidences[slot_idx].np[list(pending_resets)] = 1.0
+                pending_resets.clear()
+            old_stale_idx = self._stale_idx
+            self._stale_idx = slot_idx
+            self._free_copy_indices.append(old_stale_idx)
 
     def batches_to_profile(self, capture_sizes: list[int]) -> Iterator[dict[str, int]]:
         """Dummy-run kwargs whose step timings seed the cost tables.
@@ -261,17 +292,23 @@ class AdaptiveVerificationManager:
         """Publish this step's raw confidences for the ranking kernel and start
         copying them to the CPU, where a later step's budget reads them."""
         num_reqs = input_batch.num_reqs
-        ready_idx = self._stale_idx ^ 1
-        with gpu_sync_allowed():
-            self._copy_events[ready_idx].synchronize()
-        if self._pending_resets:
-            self._stale_confidences[ready_idx].np[self._pending_resets] = 1.0
-            self._pending_resets.clear()
-        # Last step's copy has landed: budgets read it, this step overwrites the
-        # slot they were reading before.
-        self._stale_idx, write_idx = ready_idx, self._stale_idx
-
+        # Every TP rank needs the current device values because
+        # reallocate_drafts uses them to choose the same per-request capacity
+        # assignment locally. Only rank 0 needs a CPU snapshot: it selects and
+        # broadcasts the scalar batch budget in get_num_tokens.
         self._confidence_probs[input_batch.idx_mapping] = confidence_probs[:num_reqs]
+        if not self._is_tp_driver:
+            return
+
+        self._promote_completed_confidences()
+        if not self._free_copy_indices:
+            # Never stall inference waiting for telemetry. The current CPU
+            # snapshot remains usable and a later step will publish a fresher
+            # one after a ring slot becomes available.
+            return
+
+        write_idx = self._free_copy_indices.popleft()
+        self._pending_resets_by_slot[write_idx].clear()
         write_slot = self._stale_confidences[write_idx]
         write_slot.gpu.copy_(self._confidence_probs)
 
@@ -280,6 +317,7 @@ class AdaptiveVerificationManager:
         with stream(self._copy_stream, current_stream):
             write_slot.copy_to_cpu()
             self._copy_events[write_idx].record()
+        self._pending_copy_indices.append(write_idx)
 
     def get_num_tokens(
         self,
@@ -292,6 +330,8 @@ class AdaptiveVerificationManager:
         reallocation that follow in the same step.
         """
         assert self.cost_tables is not None
+        if self._is_tp_driver:
+            self._promote_completed_confidences()
         req_ids = list(num_tokens_per_req)
         num_reqs = len(req_ids)
         scheduled_tokens = np.fromiter(
@@ -308,31 +348,9 @@ class AdaptiveVerificationManager:
             dtype=np.int32,
             count=len(req_ids),
         )
-        stale_confidences = self._stale_confidences[self._stale_idx].np[slots]
-        survival_probability = np.cumprod(stale_confidences.astype(np.float64), axis=1)
-        steps = np.arange(self.num_speculative_steps)
-        valid = steps[None, :] < scheduled_drafts[:, None]
-        scores = np.sort(survival_probability[valid])[::-1]
         num_non_draft_tokens_total = int(num_non_draft_tokens.sum())
         max_draft_budget = min(
             int(scheduled_drafts.sum()), self.max_draft_tokens(num_reqs)
-        )
-        scores = scores[:max_draft_budget]
-        draft_cost_ms, verify_cost_ms = self.cost_tables
-        num_sampling_requests = np.count_nonzero(
-            self.req_states.num_computed_tokens_np[slots] + num_non_draft_tokens
-            >= self.req_states.prefill_len.np[slots]
-        )
-        num_tokens_to_estimated_accepted_tokens = np.concatenate(
-            ([num_sampling_requests], num_sampling_requests + np.cumsum(scores))
-        )
-        costs = (
-            draft_cost_ms[len(req_ids)]
-            + verify_cost_ms[
-                num_non_draft_tokens_total : num_non_draft_tokens_total
-                + max_draft_budget
-                + 1
-            ]
         )
         num_drafts_per_req = {
             req_id: int(num_drafts)
@@ -342,7 +360,37 @@ class AdaptiveVerificationManager:
             req_id: int(num_tokens)
             for req_id, num_tokens in zip(req_ids, num_non_draft_tokens, strict=True)
         }
-        draft_budget = int(np.argmax(num_tokens_to_estimated_accepted_tokens / costs))
+        draft_budget: int | None = None
+        if self._is_tp_driver:
+            stale_confidences = self._stale_confidences[self._stale_idx].np[slots]
+            survival_probability = np.cumprod(
+                stale_confidences.astype(np.float64), axis=1
+            )
+            steps = np.arange(self.num_speculative_steps)
+            valid = steps[None, :] < scheduled_drafts[:, None]
+            scores = np.sort(survival_probability[valid])[::-1]
+            scores = scores[:max_draft_budget]
+            draft_cost_ms, verify_cost_ms = self.cost_tables
+            num_sampling_requests = np.count_nonzero(
+                self.req_states.num_computed_tokens_np[slots] + num_non_draft_tokens
+                >= self.req_states.prefill_len.np[slots]
+            )
+            num_tokens_to_estimated_accepted_tokens = np.concatenate(
+                ([num_sampling_requests], num_sampling_requests + np.cumsum(scores))
+            )
+            costs = (
+                draft_cost_ms[len(req_ids)]
+                + verify_cost_ms[
+                    num_non_draft_tokens_total : num_non_draft_tokens_total
+                    + max_draft_budget
+                    + 1
+                ]
+            )
+            draft_budget = int(
+                np.argmax(num_tokens_to_estimated_accepted_tokens / costs)
+            )
+        draft_budget = self._tp_group.broadcast_object(draft_budget, src=0)
+        assert draft_budget is not None
         self._batch_budget = (
             num_drafts_per_req,
             num_non_draft_tokens_per_req,

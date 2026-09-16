@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections import deque
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
 
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backend import AttentionCGSupport
@@ -27,6 +29,14 @@ def make_manager(
     manager.num_speculative_steps = num_steps
     manager._stale_confidences = [SimpleNamespace(np=confidences)]
     manager._stale_idx = 0
+    manager._pending_copy_indices = deque()
+    manager._free_copy_indices = deque()
+    manager._pending_resets_by_slot = [set()]
+    manager._tp_group = SimpleNamespace(
+        rank_in_group=0,
+        broadcast_object=lambda value, src: value,
+    )
+    manager._is_tp_driver = True
     manager.req_states = SimpleNamespace(
         req_id_to_index={"low": 0, "high": 1},
         num_computed_tokens_np=np.ones(num_reqs, dtype=np.int32),
@@ -36,6 +46,84 @@ def make_manager(
     manager._max_total_logits = 1 << 30
     manager.num_bonus_tokens = 1
     return manager
+
+
+class FakeEvent:
+    def __init__(self, ready: bool):
+        self.ready = ready
+
+    def query(self) -> bool:
+        return self.ready
+
+
+def test_confidence_ring_promotes_only_completed_copies_without_waiting():
+    manager = AdaptiveVerificationManager.__new__(AdaptiveVerificationManager)
+    manager._stale_confidences = [
+        SimpleNamespace(np=np.full((2, 2), value, dtype=np.float32))
+        for value in range(4)
+    ]
+    manager._copy_events = [
+        FakeEvent(True),
+        FakeEvent(True),
+        FakeEvent(False),
+        FakeEvent(False),
+    ]
+    manager._pending_copy_indices = deque([1, 2])
+    manager._free_copy_indices = deque([3])
+    manager._pending_resets_by_slot = [set(), {1}, {0}, set()]
+    manager._stale_idx = 0
+
+    manager._promote_completed_confidences()
+
+    assert manager._stale_idx == 1
+    assert list(manager._pending_copy_indices) == [2]
+    assert list(manager._free_copy_indices) == [3, 0]
+    assert np.array_equal(
+        manager._stale_confidences[1].np,
+        np.array([[1.0, 1.0], [1.0, 1.0]], dtype=np.float32),
+    )
+    assert manager._pending_resets_by_slot[1] == set()
+    # The incomplete slot is neither read nor reused.
+    assert np.array_equal(
+        manager._stale_confidences[2].np,
+        np.full((2, 2), 2.0, dtype=np.float32),
+    )
+    assert manager._pending_resets_by_slot[2] == {0}
+
+
+def test_non_driver_uses_driver_draft_budget():
+    manager = make_manager(
+        np.array([[0.1, 0.1], [0.9, 0.9]], dtype=np.float32),
+        np.ones(7),
+    )
+    manager._is_tp_driver = False
+    manager._tp_group = SimpleNamespace(
+        broadcast_object=lambda value, src: 1,
+    )
+
+    num_tokens = manager.get_num_tokens(
+        {"low": 3, "high": 3},
+        {"low": [1, 2], "high": [3, 4]},
+    )
+
+    assert num_tokens == 3
+    assert manager._batch_budget[2] == 1
+
+
+def test_non_driver_keeps_device_confidences_in_sync():
+    manager = AdaptiveVerificationManager.__new__(AdaptiveVerificationManager)
+    manager._is_tp_driver = False
+    manager._confidence_probs = torch.zeros((4, 2), dtype=torch.float32)
+    input_batch = SimpleNamespace(
+        num_reqs=2,
+        idx_mapping=torch.tensor([1, 3]),
+    )
+    confidences = torch.tensor([[0.2, 0.3], [0.8, 0.9]], dtype=torch.float32)
+
+    manager.record_confidences(confidences, input_batch)
+
+    torch.testing.assert_close(manager._confidence_probs[1], confidences[0])
+    torch.testing.assert_close(manager._confidence_probs[3], confidences[1])
 
 
 @pytest.mark.parametrize(

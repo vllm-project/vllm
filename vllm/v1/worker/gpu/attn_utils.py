@@ -427,6 +427,11 @@ def build_attn_metadata(
 
     attn_metadata: dict[str, Any] = {}
     num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
+    # query_start_loc and the packed-token layout are shared by every KV-cache
+    # group. Keep the lazily-built mapping alive across the per-group metadata
+    # objects so varlen backends launch its construction kernel only once per
+    # model step, rather than once per KV-cache group.
+    token_to_req_indices_cache: torch.Tensor | None = None
     for i in range(num_kv_cache_groups):
         if not attn_groups[i]:
             continue
@@ -472,6 +477,7 @@ def build_attn_metadata(
             mm_req_doc_ranges=mm_req_doc_ranges,
             rswa_prefix_lens=rswa_prefix_lens,
             req_idx=req_idx,
+            _token_to_req_indices_cache=token_to_req_indices_cache,
             **common_attn_metadata_extra_kwargs,
         )
 
@@ -495,6 +501,9 @@ def build_attn_metadata(
                     common_attn_metadata=common_attn_metadata,
                     **attn_metadata_extra_kwargs,
                 )
+            token_to_req_indices_cache = (
+                common_attn_metadata._token_to_req_indices_cache
+            )
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
     return attn_metadata

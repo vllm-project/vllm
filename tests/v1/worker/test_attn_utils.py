@@ -30,6 +30,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.worker.gpu import attn_utils
 from vllm.v1.worker.gpu.attn_utils import (
+    build_attn_metadata,
     get_attn_cg_support,
     get_query_lens_mismatch_unsupported_backend,
 )
@@ -112,6 +113,47 @@ class _DraftBackend:
     @classmethod
     def supports_device_cpu_query_lens_mismatch(cls) -> bool:
         return False
+
+
+def test_build_attn_metadata_shares_token_to_req_cache_across_kv_groups():
+    cached_mapping = torch.tensor([0], dtype=torch.int32)
+    observed_caches = []
+
+    class Builder:
+        def build(self, *, common_attn_metadata, **_kwargs):
+            observed_caches.append(common_attn_metadata._token_to_req_indices_cache)
+            if common_attn_metadata._token_to_req_indices_cache is None:
+                common_attn_metadata._token_to_req_indices_cache = cached_mapping
+            return object()
+
+    groups = [
+        [
+            SimpleNamespace(
+                layer_names=[f"layer{i}"],
+                get_metadata_builder=lambda _: Builder(),
+            )
+        ]
+        for i in range(2)
+    ]
+    kv_cache_config = SimpleNamespace(kv_cache_groups=[object(), object()])
+    query_start_loc = torch.tensor([0, 1], dtype=torch.int32)
+
+    build_attn_metadata(
+        attn_groups=groups,  # type: ignore[arg-type]
+        num_reqs=1,
+        num_tokens=1,
+        query_start_loc_gpu=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+        max_query_len=1,
+        seq_lens=torch.tensor([1], dtype=torch.int32),
+        max_seq_len=1,
+        block_tables=[torch.empty(0), torch.empty(0)],
+        slot_mappings=torch.zeros((2, 1), dtype=torch.int64),
+        kv_cache_config=kv_cache_config,  # type: ignore[arg-type]
+    )
+
+    assert observed_caches[0] is None
+    assert observed_caches[1] is cached_mapping
 
 
 def test_attention_checks_preserve_global_and_target_scoped_support():
