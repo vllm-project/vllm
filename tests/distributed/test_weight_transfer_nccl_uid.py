@@ -403,7 +403,8 @@ def trainer_broadcast_tensor_torch_free(
 def _run_uid_transfer(trainer_task) -> None:
     """Mint a unique id, run the worker and the given trainer peer concurrently,
     and assert the tensor round-trips. Both ranks must enter init together --
-    there is no store barrier on the UID path."""
+    there is no store barrier on the UID path.
+    """
     from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
 
     _init_ray_for_weight_transfer()
@@ -450,7 +451,8 @@ def _run_uid_transfer(trainer_task) -> None:
 )
 def test_nccl_weight_transfer_between_processes_uid():
     """Weight transfer over a pre-shared ncclUniqueId (no TCPStore), with both
-    ranks on vLLM's ``PyNcclCommunicator``."""
+    ranks on vLLM's ``PyNcclCommunicator``.
+    """
     _run_uid_transfer(trainer_broadcast_tensor_uid)
 
 
@@ -460,6 +462,7 @@ def test_nccl_weight_transfer_between_processes_uid():
 )
 def test_nccl_weight_transfer_torch_free_trainer():
     """UID weight transfer against a foreign peer that uses no torch and no vLLM
-    communicator, only a cupy buffer and raw ``ncclBroadcast``."""
+    communicator, only a cupy buffer and raw ``ncclBroadcast``.
+    """
     pytest.importorskip("cupy")
     _run_uid_transfer(trainer_broadcast_tensor_torch_free)

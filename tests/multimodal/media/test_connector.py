@@ -228,7 +228,8 @@ async def test_fetch_image_local_files_with_space_in_name(image_url: str):
 @pytest.mark.asyncio
 async def test_fetch_image_data_url_with_params():
     """RFC 2397 allows parameters between the mediatype and the base64
-    marker; they must not be rejected or leak into the media type."""
+    marker; they must not be rejected or leak into the media type.
+    """
     connector = MediaConnector()
 
     image = Image.new("RGB", (4, 4), color=(255, 0, 0))

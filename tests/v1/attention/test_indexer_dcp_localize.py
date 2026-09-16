@@ -56,7 +56,8 @@ def _ref_stable_topk_from_candidates_fp64(
 ) -> torch.Tensor:
     """Pure-PyTorch reference for the CuteDSL stable-topk selector order
     (score desc, then lowest global token id). Selects the same SET as the
-    kernel; only the set is compared in tests."""
+    kernel; only the set is compared in tests.
+    """
     num_rows, num_candidates = candidate_scores.shape
     device = candidate_scores.device
     select_k = min(k, num_candidates)
@@ -121,7 +122,8 @@ def _dcp_lse_merge(
 class _FakeDCPGroup:
     """Single-process stand-in: ``all_gather`` returns the pre-built
     concatenation of every rank's packed ``(score, global_id)`` candidates,
-    mirroring the one packed all-gather the merge issues."""
+    mirroring the one packed all-gather the merge issues.
+    """
 
     def __init__(self, gathered_packed: torch.Tensor) -> None:
         self.gathered_packed = gathered_packed
@@ -207,7 +209,8 @@ def _merge_local_topks_global_with_fake_dcp(
     """Run ``_merge_dcp_topk_global`` for every rank against a faked
     all-gather and return each rank's global-index result (all ranks should
     agree). The fake pre-builds the packed candidate concatenation the merge's
-    single ``all_gather`` would return."""
+    single ``all_gather`` would return.
+    """
     # The merge is now CuteDSL-only (no PyTorch fallback), so it runs the real
     # Triton pack + CuteDSL selector kernels even behind the faked all-gather.
     if not current_platform.is_cuda() or not has_cutedsl():
@@ -304,6 +307,23 @@ def test_get_dcp_local_seq_lens_preserves_mtp_bounds_shape():
     )
 
     assert actual.shape == seq_lens.shape
+    torch.testing.assert_close(actual, expected)
+
+
+def test_get_dcp_local_seq_lens_reuses_device_rank_tensor(monkeypatch):
+    seq_lens = torch.tensor([0, 1, 7, 8, 17], dtype=torch.int32)
+    world = 4
+    rank = 2
+    rank_tensor = torch.tensor(rank, dtype=torch.int32)
+    expected = get_dcp_local_seq_lens(seq_lens, world, rank, 2)
+
+    def fail_tensor_construction(*args, **kwargs):
+        raise AssertionError("rank tensor must be reused")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(torch, "tensor", fail_tensor_construction)
+        actual = get_dcp_local_seq_lens(seq_lens, world, rank_tensor, 2)
+
     torch.testing.assert_close(actual, expected)
 
 
@@ -692,7 +712,8 @@ def test_dcp_filter_compaction_matches_reference(
     """In-kernel compaction must, for every row, produce exactly the rank-owned
     physical slots packed into [0, valid_count) with -1 in the tail -- the same
     SET a reference filter + sort/gather produces. Uses wide rows (> BLOCK_N
-    valid slots), with interior -1 gaps."""
+    valid slots), with interior -1 gaps.
+    """
     device = torch.device("cuda")
     torch.manual_seed(7)
     dcp_size = 2
@@ -850,7 +871,8 @@ def test_decode_topk_pads_surplus_with_negative_one():
     so a non-(-1) pad would be silently attended. This is the common case under
     DCP, where each rank's local seq_len = global / world is usually << topk.
     Checked on the *set* of valid indices (the kernel may order them by score,
-    not position)."""
+    not position).
+    """
     torch.manual_seed(0)
     device = torch.device("cuda")
     topk = 8
@@ -896,7 +918,8 @@ def test_sparse_decode_dcp_short_context_matches_non_dcp():
     """End-to-end DCP decode where the global seq_len < topk (so every rank's
     local top-k is surplus-padded). Exercises the kernel surplus -> merge mask
     -> global top-k -> physical localize -> LSE merge chain for the common
-    short-context decode case, vs the non-DCP reference."""
+    short-context decode case, vs the non-DCP reference.
+    """
     torch.manual_seed(4)
     device = torch.device("cuda")
     world = 2
@@ -979,7 +1002,7 @@ def test_pcp_plan_deinterleave_restores_global_order(
 
     monkeypatch.setattr("vllm.v1.attention.backends.mla.indexer.PIN_MEMORY", False)
     monkeypatch.setattr(
-        "vllm.v1.attention.backends.mla.indexer.async_copy_to_gpu",
+        "vllm.v1.attention.backends.mla.indexer.async_tensor_h2d",
         lambda x, device: x.to(device),
     )
     scheduled = np.array(req_lens, dtype=np.int64)

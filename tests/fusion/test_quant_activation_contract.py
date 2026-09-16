@@ -24,6 +24,11 @@ from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
     FlashInferCutlassNvFp4LinearKernel,
     FlashInferTrtllmNvFp4LinearKernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
+    AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
+    AiterPerTokenFp8ScaledMMLinearKernel,
+    AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
+)
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
     CutlassFP8ScaledMMLinearKernel,
 )
@@ -56,6 +61,9 @@ SUPPORTING = {
     FlashInferFP8ScaledMMLinearKernel,
     FlashInferCutlassNvFp4LinearKernel,
     PerTensorTorchFP8ScaledMMLinearKernel,
+    AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
+    AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
+    AiterPerTokenFp8ScaledMMLinearKernel,
     FlashInferCutedslMxfp8LinearKernel,
     FlashInferCutlassMxfp8LinearKernel,
 }
@@ -78,7 +86,8 @@ def _all_kernel_classes() -> list[type]:
 
 def _probe(cls: type):
     """A bare kernel instance with a plausible config, so input_quant_key()
-    can be queried without the hardware-gated constructor."""
+    can be queried without the hardware-gated constructor.
+    """
     obj = cls.__new__(cls)  # type: ignore[call-overload]
     if issubclass(cls, NvFp4LinearKernel):
         obj.config = NvFp4LinearLayerConfig()

@@ -85,7 +85,8 @@ def test_v2_min_tokens_keeps_masking_when_other_candidates_remain():
 
 def test_v2_min_tokens_mixed_batch_gates_restore_per_request():
     """CHECK_ALL_MASKED_ROWS is a batch-wide constexpr, so a mixed batch must
-    still consult the per-request flag."""
+    still consult the per-request flag.
+    """
     out = _apply(_only_stop_token_left(2), structured=[True, False])
 
     assert out[0, STOP_TOKEN] == 1.0
