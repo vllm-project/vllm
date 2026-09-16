@@ -25,10 +25,12 @@ def step_eplb_after(*, is_dummy: bool = False) -> Callable:
     def decorator(fn: Callable) -> Callable:
         @wraps(fn)
         def wrapper(self: Any, *args, **kwargs) -> Any:
-            result = fn(self, *args, **kwargs)
             if kwargs.get("skip_eplb", False):
-                return result
+                # The router kernel records load before step() is reached.
+                with self.eplb.suppress():
+                    return fn(self, *args, **kwargs)
 
+            result = fn(self, *args, **kwargs)
             is_profile = kwargs.get("is_profile", False) if is_dummy else False
             self.eplb.step(is_dummy=is_dummy, is_profile=is_profile)
             return result
