@@ -2,19 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import contextmanager
-from typing import cast
+from typing import Any
+from unittest.mock import patch
 
 import pytest
 import torch
 from packaging.version import Version
 from transformers import __version__ as TRANSFORMERS_VERSION
 
-from vllm.logprobs import Logprob
 from vllm.platforms import current_platform
 
 from ....utils import large_gpu_mark
 from ...registry import HF_EXAMPLE_MODELS
-from ...utils import TokensTextLogprobsPromptLogprobs, check_logprobs_close
+from ...utils import check_logprobs_close
 
 # Models that require embedding scaling for prompt_embeds test
 EMBED_SCALING_MODELS = {
@@ -142,42 +142,8 @@ def moe_near_tie_rescue(hf_choice: dict[int, torch.Tensor], tol: float):
                 torch.where(take, hf_ids.gather(1, order).to(ids.dtype), ids),
             )
 
-    FusedMoERouter.select_experts = select_experts
-    try:
+    with patch.object(FusedMoERouter, "select_experts", select_experts):
         yield
-    finally:
-        FusedMoERouter.select_experts = original
-
-
-def score_forced_continuations(
-    vllm_model,
-    prompt_token_ids: list[int],
-    continuations: list[list[int]],
-) -> list[list[float]]:
-    """Teacher-forced per-token logprobs of each continuation after the prompt.
-
-    One list per continuation; sum it for the joint logprob, take the last
-    element for the conditional. Scoring each as its own sequence, in one batch,
-    keeps a token reachable however low it ranks.
-    """
-    seqs = [list(prompt_token_ids) + list(c) for c in continuations]
-    outputs = vllm_model.generate_greedy_logprobs(
-        seqs, max_tokens=1, num_logprobs=None, num_prompt_logprobs=0
-    )
-
-    results: list[list[float]] = []
-    for continuation, output in zip(continuations, outputs):
-        output = cast(TokensTextLogprobsPromptLogprobs, output)
-        token_datas = cast(list[dict[int, Logprob] | None], output[3])
-        # The trailing prompt positions are the forced continuation.
-        tail = token_datas[len(token_datas) - len(continuation) :]
-        logprobs: list[float] = []
-        for token_id, token_data in zip(continuation, tail):
-            assert token_data is not None
-            logprobs.append(token_data[token_id].logprob)
-        results.append(logprobs)
-
-    return results
 
 
 # @maybe_test_rocm_aiter
@@ -338,7 +304,7 @@ def test_models(
 
                 prompt_embeds.append(embed.squeeze(0))
 
-    vllm_kwargs = {}
+    vllm_kwargs: dict[str, Any] = {}
     if (
         model == "bigscience/bloom-560m"
         and current_platform.is_device_capability_family(90)
