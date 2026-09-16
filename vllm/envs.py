@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
+    VLLM_INDEXER_BACKEND: str = "deepgemm"
     VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN: int = 8192
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
@@ -1077,6 +1078,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB": lambda: int(
         os.getenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "512")
     ),
+    # Decode indexer: "deepgemm" (default) or "fuse_score_remap" (SM90 fused
+    # score + vLLM topk + gather_physical, capacity <= 65536). The fused
+    # path emits physical ids and skips MLA remap.
+    "VLLM_INDEXER_BACKEND": lambda: os.getenv(
+        "VLLM_INDEXER_BACKEND", "deepgemm"
+    ).strip().lower(),
     # KV context length each adaptive-verification profiling request pretends to
     # carry, so the profiled step reads a realistic amount of cache.
     # Raise it for long-context deployments, where step cost is dominated by
@@ -2270,6 +2277,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_USE_MODELSCOPE",
         "VLLM_RINGBUFFER_WARNING_INTERVAL",
         "VLLM_DEBUG_DUMP_PATH",
+        "VLLM_INDEXER_BACKEND",
         "VLLM_PORT",
         "VLLM_CACHE_ROOT",
         # Runtime memory-plan persistence; does not affect compiled graphs.

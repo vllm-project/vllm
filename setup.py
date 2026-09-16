@@ -1438,6 +1438,9 @@ package_data = {
         "third_party/deep_gemm/include/**/*.cuh",
         "third_party/deep_gemm/include/**/*.h",
         "third_party/deep_gemm/include/**/*.hpp",
+        # SM90 fused DSA decode score+topk (JIT sources)
+        "model_executor/kernels/attention/dsa/fuse_score_remap/**/*.cu",
+        "model_executor/kernels/attention/dsa/fuse_score_remap/**/*.cuh",
         # fmha_sm100 sparse CuTe-DSL helper kernels (vendored via cmake)
         "third_party/fmha_sm100/csrc/**/*.cu",
         "third_party/fmha_sm100/csrc/**/*.h",

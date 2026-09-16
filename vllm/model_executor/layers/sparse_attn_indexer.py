@@ -44,6 +44,7 @@ from vllm.utils.torch_utils import (
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
 )
+from vllm.v1.attention.backends.mla.sparse_utils import set_indexer_topk_physical
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -52,6 +53,157 @@ logger = init_logger(__name__)
 
 # MXFP4 layout: 2 values packed per byte, ue8m0 (1-byte) scale per block of 32.
 MXFP4_BLOCK_SIZE = 32
+
+_FUSE_SCORE_REMAP_MOD = None
+_FUSE_SCORE_REMAP_LOAD_ATTEMPTED = False
+
+
+def _indexer_backend() -> str:
+    return envs.VLLM_INDEXER_BACKEND
+
+
+def _fuse_score_remap_dummy_batch(hidden_states: torch.Tensor) -> int:
+    try:
+        n = int(get_current_vllm_config().scheduler_config.max_num_seqs)
+        if n > 0:
+            return n
+    except Exception:
+        pass
+    return max(int(hidden_states.shape[0]), 1)
+
+
+def _fuse_score_remap_dummy_specs(
+    hidden_states: torch.Tensor,
+    max_model_len: int,
+    topk_tokens: int,
+) -> tuple[tuple[tuple[int, ...], torch.dtype], ...]:
+    if _indexer_backend() != "fuse_score_remap":
+        return ()
+    batch = _fuse_score_remap_dummy_batch(hidden_states)
+    cap = min(int(max_model_len), 65536)
+    max_parts = max(1, (cap + 255) // 256) + 1
+    k = max(int(topk_tokens), 1)
+    return (
+        ((batch, max_parts, 256), torch.float32),
+        ((batch, max_parts, 256), torch.int32),
+        ((batch, k), torch.int32),
+    )
+
+
+def _load_fuse_score_remap():
+    global _FUSE_SCORE_REMAP_MOD, _FUSE_SCORE_REMAP_LOAD_ATTEMPTED
+    if _FUSE_SCORE_REMAP_LOAD_ATTEMPTED:
+        return _FUSE_SCORE_REMAP_MOD
+    _FUSE_SCORE_REMAP_LOAD_ATTEMPTED = True
+    try:
+        from vllm.model_executor.kernels.attention.dsa.fuse_score_remap import (
+            indexer as mod,
+        )
+
+        _FUSE_SCORE_REMAP_MOD = mod
+        return mod
+    except Exception as exc:
+        logger.warning("fuse_score_remap indexer import failed (%s); using DeepGEMM", exc)
+        return None
+
+
+def _try_fuse_score_remap_topk(
+    q: torch.Tensor,
+    kv_cache: torch.Tensor,
+    weights: torch.Tensor,
+    seq_lens: torch.Tensor,
+    block_table: torch.Tensor,
+    schedule_metadata: torch.Tensor,
+    topk_indices: torch.Tensor,
+    next_n: int,
+    head_dim: int,
+    topk_tokens: int,
+    use_fp4_cache: bool,
+    use_pcp: bool,
+    dcp_world_size: int,
+    has_prefill: bool,
+    max_model_len: int | None = None,
+    max_seq_len: int | None = None,
+    has_candidates: bool = False,
+    has_sparse_indices: bool = False,
+) -> bool:
+    """Fused SM90 score + topk + physical gather. True if it wrote topk_indices."""
+    if _indexer_backend() != "fuse_score_remap" or current_platform.is_xpu():
+        return False
+    if has_candidates or has_sparse_indices:
+        return False
+    mod = _load_fuse_score_remap()
+    if mod is None:
+        return False
+    ok, msg = mod.fuse_score_remap_available()
+    if not ok:
+        logger.warning("fuse_score_remap indexer unavailable (%s); using DeepGEMM", msg)
+        return False
+    if not mod.can_use_fuse_score_remap(
+        q,
+        kv_cache,
+        next_n=next_n,
+        head_dim=head_dim,
+        topk_tokens=topk_tokens,
+        use_fp4_cache=use_fp4_cache,
+        use_pcp=use_pcp,
+        dcp_world_size=dcp_world_size,
+        has_prefill=has_prefill,
+        block_table=block_table,
+        max_model_len=max_model_len,
+    ):
+        logger.warning_once(
+            "VLLM_INDEXER_BACKEND=fuse_score_remap but this decode step is unsupported "
+            "(need next_n=1, H=32, D=128, page=64, FP8 cache, no DCP/PCP/"
+            "prefill mix, topk in {512,1024,2048}, seq capacity <= 65536); "
+            "using DeepGEMM"
+        )
+        return False
+    logger.info_once("DSA indexer decode backend: fuse_score_remap (%s)", msg)
+    try:
+        max_parts = mod.pack_parts(block_table)
+        batch = int(q.size(0))
+        pack_scores = pack_indices = logical = topk_workspace = None
+        try:
+            wm = current_workspace_manager()
+            pack_scores, pack_indices, logical, topk_workspace = wm.get_simultaneous(
+                ((batch, max_parts, 256), torch.float32),
+                ((batch, max_parts, 256), torch.int32),
+                ((batch, topk_tokens), torch.int32),
+                ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
+            )
+        except Exception:
+            if torch.cuda.is_current_stream_capturing():
+                raise
+            pack_scores = torch.empty(
+                (batch, max_parts, 256), dtype=torch.float32, device=q.device
+            )
+            pack_indices = torch.empty(
+                (batch, max_parts, 256), dtype=torch.int32, device=q.device
+            )
+            logical = torch.empty(
+                (batch, topk_tokens), dtype=torch.int32, device=q.device
+            )
+            topk_workspace = None
+        mod.fuse_score_remap_topk_indexer(
+            q,
+            kv_cache,
+            weights,
+            seq_lens,
+            block_table,
+            schedule_metadata,
+            topk_indices,
+            topk_tokens,
+            pack_scores=pack_scores,
+            pack_indices=pack_indices,
+            logical=logical,
+            topk_workspace=topk_workspace,
+            max_seq_len=max_seq_len,
+        )
+        return True
+    except Exception as exc:
+        logger.warning_once("fuse_score_remap indexer failed, using DeepGEMM: %s", exc)
+        return False
 
 
 def _assert_cutedsl_dcp_merge_supported(
@@ -379,7 +531,17 @@ def sparse_attn_indexer(
                 total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
             )
             profile_specs.extend(gather_spec * 2)
+        profile_specs.extend(
+            _fuse_score_remap_dummy_specs(hidden_states, max_model_len, topk_tokens)
+        )
         current_workspace_manager().get_simultaneous(*profile_specs)
+        if _indexer_backend() == "fuse_score_remap":
+            mod64 = _load_fuse_score_remap()
+            if mod64 is not None:
+                try:
+                    mod64.fuse_score_remap_available()
+                except Exception as exc:
+                    logger.warning("fuse_score_remap JIT warmup failed: %s", exc)
 
         # Dummy allocation to simulate for peak logits tensor memory during inference.
         # FP8 elements so elements == bytes
@@ -417,6 +579,7 @@ def sparse_attn_indexer(
     has_decode = attn_metadata_narrowed.num_decodes > 0
     has_prefill = attn_metadata_narrowed.num_prefills > 0
     num_decode_tokens = attn_metadata_narrowed.num_decode_tokens
+    set_indexer_topk_physical(False)
 
     # q_scale is required iff the FP4 cache path is enabled; the FP8 path
     # folds the Q scale into `weights` inside fused_indexer_q_rope_quant.
@@ -695,84 +858,110 @@ def sparse_attn_indexer(
             if use_fp4_cache
             else padded_q_quant_decode_tokens
         )
-        if current_platform.is_xpu():
-            if padded_q_scale is not None:
-                raise RuntimeError("XPU fp8_paged_mqa_logits does not support FP4 Q")
-            seq_lens_xpu = (
-                seq_lens[:, -1].contiguous() if seq_lens.ndim == 2 else seq_lens
-            )
-            logits = torch.ops.vllm.xpu_fp8_paged_mqa_logits(
-                padded_q_quant_cast,
-                kv_cache,
-                weights[:num_padded_tokens],
-                seq_lens_xpu,
-                decode_metadata.block_table,
-                decode_metadata.schedule_metadata,
-                max_model_len,
-            )
-        else:
-            logits = fp8_fp4_paged_mqa_logits(
-                (padded_q_quant_cast, padded_q_scale),
-                kv_cache,
-                weights[:num_padded_tokens],
-                seq_lens,
-                decode_metadata.block_table,
-                decode_metadata.schedule_metadata,
-                max_model_len=max_model_len,
-                clean_logits=False,
-                indices=decode_metadata.indices,
-            )
-        num_rows = logits.shape[0]
-        if candidate_blocks is not None:
-            # Two-level selection (v4.1) on the decode logits; columns are
-            # request-local compressed positions. seq_lens is (B, next_n)
-            # for native spec decode (per-row effective lens) and (B, 1)
-            # otherwise.
-            vis = seq_lens.reshape(-1)
-            row_repeat = next_n if vis.numel() != num_rows else 1
-            vis = vis[:num_rows]
-            decode_candidates = candidate_blocks[:num_rows]
-            if candidate_write:
-                _select_candidate_blocks(
-                    logits,
-                    None,
-                    vis,
-                    decode_candidates.shape[1],
-                    candidate_block_size,
-                    decode_candidates,
-                    row_repeat,
+        topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
+        used_fuse_score_remap = _try_fuse_score_remap_topk(
+            padded_q_quant_decode_tokens,
+            kv_cache,
+            weights[:num_padded_tokens],
+            seq_lens,
+            decode_metadata.block_table,
+            decode_metadata.schedule_metadata,
+            topk_indices,
+            next_n=next_n,
+            head_dim=head_dim,
+            topk_tokens=topk_tokens,
+            use_fp4_cache=use_fp4_cache,
+            use_pcp=use_pcp,
+            dcp_world_size=dcp_world_size,
+            has_prefill=has_prefill,
+            max_model_len=max_model_len,
+            max_seq_len=attn_metadata_narrowed.max_seq_len,
+            has_candidates=candidate_blocks is not None,
+            has_sparse_indices=decode_metadata.indices is not None,
+        )
+        if used_fuse_score_remap:
+            set_indexer_topk_physical(True)
+        logits = None
+        if not used_fuse_score_remap:
+            if current_platform.is_xpu():
+                if padded_q_scale is not None:
+                    raise RuntimeError(
+                        "XPU fp8_paged_mqa_logits does not support FP4 Q"
+                    )
+                seq_lens_xpu = (
+                    seq_lens[:, -1].contiguous() if seq_lens.ndim == 2 else seq_lens
+                )
+                logits = torch.ops.vllm.xpu_fp8_paged_mqa_logits(
+                    padded_q_quant_cast,
+                    kv_cache,
+                    weights[:num_padded_tokens],
+                    seq_lens_xpu,
+                    decode_metadata.block_table,
+                    decode_metadata.schedule_metadata,
+                    max_model_len,
                 )
             else:
-                _apply_candidate_mask(
-                    logits,
-                    None,
-                    vis,
-                    decode_candidates,
-                    candidate_block_size,
-                    row_repeat,
+                logits = fp8_fp4_paged_mqa_logits(
+                    (padded_q_quant_cast, padded_q_scale),
+                    kv_cache,
+                    weights[:num_padded_tokens],
+                    seq_lens,
+                    decode_metadata.block_table,
+                    decode_metadata.schedule_metadata,
+                    max_model_len=max_model_len,
+                    clean_logits=False,
+                    indices=decode_metadata.indices,
                 )
-        topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
+            num_rows = logits.shape[0]
+            if candidate_blocks is not None:
+                # Two-level selection (v4.1) on the decode logits; columns are
+                # request-local compressed positions. seq_lens is (B, next_n)
+                # for native spec decode (per-row effective lens) and (B, 1)
+                # otherwise.
+                vis = seq_lens.reshape(-1)
+                row_repeat = next_n if vis.numel() != num_rows else 1
+                vis = vis[:num_rows]
+                decode_candidates = candidate_blocks[:num_rows]
+                if candidate_write:
+                    _select_candidate_blocks(
+                        logits,
+                        None,
+                        vis,
+                        decode_candidates.shape[1],
+                        candidate_block_size,
+                        decode_candidates,
+                        row_repeat,
+                    )
+                else:
+                    _apply_candidate_mask(
+                        logits,
+                        None,
+                        vis,
+                        decode_candidates,
+                        candidate_block_size,
+                        row_repeat,
+                    )
 
-        # The backend comes from the layer (config is only readable at model
-        # construction); dispatchers are cached per backend.
-        get_indexer_topk(topk_backend)(
-            logits,
-            seq_lens,
-            next_n,
-            topk_indices,
-            topk_tokens,
-            attn_metadata_narrowed.max_seq_len,
-        )
-
-        if decode_metadata.global_seq_lens is not None:
-            _merge_dcp_topk_global(
+            # The backend comes from the layer (config is only readable at model
+            # construction); dispatchers are cached per backend.
+            get_indexer_topk(topk_backend)(
                 logits,
+                seq_lens,
+                next_n,
                 topk_indices,
                 topk_tokens,
-                dcp_rank,
-                dcp_world_size,
-                cp_kv_cache_interleave_size,
+                attn_metadata_narrowed.max_seq_len,
             )
+
+            if decode_metadata.global_seq_lens is not None:
+                _merge_dcp_topk_global(
+                    logits,
+                    topk_indices,
+                    topk_tokens,
+                    dcp_rank,
+                    dcp_world_size,
+                    cp_kv_cache_interleave_size,
+                )
 
         if decode_metadata.requires_padding:
             # if padded, we need to unpack
