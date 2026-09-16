@@ -18,7 +18,6 @@ NUM_CONVERSATIONS = 8
 MAX_TOKENS = 32
 # Long first turns leave room for hybrid cache alignment and MTP recomputation.
 MIN_PROMPT_TOKENS = 2048
-MIN_HIT_RATE = 0.5
 METRICS_TIMEOUT = 30
 
 
@@ -70,7 +69,7 @@ async def _wait_for_counters(
         await asyncio.sleep(0.1)
 
 
-@pytest.fixture(scope="module", params=[False, True], ids=["base", "mtp"])
+@pytest.fixture(scope="module")
 def server(request):
     args = ["--enable-prompt-tokens-details"]
     if request.param:
@@ -83,7 +82,15 @@ def server(request):
 
 
 @pytest.mark.asyncio
-async def test_prefix_cache_hit_rate(server: RemoteOpenAIServer) -> None:
+@pytest.mark.parametrize(
+    "server, min_hit_rate",
+    # MTP re-prefills an extra block; both floors reject one more missed block.
+    [pytest.param(False, 0.90, id="base"), pytest.param(True, 0.75, id="mtp")],
+    indirect=["server"],
+)
+async def test_prefix_cache_hit_rate(
+    server: RemoteOpenAIServer, min_hit_rate: float
+) -> None:
     # Isolate sessions so another conversation cannot hide a cache miss.
     salts = [uuid4().hex for _ in range(NUM_CONVERSATIONS)]
     histories: list[list[ChatCompletionMessageParam]] = [
@@ -122,7 +129,9 @@ async def test_prefix_cache_hit_rate(server: RemoteOpenAIServer) -> None:
                 if not replay and turn == 0:
                     assert cached == 0, context
                 else:
-                    assert cached / prompt >= MIN_HIT_RATE, context
+                    assert cached / prompt >= min_hit_rate, (
+                        f"{context}, {min_hit_rate=}"
+                    )
                 if replay:
                     assert prompt == prompt_lengths[session][turn], context
                 else:
