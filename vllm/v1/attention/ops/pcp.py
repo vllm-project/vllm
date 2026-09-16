@@ -12,8 +12,18 @@ def _gather_prefill_cache_inputs(
     tensors: tuple[torch.Tensor, ...],
     slot_mapping: torch.Tensor,
     num_decode_tokens: int,
+    num_actual_tokens: int | None = None,
 ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
     """Keep replicated decode writes local and gather partitioned prefills."""
+    if num_actual_tokens is not None and num_decode_tokens == num_actual_tokens:
+        # A decode-only batch whose rows were padded (e.g. DP padding). The
+        # padding rows are not prefill tokens and the replicated slot mapping
+        # does not cover them. Prefill batches keep their padded rows: PCP
+        # padding is what makes the all-gather shapes match across ranks.
+        return (
+            tuple(tensor[:num_decode_tokens] for tensor in tensors),
+            slot_mapping[:num_decode_tokens],
+        )
     local_num_tokens = tensors[0].shape[0]
     assert all(tensor.shape[0] == local_num_tokens for tensor in tensors)
     assert 0 <= num_decode_tokens <= local_num_tokens
@@ -51,6 +61,7 @@ def maybe_gather_mla_latent_cache_inputs(
     slot_mapping: torch.Tensor | None,
     num_decode_tokens: int | None,
     use_pcp: bool,
+    num_actual_tokens: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     if not use_pcp or num_decode_tokens is None:
         return kv_c_normed, k_pe, slot_mapping
@@ -61,6 +72,7 @@ def maybe_gather_mla_latent_cache_inputs(
         (kv_c_normed, k_pe_flat),
         slot_mapping,
         num_decode_tokens,
+        num_actual_tokens,
     )
     cache_k_pe = cache_k_pe_flat.view(-1, *k_pe.shape[1:])
     return cache_kv_c, cache_k_pe, cache_slot_mapping
