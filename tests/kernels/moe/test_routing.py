@@ -214,8 +214,7 @@ def assert_routing_results_close(
     rtol: float = 1e-3,
     atol: float = 1e-3,
 ):
-    """
-    Compare routing results, sorting by expert ID first to handle non-deterministic
+    """Compare routing results, sorting by expert ID first to handle non-deterministic
     ordering from sorted=False in topk.
     """
     # Sort both results by expert IDs for consistent comparison
@@ -294,8 +293,7 @@ def assert_aiter_routing_valid(
 def baseline_fused_topk(
     router_logits: torch.Tensor, top_k: int, renormalize: bool
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Baseline for standard fused top-k routing.
+    """Baseline for standard fused top-k routing.
 
     Algorithm:
     1. Apply softmax to router logits
@@ -320,8 +318,7 @@ def baseline_fused_topk_bias(
     e_score_correction_bias: torch.Tensor,
     routed_scaling_factor: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Baseline for fused top-k with bias correction.
+    """Baseline for fused top-k with bias correction.
 
     Algorithm:
     1. Apply softmax to router logits
@@ -364,8 +361,7 @@ def baseline_grouped_topk(
     e_score_correction_bias: torch.Tensor | None,
     routed_scaling_factor: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Baseline for grouped top-k routing (e.g., DeepSeek).
+    """Baseline for grouped top-k routing (e.g., DeepSeek).
 
     Algorithm:
     1. Apply scoring function (softmax or sigmoid)
@@ -436,8 +432,7 @@ def baseline_grouped_topk(
 def baseline_custom_llama4(
     router_logits: torch.Tensor, top_k: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Baseline for Llama4 custom routing.
+    """Baseline for Llama4 custom routing.
 
     Algorithm:
     1. Select top-k expert indices (without softmax)

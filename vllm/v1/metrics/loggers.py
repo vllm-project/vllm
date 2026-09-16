@@ -1202,16 +1202,15 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
 
 class StatLoggerManager:
-    """
-    StatLoggerManager:
-        Logging happens at the level of the EngineCore (per scheduler).
-         * DP: >1 EngineCore per AsyncLLM - loggers for each EngineCore.
-         * With Local Logger, just make N copies for N EngineCores.
-         * With Prometheus, we need a single logger with N "labels"
+    """StatLoggerManager:
+    Logging happens at the level of the EngineCore (per scheduler).
+     * DP: >1 EngineCore per AsyncLLM - loggers for each EngineCore.
+     * With Local Logger, just make N copies for N EngineCores.
+     * With Prometheus, we need a single logger with N "labels"
 
-        This class abstracts away this implementation detail from
-        the AsyncLLM, allowing the AsyncLLM to just call .record()
-        and .log() to a simple interface.
+    This class abstracts away this implementation detail from
+    the AsyncLLM, allowing the AsyncLLM to just call .record()
+    and .log() to a simple interface.
     """
 
     def __init__(

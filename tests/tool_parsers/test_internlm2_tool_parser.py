@@ -18,7 +18,6 @@ class TestInternLM2ToolParser(ToolParserTests):
     @pytest.fixture
     def tokenizer(self, default_tokenizer: TokenizerLike) -> TokenizerLike:
         """Add some internlm2 specific tokens to the default vocab."""
-
         tokenizer_vocab = default_tokenizer.get_vocab()
         default_tokenizer.get_vocab = MagicMock()
         tokenizer_vocab.update(
