@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Tests for the LlamaNemotronVL model family:
+"""Tests for the LlamaNemotronVL model family:
   - nvidia/llama-nemotron-embed-vl-1b-v2  (LlamaNemotronVLForCausalLM / embed)
   - nvidia/llama-nemotron-rerank-vl-1b-v2
       (LlamaNemotronVLForSequenceClassification / rerank)

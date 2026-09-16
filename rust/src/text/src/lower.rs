@@ -92,6 +92,7 @@ pub fn lower_sampling_params(
 ) -> Result<EngineCoreSamplingParams> {
     let SamplingParams {
         temperature,
+        watermarking,
         top_p,
         top_k,
         seed,
@@ -164,6 +165,7 @@ pub fn lower_sampling_params(
 
     let params = EngineCoreSamplingParams {
         temperature,
+        watermarking,
         top_p,
         top_k,
         seed,
@@ -318,12 +320,14 @@ mod tests {
     use std::collections::{BTreeSet, HashMap};
 
     use serial_test::file_serial;
-    use vllm_engine_core_client::protocol::multimodal::{MmFeatureSpec, PlaceholderRange};
+    use vllm_engine_core_client::protocol::multimodal::{
+        MmFeatureSpec, MmModality, PlaceholderRange,
+    };
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::*;
-    use crate::backend::hf::HfTextBackend;
-    use crate::backend::{SamplingHints, TextBackend as _};
+    use crate::backend::hf::{HfTextBackend, ResolvedModelFiles};
+    use crate::backend::{GenerationConfigMode, SamplingHints, TextBackend as _};
     use crate::error::{LogprobsError, SamplingParamsError, TokenIdsError};
     use crate::request::{Prompt, TextRequest};
 
@@ -432,6 +436,20 @@ mod tests {
                 max_tokens: 4,
             }
         ));
+    }
+
+    #[test]
+    fn lower_sampling_params_preserves_zero_min_tokens() {
+        let params = lower_sampling_params_with_limits(
+            SamplingParams {
+                min_tokens: Some(0),
+                ..SamplingParams::default()
+            },
+            sample_sampling_limits(),
+        )
+        .expect("lower zero min_tokens");
+
+        assert_eq!(params.min_tokens, 0);
     }
 
     #[test]
@@ -616,6 +634,7 @@ mod tests {
         expect_test::expect![[r#"
             EngineCoreSamplingParams {
                 temperature: 1.0,
+                watermarking: true,
                 top_p: 1.0,
                 top_k: 0,
                 seed: None,
@@ -670,6 +689,7 @@ mod tests {
         expect_test::expect![[r#"
             EngineCoreSamplingParams {
                 temperature: 1.0,
+                watermarking: true,
                 top_p: 1.0,
                 top_k: 0,
                 seed: None,
@@ -706,7 +726,7 @@ mod tests {
     fn lower_text_request_moves_multimodal_features_to_generate_request() {
         let features = vec![MmFeatureSpec {
             data: None,
-            modality: "image".to_string(),
+            modality: MmModality::Image,
             identifier: "image-1".to_string(),
             mm_position: PlaceholderRange {
                 offset: 2,
@@ -785,9 +805,15 @@ mod tests {
     #[tokio::test]
     #[file_serial(hf_qwen3)]
     async fn lower_text_request_uses_real_qwen_generation_defaults() {
-        let backend = HfTextBackend::from_model("Qwen/Qwen3-0.6B")
-            .await
-            .expect("load qwen tokenizer and generation config");
+        let model_id = "Qwen/Qwen3-0.6B";
+        let files =
+            ResolvedModelFiles::new(model_id, None).await.expect("resolve qwen model files");
+        let backend = HfTextBackend::from_resolved_model_files(
+            files,
+            model_id.to_string(),
+            GenerationConfigMode::Auto,
+        )
+        .expect("load qwen tokenizer and generation config");
         let hints = backend.sampling_hints().expect("collect sampling hints");
 
         expect_test::expect![[r#"
@@ -832,6 +858,7 @@ mod tests {
         expect_test::expect![[r#"
             EngineCoreSamplingParams {
                 temperature: 0.6,
+                watermarking: true,
                 top_p: 0.95,
                 top_k: 20,
                 seed: None,
@@ -896,6 +923,7 @@ mod tests {
         expect_test::expect![[r#"
             EngineCoreSamplingParams {
                 temperature: 1.0,
+                watermarking: true,
                 top_p: 1.0,
                 top_k: 0,
                 seed: None,
@@ -968,6 +996,7 @@ mod tests {
         expect_test::expect![[r#"
             EngineCoreSamplingParams {
                 temperature: 0.2,
+                watermarking: true,
                 top_p: 0.3,
                 top_k: 4,
                 seed: None,
@@ -1218,6 +1247,7 @@ mod tests {
         expect_test::expect![[r#"
             EngineCoreSamplingParams {
                 temperature: 0.8,
+                watermarking: true,
                 top_p: 0.9,
                 top_k: 12,
                 seed: None,

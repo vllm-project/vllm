@@ -60,7 +60,8 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, StopParam
+from vllm.entrypoints.generate.base.protocol import StopParam, validate_cache_salt
+from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
@@ -79,6 +80,7 @@ _INT64_MAX = 2**63 - 1
 
 class InputTokensDetails(OpenAIBaseModel):
     cached_tokens: int
+    cache_write_tokens: int
     input_tokens_per_turn: list[int] = Field(default_factory=list)
     cached_tokens_per_turn: list[int] = Field(default_factory=list)
 
@@ -99,9 +101,7 @@ class ResponseUsage(OpenAIBaseModel):
 
 
 def serialize_message(msg):
-    """
-    Serializes a single message
-    """
+    """Serializes a single message."""
     if isinstance(msg, dict):
         return msg
     elif hasattr(msg, "to_dict"):
@@ -112,9 +112,7 @@ def serialize_message(msg):
 
 
 def serialize_messages(msgs):
-    """
-    Serializes multiple messages
-    """
+    """Serializes multiple messages."""
     return [serialize_message(msg) for msg in msgs] if msgs else None
 
 
@@ -212,6 +210,7 @@ class ResponsesRequest(OpenAIBaseModel):
     )
 
     # --8<-- [start:responses-extra-params]
+    watermarking: bool = True
     request_id: str = Field(
         default_factory=lambda: f"resp_{random_uuid()}",
         description=(
@@ -252,6 +251,7 @@ class ResponsesRequest(OpenAIBaseModel):
     cache_salt: str | None = Field(
         default=None,
         min_length=1,
+        max_length=1024,
         description=(
             "If specified, the prefix cache will be salted with the provided "
             "string to prevent an attacker to guess prompts in multi-user "
@@ -434,6 +434,7 @@ class ResponsesRequest(OpenAIBaseModel):
 
         return SamplingParams.from_optional(
             temperature=temperature,
+            watermarking=self.watermarking,
             top_p=top_p,
             top_k=top_k,
             max_tokens=max_tokens,
@@ -463,6 +464,14 @@ class ResponsesRequest(OpenAIBaseModel):
             isinstance(self.include, list)
             and "message.output_text.logprobs" in self.include
         )
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_cache_salt_support(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        validate_cache_salt(data.get("cache_salt"))
+        return data
 
     @model_validator(mode="before")
     @classmethod
@@ -622,8 +631,15 @@ class ResponsesRequest(OpenAIBaseModel):
                 if isinstance(tool, dict):
                     if tool.get("type") == "namespace":
                         namespace = tool.get("name")
-                        for namespaced_tool in tool.get("tools", []):
-                            namespaced_name = namespaced_tool.get("name")
+                        namespaced_tools = tool.get("tools")
+                        if not isinstance(namespaced_tools, list):
+                            return data
+                        for namespaced_tool in namespaced_tools:
+                            namespaced_name = (
+                                namespaced_tool.get("name")
+                                if isinstance(namespaced_tool, dict)
+                                else getattr(namespaced_tool, "name", None)
+                            )
                             tool_names.add(namespaced_name)
                             tool_names.add(f"{namespace}__{namespaced_name}")
                     else:

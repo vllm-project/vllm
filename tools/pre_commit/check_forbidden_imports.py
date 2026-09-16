@@ -48,6 +48,7 @@ CHECK_IMPORTS = {
             "vllm/distributed/device_communicators/shm_object_storage.py",
             "vllm/distributed/weight_transfer/ipc_engine.py",
             "vllm/distributed/weight_transfer/clients.py",
+            "vllm/model_executor/model_loader/weight_cache/protocol.py",
             "tests/distributed/test_shm_broadcast.py",
             "tests/distributed/test_weight_transfer.py",
             "vllm/utils/hashing.py",
@@ -59,8 +60,6 @@ CHECK_IMPORTS = {
             "benchmarks/kernels/benchmark_lora.py",
             "benchmarks/kernels/benchmark_machete.py",
             "benchmarks/fused_kernels/layernorm_rms_benchmarks.py",
-            "benchmarks/cutlass_benchmarks/w8a8_benchmarks.py",
-            "benchmarks/cutlass_benchmarks/sparse_benchmarks.py",
             # cloudpickle
             "vllm/v1/executor/multiproc_executor.py",
             "vllm/v1/executor/ray_executor.py",

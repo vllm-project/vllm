@@ -11,12 +11,8 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionToolsParam,
-)
-from vllm.entrypoints.openai.engine.protocol import (
-    OpenAIBaseModel,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
+from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 
@@ -185,8 +181,7 @@ class DetokenizeResponse(OpenAIBaseModel):
 
 
 class TokenizerInfoResponse(OpenAIBaseModel):
-    """
-    Response containing tokenizer configuration
+    """Response containing tokenizer configuration
     equivalent to tokenizer_config.json
     """
 

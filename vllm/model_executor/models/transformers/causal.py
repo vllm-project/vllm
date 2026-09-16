@@ -40,11 +40,7 @@ class CausalMixin(VllmModelForTextGeneration):
             vllm_config=vllm_config, prefix=prefix
         )
 
-        # Tell `Base.load_weights` to skip
-        # `lm_head` if the model has tied word embeddings
         tie_word_embeddings = self._get_tie_word_embeddings()
-        if tie_word_embeddings:
-            self.skip_prefixes.append("lm_head.")
 
         if self.pp_group.is_last_rank:
             self.lm_head = ParallelLMHead(
@@ -69,7 +65,6 @@ class CausalMixin(VllmModelForTextGeneration):
 
     def load_weights(self, weights: Iterable[tuple[str, "torch.Tensor"]]) -> set[str]:
         """A thin wrapper around `Base.load_weights` to handle the lm_head bias."""
-
         lm_head_bias = set()
 
         def auto_load_lm_head_bias(weights):

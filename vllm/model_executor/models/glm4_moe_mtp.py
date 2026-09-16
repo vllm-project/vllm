@@ -93,6 +93,7 @@ class Glm4MoeMultiTokenPredictorLayer(nn.Module):
         self.shared_head = SharedHead(
             config=config, prefix=prefix, quant_config=quant_config
         )
+        assert parallel_config is not None
         self.enable_eplb = parallel_config.enable_eplb
         self.mtp_block = Glm4MoeDecoderLayer(
             config=config,
@@ -411,8 +412,7 @@ class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
         return loaded_params
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
-        """
-        Rewrite the weight name to match the format of the original model.
+        """Rewrite the weight name to match the format of the original model.
         Add .mtp_block for modules in transformer layer block for spec layer
         and rename shared layer weights to be top level.
         """

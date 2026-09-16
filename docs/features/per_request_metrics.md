@@ -125,3 +125,12 @@ a single prompt's generation.
 The `metrics` response field provides per-request values for a single request.
 The `/metrics` Prometheus endpoint exposes server-level histograms (e.g.
 `vllm:time_to_first_token_seconds`) that aggregate across all requests.
+
+## Speculative Decoding Acceptance
+
+When speculative decoding is enabled, per-request acceptance metrics
+(mean acceptance length and the accepted-draft-length distribution) can be
+returned via `--per-request-spec-decode-metrics`. They share this `metrics`
+object as `metrics.speculative_decoding`, and — like the timing fields — are
+reported only for single-sequence (`n == 1`) requests. See
+[Per-Request Acceptance Metrics](speculative_decoding/acceptance_metrics.md).

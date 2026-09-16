@@ -130,6 +130,8 @@ def create_vllm_config(
         cache_dtype=cache_dtype,
         enable_prefix_caching=True,
     )
+    # Connectors are constructed after layout resolution; mirror that here.
+    cache_config.kv_cache_layout = "LBNHC"
     kv_transfer_config = KVTransferConfig(
         kv_connector=kv_connector,
         kv_connector_module_path=kv_connector_module_path,
@@ -259,7 +261,6 @@ def create_model_runner_output(
     kv_connector_worker_meta: KVConnectorWorkerMetadata | None = None,
 ) -> ModelRunnerOutput:
     """Make dummy model runner output for testing."""
-
     # Make request data.
     req_ids = [req.request_id for req in reqs]
     req_id_to_index = {req_id: idx for idx, req_id in enumerate(req_ids)}
@@ -463,6 +464,7 @@ def make_kv_cache_config(
     mamba_enabled: bool = False,
     sw_size: int = 128,
     num_blocks: int = 100,
+    mamba_cache_mode: Literal["all", "align", "none"] = "none",
 ) -> KVCacheConfig:
     kv_cache_groups = [
         KVCacheGroupSpec(
@@ -496,6 +498,7 @@ def make_kv_cache_config(
                     block_size=block_size,
                     shapes=((16,), (16,)),
                     dtypes=(torch.float16,),
+                    mamba_cache_mode=mamba_cache_mode,
                 ),
             )
         )
@@ -515,6 +518,8 @@ def make_nixl_scheduler(
     Only sets the flags needed by the tests.  When *heartbeat=True* the
     scheduler-side heartbeat bookkeeping fields are also initialised.
     """
+    from types import SimpleNamespace
+
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
         NixlConnectorScheduler,
     )
@@ -522,6 +527,11 @@ def make_nixl_scheduler(
     sched = object.__new__(NixlConnectorScheduler)
     sched._has_mamba = has_mamba
     sched._is_hma_required = is_hma_required
+    sched.kv_cache_config = make_kv_cache_config(
+        block_size=16,
+        mamba_enabled=has_mamba,
+    )
+    sched.vllm_config = SimpleNamespace(num_prefill_lookahead_tokens=0)
 
     if heartbeat:
         sched._heartbeat_by_engine = {}
@@ -531,12 +541,14 @@ def make_nixl_scheduler(
         sched._heartbeat_interval = kv_lease_duration // 6
         # Fields touched by build_connector_meta / request_finished:
         sched._reqs_need_recv = {}
+        sched._hisparse_host_blocks_to_recv = {}
         sched._reqs_need_send = {}
         sched._reqs_in_batch = set()
         sched._reqs_not_processed = set()
         sched._reqs_need_save = {}
         sched.use_host_buffer = False
         sched.engine_id = "test-engine"
+        sched.transfer_tp_size = 1
         sched.side_channel_host = "localhost"
         sched.side_channel_port = 5555
         sched.blocks_per_sw = []
@@ -576,14 +588,21 @@ def make_nixl_push_scheduler(
     sched.decoder_kv_blocks_ttl = decoder_kv_blocks_ttl
     sched.use_host_buffer = False
     sched.engine_id = "decode-engine"
+    sched.transfer_tp_size = 1
     sched.side_channel_host = "127.0.0.1"
     sched.side_channel_port = 5600
     sched.is_bidirectional_kv_xfer_enabled = is_bidirectional_kv_xfer_enabled
     sched._has_mamba = has_mamba
+    sched.kv_cache_config = make_kv_cache_config(
+        block_size=16,
+        mamba_enabled=has_mamba,
+    )
 
-    # vllm_config is consulted for parallel_config.tensor_parallel_size.
+    # vllm_config is consulted for parallel_config.tensor_parallel_size, and by
+    # `_prefill_backoff` on both the P and D prefill paths.
     vllm_config = MagicMock()
     vllm_config.parallel_config.tensor_parallel_size = 1
+    vllm_config.num_prefill_lookahead_tokens = 0
     sched.vllm_config = vllm_config
 
     # Push-specific state.

@@ -33,12 +33,15 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.batched import (
 )
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.model_executor.layers.quantization.utils.fp8_utils import is_fp8
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     ref_nvfp4_quant,
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
 from vllm.utils.math_utils import round_up
+
+DEVICE = current_platform.device_type
 
 
 def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
@@ -61,8 +64,7 @@ def make_dummy_moe_config(
     max_num_tokens: int = 512,
     activation: MoEActivation = MoEActivation.SILU,
 ) -> FusedMoEConfig:
-    """
-    This is a dummy config for the mk constructor interface
+    """This is a dummy config for the mk constructor interface
     as most kernels like DeepGEMM, CUTLASSFp4, Triton, MARLIN
     do not actually use this config.
 
@@ -80,7 +82,7 @@ def make_dummy_moe_config(
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
         activation=activation,
         in_dtype=in_dtype,
-        device="cuda",
+        device=DEVICE,
         routing_method=RoutingMethodType.TopK,
         max_num_tokens=max_num_tokens,
     )
@@ -126,6 +128,7 @@ def batched_moe(
     quant_dtype: torch.dtype | None = None,
     per_act_token_quant: bool = False,
     block_shape: list[int] | None = None,
+    moe_config: FusedMoEConfig | None = None,
 ) -> torch.Tensor:
     max_num_tokens = round_up(a.shape[0], 64)
 
@@ -139,7 +142,8 @@ def batched_moe(
         a2_scale=a2_scale,
     )
 
-    moe_config = make_dummy_moe_config()
+    if moe_config is None:
+        moe_config = make_dummy_moe_config()
 
     fused_experts = FusedMoEKernel(
         BatchedPrepareAndFinalize(
@@ -238,7 +242,7 @@ def make_quantized_test_activations(
     block_shape: list[int] | None = None,
     per_act_token_quant: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    a = torch.randn((E, m, k), device="cuda", dtype=in_dtype) / 10
+    a = torch.randn((E, m, k), device=DEVICE, dtype=in_dtype) / 10
     a_q = a
     a_scale = None
 
@@ -267,11 +271,10 @@ def moe_quantize_weights_2d(
     per_token_quant: bool,
     block_shape: list[int] | None,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-    assert (
-        quant_dtype == torch.float8_e4m3fn
-        or quant_dtype == torch.int8
-        or quant_dtype == "nvfp4"
-    ), "only fp8/int8/nvfp4 supported"
+    is_fp8_dtype = is_fp8(quant_dtype)
+    assert is_fp8_dtype or quant_dtype == torch.int8 or quant_dtype == "nvfp4", (
+        "only fp8/int8/nvfp4 supported"
+    )
 
     w_gs = None
 
@@ -279,7 +282,7 @@ def moe_quantize_weights_2d(
         assert not per_token_quant
         if quant_dtype == torch.int8:
             w, w_s = per_block_cast_to_int8(w, block_shape)
-        elif quant_dtype == torch.float8_e4m3fn:
+        elif is_fp8_dtype:
             w, w_s = per_block_cast_to_fp8(w, block_shape)
         elif quant_dtype == "nvfp4":
             raise RuntimeError("blocked quantization not supported for nvfp4")
@@ -290,7 +293,7 @@ def moe_quantize_weights_2d(
             w, w_s = ops.scaled_int8_quant(
                 w, w_s, use_per_token_if_dynamic=per_token_quant
             )
-        elif quant_dtype == torch.float8_e4m3fn:
+        elif is_fp8_dtype:
             w, w_s = ops.scaled_fp8_quant(
                 w, w_s, use_per_token_if_dynamic=per_token_quant
             )
@@ -369,7 +372,7 @@ def make_test_weight(
     block_shape: list[int] | None = None,
     per_out_ch_quant: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-    w_16 = torch.randn((e, rows, cols), device="cuda", dtype=in_dtype) / 15
+    w_16 = torch.randn((e, rows, cols), device=DEVICE, dtype=in_dtype) / 15
 
     if quant_dtype is not None:
         w, w_s, w_gs = moe_quantize_weights(
@@ -449,8 +452,8 @@ def make_test_quant_config(
     a1_gscale: torch.Tensor | None = None
     a2_gscale: torch.Tensor | None = None
     if quant_dtype == "nvfp4":
-        a1_gscale = torch.ones((e,), device="cuda", dtype=torch.float32)
-        a2_gscale = torch.ones((e,), device="cuda", dtype=torch.float32)
+        a1_gscale = torch.ones((e,), device=DEVICE, dtype=torch.float32)
+        a2_gscale = torch.ones((e,), device=DEVICE, dtype=torch.float32)
         a1_scale = a1_gscale
         a2_scale = a2_gscale
     else:
@@ -551,8 +554,8 @@ def make_naive_shared_experts(
     K: int,
     in_dtype: torch.dtype = torch.bfloat16,
 ) -> torch.nn.Module:
-    w1 = torch.randn((K, N * 2), device="cuda", dtype=in_dtype) / 15
-    w2 = torch.randn((N, K), device="cuda", dtype=in_dtype) / 15
+    w1 = torch.randn((K, N * 2), device=DEVICE, dtype=in_dtype) / 15
+    w2 = torch.randn((N, K), device=DEVICE, dtype=in_dtype) / 15
     return TestMLP(w1, w2, out_dtype=in_dtype)
 
 
