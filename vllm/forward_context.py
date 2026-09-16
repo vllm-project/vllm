@@ -64,16 +64,17 @@ def _compute_sp_num_tokens(
     pcp_size: int = 1,
     use_ep: bool = True,
 ) -> list[int]:
-    if not use_ep and pcp_size > 1:
-        # Tensor-parallel MoE gathers PCP tokens before dispatching across DP.
-        num_tokens_across_dp_cpu = num_tokens_across_dp_cpu * pcp_size
-        pcp_size = 1
+    if pcp_size > 1:
+        num_tokens_across_dp_cpu = (
+            num_tokens_across_dp_cpu.repeat_interleave(pcp_size)
+            if use_ep
+            else num_tokens_across_dp_cpu * pcp_size
+        )
     sp_tokens = (
         num_tokens_across_dp_cpu + sequence_parallel_size - 1
     ) // sequence_parallel_size
 
-    # PCP ranks execute equally padded batches; rank order is DP -> PCP -> TP.
-    sp_tokens = sp_tokens.repeat_interleave(pcp_size * sequence_parallel_size)
+    sp_tokens = sp_tokens.repeat_interleave(sequence_parallel_size)
     return sp_tokens.tolist()
 
 
@@ -83,8 +84,6 @@ class DPMetadata:
 
     # NOTE: local_sizes should only be set by the chunked_sizes context manager
     local_sizes: list[int] | None = None
-    pcp_size: int = 1
-    use_ep: bool = False
 
     @staticmethod
     def make(
@@ -106,14 +105,12 @@ class DPMetadata:
         assert num_tokens_across_dp_cpu[dp_rank] == batchsize, (
             f"{num_tokens_across_dp_cpu[dp_rank]} {batchsize}"
         )
-        return DPMetadata(
-            num_tokens_across_dp_cpu,
-            pcp_size=parallel_config.prefill_context_parallel_size,
-            use_ep=parallel_config.enable_expert_parallel,
-        )
+        return DPMetadata(num_tokens_across_dp_cpu)
 
     @contextmanager
-    def sp_local_sizes(self, sequence_parallel_size: int):
+    def sp_local_sizes(
+        self, sequence_parallel_size: int, pcp_size: int = 1, use_ep: bool = False
+    ):
         """
         Context manager for setting self.local_sizes. Same as self.chunked_sizes
         but without any chunking.
@@ -121,8 +118,8 @@ class DPMetadata:
         self.local_sizes = _compute_sp_num_tokens(
             self.num_tokens_across_dp_cpu,
             sequence_parallel_size,
-            self.pcp_size,
-            self.use_ep,
+            pcp_size,
+            use_ep,
         )
         try:
             yield self.local_sizes

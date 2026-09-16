@@ -30,7 +30,7 @@ def test_dispatch_sizes_expand_pcp_before_tp(pcp_size, sp_size, enable_ep, expec
         enable_expert_parallel=enable_ep,
     )
     metadata = DPMetadata.make(config, 5, torch.tensor([5, 7]))
-    with metadata.sp_local_sizes(sp_size) as sizes:
+    with metadata.sp_local_sizes(sp_size, pcp_size=pcp_size, use_ep=enable_ep) as sizes:
         assert sizes == expected
     assert metadata.local_sizes is None
     assert metadata.num_tokens_across_dp_cpu.tolist() == [5, 7]
@@ -114,7 +114,7 @@ def test_ag_rs_dispatch_and_combine_use_dp_pcp_sizes(monkeypatch, enable_ep):
         "vllm.distributed.device_communicators.all2all.get_forward_context",
         lambda: SimpleNamespace(dp_metadata=metadata),
     )
-    with metadata.sp_local_sizes(1):
+    with metadata.sp_local_sizes(1, pcp_size=2, use_ep=enable_ep):
         hidden_states, _, _ = manager.dispatch(
             torch.tensor(local_tokens),
             torch.ones(len(local_tokens)),
