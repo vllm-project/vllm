@@ -53,7 +53,7 @@ from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
-from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor, async_copy_to_gpu
+from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
@@ -1159,7 +1159,7 @@ class DiffusionSampler:
             return
         # Move the slot indices across once, up front: indexing a device
         # tensor with a numpy array copies them over synchronously each time.
-        ps_gpu = async_copy_to_gpu(
+        ps_gpu = async_tensor_h2d(
             ps.astype(np.int64), device=states.is_encoder_phase.device
         )
         states.init_canvas(ps_gpu)
@@ -1266,7 +1266,7 @@ class DiffusionSampler:
         # was truncated near max_model_len, in which case the scheduler gave us
         # fewer than CL logits for that request.
         valid_canvas_len_np = per_req_nlogits_np[per_req_nlogits_np > 0]
-        valid_canvas_len = async_copy_to_gpu(
+        valid_canvas_len = async_tensor_h2d(
             valid_canvas_len_np.astype(np.int64), device=device
         )
 
