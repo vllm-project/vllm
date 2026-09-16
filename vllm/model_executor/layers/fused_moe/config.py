@@ -17,14 +17,19 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_triton_kernels
+from vllm.utils.import_utils import get_triton_kernels_version
 from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
 
-if has_triton_kernels():
+_triton_kernels_version = get_triton_kernels_version()
+
+if _triton_kernels_version is not None:
     try:
-        from triton_kernels.matmul_ogs import PrecisionConfig
+        if _triton_kernels_version == "3.8":
+            from triton_kernels.matmul import PrecisionConfig
+        else:
+            from triton_kernels.matmul_ogs import PrecisionConfig
     except (ImportError, AttributeError) as e:
         logger.error(
             "Failed to import Triton kernels. Please make sure your triton "
