@@ -22,6 +22,10 @@ from transformers.models.pixtral.modeling_pixtral import (
     position_ids_in_meshgrid,
 )
 
+from vllm.compilation.decorators import (
+    should_torch_compile_mm_encoder,
+    support_torch_compile,
+)
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
@@ -823,6 +827,16 @@ class Attention(nn.Module):
         return out
 
 
+@support_torch_compile(
+    dynamic_arg_dims={
+        "x": 1,
+        "freqs_cis": 0,
+        "cu_seqlens": 0,
+        "sequence_lengths": 0,
+    },
+    enable_if=should_torch_compile_mm_encoder,
+    is_encoder=True,
+)
 class TransformerBlock(nn.Module):
     def __init__(
         self,
@@ -1294,7 +1308,7 @@ class PixtralHFAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        position_embeddings: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
         cu_seqlens: torch.Tensor,
         max_seqlen: torch.Tensor,
         sequence_lengths: torch.Tensor | None,
@@ -1325,6 +1339,17 @@ class PixtralHFAttention(nn.Module):
         return attn_output, None
 
 
+@support_torch_compile(
+    dynamic_arg_dims={
+        "hidden_states": 1,
+        "rotary_pos_emb_cos": 0,
+        "rotary_pos_emb_sin": 0,
+        "cu_seqlens": 0,
+        "sequence_lengths": 0,
+    },
+    enable_if=should_torch_compile_mm_encoder,
+    is_encoder=True,
+)
 class PixtralHFTransformerBlock(nn.Module):
     def __init__(
         self,
@@ -1351,14 +1376,15 @@ class PixtralHFTransformerBlock(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        position_embeddings: torch.Tensor,
+        rotary_pos_emb_cos: torch.Tensor,
+        rotary_pos_emb_sin: torch.Tensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: torch.Tensor,
         sequence_lengths: torch.Tensor | None,
     ) -> torch.Tensor:
         r, _ = self.attention.forward(
             self.attention_norm(hidden_states),
-            position_embeddings=position_embeddings,
+            position_embeddings=(rotary_pos_emb_cos, rotary_pos_emb_sin),
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
             sequence_lengths=sequence_lengths,
@@ -1399,18 +1425,20 @@ class PixtralHFTransformer(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        position_embeddings: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
         cu_seqlens: torch.Tensor,
         max_seqlen: torch.Tensor,
         sequence_lengths: torch.Tensor | None,
         return_all_hidden_states: bool,
     ) -> torch.Tensor:
         hidden_states_pool = [x]
+        rotary_pos_emb_cos, rotary_pos_emb_sin = position_embeddings
 
         for layer in self.layers:
             x = layer(
                 x,
-                position_embeddings,
+                rotary_pos_emb_cos,
+                rotary_pos_emb_sin,
                 cu_seqlens,
                 max_seqlen,
                 sequence_lengths,
