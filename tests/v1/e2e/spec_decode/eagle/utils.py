@@ -63,6 +63,8 @@ def _run_eagle_correctness(
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_MLA_DISABLE", "1")
+        m.setenv("VLLM_BATCH_INVARIANT", "1")
+        m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
         if attn_backend == "ROCM_AITER_FA" and current_platform.is_rocm():
             if "deepseek" in model_name.lower():

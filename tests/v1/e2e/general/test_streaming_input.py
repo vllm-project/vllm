@@ -189,34 +189,49 @@ async def test_streaming_input_spaced(engine: AsyncLLM):
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_streaming_input_output_equivalence(engine: AsyncLLM):
+async def test_streaming_input_output_equivalence(monkeypatch: pytest.MonkeyPatch):
     """Test that bunched and spaced inputs produce equivalent outputs.
 
     When the same prompts are provided either bunched or spaced,
     the final concatenated output should be the same (with deterministic
     sampling).
     """
-    prompts = ["Hello, my name is", " Bob and I work", " at Anthropic"]
-    sampling_params = get_sampling_params(max_tokens=15)
+    from vllm.engine.arg_utils import AsyncEngineArgs
 
-    # Test bunched inputs
-    async def bunched_gen() -> AsyncGenerator[StreamingInput, None]:
-        for prompt in prompts:
-            yield StreamingInput(prompt=prompt)
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
-    _, bunched_text = await collect_outputs(
-        engine.generate(bunched_gen(), sampling_params, "equiv_bunched")
+    engine_args = AsyncEngineArgs(
+        model=MODEL, enforce_eager=True, gpu_memory_utilization=0.2
     )
+    with set_default_torch_num_threads(1):
+        engine = AsyncLLM.from_engine_args(engine_args)
 
-    # Test spaced inputs (same prompts, but with delays)
-    async def spaced_gen() -> AsyncGenerator[StreamingInput, None]:
-        for prompt in prompts:
-            yield StreamingInput(prompt=prompt)
-            await asyncio.sleep(0.3)
+    try:
+        prompts = ["Hello, my name is", " Bob and I work", " at Anthropic"]
+        sampling_params = get_sampling_params(max_tokens=15)
 
-    _, spaced_text = await collect_outputs(
-        engine.generate(spaced_gen(), sampling_params, "equiv_spaced")
-    )
+        # Test bunched inputs
+        async def bunched_gen() -> AsyncGenerator[StreamingInput, None]:
+            for prompt in prompts:
+                yield StreamingInput(prompt=prompt)
+
+        _, bunched_text = await collect_outputs(
+            engine.generate(bunched_gen(), sampling_params, "equiv_bunched")
+        )
+
+        # Test spaced inputs (same prompts, but with delays)
+        async def spaced_gen() -> AsyncGenerator[StreamingInput, None]:
+            for prompt in prompts:
+                yield StreamingInput(prompt=prompt)
+                await asyncio.sleep(0.3)
+
+        _, spaced_text = await collect_outputs(
+            engine.generate(spaced_gen(), sampling_params, "equiv_spaced")
+        )
+    finally:
+        engine.shutdown()
+        await asyncio.sleep(0.1)
 
     # Both should produce the same output since we use temperature=0
     assert bunched_text == spaced_text, (

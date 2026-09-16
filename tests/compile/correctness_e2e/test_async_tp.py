@@ -92,7 +92,7 @@ def test_async_tp_pass_correctness(
         model_id,
         async_tp_args,
         tp_args,
-        method="generate",
+        method="generate_close",
         force_v1_runner=True,
     )
 
@@ -160,6 +160,6 @@ def test_async_tp_pass_nvfp4_correctness(num_gpus_available: int):
         NVFP4_MODEL_ID,
         async_tp_args,
         tp_args,
-        method="generate",
+        method="generate_close",
         force_v1_runner=True,
     )

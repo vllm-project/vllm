@@ -85,7 +85,11 @@ def example_prompt_embeds(hf_runner):
 
 @pytest.fixture(scope="module")
 def server_with_prompt_embeds(default_server_args):
-    with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
+    with RemoteOpenAIServer(
+        MODEL_NAME,
+        default_server_args,
+        env_dict={"VLLM_BATCH_INVARIANT": "1"},
+    ) as remote_server:
         yield remote_server
 
 

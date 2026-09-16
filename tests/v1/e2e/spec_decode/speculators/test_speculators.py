@@ -48,6 +48,8 @@ def test_speculators_model_integration(
     6. Output matches reference (non-speculative) generation
     """
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
     # Generate test prompts
     test_prompts = get_test_prompts(mm_enabled=False)

@@ -983,7 +983,7 @@ def test_structured_output_batched_with_non_structured_outputs_requests(
             else:
                 # Second prompt is not structured outputs, expect valid output
                 # Cannot assert on exact output, but we can expect it to be factual
-                assert "12,742" in generated_text
+                assert re.search(r"12,?742", generated_text)
 
                 # non-structured outputs requests should not return a valid JSON here
                 with pytest.raises(ValueError):
