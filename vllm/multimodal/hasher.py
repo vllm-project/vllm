@@ -23,8 +23,7 @@ logger = init_logger(__name__)
 def _get_hasher_factory(
     algorithm: MMHasherAlgorithm,
 ) -> Callable[[], "hashlib._Hash"]:
-    """
-    Get the hasher factory based on the configured algorithm.
+    """Get the hasher factory based on the configured algorithm.
 
     Args:
         algorithm: Hash algorithm name (blake3, sha256, or sha512)
@@ -33,8 +32,8 @@ def _get_hasher_factory(
     Supports blake3 (default), sha256, and sha512 for FIPS compliance.
 
     See: https://github.com/vllm-project/vllm/issues/18334
-    """
 
+    """
     if algorithm == "blake3":
         from blake3 import blake3
 

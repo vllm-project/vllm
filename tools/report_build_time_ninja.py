@@ -56,7 +56,8 @@ class Target:
 
     def __init__(self, start, end):
         """Creates a target object by passing in the start/end times in seconds
-        as a float."""
+        as a float.
+        """
         self.start = start
         self.end = end
         # A list of targets, appended to by the owner of this object.
@@ -104,7 +105,8 @@ class Target:
 def ReadTargets(log, show_all):
     """Reads all targets from .ninja_log file |log_file|, sorted by duration.
 
-    The result is a list of Target objects."""
+    The result is a list of Target objects.
+    """
     header = log.readline()
     assert header == "# ninja log v5\n", "unrecognized ninja log version {!r}".format(
         header
@@ -153,7 +155,8 @@ def GetExtension(target, extra_patterns):
 
     For targets that generate multiple outputs it is important to return a
     consistent 'canonical' extension. Ultimately the goal is to group build steps
-    by type."""
+    by type.
+    """
     for output in target.targets:
         if extra_patterns:
             for fn_pattern in extra_patterns.split(";"):
@@ -197,7 +200,6 @@ def GetExtension(target, extra_patterns):
 
 def SummarizeEntries(entries, extra_step_types):
     """Print a summary of the passed in list of Target objects."""
-
     # Create a list that is in order by time stamp and has entries for the
     # beginning and ending of each build step (one time stamp may have multiple
     # entries due to multiple steps starting/stopping at exactly the same time).

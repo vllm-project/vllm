@@ -174,7 +174,8 @@ _TOOL_CALL_SAMPLES = [
 )
 def test_delegating_parse_tool_choice_none(parser_cls, parser_name, sample):
     """Non-streaming parse() with tool_choice='none' via DelegatingParser
-    must not leak special tokens into content."""
+    must not leak special tokens into content.
+    """
     tokenizer = make_mock_tokenizer(sample)
     validated_tools = (
         _TOOLS_VALIDATOR.validate_python(sample.tools) if sample.tools else None

@@ -85,7 +85,8 @@ def test_block_fp8_activation_quant_config_is_block_quantized():
     (FP8 dtype, [1, 128] block, not per-act-token). This is what makes the
     DeepEP prepare/finalize step quantize activations to block FP8 *before* the
     all-to-all dispatch instead of deferring to Humming -- and what makes
-    HummingExpertsBase.expects_unquantized_inputs return False."""
+    HummingExpertsBase.expects_unquantized_inputs return False.
+    """
     from vllm.model_executor.layers.quantization.utils.humming_utils import (
         make_humming_moe_quant_config,
     )
@@ -107,7 +108,8 @@ def test_block_fp8_activation_quant_config_is_block_quantized():
 def test_default_activation_quant_config_defers_to_humming():
     """Without a block activation shape the config stays per-token (the deferred
     path): Humming quantizes internally, preserving pre-existing behavior for
-    every non-block-FP8 scheme."""
+    every non-block-FP8 scheme.
+    """
     from vllm.model_executor.layers.quantization.utils.humming_utils import (
         make_humming_moe_quant_config,
     )

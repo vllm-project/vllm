@@ -1583,7 +1583,8 @@ _SCAN_BEHAVIOR = {
 @pytest.mark.parametrize("result", list(LookupResult))
 def test_scan_behavior_declared_for_every_lookup_result(result: LookupResult):
     """Whether a result keeps a sliding-window streak alive decides how wide
-    the demanded chunk set gets, so every member needs deliberate behavior."""
+    the demanded chunk set gets, so every member needs deliberate behavior.
+    """
     assert result in _SCAN_BEHAVIOR, f"{result} has no declared scan behavior"
     expected_lookups, expected_end = _SCAN_BEHAVIOR[result]
 
@@ -2034,7 +2035,8 @@ def test_request_level_policy_stores_all_blocks(request_runner, async_scheduling
 
 def test_loads_do_not_populate_fence_index(request_runner):
     """Loads don't populate _block_id_to_pending_jobs (protected by
-    delay_free_blocks while in flight)."""
+    delay_free_blocks while in flight).
+    """
     runner = request_runner(
         blocks_per_chunk=3,
         block_size=4,
@@ -2104,7 +2106,8 @@ def test_fence_at_update_state_after_alloc(request_runner):
 def test_fence_at_build_store_jobs(request_runner):
     """A new prefill (no load -> update_state_after_alloc returns early)
     reusing a finished request's pending-store block is flushed by
-    _build_store_jobs's fence."""
+    _build_store_jobs's fence.
+    """
     runner = request_runner(
         blocks_per_chunk=1,
         block_size=4,
@@ -2154,7 +2157,8 @@ def test_fence_at_build_store_jobs(request_runner):
 @pytest.mark.parametrize("async_scheduling", [True, False])
 def test_complete_store_called_per_job(request_runner, async_scheduling: bool):
     """complete_store fires per-job, not deferred to request finish.
-    Each call carries only that store's keys."""
+    Each call carries only that store's keys.
+    """
     tokens_per_block = 4
     blocks_per_chunk = 3
     tokens_per_chunk = tokens_per_block * blocks_per_chunk
@@ -2383,7 +2387,8 @@ def test_offload_prompt_only(request_runner, async_scheduling: bool):
 @pytest.mark.parametrize("async_scheduling", [True, False])
 def test_reset_cache(request_runner, async_scheduling: bool):
     """reset_cache flushes in-flight loads, calls manager.reset_cache(), resets
-    next_stored_chunk_idx for active requests and clears job tracking."""
+    next_stored_chunk_idx for active requests and clears job tracking.
+    """
     block_size = 4
     blocks_per_chunk = 3
     tokens_per_chunk = block_size * blocks_per_chunk
@@ -2929,7 +2934,8 @@ def test_stale_sliding_window_block_after_prepare_store_failure(
 @pytest.mark.parametrize("async_scheduling", [True, False])
 def test_skip_reading_prefix_cache(request_runner, async_scheduling: bool):
     """When skip_reading_prefix_cache=True, the offloading connector must not
-    load any blocks from CPU even if a matching prefix is cached there."""
+    load any blocks from CPU even if a matching prefix is cached there.
+    """
     block_size = 4
     blocks_per_chunk = 3
     tokens_per_chunk = block_size * blocks_per_chunk
@@ -3023,7 +3029,8 @@ def test_max_load_tokens_limits_external_load(request_runner, async_scheduling: 
 
 class TestEagle:
     """Tests for Eagle/MTP speculative decoding support in the offloading
-    connector scheduler — both _lookup() unit tests and integration tests."""
+    connector scheduler — both _lookup() unit tests and integration tests.
+    """
 
     # -------------------------------------------------------------------
     # Helpers
@@ -3565,7 +3572,8 @@ class TestEagle:
         self, request_runner, async_scheduling: bool
     ):
         """Eagle sliding-window group stores all prompt blocks but excludes
-        the trailing chunk while decoding."""
+        the trailing chunk while decoding.
+        """
         block_size = 4
         sliding_window = 8
         num_gpu_blocks = 100
@@ -3617,7 +3625,8 @@ class TestEagle:
         self, request_runner, async_scheduling: bool
     ):
         """An eagle group with a single-block prompt stores it at the end of
-        prefill: prompt blocks are stable, so no tail is held back."""
+        prefill: prompt blocks are stable, so no tail is held back.
+        """
         block_size = 4
         blocks_per_chunk = 1
         tokens_per_chunk = block_size * blocks_per_chunk
@@ -4254,7 +4263,8 @@ def test_request_finished_mixed_full_attn_and_sliding_window(
 
 def test_chunked_local_attention_reports_its_chunk_window():
     """Llama 4 uses chunked local attention, which used to trip the
-    FullAttentionSpec assert and kill the engine at startup."""
+    FullAttentionSpec assert and kill the engine at startup.
+    """
     spec = ChunkedLocalAttentionSpec(
         block_size=16,
         num_kv_heads=2,
@@ -4493,7 +4503,8 @@ def test_retention_interval_zero_stores_only_replay_boundary(
 def _shared_kv_mtp_config():
     """Speculative config for a shared-group MTP model: eagle-family method
     whose drafter layer merges into a target KV-cache group, so no group
-    self-identifies as a drafter group (issue #52735)."""
+    self-identifies as a drafter group (issue #52735).
+    """
     spec = MagicMock(name="shared_kv_mtp_spec")
     spec.use_eagle.return_value = True
     spec.use_eagle_block_drop.return_value = True
@@ -4507,12 +4518,14 @@ def _shared_kv_mtp_config():
 class TestSharedGroupMTPOffload:
     """Regression tests for issue #52735: OffloadingConnector must keep
     serving when speculative decoding is enabled but no KV-cache group is
-    annotated as a drafter group (shared-group MTP models)."""
+    annotated as a drafter group (shared-group MTP models).
+    """
 
     def test_no_annotation_marks_no_groups(self, request_runner):
         """Spec decode on + zero annotated groups must NOT mark every group
         as a drafter group; the full store->load roundtrip must match the
-        non-speculative behavior of test_two_groups_full_and_sliding_window."""
+        non-speculative behavior of test_two_groups_full_and_sliding_window.
+        """
         block_size = 4
         kv_cache_groups = [
             KVCacheGroupSpec(
@@ -4569,7 +4582,8 @@ class TestSharedGroupMTPOffload:
 class TestMambaHybridOffloadServing:
     """Store->finish->lookup flows on a full-attention + mamba-align hybrid,
     with a manager that only HITs keys that were actually stored. Guards the
-    two collapse routes of issue #52735."""
+    two collapse routes of issue #52735.
+    """
 
     BLOCK = 4
     MAMBA_BLOCK = 16
@@ -4698,7 +4712,8 @@ class TestMambaHybridOffloadServing:
         """Route 1 of #52735: with spec decode on and no drafter annotation,
         serving must equal the non-speculative baseline (was 0 before the
         fix: the all-groups fallback marked the mamba group as a drafter and
-        the volatile-tail pop consumed its only servable chunk)."""
+        the volatile-tail pop consumed its only servable chunk).
+        """
         baseline = self._roundtrip_served_tokens(self._make_scheduler(None))
         assert baseline == 16
         served = self._roundtrip_served_tokens(
@@ -4711,7 +4726,8 @@ class TestMambaHybridOffloadServing:
         group must not drag the confirmed boundary below a coarser sibling's
         chunk granularity. The widened query makes the volatile-tail pop
         land on an extra queried chunk, holding the boundary at 16 tokens
-        (was 0 before the fix: 4 hits -> pop -> 12 tokens < mamba chunk)."""
+        (was 0 before the fix: 4 hits -> pop -> 12 tokens < mamba chunk).
+        """
         scheduler = self._make_scheduler(None, mamba_eagle=True)
         assert [c.is_eagle_group for c in scheduler.config.kv_group_configs] == [
             True,

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Tests for INT8 (W8A8) fused-MoE oracle backend selection.
+"""Tests for INT8 (W8A8) fused-MoE oracle backend selection.
 
 These exercise ``select_int8_moe_backend`` only (no kernels are launched), so
 they run on any platform where the Triton INT8 MoE kernel is available — CUDA
@@ -71,7 +70,8 @@ def _make_int8_moe_config(moe_backend: str = "auto") -> FusedMoEConfig:
 )
 def test_int8_dynamic_schemes_dispatch_to_triton(weight_key, activation_key):
     """Both dynamic-activation INT8 MoE schemes (per-channel + per-tensor
-    weights) select the Triton backend."""
+    weights) select the Triton backend.
+    """
     config = _make_int8_moe_config()
     backend, experts_cls = select_int8_moe_backend(
         config, weight_key=weight_key, activation_key=activation_key

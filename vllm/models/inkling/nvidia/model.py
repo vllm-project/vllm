@@ -75,7 +75,8 @@ def _sconv_add_norm(
     """``h = hidden + sconv(TP-sum(delta)); y = rmsnorm(h)``.
 
     The Lamport path performs reduce-scatter + shard sconv + all-gather +
-    residual add + norm. The NCCL path handles unsupported configurations."""
+    residual add + norm. The NCCL path handles unsupported configurations.
+    """
     attn_metadata = get_forward_context().attn_metadata
     m = (
         attn_metadata.get(sconv.owner.prefix)

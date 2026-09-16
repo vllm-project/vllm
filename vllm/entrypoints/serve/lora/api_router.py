@@ -63,7 +63,8 @@ def _attach_router(app: FastAPI):
     @router.post("/v1/load_lora_adapter", dependencies=[Depends(validate_json_request)])
     async def load_lora_adapter(request: LoadLoRAAdapterRequest, raw_request: Request):
         """Handle POST /v1/load_lora_adapter: load a LoRA adapter into the
-        serving engine."""
+        serving engine.
+        """
         handler: OpenAIServingModels = models(raw_request)
         response = await handler.load_lora_adapter(request)
         if isinstance(response, ErrorResponse):
@@ -85,7 +86,8 @@ def _attach_router(app: FastAPI):
         request: UnloadLoRAAdapterRequest, raw_request: Request
     ):
         """Handle POST /v1/unload_lora_adapter: unload a LoRA adapter from
-        the serving engine."""
+        the serving engine.
+        """
         handler: OpenAIServingModels = models(raw_request)
         response = await handler.unload_lora_adapter(request)
         if isinstance(response, ErrorResponse):

@@ -58,7 +58,8 @@ def test_tail_backend_layout_matches_kernel_pointer_arithmetic():
 def make_tail_block_table(own_blocks, width=64):
     """Tail-group block table as BlockTables produces it: column 0 holds the
     request's single KpoolTailManager block, the remaining columns are never
-    written and stay zero."""
+    written and stay zero.
+    """
     bt = torch.zeros(len(own_blocks), width, dtype=torch.int32)
     bt[:, 0] = torch.tensor(own_blocks, dtype=torch.int32)
     return bt
@@ -66,7 +67,8 @@ def make_tail_block_table(own_blocks, width=64):
 
 def legacy_generic_tail_slots(block_table, query_start_loc, positions):
     """Reference of the generic ``_compute_slot_mappings_kernel`` arithmetic
-    (block_table.py:305-313) applied to the tail group's table."""
+    (block_table.py:305-313) applied to the tail group's table.
+    """
     slots = []
     for req in range(block_table.shape[0]):
         for i in range(query_start_loc[req], query_start_loc[req + 1]):
@@ -107,7 +109,8 @@ def make_batch(per_req_positions, padded_len=None):
 
 def test_legacy_generic_mapping_collapses_onto_block_zero():
     """The bug: with the manager's 1-column block table, the generic kernel
-    maps every pos >= kpool onto tail block 0, and distinct requests collide."""
+    maps every pos >= kpool onto tail block 0, and distinct requests collide.
+    """
     own_blocks = [5, 9]
     per_req = [list(range(10)), list(range(12))]  # prompts of len 10 and 12
     positions, qsl, _, num_actual, num_reqs = make_batch(per_req)
@@ -137,7 +140,8 @@ def test_legacy_generic_mapping_collapses_onto_block_zero():
 def test_circular_mapping_isolates_requests():
     """The fix: every token lands in its own request's block at pos % kpool,
     and no slot is ever shared by two different requests (slots do recur
-    within a request every kpool positions -- that is the circular design)."""
+    within a request every kpool positions -- that is the circular design).
+    """
     own_blocks = [5, 9]
     per_req = [list(range(10)), list(range(12))]
     positions, qsl, slot_mapping, num_actual, num_reqs = make_batch(per_req)
@@ -165,7 +169,8 @@ def test_circular_mapping_isolates_requests():
 def test_circular_mapping_matches_generic_for_short_requests(prompt_len):
     """For pos < kpool the generic kernel already picks the own block, so the
     two mappings agree while every position fits the request's first block
-    (single-request behavior is unchanged)."""
+    (single-request behavior is unchanged).
+    """
     own_blocks = [7]
     per_req = [list(range(prompt_len))]
     positions, qsl, slot_mapping, num_actual, num_reqs = make_batch(per_req)
@@ -275,7 +280,8 @@ class TailRingMirror:
     """Mirror of _kpool_tail_seed_kernel / _kpool_decode_update_batched_kernel
     addressing: block = tail_slot // kpool, ring offset = pos % kpool; a pool
     completing at pos reads ring slots (pool_start + s) % kpool and uses the
-    current token's own K/score for the last member."""
+    current token's own K/score for the last member.
+    """
 
     def __init__(self, num_blocks, kpool=KPOOL):
         self.kpool = kpool
@@ -318,7 +324,8 @@ def tail_slot_for(mapping, req, pos, own_block):
 
 def run_scenario(mapping, interleave):
     """Requests A (block 5, prompt len 9) and B (block 9, prompt len 11)
-    decode concurrently; returns A's boundary pool [8, 9, 10, 11]."""
+    decode concurrently; returns A's boundary pool [8, 9, 10, 11].
+    """
     ring = TailRingMirror(num_blocks=16)
     blocks = {"A": 5, "B": 9}
     prompts = {"A": 9, "B": 11}

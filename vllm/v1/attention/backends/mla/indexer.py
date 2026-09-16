@@ -1118,7 +1118,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
     def _prefill_split_seq_lens(self, seq_lens_cpu: torch.Tensor) -> torch.Tensor:
         """Per-request KV lengths the prefill chunker budgets logits with;
-        subclasses whose logits rows are wider than the context override."""
+        subclasses whose logits rows are wider than the context override.
+        """
         return seq_lens_cpu
 
     @staticmethod

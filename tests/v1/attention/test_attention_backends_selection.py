@@ -115,7 +115,8 @@ def test_mamba_layers_have_unified_interface(
     layer_class, expected_backend, expected_mamba_type
 ):
     """Test that all Mamba layers have the unified get_attn_backend
-    interface."""
+    interface.
+    """
     assert hasattr(layer_class, "get_attn_backend"), (
         f"{layer_class.__name__} should have get_attn_backend method"
     )

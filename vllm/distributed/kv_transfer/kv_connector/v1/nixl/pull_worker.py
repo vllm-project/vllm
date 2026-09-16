@@ -45,8 +45,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         super().__init__(vllm_config, engine_id, kv_cache_config)
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
-        """
-        Start loading by triggering non-blocking nixl_xfer.
+        """Start loading by triggering non-blocking nixl_xfer.
         We check for these trnxs to complete in each step().
         """
         for req_id, meta in metadata.reqs_to_recv.items():
@@ -373,8 +372,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         expected_consumers: int,
         awaiting_kvs: bool,
     ) -> bool:
-        """
-        Post a READ point-to-point xfer request from a single local worker to
+        """Post a READ point-to-point xfer request from a single local worker to
         a single remote worker.
 
         Returns True when the read was posted (or was unnecessary), False
@@ -603,8 +601,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             self._recving_transfers[request_id].append(handle)
 
     def _get_new_notifs(self) -> set[str]:
-        """
-        Get req_ids which got a remote xfer message. When multiple consumers
+        """Get req_ids which got a remote xfer message. When multiple consumers
         are reading from the same producer (heterogeneous TP or DCP
         scenario), wait for all consumers to be done pulling.
 

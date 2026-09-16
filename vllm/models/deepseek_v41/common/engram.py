@@ -564,7 +564,8 @@ def _engram_head_shard_weight_loader(
     param: torch.nn.Parameter, loaded_weight: torch.Tensor
 ) -> None:
     """Load this rank's complete head buckets. ue8m0 scales arrive as
-    float8_e8m0fnu; keep the raw bytes (the param stores uint8)."""
+    float8_e8m0fnu; keep the raw bytes (the param stores uint8).
+    """
     part_rows = param.shape[0]
     if loaded_weight.dtype == torch.float8_e8m0fnu:
         loaded_weight = loaded_weight.view(torch.uint8)
@@ -739,7 +740,8 @@ class ParallelEngramEmbedding(nn.Module):
 
     def forward(self, indices: torch.Tensor) -> torch.Tensor:
         """indices: [num_tokens, n_hash_cols] -> [num_tokens, n_hash_cols, dim]
-        bf16, gathered from all shards for this replica's tokens."""
+        bf16, gathered from all shards for this replica's tokens.
+        """
         out = torch.empty(
             (indices.shape[0], self.part_n_hash_cols, self.dim),
             dtype=torch.bfloat16,
@@ -1000,7 +1002,8 @@ class Engram(nn.Module):
     ) -> torch.Tensor:
         """hidden_states: [T, hc_mult, dim]; hash_ids: [T, n_hash_cols] (all
         tokens, pre sequence-parallel shard); token_mask: [T], False shuts
-        the gate so those positions pass through untouched."""
+        the gate so those positions pass through untouched.
+        """
         kv = self.wkv(self.embed(hash_ids).flatten(-2))
         num_kv_tokens = hash_ids.shape[0]
         assert token_mask is None or token_mask.shape == (num_kv_tokens,)

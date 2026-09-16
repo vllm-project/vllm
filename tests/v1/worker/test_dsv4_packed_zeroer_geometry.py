@@ -101,7 +101,8 @@ def test_packed_dsv4_zeroer_zeroes_only_each_layers_page():
 def test_overlaid_zeroer_dedups_segments_with_max_span():
     """Two groups overlay one allocation; the zeroer must emit one segment per distinct
     byte offset, spanning the widest overlaid page, so a newly allocated block is fully
-    zeroed no matter which group owns it."""
+    zeroed no matter which group owns it.
+    """
     from unittest.mock import MagicMock
 
     from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups
