@@ -134,6 +134,11 @@ def test_warmup_locks_the_workspace_when_profiling_is_enabled(
     )
     worker.execute_model = None
     worker.sample_tokens = None
+    # capture_model() is wrapped in a profiler context that reads worker and
+    # model-runner state this test has no reason to own. What is under test is
+    # the order of reserve, warm up and lock around that call, so the context
+    # is emptied rather than imitated; the profiler path has its own tests.
+    worker._get_cudagraph_capture_context = lambda: nullcontext()
 
     monkeypatch.setattr(gpu_worker_module, "kernel_warmup", lambda w: None)
     monkeypatch.setattr(
