@@ -665,8 +665,7 @@ class CompressedTensorsConfig(QuantizationConfig):
     ) -> bool:
         """Weight N-bit INT (pack-quantized for sub-byte, int-quantized for 8-bit)
         with static per-tensor INT8 input/output activation quant, applied as a float
-        fake-quant around a weight-only matmul.
-        """
+        fake-quant around a weight-only matmul."""
         is_int_pack_format = format in (
             CompressionFormat.pack_quantized.value,
             CompressionFormat.int_quantized.value,
@@ -702,8 +701,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         format: str | None,
     ) -> bool:
         """Weight N-bit INT with symmetric dynamic INT activation quant
-        via Humming kernel.
-        """
+        via Humming kernel."""
         if input_quant is None:
             return False
         is_pack_format = format == CompressionFormat.pack_quantized.value

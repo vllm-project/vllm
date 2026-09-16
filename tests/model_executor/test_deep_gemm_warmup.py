@@ -42,8 +42,7 @@ def _run_warmup(monkeypatch, layers) -> list[dict]:
 @pytest.mark.parametrize("scale_name", ["weight_scale", "weight_scale_inv"])
 def test_registered_deep_gemm_layer_is_warmed_up(monkeypatch, scale_name) -> None:
     """Any layer stamped by the DeepGEMM kernel is warmed, regardless of the
-    quantization method that owns it or the name of its scale parameter.
-    """
+    quantization method that owns it or the name of its scale parameter."""
     layer = _block_fp8_layer(256, 128, scale_name)
 
     calls = _run_warmup(monkeypatch, [layer])
@@ -55,8 +54,7 @@ def test_registered_deep_gemm_layer_is_warmed_up(monkeypatch, scale_name) -> Non
 
 def test_n_multiple_of_64_matches_kernel_selection(monkeypatch) -> None:
     """DeepGEMM accepts N % 64 == 0 (e.g. DeepSeek kv_a_proj_with_mqa, N=576),
-    so warmup must not require N % 128 == 0.
-    """
+    so warmup must not require N % 128 == 0."""
     assert len(_run_warmup(monkeypatch, [_block_fp8_layer(576, 256)])) == 1
 
 

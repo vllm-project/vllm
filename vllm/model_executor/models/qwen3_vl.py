@@ -1321,8 +1321,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
     def _expands_only_video_token(hf_processor: ProcessorMixin) -> bool:
         """Transformers>=5.10 processors override `replace_video_token`
         to expand only the bare video token, keeping the prompt's outer
-        `<|vision_start|>`/`<|vision_end|>` markers.
-        """
+        `<|vision_start|>`/`<|vision_end|>` markers."""
         mixin_impl = getattr(ProcessorMixin, "replace_video_token", None)
         proc_impl = getattr(type(hf_processor), "replace_video_token", None)
         return proc_impl is not None and proc_impl is not mixin_impl

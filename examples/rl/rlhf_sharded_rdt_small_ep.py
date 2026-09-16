@@ -101,8 +101,7 @@ PROMPTS = ["The capital of France is", "The future of AI is"]
 class FSDPTrainWorker:
     """One FSDP2 rank per GPU. Identical to the 8-GPU example's worker: the
     sharded-RDT engine owns the NIXL serve surface, so this stays a plain Ray
-    actor with no producer mixin.
-    """
+    actor with no producer mixin."""
 
     def __init__(self, model_name, rank, world_size, master_addr, master_port):
         self.rank = rank

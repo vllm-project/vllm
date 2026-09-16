@@ -72,8 +72,7 @@ _sync_filter_head: tuple | None = None
 
 def _sync_warning_hook(message, category, filename, lineno, file=None, line=None):
     """Turn torch's sync warning into an error, but only on a thread that is
-    being checked and is outside any allow region.
-    """
+    being checked and is outside any allow region."""
     if _TORCH_SYNC_WARNING in str(message):
         mode = _checking.get()
         if mode is None or _allow_depth.get():
@@ -252,8 +251,7 @@ def _is_dense(t: torch.Tensor) -> bool:
     """Whether `t`'s elements fill a contiguous storage range, possibly
     permuted (e.g. a transposed matrix). Such layouts can be copied with
     pitched cudaMemcpy2D/3DAsync directly from/to pinned memory, whereas
-    gapped layouts (e.g. strided slices) stage through a pageable temp.
-    """
+    gapped layouts (e.g. strided slices) stage through a pageable temp."""
     if t.is_contiguous():
         # The common case, answered by a memoized TensorImpl flag.
         return True

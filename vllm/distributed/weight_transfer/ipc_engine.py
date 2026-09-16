@@ -40,8 +40,7 @@ class IPCWeightTransferInitInfo(WeightTransferInitInfo):
     `packed` is a must-agree wire param: the trainer ships it here at the init
     handshake so the worker decodes with the same setting the trainer encoded
     with. The consumer rebuilds from the IPC handle + `tensor_sizes`, so it does
-    not need the buffer size (producer-only).
-    """
+    not need the buffer size (producer-only)."""
 
     packed: bool = False
 
@@ -54,8 +53,7 @@ class IPCTrainerInitInfo(TrainerInitInfo):
 
     `packed` / `packed_buffer_size_bytes` are the transfer's wire params. The
     trainer propagates `packed` to the worker at `trainer_init` so the two sides
-    cannot disagree. `backend` is the factory dispatch key.
-    """
+    cannot disagree. `backend` is the factory dispatch key."""
 
     backend: ClassVar[str] = "ipc"
     packed: bool = False

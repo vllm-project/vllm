@@ -800,8 +800,7 @@ class SamplingParams(
         """Number of sample logprobs to return per output token, or `None` if
         no sample logprobs were requested. Takes `logprob_token_ids` into
         account: when `logprobs` is unset but `logprob_token_ids` is set,
-        returns `len(logprob_token_ids)`.
-        """
+        returns `len(logprob_token_ids)`."""
         if self.logprobs is not None:
             return self.logprobs
         return len(self.logprob_token_ids) if self.logprob_token_ids else None

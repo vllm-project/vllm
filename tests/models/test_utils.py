@@ -197,8 +197,7 @@ def test_merge_multimodal_embeddings_no_sync():
 def test_get_rename_mapper_keeps_only_renames():
     """`None` means "do not load", which is meaningless to the consumers of
     this mapper (LoRA name parsing, quantization config layer lists), and
-    applying it would silently shrink their lists.
-    """
+    applying it would silently shrink their lists."""
     mapper = WeightsMapper(
         orig_to_new_regex={re.compile(r"^drop_regex\."): None},
         orig_to_new_substr={"drop_substr": None, "keep_substr": "kept"},
