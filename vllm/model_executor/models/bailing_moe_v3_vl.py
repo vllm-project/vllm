@@ -3,6 +3,7 @@
 """Inference-only Bailing MoE V3 vision-language model."""
 
 import copy
+import math
 from collections.abc import Hashable, Iterable, Mapping, Sequence
 from typing import Any
 
@@ -40,6 +41,7 @@ from vllm.multimodal.processing.processor import (
     PlaceholderFeaturesInfo,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderCudaGraphCaptureInputs,
     EncoderCudaGraphConfig,
@@ -391,7 +393,32 @@ class BailingMoeV3VLForConditionalGeneration(
         grid_thw = mm_kwargs["image_grid_thw"]
         return grid_thw if isinstance(grid_thw, list) else grid_thw.tolist()
 
+    @property
+    def _encoder_cudagraph_pad_totals(self) -> dict[int, int]:
+        """Row count of each captured buffer set, keyed by cu_seqlens ptr."""
+        totals = self.__dict__.get("_encoder_cg_pad_totals")
+        if totals is None:
+            totals = {}
+            self.__dict__["_encoder_cg_pad_totals"] = totals
+        return totals
+
+    @property
+    def _encoder_cudagraph_tail_sequence(self) -> bool:
+        # FlashInfer buffers hold two cu_seqlens sections and their own
+        # sequence_lengths, so keep the manager's default zero-copy padding.
+        return self.visual.attn_backend != AttentionBackendEnum.FLASHINFER
+
     def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
+        pad_totals = self._encoder_cudagraph_pad_totals
+
+        def pad_cu_seqlens(dst: torch.Tensor, src: torch.Tensor) -> None:
+            # Every captured row must belong to some sequence: FlashAttention
+            # reads rows past cu_seqlens[-1] and returns NaN for the real rows
+            # when the buffer is only partially declared (see Kimi-K2.5).
+            n = min(src.shape[0], dst.shape[0])
+            dst[:n].copy_(src[:n])
+            dst[n:] = pad_totals.get(dst.data_ptr(), src[-1])
+
         return EncoderCudaGraphConfig(
             modalities=["image"],
             buffer_keys=[
@@ -403,6 +430,11 @@ class BailingMoeV3VLForConditionalGeneration(
                 "max_seqlen",
                 "sequence_lengths",
             ],
+            padding_logics=(
+                {"cu_seqlens": pad_cu_seqlens}
+                if self._encoder_cudagraph_tail_sequence
+                else {}
+            ),
             # The graph covers ``linear_proj``, so outputs are text-width.
             out_hidden_size=self.config.text_config.hidden_size,
         )
@@ -462,8 +494,16 @@ class BailingMoeV3VLForConditionalGeneration(
         merge_size = self.visual.spatial_merge_size
         # Ceil so one item consuming the whole budget still fits.
         per_item_output = (token_budget + max_batch_size - 1) // max_batch_size
+        # Use the squarest h x w for the dummy grid: a 1 x N strip would push
+        # the ViT rotary position ids past the cos/sin cache for large budgets.
+        h_tokens = next(
+            a
+            for a in range(math.isqrt(per_item_output), 0, -1)
+            if per_item_output % a == 0
+        )
         grid_config = [
-            [1, merge_size, per_item_output * merge_size] for _ in range(max_batch_size)
+            [1, h_tokens * merge_size, per_item_output // h_tokens * merge_size]
+            for _ in range(max_batch_size)
         ]
 
         patch_embed = self.visual.patch_embed
@@ -477,12 +517,16 @@ class BailingMoeV3VLForConditionalGeneration(
             total_patches, flattened_patch_size, device=device, dtype=dtype
         )
         # max_seqlen is baked into the graph, so capture with the worst case
-        # of one item spanning the whole budget.
+        # of one item spanning the whole budget. The extra cu_seqlens slot
+        # lets replay append one trailing sequence covering the padded rows.
         metadata = self.visual.prepare_encoder_metadata(
             grid_config,
-            max_batch_size=max_batch_size,
+            max_batch_size=max_batch_size + 1,
             max_seqlen_override=token_budget * merge_size**2,
             device=device,
+        )
+        self._encoder_cudagraph_pad_totals[metadata["cu_seqlens"].data_ptr()] = (
+            total_patches
         )
         return EncoderCudaGraphCaptureInputs(
             values=metadata | {"pixel_values": pixel_values}
@@ -495,9 +539,13 @@ class BailingMoeV3VLForConditionalGeneration(
         max_frames_per_batch: int,
         path: str = "default",
     ) -> EncoderCudaGraphReplayBuffers:
+        # Unpadded when pad_cu_seqlens completes the tail; otherwise padded
+        # to the captured slot count.
         metadata = self.visual.prepare_encoder_metadata(
             self._get_image_grid_thw_list(mm_kwargs),
-            max_batch_size=max_batch_size,
+            max_batch_size=(
+                None if self._encoder_cudagraph_tail_sequence else max_batch_size + 1
+            ),
         )
         return EncoderCudaGraphReplayBuffers(
             values=metadata | {"pixel_values": mm_kwargs["pixel_values"]}

@@ -12,6 +12,7 @@ Test organization:
     - TestEncoderCudaGraphVideoReplay   — video modality capture, replay
 """
 
+import itertools
 from collections.abc import Hashable
 from types import SimpleNamespace
 from typing import Any
@@ -21,6 +22,7 @@ import torch
 
 from vllm.model_executor.models.interfaces import SupportsEncoderCudaGraph
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.encoder_cudagraph import (
     EncoderCudaGraphManager,
 )
@@ -989,15 +991,25 @@ class _FakeLingViT(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.spatial_merge_size = _LING_MERGE
+        self.attn_backend = AttentionBackendEnum.FLASH_ATTN
+        self.patch_embed = SimpleNamespace(
+            proj=SimpleNamespace(in_channels=3),
+            temporal_patch_size=2,
+            patch_size=_LING_PATCH,
+        )
         self.proj = torch.nn.Linear(_LING_FLAT, _LING_VIT_HIDDEN)
 
-    def prepare_encoder_metadata(self, grid_thw_list, **kwargs):
+    def prepare_encoder_metadata(self, grid_thw_list, max_batch_size=None, **kwargs):
+        self.grids = grid_thw_list
         num_patches = sum(t * h * w for t, h, w in grid_thw_list)
+        cu_seqlens = [0, *itertools.accumulate(t * h * w for t, h, w in grid_thw_list)]
+        if max_batch_size is not None:
+            cu_seqlens += [num_patches] * (max_batch_size + 1 - len(cu_seqlens))
         return {
             "pos_embeds": torch.zeros(num_patches, _LING_VIT_HIDDEN),
             "rotary_pos_emb_cos": torch.zeros(num_patches, 1),
             "rotary_pos_emb_sin": torch.zeros(num_patches, 1),
-            "cu_seqlens": torch.tensor([0, num_patches], dtype=torch.int32),
+            "cu_seqlens": torch.tensor(cu_seqlens, dtype=torch.int32),
             "max_seqlen": torch.tensor(num_patches, dtype=torch.int32),
             "sequence_lengths": None,
         }
@@ -1049,6 +1061,36 @@ class TestBailingMoeV3VLEncoderCudaGraph:
             64,
             2048,
         )
+
+    def test_capture_grid_stays_within_rotary_range(self):
+        """A 1 x N capture strip exceeds the ViT rotary cache (8192 positions)
+        once budget * merge_size > 8192; the dummy grid must stay square-ish."""
+        inputs = self.model.prepare_encoder_cudagraph_capture_inputs(
+            8192, 1, 0, torch.device("cpu"), torch.float32
+        )
+        (grid,) = self.model.visual.grids
+        assert grid == [1, 64 * _LING_MERGE, 128 * _LING_MERGE]
+        assert inputs.values["pixel_values"].shape[0] == 8192 * _LING_MERGE**2
+
+    def test_replay_cu_seqlens_covers_padded_rows(self):
+        """FlashAttention returns NaN when cu_seqlens[-1] < captured rows, so
+        replay must complete the buffer with one trailing padding sequence."""
+        captured = self.model.prepare_encoder_cudagraph_capture_inputs(
+            64, 2, 0, torch.device("cpu"), torch.float32
+        ).values["cu_seqlens"]
+        assert captured.tolist() == [0, 128, 256, 256]
+
+        replay = self.model.prepare_encoder_cudagraph_replay_buffers(
+            {
+                "pixel_values": torch.zeros(196, _LING_FLAT),
+                "image_grid_thw": torch.tensor([[1, 14, 14]]),
+            },
+            2,
+            0,
+        )
+        pad = self.model.get_encoder_cudagraph_config().padding_logics["cu_seqlens"]
+        pad(captured, replay.values["cu_seqlens"])
+        assert captured.tolist() == [0, 196, 256, 256]
 
     def test_graph_and_eager_paths_apply_projector_and_agree(self):
         mm_kwargs = {
