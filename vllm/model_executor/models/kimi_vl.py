@@ -43,7 +43,7 @@
 # SOFTWARE.
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
@@ -135,12 +135,11 @@ class KimiVLMultiModalProjector(nn.Module):
 
 
 class KimiVLImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - nc: Number of channels
-        - np: Number of patches
-        - ps: Patch size
-        - ni: Number of images
+    """Dimensions:
+    - nc: Number of channels
+    - np: Number of patches
+    - ps: Patch size
+    - ni: Number of images
     """
 
     type: Literal["pixel_values"] = "pixel_values"
@@ -237,7 +236,7 @@ class KimiVLDummyInputsBuilder(BaseDummyInputsBuilder[KimiVLProcessingInfo]):
 
 
 class KimiVLMultiModalProcessor(BaseMultiModalProcessor[KimiVLProcessingInfo]):
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _get_mm_fields_config(
@@ -450,6 +449,7 @@ class KimiVLForConditionalGeneration(
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,

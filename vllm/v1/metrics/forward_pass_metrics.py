@@ -116,7 +116,6 @@ def encode_forward_pass_metrics(metrics: ForwardPassMetrics) -> bytes:
 
 def decode_forward_pass_metrics(data: bytes) -> ForwardPassMetrics | None:
     """Decode an FPM payload, returning ``None`` for unsupported versions."""
-
     try:
         metrics = _fpm_decoder.decode(data)
     except msgspec.DecodeError:
@@ -228,7 +227,6 @@ class ForwardPassMetricsTimer:
 
     def drain_into(self, output: Any) -> Any:
         """Attach ready timing samples to a model-runner output."""
-
         if output is None or not hasattr(output, "forward_pass_timing_samples"):
             return output
         ready = self.drain_samples()
@@ -251,7 +249,6 @@ def make_forward_pass_metrics_timer(
     The disabled path allocates no CUDA events and model runners only execute
     one predictable Python branch in existing worker methods.
     """
-
     if (
         vllm_config.observability_config.forward_pass_metrics_port <= 0
         or not is_output_rank
@@ -267,7 +264,6 @@ def is_forward_pass_metrics_output_rank(
     rank: int,
 ) -> bool:
     """Return whether ``rank`` owns the executor's ModelRunnerOutput."""
-
     parallel_config = vllm_config.parallel_config
     output_rank = parallel_config.world_size - (
         parallel_config.tensor_parallel_size
@@ -558,7 +554,6 @@ class ForwardPassMetricsEmitter:
 
     def complete_timing_samples(self, samples: Iterable[tuple[int, float]]) -> None:
         """Join completed worker timings with their scheduler snapshots."""
-
         for iteration_id, duration_seconds in samples:
             pending = self._pending.get(iteration_id)
             if pending is None:

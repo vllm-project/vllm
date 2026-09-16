@@ -166,7 +166,6 @@ class LogprobsTensors(NamedTuple):
         num_positions: int, num_tokens_per_position: int
     ) -> "LogprobsTensors":
         """Create empty LogprobsTensors on CPU."""
-
         logprob_token_ids = torch.empty(
             (num_positions, num_tokens_per_position),
             dtype=torch.int32,
@@ -281,6 +280,9 @@ class KVConnectorOutput:
     # IDs of externally computed KV blocks that failed to load.
     # Requests referencing these blocks should be rescheduled to recompute them
     invalid_block_ids: set[int] = field(default_factory=set)
+    # Receive failures keyed by request identity. This remains unambiguous for
+    # hybrid/multi-pool cache layouts where numeric block IDs overlap.
+    failed_recving: set[str] = field(default_factory=set)
     # Configuration describing how many finished sending/receiving
     # notifications should be expected for each request. This allows
     # handshake-based connectors like Nixl to update the KVOutputAggregator.
@@ -295,6 +297,7 @@ class KVConnectorOutput:
             and not self.kv_connector_stats
             and not self.kv_cache_events
             and not self.invalid_block_ids
+            and not self.failed_recving
             and not self.kv_connector_worker_meta
         )
 
@@ -437,8 +440,7 @@ class DraftTokenIds:
 def make_empty_encoder_model_runner_output(
     scheduler_output: "SchedulerOutput",
 ) -> ModelRunnerOutput:
-    """
-    Create a ModelRunnerOutput stub that contains the correct
+    """Create a ModelRunnerOutput stub that contains the correct
     per-request bookkeeping but no generated data yet.
     """
     if not scheduler_output.num_scheduled_tokens:

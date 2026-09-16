@@ -1,0 +1,70 @@
+name: Rust proto crate
+
+on:
+  pull_request:
+    paths:
+      - "rust/proto/**"
+      - "rust/Cargo.toml"
+      - "rust/Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/proto-crate.yml"
+  push:
+    tags:
+      - "proto-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  semver:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2
+        with:
+          manifest-path: rust/proto/Cargo.toml
+          package: vllm-proto
+
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - run: rustup show active-toolchain
+      - name: Check release version
+        if: github.event_name == 'push'
+        run: |
+          version=$(cargo metadata --manifest-path rust/Cargo.toml --no-deps --format-version 1 |
+            jq -er '.packages[] | select(.name == "vllm-proto") | .version')
+          if [[ "$GITHUB_REF_NAME" != "proto-v$version" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match vllm-proto version $version" >&2
+            exit 1
+          fi
+      - name: Verify package
+        run: cargo publish --manifest-path rust/proto/Cargo.toml --locked --dry-run
+
+  publish:
+    needs: [check, semver]
+    if: github.repository == 'vllm-project/vllm' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+      - run: rustup show active-toolchain
+      - name: Verify package before authentication
+        run: cargo publish --manifest-path rust/proto/Cargo.toml --locked --dry-run
+      - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+        id: auth
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish --manifest-path rust/proto/Cargo.toml --locked

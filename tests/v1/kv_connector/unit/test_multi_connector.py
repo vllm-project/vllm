@@ -171,7 +171,7 @@ def test_register_finished_partial_tail_notifies_every_connector():
 
 @pytest.fixture
 def mc() -> MultiConnector:
-    """MultiConnector using two mocked connectors"""
+    """MultiConnector using two mocked connectors."""
     mock_connector_config = {
         "kv_connector": "MockConnector",
         "kv_role": "kv_both",
@@ -215,8 +215,7 @@ def _compare_directories(dir1: Path, dir2: Path) -> bool:
 
 
 def test_multi_example_connector_consistency():
-    """
-    Tests that MultiConnector with two ExampleConnectors saves
+    """Tests that MultiConnector with two ExampleConnectors saves
     identical KV cache data to separate storage locations.
     """
     storage_1_path = Path("storage_1/")
@@ -304,10 +303,10 @@ def test_multi_example_connector_consistency():
     events = get_connector_events()
     storage1_scheduler_events = _ignore_event_collection(events["storage1-SCHEDULER"])
     storage2_scheduler_events = _ignore_event_collection(events["storage2-SCHEDULER"])
-    # Initial events bind the block pool, query completion counts, and exchange
+    # Initial events bind the cache manager, query completion counts, and exchange
     # handshake metadata before the request is enqueued.
     assert storage1_scheduler_events[:7] == [
-        "bind_gpu_block_pool",
+        "bind_kv_cache_manager",
         "get_finished_count",
         "set_xfer_handshake_metadata_pp_aware",
         "on_new_request",
@@ -315,8 +314,8 @@ def test_multi_example_connector_consistency():
         "update_state_after_alloc num_blocks=[7] 0",
         "build_connector_meta",
     ]
-    # First three events are from initialization. During generate(), layer hooks
-    # run before the deferred load is started after the forward pass.
+    # First three events are from initialization. Layer hooks run before the
+    # deferred load starts after the forward pass.
     expected_worker_prefix = [
         "register_kv_caches",
         "set_host_xfer_buffer_ops",
@@ -328,12 +327,12 @@ def test_multi_example_connector_consistency():
     ]
     for connector_name in ("storage1-WORKER", "storage2-WORKER"):
         worker_events = events[connector_name]
-        assert worker_events[:7] == expected_worker_prefix
+        assert worker_events[: len(expected_worker_prefix)] == expected_worker_prefix
         assert worker_events.index("start_load_kv") > worker_events.index(
             "save_kv_layer"
         )
     assert storage2_scheduler_events[:7] == [
-        "bind_gpu_block_pool",
+        "bind_kv_cache_manager",
         "get_finished_count",
         "set_xfer_handshake_metadata_pp_aware",
         "on_new_request",
@@ -455,8 +454,7 @@ def test_engine_id_conflict():
 
 
 def test_multi_connector_handle_preemptions_integration():
-    """
-    Integration test: verify MultiConnector delegates handle_preemptions
+    """Integration test: verify MultiConnector delegates handle_preemptions
     to all sub-connectors.
 
     Uses TestExampleConnector which logs all method calls to temp files.
@@ -863,9 +861,7 @@ class TestMultiConnectorStats:
 
 
 def test_multi_connector_overrides_all_base_methods():
-    """
-    Ensure MultiConnector overrides all public methods from KVConnectorBase_V1.
-    """
+    """Ensure MultiConnector overrides all public methods from KVConnectorBase_V1."""
     # These are fine to inherit from KVConnectorBase_V1
     # TODO(https://github.com/vllm-project/vllm/pull/31811): Remove
     # get_kv_connector_kv_cache_events from INHERITED_OK once implemented.
@@ -1045,12 +1041,10 @@ def _make_multi_connector(connector_names: list[str]) -> MultiConnector:
 
 
 def test_multi_connector_hma_support_detection():
-    """
-    At runtime, _all_support_hma is True only when every sub-connector
+    """At runtime, _all_support_hma is True only when every sub-connector
     implements SupportsHMA. Test all combinations of HMA / non-HMA
     sub-connectors.
     """
-
     assert supports_hma(MultiConnector)
 
     # -- All non-HMA connectors => _all_support_hma is False --
@@ -1092,8 +1086,7 @@ def test_divergent_local_hybrid_hit_capability_is_conservative():
     not torch.cuda.is_available(), reason="Requires GPU to instantiate LLM"
 )
 def test_multi_connector_mixed_hma_disables_hybrid_kv_cache(monkeypatch):
-    """
-    When MultiConnector wraps a mix of HMA (NixlConnector) and non-HMA
+    """When MultiConnector wraps a mix of HMA (NixlConnector) and non-HMA
     (MockConnector) sub-connectors, verify that:
     1. The scheduler's MultiConnector has _all_support_hma == False.
     2. vLLM auto-disables the hybrid KV cache manager (no preference expressed by user)
