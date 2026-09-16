@@ -676,8 +676,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             spec_query_start_loc = self.spec_query_start_loc[: batch_size + 1]
             num_accepted_tokens = self.num_accepted_tokens[:batch_size]
 
-        # The V1 runner dispatches decode graphs by shape, even for first chunks.
-        # Refresh their state indices too; this does not initialize the state.
+        # Keep replay indices current, including NULL_BLOCK_ID for padded rows.
         if (
             self.use_full_cuda_graph
             and num_spec_decodes == 0

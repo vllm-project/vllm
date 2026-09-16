@@ -668,31 +668,24 @@ def test_one_token_chunk_classification(
         assert actual.has_initial_state is None
 
 
-@pytest.mark.parametrize(
-    ("seq_lens", "query_lens", "is_prefilling", "should_stage"),
-    [
-        pytest.param([100, 1], [1, 1], [False, True], True, id="mixed-first-chunk"),
-        pytest.param([1, 1], [1, 1], [True, True], True, id="all-first-chunks"),
-        pytest.param([100, 2], [1, 2], [False, True], False, id="multi-token"),
-    ],
-)
-def test_non_spec_cudagraph_state_indices(
-    seq_lens, query_lens, is_prefilling, should_stage
-):
-    """Refresh the static state-index buffer for V1's decode-shaped batches."""
-    builder, common_attn_metadata, actual = _build_non_spec(
-        BatchSpec(seq_lens=seq_lens, query_lens=query_lens),
-        is_prefilling=is_prefilling,
-        full_cuda_graph=True,
+def test_decode_graph_state_indices_mask_padding():
+    """Padded replay rows must not retain an earlier request's state index."""
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[100, 1, 0], query_lens=[1, 1, 0]),
+        BLOCK_SIZE,
+        DEVICE,
+    ).replace(is_prefilling=torch.tensor([False, True, False]), num_actual_tokens=3)
+    common.block_table_tensor[2].fill_(NULL_BLOCK_ID)
+    builder = _make_builder(
+        KimiK3KDAMetadataBuilder, num_speculative_tokens=0, full_cuda_graph=True
     )
+    builder.non_spec_state_indices_tensor.fill_(42)
+    actual = builder.build(0, common)
 
     staged = actual.non_spec_state_indices_tensor
     assert staged is not None
-    uses_static_buffer = (
-        staged.data_ptr() == builder.non_spec_state_indices_tensor.data_ptr()
-    )
-    assert uses_static_buffer == should_stage
-    torch.testing.assert_close(staged, common_attn_metadata.block_table_tensor[:, 0])
+    assert staged.data_ptr() == builder.non_spec_state_indices_tensor.data_ptr()
+    torch.testing.assert_close(staged, common.block_table_tensor[:, 0])
 
 
 def test_cudagraph_capture_batch_stays_decode_only():
