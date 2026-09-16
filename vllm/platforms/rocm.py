@@ -187,8 +187,7 @@ def _query_total_memory_from_amdsmi(physical_device_id: int) -> int:
 
 
 def _get_gcn_arch() -> str:
-    """
-    Get GCN arch via amdsmi (no CUDA init), fallback to torch.cuda.
+    """Get GCN arch via amdsmi (no CUDA init), fallback to torch.cuda.
     Called once at module level; result stored in _GCN_ARCH.
     """
     try:
@@ -223,8 +222,7 @@ _ON_RDNA4 = any(arch in _GCN_ARCH for arch in ["gfx1200", "gfx1201"])
 
 
 def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:
-    """
-    Parse (major, minor) from a GCN arch string, mirroring how
+    """Parse (major, minor) from a GCN arch string, mirroring how
     HIP derives hipDeviceProp_t.major / .minor.
 
     Format: gfx<MAJOR><MINOR><STEPPING>
@@ -238,6 +236,7 @@ def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:
     Returns None only when the string is not gfx-prefixed at all
     (i.e. not a ROCm arch string). Raises on any string that looks
     like a GCN arch but does not match a known layout.
+
     """
     m = re.match(r"gfx(\d+)", gcn_arch)
     if not m:
@@ -778,9 +777,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
-        """
-        Set the device for the current platform.
-        """
+        """Set the device for the current platform."""
         torch.cuda.set_device(device)
 
     @classmethod
@@ -805,9 +802,7 @@ class RocmPlatform(Platform):
     @classmethod
     @with_amdsmi_context
     def is_fully_connected(cls, physical_device_ids: list[int]) -> bool:
-        """
-        Query if the set of gpus are fully connected by xgmi (1 hop)
-        """
+        """Query if the set of gpus are fully connected by xgmi (1 hop)."""
         handles = [amdsmi_get_processor_handles()[i] for i in physical_device_ids]
         for i, handle in enumerate(handles):
             for j, peer_handle in enumerate(handles):
@@ -1161,7 +1156,10 @@ class RocmPlatform(Platform):
             rms_norm = default
 
         return IrOpPriorityConfig.with_default(
-            default, rms_norm=rms_norm, fused_add_rms_norm=rms_norm
+            default,
+            rms_norm=rms_norm,
+            fused_add_rms_norm=rms_norm,
+            gelu_and_mul_sparse=["native"],
         )
 
     @classmethod
