@@ -2912,17 +2912,15 @@ class Scheduler(SchedulerInterface):
         return num_blocks + self._spec_decode_step_blocks()
 
     def _spec_decode_step_blocks(self) -> int:
-        """Blocks for the extra KV slots a spec decode step needs.
+        """Number of blocks for the extra KV slots a spec decode step needs.
 
-        Covers the `num_spec_tokens` draft slots the target model verifies plus
-        the `num_lookahead_tokens` slots the drafter writes beyond them. An
-        async load is allocated without either (see `limit_lookahead_tokens`),
-        yet its promotion step needs both. Reserving these blocks up front keeps
-        a load from being admitted into a pool it can never be promoted in,
-        which would wedge the scheduler: a parked load is not preemptible and
-        nothing else is running to free a block.
+        When using async kv load, scheduler must reserve enough blocks for
+        full sequence + the spec decode step, otherwise request cannot be
+        able to run after the async_load if we are out of kv blocks.
         """
-        return cdiv(self.num_spec_tokens + self.num_lookahead_tokens, self.block_size)
+        return 0 if not self.num_spec_tokens else cdiv(
+            1 + self.num_spec_tokens + self.num_lookahead_tokens, self.kv_cache_config.block_size
+        )
 
     def _inflight_prefill_reserved_blocks(self) -> int:
         """Num blocks in-flight prefills still need to finish (their reservation)."""
