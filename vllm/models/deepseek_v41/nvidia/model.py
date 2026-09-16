@@ -64,6 +64,9 @@ from vllm.models.deepseek_v4.nvidia.model import (
     make_deepseek_v4_expert_params_mapping,
 )
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
+from vllm.models.deepseek_v41.nvidia.flash_mla_mega_attn import (
+    DeepseekV4MegaAttnAttention,
+)
 from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
     DeepseekV4FlashInferMLAAttention,
     DeepseekV4FlashInferSM120Attention,
@@ -119,8 +122,9 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
 
     The generic CUDA backend selector does not instantiate DSv4 layers directly,
     so map generic sparse-MLA choices to the DSv4-specialized attention class.
-    Without an explicit backend, SM12 defaults to FlashInfer while the other
-    CUDA arches keep the FlashMLA path.
+    Without an explicit backend: SM12 takes FlashInfer, SM100 takes mega
+    attention where the topology allows it, and everything else keeps the
+    FlashMLA path.
     """
     backend = vllm_config.attention_config.backend
     device_capability = current_platform.get_device_capability()
@@ -140,6 +144,8 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
         if device_capability is not None and device_capability.major == 12:
             return DeepseekV4FlashInferSM120Attention
         return DeepseekV4FlashInferMLAAttention
+    if backend is AttentionBackendEnum.FLASHMLA_MEGA_ATTN_DSV41:
+        return DeepseekV4MegaAttnAttention
     if backend in (
         AttentionBackendEnum.FLASHMLA_SPARSE,
         AttentionBackendEnum.FLASHMLA_SPARSE_DSV4,
@@ -149,6 +155,14 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
 
     if device_capability is not None and device_capability.major == 12:
         return DeepseekV4FlashInferSM120Attention
+    # Mega attention is the SM100 default: it fuses Q RoPE, sparse attention,
+    # the output's inverse RoPE and its FP8 cast into one launch, and brings
+    # the 288 B NVFP4 compressed record -- the format the reference
+    # implementation itself stores. It declines topologies it cannot serve
+    # (non-SM100, TP that leaves fewer than WV_GROUP_SIZE heads per wo_a
+    # group, a build without the kernel), which then fall through to FlashMLA.
+    if DeepseekV4MegaAttnAttention.is_available_for(vllm_config):
+        return DeepseekV4MegaAttnAttention
     return DeepseekV4FlashMLAAttention
 
 
@@ -936,6 +950,17 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             layer.ffn.finalize_mega_moe_weights()
 
+    def finalize_mega_attn_weights(self) -> None:
+        """Permute wq_b / wo_a into FlashMLA's mega-attention layouts.
+
+        A no-op for every other attention layer, and idempotent, so a second
+        post-load pass cannot permute twice.
+        """
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
+            finalize = getattr(layer.attn, "finalize_loaded_weights", None)
+            if finalize is not None:
+                finalize()
+
     def finalize_mhc_broadcast_weights(self) -> None:
         if not get_pp_group().is_first_rank or self.start_layer >= self.end_layer:
             return
@@ -1190,6 +1215,7 @@ class DeepseekV41LLMForCausalLM(
     def process_weights_after_loading(self) -> None:
         self.model.finalize_mega_moe_weights()
         self.model.finalize_mhc_broadcast_weights()
+        self.model.finalize_mega_attn_weights()
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
