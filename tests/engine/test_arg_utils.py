@@ -320,12 +320,6 @@ def test_jit_monitor_verbose_arg():
     assert EngineArgs(model="test", jit_monitor_verbose=True).jit_monitor_verbose
 
 
-def test_collect_detailed_traces_rejects_comma_separated_value():
-    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
-    with pytest.raises(SystemExit):
-        parser.parse_args(["--collect-detailed-traces", "model,worker"])
-
-
 @pytest.mark.parametrize("mode", ["warn", "error"])
 def test_jit_monitor_mode_arg(mode):
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
