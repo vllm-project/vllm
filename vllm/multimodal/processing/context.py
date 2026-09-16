@@ -316,14 +316,24 @@ class InputProcessingContext:
         hf_processor: Callable[..., BatchFeature] | ProcessorMixin,
         data: Mapping[str, object],
         kwargs: Mapping[str, object] = {},
+        *,
+        mm_kwargs_are_merged: bool = False,
     ) -> BatchFeature:
         """
         Call `hf_processor` on the prompt `data`
         (text, image, audio...) with configurable options `kwargs`.
+
+        When `mm_kwargs_are_merged` is set, `kwargs` must already include the
+        engine-level `mm_processor_kwargs`; they are used without another merge.
         """
         assert callable(hf_processor)
 
-        merged_kwargs = self.get_merged_mm_kwargs(kwargs)
+        # Some callers merge the engine-level mm_processor_kwargs before preparing
+        # modality-specific kwargs. Merging them again here could reintroduce values
+        # intentionally removed from `kwargs`.
+        merged_kwargs = (
+            dict(kwargs) if mm_kwargs_are_merged else self.get_merged_mm_kwargs(kwargs)
+        )
 
         # vLLM needs the full untruncated sequence to keep multi-modal
         # placeholder tokens aligned; note that the text inputs in
