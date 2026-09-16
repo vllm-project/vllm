@@ -152,8 +152,6 @@ class StaticSinkAttention(Attention, CustomOp):
             attn_backend=attn_backend,
             **kwargs,
         )
-        CustomOp.__init__(self)
-
         self.sink_len = sink_len
         self.sink_populated = False
         self.sink_key = None

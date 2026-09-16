@@ -90,6 +90,7 @@ def _make_runner(
     return SimpleNamespace(
         num_speculative_steps=num_spec_steps,
         adaptive_verification=None,
+        rejection_sampler=None,
         decode_query_len=num_spec_steps + 1,
         is_pooling_model=False,
         is_encoder_decoder=False,
