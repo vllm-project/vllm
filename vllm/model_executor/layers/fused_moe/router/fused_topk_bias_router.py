@@ -280,6 +280,32 @@ def fused_topk_bias(
             image_sentinel_lo=image_sentinel_lo,
         )
 
+    if scoring_func == "softmax":
+        M = hidden_states.size(0)
+        topk_weights = torch.empty(
+            M, topk, dtype=torch.float32, device=hidden_states.device
+        )
+        topk_ids = torch.empty(
+            M,
+            topk,
+            dtype=torch.int32 if indices_type is None else indices_type,
+            device=hidden_states.device,
+        )
+        token_expert_indices = torch.empty(
+            M, topk, dtype=torch.int32, device=hidden_states.device
+        )
+        topk_weights, topk_ids = vllm_topk_softmax(
+            topk_weights,
+            topk_ids,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            e_score_correction_bias,
+        )
+        if routed_scaling_factor != 1.0:
+            topk_weights *= routed_scaling_factor
+        return topk_weights, topk_ids
+
     n_routed_experts = gating_output.shape[-1]
     if scoring_func == "softmax":
         scores = gating_output.softmax(dim=-1)
