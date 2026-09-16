@@ -99,6 +99,9 @@ class MMEncoderModelRunner(GPUModelRunner):
         )
         return graph_memory
 
+    def needs_cudagraph_capture(self) -> bool:
+        return False
+
     def _dummy_run(
         self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor]:
