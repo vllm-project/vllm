@@ -4,7 +4,9 @@
 use super::types::ChatCompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
 use crate::routes::openai::utils::types::{ChatMessage, Tool};
-use crate::routes::openai::utils::validate_generation_prompt_truncation;
+use crate::routes::openai::utils::{
+    validate_generation_prompt_truncation, validate_inline_hidden_states,
+};
 
 /// Enforce the minimal compatibility contract for the Rust OpenAI server.
 pub(super) fn validate_request_compat(
@@ -15,6 +17,17 @@ pub(super) fn validate_request_compat(
         && !served_model_names.iter().any(|name| name == model)
     {
         return Err(ApiError::model_not_found(model.clone()));
+    }
+
+    if validate_inline_hidden_states(
+        request.kv_transfer_params.as_ref(),
+        request.vllm_xargs.as_ref(),
+    )? && (request.stream || request.n.unwrap_or(1) != 1 || request.use_beam_search)
+    {
+        bail_invalid_request!(
+            param = "kv_transfer_params.return_inline",
+            "return_inline requires non-streaming generation with n=1 (no beam search)."
+        );
     }
 
     if request.stream_options.is_some() && !request.stream {
@@ -149,6 +162,37 @@ mod tests {
             stream: true,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn inline_hidden_states_accept_only_single_non_streaming_generation() {
+        let mut request = base_request();
+        request.stream = false;
+        request.kv_transfer_params = Some(std::collections::HashMap::from([(
+            "return_inline".to_string(),
+            json!(true),
+        )]));
+        assert!(validate_request_compat(&request, &["Qwen/Qwen1.5-0.5B-Chat".to_string()]).is_ok());
+        for options in [
+            json!({"stream": true}),
+            json!({"n": 2}),
+            json!({"n": 0}),
+            json!({"use_beam_search": true}),
+        ] {
+            let mut value = serde_json::to_value(&request).expect("serialize request");
+            value.as_object_mut().unwrap().extend(options.as_object().unwrap().clone());
+            let invalid = serde_json::from_value(value).expect("parse request");
+            assert!(
+                validate_request_compat(&invalid, &["Qwen/Qwen1.5-0.5B-Chat".to_string()]).is_err()
+            );
+        }
+        request.stream = true;
+        request
+            .kv_transfer_params
+            .as_mut()
+            .unwrap()
+            .insert("return_inline".to_string(), json!(false));
+        assert!(validate_request_compat(&request, &["Qwen/Qwen1.5-0.5B-Chat".to_string()]).is_ok());
     }
 
     #[test]

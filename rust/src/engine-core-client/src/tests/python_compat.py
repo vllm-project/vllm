@@ -424,6 +424,7 @@ class EngineCoreReadyResponse:
     enable_sleep_mode: bool = False
     supports_draft_weight_updates: bool = False
     effective_attention_block_size: int | None = None
+    supports_inline_hidden_states: bool = False
 
 
 ready_response = EngineCoreReadyResponse(

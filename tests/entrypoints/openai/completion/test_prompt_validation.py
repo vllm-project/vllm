@@ -114,3 +114,143 @@ def test_disable_prompt_embeds(dtype: torch.dtype, seq_len: int, hidden_size: in
 
     with pytest.raises(VLLMValidationError, match="--enable-prompt-embeds"):
         safe_load_prompt_embeds(model_config, encoded_tensor)
+
+
+@pytest.mark.parametrize("endpoint", ["completion", "chat"])
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"stream": True},
+        {"n": 2},
+        {"use_beam_search": True},
+    ],
+)
+def test_inline_hidden_states_rejects_unsupported_http_shapes(endpoint, options):
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+
+    cls, prompt = (
+        (CompletionRequest, {"prompt": "hello"})
+        if endpoint == "completion"
+        else (
+            ChatCompletionRequest,
+            {"messages": [{"role": "user", "content": "hello"}]},
+        )
+    )
+    with pytest.raises(VLLMValidationError, match="return_inline"):
+        cls(
+            model="test",
+            max_tokens=1,
+            kv_transfer_params={"return_inline": True},
+            **prompt,
+            **options,
+        )
+    ordinary = cls(model="test", max_tokens=128, **prompt, **options)
+    assert ordinary.max_tokens == 128
+
+
+@pytest.mark.parametrize("prompt", [["a", "b"], [[1], [2]]])
+def test_inline_hidden_states_rejects_multiple_completion_prompts(prompt):
+    from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+
+    with pytest.raises(VLLMValidationError, match="single prompt"):
+        CompletionRequest(
+            prompt=prompt, max_tokens=1, kv_transfer_params={"return_inline": True}
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rust_frontend", [False, True], ids=["python", "rust"])
+async def test_inline_hidden_states_with_concurrent_streaming(
+    tmp_path, rust_frontend, monkeypatch
+):
+    """A single generation server remains usable before/during/after extraction."""
+    import asyncio
+    import shutil
+
+    from transformers import AutoConfig
+
+    import vllm.envs as envs
+
+    server_env = {
+        "VLLM_USE_RUST_FRONTEND": "1" if rust_frontend else "0",
+        "VLLM_USE_V2_MODEL_RUNNER": "1",
+    }
+    if rust_frontend:
+        with monkeypatch.context() as patch:
+            patch.setenv("VLLM_USE_RUST_FRONTEND", "1")
+            try:
+                binary_path = envs.VLLM_RUST_FRONTEND_PATH
+            except FileNotFoundError:
+                binary_path = None
+        binary = shutil.which(binary_path) if binary_path else None
+        if binary is not None:
+            server_env["VLLM_RUST_FRONTEND_PATH"] = binary
+        else:
+            pytest.skip("Build vllm-rs and set VLLM_RUST_FRONTEND_PATH")
+
+    model = "Qwen/Qwen3.5-4B"
+    revision = "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
+    config = AutoConfig.from_pretrained(model, revision=revision).get_text_config()
+    args = [
+        "--revision",
+        revision,
+        "--max-model-len",
+        "1024",
+        "--enforce-eager",
+    ]
+    if not rust_frontend:
+        args.extend(["--tokenizer-revision", revision])
+    with RemoteOpenAIServer(model, args, env_dict=server_env) as server:
+        async with server.get_async_client() as client:
+
+            async def normal_stream():
+                stream = await client.completions.create(
+                    model=model,
+                    prompt="A forest is",
+                    max_tokens=32,
+                    stream=True,
+                    temperature=0,
+                    extra_body={"ignore_eos": True},
+                )
+                chunks = [chunk async for chunk in stream]
+                assert chunks[-1].choices[0].finish_reason == "length"
+                assert all(
+                    not getattr(chunk, "kv_transfer_params", None) for chunk in chunks
+                )
+                return "".join(chunk.choices[0].text for chunk in chunks)
+
+            before = await normal_stream()
+            normal, inline = await asyncio.gather(
+                normal_stream(),
+                client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": "Describe a forest."}],
+                    max_tokens=1,
+                    extra_body={"kv_transfer_params": {"return_inline": True}},
+                ),
+            )
+            payload = inline.kv_transfer_params
+            assert len(payload["hidden_states"]) == config.hidden_size
+            assert payload["representation"] == "post_final_norm"
+            assert all(torch.isfinite(torch.tensor(payload["hidden_states"])))
+            with pytest.raises(openai.BadRequestError, match="return_inline"):
+                await client.completions.create(
+                    model=model,
+                    prompt="hello",
+                    max_tokens=2,
+                    extra_body={"kv_transfer_params": {"return_inline": True}},
+                )
+            completion = await client.completions.create(
+                model=model,
+                prompt="A forest is",
+                max_tokens=1,
+                extra_body={"kv_transfer_params": {"return_inline": True}},
+            )
+            assert (
+                len(completion.kv_transfer_params["hidden_states"])
+                == config.hidden_size
+            )
+            assert completion.kv_transfer_params["layer_id"] == config.num_hidden_layers
+            assert before == normal == await normal_stream()
+            assert not list(tmp_path.iterdir())
