@@ -631,22 +631,14 @@ def sparse_attn_indexer_kpool(
             # Kpool writes must recover the original request grouping after the
             # indexer's flattened decode path. Host metadata avoids a CUDA graph
             # sync when choosing the uniform or padded layout.
-            per_req_lens = decode_metadata.per_req_decode_lens
-            if per_req_lens is not None:
-                use_uniform = (
-                    decode_metadata.decode_is_uniform
-                    and num_decode_tokens
-                    == num_requests * decode_metadata.write_max_decode_len
-                )
-                group_lens = per_req_lens
-                lmax = decode_metadata.write_max_decode_len
-            else:
-                # Legacy metadata without per-request lens: fall back to the
-                # host-side requires_padding flag. Unreached now (per-request
-                # lens is always populated for decode), kept defensive.
-                use_uniform = not decode_metadata.requires_padding
-                group_lens = decode_metadata.decode_lens
-                lmax = int(decode_metadata.decode_lens.max().item())
+            group_lens = decode_metadata.per_req_decode_lens
+            assert group_lens is not None
+            use_uniform = (
+                decode_metadata.decode_is_uniform
+                and num_decode_tokens
+                == num_requests * decode_metadata.write_max_decode_len
+            )
+            lmax = decode_metadata.write_max_decode_len
             if not use_uniform:
                 # Non-uniform decode_lens (mixed plain-decode + spec-verify, or
                 # a variable MTP-verify batch): scatter actual tokens into a
