@@ -2110,6 +2110,17 @@ class Scheduler(SchedulerInterface):
                 finished = self._handle_stopped_request(request)
                 if finished:
                     kv_transfer_params, ec_transfer_params = self._free_request(request)
+                    if (
+                        prefill_stats is not None
+                        and kv_transfer_params is not None
+                        and kv_transfer_params.get("do_remote_prefill")
+                    ):
+                        # P-side cache hits, so D can report them in
+                        # prompt_tokens_details instead of its own (~100%)
+                        # hit rate from the KV transfer.
+                        kv_transfer_params["remote_prefill_cached_tokens"] = (
+                            prefill_stats.num_cached_tokens
+                        )
 
                 if status_before_stop == RequestStatus.RUNNING:
                     stopped_running_reqs.add(request)
@@ -3027,11 +3038,6 @@ class Scheduler(SchedulerInterface):
         For observability, it also accumulates the total number of tokens that
         will need to be recomputed across all affected requests.
 
-        A hybrid model spreads one token span over KV cache groups that disagree
-        on block size, so a block index maps to a different token position in
-        each group and there is no single longest valid prefix. Those requests
-        recompute in full instead.
-
         Args:
             requests: The set of requests to scan for invalid blocks.
             invalid_block_ids: IDs of invalid blocks.
@@ -3055,48 +3061,18 @@ class Scheduler(SchedulerInterface):
         # these requests must be rescheduled, but only the first will recompute
         # it. This set tracks blocks already marked for recomputation.
         marked_invalid_block_ids: set[int] = set()
-        # Positions a group holds no KV for -- skipped sliding-window blocks,
-        # and every Mamba block but the aligned snapshot -- all point at this
-        # one block, shared by every request. It carries no request's data, so
-        # it can neither fail for a request nor be evicted on its behalf.
-        null_block_id = self.kv_cache_manager.block_pool.null_block.block_id
         for request in requests:
             is_affected = False
             marked_invalid_block = False
             req_id = request.request_id
-            # One block-id list per KV cache group.
-            req_block_ids_per_group = self.kv_cache_manager.get_block_ids(req_id)
+            # One block-id list per KV cache group; single-group layouts are
+            # enforced by _handle_invalid_blocks.
+            (req_block_ids,) = self.kv_cache_manager.get_block_ids(req_id)
             # We iterate only over blocks that may contain externally computed
             # tokens
             req_num_computed_tokens = (
                 request.num_computed_tokens - num_scheduled_tokens.get(req_id, 0)
             )
-
-            if len(req_block_ids_per_group) > 1:
-                # No single truncation point exists across groups, so the whole
-                # request is recomputed. Blocks are still marked, so a request
-                # sharing one of them is rescheduled too.
-                request_invalid_block_ids = {
-                    block_id
-                    for req_block_ids in req_block_ids_per_group
-                    for block_id in req_block_ids
-                    if block_id != null_block_id and block_id in invalid_block_ids
-                }
-                if request_invalid_block_ids:
-                    marked_invalid_block_ids |= request_invalid_block_ids
-                    total_affected_tokens += req_num_computed_tokens
-                    request.num_computed_tokens = 0
-                    if evict_blocks:
-                        for req_block_ids in req_block_ids_per_group:
-                            blocks_to_evict.update(
-                                block_id
-                                for block_id in req_block_ids
-                                if block_id != null_block_id
-                            )
-                    affected_req_ids.add(req_id)
-                continue
-
-            (req_block_ids,) = req_block_ids_per_group
 
             req_num_computed_blocks = (
                 req_num_computed_tokens + self.block_size - 1
@@ -3175,6 +3151,17 @@ class Scheduler(SchedulerInterface):
         Returns:
             Set of affected request IDs to skip in update_from_output main loop.
         """
+        if len(self.kv_cache_config.kv_cache_groups) > 1:
+            # Block IDs are only unique within a group, so a flat set of
+            # invalid block IDs cannot be mapped back to requests.
+            raise RuntimeError(
+                "A KV connector reported block-level load failures "
+                "(invalid_block_ids) on a layout with multiple KV cache "
+                "groups, where block IDs are only unique within a group. "
+                "Connectors must report failed requests via "
+                "KVConnectorTransferResults.failed_recving instead."
+            )
+
         should_fail = not self.recompute_kv_load_failures
 
         # handle async KV loads (not cached yet, evict_blocks=False)
