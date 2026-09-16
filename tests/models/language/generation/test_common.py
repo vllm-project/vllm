@@ -34,15 +34,9 @@ AITER_MODEL_LIST = [
     "Qwen/Qwen3-8B",
 ]
 
-# MoE top-2 near-tie second chance. tiny-mixtral diverges on one expert at a
-# router tie that is exact in HF and one ULP wide in vLLM; this lets vLLM adopt
-# HF's pair when the two selections swap exactly one expert for one other and
-# those two are within `tol` in vLLM's own fp32 router logits. 0.01 is
-# calibrated: the decisive flip margin is 0.0068 and the nearest non-tie 0.0176.
-# It lets vLLM read HF's answer, so it is not a test policy -- it shows the flip
-# is the sole cause. Set to 0 to disable. Deliberately a constant and not an env
-# var: the rescue monkeypatches a class in this process, so it has to be decided
-# at import time in whatever process ends up importing this module.
+# Near-tie window for the MoE top-2 rescue below, in fp32 router logits; 0 off.
+# Calibrated: decisive flip margin 0.0068, nearest non-tie 0.0176. A constant
+# rather than an env var, since the rescue patches a class at import time.
 MOE_NEAR_TIE_TOL = 0.01
 
 
@@ -54,9 +48,7 @@ def record_hf_expert_choice(hf_model, store: dict[int, torch.Tensor]):
         return
 
     # A router is a `gate` that owns `experts`; a dense gated MLP has neither.
-    # Index the MoE layers only, so the numbering matches the order vLLM's
-    # routers are first seen in -- a model that interleaves dense and MoE
-    # layers would otherwise be keyed two different ways on the two sides.
+    # MoE layers only, so the keys match the order vLLM first sees its routers in.
     gates = [
         layer.mlp.gate
         for layer in getattr(getattr(hf_model.model, "model", None), "layers", [])
@@ -70,12 +62,10 @@ def record_hf_expert_choice(hf_model, store: dict[int, torch.Tensor]):
     rows: dict[int, list[torch.Tensor]] = {}
 
     def record(module, args, out, i):
-        # (_, top_k_weights, top_k_index) -- anything else is not a router.
+        # A router returns (_, top_k_weights, top_k_index); anything else is not.
         if isinstance(out, tuple) and len(out) == 3:
             ids = out[2]
-            rows.setdefault(i, []).append(
-                ids.detach().reshape(-1, ids.shape[-1]).cpu()
-            )
+            rows.setdefault(i, []).append(ids.detach().reshape(-1, ids.shape[-1]).cpu())
 
     hooks = [
         gate.register_forward_hook(lambda m, args, out, i=i: record(m, args, out, i))
@@ -93,9 +83,8 @@ def record_hf_expert_choice(hf_model, store: dict[int, torch.Tensor]):
 def moe_near_tie_rescue(hf_choice: dict[int, torch.Tensor], tol: float):
     """Adopt HF's expert pair on a one-for-one swap that is a near tie in vLLM.
 
-    Rows are matched to `hf_choice` by position, so enter this once per generate
-    call, and only under eager execution -- CUDA graph replay skips Python for
-    the decode rows, which silently misaligns the cursor.
+    Rows match `hf_choice` by position: enter once per generate call, under eager
+    execution only -- graph replay skips Python and misaligns the cursor.
     """
     if tol <= 0 or not hf_choice:
         yield
@@ -116,7 +105,7 @@ def moe_near_tie_rescue(hf_choice: dict[int, torch.Tensor], tol: float):
         weights, ids = original(
             self, hidden_states, router_logits, topk_indices_dtype, input_ids=input_ids
         )
-        # Routers are called in layer order, so first-seen order is layer order.
+        # Routers run in layer order, so first-seen order is layer order.
         layer = layer_of.setdefault(id(self), len(layer_of))
         start = cursor.get(layer, 0)
         n = ids.shape[0]
@@ -165,17 +154,11 @@ def score_forced_continuations(
     prompt_token_ids: list[int],
     continuations: list[list[int]],
 ) -> list[list[float]]:
-    """
-    Teacher-forced per-token logprobs of each continuation, conditioned on
-    `prompt_token_ids`.
+    """Teacher-forced per-token logprobs of each continuation after the prompt.
 
-    Returns one list per continuation, of the same length, holding the
-    logprob of each continuation token given everything before it. Summing
-    a list gives the joint logprob of that continuation; its last element
-    is the conditional logprob of the final token.
-
-    Every continuation is scored as its own sequence, so a token is
-    reachable no matter how low it ranks. All are submitted as one batch.
+    One list per continuation; sum it for the joint logprob, take the last
+    element for the conditional. Scoring each as its own sequence, in one batch,
+    keeps a token reachable however low it ranks.
     """
     seqs = [list(prompt_token_ids) + list(c) for c in continuations]
     outputs = vllm_model.generate_greedy_logprobs(
@@ -365,15 +348,11 @@ def test_models(
         # builder and layer consistent and preserves the L4 test path.
         vllm_kwargs["attention_config"] = {"flash_attn_version": 2}
 
-    # Only when HF actually routed something -- a dense model records nothing,
-    # so it keeps the default engine setup.
-    if MOE_NEAR_TIE_TOL > 0 and hf_expert_choice:
-        # The rescue matches router rows against HF positionally, and CUDA
-        # graph replay skips Python for every decode row.
+    # Empty for a dense model, which then keeps the default engine setup.
+    if hf_expert_choice:
+        # Graph replay skips Python, so the rescue would miss every decode row.
         vllm_kwargs["enforce_eager"] = True
-        # The rescue patches FusedMoERouter in *this* process. By default
-        # EngineCore is spawned into a child, which re-imports vllm and never
-        # sees the patch -- it would silently no-op. Keep the engine in-process.
+        # The patch is process-local; a spawned EngineCore would never see it.
         monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
     with vllm_runner(
@@ -400,7 +379,6 @@ def test_models(
                 vllm_outputs_from_embeds = vllm_model.generate_greedy_logprobs(
                     prompt_embeds, max_tokens, num_logprobs
                 )
-
 
     check_logprobs_close(
         outputs_0_lst=hf_outputs,
