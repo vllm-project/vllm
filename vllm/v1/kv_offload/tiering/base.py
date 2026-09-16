@@ -154,14 +154,15 @@ class SecondaryTierManager(ABC):
         primary_kv_view: Memoryview of the primary tier's CPU KV cache.
         tier_type: Tier type identifier, set by SecondaryTierFactory
             from the registered tier type.
-        backpressure_config: Optional backpressure detector configuration.
         backpressure_detector: Optional `BackpressureDetector`.
 
         """
         self._offloading_spec = offloading_spec
         self._primary_kv_view: memoryview = primary_kv_view
-        shape = primary_kv_view.shape
-        self._block_size_bytes: int = shape[1] if shape and len(shape) > 1 else 1
+        assert primary_kv_view.strides is not None, (
+            "primary_kv_view.strides cannot be None"
+        )
+        self._block_size_bytes: int = primary_kv_view.strides[0]
         self.tier_type = tier_type
         self.locality: Locality | None = None
         self._bp_detector = backpressure_detector
