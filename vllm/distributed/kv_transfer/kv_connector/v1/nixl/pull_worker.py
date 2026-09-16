@@ -360,6 +360,10 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 if rank_to_notify != (0, read_specs[0].remote_rank):
                     self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
 
+        # Notification-only requests have no transfer completion to drain metadata.
+        if not meta.awaiting_kvs and not any(meta.local_block_ids):
+            self._recving_metadata.pop(req_id, None)
+
     def _read_blocks(
         self,
         read_spec: ReadSpec,

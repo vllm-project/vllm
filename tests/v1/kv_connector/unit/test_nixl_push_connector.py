@@ -387,6 +387,8 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._group_spec_types = (FullAttentionSpec,)
         w._engine_ttl = 0.0
         w._engine_last_active = {}
+        w._remote_engine_addresses = {}
+        w._replaced_remote_engines = set()
 
         # Track _do_start_push_kv invocations.
         calls: list[tuple[str, Any, dict[str, Any]]] = []

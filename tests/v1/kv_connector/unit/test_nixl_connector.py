@@ -7,9 +7,11 @@ import os
 import queue
 import tempfile
 import textwrap
+import threading
 import time
 import uuid
 from collections import defaultdict
+from concurrent.futures import Future
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -48,6 +50,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlKVConnectorStats,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    RemoteMeta,
+    ReqMeta,
     compute_nixl_compatibility_hash,
 )
 from vllm.distributed.kv_transfer.kv_transfer_state import (
@@ -2008,6 +2012,7 @@ def recv_worker():
     worker._recving_transfers = defaultdict(list)
     worker._failed_recv_reqs = queue.Queue()
     worker._recv_failures = set()
+    worker._replaced_remote_engines = set()
     worker._replicated_pcp_done_sending = set()
     worker._invalid_block_ids = queue.Queue()
     worker._pending_recv_notifs = {}
@@ -2600,6 +2605,229 @@ def test_engine_ttl_disabled(default_vllm_config, dist_init):
     # Nothing should be evicted.
     assert engine_id in worker._remote_agents
     assert engine_id in worker.dst_xfer_side_handles
+
+
+@pytest.fixture
+def peer_replacement_worker(recv_worker):
+    """Exercise handshake completion and cleanup without CUDA or native NIXL."""
+    worker = recv_worker
+    worker.engine_id = "local"
+    worker._handshake_lock = threading.RLock()
+    worker._handshake_futures = {}
+    worker._handshake_initiation_executor = MagicMock()
+    worker._handshake_initiation_executor.submit.side_effect = lambda *args: Future()
+    worker._ready_requests = queue.Queue()
+    worker._recving_metadata.clear()
+    worker._reqs_to_process = set()
+    worker._engine_ttl = 0
+    worker._engine_last_active = {"old-peer": time.perf_counter()}
+    worker._engine_clock_offset = {"old-peer": 0.0}
+    worker._remote_agents = {"old-peer": {(0, 0): "old-agent"}}
+    worker._remote_engine_addresses = {"old-peer": ("localhost", 1234)}
+    worker.dst_xfer_side_handles = {"old-peer": {0: 100}}
+    worker.kv_caches_base_addr = {"old-peer": {0: [1024]}}
+    worker.dst_num_blocks = {"old-peer": 16}
+    worker.dst_region_num_blocks = {"old-peer": [16]}
+    worker.dst_region_group_ids = {"old-peer": [0]}
+    worker.dst_uses_region_group_mapping = {"old-peer": False}
+    worker.dst_region_mem_types = {"old-peer": ["VRAM"]}
+    worker.tp_mappings = {"old-peer": MagicMock()}
+    worker.src_xfer_handles_by_block_size = {}
+    worker.src_xfer_handles_by_tp_ratio = {}
+    worker._dram_src_handles_by_block_size = {}
+    worker._dram_src_handles_by_tp_ratio = {}
+    worker._registered_descs = []
+    worker.pcp_rank = 0
+    worker.use_mla = False
+    worker.nixl_wrapper.get_new_notifs.return_value = {}
+    yield worker
+    worker.shutdown()
+
+
+def _start_peer_replacement(worker, host="localhost", port=1234):
+    metadata = NixlConnectorMetadata()
+    metadata.reqs_to_recv["new-req"] = ReqMeta(
+        local_block_ids=([1],),
+        local_physical_block_ids=([1],),
+        tp_size=1,
+        remote=RemoteMeta(([2],), host, port, "new-peer", "prefill-req"),
+    )
+    worker.start_load_kv(metadata)
+    return worker._handshake_futures["new-peer"]
+
+
+@pytest.mark.cpu_test
+def test_peer_replacement_cleans_old_state_after_confirmed_handshake(
+    peer_replacement_worker,
+):
+    w = peer_replacement_worker
+    w._remote_agents["healthy-peer"] = {(0, 0): "healthy-agent"}
+    w._remote_engine_addresses["healthy-peer"] = ("other-host", 1234)
+    handshake = _start_peer_replacement(w)
+    w.get_finished()
+    w.nixl_wrapper.remove_remote_agent.assert_not_called()
+
+    handshake.set_result(({(0, 0): "new-agent"}, 0.0))
+    w.get_finished()
+
+    w.nixl_wrapper.release_dlist_handle.assert_called_once_with(100)
+    w.nixl_wrapper.remove_remote_agent.assert_called_once_with("old-agent")
+    for cache in (
+        w._remote_agents,
+        w.dst_xfer_side_handles,
+        w.kv_caches_base_addr,
+        w.dst_num_blocks,
+        w.dst_region_num_blocks,
+        w.dst_region_group_ids,
+        w.dst_uses_region_group_mapping,
+        w.dst_region_mem_types,
+        w.tp_mappings,
+        w._engine_clock_offset,
+        w._engine_last_active,
+        w._remote_engine_addresses,
+    ):
+        assert "old-peer" not in cache
+    w.transfer_topo.unregister_remote_engine.assert_called_once_with("old-peer")
+    assert set(w._remote_agents) == {"new-peer", "healthy-peer"}
+    assert w._remote_engine_addresses["new-peer"] == ("localhost", 1234)
+
+    with patch.object(w, "_read_blocks_for_req") as read:
+        w.start_load_kv(NixlConnectorMetadata())
+    read.assert_called_once_with("new-req", w._recving_metadata["new-req"])
+    w.get_finished()
+    w.nixl_wrapper.remove_remote_agent.assert_called_once_with("old-agent")
+
+
+@pytest.mark.parametrize("host,port", [("other-host", 1234), ("localhost", 5678)])
+@pytest.mark.cpu_test
+def test_peer_replacement_preserves_different_addresses(
+    peer_replacement_worker, host, port
+):
+    w = peer_replacement_worker
+    handshake = _start_peer_replacement(w, host, port)
+    handshake.set_result(({(0, 0): "new-agent"}, 0.0))
+    w.get_finished()
+    assert "old-peer" in w._remote_agents
+    w.nixl_wrapper.remove_remote_agent.assert_not_called()
+
+
+@pytest.mark.cpu_test
+def test_peer_replacement_preserves_old_peer_on_handshake_failure(
+    peer_replacement_worker,
+):
+    w = peer_replacement_worker
+    handshake = _start_peer_replacement(w)
+    handshake.set_exception(RuntimeError("engine ID mismatch"))
+    assert w.get_finished() == (set(), {"new-req"})
+    assert "old-peer" in w._remote_agents
+    assert "new-peer" not in w._remote_engine_addresses
+    w.nixl_wrapper.remove_remote_agent.assert_not_called()
+
+
+@pytest.mark.cpu_test
+def test_peer_replacement_waits_for_outstanding_reads(peer_replacement_worker):
+    w = peer_replacement_worker
+    w._recving_metadata["old-req"] = ReqMeta(
+        local_block_ids=([1],),
+        local_physical_block_ids=([1],),
+        tp_size=1,
+        remote=RemoteMeta(([2],), "localhost", 1234, "old-peer", "old-prefill"),
+    )
+    w._recving_transfers["old-req"] = [77]
+    w.nixl_wrapper.check_xfer_state.return_value = "PROC"
+    handshake = _start_peer_replacement(w)
+    handshake.set_result(({(0, 0): "new-agent"}, 0.0))
+    w.get_finished()
+    w.nixl_wrapper.remove_remote_agent.assert_not_called()
+
+    w.nixl_wrapper.check_xfer_state.return_value = "DONE"
+    assert w.get_finished() == (set(), {"old-req"})
+    w.nixl_wrapper.release_xfer_handle.assert_called_once_with(77)
+    w.nixl_wrapper.remove_remote_agent.assert_called_once_with("old-agent")
+
+
+@pytest.mark.parametrize("sibling_state", ["DONE", "ERR"])
+@pytest.mark.cpu_test
+def test_peer_replacement_waits_for_failed_sibling_reads(
+    peer_replacement_worker, sibling_state
+):
+    """Peer cleanup and failure reporting must both wait for the final read."""
+    w = peer_replacement_worker
+    w._recving_metadata["old-req"] = ReqMeta(
+        local_block_ids=([1],),
+        local_physical_block_ids=([1],),
+        tp_size=1,
+        remote=RemoteMeta(([2],), "localhost", 1234, "old-peer", "old-prefill"),
+    )
+    w._recving_transfers["old-req"] = [77, 78]
+    w.nixl_wrapper.check_xfer_state.side_effect = ["ERR", "PROC", sibling_state]
+    handshake = _start_peer_replacement(w)
+    handshake.set_result(({(0, 0): "new-agent"}, 0.0))
+    result = w.get_transfer_results()
+    assert result.finished_recving == result.failed_recving == set()
+    assert w.get_block_ids_with_load_errors() == set()
+    w.nixl_wrapper.remove_remote_agent.assert_not_called()
+
+    result = w.get_transfer_results()
+    assert result.finished_recving == result.failed_recving == {"old-req"}
+    assert w.get_block_ids_with_load_errors() == {1}
+    assert w.nixl_wrapper.release_xfer_handle.call_count == 2
+    w.nixl_wrapper.remove_remote_agent.assert_called_once_with("old-agent")
+
+
+@pytest.mark.parametrize("awaiting_kvs", [False, True])
+@pytest.mark.cpu_test
+def test_peer_replacement_waits_for_queued_notification(
+    peer_replacement_worker, awaiting_kvs
+):
+    w = peer_replacement_worker
+    w._bidirectional_kv_xfer_enabled = False
+    w.dcp_size = 1
+    w.region_group_ids = [0]
+    w._mixed_mem_types = False
+    w.src_xfer_handles_by_block_size = {16: 101}
+    w.transfer_topo.tp_ratio.return_value = 1
+    w.transfer_topo.get_engine_info.return_value.remote_tp_size = 1
+    w.transfer_topo.get_engine_info.return_value.remote_dcp_size = 1
+    w.tp_mappings["old-peer"] = SimpleNamespace(
+        all_source_ranks=(0,), source_ranks_per_group=((0,),), local_consumers=1
+    )
+    meta = ReqMeta(
+        local_block_ids=([],),
+        local_physical_block_ids=([],),
+        tp_size=1,
+        remote=RemoteMeta(([2],), "localhost", 1234, "old-peer", "old-prefill"),
+        awaiting_kvs=awaiting_kvs,
+    )
+    w._recving_metadata["cached-req"] = meta
+    w._background_nixl_handshake("cached-req", "old-peer", meta)
+    handshake = w._ensure_handshake("new-peer", "localhost", 1234, 1)
+    handshake.set_result(({(0, 0): "new-agent"}, 0.0))
+    w.get_finished()
+    w.nixl_wrapper.remove_remote_agent.assert_not_called()
+
+    w.start_load_kv(NixlConnectorMetadata())
+    w.nixl_wrapper.send_notif.assert_called_once_with(
+        "old-agent", notif_msg=b"old-prefill:1"
+    )
+    result = w.get_transfer_results()
+    assert result.finished_recving == ({"cached-req"} if awaiting_kvs else set())
+    assert result.failed_recving == set()
+    w.nixl_wrapper.remove_remote_agent.assert_called_once_with("old-agent")
+
+
+@pytest.mark.cpu_test
+def test_peer_replacement_waits_for_other_handshakes(peer_replacement_worker):
+    w = peer_replacement_worker
+    handshake = _start_peer_replacement(w)
+    other = w._ensure_handshake("other-peer", "other-host", 1234, 1)
+    handshake.set_result(({(0, 0): "new-agent"}, 0.0))
+    w.get_finished()
+    w.nixl_wrapper.remove_remote_agent.assert_not_called()
+
+    other.set_result(({(0, 0): "other-agent"}, 0.0))
+    w.get_finished()
+    w.nixl_wrapper.remove_remote_agent.assert_called_once_with("old-agent")
 
 
 def test_transfer_topology_unregister():

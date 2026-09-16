@@ -838,6 +838,8 @@ class NixlBaseConnectorWorker:
         self._engine_ttl: float = vllm_config.kv_transfer_config.get_from_extra_config(
             "engine_ttl", 3600.0
         )
+        self._remote_engine_addresses: dict[EngineId, tuple[str, int]] = {}
+        self._replaced_remote_engines: set[EngineId] = set()
 
         self.model_config = vllm_config.model_config
 
@@ -1299,6 +1301,14 @@ class NixlBaseConnectorWorker:
                         self._remote_agents[eid] = remote_agents
                         self._engine_clock_offset[eid] = clock_offset
                         self._engine_last_active[eid] = time.perf_counter()
+                        if self._TRANSFER_MODE == "pull":
+                            addresses = self._remote_engine_addresses
+                            self._replaced_remote_engines.update(
+                                old_eid
+                                for old_eid, address in addresses.items()
+                                if address == (host, port) and old_eid != eid
+                            )
+                            addresses[eid] = (host, port)
                     except Exception as e:
                         self._log_failure(
                             failure_type="handshake_setup_failed",
@@ -2943,6 +2953,7 @@ class NixlBaseConnectorWorker:
             del self._reqs_to_send[req_id]
             done_sending.add(req_id)
 
+        self._cleanup_replaced_remote_engines()
         return KVConnectorTransferResults(
             finished_sending=done_sending,
             finished_recving=done_recving,
@@ -3470,6 +3481,27 @@ class NixlBaseConnectorWorker:
             and meta.remote is not None
         }
 
+    def _cleanup_replaced_remote_engines(self) -> None:
+        """Release replaced pull peers once requests and handshakes have drained."""
+        if not self._replaced_remote_engines:
+            return
+        with self._handshake_lock:
+            # Native metadata loads run outside the lock on the handshake executor.
+            if self._handshake_futures:
+                return
+            busy = {
+                meta.remote.engine_id
+                for meta in self._recving_metadata.values()
+                if meta.remote is not None
+            }
+            for engine_id in self._replaced_remote_engines - busy:
+                if engine_id in self._remote_agents:
+                    self._cleanup_remote_engine(engine_id, log_eviction=False)
+                    logger.info(
+                        "Released NIXL state for replaced remote engine %s.", engine_id
+                    )
+                self._replaced_remote_engines.discard(engine_id)
+
     def _cleanup_remote_engine(
         self, engine_id: EngineId, *, log_eviction: bool = True
     ) -> None:
@@ -3502,6 +3534,8 @@ class NixlBaseConnectorWorker:
 
         # Drop the cached clock offset; it is re-measured on the next handshake.
         self._engine_clock_offset.pop(engine_id, None)
+        self._remote_engine_addresses.pop(engine_id, None)
+        self._replaced_remote_engines.discard(engine_id)
         # A just-completed handshake may not have recorded activity yet, so
         # tolerate a missing entry.
         last_active = self._engine_last_active.pop(engine_id, None)
