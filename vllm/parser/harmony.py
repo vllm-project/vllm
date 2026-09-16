@@ -452,9 +452,10 @@ def get_harmony_structural_tag(
     tool_choice: SimplifiedToolChoice,
     reasoning: bool,
     token_suffix: str = "",
+    non_strict: bool = False,
 ) -> StructuralTag:
     # reasoning always enabled for Harmony
-    del reasoning, token_suffix
+    del reasoning, token_suffix, non_strict
 
     if builtin_tools:
         # Fallback for built-in tools
