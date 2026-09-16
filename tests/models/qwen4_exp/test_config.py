@@ -194,8 +194,10 @@ def test_qwen4_exp_rejects_pipeline_parallel_only_with_ple(ple_layer_ids) -> Non
         parallel_config=ParallelConfig(pipeline_parallel_size=2),
         speculative_config=None,
     )
-    with patch.object(
-        Qwen3_5ForConditionalGenerationConfig, "verify_and_update_config"
+    with (
+        patch.object(Qwen3_5ForConditionalGenerationConfig, "verify_and_update_config"),
+        # This platform-neutral validation is exercised with CPU-host tensors.
+        patch.object(current_platform, "is_cpu", return_value=False),
     ):
         if ple_layer_ids:
             with pytest.raises(NotImplementedError, match="pipeline_parallel_size=1"):

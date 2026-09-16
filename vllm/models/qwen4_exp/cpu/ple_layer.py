@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU-resident Qwen4Exp position-learning enhancement layers."""
 
+# TODO(refactor): Share the host-side PLE orchestration once prefetch and
+# outer-residual behavior are explicit backend hooks.
+
 from collections.abc import Sequence
 
 import torch

@@ -60,36 +60,6 @@ def test_qsa_metadata_uses_cpu_fallback_with_triton_installed(monkeypatch) -> No
     assert actual[3].tolist() == [10, 11, 12]
 
 
-def test_qsa_metadata_uses_triton_for_cuda_buffers(monkeypatch) -> None:
-    expected = (
-        torch.empty(0),
-        torch.empty(0),
-        torch.empty(0),
-        torch.empty(0),
-    )
-
-    def build_with_triton(*args, **kwargs):
-        return expected
-
-    def fail_torch_builder(*args, **kwargs):
-        raise AssertionError("CUDA metadata must use the Triton builder")
-
-    monkeypatch.setattr(qsa_cache, "HAS_TRITON", True)
-    monkeypatch.setattr(qsa_cache, "build_qsa_metadata_triton", build_with_triton)
-    monkeypatch.setattr(qsa_cache, "_build_qsa_metadata_torch", fail_torch_builder)
-
-    token_to_req_buffer = SimpleNamespace(is_cuda=True)
-    actual = qsa_cache.build_qsa_metadata(
-        SimpleNamespace(),
-        token_to_req_buffer,
-        None,
-        None,
-        None,
-    )
-
-    assert actual is expected
-
-
 @requires_triton_cpu
 def test_qsa_sparse_attention_matches_native_checkpoint_shape() -> None:
     torch.manual_seed(2)

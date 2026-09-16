@@ -22,6 +22,9 @@ Typical usage inside a transformer decoder layer::
     )
 """
 
+# TODO(refactor): Share ``GatedResidual`` once backend-local HC operations can
+# be injected without importing another platform's implementation.
+
 import torch
 from torch import nn
 

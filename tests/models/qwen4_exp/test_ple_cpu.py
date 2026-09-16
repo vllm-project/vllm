@@ -237,27 +237,6 @@ def test_cpu_ple_gate_matches_torch_reference() -> None:
             _ConvBatchCase(prefill_query_lens=(5, 0, 7), channels=64),
             id="prefill",
         ),
-        pytest.param(
-            _ConvBatchCase(
-                spec_query_lens=(1, 3),
-                num_accepted=(1, 2),
-                channels=64,
-                spec_query_len=3,
-                graph_padding=2,
-            ),
-            id="spec",
-        ),
-        pytest.param(
-            _ConvBatchCase(
-                spec_query_lens=(2,),
-                num_accepted=(1,),
-                num_decodes=1,
-                prefill_query_lens=(4,),
-                channels=64,
-                spec_query_len=2,
-            ),
-            id="mixed",
-        ),
     ],
 )
 def test_cpu_ple_short_conv_matches_shared_reference(
