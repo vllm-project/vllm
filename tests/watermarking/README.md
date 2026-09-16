@@ -1,7 +1,9 @@
 # Watermarking goldens
 
-These goldens freeze the CPU reference path: the generator and detector for both
-watermarking algorithms and the Philox PRF, over a deterministic logit fixture.
+These goldens freeze the CPU reference path: the generator and detector for each
+configured watermarking algorithm and PRF combination, over a deterministic
+logit fixture. The current matrix uses the Philox PRF. Regeneration refuses an
+incomplete algorithm/PRF matrix.
 They are a backwards-compatibility check, not a check of GPU numerics. A
 position whose context already occurred is sampled without the watermark, and
 the detector skips it too; one skipped because its context is still partial is a

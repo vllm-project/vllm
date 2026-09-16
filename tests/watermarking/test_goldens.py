@@ -23,8 +23,8 @@ from tests.watermarking.golden_candidates import (
     GoldenCandidatePayload,
     GoldenFormatError,
     compare_golden,
+    configured_algorithm_prf_combinations,
     configured_algorithms,
-    configured_prfs,
     load_goldens,
     read_goldens,
     routing_boundary,
@@ -56,11 +56,11 @@ def test_goldens_cover_every_candidate(
 
     assert len(candidate_ids) == len(WATERMARKING_CANDIDATES)
     assert set(goldens) == candidate_ids, f"Run `{REGENERATE_COMMAND}`"
-    assert {candidate.scheme for candidate in WATERMARKING_CANDIDATES} == (
-        configured_algorithms()
-    )
+    candidate_combinations = {
+        (candidate.scheme, candidate.prf) for candidate in WATERMARKING_CANDIDATES
+    }
+    assert candidate_combinations == configured_algorithm_prf_combinations()
     assert set(DETECTOR_FACTORIES) == configured_algorithms()
-    assert {candidate.prf for candidate in WATERMARKING_CANDIDATES} == configured_prfs()
 
     twin_ids = {
         candidate_id
