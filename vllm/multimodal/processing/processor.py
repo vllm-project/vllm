@@ -104,8 +104,7 @@ class PromptIndex:
 class PromptIndexTargets:
     @staticmethod
     def start() -> PromptIndex:
-        """
-        Resolves to the start of the prompt (before the first token).
+        """Resolves to the start of the prompt (before the first token).
 
         This results in a match even if the prompt is empty.
         """
@@ -116,9 +115,7 @@ class PromptIndexTargets:
 
     @staticmethod
     def prefix(seq: list[int]) -> PromptIndex:
-        """
-        Resolves to a location in the prompt after the given prefix.
-        """
+        """Resolves to a location in the prompt after the given prefix."""
 
         def get_match_index(
             prompt: list[int],
@@ -146,8 +143,7 @@ class PromptIndexTargets:
 
     @staticmethod
     def end() -> PromptIndex:
-        """
-        Resolves to the end of the prompt (after the last token).
+        """Resolves to the end of the prompt (after the last token).
 
         This results in a match even if the prompt is empty.
         """
@@ -247,8 +243,7 @@ class UpdateMode(str, Enum):
 
 @dataclass
 class PromptUpdate(ABC):
-    """
-    Defines how to update a prompt with placeholder tokens.
+    """Defines how to update a prompt with placeholder tokens.
 
     Note:
         The target and content are token sequences. When converting text
@@ -256,6 +251,7 @@ class PromptUpdate(ABC):
         `add_special_tokens=False` to match how the prompt itself is
         tokenized. Otherwise, the updated prompt may contain duplicated
         special tokens or fail to match the target.
+
     """
 
     modality: str
@@ -294,8 +290,7 @@ class PromptUpdate(ABC):
         return content
 
     def resolve(self, item_idx: int) -> "ResolvedPromptUpdate":
-        """
-        Given the index of the processed item within
+        """Given the index of the processed item within
         [`modality`][vllm.multimodal.processing.PromptUpdate.modality],
         output a copy of this object with its lazy attributes resolved.
         """
@@ -310,11 +305,9 @@ class PromptUpdate(ABC):
 
 @dataclass
 class PromptInsertion(PromptUpdate):
-    """
-    Defines how to insert placeholder tokens into a prompt.
+    """Defines how to insert placeholder tokens into a prompt.
 
     Example:
-
     For each image, insert a number of `<image>` feature placeholders
     equal to the feature size of the vision encoder after the `<s>` token:
 
@@ -355,6 +348,7 @@ class PromptInsertion(PromptUpdate):
         insertion=[image_token_id] * image_feature_size,
     )
     ```
+
     """
 
     insertion: PromptUpdateContent = field(repr=False)
@@ -379,11 +373,9 @@ class PromptInsertion(PromptUpdate):
 
 @dataclass
 class PromptReplacement(PromptUpdate):
-    """
-    Defines how to replace portions of an input prompt with placeholder tokens.
+    """Defines how to replace portions of an input prompt with placeholder tokens.
 
     Example:
-
     For each image, replace one `<image>` input placeholder in the prompt
     with a number of `<image>` feature placeholders
     equal to the feature size of the vision encoder:
@@ -412,6 +404,7 @@ class PromptReplacement(PromptUpdate):
         ),
     )
     ```
+
     """
 
     replacement: PromptUpdateContent = field(repr=False)
@@ -447,8 +440,7 @@ _M = TypeVar("_M", bound=_HasModalityAttr | _HasModalityProp)
 
 
 def full_groupby_modality(values: Iterable[_M]) -> ItemsView[str, list[_M]]:
-    """
-    Convenience function to apply
+    """Convenience function to apply
     [`full_groupby`][vllm.utils.collection_utils.full_groupby]
     based on modality.
     """
@@ -462,8 +454,7 @@ class PromptTargetMatch(NamedTuple):
 
 @dataclass(frozen=True)
 class ResolvedPromptUpdate:
-    """
-    A [`PromptUpdate`][vllm.multimodal.processing.PromptUpdate] with its
+    """A [`PromptUpdate`][vllm.multimodal.processing.PromptUpdate] with its
     lazy attributes resolved.
     """
 
@@ -522,8 +513,7 @@ def iter_token_matches(
     *,
     start_idx: int = 0,
 ) -> Generator[_TokenMatch]:
-    """
-    Yield each occurrence of `match_ids` in `token_ids`.
+    """Yield each occurrence of `match_ids` in `token_ids`.
 
     Note that empty matches are ignored.
     """
@@ -562,8 +552,7 @@ def replace_token_matches(
     match_ids: list[int],
     new_ids: list[int],
 ) -> list[int]:
-    """
-    Replace each occurrence of `match_ids` in `token_ids`
+    """Replace each occurrence of `match_ids` in `token_ids`
     with `new_ids`.
 
     Note that empty matches are ignored.
@@ -846,8 +835,7 @@ def apply_token_matches(
     prompt: list[int],
     mm_prompt_updates: "MultiModalPromptUpdates",
 ) -> tuple[list[int], "MultiModalPromptUpdatesApplyResult"]:
-    """
-    Apply the updates in `mm_prompt_updates` to `prompt`.
+    """Apply the updates in `mm_prompt_updates` to `prompt`.
 
     Matches are exclusive even when multiple modalities share
     the same placeholder tokens. In that case, the modality that
@@ -914,8 +902,7 @@ def _iter_placeholders(
     prompt: list[int],
     mm_prompt_updates: "MultiModalPromptUpdates",
 ) -> Iterable[PlaceholderFeaturesInfo]:
-    """
-    Yield each set of placeholder tokens found in `prompt`.
+    """Yield each set of placeholder tokens found in `prompt`.
 
     Matches are exclusive even when multiple modalities share
     the same placeholder tokens. In that case, the modality that
@@ -1028,8 +1015,7 @@ class MultiModalProcessingInfo(NamedTuple):
 
 
 class BaseMultiModalProcessor(ABC, Generic[_I]):
-    """
-    Abstract base class to process multi-modal inputs to be used in vLLM.
+    """Abstract base class to process multi-modal inputs to be used in vLLM.
 
     Not to be confused with `transformers.ProcessorMixin`.
     """
@@ -1097,8 +1083,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        """
-        Given the original multi-modal items for this modality
+        """Given the original multi-modal items for this modality
         and HF-processed data, output the updates to perform.
 
         The information returned by this method is used to update token inputs
@@ -1167,8 +1152,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         return processor_data, passthrough_data
 
     def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str | None:
-        """
-        Get the text to pass to the HF processor alongside the multi-modal
+        """Get the text to pass to the HF processor alongside the multi-modal
         data.
 
         By default, no text is passed. If the HF processor requires that
@@ -1183,8 +1167,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_data: Mapping[str, object],
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> tuple[Mapping[str, object], Mapping[str, object]]:
-        """
-        Pre-process the multi-modal data and HF processor keyword arguments
+        """Pre-process the multi-modal data and HF processor keyword arguments
         before they are passed to the HF processor.
 
         By default, both are returned as-is. If the HF processor expects the
@@ -1201,8 +1184,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         hf_processor_mm_kwargs: Mapping[str, object],
         processed_data: BatchFeature,
     ) -> BatchFeature:
-        """
-        Post-process the output of the HF processor.
+        """Post-process the output of the HF processor.
 
         By default, the output is returned as-is. If you need to modify the
         output of the HF processor before it is converted into multi-modal
@@ -1215,9 +1197,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        """
-        Apply the HF processor on the multi-modal data.
-        """
+        """Apply the HF processor on the multi-modal data."""
         valid_mm_items = mm_items.select(
             {k for k, c in mm_items.get_all_counts().items() if c > 0}
         )
@@ -1250,8 +1230,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         )
 
     def _postprocess_prompt(self, prompt: list[int]) -> list[int]:
-        """
-        Post-process the prompt token IDs before locating or applying
+        """Post-process the prompt token IDs before locating or applying
         multi-modal prompt updates.
 
         By default, the prompt is returned as-is. If the HF processor (or
@@ -1303,8 +1282,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         cached_update: ResolvedPromptUpdate,
         new_item_idx: int,
     ) -> ResolvedPromptUpdate:
-        """
-        Override this if other attributes of `ResolvedPromptUpdate`
+        """Override this if other attributes of `ResolvedPromptUpdate`
         also need to be recomputed after retrieving from the cache.
         """
         return replace(cached_update, item_idx=new_item_idx)
@@ -1404,8 +1382,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
     ) -> MultiModalProcessingInfo:
-        """
-        Apply the HF processor on the full prompt text,
+        """Apply the HF processor on the full prompt text,
         caching the results and reusing cached results.
         """
         cache = self.cache
@@ -1522,8 +1499,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         *,
         encode_segments_separately: bool = False,
     ) -> tuple[list[int], MultiModalPromptUpdatesApplyResult]:
-        """
-        Apply multi-modal prompt updates in text space, then encode the
+        """Apply multi-modal prompt updates in text space, then encode the
         result.
 
         A non-special-token target may be tokenized differently inside the
@@ -1716,8 +1692,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
     ) -> MultiModalInput:
-        """
-        Process multi-modal inputs to be used in vLLM.
+        """Process multi-modal inputs to be used in vLLM.
 
         The main steps are:
 
@@ -1763,8 +1738,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         prompt: list[int],
         mm_items: MultiModalDataItems,
     ) -> list[int]:
-        """
-        Create input prompt for the encoder. HF processor will be applied on
+        """Create input prompt for the encoder. HF processor will be applied on
         this prompt during profiling and generation.
         """
         raise NotImplementedError
@@ -1805,8 +1779,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
     ) -> MultiModalEncDecInput:
-        """
-        Process multi-modal inputs to be used in vLLM.
+        """Process multi-modal inputs to be used in vLLM.
         The main processing steps are modified to fit encoder-decoder model:
         1. Create encoder prompt from input prompt text.
         2. Apply the HF processor on encoder prompt.

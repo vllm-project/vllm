@@ -869,7 +869,6 @@ class Qwen4ExpNGramEmbedding(nn.Module):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load hash buffers and checkpoint-split embedding rows."""
-
         persistent_buffers = {
             "layer_multipliers": self.layer_multipliers,
             "ngram_heads_offsets": self.ngram_heads_offsets,

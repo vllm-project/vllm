@@ -19,8 +19,7 @@ logger = init_logger(__name__)
 
 
 class VllmIRInplaceFunctionalizationPass(VllmInductorPass):
-    """
-    This pass functionalizes maybe_inplace vLLM IR ops to the default overload.
+    """This pass functionalizes maybe_inplace vLLM IR ops to the default overload.
     The maybe_inplace overloads have the same signature as the default overload
     so the pass simply replaces the called overload.
     That makes the graph properly functional.

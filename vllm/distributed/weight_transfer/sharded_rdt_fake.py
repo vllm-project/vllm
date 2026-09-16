@@ -206,7 +206,8 @@ class FakeRDTTensor(torch.Tensor):
 
     def _meta(self) -> torch.Tensor:
         """A zero-storage meta tensor of this fake's shape/dtype, so PyTorch
-        itself computes post-op geometry rather than us reimplementing it."""
+        itself computes post-op geometry rather than us reimplementing it.
+        """
         return torch.empty(self.shape, dtype=self.dtype, device="meta")
 
     @classmethod
@@ -250,7 +251,8 @@ class FakeRDTTensor(torch.Tensor):
     ):
         """Append the op and return a child, or a tuple of children for
         multi-return ops. Each child's geometry comes from running the op on a
-        meta tensor."""
+        meta tensor.
+        """
         meta = self_._meta()
         with torch._C.DisableTorchFunctionSubclass():
             meta_result = func(meta, *args, **kwargs)

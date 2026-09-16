@@ -70,7 +70,8 @@ def test_dummy_video_num_frames_override_honors_min_of_two(
 ):
     """A ``num_frames`` override below 2 must be ignored (the model needs at
     least 2 frames), matching the "cannot be less than 2, will be ignored"
-    warning."""
+    warning.
+    """
     builder = object.__new__(Molmo2DummyInputsBuilder)
     builder.info = SimpleNamespace(
         get_hf_processor=lambda: SimpleNamespace(

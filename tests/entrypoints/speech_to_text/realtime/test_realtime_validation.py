@@ -295,7 +295,8 @@ async def test_session_update_invalid_model_returns_error(model_name):
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_commit_without_session_update_returns_error(model_name):
     """Test that committing before validating the model returns an error
-    and does not fall through to processing."""
+    and does not fall through to processing.
+    """
     server_args = ["--enforce-eager", "--max-model-len", "2048"]
 
     if model_name.startswith("mistralai"):

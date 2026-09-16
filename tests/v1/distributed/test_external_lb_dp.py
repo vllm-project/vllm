@@ -24,7 +24,8 @@ TP_SIZE = int(os.getenv("TP_SIZE", "1"))
 
 class ExternalLBServerManager:
     """Manages data parallel vLLM server instances for external
-    load balancer testing."""
+    load balancer testing.
+    """
 
     def __init__(
         self,

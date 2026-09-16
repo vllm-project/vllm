@@ -231,7 +231,8 @@ def test_plan_uses_state_params(monkeypatch):
 
 def test_kv_lens_host_formula():
     """Per-row host lengths: context == position + 1; capped at
-    index_topk + trailing-pool remainder past the sparse threshold."""
+    index_topk + trailing-pool remainder past the sparse threshold.
+    """
     builder = object.__new__(FlashInferMLASparseSM90Builder)
     builder._index_topk = 2048
     builder._index_kpool = 4

@@ -150,7 +150,8 @@ def test_select_default_backend_by_platform(
     expected_backend,
 ):
     """Test default backend selection per platform with all optional
-    accelerators (FlashInfer, AITER) disabled."""
+    accelerators (FlashInfer, AITER) disabled.
+    """
     with patch(
         "vllm.model_executor.layers.fused_moe.oracle.unquantized.current_platform"
     ) as mock_platform:
@@ -444,7 +445,8 @@ def test_select_cuda_flashinfer_cutlass_backend(
     mock_has_flashinfer,
 ):
     """Test CUDA backend selection when FlashInfer TRTLLM is not available
-    and FlashInfer CUTLASS is available."""
+    and FlashInfer CUTLASS is available.
+    """
     with (
         patch.object(current_platform, "is_cuda", return_value=True),
         patch.object(current_platform, "is_rocm", return_value=False),

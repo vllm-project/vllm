@@ -19,8 +19,7 @@ from vllm.platforms import current_platform
 
 
 class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
-    """
-    FlashInfer TRT-LLM MxInt4 MoE kernel. Monolithic interface
+    """FlashInfer TRT-LLM MxInt4 MoE kernel. Monolithic interface
     (fused router + experts).
 
     Wraps flashinfer_trtllm_mxint4_moe().

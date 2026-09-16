@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the MoE grouped topk kernel
+"""Tests for the MoE grouped topk kernel.
 
 Run `pytest tests/kernels/moe/test_grouped_topk.py`.
 """

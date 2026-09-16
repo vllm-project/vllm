@@ -16,8 +16,7 @@ import torch
 def compute_retained_tokens_count(
     tokens_per_frame: int, num_frames: int, q: float
 ) -> int:
-    """
-    Compute the number of retained tokens for a given video.
+    """Compute the number of retained tokens for a given video.
     Method ensures that we retain all the tokens from the first frame
     regardless of the pruning rate.
 
@@ -28,6 +27,7 @@ def compute_retained_tokens_count(
 
     Returns:
         The number of retained tokens.
+
     """
     total_tokens = tokens_per_frame * num_frames
     evs_num_tokens = int(total_tokens * (1 - q))
@@ -41,8 +41,7 @@ def compute_retention_mask(
     spatial_merge_size: int,
     q: float,
 ) -> torch.Tensor:
-    """
-    Computes the retention mask for input video embeddings.
+    """Computes the retention mask for input video embeddings.
 
     Args:
         video_embeds (`torch.Tensor`): The input video embeddings
@@ -55,6 +54,7 @@ def compute_retention_mask(
     Returns:
         `torch.Tensor`: The retention mask for the video embeddings of
             `(T * H * W // spatial_merge_size ^ 2)` shape.
+
     """
     T, H, W = map(int, video_size_thw)
 
@@ -98,8 +98,7 @@ def compute_mrope_for_media(
     tokens_per_second: float = 1.0,
     video_second_per_grid: float = 1.0,
 ) -> torch.Tensor:
-    """
-    Computes the mrope for video embeddings based on the grid dimensions.
+    """Computes the mrope for video embeddings based on the grid dimensions.
     Computed mrope positions match original qwen 2.5 implementation,
     but positions are built for media being the first element in sequence.
 
@@ -113,6 +112,7 @@ def compute_mrope_for_media(
         Tensor of shape `(T * H * W, 4)` where last dimension
         represents mrope positions [0:3), while the last channel
         contains value of llm_grid_w repeated for all positions.
+
     """
     llm_grid_t = video_size_thw[0]
     llm_grid_h = video_size_thw[1] // spatial_merge_size
@@ -160,8 +160,7 @@ def recompute_mrope_positions(
     image_token_id: int,
     video_token_id: int,
 ) -> tuple[torch.LongTensor, int]:
-    """
-    Update part of input mrope positions.
+    """Update part of input mrope positions.
     Original mrope_positions are computed incorrectly, so once we prune media
     tokens we should reflect this in the mrope positions for the LLM.
 
@@ -204,8 +203,8 @@ def recompute_mrope_positions(
 
     Returns:
         Tuple of (mrope_positions, mrope_position_delta).
-    """
 
+    """
     # Tensors
     positions: torch.LongTensor = typing.cast(
         torch.LongTensor, mrope_positions.clone()

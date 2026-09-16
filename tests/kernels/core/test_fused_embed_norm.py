@@ -41,7 +41,8 @@ def _rmsnorm(x: torch.Tensor, w: torch.Tensor, eps: float) -> torch.Tensor:
 def test_fused_embed_norm_matches_reference():
     """Main-model fusion: the residual is the exact gather and the second output
     is a correct RMSNorm. The norm matches a full-precision reference to ~2 bf16
-    ulp (rtol 1e-2) -- that gap is bf16 rounding, not the kernel."""
+    ulp (rtol 1e-2) -- that gap is bf16 rounding, not the kernel.
+    """
     set_random_seed(13)
     table = torch.randn(VOCAB, HIDDEN, dtype=DTYPE, device="cuda")
     ids = torch.randint(0, VOCAB, (NUM_TOKENS,), dtype=torch.int32, device="cuda")
@@ -60,7 +61,8 @@ def test_fused_embed_norm_matches_reference():
 @torch.inference_mode()
 def test_fused_embed_eh_norm_matches_reference():
     """MTP fusion (folded gather) is bit-exact vs gathering the embeds and
-    feeding the untouched model-local ``fused_eh_norm``."""
+    feeding the untouched model-local ``fused_eh_norm``.
+    """
     set_random_seed(13)
     table = torch.randn(VOCAB, HIDDEN, dtype=DTYPE, device="cuda")
     ids = torch.randint(0, VOCAB, (NUM_TOKENS,), dtype=torch.int32, device="cuda")

@@ -523,7 +523,7 @@ class BailingMoELinearAttention(LinearAttention):
         output: torch.Tensor,
         positions: torch.Tensor,
     ) -> None:
-        """Forward method called by torch.ops.vllm.linear_attention"""
+        """Forward method called by torch.ops.vllm.linear_attention."""
         torch.ops.vllm.linear_attention(
             hidden_states,
             output,

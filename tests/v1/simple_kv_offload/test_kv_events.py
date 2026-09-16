@@ -67,7 +67,8 @@ def _make_mixed_kv_cache_config(
     mamba_block_size: int = BLOCK_SIZE,
 ) -> KVCacheConfig:
     """Build a KVCacheConfig with a FullAttention group plus optional
-    SlidingWindow and Mamba groups for per-group metadata tests."""
+    SlidingWindow and Mamba groups for per-group metadata tests.
+    """
     register_all_kvcache_specs(vllm_config=None)
     groups = []
     tensors = []
@@ -238,7 +239,8 @@ def test_events_disabled_no_events() -> None:
 # ---------------------------------------------------------------------------
 def test_block_stored_per_group_metadata_full_attention() -> None:
     """BlockStored carries medium, group_idx, kind, sliding_window, block_size,
-    and the correct block hash."""
+    and the correct block hash.
+    """
     fix = make_events_scheduler()
     sched = fix.scheduler
     assert sched.kv_event_medium == MEDIUM_CPU
@@ -638,7 +640,8 @@ def test_mamba_block_size_not_scaled() -> None:
 def test_multi_group_fa_block_stored_group_idx() -> None:
     """Two distinct groups (FA + SW): each BlockStored carries its group_idx
     and kind. HybridKVCacheCoordinator requires >=2 distinct spec groups, so
-    we use FA (group 0) + SlidingWindow (group 1)."""
+    we use FA (group 0) + SlidingWindow (group 1).
+    """
     kv_cfg = _make_mixed_kv_cache_config(num_blocks=16, sliding_window=32)
     fix = make_events_scheduler(
         num_cpu_blocks=8,

@@ -45,7 +45,8 @@ def kv_layout(request) -> KVCacheLayout:
 
 def _layer_stride_order(layout: KVCacheLayout, ndim: int) -> tuple[int, ...]:
     """Per-layer physical stride order for the given layout; the 3-dim
-    indexer side cache (H=1) is contiguous, so identity."""
+    indexer side cache (H=1) is contiguous, so identity.
+    """
     if ndim == 3:
         return (0, 1, 2)
     stride_order = layout.layer_view_order
@@ -65,7 +66,8 @@ def _main_spec() -> FullAttentionSpec:
 
 def _main_kv_logical_shape(num_pages: int) -> tuple[int, ...]:
     """Standardized per-layer logical shape [B, H, N, C] for the main cache,
-    derived the same way the production allocator does."""
+    derived the same way the production allocator does.
+    """
     shape_bytes = compute_layer_kv_cache_shape_bytes(_main_spec(), num_pages)
     return (*shape_bytes[:-1], shape_bytes[-1] // DTYPE.itemsize)
 
@@ -75,7 +77,8 @@ def _allocate_main_kv_via_contract(
 ) -> torch.Tensor:
     """Build the main KV cache exactly as the production allocator does for the
     given layout: allocate the physical (permuted) tensor, then expose the
-    inverse-permuted logical [B, H, N, C] view the backend sees."""
+    inverse-permuted logical [B, H, N, C] view the backend sees.
+    """
     logical_shape = _main_kv_logical_shape(num_pages)
     stride_order = _layer_stride_order(layout, len(logical_shape))
     physical_shape = tuple(logical_shape[i] for i in stride_order)
@@ -1376,7 +1379,8 @@ def test_amd_decode_index_topk_end_to_end(
 @pytest.mark.parametrize("num_idx_heads", [1, 4])
 def test_decode_index_topk_fp8(num_idx_heads: int):
     """The standalone Triton path must score FP8 inputs in FP32 so its top-k
-    matches a reference computed from the dequantized FP8 values."""
+    matches a reference computed from the dequantized FP8 values.
+    """
     torch.manual_seed(0)
     topk, init_blocks, local_blocks, head_dim = 8, 0, 1, 128
     decode_query_len = 1
@@ -1649,7 +1653,8 @@ def test_prefill_sparse_attention_correctness(
 def test_main_cache_layout_contract():
     """The standardized per-layer logical shape is [B, H, N, C] with packed
     K/V content, and the legacy layout aliases resolve to the expected
-    per-layer stride orders."""
+    per-layer stride orders.
+    """
     nb, bs, h, d = 7, BLOCK_SIZE, NUM_KV_HEADS, HEAD_DIM
     logical = _main_kv_logical_shape(nb)
     assert logical == (nb, h, bs, 2 * d)
@@ -1773,7 +1778,8 @@ def test_indexer_cache_squeezes_to_contiguous_3d():
     """The indexer side cache is standardized 4D with H=1: under both layouts
     the allocator's logical view stays contiguous and squeezes (as
     `MiniMaxM3IndexerCache.bind_kv_cache` does) to the 3-dim
-    [num_blocks, block_size, head_dim] cache the kernels consume."""
+    [num_blocks, block_size, head_dim] cache the kernels consume.
+    """
     nb = 5
     ispec = MLAAttentionSpec(
         block_size=BLOCK_SIZE, num_kv_heads=1, head_size=HEAD_DIM, dtype=DTYPE
@@ -1793,7 +1799,8 @@ def test_indexer_cache_squeezes_to_contiguous_3d():
 
 def test_hnd_allocation_is_packed_head_major():
     """Under HND the backend-visible logical view is the packed head-major
-    physical allocation."""
+    physical allocation.
+    """
     nb, bs, h, d = 4, BLOCK_SIZE, NUM_KV_HEADS, HEAD_DIM
     logical = _main_kv_logical_shape(nb)
     stride_order = KVCacheLayout.LBHNC.layer_view_order
@@ -1821,7 +1828,8 @@ def test_hnd_allocation_is_packed_head_major():
 def test_main_cache_is_block_first_and_unpadded():
     """The allocator's contiguous-view branch (not the padded-strided branch)
     is used for the main GQA cache: its spec is unpadded and the physical
-    layout keeps num_blocks as the first dimension under both layouts."""
+    layout keeps num_blocks as the first dimension under both layouts.
+    """
     spec = _main_spec()
     # Unpadded -> allocator uses kv_tensor.view(...) rather than as_strided().
     assert spec.page_size_padded is None
@@ -1843,7 +1851,8 @@ def _build_decode_inputs(
 ):
     """Shared decode setup: uniform query tokens per request, a non-identity
     block table, and topk indices selecting the current block plus older causal
-    blocks for each query token."""
+    blocks for each query token.
+    """
     active_batch = len(seq_lens_list)
     batch = active_batch + num_padded_reqs
     pages_per_req = [(s + BLOCK_SIZE - 1) // BLOCK_SIZE for s in seq_lens_list]
@@ -2179,7 +2188,8 @@ def test_decode_sparse_attention_correctness(
 ):
     """Decode (split-K) parity under both layouts: this is the only coverage of
     the decode-site cache feed, and the strided HND case fails if the kernel
-    ignores the cache strides."""
+    ignores the cache strides.
+    """
     torch.manual_seed(0)
     q, block_table, seq_lens, topk_idx, num_pages = _build_decode_inputs(
         seq_lens_list, decode_query_len, num_padded_reqs
@@ -2229,7 +2239,8 @@ def test_decode_wrong_layout_breaks_parity():
     already contiguous-NHD (i.e. skipping the allocator's inverse permute)
     reorders the K/V content, so the decode output no longer matches the
     reference computed on the correct logical view. The mislabeled tensor keeps
-    the same shape as the correct view, so the kernel stays in bounds."""
+    the same shape as the correct view, so the kernel stays in bounds.
+    """
     torch.manual_seed(0)
     seq_lens_list = (130, 257)
     q, block_table, seq_lens, topk_idx, num_pages = _build_decode_inputs(seq_lens_list)
@@ -2264,7 +2275,8 @@ def test_decode_wrong_layout_breaks_parity():
 def test_main_cache_byte_identical_through_production_allocator():
     """AC-2: drive the real allocator (`create_kv_cache_views`) for the M3 main
     `FullAttentionSpec` under HND and assert the backend-visible view has the
-    same shape, stride, and storage offset as the packed-HND allocation."""
+    same shape, stride, and storage offset as the packed-HND allocation.
+    """
     nb = 4
     spec = _main_spec()
     raw = torch.zeros(nb * spec.page_size_bytes, dtype=torch.int8)
@@ -2279,7 +2291,8 @@ def test_main_cache_byte_identical_through_production_allocator():
 def test_padded_main_cache_is_flagged():
     """AC-2.1 negative: the M3 main cache relies on the allocator's
     contiguous-view branch (`page_size_padded is None`). A spec that sets
-    `page_size_padded` is explicitly flagged rather than silently wrong-strided."""
+    `page_size_padded` is explicitly flagged rather than silently wrong-strided.
+    """
 
     def _require_unpadded_block_first(spec, stride_order):
         inv_order = [stride_order.index(i) for i in range(len(stride_order))]
@@ -2316,7 +2329,8 @@ def test_padded_main_cache_is_flagged():
 def test_reshape_and_cache_flash_write_persists(kv_layout: KVCacheLayout):
     """AC-5 write path: the `reshape_and_cache_flash` write site now consumes
     packed-content K/V split views. Writing through those views must persist
-    into the bound storage under both layouts."""
+    into the bound storage under both layouts.
+    """
     torch.manual_seed(0)
     num_pages = 4
     kv_cache = _allocate_main_kv_via_contract(num_pages, kv_layout)

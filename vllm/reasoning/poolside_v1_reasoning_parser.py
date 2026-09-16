@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Laguna reasoning parser.
+"""Laguna reasoning parser.
 
 ``DeepSeekV3ReasoningParser.is_reasoning_end`` walks the entire
 token sequence backwards and returns ``True`` on the first ``</think>`` it

@@ -299,11 +299,11 @@ class NixlBaseConnectorScheduler:
     def set_xfer_handshake_metadata(
         self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
     ) -> None:
-        """
-        Set the KV connector handshake metadata for this connector.
+        """Set the KV connector handshake metadata for this connector.
 
         Args:
             metadata (dict): the handshake metadata to set.
+
         """
         encoded_data: dict[tuple[int, int], bytes] = {}
         encoder = msgspec.msgpack.Encoder()
@@ -400,7 +400,8 @@ class NixlBaseConnectorScheduler:
     def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
         """D-side only. The number of prompt tokens to load from the prefiller.
         Stops short of the trailing ``_prefill_backoff()`` tokens that the decoder
-        will recompute locally."""
+        will recompute locally.
+        """
         backoff = self._prefill_backoff()
         if backoff and num_prompt_tokens > backoff:
             return num_prompt_tokens - backoff
@@ -413,7 +414,8 @@ class NixlBaseConnectorScheduler:
         multi-module MTP it is the drafter's whole lookahead window.
 
         Guarded by ``_p_side_truncated`` to avoid repeated truncation if the
-        request is preempted and rescheduled."""
+        request is preempted and rescheduled.
+        """
         backoff = self._prefill_backoff()
         params = request.kv_transfer_params
         if (

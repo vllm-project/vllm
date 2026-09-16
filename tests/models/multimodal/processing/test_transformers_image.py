@@ -83,7 +83,8 @@ def _process_two_images(processor_cls, separator: str):
 @pytest.mark.parametrize("processor_cls", PROCESSOR_CLASSES)
 def test_image_multiple_inputs(processor_cls):
     """Multiple images per prompt are each detected as a separate placeholder
-    and multi-modal item by the Transformers modelling backend."""
+    and multi-modal item by the Transformers modelling backend.
+    """
     result = _process_two_images(processor_cls, separator="\n and ")
 
     assert len(result["mm_placeholders"]["image"]) == 2
@@ -102,7 +103,8 @@ def test_image_adjacent_inputs(processor_cls):
 @pytest.mark.parametrize("processor_cls", PROCESSOR_CLASSES)
 def test_batch_padding_removed_from_image_items(processor_cls):
     """Emu3 pads every image up to the largest in the batch, which would leave an
-    item's data dependent on what it was processed with and so uncacheable."""
+    item's data dependent on what it was processed with and so uncacheable.
+    """
     mm_processor = create_processor("BAAI/Emu3-Chat-hf", processor_cls)
     image_token = mm_processor.info.get_hf_processor().image_token
 
@@ -144,7 +146,8 @@ def _process_one_gemma3_image(processor_cls):
 @offsets_only
 def test_non_embedding_tokens_excluded_from_placeholders():
     """Gemma3 wraps each image in text that carries no embeddings, which must be
-    inside the placeholder range but masked out of it."""
+    inside the placeholder range but masked out of it.
+    """
     _, result = _process_one_gemma3_image(OffsetsMultiModalProcessor)
 
     (placeholder,) = result["mm_placeholders"]["image"]
@@ -156,7 +159,8 @@ def test_legacy_placeholders_hold_only_image_tokens():
     """The legacy path spans whatever `mm_token_type_ids` attributes to the image,
     which for Gemma3 excludes the text wrapping it, unlike the replacement the offsets
     path spans. Gemma3 is also the sharp case for the mask: its `image_token_id` is the
-    marker in the unexpanded prompt, not the token the expansion repeats."""
+    marker in the unexpanded prompt, not the token the expansion repeats.
+    """
     hf_processor, result = _process_one_gemma3_image(LegacyMultiModalProcessor)
 
     (placeholder,) = result["mm_placeholders"]["image"]
@@ -172,7 +176,8 @@ def test_tokens_structuring_an_image_are_masked_not_dropped(processor_cls):
     embeddings. Those belong inside the placeholder and masked out, because the token
     count the processor reports is over the whole span. Idefics3 also refuses a prompt
     holding `<image>` when no images are passed, which is how the offsets path has to
-    tokenize it before splicing in the expansion."""
+    tokenize it before splicing in the expansion.
+    """
     mm_processor = create_processor(
         "HuggingFaceTB/SmolVLM-256M-Instruct", processor_cls
     )
@@ -192,7 +197,8 @@ def test_tokens_structuring_an_image_are_masked_not_dropped(processor_cls):
 @offsets_only
 def test_missing_replacement_offsets_names_the_processor():
     """A processor that reports no replacement offsets cannot be served, which must
-    be said plainly rather than surfacing later as a field config mismatch."""
+    be said plainly rather than surfacing later as a field config mismatch.
+    """
     model_id = "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
     mm_processor = create_processor(model_id, OffsetsMultiModalProcessor)
     hf_processor_cls = type(mm_processor.info.get_hf_processor())
@@ -276,7 +282,8 @@ def test_repeated_image_hits_the_processor_cache():
 def test_spliced_prompt_matches_hf_expansion(model_id, prompt):
     """The offsets path splices the expansion into a prompt tokenized without any
     multi-modal data, so its token ids have to come out the same as the ones the HF
-    processor produces itself, which is what the legacy path returns."""
+    processor produces itself, which is what the legacy path returns.
+    """
     prompt_ids = []
     for processor_cls in (LegacyMultiModalProcessor, OffsetsMultiModalProcessor):
         mm_processor = create_processor(model_id, processor_cls)
@@ -298,7 +305,8 @@ def test_spliced_prompt_matches_hf_expansion(model_id, prompt):
 def test_nested_image_fields_split_per_image(processor_cls):
     """Idefics3 returns image fields with a leading batch dimension, putting the rows
     belonging to each image one dimension further in. Slicing the batch dimension
-    instead handed the first image every row and the second an empty tensor."""
+    instead handed the first image every row and the second an empty tensor.
+    """
     mm_processor = create_processor(
         "HuggingFaceTB/SmolVLM-256M-Instruct", processor_cls
     )

@@ -22,7 +22,8 @@ _VLLM_PKG = "vllm.model_executor.layers"
 
 def _resolve(module: str, name: str):
     """Return `name` from the hw-agnostic `module` when enabled and available,
-    else from vLLM. Logs which source was used."""
+    else from vLLM. Logs which source was used.
+    """
     if envs.VLLM_USE_HW_AGNOSTIC:
         try:
             obj = getattr(importlib.import_module(f"{_HW_PKG}.{module}"), name)

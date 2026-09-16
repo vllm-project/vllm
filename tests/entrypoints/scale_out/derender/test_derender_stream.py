@@ -41,7 +41,6 @@ def _make_stream_chunk(
     usage: dict | None = None,
 ) -> GenerateStreamResponse:
     """Build a GenerateStreamResponse SSE chunk."""
-
     return GenerateStreamResponse(
         request_id=request_id,
         choices=[
@@ -61,7 +60,6 @@ def _make_usage_chunk(
     request_id: str = "test-req",
 ) -> GenerateStreamResponse:
     """Build a usage only final SSE chunk (empty choices)."""
-
     return GenerateStreamResponse(
         request_id=request_id,
         choices=[],
@@ -531,7 +529,6 @@ async def client(server):
 
 async def _render_chat(client) -> dict:
     """Render a minimal chat request and return the GenerateRequest dict."""
-
     resp = await client.post(
         "/v1/chat/completions/render",
         json={

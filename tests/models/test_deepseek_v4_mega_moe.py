@@ -783,7 +783,8 @@ def test_deepseek_v4_mega_moe_stages_shared_scale_tma_layout(shared_block_m):
 def test_deepseek_v4_pwal_hook_finalizes_mega_moe_and_mhc_broadcast():
     """The loader invokes the model-level PWAL hook for every load format,
     so it must finalize megamoe + mhc broadcast weights to cover dummy
-    load, which skips load_weights()."""
+    load, which skips load_weights().
+    """
     calls = []
     stub = SimpleNamespace(
         model=SimpleNamespace(
@@ -800,7 +801,8 @@ def test_deepseek_v4_pwal_hook_finalizes_mega_moe_and_mhc_broadcast():
 def test_deepseek_v4_drafter_pwal_hooks_finalize_mega_moe():
     """MTP/DSpark drafters load as their own top-level models, so each needs
     its own PWAL hook now that the megamoe forward no longer finalizes
-    weights lazily on first use."""
+    weights lazily on first use.
+    """
     calls = []
     mtp = SimpleNamespace(finalize_mega_moe_weights=lambda: calls.append("mtp"))
     DeepSeekV4MTP.process_weights_after_loading(mtp)

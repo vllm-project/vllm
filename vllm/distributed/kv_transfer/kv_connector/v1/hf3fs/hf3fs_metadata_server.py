@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-HF3FS Metadata Server with key-based organization.
-"""
+"""HF3FS Metadata Server with key-based organization."""
 
 import argparse
 import logging
@@ -119,6 +117,7 @@ class GlobalMetadataState:
 
         Returns:
             Dictionary mapping key -> allocated page index
+
         """
         with self.global_lock:
             if rank not in self.rank_metadata:
@@ -167,6 +166,7 @@ class GlobalMetadataState:
             rank: Rank ID that confirmed the writes
             key_confirmations: List of (key, page_index) tuples
             pages_to_release: List of page indices to release back to free pool
+
         """
         with self.global_lock:
             # Confirm successful writes
@@ -197,6 +197,7 @@ class GlobalMetadataState:
 
         Returns:
             List of boolean values indicating key existence and completion
+
         """
         with self.global_lock:
             results = []
@@ -218,6 +219,7 @@ class GlobalMetadataState:
 
         Returns:
             List of page indices in the same order as input keys (None if key not found)
+
         """
         with self.global_lock:
             if rank not in self.rank_metadata:

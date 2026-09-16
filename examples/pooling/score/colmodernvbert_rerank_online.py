@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Example of using ColModernVBERT late interaction model for reranking.
+"""Example of using ColModernVBERT late interaction model for reranking.
 
 ColModernVBERT is a multi-modal ColBERT-style model combining a SigLIP
 vision encoder with a ModernBERT text encoder. It produces per-token

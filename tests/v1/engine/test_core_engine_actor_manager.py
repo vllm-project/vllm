@@ -68,7 +68,8 @@ class _StubEngineCoreActor(EngineCoreActorMixin):
 # in ``tests/entrypoints/test_api_server_process_manager.py``.
 def _bind_and_report_worker(listen_address, sock, args, client_config):
     """Bind ROUTER/PULL with a kernel-assigned port, report the actual
-    endpoints back via ``actual_address_pipe``, then exit."""
+    endpoints back via ``actual_address_pipe``, then exit.
+    """
     ctx = zmq.Context()
     try:
         in_sock = make_zmq_socket(

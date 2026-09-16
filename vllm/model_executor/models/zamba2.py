@@ -71,6 +71,8 @@ class Zamba2LoRA(nn.Module):
             rank: LoRA rank
             output_dim: output dimension
             quant_config: Configuration for model quantization
+            prefix: Module prefix used for quantization config lookup
+
         """
         super().__init__()
 
@@ -130,6 +132,7 @@ class Zamba2Attention(nn.Module):
             cache_config: Configuration for key-value caching
             quant_config: Configuration for model quantization
             prefix: Optional prefix for parameter names
+
         """
         super().__init__()
         tp_size = get_tensor_model_parallel_world_size()
@@ -257,6 +260,7 @@ class Zamba2Attention(nn.Module):
 
         Returns:
             Output tensor [batch_size, seq_len, hidden_size]
+
         """
         qkv, _ = self.qkv_proj(hidden_states)
         query_states, key_states, value_states = qkv.split([self.qkv_size] * 3, dim=-1)
@@ -311,6 +315,8 @@ class Zamba2MLP(nn.Module):
             bare_block_idx: Index of the bare block in the model
             num_hybrid_layers: Total number of hybrid layers
             quant_config: Configuration for model quantization
+            prefix: Module prefix used for quantization config lookup
+
         """
         super().__init__()
         self.config = config
@@ -369,6 +375,7 @@ class Zamba2MLP(nn.Module):
         Returns:
             Output tensor [batch_size, seq_len, hidden_size] after applying
             gated feed-forward transformation
+
         """
         # Project input to intermediate size with gating
         gate_up_states, _ = self.gate_up_proj(hidden_states)
@@ -415,6 +422,7 @@ class Zamba2AttentionDecoderLayer(nn.Module):
             cache_config: Configuration for key-value caching
             quant_config: Configuration for model quantization
             prefix: Optional prefix for parameter names
+
         """
         super().__init__()
 
@@ -461,8 +469,8 @@ class Zamba2AttentionDecoderLayer(nn.Module):
 
         Returns:
             Transformed hidden states after attention and feed-forward
-        """
 
+        """
         # The argument original_hidden_states is concatenated with hidden_states
         # (which is the output of the previous (mamba) layer).
         # The concatenated tensor is then used as input of the pre-attention
@@ -510,7 +518,11 @@ class Zamba2MambaDecoderLayer(nn.Module):
 
         Args:
             config: The Zamba2 model configuration
+            model_config: The model config, when available
+            cache_config: The KV cache config, when available
             quant_config: Configuration for model quantization
+            prefix: Module prefix used for quantization config lookup
+
         """
         super().__init__()
 
@@ -555,6 +567,7 @@ class Zamba2MambaDecoderLayer(nn.Module):
 
         Returns:
             Transformed hidden states with residual connection applied
+
         """
         # Store input for residual connection
         residual = hidden_states
@@ -603,6 +616,13 @@ class Zamba2HybridLayer(nn.Module):
 
         Args:
             shared_transformer: Transformer decoder layer for attention pathway
+            config: The Zamba2 model configuration
+            block_idx: Index of this hybrid block in the model
+            model_config: The model config, when available
+            cache_config: The KV cache config, when available
+            quant_config: Configuration for model quantization
+            prefix: Module prefix used for quantization config lookup
+
         """
         super().__init__()
         self.block_idx = block_idx
@@ -644,6 +664,7 @@ class Zamba2HybridLayer(nn.Module):
 
         Returns:
             Output tensor combining transformer and Mamba representations
+
         """
         # Process through transformer pathway
         transformer_hidden_states = self.shared_transformer(
@@ -680,6 +701,7 @@ class Zamba2Model(nn.Module):
             vllm_config: Configuration object containing model, cache,
                 quantization and LoRA settings
             prefix: Optional prefix for parameter names in state dict
+
         """
         super().__init__()
 
@@ -765,6 +787,7 @@ class Zamba2Model(nn.Module):
 
         Returns:
             Embedded representation of the input tokens
+
         """
         return self.embed_tokens(input_ids)
 
@@ -784,6 +807,7 @@ class Zamba2Model(nn.Module):
         Returns:
             Either final hidden states or intermediate tensors for pipeline
             parallelism
+
         """
         # Handle pipeline parallelism for first rank
         if inputs_embeds is None:
@@ -853,8 +877,8 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsMambaPrefixC
             Tuple containing:
             - conv_state_shape: Shape for convolutional state cache
             - temporal_state_shape: Shape for state space model cache
-        """
 
+        """
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_config
         intermediate_size = hf_config.mamba_expand * hf_config.hidden_size
@@ -884,6 +908,7 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsMambaPrefixC
         Raises:
             AssertionError: If prefix caching is enabled
                 (not supported by Mamba)
+
         """
         config = vllm_config.model_config.hf_config
 
@@ -914,10 +939,12 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsMambaPrefixC
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Convert input token IDs to embeddings.
+
         Args:
             input_ids: Tensor of input token IDs
         Returns:
             Embedded representation of the input tokens
+
         """
         return self.model.embed_input_ids(input_ids)
 
@@ -938,6 +965,7 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsMambaPrefixC
 
         Returns:
             Output hidden states
+
         """
         # Forward pass through model
         hidden_states = self.model(
@@ -959,6 +987,7 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsMambaPrefixC
 
         Returns:
             Logits for next token prediction
+
         """
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits

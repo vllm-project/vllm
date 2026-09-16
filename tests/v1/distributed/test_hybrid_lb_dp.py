@@ -30,7 +30,8 @@ DP_SIZE_LOCAL = DP_SIZE // NUM_NODES  # 2 ranks per node
 class HybridLBServerManager:
     """Manages hybrid data parallel vLLM server instances where each node
     runs a single logical API server that balances requests only to the
-    DP engines running on that same node."""
+    DP engines running on that same node.
+    """
 
     def __init__(
         self,

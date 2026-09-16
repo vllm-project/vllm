@@ -141,7 +141,7 @@ class MiMoV2MTPLayer(nn.Module):
 
 
 class _MiMoV2MTPLayers(nn.Module):
-    """Thin wrapper so parameter paths match checkpoint: model.mtp.layers.*"""
+    """Thin wrapper so parameter paths match checkpoint: model.mtp.layers.*."""
 
     def __init__(
         self,

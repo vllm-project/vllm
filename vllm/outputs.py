@@ -53,6 +53,7 @@ class CompletionOutput:
             ``--per-request-spec-decode-metrics`` is enabled; None otherwise.
             Surfaced in the response as ``metrics.speculative_decoding`` for
             single-sequence (``n == 1``) requests.
+
     """
 
     index: int
@@ -90,6 +91,7 @@ class PoolingOutput:
 
     Args:
         data: The extracted hidden states.
+
     """
 
     data: torch.Tensor
@@ -128,6 +130,7 @@ class RequestOutput:
             prefix-cache writes for this request.
         kv_transfer_params: The params for remote K/V transfer.
         ec_transfer_params: The params for remote encoder-cache transfer.
+
     """
 
     def __init__(
@@ -172,7 +175,6 @@ class RequestOutput:
 
     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
         """Merge subsequent RequestOutput into this one"""
-
         self.finished |= next_output.finished
         self.kv_transfer_params = next_output.kv_transfer_params
         self.ec_transfer_params = next_output.ec_transfer_params
@@ -232,8 +234,7 @@ _O = TypeVar("_O", default=PoolingOutput)
 
 
 class PoolingRequestOutput(Generic[_O]):
-    """
-    The output data of a pooling request to the LLM.
+    """The output data of a pooling request to the LLM.
 
     Args:
         request_id (str): A unique identifier for the pooling request.
@@ -241,6 +242,7 @@ class PoolingRequestOutput(Generic[_O]):
         prompt_token_ids (list[int]): A list of token IDs used in the prompt.
         num_cached_tokens: The number of tokens with prefix cache hit.
         finished (bool): A flag indicating whether the pooling is completed.
+
     """
 
     def __init__(
@@ -274,6 +276,7 @@ class EmbeddingOutput:
     Args:
         embedding: The embedding vector, which is a list of floats.
             Its length depends on the hidden dimension of the model.
+
     """
 
     embedding: list[float]
@@ -315,6 +318,7 @@ class ClassificationOutput:
     Args:
         probs: The probability vector, which is a list of floats.
             Its length depends on the number of classes.
+
     """
 
     probs: list[float]
@@ -356,6 +360,7 @@ class ScoringOutput:
 
     Args:
         score: The similarity score, which is a scalar value.
+
     """
 
     score: float

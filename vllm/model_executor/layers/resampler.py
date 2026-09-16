@@ -26,8 +26,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-Shared resampler perceiver network used in multimodal models and
+"""Shared resampler perceiver network used in multimodal models and
 related helpers for sincos positional embeddings.
 
 Example models: Qwen (Qwen-VL), MiniCPM-V 2.0
@@ -76,8 +75,7 @@ def get_abs_pos(abs_pos: torch.Tensor, tgt_size: torch.Tensor | int) -> torch.Te
 def get_1d_sincos_pos_embed_from_grid(
     embed_dim: int, pos: np.ndarray, version: tuple[int, int] = (2, 0)
 ) -> torch.Tensor:
-    """
-    embed_dim: output dimension for each position
+    """embed_dim: output dimension for each position
     pos: a list of positions to be encoded: size (M,) / (H, W)
     out: (M, D) / (H, W, D)
     """
@@ -126,8 +124,7 @@ def get_2d_sincos_pos_embed(
     cls_token: bool = False,
     version: tuple[int, int] = (2, 0),
 ) -> torch.Tensor:
-    """
-    grid_size: int of the grid height and width
+    """grid_size: int of the grid height and width
     return:
     pos_embed: [grid_size*grid_size, embed_dim] or
                 [1+grid_size*grid_size, embed_dim] (w/ or w/o cls_token)
@@ -154,8 +151,7 @@ def get_2d_sincos_pos_embed(
 
 
 class BaseResampler(nn.Module):
-    """
-    A 2D perceiver-resampler network with one cross attention layers by
+    """A 2D perceiver-resampler network with one cross attention layers by
         (grid_size**2) learnable queries and 2d sincos pos_emb.
     Outputs:
         A tensor with the shape of (grid_size**2, embed_dim)

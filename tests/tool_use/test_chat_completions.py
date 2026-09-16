@@ -166,8 +166,7 @@ async def test_chat_completion_with_tools(
 async def test_response_format_with_tool_choice_required(
     client: openai.AsyncOpenAI, server_config: ServerConfig
 ):
-    """
-    Test that combining response_format: json_object with tool_choice: required
+    """Test that combining response_format: json_object with tool_choice: required
     doesn't crash the engine.
 
     Before the fix, this would cause a validation error:

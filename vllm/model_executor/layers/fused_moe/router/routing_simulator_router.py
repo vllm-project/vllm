@@ -25,8 +25,7 @@ class RoutingStrategy(ABC):
         top_k: int,
         indices_type: torch.dtype | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Route tokens to experts.
+        """Route tokens to experts.
 
         Args:
             hidden_states: Input hidden states [num_tokens, hidden_size]
@@ -36,13 +35,13 @@ class RoutingStrategy(ABC):
 
         Returns:
             tuple of (topk_weights, topk_ids)
+
         """
         pass
 
 
 class DistributionBasedRouting(RoutingStrategy):
-    """
-    Distribution-based random routing strategy with configurable distributions.
+    """Distribution-based random routing strategy with configurable distributions.
 
     This routing strategy randomly selects experts for each token based on
     different probability distributions. Currently supports uniform and normal
@@ -50,8 +49,7 @@ class DistributionBasedRouting(RoutingStrategy):
     """
 
     def __init__(self, distribution: str = "uniform", **distribution_params: Any):
-        """
-        Initialize distribution-based routing.
+        """Initialize distribution-based routing.
 
         Args:
             distribution: Type of distribution to use for sampling
@@ -61,6 +59,7 @@ class DistributionBasedRouting(RoutingStrategy):
                 chosen distribution
                 For "uniform": No additional parameters needed
                 For "normal": mean (default: 0.0), std (default: 1.0)
+
         """
         self.distribution = distribution.lower()
         self.distribution_params = distribution_params
@@ -90,8 +89,7 @@ class DistributionBasedRouting(RoutingStrategy):
         top_k: int,
         indices_type: torch.dtype | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Randomly select experts for each token using the specified distribution.
+        """Randomly select experts for each token using the specified distribution.
 
         Args:
             hidden_states: Input hidden states [num_tokens, hidden_size]
@@ -103,6 +101,7 @@ class DistributionBasedRouting(RoutingStrategy):
             tuple of (topk_weights, topk_ids) where:
             - topk_weights: Weights based on distribution sampling
             - topk_ids: Expert indices sampled from the distribution
+
         """
         num_tokens = hidden_states.shape[0]
         num_experts = router_logits.shape[-1]
@@ -129,7 +128,6 @@ class DistributionBasedRouting(RoutingStrategy):
         indices_type: torch.dtype,
     ) -> torch.Tensor:
         """Sample expert IDs based on the specified distribution."""
-
         if self.distribution == "uniform":
             # Generate random scores, and take the top-k to avoid duplicate topk_ids
             scores = torch.rand(num_tokens, num_experts, device=device)
@@ -218,8 +216,7 @@ class DistributionBasedRouting(RoutingStrategy):
 
 
 class RoutingSimulator:
-    """
-    Token-to-Expert Routing Simulator.
+    """Token-to-Expert Routing Simulator.
 
     This class provides a framework for testing and comparing different
     routing strategies for MoE models. It can simulate routing behavior
@@ -239,22 +236,22 @@ class RoutingSimulator:
 
     @classmethod
     def register_strategy(cls, name: str, strategy: RoutingStrategy):
-        """
-        Register a custom routing strategy.
+        """Register a custom routing strategy.
 
         Args:
             name: Name of the strategy
             strategy: RoutingStrategy instance
+
         """
         cls._routing_strategies[name] = strategy
 
     @classmethod
     def get_available_strategies(cls) -> list[str]:
-        """
-        Get list of available routing strategy names.
+        """Get list of available routing strategy names.
 
         Returns:
             List of available strategy names
+
         """
         return list(cls._routing_strategies.keys())
 
@@ -266,8 +263,7 @@ class RoutingSimulator:
         top_k: int,
         indices_type: torch.dtype | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Simulate token-to-expert routing using the specified strategy.
+        """Simulate token-to-expert routing using the specified strategy.
 
         Args:
             hidden_states: Input hidden states [num_tokens, hidden_size]
@@ -278,6 +274,7 @@ class RoutingSimulator:
 
         Returns:
             tuple of (topk_weights, topk_ids)
+
         """
         if strategy_name not in RoutingSimulator._routing_strategies:
             raise ValueError(

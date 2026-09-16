@@ -231,6 +231,7 @@ def matmul_descriptor_persistent(
 
     Returns:
         Output matrix [M, N] with dtype matching the inputs.
+
     """
     assert a.shape[1] == b.shape[0], "Incompatible dimensions"
     assert a.dtype == b.dtype, "Incompatible dtypes"
@@ -378,7 +379,7 @@ def bmm_kernel(
     B_LARGE: tl.constexpr,
     C_LARGE: tl.constexpr,
 ):
-    """Batched GEMM: (B, M, K) x (B, K, N) -> (B, M, N)
+    """Batched GEMM: (B, M, K) x (B, K, N) -> (B, M, N).
 
     Each program computes one (batch_idx, tile_m, tile_n) tile, accumulating
     along K in a fixed order to preserve batch invariance.
@@ -495,8 +496,7 @@ def _log_softmax_kernel(
     n_cols,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """
-    Compute log_softmax along the last dimension of a 2D tensor.
+    """Compute log_softmax along the last dimension of a 2D tensor.
     Each block handles one row of the input tensor.
     """
     # Get the row index for this block
@@ -550,8 +550,7 @@ def _log_softmax_kernel(
 
 
 def log_softmax(input: torch.Tensor, dim: int = -1) -> torch.Tensor:
-    """
-    Compute log_softmax using Triton kernel.
+    """Compute log_softmax using Triton kernel.
 
     Args:
         input: Input tensor
@@ -560,6 +559,7 @@ def log_softmax(input: torch.Tensor, dim: int = -1) -> torch.Tensor:
 
     Returns:
         Tensor with log_softmax applied along the specified dimension
+
     """
     if dim != -1 and dim != input.ndim - 1:
         raise ValueError(
@@ -607,8 +607,7 @@ def mean_kernel(
     K,  # size after reduction dim
     BLOCK_SIZE: tl.constexpr,
 ):
-    """
-    Kernel for computing mean along a single dimension.
+    """Kernel for computing mean along a single dimension.
     Input is viewed as (M, N, K) where N is the dimension being reduced.
     """
     # Program ID gives us which output element we're computing
@@ -649,8 +648,7 @@ def mean_dim(
     keepdim: bool = False,
     dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
-    """
-    Triton implementation of torch.mean with single dimension reduction.
+    """Triton implementation of torch.mean with single dimension reduction.
 
     Args:
         input: Input tensor
@@ -661,6 +659,7 @@ def mean_dim(
 
     Returns:
         Tensor with mean values along specified dimension
+
     """
     # Validate inputs
     assert -input.ndim <= dim < input.ndim, (
@@ -933,8 +932,7 @@ def _rms_norm_kernel(
     BLOCK_SIZE: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
 ):
-    """
-    Compute RMS normalization along the last dimension of a 2D tensor.
+    """Compute RMS normalization along the last dimension of a 2D tensor.
     RMS Norm: y = x / sqrt(mean(x^2) + eps) * weight
     Each block handles one row of the input tensor.
     """
@@ -980,9 +978,7 @@ def rms_norm_batch_invariant(
     eps: float = 1e-6,
     residual: torch.Tensor | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """
-    Compute RMS normalization using Triton kernel.
-
+    """Compute RMS normalization using Triton kernel.
 
     Args:
         input: Input tensor of shape (..., hidden_size)
@@ -994,6 +990,7 @@ def rms_norm_batch_invariant(
     Returns:
         RMS normalized tensor, or ``(output, residual_out)`` when ``residual``
         is provided
+
     """
     if residual is not None:
         assert input.shape == residual.shape, (

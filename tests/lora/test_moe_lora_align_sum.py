@@ -249,7 +249,8 @@ def _build_and_run_align(
 )
 def test_moe_lora_align_block_size_mixed_base_and_lora(max_loras):
     """Regression test for issue #32235: real LoRA slot must not be skipped
-    when ``active_lora_ids`` has -1 at position 0."""
+    when ``active_lora_ids`` has -1 at position 0.
+    """
     out = _build_and_run_align(
         num_lora_tokens=8, num_base_tokens=8, max_loras=max_loras
     )
@@ -288,7 +289,8 @@ def test_moe_lora_align_block_size_disabled_adapter_untouched():
     kernels. Pins the invariant protected by the ``adapter_enabled`` guard
     in ``lora_count_and_sort_expert_tokens_kernel``: without it the sort
     kernel reads uninitialized ``token_mask`` values for disabled slots and
-    pollutes ``sorted_token_ids`` / ``cumsum_buffer``."""
+    pollutes ``sorted_token_ids`` / ``cumsum_buffer``.
+    """
     max_loras = 1
     out = _build_and_run_align(
         num_lora_tokens=16,

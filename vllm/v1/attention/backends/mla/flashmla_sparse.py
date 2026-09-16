@@ -437,7 +437,6 @@ class FlashMLASparseMetadataBuilder(
         be the full batch or only decodes when prefills use dense MHA. This avoids
         the BF16 prefill kernel's head-padding overhead at high TP.
         """
-
         scheduler_metadata, _ = get_mla_metadata()
         return FlashMLASparseMetadata.FP8KernelMetadata(
             scheduler_metadata=scheduler_metadata,
@@ -848,7 +847,8 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         prefill_meta: "FlashMLASparseMetadata.FP8SeparatePrefillDecode.Prefill",
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """All-gather this rank's upconverted KV shard so the chunk's rows attend
-        the whole context, and map their top-k onto the rank-major result."""
+        the whole context, and map their top-k onto the rank-major result.
+        """
         shard_rows = int(chunk.chunk_tot_seqlen)
         assert self.gathered_kv_workspace is not None
         gathered_kv = self.gathered_kv_workspace[: self.dcp_world_size * shard_rows]

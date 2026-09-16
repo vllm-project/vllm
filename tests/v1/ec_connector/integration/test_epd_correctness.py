@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-EPD Correctness Test
+"""EPD Correctness Test.
 
 Tests that EPD (Encoder-Prefill-Decode) disaggregation produces the same
 outputs as a baseline single instance.
@@ -104,6 +103,7 @@ def check_vllm_server(url: str, timeout=5, retries=10) -> bool:
 
     Returns:
         True if the server is ready, False otherwise
+
     """
     for attempt in range(retries):
         try:
@@ -138,6 +138,7 @@ def run_chat_completion(
 
     Returns:
         Generated text content
+
     """
     with openai.OpenAI(
         api_key="EMPTY", base_url=base_url, timeout=120, max_retries=0

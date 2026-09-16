@@ -261,7 +261,8 @@ def _resize_or_pad(
     allow_upscale: bool = False,
 ) -> torch.Tensor:
     """Resize onto the aligned canvas, or keep the aspect ratio and
-    zero-pad the right/bottom sides (``resize_mode="pad"``)."""
+    zero-pad the right/bottom sides (``resize_mode="pad"``).
+    """
     height, width = stacked_images.shape[-2:]
 
     if resize_mode == "resize":
@@ -307,7 +308,8 @@ def _pixel_budget(
 ) -> tuple[int, int]:
     """(min_pixels, max_pixels) from the token bounds of
     ``processor_config.json``; one vision token covers
-    ``temporal_patch_size * (patch_size * merge_size) ** 2`` pixels."""
+    ``temporal_patch_size * (patch_size * merge_size) ** 2`` pixels.
+    """
     if min_image_tokens is None or max_image_tokens is None:
         raise ValueError(
             "min_image_tokens and max_image_tokens must be provided by "

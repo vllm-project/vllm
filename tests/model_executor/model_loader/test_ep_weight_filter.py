@@ -232,7 +232,8 @@ class TestShouldSkipWeight:
 
 class TestSafetensorsWeightsIteratorWithEpFilter:
     """Verify that EP filtering produces a strict subset of unfiltered loading
-    and that all expected dense + local expert weights are present."""
+    and that all expected dense + local expert weights are present.
+    """
 
     @pytest.fixture(scope="class")
     def gpt2_files(self):
@@ -262,7 +263,8 @@ class TestSafetensorsWeightsIteratorWithEpFilter:
 
     def test_empty_filter_skips_experts_only(self, gpt2_files):
         """GPT-2 has no expert weights, so even an empty local_expert_ids
-        set should return all weights (all are dense)."""
+        set should return all weights (all are dense).
+        """
         all_weights = dict(safetensors_weights_iterator(gpt2_files, False))
         filtered_weights = dict(
             safetensors_weights_iterator(gpt2_files, False, local_expert_ids=set())
@@ -273,7 +275,8 @@ class TestSafetensorsWeightsIteratorWithEpFilter:
 
 class TestEpFilterOnSyntheticMoeWeights:
     """Create synthetic safetensors files with expert-like naming and verify
-    that the filter correctly skips non-local experts."""
+    that the filter correctly skips non-local experts.
+    """
 
     @pytest.fixture
     def synthetic_moe_files(self, tmp_path):

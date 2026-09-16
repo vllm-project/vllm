@@ -124,7 +124,8 @@ def _build_processed_layer(
     backend: str, raw: dict[str, torch.Tensor], device: torch.device
 ) -> tuple[CompressedTensorsW4A4Nvfp4MoEMethod, _RoutedExpertsStub]:
     """Create the method + layer, load ``raw`` and run the real
-    process_weights_after_loading (which builds the flashinfer kernel)."""
+    process_weights_after_loading (which builds the flashinfer kernel).
+    """
     moe_config = _make_moe_config(backend)
     method = CompressedTensorsW4A4Nvfp4MoEMethod(moe_config, "layer.0", use_a16=False)
     layer = _RoutedExpertsStub(moe_config).to(device)
@@ -157,7 +158,8 @@ def _assert_tensors_equal(
 
 def _simulate_eplb_rearrangement(layer: torch.nn.Module, perm: torch.Tensor) -> None:
     """Permute experts of every registered Parameter in place, the way
-    EPLB's in-place rearrangement moves expert slices along dim 0."""
+    EPLB's in-place rearrangement moves expert slices along dim 0.
+    """
     with torch.no_grad():
         for _, param in layer.named_parameters():
             param.copy_(param[perm])
@@ -165,7 +167,8 @@ def _simulate_eplb_rearrangement(layer: torch.nn.Module, perm: torch.Tensor) -> 
 
 def _ensure_world1_distributed() -> None:
     """The enable_eplb config makes weight processing all-reduce activation
-    scale amaxes over the EP group, so a (single-rank) EP group must exist."""
+    scale amaxes over the EP group, so a (single-rank) EP group must exist.
+    """
     from vllm.distributed.parallel_state import (
         ensure_model_parallel_initialized,
         init_distributed_environment,
@@ -253,7 +256,8 @@ def test_nvfp4_eplb_rearrangement_matches_reload(backend: str) -> None:
 def test_fp8_per_tensor_alphas_registered_and_aliased() -> None:
     """CPU-only: the fp8 per-tensor oracle must register the fused
     (w_scale * a_scale) products as layer Parameters aliased by the quant
-    config, so EPLB rearrangement keeps kernels consistent."""
+    config, so EPLB rearrangement keeps kernels consistent.
+    """
     from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
         Fp8MoeBackend,
         make_fp8_moe_quant_config,

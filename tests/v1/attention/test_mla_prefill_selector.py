@@ -315,7 +315,8 @@ class TestBackendValidation:
 
     def test_flash_attn_accepts_glm53_flash_nope_dimensions(self):
         """(256, 0, 256) runs the same FA kernels as GLM-5's (192, 64, 256); a
-        RoPE-carrying 320-wide query does not."""
+        RoPE-carrying 320-wide query does not.
+        """
         try:
             from vllm.v1.attention.backends.mla.prefill.flash_attn import (
                 FlashAttnPrefillBackend,

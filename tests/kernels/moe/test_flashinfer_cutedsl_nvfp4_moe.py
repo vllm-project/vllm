@@ -83,7 +83,7 @@ def _reference_activation(
     beta: float | None,
     limit: float | None,
 ):
-    """vLLM's own op for this activation, so the reference is not re-derived."""
+    """VLLM's own op for this activation, so the reference is not re-derived."""
     if activation == MoEActivation.RELU2_NO_MUL:
         return lambda x: torch.square(torch.relu(x))
     if activation == MoEActivation.SWIGLUOAI:

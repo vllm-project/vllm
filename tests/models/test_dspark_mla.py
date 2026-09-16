@@ -215,7 +215,8 @@ def test_v41_dspark_loads_linear_scales(
 ):
     """Checkpoint ``.scale`` maps to the quant method's scale parameter and
     loads untouched. MXFP8 block-scale expansion lives in the KMxfp8Static
-    loader (see tests/quantization/test_modelopt.py), not in load_weights."""
+    loader (see tests/quantization/test_modelopt.py), not in load_weights.
+    """
     from vllm.models.deepseek_v41.nvidia import dspark
 
     mxfp8 = scale_dtype != torch.float32

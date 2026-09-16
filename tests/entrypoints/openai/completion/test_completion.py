@@ -350,7 +350,6 @@ async def test_parallel_no_streaming(client: openai.AsyncOpenAI, model_name: str
     """Parallel sampling without streaming.
     A single request output contains a list of completions.
     """
-
     prompt = "What is an LLM?"
     n = 3
     max_tokens = 50
@@ -396,7 +395,6 @@ async def test_parallel_streaming(client: openai.AsyncOpenAI, model_name: str):
     The tokens from multiple samples, are flattened into a single stream,
     with an index to indicate which sample the token belongs to.
     """
-
     prompt = "What is an LLM?"
     n = 3
     max_tokens = 50

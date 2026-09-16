@@ -866,7 +866,6 @@ class EngineArgs:
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         """Shared CLI arguments for vLLM engine."""
-
         # Model arguments
         model_kwargs = get_kwargs(ModelConfig)
         model_group = parser.add_argument_group(
@@ -2042,8 +2041,7 @@ class EngineArgs:
         usage_context: UsageContext | None = None,
         headless: bool = False,
     ) -> VllmConfig:
-        """
-        Create the VllmConfig.
+        """Create the VllmConfig.
 
         NOTE: If VllmConfig is incompatible, we raise an error.
         """

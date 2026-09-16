@@ -13,7 +13,8 @@ from vllm.benchmarks.datasets import BFCLDataset, get_samples
 
 def _patch_hf_api(side_effect):
     """Return a patch context that swaps `hf_api()` to a stub whose
-    `.hf_hub_download` attribute uses `side_effect`."""
+    `.hf_hub_download` attribute uses `side_effect`.
+    """
     fake_api = MagicMock()
     fake_api.hf_hub_download.side_effect = side_effect
     return patch("vllm.benchmarks.datasets.datasets.hf_api", return_value=fake_api)
@@ -115,7 +116,8 @@ def test_bfcl_dataset_translates_schema_and_attaches_tools(
 ) -> None:
     """BFCLDataset should translate schemas to OpenAI tool format, set
     `messages` directly on SampleRequest, and attach tools/tool_choice via
-    request_overrides."""
+    request_overrides.
+    """
     paths = _write_fake_files(tmp_path)
 
     def fake_download(_repo, filename, **_kwargs):
@@ -166,7 +168,8 @@ def test_bfcl_dataset_missing_category_raises_clear_error(
     hf_tokenizer: PreTrainedTokenizerBase,
 ) -> None:
     """A typo'd category should produce an actionable ValueError, not an
-    opaque huggingface_hub exception."""
+    opaque huggingface_hub exception.
+    """
     from huggingface_hub.errors import EntryNotFoundError
 
     args = _args_for_bfcl(categories=["simpl"])  # typo
@@ -184,7 +187,8 @@ def test_bfcl_dataset_missing_category_raises_clear_error(
 @pytest.mark.benchmark
 def test_chat_backend_uses_messages_field_when_set() -> None:
     """When RequestFuncInput.chat_messages is set, the chat backend must use
-    it verbatim and skip default content construction from `prompt`."""
+    it verbatim and skip default content construction from `prompt`.
+    """
     import asyncio
 
     from vllm.benchmarks.lib.endpoint_request_func import (
@@ -244,7 +248,8 @@ def test_chat_backend_uses_messages_field_when_set() -> None:
 def test_bfcl_prompt_len_includes_tools(tmp_path: Path) -> None:
     """prompt_len must reflect tokens from both messages *and* tool schemas,
     so percentile buckets and input-distribution summaries aren't biased
-    low for tool-heavy traffic."""
+    low for tool-heavy traffic.
+    """
     paths = _write_fake_files(tmp_path)
 
     def fake_download(_repo, filename, **_kwargs):
@@ -291,7 +296,8 @@ def test_bfcl_prompt_len_falls_back_when_tokenizer_rejects_tools(
     tmp_path: Path,
 ) -> None:
     """Older tokenizers don't accept tools=; fallback must still produce a
-    non-zero prompt_len without crashing."""
+    non-zero prompt_len without crashing.
+    """
     paths = _write_fake_files(tmp_path)
 
     def fake_download(_repo, filename, **_kwargs):

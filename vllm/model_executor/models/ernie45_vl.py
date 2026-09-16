@@ -119,7 +119,7 @@ def all_gather_interleave(local_tensor, hidden_size: int, tp_size: int):
 
 
 class Ernie4_5_VisionAttention(nn.Module):
-    """VisionAttention using VLLM framework APIs"""
+    """VisionAttention using VLLM framework APIs."""
 
     def __init__(
         self,
@@ -497,6 +497,7 @@ class Ernie4_5_VisionTransformer(nn.Module):
 
         Returns:
             Dict with ``rotary_pos_emb``, ``cu_seqlens`` and ``max_seqlen``.
+
         """
         if device is None:
             device = self.device
@@ -600,12 +601,11 @@ class Ernie4_5_VisionTransformer(nn.Module):
 
 
 class Ernie4_5_VLImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - np: The total number of patches over each image over each prompt in
-              the batch
-        - ni: Number of images
-        - cps: Number of channels * patch_size * patch_size
+    """Dimensions:
+    - np: The total number of patches over each image over each prompt in
+          the batch
+    - ni: Number of images
+    - cps: Number of channels * patch_size * patch_size
     """
 
     type: Literal["pixel_values"]
@@ -618,13 +618,12 @@ Ernie4_5_VLImageInputs = Ernie4_5_VLImagePixelInputs
 
 
 class Ernie4_5_VLVideoPixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - np: The total number of patches over each image over each prompt in
-              the batch
-        - ni: Number of images
-        - cps: Number of channels * temporal_patch_size * patch_size *
-              patch_size
+    """Dimensions:
+    - np: The total number of patches over each image over each prompt in
+          the batch
+    - ni: Number of images
+    - cps: Number of channels * temporal_patch_size * patch_size *
+          patch_size
     """
 
     type: Literal["pixel_values_videos"]

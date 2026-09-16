@@ -47,7 +47,8 @@ ShardId: TypeAlias = str | int | tuple[int, ...]
 class WeightsMapper:
     """Maps the name of each weight if they match the following patterns.
 
-    If a key maps to a value of `None`, the corresponding weight is ignored."""
+    If a key maps to a value of `None`, the corresponding weight is ignored.
+    """
 
     orig_to_new_renaming: list["WeightRenaming"] = field(default_factory=list)
     orig_to_new_regex: Mapping[re.Pattern, str | None] = field(default_factory=dict)
@@ -84,6 +85,7 @@ class WeightsMapper:
         Returns:
             (mapped_name, shard_id) if the name should be kept.
             None if the name should be dropped.
+
         """
         # Deprecation warnings
         if key.endswith(".kv_scale"):
@@ -170,7 +172,8 @@ class WeightsMapper:
         rather than being rewritten to the stacked vLLM name (`qkv_proj`). Mappings to
         `None` are dropped because "do not load this weight" is meaningless to such a
         consumer, and applying it would silently shrink a quantization config's ignore
-        list or make LoRA name parsing fail."""
+        list or make LoRA name parsing fail.
+        """
         remove_none = lambda d: {k: v for k, v in d.items() if v is not None}
         return replace(
             self,
@@ -197,8 +200,7 @@ def _get_tied_embedding_params(module: nn.Module) -> dict[str, str]:
 
 
 class AutoWeightsLoader:
-    """
-    Helper class to load weights into a [`torch.nn.Module`][]. It is able
+    """Helper class to load weights into a [`torch.nn.Module`][]. It is able
     to automatically detect child modules and parameters while iterating over
     the weights only once.
 
@@ -315,8 +317,7 @@ class AutoWeightsLoader:
     def _add_loadable_non_param_tensors(
         self, module: nn.Module, child_params: dict[str, torch.Tensor]
     ):
-        """
-        Add tensor names that are not in the model params that may be in the
+        """Add tensor names that are not in the model params that may be in the
         safetensors, e.g., batch normalization stats and registered buffers.
         """
         # Add persistent registered buffers.
@@ -501,6 +502,7 @@ def maybe_fuse_shared_experts(
 
     Yields:
         `(name, tensor)` pairs with shared experts routed to fused slots.
+
     """
     if enabled is None:
         from vllm._aiter_ops import rocm_aiter_ops
@@ -552,6 +554,7 @@ def get_spec_layer_idx_from_weight_name(
 
     Returns:
         The absolute layer index for an MTP-layer weight, else None.
+
     """
     if not (n := getattr(config, "num_nextn_predict_layers", 0)):
         return None
@@ -579,6 +582,7 @@ def skip_spec_layers(
 
     Yields:
         `(name, tensor)` pairs whose weight is not an MTP-layer weight.
+
     """
     return (
         (name, w)
@@ -594,8 +598,7 @@ def init_vllm_registered_model(
     hf_config: "PretrainedConfig | None" = None,
     architectures: list[str] | None = None,
 ) -> nn.Module:
-    """
-    Helper function to initialize an inner model registered to vLLM,
+    """Helper function to initialize an inner model registered to vLLM,
     based on the arguments passed to the outer vLLM model.
     """
     from vllm.model_executor.model_loader.utils import initialize_model
@@ -639,8 +642,7 @@ def flatten_bn(
     *,
     concat: bool = False,
 ) -> list[torch.Tensor] | torch.Tensor:
-    """
-    Flatten the `B` and `N` dimensions of batched multimodal inputs.
+    """Flatten the `B` and `N` dimensions of batched multimodal inputs.
 
     The input tensor should have shape `(B, N, ...)`.
     """
@@ -654,11 +656,9 @@ def flatten_bn(
 
 
 def _flatten_embeddings(embeddings: NestedTensors) -> torch.Tensor:
-    """
-    Recursively flattens and concatenates NestedTensors on all but the last
+    """Recursively flattens and concatenates NestedTensors on all but the last
     dimension.
     """
-
     if isinstance(embeddings, torch.Tensor):
         # Flatten all but the last dimension.
         return embeddings.flatten(0, -2)
@@ -667,11 +667,9 @@ def _flatten_embeddings(embeddings: NestedTensors) -> torch.Tensor:
 
 
 def _embedding_count_expression(embeddings: NestedTensors) -> str:
-    """
-    Constructs a debugging representation of the number of embeddings in the
+    """Constructs a debugging representation of the number of embeddings in the
     NestedTensors.
     """
-
     if isinstance(embeddings, torch.Tensor):
         return " x ".join([str(dim) for dim in embeddings.shape[:-1]])
 
@@ -691,13 +689,13 @@ def _merge_multimodal_embeddings(
     multimodal_embeddings: NestedTensors,
     is_multimodal: torch.Tensor,
 ) -> torch.Tensor:
-    """
-    Merge `multimodal_embeddings` into `inputs_embeds` by overwriting the
+    """Merge `multimodal_embeddings` into `inputs_embeds` by overwriting the
     positions in `inputs_embeds` corresponding to placeholder tokens in
     `input_ids`.
 
     Note:
         This updates `inputs_embeds` in place.
+
     """
     if len(multimodal_embeddings) == 0:
         return inputs_embeds
@@ -751,8 +749,7 @@ def collect_children(
     *,
     targets: type[nn.Module] | tuple[type[nn.Module], ...] | None = None,
 ):
-    """
-    Within this context, collect all direct child assignments to `module`,
+    """Within this context, collect all direct child assignments to `module`,
     returning a list of children names that is internally updated until the
     context is exited.
 
@@ -784,8 +781,7 @@ def no_init_weights(
     *,
     targets: type[nn.Module] | tuple[type[nn.Module], ...] | None = None,
 ):
-    """
-    Within this context, prevent weight initialization from using device memory and
+    """Within this context, prevent weight initialization from using device memory and
     replace direct child assignments to `module` with the result of `placeholder()`.
 
     If `targets` is set, instead prevent weight initialization and
@@ -824,9 +820,7 @@ class LayerFn(Protocol):
 
 
 class PPMissingLayer(torch.nn.Identity):
-    """
-    A placeholder layer for missing layers in a pipeline parallel model.
-    """
+    """A placeholder layer for missing layers in a pipeline parallel model."""
 
     def __init__(self, *args, **kwargs):
         super().__init__()
@@ -867,6 +861,7 @@ def make_layers(
 
     Returns:
         Tuple of (start_layer, end_layer, modules).
+
     """
     from vllm.distributed.parallel_state import get_pp_group
     from vllm.distributed.utils import get_pp_indices
@@ -945,6 +940,7 @@ def maybe_prefix(prefix: str, name: str) -> str:
 
     Returns:
         The string "prefix.name" if prefix was non-empty, otherwise just "name".
+
     """
     return name if not prefix else f"{prefix}.{name}"
 
@@ -960,6 +956,7 @@ def get_draft_quant_config(vllm_config: VllmConfig) -> "QuantizationConfig | Non
 
     Returns:
         The draft model's config if available, None otherwise.
+
     """
     draft_model_config = vllm_config.speculative_config.draft_model_config
     draft_load_config = vllm_config.load_config
@@ -972,13 +969,14 @@ def get_draft_quant_config(vllm_config: VllmConfig) -> "QuantizationConfig | Non
 
 
 def extract_layer_index(layer_name: str, num_attn_module: int = 1) -> int:
-    """
-    Extract the layer index from the module name.
+    """Extract the layer index from the module name.
+
     Examples:
     - "encoder.layers.0" -> 0
     - "encoder.layers.1.self_attn" -> 1
     - "2.self_attn" -> 2
     - "model.encoder.layers.0.sub.1" -> ValueError if num_attn_module == 1
+
     """
     subnames = layer_name.split(".")
     int_vals: list[int] = []
@@ -1013,8 +1011,7 @@ def cast_overflow_tensors(tensors: torch.Tensor, offset: float = 1000) -> torch.
 def fast_topk(
     values: torch.Tensor, topk: int, dim: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Optimized topk implementation that uses torch.max for k=1 case.
+    """Optimized topk implementation that uses torch.max for k=1 case.
 
     This function provides better performance for the common case of k=1
     by using torch.max instead of the more general torch.topk.
@@ -1027,6 +1024,7 @@ def fast_topk(
     Returns:
         Tuple of (values, indices) where values are the top-k values
         and indices are their corresponding indices in the input tensor
+
     """
     if topk == 1:
         # Use max along the specified dimension to get both value and index
@@ -1086,13 +1084,14 @@ def process_eagle_weight(
     model: nn.Module,
     name: str,
 ) -> None:
-    """
-    Update EAGLE model flags based on loaded weight name.
+    """Update EAGLE model flags based on loaded weight name.
     This should be called during weight loading to detect if a model
     has its own lm_head or embed_tokens weight.
+
     Args:
         model: The model instance (must support EAGLE)
         name: The name of the weight to process
+
     """
     if not supports_any_eagle(model):
         return
@@ -1111,6 +1110,7 @@ def get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
     Args:
         feature_layer_index: Index of a required layer in the visual encoder.
         num_hidden_layers: The total number of hidden layers in the visual encoder.
+
     """
     if feature_layer_index < 0:
         return num_hidden_layers + feature_layer_index + 1

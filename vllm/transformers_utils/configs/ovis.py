@@ -14,6 +14,7 @@ class AIMv2Config(PretrainedConfig):
     """This is the configuration class to store the configuration of an [`AIMv2Model`].
     Instantiating a configuration with the defaults will yield a similar configuration
     to that of the [apple/aimv2-large-patch14-224](https://huggingface.co/apple/aimv2-large-patch14-224).
+
     Args:
         hidden_size: Dimension of the hidden representations.
         intermediate_size: Dimension of the SwiGLU representations.
@@ -29,6 +30,7 @@ class AIMv2Config(PretrainedConfig):
         qkv_bias: Whether to add a bias to the queries, keys and values.
         use_bias: Whether to add a bias in the feed-forward and projection layers.
         kwargs: Keyword arguments for the [`PretrainedConfig`].
+
     """
 
     model_type: str = "aimv2"

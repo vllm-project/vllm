@@ -29,7 +29,8 @@ pytestmark = pytest.mark.skipif(
 
 def test_rocm_aiter_group_fp8_quant_fake_implementation():
     """Test that the fake implementation is correctly
-    defined for torch.ops.vllm.rocm_aiter_group_fp8_quant."""
+    defined for torch.ops.vllm.rocm_aiter_group_fp8_quant.
+    """
     # Create test tensors
     M = 128
     N = 4096
@@ -49,7 +50,8 @@ def test_rocm_aiter_group_fp8_quant_fake_implementation():
 def test_rocm_aiter_group_fp8_quant_torch_compile_with_cudagraph():
     """Test that rocm_aiter_ops.group_fp8_quant
     with group size 128 can be used with
-    torch.compile in cudagraph mode."""
+    torch.compile in cudagraph mode.
+    """
     # Create test tensors
     M = 128
     N = 4096

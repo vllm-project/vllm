@@ -141,9 +141,11 @@ _group_name_counter: dict[str, int] = {}
 
 def _get_unique_name(name: str) -> str:
     """Get a unique name for the group.
+
     Example:
     _get_unique_name("tp") -> "tp:0"
     _get_unique_name("tp") -> "tp:1"
+
     """
     if name not in _group_name_counter:
         _group_name_counter[name] = 0
@@ -420,8 +422,7 @@ direct_register_custom_op(
 
 
 class GroupCoordinator:
-    """
-    PyTorch ProcessGroup wrapper for a group of processes.
+    """PyTorch ProcessGroup wrapper for a group of processes.
     PyTorch ProcessGroup is bound to one specific communication backend,
         e.g. NCCL, Gloo, MPI, etc.
     GroupCoordinator takes charge of all the communication operations among
@@ -634,34 +635,34 @@ class GroupCoordinator:
 
     @property
     def first_rank(self):
-        """Return the global rank of the first process in the group"""
+        """Return the global rank of the first process in the group."""
         return self.ranks[0]
 
     @property
     def last_rank(self):
-        """Return the global rank of the last process in the group"""
+        """Return the global rank of the last process in the group."""
         return self.ranks[-1]
 
     @property
     def is_first_rank(self):
-        """Return whether the caller is the first process in the group"""
+        """Return whether the caller is the first process in the group."""
         return self.rank == self.first_rank
 
     @property
     def is_last_rank(self):
-        """Return whether the caller is the last process in the group"""
+        """Return whether the caller is the last process in the group."""
         return self.rank == self.last_rank
 
     @property
     def next_rank(self):
-        """Return the global rank of the process that follows the caller"""
+        """Return the global rank of the process that follows the caller."""
         rank_in_group = self.rank_in_group
         world_size = self.world_size
         return self.ranks[(rank_in_group + 1) % world_size]
 
     @property
     def prev_rank(self):
-        """Return the global rank of the process that precedes the caller"""
+        """Return the global rank of the process that precedes the caller."""
         rank_in_group = self.rank_in_group
         world_size = self.world_size
         return self.ranks[(rank_in_group - 1) % world_size]
@@ -719,8 +720,7 @@ class GroupCoordinator:
             yield graph_capture_context
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
-        """
-        User-facing all-reduce function before we actually call the
+        """User-facing all-reduce function before we actually call the
         all-reduce operation.
 
         We need this because Dynamo does not support passing an arbitrary
@@ -809,8 +809,7 @@ class GroupCoordinator:
     def gather(
         self, input_: torch.Tensor, dst: int = 0, dim: int = -1
     ) -> torch.Tensor | None:
-        """
-        NOTE: We assume that the input tensor is on the same device across
+        """NOTE: We assume that the input tensor is on the same device across
         all the ranks.
         NOTE: `dst` is the local rank of the destination rank.
         """
@@ -1363,7 +1362,7 @@ class GroupCoordinator:
         torch.distributed.barrier(group=self.cpu_group)
 
     def send(self, tensor: torch.Tensor, dst: int | None = None) -> None:
-        """Sends a tensor to the destination rank in a blocking way"""
+        """Sends a tensor to the destination rank in a blocking way."""
         """NOTE: `dst` is the local rank of the destination rank."""
         if self.device_communicator is None:
             raise ValueError("No device communicator found")
@@ -1637,8 +1636,7 @@ def graph_capture(
     device: torch.device,
     graph_capture_context: GraphCaptureContext | None = None,
 ):
-    """
-    `graph_capture` is a context manager which should surround the code that
+    """`graph_capture` is a context manager which should surround the code that
     is capturing the CUDA graph. Its main purpose is to ensure that some
     operations will be run after the graph is captured, before the graph
     is replayed. It returns a `GraphCaptureContext` object which contains the
@@ -1981,14 +1979,17 @@ def initialize_model_parallel(
     decode_context_model_parallel_size: int | None = 1,
     backend: str | None = None,
 ) -> None:
-    """
-    Initialize model parallel groups.
+    """Initialize model parallel groups.
 
     Arguments:
         tensor_model_parallel_size: number of GPUs used for tensor model
             parallelism.
         pipeline_model_parallel_size: number of GPUs used for pipeline model
             parallelism.
+        prefill_context_model_parallel_size: number of GPUs used for context
+            parallelism during prefill.
+        decode_context_model_parallel_size: number of GPUs used for context
+            parallelism during decode.
         backend: name of torch distributed communication backend.
 
     Let's say we have a total of 8 GPUs denoted by g0 ... g7 and we
@@ -2003,6 +2004,7 @@ def initialize_model_parallel(
     are on the same DGX box. For example if we are using 2 DGX-1 boxes
     with a total of 16 GPUs, rank 0 to 7 belong to the first box and
     ranks 8 to 15 belong to the second box.
+
     """
     # Get world size and rank. Ensure some consistencies.
     assert torch.distributed.is_initialized()
@@ -2476,8 +2478,7 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
 def in_the_same_node_as(
     pg: ProcessGroup | StatelessProcessGroup, source_rank: int = 0
 ) -> list[bool]:
-    """
-    This is a collective operation that returns if each rank is in the same node
+    """This is a collective operation that returns if each rank is in the same node
     as the source rank. It tests if processes are attached to the same
     memory system (shared access to shared memory).
     """
@@ -2568,8 +2569,7 @@ def in_the_same_node_as(
 
 
 def is_global_first_rank() -> bool:
-    """
-    Check if the current process is the first rank globally across all
+    """Check if the current process is the first rank globally across all
     parallelism strategies (PP, TP, DP, EP, etc.).
 
     Unlike group-specific checks like `get_tensor_model_parallel_rank() == 0`
@@ -2579,6 +2579,7 @@ def is_global_first_rank() -> bool:
     Returns:
         bool: True if this is the global first rank (rank 0), False otherwise.
               Returns True if distributed is not initialized (single process).
+
     """
     try:
         # If world group is available, use it for the most accurate check
@@ -2599,9 +2600,7 @@ def is_global_first_rank() -> bool:
 
 
 def is_local_first_rank() -> bool:
-    """
-    Check if the current process is the first local rank (rank 0 on its node).
-    """
+    """Check if the current process is the first local rank (rank 0 on its node)."""
     try:
         # prefer the initialized world group if available
         global _WORLD
@@ -2622,14 +2621,14 @@ def is_local_first_rank() -> bool:
 
 
 def _node_count(pg: ProcessGroup | StatelessProcessGroup) -> int:
-    """
-    Returns the total number of nodes in the process group.
+    """Returns the total number of nodes in the process group.
 
     Args:
         pg: The process group to analyze
 
     Returns:
         int: The total number of nodes
+
     """
     if isinstance(pg, ProcessGroup):
         world_size = torch.distributed.get_world_size(group=pg)

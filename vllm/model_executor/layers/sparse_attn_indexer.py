@@ -140,7 +140,6 @@ def dcp_gather_kv_rows(
     out_buf: torch.Tensor,
 ) -> torch.Tensor:
     """All-gather this rank's KV shard and return it in global token order."""
-
     gathered = gathered_buf[: get_dcp_group().world_size * local_padded.shape[0]]
     dist.all_gather_into_tensor(
         gathered, local_padded.contiguous(), group=get_dcp_group().device_group
@@ -286,7 +285,8 @@ def _gather_workspace_shapes(
     """Return ((values_shape, values_dtype), (scales_shape, scales_dtype)) for
     the K-gather workspace. FP8 path: (T, head_dim) fp8 + (T, 4) uint8 fp32
     scales. MXFP4 path: (T, head_dim // 2) uint8 packed mxfp4 +
-    (T, head_dim // MXFP4_BLOCK_SIZE) uint8 ue8m0 scales."""
+    (T, head_dim // MXFP4_BLOCK_SIZE) uint8 ue8m0 scales.
+    """
     if use_fp4_cache:
         return (
             ((total_seq_lens, head_dim // 2), torch.uint8),
@@ -304,7 +304,8 @@ def kv_cache_as_quant_view(
     use_fp4_cache: bool,
 ) -> torch.Tensor:
     """4D ``[num_blocks, block_size, 1, head_width]`` view expected by
-    DeepGEMM, from the 3D indexer kv-cache allocation."""
+    DeepGEMM, from the 3D indexer kv-cache allocation.
+    """
     if use_fp4_cache:
         assert kv_cache.ndim == 3 and kv_cache.dtype == torch.uint8
         num_blocks, block_size, _ = kv_cache.shape

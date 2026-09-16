@@ -31,7 +31,8 @@ def _build_video_mm_data(
 
     ``total_num_frames`` is set equal to the ndarray frame count so
     that HF's ``sample_frames`` indices stay within bounds of the
-    actual tensor that is passed."""
+    actual tensor that is passed.
+    """
     video = np.zeros((num_frames, height, width, 3), dtype=np.uint8)
     metadata = {
         "fps": original_fps,
@@ -237,7 +238,8 @@ def _build_video_embeds_mm_data(
     grid_thw: tuple[int, int, int] = (2, 4, 4),
 ) -> dict[str, Any]:
     """Create an embeds-only video item as an EPD consumer receives it:
-    pre-computed embeddings plus the metadata published by the encoder."""
+    pre-computed embeddings plus the metadata published by the encoder.
+    """
     import torch
 
     t, h, w = grid_thw
@@ -256,7 +258,8 @@ def test_processor_video_embeds_with_timestamps(model_id: str) -> None:
     """Embeds-only video input must size the placeholder range from the
     grid and the real timestamps published by the encoder (EC consumer
     path); synthesized or missing timestamps would change the token count
-    and break embedding merging downstream."""
+    and break embedding merging downstream.
+    """
     # `build_model_context` forces enable_mm_embeds off, so build the
     # config directly; keep the same online-availability skip behavior.
     HF_EXAMPLE_MODELS.find_hf_info(model_id).check_available_online(on_fail="skip")
@@ -301,7 +304,8 @@ def test_processor_video_embeds_with_timestamps(model_id: str) -> None:
 def test_processor_video_embeds_missing_timestamps(model_id: str) -> None:
     """Timestamps are required metadata for video embeds: they size the
     placeholder range, so omitting them must fail loudly at parse time
-    instead of silently producing a wrong prompt."""
+    instead of silently producing a wrong prompt.
+    """
     ctx = build_model_context(
         model_id,
         limit_mm_per_prompt={"image": 0, "video": 1},

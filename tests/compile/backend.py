@@ -29,8 +29,7 @@ logger = init_logger("vllm.tests.compile.backend")
 
 
 class LazyInitPass(InductorPass):
-    """
-    If there's a pass that we want to initialize lazily in a test,
+    """If there's a pass that we want to initialize lazily in a test,
     we can wrap it in LazyInitPass, which will initialize the pass when invoked
     and then immediately invoke it.
     """
@@ -45,8 +44,7 @@ class LazyInitPass(InductorPass):
 
 
 class TestBackend:
-    """
-    This class provides a simple Inductor backend that can be used for testing.
+    """This class provides a simple Inductor backend that can be used for testing.
     It takes a list of custom passes and runs them after Inductor's passes.
     It also saves the graph before and after the custom passes for inspection.
 

@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Test that batched_count_greater_than does not trigger 0/1 specialization
-recompiles when batch_size varies."""
+recompiles when batch_size varies.
+"""
 
 import torch
 

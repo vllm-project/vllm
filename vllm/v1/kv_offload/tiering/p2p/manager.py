@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-P2PSecondaryTierManager: Secondary tier for P2P KV cache sharing.
+"""P2PSecondaryTierManager: Secondary tier for P2P KV cache sharing.
 
 Owns transports and a single bidirectional P2PSession per remote peer.
 """
@@ -135,7 +134,8 @@ class P2PDestInfo:
 
 def _parse_source(kv_params: dict | None) -> P2PSourceInfo | None:
     """Parse the consumer sub-dict (PD ``remote_prefiller`` or symmetric
-    ``remote_kv_source``) into a ``P2PSourceInfo``, or None if absent/incomplete."""
+    ``remote_kv_source``) into a ``P2PSourceInfo``, or None if absent/incomplete.
+    """
     role = _remote_prefiller_params(kv_params)
     do_probe = False
     if role is None:
@@ -156,7 +156,8 @@ def _parse_source(kv_params: dict | None) -> P2PSourceInfo | None:
 
 def _parse_dest(kv_params: dict | None) -> P2PDestInfo | None:
     """Parse the producer ``remote_decoder`` sub-dict into a ``P2PDestInfo``,
-    or None if the block is absent (not a remote-decode request)."""
+    or None if the block is absent (not a remote-decode request).
+    """
     role = _remote_decoder_params(kv_params)
     if role is None:
         return None
@@ -264,6 +265,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         Raises:
             ValueError: If ``unbound_store_timeout_s`` is not a positive
                 number, or anything convertible to one.
+
         """
         super().__init__(offloading_spec, primary_kv_view, tier_type)
         try:

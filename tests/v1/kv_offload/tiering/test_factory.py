@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for SecondaryTierFactory.
+"""Unit tests for SecondaryTierFactory.
 
 These tests verify:
 1. Pre-registration integrity — registered tier module paths can import

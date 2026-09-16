@@ -178,8 +178,7 @@ def _json_load_bytes(path: Path) -> list[dict[str, object]]:
 
 
 def _convert_inf_nan_strings(data: list[dict[str, object]]) -> list[dict[str, object]]:
-    """
-    Convert string values "inf", "-inf", and "nan" to their float equivalents.
+    """Convert string values "inf", "-inf", and "nan" to their float equivalents.
 
     This handles the case where JSON serialization represents inf/nan as strings.
     """

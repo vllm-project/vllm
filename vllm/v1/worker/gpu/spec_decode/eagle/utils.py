@@ -13,7 +13,6 @@ from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
 
 def _should_share(eagle: nn.Module, flag: str, draft, target) -> bool:
     """Share when the draft has no own copy, or its copy matches the target."""
-
     if not getattr(eagle, flag, False) or draft is None:
         return True
     if target is None:
@@ -29,7 +28,8 @@ def _should_share(eagle: nn.Module, flag: str, draft, target) -> bool:
 
 def get_target_lm_head(target_model: nn.Module, target_language_model: nn.Module):
     """The target's lm_head — from get_language_model() for
-    *ForConditionalGeneration targets, else the top-level module."""
+    *ForConditionalGeneration targets, else the top-level module.
+    """
     return getattr(target_language_model, "lm_head", None) or getattr(
         target_model, "lm_head", None
     )

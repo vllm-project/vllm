@@ -76,7 +76,8 @@ def token_deltas(
 ) -> list[tuple[str, list[int]]]:
     """Split ``text`` into ``(delta_text, delta_token_ids)`` steps of
     ``chunk_size`` tokens, buffering incomplete multi-byte sequences (trailing
-    U+FFFD) into the next step as real streaming does."""
+    U+FFFD) into the next step as real streaming does.
+    """
     ids = tokenizer.encode(text)
     deltas: list[tuple[str, list[int]]] = []
     prev = ""
@@ -100,7 +101,8 @@ def make_parser(
     model_config=None,
 ) -> Parser:
     """Resolve the unified Cohere parser through ``ParserManager`` by registry
-    name (``cohere_command3`` / ``cohere_command4``)."""
+    name (``cohere_command3`` / ``cohere_command4``).
+    """
     cls = ParserManager.get_parser(name, name, enable_auto_tools=True)
     assert cls is not None
     return cls(
@@ -117,7 +119,8 @@ def drive_parser(
     deltas: list[tuple[str, list[int]]],
 ) -> list[DeltaMessage]:
     """Feed ``deltas`` through ``parse_delta`` (flushing on the last one) and
-    return the non-``None`` messages in order."""
+    return the non-``None`` messages in order.
+    """
     out: list[DeltaMessage] = []
     for i, (text, ids) in enumerate(deltas):
         delta = parser.parse_delta(text, ids, request, finished=i == len(deltas) - 1)

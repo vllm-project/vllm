@@ -363,7 +363,8 @@ def test_save_caches_coalesces_only_adjacent_blocks(
 
 def test_save_caches_noop_when_mm_hash_not_in_saves(make_worker):
     """When the scheduler hasn't pre-allocated blocks for ``mm_hash``,
-    ``save_caches`` + ``flush_saves`` is a pure no-op."""
+    ``save_caches`` + ``flush_saves`` is a pure no-op.
+    """
     worker = make_worker()
     sentinel = 0x42
     worker._region.blocks.fill_(sentinel)
@@ -381,7 +382,8 @@ def test_save_caches_noop_when_mm_hash_not_in_saves(make_worker):
 )
 def test_save_caches_noop_for_non_save_rank(make_worker, tp_rank, pcp_rank):
     """Only TP rank 0 + PCP rank 0 writes to mmap. All other combinations
-    must skip the save entirely."""
+    must skip the save entirely.
+    """
     worker = make_worker(tp_rank=tp_rank, pcp_rank=pcp_rank)
     sentinel = 0x42
     worker._region.blocks.fill_(sentinel)
@@ -396,7 +398,8 @@ def test_save_caches_noop_for_non_save_rank(make_worker, tp_rank, pcp_rank):
 
 def test_save_caches_raises_when_allocated_blocks_too_small(make_worker):
     """``save_caches`` must raise ``AssertionError`` when the encoder output
-    is larger than the allocated block space."""
+    is larger than the allocated block space.
+    """
     worker = make_worker()
     src = torch.zeros(3 * _HIDDEN_DIM, dtype=_DTYPE)
     with pytest.raises(AssertionError, match="exceeds allocated blocks"):
@@ -549,7 +552,8 @@ def test_start_load_caches_noop_when_loads_is_empty(make_worker):
 def test_start_load_caches_skips_cached_and_loads_new_in_same_step(make_worker):
     """Every hash in ``meta.loads`` is copied from mmap, including one whose
     key is already resident in ``encoder_cache`` — there is no worker-side
-    skip."""
+    skip.
+    """
     worker = make_worker()
     n_blocks = 3
     src_orig = torch.arange(n_blocks * _HIDDEN_DIM, dtype=_DTYPE).reshape(
@@ -778,7 +782,8 @@ def test_buffer_pool_is_reused_across_save_steps(make_worker):
 @_requires_accelerator
 def test_buffer_pool_is_reused_across_load_steps(make_worker):
     """Once a load copy completes its descriptor buffers return to the pool and
-    are reused by the next call — no reallocation."""
+    are reused by the next call — no reallocation.
+    """
     worker = make_worker()
     worker._region.blocks[0].fill_(0x01)
     worker._region.blocks[1].fill_(0x02)
@@ -849,7 +854,8 @@ def test_init_pins_memory_when_available(pin_available, expected_pinned):
 
 def test_shutdown_calls_region_cleanup_and_swallows_errors(caplog_vllm):
     """``shutdown`` must always call ``region.cleanup`` — and must never
-    raise."""
+    raise.
+    """
     worker = object.__new__(ECCPUWorker)
     mock_region = Mock(spec=ECSharedRegion)
     worker._region = mock_region

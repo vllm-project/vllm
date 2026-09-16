@@ -36,8 +36,7 @@ logger = init_logger(__name__)
 
 
 class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
-    """
-    CPU-only MoE method using dynamic 4-bit matmul kernels on Arm Platform
+    """CPU-only MoE method using dynamic 4-bit matmul kernels on Arm Platform
     - Weights: int4 (stored as int8 values in [-8,7], packed to uint8 nibbles)
     - Scales: Fp32 for Channelwise , bf16 for groupwise quantization
     - Bias: Same data type as original weights

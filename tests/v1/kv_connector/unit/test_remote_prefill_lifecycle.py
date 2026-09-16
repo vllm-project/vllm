@@ -30,7 +30,6 @@ def _num_waiting_requests(scheduler) -> int:
 
 def test_basic_lifecycle():
     """Test lifecycle of a remote prefill."""
-
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(vllm_config)
 
@@ -151,7 +150,6 @@ def test_basic_lifecycle():
 
 def test_interleaved_lifecycle():
     """Test Remote Prefills Work Well With Other Requests."""
-
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(vllm_config)
 
@@ -249,13 +247,11 @@ def test_interleaved_lifecycle():
 
 
 def test_no_spurious_prefix_caching():
-    """
-    With P/D, blocks can be allocated but uncomputed for
+    """With P/D, blocks can be allocated but uncomputed for
     multiple engine steps. This test confirms that we do
     not accidentally have cache hits against uncomputed
     blocks.
     """
-
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(vllm_config)
 
@@ -320,7 +316,6 @@ def test_no_spurious_prefix_caching():
 
 def test_full_block_prompt():
     """Test that we handle a prompt that is the full block size."""
-
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(vllm_config)
 
@@ -394,11 +389,9 @@ def test_full_block_prompt():
 
 
 def test_cannot_schedule_after_recv():
-    """
-    Test that we can handle no schedule after recv due to not
+    """Test that we can handle no schedule after recv due to not
     enough remaining KV blocks.
     """
-
     # NOTE: the KVCacheManager will use 1 null block.
     # So there are 5 total working blocks.
     TOTAL_NUM_BLOCKS = 6
@@ -501,11 +494,9 @@ def test_cannot_schedule_after_recv():
 
 
 def test_cannot_recv():
-    """
-    Test that we can handle no schedule KV block transfer due to not
+    """Test that we can handle no schedule KV block transfer due to not
     enough remaining KV blocks.
     """
-
     # NOTE: the KVCacheManager will use 1 null block.
     # So there are 5 total working blocks.
     TOTAL_NUM_BLOCKS = 6
@@ -713,7 +704,8 @@ def test_async_load_reserves_blocks_for_inflight():
 
 def test_async_loads_both_admitted_when_pool_fits():
     """Sanity: with a pool large enough, the reservation gate admits both async
-    loads (it is not over-conservative)."""
+    loads (it is not over-conservative).
+    """
     vllm_config = create_vllm_config()
     BLOCK_SIZE = vllm_config.cache_config.block_size
     scheduler = create_scheduler(vllm_config, num_blocks=64)

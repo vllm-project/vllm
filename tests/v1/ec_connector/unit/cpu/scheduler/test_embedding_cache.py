@@ -381,7 +381,8 @@ def test_pin_if_ready_none_when_absent():
 
 def test_pin_if_ready_returns_unpinned_entry_when_not_ready():
     """The producer needs "present but not ready" told apart from "absent":
-    the first is NACKed as retryable, the second as a miss."""
+    the first is NACKed as retryable, the second as a miss.
+    """
     cache = EmbeddingCache(num_blocks=4)
     cache.alloc("h", 1)  # not-ready
     entry = cache.pin_if_ready("h")

@@ -146,7 +146,6 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         output_dtype: torch.dtype,
     ) -> torch.Tensor:
         """Dequantize PLE lookup output."""
-
         return self.ple_embedding.ngram_embedding.dequantize(
             embeddings,
             output_dtype,

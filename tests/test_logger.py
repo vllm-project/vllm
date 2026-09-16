@@ -51,7 +51,8 @@ def test_trace_function_call():
 def test_default_vllm_root_logger_configuration(monkeypatch):
     """This test presumes that VLLM_CONFIGURE_LOGGING (default: True) and
     VLLM_LOGGING_CONFIG_PATH (default: None) are not configured and default
-    behavior is activated."""
+    behavior is activated.
+    """
     monkeypatch.setenv("VLLM_LOGGING_COLOR", "0")
     _configure_vllm_root_logger()
 
@@ -75,7 +76,8 @@ def test_default_vllm_root_logger_configuration(monkeypatch):
 def test_descendent_loggers_depend_on_and_propagate_logs_to_root_logger(monkeypatch):
     """This test presumes that VLLM_CONFIGURE_LOGGING (default: True) and
     VLLM_LOGGING_CONFIG_PATH (default: None) are not configured and default
-    behavior is activated."""
+    behavior is activated.
+    """
     monkeypatch.setenv("VLLM_CONFIGURE_LOGGING", "1")
     monkeypatch.delenv("VLLM_LOGGING_CONFIG_PATH", raising=False)
 
@@ -105,7 +107,8 @@ def test_descendent_loggers_depend_on_and_propagate_logs_to_root_logger(monkeypa
 def test_logger_configuring_can_be_disabled(monkeypatch):
     """This test calls _configure_vllm_root_logger again to test custom logging
     config behavior, however mocks are used to ensure no changes in behavior or
-    configuration occur."""
+    configuration occur.
+    """
     monkeypatch.setenv("VLLM_CONFIGURE_LOGGING", "0")
     monkeypatch.delenv("VLLM_LOGGING_CONFIG_PATH", raising=False)
 
@@ -117,7 +120,8 @@ def test_logger_configuring_can_be_disabled(monkeypatch):
 def test_an_error_is_raised_when_custom_logging_config_file_does_not_exist(monkeypatch):
     """This test calls _configure_vllm_root_logger again to test custom logging
     config behavior, however it fails before any change in behavior or
-    configuration occurs."""
+    configuration occurs.
+    """
     monkeypatch.setenv("VLLM_CONFIGURE_LOGGING", "1")
     monkeypatch.setenv(
         "VLLM_LOGGING_CONFIG_PATH",
@@ -133,7 +137,8 @@ def test_an_error_is_raised_when_custom_logging_config_file_does_not_exist(monke
 def test_an_error_is_raised_when_custom_logging_config_is_invalid_json(monkeypatch):
     """This test calls _configure_vllm_root_logger again to test custom logging
     config behavior, however it fails before any change in behavior or
-    configuration occurs."""
+    configuration occurs.
+    """
     monkeypatch.setenv("VLLM_CONFIGURE_LOGGING", "1")
 
     with NamedTemporaryFile(encoding="utf-8", mode="w") as logging_config_file:
@@ -160,7 +165,8 @@ def test_an_error_is_raised_when_custom_logging_config_is_unexpected_json(
 ):
     """This test calls _configure_vllm_root_logger again to test custom logging
     config behavior, however it fails before any change in behavior or
-    configuration occurs."""
+    configuration occurs.
+    """
     monkeypatch.setenv("VLLM_CONFIGURE_LOGGING", "1")
 
     with NamedTemporaryFile(encoding="utf-8", mode="w") as logging_config_file:
@@ -176,7 +182,8 @@ def test_an_error_is_raised_when_custom_logging_config_is_unexpected_json(
 def test_custom_logging_config_is_parsed_and_used_when_provided(monkeypatch):
     """This test calls _configure_vllm_root_logger again to test custom logging
     config behavior, however mocks are used to ensure no changes in behavior or
-    configuration occur."""
+    configuration occur.
+    """
     monkeypatch.setenv("VLLM_CONFIGURE_LOGGING", "1")
 
     valid_logging_config = {
@@ -200,7 +207,8 @@ def test_custom_logging_config_is_parsed_and_used_when_provided(monkeypatch):
 def test_custom_logging_config_causes_an_error_if_configure_logging_is_off(monkeypatch):
     """This test calls _configure_vllm_root_logger again to test custom logging
     config behavior, however mocks are used to ensure no changes in behavior or
-    configuration occur."""
+    configuration occur.
+    """
     monkeypatch.setenv("VLLM_CONFIGURE_LOGGING", "0")
 
     valid_logging_config = {

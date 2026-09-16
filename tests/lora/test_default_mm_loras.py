@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Tests for applying default registered multimodal loras.
-"""
+"""Tests for applying default registered multimodal loras."""
 
 import os
 import unittest.mock as mock
@@ -134,7 +132,8 @@ def test_default_mm_lora_fails_with_overridden_lora_request(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Ensure that if the lora_request conflicts with default_mm_loras,
-    we use the lora_request."""
+    we use the lora_request.
+    """
     run_test(
         vllm_runner,
         audio_assets,

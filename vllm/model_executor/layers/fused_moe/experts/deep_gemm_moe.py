@@ -58,8 +58,7 @@ def _valid_deep_gemm_shape(M: int, N: int, K: int) -> bool:
 def _valid_deep_gemm(
     hidden_states: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor
 ) -> bool:
-    """
-    Check if the given problem size is supported by the DeepGemm grouped
+    """Check if the given problem size is supported by the DeepGemm grouped
     gemm kernel.  All of M, N, K and the quantization block_shape must be
     aligned by `dg.get_m_alignment_for_contiguous_layout()`.
     """

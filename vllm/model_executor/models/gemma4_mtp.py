@@ -101,6 +101,7 @@ class Gemma4MTPMaskedEmbedder(nn.Module):
         Returns:
             logits: (num_tokens, num_selected) sparse logits.
             indices: (num_tokens, num_selected) corresponding vocab indices.
+
         """
         num_tokens = hidden_states.shape[0]
         _, top_k_indices = torch.topk(

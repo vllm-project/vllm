@@ -143,7 +143,7 @@ class Conv2dLayer(ConvLayerBase):
         return x
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
-        """Expected input shape: (batch_size, in_channels, height, width)"""
+        """Expected input shape: (batch_size, in_channels, height, width)."""
         assert x.dim() == 4
         if self.enable_linear:
             return self._forward_mulmat(x)
@@ -193,7 +193,7 @@ class Conv3dLayer(ConvLayerBase):
         return x
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
-        """Expected input shape: (batch_size, in_channels, time, height, width)"""
+        """Expected input shape: (batch_size, in_channels, time, height, width)."""
         if self.enable_linear:
             return self._forward_mulmat(x)
         else:

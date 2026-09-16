@@ -31,7 +31,6 @@ async def init_render_app_state(
     preprocessing pipeline (renderer, input_processor)
     directly from the :class:`~vllm.config.VllmConfig`.
     """
-
     served_model_names = args.served_model_name or [args.model]
     model_registry = OpenAIModelRegistry(
         model_config=vllm_config.model_config,

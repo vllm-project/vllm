@@ -99,6 +99,7 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
         Raises:
             ValueError: If the dtype is not float32 or the shape is not
                 ``(num_heads,)``.
+
         """
         if sinks is None:
             return
@@ -134,6 +135,7 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
         Raises:
             ValueError: If the sink and query head layouts disagree, or if they
                 live on different devices.
+
         """
         sinks = self.sinks
         if sinks is None:

@@ -36,6 +36,8 @@ async def pause_generation(
     """Pause generation requests to allow weight updates.
 
     Args:
+        raw_request: The incoming FastAPI request, used to reach the engine
+            client on the app state.
         mode: How to handle in-flight requests:
             - ``"abort"``: Abort all in-flight requests immediately (default).
             - ``"wait"``: Wait for in-flight requests to complete.
@@ -43,8 +45,8 @@ async def pause_generation(
         wait_for_inflight_requests: DEPRECATED. Use ``mode="wait"`` instead.
         clear_cache: DEPRECATED. Whether to clear KV/prefix caches after
             draining. Ignored when mode="keep".
-    """
 
+    """
     engine = engine_client(raw_request)
 
     try:
@@ -74,7 +76,6 @@ async def pause_generation(
 @router.post("/resume")
 async def resume_generation(raw_request: Request) -> JSONResponse:
     """Resume generation after a pause."""
-
     engine = engine_client(raw_request)
 
     try:
@@ -97,7 +98,6 @@ async def abort_requests(raw_request: Request) -> JSONResponse:
 
     Empty/missing ``request_ids`` aborts all in-flight requests.
     """
-
     engine = engine_client(raw_request)
 
     try:
@@ -139,7 +139,6 @@ async def abort_requests(raw_request: Request) -> JSONResponse:
 @router.get("/is_paused")
 async def is_paused(raw_request: Request) -> JSONResponse:
     """Return the current pause status."""
-
     engine = engine_client(raw_request)
 
     try:
@@ -234,9 +233,12 @@ async def get_world_size(
     """Get the world size from the parallel config.
 
     Args:
+        raw_request: The incoming FastAPI request, used to reach the engine
+            client on the app state.
         include_dp: If True (default), returns the world size including
             data parallelism (TP * PP * DP). If False, returns the world
             size without data parallelism (TP * PP).
+
     """
     parallel_config = engine_client(raw_request).vllm_config.parallel_config
     if include_dp:

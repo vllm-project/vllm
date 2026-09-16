@@ -17,8 +17,7 @@ if TYPE_CHECKING:
 
 
 class Step3ReasoningParser(ReasoningParser):
-    """
-    Reasoning parser for Step3 model.
+    """Reasoning parser for Step3 model.
 
     The Step3 model uses </think> token to denote the end of reasoning
     text. This parser extracts all content before </think> as reasoning content.
@@ -62,8 +61,7 @@ class Step3ReasoningParser(ReasoningParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
-        """
-        Extract reasoning content from a delta message.
+        """Extract reasoning content from a delta message.
         Handles streaming output where previous + delta = current.
         Uses token IDs for faster processing.
         For text "abc</think>xyz":

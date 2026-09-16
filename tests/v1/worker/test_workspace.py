@@ -84,7 +84,8 @@ def test_workspace_lanes_compose_with_ubatches(monkeypatch) -> None:
 
 def test_workspace_lock_blocks_growth_and_unlock_restores(monkeypatch) -> None:
     """Once locked, oversized requests fail loudly instead of reallocating the
-    buffer that captured CUDA graphs point at; unlock restores growth."""
+    buffer that captured CUDA graphs point at; unlock restores growth.
+    """
     monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: 0)
     manager = workspace.WorkspaceManager(torch.device("cpu"), num_lanes=1)
 

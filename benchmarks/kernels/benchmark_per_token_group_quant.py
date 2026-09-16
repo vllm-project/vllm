@@ -15,7 +15,7 @@ from vllm.platforms import current_platform
 
 @contextmanager
 def _triton_mode():
-    """Temporarily force the Triton fallback path"""
+    """Temporarily force the Triton fallback path."""
     with patch("vllm.platforms.current_platform.is_cuda", return_value=False):
         yield
 

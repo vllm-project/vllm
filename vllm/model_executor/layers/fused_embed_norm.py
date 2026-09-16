@@ -170,7 +170,8 @@ def _fused_embed_eh_norm_kernel(
     ``table[ids]``, zero it at position 0, RMSNorm(embed) with enorm and
     RMSNorm(prev_hidden) with hnorm, written side-by-side into ``out`` ([N, 2H])
     ready for the eh_proj GEMM. Replaces embedding lookup + where + 2x RMSNorm +
-    cat. Requires the full table on-rank (replicated embedding)."""
+    cat. Requires the full table on-rank (replicated embedding).
+    """
     tok = tl.program_id(0)
     off = tl.arange(0, BLOCK)
     mask = off < H

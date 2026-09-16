@@ -70,7 +70,8 @@ class SleepModeBackend(ABC):
 
     def state(self) -> SleepModeState:
         """Current lifecycle state. Lets ``/health`` distinguish a healthy-idle
-        (suspended) engine from a healthy-serving one (see RFC #34303)."""
+        (suspended) engine from a healthy-serving one (see RFC #34303).
+        """
         return self._state
 
     # -- Capability introspection (no instance required) --
@@ -83,26 +84,30 @@ class SleepModeBackend(ABC):
     @classmethod
     def preserves_communicators(cls) -> bool:
         """If False, collective communicators (e.g. NCCL) are destroyed by
-        ``suspend`` and the executor must re-initialize them on ``resume``."""
+        ``suspend`` and the executor must re-initialize them on ``resume``.
+        """
         return False
 
     @classmethod
     def preserves_compiled_artifacts(cls) -> bool:
         """If True, torch.compile / JIT kernels survive suspend/resume and need
-        not be recompiled on resume."""
+        not be recompiled on resume.
+        """
         return False
 
     @classmethod
     def preserves_graphs_with_communicators(cls) -> bool:
         """If True, CUDA graphs containing collective communicators (e.g. NCCL)
         stay valid after resume. False when communicators are rebuilt (embedded
-        comm handles go stale)."""
+        comm handles go stale).
+        """
         return False
 
     @classmethod
     def supports_durable_storage(cls) -> bool:
         """If True, suspended state can be persisted beyond the process
-        lifetime (disk or object storage) and restored in a new process."""
+        lifetime (disk or object storage) and restored in a new process.
+        """
         return False
 
 

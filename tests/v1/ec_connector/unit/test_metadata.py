@@ -40,7 +40,8 @@ def test_metadata_saves_dict_operations():
 
 def test_metadata_loads_carry_a_transfer_id_and_blocks():
     """Each load entry is a (transfer_id, block_ids) pair, so the worker can
-    report the transfer rather than the mm_hash."""
+    report the transfer rather than the mm_hash.
+    """
     meta = ECCPUConnectorMetadata()
 
     meta.loads["mm_hash_1"] = (0, [5, 6, 7])
@@ -54,7 +55,7 @@ def test_metadata_loads_carry_a_transfer_id_and_blocks():
 
 
 def test_metadata_saves_and_loads_are_independent():
-    """saves and loads dicts are independent."""
+    """Saves and loads dicts are independent."""
     meta = ECCPUConnectorMetadata()
 
     meta.saves["key"] = [1, 2]

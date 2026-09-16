@@ -123,8 +123,7 @@ def causal_conv1d_update_torch(
     bias: torch.Tensor | None = None,
     activation: str | None = None,
 ) -> torch.Tensor:
-    """
-    Pure PyTorch fallback for causal_conv1d_update.
+    """Pure PyTorch fallback for causal_conv1d_update.
     Currently used as a fallback for Arm (aarch64) to leverage
     oneDNN/ACL F.conv1d kernels for batched decoding.
     """

@@ -29,7 +29,8 @@ PROCESSOR_CLASSES = [
 
 def create_processor(model_id: str, processor_cls):
     """Build a processor directly, because the registry only ever builds the one the
-    installed transformers version selects, leaving the other path untested."""
+    installed transformers version selects, leaving the other path untested.
+    """
     model_config = ModelConfig(model=model_id, model_impl="transformers")
     ctx = InputProcessingContext(
         model_config, cached_tokenizer_from_config(model_config)
@@ -40,7 +41,8 @@ def create_processor(model_id: str, processor_cls):
 
 def create_cached_processor(model_id: str, processor_cls):
     """Build a processor backed by a real multi-modal processor cache, and hand the
-    cache back so a test can check it was actually used."""
+    cache back so a test can check it was actually used.
+    """
     model_config = ModelConfig(model=model_id, model_impl="transformers")
     model_config.multimodal_config.mm_processor_cache_gb = 4
     ctx = InputProcessingContext(

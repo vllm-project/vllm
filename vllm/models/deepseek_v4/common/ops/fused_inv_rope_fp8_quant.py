@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Fused inverse RoPE + block-scaled FP8 quantization kernel for DeepseekV4 attention.
+"""Fused inverse RoPE + block-scaled FP8 quantization kernel for DeepseekV4 attention.
 
 Output scale format is pre-transformed (MN-major TMA-aligned; FP32 on SM90,
 INT32-packed UE8M0 on SM100) so fp8_einsum skips transform_sf_into_required_layout.
@@ -380,6 +379,7 @@ def fused_inv_rope_fp8_quant(
     Returns:
         Rotated output in [T, G, D] and its FP8 scales. The scale tensor is
         empty when quantization is disabled.
+
     """
     from vllm.utils.deep_gemm import get_tma_aligned_size
 

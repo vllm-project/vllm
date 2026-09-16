@@ -318,7 +318,8 @@ class TestStreaming:
 
     def test_streaming_args_arrive_incrementally(self, parser, mock_request):
         """Arguments must stream as intermediate deltas, not batch at
-        tool-end."""
+        tool-end.
+        """
         chunks = [
             "<tool_call>\n",
             "<function=get_weather>\n",
@@ -523,7 +524,8 @@ class TestStreaming:
 
     def test_streaming_split_tool_call_tag(self, parser, mock_request):
         """<tool_call> arrives as a single special token; the rest of
-        the content is split into fine-grained chunks."""
+        the content is split into fine-grained chunks.
+        """
         chunks = [
             "<tool_call>\n",
             "<function=test>\n",
@@ -700,7 +702,8 @@ class TestArgConverter:
 
 class TestSchemaAwareTypeCoercion:
     """Verify that _fix_arg_types corrects miscoerced values using the
-    tool schema."""
+    tool schema.
+    """
 
     @pytest.fixture
     def tools(self):
@@ -842,7 +845,8 @@ class TestAnyOfTypeCoercion:
 
     def test_anyof_string_param_not_coerced(self, parser_with_anyof, mock_request):
         """A param with anyOf including 'string' must not be coerced
-        to integer."""
+        to integer.
+        """
         text = (
             "<tool_call>\n"
             "<function=set_config>\n"
@@ -858,7 +862,8 @@ class TestAnyOfTypeCoercion:
 
 class TestSchemaCoercionBoolNumberNull:
     """Verify that _fix_arg_types coerces string values to non-string
-    schema types using coerce_to_schema_type."""
+    schema types using coerce_to_schema_type.
+    """
 
     @pytest.fixture
     def tools(self):

@@ -87,7 +87,8 @@ def _shard(full_table, si, rows_per_rank, dtype):
 @pytest.mark.parametrize("id_dtype", [torch.int32, torch.int64])
 def test_matches_masked_gather(tp_size, vocab_size, org_vocab_size, hidden, id_dtype):
     """Every rank's partial output is bit-exact with the eager path, including
-    the added-vocab (LoRA) rows and the ids owned by another rank."""
+    the added-vocab (LoRA) rows and the ids owned by another rank.
+    """
     set_random_seed(7)
     dtype = torch.bfloat16
     rows = pad_vocab_size(vocab_size, 64) // tp_size

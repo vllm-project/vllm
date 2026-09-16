@@ -228,7 +228,7 @@ class FilterbankFeatures(nn.Module):
         return self.fb
 
     def splice_frames(self, x, frame_splicing):
-        """Stacks frames together across feature dim
+        """Stacks frames together across feature dim.
 
         input is batch_size, feature_dim, num_frames
         output is batch_size, feature_dim*frame_splicing, num_frames
@@ -537,7 +537,8 @@ class CohereASRFeatureExtractor(SequenceFeatureExtractor):
 
 class CohereASRProcessor(ProcessorMixin):
     """HF-compatible processor combining CohereASRFeatureExtractor and a
-    tokenizer."""
+    tokenizer.
+    """
 
     feature_extractor_class = "CohereASRFeatureExtractor"
     tokenizer_class = "AutoTokenizer"

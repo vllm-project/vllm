@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for ScaledMM kernel selection logic (CPU-only)
+"""Tests for ScaledMM kernel selection logic (CPU-only).
 
 Run `pytest tests/kernels/quantization/test_scaled_mm_kernel_selection.py`.
 """

@@ -720,7 +720,8 @@ class Glm5NextMultiModalProcessor(Glm4vMultiModalProcessor):
     (image token repeat, video frame/timestamp structure) is owned by vLLM's
     prompt-update machinery — the inherited ``_get_prompt_updates`` builds
     the replacement content and the placeholder scan validates against
-    exactly that."""
+    exactly that.
+    """
 
     def _hf_processor_applies_updates(
         self,

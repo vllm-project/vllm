@@ -220,7 +220,8 @@ def test_reasoning_then_parallel_calls():
 
 def _stream(raw: str, chunk: int):
     """Feed ``raw`` incrementally in ``chunk``-char steps through BOTH streaming
-    parsers; return (reasoning, content, tool_calls)."""
+    parsers; return (reasoning, content, tool_calls).
+    """
     reasoning, content, toolcalls = [], [], []
     prev = ""
     i = 0

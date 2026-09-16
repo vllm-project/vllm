@@ -630,6 +630,7 @@ class ChunkedTokenDatabase:
                 ``mask_num``. False entries are skipped before hash access.
             put_step: Stride for distributing chunks across ranks.
             put_step_rank: ``chunk_id % put_step`` value this rank stores.
+
         """
         assert put_step > 0
         if not block_hashes:
@@ -662,6 +663,7 @@ class TailKeyBoundary:
             ``block_hashes[num_tokens // hash_block_size - 1]`` instead of the
             hash implied by ``MooncakeLookupResult.hit_length``. This changes
             only the load key, not the reusable prefix.
+
     """
 
     group_id: int
@@ -678,6 +680,7 @@ class MooncakeLookupResult:
         tail_key_boundaries: Hash boundary used to store each cache group's
             tail block when ``hit_length`` does not identify its store key.
             There is one entry per group for every nonzero hit.
+
     """
 
     hit_length: int

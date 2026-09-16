@@ -62,7 +62,8 @@ class AttentionState(NamedTuple):
 @dataclass(frozen=True)
 class BatchExecutionDescriptor:
     """Describes the shape of the batch and CG mode to run; this is used to make shape
-    matches between the capture and runtime."""
+    matches between the capture and runtime.
+    """
 
     cg_mode: CUDAGraphMode
     num_tokens: int
@@ -90,7 +91,8 @@ def make_cudagraph_stats(
 class CreateForwardFn(Protocol):
     """Factory that prepares inputs (OUTSIDE the graph) and returns a
     forward_fn. Called with warmup=True for the warmup pass and warmup=False
-    for the captured pass."""
+    for the captured pass.
+    """
 
     def __call__(
         self,
@@ -408,6 +410,8 @@ class CudaGraphManager:
                 it is invoked once with warmup=True and again with warmup=False
                 because attention backends may mutate or lazily initialize
                 metadata during warmup.
+            progress_bar_desc: Description shown on the capture progress bar.
+
         """
         with graph_capture(device=self.device), ExitStack() as stack:
             if self.ubatch_runner is not None:
@@ -503,7 +507,6 @@ class CudaGraphManager:
         num_ubatches: int = 1,
     ) -> BatchExecutionDescriptor:
         """Find matching cudagraph descriptor from priority-ordered candidates."""
-
         effective_loras = self._resolve_effective_loras(num_active_loras)
         key = (num_tokens, effective_loras)
         if self._graphs_captured and num_tokens > 0 and key in self._candidates:
@@ -952,7 +955,8 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
 def _extrapolate_full_graph_memory(mem_samples: list[int], total_graphs: int) -> int:
     """Extrapolate the total FULL capture cost from samples of the largest
     graphs. The first capture allocates the pool baseline; later graphs mostly
-    reuse it, so the second sample is taken as the per-graph cost."""
+    reuse it, so the second sample is taken as the per-graph cost.
+    """
     if not mem_samples:
         return 0
     first_capture = mem_samples[0]
@@ -989,7 +993,8 @@ def _init_minimal_kv_cache_for_profiling(runner: "GPUModelRunner") -> None:
 
 def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
     """Release the profiling KV cache and captured graphs while keeping model
-    weights, so the real ``initialize_kv_cache`` starts from a clean slate."""
+    weights, so the real ``initialize_kv_cache`` starts from a clean slate.
+    """
     torch.accelerator.synchronize()
     if hasattr(runner.model_state, "_mamba_ctx"):
         runner.model_state._mamba_ctx = None

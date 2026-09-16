@@ -372,7 +372,8 @@ class _HeterogeneousConfig(PretrainedConfig):
     """A heterogeneous config with no convertor of its own.
 
     Mirrors the parts vLLM uses: per-layer configs are shallow copies with the
-    varying attributes applied and heterogeneity stripped, so they do not recurse."""
+    varying attributes applied and heterogeneity stripped, so they do not recurse.
+    """
 
     is_heterogeneous = True
 
@@ -471,7 +472,8 @@ def test_deepseek_v4_convertor_splits_vision_architecture():
     """The vision checkpoint shares model_type/architectures with the
     text-only DeepSeek-V4; the convertor routes it to the VL wrapper class
     by rewriting hf_config.architectures (model-class resolution reads the
-    raw attribute)."""
+    raw attribute).
+    """
     from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
     from vllm.transformers_utils.model_arch_config_convertor import (
         DeepseekV4ModelArchConfigConvertor,

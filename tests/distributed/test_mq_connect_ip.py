@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Test that MessageQueue uses the local node's IP for binding,
+"""Test that MessageQueue uses the local node's IP for binding,
 not a remote master_addr. This validates the fix for cross-node
 data-parallel where each DP group leader must bind to its own IP.
 
@@ -22,7 +21,8 @@ from vllm.utils.network_utils import get_ip
 
 def test_mq_bind_with_local_ip():
     """MessageQueue with remote readers should successfully bind
-    when connect_ip is the local node's IP."""
+    when connect_ip is the local node's IP.
+    """
     # n_reader=2, n_local_reader=1 means 1 remote reader,
     # which triggers the remote ZMQ socket bind.
     mq = MessageQueue(
@@ -44,7 +44,8 @@ def test_mq_bind_with_local_ip():
 def test_mq_bind_with_non_local_ip_fails():
     """MessageQueue should fail to bind when connect_ip is a
     non-local IP address (simulating the bug where master_addr
-    from a different node was used)."""
+    from a different node was used).
+    """
     # Use a non-local IP that we definitely can't bind to.
     # 198.51.100.1 is from TEST-NET-2 (RFC 5737), never locally assigned.
     non_local_ip = "198.51.100.1"
@@ -58,7 +59,8 @@ def test_mq_bind_with_non_local_ip_fails():
 
 def test_mq_bind_defaults_to_local_ip():
     """When connect_ip is None, MessageQueue should auto-detect
-    the local IP and bind successfully."""
+    the local IP and bind successfully.
+    """
     mq = MessageQueue(
         n_reader=2,
         n_local_reader=1,

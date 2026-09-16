@@ -79,7 +79,6 @@ def validate_configuration(
     b_prime_stages: int,
 ) -> None:
     """Validate constraints imposed by this BF16 SM100 GEMM."""
-
     if latent_dim <= 0 or shard_dim <= 0:
         raise ValueError("GEMM K and N must be positive")
     if latent_dim % 8 or shard_dim % 8:

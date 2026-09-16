@@ -6,8 +6,7 @@ from transformers.configuration_utils import PretrainedConfig
 
 
 class HYV3Config(PretrainedConfig):
-    r"""
-    This is the configuration class to store the configuration of a [`HYV3Model`].
+    r"""This is the configuration class to store the configuration of a [`HYV3Model`].
     It is used to instantiate a HYV3 model (HY V3 MoE language model) according to
     the specified arguments.
 
@@ -93,6 +92,7 @@ class HYV3Config(PretrainedConfig):
         >>> config = HYV3Config()
         >>> model = HYV3Model(config)
         ```
+
     """
 
     model_type = "hy_v3"

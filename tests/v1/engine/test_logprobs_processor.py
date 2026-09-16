@@ -30,7 +30,8 @@ def _make_processor(num_logprobs: int) -> LogprobsProcessor:
 
 def test_drops_trailing_sentinel_columns():
     """A request that asked for 3 custom token logprobs but ended up in a
-    batch padded to width 5 must not surface the trailing -inf entries."""
+    batch padded to width 5 must not surface the trailing -inf entries.
+    """
     processor = _make_processor(num_logprobs=3)
 
     sampled = 42

@@ -126,7 +126,6 @@ class QuarkConfig(QuantizationConfig):
         revision: str | None = None,
     ):
         """Enable dynamic MXFP4 only for DeepSeek-V3-family fp4 checkpoints."""
-
         if hf_config is None:
             return
 
@@ -162,13 +161,13 @@ class QuarkConfig(QuantizationConfig):
     def apply_vllm_mapper(  # noqa: B027
         self, hf_to_vllm_mapper: "WeightsMapper"
     ):
-        """
-        Interface for models to update module names referenced in
+        """Interface for models to update module names referenced in
         quantization configs in order to reflect the vllm model structure
 
         Args:
             hf_to_vllm_mapper: maps from hf model structure (the assumed
                 structure of the qconfig) to vllm model structure
+
         """
         quant_config_with_hf_to_vllm_mapper: dict[str, Any] = {}
 
@@ -657,8 +656,7 @@ class QuarkConfig(QuantizationConfig):
         input_quant: dict[str, Any] | None,
         allow_static_fp8: bool = False,
     ) -> QuantKeyMatch:
-        """
-        This check returns True only if it is an OCP-MX weight quantization.
+        """This check returns True only if it is an OCP-MX weight quantization.
         The activation can be FP16/BF16, OCP MXFP4, MXFP8, FP8.
         The rationale for checking only the weight type is that
         the model loading concept and process primarily concerns the weights themselves.
@@ -984,8 +982,7 @@ class QuarkLinearMethod(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        """
-        Use the CompressedTensorsScheme associated with each layer to create
+        """Use the CompressedTensorsScheme associated with each layer to create
         the necessary parameters for the layer. See LinearMethodBase for param
         details
         """
@@ -1006,8 +1003,7 @@ class QuarkLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ):
-        """
-        Use the output of create_weights and the CompressedTensorsScheme
+        """Use the output of create_weights and the CompressedTensorsScheme
         associated with the layer to apply the forward pass with the
         layer input.  See LinearMethodBase for param details
 
@@ -1020,9 +1016,7 @@ class QuarkLinearMethod(LinearMethodBase):
 
 
 class QuarkKVCacheMethod(BaseKVCacheMethod):
-    """
-    Supports loading kv-cache scaling factors from quark checkpoints.
-    """
+    """Supports loading kv-cache scaling factors from quark checkpoints."""
 
     def __init__(self, quant_config: QuarkConfig):
         self.validate_kv_cache_config(quant_config.kv_cache_config)
@@ -1030,12 +1024,12 @@ class QuarkKVCacheMethod(BaseKVCacheMethod):
 
     @staticmethod
     def validate_kv_cache_config(kv_cache_config: dict[str, Any] | None):
-        """
-        Validator for the kv cache configuration. Useful for controlling the
+        """Validator for the kv cache configuration. Useful for controlling the
         kv cache quantization schemes, that are being supported in vLLM
 
         Args:
             kv_cache_config: the quark kv cache scheme
+
         """
         if kv_cache_config is None:
             return

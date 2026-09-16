@@ -289,7 +289,8 @@ class TestStreaming:
 
 class TestMissingFunctionCallsWrapper:
     """An invoke without the ``<｜DSML｜function_calls>`` wrapper is still a
-    tool call (V3.2 counterpart of #48931)."""
+    tool call (V3.2 counterpart of #48931).
+    """
 
     def test_non_streaming(self, mock_tokenizer, mock_request):
         text = _invoke("fn", _param("k", "true", "v"))

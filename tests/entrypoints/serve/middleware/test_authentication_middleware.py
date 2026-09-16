@@ -72,7 +72,8 @@ class MockModelConfig:
 @pytest.fixture(params=get_args(SupportedTask))
 def task_routes(request, monkeypatch) -> tuple[str, list[tuple[str, list[str]]]]:
     """For each supported task, build an app with only that task's routers,
-    extract all routes, and return the task name and routes."""
+    extract all routes, and return the task name and routes.
+    """
     task = request.param
     # Enable development mode to register all routes (including dev-only routes).
     monkeypatch.setenv("VLLM_SERVER_DEV_MODE", "1")
@@ -98,7 +99,8 @@ def task_routes(request, monkeypatch) -> tuple[str, list[tuple[str, list[str]]]]
 
 def test_auto_discovered_protected_routes_require_auth(task_routes):
     """For every auto-discovered route that starts with a guarded prefix,
-    verify that authentication is enforced."""
+    verify that authentication is enforced.
+    """
     task, routes = task_routes
     app = _create_app_with_mock_routes(routes)
     client = TestClient(app)
@@ -132,7 +134,8 @@ def test_auto_discovered_protected_routes_require_auth(task_routes):
 
 def test_auto_discovered_unprotected_routes_no_auth(task_routes):
     """For every auto-discovered route that does NOT start with a guarded
-    prefix, verify that no authentication is required."""
+    prefix, verify that no authentication is required.
+    """
     task, routes = task_routes
     app = _create_app_with_mock_routes(routes)
     client = TestClient(app)

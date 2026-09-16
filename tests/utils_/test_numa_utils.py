@@ -157,7 +157,8 @@ def test_pct_binding_filters_cpus(monkeypatch):
 )
 def test_pct_binding_fires_on_every_capable_sku(monkeypatch, sku, expected_cpus):
     """Each SKU in ``_PCT_CAPABLE_SKUS`` engages the gate at its own
-    expected ``highest_perf`` and uses its own priority-core stride."""
+    expected ``highest_perf`` and uses its own priority-core stride.
+    """
     sku_config = numa_utils._PCT_CAPABLE_SKUS[sku]
     _patch_pct_gates(
         monkeypatch,
@@ -242,7 +243,8 @@ def test_get_numactl_args_engine_core_baseline_spans_shard_numa_nodes():
 def test_get_numactl_args_engine_core_pct_spans_shard_numa_nodes(monkeypatch):
     """PCT: EngineCore for a multi-NUMA shard binds to the union of priority
     cores across all shard nodes, so worker `--physcpubind` is always a
-    subset of EngineCore's `cpus_allowed`."""
+    subset of EngineCore's `cpus_allowed`.
+    """
     _patch_pct_gates(
         monkeypatch,
         model_match=True,
@@ -292,7 +294,8 @@ def test_get_numactl_args_engine_core_pct_external_launcher_spans_local_nodes(
     """external_launcher (or multi-node-within-DP, or Ray) hits the
     fallback branch. EngineCore must still span every local NUMA node
     so it can mp-spawn its local workers without ``--physcpubind``
-    strict-validation failures."""
+    strict-validation failures.
+    """
     _patch_pct_gates(
         monkeypatch,
         model_match=True,
@@ -316,7 +319,8 @@ def test_get_numactl_args_engine_core_pct_external_launcher_spans_local_nodes(
 
 def test_get_numactl_args_engine_core_baseline_multi_node_within_dp_spans_locals():
     """Multi-node-within-DP fallback: bind EngineCore to all local NUMA
-    nodes that the visible ``numa_bind_nodes`` reference."""
+    nodes that the visible ``numa_bind_nodes`` reference.
+    """
     vllm_config = _make_config(
         numa_bind=True,
         numa_bind_nodes=[0, 0, 0, 0, 1, 1, 1, 1],
@@ -339,7 +343,8 @@ def test_get_numactl_args_engine_core_skips_user_cpu_list(monkeypatch):
     ``--physcpubind`` spawns need. We fall back to ``--cpunodebind`` over
     the shard's NUMA nodes instead. PCT auto-detect is also bypassed when
     the user is explicit (its priority-core union may not be a superset
-    of the user's per-worker cores)."""
+    of the user's per-worker cores).
+    """
     _patch_pct_gates(monkeypatch, model_match=True, highest_perf=46)
     vllm_config = _make_config(
         numa_bind=True,
@@ -392,7 +397,8 @@ def test_get_numactl_args_requires_detectable_nodes(monkeypatch):
 def test_configure_subprocess_rejects_unknown_process_kind():
     """configure_subprocess only knows 'worker' and 'EngineCore'; anything
     else must raise ValueError instead of silently routing to the worker
-    path."""
+    path.
+    """
     vllm_config = _make_config(numa_bind=True, numa_bind_nodes=[0])
     with (
         pytest.raises(ValueError, match="process_kind"),

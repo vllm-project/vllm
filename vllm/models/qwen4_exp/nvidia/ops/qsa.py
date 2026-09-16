@@ -727,7 +727,6 @@ def warmup_qsa_sparse_paged_attention(
     selection_width: int,
 ) -> tuple[tuple[int, int, int], ...]:
     """Compile every production-reachable split-K/merge specialization."""
-
     head_dim = kv_cache.shape[-1] // 2
     key_cache, value_cache = kv_cache.transpose(1, 2).split(head_dim, dim=-1)
     # An fp8 cache is allocated as uint8 and viewed as e4m3 at attention time.
@@ -870,7 +869,6 @@ def qsa_store_cache_rows(
     rows: torch.Tensor,
 ) -> None:
     """Store fixed-width rows in a QSA cache without boolean indexing."""
-
     if not cache.is_cuda or not HAS_TRITON:
         raise RuntimeError("QSA CUDA cache stores require Triton")
     if cache.ndim != 4 or cache.shape[2] != 1:
@@ -916,7 +914,6 @@ def qsa_compress_groups_with_ratio(
     rope_cache: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pool completed groups from the compressor-state ring and raw token rows."""
-
     if not raw_keys.is_cuda or not HAS_TRITON:
         raise RuntimeError("QSA CUDA compression requires Triton")
     rows = token_to_req.numel()

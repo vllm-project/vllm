@@ -155,7 +155,6 @@ class Step3p5MTPProposer(EagleProposer):
 
     def _maybe_share_lm_head(self, target_language_model: torch.nn.Module) -> None:
         """Step3.5 MTP uses the lm_head stored in each MTP layer."""
-
         # The base MTP path shares target lm_head into shared_head.head.
         # Step3.5 checkpoints carry per-MTP-layer shared_head weights.
         return

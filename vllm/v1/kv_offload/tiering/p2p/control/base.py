@@ -139,6 +139,7 @@ class ControlTransport(ABC):
         A connection to peer_id that is registered but no longer alive is
         retired and replaced; a live one is a duplicate and must not be
         replaced.
+
         """
         ...
 
@@ -158,6 +159,7 @@ class ControlTransport(ABC):
             The returned sequence is read-only — callers must not mutate
             it. The caller is responsible for creating sessions for
             these connections.
+
         """
         ...
 

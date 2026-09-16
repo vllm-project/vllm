@@ -84,6 +84,7 @@ def granite_layer_attn_params(
     Returns:
         Sliding window size (`None` for full attention), RoPE base theta (`0`
         for NoPE), and attention sink presence/absence.
+
     """
     layer_types = getattr(config, "layer_types", None)
     sliding_window = (

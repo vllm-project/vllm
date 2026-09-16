@@ -179,6 +179,7 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
 
         Args:
             n: Number of sequences the request will occupy.
+
         """
         if self.engine_client.errored:
             raise self.engine_client.dead_error
@@ -236,7 +237,7 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
 
     @staticmethod
     def _get_data_parallel_rank(raw_request: Request | None) -> int | None:
-        """Pulls the data parallel rank from a header, if provided"""
+        """Pulls the data parallel rank from a header, if provided."""
         if raw_request is None:
             return None
 
@@ -294,7 +295,8 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
     ) -> _T:
         """Wrap a `create_*` coroutine so that, if it raises or returns an
         ErrorResponse (i.e. the request never reached the engine), the KV
-        connector is notified to free any pinned remote-prefill blocks."""
+        connector is notified to free any pinned remote-prefill blocks.
+        """
         kv_transfer_params = self.has_kv_connector and request.kv_transfer_params
         if not kv_transfer_params or not kv_transfer_params.get("do_remote_prefill"):
             return await awaitable

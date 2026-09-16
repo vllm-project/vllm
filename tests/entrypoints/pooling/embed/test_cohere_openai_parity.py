@@ -76,7 +76,8 @@ def test_single_text_parity(server: RemoteOpenAIServer):
 
 def test_batch_parity(server: RemoteOpenAIServer):
     """A batch of texts should produce equivalent embeddings via both APIs,
-    in the same order."""
+    in the same order.
+    """
     texts = [
         "machine learning",
         "deep learning",

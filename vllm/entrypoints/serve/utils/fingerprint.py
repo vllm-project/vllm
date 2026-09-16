@@ -33,7 +33,8 @@ def set_default_fingerprint_mode(
     custom_value: str | None = None,
 ) -> None:
     """Configure the fingerprint mode for subsequent ``get_system_fingerprint``
-    calls. Called once at server startup."""
+    calls. Called once at server startup.
+    """
     global _DEFAULT_MODE, _CUSTOM_VALUE
     _DEFAULT_MODE = mode
     _CUSTOM_VALUE = custom_value
@@ -41,7 +42,8 @@ def set_default_fingerprint_mode(
 
 def get_system_fingerprint(vllm_config: Any) -> str | None:
     """Return the fingerprint for ``vllm_config`` using the mode configured by
-    ``set_default_fingerprint_mode``."""
+    ``set_default_fingerprint_mode``.
+    """
     return build_system_fingerprint(vllm_config, _DEFAULT_MODE, _CUSTOM_VALUE)
 
 

@@ -55,7 +55,8 @@ def _mm_feature(offset: int, length: int) -> MultiModalFeatureSpec:
 
 def test_strip_covered_mm_data() -> None:
     """Items fully inside the computed prefix lose their data; items touching
-    the uncomputed region keep it; already-None data stays None."""
+    the uncomputed region keep it; already-None data stays None.
+    """
     from dataclasses import replace
 
     covered = _mm_feature(offset=0, length=100)
@@ -107,7 +108,8 @@ def _mm_feature_mixed(offset: int, length: int) -> MultiModalFeatureSpec:
 
 def test_strip_covered_mm_data_mrope() -> None:
     """For M-RoPE models, covered items keep their keep_on_cpu metadata fields
-    (the worker needs them to compute positions); payload fields are dropped."""
+    (the worker needs them to compute positions); payload fields are dropped.
+    """
     covered = _mm_feature_mixed(offset=0, length=100)
     uncovered = _mm_feature_mixed(offset=300, length=100)
 
@@ -127,7 +129,8 @@ def test_strip_covered_mm_data_shm_address_item() -> None:
     """SHM address descriptors must survive stripping even when covered: the
     worker needs the address to resolve the payload and to acknowledge the
     sender's writer reference. Stripping it crashed the SHM receiver cache on
-    the second identical request (vllm-project/vllm#54994)."""
+    the second identical request (vllm-project/vllm#54994).
+    """
     address_item = MultiModalKwargsItem(
         {
             "address": MultiModalFieldElem(data=4096, field=MultiModalBatchedField()),

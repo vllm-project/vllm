@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Triton kernels for DeepseekV4 paged K-cache management and sparse-attention index
+"""Triton kernels for DeepseekV4 paged K-cache management and sparse-attention index
 preparation.
 
 - quantize_and_insert_k_cache: quantize bf16 K to UE8M0 FP8 and insert into
@@ -76,8 +75,7 @@ def quantize_and_insert_k_kernel(
     n_quant_blocks: tl.constexpr,  # 8 (7 real + 1 padding)
     use_fnuz: tl.constexpr = False,
 ):
-    """
-    Quantize K tensor and insert into paged K cache.
+    """Quantize K tensor and insert into paged K cache.
 
     K Cache block layout (block_size=64 tokens):
     - [0, 64*576): Token data, each token has 448 fp8 + 128 bf16
@@ -251,8 +249,7 @@ def quantize_and_insert_k_cache(
     use_fnuz: bool = False,
     bytes_per_token: int = V4_BYTES_PER_TOKEN,
 ):
-    """
-    Quantize K tensor and insert into paged K cache.
+    """Quantize K tensor and insert into paged K cache.
 
     ``bytes_per_token`` picks the record (see the module header): the V4 one,
     or V4.1's all-dims MXFP8 one.

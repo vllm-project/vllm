@@ -189,8 +189,7 @@ async def test_chat_completion_with_tool_use(server):
 
 @pytest.mark.asyncio
 async def test_comparison_with_prompt_logprobs_and_logprobs(server):
-    """
-    Test that token_ids align with prompt_logprobs and
+    """Test that token_ids align with prompt_logprobs and
     logprobs when return_tokens_as_token_ids is enabled.
     """
     async with server.get_async_client() as client:

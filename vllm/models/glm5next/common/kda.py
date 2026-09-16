@@ -130,7 +130,8 @@ def _resolve_kda_prefill_backend(
     """Pick the chunked-prefill kernel: FlashKDA (fused CUDA, ~2-4x faster on
     SM90/SM10x/SM12x for bf16, head_dim 128 and a bounded gate) or the Triton
     ``chunk_kda_with_fused_gate`` path. ``backend`` comes from
-    ``additional_config.kda_prefill_backend`` (auto / triton / flashkda)."""
+    ``additional_config.kda_prefill_backend`` (auto / triton / flashkda).
+    """
     if backend not in ("auto", "triton", "flashkda"):
         raise ValueError(f"Unsupported KDA prefill backend: {backend}")
     capability = current_platform.get_device_capability()
@@ -368,7 +369,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         bounded gate ``lower_bound * sigmoid(exp(A_log) * (g + dt_bias))``,
         matching ``chunk_kda_with_fused_gate(..., safe_gate=True)``. Writes the
         attention output into ``out`` (a workspace buffer when ``None``) and
-        returns ``(out, final_state)``."""
+        returns ``(out, final_state)``.
+        """
         assert self._flashkda_buffer_specs is not None
         final_state, workspace, workspace_out = (
             current_workspace_manager().get_simultaneous(*self._flashkda_buffer_specs)

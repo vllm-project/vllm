@@ -121,7 +121,8 @@ def test_get_world_size_tp1(vllm_runner):
 @create_new_process_for_each_test()
 def test_init_weight_transfer_engine_calls_engine(vllm_runner):
     """Test that init_weight_transfer_engine calls the engine's
-    init_transfer_engine method."""
+    init_transfer_engine method.
+    """
     if torch.accelerator.device_count() < 1:
         pytest.skip("Need at least 1 GPU for this test")
 

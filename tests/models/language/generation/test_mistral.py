@@ -274,7 +274,8 @@ def test_mistral_function_calling(vllm_runner, model: str, dtype: str) -> None:
 
 def test_mistral_function_call_nested_json():
     """Ensure that the function-name regex captures the entire outermost
-    JSON block, including nested braces."""
+    JSON block, including nested braces.
+    """
 
     # Create a minimal stub tokenizer that provides the few attributes the
     # parser accesses (`version` and `get_vocab`).

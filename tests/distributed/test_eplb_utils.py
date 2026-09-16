@@ -30,8 +30,7 @@ def _make_model_state(
 
 
 def test_commit_eplb_maps_shape_change():
-    """
-    When the number of physical experts changes, resize the active map within its
+    """When the number of physical experts changes, resize the active map within its
     preallocated storage.
     """
     num_layers, num_logical, num_physical = 2, 4, 6
@@ -65,8 +64,7 @@ def test_commit_eplb_maps_shape_change():
 
 
 def test_commit_eplb_maps_for_layer_logical_padding():
-    """
-    Test that logical_to_physical_map is padded with -1 to fill the
+    """Test that logical_to_physical_map is padded with -1 to fill the
     pre-allocated slots when the new map has fewer replicas than the max.
     """
     num_layers, num_logical, num_physical = 2, 4, 6

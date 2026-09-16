@@ -44,8 +44,7 @@ def _make_request(stop, include_stop_str_in_output: bool, min_tokens: int = 0):
 
 
 def test_stop_string_while_stop_token_terminates(include_stop_str_in_output: bool):
-    """
-    This test verifies that the detokenizer correctly handles the case where
+    """This test verifies that the detokenizer correctly handles the case where
     the generated token sequence contains both:
     - a stop token
     - an <eos> token
@@ -67,7 +66,6 @@ def test_stop_string_while_stop_token_terminates(include_stop_str_in_output: boo
     where stop-string evaluation occurs before the early-return on
     stop_terminated.
     """
-
     # Generate text "abcdeZ" and tokenize it.
     generated_text = "abcde"
     eos_token = "Z"

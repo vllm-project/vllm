@@ -192,7 +192,8 @@ class CPUUnquantizedExperts(mk.FusedMoEExpertsModular):
 
     def _pad_moe_intermediate(self, layer: torch.nn.Module) -> None:
         """Zero-pad the per-partition MoE intermediate dim of both weights and
-        the expert bias, see `_padded_intermediate_size`."""
+        the expert bias, see `_padded_intermediate_size`.
+        """
         intermediate_size = self.moe_config.intermediate_size_per_partition
         padded_size = self._padded_intermediate_size(self.moe_config)
         if padded_size == intermediate_size:
@@ -745,6 +746,7 @@ def prepare_int4_moe_layer_for_cpu(
 
     Returns:
         (blocked_w13, blocked_w2, blocked_s13, blocked_s2, blocked_z13, blocked_z2)
+
     """
     E = w13_packed.size(0)
 
@@ -951,7 +953,8 @@ class CPUExpertsInt4(mk.FusedMoEExpertsModular):
 
 class CPUExpertsInt8(mk.FusedMoEExpertsModular):
     """CPU INT8 W8A8 per-channel weight / dynamic per-token activation
-    modular MoE experts."""
+    modular MoE experts.
+    """
 
     def __init__(
         self,
@@ -1055,7 +1058,6 @@ class CPUExpertsInt8(mk.FusedMoEExpertsModular):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """VNNI-prepack INT8 MoE weights for CPU kernel."""
-
         w13 = torch.ops._C.convert_weight_packed(layer.w13_weight)
         w2 = torch.ops._C.convert_weight_packed(layer.w2_weight)
         replace_parameter(layer, "w13_weight", w13)
@@ -1285,7 +1287,8 @@ class ArmCPUExpertsInt8(mk.FusedMoEExpertsModular):
 
 class ZenCPUExpertsInt8(mk.FusedMoEExpertsModular):
     """AMD Zen INT8 MoE with per-token activation and channelwise weight
-    quantization, dispatched through zentorch."""
+    quantization, dispatched through zentorch.
+    """
 
     def __init__(
         self,

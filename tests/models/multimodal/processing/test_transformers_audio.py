@@ -116,7 +116,8 @@ def test_audio_multimodal_processor(model_id, processor_cls):
 @pytest.mark.parametrize("separator", [" and ", ""])
 def test_audio_multiple_inputs(separator, processor_cls):
     """Multiple audios per prompt are each detected as a separate placeholder
-    and multi-modal item by the Transformers modelling backend."""
+    and multi-modal item by the Transformers modelling backend.
+    """
     model_id = "ibm-granite/granite-speech-3.3-2b"
     mm_processor = create_processor(model_id, processor_cls)
 

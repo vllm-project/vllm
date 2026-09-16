@@ -28,8 +28,7 @@ from vllm.v1.worker.ubatching import (
 def _quantize_before_dispatch(
     quant_config: FusedMoEQuantConfig, defer_input_quant: bool
 ) -> bool:
-    """
-    Do quantized dispatch for blockfp8 and mxfp8, unless the
+    """Do quantized dispatch for blockfp8 and mxfp8, unless the
     subsequent moe kernel requires bf16 inputs.
     """
     if defer_input_quant:
@@ -69,8 +68,7 @@ def _unpack_mxfp8_scale(
 
 
 class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
-    """
-    Prepare/Finalize using DeepEP v2 ElasticBuffer (unified API).
+    """Prepare/Finalize using DeepEP v2 ElasticBuffer (unified API).
 
     Supports two modes controlled by the `use_cudagraph` constructor arg:
 

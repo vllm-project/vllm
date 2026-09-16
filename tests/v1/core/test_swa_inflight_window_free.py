@@ -97,7 +97,8 @@ def test_num_in_flight_tokens_accounting():
 
 def test_swa_free_waits_for_in_flight_step():
     """Async: out-of-window blocks stay allocated until the step that still
-    reads them has been processed."""
+    reads them has been processed.
+    """
     scheduler = _create_swa_scheduler(async_scheduling=True)
     request = create_requests(
         num_requests=1, num_tokens=NUM_PROMPT_TOKENS, block_size=BLOCK_SIZE
@@ -132,7 +133,8 @@ def test_swa_free_waits_for_in_flight_step():
 
 def test_swa_free_immediate_when_sync():
     """Sync: no in-flight step at schedule time, frees happen at the first
-    decode allocation as before."""
+    decode allocation as before.
+    """
     scheduler = _create_swa_scheduler(async_scheduling=False)
     request = create_requests(
         num_requests=1, num_tokens=NUM_PROMPT_TOKENS, block_size=BLOCK_SIZE
@@ -171,7 +173,8 @@ def test_swa_admission_cap_accounts_for_overlapping_batches():
 def test_chunked_local_free_waits_for_in_flight_step():
     """Chunked-local attention frees whole chunks left of the current one, and
     is exposed to the same load-WAR: with async scheduling those chunks must
-    stay allocated until the in-flight step that still reads them settles."""
+    stay allocated until the in-flight step that still reads them settles.
+    """
     scheduler = _create_chunked_scheduler(async_scheduling=True)
     request = create_requests(
         num_requests=1, num_tokens=NUM_PROMPT_TOKENS, block_size=BLOCK_SIZE
@@ -226,7 +229,8 @@ def test_connector_finish_frees_on_settled_basis():
     is handed to a KV connector (simple CPU offload / NIXL store), must use the
     same processed-token basis. Otherwise the connector reads/hands off a block
     the still-in-flight step is optimistically counted as done with, which is
-    the load-path WAR this fix closes."""
+    the load-path WAR this fix closes.
+    """
     scheduler = create_scheduler(
         block_size=BLOCK_SIZE,
         async_scheduling=True,

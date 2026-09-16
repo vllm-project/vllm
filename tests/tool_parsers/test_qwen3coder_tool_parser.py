@@ -423,7 +423,7 @@ def test_extract_tool_calls(
 def test_extract_tool_calls_fallback_no_tags(
     qwen3_tool_parser,
 ):
-    """Test fallback parsing when XML tags are missing"""
+    """Test fallback parsing when XML tags are missing."""
     model_output = """<function=get_current_weather>
 <parameter=city>
 Dallas
@@ -444,7 +444,7 @@ TX
 
 
 def test_extract_tool_calls_type_conversion(qwen3_tokenizer):
-    """Test parameter type conversion based on tool schema"""
+    """Test parameter type conversion based on tool schema."""
     tools = [
         ChatCompletionToolsParam(
             type="function",
@@ -862,7 +862,7 @@ def test_extract_tool_calls_streaming(
     expected_tool_calls,
     expected_content,
 ):
-    """Test incremental streaming behavior including typed parameters"""
+    """Test incremental streaming behavior including typed parameters."""
     request = ChatCompletionRequest(model=MODEL, messages=[])
 
     other_content = ""
@@ -932,7 +932,7 @@ def test_extract_tool_calls_streaming(
 def test_extract_tool_calls_missing_closing_parameter_tag(
     qwen3_tool_parser,
 ):
-    """Test handling of missing closing </parameter> tag"""
+    """Test handling of missing closing </parameter> tag."""
     # Using get_current_weather from sample_tools but with malformed XML
     model_output = """Let me check the weather for you:
 <tool_call>
@@ -974,7 +974,7 @@ fahrenheit
 def test_extract_tool_calls_streaming_missing_closing_tag(
     qwen3_tool_parser, qwen3_tokenizer
 ):
-    """Test streaming with missing closing </parameter> tag"""
+    """Test streaming with missing closing </parameter> tag."""
     # Using get_current_weather from sample_tools but with malformed XML
     model_output = """Let me check the weather for you:
 <tool_call>
@@ -1046,7 +1046,7 @@ fahrenheit
 
 
 def test_extract_tool_calls_streaming_incremental(qwen3_tool_parser, qwen3_tokenizer):
-    """Test that streaming is truly incremental"""
+    """Test that streaming is truly incremental."""
     model_output = """I'll check the weather.<tool_call>
 <function=get_current_weather>
 <parameter=city>
@@ -1106,7 +1106,7 @@ TX
 def test_extract_tool_calls_streaming_missing_opening_tag(
     qwen3_tool_parser, qwen3_tokenizer
 ):
-    """Test streaming with missing opening <tool_call> tag
+    """Test streaming with missing opening <tool_call> tag.
 
     This tests that the streaming parser correctly handles
     tool calls that start directly with <function=...>

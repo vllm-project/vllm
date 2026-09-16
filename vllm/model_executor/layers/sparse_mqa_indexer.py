@@ -41,7 +41,8 @@ def _prefill_k_workspaces(
     total_seq_lens: int, head_dim: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """The packed MXFP4 K-gather workspace ``(values, scales)``, shared with
-    the dense indexer layers of the same model."""
+    the dense indexer layers of the same model.
+    """
     values_spec, scales_spec = _gather_workspace_shapes(
         total_seq_lens, head_dim, current_platform.fp8_dtype(), use_fp4_cache=True
     )
@@ -119,7 +120,8 @@ class SparseMQAIndexer(nn.Module):
 
     def _reserve_workspaces(self, device: torch.device) -> None:
         """Profiling run: claim the K-gather workspace and the peak sparse
-        logits allocation so the memory estimate covers them."""
+        logits allocation so the memory estimate covers them.
+        """
         _prefill_k_workspaces(self.max_total_seq_len, self.head_dim)
         max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
         torch.empty(max_logits_bytes, dtype=torch.uint8, device=device)

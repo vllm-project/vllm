@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Integration edge-case tests for MultiConnector (NixlConnector + OffloadingConnector).
+"""Integration edge-case tests for MultiConnector (NixlConnector + OffloadingConnector).
 
 Tests cover:
   - Output correctness across block-size boundaries (proxy vs direct prefill).

@@ -130,8 +130,7 @@ def test_proposer_initialization_missing_layer_ids():
 
 
 def test_prepare_next_token_ids_padded():
-    """
-    Test for prepare_next_token_ids_padded with extract_hidden_states.
+    """Test for prepare_next_token_ids_padded with extract_hidden_states.
 
     Since num_speculative_tokens == 1, sampled_token_ids has shape (batch_size, 1).
     For each request we either use the sampled token (if valid and not discarded)
@@ -196,8 +195,7 @@ def test_prepare_next_token_ids_padded():
 
 
 def test_propose():
-    """
-    Test the propose() method of ExtractHiddenStatesProposer.
+    """Test the propose() method of ExtractHiddenStatesProposer.
 
     This should:
     1. Accept target hidden states and sampled token IDs

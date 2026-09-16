@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for TieringOffloadingManager and ExampleSecondaryTierManager.
+"""Unit tests for TieringOffloadingManager and ExampleSecondaryTierManager.
 
 These tests verify:
 1. Basic tiered offloading operations (store, load, lookup)
@@ -274,7 +273,8 @@ _CASCADE_SUPPLY_BEHAVIOR = {
 
 def test_every_lookup_result_has_a_declared_cascade_behavior():
     """A new LookupResult must state what the cascade does with it, rather
-    than falling into whichever branch happens to catch it."""
+    than falling into whichever branch happens to catch it.
+    """
     assert set(_CASCADE_SUPPLY_BEHAVIOR) == set(LookupResult)
 
 
@@ -321,7 +321,8 @@ class TestTieringOffloadingManager:
 
     def test_failed_promotion_finalizes_primary_with_failure(self, manager_setup):
         """A failed promotion still finalizes the primary slots with
-        success=False; the tier corrects its own verdict."""
+        success=False; the tier corrects its own verdict.
+        """
         from unittest.mock import patch
 
         from vllm.v1.kv_offload.tiering.base import JobResult
@@ -1092,7 +1093,8 @@ class TestTieringOffloadingManager:
 
     def test_on_new_request_lifecycle(self, manager_setup):
         """Policy defaults to CHUNK_LEVEL, escalates when a tier requests it,
-        and is cleaned up on on_request_finished."""
+        and is cleaned up on on_request_finished.
+        """
         # Default: all tiers return CHUNK_LEVEL
         ctx = ReqContext(req_id="req_policy_lifecycle")
         result = self.manager.on_new_request(ctx)
@@ -1169,7 +1171,8 @@ class TestTieringOffloadingManager:
 
     def _make_request_level_request(self, req_id: str) -> ReqContext:
         """Start a request for which tier1 asks for request-level offloading,
-        with tier1's submit_store wrapped so the cascade can be observed."""
+        with tier1's submit_store wrapped so the cascade can be observed.
+        """
         self.secondary_tier1.on_new_request = lambda req_context: (
             RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
         )
@@ -1191,7 +1194,8 @@ class TestTieringOffloadingManager:
     def test_cascade_rejects_retry_from_primary(self, manager_setup):
         """RETRY would be parked with no guarantee of ever draining, so the
         cascade refuses it. No real primary tier returns it, so this is the one
-        disposition that has to be forced."""
+        disposition that has to be forced.
+        """
         keys = to_keys(range(3))
         self._start_request()
         assert self.manager.prepare_store(keys, _CTX) is not None
@@ -1206,7 +1210,8 @@ class TestTieringOffloadingManager:
 
     def _start_in_flight_primary_write(self, keys: list[OffloadKey]) -> ReqContext:
         """Leave a GPU->primary write for `keys` open, so they look present to
-        prepare_store but are not yet readable."""
+        prepare_store but are not yet readable.
+        """
         writer_ctx = ReqContext(req_id="req_writer")
         self._start_request(writer_ctx)
         assert self.manager.prepare_store(keys, writer_ctx) is not None
@@ -1215,7 +1220,8 @@ class TestTieringOffloadingManager:
     def test_cascade_defers_keys_whose_primary_write_is_in_flight(self, manager_setup):
         """A key another request is still writing must reach the peer once the
         write lands, not be dropped: prepare_store already counts it as stored
-        and the scheduler advances past its chunk, so nothing re-offers it."""
+        and the scheduler advances past its chunk, so nothing re-offers it.
+        """
         keys = to_keys(range(3))
         writer_ctx = self._start_in_flight_primary_write(keys)
 
@@ -1232,7 +1238,8 @@ class TestTieringOffloadingManager:
 
     def test_deferred_cascade_holds_request_from_finalization(self, manager_setup):
         """A request that finishes with keys still deferred must stay alive, or
-        its tiers are torn down before the peer is ever served."""
+        its tiers are torn down before the peer is ever served.
+        """
         keys = to_keys(range(3))
         writer_ctx = self._start_in_flight_primary_write(keys)
 
@@ -1255,7 +1262,8 @@ class TestTieringOffloadingManager:
         self, manager_setup
     ):
         """A failed write frees the chunk, so the deferred key resolves to MISS
-        and the request finalizes instead of parking forever."""
+        and the request finalizes instead of parking forever.
+        """
         keys = to_keys(range(3))
         writer_ctx = self._start_in_flight_primary_write(keys)
 
@@ -1275,7 +1283,8 @@ class TestTieringOffloadingManager:
     def test_reset_cache_clears_orchestrator_state(self, manager_setup):
         """reset_cache wipes every kind of orchestrator state and resets
         primary tier; pending submissions are dropped without being sent
-        to the secondary tier. Active request state is retained."""
+        to the secondary tier. Active request state is retained.
+        """
         # Cascade — populates primary chunks and leaves cascade jobs
         # in _jobs (the synchronous example tier has already
         # queued completions); reset_cache's drain loop will pick them up.
@@ -1367,7 +1376,8 @@ class TestTieringOffloadingManager:
         self, manager_setup, load_tier_filter
     ):
         """Filter excluding secondary medium returns MISS from secondaries
-        even when they hold the chunk; primary is unaffected."""
+        even when they hold the chunk; primary is unaffected.
+        """
         chunks = to_keys(range(2))
         # Put one chunk in primary, one only in secondary
         self._start_request()

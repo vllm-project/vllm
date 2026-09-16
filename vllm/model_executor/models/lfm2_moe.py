@@ -556,6 +556,7 @@ class Lfm2MoeForCausalLM(
         Returns:
             Tuple containing:
             - conv_state_shape: Shape for convolutional state cache
+
         """
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_config

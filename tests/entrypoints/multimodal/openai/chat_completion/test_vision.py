@@ -34,8 +34,7 @@ REQUIRED_BEAM_SEARCH_TERMS = [
 
 
 def check_output_matches_terms(content: str, term_groups: list[list[str]]) -> bool:
-    """
-    Check if content matches all required term groups.
+    """Check if content matches all required term groups.
     Each term group requires at least one of its terms to be present.
     All term groups must be satisfied.
     """
@@ -146,7 +145,8 @@ def describe_image_messages(
 ) -> list[dict]:
     """Build the system + user messages used by the completions-with-image
     family of tests. *extra_image_fields* is merged into the top-level
-    image content block (for uuid / bad-key tests)."""
+    image content block (for uuid / bad-key tests).
+    """
     image_block: dict = {
         "type": "image_url",
         "image_url": {"url": image_url},
@@ -176,7 +176,8 @@ async def complete_and_check(
     temperature: float = 0.0,
 ) -> str:
     """Run a chat completion and assert the output is non-empty.
-    Returns the content string."""
+    Returns the content string.
+    """
     chat_completion = await client.chat.completions.create(
         model=model_name,
         messages=messages,

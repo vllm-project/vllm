@@ -91,8 +91,7 @@ def flashinfer_sampler_supported() -> bool:
 
 
 class TopKTopPSampler(nn.Module):
-    """
-    Module that performs optional top-k and top-p filtering followed by
+    """Module that performs optional top-k and top-p filtering followed by
     weighted random sampling of logits.
 
     Implementations may update the logits tensor in-place.
@@ -154,8 +153,7 @@ class TopKTopPSampler(nn.Module):
         k: torch.Tensor | None,
         p: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """
-        PyTorch-native implementation of top-k and top-p sampling.
+        """PyTorch-native implementation of top-k and top-p sampling.
 
         The logits tensor may be updated in-place.
         """
@@ -207,8 +205,7 @@ class TopKTopPSampler(nn.Module):
         k: torch.Tensor | None,
         p: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """
-        PyTorch-native implementation of top-k and top-p sampling for CPU.
+        """PyTorch-native implementation of top-k and top-p sampling for CPU.
 
         The logits tensor may be updated in-place.
         """
@@ -423,8 +420,7 @@ def apply_top_k_top_p_pytorch(
 
 
 def apply_top_k_only(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
-    """
-    Apply top-k mask to the logits.
+    """Apply top-k mask to the logits.
 
     This implementation doesn't involve sorting the entire vocab.
     Note however that it involves a GPU->CPU sync which can be detrimental for

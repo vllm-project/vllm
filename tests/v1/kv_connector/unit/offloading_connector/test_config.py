@@ -863,7 +863,8 @@ def test_parallelism_agnostic_excluded(kv_cache_groups: list[KVCacheGroupSpec]):
 )
 def test_canonical_layout_gate(kv_cache_groups, certified):
     """The canonical layout certifies portability group by group; none of
-    these shapes are portable in the direct layout."""
+    these shapes are portable in the direct layout.
+    """
     assert not _parallelism_agnostic(kv_cache_groups)
     assert _parallelism_agnostic(kv_cache_groups, canonical=True) is certified
 
@@ -871,7 +872,8 @@ def test_canonical_layout_gate(kv_cache_groups, certified):
 def test_canonical_layout_certifies_v2_model_runner():
     """Canonical bytes are certified per layer against live tensor strides at
     registration, so the static gate must not depend on the model-runner
-    version — the v2 runner is the case the canonical layout exists for."""
+    version — the v2 runner is the case the canonical layout exists for.
+    """
     groups = _groups(_full_attention_spec())
     assert _parallelism_agnostic(groups, canonical=True, v2=True)
 

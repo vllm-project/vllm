@@ -129,7 +129,8 @@ def test_producer_session_grant_nacks_missing_entry():
 
 def test_producer_session_grant_nacks_not_ready_entry_as_retryable():
     """An announced entry whose save is still in flight is distinguished from a
-    miss, so the consumer retries instead of falling back to local compute."""
+    miss, so the consumer retries instead of falling back to local compute.
+    """
     cache = EmbeddingCache(num_blocks=8)
     cache.alloc("h1", 2)  # not ready
     s = _make_producer_session(cache)
@@ -329,7 +330,6 @@ def test_consumer_xfer_quarantined_exception_settles():
 
 def test_consumer_xfer_quarantined_timeout_evicts_blocks():
     """Quarantine timeout should release handle and return READ_FAILED."""
-
     data = _make_data(xfer_state="PROC")
     x = _started(data)
     # First poll transitions to QUARANTINED (deadline extended by 60s)
@@ -438,7 +438,8 @@ def test_consumer_session_poll_nack_goes_to_tombstoned():
 
 def test_consumer_session_poll_not_ready_nack_goes_to_retryable():
     """A not-ready NACK must not tombstone: tombstoning admits the request with
-    no embedding, which is fatal once the media has been rewritten away."""
+    no embedding, which is fatal once the media has been rewritten away.
+    """
     import msgspec
 
     s = _make_consumer_session()

@@ -209,7 +209,8 @@ class DeepseekV41ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Supports
         self, image_embeds: torch.Tensor, types: torch.Tensor
     ) -> torch.Tensor:
         """Full image span: aligner rows at IMAGE slots, the learned
-        delimiter vectors at IMAGE_START/IMAGE_NEW_LINE/IMAGE_END."""
+        delimiter vectors at IMAGE_START/IMAGE_NEW_LINE/IMAGE_END.
+        """
         types = types.to(image_embeds.device)
         span = image_embeds.new_empty(types.numel(), image_embeds.shape[-1])
         dtype = image_embeds.dtype

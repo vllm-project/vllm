@@ -42,7 +42,8 @@ class DeepseekV4CPUCompressor(DeepseekCompressor):
         weight loading (see
         ``DeepseekV4CPUAttention.process_weights_after_loading``) -- the CPU
         kernel requires fp32/contiguous but the checkpoint loads this weight
-        in bf16, and it never changes after loading."""
+        in bf16, and it never changes after loading.
+        """
         self._norm_weight_fp32 = self.norm.weight.to(torch.float32).contiguous()
 
     def forward(

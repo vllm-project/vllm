@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit test for the MLADualRMSNormFusionPass.
+"""Unit test for the MLADualRMSNormFusionPass.
 
 The pass fuses paired q/kv RMS norms in MLA attention into a single
 fused_mla_dual_rms_norm op backed by AITER's fused_qk_rmsnorm kernel.
@@ -38,13 +37,12 @@ FP8_DTYPE = current_platform.fp8_dtype()
 
 
 class MLADualRMSNormTestModel(torch.nn.Module):
-    """
-    Minimal model reproducing the MLA dual RMS norm pattern:
-        linear -> split([q_dim, kv_dim])
-            +-- q_c (getitem 0) -> rms_norm(q_w, eps) -> linear
-            +-- kv_lora (getitem 1) -> split([kv_c_dim, k_pe_dim])
-                    +-- kv_c (getitem 0) -> rms_norm(kv_w, eps)
-                    +-- k_pe
+    """Minimal model reproducing the MLA dual RMS norm pattern:
+    linear -> split([q_dim, kv_dim])
+        +-- q_c (getitem 0) -> rms_norm(q_w, eps) -> linear
+        +-- kv_lora (getitem 1) -> split([kv_c_dim, k_pe_dim])
+                +-- kv_c (getitem 0) -> rms_norm(kv_w, eps)
+                +-- k_pe
     """
 
     def __init__(
@@ -155,13 +153,12 @@ def test_fuse_mla_dual_rms_norm(
 
 
 class MLADualRMSNormFp8PerTokenTestModel(torch.nn.Module):
-    """
-    Minimal model reproducing the FP8 MLA attention path with *per-token* quant:
-        linear -> split([q_dim, kv_dim])
-            +-- q_c (getitem 0) -> rocm_aiter_rmsnorm_fused_dynamic_quant -> dequant
-            +-- kv_lora (getitem 1) -> split([kv_c_dim, k_pe_dim])
-                    +-- kv_c (getitem 0) -> rms_norm (bf16)
-                    +-- k_pe
+    """Minimal model reproducing the FP8 MLA attention path with *per-token* quant:
+    linear -> split([q_dim, kv_dim])
+        +-- q_c (getitem 0) -> rocm_aiter_rmsnorm_fused_dynamic_quant -> dequant
+        +-- kv_lora (getitem 1) -> split([kv_c_dim, k_pe_dim])
+                +-- kv_c (getitem 0) -> rms_norm (bf16)
+                +-- k_pe
     """
 
     def __init__(

@@ -166,8 +166,7 @@ def test_cpu_eviction_removed_precedes_stored():
 
 @pytest.mark.parametrize("eviction_policy", ["lru", "arc"])
 def test_already_stored_chunk_not_evicted_during_prepare_store(eviction_policy):
-    """
-    Regression test: a chunk that is already stored must not be evicted
+    """Regression test: a chunk that is already stored must not be evicted
     by prepare_store() when it needs to make room for new chunks.
     Applies to both lru and arc policies.
 
@@ -367,9 +366,7 @@ def test_cpu_manager_clears_write_usage_after_failed_store():
 
 
 def test_cpu_manager():
-    """
-    Tests CPUOffloadingManager with lru policy.
-    """
+    """Tests CPUOffloadingManager with lru policy."""
     # initialize a CPU manager with a capacity of 4 chunks
     cpu_manager = make_cpu_manager(num_chunks=4, cache_policy="lru", enable_events=True)
 
@@ -597,8 +594,7 @@ class TestARCPolicy:
         return manager, policy
 
     def test_basic(self):
-        """
-        Tests CPUOffloadingManager with arc policy.
+        """Tests CPUOffloadingManager with arc policy.
         Verifies that ARC handles store, load, and lookup operations correctly.
         """
         cpu_manager, arc_policy = self._make_manager()
@@ -637,8 +633,7 @@ class TestARCPolicy:
         assert len(arc_policy.t2) == 0
 
     def test_t1_to_t2_promotion(self):
-        """
-        Tests that accessing a chunk in T1 promotes it to T2 (frequent).
+        """Tests that accessing a chunk in T1 promotes it to T2 (frequent).
         This is a key feature of ARC's adaptive behavior.
         """
         cpu_manager, arc_policy = self._make_manager(enable_events=False)
@@ -659,8 +654,7 @@ class TestARCPolicy:
         assert to_keys([1])[0] in arc_policy.t2
 
     def test_eviction_with_load(self):
-        """
-        Tests ARC eviction behavior similar to LRU test.
+        """Tests ARC eviction behavior similar to LRU test.
         Verifies that chunks being loaded (ref_cnt > 0) cannot be evicted.
         """
         cpu_manager, _ = self._make_manager()
@@ -700,8 +694,7 @@ class TestARCPolicy:
         assert len(prepare_store_output.evicted_keys) >= 1
 
     def test_adaptive_target(self):
-        """
-        Tests ARC's adaptive target adjustment via ghost lists.
+        """Tests ARC's adaptive target adjustment via ghost lists.
         When a chunk in B1 (ghost list) is accessed, target_t1_size increases.
         When a chunk in B2 is accessed, target_t1_size decreases.
         """
@@ -728,8 +721,7 @@ class TestARCPolicy:
         assert arc_policy.target_t1_size > initial_target
 
     def test_t1_t2_eviction_policy(self):
-        """
-        Tests that ARC evicts from T1 or T2 based on target_t1_size.
+        """Tests that ARC evicts from T1 or T2 based on target_t1_size.
         If |T1| >= target_t1_size, evict from T1, otherwise from T2.
         """
         cpu_manager, arc_policy = self._make_manager(enable_events=False)
@@ -917,8 +909,7 @@ class TestARCPolicy:
         assert not arc_policy.b2
 
     def test_ghost_list_bounds(self):
-        """
-        Tests that ghost lists (B1, B2) don't grow unbounded.
+        """Tests that ghost lists (B1, B2) don't grow unbounded.
         They should be capped at cache_capacity.
         """
         cpu_manager, arc_policy = self._make_manager(num_chunks=2, enable_events=False)
@@ -937,8 +928,7 @@ class TestARCPolicy:
         assert len(arc_policy.b2) <= arc_policy.cache_capacity
 
     def test_touch_ordering(self):
-        """
-        Tests that touch() correctly updates access patterns.
+        """Tests that touch() correctly updates access patterns.
         Similar to LRU test but verifies T1/T2 ordering.
         """
         cpu_manager, arc_policy = self._make_manager()
@@ -970,8 +960,7 @@ class TestARCPolicy:
         )
 
     def test_failed_store(self):
-        """
-        Tests that failed store operations clean up correctly.
+        """Tests that failed store operations clean up correctly.
         Similar to LRU test but for ARC.
         """
         cpu_manager, arc_policy = self._make_manager()
@@ -999,8 +988,7 @@ class TestARCPolicy:
         assert evicted_hash in arc_policy.b1
 
     def test_full_scenario(self):
-        """
-        Comprehensive test covering multiple ARC operations in sequence.
+        """Comprehensive test covering multiple ARC operations in sequence.
         Similar to the full LRU test but adapted for ARC behavior.
         """
         cpu_manager, arc_policy = self._make_manager()
@@ -1039,9 +1027,7 @@ class TestARCPolicy:
 
 
 def test_filter_reused_manager():
-    """
-    Tests CPUOffloadingManager reuse filtering (store_threshold=2).
-    """
+    """Tests CPUOffloadingManager reuse filtering (store_threshold=2)."""
     manager = make_cpu_manager(
         num_chunks=4,
         cache_policy="lru",
@@ -1148,8 +1134,7 @@ def test_store_threshold_does_not_hide_ready_reuse():
 
 
 def test_evictable_cache_chunk_count():
-    """
-    Verifies _num_evictable_cache_chunks is maintained correctly through the
+    """Verifies _num_evictable_cache_chunks is maintained correctly through the
     full store/load lifecycle, eviction, failed stores, concurrent loads,
     reset_cache, and the early-exit fast path in prepare_store.
     """

@@ -98,8 +98,7 @@ class PyNcclCommunicator:
         device: int | str | torch.device,
         library_path: str | None = None,
     ):
-        """
-        Args:
+        """Args:
             group: the process group to work on. If None, it will use the
                 default process group.
             device: the device to bind the PyNcclCommunicator to. If None,
@@ -108,6 +107,7 @@ class PyNcclCommunicator:
                 use the default library path.
         It is the caller's responsibility to make sure each communicator
         is bind to a unique device.
+
         """
         if not isinstance(group, StatelessProcessGroup):
             assert dist.is_initialized()

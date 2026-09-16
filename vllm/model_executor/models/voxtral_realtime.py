@@ -90,7 +90,7 @@ class VoxtralRealtimeMultiModalProcessor(VoxtralMultiModalProcessor):
 
 
 class TimeEmbedding(torch.nn.Module):
-    """Sinusoidal Embedding for encoding time"""
+    """Sinusoidal Embedding for encoding time."""
 
     def __init__(self, dim: int, theta: float = 10000.0) -> None:
         super().__init__()
@@ -391,7 +391,7 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
     def embed_multimodal(
         self, **kwargs
     ) -> list[torch.Tensor] | torch.Tensor | tuple[torch.Tensor, ...] | None:
-        """Transform audio waveforms -> initial whisper post-conv embeddings"""
+        """Transform audio waveforms -> initial whisper post-conv embeddings."""
         audio_inputs = self._parse_and_validate_audio_arrays(**kwargs)
 
         if audio_inputs is None:

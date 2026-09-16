@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Helion Kernel test utils"""
+"""Helion Kernel test utils."""
 
 import pytest
 import torch

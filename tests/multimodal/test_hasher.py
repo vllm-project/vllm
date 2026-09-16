@@ -141,7 +141,8 @@ def test_hash_collision_video_num_frames():
 
 def test_hash_video_tensor_frames():
     """Videos holding tensor frames (e.g. NVDEC-decoded) hash like
-    array-framed ones, from the original bytes without a D2H copy."""
+    array-framed ones, from the original bytes without a D2H copy.
+    """
     source = b"x" * 100
 
     def item_for_hash(frames):

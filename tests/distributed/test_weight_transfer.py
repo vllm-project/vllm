@@ -1166,7 +1166,8 @@ class RecordingClient:
 
 def _module_with(*pairs):
     """A tiny nn.Module exposing the given (name, tensor) pairs as parameters,
-    so trainer tests can build a ModuleSource without a real model."""
+    so trainer tests can build a ModuleSource without a real model.
+    """
     module = torch.nn.Module()
     for name, tensor in pairs:
         module.register_parameter(name, torch.nn.Parameter(tensor, requires_grad=False))
@@ -1287,7 +1288,8 @@ class TestModuleSource:
 
     def test_metadata_agrees_with_iteration(self):
         """The two channels must line up element-for-element: engines declare
-        the round from `metadata()` and then send what iteration yields."""
+        the round from `metadata()` and then send what iteration yields.
+        """
         source = ModuleSource(
             _module_with(("w", torch.zeros(2, 3)), ("b", torch.zeros(3)))
         )
@@ -1301,11 +1303,13 @@ class TestModuleSource:
 class TestWeightSourceGroupContract:
     """`groups()` / `iter_groups()` on the WeightSource ABC. Groups are what
     backends gather and free by, so the default must agree with
-    `layerwise_groups` over `metadata()`, restricted to what this rank holds."""
+    `layerwise_groups` over `metadata()`, restricted to what this rank holds.
+    """
 
     class _Source(WeightSource):
         """Minimal source over an ordered (name, tensor) list, optionally holding
-        only some names (in which case it iterates only their groups)."""
+        only some names (in which case it iterates only their groups).
+        """
 
         def __init__(self, names, held=None, reverse=False):
             self._pairs = [(n, torch.full((2,), float(i))) for i, n in enumerate(names)]
@@ -1360,7 +1364,8 @@ class TestWeightSourceGroupContract:
     def test_groups_order_follows_metadata_not_the_declaration(self):
         """The declaration is a SET of names; the groups it selects still come
         out in metadata order, so each pairs with the right ``iter_groups()``
-        batch however the source listed them."""
+        batch however the source listed them.
+        """
         names = ["embed.w", "model.layers.0.a", "model.layers.1.a", "norm.w"]
         source = self._source(
             names, held=["model.layers.1.a", "model.layers.0.a", "model.layers.1.a"]
@@ -1394,14 +1399,16 @@ class TestWeightSourceGroupContract:
 
     def test_out_of_order_iteration_raises(self):
         """Materializing is usually a collective, so a rank that iterates out of
-        order deadlocks its peers -- fail loudly instead."""
+        order deadlocks its peers -- fail loudly instead.
+        """
         source = self._source(["model.layers.0.a", "model.layers.0.b"], reverse=True)
         with pytest.raises(RuntimeError, match="iteration order must match"):
             list(source.iter_groups())
 
     def test_a_source_may_override_iter_groups(self):
         """The extension point: materialize a whole group in one step instead of
-        one generator resume per tensor."""
+        one generator resume per tensor.
+        """
         calls = []
 
         class _Batched(TestWeightSourceGroupContract._Source):
@@ -1422,7 +1429,8 @@ class TestDeferredProcessingContract:
     caller that takes over the update tail (running its own
     `finalize_layerwise_reload` instead of going through `finish_weight_update`)
     reads the flag and calls the method. Both must be answerable on any engine, or
-    that caller ends up reaching through a getattr."""
+    that caller ends up reaching through a getattr.
+    """
 
     def _engines(self):
         return {
@@ -1436,7 +1444,8 @@ class TestDeferredProcessingContract:
 
     def test_every_engine_can_be_drained(self):
         """The default is a no-op, so a caller never has to check whether the
-        method exists before calling it."""
+        method exists before calling it.
+        """
         for name, cls in self._engines().items():
             assert callable(cls.drain_pending), name
 
@@ -1530,7 +1539,8 @@ class TestTrainerEngineBase:
 )
 def test_ipc_trainer_send_weights_drives_client_in_order():
     """send_weights issues start -> update -> finish and ships per-round metadata;
-    the packed wire param rides the init info, not the per-round update_info."""
+    the packed wire param rides the init info, not the per-round update_info.
+    """
     client = RecordingClient()
     engine = IPCTrainerWeightTransferEngine(
         client=client,
@@ -1549,7 +1559,8 @@ def test_ipc_trainer_send_weights_drives_client_in_order():
 
 def test_ipc_trainer_init_ships_packed_to_worker():
     """trainer_init drives the inference-side init handshake and propagates the
-    must-agree `packed` flag to the worker."""
+    must-agree `packed` flag to the worker.
+    """
     if torch.accelerator.device_count() < 1:
         pytest.skip("Need at least 1 GPU (CUDA IPC handles).")
 
@@ -1570,7 +1581,8 @@ def test_ipc_trainer_init_ships_packed_to_worker():
 def test_nccl_trainer_init_ships_worker_init_info(monkeypatch):
     """The sender's trainer_init drives the inference-side init handshake with
     the worker-shaped init info (rank_offset=1) while opening its own endpoint,
-    and propagates the must-agree wire params to the worker."""
+    and propagates the must-agree wire params to the worker.
+    """
     import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
 
     # Bypass the real NCCL rendezvous.
@@ -1611,7 +1623,8 @@ def test_nccl_trainer_init_ships_worker_init_info(monkeypatch):
 def test_nccl_worker_learns_wire_params_from_init_handshake(monkeypatch):
     """The worker engine reads packed + buffer geometry from the
     trainer-supplied init info at the handshake, not from the config or the
-    per-round update info."""
+    per-round update info.
+    """
     import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
 
     monkeypatch.setattr(
@@ -1644,7 +1657,8 @@ def test_nccl_worker_learns_wire_params_from_init_handshake(monkeypatch):
 
 def test_nccl_trainer_init_non_sender_skips_rendezvous_and_client():
     """Non-sender trainer ranks build an engine without opening an endpoint or
-    touching the client; they only join the collectives in send_weights."""
+    touching the client; they only join the collectives in send_weights.
+    """
     client = RecordingClient()
     engine = WeightTransferTrainerFactory.trainer_init(
         init_info=NCCLTrainerInitInfo(
@@ -1674,7 +1688,8 @@ def test_nccl_trainer_init_non_sender_skips_rendezvous_and_client():
 def test_nccl_trainer_send_weights_drives_client_in_order():
     """send_weights issues start -> update -> finish and ships per-round
     metadata; the packed wire params ride the init handshake, not the
-    per-round update_info."""
+    per-round update_info.
+    """
     client = RecordingClient()
     engine = NCCLTrainerWeightTransferEngine(
         client=client,
@@ -1695,7 +1710,8 @@ def test_nccl_trainer_send_weights_drives_client_in_order():
 
 class _ScriptedSource(WeightSource):
     """Declares `meta` but yields whatever `pairs` says — used to drive the
-    metadata/iteration agreement checks."""
+    metadata/iteration agreement checks.
+    """
 
     def __init__(self, meta, pairs):
         self._meta = meta
@@ -1731,7 +1747,8 @@ def test_nccl_trainer_init_requires_source():
 
 def test_nccl_trainer_send_weights_rejects_reordered_source(monkeypatch):
     """The worker sizes its buffers (and cuts packed chunks) from metadata(), so
-    iteration disagreeing with it must raise rather than corrupt the stream."""
+    iteration disagreeing with it must raise rather than corrupt the stream.
+    """
     meta = [
         ParamMeta("w", torch.float32, (4,)),
         ParamMeta("b", torch.float32, (2,)),
@@ -1745,7 +1762,8 @@ def test_nccl_trainer_send_weights_rejects_reordered_source(monkeypatch):
 
 def test_nccl_trainer_send_weights_rejects_dtype_disagreement(monkeypatch):
     """A source that declares one wire dtype and materializes another would make
-    the two sides disagree on every byte offset."""
+    the two sides disagree on every byte offset.
+    """
     meta = [ParamMeta("w", torch.float32, (4,))]
     engine = _mock_group_engine(
         _ScriptedSource(meta, [("w", torch.zeros(4, dtype=torch.bfloat16))]),
@@ -1772,7 +1790,8 @@ def test_nccl_trainer_send_weights_rejects_truncated_source(monkeypatch):
 
 def test_nccl_trainer_send_weights_broadcasts_contiguous(monkeypatch):
     """NCCL sends numel elements from data_ptr(), so a non-contiguous view must
-    be linearized first or the worker receives unrelated memory."""
+    be linearized first or the worker receives unrelated memory.
+    """
     base = torch.arange(6, dtype=torch.float32).reshape(2, 3)
     view = base.t()  # non-contiguous
     meta = [ParamMeta("w", torch.float32, tuple(view.shape))]
@@ -1842,7 +1861,8 @@ def _sparse_patch(device: str = "cpu") -> SparseWeightPatch:
 def test_sparse_nccl_trainer_init_ships_worker_init_info(monkeypatch):
     """The sender's trainer_init drives the init handshake with the
     worker-shaped init info; sparse ships no packed wire params, so the worker
-    keeps its unpacked defaults. Sparse takes no `source`."""
+    keeps its unpacked defaults. Sparse takes no `source`.
+    """
     import vllm.distributed.weight_transfer.sparse_nccl_engine as sparse_mod
 
     monkeypatch.setattr(sparse_mod, "open_trainer_endpoint", lambda info: MagicMock())
@@ -1895,7 +1915,8 @@ def test_sparse_nccl_trainer_send_weights_drives_client_in_order(monkeypatch):
 
 def test_sparse_nccl_trainer_send_weights_empty_round_is_noop():
     """A round with no patches must not touch the client (an empty sparse
-    update info is invalid by construction)."""
+    update info is invalid by construction).
+    """
     client = RecordingClient()
     engine = SparseNCCLTrainerWeightTransferEngine(client=client)
     engine.model_update_group = MagicMock()
@@ -1931,7 +1952,8 @@ def test_sparse_nccl_trainer_rejects_source():
 def test_sparse_nccl_trainer_validates_patch_before_any_rpc():
     """Malformed patches must fail on the trainer, before start_weight_update:
     the worker's own checks only run once the broadcasts are already in flight,
-    where a size mismatch wedges both sides instead of raising."""
+    where a size mismatch wedges both sides instead of raising.
+    """
     client = RecordingClient()
     engine = SparseNCCLTrainerWeightTransferEngine(client=client)
     engine.model_update_group = MagicMock()

@@ -53,8 +53,7 @@ async def serve_http(
     enable_ssl_refresh: bool = False,
     **uvicorn_kwargs: Any,
 ):
-    """
-    Start a FastAPI app using Uvicorn, with support for custom Uvicorn config
+    """Start a FastAPI app using Uvicorn, with support for custom Uvicorn config
     options.  Supports http header limits via h11_max_incomplete_event_size and
     h11_max_header_count.
     """
@@ -185,8 +184,7 @@ async def serve_http(
 
 
 async def watchdog_loop(server: uvicorn.Server, engine: EngineClient):
-    """
-    # Watchdog task that runs in the background, checking
+    """# Watchdog task that runs in the background, checking
     # for error state in the engine. Needed to trigger shutdown
     # if an exception arises is StreamingResponse() generator.
     """
@@ -197,8 +195,7 @@ async def watchdog_loop(server: uvicorn.Server, engine: EngineClient):
 
 
 def terminate_if_errored(server: uvicorn.Server, engine: EngineClient):
-    """
-    See discussions here on shutting down a uvicorn server
+    """See discussions here on shutting down a uvicorn server
     https://github.com/encode/uvicorn/discussions/1103
     In this case we cannot await the server shutdown here
     because handler must first return to close the connection
@@ -254,7 +251,6 @@ def validate_api_server_args(args):
 @instrument(span_name="API server setup")
 def setup_server(args, *, reuse_port: bool):
     """Validate API server args and create the server socket."""
-
     log_version_and_model(logger, VLLM_VERSION, args.model)
     log_non_default_args(args)
 

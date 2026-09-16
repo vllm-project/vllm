@@ -130,7 +130,8 @@ def test_is_supported_config(present, ep_size, supported, reason_substr):
 
 def test_explicit_moe_backend_aiter():
     """--moe-backend aiter: returns FlyDSL when usable (TP or EP), else a clear
-    ValueError when the flydsl package is missing."""
+    ValueError when the flydsl package is missing.
+    """
     with _gfx950(), _flydsl_installed(True):
         assert (
             _select_kernel_cls(Fp8MoeBackend.AITER_MXFP8, _config(1))
@@ -161,8 +162,9 @@ def test_gfx950_picks_aiter():
 
 
 def test_gfx942_picks_emulation():
-    """flydsl unusable (e.g. gfx942, no FlyDSL support) -> native Triton
-    dot_scaled backend wins instead."""
+    """Flydsl unusable (e.g. gfx942, no FlyDSL support) -> native Triton
+    dot_scaled backend wins instead.
+    """
     with patch(f"{_AITER_MOD}.current_platform.supports_mx", return_value=False):
         backend, experts_cls = select_mxfp8_moe_backend(_config())
     assert backend is Fp8MoeBackend.EMULATION

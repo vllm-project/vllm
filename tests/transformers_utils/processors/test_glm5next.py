@@ -330,7 +330,8 @@ def test_sample_frames_fps_interval(video_processor):
 
 def test_defaults_mirror_checkpoint_config():
     """Bare instantiation matches the checkpoint's ``processor_config.json``
-    token-budget style defaults; ``size`` carries no budget."""
+    token-budget style defaults; ``size`` carries no budget.
+    """
     image_processor = Glm5NextImageProcessor()
     assert image_processor.patch_expand_factor == 1
     assert image_processor.min_image_tokens == 16
@@ -364,7 +365,8 @@ def test_missing_token_budgets_rejected():
 
 def test_video_config_fields_land():
     """fps_interval / max_frame_count_dynamic from the dedicated config
-    shape sampling without any request overrides."""
+    shape sampling without any request overrides.
+    """
     proc = Glm5NextVideoProcessor(
         fps_interval=4,
         max_frame_count_dynamic=32,

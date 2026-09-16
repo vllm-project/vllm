@@ -146,7 +146,8 @@ class TestUfffdReasoningTransition:
 
     def test_byte_fallback_tokenizer_produces_ufffd(self):
         """Validate the fixture: decode() returns U+FFFD for isolated
-        byte-fallback token IDs, proving the old code path would leak."""
+        byte-fallback token IDs, proving the old code path would leak.
+        """
         vocab = dict(_MODEL_CONFIGS[0].values[0])
         tokenizer = ByteFallbackMockTokenizer(vocab, _SHARED_TOKENS, _SHARED_UFFFD_IDS)
         assert tokenizer.decode([200]) == "�"

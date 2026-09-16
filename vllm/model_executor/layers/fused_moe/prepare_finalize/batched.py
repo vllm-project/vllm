@@ -16,8 +16,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 
 
 class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
-    """
-    A reference prepare/finalize class that reorganizes the tokens into
+    """A reference prepare/finalize class that reorganizes the tokens into
     expert batched format, i.e. E x max_num_tokens x K.  This is the format
     that the batched dispatch/combine kernels use.
     """

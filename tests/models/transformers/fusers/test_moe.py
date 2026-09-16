@@ -277,7 +277,8 @@ def test_moe_fuser_matches_scaled_router():
 
 def test_moe_fuser_matches_grouped_router():
     """Group masking between the score and the routing top-k still matches: the
-    scorer is anchored on the routing (last) top-k, not the group one."""
+    scorer is anchored on the routing (last) top-k, not the group one.
+    """
     with torch.device("meta"):
         block = MoEBlock(GroupedRouter)
     fuser = MoEBlockFuser.match(block, "experts")
@@ -287,7 +288,8 @@ def test_moe_fuser_matches_grouped_router():
 
 def test_moe_fuser_matches_correction_router():
     """A score-correction bias buffer (DeepSeek-V3 noaux) is allowed; the
-    rebuilt gate carries it in fp32 for FusedMoE's biased routers."""
+    rebuilt gate carries it in fp32 for FusedMoE's biased routers.
+    """
     with torch.device("meta"):
         block = MoEBlock(CorrectionRouter)
     fuser = MoEBlockFuser.match(block, "experts")
@@ -298,7 +300,8 @@ def test_moe_fuser_matches_correction_router():
 def test_moe_fuser_reads_router_dtype_from_the_gate():
     """A router that computes its logits in fp32 must keep routing in fp32 when
     rebuilt, even though no config field names the dtype. The cast back to the
-    activation dtype after the top-k must not be mistaken for the routing dtype."""
+    activation dtype after the top-k must not be mistaken for the routing dtype.
+    """
     with torch.device("meta"):
         fp32 = MoEBlockFuser.match(MoEBlock(Fp32Router), "experts")
         default = MoEBlockFuser.match(MoEBlock(TopKRouter), "experts")
@@ -317,7 +320,8 @@ def test_moe_fuser_detects_shared_experts():
 
 def test_moe_fuser_skips_shared_detection_without_extra_children():
     """With only experts and gate, shared-expert detection (and its block trace)
-    is skipped, so a gate-derived add is not misread as a shared expert."""
+    is skipped, so a gate-derived add is not misread as a shared expert.
+    """
     with torch.device("meta"):
         block = MoEBlockNoShared()
     fuser = MoEBlockFuser.match(block, "experts")
@@ -362,7 +366,8 @@ def test_moe_fuser_declines_unsupported(block_cls):
 
 def test_moe_fuser_ignores_nested_returns():
     """A tuple `return` inside a nested helper must not decline a block whose own
-    forward returns a single tensor."""
+    forward returns a single tensor.
+    """
     with torch.device("meta"):
         block = MoEBlockNestedTupleReturn()
     assert isinstance(MoEBlockFuser.match(block, "experts"), MoEBlockFuser)
@@ -370,7 +375,8 @@ def test_moe_fuser_ignores_nested_returns():
 
 def test_moe_fuser_router_requires_connected_dataflow():
     """A gate with linear + softmax + top-k present but not wired as a router
-    (top-k selects over the input, not the scored logits) is not detected."""
+    (top-k selects over the input, not the scored logits) is not detected.
+    """
     with torch.device("meta"):
         block = MoEBlock(DisconnectedRouter)
     assert MoEBlockFuser.match(block, "experts") is None

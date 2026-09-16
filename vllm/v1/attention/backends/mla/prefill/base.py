@@ -70,7 +70,8 @@ class MLAPrefillBackend(ABC):
     def supports_quant_output(self, quant_key: "QuantKey") -> bool:
         """Whether `run_prefill_new_tokens` can write quantized output
         directly (fused) for the given quant key, skipping the post-quant
-        pass. Overridden by backends that support it."""
+        pass. Overridden by backends that support it.
+        """
         return False
 
     def supports_out(self) -> bool:

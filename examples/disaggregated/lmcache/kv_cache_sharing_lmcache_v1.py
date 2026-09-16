@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This file demonstrates the example usage of remote KV cache sharing
+"""This file demonstrates the example usage of remote KV cache sharing
 with LMCache.
 We will launch 2 vllm instances, and launch an additional LMCache server.
 KV cache is transferred in the following manner:

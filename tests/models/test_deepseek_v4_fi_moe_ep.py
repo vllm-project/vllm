@@ -103,7 +103,8 @@ def test_fi_backend_strings_are_registered_mega_moe_backends():
 @pytest.mark.parametrize("moe_backend", sorted(FLASHINFER_MOE_EP_BACKENDS))
 def test_fi_moe_ep_backend_rejected_for_non_dsv4(moe_backend):
     """An FI moe_ep backend with a non-DSv4 model must fail at config time
-    instead of silently falling through to the generic FusedMoE path."""
+    instead of silently falling through to the generic FusedMoE path.
+    """
     with pytest.raises(ValueError, match="only supported for DeepSeek-V4"):
         validate_flashinfer_moe_ep_model(moe_backend, ["MixtralForCausalLM"])
 
@@ -118,8 +119,9 @@ def test_fi_moe_ep_backend_accepted_for_dsv4(moe_backend):
     [["KimiK3ForConditionalGeneration"], ["MixtralForCausalLM"]],
 )
 def test_native_deep_gemm_mega_moe_not_arch_gated(architectures):
-    """vLLM's own deep_gemm mega path is not DSv4-only (Kimi K3 uses it);
-    models validate their own constraints at construction time."""
+    """VLLM's own deep_gemm mega path is not DSv4-only (Kimi K3 uses it);
+    models validate their own constraints at construction time.
+    """
     validate_flashinfer_moe_ep_model("deep_gemm_mega_moe", architectures)
 
 
@@ -132,7 +134,8 @@ def test_all_mega_backends_get_sequence_parallel_moe(moe_backend):
     """Every mega backend must qualify for sequence-parallel MoE at
     TP>1/EP: the predicate once matched only the native backend string,
     which silently ran the fi backends full-batch with an all-reduce on
-    every rank — 0.42-0.65x native e2e at TP8."""
+    every rank — 0.42-0.65x native e2e at TP8.
+    """
     from vllm.models.deepseek_v4.nvidia.model import _use_sequence_parallel
 
     vllm_config = SimpleNamespace(
@@ -176,7 +179,8 @@ def test_bootstrap_pins_the_device_vllm_bound(fake_flashinfer, monkeypatch):
     """The runtime must not rederive the device from LOCAL_RANK/rank: under a
     remapped CUDA_VISIBLE_DEVICES that ordinal points at the wrong GPU
     (CUDA_ERROR_ILLEGAL_ADDRESS in the weight transforms). vLLM passes the
-    device it already bound via BootstrapConfig.device."""
+    device it already bound via BootstrapConfig.device.
+    """
     import vllm.utils.flashinfer_moe_ep as mod
 
     pg = object()
@@ -241,7 +245,8 @@ def test_ckpt_uses_nvfp4_experts_reads_moe_quant_algo():
 
 def test_dequant_fp4_ue8m0_gran32_decodes_lut_and_scales():
     """One 32-element scale group per row: low nibble is the even element,
-    high nibble the odd one, ue8m0 scale applies to the whole group."""
+    high nibble the odd one, ue8m0 scale applies to the whole group.
+    """
     packed = torch.arange(32, dtype=torch.uint8).reshape(2, 16)
     sf = torch.tensor([[127], [128]], dtype=torch.uint8)  # 2**0, 2**1
 

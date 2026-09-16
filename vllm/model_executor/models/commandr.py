@@ -114,8 +114,7 @@ class RMSNorm(nn.Module):
 
 
 def select_norm_impl(config: CohereConfig) -> tuple[type[nn.Module], float]:
-    """
-    Returns the normalization layer class and epsilon value to use.
+    """Returns the normalization layer class and epsilon value to use.
     If `config.rms_norm_eps` is present, use RMSNorm.
     Otherwise default to LayerNorm with `config.layer_norm_eps`.
     """

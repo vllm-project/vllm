@@ -82,7 +82,8 @@ def _make_profiling_runner(
 
 class _FakePlatform:
     """Stands in for current_platform; the global graph pool is a class attr,
-    matching vllm.platforms.Platform's lazy singleton."""
+    matching vllm.platforms.Platform's lazy singleton.
+    """
 
     _global_graph_pool: Any = GLOBAL_POOL
 

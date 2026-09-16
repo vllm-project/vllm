@@ -73,7 +73,8 @@ def _apply(bad_words_token_ids: list[list[int]]) -> torch.Tensor:
 
 def test_v2_bad_words_prefix_inside_draft_tokens():
     """A prefix matching entirely within the draft tokens must mask the bad
-    word's last token at the draft position that completes the prefix."""
+    word's last token at the draft position that completes the prefix.
+    """
     out = _apply([[12, 13, 40]])
     expected = torch.zeros_like(out)
     expected[2, 40] = -float("inf")
@@ -82,7 +83,8 @@ def test_v2_bad_words_prefix_inside_draft_tokens():
 
 def test_v2_bad_words_prefix_spanning_committed_and_draft_tokens():
     """A prefix spanning the committed/draft boundary must mask at the row
-    where the prefix completes, not one draft position later."""
+    where the prefix completes, not one draft position later.
+    """
     out = _apply([[11, 12, 30]])
     expected = torch.zeros_like(out)
     expected[1, 30] = -float("inf")
@@ -91,7 +93,8 @@ def test_v2_bad_words_prefix_spanning_committed_and_draft_tokens():
 
 def test_v2_bad_words_no_spurious_match_from_last_committed_token():
     """The last committed token must not be double-counted as the first draft
-    token; [11, 11] never occurs in output [10, 11] + drafts [12, 13]."""
+    token; [11, 11] never occurs in output [10, 11] + drafts [12, 13].
+    """
     out = _apply([[11, 11, 50]])
     expected = torch.zeros_like(out)
     torch.testing.assert_close(out, expected)

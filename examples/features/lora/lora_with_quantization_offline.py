@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This example shows how to use LoRA with different quantization techniques
+"""This example shows how to use LoRA with different quantization techniques
 for offline inference.
 
 Requires HuggingFace credentials for access.
@@ -73,7 +72,6 @@ def initialize_engine(
     model: str, quantization: str, lora_repo: str | None
 ) -> LLMEngine:
     """Initialize the LLMEngine."""
-
     engine_args = EngineArgs(
         model=model,
         quantization=quantization,
@@ -86,7 +84,6 @@ def initialize_engine(
 
 def main():
     """Main function that sets up and runs the prompt processing."""
-
     test_configs = [
         # QLoRA (https://arxiv.org/abs/2305.14314)
         {

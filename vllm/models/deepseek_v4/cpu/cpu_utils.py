@@ -23,6 +23,7 @@ def map_local_to_global_slots_cpu(
 
     Returns:
         [N, K] int64 global slot ids, -1 where ``local_indices`` was invalid.
+
     """
     valid = local_indices >= 0
     safe_local = local_indices.clamp(min=0).to(torch.int64)

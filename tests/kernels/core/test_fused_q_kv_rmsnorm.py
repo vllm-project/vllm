@@ -62,7 +62,8 @@ def test_fused_q_kv_rmsnorm_outputs_are_packed(num_tokens: int):
     a [1, q_size] slice of a [1, q_size + kv_size] buffer used to produce a
     qr_out with row stride q_size + kv_size. Downstream dispatchers that
     require packed row-major inputs then reject the tensor and silently fall
-    back to a slower GEMM path on every decode step."""
+    back to a slower GEMM path on every decode step.
+    """
     device = "cuda"
     dtype = torch.bfloat16
     q_size, kv_size = 192, 576
@@ -88,7 +89,8 @@ def test_fused_q_kv_rmsnorm_outputs_are_packed(num_tokens: int):
 def test_fused_q_kv_rmsnorm_launches_past_grid_y_cap(num_tokens: int):
     """Regression guard: grid used to be (2, num_tokens), hitting CUDA's
     65535 grid-y cap at num_tokens >= 65536. The new grid (num_tokens, 2)
-    lifts that bound to 2**31-1."""
+    lifts that bound to 2**31-1.
+    """
     device = "cuda"
     dtype = torch.bfloat16
     q_size, kv_size = 192, 576
