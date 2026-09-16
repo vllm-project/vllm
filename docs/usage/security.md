@@ -197,9 +197,12 @@ The following endpoints **do not require authentication** even when `--api-key` 
 
 **Operational control endpoints (only when `"generate"` task is supported):**
 
-- `/abort_requests` - Abort in-flight requests (causes loss of in-flight work; note that a dev-only RLHF variant also exists when `VLLM_SERVER_DEV_MODE=1`, and a `--tokens-only` variant exists in disaggregated setups)
 - `/scale_elastic_ep` - Trigger scaling operations
 - `/is_scaling_elastic_ep` - Check if scaling is in progress
+
+**Disaggregated-serving endpoints (only with `--tokens-only`):**
+
+- `/abort_requests` - Abort in-flight requests (causes loss of in-flight work; note that a dev-only RLHF variant also exists when `VLLM_SERVER_DEV_MODE=1`, which aborts all in-flight requests when `request_ids` is empty)
 
 **Fault tolerance endpoints (only when `--enable-fault-tolerance` is set):**
 
@@ -263,8 +266,8 @@ These endpoints are only available when profiling is enabled and should only be 
 An attacker who can reach the vLLM HTTP server can:
 
 1. **Bypass authentication** by using endpoints outside the protected path prefixes, such as `/invocations`, `/generative_scoring`, `/pooling`, `/classify`, `/score`, or `/rerank`, to run arbitrary inference without credentials
-2. **Cause denial of service** by calling `/scale_elastic_ep` or `/abort_requests` without a token (or `/pause` when `VLLM_SERVER_DEV_MODE=1` is set)
-3. **Access operational controls** to manipulate server state (e.g., pausing generation, updating model weights via the dev-only `/update_weights` endpoint when `VLLM_SERVER_DEV_MODE=1` is set)
+2. **Cause denial of service** by calling `/scale_elastic_ep` or `--tokens-only` `/abort_requests` without a token (or `/pause` when `VLLM_SERVER_DEV_MODE=1` is set)
+3. **Access operational controls** to manipulate server state (e.g., triggering scaling via `/scale_elastic_ep`, or — when `VLLM_SERVER_DEV_MODE=1` is set — pausing generation or updating model weights via the dev-only RLHF endpoints)
 4. **If `--enable-tokenizer-info-endpoint` is set:** Access sensitive tokenizer configuration including chat templates, which may reveal prompt engineering strategies or other implementation details
 5. **If `VLLM_SERVER_DEV_MODE=1` is set:** Execute arbitrary RPC commands via `/collective_rpc`, reset caches, put the engine to sleep, and access detailed server configuration
 
