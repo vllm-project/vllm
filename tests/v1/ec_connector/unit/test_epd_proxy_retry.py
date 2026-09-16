@@ -9,6 +9,7 @@ change to them is what these tests catch.
 import asyncio
 import importlib.util
 from pathlib import Path
+from typing import Any
 
 import httpx
 import msgspec
@@ -81,6 +82,96 @@ class _EncoderSession:
 
     async def post(self, url, data=None, headers=None):
         return _EncoderResponse(self._replies.pop(0))
+
+
+@pytest.mark.parametrize("no_rewrite", [False, True])
+def test_image_batches_preserve_item_identity(proxy, monkeypatch, no_rewrite):
+    """Rehashed and repeated images retain metadata and per-occurrence transfers."""
+    seen = []
+
+    class Session:
+        async def post(self, url, data=None, headers=None):
+            body = msgspec.json.decode(data)
+            seen.append((url, body))
+            params: dict[str, dict[str, Any]] = {}
+            for index, item in enumerate(body["messages"][0]["content"]):
+                image = item["image_url"]["url"]
+                entry = params.setdefault(
+                    image + "-processed",
+                    {
+                        "metadata": {"image_grid_thw": [1, 2, ord(image)]},
+                        "item_indices": [],
+                        "peer_port": 1234,
+                    },
+                )
+                entry["item_indices"].append(index)
+            # Response ordering must not affect the image-to-metadata mapping.
+            return _EncoderResponse(dict(reversed(list(params.items()))))
+
+    monkeypatch.setattr(proxy, "encode_session", Session())
+    monkeypatch.setattr(proxy, "NO_REWRITE", no_rewrite)
+    monkeypatch.setattr(proxy, "encoder_rr_idx", 0)
+    images = ["A", "B", "C", "D", "A", "F"]
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": image}}
+                    for image in images
+                ],
+            }
+        ],
+        "mm_processor_kwargs": {"max_pixels": 262144},
+    }
+    meta, handles = asyncio.run(
+        proxy.fanout_encoder_primer(
+            body, ["http://e0", "http://e1"], "r", "tcp://consumer:1"
+        )
+    )
+    assert [len(b["messages"][0]["content"]) for _, b in seen] == [3, 3]
+    assert (
+        len(
+            {
+                x["transfer_id"]
+                for _, b in seen
+                for x in b["ec_transfer_params"]["ec_items"]
+            }
+        )
+        == 6
+    )
+    for url, batch in seen:
+        assert batch["mm_processor_kwargs"] == body["mm_processor_kwargs"]
+        for item in batch["messages"][0]["content"]:
+            assert item["image_url"]["url"] in (
+                {"A", "C"} if url.startswith("http://e0/") else {"B", "D", "F"}
+            )
+    assert [meta[i]["image_grid_thw"][-1] for i in range(6)] == list(map(ord, images))
+    assert [meta[i]["ec_mm_hash"] for i in range(6)] == [
+        x + "-processed" for x in images
+    ]
+    assert handles["A-processed"]["peer_port"] == 1234
+    assert "ec_transfer_params" not in body
+
+
+def test_batch_rejects_ambiguous_metadata(proxy, monkeypatch):
+    monkeypatch.setattr(
+        proxy,
+        "encode_session",
+        _EncoderSession([{"unknown": {"metadata": {"image_grid_thw": [1, 2, 2]}}}]),
+    )
+    body = {
+        "messages": [
+            {
+                "content": [
+                    {"type": "image_url", "image_url": {"url": image}}
+                    for image in ["A", "B"]
+                ]
+            }
+        ]
+    }
+    with pytest.raises(proxy.HTTPException, match="cannot be matched"):
+        asyncio.run(proxy.fanout_encoder_primer(body, ["http://e0"], "r"))
 
 
 def test_a_decode_retry_does_not_inherit_the_previous_handles(proxy, monkeypatch):
@@ -187,20 +278,21 @@ async def test_http_roundtrip_preserves_payload_and_response_bytes(
         body = await request.json()
         seen[stage].append(body)
         if stage == "encode":
-            item = body["messages"][0]["content"][0]
-            mm_hash = item["uuid"]
-            if body.get("mm_processor_kwargs"):
-                mm_hash += "-processed"
-            return web.json_response(
-                {
-                    "ec_transfer_params": {
-                        mm_hash: {
-                            "metadata": {"image_grid_thw": [[1, 2, 2]]},
-                            "peer_port": len(seen[stage]),
-                        }
-                    }
-                }
-            )
+            params: dict[str, dict[str, Any]] = {}
+            for index, item in enumerate(body["messages"][0]["content"]):
+                mm_hash = item["uuid"]
+                if body.get("mm_processor_kwargs"):
+                    mm_hash += "-processed"
+                entry = params.setdefault(
+                    mm_hash,
+                    {
+                        "metadata": {"image_grid_thw": [[1, 2, 2]]},
+                        "peer_port": len(seen[stage]),
+                        "item_indices": [],
+                    },
+                )
+                entry["item_indices"].append(index)
+            return web.json_response({"ec_transfer_params": params})
         if stage == "prefill":
             assert body["max_tokens"] == 1 and body["stream"] is False
             return web.json_response(
@@ -263,7 +355,7 @@ async def test_http_roundtrip_preserves_payload_and_response_bytes(
         finally:
             await proxy.on_shutdown()
 
-    assert len(seen["encode"]) == 4
+    assert len(seen["encode"]) == 2
     assert len(seen["decode"]) == 2
     for requests in seen.values():
         for forwarded in requests:
@@ -296,7 +388,7 @@ async def test_http_roundtrip_preserves_payload_and_response_bytes(
     if request_options:
         mm_hash += "-processed"
     assert set(final["ec_transfer_params"]) - {"ec_items"} == {mm_hash}
-    assert final["ec_transfer_params"][mm_hash]["peer_port"] in (3, 4)
+    assert final["ec_transfer_params"][mm_hash]["peer_port"] == 2
     if prefill:
         assert final["kv_transfer_params"] == {"remote_block_ids": [2]}
 
