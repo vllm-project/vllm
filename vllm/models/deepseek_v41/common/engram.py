@@ -580,6 +580,7 @@ def _engram_head_shard_weight_loader(
         "vocab_start",
         "vocab_end",
         "num_rows",
+        "num_tokens",
         "ids_stride_t",
         "ids_stride_h",
         "GRID",
@@ -593,6 +594,7 @@ def _engram_lookup_kernel(
     vocab_start,
     vocab_end,
     num_rows,
+    num_tokens,
     ids_stride_t,
     ids_stride_h,
     HEAD_START: tl.constexpr,
@@ -617,7 +619,7 @@ def _engram_lookup_kernel(
         token = (rows // LOCAL_HEADS).to(tl.int64)
         index = tl.load(
             ids + token * ids_stride_t + head * ids_stride_h,
-            mask=valid & (head < TOTAL_HEADS),
+            mask=valid & (token < num_tokens) & (head < TOTAL_HEADS),
             other=-1,
         ).to(tl.int64)
         owned = valid & (head < TOTAL_HEADS)
@@ -710,7 +712,7 @@ class ParallelEngramEmbedding(nn.Module):
 
         `background` limits the grid to leave SMs for concurrent work.
         """
-        rows = indices.shape[0] * self.part_n_hash_cols
+        rows = out.shape[0] * self.part_n_hash_cols
         if not rows:
             return
         weight, scales = self._storage()
@@ -726,6 +728,7 @@ class ParallelEngramEmbedding(nn.Module):
             self.vocab_start_idx,
             self.vocab_end_idx,
             rows,
+            indices.shape[0],
             indices.stride(0),
             indices.stride(1),
             HEAD_START=self.head_start,

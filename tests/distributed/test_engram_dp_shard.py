@@ -777,3 +777,157 @@ def test_engram_hash_padding_ignores_other_nodes(tp_size, uniform, monkeypatch):
         torch.testing.assert_close(
             gathered, expected.repeat(group_size, 1, 1), msg=f"DP rank {dp_rank}"
         )
+
+
+def _sp_direct_worker(rank: int, world_size: int, port: int) -> None:
+    """Full shared visibility must produce exactly the existing SP token slice."""
+    torch.accelerator.set_device_index(rank)
+    torch.set_num_threads(1)
+    update_environment_variables(
+        {
+            "RANK": str(rank),
+            "LOCAL_RANK": str(rank),
+            "WORLD_SIZE": str(world_size),
+            "MASTER_ADDR": "localhost",
+            "MASTER_PORT": str(port),
+            "VLLM_USE_V2_MODEL_RUNNER": "1",
+        }
+    )
+    cfg = VllmConfig(
+        parallel_config=ParallelConfig(tensor_parallel_size=world_size),
+        scheduler_config=SchedulerConfig(
+            max_model_len=64,
+            is_encoder_decoder=False,
+            max_num_batched_tokens=64,
+            max_num_seqs=8,
+        ),
+    )
+    cfg.engram_config = EngramConfig(cpu_offload=True, sp_shared_memory=True)
+    cfg.model_config = SimpleNamespace(
+        architecture="DeepseekV41ForCausalLM", is_moe=True, enable_sleep_mode=False
+    )
+    try:
+        init_distributed_environment()
+        with set_current_vllm_config(cfg):
+            initialize_model_parallel(tensor_model_parallel_size=world_size)
+        group = parallel_state.get_tp_group()
+        # Reuse the production allocation/lifetime failure checks on this TP group.
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(
+                __import__(__name__, fromlist=["get_engram_dp_group"]),
+                "get_engram_dp_group",
+                lambda: group,
+            )
+            for failure in ("create", "open", "mmap", "register", "pinned", None):
+                _check_shared_storage_lifetime_and_failures(failure)
+
+        for n_heads in (7, 8):
+            heads = HEAD_SIZES[:n_heads]
+            model = SimpleNamespace(
+                hidden_size=DIM,
+                hc_mult=2,
+                rms_norm_eps=1e-6,
+                engram_layer_ids=[0],
+                engram_num_embeddings=[sum(heads)],
+                engram_max_ngram_size=2,
+                engram_n_heads=n_heads,
+                engram_head_dim=DIM,
+                engram_compressed_vocab_size=32,
+                engram_pad_token_id=0,
+                engram_vocab_size=HEAD_SIZES[0],
+            )
+            with set_current_vllm_config(cfg), torch.device("cuda"):
+                module = Engram(model, None, EngramLayout(model), 0, True, "engram")
+            weight, scales = _full_table(sum(heads))
+            embed = module.embed_tokens
+            assert isinstance(embed, engram_ops.SPSharedEngramEmbedding)
+            # Each checkpoint writer sees valid data only in its assigned range.
+            start = embed.weight.engram_vocab_start
+            end = start + embed.weight.shape[0]
+            own_weight = torch.zeros_like(weight)
+            own_scales = torch.zeros_like(scales)
+            own_weight[start:end] = weight[start:end]
+            own_scales[start:end] = scales[start:end]
+            embed.weight.weight_loader(embed.weight, own_weight)
+            embed.weight_scale_inv.weight_loader(embed.weight_scale_inv, own_scales)
+            # Inference may not repair missing data with any TP collective.
+            with pytest.MonkeyPatch.context() as patch:
+
+                def unexpected(*args, **kwargs):
+                    raise AssertionError("SP direct lookup must not call all_gather")
+
+                patch.setattr(group, "all_gather", unexpected)
+                for count in (0, 1, 3, 7, 16, 63):
+                    # Real model slices have token stride 2*heads, not packed IDs.
+                    both = torch.empty(
+                        (count, 2, n_heads), dtype=torch.int32, device="cuda"
+                    )
+                    ids = both[:, 1]
+                    ids.copy_(_make_ids(heads, count, seed=123))
+                    if count:
+                        ids[0, 0] = -1
+                    chunk = -(-count // world_size)
+                    expected = _reference(weight.cuda(), scales.cuda(), ids)
+                    expected = torch.nn.functional.pad(
+                        expected, (0, 0, 0, 0, 0, chunk * world_size - count)
+                    )[rank * chunk : (rank + 1) * chunk]
+                    module.staged_rows.fill_(float("nan"))
+                    module.prepare_embeddings(ids)
+                    result = module.embed(ids)
+                    torch.testing.assert_close(result, expected, atol=0, rtol=0)
+                    if count == 7:
+                        torch.accelerator.synchronize()
+                        graph = torch.cuda.CUDAGraph()
+                        with torch.cuda.graph(graph):
+                            module.prepare_embeddings(ids)
+                            result = module.embed(ids)
+                        for seed in (11, 19, 31):
+                            ids.copy_(_make_ids(heads, count, seed=seed))
+                            graph.replay()
+                            expected = _reference(weight.cuda(), scales.cuda(), ids)
+                            expected = torch.nn.functional.pad(
+                                expected, (0, 0, 0, 0, 0, chunk * world_size - count)
+                            )[rank * chunk : (rank + 1) * chunk]
+                            torch.testing.assert_close(result, expected, atol=0, rtol=0)
+            # Replacing the registered parameter's backing must fail closed.
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(embed.weight, "data", embed.weight.data.clone())
+                with pytest.raises(RuntimeError, match="storage must not be replaced"):
+                    embed._storage()
+            torch.accelerator.synchronize()
+    finally:
+        cleanup_dist_env_and_memory()
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 4, reason="requires four CUDA devices"
+)
+@pytest.mark.parametrize("world_size", [2, 4])
+def test_engram_sp_shared_lookup(world_size):
+    mp.spawn(_sp_direct_worker, args=(world_size, get_open_port()), nprocs=world_size)
+
+
+@pytest.mark.parametrize(
+    "options",
+    [{"cpu_offload": False}, {"dp_shared_memory": True}, {"embedding_across_dp": True}],
+)
+def test_engram_sp_shared_rejects_incompatible_storage(options):
+    with pytest.raises(ValueError, match="sp_shared_memory"):
+        EngramConfig(sp_shared_memory=True, **options)
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"tensor_parallel_size": 1},
+        {"data_parallel_size": 2},
+        {"pipeline_parallel_size": 2},
+        {"decode_context_parallel_size": 2},
+        {"prefill_context_parallel_size": 2},
+        {"enable_dbo": True},
+    ],
+)
+def test_engram_sp_shared_rejects_unsupported_topology(options):
+    parallel = ParallelConfig(**({"tensor_parallel_size": 2} | options))
+    with pytest.raises(ValueError, match="sp_shared_memory"):
+        EngramConfig(sp_shared_memory=True).verify_parallel_config(parallel)
