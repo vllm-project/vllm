@@ -28,8 +28,7 @@ batchsize_forward_time: defaultdict = defaultdict(list)
 
 @dataclass(frozen=True)
 class BatchDescriptor:
-    """
-    Batch descriptor for cudagraph dispatching. We should keep the num of
+    """Batch descriptor for cudagraph dispatching. We should keep the num of
     items as minimal as possible to properly and uniquely describe the padded
     batch for cudagraph.
     """
@@ -111,8 +110,7 @@ class DPMetadata:
     def sp_local_sizes(
         self, sequence_parallel_size: int, pcp_size: int = 1, use_ep: bool = False
     ):
-        """
-        Context manager for setting self.local_sizes. Same as self.chunked_sizes
+        """Context manager for setting self.local_sizes. Same as self.chunked_sizes
         but without any chunking.
         """
         self.local_sizes = _compute_sp_num_tokens(

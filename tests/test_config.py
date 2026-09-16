@@ -2173,7 +2173,7 @@ def test_get_and_verify_max_len_yarn_is_already_scaled(
 
 
 class MockConfig:
-    """Simple mock object for testing maybe_pull_model_tokenizer_for_runai"""
+    """Simple mock object for testing maybe_pull_model_tokenizer_for_runai."""
 
     def __init__(self, model: str, tokenizer: str):
         self.model = model
@@ -2651,7 +2651,6 @@ def test_validate_mamba_align_subblock_prefill():
 )
 def test_vllm_config_defaults(model_id, compilation_config, optimization_level):
     """Test that optimization-level defaults are correctly applied."""
-
     model_config = None
     if model_id is not None:
         model_config = ModelConfig(model_id)
@@ -2836,7 +2835,6 @@ def test_vllm_config_explicit_overrides():
 def test_fusion_pass_op_priority():
     """This test checks that custom op enablement & IR op priority
     correctly control default fusions"""
-
     # Default config, O2, rms_norm+quant fusion disabled
     cfg1 = VllmConfig()
     assert not cfg1.compilation_config.pass_config.fuse_norm_quant
@@ -3441,7 +3439,7 @@ def test_ir_op_platform_defaults_support_sparse_gelu(mode, backend):
 
 
 def test_ir_op_priority_str():
-    """Test that passing a comma-delimited string works"""
+    """Test that passing a comma-delimited string works."""
     from vllm.config.kernel import IrOpPriorityConfig
 
     priority_config = IrOpPriorityConfig(rms_norm="vllm_c")

@@ -183,6 +183,7 @@ def replay_streaming(
 
     Returns:
         List of ``DeltaMessage`` results from each ``parse_delta()`` call.
+
     """
     if chunk_size is None:
         chunk_size = len(tokens)
