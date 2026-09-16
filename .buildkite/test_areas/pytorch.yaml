@@ -169,6 +169,7 @@ steps:
   - vllm/utils/
   - vllm/v1/
   - tests/compile
+  - csrc/
   commands:
   # Run smoke tests under fullgraph directory, except test_full_cudagraph.py
   # as it is a heavy test that is covered in other steps.

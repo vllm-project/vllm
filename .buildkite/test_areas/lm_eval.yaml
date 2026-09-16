@@ -121,7 +121,7 @@ steps:
       label: ":amd: (MI355) LM Eval Small Models Distributed"
       dind: false
       device: mi355_2
-      timeout_in_minutes: 45
+      timeout_in_minutes: 55
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -307,13 +307,16 @@ steps:
       label: ":amd: (MI300) LM Eval Large Models"
       dind: false
       device: mi300_8
-      timeout_in_minutes: 40
+      timeout_in_minutes: 65
       depends_on:
       - image-build-amd
       commands:
       - export VLLM_WORKER_MULTIPROC_METHOD=spawn
       - export PYTORCH_ROCM_ARCH=gfx942 # Limit Quark compilation to save time
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx.txt
+      source_file_dependencies:
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H100) MoE Refactor Integration TEMPORARY"
   key: moe-refactor-integration-test-h100-temporary
