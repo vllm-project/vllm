@@ -958,6 +958,8 @@ def test_decode_index_topk_correctness(
     num_padded_reqs: int,
     longest_seq_len: int,
 ):
+    """Production BF16 inputs preserve strict oracle ranks without TF32 rounding."""
+    set_random_seed(149)
     topk = 6
     init_blocks = 0
     local_blocks = 1
@@ -987,8 +989,10 @@ def test_decode_index_topk_correctness(
     block_table[:active_batch] = active_block_table
     idx_q = torch.randn(
         batch * decode_query_len, num_idx_heads, head_dim, device="cuda"
+    ).to(torch.bfloat16)
+    index_kv_cache = torch.randn(num_pages, BLOCK_SIZE, head_dim, device="cuda").to(
+        torch.bfloat16
     )
-    index_kv_cache = torch.randn(num_pages, BLOCK_SIZE, head_dim, device="cuda")
 
     actual = minimax_m3_index_decode(
         idx_q,
