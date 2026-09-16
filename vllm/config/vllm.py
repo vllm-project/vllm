@@ -1304,7 +1304,8 @@ class VllmConfig:
                 logger.warning_once(
                     "Watermarking is enabled for this request, but the engine has no "
                     "watermark configuration. This and subsequent requests will run "
-                    "without watermarking."
+                    "without watermarking.",
+                    scope="global",
                 )
             return False
         if self.speculative_config is not None:
@@ -1383,7 +1384,8 @@ class VllmConfig:
             logger.warning_once(
                 "Watermarking is enabled, but beam search cannot be watermarked. "
                 "This and subsequent beam search requests will run without "
-                "watermarking."
+                "watermarking.",
+                scope="global",
             )
             return False
         if not isinstance(config, SamplingParams):
@@ -1392,14 +1394,16 @@ class VllmConfig:
             logger.warning_once(
                 "Watermarking is enabled, but trace replay cannot be watermarked. "
                 "This and subsequent trace replay requests will run without "
-                "watermarking."
+                "watermarking.",
+                scope="global",
             )
             return False
         if config.temperature == 0:
             logger.warning_once(
                 "Watermarking is enabled, but greedy decoding "
                 "(temperature=0) cannot be watermarked. This and subsequent "
-                "greedy requests will use ordinary greedy sampling."
+                "greedy requests will use ordinary greedy sampling.",
+                scope="global",
             )
             return False
         return True

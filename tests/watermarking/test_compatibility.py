@@ -11,6 +11,7 @@ from vllm import SamplingParams
 from vllm import logger as vllm_logger
 from vllm.config import VllmConfig, WatermarkConfig
 from vllm.renderers import BaseRenderer
+from vllm.sampling_params import BeamSearchParams
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.input_processor import InputProcessor
@@ -34,10 +35,12 @@ def _input_processor(server_uses_watermarking: bool = True) -> InputProcessor:
     return InputProcessor(config, renderer)
 
 
-def _validate(params: SamplingParams, server_uses_watermarking: bool = True) -> None:
+def _validate(
+    params: SamplingParams, server_uses_watermarking: bool = True
+) -> bool | None:
     processor = _input_processor(server_uses_watermarking)
     with patch.object(SamplingParams, "verify"):
-        processor._validate_params(params, ("generate",))
+        return processor._validate_params(params, ("generate",))
 
 
 def _engine_core_request(params: SamplingParams) -> EngineCoreRequest:
@@ -66,21 +69,24 @@ def test_greedy_watermarked_requests_warn_once(caplog_vllm, reset_warning_once):
     second = SamplingParams(temperature=0)
 
     with caplog_vllm.at_level("WARNING"):
-        _validate(first)
-        _validate(second)
+        first_resolved = _validate(first)
+        second_resolved = _validate(second)
 
     message = "subsequent greedy requests will use ordinary greedy sampling"
     assert caplog_vllm.text.count(message) == 1
-    assert not first.watermarking
-    assert not second.watermarking
+    assert first_resolved is False
+    assert second_resolved is False
+    # The caller's params objects are left untouched.
+    assert first.watermarking is None
+    assert second.watermarking is None
 
 
 def test_default_watermarking_resolves_when_configured():
     enabled = SamplingParams()
 
-    _validate(enabled)
-
-    assert enabled.watermarking is True
+    assert _validate(enabled) is True
+    # The caller's params object keeps inheriting.
+    assert enabled.watermarking is None
 
 
 @pytest.mark.parametrize("watermarking", [None, True])
@@ -90,10 +96,11 @@ def test_requested_watermarking_without_engine_config_warns_and_disables(
     params = SamplingParams(watermarking=watermarking)
 
     with caplog_vllm.at_level("WARNING"):
-        _validate(params, server_uses_watermarking=False)
+        resolved = _validate(params, server_uses_watermarking=False)
 
     assert "engine has no watermark configuration" in caplog_vllm.text
-    assert params.watermarking is False
+    assert resolved is False
+    assert params.watermarking is watermarking
 
 
 @pytest.mark.parametrize("watermarking", [None, True])
@@ -103,10 +110,11 @@ def test_explicit_and_default_greedy_warn_and_disable(
     params = SamplingParams(temperature=0, watermarking=watermarking)
 
     with caplog_vllm.at_level("WARNING"):
-        _validate(params)
+        resolved = _validate(params)
 
     assert "ordinary greedy sampling" in caplog_vllm.text
-    assert params.watermarking is False
+    assert resolved is False
+    assert params.watermarking is watermarking
 
 
 def test_trace_replay_with_watermarking_warns_and_disables(
@@ -115,10 +123,11 @@ def test_trace_replay_with_watermarking_warns_and_disables(
     params = SamplingParams(trace_decode_token_ids=[1])
 
     with caplog_vllm.at_level("WARNING"):
-        _validate(params)
+        resolved = _validate(params)
 
     assert "trace replay requests will run without watermarking" in caplog_vllm.text
-    assert params.watermarking is False
+    assert resolved is False
+    assert params.watermarking is None
 
 
 @pytest.mark.parametrize(
@@ -143,10 +152,11 @@ def test_requests_without_engine_config_are_unwatermarked(
     params, caplog_vllm, reset_warning_once
 ):
     with caplog_vllm.at_level("WARNING"):
-        _validate(params, server_uses_watermarking=False)
+        resolved = _validate(params, server_uses_watermarking=False)
 
     assert "engine has no watermark configuration" in caplog_vllm.text
-    assert not params.watermarking
+    assert resolved is False
+    assert params.watermarking is None
 
 
 def test_trace_replay_takes_precedence_over_greedy_warning(
@@ -278,3 +288,36 @@ def test_direct_async_engine_greedy_request_warns_and_disables_watermarking(
         caplog_vllm.text
     )
     assert not request.sampling_params.watermarking
+
+
+def test_shared_sampling_params_are_not_rewritten_by_admission(reset_warning_once):
+    """A params object reused across prompts/engines must keep inheriting."""
+    params = SamplingParams(temperature=0.8)
+
+    assert _validate(params, server_uses_watermarking=False) is False
+    assert params.watermarking is None
+    # Same object submitted to a watermarked engine must still be watermarked.
+    assert _validate(params, server_uses_watermarking=True) is True
+
+    greedy = SamplingParams(temperature=0.0)
+    assert _validate(greedy) is False
+    greedy.temperature = 0.8
+    assert _validate(greedy) is True
+
+
+def test_shared_beam_search_params_are_not_rewritten_by_admission(
+    caplog_vllm, reset_warning_once
+):
+    """Beam search must keep resolving per engine after reuse."""
+    params = BeamSearchParams(beam_width=2, max_tokens=4, temperature=0.8)
+
+    # A plain engine leaves the tri-state unresolved on the caller's object.
+    assert _input_processor(False).resolve_watermarking(params) is False
+    assert params.watermarking is None
+
+    # The same object on a watermarked engine is warned about and still
+    # resolves to False, without the first decision being written back.
+    with caplog_vllm.at_level("WARNING"):
+        assert _input_processor(True).resolve_watermarking(params) is False
+    assert "beam search requests will run without watermarking" in caplog_vllm.text
+    assert params.watermarking is None

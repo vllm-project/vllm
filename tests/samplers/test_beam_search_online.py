@@ -50,8 +50,9 @@ class _EngineClient:
     vllm_config = _VllmConfig()
 
     def resolve_watermarking(self, params):
-        params.watermarking = self.vllm_config._check_supports_watermarking(params)
-        return params.watermarking
+        # Mirrors InputProcessor.resolve_watermarking: a pure check that never
+        # writes back to the caller's params object.
+        return self.vllm_config._check_supports_watermarking(params)
 
     async def generate(self, prompt, *args, **kwargs):
         assert not args[0].watermarking
@@ -224,20 +225,24 @@ async def test_beam_search_warns_and_disables_watermarking(
         output = await anext(_AsyncServing().beam_search(prompt, "request", params))
 
     assert "beam search requests will run without watermarking" in caplog_vllm.text
-    assert params.watermarking is False
+    # The caller's params object is never rewritten by admission.
+    assert params.watermarking is None
     assert output.finished
 
 
 def test_offline_beam_search_warns_and_disables_watermarking(
     caplog_vllm, reset_warning_once
 ) -> None:
+    params = BeamSearchParams(beam_width=2, max_tokens=1)
+
     with caplog_vllm.at_level("WARNING"):
         outputs = _OfflineServing().beam_search(
-            [{"type": "token", "prompt_token_ids": [1]}],
-            BeamSearchParams(beam_width=2, max_tokens=1),
+            [{"type": "token", "prompt_token_ids": [1]}], params
         )
 
     assert "beam search requests will run without watermarking" in caplog_vllm.text
+    # The caller's params object is never rewritten by admission.
+    assert params.watermarking is None
     assert len(outputs) == 1
 
 
