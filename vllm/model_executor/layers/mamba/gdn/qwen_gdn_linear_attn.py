@@ -1265,6 +1265,161 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out=core_attn_out,
         )
 
+    def _forward_core_grouped_prefill(
+        self,
+        mixed_qkv: torch.Tensor,
+        b: torch.Tensor,
+        a: torch.Tensor,
+        core_attn_out: torch.Tensor,
+        attn_metadata: GDNAttentionMetadata,
+        conv_state: torch.Tensor,
+        ssm_state: torch.Tensor,
+        conv_weights: torch.Tensor,
+    ) -> None:
+        """Run grouped prefill as batched producer and consumer phases.
+
+        Producers write shared cache rows before consumers copy those rows into
+        private destinations. Each phase uses the existing varlen GDN kernels.
+        """
+        producer_ranges = attn_metadata.prefix_producer_ranges
+        producer_token_indices = attn_metadata.producer_token_indices
+        producer_query_start_loc = attn_metadata.producer_query_start_loc
+        producer_conv_metadata = attn_metadata.producer_conv_metadata
+        consumer_ranges = attn_metadata.consumer_ranges
+        consumer_token_indices = attn_metadata.consumer_token_indices
+        consumer_query_start_loc = attn_metadata.consumer_query_start_loc
+        consumer_conv_metadata = attn_metadata.consumer_conv_metadata
+        initial_sources = attn_metadata.shared_initial_state_source
+        shared_destinations = attn_metadata.shared_state_destinations
+        consumer_sources = attn_metadata.consumer_shared_state_sources
+        private_destinations = attn_metadata.private_final_state_destination
+        if any(
+            value is None
+            for value in (
+                producer_ranges,
+                producer_token_indices,
+                producer_query_start_loc,
+                consumer_ranges,
+                consumer_token_indices,
+                consumer_query_start_loc,
+                initial_sources,
+                shared_destinations,
+                consumer_sources,
+                private_destinations,
+            )
+        ):
+            raise ValueError("grouped GDN requires packed phase metadata")
+        assert producer_ranges is not None
+        assert producer_token_indices is not None
+        assert producer_query_start_loc is not None
+        assert consumer_ranges is not None
+        assert consumer_token_indices is not None
+        assert consumer_query_start_loc is not None
+        assert initial_sources is not None
+        assert shared_destinations is not None
+        assert consumer_sources is not None
+        assert private_destinations is not None
+        if producer_ranges.ndim != 2 or producer_ranges.shape[1] != 2:
+            raise ValueError("prefix_producer_ranges must have shape [N, 2]")
+        if consumer_ranges.ndim != 2 or consumer_ranges.shape[1] != 2:
+            raise ValueError("consumer_ranges must have shape [N, 2]")
+        if shared_destinations.numel() != producer_ranges.shape[0]:
+            raise ValueError("one shared destination is required per producer")
+        if initial_sources.numel() not in (1, producer_ranges.shape[0]):
+            raise ValueError(
+                "shared_initial_state_source must be scalar or per producer"
+            )
+        if consumer_sources.numel() != consumer_ranges.shape[0]:
+            raise ValueError("one shared source is required per consumer")
+        if private_destinations.numel() != consumer_ranges.shape[0]:
+            raise ValueError("one private destination is required per consumer")
+
+        def run_phase(
+            token_indices: torch.Tensor,
+            query_start_loc: torch.Tensor,
+            conv_metadata: object | None,
+            sources: torch.Tensor,
+            destinations: torch.Tensor,
+        ) -> None:
+            if destinations.numel() == 0:
+                return
+            if conv_metadata is None:
+                raise ValueError("non-empty grouped phase requires conv metadata")
+            # For consumers, sources and destinations are already expanded 1:1 by
+            # GDNAttentionMetadataBuilder (mapping each consumer to its producer block).
+            # Expanding here supports broadcasting a scalar initial state (e.g.
+            # NULL_BLOCK_ID) across multiple producers during the producer phase.
+            if sources.numel() == 1 and destinations.numel() > 1:
+                sources = sources.expand_as(destinations)
+            if sources.numel() != destinations.numel():
+                raise ValueError("one initial source is required per destination")
+
+            source_indices = sources.to(torch.long)
+            destination_indices = destinations.to(torch.long)
+            source_conv = conv_state.index_select(0, source_indices)
+            source_ssm = ssm_state.index_select(0, source_indices)
+            conv_state.index_copy_(0, destination_indices, source_conv)
+            ssm_state.index_copy_(0, destination_indices, source_ssm)
+
+            packed_mixed_qkv = mixed_qkv.index_select(0, token_indices)
+            packed_a = a.index_select(0, token_indices)
+            packed_b = b.index_select(0, token_indices)
+            conv_output = causal_conv1d_fn(
+                packed_mixed_qkv.transpose(0, 1),
+                conv_weights,
+                self.conv1d.bias,
+                conv_states=conv_state,
+                has_initial_state=torch.ones_like(destinations, dtype=torch.bool),
+                cache_indices=destinations,
+                query_start_loc=query_start_loc,
+                metadata=conv_metadata,
+            ).transpose(0, 1)
+            query, key, value, _, _ = fused_post_conv_prep(
+                conv_output=conv_output,
+                a=packed_a,
+                b=packed_b,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                num_k_heads=self.num_k_heads // self.tp_size,
+                head_k_dim=self.head_k_dim,
+                head_v_dim=self.head_v_dim,
+                apply_l2norm=True,
+                output_g_exp=False,
+            )
+            seqlens = query_start_loc[1:] - query_start_loc[:-1]
+            max_seqlen = int(seqlens.max().item()) if seqlens.numel() > 0 else 1
+            state_indices = destinations.unsqueeze(1).repeat(1, max_seqlen).contiguous()
+            output, _ = fused_sigmoid_gating_delta_rule_update(
+                A_log=self.A_log,
+                a=packed_a,
+                b=packed_b,
+                dt_bias=self.dt_bias,
+                q=query.unsqueeze(0),
+                k=key.unsqueeze(0),
+                v=value.unsqueeze(0),
+                initial_state=ssm_state,
+                inplace_final_state=True,
+                cu_seqlens=query_start_loc,
+                ssm_state_indices=state_indices,
+                use_qk_l2norm_in_kernel=False,
+            )
+            core_attn_out.index_copy_(0, token_indices, output.squeeze(0))
+
+        run_phase(
+            producer_token_indices,
+            producer_query_start_loc,
+            producer_conv_metadata,
+            initial_sources,
+            shared_destinations,
+        )
+        run_phase(
+            consumer_token_indices,
+            consumer_query_start_loc,
+            consumer_conv_metadata,
+            consumer_sources,
+            private_destinations,
+        )
+
     def _forward_core(
         self,
         mixed_qkv: torch.Tensor,
@@ -1334,6 +1489,24 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         conv_weights = self.conv1d.weight.view(
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
         )
+
+        grouped_metadata = (
+            attn_metadata.prefix_producer_ranges is not None
+            or attn_metadata.consumer_ranges is not None
+            or attn_metadata.private_final_state_destination is not None
+        )
+        if grouped_metadata:
+            self._forward_core_grouped_prefill(
+                mixed_qkv,
+                b,
+                a,
+                core_attn_out,
+                attn_metadata,
+                conv_state,
+                ssm_state,
+                conv_weights,
+            )
+            return
 
         if spec_sequence_masks is not None:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:

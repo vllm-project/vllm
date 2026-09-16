@@ -13,6 +13,7 @@ from vllm.renderers.hf import (
     _convert_developer_to_system,
     _detect_content_format,
     _detect_developer_role_support,
+    _ensure_mamba_checkpoint_token,
     _get_hf_base_chat_template_params,
     _template_error_reason,
     _try_extract_ast,
@@ -30,6 +31,28 @@ EXAMPLES_DIR = VLLM_PATH / "examples"
 
 chatml_jinja_path = VLLM_PATH / "examples/template_chatml.jinja"
 assert chatml_jinja_path.exists()
+
+
+class _CheckpointTokenizer:
+    def __init__(self):
+        self.special_tokens = []
+
+    def add_special_tokens(self, tokens):
+        self.special_tokens.extend(tokens["additional_special_tokens"])
+
+    def encode(self, token, add_special_tokens=False):
+        assert not add_special_tokens
+        return [123] if token in self.special_tokens else [1, 2]
+
+
+def test_ensure_mamba_checkpoint_token_registers_single_token():
+    tokenizer = _CheckpointTokenizer()
+
+    token_id = _ensure_mamba_checkpoint_token(tokenizer, "<|mamba_checkpoint|>")
+
+    assert token_id == 123
+    assert tokenizer.special_tokens == ["<|mamba_checkpoint|>"]
+
 
 # Define models, templates, and their corresponding expected outputs
 MODEL_TEMPLATE_GENERATION_OUTPUT = [

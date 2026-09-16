@@ -111,6 +111,8 @@ class InputBatch:
     # stays valid for every replay the graph serves.
     max_query_len: int | None = None
 
+    # Mapping of consumer req_id -> producer req_id for mamba checkpoint same-step prefill
+    mamba_prefix_producer_ids: dict[str, str] | None = None
     # Arms the KV-sharing fast prefill path for this step. Absent for dummy
     # (cudagraph capture) batches, which run the KV-sharing layers in full.
     fast_prefill: "FastPrefillBatchMetadata | None" = None
@@ -209,6 +211,7 @@ class InputBatch:
             has_structured_output_reqs=False,
             prompt_lens=None,
             max_query_len=max_query_len,
+            mamba_prefix_producer_ids=None,
         )
 
 
