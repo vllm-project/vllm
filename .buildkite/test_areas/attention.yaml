@@ -43,16 +43,13 @@ steps:
   commands:
     - |
       set -eu
-      # One whole directory per pytest target; trailing comment is the measured
-      # pytest time of the branch. `mla/correctness` holds one directory per MLA
-      # prefill backend (flash_attn is split by MLA dimensions because it is the
-      # only prefill backend available on every CUDA device, so it carries both).
+      # Run correlated folders and flat backend wrappers as whole units.
       case "$$BUILDKITE_PARALLEL_JOB" in
-        0) pytest -v -s v1/attention/sparse_mla ;; # 19m
-        1) pytest -v -s v1/attention/mla/correctness/rocm_aiter_fa v1/attention/mla/correctness/trtllm_ragged v1/attention/rocm ;; # 16m
-        2) pytest -v -s v1/attention/mla/correctness/flash_attn/deepseek v1/attention/mla/correctness/tokenspeed_mla ;; # 17m
-        3) pytest -v -s v1/attention/mla/backends v1/attention/mla/correctness/flash_attn/glm v1/attention/mla/correctness/flashinfer ;; # 17m
-        4) pytest -v -s v1/attention/dcp v1/attention/dense v1/attention/ssm ;; # 15m
+        0) pytest -v -s v1/attention/sparse_mla ;;
+        1) pytest -v -s v1/attention/mla/correctness/test_rocm_aiter_fa.py v1/attention/mla/correctness/test_trtllm_ragged.py v1/attention/rocm ;;
+        2) pytest -v -s v1/attention/mla/correctness/test_flash_attn_deepseek.py v1/attention/mla/correctness/test_tokenspeed_mla.py ;;
+        3) pytest -v -s v1/attention/mla/backends v1/attention/mla/correctness/test_flash_attn_glm.py v1/attention/mla/correctness/test_flashinfer.py ;;
+        4) pytest -v -s v1/attention/dcp v1/attention/dense v1/attention/ssm ;;
         *) echo "unexpected BUILDKITE_PARALLEL_JOB=$$BUILDKITE_PARALLEL_JOB" >&2; exit 1 ;;
       esac
   parallelism: 5
