@@ -227,3 +227,85 @@ def test_scheduler_output_interface():
 
     assumes(CachedRequestData, "req_ids", is_instance_of=list)
     assumes(CachedRequestData, "new_block_ids", is_instance_of=list)
+
+
+def _lmcache_token_keys():
+    from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_token_keys import (
+        apply_mm_hashes_to_token_ids,
+        mm_hash_to_token_value,
+        request_identity_mixer,
+    )
+
+    return (
+        apply_mm_hashes_to_token_ids,
+        mm_hash_to_token_value,
+        request_identity_mixer,
+    )
+
+
+def test_mm_hashes_sharing_low_16_bits_are_distinct():
+    """Distinct media identifiers must not collapse after occupying token ids."""
+    import torch
+
+    from vllm.multimodal.inputs import PlaceholderRange
+
+    apply_mm_hashes_to_token_ids, mm_hash_to_token_value, _ = _lmcache_token_keys()
+
+    hash_a = "0" * 56 + "0000abcd"
+    hash_b = "0" * 56 + "ffffabcd"
+    assert int(hash_a, 16) & 0xFFFF == int(hash_b, 16) & 0xFFFF
+    assert mm_hash_to_token_value(hash_a) != mm_hash_to_token_value(hash_b)
+
+    pos = [PlaceholderRange(offset=1, length=2)]
+    tokens_a = torch.tensor([10, 11, 12, 13], dtype=torch.long)
+    tokens_b = tokens_a.clone()
+    apply_mm_hashes_to_token_ids(tokens_a, [hash_a], pos)
+    apply_mm_hashes_to_token_ids(tokens_b, [hash_b], pos)
+    assert not torch.equal(tokens_a, tokens_b)
+
+
+def test_cache_salt_and_lora_partition_lmcache_token_keys():
+    """Requests that differ only in cache_salt or LoRA must not share keys."""
+    import torch
+
+    apply_mm_hashes_to_token_ids, _, mixer = _lmcache_token_keys()
+
+    base = torch.tensor([1, 2, 3, 4], dtype=torch.long)
+    salted_a = apply_mm_hashes_to_token_ids(base.clone(), [], [], cache_salt="tenant-a")
+    salted_b = apply_mm_hashes_to_token_ids(base.clone(), [], [], cache_salt="tenant-b")
+    salted_a_again = apply_mm_hashes_to_token_ids(
+        base.clone(), [], [], cache_salt="tenant-a"
+    )
+    lora_a = apply_mm_hashes_to_token_ids(base.clone(), [], [], lora_name="adapter-a")
+    lora_b = apply_mm_hashes_to_token_ids(base.clone(), [], [], lora_name="adapter-b")
+    unsalted = apply_mm_hashes_to_token_ids(base.clone(), [], [])
+
+    assert not torch.equal(salted_a, salted_b)
+    assert torch.equal(salted_a, salted_a_again)
+    assert not torch.equal(lora_a, lora_b)
+    assert torch.equal(unsalted, base)
+    assert mixer("tenant-a", None) != mixer("tenant-b", None)
+    assert mixer(None, "adapter-a") != mixer(None, "adapter-b")
+    assert mixer(None, None) is None
+
+
+def test_store_and_lookup_apply_the_same_lmcache_token_binding():
+    """Scheduler lookup and worker store must emit identical token-id keys."""
+    import torch
+
+    from vllm.multimodal.inputs import PlaceholderRange
+
+    apply_mm_hashes_to_token_ids, _, _ = _lmcache_token_keys()
+
+    prompt = torch.tensor([7, 8, 9, 10, 11, 12], dtype=torch.long)
+    mm_hashes = ["0" * 56 + "1234abcd"]
+    mm_positions = [PlaceholderRange(offset=2, length=2)]
+    kwargs = dict(
+        mm_hashes=mm_hashes,
+        mm_positions=mm_positions,
+        cache_salt="tenant-a",
+        lora_name="adapter-a",
+    )
+    lookup_tokens = apply_mm_hashes_to_token_ids(prompt.clone(), **kwargs)
+    store_tokens = apply_mm_hashes_to_token_ids(prompt.clone(), **kwargs)
+    assert torch.equal(lookup_tokens, store_tokens)
