@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use thiserror_ext::AsReport as _;
 
 use crate::error::{Error, Result};
+use crate::normalize_top_k;
 
 /// Minimal subset of `tokenizer_config.json` needed by chat/EOS handling.
 #[derive(Debug, Default, Deserialize)]
@@ -118,23 +119,19 @@ pub(super) struct GenerationConfig {
     pub max_new_tokens: Option<u32>,
 }
 
-/// Deserialize vLLM-compatible `top_k` values from generation configs.
+/// Deserialize a generation-config `top_k` into the text sampling model.
 ///
-/// Both `-1` and `0` disable top-k sampling and become `None`; positive values
-/// are preserved.
+/// Null, `-1`, and `0` all disable top-k sampling; positive limits are
+/// preserved.
 fn deserialize_top_k<'de, D>(deserializer: D) -> std::result::Result<Option<u32>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    match Option::<i64>::deserialize(deserializer)? {
-        None | Some(-1) | Some(0) => Ok(None),
-        Some(value) if value > 0 => {
-            u32::try_from(value).map(Some).map_err(serde::de::Error::custom)
-        }
-        Some(value) => Err(serde::de::Error::custom(format!(
-            "top_k must be -1, 0, or a positive integer, got {value}"
-        ))),
-    }
+    Option::<i64>::deserialize(deserializer)?
+        .map(normalize_top_k)
+        .transpose()
+        .map(Option::flatten)
+        .map_err(serde::de::Error::custom)
 }
 
 /// HF generation configs allow either one EOS id or a list of EOS ids.

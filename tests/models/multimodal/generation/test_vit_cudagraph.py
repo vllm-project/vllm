@@ -74,6 +74,20 @@ def ernie45_vl_chat_template(content: str) -> str:
     )
 
 
+def minicpmv_25_chat_template(content: str) -> str:
+    """Llama3-style chat template used by MiniCPM-V 2.5."""
+    return (
+        f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n"
+        f"{content}"
+        f"<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+    )
+
+
+def minicpmv_chat_template(content: str) -> str:
+    """ChatML template used by MiniCPM-V 2.6 / 4.0 / 4.5."""
+    return f"<|im_start|>user\n{content}<|im_end|>\n<|im_start|>assistant\n"
+
+
 MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
     "gemma3": VitCudagraphTestConfig(
         model="google/gemma-3-4b-it",
@@ -193,6 +207,20 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         vllm_runner_kwargs={"trust_remote_code": True},
         marks=[pytest.mark.core_model],
     ),
+    "idefics3": VitCudagraphTestConfig(
+        model="HuggingFaceTB/SmolVLM-256M-Instruct",
+        modalities=["image"],
+        image_prompt=(
+            "<|begin_of_text|>User:<image>What is in this image?"
+            "<end_of_utterance>\nAssistant:"
+        ),
+        max_model_len=4096,
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [4096],
+        },
+        vllm_runner_kwargs={"gpu_memory_utilization": 0.80},
+        marks=[pytest.mark.core_model],
+    ),
     "step3_vl": VitCudagraphTestConfig(
         model="stepfun-ai/Step3-VL-10B",
         modalities=["image"],
@@ -222,6 +250,13 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         # that changes the output token count, so video uses the eager path.
         modalities=["image"],
         image_prompt=ernie45_vl_chat_template("What is in this image?"),
+        # Ernie4_5_VLMoeModel is deliberately not torch-compiled, since its
+        # split of text and vision experts breaks compilation, so piecewise
+        # cudagraphs have nothing to partition. Only the encoder graphs this
+        # test covers are captured.
+        compilation_config_overrides={
+            "cudagraph_mode": 2,
+        },
         # Shrink to 1 text + 1 vision layer with random weights so the test
         # runs on any CI GPU and skips the ~56 GiB weight download. The test
         # only validates encoder CG capture/replay, not output quality.
@@ -293,6 +328,57 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
             "encoder_cudagraph_token_budgets": [1120],
         },
         needs_video_metadata=True,
+        marks=[pytest.mark.core_model],
+    ),
+    "minicpmv_25": VitCudagraphTestConfig(
+        model="openbmb/MiniCPM-Llama3-V-2_5",
+        modalities=["image"],
+        image_prompt=minicpmv_25_chat_template(
+            "(<image>./</image>)\nWhat is in this image?"
+        ),
+        # CI runs on 35GB MIG slices: every budget captures one graph per
+        # patch-grid bucket, so the default budgets through max_model_len
+        # OOM there. A small budget set covers the test images (each item
+        # is at most (max_slice_num + 1) * query_num = 640 tokens).
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [64, 1024],
+        },
+        vllm_runner_kwargs={"trust_remote_code": True},
+        marks=[pytest.mark.core_model],
+    ),
+    "minicpmv_26": VitCudagraphTestConfig(
+        model="openbmb/MiniCPM-V-2_6",
+        image_prompt=minicpmv_chat_template(
+            "(<image>./</image>)\nWhat is in this image?"
+        ),
+        video_prompt=minicpmv_chat_template(
+            "(<video>./</video>)\nDescribe this video in one sentence."
+        ),
+        max_model_len=2048,
+        # Fewer frames keep the video item within the 1024 budget.
+        num_video_frames=4,
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [64, 1024],
+            "encoder_cudagraph_max_frames_per_batch": 4,
+        },
+        vllm_runner_kwargs={"trust_remote_code": True},
+        marks=[pytest.mark.core_model],
+    ),
+    "minicpmv_40": VitCudagraphTestConfig(
+        model="openbmb/MiniCPM-V-4",
+        image_prompt=minicpmv_chat_template(
+            "(<image>./</image>)\nWhat is in this image?"
+        ),
+        video_prompt=minicpmv_chat_template(
+            "(<video>./</video>)\nDescribe this video in one sentence."
+        ),
+        max_model_len=2048,
+        num_video_frames=4,
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [64, 1024],
+            "encoder_cudagraph_max_frames_per_batch": 4,
+        },
+        vllm_runner_kwargs={"trust_remote_code": True},
         marks=[pytest.mark.core_model],
     ),
 }
