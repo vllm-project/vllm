@@ -73,8 +73,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
     @property
     def advance_draft_positions(self) -> bool:
-        """
-        Whether to increment positions and seq_lens between draft steps.
+        """Whether to increment positions and seq_lens between draft steps.
 
         True for Eagle/standard MTP (each step produces new KV).
         False for Gemma4 MTP (Q-only, shares target KV, constant positions).
@@ -532,11 +531,10 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 slot_mappings_by_layer = build_slot_mappings_by_layer(
                     slot_mappings, self.kv_cache_config
                 )
-                attn_metadata = self._build_draft_attn_metadata(
+                attn_metadata = self._build_uniform_attn_metadata(
                     num_reqs=num_reqs,
-                    num_reqs_padded=batch_desc.num_reqs or num_reqs,
-                    # One query per request; exclude DP-only model padding.
-                    num_tokens_padded=batch_desc.num_reqs or num_reqs,
+                    batch_desc=batch_desc,
+                    num_query_per_req=1,
                     seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
                     step=step,
                 )
@@ -581,11 +579,10 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 slot_mappings_by_layer = build_slot_mappings_by_layer(
                     slot_mappings, self.kv_cache_config
                 )
-            attn_metadata = self._build_draft_attn_metadata(
+            attn_metadata = self._build_uniform_attn_metadata(
                 num_reqs=num_reqs,
-                num_reqs_padded=batch_desc.num_reqs or num_reqs,
-                # One query per request; exclude DP-only model padding.
-                num_tokens_padded=batch_desc.num_reqs or num_reqs,
+                batch_desc=batch_desc,
+                num_query_per_req=1,
                 seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
                 step=1,
             )

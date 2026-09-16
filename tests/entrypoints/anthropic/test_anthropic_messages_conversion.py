@@ -480,7 +480,7 @@ class TestThinkingBlockConversion:
     """
 
     def test_thinking_plus_text_in_assistant_message(self):
-        """thinking + text → reasoning field + plain-string content."""
+        """Thinking + text → reasoning field + plain-string content."""
         request = _make_request(
             [
                 {"role": "user", "content": "Write me some code."},
@@ -542,7 +542,7 @@ class TestThinkingBlockConversion:
         assert asst.get("content") is None
 
     def test_thinking_plus_tool_use_in_assistant_message(self):
-        """thinking + tool_use: reasoning field set, tool_calls populated."""
+        """Thinking + tool_use: reasoning field set, tool_calls populated."""
         request = _make_request(
             [
                 {"role": "user", "content": "What is 2+2?"},
