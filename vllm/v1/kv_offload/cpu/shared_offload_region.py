@@ -135,7 +135,10 @@ class SharedOffloadRegion:
                 self._creator = True
                 if creator_memory_check is not None:
                     creator_memory_check(self.total_size_bytes)
-                check_shm_free_space(self.total_size_bytes)
+                check_shm_free_space(
+                    self.total_size_bytes,
+                    allocation_name="CPU KV offload shared region in /dev/shm",
+                )
                 os.ftruncate(self.fd, self.total_size_bytes)
                 logger.info(
                     "Created mmap file %s (%.2f GB)",
