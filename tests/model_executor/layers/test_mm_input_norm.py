@@ -14,28 +14,18 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import set_random_seed
 
-# ---------------------------------------------------------------------------
-# Device / accelerator gating
-# ---------------------------------------------------------------------------
-# The fused Triton kernel writes/reads device pointers directly; it cannot run
-# on a CPU tensor. Derive the test device from the active vLLM platform and
-# skip the accelerator-only tests when none is available.
-_DEVICE_TYPE = current_platform.device_type  # e.g. "cuda", "xpu", "cpu"
+# The fused Triton kernel cannot run on CPU tensors, so derive the test device
+# from the active vLLM platform and skip accelerator-only tests on CPU.
+_DEVICE_TYPE = current_platform.device_type
 _DEVICE = torch.device(_DEVICE_TYPE)
 
 requires_accelerator = pytest.mark.skipif(
     _DEVICE_TYPE == "cpu",
     reason="fused Triton kernel requires a CUDA/XPU accelerator",
 )
-requires_triton = pytest.mark.skipif(
-    not HAS_TRITON,
-    reason="requires Triton",
-)
+requires_triton = pytest.mark.skipif(not HAS_TRITON, reason="requires Triton")
 
 
-# ---------------------------------------------------------------------------
-# Reference implementation
-# ---------------------------------------------------------------------------
 def _reference_input_norm(
     pixel_values: torch.Tensor,
     image_mean: list[float],
@@ -58,7 +48,7 @@ def _reference_input_norm(
     return x.view(patches, size).to(out_dtype)
 
 
-# Common RGB normalization constants (CLIP-style) reused across tests.
+# CLIP-style RGB normalization constants reused across tests.
 _RGB_MEAN = [0.48145466, 0.4578275, 0.40821073]
 _RGB_STD = [0.26862954, 0.26130258, 0.27577711]
 _RGB_RESCALE = 1.0 / 255.0
@@ -69,13 +59,10 @@ _RGB_RESCALE = 1.0 / 255.0
 # ===========================================================================
 @requires_accelerator
 class TestFusedInputNormModule:
-    """End-to-end behavior of the nn.Module wrapper."""
-
     @pytest.mark.parametrize("num_patches", [1, 37, 70000])
     def test_matches_reference(self, num_patches: int):
-        """FusedInputNorm must equal the plain affine, including for
-        num_patches above the cuDNN batch-norm grid limit (~65535) that
-        previously raised CUDNN_STATUS_INTERNAL_ERROR (issue #51717)."""
+        """Including num_patches above the old cuDNN batch-norm grid limit
+        (~65535), which used to raise CUDNN_STATUS_INTERNAL_ERROR."""
         channel = 3
         patch_size = 14 * 14
 
@@ -108,8 +95,6 @@ class TestFusedInputNormModule:
         torch.testing.assert_close(out, expected)
 
     def test_identity_passthrough(self):
-        """The identity configuration returns the input unchanged (cast
-        only)."""
         norm = FusedInputNorm.identity().to(_DEVICE)
         assert norm.is_identity
 
@@ -123,8 +108,6 @@ class TestFusedInputNormModule:
 # ===========================================================================
 @requires_accelerator
 class TestFusedInputNormDtypes:
-    """Input/output dtype combinations supported by the Triton fast path."""
-
     @pytest.mark.parametrize(
         "in_dtype,out_dtype",
         [
@@ -139,8 +122,6 @@ class TestFusedInputNormDtypes:
         ],
     )
     def test_dtype_combinations(self, in_dtype: torch.dtype, out_dtype: torch.dtype):
-        """All supported input/output dtype combinations should agree with
-        the float32 reference within the output dtype's tolerance."""
         channel = 3
         patch_size = 16
         image_mean = [0.5, 0.5, 0.5]
@@ -186,12 +167,8 @@ class TestFusedInputNormDtypes:
 # ===========================================================================
 @requires_accelerator
 class TestFusedInputNormShapes:
-    """Channel variants and block-size boundaries."""
-
     @pytest.mark.parametrize("channel", [1, 3, 4])
     def test_channel_variants(self, channel: int):
-        """The kernel folds all C channels into one program; a single tuned
-        block_l should still be correct for a range of C."""
         patch_size = 64
         image_mean = [0.5] * channel
         image_std = [0.25] * channel
@@ -223,22 +200,9 @@ class TestFusedInputNormShapes:
         )
         torch.testing.assert_close(out, expected)
 
-    @pytest.mark.parametrize(
-        "patch_size",
-        [
-            1,  # tiny L, single masked block
-            255,  # just under a power of two
-            256,  # aligned to 256
-            2047,  # just under default block_l=2048
-            2048,  # exactly one block, no mask
-            2049,  # one masked tail
-            8191,  # several full blocks + mask
-            8192,  # exact multiple of 2048
-        ],
-    )
+    @pytest.mark.parametrize("patch_size", [1, 255, 256, 2047, 2048, 2049, 8191, 8192])
     def test_block_boundaries(self, patch_size: int):
-        """Exercise both the HAS_MASK=True and HAS_MASK=False kernel branches
-        by picking L values that straddle the default block size."""
+        """Cover both masked-tail and exact-multiple paths of the 1D kernel."""
         channel = 3
         image_mean = [0.485, 0.456, 0.406]
         image_std = [0.229, 0.224, 0.225]
@@ -276,23 +240,12 @@ class TestFusedInputNormShapes:
 # ===========================================================================
 @requires_accelerator
 class TestFusedInputNormInputHandling:
-    """The wrapper must transparently handle non-contiguous inputs.
-
-    ``forward`` materializes a contiguous copy internally when the input is
-    not contiguous, because the Triton kernel and the trailing ``.view(...)``
-    both require contiguous storage.
-    """
-
     def test_non_contiguous_input_matches_reference(self):
-        """A non-contiguous input (e.g. a strided slice) must produce the
-        same result as its contiguous copy."""
         channel = 3
         patch_size = 32
         patches = 8
 
         set_random_seed(0)
-        # Build a 3D tensor and take a strided 2D slice along the last dim so
-        # the resulting 2D view has non-trivial strides on both axes.
         base = torch.randint(
             0,
             256,
@@ -311,8 +264,6 @@ class TestFusedInputNormInputHandling:
         ).to(_DEVICE)
 
         out = norm(non_contig, visual_dtype=torch.float32)
-
-        # Reference is computed on the contiguous copy of the same values.
         expected = _reference_input_norm(
             non_contig.contiguous(),
             _RGB_MEAN,
@@ -324,8 +275,6 @@ class TestFusedInputNormInputHandling:
         torch.testing.assert_close(out, expected)
 
     def test_non_contiguous_input_with_out_buffer(self):
-        """A non-contiguous input combined with an ``out=`` buffer (also
-        possibly oversized) must still write only the leading rows."""
         channel = 3
         patch_size = 16
         patches = 4
@@ -369,8 +318,6 @@ class TestFusedInputNormInputHandling:
             torch.float32,
         )
         torch.testing.assert_close(returned, expected)
-
-        # The untouched tail must still be the sentinel value.
         assert torch.all(out[patches:] == 123.0)
 
 
@@ -379,12 +326,7 @@ class TestFusedInputNormInputHandling:
 # ===========================================================================
 @requires_accelerator
 class TestFusedInputNormOutBuffer:
-    """The optional ``out=`` argument: buffer reuse and validation."""
-
     def test_reuse(self):
-        """Passing a preallocated `out` buffer must write in-place and return
-        a tensor aliasing the same storage (the leading ``patches`` rows),
-        with results identical to the allocating path."""
         channel = 3
         patch_size = 32
 
@@ -410,22 +352,14 @@ class TestFusedInputNormOutBuffer:
         sentinel = out.data_ptr()
         returned = norm(pixel_values, visual_dtype=torch.float32, out=out)
 
-        # ``forward`` returns ``out[:patches]``, a view that aliases the same
-        # storage. It is *not* the same Python object as ``out``, so compare
-        # by data pointer + shape rather than identity.
         assert returned.data_ptr() == sentinel, "out must be written in place"
         assert returned.shape == pixel_values.shape
         torch.testing.assert_close(out, fresh)
         torch.testing.assert_close(returned, fresh)
 
     def test_oversized_out_buffer(self):
-        """``out`` may be larger than the input along dim 0 (``N``). Only the
-        leading ``patches`` rows are written; the returned tensor is a view
-        into that region and the trailing rows are untouched.
-
-        This is the core contract introduced by allowing the caller to reuse
-        a buffer sized for the maximum batch across calls.
-        """
+        """Only the leading ``patches`` rows of an oversized buffer are
+        written; the returned tensor is a view into that region."""
         channel = 3
         patch_size = 32
         patches = 8
@@ -455,8 +389,6 @@ class TestFusedInputNormOutBuffer:
         )
         returned = norm(pixel_values, visual_dtype=torch.float32, out=out)
 
-        # The returned tensor aliases the leading rows of ``out`` and has the
-        # shape of the input, not of the buffer.
         assert returned.data_ptr() == out.data_ptr()
         assert returned.shape == (patches, channel * patch_size)
 
@@ -469,14 +401,9 @@ class TestFusedInputNormOutBuffer:
             torch.float32,
         )
         torch.testing.assert_close(returned, expected)
-
-        # Only the leading ``patches`` rows were written; the tail keeps the
-        # sentinel value.
         assert torch.all(out[patches:] == 123.0)
 
     def test_identity_oversized_out_buffer(self):
-        """The identity fast path must honor an oversized ``out`` buffer as
-        well, writing only the leading rows and returning a view into them."""
         norm = FusedInputNorm.identity().to(_DEVICE)
         x = torch.randn(4, 3 * 8, dtype=torch.float32, device=_DEVICE)
 
@@ -489,7 +416,7 @@ class TestFusedInputNormOutBuffer:
         assert torch.all(out[4:] == 7.0)
 
     def test_validation(self):
-        """`out` with a wrong shape / dtype / device must be rejected."""
+        """Wrong shape / dtype / device must be rejected."""
         channel = 3
         norm = FusedInputNorm(
             image_mean=_RGB_MEAN,
@@ -499,21 +426,18 @@ class TestFusedInputNormOutBuffer:
         ).to(_DEVICE)
         pixel_values = torch.randn(4, channel * 16, dtype=torch.float32, device=_DEVICE)
 
-        # Wrong shape.
         with pytest.raises(AssertionError):
             norm(
                 pixel_values,
                 visual_dtype=torch.float32,
                 out=torch.empty(4, channel * 16 + 1, device=_DEVICE),
             )
-        # Wrong dtype.
         with pytest.raises(AssertionError):
             norm(
                 pixel_values,
                 visual_dtype=torch.float32,
                 out=torch.empty_like(pixel_values, dtype=torch.bfloat16),
             )
-        # Wrong device.
         with pytest.raises(AssertionError):
             norm(
                 pixel_values,
@@ -522,7 +446,6 @@ class TestFusedInputNormOutBuffer:
             )
 
     def test_identity_out_buffer(self):
-        """`out=` must also be honored on the identity fast path."""
         norm = FusedInputNorm.identity().to(_DEVICE)
         x = torch.randn(4, 3 * 8, dtype=torch.float32, device=_DEVICE)
         out = torch.empty_like(x, dtype=torch.bfloat16)
@@ -530,7 +453,6 @@ class TestFusedInputNormOutBuffer:
 
         returned = norm(x, visual_dtype=torch.bfloat16, out=out)
 
-        # Returned tensor aliases ``out`` (view), not the same object.
         assert returned.data_ptr() == sentinel
         assert returned.shape == x.shape
         torch.testing.assert_close(returned, x.to(torch.bfloat16))
@@ -543,37 +465,59 @@ class TestFusedInputNormOutBuffer:
 @requires_accelerator
 @requires_triton
 class TestFusedInputNormKernel:
-    """Direct tests of the ``fused_input_norm_triton`` entry point."""
-
-    @pytest.mark.parametrize("block_l", [128, 256, 1024, 2048])
-    def test_block_sizes(self, block_l: int):
-        """The raw kernel should produce the reference output for a range of
-        block_l values, including ones that force a masked tail."""
-        N, C, L = 5, 3, 1000  # L not divisible by any of the tested blocks
+    @pytest.mark.parametrize("block", [128, 256, 1024, 2048])
+    def test_block_sizes(self, block: int):
+        """``N*C*L`` is never a multiple of the tested blocks, so the masked
+        tail path is exercised for every parameterisation."""
+        N, C, L = 5, 3, 1000
         set_random_seed(0)
         x = torch.randn(N, C, L, dtype=torch.float32, device=_DEVICE)
         w = torch.randn(C, dtype=torch.float32, device=_DEVICE)
         b = torch.randn(C, dtype=torch.float32, device=_DEVICE)
 
         out = torch.empty_like(x)
-        fused_input_norm_triton(
-            x, out, w, b, compute_dtype=torch.float32, block_l=block_l
-        )
+        fused_input_norm_triton(x, out, w, b, compute_dtype=torch.float32, block=block)
+
+        expected = x * w.view(1, C, 1) + b.view(1, C, 1)
+        torch.testing.assert_close(out, expected)
+
+    @pytest.mark.parametrize(
+        "N, C, L",
+        [
+            (1, 1, 1),
+            (1, 3, 1),
+            (3, 3, 7),  # tile straddles channel boundaries
+            (2, 8, 63),
+            (4, 3, 1000),
+        ],
+    )
+    def test_channel_boundary_crossing(self, N: int, C: int, L: int):
+        """The 1D kernel recovers ``c = (offs // L) % C`` per lane, so a tile
+        can straddle a channel boundary and gather weight/bias per lane.
+        These shapes force that path by keeping ``L`` well below the block."""
+        set_random_seed(0)
+        x = torch.randn(N, C, L, dtype=torch.float32, device=_DEVICE)
+        w = torch.randn(C, dtype=torch.float32, device=_DEVICE)
+        b = torch.randn(C, dtype=torch.float32, device=_DEVICE)
+
+        out = torch.empty_like(x)
+        fused_input_norm_triton(x, out, w, b, compute_dtype=torch.float32)
 
         expected = x * w.view(1, C, 1) + b.view(1, C, 1)
         torch.testing.assert_close(out, expected)
 
     def test_larger_output_buffer(self):
-        """The kernel writes only ``[:N, :C, :L]``; the rest of an oversized
-        output buffer must be left untouched."""
+        """Only the leading ``N`` rows of an oversized ``out`` are written."""
         N, C, L = 3, 3, 100
         set_random_seed(0)
         x = torch.randn(N, C, L, dtype=torch.float32, device=_DEVICE)
         w = torch.randn(C, dtype=torch.float32, device=_DEVICE)
         b = torch.randn(C, dtype=torch.float32, device=_DEVICE)
 
+        # Pad only along dim 0. Padding C or L would break the flat index
+        # mapping and is explicitly disallowed.
         out = torch.full(
-            (N + 2, C + 1, L + 5),
+            (N + 2, C, L),
             123.0,
             dtype=torch.float32,
             device=_DEVICE,
@@ -581,12 +525,33 @@ class TestFusedInputNormKernel:
         fused_input_norm_triton(x, out, w, b, compute_dtype=torch.float32)
 
         expected = x * w.view(1, C, 1) + b.view(1, C, 1)
-        torch.testing.assert_close(out[:N, :C, :L], expected)
-
-        # The untouched tail must still be the sentinel value.
+        torch.testing.assert_close(out[:N], expected)
         assert torch.all(out[N:] == 123.0)
-        assert torch.all(out[:N, C:, :] == 123.0)
-        assert torch.all(out[:N, :C, L:] == 123.0)
+
+    def test_rejects_channel_or_width_padded_output(self):
+        """The flat 1D kernel cannot address a buffer padded along C or L;
+        such buffers must be rejected rather than silently mis-written."""
+        N, C, L = 3, 3, 100
+        x = torch.randn(N, C, L, dtype=torch.float32, device=_DEVICE)
+        w = torch.randn(C, dtype=torch.float32, device=_DEVICE)
+        b = torch.randn(C, dtype=torch.float32, device=_DEVICE)
+
+        with pytest.raises(AssertionError):
+            fused_input_norm_triton(
+                x,
+                torch.empty(N, C + 1, L, dtype=torch.float32, device=_DEVICE),
+                w,
+                b,
+                compute_dtype=torch.float32,
+            )
+        with pytest.raises(AssertionError):
+            fused_input_norm_triton(
+                x,
+                torch.empty(N, C, L + 1, dtype=torch.float32, device=_DEVICE),
+                w,
+                b,
+                compute_dtype=torch.float32,
+            )
 
     def test_rejects_unsupported_compute_dtype(self):
         N, C, L = 2, 3, 64
@@ -604,13 +569,10 @@ class TestFusedInputNormKernel:
 # ===========================================================================
 class TestFusedInputNormConstruction:
     """Identity detection and weight/bias buffer semantics at init time.
-
     These do not touch the device-side kernel and run on CPU.
     """
 
     def test_identity_from_identity_config(self):
-        """An identity config (rescale=1, mean=0, std=1) should collapse to
-        the identity module."""
         norm = FusedInputNorm(
             image_mean=[0.0, 0.0, 0.0],
             image_std=[1.0, 1.0, 1.0],
@@ -621,8 +583,6 @@ class TestFusedInputNormConstruction:
         assert norm.bias is None
 
     def test_non_identity_buffers(self):
-        """A non-identity module must expose fp32 weight/bias of the right
-        shape and matching the closed-form affine coefficients."""
         channel = 3
         norm = FusedInputNorm(
             image_mean=_RGB_MEAN,
@@ -664,9 +624,8 @@ class TestFusedInputNormConstruction:
             return original_allclose(input, other, *args, **kwargs)
 
         monkeypatch.setattr(torch, "allclose", cpu_allclose)
-        # Exercise the real accelerator when available. The meta device gives
-        # the CPU-only test shard the same non-CPU default-device semantics
-        # without requiring a CUDA-enabled PyTorch build.
+        # The meta device gives the CPU-only test shard the same non-CPU
+        # default-device semantics without requiring a CUDA build.
         default_device = "cuda" if torch.cuda.is_available() else "meta"
         with torch.device(default_device):
             input_norm = FusedInputNorm(image_mean, image_std, rescale_factor)

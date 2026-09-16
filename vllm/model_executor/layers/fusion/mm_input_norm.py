@@ -115,17 +115,16 @@ if HAS_TRITON:
         Computes ``y = (x * weight[c] + bias[c]).to(y.dtype)`` in a single pass.
         Equivalent to::
 
-            outputs[:N, :C, :L] = (
-                inputs * weight.view(1, C, 1) + bias.view(1, C, 1)
-            ).to(outputs.dtype)
+            outputs[:N] = (inputs * weight.view(1, C, 1) + bias.view(1, C, 1)).to(
+                outputs.dtype
+            )
 
         Args:
             inputs: Input tensor, shape ``(N, C, L)``. Must be contiguous; the
                 caller is expected to materialize a contiguous copy beforehand.
-            outputs: Output tensor. Must be contiguous, with ``outputs.shape[i]
-                >= inputs.shape[i]`` for every dim; only the ``[:N, :C, :L]``
-                region is written. This allows the caller to reuse a larger
-                preallocated buffer without a per-call allocation.
+            outputs: Output tensor. Must be contiguous and shaped exactly
+                ``(N_out, C, L)`` with ``N_out >= N``; only the leading ``N``
+                rows are written.
             weight: Per-channel scale, shape ``(C,)``, contiguous.
             bias: Per-channel shift, shape ``(C,)``, contiguous.
             compute_dtype: Compute dtype used inside the kernel. Only
@@ -160,11 +159,15 @@ if HAS_TRITON:
         assert outputs.shape[0] >= N, (
             f"outputs.shape[0]={outputs.shape[0]} < inputs.shape[0]={N}"
         )
-        assert outputs.shape[1] >= C, (
-            f"outputs.shape[1]={outputs.shape[1]} < inputs.shape[1]={C}"
-        )
-        assert outputs.shape[2] >= L, (
-            f"outputs.shape[2]={outputs.shape[2]} < inputs.shape[2]={L}"
+        # The flat 1D kernel addresses the output buffer as a contiguous
+        # ``N * C * L`` block (``y_ptr + offs``), so the buffer's physical
+        # layout must match the input exactly on the C and L axes. Only the
+        # batch dim (dim 0) may be padded.
+        assert outputs.shape[1:] == (C, L), (
+            f"outputs.shape[1:]={tuple(outputs.shape[1:])} != (C, L)={(C, L)}; "
+            "the flat 1D kernel addresses the output as a contiguous "
+            "N * C * L block and cannot handle a channel- or width-padded "
+            "output buffer"
         )
         assert weight.numel() == C and bias.numel() == C, (
             f"weight/bias must have {C} elements, got {weight.numel()} / {bias.numel()}"
@@ -183,8 +186,7 @@ if HAS_TRITON:
         if block is None:
             block = _DEFAULT_BLOCK
 
-        # The kernel only ever touches the [:N, :C, :L] region, so index over
-        # that slice rather than the full (possibly padded) output buffer.
+        # The kernel only ever writes the leading ``N`` rows
         numel = N * C * L
         grid = (triton.cdiv(numel, block),)
 
