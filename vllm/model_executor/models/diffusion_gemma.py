@@ -677,6 +677,9 @@ class DiffusionGemmaRequestStates:
         self.read_only_slots.discard(slot_idx)
 
     def remove_request(self, slot_idx: int) -> None:
+        # The GPU flags (max_steps, has_seed, read_only) are reset by
+        # add_request before the slot is reused; only the host sets that gate
+        # the sampler's work need clearing now.
         self.is_encoder_phase[slot_idx].fill_(False)
         self.accepted_canvas_history_len[slot_idx].fill_(0)
         self.self_conditioning_embeds[slot_idx] = 0
@@ -1393,9 +1396,11 @@ class DiffusionSampler:
         if states.read_only_slots and not states.read_only_slots.isdisjoint(
             decode_slots_np.tolist()
         ):
+            # A read-only slot never enters the encoder phase, so the flag
+            # being set here means it converged on this step.
             ro_mask = states.read_only[decode_slots] & states.is_encoder_phase[
                 decode_slots
-            ] & ~is_committing
+            ]
             if bool(ro_mask.any()):
                 ro_idx = decode_idx[ro_mask]
                 ro_slots = decode_slots[ro_mask]
