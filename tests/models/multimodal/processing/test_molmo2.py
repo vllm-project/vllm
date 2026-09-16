@@ -1,16 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import struct
+from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
 import torch
+from PIL import Image as PILImage
+from PIL import ImageOps
 
 from vllm.config.multimodal import VideoDummyOptions
 from vllm.model_executor.models.molmo2 import (
     Molmo2DummyInputsBuilder,
     build_flat_image_bool_length,
+    exif_transpose,
 )
+from vllm.multimodal.media.image import ImageMediaIO
 
 
 def test_build_flat_image_bool_length_matches_molmoweb_processor_tokens():
@@ -88,3 +94,44 @@ def test_dummy_video_num_frames_override_honors_min_of_two(
 
     video, _metadata = data["video"][0]
     assert video.shape[0] == expected_frames
+
+
+def _malformed_exif_jpeg() -> bytes:
+    """A JPEG whose APP1/Exif segment carries an invalid TIFF header."""
+    buf = BytesIO()
+    PILImage.new("RGB", (64, 48)).save(buf, "JPEG")
+    jpg = buf.getvalue()
+    rest = jpg[2:]
+    rest = rest[2 + struct.unpack(">H", rest[2:4])[0] :]
+    payload = b"Exif\x00\x00XXXX\x00\x00\x00\x08" + bytes(32)
+    return b"\xff\xd8\xff\xe1" + struct.pack(">H", len(payload) + 2) + payload + rest
+
+
+def _served_image() -> PILImage.Image:
+    """An image with malformed EXIF, loaded the way a served request loads it.
+
+    ``ImageMediaIO.load_bytes`` runs a suppressed ``exif_transpose`` and then
+    ``load()``, which is what primes Pillow's lazy EXIF state so the *next*
+    read of it raises.
+    """
+    return ImageMediaIO(image_mode="RGB").load_bytes(_malformed_exif_jpeg()).media
+
+
+def test_exif_transpose_tolerates_malformed_exif():
+    """A malformed EXIF header must not fail the request in the prompt update.
+
+    ``get_image_replacement_molmo2`` transposes the served image again, so a
+    bare ``ImageOps.exif_transpose`` turns it into a ``SyntaxError`` escaping the
+    multi-modal processor. This is the same payload #56576 made
+    ``MultiModalHasher`` tolerate; hashing runs first, so that fix moved the
+    failure here rather than removing it.
+    """
+    # Precondition, on its own image: Pillow raises only on the first read of
+    # the poisoned state, so every case below needs a freshly loaded image or it
+    # would pass by coincidence.
+    with pytest.raises(Exception):  # noqa: B017 - Pillow raises SyntaxError
+        ImageOps.exif_transpose(_served_image())
+
+    assert exif_transpose(_served_image()) is not None
+    assert exif_transpose([_served_image(), None])[0] is not None
+    assert exif_transpose(None) is None
