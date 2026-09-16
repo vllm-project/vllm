@@ -1,4 +1,5 @@
 #include "marlin.cuh"
+#include "marlin_ldmatrix.cuh"
 
 #include <torch/csrc/stable/accelerator.h>
 #include <torch/csrc/stable/library.h>
@@ -13,6 +14,11 @@ namespace marlin {
 
 namespace {
 
+// Read the flag from the image selected by CUDA, including legacy PTX fallback.
+// CMake gives this source and the W4A8 GEMMs the same feature targets.
+__device__ __constant__ bool ldmatrix_s4_enabled =
+    VLLM_MARLIN_LDMATRIX_S4_DEVICE_ENABLED;
+
 bool supports_ldmatrix_s4(int device_index) {
 #if defined(VLLM_MARLIN_LDMATRIX_S4_ENABLED) && CUDART_VERSION >= 13040
   int major = 0;
@@ -24,31 +30,15 @@ bool supports_ldmatrix_s4(int device_index) {
     return false;
   }
 
-  #if defined(VLLM_MARLIN_LDMATRIX_S4_SM90_ENABLED)
-  if (major == 9 && minor == 0) {
-    return true;
+  if (major < 9 || (major == 9 && minor != 0)) {
+    return false;
   }
-  #endif
-  #if defined(VLLM_MARLIN_LDMATRIX_S4_SM100_ENABLED)
-  if (major == 10 && (minor == 0 || minor == 3)) {
-    return true;
-  }
-  #endif
-  #if defined(VLLM_MARLIN_LDMATRIX_S4_SM107_ENABLED)
-  if (major == 10 && minor == 7) {
-    return true;
-  }
-  #endif
-  #if defined(VLLM_MARLIN_LDMATRIX_S4_SM110_ENABLED)
-  if (major == 11 && minor == 0) {
-    return true;
-  }
-  #endif
-  #if defined(VLLM_MARLIN_LDMATRIX_S4_SM120_ENABLED)
-  if (major == 12 && (minor == 0 || minor == 1)) {
-    return true;
-  }
-  #endif
+  torch::stable::accelerator::DeviceGuard device_guard(device_index);
+  bool enabled = false;
+  STD_TORCH_CHECK(cudaMemcpyFromSymbol(&enabled, ldmatrix_s4_enabled,
+                                       sizeof(enabled)) == cudaSuccess,
+                  "Failed to query the Marlin weight layout");
+  return enabled;
 #endif
 
   return false;

@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def _get_cmake_bin() -> str:
     cmake = shutil.which("cmake")
@@ -79,4 +81,41 @@ endif()
 """
     )
 
+    subprocess.run([_get_cmake_bin(), "-P", script], check=True)
+
+
+@pytest.mark.parametrize(
+    ("cuda_version", "requested", "expected"),
+    [
+        ("13.3", "9.0a;10.3a;12.0f", ""),
+        ("12.8", "9.0a;10.3a;12.1a", ""),
+        ("13.4", "9.0a;10.0f;11.0f;12.0f", "9.0a;10.0f;11.0f;12.0f"),
+        ("13.4", "10.3a", "10.3a"),
+        ("13.4", "10.0a;10.3a;10.7a", "10.0a;10.3a;10.7a"),
+        ("13.4", "10.0f;10.3f;10.7f", "10.0f;10.3f;10.7f"),
+        ("13.4", "12.0a;12.1a", "12.0a;12.1a"),
+        ("13.4", "7.5;8.0;8.9", ""),
+        ("13.4", "7.5;8.0;9.0a;10.3a", "9.0a;10.3a"),
+        ("13.4", "10.3;12.1;13.0a", ""),
+        ("13.4", "9.0;10.0;10.7;11.0;12.0", "9.0a;10.0f;10.7f;11.0f;12.0f"),
+        ("13.5", "10.3a;10.3a;12.1f", "10.3a;12.1f"),
+    ],
+)
+def test_ldmatrix_s4_archs_preserve_each_requested_feature_target(
+    tmp_path: Path, cuda_version: str, requested: str, expected: str
+):
+    """Keep every requested native kernel and reject unsupported generic targets."""
+    repo_root = Path(__file__).parents[1]
+    script = tmp_path / "test_ldmatrix_archs.cmake"
+    script.write_text(
+        f"""
+cmake_minimum_required(VERSION 3.26)
+include("{repo_root / "cmake" / "utils.cmake"}")
+set(CMAKE_CUDA_COMPILER_VERSION "{cuda_version}")
+cuda_archs_ldmatrix_s4(actual "{requested}")
+if(NOT "${{actual}}" STREQUAL "{expected}")
+  message(FATAL_ERROR "Expected '{expected}', got '${{actual}}'")
+endif()
+"""
+    )
     subprocess.run([_get_cmake_bin(), "-P", script], check=True)
