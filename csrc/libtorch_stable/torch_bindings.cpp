@@ -334,7 +334,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor? b_zeros, "
       "bool has_zp, Tensor! b_qweight_reorder, Tensor! b_scales_reorder, "
       "Tensor!? b_zeros_reorder, "
-      "int K, int N, int N_32align) -> ()");
+      "int K, int N, int N_32align, int num_groups) -> ()");
 
   // AllSpark quantization ops
   ops.def(
