@@ -130,24 +130,43 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
     supports_dcp: bool = False
     supports_pcp: bool = False
 
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
+        kv_cache_dtype: str,
+        logits_soft_cap: float | None = None,
+        attn_type: AttentionType = AttentionType.DECODER,
+        kv_sharing_target_layer_name: str | None = None,
+        sinks: torch.Tensor | None = None,
+    ) -> None:
         # The parent constructor probes flash-attn for quantized-KV support and
         # raises where it is unavailable (sm120), but QSA dequantizes fp8 inside
         # its own Triton kernel and never runs flash-attn over the cache. Hand
-        # the parent "auto" and restore the real dtype afterwards: the parent
-        # only uses it for that probe, and do_kv_cache_update reads the
+        # the parent "auto" for that probe and restore the real dtype afterwards:
+        # the parent only uses it there, and do_kv_cache_update reads the
         # attribute at call time.
-        arg_list = list(args)
-        kv_cache_dtype = kwargs.get(
-            "kv_cache_dtype", arg_list[6] if len(arg_list) > 6 else "auto"
-        )
+        real_kv_cache_dtype = kv_cache_dtype
         if kv_cache_dtype in ("fp8", "fp8_e4m3"):
-            if "kv_cache_dtype" in kwargs:
-                kwargs["kv_cache_dtype"] = "auto"
-            else:
-                arg_list[6] = "auto"
-        super().__init__(*arg_list, **kwargs)
-        self.kv_cache_dtype = kv_cache_dtype
+            kv_cache_dtype = "auto"
+        super().__init__(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            alibi_slopes,
+            sliding_window,
+            kv_cache_dtype,
+            logits_soft_cap,
+            attn_type,
+            kv_sharing_target_layer_name,
+            sinks,
+        )
+        self.kv_cache_dtype = real_kv_cache_dtype
         if not is_flash_attn_varlen_func_available():
             raise NotImplementedError("Qwen4Exp QSA requires FlashAttention")
         if self.dcp_world_size != 1:
