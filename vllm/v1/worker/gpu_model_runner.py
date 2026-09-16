@@ -151,7 +151,7 @@ from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     reorder_batch_to_split_decodes_and_prefills,
 )
-from vllm.v1.conf_compute_utils import StagedH2DCopier, confidential_compute_enabled
+from vllm.v1.conf_compute_utils import confidential_compute_enabled
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (
@@ -863,16 +863,8 @@ class GPUModelRunner(
         self.optimistic_seq_lens_cpu = torch.zeros(
             self.max_num_reqs, dtype=torch.int32, pin_memory=PIN_MEMORY
         )
-        self.num_computed_tokens = torch.zeros(
-            self.max_num_reqs, dtype=torch.int32, device=self.device
-        )
-        # Staged-copy helper for the direct (non-CpuGpuBuffer)
-        # num_computed_tokens H2D under Confidential Computing; see
-        # vllm.v1.conf_compute_utils.
-        self._num_computed_tokens_copier = (
-            StagedH2DCopier(self.num_computed_tokens)
-            if confidential_compute_enabled()
-            else None
+        self.num_computed_tokens = self._make_buffer(
+            self.max_num_reqs, dtype=torch.int32
         )
         self.prev_num_draft_tokens = self._make_buffer(
             self.max_num_reqs, dtype=torch.int32
@@ -2213,27 +2205,18 @@ class GPUModelRunner(
                 device=self.device, non_blocking=True
             )
             update_num_computed_tokens_for_batch_change(
-                self.num_computed_tokens,
+                self.num_computed_tokens.gpu,
                 self.num_accepted_tokens.gpu[:num_reqs],
                 self.prev_positions.gpu[:num_reqs],
                 self.valid_sampled_token_count_gpu,
                 self.prev_num_draft_tokens.gpu,
                 cpu_values,
             )
-        elif self._num_computed_tokens_copier is not None:
-            # Confidential Computing: num_computed_tokens is consumed by
-            # compute-stream kernels during _prepare_inputs, so the staged
-            # copy's D2D must be ordered on the compute stream ahead of the
-            # consumer kernel; a plain H2D here would block the host on the
-            # in-flight forward.
-            self._num_computed_tokens_copier.copy_(
-                self.input_batch.num_computed_tokens_cpu_tensor, num_reqs
-            )
         else:
-            self.num_computed_tokens[:num_reqs].copy_(
-                self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
-                non_blocking=True,
+            self.num_computed_tokens.np[:num_reqs] = (
+                self.input_batch.num_computed_tokens_cpu[:num_reqs]
             )
+            self.num_computed_tokens.copy_to_gpu(num_reqs)
 
         self.req_indices.np[:total_num_scheduled_tokens] = req_indices
         self.req_indices.copy_to_gpu(total_num_scheduled_tokens)
@@ -2244,11 +2227,11 @@ class GPUModelRunner(
         self.num_scheduled_tokens.copy_to_gpu(num_reqs)
         num_scheduled_tokens_gpu = self.num_scheduled_tokens.gpu[:num_reqs]
         self.positions[:total_num_scheduled_tokens] = (
-            self.num_computed_tokens[req_indices_gpu].to(torch.int64)
+            self.num_computed_tokens.gpu[req_indices_gpu].to(torch.int64)
             + self.query_pos.gpu[:total_num_scheduled_tokens]
         )
         self.seq_lens[:num_reqs] = (
-            self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
+            self.num_computed_tokens.gpu[:num_reqs] + num_scheduled_tokens_gpu
         )
         self.seq_lens[num_reqs:].fill_(0)
 
@@ -2283,7 +2266,7 @@ class GPUModelRunner(
                     non_blocking=True,
                 )
         if self.use_async_spec_decode and self.uses_mrope:
-            drift = self.num_computed_tokens[req_indices_gpu].to(
+            drift = self.num_computed_tokens.gpu[req_indices_gpu].to(
                 torch.int64
             ) - async_tensor_h2d(
                 self.input_batch.num_computed_tokens_cpu_tensor[req_indices],
