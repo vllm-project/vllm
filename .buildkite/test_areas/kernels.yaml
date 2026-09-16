@@ -530,6 +530,25 @@ steps:
   commands:
     - pytest -v -s kernels/moe/test_deepep_deepgemm_moe.py
     - pytest -v -s kernels/moe/test_deepep_moe.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) DeepEP FP8 MoE Kernels"
+      dind: false
+      device: mi355_2
+      timeout_in_minutes: 45
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/moe/
+      - csrc/quantization/w8a8/cutlass/moe/
+      - vllm/model_executor/layers/fused_moe/
+      - tests/kernels/moe/test_deepep_moe.py
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      - vllm/envs.py
+      commands:
+      - pytest -v -s kernels/moe/test_deepep_moe.py
 
 - label: ":nvidia: (B200) FP4 MoE Kernels"
   key: kernels-fp4-moe-test-b200
@@ -559,7 +578,30 @@ steps:
   - vllm/config
   commands:
     - pytest -v -s kernels/moe/test_moe_layer.py
-
+  mirror:
+    amd:
+      label: ":amd: (MI355) FusedMoE Layer Kernels"
+      dind: false
+      device: mi355_2
+      timeout_in_minutes: 35
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/moe/
+      - csrc/rocm/
+      - tests/kernels/moe
+      - vllm/model_executor/layers/fused_moe/
+      - vllm/model_executor/layers/quantization/
+      - vllm/distributed/
+      - vllm/config/
+      - vllm/forward_context.py
+      - vllm/v1/worker/workspace.py
+      - vllm/utils/import_utils.py
+      - vllm/utils/math_utils.py
+      - vllm/utils/torch_utils.py
+      - vllm/platforms/
+      - vllm/_aiter_ops.py
 
 - label: ":nvidia: (B200) FusedMoE Layer Kernels"
   key: kernels-fusedmoe-layer-test-2-b200s
