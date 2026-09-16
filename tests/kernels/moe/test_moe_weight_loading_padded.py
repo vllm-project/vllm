@@ -256,6 +256,36 @@ class TestNarrowExpertDataForPadding:
 class TestWeightLoadingWithPaddedHiddenSize:
     """Integration-style tests that simulate padded weight loading."""
 
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+    def test_load_w2_chunks_noncontiguous_cpu_source_to_padded_cuda(self):
+        hidden = 1024
+        intermediate = 512
+        loaded_weight = torch.arange(
+            hidden * intermediate * 2, dtype=torch.float32
+        ).reshape(hidden, intermediate * 2)
+        tp_source = loaded_weight[:, intermediate:]
+        expert_data_full = torch.zeros(hidden + 8, intermediate + 8, device="cuda")
+        destination = expert_data_full[:hidden, :intermediate]
+
+        assert not tp_source.is_contiguous()
+        assert tp_source.nbytes > 1 << 20
+        assert not destination.is_contiguous()
+
+        experts = object.__new__(RoutedExperts)
+        torch.nn.Module.__init__(experts)
+        experts.moe_config = make_dummy_moe_config()
+        experts.moe_config.moe_parallel_config.tp_size = 2
+        experts._load_w2(
+            expert_data=expert_data_full,
+            shard_dim=1,
+            loaded_weight=loaded_weight,
+            tp_rank=1,
+        )
+
+        torch.testing.assert_close(destination.cpu(), tp_source)
+        assert torch.count_nonzero(expert_data_full[hidden:, :]) == 0
+        assert torch.count_nonzero(expert_data_full[:hidden, intermediate:]) == 0
+
     def test_load_w2_with_padding(self):
         """Simulate loading w2 weights when hidden_size is padded."""
         padded_hidden = 3072

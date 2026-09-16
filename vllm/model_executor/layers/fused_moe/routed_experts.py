@@ -27,6 +27,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     resolve_quant_method,
 )
+from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.runner.shared_experts import SharedExperts
@@ -536,6 +537,20 @@ class RoutedExperts(PluggableLayer):
             hidden_dim=hidden_dim,
             shard_dim=shard_dim,
         )
+        if (
+            loaded_weight.device.type == "cpu"
+            and expert_data.device.type == "cuda"
+            and not expert_data.is_contiguous()
+            and expert_data.ndim == 2
+        ):
+            loaded_weight = loaded_weight.contiguous()
+            num_chunks = max(cdiv(loaded_weight.nbytes, 1 << 20), 1)
+            for dst, src in zip(
+                expert_data.chunk(num_chunks, dim=0),
+                loaded_weight.chunk(num_chunks, dim=0),
+            ):
+                dst.copy_(src)
+            return
         expert_data.copy_(loaded_weight)
 
     def _load_single_value(
