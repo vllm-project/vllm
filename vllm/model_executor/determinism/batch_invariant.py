@@ -1060,6 +1060,18 @@ def enable_batch_invariant_mode():
     if _batch_invariant_MODE:
         return
 
+    # Only CUDA and XPU install the matmul overrides (or pin cuBLAS split-k)
+    # that batch invariance depends on. Other platforms would fall through and
+    # register the softmax/mean/bmm overrides alone, reporting success while
+    # matmul stayed batch-variant, so refuse instead of half-enabling.
+    if not (current_platform.is_cuda() or current_platform.is_xpu()):
+        raise NotImplementedError(
+            f"Batch-invariant mode is not implemented for "
+            f"{type(current_platform).__name__}; it is currently supported on "
+            f"CUDA and XPU only. Unset VLLM_BATCH_INVARIANT to continue "
+            f"without bitwise-reproducible outputs."
+        )
+
     _batch_invariant_MODE = True
     _batch_invariant_LIB = torch.library.Library("aten", "IMPL")
 
