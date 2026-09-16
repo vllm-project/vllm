@@ -177,9 +177,14 @@ def watermarked_server():
         yield remote_server
 
 
+@pytest.fixture(params=["server", "watermarked_server"], ids=["plain", "watermarked"])
+def tool_use_server(request: pytest.FixtureRequest):
+    return request.getfixturevalue(request.param)
+
+
 @pytest_asyncio.fixture
-async def watermarked_client(watermarked_server):
-    async with watermarked_server.get_async_client() as async_client:
+async def tool_use_client(tool_use_server):
+    async with tool_use_server.get_async_client() as async_client:
         yield async_client
 
 
@@ -195,16 +200,14 @@ async def watermarked_client(watermarked_server):
     ],
 )
 @pytest.mark.parametrize("enable_thinking", [True, False])
-@pytest.mark.parametrize("client_fixture", ["client", "watermarked_client"])
 async def test_function_tool_use(
-    request: pytest.FixtureRequest,
-    client_fixture: str,
+    tool_use_client: openai.AsyncOpenAI,
     model_name: str,
     stream: bool,
     tool_choice: str | dict,
     enable_thinking: bool,
 ):
-    client: openai.AsyncOpenAI = request.getfixturevalue(client_fixture)
+    client = tool_use_client
     if not stream:
         # Non-streaming test
         chat_completion = await client.chat.completions.create(

@@ -1743,4 +1743,14 @@ class TestWatermarking:
     def test_forwards_the_opt_out(self):
         request = _make_request([{"role": "user", "content": "hi"}], watermarking=False)
 
-        assert not _convert(request).watermarking
+        assert _convert(request).watermarking is False
+
+    @pytest.mark.parametrize("watermarking", [None, True, False])
+    def test_reaches_sampling_params(self, watermarking):
+        request = _make_request(
+            [{"role": "user", "content": "hi"}], watermarking=watermarking
+        )
+
+        params = _convert(request).to_sampling_params(16, {})
+
+        assert params.watermarking is watermarking

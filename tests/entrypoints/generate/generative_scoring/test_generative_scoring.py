@@ -318,7 +318,7 @@ class TestGeneration:
 
         assert isinstance(result, GenerativeScoringResponse)
         assert state.sampling_params is not None
-        assert not state.sampling_params.watermarking
+        assert state.sampling_params.watermarking is False
         assert len(result.data) == 2
         for item_result in result.data:
             assert 0.0 <= item_result.score <= 1.0

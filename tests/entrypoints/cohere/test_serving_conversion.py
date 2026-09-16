@@ -2521,4 +2521,13 @@ def test_watermarking_explicit_enable_is_forwarded():
 
 
 def test_watermarking_opt_out_is_forwarded():
-    assert not _convert(_make_request(watermarking=False)).watermarking
+    assert _convert(_make_request(watermarking=False)).watermarking is False
+
+
+@pytest.mark.parametrize("watermarking", [None, True, False])
+def test_watermarking_reaches_sampling_params(watermarking):
+    request = _make_request(watermarking=watermarking)
+
+    params = _convert(request).to_sampling_params(16, {})
+
+    assert params.watermarking is watermarking
