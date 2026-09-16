@@ -179,13 +179,17 @@ steps:
           pytest -v -s models/multimodal/generation/audio -m 'not core_model'
           ;;
         1)
-          # vit_cudagraph, keye, nemotron_parse, phi4mm, phi4siglip,
-          # moondream3, pixtral, maverick
-          pytest -v -s models/multimodal/generation/vision -m 'not core_model'
           # moondream3_moe is a cpu_test that initializes a gloo process group
-          # in the pytest parent; run it in its own process, after the engine
-          # tests, so no EngineCore is forked from that state.
+          # in the pytest parent; it gets its own process so nothing is forked
+          # from that state.
           pytest -v -s models/multimodal/generation/moondream3_moe -m 'not core_model'
+          # vit_cudagraph, keye, nemotron_parse, phi4mm, phi4siglip,
+          # moondream3, pixtral, maverick. test_moondream3 keeps a module-scoped
+          # in-process LLM, and an EngineCore forked after it hangs on startup;
+          # spawn (from the repo root, as the whisper step does) avoids that,
+          # matching the mode main's flat job is already in by the time these
+          # files run.
+          cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/vision -m 'not core_model'
           ;;
         2)
           # ultravox, voxtral, voxtral_realtime, plus the mapping unit tests
