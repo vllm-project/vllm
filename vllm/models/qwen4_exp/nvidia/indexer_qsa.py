@@ -23,7 +23,7 @@ from ..common.qsa_cache import (
     QSAKeyStateCache,
     canonical_qsa_rope_positions,
 )
-from .ops.qsa_pre_indexer import qsa_pre_indexer
+from .ops.qsa_pre_indexer import QSAMainPrepare, qsa_pre_indexer
 
 
 def apply_qsa_rope(
@@ -236,6 +236,7 @@ class QSAIndexer(nn.Module):
         projected_qk: torch.Tensor,
         positions: torch.Tensor,
         out: torch.Tensor | None = None,
+        main_prepare: QSAMainPrepare | None = None,
     ) -> torch.Tensor:
         """Update side caches and select token indices from pre-projected Q/K.
 
@@ -244,9 +245,18 @@ class QSAIndexer(nn.Module):
         request-relative token indices, and the trailing column is the row's
         valid-entry count (the attention kernel's loop bound, never a token
         index).
+
+        ``main_prepare`` fuses the owner's main Q/K prepare and K/V cache
+        write into the fused pre-indexer launch.
         """
 
         metadata = self._metadata()
+        if main_prepare is not None and (
+            metadata is None or not self.use_fused_pre_indexer
+        ):
+            raise ValueError(
+                "main_prepare requires QSA metadata and the fused pre-indexer"
+            )
         if metadata is None:
             # Preserve step-0 indices when later MTP steps reuse the buffer.
             if self.skip_topk and out is not None:
@@ -317,6 +327,7 @@ class QSAIndexer(nn.Module):
                     if raw_key_state_cache.rope_position_cache is not None
                     else None
                 ),
+                main=main_prepare,
             )
         else:
             # Unfused reference path

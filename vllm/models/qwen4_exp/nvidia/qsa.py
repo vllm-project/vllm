@@ -52,6 +52,7 @@ from vllm.v1.kv_cache_interface import (
 from ..common.qsa_cache import QSAForwardMetadata
 from . import model
 from .indexer_qsa import QSAIndexer
+from .ops.qsa_pre_indexer import QSAMainPrepare
 
 
 class Qwen4ExpQSAMetadataBuilder(FlashAttentionMetadataBuilder):
@@ -312,6 +313,11 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             quant_config=quant_config,
             prefix=f"{prefix}.indexer",
         )
+        # Decode batches fuse the main QK-norm/RoPE/gate and the K/V cache
+        # write into the indexer prepare launch; see _run_qsa.
+        self.use_fused_qsa_prepare = (
+            self.use_fused_qk_norm_rope_gate and self.indexer.use_fused_pre_indexer
+        )
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         # PACKED selection buffer: the trailing column holds each row's
         # valid-entry count (written by the expand kernel) — never a token
@@ -346,6 +352,28 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
         )
 
+    def _main_prepare(
+        self,
+        qkv: torch.Tensor,
+        q_out: torch.Tensor,
+        gate_out: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> QSAMainPrepare:
+        q_gate, k, v = qkv.split([self.q_size * 2, self.kv_size, self.kv_size], dim=-1)
+        return QSAMainPrepare(
+            q_gate=q_gate,
+            k=k,
+            v=v,
+            q_norm_weight=self.q_norm.weight,
+            k_norm_weight=self.k_norm.weight,
+            eps=self.q_norm.variance_epsilon,
+            rotary_dim=self.rotary_emb.rotary_dim,
+            q_out=q_out,
+            gate_out=gate_out,
+            kv_cache=self.kv_cache.transpose(1, 2),
+            slot_mapping=slot_mapping,
+        )
+
     @eager_break_during_capture
     def _run_qsa(
         self,
@@ -356,6 +384,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         value: torch.Tensor,
         output: torch.Tensor,
         output_gate: torch.Tensor,
+        qkv: torch.Tensor,
     ) -> None:
         metadata = get_forward_context().attn_metadata
         if isinstance(metadata, list):
@@ -374,21 +403,42 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         )
         if side_metadata.num_actual_tokens != num_tokens:
             raise RuntimeError("QSA main and side metadata token counts disagree")
+        # Decode batches fuse the main norm/RoPE/gate and the K/V cache write
+        # into the indexer prepare launch; batches with prefill rows keep the
+        # separate kernels.
+        fuse_prepare = self.use_fused_qsa_prepare and side_metadata.num_prefills == 0
+        main_prepare: QSAMainPrepare | None = None
+        if fuse_prepare:
+            main_prepare = self._main_prepare(
+                qkv[:num_tokens],
+                query[:num_tokens],
+                output_gate[:num_tokens],
+                main_metadata.slot_mapping[:num_tokens],
+            )
+        elif self.use_fused_qsa_prepare:
+            q, k, v, gate = self._project_qkv_gate(qkv, positions)
+            assert gate is not None
+            query = q.view(-1, self.num_heads, self.head_dim)
+            key = k.view(-1, self.num_kv_heads, self.head_dim)
+            value = v.view(-1, self.num_kv_heads, self.head_dim)
+            output_gate = gate
         selected = self.indexer(
             projected_qk,
             positions,
             self.topk_indices_buffer[:num_tokens],
+            main_prepare=main_prepare,
         )
         if selected.shape != (num_tokens, self.indexer.packed_output_width):
             raise RuntimeError("QSA indexer returned an invalid selection shape")
         impl = cast(Qwen4ExpQSAFlashAttentionImpl, self.impl)
-        impl.do_kv_cache_update(
-            self,
-            key,
-            value,
-            self.kv_cache,
-            main_metadata.slot_mapping,
-        )
+        if not fuse_prepare:
+            impl.do_kv_cache_update(
+                self,
+                key,
+                value,
+                self.kv_cache,
+                main_metadata.slot_mapping,
+            )
         impl.forward_qsa(
             self,
             query,
@@ -408,12 +458,19 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v, gate = self._project_qkv_gate(qkv, positions)
-        assert gate is not None
         num_tokens = hidden_states.shape[0]
-        query = q.view(num_tokens, self.num_heads, self.head_dim)
-        key = k.view(num_tokens, self.num_kv_heads, self.head_dim)
-        value = v.view(num_tokens, self.num_kv_heads, self.head_dim)
+        if self.use_fused_qsa_prepare:
+            # Norm/RoPE/gate and the K/V cache write happen inside _run_qsa.
+            query = qkv.new_empty(num_tokens, self.num_heads, self.head_dim)
+            gate = torch.empty_like(query)
+            key = value = qkv.new_empty(0)
+        else:
+            q, k, v, maybe_gate = self._project_qkv_gate(qkv, positions)
+            assert maybe_gate is not None
+            gate = maybe_gate
+            query = q.view(num_tokens, self.num_heads, self.head_dim)
+            key = k.view(num_tokens, self.num_kv_heads, self.head_dim)
+            value = v.view(num_tokens, self.num_kv_heads, self.head_dim)
         attn_output = torch.empty_like(query)
         # Keep the index projection outside the eager break.
         projected_qk, _ = self.indexer.index_qk_proj(hidden_states)
@@ -425,6 +482,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             value,
             attn_output,
             gate,
+            qkv,
         )
         flat_output = attn_output.view(num_tokens, -1)
         output, _ = self.o_proj(flat_output)
