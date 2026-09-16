@@ -57,7 +57,15 @@ def convert_mapping(
     max_loras: int,
     vocab_size: int,
     device: torch.device,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list[int]]:
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    list[int],
+    list[int],
+    list[int],
+]:
     """Converts LoRAMapping to index tensors.
 
     Args:
@@ -83,6 +91,8 @@ def convert_mapping(
             indices_len: List of lengths of the above tensors. It contains
                 (base_indices, sampler_indices, sampler_indices_padded,
                 embeddings_indices).
+            lora_indices: CPU list containing the base LoRA indices.
+            prompt_mapping: CPU list containing the sampler LoRA indices.
     """
     index_mapping_indices: list[int] = list(mapping.index_mapping).copy()
     embedding_indices = index_mapping_indices.copy()
@@ -97,9 +107,6 @@ def convert_mapping(
         if lora_id is not None
     }
 
-    prompt_mapping: list[int] = [
-        lora_id_to_index[x] if x > 0 else -1 for x in mapping.prompt_mapping
-    ]
     lora_idx = None
     for i in range(len(index_mapping_indices)):
         lora_idx = (
@@ -109,6 +116,13 @@ def convert_mapping(
         )
         embedding_indices[i] = lora_idx if index_mapping_indices[i] > 0 else 0
         lora_indices[i] = lora_idx
+
+    if mapping.index_mapping != mapping.prompt_mapping:
+        prompt_mapping = [
+            lora_id_to_index[x] if x > 0 else -1 for x in mapping.prompt_mapping
+        ]
+    else:
+        prompt_mapping = lora_indices
 
     indices_list: list[list[int] | torch.Tensor] = [
         index_mapping_indices,
@@ -145,4 +159,6 @@ def convert_mapping(
         sampler_indices_padded,
         embeddings_indices,
         indices_len,
+        lora_indices,
+        prompt_mapping,
     )
