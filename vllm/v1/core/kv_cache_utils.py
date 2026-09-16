@@ -1588,6 +1588,12 @@ def _get_kv_cache_bytes_per_block(
         for group in kv_cache_groups
         if isinstance(group.kv_cache_spec, HiSparseHotSpec)
     )
+    alignment_sizes.extend(
+        spec.block_stride_alignment
+        for group in kv_cache_groups
+        for spec in iter_layer_specs(group.kv_cache_spec)
+        if isinstance(spec, MLAAttentionSpec) and spec.block_stride_alignment
+    )
     return round_up(bytes_per_block, math.lcm(*alignment_sizes))
 
 
@@ -2657,12 +2663,7 @@ def get_kv_cache_configs(
 
     # When speculating with more than 1 speculative module (e.g. multi-layered MTP)
     # tag every SlidingWindowSpec with how many extra tokens to retain in the window.
-    extra_retained_tokens = (
-        vllm_config.speculative_config.num_speculative_tokens - 1
-        if vllm_config.speculative_config is not None
-        and vllm_config.speculative_config.use_multi_module_mtp()
-        else 0
-    )
+    extra_retained_tokens = max(0, vllm_config.num_prefill_lookahead_tokens - 1)
     for layer_name, layer_spec in merged_kv_cache_specs.items():
         if isinstance(layer_spec, SlidingWindowSpec):
             merged_kv_cache_specs[layer_name] = replace(
