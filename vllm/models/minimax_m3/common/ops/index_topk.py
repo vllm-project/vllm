@@ -823,6 +823,7 @@ def minimax_m3_index_decode_score(
         min(MAX_NUM_KV_CHUNKS, TARGET_GRID // max(1, score_ctas_per_chunk)),
     )
     num_kv_chunks = 1 << (target.bit_length() - 1)
+    num_kv_chunks = min(num_kv_chunks, max(1, max_block))
     grid_score = (seq_lens.shape[0], num_kv_chunks)
     _decode_index_score_kernel[grid_score](
         idx_q,
@@ -914,7 +915,12 @@ def minimax_m3_index_decode(
     TOPK_TARGET_GRID = 64
     MAX_NUM_TOPK_CHUNKS = 16
     topk_target = max(
-        1, min(MAX_NUM_TOPK_CHUNKS, TOPK_TARGET_GRID // max(1, batch * num_idx_heads))
+        1,
+        min(
+            MAX_NUM_TOPK_CHUNKS,
+            max_block // (2 * triton.next_power_of_2(topk)),
+            TOPK_TARGET_GRID // max(1, batch * num_idx_heads),
+        ),
     )
     num_topk_chunks = 1 << (topk_target.bit_length() - 1)
     block_size_t = triton.next_power_of_2(topk)

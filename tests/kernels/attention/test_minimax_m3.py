@@ -951,17 +951,21 @@ def test_msa_indexer_impl_matches_triton(topk, index_dtype, monkeypatch):
     ],
 )
 @pytest.mark.parametrize("num_padded_reqs", [0, 2])
+@pytest.mark.parametrize("longest_seq_len", [1025, 8193])
 def test_decode_index_topk_correctness(
     decode_query_len: int,
     max_decode_query_len: int,
     num_padded_reqs: int,
+    longest_seq_len: int,
 ):
     topk = 6
     init_blocks = 0
     local_blocks = 1
     num_idx_heads = 2
     head_dim = 16
-    active_seq_lens = torch.tensor((7, 129, 1025), device="cuda", dtype=torch.int32)
+    active_seq_lens = torch.tensor(
+        (7, 129, longest_seq_len), device="cuda", dtype=torch.int32
+    )
     q_lens = torch.full_like(active_seq_lens, decode_query_len)
     prefix_lens = active_seq_lens - decode_query_len
     active_batch = active_seq_lens.numel()
