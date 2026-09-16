@@ -483,3 +483,110 @@ def test_unsupported_local_scaling_or_target_modes_fail_closed(manager, unsuppor
     with pytest.raises((NotImplementedError, ValueError)):
         manager.get_local_adapter_plan(helper)
     assert manager.list_adapters() == {}
+
+
+@pytest.fixture
+def single_slot_manager(manager):
+    config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+    with set_current_vllm_config(config):
+        yield type(manager)(
+            LocalAdapterTestModel(),
+            1,
+            8,
+            16,
+            LoRAConfig(
+                max_lora_rank=8, max_cpu_loras=1, max_loras=1, lora_dtype=torch.bfloat16
+            ),
+            torch.device("cpu"),
+            config,
+        )
+
+
+def test_single_slot_staging_preserves_active_values_and_owns_bf16_factors(
+    single_slot_manager,
+):
+    manager = single_slot_manager
+    plan, factors = make_payload(manager)
+    manager.add_local_adapter(1, plan, factors)
+    manager.activate_adapter(1)
+    adapter_id, live = manager.get_active_adapter_tensors()
+    saved = {name: tensor.clone() for name, tensor in live.items()}
+    assert adapter_id == 1 and manager.lora_index_to_id == [1]
+    for a, b in factors.values():
+        for tensor in a + b:
+            tensor.add_(2)
+    manager.add_local_adapter(2, plan, factors)
+    for name, tensor in manager.get_active_adapter_tensors()[1].items():
+        torch.testing.assert_close(tensor, saved[name], rtol=0, atol=0)
+    for a, b in factors.values():
+        for tensor in a + b:
+            tensor.fill_(100)
+    manager.activate_adapter(2)
+    assert manager.lora_index_to_id == [2]
+    assert set(manager._active_adapters) == {2}
+    assert set(manager.list_adapters()) == {1, 2}
+    assert any(
+        not torch.equal(tensor, saved[name])
+        for name, tensor in manager.get_active_adapter_tensors()[1].items()
+    )
+    manager.activate_adapter(1)
+    for name, tensor in manager.get_active_adapter_tensors()[1].items():
+        torch.testing.assert_close(tensor, saved[name], rtol=0, atol=0)
+    manager.remove_adapter(2)
+    assert manager.get_active_adapter_tensors()[0] == 1
+    manager.remove_adapter(1)
+    assert not manager.list_adapters()
+    assert manager.lora_index_to_id == [None]
+    assert not manager._single_slot_local_adapters
+
+
+def test_single_slot_replacement_retains_at_most_two_generations(single_slot_manager):
+    manager = single_slot_manager
+    plan, factors = make_payload(manager)
+    for generation in range(1, 12):
+        manager.add_local_adapter(generation, plan, factors)
+        manager.activate_adapter(generation)
+        if generation > 1:
+            with pytest.raises(RuntimeError, match="Retire"):
+                manager.add_local_adapter(generation + 1, plan, factors)
+            manager.remove_adapter(generation - 1)
+        assert list(manager.list_adapters()) == [generation]
+        assert len(manager._single_slot_local_adapters) == 1
+    manager.remove_all_adapters()
+    assert not manager.list_adapters()
+    assert not manager._single_slot_local_adapters
+
+
+def test_single_slot_failed_activation_restores_prior_values(
+    single_slot_manager, monkeypatch
+):
+    manager = single_slot_manager
+    plan, factors = make_payload(manager)
+    manager.add_local_adapter(1, plan, factors)
+    manager.activate_adapter(1)
+    saved = {
+        name: tensor.clone()
+        for name, tensor in manager.get_active_adapter_tensors()[1].items()
+    }
+    for a, b in factors.values():
+        for tensor in a + b:
+            tensor.add_(1)
+    manager.add_local_adapter(2, plan, factors)
+    module = list(manager.modules.values())[-1]
+    original = module.reset_lora
+    failures: list[int] = []
+
+    def fail_once(index):
+        if not failures:
+            failures.append(index)
+            raise RuntimeError("injected activation failure")
+        return original(index)
+
+    monkeypatch.setattr(module, "reset_lora", fail_once)
+    with pytest.raises(RuntimeError, match="injected"):
+        manager.activate_adapter(2)
+    assert manager.get_active_adapter_tensors()[0] == 1
+    for name, tensor in manager.get_active_adapter_tensors()[1].items():
+        torch.testing.assert_close(tensor, saved[name], rtol=0, atol=0)
+    manager.remove_adapter(2)
+    assert manager.lora_index_to_id == [1]

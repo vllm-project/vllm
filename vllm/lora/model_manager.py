@@ -129,6 +129,7 @@ class LoRAModelManager:
         # Local transport writes directly into these receiver-owned slots.
         # A reserved slot remains invisible to request mappings until activation.
         self._local_adapter_slots: dict[int, int] = {}
+        self._single_slot_local_adapters: dict[int, tuple[LocalLoRAPlan, dict]] = {}
         self.vocab_size = vocab_size
 
         self.is_pooling_model = is_pooling_model(self.model)
@@ -330,6 +331,22 @@ class LoRAModelManager:
     def adapter_slots(self) -> int:
         return self.lora_slots
 
+    def get_active_adapter_tensors(self) -> tuple[int, dict[str, torch.Tensor]]:
+        """Return the sole active adapter's identity and physical receiver buffers."""
+        active_ids = list(self._active_adapters)
+        if len(active_ids) != 1:
+            raise ValueError(f"Expected one active adapter, found {active_ids}")
+        adapter_id = active_ids[0]
+        slot = self.lora_index_to_id.index(adapter_id)
+        tensors = {}
+        for name, module in sorted(self.modules.items()):
+            for index, (a, b) in enumerate(module._get_lora_shard_buffers(slot)):
+                tensors[f"{name}.{index}.a"] = a
+                tensors[f"{name}.{index}.b"] = b
+        if not tensors:
+            raise ValueError("Active adapter has no receiver buffers")
+        return adapter_id, tensors
+
     def get_local_adapter_plan(self, peft_helper: PEFTHelper) -> LocalLoRAPlan:
         """Bind complete selected modules to their current local buffer layout."""
         peft_helper.validate_legal(self.lora_config)
@@ -491,8 +508,10 @@ class LoRAModelManager:
         self._validate_local_factors(plan, factors)
         if lora_id <= 0:
             raise ValueError("Local adapter IDs must be positive")
-        if lora_id in self._registered_adapters:
+        if lora_id in self.list_adapters():
             raise ValueError(f"Adapter ID {lora_id} is already registered")
+        if self.lora_slots == 1:
+            return self._stage_single_slot_adapter(lora_id, plan, factors)
         if len(self._registered_adapters) >= self.capacity:
             raise RuntimeError("No free local adapter cache slots")
 
@@ -531,6 +550,60 @@ class LoRAModelManager:
         )
         local_slots[lora_id] = index
         self._local_adapter_slots = local_slots
+        return True
+
+    def _stage_single_slot_adapter(self, adapter_id, plan, factors) -> bool:
+        if len(self._single_slot_local_adapters) >= 2:
+            raise RuntimeError("Retire the previous generation before staging another")
+        if any(
+            adapter_id not in self._single_slot_local_adapters
+            for adapter_id in self._active_adapters
+        ):
+            raise ValueError(
+                "Single-slot native replacement requires a native active adapter"
+            )
+        owned = {
+            name: ([tensor.clone() for tensor in a], [tensor.clone() for tensor in b])
+            for name, (a, b) in factors.items()
+        }
+        self._single_slot_local_adapters[adapter_id] = (plan, owned)
+        return True
+
+    def _copy_single_slot_adapter(self, adapter_id) -> None:
+        plan, factors = self._single_slot_local_adapters[adapter_id]
+        scale = plan.lora_alpha / plan.rank
+        for name, module in self.modules.items():
+            if name not in factors:
+                module.reset_lora(0)
+                continue
+            a, b = factors[name]
+            module.set_lora_shard(0, plan.rank, a, b)
+            if scale != 1:
+                for _, buffer in module._get_lora_shard_buffers(0):
+                    buffer[..., : plan.rank].mul_(scale)
+
+    def _activate_single_slot_adapter(self, adapter_id) -> bool:
+        """Replace one paused runtime slot, retaining BF16 factors for rollback."""
+        if adapter_id in self._active_adapters:
+            return False
+        previous = self.lora_index_to_id[0]
+        try:
+            self._copy_single_slot_adapter(adapter_id)
+        except (RuntimeError, ValueError, NotImplementedError):
+            if previous is not None:
+                self._copy_single_slot_adapter(previous)
+            else:
+                for module in self.modules.values():
+                    module.reset_lora(0)
+            raise
+        if previous is not None:
+            self._registered_adapters.pop(previous, None)
+        plan, _ = self._single_slot_local_adapters[adapter_id]
+        self._registered_adapters[adapter_id] = LoRAModel(
+            adapter_id, plan.rank, {}, local_plan=plan
+        )
+        self._active_adapters[adapter_id] = None
+        self.lora_index_to_id[0] = adapter_id
         return True
 
     def _validate_local_factors(
@@ -580,6 +653,8 @@ class LoRAModelManager:
         """Move LoRA into a GPU buffer to be used in the forward pass."""
         if lora_id in self._active_adapters:
             return False
+        if lora_id in self._single_slot_local_adapters:
+            return self._activate_single_slot_adapter(lora_id)
         cached = self._registered_adapters.cache.get(lora_id)
         if cached is not None and cached.tensor_extent == "local":
             return self._activate_local_adapter(cached)
@@ -667,6 +742,7 @@ class LoRAModelManager:
         """Remove all LoRAModels from the manager."""
         self._registered_adapters.clear()
         self._local_adapter_slots.clear()
+        self._single_slot_local_adapters.clear()
         self.lora_index_to_id = [None] * self.lora_slots
         self._active_adapters.clear()
         self._last_mapping = None
@@ -1462,15 +1538,32 @@ class LoRAModelManager:
             self._last_slot_layout = slot_layout
 
     def remove_adapter(self, adapter_id: int) -> bool:
+        if adapter_id in self._single_slot_local_adapters:
+            del self._single_slot_local_adapters[adapter_id]
+            if adapter_id in self._active_adapters:
+                self._registered_adapters.pop(adapter_id, None)
+                for module in self.modules.values():
+                    module.reset_lora(0)
+            return True
         if adapter_id not in self._registered_adapters:
             return False
         self._registered_adapters.pop(adapter_id, None)
         return True
 
     def list_adapters(self) -> dict[int, LoRAModel]:
-        return dict(self._registered_adapters.cache)
+        adapters = dict(self._registered_adapters.cache)
+        adapters.update(
+            {
+                adapter_id: LoRAModel(adapter_id, plan.rank, {}, local_plan=plan)
+                for adapter_id, (plan, _) in self._single_slot_local_adapters.items()
+            }
+        )
+        return adapters
 
     def get_adapter(self, adapter_id: int) -> LoRAModel | None:
+        if adapter_id in self._single_slot_local_adapters:
+            plan, _ = self._single_slot_local_adapters[adapter_id]
+            return LoRAModel(adapter_id, plan.rank, {}, local_plan=plan)
         return self._registered_adapters.get(adapter_id)
 
 
@@ -1494,7 +1587,9 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
         lora_id: int,
     ) -> bool:
         cached = self._registered_adapters.cache.get(lora_id)
-        if cached is not None and cached.tensor_extent == "local":
+        if lora_id in self._single_slot_local_adapters or (
+            cached is not None and cached.tensor_extent == "local"
+        ):
             result = super().activate_adapter(lora_id)
             self._registered_adapters.touch(lora_id)
             self._active_adapters.touch(lora_id)

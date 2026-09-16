@@ -241,6 +241,10 @@ class WorkerLoRAManager:
     def list_adapters(self) -> set[int]:
         return set(self._adapter_manager.list_adapters())
 
+    def get_active_adapter_tensors(self) -> tuple[int, dict[str, torch.Tensor]]:
+        """Inspect receiver-owned buffers through the worker manager boundary."""
+        return self._adapter_manager.get_active_adapter_tensors()
+
     def get_local_adapter_plan(self, peft_helper: PEFTHelper) -> LocalLoRAPlan:
         """Bind a local adapter to this worker's physical LoRA buffers."""
         return self._adapter_manager.get_local_adapter_plan(peft_helper)
