@@ -863,6 +863,7 @@ class Gemma4SelfDecoderLayers(nn.Module):
         Returns:
             Per-layer embeddings (num_tokens, num_layers,
             hidden_size_per_layer_input)
+
         """
         if self.embed_tokens_per_layer is None:
             return None
@@ -1197,6 +1198,7 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
         Returns:
             Per-layer embeddings (num_tokens, num_layers,
             hidden_size_per_layer_input)
+
         """
         return self.self_decoder.get_per_layer_inputs(input_ids)
 

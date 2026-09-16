@@ -387,9 +387,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="mlp1",
@@ -467,8 +465,7 @@ class LlamaNemotronVLEmbedProcessingInfo(BaseInternVLProcessingInfo):
     dummy_inputs=BaseInternVLDummyInputsBuilder[LlamaNemotronVLEmbedProcessingInfo],
 )
 class LlamaNemotronVLForEmbedding(LlamaNemotronVLChatModel, VllmModelForPooling):
-    """
-    LlamaNemotronVL model for embeddings.
+    """LlamaNemotronVL model for embeddings.
 
     Inherits from LlamaNemotronVLChatModel and specializes it for embedding tasks:
     - Uses SigLIP vision encoder instead of C-RADIO

@@ -1392,11 +1392,9 @@ def test_startup_failure(monkeypatch: pytest.MonkeyPatch):
 
 @create_new_process_for_each_test()
 def test_engine_core_proc_instantiation_cuda_empty(monkeypatch: pytest.MonkeyPatch):
-    """
-    Test that EngineCoreProc can be instantiated when CUDA_VISIBLE_DEVICES
+    """Test that EngineCoreProc can be instantiated when CUDA_VISIBLE_DEVICES
     is empty. This ensures the engine frontend does not need access to GPUs.
     """
-
     from vllm.v1.engine.core import EngineCoreProc
     from vllm.v1.executor.abstract import Executor
 

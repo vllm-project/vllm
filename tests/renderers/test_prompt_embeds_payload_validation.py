@@ -89,7 +89,7 @@ def test_unreadable_prompt_embeds_payload_is_a_client_error(model_config, payloa
 
 @pytest.mark.parametrize("payload", UNPARSABLE_PAYLOADS)
 def test_the_error_body_stays_bounded(model_config, payload):
-    """torch's reason is built from the caller's bytes, so it must be truncated.
+    """Torch's reason is built from the caller's bytes, so it must be truncated.
 
     An unpickler that reports the offending global, for instance, quotes a name
     the caller chose; without a bound a large one would be reflected whole.
