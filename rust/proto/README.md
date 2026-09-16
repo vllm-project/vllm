@@ -37,8 +37,7 @@ On pull requests and releases, `cargo-semver-checks` compares the crate with its
 latest published version. Include any required version bump in the protocol
 change PR. This check becomes available after the first manual publication.
 
-1. Update the crate version and the `vllm-proto` workspace dependency together,
-   and update `rust/Cargo.lock`.
+1. Update the crate version in `rust/proto/Cargo.toml` and update `rust/Cargo.lock`.
 2. Run `cargo publish --manifest-path rust/proto/Cargo.toml --locked --dry-run`
    and the frontend gRPC tests. Record the tested vLLM releases or revisions in
    the release notes; matching crate versions alone do not establish runtime compatibility.
