@@ -74,6 +74,7 @@ def test_molmo2_pooling_native_contract(
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("masked_average", [False, True])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
 @pytest.mark.parametrize(
     ("batch_size", "num_crops", "num_patches", "num_groups", "pool_size", "dim"),
     [
@@ -86,6 +87,7 @@ def test_molmo2_pooling_cuda_matches_native(
     default_vllm_config,
     masked_average: bool,
     dtype: torch.dtype,
+    index_dtype: torch.dtype,
     batch_size: int,
     num_crops: int,
     num_patches: int,
@@ -107,7 +109,7 @@ def test_molmo2_pooling_cuda_matches_native(
         num_crops * num_patches,
         (batch_size, num_groups, pool_size),
         device="cuda",
-        dtype=torch.long,
+        dtype=index_dtype,
     )
     token_pooling[:, 0] = -1
     token_pooling[:, 1, 0] = -1
@@ -146,3 +148,75 @@ def test_molmo2_pooling_cuda_supports_strided_features(
 
     for actual_tensor, expected_tensor in zip(actual, expected):
         torch.testing.assert_close(actual_tensor, expected_tensor, rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA dispatch")
+def test_molmo2_pooling_cuda_dispatch_falls_back_for_cpu_inputs(
+    default_vllm_config,
+) -> None:
+    image_features = torch.randn(1, 2, 4, 8, dtype=torch.float16)
+    token_pooling = torch.tensor([[[0, 1, -1, 7]]])
+    op = Molmo2PoolingPreparation(masked_average=True)
+
+    expected = op.forward_native(image_features, token_pooling)
+    actual = op(image_features, token_pooling)
+
+    for actual_tensor, expected_tensor in zip(actual, expected):
+        torch.testing.assert_close(actual_tensor, expected_tensor)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_molmo2_pooling_cuda_preserves_non_finite_mask_semantics(
+    default_vllm_config,
+) -> None:
+    image_features = torch.zeros(1, 1, 4, 8, device="cuda", dtype=torch.float16)
+    image_features[0, 0, 0, 0] = torch.nan
+    token_pooling = torch.full((1, 1, 4), -1, device="cuda")
+    op = Molmo2PoolingPreparation(masked_average=True)
+
+    expected = op.forward_native(image_features, token_pooling)
+    actual = op(image_features, token_pooling)
+
+    for actual_tensor, expected_tensor in zip(actual, expected):
+        torch.testing.assert_close(actual_tensor, expected_tensor, equal_nan=True)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_molmo2_pooling_cuda_supports_fullgraph_compile(
+    default_vllm_config,
+) -> None:
+    image_features = torch.randn(1, 2, 16, 128, device="cuda", dtype=torch.bfloat16)
+    token_pooling = torch.randint(0, 32, (1, 8, 4), device="cuda")
+    token_pooling[:, 0] = -1
+    op = Molmo2PoolingPreparation(masked_average=True)
+
+    expected = op(image_features, token_pooling)
+    actual = torch.compile(op, fullgraph=True)(image_features, token_pooling)
+
+    for actual_tensor, expected_tensor in zip(actual, expected):
+        torch.testing.assert_close(actual_tensor, expected_tensor, rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_molmo2_pooling_cuda_supports_graph_replay(
+    default_vllm_config,
+) -> None:
+    image_features = torch.randn(1, 3, 27, 128, device="cuda", dtype=torch.bfloat16)
+    token_pooling = torch.randint(0, 81, (1, 16, 9), device="cuda")
+    op = Molmo2PoolingPreparation(masked_average=True)
+    for _ in range(3):
+        op(image_features, token_pooling)
+    torch.cuda.synchronize()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        actual = op(image_features, token_pooling)
+
+    image_features.copy_(torch.randn_like(image_features))
+    token_pooling.copy_(torch.randint_like(token_pooling, 0, 81))
+    token_pooling[:, 0] = -1
+    graph.replay()
+    expected = op.forward_native(image_features, token_pooling)
+
+    for actual_tensor, expected_tensor in zip(actual, expected):
+        torch.testing.assert_close(actual_tensor, expected_tensor, rtol=1e-2, atol=1e-2)

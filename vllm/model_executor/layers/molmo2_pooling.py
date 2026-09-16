@@ -63,9 +63,10 @@ def _molmo2_pooling_preparation_kernel(
     )
     values = tl.load(
         image_features_ptr + image_offsets,
-        mask=valid_items[:, None] & dim_mask[None, :],
+        mask=item_mask[:, None] & dim_mask[None, :],
         other=0.0,
     )
+    values *= valid_items[:, None]
 
     output_offsets = (
         group_id * pool_size * dim + item_offsets[:, None] * dim + dim_offsets[None, :]
@@ -152,7 +153,10 @@ class Molmo2PoolingPreparation(CustomOp):
         token_pooling: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if (
-            image_features.dtype not in (torch.float16, torch.bfloat16)
+            not image_features.is_cuda
+            or not token_pooling.is_cuda
+            or image_features.device != token_pooling.device
+            or image_features.dtype not in (torch.float16, torch.bfloat16)
             or token_pooling.dtype not in (torch.int32, torch.int64)
             or image_features.ndim != 4
             or token_pooling.ndim != 3
