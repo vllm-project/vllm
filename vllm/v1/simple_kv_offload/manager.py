@@ -4,7 +4,7 @@
 
 import contextlib
 from collections.abc import Iterable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
 
@@ -47,6 +47,13 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadMetadata,
     SimpleCPUOffloadWorkerMetadata,
+)
+from vllm.v1.simple_kv_offload.metrics import (
+    LOAD_PHASE_COMPLETED,
+    LOAD_PHASE_ISSUED,
+    OUTCOME_TO_FIELD,
+    MetricName,
+    SimpleCPUOffloadStats,
 )
 
 if TYPE_CHECKING:
@@ -118,7 +125,8 @@ class BoundaryStoreStats:
     symptom is a lower cache hit rate with nothing in the logs, so each decline
     reason is counted and exposed through
     ``SimpleCPUOffloadConnector.get_boundary_store_stats()``. Reset by
-    ``reset()``; not otherwise cleared.
+    ``reset()``, which carries any not-yet-drained deltas; not otherwise
+    cleared.
     """
 
     published: int = 0
@@ -143,6 +151,7 @@ class SimpleCPUOffloadScheduler:
         hash_block_size: int,
         lazy_offload: bool = False,
         disk_capacity_bytes: int = 0,
+        use_page_cache: bool = False,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
@@ -169,6 +178,13 @@ class SimpleCPUOffloadScheduler:
             self.cpu_kv_cache_config.prefix_cacheable_group_ids
         )
         self.kv_event_medium = MEDIUM_STORAGE if disk_capacity_bytes > 0 else MEDIUM_CPU
+        # Must track kv_event_medium.
+        self._info_labelvalues: tuple[str, ...] = (
+            "disk" if disk_capacity_bytes > 0 else "cpu",
+            str(use_page_cache).lower(),
+            str(lazy_offload).lower(),
+            str(self.num_cpu_blocks),
+        )
         # Find the full attention kv group for prefix cache matching.
         self.fa_gidx = -1
         for g_idx, g in enumerate(self.cpu_kv_cache_config.kv_cache_groups):
@@ -251,6 +267,10 @@ class SimpleCPUOffloadScheduler:
         self._load_event_counter: int = 0
         self._store_event_counter: int = 0
         self.boundary_store_stats = BoundaryStoreStats()
+        # Interval stats state drained by get_stats()
+        self._boundary_stats_snapshot = BoundaryStoreStats()
+        self._interval_load_blocks_issued = 0
+        self._interval_load_blocks_completed = 0
 
         # For TP/PP: track partial store completions across steps.
         # Events must be reported by all world_size workers before considered complete.
@@ -538,6 +558,7 @@ class SimpleCPUOffloadScheduler:
             for req_id in load_req_ids:
                 self._reqs_to_load[req_id].load_event = load_event
             self._load_event_to_reqs[load_event] = load_req_ids
+            self._interval_load_blocks_issued += len(load_gpu)
 
         result = SimpleCPUOffloadMetadata(
             load_event=load_event,
@@ -955,6 +976,50 @@ class SimpleCPUOffloadScheduler:
     def get_boundary_store_stats(self) -> BoundaryStoreStats:
         return replace(self.boundary_store_stats)
 
+    def get_stats(self) -> SimpleCPUOffloadStats:
+        """Drain per-step stats for the connector's stats hooks."""
+        stats = SimpleCPUOffloadStats()
+
+        current = self.boundary_store_stats
+        for outcome, field_name in OUTCOME_TO_FIELD.items():
+            delta = getattr(current, field_name) - getattr(
+                self._boundary_stats_snapshot, field_name
+            )
+            if delta > 0:
+                stats.increase_counter(MetricName.SAVE_OUTCOMES, delta, (outcome,))
+        self._boundary_stats_snapshot = replace(current)
+
+        if self._interval_load_blocks_issued:
+            stats.increase_counter(
+                MetricName.LOAD_BLOCKS,
+                self._interval_load_blocks_issued,
+                (LOAD_PHASE_ISSUED,),
+            )
+            self._interval_load_blocks_issued = 0
+        if self._interval_load_blocks_completed:
+            stats.increase_counter(
+                MetricName.LOAD_BLOCKS,
+                self._interval_load_blocks_completed,
+                (LOAD_PHASE_COMPLETED,),
+            )
+            self._interval_load_blocks_completed = 0
+
+        stats.set_gauge(
+            MetricName.USED_BLOCKS,
+            self.num_cpu_blocks - self.cpu_block_pool.get_num_free_blocks(),
+        )
+        pending = sum(
+            len(t.cpu_block_ids)
+            for t in (
+                *self._store_event_to_blocks.values(),
+                *self._pending_finished_stores,
+                *self._abandoned_store_event_to_blocks.values(),
+            )
+        )
+        stats.set_gauge(MetricName.PENDING_STORE_BLOCKS, pending)
+        stats.set_gauge(MetricName.INFO, 1, self._info_labelvalues)
+        return stats
+
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         """Handle async transfer completions from worker.
 
@@ -965,7 +1030,9 @@ class SimpleCPUOffloadScheduler:
         """
         # --- Load completions ---
         for req_id in list(connector_output.finished_recving or []):
-            self._cleanup_load_request(req_id)
+            completed_blocks = self._cleanup_load_request(req_id)
+            if completed_blocks:
+                self._interval_load_blocks_completed += completed_blocks
 
         # --- Store completions ---
         meta = connector_output.kv_connector_worker_meta
@@ -1270,18 +1337,22 @@ class SimpleCPUOffloadScheduler:
         if blocks_to_free:
             self.cpu_block_pool.free_blocks(blocks_to_free)
 
-    def _cleanup_load_request(self, req_id: str) -> None:
+    def _cleanup_load_request(self, req_id: str) -> int:
         """Release all load resources for a request.
 
         Shared between request_finished() and update_connector_output() paths.
         Removes the request from _reqs_to_load, cleans up event mappings,
         and frees CPU/GPU touch refs.
+
+        Returns the number of blocks in the load if it had been issued to
+        the worker, else 0 (never-issued loads are not counted as completed
+        by the caller).
         """
         state = self._reqs_to_load.pop(req_id, None)
         if state is None:
             state = self._abandoned_reqs_to_load.pop(req_id, None)
         if state is None:
-            return
+            return 0
         # Remove from load event mapping (only this req, not whole event)
         if state.load_event is not None:
             reqs = self._load_event_to_reqs.get(state.load_event)
@@ -1303,6 +1374,10 @@ class SimpleCPUOffloadScheduler:
                 self._gpu_block_pool.blocks[bid]
                 for bid in state.transfer_meta.gpu_block_ids
             )
+
+        if state.load_event is None:
+            return 0
+        return len(state.transfer_meta.gpu_block_ids)
 
     def _cleanup_store_request(self, req_id: str) -> None:
         """Release store metadata for a request.
@@ -1363,7 +1438,20 @@ class SimpleCPUOffloadScheduler:
             if event_idx in self._abandoned_store_event_to_blocks
         }
         self._cursor = None
-        self.boundary_store_stats = BoundaryStoreStats()
+        # Seed the fresh counters with outcomes since the last drain so a
+        # mid-interval reset() does not drop them from the next report.
+        undrained = BoundaryStoreStats(
+            **{
+                f.name: max(
+                    0,
+                    getattr(self.boundary_store_stats, f.name)
+                    - getattr(self._boundary_stats_snapshot, f.name),
+                )
+                for f in fields(BoundaryStoreStats)
+            }
+        )
+        self.boundary_store_stats = undrained
+        self._boundary_stats_snapshot = BoundaryStoreStats()
         # NOTE: _load_event_counter / _store_event_counter are not
         # reset as they are monotonic and must stay ahead of the workers
         # high-water marks to avoid event index collisions

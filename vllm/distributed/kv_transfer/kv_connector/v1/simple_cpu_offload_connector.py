@@ -15,6 +15,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     SupportsHMA,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorPromMetrics,
+    KVConnectorStats,
+    PromMetric,
+    PromMetricT,
+)
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
@@ -24,6 +30,10 @@ from vllm.v1.simple_kv_offload.manager import (
 )
 from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadMetadata,
+)
+from vllm.v1.simple_kv_offload.metrics import (
+    SimpleCPUOffloadPromMetrics,
+    SimpleCPUOffloadStats,
 )
 from vllm.v1.simple_kv_offload.worker import (
     SimpleCPUOffloadWorker,
@@ -162,6 +172,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 hash_block_size=hash_block_size,
                 lazy_offload=lazy_offload,
                 disk_capacity_bytes=disk_capacity_bytes if disk_mode else 0,
+                use_page_cache=use_page_cache if disk_mode else False,
             )
         elif role == KVConnectorRole.WORKER:
             self.worker_handler = SimpleCPUOffloadWorker(
@@ -306,6 +317,33 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         if self.scheduler_manager is not None:
             return self.scheduler_manager.get_boundary_store_stats()
         return None
+
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        if self.scheduler_manager is not None:
+            return self.scheduler_manager.get_stats()
+        return None
+
+    @classmethod
+    def build_kv_connector_stats(
+        cls, data: dict[str, Any] | None = None
+    ) -> KVConnectorStats | None:
+        return (
+            SimpleCPUOffloadStats(data=data)
+            if data is not None
+            else SimpleCPUOffloadStats()
+        )
+
+    @classmethod
+    def build_prom_metrics(
+        cls,
+        vllm_config: VllmConfig,
+        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ) -> KVConnectorPromMetrics:
+        return SimpleCPUOffloadPromMetrics(
+            vllm_config, metric_types, labelnames, per_engine_labelvalues
+        )
 
     def take_events(self) -> Iterable[KVCacheEvent]:
         if self.scheduler_manager is not None:
