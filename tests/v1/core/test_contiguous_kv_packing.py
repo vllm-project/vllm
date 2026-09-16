@@ -178,8 +178,7 @@ def _shared_layout_config():
 class TestCSALinearGrouping:
     """A CSA + linear-attention model (sparse attention with a compressor ring,
     plus sharded GDN and one TP-replicated PLE state) goes through the generic
-    packed-group path; no model-specific branch is involved.
-    """
+    packed-group path; no model-specific branch is involved."""
 
     @staticmethod
     def _mamba_groups(groups):
@@ -194,8 +193,7 @@ class TestCSALinearGrouping:
     def test_replicated_state_gets_its_own_group(self):
         """The PLE state is TP-replicated and a different size, so it must not
         share a manager group with the sharded GDN states (the NIXL worker
-        requires exactly one single-layer replicated group).
-        """
+        requires exactly one single-layer replicated group)."""
         groups = get_kv_cache_groups(_shared_layout_config(), _make_csa_linear_specs())
 
         mamba_groups = self._mamba_groups(groups)
@@ -248,8 +246,7 @@ class TestCSALinearGrouping:
     def test_scratch_group_survives_computed_block_truncation(self):
         """The scratch group contributes no computed blocks, so truncating a
         lookup result must skip it: its block size is the ring capacity, which
-        neither divides the hit length nor bounds the (empty) block list.
-        """
+        neither divides the hit length nor bounds the (empty) block list."""
         config = _shared_layout_config()
         config.cache_config.enable_prefix_caching = True
         groups = get_kv_cache_groups(config, _make_csa_linear_specs())
@@ -363,8 +360,7 @@ class TestCSALinearGrouping:
         per page size, which is emitted whole, or a single-layer state that
         cannot be split at all -- the mamba layers must be sized against it.
         Sizing them against a narrower bucket splits them past what the block
-        already fits, spending a pool block per extra group for no saving.
-        """
+        already fits, spending a pool block per extra group for no saving."""
         config = _mock_vllm_config("BLNHC")
         config.speculative_config = None
         specs = {}
@@ -409,8 +405,7 @@ class TestSlidingWindowBucketCap:
         unbalanced 8-layer paged MLA bucket. Left whole, the SWA bucket would
         set the block width and the MLA group would fill under a third of
         every block; capped, it splits into groups no wider than the MLA
-        page.
-        """
+        page."""
         config = _shared_layout_config()
         specs: dict[str, KVCacheSpec] = {}
         for layer, ratio in ((2, 2), (8, 2), (14, 2), (20, 1)):
@@ -611,8 +606,7 @@ class TestCompressorRingGroup:
         """DeepSeek-V4.1 compressor state: a CircularBufferSpec ring (capacity
         8) beside 128-token paged MLA groups and 64-token SWA groups. The ring
         claims one block per request, never hashes, and does not disturb the
-        scheduler/hash block sizes the paged groups imply.
-        """
+        scheduler/hash block sizes the paged groups imply."""
         config = _shared_layout_config()
         config.cache_config.enable_prefix_caching = True
         specs: dict[str, KVCacheSpec] = {

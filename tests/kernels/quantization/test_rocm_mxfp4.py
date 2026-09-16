@@ -209,8 +209,7 @@ def test_rocm_aiter_fp4_enablement_follows_env_and_arch(
 @pytest.mark.parametrize("shape", LLAMA_SHAPES)
 def test_vllm_quant_dequant_mxfp4_matches_reference_on_large_shapes(shape, dtype):
     """The public vLLM MXFP4 QDQ helper should stay exact against the torch
-    reference even on larger Llama-like shapes.
-    """
+    reference even on larger Llama-like shapes."""
     from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
         quant_dequant_mxfp4,
     )

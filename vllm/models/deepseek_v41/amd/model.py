@@ -1062,8 +1062,7 @@ class DeepseekV41LLMForCausalLM(
     @property
     def token_lookback_depth(self) -> int:
         """Tokens before a chunk start the engram hash needs; the model runner
-        passes them as `lookback_token_ids`.
-        """
+        passes them as `lookback_token_ids`."""
         engram_hash = self.model.engram_hash
         return engram_hash.lookback_depth if engram_hash is not None else 0
 
@@ -1087,8 +1086,7 @@ class DeepseekV41LLMForCausalLM(
     def get_mtp_target_hidden_states(self) -> torch.Tensor | None:
         """Pre-collapse residual stream buffer (max_num_batched_tokens,
         hc_mult * hidden_size) for the MTP draft model. Populated by
-        forward(); valid after each target step.
-        """
+        forward(); valid after each target step."""
         return getattr(self.model, "_mtp_hidden_buffer", None)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

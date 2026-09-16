@@ -153,8 +153,7 @@ IS_DENSE = False
 
 def enable_norm_fusion(cfg: "VllmConfig") -> bool:
     """Enable if either RMS norm or quant FP8 custom op is active;
-    otherwise Inductor handles fusion.
-    """
+    otherwise Inductor handles fusion."""
     return (
         cfg.compilation_config.is_custom_op_enabled("rms_norm")
         or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
@@ -744,8 +743,7 @@ class VllmConfig:
 
     def _is_dflash2_draft(self) -> bool:
         """Whether the DFlash draft is a DFlash2 one, by the architecture the
-        speculator selects on (v1/worker/gpu/spec_decode/__init__.py).
-        """
+        speculator selects on (v1/worker/gpu/spec_decode/__init__.py)."""
         spec = self.speculative_config
         if spec is None or spec.method != "dflash":
             return False

@@ -115,8 +115,7 @@ class _BlocksMock:
 
 def _stub_sw_clipping(scheduler) -> None:
     """Make ``get_exchange_clipped_blocks`` a passthrough so tests don't
-    need the full sliding-window machinery.
-    """
+    need the full sliding-window machinery."""
     scheduler.get_exchange_clipped_blocks = lambda block_ids, clip_ssm=True: block_ids
 
 
@@ -174,8 +173,7 @@ class TestPushScheduler:
 
     def test_p_side_request_finished_stages_blocks(self):
         """P scheduler pushes blocks into both _finished_request_blocks (lease)
-        and _newly_finished_push_blocks (metadata for next step).
-        """
+        and _newly_finished_push_blocks (metadata for next step)."""
         sched = make_nixl_push_scheduler()
         _stub_sw_clipping(sched)
 
@@ -194,8 +192,7 @@ class TestPushScheduler:
 
     def test_build_connector_meta_drains_both_sides(self):
         """meta.push_registrations and meta.push_finished_blocks are filled
-        from the staging dicts and the staging dicts are cleared.
-        """
+        from the staging dicts and the staging dicts are cleared."""
         sched = make_nixl_push_scheduler()
         _stub_sw_clipping(sched)
 
@@ -290,8 +287,7 @@ class TestPushScheduler:
 
     def test_registration_watchdog_expires(self, caplog):
         """Stale D registrations whose deadline has passed are dropped at
-        ``build_connector_meta`` time.
-        """
+        ``build_connector_meta`` time."""
         # Watchdog logs a WARNING when it drops the stale entry; that's
         # what this test is verifying, so silence it in the test report.
         caplog.set_level(
@@ -332,8 +328,7 @@ class TestPushScheduler:
 
 class _StubWriterWorker(NixlPushConnectorWorker):
     """Construct a worker without invoking ``__init__`` so we can drive
-    the matching/notif logic without bringing up NIXL or torch.
-    """
+    the matching/notif logic without bringing up NIXL or torch."""
 
     @classmethod
     def fresh(cls) -> _StubWriterWorker:
@@ -439,8 +434,7 @@ class TestPushWriterRegSend:
     """``_do_send_reg_notif``: the PUSH_REG goes to every handshaked agent of
     the P engine, and the agent map is read under ``_handshake_lock`` so the
     send can't race the handshake done-callback's insert or a concurrent
-    stale-engine eviction (X1).
-    """
+    stale-engine eviction (X1)."""
 
     def _reg_send_worker(self) -> tuple[_StubWriterWorker, list]:
         w = _StubWriterWorker.fresh()
@@ -485,8 +479,7 @@ class TestPushWriterRegSend:
     def test_agent_read_is_serialized_with_handshake_lock(self):
         """While another thread holds ``_handshake_lock`` (as the handshake
         done-callback does while writing ``_remote_agents``), the writer's
-        check-then-send must not run ahead of the critical section.
-        """
+        check-then-send must not run ahead of the critical section."""
         w, failures = self._reg_send_worker()
         w._remote_agents["prefill-engine"] = {(0, 0): "agent-0"}
         rd = _registration_data("req-1")
@@ -596,8 +589,7 @@ class TestPushWriterMatching:
 class TestPushWriterStartLoadKv:
     def test_finished_blocks_inbox_matches_stashed_registration(self):
         """Run the writer-loop's finished-blocks drain against a
-        pre-populated _pending_d_registrations entry.
-        """
+        pre-populated _pending_d_registrations entry."""
         w = _StubWriterWorker.fresh()
         w._pending_d_registrations["req-C"] = _registration_data("req-C")
 
@@ -622,8 +614,7 @@ class TestPushWriterStartLoadKv:
 
     def test_start_load_kv_enqueues_to_writer(self):
         """``start_load_kv`` should hand registrations + finished blocks
-        to the writer queues without doing matching itself.
-        """
+        to the writer queues without doing matching itself."""
         w = _StubWriterWorker.fresh()
         # Stub heartbeats to a no-op; tests don't exercise the heartbeat
         # path here.
@@ -681,8 +672,7 @@ def test_do_start_push_kv_defers_then_writes_when_handshake_ready():
     NIXL op from the writer or the executor callback); once it resolves the
     request is re-queued on ``_deferred_push_inbox`` with the wake set; and on
     re-drive with the handshake ready the WRITE is issued with a correct
-    ReqMeta.
-    """
+    ReqMeta."""
     w = _StubWriterWorker.fresh()
     w._logical_to_kernel_block_ids = lambda x, ratio: x
     xfer_calls: list[dict[str, Any]] = []
@@ -722,8 +712,7 @@ def test_do_start_push_kv_defers_then_writes_when_handshake_ready():
 def test_do_start_push_kv_drops_request_on_handshake_failure():
     """Handshake raises: the request is dropped (not re-queued, no WRITE) and
     the failure is logged. Blocks are reclaimed by the lease/watchdog, matching
-    the old blocking behaviour.
-    """
+    the old blocking behaviour."""
     w = _StubWriterWorker.fresh()
     w._logical_to_kernel_block_ids = lambda x, ratio: x
     xfer_calls: list[dict[str, Any]] = []
@@ -745,8 +734,7 @@ def test_do_start_push_kv_drops_request_on_handshake_failure():
 
 def test_writer_loop_drains_deferred_push_inbox():
     """The writer loop drains ``_deferred_push_inbox`` and re-drives
-    ``_do_start_push_kv`` for each entry (event-driven, no polling).
-    """
+    ``_do_start_push_kv`` for each entry (event-driven, no polling)."""
     w = _StubWriterWorker.fresh()
     w.nixl_wrapper = MagicMock()
     w.nixl_wrapper.get_new_notifs.return_value = {}
@@ -779,8 +767,7 @@ def test_writer_loop_drains_deferred_push_inbox():
 
 def _eviction_worker(engine_ttl: float) -> NixlPushConnectorWorker:
     """A push worker wired to drive the base ``_ensure_handshake`` eviction
-    path (``_evict_stale_engines`` + ``_cleanup_remote_engine``).
-    """
+    path (``_evict_stale_engines`` + ``_cleanup_remote_engine``)."""
     w = _StubWriterWorker.fresh()
     w._engine_ttl = engine_ttl
     w._engine_last_active = {}
@@ -802,8 +789,7 @@ def _eviction_worker(engine_ttl: float) -> NixlPushConnectorWorker:
 def test_active_push_refreshes_engine_last_active():
     """The base ``_ensure_handshake`` refreshes liveness only on a new
     handshake, so an active push to an already-connected engine must refresh
-    ``_engine_last_active`` itself or it is reaped mid-stream (S1).
-    """
+    ``_engine_last_active`` itself or it is reaped mid-stream (S1)."""
     w = _eviction_worker(engine_ttl=3600.0)
     # Already-connected D -> _ensure_handshake returns None, WRITE runs inline.
     w._remote_agents["decode-engine"] = {(0, 0): "agent-decode"}
@@ -819,8 +805,7 @@ def test_active_push_refreshes_engine_last_active():
 def test_stale_engine_evicted_on_push():
     """A push drives ``_ensure_handshake`` -> ``_evict_stale_engines``, so a D
     engine silent past its TTL is reaped -- no _remote_agents / NIXL agent leak
-    across D scale up/down (S1).
-    """
+    across D scale up/down (S1)."""
     w = _eviction_worker(engine_ttl=30.0)
     w._remote_agents["D-old"] = {(0, 0): "agent-D-old"}
     w._engine_last_active["D-old"] = time.perf_counter() - 10_000.0
@@ -837,8 +822,7 @@ def test_stale_engine_evicted_on_push():
 def test_cleanup_remote_engine_pops_under_handshake_lock():
     """Regression (X1): eviction must not remove ``_remote_agents`` entries
     while another thread is inside the lock's critical section (e.g. the
-    push writer reading the map to send a registration).
-    """
+    push writer reading the map to send a registration)."""
     w = _eviction_worker(engine_ttl=30.0)
     w._remote_agents["D-old"] = {(0, 0): "agent-D-old"}
 
@@ -863,8 +847,7 @@ def test_cleanup_remote_engine_pops_under_handshake_lock():
 class TestPushWriterNotifs:
     def test_get_new_notifs_processes_forwarded_completion_notif(self):
         """Non-PUSH_REG notifs forwarded by the writer thread are drained
-        on the engine main thread inside ``_get_new_notifs``.
-        """
+        on the engine main thread inside ``_get_new_notifs``."""
         w = _StubWriterWorker.fresh()
         # Pretend the writer thread already forwarded a completion notif
         # for a request whose KV is being received.
@@ -910,8 +893,7 @@ class TestPushWriterNotifs:
     @staticmethod
     def _pollable_worker() -> _StubWriterWorker:
         """Stub worker with the extra base-worker state the real
-        ``get_transfer_results`` needs to poll ``_sending_transfers``.
-        """
+        ``get_transfer_results`` needs to poll ``_sending_transfers``."""
         w = _StubWriterWorker.fresh()
         w.transfer_topo = MagicMock()
         w.nixl_wrapper = MagicMock()
@@ -953,8 +935,7 @@ class TestPushWriterNotifs:
     @pytest.mark.parametrize(("pp_size", "is_hma"), [(1, False), (2, True)])
     def test_completed_push_send_waits_for_consumer_notif(self, pp_size, is_hma):
         """P-side sends are completed by consumer notifs / lease expiry,
-        not by local WRITE-handle completion.
-        """
+        not by local WRITE-handle completion."""
         w = self._pollable_worker()
         w.pp_size = pp_size
         w._is_hma_required = is_hma
@@ -1025,8 +1006,7 @@ class TestPushSchedulerNegative:
 
     def test_request_finished_unfinished_status_does_not_stage(self):
         """If a request is still RUNNING, request_finished must not stash
-        blocks for the worker (no push needed).
-        """
+        blocks for the worker (no push needed)."""
         sched = make_nixl_push_scheduler()
         _stub_sw_clipping(sched)
 
@@ -1043,8 +1023,7 @@ class TestPushSchedulerNegative:
 
     def test_request_finished_empty_blocks_does_not_arm_lease(self):
         """Empty block-id groups should still complete cleanly without
-        arming the lease/finished maps.
-        """
+        arming the lease/finished maps."""
         sched = make_nixl_push_scheduler()
         _stub_sw_clipping(sched)
 
@@ -1059,8 +1038,7 @@ class TestPushSchedulerNegative:
 
     def test_update_connector_output_unknown_request_is_noop(self):
         """Idempotent cleanup: clearing a request that was never staged
-        must not raise or mutate other state.
-        """
+        must not raise or mutate other state."""
         sched = make_nixl_push_scheduler()
         _stub_sw_clipping(sched)
 
@@ -1093,8 +1071,7 @@ class TestPushWriterNegative:
 
     def test_pop_matching_registration_no_match_when_base_ids_differ(self):
         """A registration whose base id (after stripping the random suffix)
-        does NOT match the lookup request_id must not be popped.
-        """
+        does NOT match the lookup request_id must not be popped."""
         w = _StubWriterWorker.fresh()
         # Two unrelated requests: different base UUIDs, so stripping the
         # trailing ``-<8 hex>`` suffix still yields different base ids.
@@ -1110,8 +1087,7 @@ class TestPushWriterNegative:
 
     def test_handle_push_reg_with_non_dict_payload_is_dropped(self, caplog):
         """msgpack-encoded non-dict payload (e.g. a list) should be
-        dropped without raising.
-        """
+        dropped without raising."""
         caplog.set_level(
             logging.CRITICAL,
             logger=("vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker"),
@@ -1139,8 +1115,7 @@ class TestPushWriterNegative:
 
     def test_handle_push_reg_idempotent_for_same_request_id(self):
         """Receiving the same PUSH_REG twice (e.g. P retries after a
-        flake) keeps the entry staged exactly once and never fires.
-        """
+        flake) keeps the entry staged exactly once and never fires."""
         w = _StubWriterWorker.fresh()
         notif = PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(
             _registration_data("req-dup")
@@ -1155,8 +1130,7 @@ class TestPushWriterNegative:
         """``get_transfer_results`` must enqueue every completed request
         in ``done_sending`` so the writer can drop stale matching state.
         Unlike the happy-path test, this verifies the *cardinality*: N
-        completed requests -> N evictions, in order.
-        """
+        completed requests -> N evictions, in order."""
         w = _StubWriterWorker.fresh()
         with patch.object(
             NixlPushConnectorWorker.__mro__[1],
@@ -1179,8 +1153,7 @@ class TestPushWriterNegative:
     def test_empty_transfer_results_do_not_enqueue_eviction(self):
         """If there's nothing newly done, no eviction should be enqueued.
         The wake event IS still set because ``get_finished`` always wakes
-        the writer to drain notifs.
-        """
+        the writer to drain notifs."""
         w = _StubWriterWorker.fresh()
         with patch.object(
             NixlPushConnectorWorker.__mro__[1],
@@ -1221,8 +1194,7 @@ class TestPushWriterNegative:
 
     def test_get_new_notifs_unknown_request_is_logged_and_skipped(self, caplog):
         """A completion notif for a request the worker doesn't know
-        about should be logged but not crash.
-        """
+        about should be logged but not crash."""
         caplog.set_level(
             logging.CRITICAL,
             logger=("vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker"),
@@ -1254,8 +1226,7 @@ class TestPushWriterNegative:
     def test_get_new_notifs_extends_lease_on_heartbeat(self):
         """``HB:`` notifs forwarded by the writer thread must extend the
         leases of tracked P-side requests on the engine main thread, and
-        ignore request IDs that aren't being tracked.
-        """
+        ignore request IDs that aren't being tracked."""
         w = _StubWriterWorker.fresh()
         w.transfer_topo = MagicMock()
         # _handle_heartbeat reads ``self._lease_extension`` (set in the
@@ -1291,13 +1262,11 @@ class TestPushWriterNegative:
 
 class TestPushPipelineParallel:
     """PP-sharded producer: per-stage completion counting, pp_size plumbing,
-    and remote-region slicing.
-    """
+    and remote-region slicing."""
 
     def test_completion_waits_for_one_notif_per_pp_stage(self):
         """Each PP stage WRITEs its own layers and sends one notif; D must
-        collect pp_size notifs before reporting the recv done.
-        """
+        collect pp_size notifs before reporting the recv done."""
         w = _StubWriterWorker.fresh()
         w.transfer_topo = MagicMock()
         request_id = "req-pp-2"
@@ -1318,8 +1287,7 @@ class TestPushPipelineParallel:
 
     def test_req_meta_reads_pp_size_from_kv_transfer_params(self):
         """D learns the producer's pp_size from kv_transfer_params (forwarded
-        by the proxy) and defaults to 1 when absent.
-        """
+        by the proxy) and defaults to 1 when absent."""
         metadata = NixlConnectorMetadata()
         params = {
             "remote_block_ids": ([0],),
@@ -1342,8 +1310,7 @@ class TestPushPipelineParallel:
         this worker holds only a contiguous layer slice; add_remote_agent
         trims the remote region list to [offset : offset + num_local_regions]
         before building descriptors. We stop right after the slice via a
-        sentinel on the next collaborator call.
-        """
+        sentinel on the next collaborator call."""
         block_len = 4096 * 16
         w = _StubWriterWorker.fresh()  # seeds writer-thread state for teardown
         w.pp_size = 2
@@ -1385,8 +1352,7 @@ class TestPushWriterMlaReplication:
     """MLA latent KV is replicated across D's TP ranks, so when D_TP > P_TP
     (``tp_ratio < 0``) the producer must *WRITE* the latent into every D rank
     it handshook -- not write one and merely notify the rest, which would
-    leave the un-written ranks decoding against stale KV.
-    """
+    leave the un-written ranks decoding against stale KV."""
 
     @staticmethod
     def _mla_worker_writing_to(d_ranks):
@@ -1611,8 +1577,7 @@ class TestPushPrefixCaching:
 
     def test_partial_prefix_hit_end_trims_producer_blocks(self):
         """D registered only its 2 uncomputed suffix blocks; P finished the
-        full 5-block sequence. P must WRITE its LAST 2 blocks into D's slots.
-        """
+        full 5-block sequence. P must WRITE its LAST 2 blocks into D's slots."""
         w, _ = self._worker_driving_xfer()
         reg = _registration_data("req-pc", local_block_ids=([500, 501],))
 

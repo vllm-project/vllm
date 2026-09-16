@@ -136,8 +136,7 @@ async def _client_loop(
     client_id: int,
 ):
     """A single async client: pulls prompts, submits to engine, consumes
-    hidden states as soon as each request finishes.
-    """
+    hidden states as soon as each request finishes."""
     loop = asyncio.get_event_loop()
     while True:
         item = await prompt_queue.get()

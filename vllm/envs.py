@@ -2249,8 +2249,7 @@ def compile_factors() -> dict[str, object]:
     """Return env vars used for torch.compile cache keys.
 
     Start with every known vLLM env var; drop entries in `ignored_factors`;
-    hash everything else. This keeps the cache key aligned across workers.
-    """
+    hash everything else. This keeps the cache key aligned across workers."""
     ignored_factors: set[str] = {
         "MAX_JOBS",
         "VLLM_RPC_BASE_PATH",

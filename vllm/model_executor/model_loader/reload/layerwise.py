@@ -308,8 +308,7 @@ def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -
 
     Assumes dtype/shapes of attention tensors do not change during
     processing, since we use .data.copy_() to preserve kernel tensor
-    references.
-    """
+    references."""
     quant_method = getattr(layer, "quant_method", None)
     if quant_method is not None:
         # Re-create scale Parameters with sentinel values so unloaded scales
@@ -388,8 +387,7 @@ def _get_weight_loader(tensor: torch.Tensor):
 
 def _copy_and_restore_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):
     """Copy processed values into original kernel tensor storage and restore
-    kernel tensor references on the layer. Preserves cudagraph references.
-    """
+    kernel tensor references on the layer. Preserves cudagraph references."""
     assert info.kernel_tensors is not None
     parameters, buffers = info.kernel_tensors
     non_persistent = info.kernel_non_persistent_buffers

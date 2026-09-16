@@ -1252,8 +1252,7 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
 
     def get_max_layers_per_page_size(self) -> int:
         """Max number of layers sharing a page size. For a balanced bucket
-        this equals the number of repetitions of the layer pattern.
-        """
+        this equals the number of repetitions of the layer pattern."""
         return Counter(
             spec.page_size_bytes for spec in self.kv_cache_specs.values()
         ).most_common(1)[0][1]
