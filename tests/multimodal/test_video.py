@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import numpy.typing as npt
 import pytest
+import torch
 from transformers import AutoVideoProcessor
 from transformers.video_utils import VideoMetadata
 
@@ -22,6 +23,7 @@ from vllm.multimodal.video import (
     DynamicVideoBackend,
     Glm5NextVideoBackend,
     GLM46VVideoBackend,
+    GLMGAVideoBackend,
     Molmo2VideoBackend,
     Qwen2VLVideoBackend,
     Qwen3VLVideoBackend,
@@ -172,9 +174,14 @@ def test_decode_video_imports_only_selected_backend(
     [
         (
             "torchcodec",
-            {"min_frames": 4, "num_ffmpeg_threads": 2, "seek_mode": "approximate"},
+            {
+                "min_frames": 4,
+                "num_ffmpeg_threads": 2,
+                "seek_mode": "approximate",
+                "device": "cuda",
+            },
             {"min_frames": 4},
-            {"num_ffmpeg_threads": 2, "seek_mode": "approximate"},
+            {"num_ffmpeg_threads": 2, "seek_mode": "approximate", "device": "cuda"},
         ),
         (
             "deepstream",
@@ -203,6 +210,11 @@ def test_video_backend_rejects_options_for_another_decoder():
         ValueError, match="num_ffmpeg_threads is not supported by the 'opencv' backend"
     ):
         resolve_video_backend_kwargs("opencv", {"num_ffmpeg_threads": 2})
+
+    with pytest.raises(
+        ValueError, match="device is not supported by the 'opencv' backend"
+    ):
+        resolve_video_backend_kwargs("opencv", {"device": "cuda"})
 
 
 @pytest.mark.parametrize(
@@ -1204,6 +1216,30 @@ def test_torchcodec_backend_rejects_frame_recovery(dummy_video_path):
         )
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_torchcodec_backend_cuda_decodes_on_gpu(dummy_video_path):
+    """With device="cuda", torchcodec decodes via NVDEC and keeps the frames
+    on the GPU instead of returning a host-side numpy array."""
+    pytest.importorskip("torchcodec")
+
+    with open(dummy_video_path, "rb") as f:
+        video_data = f.read()
+
+    loader = VIDEO_LOADER_REGISTRY.load("opencv")
+    frames, metadata = loader.load_bytes(
+        video_data, num_frames=8, backend="torchcodec", device="cuda"
+    )
+
+    assert isinstance(frames, torch.Tensor)
+    assert frames.device.type == "cuda"
+    assert frames.dtype == torch.uint8
+    assert frames.ndim == 4
+    assert frames.shape[3] == 3  # RGB
+    assert frames.shape[0] == 8
+    assert frames.shape[0] == len(metadata["frames_indices"])
+    assert metadata["video_backend"] == "torchcodec"
+
+
 def test_torchcodec_backend_returns_target_frames_not_keyframes():
     """Regression test: torchcodec must return the requested frames, not the
     GOP keyframe they seek back to.
@@ -1471,6 +1507,59 @@ def test_glm46v_duration_estimation_from_fps():
     assert len(indices) > 0
     assert len(indices) % 2 == 0
     assert all(0 <= idx < 90 for idx in indices)
+
+
+class TestGLMGASamplingCaps:
+    """Regression tests for GHSA-58v5-2m8f-94pr: request-controlled fps
+    and max_frames must not create intermediate allocations larger than
+    the actual frame count."""
+
+    @staticmethod
+    def _source(
+        total_frames: int, fps: float = 30.0, duration: float = 0
+    ) -> VideoSourceMetadata:
+        if duration == 0 and fps > 0 and total_frames > 1:
+            duration = round((total_frames - 1) / fps) + 1
+        return VideoSourceMetadata(total_frames, fps, duration)
+
+    def test_extreme_values_bounded_by_total_frames(self):
+        source = self._source(total_frames=2, fps=2.0, duration=1.0)
+        target = VideoTargetMetadata(num_frames=-1, fps=500_000, max_duration=-1)
+        indices = GLMGAVideoBackend.compute_frames_index_to_sample(
+            source,
+            target,
+            max_frames=500_000,
+        )
+        assert len(indices) <= 2
+
+    def test_class_cap_overrides_kwargs_max_frames(self):
+        source = self._source(total_frames=10_000, fps=30.0)
+        target = VideoTargetMetadata(num_frames=-1, fps=30, max_duration=-1)
+        indices = GLMGAVideoBackend.compute_frames_index_to_sample(
+            source,
+            target,
+            max_frames=100_000,
+        )
+        assert len(indices) <= GLMGAVideoBackend._MAX_FRAMES
+
+    def test_class_cap_overrides_target_fps(self):
+        source = self._source(total_frames=10_000, fps=30.0)
+        target = VideoTargetMetadata(num_frames=-1, fps=500_000, max_duration=-1)
+        indices = GLMGAVideoBackend.compute_frames_index_to_sample(
+            source,
+            target,
+        )
+        assert len(indices) <= GLMGAVideoBackend._MAX_FRAMES
+
+    def test_normal_operation_unchanged(self):
+        source = self._source(total_frames=1000, fps=30.0, duration=33.0)
+        target = VideoTargetMetadata(num_frames=-1, fps=2, max_duration=-1)
+        indices = GLMGAVideoBackend.compute_frames_index_to_sample(
+            source,
+            target,
+        )
+        assert 0 < len(indices) <= GLMGAVideoBackend._MAX_FRAMES
+        assert all(0 <= idx < 1000 for idx in indices)
 
 
 def test_glm5next_backend_selected_for_processor():
