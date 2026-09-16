@@ -1,0 +1,340 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Shared scheduler-side UMBP connector behavior."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.request import Request
+
+from .data import (
+    BlockIdentityCodec,
+    BlockTransferPlan,
+    KVLayoutPlanner,
+    LoadSpec,
+    RankCompletenessPolicy,
+    RankTopology,
+    RequestTracker,
+    TPShardMapping,
+    UMBPConnectorMetadata,
+    UMBPConnectorWorkerMetadata,
+)
+from .runtime import UMBPSchedulerHandle
+
+
+class UMBPStoreConnectorScheduler:
+    """Own vLLM prefix matching while the runtime owns lookup transport."""
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        kv_cache_config: KVCacheConfig,
+        runtime: UMBPSchedulerHandle,
+        codec: BlockIdentityCodec,
+        topology: RankTopology | None = None,
+    ) -> None:
+        self.block_size = vllm_config.cache_config.block_size
+        self.kv_cache_config = kv_cache_config
+        self.runtime = runtime
+        self.codec = codec
+        self.layout = KVLayoutPlanner.from_kv_cache_config(kv_cache_config)
+        self.topology = topology or RankTopology()
+        self.completeness = RankCompletenessPolicy(self.topology)
+        self.tp_shard_mapping = self._build_local_tp_mapping()
+        self.layout_descriptor = self.layout.describe(
+            self.topology,
+            tp_shard_mapping=self.tp_shard_mapping,
+        )
+        extra = vllm_config.kv_transfer_config.kv_connector_extra_config
+        self.load_async = bool(extra.get("load_async", True))
+        self.enable_lookup = bool(extra.get("enable_lookup", True))
+        if extra.get("enable_partial_hash_hits", False):
+            raise ValueError(
+                "UMBP partial hash hits require a runtime tail-key protocol"
+            )
+        self.enable_partial_hash_hits = False
+        self.hash_block_size = int(extra.get("hash_block_size", self.block_size))
+        if self.hash_block_size <= 0 or self.block_size % self.hash_block_size:
+            raise ValueError(
+                "UMBP hash_block_size must be a positive divisor of block_size"
+            )
+        self._pending_loads: dict[str, list[BlockTransferPlan]] = {}
+        self._load_specs: dict[str, LoadSpec] = {}
+        self._request_trackers: dict[str, RequestTracker] = {}
+        self._next_generation = 0
+        self._pending_stores: list[BlockTransferPlan] = []
+        self._gpu_block_pool: BlockPool | None = None
+        self._pinned_store_blocks: dict[tuple[str, int], list[int]] = {}
+        self._num_workers = getattr(vllm_config.parallel_config, "world_size", 1)
+
+    def _build_local_tp_mapping(self) -> TPShardMapping | None:
+        """Build the identity mapping for homogeneous local TP."""
+        heads = [
+            getattr(group.kv_cache_spec, "num_kv_heads", None)
+            for group in self.kv_cache_config.prefix_cacheable_groups
+        ]
+        if not heads or heads[0] is None or any(head != heads[0] for head in heads):
+            return None
+        return TPShardMapping.build(
+            self.topology.tp_size,
+            self.topology.tp_size,
+            self.topology.tp_rank,
+            heads[0],
+        )
+
+    def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
+        self._gpu_block_pool = gpu_block_pool
+
+    def get_num_new_matched_tokens(
+        self, request: Request, num_computed_tokens: int
+    ) -> tuple[int | None, bool]:
+        if not self.enable_lookup:
+            return 0, False
+        hashes = list(request.block_hashes)
+        align = (
+            self.hash_block_size
+            if self.enable_partial_hash_hits
+            else self.block_size
+        )
+        if not hashes or request.num_tokens < align:
+            return 0, False
+        group_ids = self.kv_cache_config.prefix_cacheable_group_ids
+        scale = self.block_size // self.hash_block_size
+        lookup_hashes = (
+            hashes
+            if self.enable_partial_hash_hits
+            else [
+                hashes[index * scale + scale - 1]
+                for index in range(len(hashes) // scale)
+            ]
+        )
+        keys = [
+            key
+            for block_hash in lookup_hashes
+            for key in self.codec.keys_for_topology(
+                block_hash, self.topology, group_ids
+            )
+        ]
+        hits = list(self.runtime.lookup(keys))
+        per_block = self.completeness.required_rank_count * len(group_ids)
+        if per_block == 0 or len(hits) != len(keys):
+            return 0, False
+        matched_units = 0
+        for offset in range(0, len(hits), per_block):
+            if not all(hits[offset : offset + per_block]):
+                break
+            matched_units += 1
+        unit_size = (
+            self.hash_block_size
+            if self.enable_partial_hash_hits
+            else self.block_size
+        )
+        matched_tokens = matched_units * unit_size
+        matched_tokens = min(matched_tokens, request.num_tokens)
+        need_to_load = max(matched_tokens - num_computed_tokens, 0)
+        if need_to_load <= 0:
+            return 0, False
+        self._load_specs[request.request_id] = LoadSpec(
+            local_tokens=num_computed_tokens,
+            external_tokens=matched_tokens,
+        )
+        return need_to_load, self.load_async
+
+    def update_state_after_alloc(
+        self,
+        request: Request,
+        blocks: KVCacheBlocks,
+        num_external_tokens: int,
+    ) -> None:
+        if num_external_tokens <= 0:
+            return
+        num_blocks = num_external_tokens // self.block_size
+        block_groups = blocks.get_block_ids(
+            group_ids=self.kv_cache_config.prefix_cacheable_group_ids
+        )
+        if not block_groups:
+            return
+        tracker = self._request_trackers.get(request.request_id)
+        if tracker is None:
+            tracker = RequestTracker(
+                request_id=request.request_id,
+                generation=self._next_generation,
+            )
+            self._next_generation += 1
+            self._request_trackers[request.request_id] = tracker
+        tracker.update_blocks(tuple(list(group) for group in block_groups))
+        spec = self._load_specs.get(request.request_id)
+        if spec is not None:
+            spec.can_load = (
+                num_external_tokens == spec.num_tokens_to_load
+            )
+            tracker.load_spec = spec
+            if not spec.can_load:
+                return
+        start_hash = request.num_tokens - num_external_tokens
+        plans = [
+            BlockTransferPlan(
+                key=self.codec.key(
+                    self._object_hash(
+                        request.block_hashes,
+                        start_hash // self.block_size + index,
+                    ),
+                    group_id=group_id,
+                ),
+                block_id=block_groups[group_index][-num_blocks + index],
+                request_id=request.request_id,
+                generation=tracker.generation,
+            )
+            for index in range(num_blocks)
+            for group_index, group_id in enumerate(
+                self.kv_cache_config.prefix_cacheable_group_ids
+            )
+        ]
+        self._pending_loads[request.request_id] = plans
+
+    def build_connector_meta(
+        self, scheduler_output: SchedulerOutput
+    ) -> KVConnectorMetadata:
+        meta = UMBPConnectorMetadata()
+        for request_id in scheduler_output.finished_req_ids:
+            self._pending_loads.pop(request_id, None)
+            self._load_specs.pop(request_id, None)
+            self._request_trackers.pop(request_id, None)
+        for request in scheduler_output.scheduled_new_reqs:
+            load_plans = self._pending_loads.pop(request.req_id, [])
+            self._load_specs.pop(request.req_id, None)
+            meta.load_plans.extend(load_plans)
+            if load_plans:
+                meta.load_requests[request.req_id] = load_plans
+            else:
+                tracker = self._tracker_for_request(request.req_id)
+                total_tokens = (
+                    request.num_computed_tokens
+                    + scheduler_output.num_scheduled_tokens[request.req_id]
+                )
+                store_plans = self._store_plans(request, tracker, total_tokens)
+                meta.store_plans.extend(store_plans)
+                if store_plans:
+                    meta.store_requests[request.req_id] = store_plans
+
+        cached_reqs = scheduler_output.scheduled_cached_reqs
+        for request_id in cached_reqs.req_ids:
+            load_plans = self._pending_loads.pop(request_id, [])
+            self._load_specs.pop(request_id, None)
+            if load_plans:
+                meta.load_plans.extend(load_plans)
+                meta.load_requests[request_id] = load_plans
+
+        for request_id in scheduler_output.preempted_req_ids or set():
+            meta.preempted_request_ids.add(request_id)
+            plans = self._pending_loads.pop(request_id, [])
+            meta.preempted_block_ids.update(plan.block_id for plan in plans)
+            self._load_specs.pop(request_id, None)
+            if tracker := self._request_trackers.get(request_id):
+                tracker.reset()
+
+        meta.store_plans.extend(self._pending_stores)
+        self._pending_stores.clear()
+        self._reference_store_blocks(meta)
+        return meta
+
+    def _reference_store_blocks(self, metadata: UMBPConnectorMetadata) -> None:
+        if self._gpu_block_pool is None:
+            return
+        new_block_ids: list[int] = []
+        for plan in metadata.store_plans:
+            token = (plan.key, plan.generation)
+            blocks = self._pinned_store_blocks.setdefault(token, [])
+            if plan.block_id not in blocks:
+                blocks.append(plan.block_id)
+                new_block_ids.append(plan.block_id)
+        if new_block_ids:
+            self._gpu_block_pool.touch(
+                [
+                    self._gpu_block_pool.blocks[block_id]
+                    for block_id in new_block_ids
+                ]
+            )
+
+    def _tracker_for_request(self, request_id: str) -> RequestTracker:
+        tracker = self._request_trackers.get(request_id)
+        if tracker is None:
+            tracker = RequestTracker(
+                request_id=request_id,
+                generation=self._next_generation,
+            )
+            self._next_generation += 1
+            self._request_trackers[request_id] = tracker
+        return tracker
+
+    def _object_hash(self, hashes: list[bytes], block_index: int) -> bytes:
+        scale = self.block_size // self.hash_block_size
+        hash_index = block_index * scale + scale - 1
+        if hash_index >= len(hashes):
+            raise ValueError(
+                f"request has {len(hashes)} hashes, needs index {hash_index}"
+            )
+        return hashes[hash_index]
+
+    def _store_plans(
+        self, request: Any, tracker: RequestTracker, token_count: int
+    ) -> list[BlockTransferPlan]:
+        """Describe full blocks produced by a scheduled prefill."""
+        group_ids = self.kv_cache_config.prefix_cacheable_group_ids
+        save_to = tracker.mark_saved(token_count, self.block_size)
+        num_blocks = save_to // self.block_size
+        plans: list[BlockTransferPlan] = []
+        for group_id in group_ids:
+            block_ids = request.block_ids[group_id]
+            for index, block_id in enumerate(block_ids[:num_blocks]):
+                if index >= len(request.block_hashes):
+                    break
+                plans.append(
+                    BlockTransferPlan(
+                        key=self.codec.key(
+                            self._object_hash(request.block_hashes, index),
+                            group_id=group_id,
+                        ),
+                        block_id=block_id,
+                        request_id=request.req_id,
+                        generation=tracker.generation,
+                    )
+                )
+        return plans
+
+    def request_finished(
+        self, request: Request, block_ids: tuple[list[int], ...]
+    ) -> tuple[bool, dict[str, Any] | None]:
+        self._pending_loads.pop(request.request_id, None)
+        self._load_specs.pop(request.request_id, None)
+        return False, None
+
+    def update_connector_output(self, output: KVConnectorOutput) -> None:
+        metadata = output.kv_connector_worker_meta
+        if not isinstance(metadata, UMBPConnectorWorkerMetadata):
+            return
+        pool = self._gpu_block_pool
+        terminal_counts = dict(metadata.completed_store_tokens)
+        for token, count in metadata.failed_store_tokens.items():
+            terminal_counts[token] = terminal_counts.get(token, 0) + count
+        for token, count in terminal_counts.items():
+            if count < self._num_workers:
+                continue
+            block_ids = self._pinned_store_blocks.pop(token, None)
+            if pool is None or block_ids is None:
+                continue
+            pool.free_blocks(pool.blocks[block_id] for block_id in reversed(block_ids))
+
+    def has_pending_push_work(self) -> bool:
+        return bool(self._pinned_store_blocks)
+
+    def close(self) -> None:
+        self.runtime.close()

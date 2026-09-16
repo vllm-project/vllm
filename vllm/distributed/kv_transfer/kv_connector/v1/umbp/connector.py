@@ -1,0 +1,206 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""vLLM-facing shared UMBP connector."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+import torch
+
+from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorBase_V1,
+    KVConnectorMetadata,
+    KVConnectorRole,
+    KVConnectorTransferResults,
+    SupportsHMA,
+)
+from vllm.forward_context import ForwardContext
+from vllm.v1.attention.backend import AttentionMetadata
+from vllm.v1.core.sched.output import SchedulerOutput
+
+from .data import (
+    BlockIdentityCodec,
+    KVLayoutPlanner,
+    RankTopology,
+    UMBPConnectorMetadata,
+    UMBPConnectorWorkerMetadata,
+    UMBPNamespace,
+)
+from .runtime import UMBPRuntimeFactory, UMBPRuntimeConfig
+from .scheduler import UMBPStoreConnectorScheduler
+from .worker import UMBPStoreConnectorWorker
+
+if TYPE_CHECKING:
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.request import Request
+
+
+class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
+    """Shared vLLM lifecycle for embedded, standalone, and distributed UMBP."""
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        role: KVConnectorRole,
+        kv_cache_config: "KVCacheConfig",
+    ) -> None:
+        super().__init__(vllm_config, role, kv_cache_config)
+        runtime_config = UMBPRuntimeConfig.from_vllm(vllm_config)
+        runtime = UMBPRuntimeFactory.build(runtime_config)
+        namespace = UMBPNamespace.from_vllm_config(vllm_config, kv_cache_config)
+        topology = RankTopology.from_vllm_config(vllm_config)
+        codec = BlockIdentityCodec(
+            namespace=namespace,
+            tp_rank=topology.tp_rank,
+            pp_rank=topology.pp_rank,
+            pcp_rank=topology.pcp_rank,
+            dcp_rank=topology.dcp_rank,
+        )
+        layout = KVLayoutPlanner.from_kv_cache_config(kv_cache_config)
+        layout_descriptor = layout.describe(topology)
+        self._runtime = runtime
+        self.connector_scheduler: UMBPStoreConnectorScheduler | None = None
+        self.connector_worker: UMBPStoreConnectorWorker | None = None
+        if role == KVConnectorRole.SCHEDULER:
+            self.connector_scheduler = UMBPStoreConnectorScheduler(
+                vllm_config,
+                kv_cache_config,
+                runtime.create_scheduler_handle(
+                    namespace.value, topology, layout_descriptor
+                ),
+                codec,
+                topology,
+            )
+        else:
+            self.connector_worker = UMBPStoreConnectorWorker(
+                runtime.create_worker_handle(
+                    namespace.value, topology, layout_descriptor
+                ),
+                layout,
+            )
+
+    def get_num_new_matched_tokens(
+        self, request: "Request", num_computed_tokens: int
+    ) -> tuple[int | None, bool]:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.get_num_new_matched_tokens(
+            request, num_computed_tokens
+        )
+
+    def update_state_after_alloc(
+        self,
+        request: "Request",
+        blocks: "KVCacheBlocks",
+        num_external_tokens: int,
+    ) -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.update_state_after_alloc(
+            request, blocks, num_external_tokens
+        )
+
+    def bind_gpu_block_pool(self, gpu_block_pool: Any) -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.bind_gpu_block_pool(gpu_block_pool)
+
+    def build_connector_meta(
+        self, scheduler_output: SchedulerOutput
+    ) -> KVConnectorMetadata:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.build_connector_meta(scheduler_output)
+
+    def request_finished(
+        self, request: "Request", block_ids: list[int]
+    ) -> tuple[bool, dict[str, Any] | None]:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.request_finished(request, (block_ids,))
+
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.request_finished(request, block_ids)
+
+    def update_connector_output(self, connector_output: Any) -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.update_connector_output(connector_output)
+
+    def has_pending_push_work(self) -> bool:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.has_pending_push_work()
+
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.register_kv_caches(kv_caches)
+
+    def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
+        assert self.connector_worker is not None
+        assert isinstance(kv_connector_metadata, UMBPConnectorMetadata)
+        self.connector_worker.handle_preemptions(kv_connector_metadata)
+
+    def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
+        del kwargs
+        assert self.connector_worker is not None
+        metadata = self._get_connector_metadata()
+        assert isinstance(metadata, UMBPConnectorMetadata)
+        self.connector_worker.start_load_kv(forward_context, metadata)
+
+    def wait_for_layer_load(self, layer_name: str) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.wait_for_layer_load(layer_name)
+
+    def save_kv_layer(
+        self,
+        layer_name: str,
+        kv_layer: torch.Tensor,
+        attn_metadata: AttentionMetadata,
+        **kwargs: Any,
+    ) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.save_kv_layer(
+            layer_name, kv_layer, attn_metadata, **kwargs
+        )
+
+    def wait_for_save(self) -> None:
+        assert self.connector_worker is not None
+        metadata = self._get_connector_metadata()
+        assert isinstance(metadata, UMBPConnectorMetadata)
+        self.connector_worker.enqueue_stores(metadata)
+        self.connector_worker.wait_for_save()
+
+    def get_finished(
+        self, finished_req_ids: set[str]
+    ) -> tuple[set[str] | None, set[str] | None]:
+        assert self.connector_worker is not None
+        return self.connector_worker.get_finished(finished_req_ids)
+
+    def get_transfer_results(
+        self, finished_req_ids: set[str]
+    ) -> KVConnectorTransferResults:
+        assert self.connector_worker is not None
+        finished_sending, finished_recving = self.connector_worker.get_finished(
+            finished_req_ids
+        )
+        return KVConnectorTransferResults(
+            finished_sending=set(finished_sending or ()),
+            finished_recving=set(finished_recving or ()),
+            failed_recving=self.connector_worker.get_failed_recving(),
+        )
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        assert self.connector_worker is not None
+        return self.connector_worker.get_block_ids_with_load_errors()
+
+    def build_connector_worker_meta(self) -> UMBPConnectorWorkerMetadata:
+        assert self.connector_worker is not None
+        return self.connector_worker.build_connector_worker_meta()
+
+    def shutdown(self) -> None:
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.close()
+        if self.connector_worker is not None:
+            self.connector_worker.close()
