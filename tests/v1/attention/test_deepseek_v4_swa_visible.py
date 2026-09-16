@@ -592,21 +592,25 @@ def test_builder_text_model_unchanged():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("compress_ratio", [0, 1, 2])
-@pytest.mark.parametrize("with_image", [False, True])
-def test_v41_prefill_gathers_all_visible_swa_keys(compress_ratio, with_image, tmp_path):
-    """VL continuation chunks must retain image keys outside the causal window."""
+@pytest.mark.parametrize("query_len", [100, 4000])
+def test_v41_image_prefill_uses_causal_swa(compress_ratio, query_len, tmp_path):
+    """V4.1 image tokens use the same causal SWA as text, including in chunks."""
     from transformers import LlamaConfig
 
     from vllm.models.deepseek_v41.common.ops.cache_utils import (
         combine_topk_swa_indices as combine_v41,
     )
     from vllm.models.deepseek_v41.sparse_mla import DeepseekV41SparseSWAMetadataBuilder
+    from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
 
+    config = DeepseekV41Config(vision_config={"num_hidden_layers": 2})
     LlamaConfig(
-        architectures=["LlamaForCausalLM"], max_position_embeddings=4096
+        architectures=["LlamaForCausalLM"],
+        max_position_embeddings=4096,
+        is_mm_prefix_lm=config.is_mm_prefix_lm,
     ).save_pretrained(tmp_path)
-    seq_len, query_len, window, max_image_tokens = 4000, 100, 128, 2048
-    spans = [(1900, 3947)] if with_image else []
+    seq_len, window, max_image_tokens = 4000, 128, 2048
+    spans = [(1900, 3947)]
     builder = make_builder(
         True,
         window,
@@ -616,14 +620,16 @@ def test_v41_prefill_gathers_all_visible_swa_keys(compress_ratio, with_image, tm
         builder_cls=DeepseekV41SparseSWAMetadataBuilder,
     )
     md = build_metadata(builder, [seq_len], [query_len], {0: spans})
+    assert md.prefill_left_visible is None
+    assert md.prefill_right_visible is None
+    assert md.prefill_swa_indices.shape[-1] == window
     plan = md.get_prefill_chunk_plan(
         compress_ratio, prefill_chunk_size=4, has_compressed=compress_ratio > 0
     )
     [(start, end, n, m)] = plan
     gather_len = int(md.prefill_gather_lens[0])
     assert (start, end, m - n) == (0, 1, gather_len)
-    if not with_image:
-        assert gather_len == query_len + window - 1
+    assert gather_len == query_len + min(seq_len - query_len, window - 1)
     indices, lens = combine_v41(
         torch.empty(query_len, 0, dtype=torch.int32, device="cuda"),
         md.query_start_loc,
@@ -636,14 +642,17 @@ def test_v41_prefill_gathers_all_visible_swa_keys(compress_ratio, with_image, tm
         n,
         left_visible=md.prefill_left_visible,
         right_visible=md.prefill_right_visible,
-        max_image_tokens=max_image_tokens,
+        max_image_tokens=builder.max_image_tokens,
     )
-    left, right = ref_left_right([seq_len], [query_len], [spans], max_image_tokens)
     indices, lens = indices.cpu(), lens.cpu().tolist()
+    paged_indices = md.prefill_swa_indices.cpu()
+    paged_lens = md.prefill_swa_lens.cpu().tolist()
     for token, pos in enumerate(range(seq_len - query_len, seq_len)):
-        lo, hi = ref_swa_bounds(pos, window, left[token], right[token])
+        lo, hi = max(0, pos - window + 1), pos + 1
         row = indices[token, : lens[token]]
         assert lens[token] == hi - lo
         assert torch.all((row >= n) & (row < m))
         absolute_keys = row - n + seq_len - gather_len
         assert absolute_keys.tolist() == list(range(lo, hi))
+        assert paged_lens[token] == hi - lo
+        assert paged_indices[token, 0, : hi - lo].tolist() == list(range(lo, hi))

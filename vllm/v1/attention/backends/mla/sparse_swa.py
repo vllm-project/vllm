@@ -208,7 +208,6 @@ class DeepseekSparseSWAMetadata:
     prefill_seq_lens_cpu: torch.Tensor | None = None
     prefill_gather_lens: torch.Tensor | None = None
     prefill_query_lens_cpu: torch.Tensor | None = None
-    # Gather lookback, including the image span when it exceeds the causal window.
     prefill_window_size: int = 0
     prefill_max_model_len: int = 0
     prefill_max_num_batched_tokens: int = 0
@@ -449,7 +448,6 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         hf_config = self.vllm_config.model_config.hf_config
         assert hasattr(hf_config, "sliding_window")
         self.window_size = hf_config.sliding_window
-        self.prefill_gather_window_size = self.window_size
 
         # Vision variant: image spans (up to vision_max_n_token tokens) are
         # visible bidirectionally, so prefill index rows widen from
@@ -457,7 +455,8 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         # max_image_tokens == 0 and take the original code paths everywhere.
         self.max_image_tokens = (
             getattr(hf_config, "vision_max_n_token", 0)
-            if getattr(hf_config, "vision_n_layers", 0) > 0
+            if getattr(hf_config, "is_mm_prefix_lm", True)
+            and getattr(hf_config, "vision_n_layers", 0) > 0
             else 0
         )
         self.prefill_index_width = self.window_size + self.max_image_tokens
@@ -691,7 +690,6 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             seq_lens_cpu,
             query_start_loc,
             query_start_loc_cpu,
-            has_image=prefill_left_visible is not None,
         )
 
         # Per-layer-type tile-scheduler plan holders. Empty FlashMLASchedMeta
@@ -868,7 +866,6 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         seq_lens_cpu: torch.Tensor | None,
         query_start_loc: torch.Tensor,
         query_start_loc_cpu: torch.Tensor,
-        has_image: bool = False,
     ) -> dict[str, torch.Tensor | int | None]:
         """Pre-compute DeepseekV4 prefill metadata during the metadata build phase.
 
@@ -883,11 +880,6 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         # --- Prefill query metadata (single Triton kernel + CPU slicing) ---
         if num_prefills > 0:
             assert seq_lens_cpu is not None
-            # A continuation chunk can begin inside an image whose visible
-            # prefix extends beyond the causal SWA window.
-            gather_window_size = (
-                self.prefill_gather_window_size if has_image else self.window_size
-            )
             pfx_gather_lens = torch.empty(
                 num_prefills, dtype=torch.int32, device=seq_lens.device
             )
@@ -897,7 +889,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
                 query_start_loc,
                 num_prefills,
                 num_decodes,
-                gather_window_size,
+                self.window_size,
             )
 
             result["prefill_seq_lens"] = seq_lens[num_decodes:]
@@ -907,7 +899,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
                 query_start_loc_cpu[num_decodes + 1 : num_decodes + num_prefills + 1]
                 - query_start_loc_cpu[num_decodes : num_decodes + num_prefills]
             ).to(dtype=torch.int32)
-            result["prefill_window_size"] = gather_window_size
+            result["prefill_window_size"] = self.window_size
             result["prefill_max_model_len"] = self.max_model_len
             result["prefill_max_num_batched_tokens"] = self.max_num_batched_tokens
 

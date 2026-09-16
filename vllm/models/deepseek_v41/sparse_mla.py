@@ -60,7 +60,6 @@ class DeepseekV41SparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.prefill_gather_window_size = max(self.window_size, self.max_image_tokens)
         compress_ratios = getattr(
             self.vllm_config.model_config.hf_config, "compress_ratios", None
         ) or [0]
