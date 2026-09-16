@@ -66,7 +66,7 @@ model_tests() {
 
   docker exec "$CONTAINER_NAME" bash -c "
     set -e
-    pytest -x -v -s tests/models/multimodal/standard/whisper -m cpu_model
+    pytest -x -v -s tests/models/multimodal/standard/test_whisper.py -m cpu_model
     pytest -x -v -s 'tests/models/language/pooling/test_embedding.py::test_models[sentence-transformers/all-MiniLM-L12-v2]'"
 
   docker exec "$CONTAINER_NAME" bash -c "
