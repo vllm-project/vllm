@@ -158,7 +158,10 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
         local_engines_only=False,
         enable_elastic_ep=False,
     )
-    vllm_config = SimpleNamespace(parallel_config=parallel_config)
+    vllm_config = SimpleNamespace(
+        parallel_config=parallel_config,
+        cache_config=SimpleNamespace(effective_attention_block_size=None),
+    )
 
     client = core_client_mod.MPClient(
         asyncio_mode=False,
@@ -246,7 +249,8 @@ def test_dplb_non_late_interaction_still_uses_lb():
 
 def test_dplb_burst_round_robins_despite_snapshot_rebinds():
     """A stats snapshot rebind wipes the optimistic lb_engines increments;
-    the exact in-flight floor must keep a burst spreading round-robin."""
+    the exact in-flight floor must keep a burst spreading round-robin.
+    """
     client = _make_dplb_client(num_engines=4)
 
     for _ in range(4):
@@ -321,7 +325,8 @@ async def test_dplb_scale_down_routes_after_stale_stats_snapshot():
 
 def test_dplb_snapshot_backpressure_overrides_inflight():
     """An engine reported heavily loaded by the coordinator is avoided even
-    when this client has routed nothing to it."""
+    when this client has routed nothing to it.
+    """
     client = _make_dplb_client(num_engines=2)
     client.lb_engines = [[5, 10, 0.0], [0, 0, 0.0]]
 
@@ -334,7 +339,8 @@ def test_dplb_snapshot_backpressure_overrides_inflight():
 
 def test_dplb_kv_pressure_amplifies_waiting_penalty():
     """A waiting queue on a KV-bound engine (slow drain) is penalized, while
-    the same queue with low KV usage is not (e.g. transient burst)."""
+    the same queue with low KV usage is not (e.g. transient burst).
+    """
     client = _make_dplb_client(num_engines=2)
     # Engine 0 has a smaller total but is KV-bound with a queue.
     client.lb_engines = [[5, 10, 1.0], [0, 20, 0.2]]
@@ -368,10 +374,15 @@ def test_dplb_finished_requests_release_inflight():
     assert req.request_id not in client.reqs_in_flight
 
 
-def test_apply_ready_response_syncs_block_size():
+@pytest.mark.parametrize(
+    ("effective_size", "other_size"),
+    [(None, None), (4224, 4224), (4224, 1056), (4224, None)],
+)
+def test_apply_ready_response_syncs_block_size(effective_size, other_size):
     import msgspec
 
     client = object.__new__(MPClient)
+    client._effective_attention_block_sizes = set()
     client.vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
         model_config=SimpleNamespace(max_model_len=8192),
@@ -399,14 +410,31 @@ def test_apply_ready_response_syncs_block_size():
             max_loras=0,
         )
     )
-    client._apply_ready_response(payload)
+    fields = msgspec.msgpack.decode(payload)
+    if effective_size is None:
+        del fields["effective_attention_block_size"]
+    else:
+        fields["effective_attention_block_size"] = effective_size
+    client._apply_ready_response(msgspec.msgpack.encode(fields))
     assert client.vllm_config.cache_config.block_size == 1056
+    cache_config = client.vllm_config.cache_config
+    assert cache_config.effective_attention_block_size == effective_size
+
+    fields["effective_attention_block_size"] = other_size
+    client._apply_ready_response(msgspec.msgpack.encode(fields))
+    assert cache_config.effective_attention_block_size == (
+        effective_size if effective_size == other_size else None
+    )
+
+    client._apply_ready_response(b"")
+    assert cache_config.effective_attention_block_size is None
 
 
 def test_apply_ready_response_syncs_mamba_block_size():
     import msgspec
 
     client = object.__new__(MPClient)
+    client._effective_attention_block_sizes = set()
     client.vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
         model_config=SimpleNamespace(max_model_len=8192),
@@ -1367,11 +1395,9 @@ def test_startup_failure(monkeypatch: pytest.MonkeyPatch):
 
 @create_new_process_for_each_test()
 def test_engine_core_proc_instantiation_cuda_empty(monkeypatch: pytest.MonkeyPatch):
-    """
-    Test that EngineCoreProc can be instantiated when CUDA_VISIBLE_DEVICES
+    """Test that EngineCoreProc can be instantiated when CUDA_VISIBLE_DEVICES
     is empty. This ensures the engine frontend does not need access to GPUs.
     """
-
     from vllm.v1.engine.core import EngineCoreProc
     from vllm.v1.executor.abstract import Executor
 

@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Reasoning extraction, reasoning-end gating and parser selection for the
-unified Cohere Command parser."""
+unified Cohere Command parser.
+"""
 
 from __future__ import annotations
 

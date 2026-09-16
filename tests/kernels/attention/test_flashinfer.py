@@ -96,6 +96,7 @@ def _make_paged_kv_metadata(
         kv_indices         – CUDA int32, shape [total_blocks]
         kv_last_page_lens  – CPU int32, shape [num_seqs]
         block_tables       – CUDA int32, shape [num_seqs, max_blocks_per_seq]
+
     """
     num_seqs = len(kv_lens)
     max_blocks = (max(kv_lens) + block_size - 1) // block_size
@@ -161,7 +162,8 @@ def test_fast_decode_plan_importable() -> None:
 @torch.inference_mode
 def test_fast_plan_decode_warmup_uses_full_plan(dtype: torch.dtype) -> None:
     """On the first call fast_plan_decode must route through self.plan() and
-    flip vllm_first_call to False on the wrapper object."""
+    flip vllm_first_call to False on the wrapper object.
+    """
     from unittest.mock import patch
 
     from vllm.v1.attention.backends.flashinfer import fast_plan_decode

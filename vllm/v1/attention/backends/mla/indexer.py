@@ -27,7 +27,7 @@ from vllm.utils.deep_gemm import (
 )
 from vllm.utils.math_utils import round_down
 from vllm.utils.platform_utils import num_compute_units
-from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -47,7 +47,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
 )
-from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 
 logger = init_logger(__name__)
 
@@ -338,14 +337,14 @@ def build_pcp_global_chunk_plan(
             + local
         )
 
-    cu = async_copy_to_gpu(cu, device=device)
+    cu = async_tensor_h2d(cu, device=device)
     return PCPGlobalChunkPlan(
         row_start_cu=cu[0],
         global_cu=cu[1],
         padded_local_cu=cu[2],
         padded_local_total=padded_total,
         total=total,
-        deinterleave_idx=async_copy_to_gpu(idx, device=device),
+        deinterleave_idx=async_tensor_h2d(idx, device=device),
     )
 
 
@@ -1117,6 +1116,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             for request_slice, query_slice in chunk_specs
         ]
 
+    def _prefill_split_seq_lens(self, seq_lens_cpu: torch.Tensor) -> torch.Tensor:
+        """Per-request KV lengths the prefill chunker budgets logits with;
+        subclasses whose logits rows are wider than the context override.
+        """
+        return seq_lens_cpu
+
     @staticmethod
     def _split_indexer_prefill_chunks(
         compressed_seq_lens_cpu: torch.Tensor,
@@ -1279,7 +1284,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 )
             else:
                 chunk_specs = self._split_indexer_prefill_chunks(
-                    compressed_seq_lens_cpu[num_decodes:],
+                    self._prefill_split_seq_lens(compressed_seq_lens_cpu[num_decodes:]),
                     prefill_query_lens_cpu,
                     self.max_prefill_buffer_size,
                     max_logits_bytes,

@@ -73,6 +73,7 @@ def make_copy_and_call(
 
     Returns:
         A wrapper function that copies inputs and calls the compiled function
+
     """
 
     def copy_and_call(*args: Any) -> Any:
@@ -122,8 +123,7 @@ def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
 
 
 class CompilerManager:
-    """
-    A manager to manage the compilation process, including
+    """A manager to manage the compilation process, including
     caching the compiled graph, loading the compiled graph,
     and compiling the graph.
 
@@ -150,7 +150,8 @@ class CompilerManager:
     def compile_context(self, compile_range: Range) -> Generator[None, None, None]:
         """Provide compilation context for the duration of compilation to set
         any torch global properties we want to scope to a single Inductor
-        compilation (e.g. partition rules, pass context)."""
+        compilation (e.g. partition rules, pass context).
+        """
         with pass_context(compile_range):
             if self.compilation_config.use_inductor_graph_partition:
                 with inductor_partition_rule_context(
@@ -163,8 +164,7 @@ class CompilerManager:
     def initialize_cache(
         self, cache_dir: str, disable_cache: bool = False, prefix: str = ""
     ) -> None:
-        """
-        Initialize the cache directory for the compiler.
+        """Initialize the cache directory for the compiler.
 
         The organization of the cache directory is as follows:
         cache_dir=/path/to/hash_str/rank_i_j/prefix/
@@ -177,7 +177,6 @@ class CompilerManager:
         base cache dir of /path/to/hash_str/rank_i_j/ ,
         to store some common compilation artifacts.
         """
-
         self.disable_cache = disable_cache
         self.cache_dir = cache_dir
         self.cache_file_path = os.path.join(cache_dir, "vllm_compile_cache.py")
@@ -438,12 +437,10 @@ def _merge_empty_only_subgraphs(
     node_to_subgraph_id: dict[fx.Node, int],
     split_op_graphs: list[int],
 ) -> None:
-    """
-    Merge a partition that only contains an empty allocation op into the
+    """Merge a partition that only contains an empty allocation op into the
     previous partition. This avoids generating standalone empty submodules,
     which can lead to empty cudagraph captures.
     """
-
     nodes_by_subgraph_id: dict[int, list[fx.Node]] = defaultdict(list)
     for node, subgraph_id in node_to_subgraph_id.items():
         nodes_by_subgraph_id[subgraph_id].append(node)
@@ -637,8 +634,7 @@ def wrap_with_cudagraph_if_needed(
     is_first_graph: bool,
     is_last_graph: bool,
 ) -> Any:
-    """
-    Wrap a piecewise backend with CUDA graph wrapper if needed.
+    """Wrap a piecewise backend with CUDA graph wrapper if needed.
     This function is shared between VllmBackend and
     construct_serializable_fn_from_inductor_cache.
 
@@ -651,6 +647,7 @@ def wrap_with_cudagraph_if_needed(
 
     Returns:
         The wrapped backend if CUDA graphs are enabled, otherwise the original backend
+
     """
     if (
         not compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
@@ -883,8 +880,8 @@ class VllmBackend:
                   sym_shape_indices
                 - returns_tuple_map: dict mapping submod_name to
                   returns_tuple
-        """
 
+        """
         if not envs.VLLM_USE_MEGA_AOT_ARTIFACT:
             return None, None, None
 

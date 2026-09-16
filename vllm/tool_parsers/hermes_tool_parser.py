@@ -219,7 +219,8 @@ class Hermes2ProToolParser(ToolParser):
 
         Returns a ``DeltaMessage`` containing either plain content (for
         text preceding any tool call) or one or more ``DeltaToolCall``
-        entries, or ``None`` if there is nothing new to send yet."""
+        entries, or ``None`` if there is nothing new to send yet.
+        """
         try:
             # Extract any content before tool calls.
             content = self._extract_content(current_text)

@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-This module re-exports linear kernel implementations to provide a
+"""This module re-exports linear kernel implementations to provide a
 stable import interface during an ongoing reorganization. Upcoming
 PRs will remove the scaled_mm and mixed_precision subdirectories
 and reorganize kernels by provider (aiter, cutlass, flashinfer, etc.)
@@ -187,6 +186,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cpu import (
     CPUFp8BlockScaledMMKernel,
+    CPUFp8PerTensorScaledMMLinearKernel,
     CPUInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
@@ -438,6 +438,7 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
         ChannelWiseTorchFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.CPU: [
+        CPUFp8PerTensorScaledMMLinearKernel,
         PerTensorTorchFP8ScaledMMLinearKernel,
         ChannelWiseTorchFP8ScaledMMLinearKernel,
     ],
@@ -635,8 +636,7 @@ def choose_scaled_mm_linear_kernel(
     *,
     quantization: str,
 ) -> type[_KernelT]:
-    """
-    Choose a _KernelT that can implement the given config for the
+    """Choose a _KernelT that can implement the given config for the
     given compute capability. Attempts to choose the best kernel in terms of
     performance.
 
@@ -658,8 +658,8 @@ def choose_scaled_mm_linear_kernel(
 
     Returns:
         _KernelT: Chosen kernel.
-    """
 
+    """
     failure_reason_list = []
 
     if force_kernel is not None:
@@ -813,8 +813,7 @@ def init_int8_linear_kernel(
 def choose_mp_linear_kernel(
     config: MPLinearLayerConfig, compute_capability: int | None = None
 ) -> type[MPLinearKernel]:
-    """
-    Choose an MPLinearKernel that can implement the given config for the given
+    """Choose an MPLinearKernel that can implement the given config for the given
      compute capability. Attempts to choose the best kernel in terms of
      performance.
 
@@ -830,6 +829,7 @@ def choose_mp_linear_kernel(
 
     Returns:
         type[MPLinearKernel]: Chosen kernel.
+
     """
     if compute_capability is None:
         if current_platform is None:
@@ -881,7 +881,8 @@ def choose_mp_linear_kernel(
 
 def init_mxfp8_linear_kernel(*, bmm_batch_size: int | None = None) -> Mxfp8LinearKernel:
     """Select and instantiate the best MXFP8 linear kernel for the
-    current platform."""
+    current platform.
+    """
     config = Mxfp8LinearLayerConfig(bmm_batch_size=bmm_batch_size)
 
     platform = current_platform._enum
@@ -933,7 +934,8 @@ def init_mxfp4_linear_kernel(
     activation_quant_key: QuantKey | None = None,
 ) -> MxFp4LinearKernel:
     """Select and instantiate the best MXFP4 linear kernel for the
-    current platform."""
+    current platform.
+    """
     config = MxFp4LinearLayerConfig(
         activation_quant_key=activation_quant_key,
     )
@@ -980,7 +982,8 @@ def init_mxfp6_linear_kernel(
     activation_quant_key: QuantKey | None = None,
 ) -> MxFp6LinearKernel:
     """Select and instantiate the best MXFP6 linear kernel for the
-    current platform."""
+    current platform.
+    """
     config = MxFp6LinearLayerConfig(
         weight_quant_key=weight_quant_key,
         activation_quant_key=activation_quant_key,
@@ -1068,7 +1071,8 @@ def init_wfp8_a16_linear_kernel(
 
 def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     """Select and instantiate the best NVFP4 linear kernel for the
-    current platform."""
+    current platform.
+    """
     config = NvFp4LinearLayerConfig()
     a16_kernels = (
         FlashInferCuteDslNvFp4W4A16LinearKernel,
@@ -1191,8 +1195,7 @@ def register_linear_kernel(
     platform: PlatformEnum,
     kernel_type: str = "mp",
 ) -> None:
-    """
-    Register a new linear kernel class to be considered in kernel selection.
+    """Register a new linear kernel class to be considered in kernel selection.
 
     Args:
         kernel_class (type): The kernel class to register.
@@ -1202,6 +1205,7 @@ def register_linear_kernel(
 
     Raises:
         ValueError: If the kernel_type is not recognized.
+
     """
     if kernel_type == "mp":
         if platform not in _POSSIBLE_KERNELS:
