@@ -5333,6 +5333,7 @@ def test_scheduler_ec_connector_stats():
             GenericECConnectorStats(data=scheduler_data) if scheduler_data else None
         )
         scheduler.ec_connector = Mock()
+        scheduler.ec_connector.take_unavailable_requests.return_value = set()
         scheduler.ec_connector.get_ec_connector_stats.return_value = (
             scheduler_stats if worker_stats is None else None
         )
