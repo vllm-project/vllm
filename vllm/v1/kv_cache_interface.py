@@ -652,12 +652,8 @@ class MLAAttentionSpec(FullAttentionSpec):
     """Required alignment, in bytes, of the distance between consecutive
     blocks of this cache. In block-major layouts that distance is the whole
     block (all layers' pages), so the allocator rounds the block up to it.
-    DeepGEMM's paged sparse MQA-logits kernels address pages as
-    ``base + page * stride`` and need it 512B-aligned."""
-    # Rows per kernel page when the backend re-pages a block larger than its
-    # native block sizes (AttentionBackend.get_kernel_page_rows); packed layouts
-    # align the block stride to it.
-    kernel_page_rows: int | None = None
+    Kernels that re-page manager blocks set this to their page size in bytes;
+    DeepGEMM's paged sparse MQA-logits kernels require 512B alignment."""
     # Group capability enabled when any member flattens a non-causal query block
     # into decode rows. Runtime metadata still selects causal vs. non-causal mode.
     non_causal_multi_token_decode: bool = False
@@ -680,7 +676,6 @@ class MLAAttentionSpec(FullAttentionSpec):
         index_group_leader_set = {spec.is_index_group_leader for spec in specs}
         storage_block_size_set = set(spec.storage_block_size for spec in specs)
         block_stride_alignment_set = {spec.block_stride_alignment for spec in specs}
-        kernel_page_rows_set = set(spec.kernel_page_rows for spec in specs)
         assert (
             len(cache_dtype_str_set) == 1
             and len(tokens_per_state_set) == 1
@@ -689,12 +684,11 @@ class MLAAttentionSpec(FullAttentionSpec):
             and len(index_group_leader_set) == 1
             and len(storage_block_size_set) == 1
             and len(block_stride_alignment_set) == 1
-            and len(kernel_page_rows_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
             "quantization method, tokens per state, model version, cache role, "
-            "index-sharing role, storage block size, block stride alignment, "
-            "and kernel page size."
+            "index-sharing role, storage block size, and "
+            "block stride alignment."
         )
         merged_spec = cls(
             block_size=specs[0].block_size,
@@ -712,7 +706,6 @@ class MLAAttentionSpec(FullAttentionSpec):
             is_index_group_leader=index_group_leader_set.pop(),
             storage_block_size=storage_block_size_set.pop(),
             block_stride_alignment=block_stride_alignment_set.pop(),
-            kernel_page_rows=kernel_page_rows_set.pop(),
             non_causal_multi_token_decode=any(
                 spec.non_causal_multi_token_decode for spec in specs
             ),

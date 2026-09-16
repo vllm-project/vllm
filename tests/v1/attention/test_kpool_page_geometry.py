@@ -117,49 +117,26 @@ def test_sparse_mla_kernel_paged_view_repages_large_blocks():
         torch.testing.assert_close(paged_s[r // page, 0, r % page], strided[b, 40])
 
 
-def test_layout_alignment_rule_matches_kernel_paging():
-    """The layout aligns block strides with the pages the kernels re-page with."""
-    from vllm.v1.core.kv_cache_utils import _kernel_page_rows
-    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+@pytest.mark.parametrize(
+    ("block_size", "kpool", "expected_page"),
+    [(1024, 4, 64), (1152, 4, 32), (256, 4, None), (4096, 16, 64)],
+)
+def test_kpool_spec_declares_repage_alignment(
+    default_vllm_config, block_size, kpool, expected_page
+):
+    from vllm.models.glm5next.common.attention import Glm5NextIndexerCache
 
-    for block_size, kpool in (
-        (1024, 4),
-        (1152, 4),
-        (256, 4),
-        (64, 1),
-        (4096, 16),
-        (256, 128),
-    ):
-        idx = MLAAttentionSpec(
-            block_size=block_size,
-            num_kv_heads=1,
-            head_size=132,
-            dtype=torch.uint8,
-            tokens_per_state=kpool,
-        )
-        assert (
-            _kernel_page_rows(idx) == kpool_page_geometry(idx.num_states, None, ROW)[0]
-        )
-        mla = MLAAttentionSpec(
-            block_size=block_size,
-            num_kv_heads=1,
-            head_size=512,
-            dtype=torch.bfloat16,
-            kernel_page_rows=32,
-        )
-        assert _kernel_page_rows(mla) == (block_size if block_size <= 64 else 32)
-        # A backend that takes any block (kernel_page_rows None) needs no alignment.
-        assert (
-            _kernel_page_rows(
-                MLAAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=1,
-                    head_size=512,
-                    dtype=torch.bfloat16,
-                )
-            )
-            == block_size
-        )
+    default_vllm_config.cache_config.block_size = block_size
+    cache = Glm5NextIndexerCache(
+        head_dim=ROW,
+        dtype=torch.uint8,
+        prefix=f"indexer_{block_size}_{kpool}",
+        cache_config=default_vllm_config.cache_config,
+        index_kpool=kpool,
+    )
+    spec = cache.get_kv_cache_spec(default_vllm_config)
+    expected = None if expected_page is None else expected_page * ROW
+    assert spec.block_stride_alignment == expected
 
 
 @pytest.mark.parametrize("family,expected_page", [(90, 32), (100, 32), (120, 64)])
