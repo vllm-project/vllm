@@ -189,6 +189,7 @@ class SimpleContext(ConversationContext):
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
         self.num_cached_tokens = 0
+        self.num_cache_creation_tokens = 0
         # todo num_reasoning_tokens is not implemented yet.
         self.num_reasoning_tokens = 0
         # not implemented yet for SimpleContext
@@ -204,6 +205,8 @@ class SimpleContext(ConversationContext):
             raise ValueError("SimpleContext only supports RequestOutput.")
         self.num_prompt_tokens = len(output.prompt_token_ids or [])
         self.num_cached_tokens = output.num_cached_tokens or 0
+        if output.num_cache_creation_tokens is not None:
+            self.num_cache_creation_tokens = output.num_cache_creation_tokens
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
         if output.kv_transfer_params is not None:
             self.kv_transfer_params = output.kv_transfer_params

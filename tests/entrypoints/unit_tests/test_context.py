@@ -682,6 +682,7 @@ def create_simple_context_output(
     prompt="Test prompt",
     prompt_token_ids=None,
     num_cached_tokens=0,
+    num_cache_creation_tokens=None,
     logprobs=None,
     finished=True,
 ):
@@ -707,6 +708,7 @@ def create_simple_context_output(
         ],
         finished=finished,
         num_cached_tokens=num_cached_tokens,
+        num_cache_creation_tokens=num_cache_creation_tokens,
     )
 
 
@@ -827,6 +829,7 @@ def test_simple_context_token_counting():
             token_ids=[10, 11],
             prompt_token_ids=[1, 2, 3, 4, 5],
             num_cached_tokens=2,
+            num_cache_creation_tokens=3,
         )
     )
     context.append_output(
@@ -835,12 +838,14 @@ def test_simple_context_token_counting():
             token_ids=[12],
             prompt_token_ids=[1, 2, 3, 4, 5],
             num_cached_tokens=2,
+            num_cache_creation_tokens=3,
         )
     )
 
     assert context.num_prompt_tokens == 5
     assert context.num_output_tokens == 3  # 2 + 1
     assert context.num_cached_tokens == 2
+    assert context.num_cache_creation_tokens == 3
 
 
 def test_simple_context_final_output():

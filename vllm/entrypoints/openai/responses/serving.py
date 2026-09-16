@@ -837,6 +837,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             output_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
             input_tokens_details=InputTokensDetails(
+                cache_write_tokens=getattr(context, "num_cache_creation_tokens", 0),
                 cached_tokens=num_cached_tokens,
                 input_tokens_per_turn=[
                     turn.input_tokens for turn in context.all_turn_metrics
