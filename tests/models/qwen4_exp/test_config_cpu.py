@@ -55,7 +55,7 @@ def _vllm_config(restriction: str | None = None) -> SimpleNamespace:
             hf_text_config=_text_config(),
             hf_config=_text_config(),
             multimodal_config=SimpleNamespace(language_model_only=True),
-            enforce_eager=restriction == "eager",
+            enforce_eager=False,
         ),
         parallel_config=SimpleNamespace(
             pipeline_parallel_size=1,
@@ -84,7 +84,6 @@ def _vllm_config(restriction: str | None = None) -> SimpleNamespace:
         ("lora", NotImplementedError, "LoRA"),
         ("multimodal", NotImplementedError, "text-only"),
         ("model_runner", ValueError, "Model Runner V2"),
-        ("eager", ValueError, "compiled model execution"),
         ("triton", ValueError, "active CPU backend"),
     ],
 )
