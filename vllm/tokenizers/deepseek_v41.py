@@ -32,7 +32,7 @@ def _normalize_messages(
             parts = []
             for block in content:
                 part_type = block.get("type")
-                if part_type == "text":
+                if part_type in ("text", "input_text", "output_text"):
                     parts.append(block.get("text", ""))
                 elif part_type in ("image_url", "input_image", "image_pil"):
                     parts.append(IMAGE_PLACEHOLDER)
