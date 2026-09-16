@@ -146,13 +146,13 @@ class CorrectAttnCPOutKernel(VllmTritonJitKernel["CorrectAttnCPOutKernel.Compile
                 Pointer to output tensor of shape [ B, H, D ]
             vlse_ptr (triton.PointerType):
                 Pointer to output tensor of shape [ B, H ]
-            outputs_stride_B: Batch stride of ``outputs_ptr``
-            outputs_stride_H: Head stride of ``outputs_ptr``
-            outputs_stride_D: Head-dim stride of ``outputs_ptr``
-            lses_stride_N: Rank stride of ``lses_ptr``
-            lses_stride_B: Batch stride of ``lses_ptr``
-            lses_stride_H: Head stride of ``lses_ptr``
-            lse_idx: Index of this rank's lse within the all-gathered tensor
+            outputs_stride_B (int): Batch stride of ``outputs_ptr``
+            outputs_stride_H (int): Head stride of ``outputs_ptr``
+            outputs_stride_D (int): Head-dim stride of ``outputs_ptr``
+            lses_stride_N (int): Rank stride of ``lses_ptr``
+            lses_stride_B (int): Batch stride of ``lses_ptr``
+            lses_stride_H (int): Head stride of ``lses_ptr``
+            lse_idx (int): Index of this rank's lse within the all-gathered tensor
             HEAD_DIM: Head dimension, as a constexpr
             N_ROUNDED: Rank count rounded to a power of two, as a constexpr
             IS_BASE_E: Whether the lses are natural-log based, as a constexpr

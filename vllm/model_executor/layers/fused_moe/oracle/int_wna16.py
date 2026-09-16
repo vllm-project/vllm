@@ -1450,8 +1450,6 @@ def convert_to_wna16_moe_kernel_format(
         w2: down-projection expert weights.
         w13_scale: quantization scales for ``w13``.
         w2_scale: quantization scales for ``w2``.
-        w13_g_idx: optional act_order indices for ``w13``.
-        w2_g_idx: optional act_order indices for ``w2``.
         w13_qzeros: optional zero points for ``w13``.
         w2_qzeros: optional zero points for ``w2``.
         w13_bias: optional bias for ``w13``.
