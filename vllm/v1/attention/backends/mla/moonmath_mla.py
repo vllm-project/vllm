@@ -9,12 +9,17 @@ AITER's only bf16xfp8 gqa=16 object is qSeqLen=4 and pads a smaller head count
 up to 16.
 
 Prefill, metadata and cudagraph buffers are inherited from `AiterMLABackend`
-unchanged; a batch outside the kernel's domain falls back to it. The package is
-optional and imported lazily, so this module is safe to import without it;
-`_get_backend_priorities` only offers the backend when `has_moonmath_amd()`.
+unchanged; a batch outside the kernel's domain falls back to it. Under decode
+context parallelism each rank attends its own KV shard, with the causal limit
+taken from the global lengths, and returns its LSE for the cross-rank merge.
+The package is optional and imported lazily, so this module is safe to import
+without it; `_get_backend_priorities` only offers the backend when
+`has_moonmath_amd()`.
 """
 
 from __future__ import annotations
+
+import math
 
 import torch
 
@@ -34,6 +39,10 @@ _MAX_HEADS, _ROWS_PER_SLICE, _MAX_ROW_SLICES = 128, 96, 304
 
 
 class MoonmathMLAMetadataBuilder(AiterMLAMetadataBuilder):
+    # Verify reads the flat per-token view; the kernel places each row's causal
+    # window on the rank's shard from the global lengths.
+    segmented_dcp_verify = False
+
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         # The query is bf16 here (supports_quant_query_input=False), so pin
@@ -60,18 +69,18 @@ class MoonmathMLAImpl(AiterMLAImpl):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         decode = attn_metadata.decode
         assert decode is not None
-        assert isinstance(q, tuple), (
-            "moonmath MLA is a16w8 and needs the unfused BF16 (nope, pe) query; "
-            "supports_quant_query_input must stay False on this impl."
-        )
-        q_lat, q_pe = q
+        # A bf16 (nope, pe) pair (supports_quant_query_input is False); DCP
+        # concatenates the halves before gathering the query heads.
+        q_lat, q_pe = q if isinstance(q, tuple) else q.split((_LAT, _ROPE), dim=-1)
         # Routing reads only shapes and the causal flag, so it is fixed per
         # captured graph.
         num_tokens, heads, _ = q_lat.shape
         num_reqs = decode.seq_lens.size(0)
         q_len = num_tokens // num_reqs
+        dcp = self.dcp_world_size > 1
         if (
             not attn_metadata.causal
+            or (dcp and decode.dcp_tot_seq_lens is None)
             or decode.paged_kv_indices is None
             or heads > _MAX_HEADS
             or num_tokens != num_reqs * q_len
@@ -88,6 +97,11 @@ class MoonmathMLAImpl(AiterMLAImpl):
         q_lat = q_lat.contiguous()
         q_pe = q_pe.contiguous()
         out = torch.empty_like(q_lat)
+        lse = (
+            torch.empty(num_tokens, heads, dtype=torch.float32, device=q_lat.device)
+            if dcp
+            else None
+        )
 
         if self._mm_kv_scale is None:
             # Static load-time constant, read once: .item() is illegal inside
@@ -110,8 +124,15 @@ class MoonmathMLAImpl(AiterMLAImpl):
             decode.paged_kv_indptr,
             self.scale,
             self._mm_kv_scale,
+            lse=lse,
+            glen=decode.dcp_tot_seq_lens if dcp else None,
+            cp_rank=self.dcp_rank,
+            cp_world=self.dcp_world_size,
         )
-        return out, None
+        if lse is None:
+            return out, None
+        # The kernel's LSE is base 2; the DCP merge reads aiter's natural log.
+        return out, lse.mul_(math.log(2))
 
 
 class MoonmathMLABackend(AiterMLABackend):

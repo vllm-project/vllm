@@ -310,13 +310,11 @@ def resolve_kv_cache_layout(
     page_sizes = {spec.page_size_bytes for spec in kv_cache_specs}
     if len(dcp_sharding) > 1 and len(page_sizes) > 1:
         # Sharded target and replicated draft caches need independent groups.
-        # Block-outer layouts can pack those groups without equalizing pages.
-        candidates = [layout for layout in candidates if layout.is_block_outermost]
-        if not candidates:
-            raise ValueError(
-                "DCP with a replicated draft and mixed KV page sizes requires "
-                f"a block-outer KV cache layout; supported sets: {supported_layouts}."
-            )
+        # Block-outer layouts can pack those groups without equalizing pages;
+        # a backend without one pads the replicated attention pages instead.
+        candidates = [
+            layout for layout in candidates if layout.is_block_outermost
+        ] or candidates
 
     if (requested := envs.VLLM_KV_CACHE_LAYOUT) is not None:
         layout = _layout_from_name(requested)

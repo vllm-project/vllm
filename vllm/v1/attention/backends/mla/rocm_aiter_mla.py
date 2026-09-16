@@ -436,6 +436,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     # Set from the common metadata every build; a batch is causal unless the
     # drafter says otherwise.
     _decode_causal: bool = True
+    # DCP multi-token verify runs on AITER's segmented MLA decode. A subclass
+    # whose kernel takes the flat per-token view and the global lengths serves
+    # it without, so it keeps varlen DCP and skips the segmented metadata.
+    segmented_dcp_verify: ClassVar[bool] = True
 
     @staticmethod
     def _uniform_padded_mtp_qo_len(
@@ -485,19 +489,25 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         device: torch.device,
     ):
         parallel_config = vllm_config.parallel_config
-        supports_segmented_dcp_verify = _segmented_dcp_verify_supported(
-            parallel_config.decode_context_parallel_size,
-            parallel_config.cp_kv_cache_interleave_size,
-        )
+        dcp_world_size = parallel_config.decode_context_parallel_size
+        cp_interleave = parallel_config.cp_kv_cache_interleave_size
+        if self.segmented_dcp_verify:
+            supports_dcp_with_varlen = _segmented_dcp_verify_supported(
+                dcp_world_size, cp_interleave
+            )
+        else:
+            supports_dcp_with_varlen = dcp_world_size > 1 and cp_interleave == 1
         super().__init__(
             kv_cache_spec,
             layer_names,
             vllm_config,
             device,
             AiterMLAMetadata,
-            supports_dcp_with_varlen=supports_segmented_dcp_verify,
+            supports_dcp_with_varlen=supports_dcp_with_varlen,
         )
-        self._supports_segmented_dcp_verify = supports_segmented_dcp_verify
+        self._supports_segmented_dcp_verify = (
+            self.segmented_dcp_verify and supports_dcp_with_varlen
+        )
 
         self.compilation_config = vllm_config.compilation_config
         self.decode_attn_out_dtype = vllm_config.model_config.dtype
