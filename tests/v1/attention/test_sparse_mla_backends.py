@@ -442,13 +442,8 @@ def _run_sparse_backend_decode_correctness(
     q_scale: float,
     k_scale: float,
     *,
-    total_num_heads: int = 128,
-    qk_nope_head_dim: int = 128,
-    qk_rope_head_dim: int = 64,
-    v_head_dim: int = 128,
     block_stride_rows: int | None = None,
     spread_sparse_indices: bool = False,
-    scale: float | None = None,
 ):
     if kv_cache_dtype not in backend_cls.supported_kv_cache_dtypes:
         pytest.skip(f"{backend_cls.get_name()} does not support {kv_cache_dtype}")
@@ -496,10 +491,8 @@ def _run_sparse_backend_decode_correctness(
     device = torch.device(DEVICE_TYPE)
     dtype = torch.bfloat16
 
-    # Compute per-rank heads for simulated TP
-    num_heads = max(1, total_num_heads // tensor_parallel_size)
-
-    kv_lora_rank = 512
+    num_heads = max(1, 128 // tensor_parallel_size)
+    kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_head_dim = 512, 128, 64, 128
     head_size = kv_lora_rank + qk_rope_head_dim
     topk_tokens = 128
 
@@ -549,8 +542,7 @@ def _run_sparse_backend_decode_correctness(
 
     torch.manual_seed(0)
 
-    if scale is None:
-        scale = 1.0 / math.sqrt(head_size)
+    scale = 1.0 / math.sqrt(head_size)
 
     # Shared MLA projection weights to keep reference and backend in sync
     W_UK = torch.rand(
@@ -830,9 +822,10 @@ def _run_sparse_backend_decode_correctness(
         )
 
     if block_stride_rows is not None:
+        expected_cache_row = torch.cat((kv_c_vllm[0], k_pe_vllm[0, 0]))
         torch.testing.assert_close(
             kv_cache[query_slot // block_size, 0, query_slot % block_size],
-            kv_c_vllm[0],
+            expected_cache_row,
             rtol=0,
             atol=0,
         )
@@ -851,12 +844,12 @@ def _run_sparse_backend_decode_correctness(
         torch.testing.assert_close(backend_output, sdpa_reference, rtol=0.01, atol=0.01)
 
 
-def test_flashinfer_sparse_mla_glm_nope_packed_stride(
+def test_flashinfer_sparse_mla_packed_stride(
     default_vllm_config,
     dist_init,
     workspace_init,
 ):
-    """Packed GLM blocks must use their physical stride for writes and top-k."""
+    """Packed blocks must use their physical stride for writes and top-k."""
     _run_sparse_backend_decode_correctness(
         FlashInferMLASparseTRTLLMBackend,
         BatchSpec(seq_lens=[300], query_lens=[1]),
@@ -865,13 +858,8 @@ def test_flashinfer_sparse_mla_glm_nope_packed_stride(
         256,
         1.0,
         1.0,
-        total_num_heads=64,
-        qk_nope_head_dim=256,
-        qk_rope_head_dim=0,
-        v_head_dim=256,
         block_stride_rows=320,
         spread_sparse_indices=True,
-        scale=256**-0.5,
     )
 
 

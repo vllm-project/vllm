@@ -739,7 +739,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         """
         self.attention_groups: list[SpecGroup] = []
         for i, g in enumerate(self.kv_cache_config.kv_cache_groups):
-            # Scratch groups never take part in hit lookup; their hit slot stays empty.
+            # Skip groups that opt out of prefix caching (e.g. GLM-5.3-Flash
+            # kpool tail): their blocks are per-request scratch, never
+            # shareable, so they must not participate in hit lookup (their
+            # manager-level hooks already no-op). Their slot in the per-group
+            # hit tuple stays empty.
             if not g.kv_cache_spec.prefix_cacheable:
                 continue
             manager_cls = self.single_type_managers[i].__class__

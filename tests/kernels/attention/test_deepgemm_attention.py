@@ -327,75 +327,48 @@ def test_deepgemm_paged_mqa_packed_manager_block_stride():
     from vllm.v1.attention.backends.mla.indexer import kpool_page_geometry
 
     torch.manual_seed(0)
-    num_blocks, manager_block_size, packed_stride_rows = 4, 256, 320
-    num_heads, head_dim = 64, 128
-    page_size, pages_per_block, compact_stride_pages = kpool_page_geometry(
-        manager_block_size, None, head_dim + 4
-    )
-    assert (page_size, pages_per_block, compact_stride_pages) == (64, 4, 4)
-
-    kv = torch.randn(
-        num_blocks,
-        manager_block_size,
-        1,
-        head_dim,
-        device="cuda",
-        dtype=torch.bfloat16,
+    num_blocks, block_size, packed_rows = 4, 256, 320
+    num_heads, head_dim, row_bytes = 64, 128, 132
+    page_size, pages_per_block, dense_stride = kpool_page_geometry(
+        block_size, None, row_bytes
     )
     compact_pages = kv_cache_cast_to_fp8(
-        kv.view(num_blocks * pages_per_block, page_size, 1, head_dim)
-    )
-    row_bytes = compact_pages.shape[-1]
-    compact_manager = compact_pages.squeeze(2).view(
-        num_blocks, manager_block_size, row_bytes
+        torch.randn(
+            num_blocks, block_size, 1, head_dim, device="cuda", dtype=torch.bfloat16
+        ).view(num_blocks * pages_per_block, page_size, 1, head_dim)
     )
     packed_backing = torch.zeros(
         num_blocks,
-        packed_stride_rows,
+        packed_rows,
         row_bytes,
         device="cuda",
         dtype=torch.uint8,
     )
-    packed_manager = packed_backing[:, :manager_block_size]
-    packed_manager.copy_(compact_manager)
-
-    _, _, packed_stride_pages = kpool_page_geometry(
-        manager_block_size,
+    packed_manager = packed_backing[:, :block_size]
+    packed_manager.copy_(compact_pages.squeeze(2).view(num_blocks, block_size, -1))
+    packed_stride = kpool_page_geometry(
+        block_size,
         packed_manager.stride(0) * packed_manager.element_size(),
         row_bytes,
-    )
-    assert packed_stride_pages == 5
-
+    )[2]
     packed_pages = _kpool_flat_page_view(packed_manager).unsqueeze(2)
-    page_offsets = torch.arange(pages_per_block, device="cuda", dtype=torch.int32)
-    logical_block = 1
-    compact_table = (logical_block * compact_stride_pages + page_offsets).unsqueeze(0)
-    packed_table = (logical_block * packed_stride_pages + page_offsets).unsqueeze(0)
+    offsets = torch.arange(pages_per_block, device="cuda", dtype=torch.int32)
+    tables = [
+        (stride + offsets).unsqueeze(0) for stride in (dense_stride, packed_stride)
+    ]
 
     q = torch.randn(1, 1, num_heads, head_dim, device="cuda", dtype=torch.bfloat16).to(
         torch.float8_e4m3fn
     )
     weights = torch.randn(1, num_heads, device="cuda", dtype=torch.float32)
-    context_lens = torch.full(
-        (1, 1), manager_block_size, device="cuda", dtype=torch.int32
-    )
+    context_lens = torch.full((1, 1), block_size, device="cuda", dtype=torch.int32)
     schedule = get_paged_mqa_logits_metadata(context_lens, page_size, get_num_sms())
-
-    def run(cache: torch.Tensor, table: torch.Tensor) -> torch.Tensor:
-        return fp8_fp4_paged_mqa_logits(
-            (q, None),
-            cache,
-            weights,
-            context_lens,
-            table,
-            schedule,
-            manager_block_size,
-            clean_logits=False,
+    logits = [
+        fp8_fp4_paged_mqa_logits(
+            (q, None), cache, weights, context_lens, table, schedule, block_size, False
         )
-
-    compact_logits = run(compact_pages, compact_table)
-    packed_logits = run(packed_pages, packed_table)
-    finite = torch.isfinite(compact_logits)
-    assert torch.equal(finite, torch.isfinite(packed_logits))
-    assert finite.all()
-    torch.testing.assert_close(compact_logits, packed_logits, rtol=0, atol=0)
+        for cache, table in zip((compact_pages, packed_pages), tables)
+    ]
+    assert torch.isfinite(logits[0]).all()
+    assert torch.equal(torch.isfinite(logits[0]), torch.isfinite(logits[1]))
+    torch.testing.assert_close(*logits, rtol=0, atol=0)

@@ -165,9 +165,7 @@ def _kpool_flat_page_view(kv_cache: torch.Tensor) -> torch.Tensor:
     assert kv_cache.stride(1) == row and kv_cache.stride(2) == 1, kv_cache.stride()
     page_stride = page_states * row
     num_pages = (num_blocks - 1) * stride_pages + pages_per_block
-    return kv_cache.as_strided(
-        (num_pages, page_states, row), (page_stride, row, 1)
-    )
+    return kv_cache.as_strided((num_pages, page_states, row), (page_stride, row, 1))
 
 
 def kv_cache_as_quant_view(

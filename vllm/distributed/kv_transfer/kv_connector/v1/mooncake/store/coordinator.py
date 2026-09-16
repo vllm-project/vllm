@@ -84,8 +84,10 @@ class MooncakeStoreCoordinator:
         retention_interval: int | None = None,
         dcp_world_size: int = 1,
     ) -> None:
-        # As in core's resolve_kv_cache_block_sizes, only groups that take part
-        # in prefix caching must be divisible by the hash unit.
+        # Mirrors core's resolve_kv_cache_block_sizes: the hash unit only has
+        # to divide groups that participate in prefix caching. Non-shareable
+        # scratch groups (e.g. GLM-5.3-Flash's kpool tail) are skipped by
+        # _verify_and_split_kv_cache_groups and never probed for hits.
         assert all(
             g.kv_cache_spec.block_size % hash_block_size == 0
             for g in kv_cache_groups
@@ -130,7 +132,10 @@ class MooncakeStoreCoordinator:
         """
         attention_groups: list[StoreSpecGroup] = []
         for i, g in enumerate(self.kv_cache_groups):
-            # Scratch groups never take part in hit lookup.
+            # Skip groups that opt out of prefix caching (e.g. GLM-5.3-Flash
+            # kpool tail): per-request scratch, never shareable, so they must
+            # not participate in hit lookup. Mirrors core's
+            # KVCacheCoordinator.verify_and_split_kv_cache_groups.
             if not g.kv_cache_spec.prefix_cacheable:
                 continue
             spec = _unwrap_spec(g.kv_cache_spec)
