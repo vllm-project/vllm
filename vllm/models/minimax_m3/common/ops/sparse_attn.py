@@ -19,11 +19,20 @@ leaves the prefill kernels (which parallelize over the query dim) idle.
 
 import torch
 
+from vllm import envs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 # One sparse block == one KV page.
 SPARSE_BLOCK_SIZE = 128
+
+# Keep the scalar kernel as the default until the tiled path has been measured
+# across more hardware and workloads. Values greater than one opt into tiling.
+_PREFILL_TILE_Q = envs.VLLM_MINIMAX_SPARSE_PREFILL_TILE_Q
+if _PREFILL_TILE_Q not in (0, 1, 2, 4, 8, 16, 32):
+    raise ValueError(
+        "VLLM_MINIMAX_SPARSE_PREFILL_TILE_Q must be 0, 1, 2, 4, 8, 16, or 32"
+    )
 
 _FP8_DTYPES = (
     torch.float8_e4m3fn,
@@ -34,12 +43,9 @@ _FP8_DTYPES = (
 
 
 # ---------------------------------------------------------------------------
-# GQA block-sparse attention (paged). Main heads attend only to the selected
-# blocks. BLOCK_SIZE_K == 128 so each selected block is one page.
+# Scalar-query GQA block-sparse attention (paged). This remains the default
+# until the query-tiled path has broader workload and hardware coverage.
 # ---------------------------------------------------------------------------
-# since prefill metadata is sliced from mixed batch metadata, seq_lens and prefix_lens
-# might lose pointer alignment, which trigger Triton recompiles. we don't actually
-# need pointer alignment for those tensors anyway because we do scalar load.
 @triton.heuristics(
     {
         "BLOCK_SIZE_D": lambda args: triton.next_power_of_2(args["head_dim"]),
@@ -50,64 +56,68 @@ _FP8_DTYPES = (
 )
 @triton.jit(do_not_specialize_on_alignment=["seq_lens", "prefix_lens"])
 def _gqa_sparse_fwd_kernel(
-    q_ptr,  # [total_q, num_heads, head_dim]
-    kv_cache_ptr,  # main cache: [num_blocks, num_kv_heads, 128, 2*head_dim]
+    q_ptr,
+    kv_cache_ptr,
     k_scale_ptr,
     v_scale_ptr,
-    t_ptr,  # topk_idx: [num_kv_heads, total_q, topk]
-    o_ptr,  # [total_q, num_heads, head_dim]
-    block_table_ptr,  # [num_reqs, max_blocks]
+    t_ptr,
+    o_ptr,
+    block_table_ptr,
     cu_seqlens_q,
-    cu_seqblocks_q,
     seq_lens,
     prefix_lens,
-    num_kv_heads,
-    gqa_group_size,
-    head_dim,
-    max_topk,
-    num_q_loop,
+    gqa_group_size: tl.constexpr,
+    head_dim: tl.constexpr,
+    max_topk: tl.constexpr,
     sm_scale,
-    stride_qn,
-    stride_qh,
-    stride_qd,
-    stride_kv_blk,
-    stride_kv_h,
-    stride_kv_pos,
-    stride_kv_d,
-    stride_ks_h,
-    stride_ks_t,
-    stride_vs_h,
-    stride_vs_t,
-    stride_th,
-    stride_tn,
-    stride_tk,
-    stride_on,
-    stride_oh,
-    stride_od,
-    stride_bt_b,
+    stride_qn: tl.constexpr,
+    stride_qh: tl.constexpr,
+    stride_qd: tl.constexpr,
+    stride_kv_blk: tl.constexpr,
+    stride_kv_h: tl.constexpr,
+    stride_kv_pos: tl.constexpr,
+    stride_kv_d: tl.constexpr,
+    stride_ks_h: tl.constexpr,
+    stride_ks_t: tl.constexpr,
+    stride_vs_h: tl.constexpr,
+    stride_vs_t: tl.constexpr,
+    stride_th: tl.constexpr,
+    stride_tn: tl.constexpr,
+    stride_tk: tl.constexpr,
+    stride_on: tl.constexpr,
+    stride_oh: tl.constexpr,
+    stride_od: tl.constexpr,
+    stride_bt_b: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,  # == SPARSE_BLOCK_SIZE (128)
+    BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_D: tl.constexpr,
     BLOCK_SIZE_H: tl.constexpr,
     BLOCK_SIZE_QH: tl.constexpr,
-    USE_FP8: tl.constexpr,  # fp8 KV cache: dequantize K/V to q.dtype on load
-    KV_SCALE_MODE: tl.constexpr,  # 0: none, 1: scalar, 2: [kv_head, token]
+    USE_FP8: tl.constexpr,
+    KV_SCALE_MODE: tl.constexpr,
 ):
-    sm_scale_log2e = sm_scale * 1.4426950409
     pid_q = tl.program_id(0)
     pid_kh = tl.program_id(1)
     pid_b = tl.program_id(2)
-    pid_h = pid_kh * gqa_group_size
     q_start = tl.load(cu_seqlens_q + pid_b)
     q_len = tl.load(cu_seqlens_q + pid_b + 1) - q_start
-    q_block_start = tl.load(cu_seqblocks_q + pid_b)
-    q_block_len = tl.load(cu_seqblocks_q + pid_b + 1) - q_block_start
+    if pid_q >= q_len:
+        return
     seq_len = tl.load(seq_lens + pid_b)
     prefix_len = tl.load(prefix_lens + pid_b)
-    if pid_q * num_q_loop >= q_block_len:
-        return
-    real_q_loop = min(num_q_loop, q_block_len - pid_q * num_q_loop)
-    bt_row = block_table_ptr + pid_b * stride_bt_b
+    q_abs = prefix_len + pid_q
+    real_topk = tl.minimum(max_topk, (q_abs + BLOCK_SIZE_K) // BLOCK_SIZE_K)
+    topk_ptr = t_ptr + pid_kh * stride_th + (q_start + pid_q) * stride_tn
+    q_ptrs = tl.make_block_ptr(
+        base=q_ptr + q_start * stride_qn + pid_kh * gqa_group_size * stride_qh,
+        shape=(q_len, gqa_group_size, head_dim),
+        strides=(stride_qn, stride_qh, stride_qd),
+        offsets=(pid_q, 0, 0),
+        block_shape=(BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D),
+        order=(2, 1, 0),
+    )
+    q = tl.load(q_ptrs, boundary_check=(0, 1, 2), padding_option="zero")
+    q = tl.reshape(q, (BLOCK_SIZE_QH, BLOCK_SIZE_D))
     off_n = tl.arange(0, BLOCK_SIZE_K)
     off_d = tl.arange(0, BLOCK_SIZE_D)
     off_h = tl.arange(0, BLOCK_SIZE_H)
@@ -541,7 +551,12 @@ def minimax_m3_sparse_attn(
     k_scale: torch.Tensor | None = None,
     v_scale: torch.Tensor | None = None,
 ) -> None:
-    """GQA block-sparse attention over the selected blocks. block_size_q == 1."""
+    """GQA block-sparse attention over the selected blocks.
+
+    The scalar kernel is the default. Set
+    ``VLLM_MINIMAX_SPARSE_PREFILL_TILE_Q`` to a value greater than one to
+    opt into query tiling.
+    """
     total_q, num_heads, head_dim = q.shape
     batch = cu_seqlens_q.shape[0] - 1
     topk = topk_idx.shape[-1]
@@ -568,8 +583,21 @@ def minimax_m3_sparse_attn(
             _KV_SCALE_NONE,
         )
     )
-    grid = (max_query_len, num_kv_heads, batch)
-    _gqa_sparse_fwd_kernel[grid](
+    use_tiled = _PREFILL_TILE_Q > 1
+    tile_q = _PREFILL_TILE_Q if use_tiled else 1
+    kernel = _gqa_sparse_fwd_tiled_kernel if use_tiled else _gqa_sparse_fwd_kernel
+    # Spread the larger Q/accumulator tiles over more threads to limit spilling.
+    launch_options = (
+        {
+            "num_warps": min(
+                16, max(4, tile_q * triton.next_power_of_2(gqa_group_size) // 16)
+            )
+        }
+        if use_tiled
+        else {}
+    )
+    grid = (triton.cdiv(max_query_len, tile_q), num_kv_heads, batch)
+    kernel[grid](
         q,
         kv_cache,
         k_scale_arg,
@@ -578,14 +606,11 @@ def minimax_m3_sparse_attn(
         output,
         block_table,
         cu_seqlens_q,
-        cu_seqlens_q,  # cu_seqblocks_q == cu_seqlens_q when block_size_q == 1
         seq_lens,
         prefix_lens,
-        num_kv_heads,
         gqa_group_size,
         head_dim,
         topk,
-        1,  # num_q_loop
         sm_scale,
         q.stride(0),
         q.stride(1),
@@ -605,10 +630,11 @@ def minimax_m3_sparse_attn(
         output.stride(1),
         output.stride(2),
         block_table.stride(0),
-        BLOCK_SIZE_Q=1,
+        BLOCK_SIZE_Q=tile_q,
         BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
         USE_FP8=use_fp8,
         KV_SCALE_MODE=kv_scale_mode,
+        **launch_options,
     )
 
 
