@@ -159,7 +159,8 @@ class DeepseekV4MegaMoEExpertsFI(DeepseekV4MegaMoEExperts):
     def _realloc_nvfp4_params(self) -> None:
         """Swap the mx-recipe scale params for the NVFP4 checkpoint's:
         fp8-e4m3 per-16 block scales plus the per-tensor second-level
-        scales (weight_scale_2, input_scale) modelopt exports."""
+        scales (weight_scale_2, input_scale) modelopt exports.
+        """
         n_e = self.num_local_experts
         inter = self.intermediate_size
         hidden = self.hidden_size

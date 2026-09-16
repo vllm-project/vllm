@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Scan delta token IDs for special tokens and split the stream into
-pre-lexed terminals and plain text chunks."""
+pre-lexed terminals and plain text chunks.
+"""
 
 from __future__ import annotations
 

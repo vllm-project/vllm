@@ -14,10 +14,10 @@ pytestmark = pytest.mark.cpu_test
 
 
 class TestCheckSequenceRepetition:
-    """Unit tests for the check_sequence_repetition function"""
+    """Unit tests for the check_sequence_repetition function."""
 
     def test_simple_repetition_detected(self):
-        """Test detection of simple repetitive patterns"""
+        """Test detection of simple repetitive patterns."""
         token_ids = [1, 2, 3, 1, 2, 3, 1, 2, 3]
         params = RepetitionDetectionParams(
             max_pattern_size=3,
@@ -27,7 +27,7 @@ class TestCheckSequenceRepetition:
         assert check_sequence_repetition(token_ids, params)
 
     def test_repetition_below_min_count(self):
-        """Test that pattern below min_count is not detected"""
+        """Test that pattern below min_count is not detected."""
         token_ids = [1, 2, 3, 1, 2, 3]
         params = RepetitionDetectionParams(
             max_pattern_size=3,
@@ -37,7 +37,7 @@ class TestCheckSequenceRepetition:
         assert not check_sequence_repetition(token_ids, params)
 
     def test_two_token_pattern(self):
-        """Test detection of 2-token patterns"""
+        """Test detection of 2-token patterns."""
         token_ids = [1, 2, 1, 2, 1, 2, 1, 2]
         params = RepetitionDetectionParams(
             max_pattern_size=5,
@@ -47,7 +47,7 @@ class TestCheckSequenceRepetition:
         assert check_sequence_repetition(token_ids, params)
 
     def test_no_repetition_varied_sequence(self):
-        """Test that non-repetitive sequences are not flagged"""
+        """Test that non-repetitive sequences are not flagged."""
         token_ids = [1, 2, 3, 4, 5, 6, 7, 8, 9]
         params = RepetitionDetectionParams(
             max_pattern_size=5,
@@ -57,7 +57,7 @@ class TestCheckSequenceRepetition:
         assert not check_sequence_repetition(token_ids, params)
 
     def test_partial_repetition_not_detected(self):
-        """Test that incomplete repetitions are not detected"""
+        """Test that incomplete repetitions are not detected."""
         token_ids = [1, 2, 3, 1, 2, 3, 1, 2, 4]
         params = RepetitionDetectionParams(
             max_pattern_size=3,
@@ -67,7 +67,7 @@ class TestCheckSequenceRepetition:
         assert not check_sequence_repetition(token_ids, params)
 
     def test_empty_token_list(self):
-        """Test with empty token list"""
+        """Test with empty token list."""
         params = RepetitionDetectionParams(
             max_pattern_size=3,
             min_pattern_size=2,
@@ -76,19 +76,19 @@ class TestCheckSequenceRepetition:
         assert not check_sequence_repetition([], params)
 
     def test_detection_disabled_max_size_zero(self):
-        """Test that zero max_pattern_size disables detection"""
+        """Test that zero max_pattern_size disables detection."""
         token_ids = [1, 2, 1, 2, 1, 2]
         params = RepetitionDetectionParams()
         assert not check_sequence_repetition(token_ids, params)
 
     def test_invalid_min_count(self):
-        """Test that min_count < 2 returns False"""
+        """Test that min_count < 2 returns False."""
         token_ids = [1, 2, 1, 2]
         params = RepetitionDetectionParams()
         assert not check_sequence_repetition(token_ids, params)
 
     def test_repetition_at_end_of_sequence(self):
-        """Test detection when repetition occurs at the end"""
+        """Test detection when repetition occurs at the end."""
         token_ids = [1, 2, 3, 4, 5, 6, 5, 6, 5, 6]
         params = RepetitionDetectionParams(
             max_pattern_size=3,
@@ -98,7 +98,7 @@ class TestCheckSequenceRepetition:
         assert check_sequence_repetition(token_ids, params)
 
     def test_large_pattern_many_repetitions(self):
-        """Test large pattern repeated many times"""
+        """Test large pattern repeated many times."""
         token_ids = [1, 2, 3, 4, 5, 6, 7, 8] * 5
         params = RepetitionDetectionParams(
             max_pattern_size=10,
@@ -114,10 +114,10 @@ class TestCheckSequenceRepetition:
 
 
 class TestRepetitionDetectionIntegration:
-    """Integration tests for repetition detection in check_stop"""
+    """Integration tests for repetition detection in check_stop."""
 
     def test_basic_repetition_stops_generation(self):
-        """Test that repetition is detected and stops generation"""
+        """Test that repetition is detected and stops generation."""
         params = SamplingParams(
             max_tokens=100,
             repetition_detection=RepetitionDetectionParams(
@@ -138,7 +138,7 @@ class TestRepetitionDetectionIntegration:
         assert request.stop_reason == "repetition_detected"
 
     def test_detection_disabled_no_stop(self):
-        """Test that disabled detection doesn't stop generation"""
+        """Test that disabled detection doesn't stop generation."""
         params = SamplingParams(
             max_tokens=100,
         )
@@ -152,7 +152,7 @@ class TestRepetitionDetectionIntegration:
         assert not check_stop(request, max_model_len=1024)
 
     def test_repetition_respects_min_tokens(self):
-        """Test that repetition detection respects min_tokens"""
+        """Test that repetition detection respects min_tokens."""
         params = SamplingParams(
             min_tokens=10,
             max_tokens=100,
@@ -172,7 +172,7 @@ class TestRepetitionDetectionIntegration:
         assert not check_stop(request, max_model_len=1024)
 
     def test_no_repetition_continues_generation(self):
-        """Test that non-repetitive tokens don't stop generation"""
+        """Test that non-repetitive tokens don't stop generation."""
         params = SamplingParams(
             max_tokens=100,
             repetition_detection=RepetitionDetectionParams(
@@ -191,7 +191,7 @@ class TestRepetitionDetectionIntegration:
         assert not check_stop(request, max_model_len=1024)
 
     def test_pattern_at_size_boundary(self):
-        """Test detection at exact pattern size boundary"""
+        """Test detection at exact pattern size boundary."""
         params = SamplingParams(
             max_tokens=100,
             repetition_detection=RepetitionDetectionParams(
@@ -211,7 +211,7 @@ class TestRepetitionDetectionIntegration:
         assert request.status == RequestStatus.FINISHED_REPETITION
 
     def test_multiple_pattern_sizes_checked(self):
-        """Test that function checks pattern sizes in range"""
+        """Test that function checks pattern sizes in range."""
         params = SamplingParams(
             max_tokens=100,
             repetition_detection=RepetitionDetectionParams(
@@ -231,7 +231,7 @@ class TestRepetitionDetectionIntegration:
         assert request.status == RequestStatus.FINISHED_REPETITION
 
     def test_eos_takes_precedence_over_repetition(self):
-        """Test that EOS token stops before repetition check"""
+        """Test that EOS token stops before repetition check."""
         params = SamplingParams(
             max_tokens=100,
             stop_token_ids=[999],
@@ -252,7 +252,7 @@ class TestRepetitionDetectionIntegration:
         assert request.status == RequestStatus.FINISHED_STOPPED
 
     def test_min_pattern_size_filters_small_patterns(self):
-        """Test that min_pattern_size filters out smaller patterns"""
+        """Test that min_pattern_size filters out smaller patterns."""
         params = SamplingParams(
             max_tokens=100,
             repetition_detection=RepetitionDetectionParams(
@@ -271,7 +271,7 @@ class TestRepetitionDetectionIntegration:
         assert not check_stop(request, max_model_len=1024)
 
     def test_high_repetition_threshold(self):
-        """Test that high min_count requires many repetitions"""
+        """Test that high min_count requires many repetitions."""
         params = SamplingParams(
             max_tokens=100,
             repetition_detection=RepetitionDetectionParams(

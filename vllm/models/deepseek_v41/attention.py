@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-DeepseekV4 MLA Attention Layer
-"""
+"""DeepseekV4 MLA Attention Layer"""
 
 import math
 from abc import ABC, abstractmethod
@@ -1068,7 +1066,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
     def _compressed_kv_cache(self) -> torch.Tensor:
         """The compressed-KV cache tensor of this layer's kv source (own
-        cache for kv-source layers)."""
+        cache for kv-source layers).
+        """
         if self.is_kv_source:
             return self.kv_cache
         assert self.compressed_cache_prefix is not None

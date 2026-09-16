@@ -171,7 +171,8 @@ def test_gpu_memory_nixl_hma(model_name, sw_size):
 @pytest.mark.parametrize("model_name", ["google/gemma-3-1b-it"])
 def test_gpu_memory_no_nixl_baseline(model_name):
     """Same workload without NixlConnector.  Comparing driver-level memory
-    between this and test_gpu_memory_nixl_hma isolates UCX/NIXL impact."""
+    between this and test_gpu_memory_nixl_hma isolates UCX/NIXL impact.
+    """
     from vllm import LLM, SamplingParams
     from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
 

@@ -24,9 +24,7 @@ from vllm.v1.worker.gpu_worker import Worker
 
 
 class ConcreteWorkerProfiler(WorkerProfiler):
-    """
-    A basic implementation of a worker profiler for testing purposes.
-    """
+    """A basic implementation of a worker profiler for testing purposes."""
 
     def __init__(self, profiler_config: ProfilerConfig):
         self.start_call_count = 0
@@ -122,7 +120,8 @@ def test_max_iterations(default_profiler_config):
 def test_restart_after_max_iterations(default_profiler_config):
     """A start_profile after an auto-stop must actually restart, not be
     silently ignored (regression test: auto-stop used to leave _active
-    True forever, so start() always bailed out early)."""
+    True forever, so start() always bailed out early).
+    """
     default_profiler_config.max_iterations = 2
     profiler = ConcreteWorkerProfiler(default_profiler_config)
 
@@ -333,7 +332,8 @@ class TestAnnotateProfile:
 
 def test_profiler_entered_during_capture():
     """Profiler is used as a context manager in _warmup_and_capture,
-    confirming it is active during the actual graph capture run."""
+    confirming it is active during the actual graph capture run.
+    """
     runner = MagicMock()
     runner.compilation_config.cudagraph_num_of_warmups = 0
     mock_profiler = MagicMock()

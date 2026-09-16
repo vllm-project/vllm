@@ -376,7 +376,6 @@ def _run_and_monitor_call(
     wrapper, input_tensor, runtime_mode, batch_descriptor, vllm_config
 ):
     """Helper to run a single call and monitor the action."""
-
     with (
         patch("torch.cuda.graph", wraps=torch.cuda.graph) as mock_graph_context,
         patch.object(wrapper, "runnable", wraps=wrapper.runnable) as mock_runnable,

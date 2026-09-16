@@ -38,8 +38,8 @@ def compute_need_sampled_mask(input_batch: InputBatch) -> np.ndarray | None:
     """Return a bool array of shape `[input_batch.num_reqs]` marking requests
     that produce a sampled token this step, and therefore must have that token
     (and the draft block proposed from it) propagated to the earlier PP stages.
-    Returns None if no request in the batch produces a sample."""
-
+    Returns None if no request in the batch produces a sample.
+    """
     old_computed = input_batch.num_computed_tokens_np
     prefill_len = input_batch.prefill_len_np
     # Exclude non-final prefill chunks (they don't produce a sample).
@@ -179,7 +179,8 @@ class PPHandler:
 
     def receive(self, input_batch: InputBatch) -> bool:
         """Returns True iff sampled tokens need to be gathered from *all*
-        requests in the batch."""
+        requests in the batch.
+        """
         assert not self.is_last_rank
         need_sampled_mask = compute_need_sampled_mask(input_batch)
         if need_sampled_mask is None:

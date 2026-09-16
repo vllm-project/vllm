@@ -52,7 +52,8 @@ def _write_dataset(path: Path) -> None:
 
 def _args(dataset_path: str) -> argparse.Namespace:
     """Reproduce the argparse.Namespace that serve.py builds from the
-    failing command, including skip_tokenizer_init=True."""
+    failing command, including skip_tokenizer_init=True.
+    """
     return argparse.Namespace(
         # dataset
         dataset_name="custom",

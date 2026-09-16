@@ -251,7 +251,8 @@ class UnderscoreInplaceParallelLinears(FourParallelLinears):
 
 class PlainQKV(nn.Module):
     """q/k/v returned as a bare tuple: no reshape stands between the calls and
-    the return, so both QKVFuser and MergedColumnParallelFuser can rewrite it."""
+    the return, so both QKVFuser and MergedColumnParallelFuser can rewrite it.
+    """
 
     def __init__(self, hidden: int = 32, heads: int = 4, head_dim: int = 8):
         super().__init__()
@@ -338,7 +339,8 @@ class GuardedVAttention(FakeAttention):
     """Gemma 4-style: `v_proj` is called once but also read in a `None` guard.
 
     The guard is a fusion invariant (the fuser only binds instances where the
-    projection exists), so it folds to `True` and the call still fuses."""
+    projection exists), so it folds to `True` and the call still fuses.
+    """
 
     def forward(
         self, hidden_states, attention_mask=None, past_key_values=None, **kwargs
@@ -368,7 +370,8 @@ class TruthyGuardAttention(FakeAttention):
 
     An `nn.Linear` is always truthy, so the guard folds to `True` and the call
     still fuses (the projection is a proven invariant, exactly as for a `None`
-    guard)."""
+    guard).
+    """
 
     def forward(
         self, hidden_states, attention_mask=None, past_key_values=None, **kwargs
@@ -399,7 +402,8 @@ class StatementGuardVAttention(FakeAttention):
     The `if`'s test is not an `ast.Compare`, so the identity-check scan skips it;
     `_in_boolean_context` folds the test to `True` (an `nn.Linear` is always
     truthy) and the call inside the now-`if True:` body still fuses, with the
-    live `else` surviving the rewrite."""
+    live `else` surviving the rewrite.
+    """
 
     def forward(
         self, hidden_states, attention_mask=None, past_key_values=None, **kwargs
@@ -428,7 +432,8 @@ class BranchedKVAttention(FakeAttention):
 
     The three calls do not share a block, so the fused GEMM must be hoisted to
     the innermost block that dominates all of them (the function body). The
-    live `if`/`else` must survive the rewrite."""
+    live `if`/`else` must survive the rewrite.
+    """
 
     is_kv_shared_layer = False
 
@@ -459,7 +464,8 @@ class RebindArgAttention(FakeAttention):
 
     The branch is dead at trace time so the match succeeds, but the source
     rewrite must refuse: hoisting the GEMM above the rebind would feed k/v a
-    different input. Result: no fusion."""
+    different input. Result: no fusion.
+    """
 
     recompute = False
 
@@ -490,7 +496,8 @@ class InPlaceMutatedArgAttention(FakeAttention):
     Like `RebindArgAttention`, but the mutation keeps the name in a `Load`
     context (`hidden_states.mul_(2)`), so a bare `Name`-store check would miss it.
     The rewrite must still refuse: hoisting the GEMM above the mutation changes
-    the value k/v see. Result: no fusion."""
+    the value k/v see. Result: no fusion.
+    """
 
     recompute = False
 
@@ -520,7 +527,8 @@ class AliasMutatedArgAttention(FakeAttention):
 
     `hidden_states.view(-1)` shares storage with its base, so `alias.mul_(2)`
     changes what k/v read without ever naming `hidden_states` as a target. Only
-    tracking names that may alias the input catches it. Result: no fusion."""
+    tracking names that may alias the input catches it. Result: no fusion.
+    """
 
     recompute = False
 
@@ -551,7 +559,8 @@ class FunctionalInplaceArgAttention(FakeAttention):
 
     `F.relu(hidden_states, inplace=True)` writes through an argument, so the
     name appears only in a `Load` context inside a call that is not a method on
-    it -- invisible to a trailing-underscore method check. Result: no fusion."""
+    it -- invisible to a trailing-underscore method check. Result: no fusion.
+    """
 
     recompute = False
 
@@ -581,7 +590,8 @@ class SubscriptMutatedArgAttention(FakeAttention):
 
     `hidden_states[..., 0] = 0` leaves the name in a `Load` context on the
     subscript's value, so it too evades a bare `Name`-store check. The rewrite
-    must refuse for the same reason. Result: no fusion."""
+    must refuse for the same reason. Result: no fusion.
+    """
 
     recompute = False
 
@@ -611,7 +621,8 @@ class NonFoldableRefAttention(FakeAttention):
 
     Deleting `v_proj` would break `isinstance(self.v_proj, nn.Linear)`: it reads
     the projection's type, not just whether it exists, so the fuser cannot fold
-    it and must refuse rather than rewrite it."""
+    it and must refuse rather than rewrite it.
+    """
 
     def forward(
         self, hidden_states, attention_mask=None, past_key_values=None, **kwargs
@@ -836,7 +847,8 @@ def test_glu_identifies_down_projection():
 
     It is forced to `RowParallelLinear` in `update_attrs` so its sharded input
     matches the column-parallel merged gate/up; `None` when there is no such
-    projection to force (fusion of gate/up still applies)."""
+    projection to force (fusion of gate/up still applies).
+    """
     with torch.device("meta"):
         assert get_fuser(GLUMLP(), GLUFuser).down_name == "down_proj"
         assert get_fuser(ReversedGLUMLP(), GLUFuser).down_name == "down_proj"
@@ -997,7 +1009,8 @@ def test_bypass_existence_guard_folds_identity_none_check(expr, expected):
     The projection is a proven invariant (it exists as an `nn.Linear`), so an
     `is (not) None` guard has a constant truth value; folding it lets the call be
     rewritten away without changing the guard's outcome. `==`/`!=` are excluded
-    (see the refusal test) because a subclass may override `__eq__`/`__ne__`."""
+    (see the refusal test) because a subclass may override `__eq__`/`__ne__`.
+    """
     funcdef, ref = _guard_funcdef(expr)
     bypass_existence_guard(funcdef, ref, "v_proj")
     test = next(node for node in ast.walk(funcdef) if isinstance(node, ast.IfExp)).test
@@ -1016,7 +1029,8 @@ def test_bypass_existence_guard_folds_bare_truthiness(expr):
 
     An `nn.Linear` has no `__bool__`/`__len__`, so it is always truthy; in a pure
     boolean position (a test, or a `not` operand) the reference can be replaced by
-    `True`, letting the projection be deleted."""
+    `True`, letting the projection be deleted.
+    """
     funcdef, ref = _guard_funcdef(expr)
     bypass_existence_guard(funcdef, ref, "v_proj")
     # No `self.v_proj` reference survives; a literal `True` took its place.
@@ -1031,7 +1045,8 @@ def test_bypass_existence_guard_folds_bare_if_statement():
 
     The `len(node.ops) == 1` `Compare` scan skips it (it is not a comparison at
     all); `_in_boolean_context` then matches the `if`'s test and folds it, so the
-    bare-truthiness statement form is handled, not silently dropped."""
+    bare-truthiness statement form is handled, not silently dropped.
+    """
     funcdef = ast.parse(
         "def f(self, a, b):\n    if self.v_proj:\n        return a\n    return b"
     ).body[0]
@@ -1063,7 +1078,8 @@ def test_bypass_existence_guard_refuses_non_guard_reference(expr):
     Rewriting it is unsafe (its value depends on more than the projection's
     existence), so the fuser refuses rather than change semantics. `==`/`!=` are
     refused too: `is_linear` accepts `nn.Linear` subclasses that could override
-    `__eq__`/`__ne__`, so equality need not agree with `is (not) None`."""
+    `__eq__`/`__ne__`, so equality need not agree with `is (not) None`.
+    """
     funcdef, ref = _guard_funcdef(expr)
     with pytest.raises(ValueError, match="outside an existence guard"):
         bypass_existence_guard(funcdef, ref, "v_proj")
@@ -1103,7 +1119,8 @@ def test_merged_column_fuser_folds_existence_guard():
 
     Guard folding lives on `StackedFuser`, not just `QKVFuser`, because every
     stacked fuser deletes the projections it merges -- a surviving reference to
-    one would fail at runtime."""
+    one would fail at runtime.
+    """
     with torch.device("meta"):
         module = GuardedParallelLinears()
     fuser = MergedColumnParallelFuser.match(trace(module), module)
@@ -1129,7 +1146,8 @@ def test_merged_column_fuser_rejects_input_mutation(cls):
     The mutation may be direct (`x.add_(1)`), through a view that shares the
     input's storage, or through a call that writes an argument in place
     (`F.relu(x, inplace=True)`, `torch.relu_(x)`). Each one silently changes the
-    fused result, so the rewrite must refuse rather than fuse."""
+    fused result, so the rewrite must refuse rather than fuse.
+    """
     with torch.device("meta"):
         module = cls()
     fuser = MergedColumnParallelFuser.match(trace(module), module)
@@ -1187,7 +1205,8 @@ def test_merged_column_fuser_supports_any_number_of_linears(
 
 def test_merged_name_is_unique_per_linear_names():
     """The computed name must not collide across different projections, so
-    stacking two unrelated fusions can never clobber packed_modules_mapping."""
+    stacking two unrelated fusions can never clobber packed_modules_mapping.
+    """
     ab_c = MergedColumnParallelFuser(source_cls="M", linear_names=("a_b", "c"))
     a_bc = MergedColumnParallelFuser(source_cls="M", linear_names=("a", "b_c"))
     assert ab_c.merged_name != a_bc.merged_name
@@ -1203,7 +1222,8 @@ def test_heterogeneous_instances_fall_back_to_merged_column_fuser(
     layer whose out_features aren't a multiple of its own head_dim (as a
     misconfigured or heterogeneous checkpoint might have) fails QKVFuser's
     validation and must still fuse via the generic fallback, while a
-    well-formed sibling of the same class keeps using QKVFuser."""
+    well-formed sibling of the same class keeps using QKVFuser.
+    """
     with torch.device("meta"):
         container = nn.Module()
         container.compatible = PlainQKV(head_dim=8)
@@ -1224,7 +1244,8 @@ def test_detects_and_rewrites_packed_qkv(kv_heads):
     """A single projection split into q/k/v must be re-sharded, not merged.
 
     Only the split sizes change: `QKVParallelLinear` loads the packed
-    checkpoint weight as-is, and shards q by heads while replicating k/v."""
+    checkpoint weight as-is, and shards q by heads while replicating k/v.
+    """
     with torch.device("meta"):
         meta = PackedQKVAttention(kv_heads=kv_heads)
     fuser = get_fuser(meta, PackedQKVFuser)
@@ -1255,7 +1276,8 @@ def test_detects_and_rewrites_packed_qkv(kv_heads):
 
 def test_per_head_split_is_not_packed_qkv():
     """The split must consume the whole projection, else its sizes are head
-    widths and re-sharding by them would be wrong."""
+    widths and re-sharding by them would be wrong.
+    """
     with torch.device("meta"):
         assert get_fuser(PerHeadSplitAttention(), PackedQKVFuser) is None
 
@@ -1375,7 +1397,8 @@ def test_act_and_mul_derived_from_module(default_vllm_config):
 
 def _wider_model_config(head_dim: int) -> SimpleNamespace:
     """A model whose global head size is twice `head_dim`, as a wider layer
-    elsewhere in a heterogeneous checkpoint would make it."""
+    elsewhere in a heterogeneous checkpoint would make it.
+    """
     return SimpleNamespace(
         model_config=SimpleNamespace(get_head_size=lambda: 2 * head_dim),
         quant_config=None,

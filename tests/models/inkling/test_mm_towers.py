@@ -42,7 +42,8 @@ def _assert_close_ulps(
     compare against the reference's local ulp spacing. ``pre_act`` (the
     reference pre-activation) adds derivative-propagated slack: near
     ``gelu(x) ~ 0`` an ulp-level input flip legitimately moves the output by
-    many of ITS (tiny) ulps, bounded by |gelu'| <= 1.13 times the input ulps."""
+    many of ITS (tiny) ulps, bounded by |gelu'| <= 1.13 times the input ulps.
+    """
     g, r = got.float(), ref.float()
     tol = torch.clamp(max_ulps * _bf16_spacing(ref), min=atol)
     if pre_act is not None:
