@@ -139,4 +139,5 @@ steps:
   - tests/models/transformers/fusers/
   device: cpu-small
   commands:
-    - pytest -v -s models/test_utils.py models/test_vision.py models/test_adapters.py models/test_qwen3_5_mtp_config.py models/test_minimax_m3_indexer.py models/transformers/fusers/
+    - pytest -v -s models/test_minimax_m3_indexer.py
+    - pytest -v -s models/test_utils.py models/test_vision.py models/test_adapters.py models/test_qwen3_5_mtp_config.py models/transformers/fusers/
