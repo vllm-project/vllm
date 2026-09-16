@@ -1948,7 +1948,7 @@ async fn control_reports_server_and_model_info() {
     assert_eq!(parallelism.tensor_parallel_size, 1);
     assert_eq!(parallelism.pipeline_parallel_size, 1);
     assert_eq!(parallelism.data_parallel_size, 1);
-    assert_eq!(parallelism.data_parallel_size_local, Some(1));
+    assert_eq!(parallelism.data_parallel_size_local, 1);
     assert_eq!(parallelism.data_parallel_rank, 0);
     assert_eq!(parallelism.decode_context_parallel_size, 1);
     let rl = server.rl_capabilities.expect("RL capabilities");
@@ -2279,7 +2279,7 @@ async fn control_aggregates_multi_engine_capacity() {
         let parallelism = server.parallelism.unwrap();
         assert_eq!(parallelism.data_parallel_size, global_size as u32);
         assert_eq!(parallelism.data_parallel_rank, start_rank);
-        assert_eq!(parallelism.data_parallel_size_local, Some(2));
+        assert_eq!(parallelism.data_parallel_size_local, 2);
         assert_eq!(parallelism.world_size, 12);
 
         drop(engine_sockets);
