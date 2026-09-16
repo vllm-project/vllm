@@ -88,6 +88,13 @@ class ARCCachePolicy(CachePolicy):
         return False
 
     @override
+    def on_store_miss(
+        self, keys: Iterable[OffloadKey], req_context: ReqContext
+    ) -> None:
+        for key in reversed(list(keys)):
+            self._adapt_to_ghost_hit(key)
+
+    @override
     def touch(self, keys: Iterable[OffloadKey], req_context: ReqContext) -> None:
         for key in reversed(list(keys)):
             if key in self.t1:

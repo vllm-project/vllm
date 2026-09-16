@@ -281,15 +281,20 @@ class CPUOffloadingManager(OffloadingManager):
         if new_store_misses:
             # ARC learns from B1/B2 before insert() removes the ghost entry.
             # Deduplication makes this one policy observation per request.
-            self._policy.touch(new_store_misses, req_context)
+            self._policy.on_store_miss(new_store_misses, req_context)
             state.store_miss_keys.update(new_store_misses)
 
+        recorded_keys = set(keys_to_store)
+        recorded_keys.update(ready_existing_keys)
+        # Record once before any allocation-related early return. Store
+        # candidates are classified as insertions only after allocation succeeds.
+        self._record_request_cache_access(
+            (key for key in keys if key in recorded_keys),
+            req_context,
+            reused_keys=ready_existing_keys,
+        )
+
         if not keys_to_store:
-            self._record_request_cache_access(
-                ready_existing_keys,
-                req_context,
-                reused_keys=ready_existing_keys,
-            )
             return PrepareStoreOutput(
                 keys_to_store=[],
                 store_spec=self._get_load_store_spec([], []),
@@ -303,11 +308,6 @@ class CPUOffloadingManager(OffloadingManager):
         if num_chunks_to_evict > 0:
             if num_chunks_to_evict > self._num_evictable_cache_chunks:
                 # Eviction will fail.
-                self._record_request_cache_access(
-                    ready_existing_keys,
-                    req_context,
-                    reused_keys=ready_existing_keys,
-                )
                 return None
             # There is a still a chance for eviction failure as some of the
             # idle chunks might be in the protected list.
@@ -317,11 +317,6 @@ class CPUOffloadingManager(OffloadingManager):
             protected = set(keys)
             evicted = self._policy.evict(num_chunks_to_evict, protected)
             if evicted is None:
-                self._record_request_cache_access(
-                    ready_existing_keys,
-                    req_context,
-                    reused_keys=ready_existing_keys,
-                )
                 return None
 
             # cache-policy removes only idle chunks.
@@ -349,14 +344,7 @@ class CPUOffloadingManager(OffloadingManager):
         for key, chunk in zip(keys_to_store, chunks):
             self._policy.insert(key, chunk)
         self._num_write_pending_chunks += len(keys_to_store)
-        recorded_keys = set(keys_to_store)
-        recorded_keys.update(ready_existing_keys)
-        self._record_request_cache_access(
-            (key for key in keys if key in recorded_keys),
-            req_context,
-            inserted_keys=keys_to_store,
-            reused_keys=ready_existing_keys,
-        )
+        state.inserted_keys.update(keys_to_store)
 
         # build store specs for allocated chunks
         store_spec = self._get_load_store_spec(keys_to_store, chunks)

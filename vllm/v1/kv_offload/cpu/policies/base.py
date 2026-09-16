@@ -81,6 +81,17 @@ class CachePolicy(ABC):
             req_context: Per-request context for the request touching these chunks.
         """
 
+    def on_store_miss(
+        self, keys: Iterable[OffloadKey], req_context: ReqContext
+    ) -> None:
+        """Observe store misses before their cache entries are inserted.
+
+        The default delegates to ``touch`` for compatibility with external
+        policies. Policies may override this hook when a miss has distinct
+        semantics, such as ARC adapting to a ghost-list hit.
+        """
+        self.touch(keys, req_context)
+
     def on_request_finished(
         self,
         key_groups: Sequence[Sequence[OffloadKey]],

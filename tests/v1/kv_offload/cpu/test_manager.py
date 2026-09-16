@@ -1431,6 +1431,52 @@ def test_request_finish_forwards_grouped_deduplicated_accesses(monkeypatch):
     ]
 
 
+def test_failed_store_records_access_once_and_uses_store_miss_hook(monkeypatch):
+    manager = make_cpu_manager(num_chunks=1)
+    resident, candidate = to_keys([1, 2])
+
+    seed_ctx = make_req_context("seed")
+    assert manager.prepare_store([resident], seed_ctx) is not None
+    manager.complete_store([resident], seed_ctx)
+
+    pin_ctx = make_req_context("pin")
+    manager.prepare_load([resident], pin_ctx)
+
+    record_calls = 0
+    original_record = manager._record_request_cache_access
+
+    def record_access(*args, **kwargs):
+        nonlocal record_calls
+        record_calls += 1
+        return original_record(*args, **kwargs)
+
+    store_miss_calls = []
+
+    def on_store_miss(keys, req_context):
+        store_miss_calls.append((list(keys), req_context))
+
+    finalized = []
+
+    def on_request_finished(key_groups, insertion_only_keys, reused_keys, req_context):
+        finalized.append((key_groups, insertion_only_keys, reused_keys, req_context))
+
+    monkeypatch.setattr(manager, "_record_request_cache_access", record_access)
+    monkeypatch.setattr(manager._policy, "on_store_miss", on_store_miss)
+    monkeypatch.setattr(manager._policy, "on_request_finished", on_request_finished)
+
+    ctx = make_req_context("failed-store")
+    assert manager.prepare_store([candidate, resident], ctx) is None
+    assert record_calls == 1
+    assert store_miss_calls == [([candidate], ctx)]
+
+    manager.on_request_finished(ctx)
+    assert finalized == [
+        (((candidate, resident),), set(), {resident}, ctx),
+    ]
+
+    manager.complete_load([resident], pin_ctx)
+
+
 def test_arc_ghost_hit_adapts_once_per_request_before_insertion():
     manager = make_cpu_manager(num_chunks=2, cache_policy="arc")
     policy = manager._policy
