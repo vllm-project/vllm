@@ -4,6 +4,7 @@
 
 import torch
 
+from vllm.models.deepseek_v4.common.ops.fused_indexer_q import _fp32x2_to_fp4x2
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
@@ -232,13 +233,14 @@ def rope_quant_insert(
 
     The BF16 latent supplies both NoPE quantization and RoPE input. It is read
     only for valid slots at group boundaries. The cache dtype selects the
-    layout: ``uint8`` is the fp8_ds_mla paged layout, whose record the
-    per-token byte width names -- 584 B for V4 (576 value bytes and eight
-    segregated UE8M0 scale bytes, including one zero padding scale) or 528 B
-    for V4.1 (512 MXFP8 value bytes covering the RoPE dims too, then 16 UE8M0
-    scales of 32 dims each). ``bfloat16`` and ``float8_e4m3fn`` are the plain
-    [448 NoPE | 64 RoPE] rows read by FlashInfer, the latter scaled by the
-    per-tensor ``fp8_scale``.
+    layout: ``uint8`` is a paged FlashMLA layout, whose record the per-token
+    byte width names -- 584 B for V4 (576 value bytes and eight segregated
+    UE8M0 scale bytes, including one zero padding scale), 528 B for V4.1
+    (512 MXFP8 value bytes covering the RoPE dims too, then 16 UE8M0 scales of
+    32 dims each), or 288 B for V4.1 NVFP4 (256 bytes of e2m1 pairs then 32
+    e4m3 scales of 16 dims each), which only the compressed cache uses.
+    ``bfloat16`` and ``float8_e4m3fn`` are the plain [448 NoPE | 64 RoPE] rows
+    read by FlashInfer, the latter scaled by the per-tensor ``fp8_scale``.
     """
     assert compress_ratio in (1, 2)
     assert latent.shape[1] == 512 and latent.dtype == torch.bfloat16
@@ -249,13 +251,13 @@ def rope_quant_insert(
         return
     launch_kwargs = {"launch_pdl": False} if current_platform.is_cuda() else {}
     if kv_cache.dtype == torch.uint8:
-        assert kv_cache.shape[-1] in (584, 528), (
+        kernel = {
+            584: _rope_quant_insert_kernel,
+            528: _rope_quant_insert_mxfp8_kernel,
+            288: _rope_quant_insert_nvfp4_kernel,
+        }.get(kv_cache.shape[-1])
+        assert kernel is not None, (
             f"unsupported paged KV record width {kv_cache.shape[-1]}"
-        )
-        kernel = (
-            _rope_quant_insert_mxfp8_kernel
-            if kv_cache.shape[-1] == 528
-            else _rope_quant_insert_kernel
         )
         kernel[(num_tokens,)](
             latent,
@@ -400,6 +402,62 @@ def _rope_quant_insert_mxfp8_kernel(
     max_encoded: tl.constexpr = 254.0 if SANITIZE_CACHE_NANS else 255.0
     encoded = tl.minimum(tl.maximum(exponent + 127.0, 0.0), max_encoded)
     tl.store(scales + tl.arange(0, 16), encoded.to(tl.uint8))
+
+
+@triton.jit
+def _rope_quant_insert_nvfp4_kernel(
+    latent,
+    positions,
+    cos_sin,
+    cache,
+    cache_slots,
+    COS_STRIDE: tl.constexpr,
+    CACHE_STRIDE: tl.constexpr,
+    CACHE_BLOCK: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    SANITIZE_CACHE_NANS: tl.constexpr,
+):
+    """V4.1 NVFP4 record: RoPE, then e2m1 with one e4m3 scale per 16 dims.
+
+    The scale is ``amax / 6`` (6 is e2m1's largest magnitude) clamped to the
+    e4m3 range, with no per-tensor scale on top.
+    """
+    t = tl.program_id(0)
+    slot = tl.load(cache_slots + t)
+    if slot < 0:
+        return
+    position = tl.load(positions + t)
+    if (position + 1) % COMPRESS_RATIO != 0:
+        return
+    d = tl.arange(0, 512)
+    normed = tl.load(latent + t.to(tl.int64) * 512 + d).to(tl.float32)
+
+    # NoPE pairs load (cos, sin) = (1, 0), so the rotation is the identity there.
+    even, odd = tl.split(tl.reshape(normed, (256, 2)))
+    pair = tl.arange(0, 256) - 224
+    cs = cos_sin + (position // COMPRESS_RATIO * COMPRESS_RATIO) * COS_STRIDE
+    c = tl.load(cs + tl.maximum(pair, 0), pair >= 0, other=1.0).to(tl.float32)
+    s = tl.load(cs + 32 + tl.maximum(pair, 0), pair >= 0, other=0.0).to(tl.float32)
+    rotated = tl.interleave(even * c - odd * s, odd * c + even * s)
+    if SANITIZE_CACHE_NANS:
+        rotated = tl.where(rotated == rotated, rotated, 0.0)
+
+    tiles = tl.reshape(rotated, (32, 16))
+    amax = tl.max(tl.abs(tiles), 1)
+    # 2**-9 is the smallest normal e4m3 magnitude; 448 the largest.
+    scale = tl.clamp(amax * (1.0 / 6.0), 0.001953125, 448.0).to(tl.float8e4nv)
+    # Round-to-nearest division: Triton's default div.full misplaces values
+    # that land exactly on an e2m1 tie.
+    scaled = tl.math.div_rn(tiles, tl.reshape(scale.to(tl.float32), (32, 1)))
+    lo, hi = tl.split(tl.reshape(tl.reshape(scaled, (512,)), (256, 2)))
+
+    page = cache + (slot // CACHE_BLOCK).to(tl.int64) * CACHE_STRIDE
+    tl.store(
+        page + (slot % CACHE_BLOCK) * 256 + tl.arange(0, 256),
+        _fp32x2_to_fp4x2(lo, hi),
+    )
+    scales = page + CACHE_BLOCK * 256 + (slot % CACHE_BLOCK) * 32
+    tl.store(scales + tl.arange(0, 32), scale.to(tl.uint8, bitcast=True))
 
 
 @triton.jit
