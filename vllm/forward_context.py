@@ -114,8 +114,7 @@ class DPMetadata:
         )
         if (
             parallel_config.data_parallel_size > 1
-            and parallel_config.prefill_context_parallel_size > 1
-            and parallel_config.enable_expert_parallel
+            and parallel_config.moe_dispatch_across_pcp
         ):
             assert moe_non_sp_token_counts_cpu is not None, (
                 "MoE non-SP token counts must be supplied by batch coordination"

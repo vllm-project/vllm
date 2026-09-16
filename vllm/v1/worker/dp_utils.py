@@ -44,10 +44,7 @@ def _get_device_and_group(parallel_config: ParallelConfig):
     group_coordinator = get_dp_group()
     pcp_size = 1
     pcp_rank = 0
-    if (
-        parallel_config.enable_expert_parallel
-        and parallel_config.prefill_context_parallel_size > 1
-    ):
+    if parallel_config.moe_dispatch_across_pcp:
         group_coordinator = get_moe_non_sp_group()
         pcp_size = parallel_config.prefill_context_parallel_size
         pcp_rank = get_pcp_group().rank_in_group
@@ -289,10 +286,7 @@ def coordinate_batch_across_dp(
             dtype=torch.int32,
         )
         num_tokens_across_dp_pcp = None
-        if (
-            parallel_config.enable_expert_parallel
-            and parallel_config.prefill_context_parallel_size > 1
-        ):
+        if parallel_config.moe_dispatch_across_pcp:
             num_tokens_across_dp_pcp = torch.full(
                 (
                     parallel_config.data_parallel_size

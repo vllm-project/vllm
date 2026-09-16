@@ -393,10 +393,7 @@ class UBatchWrapper:
                 [ubatch_slice.num_tokens] * dp_size, device="cpu", dtype=torch.int32
             )
             ubatch_moe_non_sp_token_counts = None
-            if (
-                parallel_config.enable_expert_parallel
-                and parallel_config.prefill_context_parallel_size > 1
-            ):
+            if parallel_config.moe_dispatch_across_pcp:
                 ubatch_moe_non_sp_token_counts = torch.tensor(
                     [ubatch_slice.num_tokens]
                     * dp_size
