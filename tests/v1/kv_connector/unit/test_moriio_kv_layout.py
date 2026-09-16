@@ -664,10 +664,8 @@ def test_moriio_wrapper_rejects_invalid_messages(role, payload, match):
 
 
 def test_local_block_ids_longer_than_remote_raises():
-    # A longer local list is a genuine bug in the layout transfer path and must
-    # fail loudly. The speculative-decoding "longer local is OK" relaxation is
-    # handled upstream in the WRITE producer save path (which trims the trailing
-    # lookahead blocks before they ever reach here), NOT by clamping here.
+    # A longer local list is a genuine bug here and must fail loudly; the WRITE
+    # producer save path trims lookahead blocks before they reach this layer.
     cache = torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16)  # interleaved
     worker = _worker({"layer": cache}, {"layer": _full_spec()})
 
@@ -683,8 +681,7 @@ def test_local_block_ids_longer_than_remote_raises():
 
 
 def test_shorter_local_block_ids_still_transfers_only_what_decode_allocated():
-    # Regression guard: the pre-existing shorter-local behavior (READ-mode
-    # partial transfer) is unchanged by the longer-local clamp.
+    # READ-mode partial transfer keeps its shorter-local behavior.
     cache = torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16)
     worker = _worker({"layer": cache}, {"layer": _full_spec()})
 
