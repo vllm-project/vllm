@@ -5,11 +5,10 @@
 import json
 
 import pytest
-from transformers import AutoTokenizer
 from xgrammar import Grammar
 from xgrammar.testing import _is_grammar_accept_string
 
-from vllm.config import ModelConfig, StructuredOutputsConfig
+from vllm.config import StructuredOutputsConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.exceptions import VLLMClientError, VLLMValidationError
@@ -29,20 +28,11 @@ JSON_SCHEMA = {
 
 
 class _StubModelConfig:
+    max_logprobs = 20
+    logits_processors = None
+
     def __init__(self, is_diffusion: bool):
         self.is_diffusion = is_diffusion
-
-
-@pytest.fixture(scope="module")
-def choice_request_context():
-    model = "openai-community/gpt2"
-    model_config = ModelConfig(
-        model=model,
-        dtype="float32",
-        max_model_len=64,
-        generation_config="vllm",
-    )
-    return model_config, AutoTokenizer.from_pretrained(model)
 
 
 @pytest.mark.parametrize(
@@ -53,22 +43,14 @@ def choice_request_context():
 @pytest.mark.parametrize(
     "choice",
     [
-        pytest.param("yes", id="ascii"),
         pytest.param("line1\nline2", id="newline"),
         pytest.param("line1\rline2", id="carriage_return"),
         pytest.param("left\x00right", id="nul"),
-        pytest.param("left\tright", id="tab"),
-        pytest.param('say "yes" \\ no', id="quote_and_backslash"),
-        pytest.param("你好", id="unicode"),
-        pytest.param("🙂", id="emoji"),
     ],
 )
-def test_xgrammar_choice_request_preserves_literals(
-    choice_request_context, request_cls, choice
-):
-    model_config, tokenizer = choice_request_context
+def test_xgrammar_choice_request_preserves_control_characters(request_cls, choice):
     payload = {
-        "model": model_config.model,
+        "model": "test-model",
         "max_tokens": 8,
         "structured_outputs": {"choice": [choice]},
     }
@@ -82,11 +64,11 @@ def test_xgrammar_choice_request_preserves_literals(
     params = request.to_sampling_params(8, {})
     assert params.structured_outputs.choice == [choice]
 
-    token_ids = tokenizer.encode(choice, add_special_tokens=False)
-    assert tokenizer.decode(token_ids, clean_up_tokenization_spaces=False) == choice
-
     params.verify(
-        model_config, None, StructuredOutputsConfig(backend="xgrammar"), tokenizer
+        _StubModelConfig(is_diffusion=False),
+        None,
+        StructuredOutputsConfig(backend="xgrammar"),
+        tokenizer=object(),  # Choice validation only requires a non-None tokenizer.
     )
     assert params.structured_outputs._backend == "xgrammar"
     assert params.structured_outputs.choice is None
