@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import MagicMock
@@ -47,7 +47,6 @@ from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
     LoadStoreSpec,
     LookupResult,
-    OffloadingConfigInfo,
     OffloadingManager,
     OffloadingSpec,
     OffloadingWorker,
@@ -131,6 +130,7 @@ class MockOffloadingSpec(OffloadingSpec):
         self.manager.prepare_load = lambda keys, req_context: MockLoadStoreSpec(keys)
         self.manager.lookup.return_value = LookupResult.MISS
         self.manager.get_stats.return_value = None
+        self.manager.config_info.return_value = {}
         self.manager.on_new_request.return_value = RequestOffloadingContext()
         self.handler = MockOffloadingWorker()
 
@@ -139,15 +139,6 @@ class MockOffloadingSpec(OffloadingSpec):
 
     def get_worker(self, _: CanonicalKVCaches) -> OffloadingWorker:
         return self.handler
-
-    @classmethod
-    def config_info_classes(
-        cls, extra_config: Mapping[str, Any]
-    ) -> tuple[tuple[str, type[OffloadingConfigInfo]], ...]:
-        return ()
-
-    def config_info(self) -> tuple[OffloadingConfigInfo, ...]:
-        return ()
 
     def complete_transfers(self):
         self.handler.complete_jobs(self.handler.waiting_jobs.copy())

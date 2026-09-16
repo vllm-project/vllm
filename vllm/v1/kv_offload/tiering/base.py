@@ -4,7 +4,7 @@
 
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -358,3 +358,12 @@ class SecondaryTierManager(ABC):
     def get_stats(self) -> "OffloadingConnectorStats | None":
         """Return and reset metric observations collected by this tier."""
         return None
+
+    def config_info(self) -> Mapping[str, str | int | float | bool]:
+        """Return static config facts to publish as info metric labels.
+
+        A tier cannot know its own index, so TieringOffloadingManager prefixes
+        these keys with the index and the tier type. Every other rule matches
+        OffloadingManager.config_info().
+        """
+        return {}

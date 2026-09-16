@@ -4,7 +4,7 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, NewType, TypeVar
 
@@ -226,50 +226,6 @@ class OffloadingHistogramMetadata(OffloadingMetricMetadata):
     buckets: tuple[float, ...] | None = None
 
 
-KV_OFFLOAD_CONFIG_INFO = "vllm:kv_offload_config_info"
-
-_INFO_METRIC_HELP = (
-    "Static configuration of the KV offload sources of this engine instance. "
-    "The metric appears from the first scheduler step, so an idle engine "
-    "exposes no series. Each engine reports its own sources, not the instance "
-    "total."
-)
-
-
-@dataclass(frozen=True)
-class OffloadingConfigInfo:
-    """Static, per-engine facts that one config source adds to an info metric.
-
-    A config source is any part of a spec that owns configuration worth
-    publishing, for example the CPU cache or one secondary tier.
-
-    The label names come from the class, in the API-server process. The label
-    values come from an instance, in the scheduler process. Both walks read
-    dataclasses.fields, which keeps the declaration order, so the two sides bind
-    by position.
-    """
-
-    @classmethod
-    def as_labelnames(cls, prefix: str) -> tuple[str, ...]:
-        """Return one label name for each field, in declaration order.
-
-        Args:
-            prefix: Prefix of every label name. It names the config source that
-                owns these facts, so two sources cannot collide on one field
-                name.
-        """
-        return tuple(f"{prefix}_{f.name}" for f in fields(cls))
-
-    @classmethod
-    def help_text(cls) -> str:
-        """Return one sentence about these fields, for the info metric HELP."""
-        return ""
-
-    def as_labelvalues(self) -> tuple[str, ...]:
-        """Return one label value for each field, in declaration order."""
-        return tuple(str(getattr(self, f.name)) for f in fields(self))
-
-
 @dataclass(frozen=True)
 class OffloadingKVEventsConfig:
     # Global vLLM KV event publishing flag. When false, connector-specific
@@ -451,6 +407,19 @@ class OffloadingManager(ABC):
     def get_stats(self) -> "OffloadingConnectorStats | None":
         """Return collected metrics since last call, or None if disabled."""
         return None
+
+    def config_info(self) -> Mapping[str, str | int | float | bool]:
+        """Return static config facts to publish as info metric labels.
+
+        The scheduler reads this once, after the manager is built, so the
+        values must stay fixed for the process lifetime.
+
+        Returns:
+            Mapping of label name to value. The frontend renders each value
+            with str(), so a value must be a scalar that msgpack carries, not
+            an enum or an object. Empty by default.
+        """
+        return {}
 
     def shutdown(self) -> None:
         """Shutdown the manager and release any resources."""
@@ -637,107 +606,6 @@ class OffloadingSpec(ABC):
     ) -> dict[str, "OffloadingMetricMetadata"]:
         """Return Prometheus metric definitions emitted by this spec."""
         return {}
-
-    @classmethod
-    @abstractmethod
-    def config_info_classes(
-        cls, extra_config: Mapping[str, Any]
-    ) -> tuple[tuple[str, type[OffloadingConfigInfo]], ...]:
-        """Return the name and the OffloadingConfigInfo class of every config
-        source of this spec.
-
-        Runs in the API-server process, on the class, with no instance. The
-        position of an entry gives the source index, and the base builds each
-        label-name prefix from the source name and that index, for example
-        "fs1".
-
-        config_info() must return one entry for each entry here, in the same
-        order. Return an empty tuple to emit the info metric with no labels.
-
-        The two halves run in different processes. info_labelvalues() catches
-        a disagreement about the source count at the first scheduler step, not
-        at startup.
-
-        Args:
-            extra_config: The kv_connector_extra_config of this engine. A spec
-                may read its own source list from it.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def config_info(self) -> tuple["OffloadingConfigInfo", ...]:
-        """Return the static facts of every config source, in declared order.
-
-        Runs in the scheduler process, after get_manager(), because a tiering
-        spec builds its tiers inside that call. Entry i holds an instance of
-        config_info_classes()[i][1]. A source that cannot read one of its own
-        facts must put its own placeholder in that field.
-        """
-        raise NotImplementedError
-
-    @classmethod
-    def build_info_metric_definition(
-        cls, extra_config: Mapping[str, Any]
-    ) -> dict[str, "OffloadingMetricMetadata"]:
-        """Return the info metric definition built from config_info_classes().
-
-        The label names come from the classes alone, so this runs in the
-        API-server process. OffloadingConnectorScheduler renders the matching
-        values in the scheduler process.
-
-        Args:
-            extra_config: The kv_connector_extra_config of this engine, passed
-                to config_info_classes().
-        """
-        declared = cls.config_info_classes(extra_config)
-        labelnames: tuple[str, ...] = ()
-        for idx, (name, info_cls) in enumerate(declared):
-            labelnames += info_cls.as_labelnames(f"{name}{idx}")
-
-        # One title per unique source name: two sources of one name share a
-        # class, and one HELP string serves the whole metric family.
-        # dict.fromkeys drops the duplicate and keeps the declared order, which
-        # a set loses.
-        documentation = [_INFO_METRIC_HELP]
-        for name, info_cls in dict.fromkeys(declared):
-            help_text = info_cls.help_text()
-            if help_text:
-                documentation.append(f"{name}:\n{help_text}")
-
-        return {
-            KV_OFFLOAD_CONFIG_INFO: OffloadingGaugeMetadata(
-                documentation="\n\n".join(documentation),
-                labelnames=labelnames,
-            )
-        }
-
-    def info_labelvalues(self) -> tuple[str, ...]:
-        """Return one label value for each label of the info metric.
-
-        build_info_metric_definition declares the label names from the same
-        config sources, in the same order, so the values bind by position.
-
-        Raises:
-            AssertionError: config_info() and config_info_classes() disagree
-                about the source count, or a source reports the wrong
-                OffloadingConfigInfo class.
-        """
-        declared = type(self).config_info_classes(self.extra_config)
-        infos = self.config_info()
-        if len(infos) != len(declared):
-            raise AssertionError(
-                f"{type(self).__name__} declares {len(declared)} config info "
-                f"source(s) but reports {len(infos)}"
-            )
-
-        labelvalues: tuple[str, ...] = ()
-        for (_, info_cls), info in zip(declared, infos):
-            assert isinstance(info, info_cls), (
-                f"{type(self).__name__}.config_info() must report a "
-                f"{info_cls.__name__}, got {type(info).__name__}"
-            )
-            labelvalues += info.as_labelvalues()
-        return labelvalues
 
     def __init__(self, config: OffloadingConfig):
         self.config = config
