@@ -78,7 +78,6 @@ class DummyExecutor(UniProcExecutor):
         non_block: bool = False,
     ) -> Future[ModelRunnerOutput | None]:
         """Make execute_model non-blocking."""
-
         # DummyExecutor used only for testing async case.
         assert non_block
 
@@ -97,7 +96,6 @@ class DummyExecutor(UniProcExecutor):
         non_block: bool = False,
     ) -> Future[ModelRunnerOutput | None]:
         """Make sample_tokens non-blocking."""
-
         # DummyExecutor used only for testing async case.
         assert non_block
 
@@ -247,8 +245,7 @@ def test_engine_core():
 
 @create_new_process_for_each_test()
 def test_engine_core_advanced_sampling():
-    """
-    A basic end-to-end test to verify that the engine functions correctly
+    """A basic end-to-end test to verify that the engine functions correctly
     when additional sampling parameters, such as top_p, min_tokens, and
     presence_penalty, are set.
     """
@@ -296,9 +293,7 @@ def test_engine_core_advanced_sampling():
 
 @create_new_process_for_each_test()
 def test_engine_core_concurrent_batches():
-    """
-    Test that the engine can handle multiple concurrent batches.
-    """
+    """Test that the engine can handle multiple concurrent batches."""
 
     def make_request_with_max_tokens(req_id: str, max_tokens: int) -> EngineCoreRequest:
         request = make_request()
@@ -442,10 +437,7 @@ def test_batch_queue_propagates_model_runner_execution_error() -> None:
 
 @multi_gpu_test(num_gpus=2)
 def test_engine_core_tp():
-    """
-    Test engine can initialize worker in tp properly
-    """
-
+    """Test engine can initialize worker in tp properly."""
     """Setup the EngineCore."""
     engine_args = EngineArgs(
         model=MODEL_NAME,
@@ -531,7 +523,7 @@ def test_encoder_instance_zero_kv_cache(
     enable_prefix_caching: bool,
     use_kv_connector: bool,
 ):
-    """EPD (Encoder-Prefill-Decode) Encoder-cache-specific tests
+    """EPD (Encoder-Prefill-Decode) Encoder-cache-specific tests.
 
     This test verifies encoder-only instance initializes with 0 KV cache blocks.
     Under EPD disagg mode, Encoder instances (EC producer role) only execute

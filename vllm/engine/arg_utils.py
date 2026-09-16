@@ -10,7 +10,6 @@ import os
 import sys
 from collections.abc import Callable
 from dataclasses import MISSING, asdict, dataclass, fields, is_dataclass
-from itertools import permutations
 from types import UnionType
 from typing import (
     TYPE_CHECKING,
@@ -411,7 +410,7 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
         if type(None) in type_hints and not contains_type(type_hints, bool):
             kwargs[name]["type"] = optional_type(kwargs[name]["type"])
             if kwargs[name].get("choices"):
-                kwargs[name]["choices"].append("None")
+                kwargs[name]["choices"].append(None)
     return kwargs
 
 
@@ -866,7 +865,6 @@ class EngineArgs:
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         """Shared CLI arguments for vLLM engine."""
-
         # Model arguments
         model_kwargs = get_kwargs(ModelConfig)
         model_group = parser.add_argument_group(
@@ -1524,13 +1522,6 @@ class EngineArgs:
         observability_group.add_argument(
             "--otlp-traces-endpoint", **observability_kwargs["otlp_traces_endpoint"]
         )
-        # TODO: generalise this special case
-        choices = observability_kwargs["collect_detailed_traces"]["choices"]
-        metavar = f"{{{','.join(choices)}}}"
-        observability_kwargs["collect_detailed_traces"]["metavar"] = metavar
-        observability_kwargs["collect_detailed_traces"]["choices"] += [
-            ",".join(p) for p in permutations(get_args(DetailedTraceModules), r=2)
-        ]
         observability_group.add_argument(
             "--collect-detailed-traces",
             **observability_kwargs["collect_detailed_traces"],
@@ -2042,8 +2033,7 @@ class EngineArgs:
         usage_context: UsageContext | None = None,
         headless: bool = False,
     ) -> VllmConfig:
-        """
-        Create the VllmConfig.
+        """Create the VllmConfig.
 
         NOTE: If VllmConfig is incompatible, we raise an error.
         """
@@ -2051,7 +2041,7 @@ class EngineArgs:
 
         device_config = DeviceConfig(device=cast(Device, current_platform.device_type))
 
-        envs.validate_environ(self.fail_on_environ_validation)
+        current_platform.validate_environ(self.fail_on_environ_validation)
 
         # Check if the model is a speculator and override model/tokenizer/config
         # BEFORE creating ModelConfig, so the config is created with the target model

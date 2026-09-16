@@ -148,9 +148,7 @@ class Config:
         return self.E // self.world_size
 
     def make_env_data(self) -> tuple[VllmConfig, dict[Any, Any]]:
-        """
-        make env data for vllm launch.
-        """
+        """Make env data for vllm launch."""
         vllm_config = VllmConfig()
         vllm_config.model_config = SimpleNamespace(
             enforce_eager=True,
@@ -444,9 +442,7 @@ class RankTensors:
     def make_hidden_states(
         config: Config,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """
-        Return hidden_states
-        """
+        """Return hidden_states."""
         m, k, dtype = (config.M, config.K, config.dtype)
         device = torch.accelerator.current_device_index()
         a = torch.randn((m, k), device=device, dtype=dtype) / 15.0

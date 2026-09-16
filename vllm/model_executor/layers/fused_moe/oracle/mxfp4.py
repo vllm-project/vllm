@@ -355,8 +355,7 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
 
 
 def _get_priority_backends() -> list[Mxfp4MoeBackend]:
-    """
-    Get available backends in priority order. SM100+ prefers DeepGEMM FP4 /
+    """Get available backends in priority order. SM100+ prefers DeepGEMM FP4 /
     TRTLLM MXFP8; SM90 falls through to Triton_unfused or Marlin (the
     backend-level ``is_supported_config`` check filters by device capability).
     """
@@ -526,8 +525,7 @@ def select_mxfp4_moe_backend(
     config: FusedMoEConfig,
     activation_key: QuantKey | None = None,
 ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
-    """
-    Select the primary MXFP4 MoE backend.
+    """Select the primary MXFP4 MoE backend.
 
     Args:
         config: MoE configuration
@@ -536,6 +534,7 @@ def select_mxfp4_moe_backend(
             Use kFp8StaticTensorSym for W4A8 scheme.
 
     Note: Shape-specific fallbacks may still occur at runtime.
+
     """
     runner_backend = config.moe_backend
     requested_activation_key = _resolve_activation_key(activation_key)
@@ -648,8 +647,7 @@ def select_mxfp4_moe_backend(
 def select_deepseek_v4_mxfp4_moe_backend(
     config: FusedMoEConfig,
 ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
-    """
-    Select the MXFP4 MoE backend with MXFP8 activation as top priority.
+    """Select the MXFP4 MoE backend with MXFP8 activation as top priority.
     Falls back through BF16 and other backends.
     """
     activation_format = (
@@ -799,7 +797,6 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     torch.Tensor | None,
 ]:
     """Convert loaded weights into backend-specific kernel format."""
-
     if mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
         w13_weight_scale, w2_weight_scale = _pack_deepgemm_mxfp4_scales(
             w13_weight,
@@ -1572,12 +1569,6 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         if w2_bias is not None:
             w2_bias = w2_bias.data.to(torch.float32)
 
-        import os
-
-        # TODO: Remove this once AITER is fixed
-        # Necessary for AITER side from crashing
-        os.environ["AITER_BF16_FP8_MOE_BOUND"] = "0"
-
         if activation == MoEActivation.SITU:
             from aiter.utility.fp4_utils import e8m0_shuffle
 
@@ -1585,9 +1576,8 @@ def convert_weight_to_mxfp4_moe_kernel_format(
 
             fp4_dtype = torch.float4_e2m1fn_x2
             e8m0_dtype = torch.float8_e8m0fnu
-            # a8w4 uses gate/up-interleaved flydsl kernels;
-            # default a16w4 keeps the separated layout.
-            guinterleave = rocm_aiter_ops.is_fused_moe_situv2_a8w4_enabled()
+            # SiTUv2 flydsl uses separated gate/up layout (a4w4).
+            guinterleave = False
             w13 = rocm_aiter_ops.shuffle_weight_a16w4(
                 w13_weight.data.view(fp4_dtype), 16, guinterleave
             )
@@ -1605,6 +1595,14 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w13.is_shuffled = True
             w2.is_shuffled = True
             return (w13, w2, w13_scale, w2_scale, w13_bias, w2_bias)
+
+        import os
+
+        # Interleaved a16w4 only (DeepSeekV4 etc.). AITER uses this bound to
+        # pick bf16 vs fp8 activations when gate_mode is INTERLEAVE. SiTUv2
+        # a4w4 is separated and selects q_dtype_a independently, so the bound
+        # is unused on that path.
+        os.environ["AITER_BF16_FP8_MOE_BOUND"] = "0"
 
         from aiter.ops.shuffle import shuffle_scale as _shuf_s
         from aiter.ops.shuffle import shuffle_weight as _shuf_w
