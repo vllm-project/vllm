@@ -23,6 +23,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine import (
     EngineCoreEvent,
     EngineCoreEventType,
+    EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreRequest,
     FinishReason,
@@ -32,7 +33,7 @@ from vllm.v1.engine.output_processor import (
     RequestOutputCollector,
     RequestState,
 )
-from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+from vllm.v1.metrics.stats import IterationStats, PrefillStats, SchedulerStats
 
 
 @pytest.mark.parametrize("flat_logprobs", [False, True])
@@ -72,6 +73,7 @@ def _ref_convert_id_to_token(
 
     Returns:
       String representation of input token id
+
     """
     return tokenizer.decode([token_id]) or ""
 
@@ -169,6 +171,57 @@ def test_incremental_detokenization(
 
     assert output_processor.get_num_unfinished_requests() == 0
     assert not output_processor.has_unfinished_requests()
+
+
+@pytest.mark.parametrize("do_remote_prefill", [True, False])
+def test_remote_prefill_cached_tokens_override(do_remote_prefill: bool):
+    """P/D disaggregation: num_cached_tokens should report the P worker's
+    cache hits (passed via kv_transfer_params) instead of the local count,
+    which sees the KVs pulled from the remote prefill as a ~100% hit."""
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+
+    prompt_tokens = [1, 2, 3, 4, 5, 6, 7, 8]
+    kv_transfer_params = {
+        "do_remote_prefill": do_remote_prefill,
+        "remote_prefill_cached_tokens": 5,
+    }
+    request = EngineCoreRequest(
+        request_id="request-0-int",
+        external_req_id="request-0",
+        prompt_token_ids=prompt_tokens,
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(
+            detokenize=False,
+            extra_args={"kv_transfer_params": kv_transfer_params},
+        ),
+        pooling_params=None,
+    )
+    output_processor.add_request(request, prompt=None)
+
+    prefill_stats = PrefillStats()
+    prefill_stats.set(
+        num_prompt_tokens=len(prompt_tokens),
+        num_local_cached_tokens=0,
+        num_external_cached_tokens=len(prompt_tokens) - 1,
+    )
+    processed = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id="request-0-int",
+                new_token_ids=[42],
+                prefill_stats=prefill_stats,
+            )
+        ]
+    )
+    request_output = processed.request_outputs[0]
+    if do_remote_prefill:
+        assert request_output.num_cached_tokens == 5
+    else:
+        assert request_output.num_cached_tokens == len(prompt_tokens) - 1
 
 
 def test_request_stream_interval_raises_but_not_below_engine_default(
@@ -740,6 +793,7 @@ def test_stop_token(
         stop_token_type: "eos_token_id" for EOS, "stop_token_ids" for stop token
         ignore_eos: if True, EOS stops are disabled
         dummy_test_vectors: dummy engine core outputs and other data structures
+
     """
     model_id = dummy_test_vectors.tokenizer.name_or_path
     if model_id != "meta-llama/Llama-3.2-1B":
