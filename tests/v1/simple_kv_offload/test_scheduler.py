@@ -3006,7 +3006,7 @@ def _make_qsa_scheduler(
 
 def test_qsa_ring_group_is_never_stored_or_loaded() -> None:
     sched, gpu_pool = _make_qsa_scheduler()
-    assert sched.prefix_cacheable_group_ids == {0}
+    assert sched.prefix_cacheable_group_ids == (0,)
 
     num_blocks = 2
     req = make_request(num_blocks=num_blocks)

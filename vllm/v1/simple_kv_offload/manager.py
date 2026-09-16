@@ -170,7 +170,7 @@ class SimpleCPUOffloadScheduler:
         # block_size need not divide hash_block_size) hold no hashed blocks and
         # are never stored or loaded; skip them wherever blocks are mapped to
         # token ranges.
-        self.prefix_cacheable_group_ids = frozenset(
+        self.prefix_cacheable_group_ids = (
             self.cpu_kv_cache_config.prefix_cacheable_group_ids
         )
         self.kv_event_medium = MEDIUM_STORAGE if disk_capacity_bytes > 0 else MEDIUM_CPU
@@ -305,10 +305,8 @@ class SimpleCPUOffloadScheduler:
         """GPU blocks to keep available (free/offloaded) per step in lazy mode."""
         WATERMARK_RATIO = 1.0  # Reserve larger space to avoid running out of GPU blocks
         target = 0
-        for g in kv_cache_config.kv_cache_groups:
+        for g in kv_cache_config.prefix_cacheable_groups:
             spec = g.kv_cache_spec
-            if not spec.prefix_cacheable:
-                continue
             # Only full attention is sharded across DCP ranks; replicated specs
             # (mamba, sliding window, chunked-local) keep their own block size.
             block_size = spec.block_size * dcp_world_size_for_kv_cache_spec(
