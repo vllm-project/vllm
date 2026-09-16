@@ -34,8 +34,8 @@ if TYPE_CHECKING:
 
 
 class ClassifierWithReshape(nn.Module):
-    """
-    Token extraction has already been applied in `pooler.pooling`.
+    """Token extraction has already been applied in `pooler.pooling`.
+
     Add dim to match expected input shape of `classifier.forward`.
     """
 

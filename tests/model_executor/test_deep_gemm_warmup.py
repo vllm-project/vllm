@@ -71,7 +71,7 @@ def test_unstamped_and_mismatched_block_layers_are_skipped(monkeypatch) -> None:
 
 @pytest.mark.parametrize("is_bmm", [False, True])
 def test_kernel_registers_itself_as_warmup_provider(is_bmm) -> None:
-    """bmm layers bypass the kernel at runtime, so they must not be warmed."""
+    """Bmm layers bypass the kernel at runtime, so they must not be warmed."""
     kernel = object.__new__(DeepGemmFp8BlockScaledMMKernel)
     kernel.is_deep_gemm_supported = False
     layer = torch.nn.Module()
