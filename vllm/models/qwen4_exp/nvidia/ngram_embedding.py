@@ -40,6 +40,7 @@ from vllm.transformers_utils.configs.qwen4_exp import (
     Qwen4ExpTextConfig,
 )
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import round_up
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
@@ -690,7 +691,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             persistent=True,
         )
         divisor = int(config.make_ngram_vocab_size_divisible_by)
-        padded_vocab_size = ((total_vocab_size + divisor - 1) // divisor) * divisor
+        padded_vocab_size = round_up(total_vocab_size, divisor)
         embedding_prefix = f"{prefix}.ngram_embedding"
         embedding_quant_method = Qwen4ExpPLEEmbeddingMethod.from_quant_config(
             quant_config,
