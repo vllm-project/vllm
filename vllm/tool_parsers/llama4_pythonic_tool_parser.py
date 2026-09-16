@@ -25,6 +25,8 @@ from vllm.tool_parsers.utils import (
     compute_tool_delta,
     handle_single_tool,
     make_valid_python,
+    partial_tag_overlap,
+    split_pythonic_tool_calls,
 )
 
 logger = init_logger(__name__)
@@ -44,7 +46,7 @@ class Llama4PythonicToolParser(ToolParser):
     # Llama3.2 models more reliable.
 
     TOOL_CALL_REGEX = re.compile(
-        r"\[([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*,\s*)*([a-zA-Z]+\w*=.*\s)?\),\s*)*([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*,\s*)*([a-zA-Z]+\w*=.*\s*)?\)\s*)+\]",
+        r"\[([a-zA-Z_]\w*\(([a-zA-Z_]\w*=.*,\s*)*([a-zA-Z_]\w*=.*\s)?\),\s*)*([a-zA-Z_]\w*\(([a-zA-Z_]\w*=.*,\s*)*([a-zA-Z_]\w*=.*\s*)?\)\s*)+\]",
         re.DOTALL,
     )
 
@@ -54,6 +56,7 @@ class Llama4PythonicToolParser(ToolParser):
         tools: list[Tool] | None = None,
     ):
         super().__init__(tokenizer, tools)
+        self._streamed_trailing_text = ""
 
     # Rename for readability. This is NOT a tool id.
     @property
@@ -77,11 +80,15 @@ class Llama4PythonicToolParser(ToolParser):
             model_output = model_output[len("<|python_start|>") :]
             model_output = model_output.replace("<|python_end|>", "")
 
+        split = split_pythonic_tool_calls(model_output)
+        tool_call_text, trailing_text = split if split else (model_output, "")
+
         is_tool_call_pattern = False
         try:
             is_tool_call_pattern = (
                 self.TOOL_CALL_REGEX.match(
-                    model_output, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+                    tool_call_text,
+                    timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS,
                 )
                 is not None
             )
@@ -97,7 +104,7 @@ class Llama4PythonicToolParser(ToolParser):
             )
 
         try:
-            module = ast.parse(model_output)
+            module = ast.parse(tool_call_text)
             parsed = getattr(module.body[0], "value", None)
             if isinstance(parsed, ast.List) and all(
                 isinstance(e, ast.Call) for e in parsed.elts
@@ -108,7 +115,7 @@ class Llama4PythonicToolParser(ToolParser):
                         handle_single_tool(e)  # type: ignore
                         for e in parsed.elts
                     ],
-                    content=None,
+                    content=trailing_text.lstrip() or None,
                 )
             else:
                 raise UnexpectedAstError("Tool output must be a list of function calls")
@@ -140,7 +147,14 @@ class Llama4PythonicToolParser(ToolParser):
                 current_text = current_text[len("<|python_start|>") :]
             if current_text.endswith("<|python_end|>"):
                 current_text = current_text[: current_text.rfind("<|python_end|>")]
-            valid_and_added_text = make_valid_python(current_text)
+            split = split_pythonic_tool_calls(current_text)
+            tool_call_text, trailing_text = split if split else (current_text, "")
+            trailing_text = trailing_text.replace("<|python_end|>", "")
+            trailing_text = trailing_text[
+                : len(trailing_text)
+                - partial_tag_overlap(trailing_text, "<|python_end|>")
+            ]
+            valid_and_added_text = make_valid_python(tool_call_text)
             if valid_and_added_text is None:
                 return None
             valid_text, added_text = valid_and_added_text
@@ -198,8 +212,14 @@ class Llama4PythonicToolParser(ToolParser):
             if tool_deltas and not self.prev_tool_call_arr:
                 self.prev_tool_call_arr = [{"arguments": {}}]
 
+            trailing_text = trailing_text.lstrip()
+            content = trailing_text[len(self._streamed_trailing_text) :]
+            self._streamed_trailing_text = trailing_text
+
             if tool_deltas:
-                return DeltaMessage(tool_calls=tool_deltas)
+                return DeltaMessage(tool_calls=tool_deltas, content=content or None)
+            elif content:
+                return DeltaMessage(content=content)
             elif not added_text and self.current_tool_id > 0:
                 # Return an empty DeltaMessage once the tool calls are all done
                 # so that finish_reason gets set.

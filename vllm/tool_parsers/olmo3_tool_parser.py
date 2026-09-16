@@ -48,7 +48,7 @@ class Olmo3PythonicToolParser(ToolParser):
     # Llama3.2 models more reliable.
 
     TOOL_CALL_REGEX = re.compile(
-        r"\[([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*,\s*)*([a-zA-Z]+\w*=.*\s)?\),\s*)*([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*,\s*)*([a-zA-Z]+\w*=.*\s*)?\)\s*)+\]",
+        r"\[([a-zA-Z_]\w*\(([a-zA-Z_]\w*=.*,\s*)*([a-zA-Z_]\w*=.*\s)?\),\s*)*([a-zA-Z_]\w*\(([a-zA-Z_]\w*=.*,\s*)*([a-zA-Z_]\w*=.*\s*)?\)\s*)+\]",
         re.DOTALL,
     )
 

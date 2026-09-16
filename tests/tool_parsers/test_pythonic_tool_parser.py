@@ -229,3 +229,59 @@ def test_regex_timeout_handling(streaming: bool, default_tokenizer: TokenizerLik
         assert content == fake_problematic_input
         assert len(tool_calls) == 0
         mock_regex.match.assert_called_once()
+
+
+TRAILING_TEXT_CASES = [
+    pytest.param(
+        f"[{SIMPLE_FUNCTION_OUTPUT}] Let me check that for you.",
+        "Let me check that for you.",
+        id="same_line",
+    ),
+    pytest.param(
+        f"[{SIMPLE_FUNCTION_OUTPUT}]\n\nI'll wait for the result.",
+        "I'll wait for the result.",
+        id="after_blank_line",
+    ),
+]
+
+
+@pytest.mark.parametrize("streaming", [True, False])
+@pytest.mark.parametrize("model_output, expected_content", TRAILING_TEXT_CASES)
+def test_tool_call_followed_by_text(
+    streaming: bool,
+    model_output: str,
+    expected_content: str,
+    default_tokenizer: TokenizerLike,
+):
+    """Both modes return the call and the text after it."""
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("pythonic")(
+        default_tokenizer
+    )
+
+    content, tool_calls = run_tool_extraction(
+        tool_parser, model_output, streaming=streaming
+    )
+
+    assert content == expected_content
+    assert len(tool_calls) == 1
+    assert tool_calls[0].function == SIMPLE_FUNCTION_CALL
+
+
+@pytest.mark.parametrize("streaming", [True, False])
+def test_leading_underscore_identifiers(
+    streaming: bool, default_tokenizer: TokenizerLike
+):
+    """Leading-underscore names are valid Python and JSON Schema names."""
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("pythonic")(
+        default_tokenizer
+    )
+
+    content, tool_calls = run_tool_extraction(
+        tool_parser, "[_lookup(_id='abc', limit=5)]", streaming=streaming
+    )
+
+    assert content is None
+    assert len(tool_calls) == 1
+    assert tool_calls[0].function == FunctionCall(
+        name="_lookup", arguments='{"_id": "abc", "limit": 5}'
+    )
