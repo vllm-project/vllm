@@ -2424,7 +2424,7 @@ def test_packed_groups_glm5_like_hybrid():
             num_kv_heads=1,
             head_size=576,
             dtype=torch.bfloat16,
-            kernel_page_rows=32,  # TRT-LLM sparse MLA re-pages in 32-row pages
+            block_stride_alignment=32 * 576 * 2,
         )
         kv_cache_spec[f"layers.{i}.indexer"] = MLAAttentionSpec(
             block_size=block_size,
@@ -2432,6 +2432,7 @@ def test_packed_groups_glm5_like_hybrid():
             head_size=132,
             dtype=torch.uint8,
             tokens_per_state=kpool,
+            block_stride_alignment=64 * 132,
         )
         kv_cache_spec[f"layers.{i}.tail"] = CircularBufferSpec(
             block_size=kpool,
@@ -2521,7 +2522,7 @@ def test_get_kv_cache_capacity_after_scheduler_unwrap():
             kv_cache_spec[f"layers.{i}.linear_attn"] = new_mamba_spec()
 
     groups = kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_spec)
-    bytes_per_block = kv_cache_utils._pool_bytes_per_block(vllm_config, groups)
+    bytes_per_block = kv_cache_utils._get_kv_cache_bytes_per_block(groups)
     kv_cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
         vllm_config, groups, bytes_per_block * 100 + 1
     )
@@ -2538,7 +2539,7 @@ def test_get_kv_cache_capacity_after_scheduler_unwrap():
     expected_max_mem = kv_cache_utils._max_memory_usage_bytes_from_groups(
         vllm_config, unwrapped_groups
     )
-    expected_pool = kv_cache_utils._pool_bytes_per_block(vllm_config, unwrapped_groups)
+    expected_pool = kv_cache_utils._get_kv_cache_bytes_per_block(unwrapped_groups)
     expected_blocks_per_request = (
         expected_max_mem + expected_pool - 1
     ) // expected_pool

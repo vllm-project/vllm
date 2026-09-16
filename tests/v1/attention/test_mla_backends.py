@@ -220,6 +220,7 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
     layer = SimpleNamespace(
         kv_cache_dtype=cache_dtype,
         head_size=576,
+        attn_backend=SimpleNamespace(get_kernel_page_rows=lambda: 32),
         indexer=None,
         non_causal_multi_token_decode=False,
         sliding_window=None,
@@ -233,6 +234,7 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
     assert isinstance(spec, MLAAttentionSpec)
     assert spec.cache_dtype_str == cache_dtype
     assert spec.kv_quant_mode == expected_quant_mode
+    assert spec.block_stride_alignment == 32 * spec.state_content_size_bytes
     if cache_dtype == "fp8_ds_mla":
         assert spec.page_size_bytes == 64 * 656
 

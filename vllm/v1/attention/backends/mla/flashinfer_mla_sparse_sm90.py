@@ -153,7 +153,7 @@ class FlashInferMLASparseSM90Backend(AttentionBackend):
 
     @staticmethod
     def get_kernel_page_rows() -> int | None:
-        # page_size=1: rows are the page table, so any block stride works.
+        # Rows are the page table; only whole-row block stride alignment is needed.
         return 1
 
 
