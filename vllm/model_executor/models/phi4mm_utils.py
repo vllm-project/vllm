@@ -1462,8 +1462,7 @@ class NemoConvSubsampling(torch.nn.Module):
 
     def conv_split_by_channel(self, x: Tensor) -> Tensor:
         """For dw convs, tries to split input by time, run conv and concat
-        results
-        """
+        results"""
         x = self.conv[0](x)  # full conv2D
         x = self.conv[1](x)  # activation
 

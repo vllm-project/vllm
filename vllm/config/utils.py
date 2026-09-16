@@ -84,8 +84,7 @@ def config(
 
 def get_field(cls: ConfigType, name: str) -> Any:
     """Get the default factory field of a dataclass by name. Used for getting
-    default factory fields in `EngineArgs`.
-    """
+    default factory fields in `EngineArgs`."""
     if not is_dataclass(cls):
         raise TypeError("The given class is not a dataclass.")
     try:
@@ -122,8 +121,7 @@ def is_init_field(cls: ConfigType, name: str) -> bool:
 def replace(dataclass_instance: ConfigT, /, **kwargs) -> ConfigT:
     """Like [`dataclasses.replace`](https://docs.python.org/3/library/dataclasses.html#dataclasses.replace),
     but compatible with Pydantic dataclasses which use `pydantic.fields.Field` instead
-    of `dataclasses.field`
-    """
+    of `dataclasses.field`"""
     cls = type(dataclass_instance)
     dataclass_dict = dataclass_instance.__dict__
     dataclass_dict = {k: v for k, v in dataclass_dict.items() if is_init_field(cls, k)}

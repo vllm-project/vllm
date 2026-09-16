@@ -922,8 +922,7 @@ class TestFlashInferTopkToppRobustness:
 
     def _make_logits(self, pattern: str) -> torch.Tensor:
         """Build (BATCH, VOCAB) logits with `pattern` applied to row 0
-        (rows 1..B-1 stay clean so we can detect cross-row corruption).
-        """
+        (rows 1..B-1 stay clean so we can detect cross-row corruption)."""
         logits = (
             torch.randn(
                 self.BATCH,

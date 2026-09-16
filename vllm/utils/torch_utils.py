@@ -230,8 +230,7 @@ def _cgroup_cpu_limit() -> float | None:
 
 def available_cpu_count() -> int:
     """CPUs actually usable by this process: scheduling affinity capped by
-    the cgroup CPU quota (unlike `os.cpu_count()`, which is quota-blind).
-    """
+    the cgroup CPU quota (unlike `os.cpu_count()`, which is quota-blind)."""
     if sys.platform != "linux":
         return os.cpu_count() or 1
     count = len(os.sched_getaffinity(0))
