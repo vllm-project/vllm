@@ -39,10 +39,6 @@ def verify_cpu_config(vllm_config: "VllmConfig") -> None:
             "Qwen4Exp on CPU requires Model Runner V2; remove "
             "VLLM_USE_V2_MODEL_RUNNER=0."
         )
-    if vllm_config.model_config.enforce_eager:
-        raise ValueError(
-            "Qwen4Exp on CPU requires compiled model execution; remove --enforce-eager."
-        )
     if not has_active_triton_cpu_backend():
         raise ValueError(
             "Qwen4Exp on CPU requires Triton with an active CPU backend. "
