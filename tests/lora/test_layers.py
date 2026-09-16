@@ -4,6 +4,7 @@
 import random
 from copy import deepcopy
 from dataclasses import dataclass
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -31,6 +32,7 @@ from vllm.lora.layers import (
 )
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.punica_wrapper import get_punica_wrapper
+from vllm.lora.utils import from_layer
 from vllm.model_executor.layers.fusion.quant_activation import (
     get_input_quant_key,
 )
@@ -1751,6 +1753,145 @@ def test_deepseek_fused_qkv_a_proj_lora_preserves_base_forward(
     merged_result = merged_layer(torch.cat(inputs))[0]
 
     torch.testing.assert_close(lora_result, merged_result, rtol=rtol, atol=atol)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA grouped projection")
+@pytest.mark.parametrize("groups", [1, 2, 8])
+@pytest.mark.parametrize("fp8", [False, True])
+def test_grouped_o_projection_applies_each_tokens_adapter(
+    default_vllm_config, dist_init, groups, fp8
+):
+    """The fused base path must include the matching group's nonzero LoRA-B."""
+    from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
+        fused_inv_rope_fp8_quant,
+    )
+    from vllm.models.deepseek_v4.nvidia.ops.o_proj import deep_gemm_fp8_o_proj
+
+    torch.manual_seed(0)
+    tokens, columns, outputs, rank = 17, 256, 128, 8
+    config = LoRAConfig(max_loras=2, max_lora_rank=rank, lora_dtype=torch.bfloat16)
+    with torch.device("cuda"), torch.inference_mode():
+        base = ColumnParallelLinear(
+            columns,
+            groups * outputs,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            return_bias=False,
+        )
+        base.weight.copy_(torch.randn_like(base.weight) / columns**0.5)
+        if fp8:
+            base.weight = torch.nn.Parameter(
+                base.weight.view(groups, outputs, columns).to(torch.float8_e4m3fn),
+                requires_grad=False,
+            )
+            base.weight_scale = torch.nn.Parameter(
+                torch.ones(groups, 1, 2), requires_grad=False
+            )
+        layer = from_layer(base, 2, config, [])
+        punica = get_punica_wrapper(
+            tokens, tokens, base.weight.device, lora_config=config
+        )
+        layer.set_mapping(punica)
+        ids = [i % 3 for i in range(tokens)]
+        punica.update_metadata(LoRAMapping(ids, [1], is_prefill=True), [1, 2], 3, 128)
+        o = torch.randn(tokens, groups * 2, 128, dtype=torch.bfloat16)
+        positions = torch.arange(tokens)
+        angles = torch.randn(tokens, 32)
+        cache = torch.cat((angles.cos(), angles.sin()), dim=1)
+        kwargs = dict(
+            n_groups=groups,
+            heads_per_group=2,
+            nope_dim=64,
+            rope_dim=64,
+            o_lora_rank=outputs,
+            einsum_recipe=(1, 128, 128),
+            tma_aligned_scales=False,
+        )
+        baseline = deep_gemm_fp8_o_proj(
+            o, positions, cache, base, torch.nn.Identity(), **kwargs
+        )
+        expected = baseline.clone().view(tokens, groups, outputs)
+        x, _ = fused_inv_rope_fp8_quant(
+            o, positions, cache, groups, 2, nope_dim=64, rope_dim=64, quantize=False
+        )
+        for slot in range(2):
+            a = torch.randn(rank, columns, dtype=torch.bfloat16) / columns**0.5
+            b = torch.randn(groups * outputs, rank, dtype=torch.bfloat16) / 8
+            layer.set_lora(slot, a, b)
+            delta = torch.bmm(
+                F.linear(x, a).transpose(0, 1),
+                b.view(groups, outputs, rank).transpose(1, 2),
+            ).transpose(0, 1)
+            active = torch.tensor([value == slot + 1 for value in ids])
+            expected[active] += delta[active]
+        actual = deep_gemm_fp8_o_proj(
+            o, positions, cache, layer, torch.nn.Identity(), **kwargs
+        )
+        torch.testing.assert_close(actual, expected.flatten(1), rtol=0.02, atol=0.02)
+        inactive = torch.tensor([value == 0 for value in ids])
+        torch.testing.assert_close(actual[inactive], baseline[inactive], rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA compressor projection")
+@pytest.mark.parametrize("has_gate", [False, True])
+@pytest.mark.parametrize("aux_stream", [False, True])
+def test_compressor_projection_applies_lora_with_fp32_output(
+    default_vllm_config, dist_init, has_gate, aux_stream
+):
+    """Direct FP32-output GEMM must retain adapters for both compressed KV and gate."""
+    from vllm.models.deepseek_v4_1.attention import DeepseekV4Attention
+
+    torch.manual_seed(1)
+    tokens, columns, outputs, rank = 17, 256, 128, 8
+    config = LoRAConfig(max_loras=2, max_lora_rank=rank, lora_dtype=torch.bfloat16)
+    with torch.device("cuda"), torch.inference_mode():
+        sizes = [outputs] * (2 if has_gate else 1)
+        base = MergedColumnParallelLinear(
+            columns,
+            sizes,
+            bias=False,
+            return_bias=False,
+            disable_tp=True,
+            params_dtype=torch.bfloat16,
+        )
+        base.weight.copy_(torch.randn_like(base.weight) / columns**0.5)
+        layer = from_layer(base, 2, config, ["wkv", "wgate"])
+        punica = get_punica_wrapper(
+            tokens, tokens, base.weight.device, lora_config=config
+        )
+        layer.set_mapping(punica)
+        ids = [i % 3 for i in range(tokens)]
+        punica.update_metadata(LoRAMapping(ids, [1], is_prefill=True), [1, 2], 3, 128)
+        x = torch.randn(tokens, columns, dtype=torch.bfloat16)
+        baseline = torch.mm(x, base.weight.T, out_dtype=torch.float32)
+        expected = baseline.clone()
+        for slot in range(2):
+            a = [
+                torch.randn(rank, columns, dtype=torch.bfloat16) / columns**0.5
+                for _ in sizes
+            ]
+            b = [torch.randn(outputs, rank, dtype=torch.bfloat16) / 8 for _ in sizes]
+            layer.set_lora(
+                slot, a + ([] if has_gate else [None]), b + ([] if has_gate else [None])
+            )
+            active = torch.tensor([value == slot + 1 for value in ids])
+            for i in range(len(sizes)):
+                delta = F.linear(F.linear(x, a[i]), b[i]).float()
+                expected[active, i * outputs : (i + 1) * outputs] += delta[active]
+        attention = SimpleNamespace(
+            aux_stream_list=[torch.cuda.Stream(), torch.cuda.Stream()]
+            if aux_stream
+            else None,
+            ln_events=[torch.cuda.Event() for _ in range(3)],
+            compressor=SimpleNamespace(fused_wkv_wgate=layer),
+            indexer=None,
+            _fused_wqa_wkv_gemm=lambda values: values,
+        )
+        _, actual, _ = DeepseekV4Attention._run_parallel_input_projections(attention, x)
+        assert actual.dtype == torch.float32
+        torch.testing.assert_close(actual, expected, rtol=0.02, atol=0.02)
+        inactive = torch.tensor([value == 0 for value in ids])
+        torch.testing.assert_close(actual[inactive], baseline[inactive], rtol=0, atol=0)
 
 
 @torch.inference_mode()
