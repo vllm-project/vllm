@@ -16,7 +16,6 @@ from vllm.model_executor.models.gemma3n import (
 )
 from vllm.model_executor.models.gemma4 import (
     Gemma4ForCausalLM,
-    Gemma4Model,
     _gemma4_layer_weights_mapper,
 )
 
@@ -82,7 +81,7 @@ def test_gemma4_attention_mapper() -> None:
         ("model.layers.1.self_attn.v_proj.weight", torch.empty(0)),
     ]
 
-    mapper = Gemma4Model.hf_to_vllm_mapper | _gemma4_layer_weights_mapper(config)
+    mapper = _gemma4_layer_weights_mapper(config)
     mapped = list(mapper.apply(weights))
 
     assert [(name, getattr(w, "shard_id", None)) for name, w in mapped] == [
@@ -102,9 +101,9 @@ def test_gemma4_attention_mapper() -> None:
 
 
 @pytest.mark.cpu_test
-def test_gemma4_expert_names_map_onto_moe() -> None:
-    """HF keeps experts and per_expert_scale on the layer/router; vLLM nests
-    them under `moe`, so fused and per-expert tensors reach RoutedExperts."""
+def test_gemma4_expert_names_strip_language_model_prefix() -> None:
+    """The text-only path reuses the conditional wrapper's checkpoint naming,
+    so fused and per-expert tensors reach the experts under `model.*`."""
     prefix = "model.language_model.layers.0."
     weights = [
         (prefix + name, torch.empty(0))
@@ -121,9 +120,9 @@ def test_gemma4_expert_names_map_onto_moe() -> None:
     ]
 
     assert mapped == [
-        ("model.layers.0.moe.experts.gate_up_proj", None),
-        ("model.layers.0.moe.experts.3.down_proj.weight_packed", None),
-        ("model.layers.0.moe.per_expert_scale", None),
+        ("model.layers.0.experts.gate_up_proj", None),
+        ("model.layers.0.experts.3.down_proj.weight_packed", None),
+        ("model.layers.0.router.per_expert_scale", None),
     ]
 
 
