@@ -948,7 +948,7 @@ def test_structured_output_batched_with_non_structured_outputs_requests(
         prompts = [structured_outputs_prompt, non_structured_outputs_prompt]
         sampling_params = [
             SamplingParams(
-                temperature=1.0,
+                temperature=0,
                 max_tokens=400,
                 structured_outputs=StructuredOutputsParams(json=sample_json_schema),
             ),
