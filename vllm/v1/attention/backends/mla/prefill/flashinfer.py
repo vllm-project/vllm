@@ -38,11 +38,30 @@ _DEFAULT_NUM_CHUNKS = 32
 class FlashInferPrefillBackend(MLAPrefillBackend):
     """FlashInfer backend for MLA prefill."""
 
+    # The wrapper is planned with head_dim_qk = qk_nope + qk_rope and
+    # head_dim_vo = v_head_dim, so what matters is the (qk, vo) pair the
+    # underlying kernel serves. With backend="auto" on Blackwell that is
+    # {(128,128), (192,128), (256,256)}: CUTLASS covers the first two and cuDNN
+    # adds (256,256). Listed by MLA dims rather than by (qk, vo) because that is
+    # what the selector compares against.
     supported_mla_dimensions: ClassVar[list[MLADimensions]] = [
+        # DeepSeek-V3 family -> (192, 128)
         MLADimensions(
             qk_nope_head_dim=128,
             qk_rope_head_dim=64,
             v_head_dim=128,
+        ),
+        # GLM-5.3 / Glm5Next NoPE MLA -> (256, 256), cuDNN only
+        MLADimensions(
+            qk_nope_head_dim=256,
+            qk_rope_head_dim=0,
+            v_head_dim=256,
+        ),
+        # Rope-carrying variant of the same (256, 256) wrapper shape
+        MLADimensions(
+            qk_nope_head_dim=192,
+            qk_rope_head_dim=64,
+            v_head_dim=256,
         ),
     ]
 
@@ -101,7 +120,7 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
             for _ in range(len(self._prefill_chunks), num_chunks):
                 self._prefill_chunks.append(
                     BatchPrefillWithRaggedKVCacheWrapper(
-                        workspace_buffer, "NHD", backend="cutlass"
+                        workspace_buffer, "NHD", backend="auto"
                     )
                 )
 
@@ -145,7 +164,7 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
         has_context = prefill_metadata.chunked_context is not None
         if self._prefill_main is None:
             self._prefill_main = BatchPrefillWithRaggedKVCacheWrapper(
-                self._workspace_buffer, "NHD", backend="cutlass"
+                self._workspace_buffer, "NHD", backend="auto"
             )
             self._ensure_chunks(_DEFAULT_NUM_CHUNKS, self._workspace_buffer)
 
