@@ -20,7 +20,6 @@ from vllm.distributed import (
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
-    mhc_fused_post_pre_delayed_tilelang,
     mhc_post_tilelang,
     mhc_pre_delayed_tilelang,
 )
@@ -79,6 +78,7 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 from ..common.engram import EngramLayout, NgramHashState
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
 from .engram import Engram, gather_engram_hashes
+from .ops.mega_mhc import mhc_shifted_post_pre
 
 if typing.TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
@@ -403,25 +403,23 @@ class DeepseekV4DecoderLayer(nn.Module):
         else:
             # The collapse already reads the post-mapped streams, so the mean
             # aux consumers want comes out of the same kernel.
-            residual, post_mix, res_mix, x, attn_pre, aux = (
-                mhc_fused_post_pre_delayed_tilelang(
-                    x,
-                    residual,
-                    post_mix,
-                    res_mix,
-                    self.hc_attn_fn,
-                    self.hc_attn_scale,
-                    self.hc_attn_base,
-                    self.rms_norm_eps,
-                    self.hc_eps,
-                    self.hc_eps,
-                    self.hc_post_alpha,
-                    self.hc_sinkhorn_iters,
-                    pre_mix=pre_mix,
-                    norm_weight=self.attn_norm.weight,
-                    norm_eps=self.attn_norm.variance_epsilon,
-                    capture_aux=capture_previous_aux,
-                )
+            residual, post_mix, res_mix, x, attn_pre, aux = mhc_shifted_post_pre(
+                x,
+                residual,
+                post_mix,
+                res_mix,
+                self.hc_attn_fn,
+                self.hc_attn_scale,
+                self.hc_attn_base,
+                self.rms_norm_eps,
+                self.hc_eps,
+                self.hc_eps,
+                self.hc_post_alpha,
+                self.hc_sinkhorn_iters,
+                pre_mix=pre_mix,
+                norm_weight=self.attn_norm.weight,
+                norm_eps=self.attn_norm.variance_epsilon,
+                capture_aux=capture_previous_aux,
             )
             if capture_previous_aux:
                 previous_aux = aux
@@ -433,24 +431,22 @@ class DeepseekV4DecoderLayer(nn.Module):
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
 
-        residual, post_mix, res_mix, x, ffn_pre, _ = (
-            mhc_fused_post_pre_delayed_tilelang(
-                x,
-                residual,
-                post_mix,
-                res_mix,
-                self.hc_ffn_fn,
-                self.hc_ffn_scale,
-                self.hc_ffn_base,
-                self.rms_norm_eps,
-                self.hc_eps,
-                self.hc_eps,
-                self.hc_post_alpha,
-                self.hc_sinkhorn_iters,
-                pre_mix=attn_pre,
-                norm_weight=self.ffn_norm.weight,
-                norm_eps=self.ffn_norm.variance_epsilon,
-            )
+        residual, post_mix, res_mix, x, ffn_pre, _ = mhc_shifted_post_pre(
+            x,
+            residual,
+            post_mix,
+            res_mix,
+            self.hc_ffn_fn,
+            self.hc_ffn_scale,
+            self.hc_ffn_base,
+            self.rms_norm_eps,
+            self.hc_eps,
+            self.hc_eps,
+            self.hc_post_alpha,
+            self.hc_sinkhorn_iters,
+            pre_mix=attn_pre,
+            norm_weight=self.ffn_norm.weight,
+            norm_eps=self.ffn_norm.variance_epsilon,
         )
         x = self.ffn(x, input_ids)
         return x, residual, post_mix, res_mix, ffn_pre, previous_aux
