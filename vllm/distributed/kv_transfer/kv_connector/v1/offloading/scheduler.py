@@ -184,6 +184,10 @@ class SchedulerOffloadConfig(NamedTuple):
     alignment_tokens: int | None = None
     retention_interval: int | None = None
     dcp_world_size: int = 1
+    # Full-attention block size in tokens. A partial tail lies inside the block
+    # that follows the last complete chunk hit. 0 when partial tails are
+    # unsupported.
+    partial_tail_window: int = 0
 
     @classmethod
     def from_spec(
@@ -293,26 +297,47 @@ class SchedulerOffloadConfig(NamedTuple):
                 )
             )
         kv_group_configs = tuple(kv_group_configs_list)
-        group_block_sizes = {config.tokens_per_block for config in kv_group_configs}
         has_partial_recurrent_group = any(
             config.requires_cow_source
             and config.tokens_per_block > spec.tokens_per_hash
             for config in kv_group_configs
         )
-        # Partial tails currently require one physical block per offload chunk
-        # and uniform, non-windowed groups so one boundary identifies every
-        # group's source. EAGLE and DCP need additional hand-off semantics.
+        # Partial tails require one physical block per offload chunk and only
+        # full-attention or recurrent (cow-source) groups, so that a single
+        # boundary identifies every group's source block. Group block sizes may
+        # differ -- under DCP the full-attention offload block is dcp x the
+        # attention block while recurrent blocks stay unsharded -- as long as
+        # every recurrent block divides the full-attention block and hash
+        # boundaries split evenly across DCP ranks. EAGLE needs additional
+        # hand-off semantics for its volatile draft tail.
+        dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
+        full_attention_block_sizes = {
+            config.tokens_per_block
+            for config in kv_group_configs
+            if config.sliding_window_size_in_chunks is None
+        }
+        # tokens_per_block of an attention group is already scaled by DCP, so
+        # this is the full-attention offload chunk size.
+        partial_tail_window = (
+            next(iter(full_attention_block_sizes))
+            if len(full_attention_block_sizes) == 1
+            else None
+        )
         supports_partial_tail = (
             spec.blocks_per_chunk == 1
-            and len(group_block_sizes) == 1
+            and partial_tail_window is not None
             and has_partial_recurrent_group
             and all(
                 config.sliding_window_size_in_chunks is None
-                or config.requires_cow_source
+                or (
+                    config.requires_cow_source
+                    and partial_tail_window % config.tokens_per_block == 0
+                    and config.tokens_per_block % spec.tokens_per_hash == 0
+                )
                 for config in kv_group_configs
             )
             and not any(config.is_eagle_group for config in kv_group_configs)
-            and vllm_config.parallel_config.decode_context_parallel_size == 1
+            and spec.tokens_per_hash % dcp_world_size == 0
         )
 
         if retention_interval is not None:
@@ -341,7 +366,12 @@ class SchedulerOffloadConfig(NamedTuple):
             supports_partial_tail=supports_partial_tail,
             alignment_tokens=alignment_tokens,
             retention_interval=retention_interval,
-            dcp_world_size=vllm_config.parallel_config.decode_context_parallel_size,
+            dcp_world_size=dcp_world_size,
+            partial_tail_window=(
+                partial_tail_window
+                if supports_partial_tail and partial_tail_window is not None
+                else 0
+            ),
         )
 
 
@@ -594,11 +624,7 @@ class OffloadingConnectorScheduler:
         self._mamba_align_size: int | None = resolve_mamba_align_size(
             spec, kv_cache_config
         )
-        self._partial_tail_block_size = (
-            self.config.kv_group_configs[0].tokens_per_block
-            if self.config.supports_partial_tail
-            else 0
-        )
+        self._partial_tail_window = self.config.partial_tail_window
         self._cow_source_groups = frozenset(
             config.group_idx
             for config in self.config.kv_group_configs
@@ -974,7 +1000,7 @@ class OffloadingConnectorScheduler:
         local_tokens = req_status.num_locally_computed_tokens
         complete_boundary = local_tokens + complete_hit
         tokens_per_hash = self.config.tokens_per_hash
-        block_end = complete_boundary + self._partial_tail_block_size
+        block_end = complete_boundary + self._partial_tail_window
         max_boundary = min(req_status.req.num_prompt_tokens - 1, block_end - 1)
         if max_num_new_tokens is not None:
             max_boundary = min(max_boundary, local_tokens + max_num_new_tokens)
@@ -1348,9 +1374,9 @@ class OffloadingConnectorScheduler:
 
         for req_id, entries in handoffs.items():
             entries = [
-                entry
-                for entry in entries
-                if entry[2] % self._partial_tail_block_size != 0
+                (group_idx, block_id, boundary)
+                for group_idx, block_id, boundary in entries
+                if boundary % self._partial_tail_window != 0
             ]
             if not entries:
                 continue
@@ -1377,12 +1403,19 @@ class OffloadingConnectorScheduler:
             cow_blocks = {group_idx: block_id for group_idx, block_id, _ in entries}
             assert self._cow_source_groups.issubset(cow_blocks)
 
-            assert boundary % self._partial_tail_block_size != 0
-            block_idx = boundary // self._partial_tail_block_size
+            assert boundary % self._partial_tail_window != 0
+            # Each group addresses the block containing the boundary in its own
+            # block size; recurrent groups supply the CoW block from the
+            # hand-off instead.
+            group_block_idx = [
+                boundary // group.tokens_per_block
+                for group in self.config.kv_group_configs
+            ]
             if any(
                 group.group_idx not in self._cow_source_groups
-                and block_idx >= len(group_states[group.group_idx].block_ids)
-                for group in self.config.kv_group_configs
+                and group_block_idx[config_idx]
+                >= len(group_states[group.group_idx].block_ids)
+                for config_idx, group in enumerate(self.config.kv_group_configs)
             ):
                 continue
             keys = [
@@ -1394,8 +1427,10 @@ class OffloadingConnectorScheduler:
             block_ids = [
                 cow_blocks[group.group_idx]
                 if group.group_idx in self._cow_source_groups
-                else group_states[group.group_idx].block_ids[block_idx]
-                for group in self.config.kv_group_configs
+                else group_states[group.group_idx].block_ids[
+                    group_block_idx[config_idx]
+                ]
+                for config_idx, group in enumerate(self.config.kv_group_configs)
             ]
             assert all(block_id != 0 for block_id in block_ids)
 
@@ -1418,10 +1453,10 @@ class OffloadingConnectorScheduler:
             accepted_groups = [group_by_key[key] for key in store_output.keys_to_store]
             group_sizes = [0] * len(self.config.kv_group_configs)
             block_indices = [0] * len(self.config.kv_group_configs)
-            for group_idx in accepted_groups:
-                group_sizes[group_idx] = 1
-                block_indices[group_idx] = block_idx
-            source_blocks = [block_ids[group_idx] for group_idx in accepted_groups]
+            for config_idx in accepted_groups:
+                group_sizes[config_idx] = 1
+                block_indices[config_idx] = group_block_idx[config_idx]
+            source_blocks = [block_ids[config_idx] for config_idx in accepted_groups]
 
             job_id = self._generate_job_id()
             req_status.transfer_jobs.add(job_id)
