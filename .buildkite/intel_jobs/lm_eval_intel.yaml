@@ -11,6 +11,7 @@ steps:
     gpu: 1+
     mem: 24+
   no_plugin: true
+  optional: true
   working_dir: "."
   env:
     REGISTRY: "public.ecr.aws/q9t5s3a7"
