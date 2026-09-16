@@ -3234,5 +3234,20 @@ class Scheduler(SchedulerInterface):
 
         # Mark async requests with KV load failures for retry once loading completes
         self.failed_recving_kv_req_ids |= async_failed_req_ids
+        if sync_failed_req_ids and len(self.kv_cache_config.kv_cache_groups) > 1:
+            # A hybrid request recomputes in full, which a running request
+            # cannot do in place: with overlapping batches the next step is
+            # already scheduled, so its sliding-window and Mamba groups have
+            # swapped blocks they no longer need for the null block, and its
+            # in-flight output was computed on the failed load. Preempt it
+            # instead: re-admission starts over on fresh blocks and drops that
+            # output. Its blocks leave the prefix cache first, as the loaded
+            # ones would otherwise be hit again.
+            self.kv_cache_manager.evict_blocks(sync_blocks_to_evict)
+            timestamp = time.monotonic()
+            for req_id in sync_failed_req_ids:
+                request = self.requests[req_id]
+                self.running.remove(request)
+                self._preempt_request(request, timestamp, drop_stale_output=True)
         # Return sync affected IDs to skip in update_from_output
         return sync_failed_req_ids

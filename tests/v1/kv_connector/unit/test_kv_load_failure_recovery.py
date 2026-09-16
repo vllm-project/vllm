@@ -452,6 +452,49 @@ def test_hybrid_load_failure_ignores_null_block(hybrid_scheduler: Scheduler):
     assert not hybrid_scheduler.failed_recving_kv_req_ids
 
 
+def test_hybrid_sync_load_failure_preempts_request(hybrid_scheduler: Scheduler):
+    """A running hybrid request restarts by preemption, not in place: the
+    failed step's output is dropped, its blocks are released and leave the
+    prefix cache, and it is re-admitted from scratch."""
+    scheduler = hybrid_scheduler
+    request = create_request(num_tokens=10 * scheduler.block_size)
+    scheduler.add_request(request)
+    scheduler.connector = Mock()
+    scheduler.connector.get_num_new_matched_tokens.side_effect = [
+        (9 * scheduler.block_size, False),  # sync load, reported failed below
+        (0, False),
+    ]
+    scheduler.connector.take_events.return_value = ()
+    scheduler_output = scheduler.schedule()
+
+    block_pool = scheduler.kv_cache_manager.block_pool
+    attn_block_ids, _ = scheduler.kv_cache_manager.get_block_ids(request.request_id)
+    # A sync load is cached at allocation, so a retry would hit it.
+    assert all(block_pool.blocks[b].block_hash is not None for b in attn_block_ids)
+
+    scheduler.update_from_output(
+        scheduler_output,
+        create_model_runner_output(
+            [request], invalid_block_ids={attn_block_ids[0]}, use_eos=True
+        ),
+    )
+
+    assert request.status == RequestStatus.PREEMPTED
+    assert request.num_computed_tokens == 0
+    assert request.num_output_tokens == 0
+    assert not scheduler.running
+    assert scheduler.waiting.peek_request() is request
+    assert scheduler.kv_cache_manager.get_block_ids(request.request_id) == ([], [])
+    assert all(block_pool.blocks[b].block_hash is None for b in attn_block_ids)
+
+    scheduler_output = scheduler.schedule()
+    assert scheduler_output.preempted_req_ids == {request.request_id}
+    assert request.status == RequestStatus.RUNNING
+    assert request.num_computed_tokens == scheduler_output.num_scheduled_tokens.get(
+        request.request_id
+    )
+
+
 def _make_deepseek_v4_five_group_config(num_blocks: int) -> KVCacheConfig:
     """Build the scheduler-side projection of V4-Flash's packed KV layout."""
 
