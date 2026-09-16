@@ -590,3 +590,33 @@ def test_single_slot_failed_activation_restores_prior_values(
         torch.testing.assert_close(tensor, saved[name], rtol=0, atol=0)
     manager.remove_adapter(2)
     assert manager.lora_index_to_id == [1]
+
+
+def test_public_snapshot_tensors_observe_staging_and_retirement(single_slot_manager):
+    manager = single_slot_manager
+    plan, factors = make_payload(manager)
+    manager.add_local_adapter(1, plan, factors)
+    manager.activate_adapter(1)
+    first = manager.get_local_adapter_tensors()
+    assert set(first) == {1}
+    live_storage = {
+        tensor.untyped_storage().data_ptr()
+        for tensor in manager.get_active_adapter_tensors()[1].values()
+    }
+    assert first[1]
+    for tensor in first[1].values():
+        assert tensor.dtype is torch.bfloat16
+        assert tensor.untyped_storage().data_ptr() not in live_storage
+    first_bytes = sum(tensor.untyped_storage().nbytes() for tensor in first[1].values())
+    manager.add_local_adapter(2, plan, factors)
+    assert set(manager.get_local_adapter_tensors()) == {1, 2}
+    manager.activate_adapter(2)
+    manager.remove_adapter(1)
+    retained = manager.get_local_adapter_tensors()
+    assert set(retained) == {2}
+    assert (
+        sum(tensor.untyped_storage().nbytes() for tensor in retained[2].values())
+        == first_bytes
+    )
+    manager.remove_adapter(2)
+    assert manager.get_local_adapter_tensors() == {}

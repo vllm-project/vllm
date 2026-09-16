@@ -347,6 +347,18 @@ class LoRAModelManager:
             raise ValueError("Active adapter has no receiver buffers")
         return adapter_id, tensors
 
+    def get_local_adapter_tensors(self) -> dict[int, dict[str, torch.Tensor]]:
+        """Inspect independently owned factors retained for single-slot transactions."""
+        return {
+            adapter_id: {
+                f"{name}.{component}.{index}": tensor
+                for name, pair in sorted(factors.items())
+                for component, tensors in zip(("a", "b"), pair)
+                for index, tensor in enumerate(tensors)
+            }
+            for adapter_id, (_, factors) in self._single_slot_local_adapters.items()
+        }
+
     def get_local_adapter_plan(self, peft_helper: PEFTHelper) -> LocalLoRAPlan:
         """Bind complete selected modules to their current local buffer layout."""
         peft_helper.validate_legal(self.lora_config)

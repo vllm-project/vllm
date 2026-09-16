@@ -245,6 +245,10 @@ class WorkerLoRAManager:
         """Inspect receiver-owned buffers through the worker manager boundary."""
         return self._adapter_manager.get_active_adapter_tensors()
 
+    def get_local_adapter_tensors(self) -> dict[int, dict[str, torch.Tensor]]:
+        """Inspect native snapshots through the worker manager boundary."""
+        return self._adapter_manager.get_local_adapter_tensors()
+
     def get_local_adapter_plan(self, peft_helper: PEFTHelper) -> LocalLoRAPlan:
         """Bind a local adapter to this worker's physical LoRA buffers."""
         return self._adapter_manager.get_local_adapter_plan(peft_helper)
