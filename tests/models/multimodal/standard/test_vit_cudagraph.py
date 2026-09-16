@@ -5,7 +5,7 @@ import pytest
 
 from vllm.platforms import current_platform
 
-from .._vit_cudagraph import (
+from ._vit_cudagraph import (
     CORE_MODEL_CONFIGS,
     params_with_marks,
     run_vit_cudagraph_image,
