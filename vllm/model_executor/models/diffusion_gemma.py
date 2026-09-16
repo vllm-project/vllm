@@ -386,7 +386,7 @@ def _compiled_sample_step(
     normalizer: torch.Tensor,
     history: torch.Tensor,  # [max_num_reqs, ST, CL]
     history_len_tensor: torch.Tensor,  # [max_num_reqs]
-    max_steps_tensor: torch.Tensor,  # [max_num_reqs] float, per-slot step cap
+    max_steps_tensor: torch.Tensor,  # [max_num_reqs] int32, per-slot step cap
     # Output tensors (modified in-place)
     sampled: torch.Tensor,  # [num_reqs, CL]
     num_sampled: torch.Tensor,  # [num_reqs]
@@ -519,7 +519,7 @@ def _compiled_sample_step(
 
     step_after = step_tensor[decode_slots]
     converged = (stable & confident_tensor[decode_slots] & (new_hist_len >= ST)) | (
-        step_after.float() >= max_steps_tensor[decode_slots]
+        step_after >= max_steps_tensor[decode_slots]
     )
     # Commit done → denoise next (False); denoise converged → commit next (True)
     is_encoder_phase[decode_slots] = torch.where(
@@ -627,7 +627,7 @@ class DiffusionGemmaRequestStates:
         # Per-slot denoising step cap (structured reads run 1). Defaults to the
         # global max; the sampler's add_request lowers it from extra_args.
         self.max_steps = torch.full(
-            (max_num_reqs,), float(max_denoising_steps), dtype=torch.float32, device=device
+            (max_num_reqs,), max_denoising_steps, dtype=torch.int32, device=device
         )
         # A seed canvas replaces the random initial canvas once the prompt is
         # prefilled. The host-side slot sets let the sampler skip the seed and
@@ -670,7 +670,7 @@ class DiffusionGemmaRequestStates:
         self.step[slot_idx].fill_(0)
         self.accepted_canvas_history_len[slot_idx].fill_(0)
         self.self_conditioning_embeds[slot_idx] = 0
-        self.max_steps[slot_idx].fill_(float(self.max_denoising_steps))
+        self.max_steps[slot_idx].fill_(self.max_denoising_steps)
         self.has_seed[slot_idx].fill_(False)
         self.seeded_slots.discard(slot_idx)
         self.read_only[slot_idx].fill_(False)
@@ -1077,7 +1077,9 @@ class DiffusionSampler:
         states = self.diffusion_states
         cap = extra.get("diffusion_max_steps")
         if cap is not None:
-            states.max_steps[req_idx].fill_(float(max(1, min(int(cap), states.max_denoising_steps))))
+            states.max_steps[req_idx].fill_(
+                max(1, min(int(cap), states.max_denoising_steps))
+            )
         seed = extra.get("diffusion_seed_canvas")
         if seed is not None:
             if len(seed) != self.canvas_length:

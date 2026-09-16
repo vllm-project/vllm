@@ -7,7 +7,10 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.model_executor.models.diffusion_gemma import DiffusionGemmaRequestStates
+from vllm.model_executor.models.diffusion_gemma import (
+    DiffusionGemmaRequestStates,
+    _compiled_sample_step,
+)
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
@@ -93,3 +96,59 @@ def test_remove_request_forgets_the_slot():
 
     assert not states.seeded_slots
     assert not states.read_only_slots
+
+
+def _denoise_once(states: DiffusionGemmaRequestStates, slots: list[int]) -> None:
+    """One compiled denoise step over ``slots`` with flat logits, so nothing
+    converges by stability or confidence and only the step cap can end it."""
+    n = len(slots)
+    device = states.device
+    decode_slots = torch.tensor(slots, dtype=torch.int64, device=device)
+    decode_idx = torch.arange(n, dtype=torch.int64, device=device)
+    _compiled_sample_step(
+        torch.zeros(n * CL, VOCAB, device=device),
+        decode_slots,
+        decode_idx,
+        decode_slots,
+        torch.full((n,), CL, dtype=torch.int64, device=device),
+        states.canvas,
+        states.argmax_canvas,
+        states.step,
+        states.is_encoder_phase,
+        states.confident,
+        states.self_conditioning_embeds,
+        torch.zeros(VOCAB, 4, device=device),
+        torch.tensor(1.0, device=device),
+        states.accepted_canvas_history,
+        states.accepted_canvas_history_len,
+        states.max_steps,
+        torch.zeros(n, CL, dtype=torch.int32, device=device),
+        torch.zeros(n, dtype=torch.int32, device=device),
+        torch.zeros(MAX_REQS, CL, dtype=torch.int64, device=device),
+        max_denoising_steps=float(MAX_STEPS),
+        t_min=0.5,
+        t_max=1.0,
+        confidence_threshold=0.1,
+        vocab_size=VOCAB,
+        CL=CL,
+        ST=states.stability_threshold,
+        entropy_bound=0.1,
+        sc_vocab_start=0,
+        sc_vocab_end=VOCAB,
+        tp_size=1,
+        tp_group_name="",
+    )
+
+
+def test_step_cap_is_per_slot():
+    states = _states()
+    for slot in (0, 1):
+        states.add_request(slot)
+        states.is_encoder_phase[slot] = False
+    states.max_steps[0] = 1
+
+    _denoise_once(states, [0, 1])
+
+    # Slot 0 hit its cap and moves to commit; slot 1 keeps denoising.
+    assert states.is_encoder_phase[:2].tolist() == [True, False]
+    assert states.step[:2].tolist() == [1, 1]
