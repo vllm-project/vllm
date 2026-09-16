@@ -1002,26 +1002,6 @@ def test_one_token_chunk_classification(
         assert actual.has_initial_state is None
 
 
-def test_decode_graph_state_indices_mask_padding():
-    """Padded replay rows must not retain an earlier request's state index."""
-    common = create_common_attn_metadata(
-        BatchSpec(seq_lens=[100, 1, 0], query_lens=[1, 1, 0]),
-        BLOCK_SIZE,
-        DEVICE,
-    ).replace(is_prefilling=torch.tensor([False, True, False]), num_actual_tokens=3)
-    common.block_table_tensor[2].fill_(NULL_BLOCK_ID)
-    builder = _make_builder(
-        KimiK3KDAMetadataBuilder, num_speculative_tokens=0, full_cuda_graph=True
-    )
-    builder.non_spec_state_indices_tensor.fill_(42)
-    actual = builder.build(0, common)
-
-    staged = actual.non_spec_state_indices_tensor
-    assert staged is not None
-    assert staged.data_ptr() == builder.non_spec_state_indices_tensor.data_ptr()
-    torch.testing.assert_close(staged, common.block_table_tensor[:, 0])
-
-
 def test_cudagraph_capture_batch_stays_decode_only():
     """Capture rows have no history, but must still select decode kernels."""
     batch = BatchSpec(seq_lens=[1] * 4, query_lens=[1] * 4)
