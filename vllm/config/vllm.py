@@ -1908,6 +1908,14 @@ class VllmConfig:
                     "replicated [E+B] weights do not follow. Disable "
                     "--enable-eplb or use a different --all2all-backend."
                 )
+            if self.parallel_config.expert_placement_strategy != "linear":
+                raise ValueError(
+                    "The moonep all2all backend requires linear expert "
+                    "placement: its load-time all-gather assumes each rank "
+                    "holds a contiguous chunk of the global expert range. Got "
+                    "--expert-placement-strategy "
+                    f"{self.parallel_config.expert_placement_strategy!r}."
+                )
             # Enforced here rather than in set_splitting_ops_for_v1 so it
             # holds for every compilation mode, and keyed on use_all2all so
             # PCP/SP-only topologies are covered too: MoonEP dispatch/combine

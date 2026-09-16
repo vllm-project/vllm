@@ -49,12 +49,16 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     # --8<-- [end:unquantized_fused_moe]
 
-    supports_pre_processed_weights = True
-
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
         self.unquantized_backend, self.experts_cls = select_unquantized_moe_backend(
             moe_config=self.moe,
+        )
+        # MoonEP replaces the named parameters with its [E+B] gate/down
+        # split and keeps the up projection outside the parameter registry,
+        # so a pre-processed (e.g. ipc_cache) load cannot reconstruct it.
+        self.supports_pre_processed_weights = (
+            self.unquantized_backend != UnquantizedMoeBackend.MOONEP
         )
 
     @property
