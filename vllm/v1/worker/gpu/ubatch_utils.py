@@ -44,6 +44,48 @@ class UBatchState(NamedTuple):
 
     slices: UBatchSlices
     forward_contexts: list[ForwardContext]
+    real_split: tuple[int, int] | None = None
+
+
+def stage_conditional_decode(
+    input_batch: InputBatch,
+    block_tables: tuple[torch.Tensor, ...],
+    slot_mappings: torch.Tensor,
+) -> tuple[int, int]:
+    """Move the second real half into the captured MB1 input addresses.
+
+    Restricted to one token per request and n <= capacity. Source and destination
+    never overlap. Request state and sampling indices retain their original order.
+    """
+    n = input_batch.num_tokens
+    capacity = input_batch.num_tokens_after_padding // 2
+    assert 2 <= n <= capacity
+    assert input_batch.num_reqs == n
+    assert np.all(input_batch.num_scheduled_tokens == 1)
+    first = (n + 1) // 2
+    second = n - first
+    for values in (input_batch.input_ids, input_batch.positions, *block_tables):
+        values[capacity : capacity + second].copy_(values[first:n])
+        values[first:capacity].zero_()
+        values[capacity + second : 2 * capacity].zero_()
+    slot_mappings[:, capacity : capacity + second].copy_(slot_mappings[:, first:n])
+    slot_mappings[:, first:capacity].fill_(-1)
+    slot_mappings[:, capacity + second : 2 * capacity].fill_(-1)
+    input_batch.is_padding[:first].fill_(False)
+    input_batch.is_padding[first:capacity].fill_(True)
+    input_batch.is_padding[capacity : capacity + second].fill_(False)
+    input_batch.is_padding[capacity + second : 2 * capacity].fill_(True)
+    return first, second
+
+
+def compact_conditional_output(
+    output: torch.Tensor, real_split: tuple[int, int], capacity: int = 64
+) -> torch.Tensor:
+    """Restore original token order before the unchanged sampling path."""
+    first, second = real_split
+    assert first + second <= capacity
+    output[first : first + second].copy_(output[capacity : capacity + second])
+    return output
 
 
 def create_ubatch_slices(input_batch: InputBatch, num_ubatches: int) -> UBatchSlices:
@@ -301,6 +343,27 @@ class UBatchRunner:
         self.model_state = model_state
         self.attn_groups = attn_groups
         self.kv_cache_config = kv_cache_config
+        # Experimental scope: DeepSeek-V2 with FlashAttention MLA and NIXL only.
+        self.conditional_real_split = (
+            vllm_config.model_config.hf_config.model_type == "deepseek_v2"
+            and self.parallel_config.data_parallel_size == 2
+            and self.parallel_config.tensor_parallel_size == 1
+            and self.parallel_config.pipeline_parallel_size == 1
+            and self.parallel_config.prefill_context_parallel_size == 1
+            and self.dcp_size == 1
+            and self.num_ubatches == 2
+            and self.parallel_config.all2all_backend == "nixl_ep"
+            and not self.parallel_config.enable_eplb
+            and vllm_config.lora_config is None
+            and vllm_config.speculative_config is None
+            and vllm_config.kv_transfer_config is None
+            and not vllm_config.model_config.enable_prompt_embeds
+            and all(
+                group.backend.get_name() == "FLASH_ATTN_MLA"
+                for groups in attn_groups
+                for group in groups
+            )
+        )
         # `query_start_loc` and `seq_lens` are rebased onto each microbatch's
         # own token range, so they cannot be views of the full batch's buffers.
         # Allocating up front keeps their addresses stable across replays.
@@ -342,15 +405,44 @@ class UBatchRunner:
         FULL uses padded sizes; `for_capture` refreshes metadata from dummy
         block tables.
         """
-        ubatch_slices = create_ubatch_slices(input_batch, self.num_ubatches)
+        real_split = None
+        capacity = input_batch.num_tokens_after_padding // 2
+        if (
+            self.conditional_real_split
+            and cg_mode == CUDAGraphMode.FULL
+            and not for_capture
+            and input_batch.num_tokens_after_padding % 2 == 0
+            and input_batch.num_reqs_after_padding
+            == input_batch.num_tokens_after_padding
+            and input_batch.num_reqs == input_batch.num_tokens
+            and np.all(input_batch.num_scheduled_tokens == 1)
+            and 2 <= input_batch.num_tokens <= capacity
+        ):
+            real_split = stage_conditional_decode(
+                input_batch, block_tables, slot_mappings
+            )
+            ubatch_slices = [
+                UBatchSlice(
+                    slice(i * capacity, (i + 1) * capacity),
+                    slice(i * capacity, (i + 1) * capacity),
+                )
+                for i in range(2)
+            ]
+        else:
+            ubatch_slices = create_ubatch_slices(input_batch, self.num_ubatches)
 
         attn_metadata = []
         slot_mappings_by_layer = []
         is_padding = []
         for i, ubatch_slice in enumerate(ubatch_slices):
+            source_slice = ubatch_slice
+            if real_split is not None:
+                start = 0 if i == 0 else real_split[0]
+                stop = start + real_split[i]
+                source_slice = UBatchSlice(slice(start, stop), slice(start, stop))
             ubatch = _slice_input_batch(
                 input_batch,
-                ubatch_slice,
+                source_slice,
                 self.ubatch_query_start_loc[i],
                 self.ubatch_seq_lens[i],
                 self.ubatch_dcp_local_seq_lens[i],
@@ -358,6 +450,25 @@ class UBatchRunner:
                 dcp_rank=self.dcp_rank,
                 cp_interleave=self.cp_interleave,
             )
+            if real_split is not None:
+                count = real_split[i]
+                self.ubatch_query_start_loc[i][count + 1 : capacity + 1].fill_(count)
+                self.ubatch_seq_lens[i][count:capacity].zero_()
+                query_cpu = np.minimum(np.arange(capacity + 1, dtype=np.int32), count)
+                seq_cpu = torch.zeros(capacity, dtype=torch.int32)
+                seq_cpu[:count] = ubatch.seq_lens_cpu_upper_bound
+                ubatch = replace(
+                    ubatch,
+                    num_reqs_after_padding=capacity,
+                    num_tokens_after_padding=capacity,
+                    query_start_loc=self.ubatch_query_start_loc[i][: capacity + 1],
+                    query_start_loc_np=query_cpu,
+                    seq_lens=self.ubatch_seq_lens[i][:capacity],
+                    seq_lens_cpu_upper_bound=seq_cpu,
+                    input_ids=input_batch.input_ids[ubatch_slice.token_slice],
+                    positions=input_batch.positions[ubatch_slice.token_slice],
+                    is_padding=input_batch.is_padding[ubatch_slice.token_slice],
+                )
             ubatch_slot_mappings = slot_mappings[:, ubatch_slice.token_slice]
             ubatch_block_tables = tuple(
                 block_table[ubatch_slice.request_slice] for block_table in block_tables
@@ -384,6 +495,7 @@ class UBatchRunner:
             forward_contexts=self._make_forward_contexts(
                 ubatch_slices, attn_metadata, slot_mappings_by_layer, is_padding
             ),
+            real_split=real_split,
         )
 
     def _make_forward_contexts(

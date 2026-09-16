@@ -127,10 +127,24 @@ def sync_cudagraph_and_dp_padding(
                     num_active_loras=num_active_loras,
                     num_ubatches=num_ubatches,
                 )
-                if 2 * int(num_tokens_across_dp.min()) < ubatch_desc.num_tokens:
-                    # If one rank has an empty second microbatch, run without
-                    # CUDA graphs.
-                    ubatch_desc = None
+                if 2 * int(num_tokens_across_dp.min()) <= ubatch_desc.num_tokens:
+                    # Only the restricted decode prototype can stage real rows
+                    # into both halves of the already captured static layout.
+                    runner = cudagraph_manager.ubatch_runner
+                    can_stage = (
+                        runner is not None
+                        and getattr(runner, "conditional_real_split", False)
+                        and ubatch_desc.cg_mode == CUDAGraphMode.FULL
+                        and ubatch_desc.num_tokens >= 4
+                        and ubatch_desc.num_tokens % 2 == 0
+                        and ubatch_desc.num_reqs == ubatch_desc.num_tokens
+                        and num_ubatches == 2
+                        and synced_uniform_token_count == 1
+                        and bool(torch.all(num_reqs_across_dp == num_tokens_across_dp))
+                        and int(num_tokens_across_dp.min()) >= 2
+                    )
+                    if not can_stage:
+                        ubatch_desc = None
             if ubatch_desc is None:
                 ubatch_desc = BatchExecutionDescriptor(
                     cg_mode=CUDAGraphMode.NONE,

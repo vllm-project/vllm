@@ -42,8 +42,10 @@ from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchRunner,
     UBatchState,
     _slice_input_batch,
+    compact_conditional_output,
     create_ubatch_slices,
     slice_model_inputs,
+    stage_conditional_decode,
 )
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlice,
@@ -282,6 +284,7 @@ def _sync_dp(
     uniform_token_count_per_rank: list[int] | None = None,
     allow_ubatching: bool = True,
     cudagraph_manager: Any = None,
+    num_reqs_per_rank: list[int] | None = None,
 ) -> tuple[BatchExecutionDescriptor, dp_utils.DPSyncState | None]:
     """Run the DP handshake with the all-reduce stubbed out.
 
@@ -298,7 +301,7 @@ def _sync_dp(
     reduced[2] = torch.tensor(uniform_token_counts, dtype=torch.int32)
     reduced[3] = -1  # max_query_len, -1 means None
     reduced[4] = int(allow_ubatching)
-    reduced[5] = 8  # num_reqs
+    reduced[5] = torch.tensor(num_reqs_per_rank) if num_reqs_per_rank is not None else 8
 
     with (
         patch.object(dp_utils.dist, "all_reduce", lambda t, group: t.copy_(reduced)),
@@ -873,3 +876,62 @@ def test_microbatched_graph_needs_every_rank_to_reach_the_split():
     assert desc.cg_mode == CUDAGraphMode.NONE
     assert desc.num_ubatches == 2
     assert dp_sync is not None and dp_sync.eager
+
+
+@pytest.mark.parametrize(
+    "capacity,n",
+    [(32, 2), (32, 3), (32, 31), (32, 32), (64, 63), (64, 64), (128, 127), (128, 128)],
+)
+def test_conditional_decode_preserves_token_position_and_kv_mapping(capacity, n):
+    """Inserting padding must preserve every real row and isolate KV writes."""
+    buffers = InputBuffers(2 * capacity, 2 * capacity, torch.device("cpu"))
+    batch = _make_input_batch(
+        [1] * n, [100 + i for i in range(n)], buffers, 2 * capacity, 2 * capacity
+    )
+    batch.input_ids.copy_(torch.arange(2 * capacity))
+    batch.positions.copy_(torch.arange(2 * capacity) + 100)
+    blocks = torch.arange(2 * capacity * 4).reshape(2 * capacity, 4)
+    slots = torch.arange(2 * capacity).reshape(1, 2 * capacity) + 1000
+    expected_blocks = blocks[:n].clone()
+    expected_slots = slots[:, :n].clone()
+    ptrs = [x.data_ptr() for x in (batch.input_ids, batch.positions, blocks, slots)]
+    first, second = stage_conditional_decode(batch, (blocks,), slots)
+    indices = torch.cat(
+        (torch.arange(first), torch.arange(capacity, capacity + second))
+    )
+    torch.testing.assert_close(batch.input_ids[indices], torch.arange(n).int())
+    torch.testing.assert_close(batch.positions[indices], torch.arange(n) + 100)
+    torch.testing.assert_close(blocks[indices], expected_blocks)
+    torch.testing.assert_close(slots[:, indices], expected_slots)
+    assert not batch.is_padding[indices].any()
+    assert batch.is_padding.sum() == 2 * capacity - n
+    assert (slots[:, batch.is_padding] == -1).all()
+    assert ptrs == [
+        x.data_ptr() for x in (batch.input_ids, batch.positions, blocks, slots)
+    ]
+    output = batch.input_ids[:, None].clone()
+    compact_conditional_output(output, (first, second), capacity)
+    torch.testing.assert_close(output[:n, 0], torch.arange(n).int())
+
+
+@pytest.mark.parametrize("n", [0, 1, 65, 80])
+def test_conditional_staging_rejects_ineligible_counts(n):
+    batch = SimpleNamespace(num_tokens=n, num_tokens_after_padding=128)
+    with pytest.raises(AssertionError):
+        stage_conditional_decode(batch, (), torch.empty(1, 128))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a graph pool")
+@pytest.mark.parametrize("loads", [[63, 97], [63, 127], [63, 64], [32, 96], [64, 97]])
+def test_conditional_graph_guard_requires_supported_single_token_layout(loads):
+    manager = _make_cudagraph_manager([128])
+    manager.ubatch_runner = SimpleNamespace(conditional_real_split=True)
+    desc, sync = _sync_dp(
+        loads, [1, 1], cudagraph_manager=manager, num_reqs_per_rank=loads
+    )
+    assert desc.cg_mode == CUDAGraphMode.FULL
+    assert desc.num_tokens == 128 and desc.num_ubatches == 2
+    assert sync is not None and not sync.eager
+    # A different request/token layout cannot use this staging implementation.
+    desc, _ = _sync_dp(loads, [1, 1], cudagraph_manager=manager)
+    assert desc.cg_mode == CUDAGraphMode.NONE
