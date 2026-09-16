@@ -439,7 +439,11 @@ class DelegatingParser(Parser):
         if tool_parser is None:
             return [], content
 
-        if request.tool_choice == "none":
+        # No tools / tool_choice none: do not extract; keep original text.
+        # ChatCompletionRequest defaults omitted tool_choice to "none"; also
+        # treat absent/empty tools as off so enable_auto_tools + tool_choice=None
+        # cannot still run extract_tool_calls.
+        if request.tool_choice == "none" or not request.tools:
             return [], content
 
         supports_required_and_named = tool_parser.supports_required_and_named
@@ -679,7 +683,11 @@ class DelegatingParser(Parser):
         assert self._tool_parser is not None
         supports_required_and_named = self._tool_parser.supports_required_and_named
 
-        if request.tool_choice == "none":
+        # No tools / tool_choice none: do not extract; keep original text.
+        # ChatCompletionRequest defaults omitted tool_choice to "none"; also
+        # treat absent/empty tools as off so enable_auto_tools + tool_choice=None
+        # cannot still run extract_tool_calls.
+        if request.tool_choice == "none" or not request.tools:
             return (DeltaMessage(content=delta_text) if delta_text else None), False
 
         if (

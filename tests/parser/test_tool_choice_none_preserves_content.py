@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""tool_choice='none' must skip tool extraction and keep original model text.
+"""Skip tool extraction for tool_choice='none' and for requests with no tools.
 
 Regression for https://github.com/vllm-project/vllm/issues/55080
 """
@@ -89,6 +89,33 @@ def _none_request() -> ChatCompletionRequest:
     )
 
 
+def _no_tools_omitted_tool_choice_request() -> ChatCompletionRequest:
+    # Client omits tools and tool_choice. Field default is tool_choice="none".
+    return ChatCompletionRequest.model_validate(
+        {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+    )
+
+
+def _no_tools_tool_choice_none_request() -> ChatCompletionRequest:
+    # is_auto_tool_choice treats tool_choice is None as auto when
+    # enable_auto_tools=True; not request.tools must still skip extraction.
+    return ChatCompletionRequest(
+        model="m",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=None,
+        tool_choice=None,
+    )
+
+
+NO_TOOLS_REQUESTS = (
+    _no_tools_omitted_tool_choice_request,
+    _no_tools_tool_choice_none_request,
+)
+
+
 def _auto_request(tool_name: str) -> ChatCompletionRequest:
     return ChatCompletionRequest.model_validate(
         {
@@ -169,6 +196,78 @@ def test_streaming_preserves_delta_when_tool_choice_none(parser_name):
 def test_streaming_empty_delta_is_none_when_tool_choice_none(parser_name):
     parser = _make_parser(parser_name)
     request = _none_request()
+
+    delta, _ = parser._extract_tool_calls_streaming(
+        previous_text="",
+        current_text="",
+        delta_text="",
+        previous_token_ids=[],
+        current_token_ids=[],
+        delta_token_ids=[],
+        request=request,
+    )
+
+    assert delta is None
+
+
+@pytest.mark.parametrize("parser_name", ENGINE_PARSERS)
+@pytest.mark.parametrize("request_factory", NO_TOOLS_REQUESTS)
+def test_extract_tool_calls_preserves_content_when_no_tools(
+    parser_name, request_factory
+):
+    parser = _make_parser(parser_name)
+    request = request_factory()
+
+    calls, content = parser._extract_tool_calls(TEXT, request, enable_auto_tools=True)
+
+    assert not request.tools
+    assert calls == []
+    assert content == TEXT
+
+
+@pytest.mark.parametrize("parser_name", ENGINE_PARSERS)
+@pytest.mark.parametrize("request_factory", NO_TOOLS_REQUESTS)
+def test_parse_preserves_content_when_no_tools(parser_name, request_factory):
+    parser = _make_parser(parser_name)
+    request = request_factory()
+
+    reasoning, content, calls = parser.parse(TEXT, request, enable_auto_tools=True)
+
+    assert not request.tools
+    assert reasoning is None
+    assert calls == []
+    assert content == TEXT
+
+
+@pytest.mark.parametrize("parser_name", ENGINE_PARSERS)
+@pytest.mark.parametrize("request_factory", NO_TOOLS_REQUESTS)
+def test_streaming_preserves_delta_when_no_tools(parser_name, request_factory):
+    parser = _make_parser(parser_name)
+    request = request_factory()
+    token_ids = parser.model_tokenizer.encode(TEXT)
+
+    delta, function_name_returned = parser._extract_tool_calls_streaming(
+        previous_text="",
+        current_text=TEXT,
+        delta_text=TEXT,
+        previous_token_ids=[],
+        current_token_ids=token_ids,
+        delta_token_ids=token_ids,
+        request=request,
+    )
+
+    assert not request.tools
+    assert function_name_returned is False
+    assert delta is not None
+    assert delta.content == TEXT
+    assert not delta.tool_calls
+
+
+@pytest.mark.parametrize("parser_name", ENGINE_PARSERS)
+@pytest.mark.parametrize("request_factory", NO_TOOLS_REQUESTS)
+def test_streaming_empty_delta_is_none_when_no_tools(parser_name, request_factory):
+    parser = _make_parser(parser_name)
+    request = request_factory()
 
     delta, _ = parser._extract_tool_calls_streaming(
         previous_text="",
