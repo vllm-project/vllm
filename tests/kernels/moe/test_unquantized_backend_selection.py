@@ -274,6 +274,20 @@ def test_select_rocm_aiter_backend_non_gated_activation_falls_back(
         assert expert_cls is not None
 
 
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="ROCm-specific backend selection test"
+)
+def test_explicit_aiter_backend_non_gated_activation_still_raises():
+    """Explicit `--moe-backend aiter` still raises for non-gated MoE;
+    only the env-var opt-in path falls back."""
+    moe_config = make_dummy_moe_config(activation=MoEActivation.SILU_NO_MUL)
+    moe_config.moe_backend = "aiter"  # explicit pin, not "auto"
+    assert moe_config.is_act_and_mul is False
+
+    with pytest.raises(ValueError):
+        select_unquantized_moe_backend(moe_config=moe_config)
+
+
 @patch(
     "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16ExpertsMonolithic.is_supported_config",
     return_value=(True, None),
