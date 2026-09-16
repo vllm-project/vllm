@@ -62,7 +62,10 @@ def test_mixed_warmup_disables_watermarking():
         for request in output.scheduled_new_reqs
     ]
     assert len(sampling_params) == 2
-    assert all(not params.watermarking for params in sampling_params)
+    # ``is False`` and not ``not params.watermarking``: ``None`` (inherit the
+    # engine configuration) is also falsy, so a looser assertion would not
+    # catch a regression that dropped the explicit opt-out.
+    assert all(params.watermarking is False for params in sampling_params)
 
 
 @pytest.mark.parametrize("fail_warmup", [False, True])

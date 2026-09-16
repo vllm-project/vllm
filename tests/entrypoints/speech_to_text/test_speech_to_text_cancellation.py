@@ -199,5 +199,5 @@ async def test_language_detection_cancel_aborts_engine_request():
         await task
 
     sampling_params = engine_client.generate.call_args.args[1]
-    assert not sampling_params.watermarking
+    assert sampling_params.watermarking is False
     engine_client.abort.assert_awaited_once_with(request_id)

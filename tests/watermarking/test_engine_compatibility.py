@@ -53,6 +53,28 @@ def test_watermark_with_combined_sampling_controls(watermarked_llm: LLM):
 
     assert list(output.outputs[0].token_ids) == [10] * 8
 
+    # The assertion above holds with or without watermarking, because
+    # allowed_token_ids leaves a single candidate. Repeat with a wider allowed
+    # set, where only watermarked sampling is reproducible without a seed.
+    wide = SamplingParams(
+        temperature=0.8,
+        top_k=8,
+        top_p=0.9,
+        min_p=0.01,
+        presence_penalty=0.2,
+        frequency_penalty=0.2,
+        repetition_penalty=1.1,
+        allowed_token_ids=list(range(10, 210)),
+        max_tokens=8,
+        ignore_eos=True,
+    )
+
+    first = watermarked_llm.generate("Sampling smoke test", wide)[0]
+    second = watermarked_llm.generate("Sampling smoke test", wide)[0]
+
+    assert set(first.outputs[0].token_ids) <= set(range(10, 210))
+    assert first.outputs[0].token_ids == second.outputs[0].token_ids
+
 
 def test_watermark_with_penalties_and_nucleus_sampling(watermarked_llm: LLM):
     params = SamplingParams(
@@ -92,6 +114,21 @@ def test_plain_gumbel_seeded_parallel_sampling_is_deterministic(
     assert all(len(candidate.token_ids) == 8 for candidate in output.outputs)
     assert output.outputs[0].token_ids == output.outputs[1].token_ids
 
+    # Plain Gumbel keys on the token context, so the request seed does not
+    # change a watermarked draw. Pin that down rather than implying the seed
+    # is what makes the candidates match.
+    unseeded = watermarked_llm.generate(
+        "Seeded parallel sampling smoke test",
+        SamplingParams(
+            n=2,
+            temperature=0.8,
+            max_tokens=8,
+            ignore_eos=True,
+        ),
+    )[0]
+
+    assert unseeded.outputs[0].token_ids == output.outputs[0].token_ids
+
 
 @pytest.mark.parametrize(
     "structured_outputs",
@@ -113,6 +150,25 @@ def test_watermark_with_structured_output(
     output = watermarked_llm.generate("Choose A or B:", params)[0]
 
     assert output.outputs[0].text.strip() in ("A", "B")
+
+
+def test_watermark_with_wide_grammar_is_deterministic(watermarked_llm: LLM):
+    # The choice/grammar cases above constrain the output to "A" or "B", which
+    # any sampler satisfies. A wider grammar leaves enough freedom that only
+    # watermarked sampling reproduces the same unseeded draw twice.
+    params = SamplingParams(
+        temperature=0.8,
+        max_tokens=8,
+        structured_outputs=StructuredOutputsParams(
+            grammar="root ::= [A-Z] [A-Z] [A-Z] [A-Z] [A-Z] [A-Z]"
+        ),
+    )
+
+    first = watermarked_llm.generate("Emit six letters:", params)[0]
+    second = watermarked_llm.generate("Emit six letters:", params)[0]
+
+    assert first.outputs[0].text.strip().isupper()
+    assert first.outputs[0].token_ids == second.outputs[0].token_ids
 
 
 def test_watermark_with_prefix_cache_and_chunked_prefill(watermarked_llm: LLM):

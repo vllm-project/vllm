@@ -71,7 +71,11 @@ def test_realtime_generation_preserves_watermarking():
     asyncio.run(connection._run_generation(streaming_input(), asyncio.Queue()))
 
     assert len(transcription_outputs) == 1
-    assert transcription_outputs[0].is_watermarked
+    # ``is None`` and not a truthiness check: the realtime path leaves
+    # ``watermarking`` unset so it inherits the engine configuration at
+    # admission. ``None`` is falsy, so ``assert ...is_watermarked`` fails today
+    # and ``assert not ...`` would silently accept a hard-coded opt-out.
+    assert transcription_outputs[0].is_watermarked is None
 
 
 def _get_websocket_url(server: RemoteOpenAIServer) -> str:

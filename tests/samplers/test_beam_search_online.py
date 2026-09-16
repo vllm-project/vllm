@@ -55,7 +55,7 @@ class _EngineClient:
         return self.vllm_config._check_supports_watermarking(params)
 
     async def generate(self, prompt, *args, **kwargs):
-        assert not args[0].watermarking
+        assert args[0].watermarking is False
         yield RequestOutput(
             request_id=kwargs.get("request_id", "test-request"),
             prompt=prompt.get("prompt"),
@@ -99,7 +99,7 @@ class _OfflineServing(BeamSearchOfflineMixin):
         return [None] * num_requests
 
     def _beam_search_step(self, **kwargs):
-        assert not kwargs["base_sampling_params"].watermarking
+        assert kwargs["base_sampling_params"].watermarking is False
         return True
 
 
@@ -287,6 +287,6 @@ def test_offline_structured_beam_search_disables_internal_watermarking() -> None
     beam_params = entries[0][0]
     assert beam_params is not base_params
     assert beam_params.logprobs == base_params.logprobs
-    assert not beam_params.watermarking
+    assert beam_params.watermarking is False
     assert beam_params.allowed_token_ids == [0]
     assert base_params.allowed_token_ids is None
