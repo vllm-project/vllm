@@ -73,6 +73,7 @@ pub(super) fn prepare_generate_request(
         sampling_params,
         decode_options: TextDecodeOptions::default(),
         intermediate: false,
+        prompt_truncation: None,
         priority: request.priority,
         cache_salt: request.cache_salt,
         add_special_tokens: false,
@@ -161,6 +162,30 @@ mod tests {
                 .and_then(|mut xargs| xargs.remove("kv_transfer_params")),
             Some(json!({"connector": "x"}))
         );
+    }
+
+    #[test]
+    fn prepare_generate_request_preserves_watermarking_defaults_and_opt_out() {
+        for watermarking in [None, Some(true), Some(false)] {
+            let mut body = json!({
+                "token_ids": [11, 22],
+                "sampling_params": {}
+            });
+            if let Some(watermarking) = watermarking {
+                body["sampling_params"]["watermarking"] = json!(watermarking);
+            }
+            let prepared = prepare_generate_request(
+                serde_json::from_value(body).expect("parse request"),
+                &served(&["test-model"]),
+                ResolvedRequestContext::default(),
+                None,
+            )
+            .expect("prepare request");
+            assert_eq!(
+                prepared.text_request.sampling_params.watermarking,
+                watermarking.unwrap_or(true)
+            );
+        }
     }
 
     #[test]

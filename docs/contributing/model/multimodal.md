@@ -532,6 +532,12 @@ return a list of [PromptUpdate][vllm.multimodal.processing.PromptUpdate] instanc
 Each [PromptUpdate][vllm.multimodal.processing.PromptUpdate] instance specifies an update operation
 (e.g.: insertion, replacement) performed by the HF processor.
 
+!!! note
+    The target and content of each update are token sequences. When converting
+    text to token sequences, remember to encode it with
+    `cached_encode(..., add_special_tokens=False)`. Otherwise, the updated prompt
+    may contain duplicated special tokens or fail to match the target.
+
 === "Basic example: LLaVA"
 
     Looking at HF's `LlavaProcessor`:
@@ -713,7 +719,6 @@ Examples:
 
 Examples:
 
-- Chameleon (appends `sep_token`): [vllm/model_executor/models/chameleon.py](../../../vllm/model_executor/models/chameleon.py)
 - Molmo2 (prepends `bos_token`): [vllm/model_executor/models/molmo2.py](../../../vllm/model_executor/models/molmo2.py)
 - Molmo (applies chat template which is not defined elsewhere): [vllm/model_executor/models/molmo.py](../../../vllm/model_executor/models/molmo.py)
 

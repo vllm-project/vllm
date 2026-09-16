@@ -34,7 +34,7 @@ from torch import nn
 from transformers import BatchFeature, PretrainedConfig
 
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import MultiModalDataDict, PromptType, TokensPrompt
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
@@ -166,7 +166,9 @@ class GraniteSpeechMultiModalProcessor(
         def get_replacement(item_idx: int):
             audios = mm_items.get_items("audio", AudioProcessorItems)
             audio = audios.get(item_idx)
-            audio_length = audio.shape[-1]
+            if audio is None:
+                raise ValueError(f"Missing audio item {item_idx}")
+            audio_length = len(audio) if isinstance(audio, list) else audio.shape[-1]
             num_projector_features = feature_extractor._get_num_audio_features(
                 [audio_length]
             )[0]
@@ -225,6 +227,7 @@ class GraniteSpeechDummyInputsBuilder(
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
         audio_overrides = mm_options.get("audio")
+        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
 
         return {
             "audio": self._get_dummy_audios(
@@ -659,6 +662,9 @@ class GraniteSpeechForConditionalGeneration(
         if input_features is None:
             return None
 
+        if not isinstance(audio_embed_sizes, torch.Tensor):
+            raise ValueError("audio_embed_sizes must be a tensor")
+
         # If we have a batch of variable feature length audio clips, we need
         # to mask the features; usually we would get an input_features_mask
         # from the processor, but we handle rebuilding it here since
@@ -879,7 +885,11 @@ class GraniteSpeechForConditionalGeneration(
         audio_tok = cls.get_placeholder_str("audio", 0)
 
         if task_type == "translate":
-            full_lang_name_to = cls.supported_languages.get(to_language, to_language)
+            full_lang_name_to = (
+                cls.supported_languages.get(to_language, to_language)
+                if to_language is not None
+                else ""
+            )
             user_prompt = f"{audio_tok}translate the speech to {full_lang_name_to}"  # noqa: E501
         elif task_type == "transcribe":
             user_prompt = (
