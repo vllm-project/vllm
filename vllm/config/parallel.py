@@ -581,11 +581,7 @@ class ParallelConfig:
             self.numa_bind = True
 
         if self.enable_eplb:
-            if not (
-                current_platform.supports_eplb()
-                or current_platform.is_cuda_alike()
-                or current_platform.is_xpu()
-            ):
+            if not current_platform.supports_eplb():
                 raise ValueError(
                     "Expert parallelism load balancing is not supported "
                     "on this platform."

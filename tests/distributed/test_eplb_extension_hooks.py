@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -11,6 +12,7 @@ from vllm.config.parallel import EPLBConfig, ParallelConfig
 from vllm.distributed.eplb.async_worker import run_rebalance_experts
 from vllm.distributed.eplb.eplb_state import (
     EplbLayerState,
+    EplbRebalanceContext,
     EplbState,
     _move_to_workspace,
 )
@@ -43,6 +45,21 @@ def test_parallel_config_delegates_eplb_config_to_platform(communicator):
         )
     assert config.eplb_config.communicator == "torch_gloo"
     platform.check_and_update_eplb_config.assert_called_once_with(config)
+
+
+def test_platform_eplb_capability_is_authoritative():
+    with (
+        patch("vllm.config.parallel.current_platform") as platform,
+        pytest.raises(ValueError, match="not supported on this platform"),
+    ):
+        platform.supports_eplb.return_value = False
+        platform.is_cuda_alike.return_value = True
+        ParallelConfig(
+            enable_eplb=True,
+            enable_expert_parallel=True,
+            tensor_parallel_size=2,
+            distributed_executor_backend="uni",
+        )
 
 
 @pytest.mark.parametrize(
@@ -85,14 +102,46 @@ def test_platform_rejects_unknown_communicator():
 
 
 def test_async_planner_uses_state_hook():
+    load_window = torch.tensor([[3, 1]])
     old_map = torch.tensor([[0, 1]])
     new_map = torch.tensor([[1, 0]])
     state = SimpleNamespace(plan_rebalance=Mock(return_value=new_map))
-    model_state = SimpleNamespace()
+    model_state = SimpleNamespace(
+        eplb_stats=SimpleNamespace(
+            global_expert_load_window=load_window,
+            num_replicas=2,
+            num_groups=1,
+            num_nodes=1,
+            num_gpus=2,
+        )
+    )
     stream = object()
 
-    assert run_rebalance_experts(model_state, state, old_map, stream) is new_map
-    state.plan_rebalance.assert_called_once_with(model_state, old_map, stream)
+    with patch("torch.cuda.stream", return_value=nullcontext()):
+        assert run_rebalance_experts(model_state, state, old_map, stream) is new_map
+
+    context = state.plan_rebalance.call_args.args[0]
+    assert isinstance(context, EplbRebalanceContext)
+    assert context.load_window_cpu is load_window
+    assert context.physical_to_logical_map_cpu is old_map
+    assert context.num_replicas == 2
+    assert context.topology.num_groups == 1
+    assert context.topology.num_nodes == 1
+    assert context.topology.num_ranks == 2
+
+
+def test_state_creates_device_specific_layer_state():
+    class CustomLayerState(EplbLayerState):
+        pass
+
+    class CustomEplbState(EplbState):
+        def create_layer_state(self):
+            return CustomLayerState()
+
+    layer = SimpleNamespace(eplb_state=EplbLayerState())
+    state = CustomEplbState.__new__(CustomEplbState)
+    state._create_model_layer_states(SimpleNamespace(moe_layers=[layer]))
+    assert isinstance(layer.eplb_state, CustomLayerState)
 
 
 def test_model_communicator_uses_state_hook():
@@ -127,6 +176,8 @@ def test_layer_commit_hook_runs_before_worker_ack():
         expert_buffer=[torch.empty(1)],
         rebalanced=True,
     )
+    state = EplbState.__new__(EplbState)
+    state.on_layer_committed = lambda _state, _layer: calls.append("hook")
     with (
         patch(
             "vllm.distributed.eplb.eplb_state.move_from_buffer",
@@ -140,7 +191,7 @@ def test_layer_commit_hook_runs_before_worker_ack():
         _move_to_workspace(
             model_state,
             ep_rank=0,
-            on_committed=lambda _state, _layer: calls.append("hook"),
+            commit_rebalance=state._commit_rebalance,
         )
     assert calls == ["weights", "maps", "hook", "ack"]
     assert model_state.pending_result is None
@@ -165,6 +216,8 @@ def test_failed_commit_hook_does_not_ack_buffer():
     def fail_refresh(_state, _layer):
         raise RuntimeError("refresh failed")
 
+    state = EplbState.__new__(EplbState)
+    state.on_layer_committed = fail_refresh
     with (
         patch("vllm.distributed.eplb.eplb_state.move_from_buffer"),
         patch("vllm.distributed.eplb.eplb_state._commit_eplb_maps_for_layer"),
@@ -173,10 +226,25 @@ def test_failed_commit_hook_does_not_ack_buffer():
         _move_to_workspace(
             model_state,
             ep_rank=0,
-            on_committed=fail_refresh,
+            commit_rebalance=state._commit_rebalance,
         )
     assert model_state.pending_result is result
     event.record.assert_not_called()
+
+
+def test_sync_commit_uses_layer_commit_hook():
+    calls = []
+    model_state = SimpleNamespace(model=SimpleNamespace(num_moe_layers=2))
+    state = EplbState.__new__(EplbState)
+    state.on_layer_committed = lambda _state, layer: calls.append(f"hook-{layer}")
+
+    with patch(
+        "vllm.distributed.eplb.eplb_state._commit_eplb_maps",
+        side_effect=lambda *_args: calls.append("maps"),
+    ):
+        state._commit_rebalance(model_state, torch.tensor([[0], [0]]))
+
+    assert calls == ["maps", "hook-0", "hook-1"]
 
 
 def test_router_uses_device_specific_mapping_hook():

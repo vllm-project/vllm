@@ -1231,7 +1231,7 @@ class Platform:
     @classmethod
     def supports_eplb(cls) -> bool:
         """Whether this platform can run expert parallel load balancing."""
-        return cls.is_cuda_alike()
+        return cls.is_cuda_alike() or cls.is_xpu()
 
     @classmethod
     def check_and_update_eplb_config(cls, parallel_config: "ParallelConfig") -> None:
