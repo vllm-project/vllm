@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from contextlib import contextmanager
 from typing import cast
 
@@ -82,6 +83,18 @@ def _group_can_attempt_mnnvl(
         group=group,
     )
     return bool(group_support.item())
+
+
+def _expandable_segments_enabled() -> bool:
+    """Whether PyTorch's expandable-segments (CUDA VMM) allocator is enabled.
+
+    PyTorch reads this from ``PYTORCH_ALLOC_CONF``, falling back to the legacy
+    ``PYTORCH_CUDA_ALLOC_CONF`` name, so honour both.
+    """
+    for var in ("PYTORCH_ALLOC_CONF", "PYTORCH_CUDA_ALLOC_CONF"):
+        if "expandable_segments:True" in os.environ.get(var, ""):
+            return True
+    return False
 
 
 def _can_p2p(rank: int, world_size: int) -> bool:
@@ -187,6 +200,32 @@ class CustomAllreduce:
                 "warning, specify disable_custom_all_reduce=True explicitly.",
                 world_size,
                 str(CustomAllreduce._SUPPORTED_WORLD_SIZES),
+            )
+            return
+
+        if _expandable_segments_enabled():
+            # PyTorch's expandable-segments allocator backs tensors with CUDA
+            # VMM ranges (cuMemAddressReserve + cuMemMap) rather than a single
+            # cudaMalloc allocation. Custom allreduce shares its CUDA graph
+            # buffers across ranks with cudaIpcGetMemHandle, which rejects
+            # VMM-backed pointers with cudaErrorInvalidValue. Because that call
+            # sits behind the CUDACHECK macro, the worker dies via exit(1)
+            # printing only "Failed: Cuda error custom_all_reduce.cuh:<line>
+            # 'invalid argument'", with no Python traceback and no hint at the
+            # cause. Fall back to NCCL instead. See #42609, #49101, #56180.
+            #
+            # Note: the cumem allocator is deliberately *not* exempted here.
+            # It only disables expandable segments around its own memory pool,
+            # which does not cover CUDA graph capture, and #42609 reproduces
+            # both with and without sleep mode.
+            logger.warning(
+                "Custom allreduce is disabled because expandable_segments:True "
+                "is set in PYTORCH_ALLOC_CONF/PYTORCH_CUDA_ALLOC_CONF. Its CUDA "
+                "VMM allocations cannot be shared between ranks via CUDA IPC, "
+                "which custom allreduce needs in order to register CUDA graph "
+                "buffers. Unset expandable_segments:True to re-enable custom "
+                "allreduce. To silence this warning, specify "
+                "disable_custom_all_reduce=True explicitly."
             )
             return
 
