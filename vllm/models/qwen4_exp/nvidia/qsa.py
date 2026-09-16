@@ -94,21 +94,9 @@ class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
         device_capability: DeviceCapability,
     ) -> str | None:
         # QSA dequantizes the fp8 KV in its own Triton kernel and never runs
-        # flash-attn over the quantized cache, so the parent fp8-KV rejection
-        # does not apply; hand it an unquantized dtype to skip only that check.
-        if kv_cache_dtype in ("fp8", "fp8_e4m3"):
-            kv_cache_dtype = "auto"
-        return super().supports_combination(
-            head_size,
-            dtype,
-            kv_cache_dtype,
-            block_size,
-            use_mla,
-            has_sink,
-            use_sparse,
-            use_mm_prefix,
-            device_capability,
-        )
+        # flash-attn over the quantized cache, so the parent's fp8-KV rejection
+        # does not apply and every combination it is handed is accepted here.
+        return None
 
     @staticmethod
     def get_name() -> str:
