@@ -904,6 +904,47 @@ class MoRIIOConnectorScheduler:
 
             params["do_remote_prefill"] = False
 
+    def _clamp_to_prompt_blocks(
+        self, req: "Request", block_ids: list[list[int]]
+    ) -> list[list[int]]:
+        """Keep only the blocks covering the request's prompt in the
+        full-attention KV group, dropping any trailing blocks the consumer
+        (decode) never allocated.
+
+        ``block_ids`` is per-KV-cache-group (list per group). Under speculative
+        decoding (e.g. MTP) the producer (prefill) KV-cache manager reserves
+        lookahead slots beyond the prompt that the consumer (decode) does not
+        allocate, so the producer's full-attention block list runs longer than
+        the consumer's. Block order is positional and the prompt occupies the
+        leading blocks, so keep ``ceil(num_prompt_tokens / full_attn_block_size)``
+        blocks in the full-attention group and drop the trailing lookahead
+        scratch. Other (clipped / sliding-window) groups are left as allocated —
+        only the full-attention group reflects the full sequence length. The
+        drop count is derived from the prompt length (not the speculative-token
+        count), so this is correct for any block size. Runs on the final-chunk
+        save, where the full local set has been assembled.
+        """
+        g = self._full_attn_group_idx
+        num_prompt_blocks = math.ceil(
+            req.num_prompt_tokens / self._full_attn_block_size
+        )
+        full_attn_blocks = block_ids[g]
+        if len(full_attn_blocks) <= num_prompt_blocks:
+            return block_ids
+        clamped = list(block_ids)
+        clamped[g] = full_attn_blocks[:num_prompt_blocks]
+        logger.debug(
+            "MoRIIO WRITE producer: kept %d prompt block(s), dropped %d "
+            "trailing lookahead block(s) in full-attn group for request %s "
+            "(%d -> %d)",
+            num_prompt_blocks,
+            len(full_attn_blocks) - num_prompt_blocks,
+            req.request_id,
+            len(full_attn_blocks),
+            len(clamped[g]),
+        )
+        return clamped
+
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
@@ -932,19 +973,35 @@ class MoRIIOConnectorScheduler:
                         for g in range(len(new_block_ids))
                     ]
                     self._reqs_need_pending_save[req_id] = (req, updated_blocks)
-                    saved_tokens = (
-                        len(updated_blocks[self._full_attn_group_idx])
-                        * self._full_attn_block_size
+                    # Detect the final prefill chunk by prompt-token progress,
+                    # not by block count. Speculative lookahead blocks inflate
+                    # the accumulated block tally, so a block-count test could
+                    # flag an earlier chunk as final when the last real chunk is
+                    # <= num_lookahead tokens. num_computed_tokens is advanced in
+                    # _update_after_schedule AFTER build_connector_meta runs, so
+                    # it excludes the current chunk here — add this step's
+                    # scheduled tokens to get the post-chunk prompt progress.
+                    num_scheduled = scheduler_output.num_scheduled_tokens.get(
+                        req_id, 0
                     )
-                    if saved_tokens >= req.num_prompt_tokens:
+                    if (
+                        req.num_computed_tokens + num_scheduled
+                        >= req.num_prompt_tokens
+                    ):
                         # Final chunk: live kv_transfer_params may be cleared,
                         # so prefer the snapshot from update_state_after_alloc.
                         kv_params = self._req_kv_params.pop(
                             req_id, req.kv_transfer_params or {}
                         )
+                        # Final chunk holds the full local set including any
+                        # speculative lookahead blocks; keep only the prompt
+                        # blocks so decode receives exactly what it allocated.
+                        save_block_ids = self._clamp_to_prompt_blocks(
+                            req, self._reqs_need_pending_save[req_id][1]
+                        )
                         meta.add_new_req(
                             request_id=req_id,
-                            local_block_ids=self._reqs_need_pending_save[req_id][1],
+                            local_block_ids=save_block_ids,
                             kv_transfer_params=kv_params,
                             write_mode=True,
                         )
@@ -961,16 +1018,21 @@ class MoRIIOConnectorScheduler:
 
         for req_id, (req, block_ids) in self._reqs_need_save.items():
             kv_params = self._req_kv_params.get(req_id, req.kv_transfer_params or {})
-            tokens_covered = (
-                len(block_ids[self._full_attn_group_idx]) * self._full_attn_block_size
-            )
-            if req.num_prompt_tokens > tokens_covered:
+            # Final-chunk detection by prompt-token progress (lookahead-immune),
+            # not block count. num_computed_tokens excludes the current chunk at
+            # build_connector_meta time (advanced later in _update_after_schedule),
+            # so add this step's scheduled tokens.
+            num_scheduled = scheduler_output.num_scheduled_tokens.get(req_id, 0)
+            if req.num_computed_tokens + num_scheduled < req.num_prompt_tokens:
                 # not last chunk prefill
                 self._reqs_need_pending_save[req_id] = (req, block_ids)
                 continue
+            # Final/only chunk: keep only the prompt blocks (drop any trailing
+            # speculative lookahead blocks) so only the prompt KV is recorded.
+            save_block_ids = self._clamp_to_prompt_blocks(req, block_ids)
             meta.add_new_req(
                 request_id=req_id,
-                local_block_ids=block_ids,
+                local_block_ids=save_block_ids,
                 kv_transfer_params=kv_params,
                 write_mode=True,
             )
@@ -2699,6 +2761,18 @@ class MoRIIOConnectorWorker:
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             is_mla=self._is_mla_cache_layer(layer_name),
         )
+        # The scheduler WRITE producer save already clamps local_block_ids to
+        # the prompt blocks before recording, so by transfer time local must
+        # never exceed remote. Assert that invariant instead of trimming again
+        # (a longer local here is a genuine bug). compute_block_transfer_offsets
+        # still raises on the READ path (unclamped), so READ bugs stay guarded.
+        if self.mode == MoRIIOMode.WRITE:
+            assert len(local_block_ids) <= len(remote_block_ids), (
+                "MoRIIO WRITE local_block_ids longer than remote_block_ids "
+                f"(local {len(local_block_ids)} vs remote "
+                f"{len(remote_block_ids)}); scheduler save should have clamped "
+                "to prompt blocks"
+            )
         local, remote, sizes = compute_block_transfer_offsets(
             layer_name=layer_name,
             kv_cache=self.kv_caches[layer_name],

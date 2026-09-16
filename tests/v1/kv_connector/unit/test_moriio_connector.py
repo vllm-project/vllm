@@ -3,6 +3,8 @@
 import importlib.util
 import socket
 import uuid
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import msgspec
@@ -20,11 +22,13 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
+    ROLE,
     MoRIIOAgentMetadata,
     MoRIIOConnectorMetadata,
     MoRIIOConstants,
     MoRIIOMode,
     resolve_host_ip,
+    set_role,
     zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
@@ -145,6 +149,64 @@ def _write_consumer_scheduler_for_finished_request(tp_size: int = 2):
     scheduler._reqs_need_recv = {}
     scheduler.unmap_request_id = MagicMock()
     return scheduler
+
+
+def _write_producer_scheduler(block_size: int = 1) -> Any:
+    """Bare WRITE-mode PRODUCER MoRIIOConnectorScheduler for save-path tests.
+
+    Constructed via ``__new__`` (like ``_write_consumer_scheduler_for_finished_request``
+    above) so the save path (``build_connector_meta`` -> ``_clamp_to_prompt_blocks``)
+    can be exercised without a real engine/RDMA stack. Only the attributes touched
+    by that path are populated. The prompt-block clamp is derived purely from
+    ``req.num_prompt_tokens`` and ``block_size`` (no speculative-token field), so
+    it is correct for any block size.
+    """
+    scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
+    scheduler.mode = MoRIIOMode.WRITE
+    scheduler.is_producer = True
+    scheduler.block_size = block_size
+    # Merged (hybrid/multi-KV-group aware) reality: block id lists are per
+    # attention group and the prompt-block clamp targets the full-attention
+    # group. These single-group save-path tests use one full-attention group
+    # (index 0) whose block size drives ceil(num_prompt_tokens / block_size).
+    scheduler._full_attn_group_idx = 0
+    scheduler._full_attn_block_size = block_size
+    scheduler.transfer_id_to_request_id = {}
+    scheduler._reqs_need_recv = {}
+    scheduler._reqs_need_save = {}
+    scheduler._reqs_need_pending_save = {}
+    scheduler._req_kv_params = {}
+    scheduler._reqs_need_send = {}
+    return scheduler
+
+
+def _spec_kv_params(transfer_id: str = "xfer-spec") -> dict[str, Any]:
+    # Sidecar-style params: request_id embeds no zmq address, so add_new_req
+    # resolves the peer from these explicit fields.
+    return {
+        "transfer_id": transfer_id,
+        "remote_engine_id": "remote-engine",
+        "remote_block_ids": [],
+        "remote_host": "127.0.0.1",
+        "remote_handshake_port": 5000,
+        "remote_notify_port": 5001,
+    }
+
+
+def _build_meta(
+    scheduler: Any, req_ids=None, new_block_ids=None, num_scheduled_tokens=None
+) -> Any:
+    # build_connector_meta detects the final prefill chunk by prompt-token
+    # progress (req.num_computed_tokens + scheduler_output.num_scheduled_tokens
+    # [req_id]), so the fake SchedulerOutput must expose num_scheduled_tokens.
+    scheduler_output = SimpleNamespace(
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=req_ids or [],
+            new_block_ids=new_block_ids or [],
+        ),
+        num_scheduled_tokens=num_scheduled_tokens or {},
+    )
+    return scheduler.build_connector_meta(scheduler_output)
 
 
 class FakeMoRIIOWrapper:
@@ -701,6 +763,241 @@ def test_resolve_host_ip_prefers_extra_config():
     fallback = get_ip()
     assert resolve_host_ip({}) == fallback
     assert resolve_host_ip({"host_ip": ""}) == fallback
+
+
+def test_write_mode_excludes_spec_lookahead_blocks():
+    # WRITE producer save path with speculative decoding enabled must record
+    # only the prompt blocks: the trailing lookahead blocks (that decode never
+    # allocates) are clamped off via ceil(num_prompt_tokens / block_size) before
+    # the local_block_ids are recorded into MoRIIOConnectorMetadata.reqs_to_save.
+    set_role(ROLE.PRODUCER)
+    scheduler = _write_producer_scheduler(block_size=1)
+
+    req_id = "req-spec"
+    prompt_blocks = [10, 11, 12, 13, 14, 15, 16, 17]  # 8 prompt blocks
+    lookahead_blocks = [18, 19, 20]  # trailing lookahead blocks decode never gets
+    # Per-KV-cache-group layout: one full-attention group (index 0) holds the
+    # prompt + trailing lookahead blocks.
+    local_block_ids = [prompt_blocks + lookahead_blocks]
+
+    # block_size=1: num_prompt_tokens == number of prompt blocks. The full
+    # (only) chunk holds prompt + lookahead. num_computed_tokens is 0 at
+    # build_connector_meta time (advanced only afterwards), so the whole prompt
+    # is scheduled in this single chunk -> final-chunk detection fires.
+    num_prompt_tokens = len(prompt_blocks)
+    req = SimpleNamespace(
+        request_id=req_id,
+        num_prompt_tokens=num_prompt_tokens,
+        num_computed_tokens=0,
+        kv_transfer_params=_spec_kv_params(),
+    )
+    scheduler._reqs_need_save[req_id] = (req, local_block_ids)
+    scheduler._req_kv_params[req_id] = _spec_kv_params()
+
+    meta = _build_meta(scheduler, num_scheduled_tokens={req_id: num_prompt_tokens})
+
+    assert isinstance(meta, MoRIIOConnectorMetadata)
+    assert req_id in meta.reqs_to_save
+    # Only the full-attention group is clamped to the prompt blocks.
+    saved = meta.reqs_to_save[req_id]
+    assert saved.local_block_ids == [prompt_blocks]
+    assert saved.local_block_ids[scheduler._full_attn_group_idx] == prompt_blocks
+
+
+def test_write_mode_chunked_prefill_clamps_spec_lookahead_blocks():
+    # Chunked-prefill + spec variant: earlier (non-final) chunks are buffered in
+    # _reqs_need_pending_save untouched; the trailing lookahead blocks are only
+    # clamped on the final-chunk save where the full local set is assembled.
+    set_role(ROLE.PRODUCER)
+    scheduler = _write_producer_scheduler(block_size=1)
+
+    req_id = "req-spec-chunked"
+    num_prompt_tokens = 8  # block_size=1 => 8 prompt blocks
+    first_chunk = [10, 11, 12, 13]  # non-final chunk, no lookahead yet
+    # final chunk carries the remaining prompt blocks + trailing lookahead
+    final_chunk = [14, 15, 16, 17, 18, 19, 20]  # 4 prompt + 3 lookahead
+    prompt_blocks = [10, 11, 12, 13, 14, 15, 16, 17]
+
+    req = SimpleNamespace(
+        request_id=req_id,
+        num_prompt_tokens=num_prompt_tokens,
+        num_computed_tokens=0,
+        kv_transfer_params=_spec_kv_params(),
+    )
+
+    # Step 1: first (non-final) chunk arrives via _reqs_need_save. It must be
+    # buffered into _reqs_need_pending_save and NOT saved/clamped yet. Only the
+    # first 4 of the 8 prompt tokens are scheduled here (computed 0 + scheduled
+    # 4 < 8), so this is not the final chunk.
+    scheduler._reqs_need_save[req_id] = (req, [first_chunk])
+    scheduler._req_kv_params[req_id] = _spec_kv_params()
+    meta_step1 = _build_meta(scheduler, num_scheduled_tokens={req_id: 4})
+    assert req_id not in meta_step1.reqs_to_save
+    assert req_id in scheduler._reqs_need_pending_save
+    assert scheduler._reqs_need_pending_save[req_id][1] == [first_chunk]
+
+    # Step 2: final chunk arrives via scheduled_cached_reqs. The remaining 4
+    # prompt tokens are scheduled now; num_computed_tokens has advanced to 4
+    # (post-step-1), so computed 4 + scheduled 4 >= 8 marks the final chunk. The
+    # full local set (first_chunk + final_chunk incl. lookahead) is assembled,
+    # the trailing lookahead blocks clamped off, and only the prompt blocks
+    # recorded.
+    req.num_computed_tokens = 4
+    meta_step2 = _build_meta(
+        scheduler,
+        req_ids=[req_id],
+        new_block_ids=[[final_chunk]],
+        num_scheduled_tokens={req_id: 4},
+    )
+    assert req_id in meta_step2.reqs_to_save
+    assert meta_step2.reqs_to_save[req_id].local_block_ids == [prompt_blocks]
+    assert req_id not in scheduler._reqs_need_pending_save
+
+
+@pytest.mark.parametrize(
+    ("block_size", "num_prompt_tokens", "num_prompt_blocks"),
+    [
+        # block_size=4: exact multiple (2 full blocks) and non-multiple (3 blocks,
+        # last one partial).
+        pytest.param(4, 8, 2, id="bs4-exact-multiple"),
+        pytest.param(4, 9, 3, id="bs4-non-multiple"),
+        # block_size=16: exact multiple (2 full blocks) and non-multiple (3
+        # blocks, last one partial).
+        pytest.param(16, 32, 2, id="bs16-exact-multiple"),
+        pytest.param(16, 40, 3, id="bs16-non-multiple"),
+    ],
+)
+def test_write_mode_clamps_prompt_blocks_with_block_size_gt_1(
+    block_size, num_prompt_tokens, num_prompt_blocks
+):
+    # Key coverage for the block-size-agnostic clamp: with block_size > 1 the
+    # producer's local_block_ids cover ceil(num_prompt_tokens / block_size)
+    # prompt blocks plus a trailing lookahead block. The clamp must keep exactly
+    # the prompt blocks and drop the tail. The old drop-trailing-N-spec-tokens
+    # logic would have over-dropped here, since one lookahead block spans
+    # multiple speculative tokens once block_size > 1.
+    set_role(ROLE.PRODUCER)
+    scheduler = _write_producer_scheduler(block_size=block_size)
+
+    req_id = f"req-bs{block_size}-{num_prompt_tokens}"
+    prompt_blocks = list(range(10, 10 + num_prompt_blocks))
+    lookahead_blocks = [10 + num_prompt_blocks]  # one trailing lookahead block
+    # Per-KV-cache-group layout: single full-attention group (index 0).
+    local_block_ids = [prompt_blocks + lookahead_blocks]
+
+    req = SimpleNamespace(
+        request_id=req_id,
+        num_prompt_tokens=num_prompt_tokens,
+        num_computed_tokens=0,
+        kv_transfer_params=_spec_kv_params(),
+    )
+    scheduler._reqs_need_save[req_id] = (req, local_block_ids)
+    scheduler._req_kv_params[req_id] = _spec_kv_params()
+
+    # Single (final) chunk: computed 0 + scheduled num_prompt_tokens >=
+    # num_prompt_tokens, so final-chunk detection fires and the clamp runs.
+    meta = _build_meta(scheduler, num_scheduled_tokens={req_id: num_prompt_tokens})
+
+    assert isinstance(meta, MoRIIOConnectorMetadata)
+    assert req_id in meta.reqs_to_save
+    # Exactly ceil(num_prompt_tokens / block_size) leading blocks are kept in
+    # the full-attention group.
+    assert len(prompt_blocks) == num_prompt_blocks
+    assert meta.reqs_to_save[req_id].local_block_ids == [prompt_blocks]
+
+
+def test_write_mode_defers_save_until_prompt_complete_with_lookahead():
+    # Regression for the chunked-prefill final-chunk edge case raised in review
+    # (vLLM PR #55053): under speculative decoding the producer's KV-cache
+    # manager reserves num_lookahead slots BEYOND the last-scheduled prompt
+    # token, so the accumulated local_block_ids grow past the prompt block count
+    # on a *non-final* chunk. The OLD final-chunk test compared block count to
+    # prompt length
+    #     len(accumulated_blocks) * block_size >= num_prompt_tokens
+    # which those inflated lookahead blocks trip early, firing the save on an
+    # earlier chunk and shipping an INCOMPLETE prompt. The fix detects the final
+    # chunk by prompt-token progress instead
+    #     req.num_computed_tokens + num_scheduled_tokens[req_id]
+    #         >= req.num_prompt_tokens
+    # which is immune to lookahead-block inflation. (num_computed_tokens is
+    # advanced in _update_after_schedule AFTER build_connector_meta, so it
+    # excludes the current chunk -> we add this step's num_scheduled_tokens.)
+    #
+    # Numbers chosen so the OLD block-count logic mis-fires but the NEW
+    # token-progress logic waits: block_size=1, num_prompt_tokens=10, chunk=4,
+    # num_lookahead=3. After 8 prompt tokens the producer has allocated 8 prompt
+    # blocks + 3 lookahead blocks = 11 >= 10, so the block-count test would
+    # wrongly flag the second-to-last chunk as final; token progress 8 < 10
+    # correctly keeps waiting. A final chunk then completes prompt tokens 9-10.
+    set_role(ROLE.PRODUCER)
+    scheduler = _write_producer_scheduler(block_size=1)
+
+    req_id = "req-lookahead-final-chunk"
+    num_prompt_tokens = 10  # block_size=1 => 10 prompt blocks
+
+    # Positional block layout (prompt occupies the leading blocks, lookahead
+    # trails): tokens 1-10 -> blocks 100..109, one pure lookahead slot -> 110.
+    chunk1_blocks = [100, 101, 102, 103]  # prompt tokens 1-4
+    # Second-to-last chunk: 4 real blocks for prompt tokens 5-8 plus the blocks
+    # the spec lookahead reserved ahead of the cursor (109 is still a prompt
+    # block for token 10; 108 for token 9; 110 is the pure spec slot). This is
+    # what inflates the accumulated count to 11 on a non-final chunk.
+    chunk2_blocks = [104, 105, 106, 107, 108, 109, 110]  # 4 real + 3 lookahead
+    prompt_blocks = [100, 101, 102, 103, 104, 105, 106, 107, 108, 109]  # 10 blocks
+
+    req = SimpleNamespace(
+        request_id=req_id,
+        num_prompt_tokens=num_prompt_tokens,
+        num_computed_tokens=0,
+        kv_transfer_params=_spec_kv_params(),
+    )
+    scheduler._req_kv_params[req_id] = _spec_kv_params()
+
+    # Chunk 1 (prompt tokens 1-4) enters via _reqs_need_save. computed 0 +
+    # scheduled 4 < 10 -> buffered, not saved.
+    scheduler._reqs_need_save[req_id] = (req, [chunk1_blocks])
+    meta1 = _build_meta(scheduler, num_scheduled_tokens={req_id: 4})
+    assert req_id not in meta1.reqs_to_save, "chunk 1 must not be saved"
+    assert req_id in scheduler._reqs_need_pending_save
+    assert scheduler._reqs_need_pending_save[req_id][1] == [chunk1_blocks]
+
+    # Chunk 2 (prompt tokens 5-8) is the PREMATURE chunk. It arrives via
+    # scheduled_cached_reqs and pushes the accumulated block count to 11
+    # (4 + 7), which the OLD `len(blocks) * block_size >= num_prompt_tokens`
+    # test (11 >= 10) would have wrongly flagged as final. The fix uses token
+    # progress: computed 4 + scheduled 4 = 8 < 10, so the request must STAY
+    # deferred and NOT be emitted as a WRITE add_new_req here.
+    req.num_computed_tokens = 4
+    meta2 = _build_meta(
+        scheduler,
+        req_ids=[req_id],
+        new_block_ids=[[chunk2_blocks]],
+        num_scheduled_tokens={req_id: 4},
+    )
+    assert req_id not in meta2.reqs_to_save, (
+        "second-to-last chunk saved prematurely: lookahead blocks inflated the "
+        "block count and tripped the old final-chunk detection"
+    )
+    assert req_id in scheduler._reqs_need_pending_save
+    # All 11 blocks (incl. lookahead) are buffered, but nothing shipped yet.
+    assert scheduler._reqs_need_pending_save[req_id][1] == [chunk1_blocks + chunk2_blocks]
+
+    # Final chunk completes prompt tokens 9-10. Their blocks (108, 109) were
+    # already reserved with the lookahead on chunk 2, so no new blocks are
+    # allocated (new_block_ids[0] is empty). computed 8 + scheduled 2 = 10 >= 10
+    # -> final chunk: the request is emitted now, with the trailing lookahead
+    # block (110) clamped off so only the 10 prompt blocks are recorded.
+    req.num_computed_tokens = 8
+    meta3 = _build_meta(
+        scheduler,
+        req_ids=[req_id],
+        new_block_ids=[[[]]],
+        num_scheduled_tokens={req_id: 2},
+    )
+    assert req_id in meta3.reqs_to_save, "final chunk must emit the WRITE save"
+    assert meta3.reqs_to_save[req_id].local_block_ids == [prompt_blocks]
+    assert req_id not in scheduler._reqs_need_pending_save
+
 
 
 def _make_hybrid_kv_cache_config() -> KVCacheConfig:
