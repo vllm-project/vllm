@@ -2641,6 +2641,223 @@ def reshape_and_cache_flash(
     )
 
 
+# Head dim is hard-coded to 128 in the CUDA kernel and the reference below.
+_MINIMAX_M3_HEAD_DIM = 128
+_FP8_E4M3_MAX = 448.0
+
+_HAS_FUSED_MINIMAX_M3_KERNEL = hasattr(torch.ops, "_C") and hasattr(
+    torch.ops._C, "fused_minimax_m3_qknorm_rope_kv_insert"
+)
+
+
+def _minimax_m3_gemma_norm_rope(
+    x: torch.Tensor,
+    weight: torch.Tensor | None,
+    eps: float,
+    cos: torch.Tensor | None,
+    sin: torch.Tensor | None,
+) -> torch.Tensor:
+    """Gemma RMSNorm + partial NeoX RoPE on one branch, in FP32.
+
+    Mirrors ``normAndRope()`` in the fused CUDA kernel, over a
+    ``[num_tokens, heads, 128]`` view of the packed row.
+
+    The norm is skipped when ``weight is None`` (the V branch) and RoPE when
+    ``cos is None``. RoPE rotates the leading ``2 * cos.shape[-1]`` channels and
+    passes the tail through. Returns FP32; the caller rounds to the destination
+    dtype, as the kernel keeps registers in FP32 until store.
+    """
+    out = x.float()
+    if weight is not None:
+        variance = out.pow(2).mean(dim=-1, keepdim=True)
+        out = out * torch.rsqrt(variance + eps) * (1.0 + weight.float())
+    if cos is not None:
+        assert sin is not None
+        half = cos.shape[-1]
+        rotary_dim = 2 * half
+        x1 = out[..., :half]
+        x2 = out[..., half:rotary_dim]
+        c = cos.unsqueeze(-2)
+        s = sin.unsqueeze(-2)
+        out = torch.cat(
+            (x1 * c - x2 * s, x2 * c + x1 * s, out[..., rotary_dim:]), dim=-1
+        )
+    return out
+
+
+def _to_fp8_e4m3(x: torch.Tensor) -> torch.Tensor:
+    """FP32 -> E4M3, saturating at +-448 like the kernel."""
+    return x.clamp(-_FP8_E4M3_MAX, _FP8_E4M3_MAX).to(torch.float8_e4m3fn)
+
+
+def _minimax_m3_cache_store_dtype(
+    kv_cache: torch.Tensor, kv_cache_dtype: str
+) -> torch.dtype:
+    """Storage dtype to cast K/V to before writing them into ``kv_cache``.
+
+    ``"auto"`` means unquantized: the cache already has the model dtype. The FP8
+    modes keep uint8 storage and convert with an identity scale.
+    """
+    if kv_cache_dtype == "auto":
+        return kv_cache.dtype
+    if kv_cache_dtype in ("fp8", "fp8_e4m3"):
+        return torch.float8_e4m3fn
+    if kv_cache_dtype == "fp8_e5m2":
+        return torch.float8_e5m2
+    raise NotImplementedError(
+        f"kv_cache_dtype={kv_cache_dtype!r} is not supported by the reference "
+        "MiniMax-M3 fused-preprocessing implementation"
+    )
+
+
+def _fused_minimax_m3_qknorm_rope_kv_insert_ref(
+    qkv: torch.Tensor,
+    q_norm_weight: torch.Tensor,
+    k_norm_weight: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+    num_heads: int,
+    num_kv_heads: int,
+    rotary_dim: int,
+    eps: float,
+    index_q_norm_weight: torch.Tensor | None,
+    index_k_norm_weight: torch.Tensor | None,
+    num_index_heads: int,
+    slot_mapping: torch.Tensor | None,
+    index_slot_mapping: torch.Tensor | None,
+    kv_cache: torch.Tensor | None,
+    index_cache: torch.Tensor | None,
+    block_size: int,
+    q_out: torch.Tensor | None,
+    index_q_out: torch.Tensor | None,
+    kv_cache_dtype: str,
+    skip_index_branch: bool,
+    q_fp8_out: torch.Tensor | None,
+    q_fp8_scale: float,
+) -> None:
+    """Unfused reference for ``fused_minimax_m3_qknorm_rope_kv_insert``.
+
+    Follows the semantics of
+    ``csrc/libtorch_stable/fused_minimax_m3_qknorm_rope_kv_insert_kernel.cu``;
+    see the public wrapper below for the argument contract.
+    """
+    head_dim = _MINIMAX_M3_HEAD_DIM
+    num_tokens = qkv.shape[0]
+    nq, nkv, niq = num_heads, num_kv_heads, num_index_heads
+    has_index = niq > 0
+    insert_kv = kv_cache is not None
+    process_index = has_index and not skip_index_branch
+
+    expected_row = (nq + 2 * nkv + (niq + 1 if has_index else 0)) * head_dim
+    assert qkv.shape[1] == expected_row, (
+        f"qkv row {qkv.shape[1]} != expected {expected_row}"
+    )
+    assert qkv.is_contiguous(), "qkv must be contiguous"
+    assert not insert_kv or has_index, (
+        "insert mode (kv_cache) requires the index branch (sparse layer)"
+    )
+    assert cos_sin_cache.dim() == 2 and cos_sin_cache.shape[1] == rotary_dim, (
+        "cos_sin_cache shape must be [max_pos, rotary_dim]"
+    )
+
+    # cos_sin_cache rows are [cos(rotary_dim/2) | sin(rotary_dim/2)].
+    half = rotary_dim // 2
+    cos_sin = cos_sin_cache.index_select(0, positions.long().view(-1))
+    cos = cos_sin[:, :half].float()
+    sin = cos_sin[:, half:rotary_dim].float()
+
+    # Per-token head-slot view over the packed row: [q | k | v] (dense) or
+    # [q | k | v | index_q | index_k] (sparse).
+    heads = qkv.view(num_tokens, -1, head_dim)
+    k_begin, v_begin, iq_begin = nq, nq + nkv, nq + 2 * nkv
+
+    q = _minimax_m3_gemma_norm_rope(heads[:, :k_begin], q_norm_weight, eps, cos, sin)
+    q_rounded = q.to(qkv.dtype)
+    if q_out is not None:
+        q_out.view(num_tokens, nq, head_dim).copy_(q_rounded)
+    else:
+        heads[:, :k_begin] = q_rounded
+    if q_fp8_out is not None:
+        # Like the kernel, round to the model dtype before scaling.
+        scaled = q_rounded.float() * (1.0 / float(q_fp8_scale))
+        q_fp8_out.view(num_tokens, nq, head_dim).copy_(_to_fp8_e4m3(scaled))
+
+    k = _minimax_m3_gemma_norm_rope(
+        heads[:, k_begin:v_begin], k_norm_weight, eps, cos, sin
+    )
+    heads[:, k_begin:v_begin] = k.to(qkv.dtype)
+
+    index_k = None
+    if process_index:
+        assert index_q_norm_weight is not None and index_k_norm_weight is not None, (
+            "index branch requires both index norm weights"
+        )
+        ik_begin = iq_begin + niq
+        index_q = _minimax_m3_gemma_norm_rope(
+            heads[:, iq_begin:ik_begin], index_q_norm_weight, eps, cos, sin
+        )
+        index_k = _minimax_m3_gemma_norm_rope(
+            heads[:, ik_begin : ik_begin + 1], index_k_norm_weight, eps, cos, sin
+        )
+        if index_q_out is not None:
+            dst = index_q_out.view(num_tokens, niq, head_dim)
+            if index_q_out.dtype == torch.float8_e4m3fn:
+                dst.copy_(_to_fp8_e4m3(index_q))
+            else:
+                dst.copy_(index_q.to(index_q_out.dtype))
+        else:
+            heads[:, iq_begin:ik_begin] = index_q.to(qkv.dtype)
+        heads[:, ik_begin : ik_begin + 1] = index_k.to(qkv.dtype)
+
+    if not insert_kv:
+        return
+
+    # Negative slots are padded or unscheduled tokens and must be skipped.
+    # Masking them out costs a device->host sync, which the kernel avoids with a
+    # per-thread guard, but clamping them to a real row would instead race with
+    # a genuine write to that row under duplicate-index scatter.
+    assert slot_mapping is not None, "insert mode requires slot_mapping"
+    slots = slot_mapping.long().view(-1)
+    row_sel = slots >= 0
+    rows = slots[row_sel]
+
+    if rows.numel():
+        # kv_cache logical shape [num_blocks, nkv, block_size, 2 * head_dim].
+        block = rows // block_size
+        offset = rows % block_size
+        store_dtype = _minimax_m3_cache_store_dtype(kv_cache, kv_cache_dtype)
+        cache = (
+            kv_cache if store_dtype == kv_cache.dtype else kv_cache.view(store_dtype)
+        )
+        if store_dtype == torch.float8_e4m3fn:
+            k_store = _to_fp8_e4m3(k[row_sel])
+            v_store = _to_fp8_e4m3(heads[row_sel, v_begin:iq_begin].float())
+        else:
+            k_store = k[row_sel].to(store_dtype)
+            v_store = heads[row_sel, v_begin:iq_begin].to(store_dtype)
+        cache[block, :, offset, :head_dim] = k_store
+        cache[block, :, offset, head_dim:] = v_store
+
+    if not process_index:
+        return
+
+    assert index_cache is not None, "insert mode requires index_cache"
+    index_slots = (
+        slots if index_slot_mapping is None else index_slot_mapping.long().view(-1)
+    )
+    index_sel = index_slots >= 0
+    index_rows = index_slots[index_sel]
+    if not index_rows.numel():
+        return
+    # index_cache is addressed flat by slot: [num_blocks * block_size, 128].
+    flat_index_cache = index_cache.view(-1, head_dim)
+    src = index_k[index_sel, 0]
+    if index_cache.dtype == torch.float8_e4m3fn:
+        flat_index_cache[index_rows] = _to_fp8_e4m3(src)
+    else:
+        flat_index_cache[index_rows] = src.to(index_cache.dtype)
+
+
 def fused_minimax_m3_qknorm_rope_kv_insert(
     qkv: torch.Tensor,
     q_norm_weight: torch.Tensor,
@@ -2694,7 +2911,36 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     ``[index_q | index_k]`` tail, but the kernel only processes the main q/k/v
     branches and main KV cache. This is used by MiniMax-M3 index-topk reuse
     layers that consume top-k block ids selected by an earlier sparse layer.
+
+    Platforms that do not build ``vllm._C`` (XPU, CPU) dispatch to an unfused
+    PyTorch implementation with the same semantics.
     """
+    if not _HAS_FUSED_MINIMAX_M3_KERNEL:
+        return _fused_minimax_m3_qknorm_rope_kv_insert_ref(
+            qkv,
+            q_norm_weight,
+            k_norm_weight,
+            cos_sin_cache,
+            positions,
+            num_heads,
+            num_kv_heads,
+            rotary_dim,
+            eps,
+            index_q_norm_weight,
+            index_k_norm_weight,
+            num_index_heads,
+            slot_mapping,
+            index_slot_mapping,
+            kv_cache,
+            index_cache,
+            block_size,
+            q_out,
+            index_q_out,
+            kv_cache_dtype,
+            skip_index_branch,
+            q_fp8_out,
+            q_fp8_scale,
+        )
     torch.ops._C.fused_minimax_m3_qknorm_rope_kv_insert(
         qkv,
         q_norm_weight,
