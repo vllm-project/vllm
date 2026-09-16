@@ -1049,6 +1049,7 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
         # missing GIN support.
         probe = torch.zeros(1, device="cuda")
         torch.distributed.all_reduce(probe, group=group)
+        # DeepEPv2 respects EP_DISABLE_GIN, so skip the GIN requirement check.
         if os.environ.get("EP_DISABLE_GIN", "0") != "0":
             return
 
