@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import chain, islice
 from typing import Any, NamedTuple
 
@@ -114,7 +114,10 @@ class GroupOffloadConfig(NamedTuple):
             window = max(
                 window,
                 cdiv(
-                    self.kv_cache_spec.sliding_window - 1 + right_padding,
+                    self.kv_cache_spec.sliding_window
+                    - 1
+                    + self.kv_cache_spec.extra_retained_tokens
+                    + right_padding,
                     self.tokens_per_chunk,
                 ),
             )
@@ -126,7 +129,13 @@ def get_sliding_window_size_in_chunks(
 ) -> int | None:
     if isinstance(kv_cache_spec, SlidingWindowSpec):
         assert kv_cache_spec.sliding_window > 0
-        return cdiv(kv_cache_spec.sliding_window, tokens_per_chunk)
+        return max(
+            cdiv(kv_cache_spec.sliding_window, tokens_per_chunk),
+            cdiv(
+                kv_cache_spec.sliding_window - 1 + kv_cache_spec.extra_retained_tokens,
+                tokens_per_chunk,
+            ),
+        )
 
     if isinstance(kv_cache_spec, ChunkedLocalAttentionSpec):
         # Attention never reaches back past one chunk
@@ -354,6 +363,8 @@ class RequestOffloadState:
     req_context: ReqContext
     offloading_context: RequestOffloadingContext
     group_states: tuple[RequestGroupState, ...] = field(init=False)
+    # upper bound on tokens to load for this request; None means no cap
+    max_load_tokens: int | None = None
     # upper bound on tokens to offload for this request; None means no cap
     max_offload_tokens: int | None = None
     # number of hits in the GPU cache
@@ -375,6 +386,20 @@ class RequestOffloadState:
             RequestGroupState() for _ in self.config.kv_group_configs
         )
         params = self.req.kv_transfer_params
+
+        # NOTE: This field is experimental and subject to change in the future.
+        raw = params.get("max_load_tokens") if params else None
+        if type(raw) is int and raw >= 0:
+            self.max_load_tokens = raw
+            logger.debug(
+                "Request %s: max_load_tokens set to %d",
+                self.req.request_id,
+                raw,
+            )
+        elif raw is not None:
+            logger.warning(
+                "max_load_tokens must be a non-negative int, got %r; ignoring", raw
+            )
 
         # NOTE: This field is experimental and subject to change in the future.
         raw = params.get("max_offload_tokens") if params else None
@@ -685,6 +710,7 @@ class OffloadingConnectorScheduler:
         The first run may need a larger window for a partial rightmost chunk.
         Returns 0 on miss, None if the backend deferred a lookup."""
         defer_lookup = False
+        pending_in_window = False
         consecutive_hits = 0
         required_window = initial_window_size or sliding_window_size
         for idx in range(len(keys) - 1, -1, -1):
@@ -695,7 +721,7 @@ class OffloadingConnectorScheduler:
                     # Block is in cache, just not readable yet — counts
                     # as hit for the consecutive streak. Don't break:
                     # keep scanning to let manager kick off async lookups.
-                    defer_lookup = True
+                    pending_in_window = True
                     consecutive_hits += 1
                 case LookupResult.RETRY:
                     # Block location uncertain — does not count as hit.
@@ -703,13 +729,18 @@ class OffloadingConnectorScheduler:
                     # async lookups.
                     defer_lookup = True
                     consecutive_hits = 0
+                    pending_in_window = False
                     required_window = sliding_window_size
                 case LookupResult.MISS:
                     consecutive_hits = 0
+                    # This gap rules out the incomplete window to its right.
+                    pending_in_window = False
                     required_window = sliding_window_size
             if consecutive_hits == required_window:
-                return idx + required_window if not defer_lookup else None
-        return consecutive_hits if not defer_lookup else None
+                return (
+                    None if defer_lookup or pending_in_window else idx + required_window
+                )
+        return None if defer_lookup or pending_in_window else consecutive_hits
 
     def _touch(self, req_status: RequestOffloadState):
         for group_config, group_state in zip(
@@ -761,6 +792,11 @@ class OffloadingConnectorScheduler:
             max_hit_size_tokens = min(
                 max_hit_size_tokens, num_computed_tokens + max_num_new_tokens
             )
+        if req_status.max_load_tokens is not None:
+            max_hit_size_tokens = min(
+                max_hit_size_tokens,
+                num_computed_tokens + req_status.max_load_tokens,
+            )
         if self._sliding_window_groups:
             # the last prompt token has to be recomputed to get the logprobs
             # for sliding window attention, we must reduce by 1 to make sure
@@ -804,6 +840,10 @@ class OffloadingConnectorScheduler:
                 max_hit_size_tokens = min(
                     max_hit_size_tokens, len(offload_keys) * tokens_per_chunk
                 )
+                if req_status.max_load_tokens is not None:
+                    max_hit_size_tokens = round_down(
+                        max_hit_size_tokens, tokens_per_chunk
+                    )
                 if max_hit_size_tokens - num_computed_tokens < tokens_per_chunk:
                     # We can only load less than a chunk, so skip.
                     return 0
@@ -959,6 +999,11 @@ class OffloadingConnectorScheduler:
         max_boundary = min(req_status.req.num_prompt_tokens - 1, block_end - 1)
         if max_num_new_tokens is not None:
             max_boundary = min(max_boundary, local_tokens + max_num_new_tokens)
+        if req_status.max_load_tokens is not None:
+            max_boundary = min(
+                max_boundary,
+                local_tokens + req_status.max_load_tokens,
+            )
         max_boundary = round_down(max_boundary, tokens_per_hash)
         if max_boundary <= complete_boundary:
             return complete_hit
@@ -1425,11 +1470,24 @@ class OffloadingConnectorScheduler:
     ) -> list[bool] | None:
         """Build the block mask for a range of candidate offload chunks."""
         blocks_per_chunk = self.config.blocks_per_chunk
+        kv_cache_spec = group_config.kv_cache_spec
+        if isinstance(kv_cache_spec, SlidingWindowSpec) and (
+            kv_cache_spec.extra_retained_tokens
+        ):
+            # Offload restores all allocated history, including MTP re-prefill
+            # tokens. Widen only the store mask, not the model's attention window.
+            kv_cache_spec = replace(
+                kv_cache_spec,
+                sliding_window=(
+                    kv_cache_spec.sliding_window + kv_cache_spec.extra_retained_tokens
+                ),
+                extra_retained_tokens=0,
+            )
         return group_config.manager_cls.reachable_block_mask(
             start_block=start_chunk_idx * blocks_per_chunk,
             end_block=end_chunk_idx * blocks_per_chunk,
             alignment_tokens=self.config.alignment_tokens,
-            kv_cache_spec=group_config.kv_cache_spec,
+            kv_cache_spec=kv_cache_spec,
             use_eagle=group_config.is_eagle_group,
             retention_interval=self.config.retention_interval,
             reachable_boundaries=reachable_boundaries,
