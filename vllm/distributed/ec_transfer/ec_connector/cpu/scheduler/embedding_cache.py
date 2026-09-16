@@ -15,7 +15,8 @@ from collections import OrderedDict
 
 class CacheEntry:
     """A single cache entry. Read `.block_ids` and `.ready` freely;
-    mutations only through EmbeddingCache methods."""
+    mutations only through EmbeddingCache methods.
+    """
 
     __slots__ = ("block_ids", "_pin_count")
 

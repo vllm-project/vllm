@@ -90,7 +90,7 @@ class VoxtralRealtimeMultiModalProcessor(VoxtralMultiModalProcessor):
 
 
 class TimeEmbedding(torch.nn.Module):
-    """Sinusoidal Embedding for encoding time"""
+    """Sinusoidal Embedding for encoding time."""
 
     def __init__(self, dim: int, theta: float = 10000.0) -> None:
         super().__init__()
@@ -217,9 +217,15 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
-        assert (
-            not vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
-        ), "Voxtral realtime doesn't support full cudagraphs yet. Please use PIECEWISE."
+        # Full cudagraphs are supported for decode-only batches (the encoder's
+        # block-pooling attention builder is capture-safe for uniform
+        # single-token decode). Mixed/prefill batches are not, so block only
+        # pure FULL; FULL_DECODE_ONLY and FULL_AND_PIECEWISE are allowed.
+        cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
+        assert not cudagraph_mode.mixed_mode().has_full_cudagraphs(), (
+            "Voxtral realtime supports full cudagraphs for decode-only batches. "
+            "Use cudagraph_mode=FULL_DECODE_ONLY or FULL_AND_PIECEWISE (not FULL)."
+        )
 
         self.time_embedding: TimeEmbedding = TimeEmbedding(
             dim=self.config.text_config.hidden_size
@@ -385,7 +391,7 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
     def embed_multimodal(
         self, **kwargs
     ) -> list[torch.Tensor] | torch.Tensor | tuple[torch.Tensor, ...] | None:
-        """Transform audio waveforms -> initial whisper post-conv embeddings"""
+        """Transform audio waveforms -> initial whisper post-conv embeddings."""
         audio_inputs = self._parse_and_validate_audio_arrays(**kwargs)
 
         if audio_inputs is None:

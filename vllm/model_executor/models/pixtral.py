@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib.metadata
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields
@@ -12,15 +13,12 @@ import torch.nn as nn
 from mistral_common.protocol.instruct.chunk import ImageChunk, TextChunk
 from mistral_common.protocol.instruct.messages import UserMessage
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
+from packaging.version import Version
 from transformers import BatchFeature, PixtralVisionConfig
 from transformers.models.pixtral.image_processing_pixtral import (
     _num_image_tokens as _get_pixtral_hf_num_image_tokens,
 )
-from transformers.models.pixtral.modeling_pixtral import (
-    PixtralRotaryEmbedding,
-    apply_rotary_pos_emb,
-    position_ids_in_meshgrid,
-)
+from transformers.models.pixtral.modeling_pixtral import apply_rotary_pos_emb
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -42,6 +40,7 @@ from vllm.model_executor.models.utils import WeightsMapper
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsOptionalItems,
     NestedTensors,
 )
@@ -91,6 +90,39 @@ from .vision import (
 
 PATCH_MERGE = "patch_merge"
 
+# Transformers 5.17 renamed Pixtral's rotary embedding and switched it to axial
+# RoPE, which takes 2D (height, width) positions instead of flattened grid ids.
+TRANSFORMERS_VERSION = importlib.metadata.version("transformers")
+TRANSFORMERS_WITH_AXIAL_ROPE = Version(TRANSFORMERS_VERSION) >= Version("5.17.0.dev0")
+
+if TRANSFORMERS_WITH_AXIAL_ROPE:
+    from transformers.models.pixtral.modeling_pixtral import (
+        PixtralVisionRotaryEmbedding,
+    )
+else:
+    from transformers.models.pixtral.modeling_pixtral import (
+        PixtralRotaryEmbedding as PixtralVisionRotaryEmbedding,
+    )
+    from transformers.models.pixtral.modeling_pixtral import (
+        position_ids_in_meshgrid as flat_position_ids_in_meshgrid,
+    )
+
+
+def position_ids_in_meshgrid(
+    patch_embeds_list: list[torch.Tensor],
+    max_width: int,
+) -> torch.Tensor:
+    if not TRANSFORMERS_WITH_AXIAL_ROPE:
+        return flat_position_ids_in_meshgrid(patch_embeds_list, max_width)
+    positions = []
+    for patch in patch_embeds_list:
+        height, width = patch.shape[-2:]
+        h_ids, w_ids = torch.meshgrid(
+            torch.arange(height), torch.arange(width), indexing="ij"
+        )
+        positions.append(torch.stack([h_ids.flatten(), w_ids.flatten()], dim=-1))
+    return torch.cat(positions, dim=0)
+
 
 def _make_packed_sequence_metadata(
     sequence_lengths: list[int],
@@ -125,8 +157,7 @@ def _is_layer_none_or_staged(layer: nn.Module) -> bool:
 
 
 class PixtralImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
+    """Dimensions:
         - bn: Batch size * number of images
         - c: Number of channels (3)
         - h: Height of each image
@@ -623,17 +654,18 @@ class PixtralForConditionalGeneration(
             tower_model="vision_encoder",
         )
 
-    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
         if getattr(self, "patch_merger", None) is None:
-            return num_image_tokens
+            return num_mm_embeds, num_mm_embeds
         merge_size = self.vision_args.spatial_merge_size
-        return num_image_tokens * (merge_size**2)
-
-    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
-        if getattr(self, "patch_merger", None) is None:
-            return num_vision_tokens
-        merge_size = self.vision_args.spatial_merge_size
-        return num_vision_tokens // (merge_size**2)
+        return num_mm_embeds * (merge_size**2), num_mm_embeds
 
 
 # Vision encoder
@@ -655,8 +687,7 @@ class VisionEncoderArgs:
 
 
 def _reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-    """
-    freqs_cis: complex - (seq_len, head_dim / 2)
+    """freqs_cis: complex - (seq_len, head_dim / 2)
     x: complex - (bsz, seq_len, head_dim / 2)
     """
     ndim = x.ndim
@@ -675,9 +706,8 @@ def precompute_freqs_cis_2d(
     width: int,
     theta: float,
 ) -> torch.Tensor:
-    """
-    freqs_cis: 2D complex tensor of shape (height, width, dim // 2)
-        to be indexed by (height, width) position tuples
+    """freqs_cis: 2D complex tensor of shape (height, width, dim // 2)
+    to be indexed by (height, width) position tuples
     """
     # (dim / 2) frequency bases
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
@@ -985,13 +1015,14 @@ class VisionTransformer(nn.Module):
         self,
         images: list[torch.Tensor],
     ) -> torch.Tensor:
-        """
-        Args:
+        """Args:
             images: list of N_img images of variable sizes,
                 each of shape (C, H, W)
+
         Returns:
             image_features: tensor of token features for
                 all tokens of all images of shape (N_toks, D)
+
         """
         # pass images through initial convolution independently
         patch_embeds_list = [
@@ -1049,9 +1080,7 @@ class VisionLanguageAdapter(nn.Module):
 
 
 class PatchMerger(nn.Module):
-    """
-    Learned merging of spatial_merge_size ** 2 patches
-    """
+    """Learned merging of spatial_merge_size ** 2 patches."""
 
     def __init__(
         self,
@@ -1091,8 +1120,7 @@ class PatchMerger(nn.Module):
         x: torch.Tensor,
         image_sizes: list[tuple[int, int]],
     ) -> torch.Tensor:
-        """
-        Args:
+        """Args:
             x: (N, D) where N is flattened and concatenated patch tokens
                 for all images
             image_sizes: list of tuple of (height, width) in tokens for
@@ -1101,8 +1129,8 @@ class PatchMerger(nn.Module):
             image_features: reorders patch tokens so each grid of
                 (spatial_merge_size, spatial_merge_size) is contiguous.
                 now (N / spatial_merge_size ** 2, D * spatial_merge_size ** 2)
-        """
 
+        """
         sub_grids = get_sub_grids(
             x=x, image_sizes=image_sizes, spatial_merge_size=self.spatial_merge_size
         )  # list of [d x sub_grid_size x sub_grid_size x n_patches]
@@ -1465,7 +1493,9 @@ class PixtralHFVisionModel(nn.Module):
 
         self.dtype = next(self.parameters()).dtype
         self.device = next(self.parameters()).device
-        self.patch_positional_embedding = PixtralRotaryEmbedding(config, self.device)
+        self.patch_positional_embedding = PixtralVisionRotaryEmbedding(config).to(
+            self.device
+        )
 
     def forward(
         self,
@@ -1474,8 +1504,7 @@ class PixtralHFVisionModel(nn.Module):
         select_layers: list[int] | None = None,
         feature_select_strategy: VisionFeatureSelectStrategy | None = None,
     ) -> tuple[torch.Tensor, ...]:
-        """
-        Args:
+        """Args:
             pixel_values: Each image to be processed will be a separate tensor
                 in pixel_values. This means it will be a list of tensors
                 because multiple requests batched can have multiple images,
@@ -1487,6 +1516,7 @@ class PixtralHFVisionModel(nn.Module):
         Returns:
             image_features: tensor of token features for
                 all tokens of all images of shape (N_toks, D)
+
         """
         # pass images through initial convolution independently
         patch_embeds_list = [

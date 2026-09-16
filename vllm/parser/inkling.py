@@ -67,7 +67,8 @@ _WS = " \t\r\n"
 
 def _scan_json_value(raw: str, start: int) -> int | None:
     """Return the end index (exclusive) of the JSON object starting at
-    ``raw[start]``, or ``None`` when the object is still unterminated."""
+    ``raw[start]``, or ``None`` when the object is still unterminated.
+    """
     depth = 0
     in_string = False
     escape = False
@@ -282,6 +283,7 @@ def inkling_config() -> ParserEngineConfig:
         # `<|message_model|>`. Non-streaming parsing receives only the generated
         # suffix, so begin in the corresponding message-header state as well.
         initial_state=ParserState.MESSAGE_HEADER,
+        wait_for_reasoning=True,
         terminals=terminals,
         # Inkling content-kind markers are the grammar. When the engine is
         # used through DelegatingParser, the reasoning pass can hand the tool

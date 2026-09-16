@@ -7,15 +7,15 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.models.deepseek_v4_1.common import engram as engram_ops
-from vllm.models.deepseek_v4_1.common.engram import (
+from vllm.models.deepseek_v41.common import engram as engram_ops
+from vllm.models.deepseek_v41.common.engram import (
     Engram as CommonEngram,
 )
-from vllm.models.deepseek_v4_1.common.engram import (
+from vllm.models.deepseek_v41.common.engram import (
     NgramHashState,
 )
-from vllm.models.deepseek_v4_1.nvidia import engram as nvidia_engram_ops
-from vllm.models.deepseek_v4_1.nvidia.engram import Engram, ParallelEngramEmbedding
+from vllm.models.deepseek_v41.nvidia import engram as nvidia_engram_ops
+from vllm.models.deepseek_v41.nvidia.engram import Engram, ParallelEngramEmbedding
 from vllm.platforms import current_platform
 
 
@@ -383,7 +383,8 @@ def _hash_ids(requests, tables_meta, block_table, cache=None, capture=False):
     """Run the op on a batch of (token_ids, start, window) requests; `window`
     is the runner's [depth] lookback for that request (None = all unknown).
     Token IDs 14 and 22 stand in for image tokens that break n-grams.
-    Returns one [len(token_ids), ...] hash tensor per request."""
+    Returns one [len(token_ids), ...] hash tensor per request.
+    """
     token_map, multipliers, primes, offsets, block_size = tables_meta
     depth = multipliers.shape[1] - 1
 
@@ -442,7 +443,8 @@ def test_lookback_window_reproduces_single_instance(runner, capture):
     V2 supplies every lookback from its device token history and needs no
     slot cache. V1 supplies prompt positions only and reads generated
     positions from the slot cache it fills itself. Without any window the
-    first decode token hashes stale slots (negative control)."""
+    first decode token hashes stale slots (negative control).
+    """
     block_size = 4
     block_table = torch.tensor(
         [[3, 1, 5, 0], [2, 4, 6, 7]], dtype=torch.int32, device="cuda"
@@ -503,7 +505,7 @@ def test_lookback_window_reproduces_single_instance(runner, capture):
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 def test_v2_model_state_gathers_lookback_window():
     """The window is gathered on device from the runner's token history."""
-    from vllm.models.deepseek_v4_1.nvidia.model_state import DeepseekV41ModelState
+    from vllm.models.deepseek_v41.nvidia.model_state import DeepseekV41ModelState
 
     depth, max_num_reqs, max_model_len = 3, 4, 16
     state = DeepseekV41ModelState.__new__(DeepseekV41ModelState)
@@ -708,7 +710,8 @@ def test_engram_lookup_reuses_jit_across_token_shapes():
 def test_engram_lookup_matches_torch(cpu_offload, background, num_tokens):
     """The fused gather must be bit-exact with the torch dequant path it
     replaces, from HBM and from pinned host memory alike, and must contribute
-    zeros for rows another TP rank owns."""
+    zeros for rows another TP rank owns.
+    """
     layer = _make_embedding(cpu_offload)
     cols, rows = 24, layer.part_num_embeddings
     ids = torch.randint(0, rows, (num_tokens, cols), dtype=torch.int32, device="cuda")

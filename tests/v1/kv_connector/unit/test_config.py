@@ -19,13 +19,15 @@ class _StubLMCacheMPConnector:
     test only asserts on the connector *name* and the ``extra_config`` dict
     produced by ``VllmConfig``, never instantiates the connector, so a bare
     placeholder class is sufficient. Not subclassing ``SupportsHMA`` mirrors
-    the real connector's HMA support (it does not support HMA either)."""
+    the real connector's HMA support (it does not support HMA either).
+    """
 
 
 @pytest.fixture
 def stub_lmcache_mp_connector(monkeypatch):
     """Replace the lazy loader so VllmConfig.__post_init__ does not import
-    ``lmcache_mp_connector`` (and thus ``lmcache``) during config tests."""
+    ``lmcache_mp_connector`` (and thus ``lmcache``) during config tests.
+    """
     monkeypatch.setitem(
         KVConnectorFactory._registry,
         "LMCacheMPConnector",
@@ -105,7 +107,8 @@ def _build_config(
     enable_cumem_allocator: bool = False,
 ) -> VllmConfig:
     """Build a VllmConfig that exercises _verify_kv_transfer_compat without
-    requiring a real model (avoids HF downloads in CI)."""
+    requiring a real model (avoids HF downloads in CI).
+    """
     from types import SimpleNamespace
 
     kv_transfer_config = (
@@ -131,7 +134,8 @@ def test_kv_connector_rejects_expandable_segments(monkeypatch, kv_connector):
     invalidated when expandable_segments lets the CUDA VMM allocator remap
     the underlying physical pages. We can't enumerate every connector that
     does this (especially OOT ones), so reject the combination whenever any
-    connector is configured."""
+    connector is configured.
+    """
     monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     with pytest.raises(ValueError, match="expandable_segments"):
         _build_config(kv_connector=kv_connector)
@@ -139,7 +143,8 @@ def test_kv_connector_rejects_expandable_segments(monkeypatch, kv_connector):
 
 def test_kv_connector_allows_expandable_segments_with_sleep_mode(monkeypatch):
     """Sleep mode routes KV allocations through CuMemAllocator's pool, which
-    auto-disables expandable_segments (see #40812)."""
+    auto-disables expandable_segments (see #40812).
+    """
     monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     _build_config(kv_connector="NixlConnector", enable_sleep_mode=True)
 
@@ -162,7 +167,8 @@ def test_kv_connector_allows_other_alloc_conf(monkeypatch):
 
 def test_no_kv_connector_ignores_expandable_segments(monkeypatch):
     """The expandable_segments check only applies when a KV connector is
-    configured."""
+    configured.
+    """
     monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     _build_config(kv_connector=None)
 

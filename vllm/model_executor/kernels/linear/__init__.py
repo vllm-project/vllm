@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-This module re-exports linear kernel implementations to provide a
+"""This module re-exports linear kernel implementations to provide a
 stable import interface during an ongoing reorganization. Upcoming
 PRs will remove the scaled_mm and mixed_precision subdirectories
 and reorganize kernels by provider (aiter, cutlass, flashinfer, etc.)
@@ -187,6 +186,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cpu import (
     CPUFp8BlockScaledMMKernel,
+    CPUFp8PerTensorScaledMMLinearKernel,
     CPUInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
@@ -235,14 +235,19 @@ from vllm.platforms import PlatformEnum, current_platform
 logger = init_logger(__name__)
 
 
-def _get_linear_backend() -> str:
+def _get_linear_backend(*, quantization: str) -> str:
     """Get the linear_backend setting from the current vllm config."""
     from vllm.config import get_current_vllm_config_or_none
 
-    config = get_current_vllm_config_or_none()
-    if config is not None:
-        return config.kernel_config.linear_backend
-    return "auto"
+    if (config := get_current_vllm_config_or_none()) is None:
+        return "auto"
+    overrides = config.kernel_config.linear_backend_per_quant
+    if overrides is not None and (override := overrides.get(quantization)):
+        logger.info_once(
+            "Applied linear backend override for %r: %r", quantization, override
+        )
+        return override
+    return config.kernel_config.linear_backend
 
 
 # Kernel classes covered by each --linear-backend value.
@@ -370,6 +375,8 @@ def _filter_kernels_by_backend(
 def _resolve_backend_kernels(
     kernels: list[type],
     layer_desc: str,
+    *,
+    quantization: str,
 ) -> list[type]:
     """Apply --linear-backend filtering to one layer type's kernel list.
 
@@ -380,7 +387,7 @@ def _resolve_backend_kernels(
     layer types (e.g. NVFP4 MoE projections next to FP8 attention
     projections).
     """
-    linear_backend = _get_linear_backend()
+    linear_backend = _get_linear_backend(quantization=quantization)
     if linear_backend == "auto":
         return kernels
     filtered = _filter_kernels_by_backend(linear_backend, kernels)
@@ -431,6 +438,7 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
         ChannelWiseTorchFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.CPU: [
+        CPUFp8PerTensorScaledMMLinearKernel,
         PerTensorTorchFP8ScaledMMLinearKernel,
         ChannelWiseTorchFP8ScaledMMLinearKernel,
     ],
@@ -625,9 +633,10 @@ def choose_scaled_mm_linear_kernel(
     possible_kernels: dict[PlatformEnum, list[type[_KernelT]]],
     compute_capability: int | None = None,
     force_kernel: type[_KernelT] | None = None,
+    *,
+    quantization: str,
 ) -> type[_KernelT]:
-    """
-    Choose a _KernelT that can implement the given config for the
+    """Choose a _KernelT that can implement the given config for the
     given compute capability. Attempts to choose the best kernel in terms of
     performance.
 
@@ -642,14 +651,15 @@ def choose_scaled_mm_linear_kernel(
         force_kernel (Optional[type[_KernelT]]): An Optional forced kernel to override
             the possible_kernels if it can be implemented. If None, it will only try the
             possible kernels.
+        quantization: Quantization scheme used to select a backend override.
 
     Raises:
         ValueError: If no kernel can implement the given config.
 
     Returns:
         _KernelT: Chosen kernel.
-    """
 
+    """
     failure_reason_list = []
 
     if force_kernel is not None:
@@ -668,7 +678,11 @@ def choose_scaled_mm_linear_kernel(
     platform_kernels = possible_kernels.get(current_platform._enum, [])
 
     # Apply --linear-backend filtering when set.
-    platform_kernels = _resolve_backend_kernels(platform_kernels, "scaled-mm")
+    platform_kernels = _resolve_backend_kernels(
+        platform_kernels,
+        "scaled-mm",
+        quantization=quantization,
+    )
 
     for kernel in platform_kernels:
         is_supported_and_can_implement, failure_reason = (
@@ -705,6 +719,7 @@ def init_fp8_linear_kernel(
         kernel_type = choose_scaled_mm_linear_kernel(
             config=scaled_mm_linear_kernel_config,
             possible_kernels=_POSSIBLE_FP8_BLOCK_KERNELS,  # type: ignore[misc]
+            quantization="fp8_block_w8a8",
             force_kernel=force_kernel,
         )
         if module_name:
@@ -736,6 +751,7 @@ def init_fp8_linear_kernel(
         kernel_type = choose_scaled_mm_linear_kernel(
             config=scaled_mm_linear_kernel_config,
             possible_kernels=_POSSIBLE_FP8_KERNELS,  # type: ignore[arg-type]
+            quantization="fp8_w8a8",
             force_kernel=force_kernel,
         )
         if module_name:
@@ -772,6 +788,7 @@ def init_int8_linear_kernel(
     kernel_type = choose_scaled_mm_linear_kernel(
         config,
         _POSSIBLE_INT8_KERNELS,
+        quantization="int8_w8a8",
     )
 
     logger.info_once(
@@ -796,8 +813,7 @@ def init_int8_linear_kernel(
 def choose_mp_linear_kernel(
     config: MPLinearLayerConfig, compute_capability: int | None = None
 ) -> type[MPLinearKernel]:
-    """
-    Choose an MPLinearKernel that can implement the given config for the given
+    """Choose an MPLinearKernel that can implement the given config for the given
      compute capability. Attempts to choose the best kernel in terms of
      performance.
 
@@ -813,6 +829,7 @@ def choose_mp_linear_kernel(
 
     Returns:
         type[MPLinearKernel]: Chosen kernel.
+
     """
     if compute_capability is None:
         if current_platform is None:
@@ -824,7 +841,11 @@ def choose_mp_linear_kernel(
     platform_kernels = _POSSIBLE_KERNELS.get(current_platform._enum, [])
 
     # Apply --linear-backend filtering when set.
-    platform_kernels = _resolve_backend_kernels(platform_kernels, "mixed-precision")
+    platform_kernels = _resolve_backend_kernels(
+        platform_kernels,
+        "mixed-precision",
+        quantization="mixed_precision",
+    )
 
     failure_reasons = []
     for kernel in platform_kernels:
@@ -860,7 +881,8 @@ def choose_mp_linear_kernel(
 
 def init_mxfp8_linear_kernel(*, bmm_batch_size: int | None = None) -> Mxfp8LinearKernel:
     """Select and instantiate the best MXFP8 linear kernel for the
-    current platform."""
+    current platform.
+    """
     config = Mxfp8LinearLayerConfig(bmm_batch_size=bmm_batch_size)
 
     platform = current_platform._enum
@@ -875,7 +897,11 @@ def init_mxfp8_linear_kernel(*, bmm_batch_size: int | None = None) -> Mxfp8Linea
         possible = list(_POSSIBLE_MXFP8_KERNELS.get(platform, []))
 
     # Apply --linear-backend filtering when set.
-    possible = _resolve_backend_kernels(possible, "MXFP8")
+    possible = _resolve_backend_kernels(
+        possible,
+        "MXFP8",
+        quantization="mxfp8",
+    )
 
     failure_reasons = []
     for kernel_cls in possible:
@@ -908,7 +934,8 @@ def init_mxfp4_linear_kernel(
     activation_quant_key: QuantKey | None = None,
 ) -> MxFp4LinearKernel:
     """Select and instantiate the best MXFP4 linear kernel for the
-    current platform."""
+    current platform.
+    """
     config = MxFp4LinearLayerConfig(
         activation_quant_key=activation_quant_key,
     )
@@ -917,7 +944,11 @@ def init_mxfp4_linear_kernel(
     possible = list(_POSSIBLE_MXFP4_KERNELS.get(platform, []))
 
     # Apply --linear-backend filtering when set.
-    possible = _resolve_backend_kernels(possible, "MXFP4")
+    possible = _resolve_backend_kernels(
+        possible,
+        "MXFP4",
+        quantization="mxfp4",
+    )
 
     failure_reasons = []
     for kernel_cls in possible:
@@ -951,13 +982,14 @@ def init_mxfp6_linear_kernel(
     activation_quant_key: QuantKey | None = None,
 ) -> MxFp6LinearKernel:
     """Select and instantiate the best MXFP6 linear kernel for the
-    current platform."""
+    current platform.
+    """
     config = MxFp6LinearLayerConfig(
         weight_quant_key=weight_quant_key,
         activation_quant_key=activation_quant_key,
     )
 
-    linear_backend = _get_linear_backend()
+    linear_backend = _get_linear_backend(quantization="mxfp6")
 
     platform = current_platform._enum
     possible = list(_POSSIBLE_MXFP6_KERNELS.get(platform, []))
@@ -1017,7 +1049,10 @@ def init_wfp8_a16_linear_kernel(
     )
 
     kernel_type = choose_scaled_mm_linear_kernel(
-        config, _POSSIBLE_WFP8A16_KERNELS, force_kernel=force_kernel
+        config,
+        _POSSIBLE_WFP8A16_KERNELS,
+        quantization="w8a16_fp8",
+        force_kernel=force_kernel,
     )
 
     if module_name:
@@ -1036,7 +1071,8 @@ def init_wfp8_a16_linear_kernel(
 
 def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     """Select and instantiate the best NVFP4 linear kernel for the
-    current platform."""
+    current platform.
+    """
     config = NvFp4LinearLayerConfig()
     a16_kernels = (
         FlashInferCuteDslNvFp4W4A16LinearKernel,
@@ -1048,7 +1084,8 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     # batch-invariant CUTLASS implementation when available, otherwise fall
     # back to emulation. It overrides --linear-backend.
     force_kernel: type[NvFp4LinearKernel] | None = None
-    linear_backend = _get_linear_backend()
+    quantization = "nvfp4_w4a16" if use_a16 else "nvfp4_w4a4"
+    linear_backend = _get_linear_backend(quantization=quantization)
     if envs.VLLM_BATCH_INVARIANT:
         bi_supported, reason = CutlassNvFp4LinearKernel.is_supported()
         if bi_supported:
@@ -1110,7 +1147,11 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
         possible = [kernel for kernel in possible if kernel in a16_kernels]
 
     # Apply --linear-backend filtering when set.
-    possible = _resolve_backend_kernels(possible, "NVFP4")
+    possible = _resolve_backend_kernels(
+        possible,
+        "NVFP4",
+        quantization=quantization,
+    )
 
     failure_reasons = []
     for kernel_cls in possible:
@@ -1154,8 +1195,7 @@ def register_linear_kernel(
     platform: PlatformEnum,
     kernel_type: str = "mp",
 ) -> None:
-    """
-    Register a new linear kernel class to be considered in kernel selection.
+    """Register a new linear kernel class to be considered in kernel selection.
 
     Args:
         kernel_class (type): The kernel class to register.
@@ -1165,6 +1205,7 @@ def register_linear_kernel(
 
     Raises:
         ValueError: If the kernel_type is not recognized.
+
     """
     if kernel_type == "mp":
         if platform not in _POSSIBLE_KERNELS:

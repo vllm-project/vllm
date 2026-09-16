@@ -22,7 +22,8 @@ AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
 class StreamedResponseHandler:
     """Handles streaming HTTP responses by accumulating chunks until complete
-    messages are available."""
+    messages are available.
+    """
 
     def __init__(self):
         self.buffer = ""
@@ -30,7 +31,8 @@ class StreamedResponseHandler:
 
     def add_chunk(self, chunk_bytes: bytes) -> list[str]:
         """Add a chunk of bytes to the buffer and return any complete
-        messages."""
+        messages.
+        """
         chunk_str = self._decoder.decode(chunk_bytes)
         self.buffer += chunk_str
 
@@ -167,10 +169,12 @@ async def async_request_openai_completions(
 
     Args:
         request_func_input: The input for the request function.
+        session: The aiohttp session used to issue the request.
         pbar: The progress bar to display the progress.
 
     Returns:
         The output of the request function.
+
     """
     api_url = request_func_input.api_url
     _validate_api_url(api_url, "OpenAI Completions API", "completions")
@@ -606,6 +610,7 @@ async def _run_pooling_request(
     headers: dict[str, Any],
     pbar: tqdm | None = None,
     num_input_sequences: int = 1,
+    prompt_len: int = 0,
 ) -> RequestFuncOutput:
     output = RequestFuncOutput(num_input_sequences=num_input_sequences)
     st = time.perf_counter()
@@ -613,11 +618,19 @@ async def _run_pooling_request(
     try:
         async with session.post(url=api_url, headers=headers, json=payload) as response:
             if response.status == 200:
+                encoding_format = payload.get("encoding_format", "float")
+                if encoding_format in ("bytes", "bytes_only"):
+                    async for _ in response.content.iter_any():
+                        pass
+                else:
+                    await response.read()
                 output.ttft = output.latency = time.perf_counter() - st
 
-                if payload.get("encoding_format", "float") == "bytes":
+                if encoding_format == "bytes":
                     metadata = json.loads(response.headers["metadata"])
                     usage = metadata.get("usage", {})
+                elif encoding_format == "bytes_only":
+                    usage = {"prompt_tokens": prompt_len}
                 else:
                     data = await response.json()
                     usage = data.get("usage", {})
@@ -672,6 +685,7 @@ async def async_request_openai_embeddings(
         headers=headers,
         pbar=pbar,
         num_input_sequences=_get_num_input_sequences(request_func_input.prompt),
+        prompt_len=request_func_input.prompt_len,
     )
 
 
@@ -709,6 +723,7 @@ async def async_request_vllm_rerank(
         headers=headers,
         pbar=pbar,
         num_input_sequences=len(request_func_input.prompt) - 1,
+        prompt_len=request_func_input.prompt_len,
     )
 
 
@@ -743,6 +758,7 @@ async def async_request_openai_embeddings_chat(
         payload=payload,
         headers=headers,
         pbar=pbar,
+        prompt_len=request_func_input.prompt_len,
     )
 
 
@@ -847,6 +863,7 @@ async def async_request_infinity_embeddings(
         headers=headers,
         pbar=pbar,
         num_input_sequences=_get_num_input_sequences(request_func_input.prompt),
+        prompt_len=request_func_input.prompt_len,
     )
 
 
@@ -896,6 +913,7 @@ async def async_request_vllm_pooling(
         headers=headers,
         pbar=pbar,
         num_input_sequences=_get_num_input_sequences(request_func_input.prompt),
+        prompt_len=request_func_input.prompt_len,
     )
 
 

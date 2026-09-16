@@ -35,8 +35,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
     ) -> tuple[int, bool]:
-        """
-        For remote prefill, pull all prompt blocks from remote
+        """For remote prefill, pull all prompt blocks from remote
         asynchronously relative to engine execution.
 
         Args:
@@ -48,8 +47,8 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
               external KV cache beyond what is already computed.
             * true if the external KV cache tokens will be loaded
               asynchronously (between scheduler steps).
-        """
 
+        """
         request.hisparse_gpu_import = True
         params = request.kv_transfer_params
         logger.debug(
@@ -188,6 +187,9 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                         request,
                         local_block_ids,
                         local_num_computed_blocks,
+                        # Parked in WAITING_FOR_REMOTE_KVS only when there is
+                        # something to pull; a full local hit stays RUNNING.
+                        num_external_tokens > 0,
                     )
 
                 else:
@@ -207,8 +209,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
         request: "Request",
         block_ids: "BlockIds",
     ) -> tuple[bool, dict[str, Any] | None]:
-        """
-        Once a request is finished, determine whether request blocks
+        """Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
         """
         from vllm.v1.request import RequestStatus
@@ -240,7 +241,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             # To avoid stranding the prefill blocks in the prefill instance,
             # we must add empty block_ids to _reqs_need_recv so that our
             # worker side will notify and free blocks in the prefill instance.
-            self._reqs_need_recv[request.request_id] = (request, [], ())
+            self._reqs_need_recv[request.request_id] = (request, [], (), False)
             params["do_remote_prefill"] = False
             return False, None
 

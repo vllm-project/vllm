@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """End-to-end save->lookup test for MooncakeStoreConnector on a hybrid
-(SWA + Full) attention config, using a dict-backed mock store."""
+(SWA + Full) attention config, using a dict-backed mock store.
+"""
 
 import sys
 import threading
@@ -147,8 +148,7 @@ def _build_worker_with_dict_store(vllm_config, kv_cache_config, store):
 
 
 def test_e2e_swa_plus_full_save_then_lookup_hits():
-    """
-    E2E: build a SWA+Full hybrid worker, save all blocks via the sending
+    """E2E: build a SWA+Full hybrid worker, save all blocks via the sending
     thread (synchronously), then verify lookup returns the full hit length.
     Also verify that evicting SWA's early blocks (outside its window) still
     allows a full hit because the window covers the tail.
@@ -283,7 +283,8 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
 
 def test_recv_skips_swa_blocks_before_window():
     """Producer stored every block for both groups; consumer must only fetch
-    SWA blocks within the sliding window, not the head."""
+    SWA blocks within the sliding window, not the head.
+    """
     full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
     # sliding_window=32, block_size=16 → 2 contiguous blocks within window.
     swa = SlidingWindowSpec(
@@ -351,7 +352,8 @@ def test_recv_skips_swa_blocks_before_window():
 
 def test_chunked_token_database_hash_block_size_smaller_than_block_size():
     """DSv4-style: hash_block_size=4, group block_size=16 — process_tokens
-    keys each chunk by its ending fine hash, including a partial tail."""
+    keys each chunk by its ending fine hash, including a partial tail.
+    """
     md = KeyMetadata("m", 0, 0, 0, 0, group_id=3)
     db = ChunkedTokenDatabase(md, block_size=16, hash_block_size=4)
     db.set_kv_caches_base_addr([0])
@@ -384,7 +386,8 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
     """Sub-block prompt (the 900/128/1536 shape, scaled to 12/4/16): the
     partial tail is offloaded for both groups under the boundary sub-hash. The
     full-attention block is read from the request block table; the mamba block
-    is the core-provided CoW target, not block_ids."""
+    is the core-provided CoW target, not block_ids.
+    """
     full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
     mamba = MambaSpec(
         block_size=16,
@@ -463,7 +466,8 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
 def test_offload_syncs_event_before_put():
     """An offload-carrying meta synchronizes its CoW-fence event before the
     store put reads the blocks, then completes in one pass and drains the
-    completion counter."""
+    completion counter.
+    """
     full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
     mamba = MambaSpec(
         block_size=16,
@@ -534,7 +538,8 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
     offload must persist every FA block up to the boundary — the normal save
     floors to the lcm, so those blocks are otherwise never written and the
     consumer's per-group lookup would miss. The mamba boundary block still
-    reads the core-provided CoW target."""
+    reads the core-provided CoW target.
+    """
     full = FullAttentionSpec(block_size=4, num_kv_heads=8, head_size=64, dtype=None)
     mamba = MambaSpec(
         block_size=16,
@@ -759,8 +764,9 @@ def test_worker_setup_tolerates_finer_scratch_group():
     worker.pp_size = 1
     worker.num_kv_head = 8
     assert worker.coord.enable_partial_hash_hits
-    # The scratch DB is keyed at its own block size and never probed.
-    assert worker.token_dbs[2].hash_block_size == 4
+    # Only the participating full-attention and Mamba groups are registered.
+    assert len(worker.token_dbs) == 2
+    assert all(db.hash_block_size == 8 for db in worker.token_dbs)
 
     for g_idx, db in enumerate(worker.token_dbs):
         db.set_kv_caches_base_addr([g_idx * 10_000])
@@ -772,11 +778,11 @@ def test_worker_setup_tolerates_finer_scratch_group():
         block_size=worker.block_size,
         coord=worker.coord,
         tp_rank=0,
-        group_put_steps=[1, 1, 1],
+        group_put_steps=[1, 1],
         kv_role="kv_both",
         ready_event=threading.Event(),
         replicate_config=MagicMock(),
-        group_participates=[True, True, False],
+        group_participates=[True, True],
     )
 
     # Persist the sub-block partial tail at boundary 12 (keyed by hs[12//8-1]).
@@ -784,7 +790,7 @@ def test_worker_setup_tolerates_finer_scratch_group():
     req = ReqMeta(
         req_id="r0",
         token_len_chunk=0,
-        block_ids=([1], [2], [3]),
+        block_ids=([1], [2]),
         block_hashes=hs,
         can_save=True,
         num_prompt_tokens=20,
@@ -797,15 +803,15 @@ def test_worker_setup_tolerates_finer_scratch_group():
     # A 13-token prompt sharing the prefix must hit the first hash unit.
     assert worker.lookup(num_tokens=13, block_hashes=hs).hit_length == 8
     # The scratch group's namespace never enters the store.
-    scratch_prefix = worker.token_dbs[2].key_for(hs[0]).rsplit("@", 1)[0]
-    assert not any(key.startswith(scratch_prefix) for key in store._data)
+    assert not any("@group:2" in key for key in store._data)
 
 
 def test_ring_scratch_group_is_never_stored_and_does_not_block_hits():
     """A per-request ring group (CircularBufferSpec, capacity as block_size)
     sits beside the paged group: worker setup tolerates its block size (the
     DeepSeek-V4.1 compressor ring is 8 rows), saving a request stores paged
-    blocks only, and lookup hits on the paged group alone."""
+    blocks only, and lookup hits on the paged group alone.
+    """
     full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
     ring = CircularBufferSpec(
         block_size=8, num_kv_heads=1, head_size=64, head_size_v=0, dtype=torch.uint8
@@ -838,7 +844,8 @@ def test_ring_scratch_group_is_never_stored_and_does_not_block_hits():
     worker.tp_size = 1
     worker.pp_size = 1
     worker.num_kv_head = 8
-    assert worker.token_dbs[1].hash_block_size == 8
+    assert len(worker.token_dbs) == 1
+    assert worker.token_dbs[0].hash_block_size == 16
 
     raw_full = torch.zeros(4 * full.page_size_bytes, dtype=torch.int8)
     raw_ring = torch.zeros(4 * ring.page_size_bytes, dtype=torch.int8)
@@ -879,14 +886,14 @@ def test_ring_scratch_group_is_never_stored_and_does_not_block_hits():
         kv_role=worker.kv_role,
         ready_event=threading.Event(),
         enable_kv_event=False,
-        group_participates=[True, False],
+        group_participates=[True],
     )
     hs = [BlockHash(bytes([i + 1]) * 4) for i in range(4)]
     save_req = ReqMeta(
         req_id="r0",
         token_len_chunk=64,
-        # The ring group holds one block for the request's lifetime.
-        block_ids=([1, 2, 3, 4], [1]),
+        # Scheduler metadata is projected to the participating store groups.
+        block_ids=([1, 2, 3, 4],),
         block_hashes=hs,
         can_save=True,
         store_job_id=1,

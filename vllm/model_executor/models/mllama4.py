@@ -60,6 +60,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
@@ -90,12 +91,11 @@ from .vision import is_vit_use_data_parallel, run_dp_sharded_vision_model
 
 
 class Llama4ImagePatchInputs(TensorSchema):
-    """
-    Dimensions:
-        - batch_size: Batch size
-        - total_num_chunks: Batch size * number of chunks
-        - num_channels: Number of channels
-        - image_size: Size of each image
+    """Dimensions:
+    - batch_size: Batch size
+    - total_num_chunks: Batch size * number of chunks
+    - num_channels: Number of channels
+    - image_size: Size of each image
     """
 
     type: Literal["pixel_values"] = "pixel_values"
@@ -412,16 +412,15 @@ class Llama4VisionEncoder(nn.Module):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        r"""
-        Args:
-            hidden_states: Input tensor of shape
-                (batch_size, sequence_length, hidden_size).
-                Hidden states from the model embeddings, representing
-                the input tokens.
-                associated vectors than the model's internal embedding
-                lookup matrix.
-        """
+        r"""Args:
+        hidden_states: Input tensor of shape
+            (batch_size, sequence_length, hidden_size).
+            Hidden states from the model embeddings, representing
+            the input tokens.
+            associated vectors than the model's internal embedding
+            lookup matrix.
 
+        """
         for encoder_layer in self.layers:
             layer_outputs = encoder_layer(hidden_states)
             hidden_states = layer_outputs[0]
@@ -1091,7 +1090,8 @@ class Llama4ForConditionalGeneration(
 
     def _rename_weight_for_modelopt_checkpoint(self, name: str) -> str:
         """Rename weights from ModelOpt llama4 fp8 checkpoints to vLLM
-        format."""
+        format.
+        """
         if name.startswith("model.") or name.startswith("language_model.model."):
             renamed = (
                 name.replace("model.", "language_model.model.", 1)
@@ -1269,9 +1269,7 @@ class Llama4ForConditionalGeneration(
         return updated_params
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector=[
@@ -1281,21 +1279,18 @@ class Llama4ForConditionalGeneration(
             tower_model="vision_model.",
         )
 
-    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
         vision_config = self.config.vision_config
         patches_per_chunk = Mllama4ProcessingInfo.get_patch_per_chunk(vision_config)
-        if num_image_tokens <= 0 or patches_per_chunk <= 0:
-            return 0
+        if num_mm_embeds <= 0 or patches_per_chunk <= 0:
+            return 0, 0
         raw_patches = (vision_config.image_size // vision_config.patch_size) ** 2
-        num_chunks = num_image_tokens // patches_per_chunk
-        # Encoder processes raw_patches + 1 (CLS) per chunk
-        return num_chunks * (raw_patches + 1)
-
-    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
-        vision_config = self.config.vision_config
-        raw_patches = (vision_config.image_size // vision_config.patch_size) ** 2
-        if num_vision_tokens <= 0:
-            return 0
-        num_chunks = num_vision_tokens // (raw_patches + 1)
-        patches_per_chunk = Mllama4ProcessingInfo.get_patch_per_chunk(vision_config)
-        return num_chunks * patches_per_chunk
+        num_chunks = num_mm_embeds // patches_per_chunk
+        return num_chunks * (raw_patches + 1), num_chunks * patches_per_chunk

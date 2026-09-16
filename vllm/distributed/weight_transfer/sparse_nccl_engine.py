@@ -68,7 +68,8 @@ class SparseNCCLTrainerInitInfo(TrainerInitInfo):
 
     Same rendezvous shape as the dense NCCL backend (the sender opens its
     endpoint as NCCL rank 0), but with no packed wire params: sparse transfers
-    are never packed. `backend` is the factory dispatch key."""
+    are never packed. `backend` is the factory dispatch key.
+    """
 
     backend: ClassVar[str] = "sparse_nccl"
 
@@ -113,8 +114,7 @@ class SparseNCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
 class SparseNCCLWeightTransferEngine(
     WeightTransferEngine[NCCLWeightTransferInitInfo, SparseNCCLWeightTransferUpdateInfo]
 ):
-    """
-    Sparse weight transfer engine using NCCL.
+    """Sparse weight transfer engine using NCCL.
 
     Receives checkpoint-coordinate patches broadcast from the trainer and applies
     them through the model's native weight loader. Sparse updates modify initialized
@@ -368,7 +368,8 @@ class SparseNCCLTrainerWeightTransferEngine(
         rebuild or free the patch tensors as soon as a send method returns rather
         than relying on same-stream ordering. See
         `NCCLTrainerWeightTransferEngine._post_send_sync` for why there is no
-        cross-rank barrier."""
+        cross-rank barrier.
+        """
         if torch.cuda.is_available():
             torch.cuda.current_stream().synchronize()
 

@@ -776,6 +776,7 @@ class Qwen3_VisionTransformer(nn.Module):
                 instead of computing from cu_seqlens (needed for CUDA
                 graph capture to cover worst-case replay scenarios).
             device: Device to place tensors on. Defaults to self.device.
+
         """
         if device is None:
             device = self.device
@@ -1291,6 +1292,7 @@ def _replace_video_token_placeholders(
 
     Returns:
         Token IDs with every placeholder replaced.
+
     """
     result: list[int] = []
     repl_idx = 0
@@ -1319,7 +1321,8 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
     def _expands_only_video_token(hf_processor: ProcessorMixin) -> bool:
         """Transformers>=5.10 processors override `replace_video_token`
         to expand only the bare video token, keeping the prompt's outer
-        `<|vision_start|>`/`<|vision_end|>` markers."""
+        `<|vision_start|>`/`<|vision_end|>` markers.
+        """
         mixin_impl = getattr(ProcessorMixin, "replace_video_token", None)
         proc_impl = getattr(type(hf_processor), "replace_video_token", None)
         return proc_impl is not None and proc_impl is not mixin_impl
@@ -1647,9 +1650,11 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             vision_start_token_id: Token ID for vision start marker
             vision_end_token_id: Token ID for vision end marker
             video_token_id: Token ID for video content
+            select_token_id: Whether to return token ids instead of text
 
         Returns:
             PromptUpdateDetails with full token sequence
+
         """
         assert len(timestamps) == len(tokens_per_frame), (
             "timestamps and tokens_per_frame must have the same length"
@@ -2350,8 +2355,7 @@ class Qwen3VLForConditionalGeneration(
         image_embeds_split: tuple[torch.Tensor, ...],
         image_input: Qwen2_5_VLImageInputs,
     ) -> tuple[torch.Tensor, ...]:
-        """
-        Append mrope positions for each for images.
+        """Append mrope positions for each for images.
         This is necessary to recover correct mrope
         positions after video pruning
 
@@ -2364,6 +2368,7 @@ class Qwen3VLForConditionalGeneration(
             Tuple of image embeddings for each image item.
             Resulting embeddings will have extra 5 channels for
             computed mrope positions, consistent with video embeddings.
+
         """
         if self.is_multimodal_pruning_enabled:
             merge_size = self.visual.spatial_merge_size
@@ -2393,8 +2398,7 @@ class Qwen3VLForConditionalGeneration(
         video_embeds_split: tuple[torch.Tensor, ...],
         video_input: Qwen2_5_VLVideoInputs,
     ) -> tuple[torch.Tensor, ...]:
-        """
-        Prunes video embeddings via Efficient Video Sampling (EVS)
+        """Prunes video embeddings via Efficient Video Sampling (EVS)
         and then appends mrope positions for each retained embeddings
 
         Args:
@@ -2405,6 +2409,7 @@ class Qwen3VLForConditionalGeneration(
             Tuple of video embeddings for each video item.
             Resulting embeddings will have extra 5 channels for computed mrope
             positions, and whether the index corresponds to a video embedding.
+
         """
         grid_thw = video_input["video_grid_thw"]
         assert grid_thw.ndim == 2
@@ -2478,7 +2483,6 @@ class Qwen3VLForConditionalGeneration(
         These embeddings will replace the placeholder embeddings to create
         input_embeds for the LLM.
         """
-
         device = video_embeddings.device
 
         # Generate video replacement token IDs using get_video_repl
@@ -2664,6 +2668,7 @@ class Qwen3VLForConditionalGeneration(
             llm_grid_h: Logical grid height (may not match actual token count with EVS).
             llm_grid_w: Logical grid width (may not match actual token count with EVS).
             actual_num_tokens: Actual number of video/image tokens in the placeholder.
+
         """
         for mm_feature in sorted(mm_features, key=lambda f: f.mm_position.offset):
             offset = mm_feature.mm_position.offset
@@ -2806,8 +2811,7 @@ class Qwen3VLForConditionalGeneration(
         mrope_positions: torch.LongTensor,
         num_computed_tokens: int,
     ) -> tuple[Sequence[torch.Tensor], torch.Tensor, int]:
-        """
-        Update part of input mrope positions (starting with
+        """Update part of input mrope positions (starting with
         num_computed_tokens index). Original mrope_positions are computed
         for unpruned sequence and becomes incorrect once pruning occurs,
         so once we prune media tokens we should reflect this in the
@@ -2825,6 +2829,7 @@ class Qwen3VLForConditionalGeneration(
         Returns:
             Tuple of (multimodal_embeddings, mrope_positions,
                 mrope_position_delta).
+
         """
         return self._recompute_mrope_positions(
             input_ids=input_ids,
@@ -3031,8 +3036,8 @@ class Qwen3VLForConditionalGeneration(
                     model. `None` if no videos are passed.
                 - video_grid_thw: Tensor `(n_videos, 3)` of video 3D grid in
                     LLM. `None` if no videos are passed.
-        """
 
+        """
         if intermediate_tensors is not None:
             inputs_embeds = None
 
@@ -3068,33 +3073,25 @@ class Qwen3VLForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector=["visual.merger", "visual.deepstack_merger_list"],
             tower_model="visual.",
         )
 
-    def get_num_mm_encoder_tokens(
+    def get_mm_lora_token_counts(
         self,
-        num_image_tokens: int,
-    ) -> int:
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
         hf_config = self.config
         vision_config = hf_config.vision_config
         merge_size = vision_config.spatial_merge_size
-
-        return num_image_tokens * merge_size**2
-
-    def get_num_mm_connector_tokens(
-        self,
-        num_vision_tokens: int,
-    ) -> int:
-        hf_config = self.config
-        vision_config = hf_config.vision_config
-        merge_size = vision_config.spatial_merge_size
-        return num_vision_tokens // merge_size**2
+        return num_mm_embeds * merge_size**2, num_mm_embeds
 
 
 @lru_cache

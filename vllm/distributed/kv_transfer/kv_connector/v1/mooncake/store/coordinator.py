@@ -73,7 +73,8 @@ class ExternalCachedBlockPool:
 
 class MooncakeStoreCoordinator:
     """Mirror of ``HybridKVCacheCoordinator.find_longest_cache_hit`` over an
-    ``ExternalCachedBlockPool``."""
+    ``ExternalCachedBlockPool``.
+    """
 
     def __init__(
         self,
@@ -452,7 +453,7 @@ def _unwrap_spec(spec: KVCacheSpec) -> KVCacheSpec:
 
 
 def partial_hash_hits_enabled(
-    kv_cache_groups: list[KVCacheGroupSpec],
+    kv_cache_groups: Sequence[KVCacheGroupSpec],
     hash_block_size: int,
     dcp_world_size: int = 1,
 ) -> bool:

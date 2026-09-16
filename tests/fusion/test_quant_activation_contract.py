@@ -42,6 +42,7 @@ from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     as_quantized_activation,
     expose_input_quant_key,
+    get_input_quant_key,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
@@ -77,7 +78,8 @@ def _all_kernel_classes() -> list[type]:
 
 def _probe(cls: type):
     """A bare kernel instance with a plausible config, so input_quant_key()
-    can be queried without the hardware-gated constructor."""
+    can be queried without the hardware-gated constructor.
+    """
     obj = cls.__new__(cls)  # type: ignore[call-overload]
     if issubclass(cls, NvFp4LinearKernel):
         obj.config = NvFp4LinearLayerConfig()
@@ -118,13 +120,13 @@ def test_bridge_marks_supporting_and_skips_others():
     supported = _probe(FlashInferCutlassNvFp4LinearKernel)
     layer = torch.nn.Module()
     expose_input_quant_key(layer, supported)
-    assert layer.input_quant_key == kNvfp4Dynamic
+    assert get_input_quant_key(layer) == kNvfp4Dynamic
 
     unsupported = _probe(FlashInferTrtllmNvFp4LinearKernel)
     assert unsupported.input_quant_key() is None
     layer = torch.nn.Module()
     expose_input_quant_key(layer, unsupported)
-    assert not hasattr(layer, "input_quant_key")
+    assert get_input_quant_key(layer) is None
 
 
 def test_as_quantized_activation_validates_key():

@@ -957,16 +957,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.hc_dim = self.hc_mult * config.hidden_size
         self.rms_norm_eps = config.rms_norm_eps
 
-        # Three aux streams: one per non-default input GEMM in
-        # DeepseekV4Attention._run_parallel_input_projections
-        # (compressor kv_score, indexer.weights_proj, indexer.compressor
-        # kv_score). fused_wqa_wkv stays on the default stream.
-        # Disable them on ROCm because of hang issues.
-        aux_stream_list = (
-            None
-            if current_platform.is_rocm()
-            else [torch.cuda.Stream() for _ in range(3)]
-        )
+        aux_stream_list = [torch.cuda.Stream() for _ in range(3)]
 
         self.device = current_platform.device_type
         # Reserved topk indices buffer for all Indexer layers to reuse.
@@ -1434,7 +1425,8 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     def get_mtp_target_hidden_states(self) -> torch.Tensor | None:
         """Pre-hc_head residual stream buffer (max_num_batched_tokens,
         hc_mult * hidden_size) for the MTP draft model. Populated by
-        forward(); valid after each target step."""
+        forward(); valid after each target step.
+        """
         return getattr(self.model, "_mtp_hidden_buffer", None)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

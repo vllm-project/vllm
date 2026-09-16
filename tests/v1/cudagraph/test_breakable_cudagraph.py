@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for the breakable cudagraph primitives.
-"""
+"""Unit tests for the breakable cudagraph primitives."""
 
 from __future__ import annotations
 
@@ -43,6 +41,7 @@ def test_piecewise_capture_builds_fresh_metadata_for_both_passes():
     manager._capture_descs = {CUDAGraphMode.PIECEWISE: [desc]}
     manager._graphs_captured = False
     manager.use_breakable_cg = True
+    manager.ubatch_runner = None
 
     create_calls = []
     forward_calls = []
@@ -81,7 +80,8 @@ def test_piecewise_capture_builds_fresh_metadata_for_both_passes():
 @pytest.fixture(autouse=True)
 def _reset_breakable_tls():
     """Defensively clear thread-local capture state between tests so a
-    failure in one test can't leak "nested capture" errors into the next."""
+    failure in one test can't leak "nested capture" errors into the next.
+    """
     from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 
     BreakableCUDAGraphCapture._tls.active = None
@@ -291,7 +291,8 @@ def test_capture_replay_matches_eager_simple(cuda_capture_stream):
 def test_decorator_breaks_when_invoked_inside_capture(cuda_capture_stream):
     """Verify @eager_break_during_capture correctly routes through
     add_eager when inside a capture context, and runs straight through
-    when there's no active capture."""
+    when there's no active capture.
+    """
     from vllm.compilation.breakable_cudagraph import (
         BreakableCUDAGraphCapture,
         eager_break_during_capture,
@@ -553,7 +554,8 @@ def _mock_vllm_config():
 
 def test_wrapper_falls_through_on_runtime_mode_mismatch():
     """A PIECEWISE-scoped wrapper runs other modes eagerly, capturing
-    nothing, so an outer CUDAGraphWrapper can own them."""
+    nothing, so an outer CUDAGraphWrapper can own them.
+    """
     from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
     from vllm.config import CUDAGraphMode
     from vllm.forward_context import BatchDescriptor, set_forward_context

@@ -176,13 +176,15 @@ def _fused_indexer_q_rope_quant_cpu(
 
 class _NoOpEvent:
     """Stand-in for ``torch.cuda.Event`` on CPU: since CPU never sets an aux
-    stream list, these events are constructed but never actually used."""
+    stream list, these events are constructed but never actually used.
+    """
 
 
 class DeepseekV4CPUIndexerCache(DeepseekV4IndexerCache):
     """CPU indexer K-cache descriptor: same fields as the shared base, just
     pointing ``get_attn_backend()`` at ``DeepseekV4CPUIndexerBackend``
-    instead of the shared, CUDA/XPU-oriented ``DeepseekV4IndexerBackend``."""
+    instead of the shared, CUDA/XPU-oriented ``DeepseekV4IndexerBackend``.
+    """
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return DeepseekV4CPUIndexerBackend
@@ -198,17 +200,19 @@ class DeepseekV4CPUIndexer(DeepseekV4Indexer):
         self,
         hidden_states: torch.Tensor,
         qr: torch.Tensor,
-        compressed_kv_score: torch.Tensor,
+        compressed_kv_score: torch.Tensor | None,
         indexer_weights: torch.Tensor,
         positions: torch.Tensor,
         rotary_emb: nn.Module,
         qr_scale: torch.Tensor | None = None,
+        skip_compressor: bool = False,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         """CPU override: no aux streams, so wq_b_and_q_quant and the
         compressor run straight-line instead of through
         ``maybe_execute_in_parallel``; the short-context check drops the
         CUDA-only ``is_current_stream_capturing()`` guard (always False
-        here)."""
+        here).
+        """
         compressor = self.compressor
 
         attn_metadata = get_forward_context().attn_metadata
@@ -308,7 +312,8 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
         """Snapshot and pack ``wo_a``'s weight into a bf16 copy for
         ``bmm_cpu`` before the FP8 kernel's own
         ``process_weights_after_loading`` VNNI-repacks it in place for
-        row-major reads ``_o_proj`` never does."""
+        row-major reads ``_o_proj`` never does.
+        """
         wo_a = self.wo_a
         quant_method = wo_a.quant_method
         orig_pwal = quant_method.process_weights_after_loading
@@ -399,7 +404,8 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
     ) -> torch.Tensor:
         """CPU override: only the fp8_ds_mla (uint8) SWA cache layout is
         supported here, so the base method's bf16/per-tensor-fp8 branches
-        are dropped."""
+        are dropped.
+        """
         if not isinstance(attn_metadata, dict):
             # Profile run: kernel doesn't fire; produce a padded tensor so
             # downstream FlashMLA gets the right shape.
@@ -444,7 +450,8 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
         """CPU override: two ``RMSNorm`` calls instead of the shared
         ``fused_q_kv_rmsnorm``, whose raw ``@triton.jit`` kernel fails to
-        link under triton-cpu (``undefined symbol: __truncdfbf2``)."""
+        link under triton-cpu (``undefined symbol: __truncdfbf2``).
+        """
         qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
         return self.q_norm(qr), None, self.kv_norm(kv)
 
@@ -462,7 +469,8 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
     ) -> None:
         """CPU override: no aux streams, so query-projection+KV-insert, the
         indexer, and the compressor run straight-line instead of through
-        execute_in_parallel/maybe_execute_in_parallel."""
+        execute_in_parallel/maybe_execute_in_parallel.
+        """
         attn_metadata = get_forward_context().attn_metadata
         indexer = self.indexer
         compressor = self.compressor
@@ -511,7 +519,8 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
         out: torch.Tensor,
     ) -> None:
         """CPU override: identical body, minus ``@eager_break_during_capture``
-        (this platform never captures a CUDA graph, so it was a no-op)."""
+        (this platform never captures a CUDA graph, so it was a no-op).
+        """
         if self.indexer is not None and index_q is not None:
             assert index_weights is not None
             # index_q_scale is always None on CPU (FP8-only path).
