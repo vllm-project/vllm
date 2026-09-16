@@ -40,6 +40,12 @@ graphs for models implementing `SupportsEncoderCudaGraph`. Add
 This is disabled by default and independent of the decoder's `cudagraph_mode`;
 `--enforce-eager` disables encoder graphs as well.
 
+FA3 and FA4 produced NaN embeddings with multi-budget encoder graphs in H20
+Qwen2.5-VL testing; see [#57136](https://github.com/vllm-project/vllm/issues/57136).
+`--mm-encoder-attn-backend TRITON_ATTN` and `FLASHINFER` did not reproduce this
+failure in the same configuration. The FA issue is not fixed by E-only capture
+support.
+
 Inputs exceeding the largest encoder graph budget, and unsupported modalities,
 use the existing eager encoder path. Tune `encoder_cudagraph_token_budgets`,
 `encoder_cudagraph_max_vision_items_per_batch`, and
@@ -49,6 +55,7 @@ buffers before caching and EC transfer.
 
 The Mooncake integration script accepts `E_CUDAGRAPH_MM_ENCODER=1` to enable
 graphs on E while preserving the PD configuration.
+Set `E_MM_ENCODER_ATTN_BACKEND=TRITON_ATTN` to use the backend tested in CI.
 
 The current reference pathway is **ExampleConnector**.  
 Below ready-to-run scripts shows the workflow:

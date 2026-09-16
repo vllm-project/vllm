@@ -21,6 +21,7 @@
 #   CONCURRENCY / REPEAT        concurrent requests / rounds (defaults 3 / 2)
 #   MAX_MODEL_LEN               context length (default 16384)
 #   E_CUDAGRAPH_MM_ENCODER       enable encoder CUDA graphs (default 0)
+#   E_MM_ENCODER_ATTN_BACKEND    optional encoder attention backend override
 
 set -euo pipefail
 
@@ -36,6 +37,10 @@ if [[ "$USE_MM_PROMPTS" == "1" ]]; then
   TEST_ARGS+=(--use_mm_prompts --mm_smoke_test)
 fi
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
+E_ATTN_ARGS=()
+if [[ -n "${E_MM_ENCODER_ATTN_BACKEND:-}" ]]; then
+  E_ATTN_ARGS+=(--mm-encoder-attn-backend "$E_MM_ENCODER_ATTN_BACKEND")
+fi
 case "${E_CUDAGRAPH_MM_ENCODER:-0}" in
   0) E_COMPILATION_CONFIG='{"cudagraph_mm_encoder":false}' ;;
   1) E_COMPILATION_CONFIG='{"cudagraph_mm_encoder":true}' ;;
@@ -222,6 +227,7 @@ run_epd_mooncake() {
     --allowed-local-media-path "${GIT_ROOT}/tests/v1/ec_connector/integration" \
     --ec-transfer-config "$ENC_EC_JSON" \
     --compilation-config "$E_COMPILATION_CONFIG" \
+    "${E_ATTN_ARGS[@]}" \
     --worker-extension-cls tests.v1.ec_connector.integration.test_epd_correctness.EncoderGraphTestWorkerExtension \
     >"${LOG_PATH}/mooncake_epd_encoder.log" 2>&1 &
   local ENCODER_PID=$!
