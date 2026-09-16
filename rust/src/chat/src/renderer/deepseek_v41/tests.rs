@@ -10,7 +10,9 @@ use super::DeepSeekV41ChatRenderer;
 use crate::ChatRenderer;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
-use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest, ReasoningEffort};
+use crate::request::{
+    ChatContent, ChatContentPart, ChatMessage, ChatRequest, GenerationPromptMode, ReasoningEffort,
+};
 
 fn render(request: &ChatRequest) -> String {
     DeepSeekV41ChatRenderer::new()
@@ -279,6 +281,49 @@ fn mid_system_advances_last_user_boundary_and_drops_old_reasoning() {
         .insert("reasoning_effort".into(), json!(88));
     expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 88 (range 1-100, the higher the value, the more thorough the reasoning)\n\nsys<｜User｜>q1<｜Assistant｜></think>a1<｜end▁of▁sentence｜><｜System｜>mid sys<｜Assistant｜><think>"]
         .assert_eq(&render(&request));
+}
+
+#[test]
+fn last_user_turn_omits_generation_prompt_when_disabled() {
+    let mut request = request();
+    request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
+
+    expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 50 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>question"]
+        .assert_eq(&render(&request));
+}
+
+#[test]
+fn last_mid_system_omits_generation_prompt_when_disabled() {
+    let mut request = ChatRequest {
+        messages: vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("q1"),
+            ChatMessage::assistant_blocks(vec![
+                AssistantContentBlock::Reasoning { text: "r1".into() },
+                AssistantContentBlock::Text { text: "a1".into() },
+            ]),
+            ChatMessage::developer("old policy", None),
+            ChatMessage::system("mid sys"),
+        ],
+        ..ChatRequest::for_test()
+    };
+    request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
+    request
+        .chat_options
+        .template_kwargs
+        .insert("reasoning_effort".into(), json!(88));
+
+    expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 88 (range 1-100, the higher the value, the more thorough the reasoning)\n\nsys<｜User｜>q1<｜Assistant｜></think>a1<｜end▁of▁sentence｜><｜System｜>mid sys"]
+        .assert_eq(&render(&request));
+}
+
+#[test]
+fn chat_mode_omits_generation_prompt_when_disabled() {
+    let mut request = request();
+    request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
+    request.chat_options.template_kwargs.insert("thinking".into(), json!(false));
+
+    expect!["<｜begin▁of▁sentence｜><｜User｜>question"].assert_eq(&render(&request));
 }
 
 #[test]
