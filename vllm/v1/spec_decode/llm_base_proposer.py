@@ -1490,7 +1490,8 @@ class SpecDecodeBaseProposer:
                 # Guard with isinstance so non-Tensor weights (e.g. in tests)
                 # are not affected — mirrors the weight-equality check above.
                 if isinstance(target_embed_tokens.weight, torch.Tensor) and isinstance(
-                    draft_embed.weight, torch.Tensor
+                    getattr(draft_embed, "weight", None),
+                    torch.Tensor,
                 ):
                     target_dim = target_embed_tokens.weight.shape[-1]
                     draft_dim = draft_embed.weight.shape[-1]

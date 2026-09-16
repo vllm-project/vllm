@@ -109,6 +109,9 @@ def update_dflash(config_dict: dict, pre_trained_config: dict) -> None:
     - sample_from_anchor: Whether to sample from the anchor position. Default
         False (anchor is a bonus token, only mask tokens predict, yielding
         block_size - 1 speculative tokens).
+    - has_own_embed_tokens / has_own_lm_head: Whether the checkpoint owns each
+        vocabulary module instead of sharing it with the target model.
+
     """
     pre_trained_config["architectures"] = ["DFlashDraftModel"]
     pre_trained_config["draft_vocab_size"] = config_dict.get("draft_vocab_size")
@@ -128,6 +131,9 @@ def update_dflash(config_dict: dict, pre_trained_config: dict) -> None:
     pre_trained_config["dflash_config"]["causal"] = not config_dict.get(
         "sliding_window_non_causal", True
     )
+    for key in ("has_own_embed_tokens", "has_own_lm_head"):
+        if key in config_dict:
+            pre_trained_config["dflash_config"][key] = bool(config_dict[key])
 
 
 @register_speculator("dflash2")

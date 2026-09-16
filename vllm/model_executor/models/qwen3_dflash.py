@@ -46,13 +46,27 @@ from .utils import (
     WeightsMapper,
     get_draft_quant_config,
     maybe_prefix,
-    process_eagle_weight,
 )
 
 logger = init_logger(__name__)
 
-
 _SLIDING_ATTENTION = "sliding_attention"
+
+
+def _get_vocab_module_ownership(config: Qwen3Config, module: str) -> bool | None:
+    """Return configured ownership, or None for legacy key-based detection."""
+    dflash_config = getattr(config, "dflash_config", None) or {}
+    key = f"has_own_{module}"
+    if key in dflash_config:
+        return bool(dflash_config[key])
+
+    # The original DFlash2 checkpoint predates explicit ownership metadata and
+    # shares both vocabulary modules with its target. Preserve that behavior
+    # without imposing it on future DFlash2 checkpoints that set the flags.
+    architectures = getattr(config, "architectures", None) or []
+    if "DFlash2DraftModel" in architectures:
+        return False
+    return None
 
 
 def _dflash_layer_causal(config: Qwen3Config, layer_idx: int) -> bool:
@@ -399,10 +413,15 @@ class DFlashQwen3Model(nn.Module):
 
         current_vllm_config = get_current_vllm_config()
 
-        self.embed_tokens = VocabParallelEmbedding(
-            self.config.vocab_size,
-            self.config.hidden_size,
-            prefix=maybe_prefix(prefix, "embed_tokens"),
+        embed_ownership = _get_vocab_module_ownership(self.config, "embed_tokens")
+        self.embed_tokens: VocabParallelEmbedding | None = (
+            VocabParallelEmbedding(
+                self.config.vocab_size,
+                self.config.hidden_size,
+                prefix=maybe_prefix(prefix, "embed_tokens"),
+            )
+            if embed_ownership is not False
+            else None
         )
 
         # Masked query slots are fed to the draft as `mask_token_id`. Most DFlash
@@ -454,6 +473,7 @@ class DFlashQwen3Model(nn.Module):
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        assert self.embed_tokens is not None
         embeds = self.embed_tokens(input_ids)
         if self.has_separate_mask_embedding and self.mask_token_id is not None:
             # Replace masked slots with the dedicated mask embedding.
@@ -701,11 +721,21 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             start_layer_id=target_layer_num,
         )
 
+        embed_ownership = _get_vocab_module_ownership(self.config, "embed_tokens")
+        lm_head_ownership = _get_vocab_module_ownership(self.config, "lm_head")
+        # Unknown legacy configs keep their eagerly constructed modules unless
+        # the standard loader later determines that the checkpoint omits them.
+        self.has_own_embed_tokens = embed_ownership is not False
+        self.has_own_lm_head = lm_head_ownership is not False
         logit_scale = getattr(self.config, "logit_scale", 1.0)
-        self.lm_head = ParallelLMHead(
-            self.config.draft_vocab_size,
-            self.config.hidden_size,
-            prefix=maybe_prefix(prefix, "lm_head"),
+        self.lm_head: ParallelLMHead | None = (
+            ParallelLMHead(
+                self.config.draft_vocab_size,
+                self.config.hidden_size,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+            if lm_head_ownership is not False
+            else None
         )
         self.logits_processor = LogitsProcessor(
             self.config.draft_vocab_size, scale=logit_scale
@@ -747,6 +777,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
+        assert self.lm_head is not None
         logits = self.logits_processor(self.lm_head, hidden_states)
         if self.draft_id_to_target_id is None:
             return logits
@@ -797,6 +828,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         model_weights = {}
         includes_draft_id_mapping = False
         includes_embed_tokens = False
+        includes_lm_head = False
         for name, loaded_weight in weights:
             assert "mask_hidden" not in name, (
                 "DFlash embeds masked slots via mask_token_id (optionally "
@@ -812,8 +844,16 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
                 name = "model." + name
             if "embed_tokens" in name:
                 includes_embed_tokens = True
+            if "lm_head" in name:
+                includes_lm_head = True
             model_weights[name] = loaded_weight
-            process_eagle_weight(self, name)
+
+        embed_ownership = _get_vocab_module_ownership(self.config, "embed_tokens")
+        lm_head_ownership = _get_vocab_module_ownership(self.config, "lm_head")
+        if embed_ownership is None:
+            self.has_own_embed_tokens = includes_embed_tokens
+        if lm_head_ownership is None:
+            self.has_own_lm_head = includes_lm_head
 
         # Route the separately-trained mask embedding (if shipped) through the
         # standard weight loader alongside the rest of the draft weights.
