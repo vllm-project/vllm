@@ -727,11 +727,15 @@ def _get_available_ram_bytes() -> int:
 
     host_available = psutil.virtual_memory().available
 
-    from vllm.utils.cpu_resource_utils import get_cgroup_memory_limit
+    from vllm.utils.cpu_resource_utils import (
+        get_cgroup_memory_limit,
+        get_cgroup_memory_usage,
+    )
 
-    cgroup_limit, cgroup_usage = get_cgroup_memory_limit()
+    cgroup_limit = get_cgroup_memory_limit()
     if cgroup_limit is None:
         return host_available
+    cgroup_usage = get_cgroup_memory_usage()
     cgroup_available = (
         cgroup_limit if cgroup_usage is None else max(0, cgroup_limit - cgroup_usage)
     )
@@ -1380,10 +1384,9 @@ def initialize_single_dummy_weight(
     generator.manual_seed(seed)
     if torch.finfo(param.data.dtype).bits < 16:
         # uniform_ doesn't support < 16-bit datatypes (FP8)
-        dtype = param.data.dtype
-        tmp_param = param.data.to(torch.float16)
-        tmp_param = tmp_param.uniform_(low, high, generator=generator).to(dtype)
-        param.data.copy_(tmp_param)
+        tmp_param = torch.empty_like(param, dtype=torch.float16)
+        tmp_param.uniform_(low, high, generator=generator)
+        param.copy_(tmp_param)
     else:
         param.uniform_(low, high, generator=generator)
 
