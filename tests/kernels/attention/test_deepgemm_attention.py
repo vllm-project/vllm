@@ -313,3 +313,90 @@ def test_deepgemm_fp8_fp4_paged_mqa_logits(batch_size: int, next_n: int):
             ref_logits = ref_logits.masked_fill(~mask, 0)
             diff = calc_diff(logits, ref_logits)
             assert diff < 1e-3, f"{diff=}"
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.skipif(not has_deep_gemm(), reason="DeepGEMM not available")
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(90), reason="SM90 and SM100 only"
+)
+def test_deepgemm_paged_mqa_packed_manager_block_stride():
+    import vllm.models.glm5next.common.attention  # noqa: F401
+    from vllm.model_executor.layers.sparse_attn_indexer_kpool import (
+        _kpool_flat_page_view,
+    )
+    from vllm.v1.attention.backends.mla.indexer import kpool_page_geometry
+
+    torch.manual_seed(0)
+    num_blocks, manager_block_size, packed_stride_rows = 4, 256, 320
+    num_heads, head_dim = 64, 128
+    page_size, pages_per_block, compact_stride_pages = kpool_page_geometry(
+        manager_block_size, None, head_dim + 4
+    )
+    assert (page_size, pages_per_block, compact_stride_pages) == (64, 4, 4)
+
+    kv = torch.randn(
+        num_blocks,
+        manager_block_size,
+        1,
+        head_dim,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    compact_pages = kv_cache_cast_to_fp8(
+        kv.view(num_blocks * pages_per_block, page_size, 1, head_dim)
+    )
+    row_bytes = compact_pages.shape[-1]
+    compact_manager = compact_pages.squeeze(2).view(
+        num_blocks, manager_block_size, row_bytes
+    )
+    packed_backing = torch.zeros(
+        num_blocks,
+        packed_stride_rows,
+        row_bytes,
+        device="cuda",
+        dtype=torch.uint8,
+    )
+    packed_manager = packed_backing[:, :manager_block_size]
+    packed_manager.copy_(compact_manager)
+
+    _, _, packed_stride_pages = kpool_page_geometry(
+        manager_block_size,
+        packed_manager.stride(0) * packed_manager.element_size(),
+        row_bytes,
+    )
+    assert packed_stride_pages == 5
+
+    packed_pages = _kpool_flat_page_view(packed_manager).unsqueeze(2)
+    page_offsets = torch.arange(pages_per_block, device="cuda", dtype=torch.int32)
+    logical_block = 1
+    compact_table = (logical_block * compact_stride_pages + page_offsets).unsqueeze(0)
+    packed_table = (logical_block * packed_stride_pages + page_offsets).unsqueeze(0)
+
+    q = torch.randn(1, 1, num_heads, head_dim, device="cuda", dtype=torch.bfloat16).to(
+        torch.float8_e4m3fn
+    )
+    weights = torch.randn(1, num_heads, device="cuda", dtype=torch.float32)
+    context_lens = torch.full(
+        (1, 1), manager_block_size, device="cuda", dtype=torch.int32
+    )
+    schedule = get_paged_mqa_logits_metadata(context_lens, page_size, get_num_sms())
+
+    def run(cache: torch.Tensor, table: torch.Tensor) -> torch.Tensor:
+        return fp8_fp4_paged_mqa_logits(
+            (q, None),
+            cache,
+            weights,
+            context_lens,
+            table,
+            schedule,
+            manager_block_size,
+            clean_logits=False,
+        )
+
+    compact_logits = run(compact_pages, compact_table)
+    packed_logits = run(packed_pages, packed_table)
+    finite = torch.isfinite(compact_logits)
+    assert torch.equal(finite, torch.isfinite(packed_logits))
+    assert finite.all()
+    torch.testing.assert_close(compact_logits, packed_logits, rtol=0, atol=0)

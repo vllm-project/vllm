@@ -422,6 +422,34 @@ def test_sparse_backend_decode_correctness(
     q_scale: float,
     k_scale: float,
 ):
+    _run_sparse_backend_decode_correctness(
+        backend_cls,
+        SPARSE_BACKEND_BATCH_SPECS[batch_name],
+        kv_cache_dtype,
+        tensor_parallel_size,
+        block_size,
+        q_scale,
+        k_scale,
+    )
+
+
+def _run_sparse_backend_decode_correctness(
+    backend_cls,
+    batch_spec,
+    kv_cache_dtype,
+    tensor_parallel_size,
+    block_size,
+    q_scale: float,
+    k_scale: float,
+    *,
+    total_num_heads: int = 128,
+    qk_nope_head_dim: int = 128,
+    qk_rope_head_dim: int = 64,
+    v_head_dim: int = 128,
+    block_stride_rows: int | None = None,
+    spread_sparse_indices: bool = False,
+    scale: float | None = None,
+):
     if kv_cache_dtype not in backend_cls.supported_kv_cache_dtypes:
         pytest.skip(f"{backend_cls.get_name()} does not support {kv_cache_dtype}")
 
@@ -446,8 +474,7 @@ def test_sparse_backend_decode_correctness(
         if device_capability is None or device_capability.major != 10:
             pytest.skip("The NVFP4 DS-MLA kv-cache dtype requires SM 10.x")
 
-    supported_block_sizes = backend_cls.get_supported_kernel_block_sizes()
-    if block_size not in supported_block_sizes:
+    if not backend_cls.supports_block_size(block_size):
         pytest.skip(
             f"{backend_cls.get_name()} does not support block_size={block_size}"
         )
@@ -463,22 +490,16 @@ def test_sparse_backend_decode_correctness(
         ):
             pytest.skip("FlashInferMLASparseTRTLLMBackend requires SM 10.x capability")
 
-    batch_spec = SPARSE_BACKEND_BATCH_SPECS[batch_name]
     use_fp8_ds_mla_quantization = kv_cache_dtype == "fp8_ds_mla"
     use_nvfp4_ds_mla_quantization = kv_cache_dtype == "nvfp4_ds_mla"
 
     device = torch.device(DEVICE_TYPE)
     dtype = torch.bfloat16
 
-    # Model hyper-parameters (kept intentionally small for the unit test)
-    total_num_heads = 128
     # Compute per-rank heads for simulated TP
     num_heads = max(1, total_num_heads // tensor_parallel_size)
 
     kv_lora_rank = 512
-    qk_nope_head_dim = 128
-    qk_rope_head_dim = 64
-    v_head_dim = 128
     head_size = kv_lora_rank + qk_rope_head_dim
     topk_tokens = 128
 
@@ -491,7 +512,11 @@ def test_sparse_backend_decode_correctness(
         model_name="deepseek-ai/DeepSeek-V2-Lite-Chat",
         tensor_parallel_size=1,
         max_model_len=max_seqlen,
-        num_gpu_blocks=max(2048, cdiv(total_cache_tokens, block_size) + 1),
+        num_gpu_blocks=(
+            max(2048, cdiv(total_cache_tokens, block_size) + 1)
+            if block_stride_rows is None
+            else cdiv(total_cache_tokens, block_size) + 2
+        ),
         block_size=block_size,
         hf_config_override={
             "index_topk": topk_tokens,
@@ -524,7 +549,8 @@ def test_sparse_backend_decode_correctness(
 
     torch.manual_seed(0)
 
-    scale = 1.0 / math.sqrt(head_size)
+    if scale is None:
+        scale = 1.0 / math.sqrt(head_size)
 
     # Shared MLA projection weights to keep reference and backend in sync
     W_UK = torch.rand(
@@ -562,7 +588,11 @@ def test_sparse_backend_decode_correctness(
         num_valid = min(topk_tokens // 2, max_valid_idx + 1)
         if num_valid > 0:
             valid_range = torch.arange(num_valid, device=device, dtype=torch.int32)
-            tok_indices = (valid_range + offset) % (max_valid_idx + 1)
+            if spread_sparse_indices:
+                tok_indices = valid_range * (max_valid_idx + 1) // num_valid
+                tok_indices[-1] = max_valid_idx
+            else:
+                tok_indices = (valid_range + offset) % (max_valid_idx + 1)
             # Pad with -1 for the remaining positions
             tok_indices = torch.cat(
                 [
@@ -692,6 +722,22 @@ def test_sparse_backend_decode_correctness(
         kv_cache_dtype=kv_cache_dtype,
         scale=kv_cache_scale,
     )
+    if block_stride_rows is not None:
+        backing = torch.zeros(
+            kv_cache.shape[0],
+            kv_cache.shape[1],
+            block_stride_rows,
+            kv_cache.shape[-1],
+            dtype=kv_cache.dtype,
+            device=kv_cache.device,
+        )
+        packed_kv_cache = backing[:, :, :block_size]
+        packed_kv_cache.copy_(kv_cache)
+        kv_cache = packed_kv_cache
+        assert kv_cache.stride(0) // kv_cache.shape[-1] == block_stride_rows
+        assert common_attn_metadata.slot_mapping.numel() == 1
+        query_slot = int(common_attn_metadata.slot_mapping[0].item())
+        kv_cache[query_slot // block_size, :, query_slot % block_size].zero_()
 
     # The sparse builder clones the layer's dense-MHA prefill backend from
     # static_forward_context; register a mock layer carrying one.
@@ -783,6 +829,14 @@ def test_sparse_backend_decode_correctness(
             out_buffer,
         )
 
+    if block_stride_rows is not None:
+        torch.testing.assert_close(
+            kv_cache[query_slot // block_size, 0, query_slot % block_size],
+            kv_c_vllm[0],
+            rtol=0,
+            atol=0,
+        )
+
     assert backend_output.shape == sdpa_reference.shape
     assert backend_output.dtype == sdpa_reference.dtype
     assert torch.isfinite(backend_output).all()
@@ -795,6 +849,30 @@ def test_sparse_backend_decode_correctness(
         )
     else:
         torch.testing.assert_close(backend_output, sdpa_reference, rtol=0.01, atol=0.01)
+
+
+def test_flashinfer_sparse_mla_glm_nope_packed_stride(
+    default_vllm_config,
+    dist_init,
+    workspace_init,
+):
+    """Packed GLM blocks must use their physical stride for writes and top-k."""
+    _run_sparse_backend_decode_correctness(
+        FlashInferMLASparseTRTLLMBackend,
+        BatchSpec(seq_lens=[300], query_lens=[1]),
+        "auto",
+        1,
+        256,
+        1.0,
+        1.0,
+        total_num_heads=64,
+        qk_nope_head_dim=256,
+        qk_rope_head_dim=0,
+        v_head_dim=256,
+        block_stride_rows=320,
+        spread_sparse_indices=True,
+        scale=256**-0.5,
+    )
 
 
 def _triton_convert_reference_impl(
