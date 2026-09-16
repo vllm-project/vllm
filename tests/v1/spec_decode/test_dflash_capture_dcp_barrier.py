@@ -15,7 +15,7 @@ they pin the two properties that prevent it:
   * it is skipped entirely when DCP is off, so the single-GPU path pays nothing
     and does not require an initialised process group.
 
-The barrier goes through the DCP group's ``GroupCoordinator``, not
+The barrier goes through the TP group's ``GroupCoordinator``, not
 ``torch.distributed.barrier``: the latter is an NCCL barrier that allocates
 secret GPU tensors and can move the current device out from under capture, which
 its own docstring in ``parallel_state.py`` warns about.
@@ -73,13 +73,31 @@ def patched(monkeypatch):
 
     group = MagicMock()
     group.barrier = MagicMock(side_effect=lambda: calls.append("barrier"))
-    monkeypatch.setattr(speculator_mod, "get_dcp_group", lambda: group)
+    monkeypatch.setattr(speculator_mod, "get_tp_group", lambda: group)
+    monkeypatch.setattr(
+        speculator_mod, "current_platform", SimpleNamespace(is_rocm=lambda: True)
+    )
     monkeypatch.setattr(
         speculator_mod.torch.accelerator,
         "synchronize",
         lambda *a, **k: calls.append("synchronize"),
     )
     return calls, group
+
+
+def test_the_barrier_is_on_tp_not_dcp(patched):
+    """TP, not DCP: __init__ forces the draft to pcp == 1, where config
+    validation requires tp % dcp == 0, so DCP is a subset of TP. The captured
+    graph also carries the draft's TP all-reduces, so at dcp < tp a DCP barrier
+    would align only some participants."""
+    calls, group = patched
+    import vllm.v1.worker.gpu.spec_decode.dflash.speculator as mod
+
+    assert hasattr(mod, "get_tp_group"), "barrier must use the TP group"
+    assert not hasattr(mod, "get_dcp_group"), (
+        "DCP is a subset of TP for the draft; a DCP barrier misses participants "
+        "when dcp < tp"
+    )
 
 
 def test_ranks_are_aligned_before_capture_under_dcp(patched):
@@ -103,7 +121,7 @@ def test_no_barrier_when_dcp_is_off(patched):
     group.barrier.assert_not_called()
 
 
-def test_barrier_uses_the_dcp_group_not_torch_distributed(monkeypatch, patched):
+def test_barrier_uses_the_tp_group_not_torch_distributed(monkeypatch, patched):
     """An NCCL barrier allocates secret GPU tensors and can move the current
     device; GroupCoordinator.barrier() uses the CPU group instead. Guard against
     a well-meaning simplification back to torch.distributed.barrier()."""
@@ -115,3 +133,18 @@ def test_barrier_uses_the_dcp_group_not_torch_distributed(monkeypatch, patched):
     _make_speculator(dcp_size=8, calls=calls).capture()
 
     raw.assert_not_called()
+
+
+def test_no_barrier_off_rocm(patched, monkeypatch):
+    """The fault was measured on gfx950 and the fix is untested on CUDA, so
+    other platforms keep their current behaviour. Patched rather than detected,
+    so both branches are exercised on any runner."""
+    calls, group = patched
+    monkeypatch.setattr(
+        speculator_mod, "current_platform", SimpleNamespace(is_rocm=lambda: False)
+    )
+
+    _make_speculator(dcp_size=8, calls=calls).capture()
+
+    assert calls == ["capture"], calls
+    group.barrier.assert_not_called()
