@@ -83,6 +83,7 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
             (e.g. partial boolean parsed as bare string).
 
     Returns a dict ready for ``json.dumps()``.
+
     """
     if not args_str or not args_str.strip():
         return {}

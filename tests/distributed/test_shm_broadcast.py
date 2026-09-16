@@ -43,6 +43,7 @@ def distributed_run(fn, world_size, timeout=60):
         fn: Function to run in each process
         world_size: Number of processes to spawn
         timeout: Maximum time in seconds to wait for processes (default: 60)
+
     """
     number_of_processes = world_size
     processes = []
@@ -634,11 +635,9 @@ def test_acquire_read_releases_slot_when_reader_raises():
 
 
 def test_warning_logs(caplog_vllm):
-    """
-    Test that warning logs are emitted at VLLM_RINGBUFFER_WARNING_INTERVAL intervals
+    """Test that warning logs are emitted at VLLM_RINGBUFFER_WARNING_INTERVAL intervals
     when indefinite=False, and are not emitted when indefinite=True.
     """
-
     # Patch the warning log interval to every 1 ms during reads
     with mock.patch(
         "vllm.distributed.device_communicators.shm_broadcast.VLLM_RINGBUFFER_WARNING_INTERVAL",

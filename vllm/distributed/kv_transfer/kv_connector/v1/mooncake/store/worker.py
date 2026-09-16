@@ -815,6 +815,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
         Returns:
             True when no put is needed or every put succeeds, False otherwise.
+
         """
         offloads = req_meta.boundary_state_offloads
         if not offloads or not req_meta.block_hashes:
