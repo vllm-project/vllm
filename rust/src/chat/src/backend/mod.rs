@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::Value;
+use vllm_text::backend::hf::HfOverrides;
 use vllm_text::{DynTextBackend, GenerationConfigMode, TextBackend};
 
 use crate::error::Result;
@@ -63,6 +64,8 @@ pub type DynChatTextBackend = Arc<dyn ChatTextBackend>;
 pub struct LoadModelBackendsOptions {
     /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
     pub revision: Option<String>,
+    /// JSON Merge Patch applied to the model config before loading any backend.
+    pub hf_overrides: HfOverrides,
     /// Which generation-config sampling defaults to inherit.
     pub generation_config: GenerationConfigMode,
     /// Which chat renderer implementation to use.
