@@ -1188,8 +1188,7 @@ class NemotronH_Nano_VL_V2(
         self, video_input: NanoNemotronVLVideoPixelInputs
     ) -> tuple[torch.Tensor, ...]:
         """Process video input and create final embeddings with video content
-        and indicator tokens.
-        """
+        and indicator tokens."""
         T = self.video_temporal_patch_size
 
         if T > 1:

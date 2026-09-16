@@ -167,8 +167,7 @@ class Config:
 
     def fe_supports_quant_scheme(self) -> bool:
         """Check if the fused experts class supports this quant config.
-        See https://github.com/ROCm/aiter/issues/2419 for AITER gaps.
-        """
+        See https://github.com/ROCm/aiter/issues/2419 for AITER gaps."""
         if self.quant_config is None or self.quant_dtype is None:
             return True
         if self.quant_dtype != torch.float8_e4m3fn:

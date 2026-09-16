@@ -138,8 +138,7 @@ class EntryPoints(list):
 
 class DummyPerReqLogitsProcessor:
     """The request-level logits processor masks out all logits except the
-    token id identified by `target_token`
-    """
+    token id identified by `target_token`"""
 
     def __init__(self, target_token: int) -> None:
         """Specify `target_token`."""
@@ -158,8 +157,7 @@ class DummyPerReqLogitsProcessor:
 
 class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
     """Example of wrapping a fake request-level logit processor to create a
-    batch-level logits processor
-    """
+    batch-level logits processor"""
 
     def is_argmax_invariant(self) -> bool:
         return False

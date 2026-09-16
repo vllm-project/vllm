@@ -150,8 +150,7 @@ class CompilerManager:
     def compile_context(self, compile_range: Range) -> Generator[None, None, None]:
         """Provide compilation context for the duration of compilation to set
         any torch global properties we want to scope to a single Inductor
-        compilation (e.g. partition rules, pass context).
-        """
+        compilation (e.g. partition rules, pass context)."""
         with pass_context(compile_range):
             if self.compilation_config.use_inductor_graph_partition:
                 with inductor_partition_rule_context(

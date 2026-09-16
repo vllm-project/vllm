@@ -19,8 +19,7 @@ NON_EXPERT_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj", "gate")
 
 def _expected_lora_modules() -> set[str]:
     """Replicate the set ``WorkerLoRAManager._load_adapter`` would build
-    from this model's ``packed_modules_mapping``.
-    """
+    from this model's ``packed_modules_mapping``."""
     expected: set[str] = set(NON_EXPERT_MODULES)
     for expert in range(GLOBAL_NUM_EXPERTS):
         for proj in EXPERT_PROJECTIONS:
@@ -43,8 +42,7 @@ def _load(lora_dir, peft_helper, *, moe_ep_spec, lora_id):
 def test_moe_lora_ep2_real_qwen3moe(qwen3moe_lora_files, ep_rank):
     """ep_size=2 against the real Qwen3-MoE adapter: each rank's loaded
     LoRA has the right size, the right expert membership, and the
-    right tensor values.
-    """
+    right tensor values."""
     peft_helper = PEFTHelper.from_local_dir(
         qwen3moe_lora_files, max_position_embeddings=4096
     )

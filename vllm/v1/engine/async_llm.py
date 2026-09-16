@@ -871,8 +871,7 @@ class AsyncLLM(EngineClient):
     ) -> None:
         """Submit a pre-aborted request so the connector's request_finished
         hook runs to free any pre-admission KV-transfer resources (e.g. NIXL
-        prefill blocks pinned on the P node).
-        """
+        prefill blocks pinned on the P node)."""
         request = EngineCoreRequest(
             request_id=request_id,
             prompt_token_ids=[0],

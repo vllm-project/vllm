@@ -704,8 +704,7 @@ def fp8_fp4_paged_mqa_logits(
 
 def has_deep_gemm_sparse_mqa() -> bool:
     """Whether the installed DeepGEMM provides the sparse-indexer kernels
-    (``fp8_fp4_(paged_)sparse_mqa_logits``, added in DeepGEMM 2.8, SM100-only).
-    """
+    (``fp8_fp4_(paged_)sparse_mqa_logits``, added in DeepGEMM 2.8, SM100-only)."""
     _lazy_init()
     return (
         _fp8_fp4_sparse_mqa_logits_impl is not None

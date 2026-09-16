@@ -464,8 +464,7 @@ def test_trtllm_fp8_swiglu_clamp_support(
 ):
     """FlashInfer >= 0.6.18 applies the SwiGLU clamp for both block-scaled
     kernels with a SwiGLU activation (DeepSeek-V4 sets swiglu_limit); the
-    per-tensor kernel has no clamp, and Relu2 rejects the parameters.
-    """
+    per-tensor kernel has no clamp, and Relu2 rejects the parameters."""
 
     class _Experts(TrtLlmFp8ExpertsModular):
         @staticmethod

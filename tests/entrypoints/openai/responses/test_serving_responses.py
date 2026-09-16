@@ -1163,8 +1163,7 @@ class TestHarmonyPreambleStreaming:
 
     def test_preamble_done_emits_text_done_events(self) -> None:
         """Completed preamble should emit text done + content_part done +
-        output_item done, same shape as final channel.
-        """
+        output_item done, same shape as final channel."""
         from vllm.entrypoints.openai.responses.streaming_events import (
             emit_previous_item_done_events,
         )
@@ -1185,8 +1184,7 @@ class TestHarmonyPreambleStreaming:
 
     def test_commentary_with_recipient_no_preamble_done(self) -> None:
         """Commentary + recipient='functions.X' should route to function call
-        done, not preamble done.
-        """
+        done, not preamble done."""
         from vllm.entrypoints.openai.responses.streaming_events import (
             emit_previous_item_done_events,
         )
@@ -1332,8 +1330,7 @@ def _mock_parser_with_reasoning(serving, delta_sequence: list[DeltaMessage]):
 class TestStreamingReasoningToContentTransition:
     """Tests for _process_simple_streaming_events reasoning-to-content
     transition, specifically the fix for mixed deltas that carry both
-    reasoning and content simultaneously.
-    """
+    reasoning and content simultaneously."""
 
     @pytest.mark.asyncio
     async def test_mixed_delta_reasoning_and_content_emits_reasoning_delta(
@@ -1343,8 +1340,7 @@ class TestStreamingReasoningToContentTransition:
         and content set (e.g. reasoning end and content start in the same
         chunk), the trailing reasoning text must be emitted as a
         ResponseReasoningTextDeltaEvent and included in the
-        ResponseReasoningTextDoneEvent text.
-        """
+        ResponseReasoningTextDoneEvent text."""
         monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
         serving = _make_serving_instance_with_reasoning()
 
@@ -1413,8 +1409,7 @@ class TestStreamingReasoningToContentTransition:
         self, monkeypatch
     ):
         """When the transition from reasoning to content is clean (no mixed
-        delta), no extra reasoning delta event should be emitted.
-        """
+        delta), no extra reasoning delta event should be emitted."""
         monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
         serving = _make_serving_instance_with_reasoning()
 
@@ -1475,8 +1470,7 @@ class TestStreamingReasoningToContentTransition:
     async def test_reasoning_only_stream_no_content(self, monkeypatch):
         """When the stream has only reasoning deltas and no content, the
         reasoning done event should be emitted at finalization with the
-        full accumulated text, and no text delta events should appear.
-        """
+        full accumulated text, and no text delta events should appear."""
         monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
         serving = _make_serving_instance_with_reasoning()
 

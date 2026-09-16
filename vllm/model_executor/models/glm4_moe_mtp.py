@@ -22,8 +22,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only GLM-4.5, GLM-4.6, GLM-4.7 MTP
-model compatible with HuggingFace weights.
-"""
+model compatible with HuggingFace weights."""
 
 import typing
 from collections.abc import Callable, Iterable

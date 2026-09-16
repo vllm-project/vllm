@@ -51,8 +51,7 @@ async def test_tokenize_then_chat_completion_with_image(
     local_asset_server,
 ):
     """Tokenize a multimodal message, then send the same message to chat
-    completions.  The chat completion must succeed (not 500).
-    """
+    completions.  The chat completion must succeed (not 500)."""
     image_url = local_asset_server.url_for("stop_sign.jpg")
     messages = [
         {

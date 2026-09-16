@@ -396,8 +396,7 @@ class ExtractHiddenStatesProposer:
 
     def validate_same_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:
         """Validate all drafting layers belong to the same KV cache group
-        and record the group index for common_attn_metadata selection.
-        """
+        and record the group index for common_attn_metadata selection."""
         assert len(self.attn_layer_names) == 1
         layer = self.attn_layer_names[0]
         for gid, group in enumerate(kv_cache_config.kv_cache_groups):

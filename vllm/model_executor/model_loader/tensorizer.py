@@ -497,8 +497,7 @@ def _check_tensors_on_meta_device(model: nn.Module) -> None:
 
 def _resize_lora_embeddings(model: nn.Module):
     """Modify LoRA embedding layers to use bigger tensors
-    to allow for adapter added tokens.
-    """
+    to allow for adapter added tokens."""
     for child in model.modules():
         if (
             isinstance(child, VocabParallelEmbedding)

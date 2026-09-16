@@ -376,8 +376,7 @@ class VocabParallelEmbedding(PluggableLayer):
     ) -> VocabParallelEmbeddingShardIndices:
         """Get start and end indices for vocab parallel embedding, following the
         layout outlined in the class docstring, based on the given tp_rank and
-        tp_size.
-        """
+        tp_size."""
         num_added_embeddings_padded = vocab_size_padded - org_vocab_size_padded
         padded_org_vocab_start_index, padded_org_vocab_end_index = (
             vocab_range_from_global_vocab_size(org_vocab_size_padded, tp_rank, tp_size)

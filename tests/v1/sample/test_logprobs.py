@@ -573,8 +573,7 @@ def test_logprobs_mode(logprobs_mode: LogprobsMode):
 def test_prompt_logprobs_mode():
     """prompt_logprobs must respect logprobs_mode: *_logits and *_logprobs
     must return different values. Prompt tokens skip sampling processors,
-    so processed_* == raw_* on the prompt side.
-    """
+    so processed_* == raw_* on the prompt side."""
     from vllm import LLM
 
     values: dict[str, float] = {}

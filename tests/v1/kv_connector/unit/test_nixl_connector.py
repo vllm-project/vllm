@@ -318,8 +318,7 @@ def test_abort_immediately_remote_prefill_enqueues_empty_recv():
     """A remote-prefill request added with abort_immediately=True should
     be added to the scheduler's waiting queue then immediately aborted, so the
     NIXL connector's request_finished hook enqueues an empty recv to notify
-    the prefill instance to free its blocks.
-    """
+    the prefill instance to free its blocks."""
     from vllm.v1.request import RequestStatus
 
     scheduler = create_scheduler(create_vllm_config())
@@ -3146,8 +3145,7 @@ def test_split_read_failure_defers_report_until_last_handle(
     request — nor invalidate its blocks — while the sibling xfer is still in
     flight: a posted READ cannot be aborted and would DMA into blocks the
     scheduler could free and reuse. The report happens exactly once, when the
-    last handle is terminal.
-    """
+    last handle is terminal."""
     request_id = "split_read_partial_failure"
     err_handle, live_handle = 11, 22
     connector, worker, wrapper = _make_split_read_connector(

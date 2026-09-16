@@ -213,8 +213,7 @@ def test_deepseek_v41_vl_mapper_routes_linear_scales(
 ):
     """The VL wrapper must map ``.scale`` keys to the parameter the linear
     quant method registers, as the text model does. A hardcoded
-    ``weight_scale_inv`` raised KeyError for native MXFP8 checkpoints.
-    """
+    ``weight_scale_inv`` raised KeyError for native MXFP8 checkpoints."""
     from vllm.models.deepseek_v41.nvidia import model as model_module
     from vllm.models.deepseek_v41.nvidia import vl_model as vl_module
 

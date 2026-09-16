@@ -79,8 +79,7 @@ def get_offloading_event_group_spec(
 class _OffloadEventMetadata:
     """BlockStored payload snapshot for one OffloadKey, captured while the
     Request is available and kept until the final matching removal event.
-    ``medium`` and ``ownership`` are forwarded from the OffloadingEvent.
-    """
+    ``medium`` and ``ownership`` are forwarded from the OffloadingEvent."""
 
     # The chunk's constituent block hashes; the last one is the OffloadKey.
     block_hashes: tuple[BlockHash, ...]
@@ -256,8 +255,7 @@ class OffloadingEventsTracker:
 
     def reset(self) -> None:
         """Drop all tracked state; pending payloads are stale after a
-        manager cache reset.
-        """
+        manager cache reset."""
         self._pending_event_metadata.clear()
 
     def _build_event_metadata(
@@ -268,8 +266,7 @@ class OffloadingEventsTracker:
     ) -> _OffloadEventMetadata:
         """Build the payload snapshot for one offloaded chunk: its
         constituent per-block hashes, the whole chunk's tokens, and the
-        per-block ``block_size``.
-        """
+        per-block ``block_size``."""
         hashes_per_chunk = group_config.hashes_per_chunk
         assert hashes_per_chunk > 0
         assert chunk_idx >= 0

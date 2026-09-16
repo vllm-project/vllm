@@ -804,8 +804,7 @@ _ACTIVATION_REGISTRY = LazyDict(
 
 def _get_gelu_pytorch_tanh() -> nn.Module:
     """Get PyTorch GELU with tanh approximation, with ROCm fallback
-    and fast GELU for ARM.
-    """
+    and fast GELU for ARM."""
     if current_platform.is_rocm():
         # TODO:[ROCm] PyTorch native GELU with tanh is unstable with torch.compile
         logger.warning_once(

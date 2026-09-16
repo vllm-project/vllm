@@ -295,8 +295,7 @@ def _is_dense(t: torch.Tensor) -> bool:
     """Whether `t`'s elements fill a contiguous storage range, possibly
     permuted (e.g. a transposed matrix). Such layouts can be copied with
     pitched cudaMemcpy2D/3DAsync directly from pinned memory, whereas
-    gapped layouts (e.g. strided slices) stage through a pageable temp.
-    """
+    gapped layouts (e.g. strided slices) stage through a pageable temp."""
     if not t.is_contiguous():
         expected_stride = 1
         for stride, size in sorted(zip(t.stride(), t.shape)):

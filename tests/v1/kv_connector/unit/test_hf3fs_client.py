@@ -131,8 +131,7 @@ class TestHf3fsClientResourceManagement:
 
     def test_close_idempotent_and_handles_cleared(self, tmp_path):
         """Multiple close() calls must not raise; deregister_fd called exactly
-        once, all handles set to None, shm.close() invoked.
-        """
+        once, all handles set to None, shm.close() invoked."""
         client, shm_r, shm_w = self._make_client(tmp_path)
 
         with (
@@ -238,8 +237,7 @@ class TestHf3fsClientResourceManagement:
 
     def test_constructor_failure_does_not_close_unallocated_shm(self, tmp_path):
         """Failure before SharedMemory is created must not raise AttributeError
-        or TypeError from cleanup.
-        """
+        or TypeError from cleanup."""
         with (
             patch(f"{self._MOD}.HF3FS_AVAILABLE", True),
             patch(f"{self._MOD}.register_fd"),

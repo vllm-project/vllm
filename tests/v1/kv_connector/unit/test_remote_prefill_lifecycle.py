@@ -704,8 +704,7 @@ def test_async_load_reserves_blocks_for_inflight():
 
 def test_async_loads_both_admitted_when_pool_fits():
     """Sanity: with a pool large enough, the reservation gate admits both async
-    loads (it is not over-conservative).
-    """
+    loads (it is not over-conservative)."""
     vllm_config = create_vllm_config()
     BLOCK_SIZE = vllm_config.cache_config.block_size
     scheduler = create_scheduler(vllm_config, num_blocks=64)

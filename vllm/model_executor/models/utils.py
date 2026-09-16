@@ -47,8 +47,7 @@ ShardId: TypeAlias = str | int | tuple[int, ...]
 class WeightsMapper:
     """Maps the name of each weight if they match the following patterns.
 
-    If a key maps to a value of `None`, the corresponding weight is ignored.
-    """
+    If a key maps to a value of `None`, the corresponding weight is ignored."""
 
     orig_to_new_renaming: list["WeightRenaming"] = field(default_factory=list)
     orig_to_new_regex: Mapping[re.Pattern, str | None] = field(default_factory=dict)
@@ -172,8 +171,7 @@ class WeightsMapper:
         rather than being rewritten to the stacked vLLM name (`qkv_proj`). Mappings to
         `None` are dropped because "do not load this weight" is meaningless to such a
         consumer, and applying it would silently shrink a quantization config's ignore
-        list or make LoRA name parsing fail.
-        """
+        list or make LoRA name parsing fail."""
         remove_none = lambda d: {k: v for k, v in d.items() if v is not None}
         return replace(
             self,

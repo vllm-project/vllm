@@ -1041,8 +1041,7 @@ def get_engine_zmq_addresses(
 
     Set ``defer_api_server_ports=False`` only when the consumer cannot
     report a bound port back (e.g. the Rust front-end). IPC paths are
-    unaffected.
-    """
+    unaffected."""
     parallel_config = vllm_config.parallel_config
     local_engine_count = parallel_config.data_parallel_size_local
     local_start_index = parallel_config.data_parallel_rank_local

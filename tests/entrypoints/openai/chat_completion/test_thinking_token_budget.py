@@ -151,8 +151,7 @@ async def client(request, server, server_with_auto_reasoning_config):
 @pytest.mark.parametrize("client", ["default", "auto_config"], indirect=True)
 async def test_thinking_token_budget_mixed_requests(client: openai.AsyncOpenAI):
     """Test that mixed requests (some with thinking_token_budget, some without)
-    complete successfully without errors.
-    """
+    complete successfully without errors."""
     response_with_budget = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES,

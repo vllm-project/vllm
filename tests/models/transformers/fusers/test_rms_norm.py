@@ -83,8 +83,7 @@ class ToleranceRMSNorm(NamedEpsRMSNorm):
 
 class LiteralEpsRMSNorm(RMSNorm):
     """eps is a literal in the source, and an unrelated attribute happens to
-    hold the same value: matching on the value alone would bind to it.
-    """
+    hold the same value: matching on the value alone would bind to it."""
 
     def __init__(self, hidden: int = 16, eps: float = 1e-5):
         super().__init__(hidden, eps)
@@ -96,8 +95,7 @@ class LiteralEpsRMSNorm(RMSNorm):
 
 class AmbiguousEpsRMSNorm(nn.Module):
     """Two attributes hold the eps value, and the forward reads the second, so
-    their order cannot pick it.
-    """
+    their order cannot pick it."""
 
     def __init__(self, hidden: int = 16, eps: float = 1e-6):
         super().__init__()
@@ -233,8 +231,7 @@ def test_weightless_norm_has_no_hidden_size(default_vllm_config):
 
 def test_fused_rms_norm_op_default_eps(default_vllm_config):
     """`torch.nn.RMSNorm` (a single `F.rms_norm` call) matches via the fast path;
-    its default `eps=None` resolves to `finfo(dtype).eps` in `fuse`.
-    """
+    its default `eps=None` resolves to `finfo(dtype).eps` in `fuse`."""
     from vllm.model_executor.layers.layernorm import RMSNorm as VLLMRMSNorm
 
     with torch.device("meta"):
@@ -250,8 +247,7 @@ def test_fused_rms_norm_op_default_eps(default_vllm_config):
 
 def test_eps_is_derived_per_instance(default_vllm_config):
     """Two instances of the same norm class with different eps must fuse to their
-    own eps: the type-cached fuser holds only structure, not this value.
-    """
+    own eps: the type-cached fuser holds only structure, not this value."""
     with torch.device("meta"):
         for eps in (1e-5, 1e-6):
             module = RMSNorm(16, eps=eps)
@@ -263,8 +259,7 @@ def test_eps_is_derived_per_instance(default_vllm_config):
 @pytest.mark.parametrize("cls", [NamedEpsRMSNorm, ToleranceRMSNorm])
 def test_eps_attr_is_found_by_value_not_name(cls, default_vllm_config):
     """The eps attribute is identified by holding the traced value, so a norm
-    stays per-instance correct whatever it names it.
-    """
+    stays per-instance correct whatever it names it."""
     with torch.device("meta"):
         for eps in (1e-5, 1e-6):
             module = cls(16, eps=eps)
@@ -276,8 +271,7 @@ def test_eps_attr_is_found_by_value_not_name(cls, default_vllm_config):
 
 def test_literal_eps_is_not_mistaken_for_an_attribute(default_vllm_config, caplog):
     """A literal eps is recognised as coming from no attribute, even when one
-    holds the same value, and is taken from the traced source instead.
-    """
+    holds the same value, and is taken from the traced source instead."""
     logger = "vllm.model_executor.models.transformers.fusers.rms_norm"
     with caplog.at_level("DEBUG", logger=logger), torch.device("meta"):
         module = LiteralEpsRMSNorm()
@@ -290,8 +284,7 @@ def test_literal_eps_is_not_mistaken_for_an_attribute(default_vllm_config, caplo
 
 def test_ambiguous_eps_attrs_are_disambiguated(default_vllm_config):
     """When several attributes hold the eps value, the one the forward actually
-    reads is identified, and they are all left as they were found.
-    """
+    reads is identified, and they are all left as they were found."""
     with torch.device("meta"):
         module = AmbiguousEpsRMSNorm(16, eps=1e-6)
         before = dict(vars(module))
@@ -308,8 +301,7 @@ def test_ambiguous_eps_attrs_are_disambiguated(default_vllm_config):
 def test_fused_norm_is_gather_capable(default_vllm_config):
     """Every weighted fused norm is emitted gather-capable, so a norm on a head-sharded
     projection (OLMoE-style) self-corrects at runtime with no QKV-specific
-    plumbing. A full-width input skips the gather and equals a plain norm.
-    """
+    plumbing. A full-width input skips the gather and equals a plain norm."""
     from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
     from vllm.model_executor.models.transformers.fusers import rms_norm
 
@@ -331,8 +323,7 @@ def test_fused_norm_is_gather_capable(default_vllm_config):
 
 def test_gathered_norm_rejects_uneven_sharding(default_vllm_config):
     """A sharded input (narrower than the full-width weight) that does not tile
-    the weight evenly across ranks is rejected before any collective.
-    """
+    the weight evenly across ranks is rejected before any collective."""
     from vllm.model_executor.models.transformers.fusers import rms_norm
 
     norm = rms_norm.TPAwareRMSNorm(hidden_size=8, eps=1e-6)

@@ -34,8 +34,7 @@ def test_decoder_max_context_length_validation(
     max_tokens: int,
 ) -> None:
     """Check vLLM decoder model input validation for edge cases where
-    the prompt length is (almost) equal to the max model length.
-    """
+    the prompt length is (almost) equal to the max model length."""
     prompt_ids = [[43] * prompt_len]
 
     with vllm_runner(
@@ -72,8 +71,7 @@ def test_auto_fit_max_model_len_rejects_oversized_input(
     """When max_model_len='auto' and KV cache memory is very limited,
     the engine auto-fits max_model_len to a small value. The frontend
     must see this reduced value and reject prompts that exceed it,
-    rather than accepting them and hanging.
-    """
+    rather than accepting them and hanging."""
     # Use a small KV cache budget to force auto-fit to a small
     # max_model_len. Pin block_size=16 so the budget is independent
     # of the platform's default block size. One block for this model is

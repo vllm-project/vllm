@@ -34,8 +34,7 @@ from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
 
 class _ListSource(WeightSource):
     """A WeightSource over an explicit ordered (name, cpu-tensor) list, so the
-    sharded-RDT group/order logic can be tested without a real model.
-    """
+    sharded-RDT group/order logic can be tested without a real model."""
 
     def __init__(self, pairs):
         self._pairs = list(pairs)
@@ -55,8 +54,7 @@ class _FakeProducerServer:
     per-group barrier: publish/free are keyed by GROUP INDEX, signals count
     to the ``begin_sync`` live total, publish_group returns nothing, and freed
     groups flow back only through wait_freed / end_sync (see
-    test_sharded_rdt_producer.TestFakeServerAgreesWithTheRealOne).
-    """
+    test_sharded_rdt_producer.TestFakeServerAgreesWithTheRealOne)."""
 
     def __init__(self, auto_free=True):
         self.order: list[str] = []
@@ -100,8 +98,7 @@ class _FakeProducerServer:
         must already have a banked credit when the gate asks (auto_free, or a
         test's own free_group) — anything else is the deadlock the real
         watchdog would kill, so fail loudly. Not appended to ``order``: it is
-        pacing, not a lifecycle milestone.
-        """
+        pacing, not a lifecycle milestone."""
         assert self._pending_freed, (
             "wait_freed with nothing freed: the gather loop would deadlock"
         )
@@ -124,8 +121,7 @@ def _rdt_engine_with_fake_server(
 ):
     """Build a ShardedRDTTrainerWeightTransferEngine wired to an in-process fake
     server (no Ray, no CUDA IPC): bypass trainer_init's spawn, set the
-    group-major metadata, and route _rpc to the fake.
-    """
+    group-major metadata, and route _rpc to the fake."""
     import vllm.distributed.weight_transfer.sharded_rdt_trainer as mod
 
     # reduce_tensor needs CUDA; the fake server never rebuilds, so stub it.
@@ -325,8 +321,7 @@ def test_sharded_rdt_send_weights_surfaces_update_error(monkeypatch):
 
 class _OwnedSource(_ListSource):
     """A source holding only some groups' names, like a pipeline-parallel rank.
-    Takes group indices for convenience and declares the names inside them.
-    """
+    Takes group indices for convenience and declares the names inside them."""
 
     def __init__(self, pairs, owned_group_idx):
         super().__init__(pairs)
@@ -392,8 +387,7 @@ def test_sharded_rdt_owned_group_order_mismatch_raises(monkeypatch):
 )
 def test_sharded_rdt_begin_sync_carries_the_live_count(monkeypatch):
     """The free barrier's target is one integer per sync: the live consumer
-    count, defaulting to the whole provisioned fleet.
-    """
+    count, defaulting to the whole provisioned fleet."""
     server = _FakeProducerServer(auto_free=True)
     engine = _rdt_engine_with_fake_server(
         _rdt_source_two_layers(),
@@ -411,8 +405,7 @@ def test_sharded_rdt_begin_sync_carries_the_live_count(monkeypatch):
 class TestLiveCountPlumbing:
     """``send_weights(live_consumer_ids)`` -> the barrier target. The
     provisioned geometry is frozen; a degraded sync only lowers the target and
-    narrows each slot-sharing group's rendezvous.
-    """
+    narrows each slot-sharing group's rendezvous."""
 
     @staticmethod
     def _engine(num_consumers, world=2, rank=0):
@@ -445,8 +438,7 @@ class TestLiveCountPlumbing:
 
     def test_which_consumers_died_does_not_matter_only_how_many(self):
         """The whole point of the barrier: no routed per-producer targets, so
-        the identity of the dead consumer is irrelevant to the producers.
-        """
+        the identity of the dead consumer is irrelevant to the producers."""
         counts = []
         for live in ([0, 1, 2, 3], [4, 5, 6, 7], [0, 2, 4, 6]):
             engine, got = self._engine(num_consumers=8)
@@ -457,8 +449,7 @@ class TestLiveCountPlumbing:
     def test_the_live_ids_travel_with_the_count(self):
         """The count sizes the free barrier, the ids size the slot-sharing
         rendezvous, so a producer that shares slots can tell WHICH consumers it
-        is still waiting for. They must describe the same set.
-        """
+        is still waiting for. They must describe the same set."""
         engine, got = self._engine(num_consumers=8)
         engine.send_weights([6, 0, 2, 2])
         ((count, ids),) = got
@@ -526,8 +517,7 @@ def test_sharded_rdt_rejects_a_rank_holding_nothing(monkeypatch):
 
 def test_sharded_rdt_rejects_a_name_no_rank_holds(monkeypatch):
     """Every name must be held somewhere or it can never be served — caught
-    when the holdings are transposed, naming the orphan.
-    """
+    when the holdings are transposed, naming the orphan."""
     with pytest.raises(ValueError, match="no trainer rank holds"):
         _rdt_engine_with_fake_server(
             _OwnedSource(_rdt_source_two_layers()._pairs, [0, 1]),
@@ -541,8 +531,7 @@ def test_sharded_rdt_rejects_a_name_no_rank_holds(monkeypatch):
 
 def test_sharded_rdt_rejects_metadata_disagreement_across_ranks(monkeypatch):
     """Only the sender's metadata reaches the consumers, so a rank describing
-    just its own share must fail loudly rather than silently drop the rest.
-    """
+    just its own share must fail loudly rather than silently drop the rest."""
     engine = _rdt_engine_with_fake_server(
         _OwnedSource(_rdt_source_two_layers()._pairs, [1, 2]),
         is_sender=False,
@@ -565,8 +554,7 @@ def _serve_ring_server(src_name, src):
     """A producer server with one cached tensor and a pre-seeded serve ring, so a
     pull needs no Ray and no NIXL registration. Returns (server, serve) where
     ``serve(chain)`` packs one spec into the SAME ring slot every time — which is
-    what puts the destination-view cache, and only it, under test.
-    """
+    what puts the destination-view cache, and only it, under test."""
     from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
         _RDTProducerServer,
     )

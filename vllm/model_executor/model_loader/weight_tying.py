@@ -78,8 +78,7 @@ def maybe_retie_word_embeddings(model: nn.Module, model_config: ModelConfig) -> 
 
     Checkpoints produced by quantization or fine-tuning tooling often keep a redundant
     copy of the tied `lm_head`. Sharing the storage again reclaims the memory it would
-    otherwise cost.
-    """
+    otherwise cost."""
     if not model_config.word_embeddings_untied_by_checkpoint:
         return
     if (untied := _get_untied_lm_head(model)) is None:

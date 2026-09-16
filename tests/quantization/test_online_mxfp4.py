@@ -411,8 +411,7 @@ def test_online_mxfp4_moe_matches_quark(
         ) -> tuple[torch.Tensor, torch.Tensor]:
             """Place the source weights into buffers of the padded size, the
             way the weight loader writes only the unpadded slice of a larger
-            allocation.
-            """
+            allocation."""
             w13 = torch.full(
                 (num_experts, 2 * intermediate_size, hidden_size),
                 padding_value,

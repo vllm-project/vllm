@@ -499,8 +499,7 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo])
 
 class Gemma3nMultimodalEmbedder(nn.Module):
     """Embeds token ids or soft tokens for multimodal content into language
-    model space.
-    """
+    model space."""
 
     def __init__(
         self,

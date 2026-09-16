@@ -139,8 +139,7 @@ class NoRepeatNGramLogitsProcessor:
 
 class NGramPerReqLogitsProcessor(AdapterLogitsProcessor):
     """Example of overriding the wrapper class `__init__()` in order to utilize
-    info about the device type
-    """
+    info about the device type"""
 
     @classmethod
     def validate_params(cls, params: SamplingParams):

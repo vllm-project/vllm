@@ -216,8 +216,7 @@ def _configure_vllm_root_logger() -> None:
 def init_logger(name: str) -> _VllmLogger:
     """The main purpose of this function is to ensure that loggers are
     retrieved in such a way that we can be sure the root vllm logger has
-    already been configured.
-    """
+    already been configured."""
     logger = logging.getLogger(name)
 
     for method_name, method in _METHODS_TO_PATCH.items():

@@ -1123,8 +1123,7 @@ def test_fused_moe_lora_kernel_one_shot_early_exit(trigger, device):
 @pytest.mark.parametrize("device", DEVICES)
 def test_fused_moe_lora_kernel_zero_grid_no_crash(device):
     """num_active_loras=0 (or num_slices=0) would otherwise launch a grid
-    with a zero dimension. one-shot wrapper must short-circuit before launch.
-    """
+    with a zero dimension. one-shot wrapper must short-circuit before launch."""
     torch.set_default_device(device)
     set_random_seed(0)
     num_tokens, top_k, E, max_loras, R, K, N = 8, 2, 8, 4, 16, 1024, 1024
@@ -1186,8 +1185,7 @@ def test_fused_moe_lora_kernel_zero_grid_no_crash(device):
 def test_fused_moe_lora_kernel_rejects_bad_block_size_m(device):
     """one-shot must surface a clear assertion when shrink_block_size_m is not
     a power of 2 / less than 16, instead of the cryptic Triton compile
-    failure (`arange's range must be a power of 2`).
-    """
+    failure (`arange's range must be a power of 2`)."""
     torch.set_default_device(device)
     set_random_seed(0)
     num_tokens, top_k, E, max_loras, R, K, N = 32, 2, 8, 4, 16, 1024, 1024

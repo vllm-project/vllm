@@ -69,8 +69,7 @@ class NCCLTrainerInitInfo(TrainerInitInfo):
     propagates them to the worker at `trainer_init` so the two sides cannot
     disagree. Note this defaults to packed, unlike the worker-side
     `NCCLWeightTransferInitInfo`, whose default only applies when no trainer
-    ships a value. `backend` is the factory dispatch key.
-    """
+    ships a value. `backend` is the factory dispatch key."""
 
     backend: ClassVar[str] = "nccl"
 
@@ -365,8 +364,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
     def _broadcast(self, source: WeightSource, meta: list[ParamMeta]) -> None:
         """Iterate the source (materializing each tensor — a collective on all
         ranks) and, on the sender, broadcast from rank 0, packed or one-by-one.
-        Non-sender ranks only replay the iteration to stay in the collective.
-        """
+        Non-sender ranks only replay the iteration to stay in the collective."""
         if not self.is_sender:
             for _ in source:
                 pass

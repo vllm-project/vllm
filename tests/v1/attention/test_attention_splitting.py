@@ -164,8 +164,7 @@ def apply_split_decodes_and_prefills(
     treat_short_extends_as_decodes: bool = True,
 ):
     """Helper function to apply split_decodes_and_prefills and return
-    the results.
-    """
+    the results."""
     device = torch.device("cpu")
     seq_lens = [10 * (i + 1) for i in range(len(query_lens))]
     common_metadata = create_common_attn_metadata(

@@ -127,8 +127,7 @@ def test_a_long_reason_is_truncated_and_says_how_much_was_left_out(model_config)
 
 def test_a_short_reason_is_passed_through_whole(model_config):
     """A reason that fits is not annotated -- the count only appears when it is
-    telling the reader something.
-    """
+    telling the reader something."""
     reason = "invalid magic number; corrupt file?"
     assert len(reason) <= _MAX_EMBED_ERROR_REASON_CHARS
 

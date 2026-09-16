@@ -454,8 +454,7 @@ async def test_derender_completion_empty_generate_responses(client):
 @pytest.mark.asyncio
 async def test_derender_completion_logprobs(client):
     """token_id:N placeholders in logprobs are resolved; CompletionLogProbs
-    flat-list structure is returned with non-empty tokens and text_offsets.
-    """
+    flat-list structure is returned with non-empty tokens and text_offsets."""
     gr1 = await _render_completion(client, "Hello world")
     ids1 = gr1["token_ids"][:3]
     token_id = ids1[0]

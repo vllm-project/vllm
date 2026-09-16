@@ -492,8 +492,7 @@ def test_extract_tool_calls_pre_v11_regex_fallback(
 ):
     """The regex fallback path finds valid JSON via regex when the primary
     raw_decode fails on leading junk. It should re-serialize arguments
-    and return a valid tool call.
-    """
+    and return a valid tool call."""
     model_output = (
         '[TOOL_CALLS]  junk [{"name": "add", "arguments":{"a": 1, "b": 2}}] trail'
     )
@@ -2004,8 +2003,7 @@ def test_streaming_pre_v11_parallel_calls_batched_deltas(
     mistral_pre_v11_tool_parser, mistral_pre_v11_tokenizer, chunk_size, driver
 ):
     """A batched delta spanning the boundary between two parallel calls must
-    keep them on distinct indices (the bug collapsed both onto index 0).
-    """
+    keep them on distinct indices (the bug collapsed both onto index 0)."""
     model_output = (
         '[TOOL_CALLS] [{"name": "add", "arguments": {"a": 3.5, "b": 4}}, '
         '{"name": "get_current_weather", "arguments": '
@@ -2123,8 +2121,7 @@ def test_reasoning_active_no_think_block_no_leak(
     chunk_size,
 ):
     """Tool call without a preceding think block must not leak as content
-    when the reasoning parser is active.
-    """
+    when the reasoning parser is active."""
     accumulated_content = ""
     function_names: list[str] = []
     function_args_strs: list[str] = []
@@ -2225,8 +2222,7 @@ def test_adjust_request_pre_v11_required_clears_response_format(
     response_format so the tool schema is the sole structured-output
     constraint, matching the base ToolParser (otherwise the request either
     hits the "multiple constraints" engine error or, with no constraint,
-    rambles to finish_reason='length').
-    """
+    rambles to finish_reason='length')."""
     request = _make_request(tool_choice="required", response_format=response_format)
     result = mistral_pre_v11_tool_parser.adjust_request(request)
 
@@ -2243,8 +2239,7 @@ def test_adjust_request_non_mistral_tokenizer_required_injects_schema(
 ) -> None:
     """The guided-schema injection must also fire for non-Mistral (e.g. HF-mode)
     tokenizers driving the Mistral tool parser, mirroring the base ToolParser so
-    required + response_format does not fall back to an unconstrained ramble.
-    """
+    required + response_format does not fall back to an unconstrained ramble."""
     request = _make_request(
         tool_choice="required", response_format={"type": "json_object"}
     )

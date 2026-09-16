@@ -98,8 +98,7 @@ class WorkerProfiler(ABC):
 
     def step(self) -> None:
         """Update the profiler state at each worker step,
-        to handle delayed starts and max iteration limits.
-        """
+        to handle delayed starts and max iteration limits."""
         if not self._active:
             return
 

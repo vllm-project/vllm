@@ -85,8 +85,7 @@ def _decode_token_regions(
     cache: torch.Tensor, slot_mapping: torch.Tensor, block_size: int
 ):
     """Slice out, per valid token, the raw NoPE-fp8 / RoPE-bf16 / scale byte
-    regions this layout defines.
-    """
+    regions this layout defines."""
     valid = slot_mapping >= 0
     idx = valid.nonzero(as_tuple=True)[0]
     slots = slot_mapping[idx]
@@ -111,8 +110,7 @@ def _assert_cache_parity(cache_fused, cache_ref, slot_mapping, block_size):
     """NoPE fp8 + the UE8M0 scale byte are a deterministic quant of an
     un-rotated bf16 value, so they match tightly; the RoPE region is rotated
     in fp32 before its bf16 store and eager/kernel can round a tie to
-    opposite sides, so allow <=1 ULP there.
-    """
+    opposite sides, so allow <=1 ULP there."""
     nope_ref, rope_ref, scale_ref = _decode_token_regions(
         cache_ref, slot_mapping, block_size
     )
@@ -192,8 +190,7 @@ def _dup_padded_block_cache(
     num_blocks: int, block_size: int, width: int, pad_elems: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Two independently-stored padded caches with identical values, for ops
-    that mutate the cache in place.
-    """
+    that mutate the cache in place."""
     page_stride = block_size * width + pad_elems
     template = torch.randn(num_blocks, page_stride, dtype=torch.float32)
 
@@ -210,8 +207,7 @@ def _run_save_partial_states_eager(
 ):
     """Reference: state_cache[block_idx, pos_in_block, :W] = kv;
     state_cache[..., W:] = score + ape[position % compress_ratio]; skip
-    slot < 0. Mutates state_cache in place, matching the op's contract.
-    """
+    slot < 0. Mutates state_cache in place, matching the op's contract."""
     state_width = kv.shape[-1]
     block_size = state_cache.shape[1]
     valid = slot_mapping >= 0
@@ -271,8 +267,7 @@ def _run_compress_eager(
 ):
     """Reference for the per-channel-softmax-pooling + RMSNorm + NoPE-UE8M0
     quant + GPT-J RoPE math writing the main (head_dim=512) fp8_ds_mla
-    layout.
-    """
+    layout."""
     num_tokens, window = gather_slots.shape
     state_width = state_cache.shape[-1] // 2
     state_block_size = state_cache.shape[1]
@@ -449,8 +444,7 @@ def test_compress_norm_rope_store_cpu_matches_eager(
 
 def test_compress_norm_rope_store_cpu_non_contiguous_kv_cache_row_stride():
     """The main (output) kv_cache is a separate physical buffer from the
-    state cache and can independently be a strided view.
-    """
+    state cache and can independently be a strided view."""
     eps = 1e-6
     compress_ratio, overlap = 128, False
     num_tokens = 5
@@ -526,8 +520,7 @@ def _run_compress_indexer_eager(
     """Same softmax-pool + RMSNorm + GPT-J RoPE prologue as the head=512
     path, but the indexer's cache quantizes all 128 post-RoPE dims as one
     FP8 block with a single raw fp32 scale per token (matching
-    _indexer_k_quant_and_cache_cpu's layout), not 7 separate UE8M0 blocks.
-    """
+    _indexer_k_quant_and_cache_cpu's layout), not 7 separate UE8M0 blocks."""
     num_tokens, window = gather_slots.shape
     state_width = state_cache.shape[-1] // 2
     state_block_size = state_cache.shape[1]
@@ -655,8 +648,7 @@ def _pack_flash_mla_cache(kv_f32: torch.Tensor, block_size: int):
     """Quantize kv_f32 ([N, HEAD_DIM]) into the fp8_ds_mla byte layout and
     return (cache, dequant_ref) -- the exact post-quantization value the
     kernel's dequant should reproduce. Slot id == row index, packed
-    contiguously from block 0.
-    """
+    contiguously from block 0."""
     n = kv_f32.shape[0]
     num_blocks = max(1, -(-n // block_size))
     cache = _make_cache(num_blocks, block_size)
@@ -714,8 +706,7 @@ def _flash_mla_eager(
     """MQA attention: gather the (already-dequantized) window+compressed KV
     rows referenced by *_slots (-1 = invalid/masked), append a learned
     per-head sink logit with zero value contribution, softmax, weighted
-    sum.
-    """
+    sum."""
     num_tokens, num_heads, _ = q.shape
     q_f32 = q.float()
 
@@ -814,8 +805,7 @@ def test_flash_mla_cpu_kernel_matches_eager(
 
 def test_flash_mla_cpu_kernel_all_invalid_falls_back_to_sink():
     """When every KV slot is masked out, softmax degenerates to the sink
-    logit alone and the output must be all-zero (no valid value rows).
-    """
+    logit alone and the output must be all-zero (no valid value rows)."""
     torch.manual_seed(2)
     dtype = torch.bfloat16
     num_tokens, num_heads, num_window = 3, 4, 5
@@ -855,8 +845,7 @@ def _qnorm_kv_insert_eager(
     q, kv, positions, cache, slot_mapping, cos_sin_cache, q_head_padded, eps, bs
 ):
     """Reference: per-head weight-free RMSNorm + GPT-J RoPE on Q; GPT-J RoPE
-    + UE8M0 FP8 quant + paged insert on KV.
-    """
+    + UE8M0 FP8 quant + paged insert on KV."""
     num_quant_blocks = NOPE_DIM // QUANT_BLOCK
 
     num_tokens_full, num_heads_q, _ = q.shape
@@ -982,8 +971,7 @@ def test_qnorm_rope_kv_insert_cpu_kernel_matches_eager(
 @pytest.mark.parametrize("pad", [1, 5])
 def test_qnorm_rope_kv_insert_cpu_kernel_dp_padding(pad: int):
     """slot_mapping shorter than q/kv rows: the KV branch must only touch
-    the first num_tokens rows while Q-norm+RoPE still runs on all rows.
-    """
+    the first num_tokens rows while Q-norm+RoPE still runs on all rows."""
     torch.manual_seed(1)
     dtype = torch.bfloat16
     eps = 1e-6
@@ -1044,8 +1032,7 @@ def _inverse_gptj_rope_o_proj_eager(
     rope_dim: int,
 ) -> torch.Tensor:
     """NoPE dims pass through as fp32; the RoPE segment is de-rotated by
-    R(-pos) in GPT-J (interleaved even/odd) convention.
-    """
+    R(-pos) in GPT-J (interleaved even/odd) convention."""
     nope_dim = o.shape[-1] - rope_dim
     half_dim = rope_dim // 2
 
@@ -1111,8 +1098,7 @@ def _write_page(
 ) -> None:
     """Write k_fp8 ([block_size, INDEXER_HEAD_DIM]) and scale ([block_size]
     fp32) into one page row: K-region then scale-region, matching
-    compress_norm_rope_store_indexer_cpu's layout.
-    """
+    compress_norm_rope_store_indexer_cpu's layout."""
     k_region = page_row[: block_size * INDEXER_HEAD_DIM]
     k_region.copy_(k_fp8.view(torch.uint8).flatten())
     scale_region = page_row[block_size * INDEXER_HEAD_DIM :].view(torch.float32)
@@ -1148,8 +1134,7 @@ def _build_paged_mqa_logits_batch(
 ):
     """Fill pages (a pre-sized [n_pages, buf_width] uint8 tensor, possibly
     non-contiguous in dim 0) with deterministic-per-seed random K/scale
-    data.
-    """
+    data."""
     torch.manual_seed(seed)
     batch_size = len(seq_lens)
     max_seq_len = max(seq_lens)
@@ -1215,8 +1200,7 @@ def test_fp8_paged_mqa_logits_cpu_non_contiguous_kv_cache_row_stride():
     """The paged K-cache in production is a per-layer view into a shared
     multi-layer allocation, so its page stride generally exceeds the page
     byte width -- check the kernel reads a padded/strided buffer identically
-    to an equivalent tightly-packed one.
-    """
+    to an equivalent tightly-packed one."""
     block_size = 64
     num_heads = 4
     seq_lens = [1, block_size + 7, 3 * block_size]
@@ -1342,8 +1326,7 @@ def test_fused_indexer_q_rope_quant_dispatches_to_cpu_kernel():
     CPU op on a CPU tensor, not silently fall through to the Triton kernel
     (which would also "work" under triton-cpu, masking a dispatch
     regression). The dispatcher does its CPU import inside the CPU branch,
-    so the patch target is the source module.
-    """
+    so the patch target is the source module."""
     torch.manual_seed(0)
     num_tokens = 1
 
@@ -1410,8 +1393,7 @@ def _hc_head_torch(
 ) -> torch.Tensor:
     """Eager reference for hc_head_fused_cpu: round-trips the RMSNorm
     output through bf16 before the linear, matching the kernel's bf16
-    arithmetic.
-    """
+    arithmetic."""
     hc_mult, hidden_size = hidden_states.shape[-2:]
     outer_shape = hidden_states.shape[:-2]
     hs_flat = hidden_states.reshape(-1, hc_mult, hidden_size)
@@ -1493,8 +1475,7 @@ def test_mhc_post_cpu(num_tokens: int, hidden_size: int):
 @pytest.mark.parametrize("hidden_size", [4096, 7168])
 def test_hc_head_cpu(num_tokens: int, hidden_size: int):
     """hc_head_fused_cpu vs. the _hc_head_torch eager reference it
-    replaces.
-    """
+    replaces."""
     torch.set_default_device(DEVICE)
     set_random_seed(0)
     hc_mult = 4

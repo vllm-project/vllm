@@ -547,8 +547,7 @@ async def test_dp_pause_keep_then_resume(expert_parallel: bool):
 async def test_dp_pause_keep_race_staggered_engines():
     """Race: send pause(keep) to engine 0, then add two requests,
     then pause(keep) to engine 1. Ensures no deadlock when pause
-    requests are staggered and requests arrive in between.
-    """
+    requests are staggered and requests arrive in between."""
     if DP_SIZE != 2:
         pytest.skip("test_dp_pause_keep_race_staggered_engines requires DP_SIZE=2")
 
@@ -718,8 +717,7 @@ async def test_dp_pause_barrier_request_deadlock():
 async def test_dp_pause_wait_mode_drains_in_flight():
     """mode="wait" through the DP consensus path: the pause lets the
     in-flight request run to completion while the consensus is pending,
-    resolves only once drained, and the engine generates again on resume.
-    """
+    resolves only once drained, and the engine generates again on resume."""
     with ExitStack() as after:
         engine = AsyncLLM.from_engine_args(_get_dp_pause_engine_args(True))
         after.callback(engine.shutdown)
@@ -750,8 +748,7 @@ async def test_dp_pause_wait_mode_drains_in_flight():
 async def test_dp_pause_while_asleep():
     """Pausing a sleeping DP engine: sleeping ranks skip dummy batches yet
     must still reach the pause consensus, and the completion barrier must
-    be harmless on workers whose memory is unmapped.
-    """
+    be harmless on workers whose memory is unmapped."""
     with ExitStack() as after:
         engine = AsyncLLM.from_engine_args(_get_dp_pause_engine_args(True))
         after.callback(engine.shutdown)
@@ -787,8 +784,7 @@ async def test_dp_pause_completion_implies_device_idle(
     """A resolved pause future promises an idle device. Inflate the dummy
     batches the pause consensus manufactures so any work the pause fails to
     wait on stays visible, then require a quiet worker stream the moment
-    pause_generation() returns.
-    """
+    pause_generation() returns."""
     with ExitStack() as after:
         # The probes below ship functions through collective_rpc.
         monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")

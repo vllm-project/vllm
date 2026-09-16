@@ -537,8 +537,7 @@ class CohereASRFeatureExtractor(SequenceFeatureExtractor):
 
 class CohereASRProcessor(ProcessorMixin):
     """HF-compatible processor combining CohereASRFeatureExtractor and a
-    tokenizer.
-    """
+    tokenizer."""
 
     feature_extractor_class = "CohereASRFeatureExtractor"
     tokenizer_class = "AutoTokenizer"

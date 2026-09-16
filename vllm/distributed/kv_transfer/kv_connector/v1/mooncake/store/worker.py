@@ -2629,8 +2629,7 @@ class LookupKeyClient:
         non_block: bool = False,
     ) -> MooncakeLookupResult | None:
         """If non_block is True, will return None until the result is ready,
-        so the caller retries on a later step.
-        """
+        so the caller retries on a later step."""
         future = self.futures.get(req_id)
         if future is None:
             future = self.executor.submit(self._lookup, num_tokens, list(block_hashes))

@@ -79,8 +79,7 @@ def test_request_finished_announces_not_ready_entry(monkeypatch):
     """A save whose GPU->mmap copy hasn't been confirmed complete yet is
     still announced: the entry can't be evicted before it's ready, and a read
     arriving too early is NACKed NACK_NOT_READY for the consumer to retry —
-    protecting it is not this method's job.
-    """
+    protecting it is not this method's job."""
     s = _sched_gate_off(monkeypatch)
     s._nixl_enabled = True
     s._peer_host, s._peer_port = "1.2.3.4", 5601

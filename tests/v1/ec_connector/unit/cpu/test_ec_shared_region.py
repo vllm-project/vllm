@@ -98,8 +98,7 @@ def test_second_instance_opens_existing_file_and_shares_memory():
 def test_only_creator_unlinks_file_on_cleanup():
     """Critical contract: if the non-creator unlinks, the creator's mmap path
     becomes a dangling backing file and a third opener would create a new one
-    out from under the creator.
-    """
+    out from under the creator."""
     instance_id = str(uuid.uuid4())
     r1 = ECSharedRegion(
         engine_id=instance_id,
@@ -216,8 +215,7 @@ def test_madvise_einval_selects_fallback_for_whole_region(monkeypatch):
 
 def test_non_creator_does_not_probe_or_populate(monkeypatch):
     """Only the creator pre-faults. A second opener must not probe the advice
-    nor re-touch pages the creator already populated.
-    """
+    nor re-touch pages the creator already populated."""
     from vllm.distributed.ec_transfer.ec_connector.cpu import ec_shared_region as esr
 
     instance_id = str(uuid.uuid4())
@@ -314,8 +312,7 @@ def test_madvise_unexpected_oserror_propagates(monkeypatch):
 
 def test_pin_memory_success_sets_flag(region):
     """When cudaHostRegister returns 0, _is_pinned flips to True
-    and cleanup will correspondingly call cudaHostUnregister.
-    """
+    and cleanup will correspondingly call cudaHostUnregister."""
     fake_cudart = MagicMock()
     success = MagicMock()
     success.value = 0
@@ -335,8 +332,7 @@ def test_pin_memory_success_sets_flag(region):
 
 def test_pin_memory_failure_leaves_flag_false():
     """If cudaHostRegister fails (non-zero), don't pretend it succeeded —
-    cleanup must NOT call cudaHostUnregister on memory we never registered.
-    """
+    cleanup must NOT call cudaHostUnregister on memory we never registered."""
     r = _make_region()
     try:
         fake_cudart = MagicMock()

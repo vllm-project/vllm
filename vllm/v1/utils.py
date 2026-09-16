@@ -144,8 +144,7 @@ class CpuGpuBuffer:
 
     def copy_to_cpu(self, n: int | None = None) -> torch.Tensor:
         """NOTE: Because this method is non-blocking, explicit synchronization
-        is needed to ensure the data is copied to CPU.
-        """
+        is needed to ensure the data is copied to CPU."""
         if n is None:
             return self.cpu.copy_(self.gpu, non_blocking=True)
         return self.cpu[:n].copy_(self.gpu[:n], non_blocking=True)
@@ -159,8 +158,7 @@ def get_engine_client_zmq_addr(
     """Return an IPC path (``local_only=True``) or ``tcp://host:port``.
 
     ``port=0`` lets the kernel assign the port at ``bind()`` time; the
-    caller must recover it via ``getsockopt(zmq.LAST_ENDPOINT)``.
-    """
+    caller must recover it via ``getsockopt(zmq.LAST_ENDPOINT)``."""
     if local_only:
         return get_open_zmq_ipc_path()
     return get_tcp_uri(host, port)
@@ -265,8 +263,7 @@ class APIServerProcessManager:
     ) -> tuple[list[str], list[str]]:
         """Return (inputs, outputs) reported by each child, indexed by
         ``client_index``. Raises ``RuntimeError`` on timeout or premature
-        child exit.
-        """
+        child exit."""
         n = len(self._address_pipes)
         inputs: list[str | None] = [None] * n
         outputs: list[str | None] = [None] * n
@@ -427,8 +424,7 @@ class RustFrontendProcessManager:
 
 class _SubprocessWrapper:
     """Wraps subprocess.Popen to provide the BaseProcess-like interface
-    needed by wait_for_completion_or_failure.
-    """
+    needed by wait_for_completion_or_failure."""
 
     def __init__(self, proc, name: str):
         self._proc = proc

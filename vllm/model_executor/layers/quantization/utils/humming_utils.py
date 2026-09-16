@@ -297,8 +297,7 @@ def _humming_input_schema_to_quant_key(
     schema: "HummingInputSchema",
 ) -> QuantKey | None:
     """Convert a HummingInputSchema to a QuantKey. Returns None if
-    the schema represents unquantized (bf16/fp16) inputs.
-    """
+    the schema represents unquantized (bf16/fp16) inputs."""
     if schema.a_dtype is None or schema.a_dtype.num_bits >= 16:
         return None
 
@@ -427,8 +426,7 @@ def convert_linear_layer_to_humming_standard(
 ):
     """Rename/reshape a linear layer's quantized params (the canonical MPLinear
     layout: ``weight_packed`` int32 + ``weight_scale``) into the parameter names
-    and layout humming's weight schema expects (``weight`` / ``weight_scale``).
-    """
+    and layout humming's weight schema expects (``weight`` / ``weight_scale``)."""
     for name, checkpoint_name in name_map.items():
         tensor = getattr(layer, checkpoint_name)
         delattr(layer, checkpoint_name)

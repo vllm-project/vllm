@@ -158,8 +158,7 @@ class LinearMethodBase(QuantizeMethodBase):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Apply the weights in layer to the input tensor.
-        Expects create_weights to have been called before on the layer.
-        """
+        Expects create_weights to have been called before on the layer."""
         raise NotImplementedError
 
 

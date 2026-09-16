@@ -1090,8 +1090,7 @@ class Llama4ForConditionalGeneration(
 
     def _rename_weight_for_modelopt_checkpoint(self, name: str) -> str:
         """Rename weights from ModelOpt llama4 fp8 checkpoints to vLLM
-        format.
-        """
+        format."""
         if name.startswith("model.") or name.startswith("language_model.model."):
             renamed = (
                 name.replace("model.", "language_model.model.", 1)

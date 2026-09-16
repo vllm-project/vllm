@@ -512,8 +512,7 @@ def _reference_input_norm(
 def test_fused_input_norm_matches_reference(num_patches: int):
     """FusedInputNorm must equal the plain affine, including for num_patches
     above the cuDNN batch-norm grid limit (~65535) that previously raised
-    CUDNN_STATUS_INTERNAL_ERROR (issue #51717).
-    """
+    CUDNN_STATUS_INTERNAL_ERROR (issue #51717)."""
     channel = 3
     patch_size = 14 * 14
     image_mean = [0.48145466, 0.4578275, 0.40821073]

@@ -517,8 +517,7 @@ def test_auto_selection_for_kv_connector(
     aiter_found, expected_backend, mock_vllm_config, mock_get_cdna_version
 ):
     """Auto-selection with a KV connector and AITER enabled resolves to unified attn,
-    and to triton attn if AITER not enabled.
-    """
+    and to triton attn if AITER not enabled."""
     from vllm.platforms.rocm import RocmPlatform
 
     with patch(

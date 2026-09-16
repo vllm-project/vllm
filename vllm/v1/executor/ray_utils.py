@@ -55,8 +55,7 @@ try:
 
     class RayWorkerWrapper(WorkerWrapperBase):
         """Ray wrapper for vllm.worker.Worker, allowing Worker to be
-        lazily initialized after Ray sets CUDA_VISIBLE_DEVICES.
-        """
+        lazily initialized after Ray sets CUDA_VISIBLE_DEVICES."""
 
         def __init__(self, *args, **kwargs) -> None:
             super().__init__(*args, **kwargs)

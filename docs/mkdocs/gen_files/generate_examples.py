@@ -75,8 +75,7 @@ class Example:
 
         If path is a file, it returns the path itself. If path is a directory, it
         searches for Markdown files (*.md) in the directory and returns the first one
-        found. If no Markdown files are found, it returns None.
-        """
+        found. If no Markdown files are found, it returns None."""
         # Single file example
         if self.path.is_file():
             return self.path
@@ -91,8 +90,7 @@ class Example:
         """Determine other files in the directory excluding the main file.
 
         If path is a file, it returns an empty list. Otherwise, it returns every file
-        in the directory except the main file in a list.
-        """
+        in the directory except the main file in a list."""
         # Single file example
         if self.path.is_file():
             return []

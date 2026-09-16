@@ -176,8 +176,7 @@ def _call_fused(
 
 def _as_stored_fp8(t: torch.Tensor) -> torch.Tensor:
     """Reinterpret a float8_e4m3fn-typed kernel output under the real (FNUZ on
-    gfx942) encoding the kernel actually wrote, without touching the bytes.
-    """
+    gfx942) encoding the kernel actually wrote, without touching the bytes."""
     return t.contiguous().view(torch.uint8).view(FP8_STORE_DTYPE)
 
 
@@ -713,8 +712,7 @@ def test_q_interleaved_is_orthogonal_to_norm_and_rope(
 @pytest.mark.parametrize("block_size", [16, 64])
 def test_kv_path_with_dp_padding(num_tokens: int, pad: int, block_size: int):
     """slot_mapping.size(0) < q.size(0): the kernel must skip padded
-    tokens in the KV branch while still processing Q on all rows.
-    """
+    tokens in the KV branch while still processing Q on all rows."""
     torch.manual_seed(3)
     device = "cuda"
     dtype = torch.bfloat16

@@ -134,8 +134,7 @@ class P2PDestInfo:
 
 def _parse_source(kv_params: dict | None) -> P2PSourceInfo | None:
     """Parse the consumer sub-dict (PD ``remote_prefiller`` or symmetric
-    ``remote_kv_source``) into a ``P2PSourceInfo``, or None if absent/incomplete.
-    """
+    ``remote_kv_source``) into a ``P2PSourceInfo``, or None if absent/incomplete."""
     role = _remote_prefiller_params(kv_params)
     do_probe = False
     if role is None:
@@ -156,8 +155,7 @@ def _parse_source(kv_params: dict | None) -> P2PSourceInfo | None:
 
 def _parse_dest(kv_params: dict | None) -> P2PDestInfo | None:
     """Parse the producer ``remote_decoder`` sub-dict into a ``P2PDestInfo``,
-    or None if the block is absent (not a remote-decode request).
-    """
+    or None if the block is absent (not a remote-decode request)."""
     role = _remote_decoder_params(kv_params)
     if role is None:
         return None

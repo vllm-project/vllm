@@ -278,8 +278,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
 
     def _on_write_done(self, req_id: str, future: Future) -> None:
         """Surface any exception from the disk-write thread and drop the
-        completed future from the in-flight tracking dict.
-        """
+        completed future from the in-flight tracking dict."""
         self._req_futures.pop(req_id, None)
         exc = future.exception()
         if exc is not None:

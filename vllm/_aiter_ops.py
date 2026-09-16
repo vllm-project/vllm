@@ -1974,8 +1974,7 @@ class rocm_aiter_ops:
         enabled aiter. Only aiter's Triton kernels exist on gfx12 (no CK build),
         so this deliberately stays off the gfx9/CK `@if_aiter_supported` umbrella
         and gates only the Triton paths rdna4 uses. The gfx12 analog of
-        `is_enabled()`.
-        """
+        `is_enabled()`."""
         if not current_platform.is_rocm() or not IS_AITER_FOUND:
             return False
         from vllm.platforms.rocm import on_rdna4

@@ -76,8 +76,7 @@ MAX_COMPACT_SUPPORT = 2048
 
 class SamplingMaskTensors(NamedTuple):
     """Device-side masks pending async D2H: compact ids, plus the bitmask as
-    the exact fallback for rows wider than ``max_num_kept``.
-    """
+    the exact fallback for rows wider than ``max_num_kept``."""
 
     # [num_requests, max_num_kept]
     token_ids: torch.Tensor

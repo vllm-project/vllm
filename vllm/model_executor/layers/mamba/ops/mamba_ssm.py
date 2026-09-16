@@ -59,8 +59,7 @@ def get_ssm_device_name() -> str:
 
 def _canonical_cache_dtype(cache_dtype: str) -> str:
     """Canonical key for config lookup. bf16 and fp16 share the same tuned
-    configs because the kernel only sees bit width when accessing state.
-    """
+    configs because the kernel only sees bit width when accessing state."""
     return "float16" if cache_dtype == "bfloat16" else cache_dtype
 
 
@@ -161,8 +160,7 @@ _ssm_config_override: tuple[int, int] | None = None
 @contextmanager
 def override_ssm_config(config: tuple[int, int]):
     """Pin ``try_get_optimal_ssm_config`` to ``config`` for the duration of
-    the context. Used by the tuning benchmark to time specific configs.
-    """
+    the context. Used by the tuning benchmark to time specific configs."""
     global _ssm_config_override
     prev = _ssm_config_override
     _ssm_config_override = config

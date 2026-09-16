@@ -50,8 +50,7 @@ def update_admission_stats_worker(listen_address, sock, args, client_config):
 # importable by `multiprocessing.spawn` (no closures, no nesting).
 def defer_addresses_stub_worker(listen_address, sock, args, client_config):
     """Bind ROUTER/PULL with a kernel-assigned port, report the actual
-    endpoints back via the pipe, then exit.
-    """
+    endpoints back via the pipe, then exit."""
     ctx = zmq.Context()
     try:
         in_sock = make_zmq_socket(
@@ -358,8 +357,7 @@ def test_external_process_monitoring(api_server_args):
 def test_gather_actual_addresses_end_to_end():
     """Each child binds ROUTER/PULL with a kernel-picked port and reports
     the bound endpoints back via its per-child pipe; the manager surfaces
-    them via :py:meth:`gather_actual_addresses`.
-    """
+    them via :py:meth:`gather_actual_addresses`."""
     host = "127.0.0.1"
     num_servers = 4
 
@@ -409,8 +407,7 @@ def test_gather_actual_addresses_end_to_end():
 @pytest.mark.timeout(30)
 def test_gather_actual_addresses_child_crash_before_report():
     """A child that exits before sending its endpoints must surface a
-    clear ``RuntimeError`` rather than hang or return ``None`` slots.
-    """
+    clear ``RuntimeError`` rather than hang or return ``None`` slots."""
     host = "127.0.0.1"
     num_servers = 2
     placeholder_inputs = [
@@ -447,8 +444,7 @@ def test_gather_actual_addresses_child_crash_before_report():
 
 def test_rust_frontend_launch_log_redacts_credentials(monkeypatch, caplog):
     """The Rust frontend command carries every non-default arg as JSON.
-    Credentials must not reach the log line.
-    """
+    Credentials must not reach the log line."""
     import subprocess as subprocess_mod
 
     from vllm.entrypoints.launchers.cli_args import make_arg_parser

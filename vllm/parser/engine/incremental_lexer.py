@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Incremental text lexer that converts text chunks into terminal
-tokens, with prefix-match buffering for ambiguous boundaries.
-"""
+tokens, with prefix-match buffering for ambiguous boundaries."""
 
 from __future__ import annotations
 

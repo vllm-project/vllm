@@ -135,8 +135,7 @@ class CustomOp(nn.Module):
 
     def forward_native(self, *args, **kwargs):
         """PyTorch-native implementation; OOT plugins override via
-        :meth:`forward_oot`.
-        """
+        :meth:`forward_oot`."""
         raise NotImplementedError
 
     def forward_oot(self, *args, **kwargs):

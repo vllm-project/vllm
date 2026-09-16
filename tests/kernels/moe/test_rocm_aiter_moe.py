@@ -249,8 +249,7 @@ def _make_topk_ids(
     device: str = "cuda",
 ) -> torch.Tensor:
     """Generate distinct expert IDs per token with the same top-k shape as
-    production routing.
-    """
+    production routing."""
     router_logits = torch.randn(num_tokens, num_experts, device=device)
     _, topk_ids = torch.topk(torch.softmax(router_logits, dim=-1), k=topk, dim=-1)
     return topk_ids.to(torch.int32)
@@ -444,8 +443,7 @@ def test_aiter_fused_moe_custom_op_registered():
 
 def test_aiter_asm_moe_tkw1_custom_op_registered():
     """The tkw1 custom op should stay registered for FP8 apply-router-weight
-    paths.
-    """
+    paths."""
     _assert_aiter_supported()
     import vllm._aiter_ops as aiter_ops  # noqa: F401
 
@@ -455,8 +453,7 @@ def test_aiter_asm_moe_tkw1_custom_op_registered():
 
 def test_aiter_fused_moe_fake_tensor_support():
     """The fused-MoE op should preserve fake-tensor compatibility for
-    torch.compile-style tracing.
-    """
+    torch.compile-style tracing."""
     _assert_aiter_supported()
     import vllm._aiter_ops  # noqa: F401
 
@@ -519,8 +516,7 @@ def test_aiter_moe_enablement_follows_env(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """The fused-MoE gate should depend only on the main AITER toggle and the
-    MoE-specific toggle.
-    """
+    MoE-specific toggle."""
     from vllm._aiter_ops import rocm_aiter_ops
 
     _assert_aiter_supported()
@@ -551,8 +547,7 @@ def test_aiter_moe_shared_experts_enablement_follows_env(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Shared-expert fusion should only be enabled when the fused-MoE path is
-    enabled too.
-    """
+    enabled too."""
     from vllm._aiter_ops import rocm_aiter_ops
 
     _assert_aiter_supported()
@@ -693,8 +688,7 @@ def test_aiter_mxfp4_quant_scheme_support_matches_gfx950():
 @pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
 def test_aiter_fused_moe_mi350_mxfp4_w4a16_accuracy():
     """The gfx950 AITER MXFP4 W4A16 MoE path should match the dequantized
-    MXFP4 reference.
-    """
+    MXFP4 reference."""
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
         rocm_aiter_fused_experts,
@@ -743,8 +737,7 @@ def test_aiter_fused_moe_mi350_mxfp4_w4a16_accuracy():
 @pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
 def test_aiter_fused_moe_mi350_mxfp4_w4a16_determinism():
     """The gfx950 AITER MXFP4 W4A16 MoE path should stay bitwise
-    deterministic.
-    """
+    deterministic."""
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
         rocm_aiter_fused_experts,
@@ -837,8 +830,7 @@ def test_aiter_fused_moe_bf16_accuracy(
     intermediate_dim: int,
 ):
     """The ROCm AITER fused-MoE BF16 path should match the float32 reference
-    on representative shapes.
-    """
+    on representative shapes."""
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
         ActivationMethod,
         QuantMethod,
@@ -883,8 +875,7 @@ def test_aiter_fused_moe_bf16_accuracy(
 
 def test_aiter_fused_moe_gelu_accuracy():
     """The GELU activation variant should stay aligned with the float32
-    reference.
-    """
+    reference."""
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
         ActivationMethod,
         QuantMethod,
@@ -929,8 +920,7 @@ def test_aiter_fused_moe_gelu_accuracy():
 
 def test_aiter_fused_moe_determinism():
     """The BF16 fused-MoE kernel should stay bitwise deterministic for the
-    same inputs.
-    """
+    same inputs."""
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
         ActivationMethod,
         QuantMethod,
@@ -1085,8 +1075,7 @@ def test_aiter_fused_moe_mi3xx_bf16_accuracy():
 )
 def test_aiter_fused_moe_mi3xx_fp8_accuracy():
     """The MI3xx FP8 per-tensor MoE path should stay within the measured FP8
-    error budget.
-    """
+    error budget."""
     from tests.kernels.moe.utils import make_test_weights
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (

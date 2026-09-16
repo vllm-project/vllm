@@ -224,8 +224,7 @@ def _humming_int8_weight_schema(
     weight: torch.Tensor, weight_scale: torch.Tensor
 ) -> dict[str, Any]:
     """Build the humming compressed-tensors int8 schema from the canonical
-    on-device tensors; humming does the signed-int8 -> native conversion.
-    """
+    on-device tensors; humming does the signed-int8 -> native conversion."""
     config: dict[str, Any] = {
         "quant_method": "compressed-tensors",
         "format": "int-quantized",

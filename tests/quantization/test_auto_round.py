@@ -382,8 +382,7 @@ def test_inc_get_quant_method_unquantized_layer_with_model_prefix(
     layer_factory,
 ) -> None:
     """``model.``-prefixed extra_config entries trigger early exit for both
-    LinearBase and ParallelLMHead layers.
-    """
+    LinearBase and ParallelLMHead layers."""
     config = make_config(extra_config={"model.layer": {"bits": 16}})
     layer = layer_factory()
 
@@ -396,8 +395,7 @@ def test_inc_get_quant_method_unquantized_routed_experts_with_model_prefix(
     monkeypatch,
 ) -> None:
     """``model.``-prefixed extra_config entries trigger early exit for
-    RoutedExperts layers, returning UnquantizedFusedMoEMethod.
-    """
+    RoutedExperts layers, returning UnquantizedFusedMoEMethod."""
 
     class DummyUnquantizedFusedMoEMethod:
         def __init__(self, moe_config) -> None:
@@ -420,8 +418,7 @@ def test_inc_get_quant_method_unquantized_routed_experts_with_model_prefix(
 
 def test_inc_get_quant_method_unknown_layer_with_model_prefix_returns_none() -> None:
     """``model.``-prefixed extra_config entries return None for unhandled
-    layer types (non-Linear, non-MoE).
-    """
+    layer types (non-Linear, non-MoE)."""
     config = make_config(extra_config={"model.unknown": {"bits": 16}})
 
     method = config.get_quant_method(DummyLayer(), "unknown")
@@ -736,8 +733,7 @@ def test_wna16_cuda_low_bit_moe_routes_to_humming(monkeypatch, bits) -> None:
 @pytest.mark.parametrize("bits", [4, 8])
 def test_wna16_cuda_high_bit_skips_humming(monkeypatch, bits) -> None:
     """4/8-bit int stays on the Marlin/GPTQ/AWQ path even on CUDA so a single
-    model can mix high-bit Marlin and low-bit humming layers.
-    """
+    model can mix high-bit Marlin and low-bit humming layers."""
     called = {"humming": False}
 
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
@@ -1668,8 +1664,7 @@ def test_inc_get_quant_method_unquantized_moe_returns_unquantized(
     monkeypatch,
 ) -> None:
     """Early-exit returns UnquantizedFusedMoEMethod for FusedMoE layers
-    when extra_config has bits >= 16.
-    """
+    when extra_config has bits >= 16."""
     config = make_config(extra_config={"layer": {"bits": 16}})
     layer = object.__new__(RoutedExperts)
     layer.moe_config = None  # UnquantizedFusedMoEMethod accepts moe_config

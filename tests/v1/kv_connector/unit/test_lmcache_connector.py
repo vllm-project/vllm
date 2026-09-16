@@ -212,8 +212,7 @@ class TestUpdateConnectorOutput:
         self, mock_connector
     ):
         """Test that method returns early when kv_cache_events is not
-        LMCacheKVEvents.
-        """
+        LMCacheKVEvents."""
         # Create a mock object that is not LMCacheKVEvents
         fake_events = MagicMock()
         connector_output = KVConnectorOutput(kv_cache_events=fake_events)

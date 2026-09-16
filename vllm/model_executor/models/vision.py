@@ -116,8 +116,7 @@ def get_multimodal_config() -> MultiModalConfig | None:
     """Return the current ``MultiModalConfig``, or ``None`` when no engine
     config context is active (e.g., during unit tests) or when the current
     ``model_config`` does not carry a ``multimodal_config`` (e.g., minimal
-    stubs used in tests).
-    """
+    stubs used in tests)."""
     vllm_config = get_current_vllm_config_or_none()
     if vllm_config is None or vllm_config.model_config is None:
         return None
