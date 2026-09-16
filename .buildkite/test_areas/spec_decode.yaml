@@ -98,9 +98,11 @@ steps:
   commands:
     - pytest -v -s v1/e2e/spec_decode/eagle/
 
-- label: ":nvidia: (H200 MIG 35GB) Spec Decode Speculators + MTP"
-  key: spec-decode-speculators-mtp
-  timeout_in_minutes: 50
+# MTP correctness is one parametrized test split into per-model folders;
+# each job below runs whole directories.
+- label: ":nvidia: (H200 MIG 35GB) Spec Decode Speculators + MTP Qwen3.5"
+  key: spec-decode-speculators-mtp-qwen3-5
+  timeout_in_minutes: 30
   device: h200_35gb
   source_file_dependencies:
     - vllm/v1/spec_decode/
@@ -110,13 +112,104 @@ steps:
     - tests/v1/e2e/spec_decode/
   commands:
     - pytest -v -s v1/e2e/spec_decode/speculators/
-    - pytest -v -s v1/e2e/spec_decode/mtp/
+    - pytest -v -s v1/e2e/spec_decode/mtp/qwen3_5/
   mirror:
     amd:
-      label: ":amd: (MI300) Spec Decode Speculators + MTP"
+      label: ":amd: (MI300) Spec Decode Speculators + MTP Qwen3.5"
       dind: false
       device: mi300_1
-      timeout_in_minutes: 75
+      timeout_in_minutes: 40
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/v1/spec_decode/
+      - vllm/v1/worker/gpu/spec_decode/
+      - vllm/model_executor/model_loader/
+      - vllm/v1/sample/
+      - vllm/model_executor/layers/
+      - vllm/transformers_utils/configs/speculators/
+      - tests/v1/e2e/spec_decode/
+      - vllm/platforms/rocm.py
+
+- label: ":nvidia: (H200 MIG 35GB) Spec Decode MTP Gemma4"
+  key: spec-decode-mtp-gemma4
+  timeout_in_minutes: 30
+  device: h200_35gb
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/
+    - vllm/v1/attention/backends/
+    - vllm/transformers_utils/configs/speculators/
+    - tests/v1/e2e/spec_decode/
+  commands:
+    - pytest -v -s v1/e2e/spec_decode/mtp/gemma4/
+  mirror:
+    amd:
+      label: ":amd: (MI300) Spec Decode MTP Gemma4"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 40
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/v1/spec_decode/
+      - vllm/v1/worker/gpu/spec_decode/
+      - vllm/model_executor/model_loader/
+      - vllm/v1/sample/
+      - vllm/model_executor/layers/
+      - vllm/transformers_utils/configs/speculators/
+      - tests/v1/e2e/spec_decode/
+      - vllm/platforms/rocm.py
+
+- label: ":nvidia: (H200 MIG 35GB) Spec Decode MTP DeepSeek + MiMo"
+  key: spec-decode-mtp-deepseek-mimo
+  timeout_in_minutes: 30
+  device: h200_35gb
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/
+    - vllm/v1/attention/backends/
+    - vllm/transformers_utils/configs/speculators/
+    - tests/v1/e2e/spec_decode/
+  commands:
+    - pytest -v -s v1/e2e/spec_decode/mtp/deepseek/
+    - pytest -v -s v1/e2e/spec_decode/mtp/mimo/
+  mirror:
+    amd:
+      label: ":amd: (MI300) Spec Decode MTP DeepSeek + MiMo"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 40
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/v1/spec_decode/
+      - vllm/v1/worker/gpu/spec_decode/
+      - vllm/model_executor/model_loader/
+      - vllm/v1/sample/
+      - vllm/model_executor/layers/
+      - vllm/transformers_utils/configs/speculators/
+      - tests/v1/e2e/spec_decode/
+      - vllm/platforms/rocm.py
+
+- label: ":nvidia: (H200 MIG 35GB) Spec Decode MTP Rejected Placeholders"
+  key: spec-decode-mtp-rejected-placeholders
+  timeout_in_minutes: 30
+  device: h200_35gb
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/
+    - vllm/v1/attention/backends/
+    - vllm/transformers_utils/configs/speculators/
+    - tests/v1/e2e/spec_decode/
+  commands:
+    - pytest -v -s v1/e2e/spec_decode/mtp/rejected_placeholders/
+  mirror:
+    amd:
+      label: ":amd: (MI300) Spec Decode MTP Rejected Placeholders"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 40
       depends_on:
       - image-build-amd
       source_file_dependencies:
