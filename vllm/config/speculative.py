@@ -1753,10 +1753,6 @@ class SpeculativeConfig:
         """Create a parallel config for use by the draft worker.
 
         This is mostly a copy of the target parallel config, except the tp_size.
-
-        Expert parallelism is only inherited by a drafter that actually has
-        experts to shard. A dense drafter under a MoE target would otherwise be
-        rejected by verify_with_parallel_config.
         """
         draft_is_moe = draft_model_config is None or draft_model_config.is_moe
         draft_parallel_config = ParallelConfig(
