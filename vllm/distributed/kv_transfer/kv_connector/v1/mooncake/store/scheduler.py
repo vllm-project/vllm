@@ -172,6 +172,12 @@ class MooncakeStoreScheduler:
 
         return need_to_allocate, self.load_async
 
+    def bypass_external_lookup(
+        self, request: Request, num_computed_tokens: int
+    ) -> tuple[int | None, bool]:
+        self.client.discard(request.request_id)
+        return 0, False
+
     def update_state_after_alloc(
         self,
         request: Request,

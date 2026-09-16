@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -63,6 +63,31 @@ def _make_bare_scheduler(
     scheduler._pinned_saves = {}
     scheduler._boundary_state_group_ids = frozenset({1})
     return scheduler
+
+
+@pytest.mark.parametrize("old_spec", [False, True])
+def test_bypass_preserves_zero_hit_allocation_cleanup(old_spec):
+    scheduler = _make_bare_scheduler()
+    scheduler.client = Mock()
+    request = SimpleNamespace(request_id="req-0")
+    spec = LoadSpec(vllm_cached_tokens=16, kvpool_cached_tokens=32, can_load=True)
+    if old_spec:
+        scheduler.load_specs[request.request_id] = spec
+    for _ in range(2):
+        assert scheduler.bypass_external_lookup(request, 16) == (0, False)
+    assert scheduler.client.discard.call_count == 2
+    scheduler.client.discard.assert_called_with("req-0")
+    scheduler.client.lookup.assert_not_called()
+    if old_spec:
+        assert scheduler.load_specs[request.request_id] is spec
+    else:
+        assert not scheduler.load_specs
+    scheduler.update_state_after_alloc(request, Mock(), 0)
+    assert scheduler._unfinished_requests[request.request_id] == (request, ())
+    if old_spec:
+        assert not spec.can_load
+    else:
+        assert not scheduler.load_specs
 
 
 def _make_connector_block_state(

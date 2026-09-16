@@ -279,6 +279,12 @@ class KVCacheManager:
                   Pinned so sparse prefix-cache retention does not drop
                   the junction and defeat cross-request reuse.
         """
+        return self.get_computed_blocks_up_to(request, request.num_tokens - 1)
+
+    def get_computed_blocks_up_to(
+        self, request: Request, max_cache_hit_length: int
+    ) -> tuple[KVCacheBlocks, int, int]:
+        """Query up to an absolute token boundary using the normal cache path."""
         # We skip finding the prefix cache hit when prefix caching is
         # disabled or the request is marked as skipping kv cache read
         # (which happens when the request requires prompt logprobs
@@ -292,7 +298,7 @@ class KVCacheManager:
         # the single last token, because allocate_slots() requires
         # num_computed_tokens to be block-size aligned. Removing this limitation
         # could slightly improve performance in the future.
-        max_cache_hit_length = request.num_tokens - 1
+        max_cache_hit_length = min(request.num_tokens - 1, max_cache_hit_length)
         computed_blocks, num_new_computed_tokens, num_uncached = (
             self.coordinator.find_longest_cache_hit(
                 request.block_hashes, max_cache_hit_length

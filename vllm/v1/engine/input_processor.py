@@ -337,6 +337,14 @@ class InputProcessor:
         current_platform.validate_request(engine_input, params)
 
         encoder_input, decoder_input = split_enc_dec_input(engine_input)
+        if self.model_config.enable_omit_prefix_routed_experts:
+            from vllm.utils.routed_expert_session import (
+                normalize_routed_expert_cache_salt,
+            )
+
+            normalize_routed_expert_cache_salt(
+                decoder_input.get("cache_salt"), None, allow_encoded_session=True
+            )
         self._validate_model_inputs(encoder_input, decoder_input)
 
         # Mypy can be conservative for TypedDict unions; normalize access.

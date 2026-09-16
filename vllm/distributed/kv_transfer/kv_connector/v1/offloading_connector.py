@@ -6,7 +6,7 @@ from typing import Any
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
@@ -50,6 +50,16 @@ from vllm.v1.request import Request
 
 
 class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
+    @classmethod
+    def supports_external_lookup_bypass(cls, config: KVTransferConfig) -> bool:
+        extra = config.kv_connector_extra_config
+        return (
+            config.kv_role == "kv_both"
+            and extra.get("spec_name", "CPUOffloadingSpec") == "CPUOffloadingSpec"
+            and not extra.get("spec_module_path")
+            and not extra.get("secondary_tiers")
+        )
+
     @cached_property
     def _bounding_group_ids(self) -> tuple[int, ...]:
         """Prefix-cacheable groups this connector does not offload.
@@ -163,6 +173,14 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
             request,
             num_computed_tokens,
             max_num_new_tokens=self._max_loadable_tokens(request, num_computed_tokens),
+        )
+
+    def bypass_external_lookup(
+        self, request: Request, num_computed_tokens: int
+    ) -> tuple[int | None, bool]:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.bypass_external_lookup(
+            request, num_computed_tokens
         )
 
     def _max_loadable_tokens(
