@@ -65,7 +65,23 @@ _running_tasks: set[asyncio.Task] = set()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    responses_store_service = None
     try:
+        if getattr(app.state, "responses_store_enabled", False):
+            from vllm.entrypoints.openai.responses.store.service import (
+                ResponsesStoreService,
+            )
+
+            responses_store_service = getattr(
+                app.state, "responses_store_service", None
+            )
+            if responses_store_service is None:
+                responses_store_service = ResponsesStoreService.from_cli_args(
+                    app.state.args
+                )
+                app.state.responses_store_service = responses_store_service
+            responses_store_service.start()
+
         if app.state.log_stats:
             engine_client: EngineClient = app.state.engine_client
 
@@ -96,5 +112,9 @@ async def lifespan(app: FastAPI):
                 if serving is not None and hasattr(serving, "shutdown"):
                     serving.shutdown()
     finally:
-        # Ensure app state including engine ref is gc'd
-        del app.state
+        try:
+            if responses_store_service is not None:
+                await responses_store_service.close()
+        finally:
+            # Ensure app state including engine ref is gc'd
+            del app.state

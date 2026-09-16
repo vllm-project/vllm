@@ -53,6 +53,7 @@ from vllm.entrypoints.openai.responses.protocol import (
 )
 from vllm.entrypoints.openai.responses.serving import (
     OpenAIServingResponses,
+    _SessionTokenState,
     extract_tool_types,
 )
 from vllm.entrypoints.openai.responses.streaming_events import (
@@ -735,6 +736,70 @@ class TestInitializeToolSessions:
         assert render_request.input == turn_messages
         assert render_request.instructions is None
         assert render_request.cache_salt == "request-salt"
+
+    @pytest.mark.asyncio
+    async def test_incremental_request_reuses_history_without_duplicate_bos(
+        self, serving_responses_instance
+    ):
+        serving = serving_responses_instance
+        serving.renderer.get_bos_token_id.return_value = 1
+        serving.online_renderer.preprocess_chat = AsyncMock(
+            return_value=([], [tokens_input([1, 8, 9])])
+        )
+        state = _SessionTokenState(
+            store=MagicMock(),
+            session_id="session",
+            should_save=True,
+            reused_prompt_token_ids=[1, 2, 3],
+            history_length=3,
+        )
+        request = ResponsesRequest(
+            input="next turn",
+            instructions="already in the stored prompt",
+            use_incremental_token=True,
+        )
+
+        messages, engine_inputs = await serving._make_incremental_request(
+            request, state
+        )
+
+        assert messages == [{"role": "user", "content": "next turn"}]
+        assert engine_inputs[0]["prompt_token_ids"] == [1, 2, 3, 8, 9]
+        kwargs = serving.online_renderer.preprocess_chat.call_args.kwargs
+        assert kwargs["default_template_kwargs"]["use_incremental_token"] is True
+
+    @pytest.mark.asyncio
+    async def test_incremental_tool_followup_only_tokenizes_new_output(
+        self, serving_responses_instance
+    ):
+        serving = serving_responses_instance
+        serving.online_renderer.preprocess_chat = AsyncMock(
+            return_value=([], [tokens_input([8, 9])])
+        )
+        request = ResponsesRequest(input="first", use_incremental_token=True)
+        messages = [
+            {"role": "user", "content": "first"},
+            ResponseFunctionToolCall(
+                type="function_call",
+                call_id="call_1",
+                name="lookup",
+                arguments="{}",
+            ),
+            {"type": "function_call_output", "call_id": "call_1", "output": "result"},
+        ]
+
+        engine_inputs = await serving._render_next_turn(
+            request, messages, new_item_count=1
+        )
+
+        assert engine_inputs[0]["prompt_token_ids"] == [8, 9]
+        call = serving.online_renderer.preprocess_chat.call_args
+        assert call.args[1] == [
+            {"role": "tool", "content": "result", "tool_call_id": "call_1"}
+        ]
+        context = call.kwargs["default_template_kwargs"]["incremental_context"]
+        assert context[0] == {"role": "user", "content": "first"}
+        assert context[1]["tool_calls"][0]["id"] == "call_1"
 
     @pytest.mark.asyncio
     async def test_harmony_tool_followup_preserves_render_params(

@@ -23,6 +23,8 @@ def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
             self,
             messages: list["ChatCompletionMessageParam"],
             tools: list[dict[str, Any]] | None = None,
+            incremental_context: (list["ChatCompletionMessageParam"] | None) = None,
+            use_incremental_token: bool = False,
             **kwargs,
         ) -> str | list[int]:
             thinking = kwargs.get("thinking")
@@ -34,6 +36,10 @@ def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
 
             conversation = kwargs.get("conversation", messages)
             messages = conversation.copy()
+
+            # 表示当前消息会被追加到跨请求历史 token 后。
+            incremental_continuation = use_incremental_token
+
             if tools is not None and len(tools) > 0:
                 messages.insert(0, {"role": "system"})
                 messages[0]["tools"] = tools  # type: ignore[typeddict-unknown-key]
@@ -54,10 +60,17 @@ def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
             encode_config = dict(
                 thinking_mode=thinking_mode,
                 drop_thinking=kwargs.get("drop_thinking", True),
-                reasoning_effort=reasoning_effort,
+                reasoning_effort=None if incremental_continuation else reasoning_effort,
             )
 
-            prompt_str = encode_messages(messages, **encode_config)  # type: ignore
+            prompt_str = encode_messages(
+                messages,
+                context=incremental_context,
+                add_default_bos_token=(
+                    incremental_context is None and not incremental_continuation
+                ),
+                **encode_config,
+            )  # type: ignore
 
             if kwargs.get("tokenize", True):
                 tokenizer_kwargs = {
