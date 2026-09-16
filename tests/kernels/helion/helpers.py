@@ -14,9 +14,9 @@ import helion
 from vllm.kernels.helion.case_key import CaseKey
 from vllm.kernels.helion.config_manager import ConfigManager
 from vllm.kernels.helion.register import register_kernel
-from vllm.kernels.helion.utils import get_canonical_gpu_name
+from vllm.kernels.helion.utils import get_config_gpu_name
 
-GPU_PLATFORM = get_canonical_gpu_name()
+GPU_PLATFORM = get_config_gpu_name(False)
 
 DEFAULT_CONFIGS: dict[CaseKey, helion.Config] = {
     CaseKey.default(): helion.Config(block_sizes=[32]),
